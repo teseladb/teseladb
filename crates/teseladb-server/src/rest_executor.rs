@@ -144,6 +144,34 @@ pub fn authenticate(
     ok_reply(&exec.run(EXTERNAL_DB, command)).map(|()| None)
 }
 
+/// The part of the HTTP port a request reaches, which a tenant turns on or off (007 FR-036).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// The REST API.
+    Rest,
+    /// `/mcp`.
+    Mcp,
+}
+
+/// `Ok` unless the user the request logged in as belongs to a tenant with `surface` off and is
+/// not its service user (007 FR-036): then the `401` of a credential this part does not take.
+pub fn tenant_switch(exec: &mut NodeExecutor, surface: Surface) -> Result<(), Response> {
+    let Some(user) = exec.conn.auth.user.clone() else { return Ok(()) };
+    if user.tenant == 0 {
+        return Ok(());
+    }
+    let state = teseladb_wire::commands::Backend::tenant_state(&mut exec.backend, user.tenant);
+    let Some(state) = state else { return Ok(()) };
+    let on = match surface {
+        Surface::Rest => state.limits.http_enabled,
+        Surface::Mcp => state.limits.mcp_enabled,
+    };
+    if on || crate::tenant_limits::is_service_user(&state.limits, &user.name) {
+        return Ok(());
+    }
+    Err(unauthenticated(false))
+}
+
 /// `Ok` if `reply` has `ok: 1`, else the `401` of a credential that failed.
 fn ok_reply(reply: &teseladb_bson::Document) -> Result<(), Response> {
     match reply.get("ok") {

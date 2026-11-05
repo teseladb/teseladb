@@ -470,6 +470,19 @@ fn command<B: Backend + ?Sized>(
         // The commands that answer without the node count here; the others in `run_op`.
         lock(s).counters.count(name, &req.command, false);
     }
+    // The tenant's `maxTimeMS` (007 FR-036): no command of its users that takes one runs longer,
+    // and one without it gets it; `getMore` and the end of a transaction wait as they do.
+    let own_limit = match (cmds.as_mut(), conn.auth.user.as_ref()) {
+        (Some((backend, _)), Some(u)) if u.tenant != 0 && !free_of_time_limit(name) => {
+            let cap = backend.tenant_state(u.tenant).map_or(0, |s| s.limits.max_time_ms);
+            match (cap, own_limit) {
+                (0, limit) => limit,
+                (cap, Some(own)) => Some(own.min(u64::from(cap))),
+                (cap, None) => Some(u64::from(cap)),
+            }
+        }
+        _ => own_limit,
+    };
     // The limits of the tenant of the user signed in (007 FR-032): its wait counts in its
     // `maxTimeMS`, and it ends with the command.
     let limited = match (cmds.as_mut(), conn.auth.user.as_ref()) {
@@ -511,6 +524,16 @@ fn free_of_limits(name: &str) -> bool {
         || name == WHATS_MY_URI
         || name == crate::commands::session::END_SESSIONS
         || name == crate::commands::query::KILL_CURSORS
+}
+
+/// The commands a tenant's `maxTimeMS` does not hold (007 FR-036): those that spend no token,
+/// `getMore` (a tailable cursor or a change stream waits with `maxAwaitTimeMS`) and the end of a
+/// transaction.
+fn free_of_time_limit(name: &str) -> bool {
+    free_of_limits(name)
+        || name == crate::commands::query::GET_MORE
+        || name == crate::commands::txn::COMMIT_TRANSACTION
+        || name == crate::commands::txn::ABORT_TRANSACTION
 }
 
 /// The commands whose bytes count against a tenant's bytes written per second (007 FR-032).
@@ -729,6 +752,7 @@ fn run_op<B: Backend + ?Sized>(
     let id = lock(shared).ops.begin(op);
     let started_micros = backend.now_micros();
     let started_cpu = backend.thread_cpu_nanos();
+    let outer_limit = crate::commands::js::set_op_limit(limit);
     let (result, mut events) = {
         let mut guarded = Guarded::new(backend, shared, id);
         let (db, cmd) = (req.db.as_str(), &req.command);
@@ -762,6 +786,7 @@ fn run_op<B: Backend + ?Sized>(
         };
         (result, guarded.take_audit())
     };
+    crate::commands::js::set_op_limit(outer_limit);
     if let Some(Ok(reply)) = &result
         && reply.get("ok") == Some(&Value::Double(1.0))
         && let Some(e) = audit::user_role_event(&req.db, &req.command)

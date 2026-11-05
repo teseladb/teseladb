@@ -46,6 +46,10 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
     user(&mut root, "ann");
     user(&mut root, "svc");
     admin(&nodes[0], &["tenant", "limits", "acme", "--service-user", "svc"]);
+    // The second node counts the service user apart once its copy of Group 0 names it.
+    until("the service user on the second node", || {
+        admin(&nodes[1], &["tenant", "limits", "acme"]).contains("svc").then_some(())
+    });
     // Two connections of Ann on the second node, and the service user's, which counts for nothing.
     let mut a = signed_in(&nodes[1], "ann");
     let _b = signed_in(&nodes[1], "ann");

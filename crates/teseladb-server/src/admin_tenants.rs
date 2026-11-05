@@ -112,8 +112,10 @@ pub fn parse(words: &[&str], opts: &[(String, String)]) -> Option<Result<TenantA
         ["tenant", "suspend", n] => allow(&[]).map(|()| TenantAction::Suspend(name(n))),
         ["tenant", "resume", n] => allow(&[]).map(|()| TenantAction::Resume(name(n))),
         ["tenant", "usage", n] => allow(&[]).map(|()| TenantAction::Usage(name(n))),
+        // A value an option does not take is a usage error, before anything is sent.
         ["tenant", "limits", n] => allow(&LIMIT_OPTIONS)
-            .map(|()| TenantAction::Limits { name: name(n), set: opts.to_vec() }),
+            .and_then(|()| limits_body(opts))
+            .map(|_| TenantAction::Limits { name: name(n), set: opts.to_vec() }),
         ["tenant", "access", n] => allow(&ACCESS_OPTIONS).map(|()| TenantAction::Access {
             name: name(n),
             allow: opts.iter().filter(|(k, _)| k == "allow").map(|(_, v)| v.clone()).collect(),

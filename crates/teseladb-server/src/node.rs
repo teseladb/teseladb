@@ -831,6 +831,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         mut open_disk: impl FnMut() -> io::Result<D>,
         lock: Option<FileLock>,
     ) -> Result<Node<D>, NodeError> {
+        // Every node's JavaScript reads the deadline of its command and waits in `sleep`, also
+        // one a test or a tool starts without `teseladb start` (016 FR-007).
+        crate::install_js_host();
         let listener = crate::listen::bind(crate::listen::PEERS, cfg.listen_peer)?;
         let peer_addr = listener.local_addr()?;
         let advertise = cfg.advertise.clone().unwrap_or_else(|| peer_addr.ip().to_string());

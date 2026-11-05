@@ -24,7 +24,8 @@ use teseladb_rest::changestream::HEARTBEAT_MS;
 use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
 
 use crate::rest_executor::{
-    Credential, Forwarded, NodeExecutor, authenticate, encode_response, touch_later,
+    Credential, Forwarded, NodeExecutor, Surface, authenticate, encode_response, tenant_switch,
+    touch_later,
 };
 
 use teseladb_rest::routes::BASE;
@@ -261,11 +262,23 @@ impl NodeHttp {
             if self.auth && token {
                 return Err(unknown_resource(401));
             }
-            return authenticate(exec, request, who, self.auth);
+            return mcp_key(exec, request, who, self.auth);
         };
         exec.auth_state().oidc_resource = Some(resource.clone());
-        authenticate(exec, request, who, self.auth).map_err(|r| with_metadata(&resource, r))
+        mcp_key(exec, request, who, self.auth).map_err(|r| with_metadata(&resource, r))
     }
+}
+
+/// [`authenticate`] for `/mcp`, which also refuses a user of a tenant with MCP off (007 FR-036).
+fn mcp_key(
+    exec: &mut NodeExecutor,
+    request: &Request,
+    who: &Credential,
+    auth: bool,
+) -> Result<Option<teseladb_auth::apikey::ApiKey>, Response> {
+    let key = authenticate(exec, request, who, auth)?;
+    tenant_switch(exec, Surface::Mcp)?;
+    Ok(key)
 }
 
 /// A change stream opened on the node: where its cursor is and the events of its first batch.
@@ -586,7 +599,9 @@ impl NodeHttp {
         // to pick up: the requests reuse them.
         let mut exec = self.executor(self.backend());
         let mut key_id = None;
-        let (answer, stream) = match authenticate(&mut exec, request, who, self.auth) {
+        let login = authenticate(&mut exec, request, who, self.auth)
+            .and_then(|key| tenant_switch(&mut exec, Surface::Rest).map(|()| key));
+        let (answer, stream) = match login {
             Ok(key) => {
                 if let Some(k) = key {
                     key_id = Some(k.key_id.clone());

@@ -26,6 +26,45 @@ use super::users::{MAX_ATTEMPTS, bad_value, conflict, roles_arg};
 use super::{Backend, Ctx};
 use crate::error::{CommandError, INTERNAL_ERROR, KEY_NOT_FOUND, UNAUTHORIZED, USER_NOT_FOUND};
 
+/// Whether user `user` of tenant `tenant` may get another key (007 FR-036): not when the tenant
+/// has both the REST API and MCP off, nor when it holds `maxApiKeys` live keys; its service user
+/// is held by neither. Whoever asks, the user itself or the default tenant with `$tenant`.
+fn tenant_keys<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    tenant: u32,
+    user: &UserName,
+) -> Result<(), CommandError> {
+    let Some(state) = (tenant != 0).then(|| ctx.backend.tenant_state(tenant)).flatten() else {
+        return Ok(());
+    };
+    let l = &state.limits;
+    if l.service_user.as_ref().is_some_and(|s| s.user == user.user && s.db == user.db) {
+        return Ok(());
+    }
+    if !l.http_enabled && !l.mcp_enabled {
+        let msg = "the tenant has the REST API and MCP off: its users get no API key";
+        return Err(CommandError::new(UNAUTHORIZED, msg));
+    }
+    if l.max_api_keys == 0 {
+        return Ok(());
+    }
+    let now = i64::try_from(ctx.backend.wall_ms()).unwrap_or(i64::MAX);
+    let service = l.service_user.clone();
+    let mut live = 0usize;
+    for doc in ctx.backend.principals(Principal::ApiKey, None)? {
+        let k = stored(&doc)?;
+        let of_service = service.as_ref().is_some_and(|s| s.user == k.user && s.db == k.db);
+        if !of_service && k.expires_ms > now {
+            live += 1;
+        }
+    }
+    if live >= l.max_api_keys as usize {
+        let msg = format!("the tenant has its {} API keys", l.max_api_keys);
+        return Err(CommandError::new(UNAUTHORIZED, msg));
+    }
+    Ok(())
+}
+
 /// `createApiKey`.
 pub const CREATE_API_KEY: &str = "createApiKey";
 /// `listApiKeys`.
@@ -98,6 +137,7 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         let msg = format!("User {}@{} not found", user.user, user.db);
         return Err(CommandError::new(USER_NOT_FOUND, msg));
     };
+    tenant_keys(ctx, found.tenant, &user)?;
     let allowed = grantable(&*ctx.backend, &user, found.roles);
     let roles = match roles_arg(cmd, CREATE_API_KEY, db)? {
         None => allowed,

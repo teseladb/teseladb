@@ -42,6 +42,8 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(true) };
     static NOW_MS: Cell<i64> = const { Cell::new(0) };
     static DEADLINE_MS: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The time limit of the operation running on this thread ([`set_op_limit`]).
+    static OP_LIMIT_MS: Cell<Option<u64>> = const { Cell::new(None) };
     static CACHE: RefCell<HashMap<String, Rc<Program>>> = RefCell::new(HashMap::new());
     static FUNCTION_IDS: Cell<u64> = const { Cell::new(0) };
     /// The native stack this thread gives a call ([`set_stack`]).
@@ -176,10 +178,19 @@ pub(crate) fn begin(enabled: bool, now_ms: u64, deadline_ms: Option<u64>) {
     DEADLINE_MS.with(|d| d.set(deadline_ms));
 }
 
-/// The deadline of the running command, read on the clock: `None` without one.
+/// The deadline of the running command, read on the clock: `None` without one. The limit of
+/// the operation the command runs in, when it has one, is the one its calls keep: it holds the
+/// tenant's cap and the default of reads as well as the command's `maxTimeMS` (007 FR-036).
 pub(crate) fn deadline_from(max_time_ms: Option<u64>) -> Option<u64> {
     let clock = *CLOCK.get()?;
-    max_time_ms.filter(|ms| *ms > 0).map(|ms| clock().saturating_add(ms))
+    let limit = OP_LIMIT_MS.with(Cell::get).or(max_time_ms);
+    limit.filter(|ms| *ms > 0).map(|ms| clock().saturating_add(ms))
+}
+
+/// Sets the time limit of the operation about to run on this thread, `None` once it ends: the
+/// limit that was set before, for the operation it runs inside.
+pub(crate) fn set_op_limit(limit_ms: Option<u64>) -> Option<u64> {
+    OP_LIMIT_MS.with(|l| l.replace(limit_ms))
 }
 
 fn enabled() -> bool {
@@ -447,6 +458,15 @@ pub(crate) fn engine() -> Rc<dyn JsEngine> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    /// The limit of an operation run inside another comes back when the inner one ends.
+    #[test]
+    fn an_operation_limit_restores_the_one_it_ran_inside() {
+        assert_eq!(set_op_limit(Some(150)), None);
+        assert_eq!(set_op_limit(Some(40)), Some(150));
+        assert_eq!(set_op_limit(Some(150)), Some(40));
+        assert_eq!(set_op_limit(None), Some(150));
+    }
 
     /// `killOp` raises the operation's flag: a long script stops with `Interrupted`, not with
     /// the time limit, and the flag set before comes back.

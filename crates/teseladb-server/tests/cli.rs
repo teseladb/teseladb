@@ -382,3 +382,114 @@ fn set_parameter_takes_every_parameter_settable_at_startup() {
         "Cannot use --setParameter to set \"clusterAuthMode\" at startup"
     );
 }
+
+/// `teseladb admin --node <at> <args>` in this process: exit code, output and errors.
+fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
+    let argv: Vec<String> =
+        ["admin", "--node", at].iter().chain(args).map(|s| (*s).to_owned()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = teseladb_server::run(&argv, &mut out, &mut err, &|| true);
+    (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+}
+
+/// The output of `args`, which must succeed.
+fn admin_ok(at: &str, args: &[&str]) -> String {
+    let (code, out, err) = admin(at, args);
+    assert_eq!(code, 0, "{args:?}: {err}");
+    out
+}
+
+/// 007 T058 (FR-030, FR-033 to FR-036): `teseladb admin tenant` with each option of `limits`,
+/// `access`, `usage`, `suspend` and `resume`, as text and with `--format json`, and `tenant list`
+/// with the limits, the list and the state (contract `admin-cli.md`).
+#[test]
+fn the_tenant_subcommands_take_every_option_as_text_and_json() {
+    use std::net::SocketAddr;
+    use teseladb_server::node::{Node, NodeConfig};
+    let cfg = NodeConfig {
+        cores: Some(1),
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(std::time::Duration::from_secs(30)));
+    let at = node.admin_addr().unwrap().to_string();
+    assert!(admin_ok(&at, &["tenant", "create", "acme"]).starts_with("tenant acme: "));
+    // Every limit, each switch and the service user in one call: the answer has them all.
+    let set = [
+        ("--storage-bytes", "1048576", "storageBytes\t1048576"),
+        ("--max-connections", "20", "maxConnections\t20"),
+        ("--ops-per-second", "100", "opsPerSecond\t100"),
+        ("--max-api-keys", "3", "maxApiKeys\t3"),
+        ("--max-time-ms", "30000", "maxTimeMS\t30000"),
+        ("--max-concurrent-ops", "4", "maxConcurrentOps\t4"),
+        ("--max-write-bytes-per-second", "65536", "maxWriteBytesPerSecond\t65536"),
+        ("--max-databases", "5", "maxDatabases\t5"),
+        ("--max-collections", "50", "maxCollections\t50"),
+        ("--max-search-indexes", "2", "maxSearchIndexes\t2"),
+        ("--http", "off", "httpEnabled\tfalse"),
+        ("--mcp", "off", "mcpEnabled\tfalse"),
+    ];
+    let mut argv = vec!["tenant", "limits", "acme"];
+    for (opt, value, _) in &set {
+        argv.extend([*opt, *value]);
+    }
+    argv.extend(["--service-user", "svc"]);
+    let out = admin_ok(&at, &argv);
+    for (_, _, line) in &set {
+        assert!(out.lines().any(|l| l == *line), "{line} in {out}");
+    }
+    assert!(out.contains("serviceUser\t") && out.contains("svc"), "{out}");
+    // Without options it shows them; as JSON, one document.
+    assert_eq!(admin_ok(&at, &["tenant", "limits", "acme"]), out);
+    let json = admin_ok(&at, &["tenant", "limits", "acme", "--format", "json"]);
+    let doc = teseladb_bson::extjson::parse(json.trim()).unwrap();
+    assert_eq!(doc.get("httpEnabled"), Some(&teseladb_bson::Value::Boolean(false)), "{json}");
+    // A bad value and an option of another subcommand are refused with the usage code.
+    let (code, _, err) = admin(&at, &["tenant", "limits", "acme", "--http", "maybe"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("on or off"), "{err}");
+    let (code, _, err) = admin(&at, &["tenant", "limits", "acme", "--allow", "10.0.0.0/8"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("does not go with this subcommand"), "{err}");
+    let (code, _, err) = admin(&at, &["tenant", "limits", "acme", "--max-databases", "x"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not a whole number"), "{err}");
+    // The access list: replaced, shown, cleared.
+    let allow = ["tenant", "access", "acme", "--allow", "10.0.0.0/8", "--allow", "192.168.1.7"];
+    assert_eq!(admin_ok(&at, &allow), "10.0.0.0/8\n192.168.1.7\n");
+    assert_eq!(admin_ok(&at, &["tenant", "access", "acme"]), "10.0.0.0/8\n192.168.1.7\n");
+    let json = admin_ok(&at, &["tenant", "access", "acme", "--format", "json"]);
+    assert!(json.contains("allowedSources") && json.contains("192.168.1.7"), "{json}");
+    // `tenant list` names each limit set, each switch off, the list and the state.
+    assert_eq!(admin_ok(&at, &["tenant", "suspend", "acme"]), "tenant acme suspended\n");
+    let list = admin_ok(&at, &["tenant", "list"]);
+    let line = list.lines().find(|l| l.contains("acme")).unwrap_or_else(|| panic!("{list}"));
+    for word in [
+        "opsPerSecond=100",
+        "httpEnabled=off",
+        "mcpEnabled=off",
+        "serviceUser=svc",
+        "allowedSources=10.0.0.0/8,192.168.1.7",
+        "suspended",
+    ] {
+        assert!(line.split('\t').any(|w| w == word), "{word} in {line}");
+    }
+    let json = admin_ok(&at, &["tenant", "list", "--format", "json"]);
+    assert!(json.contains("\"suspended\":true") || json.contains("\"suspended\" : true"), "{json}");
+    assert_eq!(admin_ok(&at, &["tenant", "resume", "acme"]), "tenant acme resumed\n");
+    assert!(!admin_ok(&at, &["tenant", "list"]).contains("\tsuspended"));
+    assert_eq!(admin_ok(&at, &["tenant", "access", "acme", "--clear"]), "any source\n");
+    // The usage: the five fields of the contract, as text and as JSON.
+    let usage = admin_ok(&at, &["tenant", "usage", "acme"]);
+    for field in ["storageBytes", "connections", "opsTotal", "throttledSeconds", "lastAuth"] {
+        assert!(usage.lines().any(|l| l.starts_with(&format!("{field}\t"))), "{field}: {usage}");
+    }
+    let json = admin_ok(&at, &["tenant", "usage", "acme", "--format", "json"]);
+    assert!(teseladb_bson::extjson::parse(json.trim()).unwrap().get("opsTotal").is_some(), "{json}");
+    // A tenant that does not exist: an error with its name.
+    let (code, _, err) = admin(&at, &["tenant", "limits", "nobody"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("nobody"), "{err}");
+    drop(node.stop());
+}

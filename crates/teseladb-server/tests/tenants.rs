@@ -139,10 +139,7 @@ fn a_tenant_gets_limits_an_access_list_and_a_suspension_through_the_port() {
         (1, "teseladb admin: not an address or a CIDR block: \"10.0.0.0/40\"\n")
     );
     let (code, _, err) = admin(&at, &["tenant", "limits", "acme", "--max-connections", "x"]);
-    assert_eq!(
-        (code, err.as_str()),
-        (1, "teseladb admin: --max-connections: not a whole number: x\n")
-    );
+    assert_eq!((code, err.as_str()), (2, "--max-connections: not a whole number: x\n"));
     let (code, _, err) = admin(&at, &["tenant", "suspend", "acme", "--allow", "1.2.3.4"]);
     assert_eq!((code, err.as_str()), (2, "--allow does not go with this subcommand\n"));
     node.stop();
