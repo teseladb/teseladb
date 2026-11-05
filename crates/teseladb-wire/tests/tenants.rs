@@ -448,3 +448,47 @@ fn a_suspended_tenant_signs_nobody_in_and_the_default_one_still_works_in_it() {
     let r = start_login(&mut m, &mut ann, "ann");
     assert!(ok(&r) && r.get("done") == Some(&Value::Boolean(true)), "{r:?}");
 }
+
+// 007 T061 (FR-035): with an access list, a user of the tenant signs in only from an address in
+// it, and the user's own `authenticationRestrictions` still apply on top of it.
+#[test]
+fn a_tenant_access_list_lets_in_only_its_sources_and_adds_to_the_user_restrictions() {
+    let (mut m, mut c) = (node(), Connection::new(9));
+    let create = doc(&[
+        ("createUser", "ann".into()),
+        ("pwd", PASSWORD.into()),
+        ("roles", Value::Array(vec![Value::from("root")])),
+        ("mechanisms", Value::Array(vec![Value::from("SCRAM-SHA-256")])),
+        (
+            "authenticationRestrictions",
+            Value::Array(vec![Value::Document(doc(&[(
+                "clientSource",
+                Value::Array(vec![Value::from("10.0.0.0/16")]),
+            )]))]),
+        ),
+    ]);
+    assert!(ok(&run(&mut m, &mut c, "admin", as_acme(create))));
+    let from = |addr: &str| {
+        let mut conn = Connection::new(10);
+        conn.auth.required = true;
+        conn.auth.client_addr = Some(addr.to_owned());
+        conn
+    };
+    m.sources = vec!["10.0.1.0/24".to_owned(), "2001:db8::/32".to_owned()];
+    // In both lists.
+    let r = start_login(&mut m, &mut from("10.0.1.7:5000"), "ann");
+    assert!(ok(&r), "{r:?}");
+    // In the user's, not in the tenant's.
+    let r = start_login(&mut m, &mut from("10.0.2.7:5000"), "ann");
+    assert_eq!(r.get("code"), Some(&Value::Int32(18)), "{r:?}");
+    // In the tenant's, not in the user's.
+    let r = start_login(&mut m, &mut from("[2001:db8::1]:5000"), "ann");
+    assert_eq!(r.get("code"), Some(&Value::Int32(18)), "{r:?}");
+    // A connection without an address is outside any list.
+    let r = start_login(&mut m, &mut Connection::new(11), "ann");
+    assert_eq!(r.get("code"), Some(&Value::Int32(18)), "{r:?}");
+    // Without a tenant list only the user's applies.
+    m.sources.clear();
+    let r = start_login(&mut m, &mut from("10.0.2.7:5000"), "ann");
+    assert!(ok(&r), "{r:?}");
+}

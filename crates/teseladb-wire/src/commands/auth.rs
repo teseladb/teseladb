@@ -196,9 +196,15 @@ fn admit<B: Backend + ?Sized>(
             None => (None, None, 0),
         },
     };
-    // A user of a suspended tenant does not sign in (007 FR-034).
-    if tenant != 0 && backend.tenant_state(tenant).is_some_and(|s| s.suspended) {
-        return Err(CommandError::new(AUTHENTICATION_FAILED, TENANT_SUSPENDED));
+    // A user of a suspended tenant does not sign in (007 FR-034), nor one from outside the
+    // tenant's access list (FR-035), which adds to the user's own restrictions.
+    if let Some(t) = (tenant != 0).then(|| backend.tenant_state(tenant)).flatten() {
+        if t.suspended {
+            return Err(CommandError::new(AUTHENTICATION_FAILED, TENANT_SUSPENDED));
+        }
+        if !restrictions::sources_allow(&t.allowed_sources, state.client_addr.as_deref()) {
+            return Err(sasl_error(&SaslError::AuthenticationFailed));
+        }
     }
     if let Some(roles) = roles {
         let inherited =

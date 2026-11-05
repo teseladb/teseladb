@@ -195,6 +195,8 @@ pub struct Mem {
     pub tenants: Vec<(u32, String)>,
     /// The tenants suspended (007 FR-034).
     pub suspended: Vec<u32>,
+    /// The access list of every tenant (007 FR-035).
+    pub sources: Vec<String>,
     /// The catalog changes, at the node's clock (014 FR-014).
     pub ddl: teseladb_meta::ddl_log::DdlLog,
     /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
@@ -534,6 +536,7 @@ impl Backend for Mem {
         self.tenants.iter().any(|(id, _)| *id == tenant).then(|| {
             teseladb_meta::tenants::TenantState {
                 suspended: self.suspended.contains(&tenant),
+                allowed_sources: self.sources.clone(),
                 ..Default::default()
             }
         })

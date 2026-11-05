@@ -121,6 +121,16 @@ fn field_matches(doc: &teseladb_bson::Document, field: &str, addr: Option<&[u8]>
     })
 }
 
+/// Whether the access list `sources` of a tenant (addresses and CIDR blocks, 007 FR-035) lets
+/// `client` in: an empty list lets anyone, and a client without an address no one.
+pub fn sources_allow(sources: &[String], client: Option<&str>) -> bool {
+    if sources.is_empty() {
+        return true;
+    }
+    let Some(addr) = client.and_then(|c| address(host(c))) else { return false };
+    sources.iter().any(|s| cidr(s).is_some_and(|(net, bits)| contains(&net, bits, &addr)))
+}
+
 /// Whether one of the restriction documents of `list` lets `client` reach `server` (an empty
 /// list lets anyone).
 pub fn list_allows(list: &[Value], client: Option<&str>, server: Option<&str>) -> bool {
