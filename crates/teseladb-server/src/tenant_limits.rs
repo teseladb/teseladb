@@ -64,6 +64,8 @@ pub struct NodeUsage {
 #[derive(Clone, Copy, Debug, Default)]
 struct Tenant {
     usage: NodeUsage,
+    /// The bytes this node let the tenant write since the last read of its data (FR-031).
+    written: u64,
     running: u32,
     ops: Bucket,
     bytes: Bucket,
@@ -155,6 +157,26 @@ impl TenantLimiter {
         })
     }
 
+    /// Lets `tenant` write `bytes` more on this node if what it wrote since the last read of its
+    /// data stays within `share`; `false` refuses the write.
+    pub fn write_within(&self, tenant: u32, bytes: u64, share: u64) -> bool {
+        self.with(tenant, |t| {
+            if t.written.saturating_add(bytes) > share {
+                return false;
+            }
+            t.written += bytes;
+            true
+        })
+    }
+
+    /// The tenants' data was read again: what each wrote starts from zero.
+    pub fn reset_written(&self) {
+        let mut g = self.tenants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for t in g.values_mut() {
+            t.written = 0;
+        }
+    }
+
     /// Counts `wait` as time `tenant` was held back.
     pub fn throttle(&self, tenant: u32, wait: Duration) {
         self.with(tenant, |t| t.usage.throttled_seconds += wait.as_secs_f64());
@@ -206,17 +228,211 @@ pub const SYSTEM_OVERLOADED: &str = "SystemOverloadedError";
 /// See [`SYSTEM_OVERLOADED`].
 pub const RETRYABLE: &str = "RetryableError";
 
+/// How often each node reads again the data each tenant uses (FR-031).
+pub const USAGE_EVERY: Duration = Duration::from_secs(5);
+
+/// The first key of the data of `tenant`: documents and index entries (007 FR-012).
+pub fn tenant_start(tenant: u32) -> Vec<u8> {
+    let mut k = vec![teseladb_keys::space::DATA];
+    k.extend_from_slice(&tenant.to_be_bytes());
+    k
+}
+
+/// The first key past the data of `tenant`.
+pub fn tenant_end(tenant: u32) -> Vec<u8> {
+    match tenant.checked_add(1) {
+        Some(next) => tenant_start(next),
+        None => vec![teseladb_keys::space::DATA + 1],
+    }
+}
+
+/// The data `tenant` uses in the cluster (FR-031): the live bytes of each range inside its key
+/// interval, as its state machine keeps them, and the stored bytes of the part of a range that
+/// holds other data too.
+pub fn storage_of<B: teseladb_wire::commands::Backend + ?Sized>(
+    b: &mut B,
+    tenant: u32,
+) -> Result<u64, teseladb_wire::error::CommandError> {
+    let start = tenant_start(tenant);
+    let end = tenant_end(tenant);
+    let mut total = 0u64;
+    for e in b.route_entries()? {
+        // An empty end is no end.
+        let range_end = if e.end.is_empty() { None } else { Some(e.end.as_slice()) };
+        if range_end.is_some_and(|re| re <= start.as_slice())
+            || e.start.as_slice() >= end.as_slice()
+        {
+            continue;
+        }
+        let contained = e.start >= start && range_end.is_some_and(|re| re <= end.as_slice());
+        total += if contained {
+            b.range_live_bytes(&e)?
+        } else {
+            let from = e.start.clone().max(start.clone());
+            let to = range_end.map_or(end.clone(), |re| re.min(end.as_slice()).to_vec());
+            b.stored_bytes(&from, &to)?
+        };
+    }
+    Ok(total)
+}
+
+/// Reads again the data each tenant uses and gives every tenant a new margin on this node. A
+/// tenant whose read fails (no leader for a range) keeps its last value.
+pub fn read_usage(backend: &mut crate::backend::ServerBackend) {
+    let tenants: Vec<u32> = backend.routes().tenants().keys().copied().collect();
+    if tenants.is_empty() {
+        return;
+    }
+    let mut usage = (*backend.routes().usage()).clone();
+    for t in tenants {
+        if let Ok(bytes) = storage_of(backend, t) {
+            usage.insert(t, bytes);
+        }
+        teseladb_wire::commands::Backend::end_operation(backend);
+    }
+    backend.routes().publish_usage(std::sync::Arc::new(usage));
+    backend.routes().limiter().reset_written();
+}
+
+/// The thread of each node that reads the tenants' data every [`USAGE_EVERY`] until `stop`: on its
+/// own, so that no other periodic task of the node holds it back.
+pub fn spawn_reader(
+    mut backend: crate::backend::ServerBackend,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().name("tenant-usage".into()).spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            read_usage(&mut backend);
+            std::thread::park_timeout(USAGE_EVERY);
+        }
+    })
+}
+
+/// A tenant's name as the value of a Prometheus label: backslash, quote and line break escaped.
+pub fn label(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+/// The series of each tenant but the default one on this node (FR-033): the data it uses in the
+/// cluster, and this node's connections, commands served, seconds held back and last sign-in.
+pub fn metrics(routes: &crate::routes::SharedRoutes, out: &mut String) {
+    use std::fmt::Write as _;
+    let usage = routes.usage();
+    let rows: Vec<(String, u64, NodeUsage)> = routes
+        .tenants()
+        .keys()
+        .filter_map(|id| {
+            let name = routes.tenant_name(*id)?;
+            Some((label(&name), usage.get(id).copied().unwrap_or(0), routes.limiter().usage(*id)))
+        })
+        .collect();
+    let series: [(&str, &str, &str); 5] = [
+        (
+            "teseladb_tenant_storage_bytes",
+            "gauge",
+            "Bytes of data and indexes the tenant uses in the cluster.",
+        ),
+        (
+            "teseladb_tenant_connections",
+            "gauge",
+            "Authenticated connections of the tenant on this node, without its service user's.",
+        ),
+        (
+            "teseladb_tenant_ops_total",
+            "counter",
+            "Commands this node served the tenant, without its service user's.",
+        ),
+        (
+            "teseladb_tenant_throttled_seconds_total",
+            "counter",
+            "Seconds the tenant's commands waited or were refused for its limits on this node.",
+        ),
+        (
+            "teseladb_tenant_last_auth_timestamp_seconds",
+            "gauge",
+            "When a user of the tenant last signed in on this node.",
+        ),
+    ];
+    for (i, (name, kind, help)) in series.iter().enumerate() {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
+        for (tenant, storage, u) in &rows {
+            let value = match i {
+                0 => storage.to_string(),
+                1 => u.connections.to_string(),
+                2 => u.ops_total.to_string(),
+                3 => format!("{:.3}", u.throttled_seconds),
+                _ => match u.last_auth_ms {
+                    Some(ms) => format!("{:.3}", ms as f64 / 1000.0),
+                    None => continue,
+                },
+            };
+            let _ = writeln!(out, "{name}{{tenant=\"{tenant}\"}} {value}");
+        }
+    }
+}
+
+/// `GET /admin/tenants/<name>/usage` of tenant `id` (FR-033): the data it uses in the cluster and
+/// what this node counted of it.
+pub fn usage_doc(routes: &crate::routes::SharedRoutes, id: u32) -> teseladb_bson::Document {
+    let u = routes.limiter().usage(id);
+    let storage = routes.usage().get(&id).copied().unwrap_or(0);
+    let last = u.last_auth_ms.map_or(teseladb_bson::Value::Null, |ms| {
+        teseladb_bson::Value::DateTime(i64::try_from(ms).unwrap_or(i64::MAX))
+    });
+    teseladb_bson::Document::new()
+        .with("storageBytes", i64::try_from(storage).unwrap_or(i64::MAX))
+        .with("connections", i64::from(u.connections))
+        .with("opsTotal", i64::try_from(u.ops_total).unwrap_or(i64::MAX))
+        .with("throttledSeconds", u.throttled_seconds)
+        .with("lastAuth", last)
+        .with("ok", 1.0)
+}
+
+/// The error of a write of tenant `name` past its storage quota (FR-031).
+pub fn over_quota(name: &str, used: u64, limit: u64) -> teseladb_wire::error::CommandError {
+    teseladb_wire::error::CommandError::new(
+        teseladb_wire::error::OUT_OF_DISK_SPACE,
+        format!("tenant {name} is over its storage quota: {used} of {limit} bytes"),
+    )
+}
+
+/// Whether a write of `bytes` of `tenant` fits in its storage quota on this node: the data it
+/// uses below the limit, and what this node let it write since the last read within its part of
+/// the margin, `(limit - used) / nodes` (FR-031).
+fn check_quota(
+    routes: &crate::routes::SharedRoutes,
+    tenant: u32,
+    limit: u64,
+    bytes: u64,
+) -> Result<(), teseladb_wire::error::CommandError> {
+    let used = routes.usage().get(&tenant).copied().unwrap_or(0);
+    let name = || routes.tenant_name(tenant).unwrap_or_else(|| tenant.to_string());
+    if used >= limit {
+        return Err(over_quota(&name(), used, limit));
+    }
+    let share = (limit - used) / routes.nodes() as u64;
+    if !routes.limiter().write_within(tenant, bytes, share) {
+        return Err(over_quota(&name(), used, limit));
+    }
+    Ok(())
+}
+
 /// Lets a command of `user` of `tenant` that writes `bytes` begin on this node: `None` when no
-/// limit counts it, or the milliseconds it waited; the error when it may not run. A slot among
-/// the commands at once is waited for up to [`MAX_WAIT`] too.
+/// limit counts it, or the milliseconds it waited; the error when it may not run. A command that
+/// makes the tenant's data grow (`grows`) fits in its storage quota first. A slot among the
+/// commands at once is waited for up to [`MAX_WAIT`] too.
 pub fn begin(
     routes: &crate::routes::SharedRoutes,
     tenant: u32,
     user: &teseladb_auth::users::UserName,
     bytes: u64,
+    grows: bool,
 ) -> Result<Option<u64>, teseladb_wire::error::CommandError> {
     let states = routes.tenants();
     let Some(state) = states.get(&tenant) else { return Ok(None) };
+    if grows && state.limits.storage_bytes > 0 {
+        check_quota(routes, tenant, state.limits.storage_bytes, bytes)?;
+    }
     if is_service_user(&state.limits, user) {
         return Ok(None);
     }

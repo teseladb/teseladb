@@ -509,6 +509,7 @@ impl AdminBackend for NodeAdmin {
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
         }
+        crate::tenant_limits::metrics(&self.handle.routes, &mut out);
         if let Some(h) = &self.http_metrics {
             out.push_str(&h.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render());
         }
@@ -1066,6 +1067,7 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   tenant access <name> [--allow <cidr>]... [--clear]
   tenant suspend <name>
   tenant resume <name>
+  tenant usage <name>
   apikey create --user <u> --db <db> [--role <role>@<db>]... [--expires-after-days <n>]
   apikey list [--user <u>]
   apikey revoke <keyId>";

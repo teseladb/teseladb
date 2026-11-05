@@ -541,6 +541,8 @@ pub struct ClientListener {
     keeper: Option<JoinHandle<()>>,
     /// The thread that builds the node's search indexes, with a node behind the port.
     builder: Option<JoinHandle<()>>,
+    /// The thread that reads the data each tenant uses (007 FR-031), with a node behind the port.
+    usage: Option<JoinHandle<()>>,
     open: Arc<AtomicUsize>,
 }
 
@@ -668,6 +670,13 @@ impl ClientListener {
             }
             None => None,
         };
+        let usage = match state.handle() {
+            Some(h) => {
+                let backend = ServerBackend::new(h, seed(workers.saturating_add(2)));
+                Some(crate::tenant_limits::spawn_reader(backend, stop.clone())?)
+            }
+            None => None,
+        };
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
@@ -690,6 +699,7 @@ impl ClientListener {
             workers: handles,
             keeper,
             builder,
+            usage,
             open,
         })
     }
@@ -713,7 +723,7 @@ impl ClientListener {
             let _ = waker.wake();
             let _ = t.join();
         }
-        for k in self.keeper.into_iter().chain(self.builder) {
+        for k in self.keeper.into_iter().chain(self.builder).chain(self.usage) {
             k.thread().unpark();
             let _ = k.join();
         }

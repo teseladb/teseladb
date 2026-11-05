@@ -134,6 +134,11 @@ impl ServerBackend {
         ServerBackend::new(self.h.clone(), seed)
     }
 
+    /// The node's routing table and what it publishes for the workers.
+    pub fn routes(&self) -> &SharedRoutes {
+        &self.h.routes
+    }
+
     /// A backend over `h`, with `seed` for its random numbers.
     pub fn new(h: NodeHandle, seed: u64) -> ServerBackend {
         let cores = h.senders.iter().map(CoreSenders::sender).collect();
@@ -1243,12 +1248,17 @@ impl Backend for ServerBackend {
         tenant: u32,
         user: &teseladb_auth::users::UserName,
         bytes: u64,
+        grows: bool,
     ) -> Result<Option<u64>, CommandError> {
-        crate::tenant_limits::begin(&self.h.routes, tenant, user, bytes)
+        crate::tenant_limits::begin(&self.h.routes, tenant, user, bytes, grows)
     }
 
     fn tenant_end(&mut self, tenant: u32) {
         self.h.routes.limiter().end(tenant);
+    }
+
+    fn tenant_name(&mut self, tenant: u32) -> Option<String> {
+        self.h.routes.tenant_name(tenant)
     }
 
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {

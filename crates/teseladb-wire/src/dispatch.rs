@@ -474,12 +474,13 @@ fn command<B: Backend + ?Sized>(
     // `maxTimeMS`, and it ends with the command.
     let limited = match (cmds.as_mut(), conn.auth.user.as_ref()) {
         (Some((backend, _)), Some(u)) if u.tenant != 0 && !free_of_limits(name) => {
-            let bytes = if tenant_write(name) {
+            let grows = tenant_grows(name, &req.command);
+            let bytes = if grows || tenant_write(name) {
                 u64::from(req.header.length.max(0).unsigned_abs())
             } else {
                 0
             };
-            backend.tenant_begin(u.tenant, &u.name, bytes)?.map(|waited| (u.tenant, waited))
+            backend.tenant_begin(u.tenant, &u.name, bytes, grows)?.map(|waited| (u.tenant, waited))
         }
         _ => None,
     };
@@ -528,6 +529,36 @@ const TENANT_WRITES: [&str; 10] = [
 
 fn tenant_write(name: &str) -> bool {
     TENANT_WRITES.contains(&canonical(name))
+}
+
+/// Whether command `cmd` named `name` makes a tenant's data grow (007 FR-031): its writes but an
+/// `update` or `findAndModify` that only `$unset`s, and an `aggregate` that ends in `$out` or
+/// `$merge`. Deleting, dropping and reading never do.
+fn tenant_grows(name: &str, cmd: &Document) -> bool {
+    let only_unset = |u: Option<&Value>| match u {
+        Some(Value::Document(d)) => !d.is_empty() && d.iter().all(|(k, _)| k == "$unset"),
+        _ => false,
+    };
+    match canonical(name) {
+        crate::commands::crud::UPDATE => match cmd.get("updates") {
+            Some(Value::Array(all)) => !all.iter().all(|s| match s {
+                Value::Document(s) => only_unset(s.get("u")),
+                _ => false,
+            }),
+            _ => true,
+        },
+        crate::commands::crud::FIND_AND_MODIFY => {
+            cmd.get("remove") != Some(&Value::Boolean(true)) && !only_unset(cmd.get("update"))
+        }
+        crate::commands::aggregate::AGGREGATE => match cmd.get("pipeline") {
+            Some(Value::Array(stages)) => stages.last().is_some_and(|s| match s {
+                Value::Document(s) => s.get("$out").is_some() || s.get("$merge").is_some(),
+                _ => false,
+            }),
+            _ => false,
+        },
+        other => TENANT_WRITES.contains(&other),
+    }
 }
 
 /// Reply `d` with a failpoint's `writeConcernError` and its labels before `ok`, as a `refrouter`

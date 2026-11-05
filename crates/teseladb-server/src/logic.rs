@@ -895,6 +895,13 @@ impl NodeLogic {
                 routes.publish_tenants(Arc::new(tenants.clone()));
             }
             self.sent_tenants = Some((applied, tenants));
+            if let Some(sm) = self.group0() {
+                let names =
+                    sm.tenants.list().into_iter().map(|(id, n)| (id, n.to_owned())).collect();
+                routes.publish_tenant_names(Arc::new(names));
+                let live = sm.nodes.values().filter(|n| n.state != NodeState::Removed).count();
+                routes.publish_nodes(live);
+            }
         }
     }
 

@@ -20,6 +20,8 @@ pub const ACCESS: &str = "access";
 pub const SUSPEND: &str = "suspend";
 /// Last part of the path that reactivates a tenant.
 pub const RESUME: &str = "resume";
+/// Last part of the path with what a tenant uses (FR-033).
+pub const USAGE: &str = "usage";
 /// The most sources an access list holds (FR-035).
 pub const MAX_SOURCES: usize = 256;
 /// The database of a service user named without one.
@@ -68,6 +70,8 @@ pub enum StateOp {
     Access(Option<Document>),
     /// Suspends it (`true`) or reactivates it.
     Suspend(bool),
+    /// What it uses in the cluster and on this node.
+    Usage,
 }
 
 /// The operation of `method` on the last part `op` of a tenant's path, with the request's
@@ -80,7 +84,8 @@ pub fn op_of(method: Method, op: &str, body: Option<Document>) -> Option<Result<
         (ACCESS, Method::Post) => Ok(StateOp::Access(Some(body.unwrap_or_default()))),
         (SUSPEND, Method::Post) => Ok(StateOp::Suspend(true)),
         (RESUME, Method::Post) => Ok(StateOp::Suspend(false)),
-        (SUSPEND | RESUME, Method::Get) => Err(405),
+        (USAGE, Method::Get) => Ok(StateOp::Usage),
+        (SUSPEND | RESUME, Method::Get) | (USAGE, Method::Post) => Err(405),
         _ => return None,
     })
 }
@@ -226,6 +231,8 @@ fn command(
             Group0Command::SetTenantAccess { tenant: id, sources: sources(&body)? }
         }
         StateOp::Suspend(suspended) => Group0Command::SetTenantSuspended { tenant: id, suspended },
+        // Read by the caller from the node's counters.
+        StateOp::Usage => return Ok(Err(Document::new())),
     }))
 }
 
@@ -249,6 +256,9 @@ pub fn apply(a: &NodeAdmin, name: &str, op: StateOp) -> Answer {
         .into_iter()
         .find(|(_, n, _)| n == name)
         .ok_or_else(|| AdminError::not_found(format!("no tenant named '{name}'")))?;
+    if op == StateOp::Usage {
+        return Ok(crate::tenant_limits::usage_doc(&a.handle.routes, id));
+    }
     let cmd = match command(id, &state, op)? {
         Ok(cmd) => cmd,
         Err(read) => return Ok(read),

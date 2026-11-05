@@ -319,6 +319,31 @@ fn wanted(i: usize, v: &Value) -> Result<Wanted, CommandError> {
     Ok(Wanted { name, kind, definition: definition.clone() })
 }
 
+/// The search indexes a tenant creates within its `maxSearchIndexes` (007 FR-036): 14031 and the
+/// message of its quota past it.
+fn check_search_quota<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    adding: usize,
+) -> Result<(), CommandError> {
+    let tenant = ctx.backend.tenant();
+    let max = match ctx.backend.tenant_state(tenant) {
+        Some(s) if tenant != 0 && s.limits.max_search_indexes > 0 && adding > 0 => {
+            s.limits.max_search_indexes as usize
+        }
+        _ => return Ok(()),
+    };
+    let mut held = 0;
+    for (_, c) in ctx.backend.collections()? {
+        held += ctx.backend.search_indexes(c.id)?.len();
+    }
+    if held + adding > max {
+        let name = ctx.backend.tenant_name(tenant).unwrap_or_else(|| tenant.to_string());
+        let msg = format!("tenant {name} is over its search index quota: {held} of {max}");
+        return Err(CommandError::new(crate::error::OUT_OF_DISK_SPACE, msg));
+    }
+    Ok(())
+}
+
 /// `createSearchIndexes`: every index is checked before any is created; one with the name and
 /// definition of an existing index gives that index back.
 pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
@@ -348,6 +373,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
             None => new.push((w, bytes)),
         }
     }
+    check_search_quota(ctx, new.len())?;
     for (w, definition) in new {
         let id = super::new_object_id(ctx.backend, ctx.shared);
         let at_ms = i64::try_from(ctx.backend.now_ms()).unwrap_or(i64::MAX);

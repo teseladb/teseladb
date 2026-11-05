@@ -1699,12 +1699,17 @@ impl Backend for TxnBackend<'_> {
         tenant: u32,
         user: &teseladb_auth::users::UserName,
         bytes: u64,
+        grows: bool,
     ) -> Result<Option<u64>, CommandError> {
-        self.inner.tenant_begin(tenant, user, bytes)
+        self.inner.tenant_begin(tenant, user, bytes, grows)
     }
 
     fn tenant_end(&mut self, tenant: u32) {
         self.inner.tenant_end(tenant);
+    }
+
+    fn tenant_name(&mut self, tenant: u32) -> Option<String> {
+        self.inner.tenant_name(tenant)
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {

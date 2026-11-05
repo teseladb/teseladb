@@ -500,15 +500,21 @@ pub trait Backend {
         Ok(true)
     }
     /// Lets a command of user `user` of tenant `tenant` that writes `bytes` begin under the
-    /// tenant's limits on this node (007 FR-032): `None` when nothing limits it (no limits, its
-    /// service user), or the milliseconds it waited; an error 462 when it may not run.
+    /// tenant's limits on this node (007 FR-031, FR-032): `None` when nothing limits it (no
+    /// limits, its service user), or the milliseconds it waited; an error 462 when it may not run,
+    /// or 14031 when it makes the tenant's data grow (`grows`) past its storage quota.
     fn tenant_begin(
         &mut self,
         _tenant: u32,
         _user: &teseladb_auth::users::UserName,
         _bytes: u64,
+        _grows: bool,
     ) -> Result<Option<u64>, CommandError> {
         Ok(None)
+    }
+    /// The name of tenant `tenant`, for the messages of its quotas (007 FR-031).
+    fn tenant_name(&mut self, _tenant: u32) -> Option<String> {
+        None
     }
     /// A command [`Backend::tenant_begin`] let run ended.
     fn tenant_end(&mut self, _tenant: u32) {}

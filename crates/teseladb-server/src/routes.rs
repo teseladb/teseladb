@@ -35,6 +35,12 @@ pub struct SharedRoutes {
     tenants: Arc<RwLock<Arc<TenantStates>>>,
     /// What this node counts and limits of each tenant (FR-032, FR-033).
     limiter: Arc<crate::tenant_limits::TenantLimiter>,
+    /// The tenants' names, for the messages of their quotas.
+    tenant_names: Arc<RwLock<Arc<BTreeMap<u32, String>>>>,
+    /// The data each tenant uses in the cluster, as this node last read it (FR-031).
+    usage: Arc<RwLock<Arc<BTreeMap<u32, u64>>>>,
+    /// The nodes of the cluster that are not removed, among which a tenant's margin is shared.
+    nodes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The state of each tenant, by number.
@@ -101,6 +107,36 @@ impl SharedRoutes {
     /// Replaces the tenants' states with `states`.
     pub fn publish_tenants(&self, states: Arc<TenantStates>) {
         replace(&self.tenants, states);
+    }
+
+    /// Replaces the tenants' names with `names`.
+    pub fn publish_tenant_names(&self, names: Arc<BTreeMap<u32, String>>) {
+        replace(&self.tenant_names, names);
+    }
+
+    /// The name of tenant `id`.
+    pub fn tenant_name(&self, id: u32) -> Option<String> {
+        read(&self.tenant_names).get(&id).cloned()
+    }
+
+    /// Replaces the data each tenant uses with `usage`.
+    pub fn publish_usage(&self, usage: Arc<BTreeMap<u32, u64>>) {
+        replace(&self.usage, usage);
+    }
+
+    /// The data each tenant uses in the cluster, as this node last read it.
+    pub fn usage(&self) -> Arc<BTreeMap<u32, u64>> {
+        read(&self.usage)
+    }
+
+    /// Records how many nodes of the cluster are not removed.
+    pub fn publish_nodes(&self, n: usize) {
+        self.nodes.store(n, std::sync::atomic::Ordering::Release);
+    }
+
+    /// How many nodes of the cluster are not removed; at least one.
+    pub fn nodes(&self) -> usize {
+        self.nodes.load(std::sync::atomic::Ordering::Acquire).max(1)
     }
 
     /// What this node counts and limits of each tenant.

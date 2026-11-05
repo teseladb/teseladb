@@ -46,6 +46,8 @@ pub enum TenantAction {
     Suspend(String),
     /// `tenant resume <name>`.
     Resume(String),
+    /// `tenant usage <name>`.
+    Usage(String),
 }
 
 /// The route of the port for `path`, if it is one of the tenants'.
@@ -109,6 +111,7 @@ pub fn parse(words: &[&str], opts: &[(String, String)]) -> Option<Result<TenantA
         ["tenant", "drop", n] => allow(&[]).map(|()| TenantAction::Drop(name(n))),
         ["tenant", "suspend", n] => allow(&[]).map(|()| TenantAction::Suspend(name(n))),
         ["tenant", "resume", n] => allow(&[]).map(|()| TenantAction::Resume(name(n))),
+        ["tenant", "usage", n] => allow(&[]).map(|()| TenantAction::Usage(name(n))),
         ["tenant", "limits", n] => allow(&LIMIT_OPTIONS)
             .map(|()| TenantAction::Limits { name: name(n), set: opts.to_vec() }),
         ["tenant", "access", n] => allow(&ACCESS_OPTIONS).map(|()| TenantAction::Access {
@@ -157,7 +160,7 @@ fn limits_body(set: &[(String, String)]) -> Result<Document, String> {
 
 /// The request `teseladb admin` sends for `a`: method, target and body.
 pub fn request(a: &TenantAction) -> Result<(Method, String, String), String> {
-    use crate::admin_tenant_state::{ACCESS, LIMITS, RESUME, SUSPEND, field};
+    use crate::admin_tenant_state::{ACCESS, LIMITS, RESUME, SUSPEND, USAGE, field};
     let at = |n: &str, op: &str| format!("{TENANTS}/{}/{op}", crate::admin::component(n));
     let encode = |d: &Document| {
         teseladb_rest::media::encode(d, teseladb_rest::media::Format::Relaxed)
@@ -172,6 +175,7 @@ pub fn request(a: &TenantAction) -> Result<(Method, String, String), String> {
         TenantAction::Drop(n) => (Method::Post, at(n, DROP), String::new()),
         TenantAction::Suspend(n) => (Method::Post, at(n, SUSPEND), String::new()),
         TenantAction::Resume(n) => (Method::Post, at(n, RESUME), String::new()),
+        TenantAction::Usage(n) => (Method::Get, at(n, USAGE), String::new()),
         TenantAction::Limits { name, set } if set.is_empty() => {
             (Method::Get, at(name, LIMITS), String::new())
         }
@@ -236,7 +240,7 @@ pub fn text(a: &TenantAction, doc: Option<&Document>) -> String {
         TenantAction::Drop(n) => format!("tenant {n} dropped\n"),
         TenantAction::Suspend(n) => format!("tenant {n} suspended\n"),
         TenantAction::Resume(n) => format!("tenant {n} resumed\n"),
-        TenantAction::Limits { .. } => doc.map_or_else(String::new, |d| {
+        TenantAction::Limits { .. } | TenantAction::Usage(_) => doc.map_or_else(String::new, |d| {
             d.iter()
                 .filter(|(k, _)| *k != "ok")
                 .map(|(k, v)| format!("{k}\t{}\n", teseladb_wire::commands::display(v)))

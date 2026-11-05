@@ -416,6 +416,46 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     }
 }
 
+impl<B: Backend + ?Sized> Guarded<'_, B> {
+    /// A collection or a database a tenant creates, explicitly or by writing, within its
+    /// `maxCollections` and `maxDatabases` (007 FR-031): 14031 past them, since RefDb has no
+    /// code of its own for it.
+    fn check_tenant_quotas(&mut self, cmd: &CatalogCommand) -> Result<(), CommandError> {
+        let CatalogCommand::Create { ns, .. } = cmd else { return Ok(()) };
+        if self.tenant == 0 {
+            return Ok(());
+        }
+        let Some(limits) = self.inner.tenant_state(self.tenant).map(|s| s.limits) else {
+            return Ok(());
+        };
+        if limits.max_collections == 0 && limits.max_databases == 0 {
+            return Ok(());
+        }
+        if self.collection(ns)?.is_some() {
+            return Ok(());
+        }
+        let name = self.inner.tenant_name(self.tenant).unwrap_or_else(|| self.tenant.to_string());
+        let over = |what: &str, n: usize, max: u32| {
+            CommandError::new(
+                crate::error::OUT_OF_DISK_SPACE,
+                format!("tenant {name} is over its {what} quota: {n} of {max}"),
+            )
+        };
+        let collections = self.collections()?;
+        if limits.max_collections > 0 && collections.len() >= limits.max_collections as usize {
+            return Err(over("collection", collections.len(), limits.max_collections));
+        }
+        let dbs = self.databases()?;
+        if limits.max_databases > 0
+            && !dbs.contains(&ns.db)
+            && dbs.len() >= limits.max_databases as usize
+        {
+            return Err(over("database", dbs.len(), limits.max_databases));
+        }
+        Ok(())
+    }
+}
+
 impl<B: Backend + ?Sized> Drop for Guarded<'_, B> {
     fn drop(&mut self) {
         self.inner.set_deadline(None);
@@ -457,6 +497,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     ) -> Result<Option<CollectionEntry>, CommandError> {
         use crate::commands::audit;
         let tenant = self.tenant;
+        self.check_tenant_quotas(&cmd)?;
         let qualified = tenants::qualified_command(tenant, &cmd);
         if !audit::enabled(self.shared) {
             let entry = self.call(|b| b.catalog_write(qualified))?;
@@ -485,12 +526,17 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         tenant: u32,
         user: &teseladb_auth::users::UserName,
         bytes: u64,
+        grows: bool,
     ) -> Result<Option<u64>, CommandError> {
-        self.inner.tenant_begin(tenant, user, bytes)
+        self.inner.tenant_begin(tenant, user, bytes, grows)
     }
 
     fn tenant_end(&mut self, tenant: u32) {
         self.inner.tenant_end(tenant);
+    }
+
+    fn tenant_name(&mut self, tenant: u32) -> Option<String> {
+        self.inner.tenant_name(tenant)
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
