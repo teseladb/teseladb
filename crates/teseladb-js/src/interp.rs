@@ -214,6 +214,8 @@ pub struct Interp<'c> {
     pub now_ms: f64,
     pub rng: u64,
     pub deadline: Option<&'c dyn Fn() -> bool>,
+    /// The host's wait for `sleep(ms)`: `true` if the deadline passed meanwhile.
+    pub sleep: Option<&'c dyn Fn(u64) -> bool>,
     pub symbol_ids: u64,
     /// The symbols made without a description (`Symbol()`): their `description` is undefined.
     pub undescribed: Vec<u64>,

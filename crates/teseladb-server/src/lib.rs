@@ -447,6 +447,18 @@ fn js_clock_ms() -> u64 {
     u64::try_from(backend::process_start().elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The wait of `sleep(ms)` in a JavaScript call: its thread sleeps, as on a `refnode`.
+fn js_sleep(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// What the JavaScript calls of a server read from the process: the clock of their deadline and
+/// the wait of `sleep` (016 FR-007), for `teseladb start` and `teseladb dev` alike.
+pub(crate) fn install_js_host() {
+    teseladb_wire::commands::js::set_clock(js_clock_ms);
+    teseladb_wire::commands::js::set_sleeper(js_sleep);
+}
+
 /// The user id of `root`.
 const ROOT_UID: u32 = 0;
 /// RefDb's startup warning for a process run as `root`, and its identifier.
@@ -461,7 +473,7 @@ pub fn start(
     err: &mut dyn Write,
     stop: &dyn Fn() -> bool,
 ) -> i32 {
-    teseladb_wire::commands::js::set_clock(js_clock_ms);
+    install_js_host();
     let log = match log_output(o) {
         Ok(w) => std::sync::Arc::new(Logger::new(o.log_level, o.log_format, w)),
         Err(e) => {

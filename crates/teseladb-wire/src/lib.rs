@@ -25,6 +25,7 @@ pub mod error;
 pub mod failpoint;
 pub mod generic;
 pub mod hello;
+pub mod ingress;
 pub mod internal_fields;
 pub mod msg;
 pub mod ops;

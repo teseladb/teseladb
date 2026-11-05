@@ -789,6 +789,8 @@ pub struct NodeSessions {
     pub search: search_ops::SearchIndexes,
     /// Where stages write what passes their memory (010 FR-010).
     pub spill: Spill,
+    /// The limiter of the node's new connections (006 FR-036).
+    pub ingress: crate::ingress::Limiter,
 }
 
 /// What a node puts after the seconds of each ObjectId it makes (ObjectId specification): five
@@ -834,6 +836,7 @@ impl NodeSessions {
             query_settings: query_settings::Cache::default(),
             search: search_ops::SearchIndexes::default(),
             spill: Spill::default(),
+            ingress: crate::ingress::Limiter::default(),
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),

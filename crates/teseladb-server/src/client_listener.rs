@@ -13,9 +13,9 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,7 @@ use crate::diagnostic_capture::{self, Capture};
 use crate::tls_port::{TlsPort, Transport};
 use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
 use teseladb_wire::hello::HelloRequest;
+use teseladb_wire::ingress::Admission;
 
 /// RefDb's default `net.maxIncomingConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
@@ -107,6 +108,8 @@ pub struct ClientConfig {
     pub kerberos: Option<Arc<Vec<teseladb_auth::kerberos::ServiceKey>>>,
     /// `authenticationMechanisms`; empty, RefDb's default.
     pub mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    /// The parameters of the limiter of new connections given at start (006 FR-036), in order.
+    pub ingress: Vec<teseladb_wire::ingress::Setting>,
 }
 
 impl ClientConfig {
@@ -124,6 +127,9 @@ impl ClientConfig {
         s.params.tls_outgoing = self.tls_outgoing;
         s.params.transaction_lifetime_secs = self.transaction_lifetime_secs;
         s.params.max_concurrent_transactions = self.max_concurrent_transactions;
+        for setting in &self.ingress {
+            s.ingress.set(setting.clone());
+        }
         if self.test_commands { s.with_test_commands() } else { s }
     }
 
@@ -158,6 +164,7 @@ impl ClientConfig {
             oidc: None,
             kerberos: None,
             mechanisms: Vec::new(),
+            ingress: Vec::new(),
         }
     }
 }
@@ -856,13 +863,16 @@ enum Pending {
     /// A request the failpoint holds (`blockConnection`), dispatched again at the deadline with
     /// its connection, which waits with it.
     Held { conn: Box<Connection>, req: Request, deadline: Instant },
+    /// The first request of a connection waiting in the queue of the limiter of new connections
+    /// for its token (006 FR-036), dispatched at the deadline as a held one.
+    Queued { conn: Box<Connection>, req: Request, deadline: Instant },
 }
 
 impl Pending {
     fn deadline(&self) -> Instant {
         match self {
             Pending::Hello(h) => h.deadline,
-            Pending::Held { deadline, .. } => *deadline,
+            Pending::Held { deadline, .. } | Pending::Queued { deadline, .. } => *deadline,
         }
     }
 }
@@ -907,6 +917,17 @@ struct Client {
     /// The subject of the port's certificate, when it names an organization, unit or domain
     /// component: a client certificate with the same ones is a member's (013 FR-034).
     member_subject: Option<Arc<teseladb_x509::Name>>,
+    /// The client's address, which the bypass list of the limiter of new connections names.
+    peer_ip: Option<IpAddr>,
+    /// Whether the limiter of new connections let its first request through (006 FR-036).
+    admitted: bool,
+}
+
+/// Microseconds since the first connection's first request: the limiter's clock.
+fn limiter_now_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    let micros = START.get_or_init(Instant::now).elapsed().as_micros();
+    u64::try_from(micros).unwrap_or(u64::MAX)
 }
 
 impl Client {
@@ -970,6 +991,26 @@ impl Client {
                     return next.is_ok();
                 }
             };
+            if !self.admitted {
+                // The first request takes a token of the limiter of new connections, waits for
+                // one, or closes the connection without a reply (006 FR-036).
+                let peer = self.peer_ip;
+                match lock(cmds.shared).ingress.admit(peer, limiter_now_us()) {
+                    Admission::Go => self.admitted = true,
+                    Admission::Reject => {
+                        self.conn = Some(conn);
+                        return false;
+                    }
+                    Admission::Wait { micros } => {
+                        self.admitted = true;
+                        self.waiting = true;
+                        let deadline = Instant::now() + Duration::from_micros(micros);
+                        self.new_wait =
+                            Some(Pending::Queued { conn: Box::new(conn), req, deadline });
+                        return true;
+                    }
+                }
+            }
             if !self.handle(conn, req, info, cmds) {
                 return false;
             }
@@ -1255,7 +1296,7 @@ impl Worker {
             self.close(t);
         }
         for p in std::mem::take(&mut self.awaits).into_values() {
-            if let Pending::Held { conn, .. } = p {
+            if let Pending::Held { conn, .. } | Pending::Queued { conn, .. } = p {
                 self.gone(*conn);
             }
         }
@@ -1277,6 +1318,7 @@ impl Worker {
                 conn.auth.mechanisms.clone_from(&self.mechanisms);
                 conn.auth.client_addr = conn.peer.clone();
                 conn.auth.server_addr = stream.local_addr().ok().map(|a| a.to_string());
+                let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
                 let c = Client {
                     stream,
                     transport,
@@ -1291,6 +1333,8 @@ impl Worker {
                     new_wait: None,
                     diag: self.diag.clone(),
                     member_subject: crate::cluster_auth::member_subject(&self.tls),
+                    peer_ip,
+                    admitted: false,
                 };
                 self.conns.insert(token, c);
             }
@@ -1402,9 +1446,15 @@ impl Worker {
             let ((_, token), p) = entry.remove_entry();
             let poller = &self.poller;
             let Some(c) = self.conns.get_mut(&token) else {
-                // Closed while it waited: a held connection's close is recorded now.
-                if let Pending::Held { conn, .. } = p {
-                    self.gone(*conn);
+                // Closed while it waited: a held connection's close is recorded now, and one in
+                // the limiter's queue leaves it as interrupted.
+                match p {
+                    Pending::Held { conn, .. } => self.gone(*conn),
+                    Pending::Queued { conn, .. } => {
+                        lock(&self.shared).ingress.abandon();
+                        self.gone(*conn);
+                    }
+                    Pending::Hello(_) => {}
                 }
                 continue;
             };
@@ -1422,6 +1472,11 @@ impl Worker {
                 }
                 // The held request runs now, with what the failpoint does next.
                 Pending::Held { conn, req, .. } => c.resume(*conn, req, info, &mut cmds),
+                // Its turn in the limiter's queue came.
+                Pending::Queued { conn, req, .. } => {
+                    lock(&self.shared).ingress.dequeue();
+                    c.resume(*conn, req, info, &mut cmds)
+                }
             };
             let alive = c.flush_after(info, &mut cmds) && resumed && c.watch(poller, token);
             self.settle(token, alive);

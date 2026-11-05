@@ -10,6 +10,7 @@ use crate::error::{
     BAD_VALUE, CommandError, ILLEGAL_CLUSTER_AUTH_MODE_TRANSITION, ILLEGAL_OPERATION,
     INVALID_OPTIONS,
 };
+use crate::ingress;
 
 /// `getParameter`.
 pub const GET_PARAMETER: &str = "getParameter";
@@ -224,13 +225,18 @@ impl Default for ServerParams {
 
 /// The parameters TeselaDB has, in name order: name, settable at runtime, settable at startup
 /// with `--setParameter` (`redactClientLogData` starts with its own option, measured).
-const KNOWN: [(&str, bool, bool); 21] = [
+const KNOWN: [(&str, bool, bool); 26] = [
     (AUDIT_AUTHORIZATION_SUCCESS, true, true),
     (AUTH_SCHEMA_VERSION, false, false),
     (CLIENT_CURSOR_MONITOR_FREQUENCY_SECS, true, true),
     (CLUSTER_AUTH_MODE, true, false),
     (CURSOR_TIMEOUT_MILLIS, true, true),
     (ENABLE_TEST_COMMANDS, false, true),
+    (ingress::BURST_CAPACITY_SECS, true, true),
+    (ingress::MAX_QUEUE_DEPTH, true, true),
+    (ingress::BYPASS, true, true),
+    (ingress::ENABLED, true, true),
+    (ingress::RATE_PER_SEC, true, true),
     (MAX_OPERATION_MEMORY, true, true),
     (MAX_EXPRESSION_MEMORY, true, true),
     (HASH_INTERSECTION, true, true),
@@ -286,6 +292,7 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS => {
             Value::Int32(clamp_i32(s.params.max_concurrent_transactions))
         }
+        n if ingress::NAMES.contains(&n) => s.ingress.value(n),
         _ => Value::Int32(clamp_i32(
             i64::try_from(s.sessions.timeout_ms() / 60_000).unwrap_or(i64::MAX),
         )),
@@ -341,8 +348,9 @@ fn integral(name: &str, v: &Value) -> Result<i64, CommandError> {
         Value::Double(_) | Value::Decimal128(_) => crate::types::number(v).ok_or_else(unable)?,
         _ => return Err(unable()),
     };
-    if x.is_nan() {
-        return Err(unable());
+    // NaN and the infinities have their own message (measured on a `refnode` 9.0.4).
+    if !x.is_finite() {
+        return Err(failed("Unable to coerce NaN/Inf to integral type"));
     }
     if !(-(2f64.powi(63))..2f64.powi(63)).contains(&x) {
         return Err(failed("Out of bounds coercing to integral value"));
@@ -437,6 +445,13 @@ fn cluster_auth_mode_step(
     Ok(to)
 }
 
+/// A new value `setParameter` checked: a number (a boolean as 0 or 1, a rate as its bits, a mode
+/// as its index), or one of the limiter's (006 FR-036).
+enum Change {
+    Number(i64),
+    Ingress(ingress::Setting),
+}
+
 /// `setParameter`: every parameter is checked before any changes; the answer has the old value
 /// of the first.
 pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
@@ -455,6 +470,10 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         if !runtime {
             let msg = format!("not allowed to change [{name}] at runtime");
             return Err(CommandError::new(ILLEGAL_OPERATION, msg));
+        }
+        if ingress::NAMES.contains(name) {
+            changes.push((*name, Change::Ingress(ingress::parse(name, v, integral)?)));
+            continue;
         }
         let n = match *name {
             REDACT_CLIENT_LOG_DATA | USE_INTERNAL_AUTHZ_FOR_X509 | HASH_INTERSECTION => {
@@ -491,7 +510,7 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
             );
             return Err(CommandError::new(BAD_VALUE, msg));
         }
-        changes.push((*name, n));
+        changes.push((*name, Change::Number(n)));
     }
     let Some((first, _)) = changes.first() else {
         let msg = "no option found to set, use help:true to see options ";
@@ -499,7 +518,14 @@ pub fn set_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     };
     let mut g = lock(ctx.shared);
     let was = value_of(first, &g);
-    for (name, n) in changes {
+    for (name, change) in changes {
+        let n = match change {
+            Change::Ingress(s) => {
+                g.ingress.set(s);
+                continue;
+            }
+            Change::Number(n) => n,
+        };
         match name {
             CURSOR_TIMEOUT_MILLIS => {
                 g.params.cursor_timeout_ms = n;

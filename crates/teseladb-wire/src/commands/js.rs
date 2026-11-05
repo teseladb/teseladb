@@ -145,6 +145,17 @@ pub fn set_clock(clock: fn() -> u64) {
     let _ = CLOCK.set(clock);
 }
 
+/// How the thread of a call waits for `sleep(ms)`, set once for the process (the server's: the
+/// thread sleeps); without one `sleep` counts its wait as steps.
+static SLEEPER: std::sync::OnceLock<fn(u64)> = std::sync::OnceLock::new();
+/// The longest a `sleep` waits before it reads the deadline and `killOp` again.
+const SLEEP_SLICE_MS: u64 = 10;
+
+/// Sets the wait of [`SLEEPER`] once for the process.
+pub fn set_sleeper(sleeper: fn(u64)) {
+    let _ = SLEEPER.set(sleeper);
+}
+
 /// The native stack of a thread that runs commands: room for the 51 000 nested calls of a
 /// `refrouter` 9.0.4 (016 A016-3-18). The system reserves it and only commits what a call uses.
 pub const COMMAND_STACK: usize = 256 << 20;
@@ -221,12 +232,25 @@ fn run_full(
                 _ => false,
             }
     };
+    // `sleep(ms)` waits on this thread in slices, reading the deadline and `killOp` between them.
+    let sleeper = SLEEPER.get().copied();
+    let wait = |ms: u64| {
+        let Some(sleep) = sleeper else { return false };
+        let mut left = ms;
+        while left > 0 && !passed() {
+            let slice = left.min(SLEEP_SLICE_MS);
+            sleep(slice);
+            left -= slice;
+        }
+        passed()
+    };
     let limits = teseladb_js::Limits { stack: STACK.with(Cell::get), ..Default::default() };
     let mut ctx = JsCtx {
         limits,
         now_ms: NOW_MS.with(Cell::get),
         seed: super::engines::next_seed(),
         deadline: Some(&passed),
+        sleep: sleeper.map(|_| &wait as &dyn Fn(u64) -> bool),
         emit: match emit {
             Some(e) => Some(&mut *e),
             None => None,

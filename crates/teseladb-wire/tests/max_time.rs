@@ -821,7 +821,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     // A `refrouter` 9.0.4 lists the `internalQuery*` ones too (measured on 02-11-2026).
     // `auditAuthorizationSuccess` is RefDb Enterprise's, the OCSP ones, `authSchemaVersion` and
     // `maxConcurrentMultiDocumentTransactions` a refnode's (measured on 9.0.4; 013 FR-016, FR-030,
-    // FR-031; 008 FR-020).
+    // FR-031; 008 FR-020); the limiter of new connections is 9.0's (006 FR-036).
     assert_eq!(
         names,
         [
@@ -831,6 +831,11 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "clusterAuthMode",
             "cursorTimeoutMillis",
             "enableTestCommands",
+            "ingressConnectionEstablishmentBurstCapacitySecs",
+            "ingressConnectionEstablishmentMaxQueueDepth",
+            "ingressConnectionEstablishmentRateLimiterBypass",
+            "ingressConnectionEstablishmentRateLimiterEnabled",
+            "ingressConnectionEstablishmentRatePerSec",
             "internalQueryMaxMemoryUsageBytesPerOperation",
             "internalQueryMaxSingleExpressionMemoryUsageBytes",
             "internalQueryPlannerEnableHashIntersection",
@@ -849,7 +854,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             "ok"
         ]
     );
-    let cases: [(Document, &str, i32, &str); 10] = [
+    let cases: [(Document, &str, i32, &str); 11] = [
         (get("nope"), "admin", 72, "no option found to get"),
         (Document::new().with("getParameter", 1), "admin", 72, "no option found to get"),
         (
@@ -888,11 +893,18 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             2,
             "Failed validating cursorTimeoutMillis: Out of bounds coercing to integral value",
         ),
+        // NaN and the infinities have their own message (measured on a `refnode` 9.0.4).
         (
             set("cursorTimeoutMillis", Value::Double(f64::NAN)),
             "admin",
             2,
-            "Failed validating cursorTimeoutMillis: Unable to coerce value to integral type",
+            "Failed validating cursorTimeoutMillis: Unable to coerce NaN/Inf to integral type",
+        ),
+        (
+            set("cursorTimeoutMillis", Value::Double(f64::NEG_INFINITY)),
+            "admin",
+            2,
+            "Failed validating cursorTimeoutMillis: Unable to coerce NaN/Inf to integral type",
         ),
         (
             get("cursorTimeoutMillis"),

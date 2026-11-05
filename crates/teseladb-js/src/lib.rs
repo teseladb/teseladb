@@ -183,6 +183,9 @@ pub struct JsCtx<'a> {
     pub seed: u64,
     /// Whether the operation's deadline has passed; read every few thousand steps.
     pub deadline: Option<&'a dyn Fn() -> bool>,
+    /// Waits `ms` milliseconds on the host's clock for `sleep(ms)`; `true` if the deadline passed
+    /// meanwhile. Without it `sleep` counts its wait as steps.
+    pub sleep: Option<&'a dyn Fn(u64) -> bool>,
     /// `emit(key, value)` of `mapReduce`'s `map`.
     pub emit: Option<&'a mut dyn FnMut(Value, Value)>,
     /// The global variables of `mapReduce`'s `scope`.
@@ -259,6 +262,7 @@ impl Program {
             it.now_ms = ctx.now_ms as f64;
             it.rng = ctx.seed;
             it.deadline = ctx.deadline;
+            it.sleep = ctx.sleep;
             it.col_offset = if self.is_function { FUNCTION_PREFIX } else { WHERE_PREFIX };
             let r =
                 self.run(&mut it, &globals, this, args, ctx.scope, emit.is_some(), &mut emitted);

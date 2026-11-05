@@ -89,6 +89,7 @@ pub fn start_within(
 
 /// Runs the development cluster until `stop()` says so.
 pub fn run(o: &DevOpts, out: &mut dyn Write, err: &mut dyn Write, stop: &dyn Fn() -> bool) -> i32 {
+    crate::install_js_host();
     let log = Logger::new(Level::Info, Format::Text, Box::new(io::stderr()));
     log.warn("development cluster: nothing is durable", &[]);
     let nodes = match start(o, None) {

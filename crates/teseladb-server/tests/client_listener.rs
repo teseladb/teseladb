@@ -781,3 +781,101 @@ fn a_stopped_port_is_no_longer_woken() {
     assert_eq!(presence.watchers(), 1);
     again.stop();
 }
+
+/// The limiter of new connections (006 FR-036, measured on a `refnode` 9.0.4): with a bucket of
+/// two tokens refilled at one a second and a queue of one, of five connections that greet at once
+/// two are answered now, one a second later and two are closed without a reply. A connection that
+/// has sent nothing has taken no token, and is answered when it greets.
+#[test]
+fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_bucket() {
+    use teseladb_wire::ingress::Setting;
+    let mut cfg = config(DEFAULT_MAX_CONNECTIONS);
+    cfg.ingress = vec![
+        Setting::RatePerSec(1),
+        Setting::BurstSecs(2.0),
+        Setting::QueueDepth(1),
+        Setting::Enabled(true),
+    ];
+    let l = ClientListener::spawn(&cfg, 2, Arc::new(Fixed)).unwrap();
+    let mut silent = connect(&l);
+    let start = Instant::now();
+    let mut clients: Vec<TcpStream> = (0..5).map(|_| connect(&l)).collect();
+    for (k, c) in clients.iter_mut().enumerate() {
+        send(c, k as i32 + 1, 0, &hello());
+    }
+    let mut answered: Vec<Duration> = Vec::new();
+    let mut shut = 0;
+    std::thread::scope(|scope| {
+        let waits: Vec<_> = clients
+            .iter_mut()
+            .map(|c| scope.spawn(move || recv(c).map(|_| start.elapsed())))
+            .collect();
+        for w in waits {
+            match w.join().unwrap() {
+                Some(at) => answered.push(at),
+                None => shut += 1,
+            }
+        }
+    });
+    answered.sort_unstable();
+    assert_eq!((answered.len(), shut), (3, 2), "{answered:?}");
+    assert!(answered[1] < Duration::from_millis(500), "{answered:?}");
+    assert!(answered[2] >= Duration::from_millis(900), "{answered:?}");
+    send(&mut silent, 9, 0, &hello());
+    assert!(recv(&mut silent).is_some(), "the silent connection is answered");
+    l.stop();
+}
+
+/// The limiter of new connections on a node (006 FR-036): `setParameter` turns it on, a client
+/// that leaves while it waits in the queue counts as interrupted when its turn comes, one that
+/// finds the queue full is closed, and `serverStatus` counts both.
+#[test]
+fn a_node_s_limiter_counts_the_closed_connections_and_those_that_left_the_queue() {
+    use teseladb_wire::ingress::{BURST_CAPACITY_SECS, ENABLED, MAX_QUEUE_DEPTH, RATE_PER_SEC};
+    let cfg = NodeConfig {
+        cores: Some(2),
+        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(Duration::from_secs(10)));
+    let open = || {
+        let s = TcpStream::connect(node.client_addrs()[0]).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s
+    };
+    let mut admin = open();
+    let params = [(RATE_PER_SEC, 1), (BURST_CAPACITY_SECS, 1), (MAX_QUEUE_DEPTH, 1), (ENABLED, 1)];
+    for (k, (name, v)) in params.into_iter().enumerate() {
+        let cmd = Document::new().with("setParameter", 1).with(name, v).with("$db", "admin");
+        send(&mut admin, k as i32 + 1, 0, &cmd);
+        assert_eq!(recv(&mut admin).unwrap().2.get("ok"), Some(&Value::Double(1.0)));
+    }
+    let (mut first, mut queued, mut late) = (open(), open(), open());
+    send(&mut first, 1, 0, &hello());
+    assert!(recv(&mut first).is_some(), "the bucket's token");
+    send(&mut queued, 1, 0, &hello());
+    // `late` knocks once `queued` holds the only place in the queue, whatever the load.
+    let mut id = 8;
+    let mut connections = |admin: &mut TcpStream| {
+        id += 1;
+        let status = Document::new().with("serverStatus", 1).with("$db", "admin");
+        send(admin, id, 0, &status);
+        let (_, _, d) = recv(admin).unwrap();
+        let Some(Value::Document(conns)) = d.get("connections") else { panic!("{d:?}") };
+        conns.clone()
+    };
+    while connections(&mut admin).get("queuedForEstablishment") != Some(&Value::Int32(1)) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    send(&mut late, 1, 0, &hello());
+    assert!(recv(&mut late).is_none(), "the queue is full");
+    drop(queued);
+    std::thread::sleep(Duration::from_millis(1300));
+    let conns = connections(&mut admin);
+    assert_eq!(conns.get("queuedForEstablishment"), Some(&Value::Int32(0)), "{conns:?}");
+    let Some(Value::Document(limit)) = conns.get("establishmentRateLimit") else { panic!() };
+    assert_eq!(limit.get("rejected"), Some(&Value::Int32(1)), "{limit:?}");
+    assert_eq!(limit.get("interruptedDueToClientDisconnect"), Some(&Value::Int32(1)));
+    drop(node.stop());
+}

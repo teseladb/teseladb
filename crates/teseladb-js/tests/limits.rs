@@ -518,3 +518,26 @@ fn maps_and_sets_find_their_keys_by_hash() {
         Ok(Value::String("NaN,5|0,4|0,6|[object Object],7:4:true:false:2,1".into()))
     );
 }
+
+/// `sleep(ms)` waits on the host's clock when the host gives one (a server's thread waits, 016
+/// FR-007); without one it counts the wait as steps.
+#[test]
+fn sleep_waits_on_the_host_and_stops_at_its_deadline() {
+    let waited = Cell::new(0u64);
+    let wait = |ms: u64| {
+        waited.set(waited.get() + ms);
+        false
+    };
+    let mut ctx = JsCtx { sleep: Some(&wait), ..JsCtx::default() };
+    let r = run_with("function(){ sleep(100); sleep(-5); sleep(2.9); return 1 }", &mut ctx);
+    assert_eq!(r, Ok(Value::Double(1.0)));
+    assert_eq!(waited.get(), 102);
+    // A host whose deadline passes while it waits ends the call as an endless loop ends.
+    let cut = |_: u64| true;
+    let mut ctx = JsCtx { sleep: Some(&cut), ..JsCtx::default() };
+    assert_eq!(run_with("function(){ sleep(1000); return 1 }", &mut ctx), Err(JsError::Deadline));
+    // Without a host clock the wait is steps against the step limit.
+    let mut ctx =
+        JsCtx { limits: Limits { steps: 1_000, ..Limits::default() }, ..JsCtx::default() };
+    assert_eq!(run_with("function(){ sleep(5000) }", &mut ctx), Err(JsError::Steps));
+}

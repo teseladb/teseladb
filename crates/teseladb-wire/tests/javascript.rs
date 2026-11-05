@@ -226,6 +226,29 @@ fn an_endless_where_stops_at_max_time_ms() {
     assert_eq!(ids(&r), [2]);
 }
 
+fn test_sleep(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// `sleep(ms)` in a `$where` waits on the thread, as on a `refnode` 9.0.4: drivers' tests make slow
+/// operations with it (PyRef's `delay`). With `maxTimeMS` it stops at the deadline with 50.
+#[test]
+fn sleep_in_a_where_waits_and_stops_at_max_time_ms() {
+    teseladb_wire::commands::js::set_clock(test_clock_ms);
+    teseladb_wire::commands::js::set_sleeper(test_sleep);
+    let mut m = Mem::new();
+    load(&mut m);
+    let start = std::time::Instant::now();
+    let slow = r#"{"find":"c","filter":{"_id":2,"$where":"function() { sleep(0.1 * 1000); return true; }"}}"#;
+    assert_eq!(ids(&run(&mut m, slow)), [2]);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(100), "{:?}", start.elapsed());
+    let start = std::time::Instant::now();
+    let r = run(&mut m, r#"{"find":"c","filter":{"$where":"sleep(5000) || true"},"maxTimeMS":50}"#);
+    let (code, msg) = error(&r);
+    assert_eq!(code, 50, "{msg}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+}
+
 /// Measured on a `refrouter` 9.0.4 on 02-11: a function stored in `system.js` is a global of the
 /// database's JavaScript.
 #[test]

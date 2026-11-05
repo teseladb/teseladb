@@ -24,6 +24,7 @@ use crate::MAX_BSON_OBJECT_SIZE;
 use crate::api_version;
 use crate::error::{BAD_VALUE, CommandError, INVALID_NAMESPACE, OPERATION_FAILED};
 use crate::failpoint::CONFIGURE_FAIL_POINT;
+use crate::ingress::IngressCounts;
 use crate::types::{type_name, wrong_type, wrong_types};
 
 /// `buildInfo`.
@@ -346,9 +347,10 @@ fn shown(cmd: &Document, section: &str) -> bool {
 /// `serverStatus`.
 pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let facts = ctx.backend.process();
-    let (counters, status, sessions, cursors) = {
+    let (counters, status, sessions, cursors, ingress) = {
         let g = lock(ctx.shared);
-        (g.counters, super::txn_stats::status(&g), g.sessions.len(), g.cursors.len())
+        let ingress = g.ingress.counts();
+        (g.counters, super::txn_stats::status(&g), g.sessions.len(), g.cursors.len(), ingress)
     };
     let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
     let started = i64::try_from(facts.start_ms).unwrap_or(i64::MAX);
@@ -365,7 +367,7 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     // In a `refrouter` 9.0.4's order; the sections that cannot apply to TeselaDB are in DV-038.
     let sections = [
         ("asserts", asserts(&counters)),
-        ("connections", connections(&facts.connections)),
+        ("connections", connections(&facts.connections, &ingress)),
         ("defaultRWConcern", super::cluster_admin::server_status_section(ctx.backend)?),
         ("extra_info", extra_info(&facts.resources)),
         (
@@ -460,18 +462,20 @@ fn asserts(c: &OpCounters) -> Document {
         .with("rollovers", 0)
 }
 
-fn connections(c: &ConnectionCounts) -> Document {
+/// The `connections` section: the port's counters, and those of the limiter of new connections
+/// (006 FR-036), whose closes count among the rejected ones too (measured).
+fn connections(c: &ConnectionCounts, ingress: &IngressCounts) -> Document {
     let rate = Document::new()
-        .with("rejected", 0)
-        .with("exempted", 0)
-        .with("interruptedDueToClientDisconnect", 0);
+        .with("rejected", number(ingress.rejected))
+        .with("exempted", number(ingress.exempted))
+        .with("interruptedDueToClientDisconnect", number(ingress.interrupted));
     Document::new()
         .with("current", number(c.current))
         .with("available", number(c.available))
         .with("totalCreated", number(c.total_created))
-        .with("rejected", number(c.rejected))
+        .with("rejected", number(c.rejected.saturating_add(ingress.rejected)))
         .with("active", number(c.active))
-        .with("queuedForEstablishment", 0)
+        .with("queuedForEstablishment", number(ingress.queued))
         .with("establishmentRateLimit", rate)
         .with("threaded", number(c.current))
         .with("exhaustIsMaster", Value::Int64(0))

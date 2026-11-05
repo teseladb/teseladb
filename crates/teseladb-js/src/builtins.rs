@@ -330,11 +330,18 @@ fn print(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Undef)
 }
 
-/// `sleep(ms)` waits on the operation's clock in RefDb; the interpreter has no clock, so it
-/// counts the wait as steps against the deadline.
+/// `sleep(ms)` waits on the operation's clock, as in RefDb: on the host's when it gives one,
+/// which ends the call when the deadline passes; the interpreter has no clock of its own, so
+/// without one it counts the wait as steps against the deadline.
 fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let ms = it.number_of(&arg(a, 0))?;
     let n = if ms.is_finite() && ms > 0.0 { (ms as u64).min(1_000_000) } else { 0 };
+    if let Some(wait) = it.sleep {
+        if wait(n) {
+            return Err(Ctrl::Fatal(crate::interp::Fatal::Deadline));
+        }
+        return Ok(Val::Undef);
+    }
     for _ in 0..n {
         it.step()?;
     }
