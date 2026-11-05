@@ -2,3 +2,8 @@
 # Cargo must not contact any registry.
 [net]
 offline = true
+
+# The viuzi-* crates name the registry they are published to (shared-crates 8545ad4). Cargo needs it
+# defined to read their manifests, and builds them from their path, so it never contacts it.
+[registries.viuzi]
+index = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
