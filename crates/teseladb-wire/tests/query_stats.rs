@@ -490,3 +490,46 @@ fn a_hinted_read_never_takes_the_cached_plan() {
     let e = find_on_q(&mut c, "hint");
     assert_eq!(yes(&e, "fromPlanCache"), &Value::Int64(0), "{e:?}");
 }
+
+#[test]
+fn a_cached_plan_reads_the_values_of_the_query_that_runs_it() {
+    // The plan the cache keeps is a plan of the shape: each query of that shape scans its own values.
+    // Ten queries `{a, b}` with other values each: from the third on they take the cached plan, and
+    // each finds its own document (measured on RefDb 9.0.4: a cached entry keeps no bounds).
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    fifty(&mut c);
+    for i in 0..10 {
+        let q = format!(r#"{{"find":"q","filter":{{"a":{},"b":{i}}}}}"#, i % 5);
+        let r = c.ok(DB, &q);
+        let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+        assert_eq!(batch.len(), 1, "{q}: {r:?}");
+        let Value::Document(d) = &batch[0] else { panic!("{r:?}") };
+        assert_eq!(d.get("_id"), Some(&Value::Int32(i)), "{q}");
+    }
+    let e = find_on_q(&mut c, "\"b\"");
+    assert!(yes(&e, "fromPlanCache") != &Value::Int64(0), "the plan came from the cache: {e:?}");
+}
+
+#[test]
+fn a_cached_or_plan_reads_the_values_of_the_query_that_runs_it() {
+    let mut c = Client::new();
+    c.set(-1, 0.0);
+    fifty(&mut c);
+    for i in 0..8 {
+        let q = format!(
+            r#"{{"find":"q","filter":{{"$or":[{{"b":{i}}},{{"b":{}}}]}},"sort":{{"_id":1}}}}"#,
+            i + 20
+        );
+        let r = c.ok(DB, &q);
+        let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+        let ids: Vec<&Value> = batch
+            .iter()
+            .map(|d| match d {
+                Value::Document(d) => d.get("_id").unwrap_or(&Value::Null),
+                other => other,
+            })
+            .collect();
+        assert_eq!(ids, [&Value::Int32(i), &Value::Int32(i + 20)], "{q}");
+    }
+}

@@ -1248,7 +1248,11 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         Some(_) => None,
         None => super::lock(note.shared).plan_cache.cached(&ns, &note.shape, &catalog),
     };
-    let outcome = match cached {
+    // The entry keeps the plan of the read that learned it, with that read's values: the plan
+    // runs with the bounds and residual this read gives it, or the read plans from scratch.
+    let outcome = match cached
+        .and_then(|(access, works)| Some((rebound(&access, &indexes, read)?, works)))
+    {
         Some((access, works)) => Some(cached_run(backend, coll, &indexes, read, access, works)?),
         None => None,
     };
@@ -1302,6 +1306,42 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     Ok(Some((chosen.winner.found.into_iter().map(|(_, d)| d).collect(), keys)))
 }
 
+/// The plan of `read` with the shape of `cached`: the candidate of this read that scans the same
+/// indexes the same way, with this read's bounds and residual; `None` when none does.
+fn rebound(cached: &Access, indexes: &[PlanIndex], read: &ReadPlan<'_>) -> Option<Access> {
+    let metas: Vec<IndexMeta> = indexes.iter().map(|i| i.meta.clone()).collect();
+    let request = Request {
+        parsed: Some(read.parsed),
+        sort: &read.sort,
+        hint: read.hint,
+        intersect: read.intersect,
+    };
+    candidates(&request, &metas).into_iter().find(|a| same_shape(a, cached))
+}
+
+/// Whether two plans scan the same indexes the same way, whatever their values.
+fn same_shape(a: &Access, b: &Access) -> bool {
+    let scans = |x: &[IndexScan], y: &[IndexScan]| {
+        x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_scan(x, y))
+    };
+    match (a, b) {
+        (Access::Collscan, Access::Collscan) => true,
+        (Access::Index(x), Access::Index(y)) => same_scan(x, y),
+        (Access::Or(x), Access::Or(y)) => scans(x, y),
+        (Access::AndHash { scans: x, .. }, Access::AndHash { scans: y, .. }) => scans(x, y),
+        _ => false,
+    }
+}
+
+fn same_scan(a: &IndexScan, b: &IndexScan) -> bool {
+    a.index == b.index
+        && a.backward == b.backward
+        && a.sorts == b.sorts
+        && a.assigned == b.assigned
+        && a.preds == b.preds
+        && a.bounds.iter().map(|(f, _)| f).eq(b.bounds.iter().map(|(f, _)| f))
+}
+
 /// What became of the plan the cache holds for a read.
 enum Cached {
     /// It gave a batch or ended within [`EVICTION_RATIO`] times its entry's works: its run.
@@ -1338,3 +1378,41 @@ fn cached_run<B: Backend + ?Sized>(
 
 /// The documents a plan found, in order, and the index key of each when the read wants them.
 pub(crate) type Planned = (Vec<Vec<u8>>, Vec<Option<Document>>);
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    fn scan(index: usize, field: &str, at: i32) -> IndexScan {
+        let v = Value::Int32(at);
+        let bound = Bound { low: v.clone(), low_inclusive: true, high: v, high_inclusive: true };
+        IndexScan {
+            index,
+            bounds: vec![(field.to_owned(), vec![bound])],
+            backward: false,
+            residual: None,
+            sorts: false,
+            assigned: 1,
+            preds: vec![0],
+        }
+    }
+
+    #[test]
+    fn the_shape_of_a_plan_is_its_indexes_and_their_use_not_its_values() {
+        assert!(same_shape(&Access::Collscan, &Access::Collscan));
+        assert!(same_shape(&Access::Index(scan(1, "a", 1)), &Access::Index(scan(1, "a", 2))));
+        assert!(!same_shape(&Access::Index(scan(1, "a", 1)), &Access::Index(scan(2, "a", 1))));
+        assert!(!same_shape(&Access::Index(scan(1, "a", 1)), &Access::Index(scan(1, "b", 1))));
+        let backward = IndexScan { backward: true, ..scan(1, "a", 1) };
+        assert!(!same_shape(&Access::Index(backward), &Access::Index(scan(1, "a", 1))));
+        let or = |x, y| Access::Or(vec![scan(1, "a", x), scan(2, "b", y)]);
+        assert!(same_shape(&or(1, 2), &or(3, 4)));
+        assert!(!same_shape(&or(1, 2), &Access::Or(vec![scan(1, "a", 1)])));
+        let hash =
+            |x| Access::AndHash { scans: vec![scan(1, "a", x), scan(2, "b", x)], filter: None };
+        assert!(same_shape(&hash(1), &hash(2)));
+        assert!(!same_shape(&hash(1), &or(1, 1)));
+        assert!(!same_shape(&Access::Collscan, &Access::Index(scan(1, "a", 1))));
+    }
+}
