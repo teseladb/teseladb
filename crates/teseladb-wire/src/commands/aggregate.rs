@@ -255,9 +255,11 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
         // A time series lists its buckets' indexes alone, as `listIndexes` shows them (measured
-        // on a `refnode` and a `refrouter` 9.0.4 on 03-11-2026).
+        // on a `refnode` and a `refrouter` 9.0.4 on 03-11-2026); a clustered collection's index is
+        // not listed (measured on a `refrouter` 9.0.4 on 05-11-2026).
         let series = super::timeseries::spec_of(&coll)?;
-        let mut specs = match super::catalog::has_id_index(ns) && series.is_none() {
+        let clustered = super::catalog::is_clustered(&coll)?;
+        let mut specs = match super::catalog::has_id_index(ns) && series.is_none() && !clustered {
             true => vec![super::catalog::id_index(&coll)?],
             false => Vec::new(),
         };

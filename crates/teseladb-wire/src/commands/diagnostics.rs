@@ -712,6 +712,14 @@ fn index_sizes<B: Backend + ?Sized>(
     Ok(out)
 }
 
+/// The `nindexes` of `collStats` for a collection with `sized` indexes in `indexSizes`: a
+/// clustered collection's index counts and has no size of its own (measured on a `refrouter` 9.0.4
+/// on 05-11-2026: `nindexes: 1`, `indexSizes: {}`).
+fn index_count(kind: &CollectionKind, sized: usize) -> i32 {
+    let clustered = usize::from(matches!(kind, CollectionKind::Clustered { .. }));
+    i32::try_from(sized + clustered).unwrap_or(i32::MAX)
+}
+
 /// `dbStats`. The sizes are TeselaDB's (DV-037); views arrive with 010.
 pub fn db_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let scale = scale(ctx.cmd, DB_STATS)?;
@@ -832,7 +840,7 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
         d.push("max", number(max.map_or(0, |m| i64::try_from(m).unwrap_or(i64::MAX))));
         d.push("maxSize", scaled(*size));
     }
-    let nindexes = i64::try_from(index_sizes.len()).unwrap_or(0);
+    let nindexes = i64::from(index_count(&kind, index_sizes.len()));
     Ok(d.with("nindexes", number(nindexes))
         .with("totalIndexSize", scaled(index_bytes))
         .with("indexSizes", index_sizes)
@@ -921,7 +929,7 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         }
         d.push("timeseries", ts);
     }
-    let nindexes = i32::try_from(sizes.len()).unwrap_or(i32::MAX);
+    let nindexes = index_count(&kind, sizes.len());
     let mut index_sizes = Document::new();
     for (name, b) in sizes {
         index_sizes.push(name, scaled(b));

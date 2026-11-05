@@ -380,6 +380,7 @@ pub fn rules_of(
         moves: false,
         rekeys: false,
         retry: None,
+        clustered: matches!(super::kinds::kind_of(coll)?, CollectionKind::Clustered { .. }),
     })
 }
 

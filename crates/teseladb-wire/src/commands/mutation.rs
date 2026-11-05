@@ -67,6 +67,7 @@ mod f {
     pub const SHARD_KEY: &str = "shardKey";
     pub const MOVES: &str = "moves";
     pub const REKEYS: &str = "rekeys";
+    pub const CLUSTERED: &str = "clustered";
     pub const RETRY: &str = "retry";
     pub const MARK: &str = "mark";
     pub const PROBES: &str = "probes";
@@ -181,6 +182,8 @@ pub struct Rules {
     /// The retryable write outside a transaction that sends it (018 FR-009): its documents' metas
     /// keep the session for their oplog entries.
     pub retry: Option<teseladb_changestream::meta::RetryInfo>,
+    /// The collection is clustered by `_id` (015 FR-009): a duplicate `_id` fails as there.
+    pub clustered: bool,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -333,6 +336,9 @@ fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
     }
     if r.rekeys {
         d.push(f::REKEYS, true);
+    }
+    if r.clustered {
+        d.push(f::CLUSTERED, true);
     }
     if let Some(info) = retry.or(r.retry.as_ref()) {
         d.push(f::RETRY, Value::Binary { subtype: 0, bytes: info.to_bytes() });
@@ -509,6 +515,7 @@ fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
         shard_key: get_doc(d, f::SHARD_KEY),
         moves: get_bool(d, f::MOVES),
         rekeys: get_bool(d, f::REKEYS),
+        clustered: get_bool(d, f::CLUSTERED),
         retry: match d.get(f::RETRY) {
             Some(RawValue::Binary { bytes, .. }) => {
                 let mut b = bytes;
@@ -1010,16 +1017,25 @@ fn bad_rules() -> CommandError {
     CommandError::new(INTERNAL_ERROR, "malformed collection rules")
 }
 
-fn duplicate(ns: &str, id: &Value) -> CommandError {
-    let mut e = CommandError::new(
-        DUPLICATE_KEY,
-        format!(
-            "E11000 duplicate key error collection: {ns} index: _id_ dup key: {{ _id: {} }}",
-            crate::commands::display(id)
+/// The 11000 of a document whose `_id` is taken. In a clustered collection the documents are
+/// the index: the message names no index and ends in the value found, an empty document, which
+/// `foundValue` repeats (measured on a `refrouter` 9.0.4 on 05-11-2026).
+fn duplicate(rules: &Rules, id: &Value) -> CommandError {
+    let (ns, shown) = (&rules.ns, crate::commands::display(id));
+    let errmsg = match rules.clustered {
+        true => format!(
+            "E11000 duplicate key error collection: {ns} dup key: {{ _id: {shown} }} found value: {{}}"
         ),
-    );
+        false => format!(
+            "E11000 duplicate key error collection: {ns} index: _id_ dup key: {{ _id: {shown} }}"
+        ),
+    };
+    let mut e = CommandError::new(DUPLICATE_KEY, errmsg);
     e.extra.push("keyPattern", Document::new().with("_id", 1));
     e.extra.push("keyValue", Document::new().with("_id", id.clone()));
+    if rules.clustered {
+        e.extra.push("foundValue", Document::new());
+    }
     e
 }
 
@@ -1399,7 +1415,7 @@ fn insert(
         let doc = filled.as_ref().unwrap_or(doc);
         let taken = lookup(key).is_some() || puts.iter().any(|p| &p.key == key);
         let outcome = if taken {
-            Err(duplicate(&rules.ns, &id_of(doc)))
+            Err(duplicate(rules, &id_of(doc)))
         } else {
             stored_bytes(doc, Stored::Insert)
                 .and_then(|b| checker.check(&b, None).map(|()| b))
@@ -1609,7 +1625,7 @@ fn modify(
     }
     if let (0, Some(doc), Some(key)) = (r.n, upsert, keys.last()) {
         if lookup(key).is_some() {
-            return Err(duplicate(&rules.ns, &id_of(doc)));
+            return Err(duplicate(rules, &id_of(doc)));
         }
         let during = executor_error(executor_of(image));
         let replacement = update.as_ref().is_some_and(|u| u.is_replacement());

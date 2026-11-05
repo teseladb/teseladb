@@ -14,9 +14,9 @@ use super::mutation::{Bound, DocMutation, Rules};
 use super::names::{self, full};
 use super::{Backend, Ctx, display, index_spec};
 use crate::error::{
-    BAD_VALUE, CANNOT_CREATE_INDEX, CommandError, FAILED_TO_PARSE, HASHED_FIELDS, HASHED_UNIQUE,
-    INTERNAL_ERROR, INVALID_INDEX_SPECIFICATION_OPTION, INVALID_NAMESPACE, INVALID_OPTIONS,
-    OPERATION_FAILED, TYPE_MISMATCH,
+    BAD_VALUE, CANNOT_CREATE_INDEX, CLUSTERED_INDEX_DROP, CommandError, FAILED_TO_PARSE,
+    HASHED_FIELDS, HASHED_UNIQUE, INTERNAL_ERROR, INVALID_INDEX_SPECIFICATION_OPTION,
+    INVALID_NAMESPACE, INVALID_OPTIONS, OPERATION_FAILED, TYPE_MISMATCH,
 };
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_index::build::CommitQuorum;
@@ -341,12 +341,16 @@ struct Existing {
     entry: Option<IndexEntry>,
 }
 
-/// The number of indexes of collection `c`, as `dropIndexes` counts them (`nIndexesWas`).
+/// The number of indexes of collection `c`, as `dropIndexes` (`nIndexesWas`) and
+/// `createIndexes` (`numIndexesBefore`) count them: a clustered collection's index is not one
+/// of them (measured on a `refrouter` 9.0.4 on 05-11-2026).
 pub fn count<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
 ) -> Result<i32, CommandError> {
-    Ok(i32::try_from(existing(backend, c)?.len()).unwrap_or(i32::MAX))
+    let all = existing(backend, c)?.len();
+    let clustered = usize::from(super::catalog::is_clustered(c)?);
+    Ok(i32::try_from(all - clustered).unwrap_or(i32::MAX))
 }
 
 fn existing<B: Backend + ?Sized>(
@@ -356,7 +360,7 @@ fn existing<B: Backend + ?Sized>(
     // A time series has no `_id_` index (measured on a `refrouter` 9.0.4).
     let mut out = match super::timeseries::spec_of(c)? {
         Some(_) => Vec::new(),
-        None => vec![Existing { spec: super::catalog::id_index(c)?, entry: None }],
+        None => vec![Existing { spec: super::catalog::listed_id_index(c)?, entry: None }],
     };
     for e in backend.indexes(c.id)? {
         let spec = Document::from(RawDoc::from_bytes(&e.spec)?);
@@ -469,12 +473,21 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     // the ones checked, as RefDb checks them after translating them; with `rawData` they are
     // given on the buckets already (measured on a `refnode` 9.0.4 on 02-11-2026).
     let raw = matches!(ctx.cmd.get("rawData"), Some(Value::Boolean(true)));
+    let asked_count = specs.len();
     let specs = match ctx.backend.collection(&ns)? {
         Some(c) => match super::timeseries::spec_of(&c)?.filter(|_| !raw) {
             Some(ts) => specs
                 .iter()
                 .map(|s| super::timeseries::bucket_index(&ts, s))
                 .collect::<Result<Vec<_>, _>>()?,
+            None if super::catalog::is_clustered(&c)? => {
+                let kept: Vec<Document> =
+                    specs.into_iter().filter(|s| !is_clustered_id(s)).collect();
+                if kept.is_empty() {
+                    return already_there(ctx, &c);
+                }
+                kept
+            }
             None => specs,
         },
         None => specs,
@@ -530,7 +543,7 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         }
     }
     let all = existing(ctx.backend, &coll)?;
-    let before = all.len();
+    let before = usize::try_from(count(ctx.backend, &coll)?).unwrap_or(0);
     let mut new = Vec::new();
     // The specifications before this one in the command, as the build compares them.
     let mut asked: Vec<Existing> = Vec::new();
@@ -560,10 +573,33 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     reply.push("numIndexesAfter", (before + new.len()) as i32);
     reply.push("createdCollectionAutomatically", created);
     reply.push("commitQuorum", quorum.shown);
-    if new.len() < specs.len() {
+    if new.len() < asked_count {
         reply.push("note", "index already exists");
     }
     Ok(with_raw_first(ctx.backend, reply.with("ok", 1.0)))
+}
+
+/// Whether `spec` asks for the clustered index of `_id`: on a clustered collection it is there
+/// already, whatever its name (measured on a `refrouter` 9.0.4 on 05-11-2026).
+fn is_clustered_id(spec: &Document) -> bool {
+    let id_key = Value::Document(Document::new().with("_id", 1));
+    spec.get("clustered").is_some() && spec.get(KEY) == Some(&id_key)
+}
+
+/// The reply of a `createIndexes` whose indexes all exist on collection `c`.
+fn already_there<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    c: &CollectionEntry,
+) -> Result<Document, CommandError> {
+    let quorum = index_build::commit_quorum(ctx.cmd)?;
+    let before = count(ctx.backend, c)?;
+    let reply = Document::new()
+        .with("numIndexesBefore", before)
+        .with("numIndexesAfter", before)
+        .with("commitQuorum", quorum.shown)
+        .with("note", "all indexes already exist")
+        .with("ok", 1.0);
+    Ok(with_raw_first(ctx.backend, reply))
 }
 
 /// Reply `reply` after the node's own under `raw`, as a `refrouter` gives its shard's (measured).
@@ -718,8 +754,14 @@ fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandEr
         return Err(super::catalog::missing_namespace(ctx.backend, &ns, msg)?);
     };
     let all = existing(ctx.backend, &coll)?;
-    let was = all.len() as i32;
-    let refuse_id = || CommandError::new(INVALID_OPTIONS, "cannot drop _id index");
+    let was = count(ctx.backend, &coll)?;
+    let refuse_id: fn() -> CommandError = match super::catalog::is_clustered(&coll)? {
+        // Measured on a `refrouter` 9.0.4 on 05-11-2026.
+        true => {
+            || CommandError::new(CLUSTERED_INDEX_DROP, "It is illegal to drop the clusteredIndex")
+        }
+        false => || CommandError::new(INVALID_OPTIONS, "cannot drop _id index"),
+    };
     let pick = |e: &Existing, which: &Value| match which {
         Value::String(n) => e.spec.get(NAME) == Some(&Value::from(n.as_str())),
         Value::Document(k) => e.spec.get(KEY) == Some(&Value::Document(k.clone())),

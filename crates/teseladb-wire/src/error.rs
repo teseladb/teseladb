@@ -349,6 +349,8 @@ codes! {
     QUERY_FEATURE_NOT_ALLOWED = 224, "QueryFeatureNotAllowed";
     /// A `clustered` index specification on a collection that is not clustered.
     CLUSTERED_INDEX_MISMATCH = 6_243_700, "Location6243700";
+    /// `dropIndexes` of a clustered collection's index (015 FR-009).
+    CLUSTERED_INDEX_DROP = 5_979_800, "Location5979800";
     /// A value that is not the object RefDb reads there: a `readConcern.afterOpTime`, a field of
     /// a stored user or role (013 FR-030).
     EXPECTED_OBJECT = 10_065, "Location10065";

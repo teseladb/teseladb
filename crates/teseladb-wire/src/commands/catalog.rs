@@ -21,7 +21,7 @@ use super::query::{QueryCursor, documents_of, for_each_match, keep, target};
 use super::{Backend, Ctx, index_spec, kinds, uuid, uuid_text};
 use crate::error::{
     BAD_VALUE, COLLECTION_UUID_MISMATCH, CommandError, DATABASE_DIFFER_CASE, ILLEGAL_OPERATION,
-    INVALID_NAMESPACE, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
+    INTERNAL_ERROR, INVALID_NAMESPACE, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
 };
 use crate::types::wrong_type;
 use teseladb_collation::ParsedCollation;
@@ -184,6 +184,47 @@ const COLLATION: &str = "collation";
 pub(crate) fn has_id_index(ns: &Namespace) -> bool {
     ns.coll != super::profile::SYSTEM_PROFILE
 }
+
+/// Whether collection `c` is clustered by `_id` (015 FR-009).
+pub(crate) fn is_clustered(c: &CollectionEntry) -> Result<bool, CommandError> {
+    Ok(matches!(kinds::kind_of(c)?, CollectionKind::Clustered { .. }))
+}
+
+/// The `_id` index of collection `c` as `listIndexes` lists it. A clustered collection's is its
+/// clustered index: its version, key and name, `unique`, the collection's `expireAfterSeconds`
+/// and collation, and `clustered` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+pub(crate) fn listed_id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
+    let CollectionKind::Clustered { expire_after_seconds, .. } = kinds::kind_of(c)? else {
+        return id_index(c);
+    };
+    let options = options_of(c)?;
+    let Some(Value::Document(clustered)) = options.get(CLUSTERED_INDEX) else {
+        return Err(CommandError::new(INTERNAL_ERROR, "a clustered collection without its index"));
+    };
+    let mut index = Document::new();
+    for field in ["v", "key", "name"] {
+        if let Some(v) = clustered.get(field) {
+            index.push(field, v.clone());
+        }
+    }
+    index.push("unique", true);
+    // An `int` when it fits (measured: `expireAfterSeconds: 30`).
+    if let Some(seconds) = expire_after_seconds {
+        index.push(
+            EXPIRE_AFTER_SECONDS,
+            i32::try_from(seconds).map_or(Value::Int64(seconds), Value::Int32),
+        );
+    }
+    if let Some(collation) = options.get(COLLATION) {
+        index.push(COLLATION, collation.clone());
+    }
+    Ok(index.with("clustered", true))
+}
+
+/// The option of a clustered collection's index.
+const CLUSTERED_INDEX: &str = "clusteredIndex";
+/// The option of a clustered collection's expiry, and the field of a TTL index.
+const EXPIRE_AFTER_SECONDS: &str = "expireAfterSeconds";
 
 /// The `_id` index of collection `c`, with the collection's collation (`listCollections`'
 /// `idIndex`, `listIndexes`).
@@ -1027,7 +1068,7 @@ pub fn list_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
             .collect(),
         None => {
             let mut specs = match has_id_index(&ns) {
-                true => vec![id_index(&c)?],
+                true => vec![listed_id_index(&c)?],
                 false => Vec::new(),
             };
             specs.extend(super::indexes::listed(ctx.backend, &c)?);
