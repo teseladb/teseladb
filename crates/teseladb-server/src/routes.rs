@@ -30,7 +30,13 @@ pub struct SharedRoutes {
     /// The highest feature compatibility version every node runs, when one runs less than this
     /// binary's latest (FR-027).
     fcv_limit: Arc<RwLock<Arc<Option<String>>>>,
+    /// The state of each tenant but the default one: its limits, its access list and whether it
+    /// is suspended (FR-030, FR-034, FR-035).
+    tenants: Arc<RwLock<Arc<TenantStates>>>,
 }
+
+/// The state of each tenant, by number.
+pub type TenantStates = BTreeMap<u32, teseladb_meta::tenants::TenantState>;
 
 /// Replaces what `lock` holds with `v`; a writer that panicked left a whole value behind, which
 /// is replaced all the same.
@@ -88,6 +94,16 @@ impl SharedRoutes {
     /// The write gates.
     pub fn gate(&self) -> WriteGate {
         *read(&self.gate)
+    }
+
+    /// Replaces the tenants' states with `states`.
+    pub fn publish_tenants(&self, states: Arc<TenantStates>) {
+        replace(&self.tenants, states);
+    }
+
+    /// The tenants' states; the same `Arc` until core 0 publishes a change.
+    pub fn tenants(&self) -> Arc<TenantStates> {
+        read(&self.tenants)
     }
 
     /// Replaces the nodes' feature compatibility version limit with `limit`.

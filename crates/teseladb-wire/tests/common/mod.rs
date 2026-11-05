@@ -193,6 +193,8 @@ pub struct Mem {
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
     pub tenants: Vec<(u32, String)>,
+    /// The tenants suspended (007 FR-034).
+    pub suspended: Vec<u32>,
     /// The catalog changes, at the node's clock (014 FR-014).
     pub ddl: teseladb_meta::ddl_log::DdlLog,
     /// How far behind the clock the ranges' resolved mark goes, in milliseconds (014 FR-004).
@@ -526,6 +528,15 @@ impl Backend for Mem {
 
     fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
         Ok(self.tenants.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    fn tenant_state(&mut self, tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {
+        self.tenants.iter().any(|(id, _)| *id == tenant).then(|| {
+            teseladb_meta::tenants::TenantState {
+                suspended: self.suspended.contains(&tenant),
+                ..Default::default()
+            }
+        })
     }
 
     fn gate_everywhere(

@@ -396,3 +396,55 @@ fn a_cursor_of_a_tenant_is_not_found_from_another() {
     let r = run(&mut m, &mut c, "app", in_tenant(ACME, kill));
     assert_eq!(field(&r, "cursorsKilled"), &Value::Array(vec![id.into()]), "{r:?}");
 }
+
+/// Starts a SCRAM-SHA-256 login of `user` on `c`: the answer to `saslStart`, or the error.
+fn start_login(m: &mut Mem, c: &mut Connection, user: &str) -> Document {
+    let mech = Mechanism::ScramSha256;
+    let prepared = mech.prepare_password(user, PASSWORD, false).unwrap();
+    let (mut client, first) = ClientSession::start(mech, user, &prepared, "clientnonce0123");
+    let bin = |b: &[u8]| Value::Binary { subtype: 0, bytes: b.to_vec() };
+    let start = doc(&[
+        ("saslStart", 1.into()),
+        ("mechanism", mech.name().into()),
+        ("payload", bin(&first)),
+        ("options", Value::Document(doc(&[("skipEmptyExchange", true.into())]))),
+    ]);
+    let r = run(m, c, "admin", start);
+    if !ok(&r) {
+        return r;
+    }
+    let Value::Binary { bytes, .. } = field(&r, "payload") else { panic!("{r:?}") };
+    let answer = client.respond(bytes).unwrap();
+    let next =
+        doc(&[("saslContinue", 1.into()), ("conversationId", 1.into()), ("payload", bin(&answer))]);
+    run(m, c, "admin", next)
+}
+
+// 007 T057 (FR-034): a user of a suspended tenant does not sign in, with 18 and the words of the
+// contract; the default tenant still works in it with `$tenant`, and after `resume` the user
+// signs in again.
+#[test]
+fn a_suspended_tenant_signs_nobody_in_and_the_default_one_still_works_in_it() {
+    let (mut m, mut c) = (node(), Connection::new(9));
+    assert!(ok(&run(&mut m, &mut c, "app", as_acme(insert(1)))));
+    let create = doc(&[
+        ("createUser", "ann".into()),
+        ("pwd", PASSWORD.into()),
+        ("roles", Value::Array(vec![Value::from("root")])),
+        ("mechanisms", Value::Array(vec![Value::from("SCRAM-SHA-256")])),
+    ]);
+    assert!(ok(&run(&mut m, &mut c, "admin", as_acme(create))));
+    m.suspended = vec![1];
+    let mut ann = Connection::new(10);
+    ann.auth.required = true;
+    let r = start_login(&mut m, &mut ann, "ann");
+    assert_eq!(r.get("code"), Some(&Value::Int32(18)), "{r:?}");
+    assert_eq!(r.get("errmsg"), Some(&Value::String("tenant is suspended".into())), "{r:?}");
+    assert!(ann.auth.user.is_none());
+    // The default tenant copies or empties it with `$tenant`.
+    let r = run(&mut m, &mut c, "app", as_acme(doc(&[("find", "c".into())])));
+    assert_eq!(found(&r), 1, "{r:?}");
+    m.suspended.clear();
+    let r = start_login(&mut m, &mut ann, "ann");
+    assert!(ok(&r) && r.get("done") == Some(&Value::Boolean(true)), "{r:?}");
+}

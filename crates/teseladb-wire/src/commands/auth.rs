@@ -196,6 +196,10 @@ fn admit<B: Backend + ?Sized>(
             None => (None, None, 0),
         },
     };
+    // A user of a suspended tenant does not sign in (007 FR-034).
+    if tenant != 0 && backend.tenant_state(tenant).is_some_and(|s| s.suspended) {
+        return Err(CommandError::new(AUTHENTICATION_FAILED, TENANT_SUSPENDED));
+    }
     if let Some(roles) = roles {
         let inherited =
             super::roles::Graph::new(&mut *backend).inherit(&roles, None).map_err(login_fault)?;
@@ -211,6 +215,9 @@ fn admit<B: Backend + ?Sized>(
     }
     Ok(())
 }
+
+/// The message of an authentication of a user of a suspended tenant (007 FR-034).
+pub const TENANT_SUSPENDED: &str = "tenant is suspended";
 
 /// The user members of the cluster log in as (`__system` of `local`), and its role.
 pub const INTERNAL_USER: &str = "__system";

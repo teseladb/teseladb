@@ -183,6 +183,12 @@ impl<S> CursorTable<S> {
         })
     }
 
+    /// Kills the cursors whose namespace `gone` picks, whoever owns them (those of a tenant that
+    /// was suspended, 007 FR-034); their identifiers.
+    pub fn kill_namespaces(&mut self, gone: impl Fn(&str) -> bool) -> Vec<i64> {
+        self.kill_where(|c| gone(&c.ns))
+    }
+
     /// Kills every cursor that belongs to a session; their identifiers.
     pub fn kill_all_sessions(&mut self) -> Vec<i64> {
         self.kill_where(|c| c.lsid.is_some())

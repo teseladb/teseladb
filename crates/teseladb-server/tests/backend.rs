@@ -12,6 +12,7 @@ use teseladb_io::runtime::CoreInput;
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::group0::{Group0Error, RangeDesc, ReplicaRole};
 use teseladb_meta::indexes::{IndexEntry, IndexState};
+use teseladb_meta::tenants::TenantState;
 use teseladb_multiraft::{Done, NodeClock, OpError, OpId};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::host::{MutationError, RangeError};
@@ -1030,7 +1031,7 @@ fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
 fn tenants_settings_and_other_operations_wait_for_core_zero() {
     use std::collections::BTreeMap;
     use teseladb_bson::{Document, Value};
-    let tenants = CatalogAnswer::Tenants(vec![(4, "acme".into())]);
+    let tenants = CatalogAnswer::Tenants(vec![(4, "acme".into(), TenantState::default())], true);
     let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, tenants.clone(), tenants]);
     assert_eq!(b.tenant_named("acme"), Ok(Some(4)));
     assert_eq!(b.tenant_named("other"), Ok(None));

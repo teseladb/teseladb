@@ -499,6 +499,11 @@ pub trait Backend {
     fn gate_everywhere(&mut self, _want: write_block::WriteGate) -> Result<bool, CommandError> {
         Ok(true)
     }
+    /// The state of tenant `tenant`, as this node's copy of Group 0 has it (007 FR-030, FR-034);
+    /// none for the default tenant or one that does not exist.
+    fn tenant_state(&mut self, _tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {
+        None
+    }
     /// The highest feature compatibility version every node of the cluster runs (007 FR-027),
     /// if one runs less than this binary's latest.
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {

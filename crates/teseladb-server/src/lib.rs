@@ -10,6 +10,7 @@ pub const USER_AGENT: &str = "teseladb";
 pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
+pub mod admin_tenant_state;
 pub mod admin_tenants;
 pub mod affinity;
 pub mod at_rest;

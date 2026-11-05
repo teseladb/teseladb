@@ -68,3 +68,82 @@ fn tenants_are_created_listed_and_dropped_and_each_sees_its_databases() {
     assert_eq!(found(&c.run("app", find())), 1);
     node.stop();
 }
+
+/// 007 T055 (FR-030, FR-034, FR-035): the limits, the access list and the suspension of a tenant
+/// through `teseladb admin tenant limits|access|suspend|resume`, and what `tenant list` shows.
+#[test]
+fn a_tenant_gets_limits_an_access_list_and_a_suspension_through_the_port() {
+    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let at = node.admin_addr().unwrap().to_string();
+    let run = |args: &[&str]| {
+        let (code, out, err) = admin(&at, args);
+        assert_eq!(code, 0, "{args:?}: {out}{err}");
+        out
+    };
+    run(&["tenant", "create", "acme"]);
+    // A new tenant has no limits, its switches on and any source.
+    let shown = run(&["tenant", "limits", "acme"]);
+    assert!(
+        shown.contains("storageBytes\t0\n") && shown.contains("httpEnabled\ttrue\n"),
+        "{shown}"
+    );
+    assert_eq!(run(&["tenant", "access", "acme"]), "any source\n");
+    let changed = run(&[
+        "tenant",
+        "limits",
+        "acme",
+        "--storage-bytes",
+        "1048576",
+        "--max-connections",
+        "5",
+        "--http",
+        "off",
+        "--service-user",
+        "svc.acme",
+    ]);
+    assert!(
+        changed.contains("storageBytes\t1048576\n") && changed.contains("httpEnabled\tfalse\n")
+    );
+    // Only the limits given change.
+    let again = run(&["tenant", "limits", "acme", "--ops-per-second", "100"]);
+    assert!(
+        again.contains("maxConnections\t5\n") && again.contains("opsPerSecond\t100\n"),
+        "{again}"
+    );
+    assert_eq!(
+        run(&["tenant", "access", "acme", "--allow", "10.0.0.0/8", "--allow", "2001:db8::/32"]),
+        "10.0.0.0/8\n2001:db8::/32\n"
+    );
+    assert_eq!(run(&["tenant", "suspend", "acme"]), "tenant acme suspended\n");
+    assert_eq!(run(&["tenant", "suspend", "acme"]), "tenant acme suspended\n", "twice is no error");
+    let line = run(&["tenant", "list"]);
+    assert!(
+        line.starts_with("1\tacme\tstorageBytes=1048576\tmaxConnections=5\topsPerSecond=100\t"),
+        "{line}"
+    );
+    assert!(
+        line.contains("\thttpEnabled=off\t") && line.contains("\tserviceUser=svc.acme\t"),
+        "{line}"
+    );
+    assert!(line.ends_with("\tallowedSources=10.0.0.0/8,2001:db8::/32\tsuspended\n"), "{line}");
+    assert_eq!(run(&["tenant", "resume", "acme"]), "tenant acme resumed\n");
+    assert_eq!(run(&["tenant", "access", "acme", "--clear"]), "any source\n");
+    assert!(!run(&["tenant", "list"]).contains("suspended"));
+    // What the port refuses.
+    let (code, _, err) = admin(&at, &["tenant", "limits", "nobody", "--max-connections", "1"]);
+    assert_eq!((code, err.as_str()), (1, "teseladb admin: no tenant named 'nobody'\n"));
+    let (code, _, err) = admin(&at, &["tenant", "access", "acme", "--allow", "10.0.0.0/40"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (1, "teseladb admin: not an address or a CIDR block: \"10.0.0.0/40\"\n")
+    );
+    let (code, _, err) = admin(&at, &["tenant", "limits", "acme", "--max-connections", "x"]);
+    assert_eq!(
+        (code, err.as_str()),
+        (1, "teseladb admin: --max-connections: not a whole number: x\n")
+    );
+    let (code, _, err) = admin(&at, &["tenant", "suspend", "acme", "--allow", "1.2.3.4"]);
+    assert_eq!((code, err.as_str()), (2, "--allow does not go with this subcommand\n"));
+    node.stop();
+}

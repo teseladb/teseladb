@@ -135,6 +135,9 @@ pub trait AdminBackend: Send + Sync {
     fn create_tenant(&self, name: &str) -> Answer;
     /// Drops tenant `name`, which has no database and no user left.
     fn drop_tenant(&self, name: &str) -> Answer;
+    /// Reads or changes the limits, the access list or the suspension of tenant `name` (007
+    /// FR-030, FR-034, FR-035).
+    fn tenant_state(&self, name: &str, op: crate::admin_tenant_state::StateOp) -> Answer;
     /// Runs a command of the API keys (`createApiKey`, `listApiKeys`, `revokeApiKey`, 019
     /// FR-016) with the port's authority.
     fn api_keys(&self, cmd: &Document) -> Answer;
@@ -634,6 +637,10 @@ impl AdminBackend for NodeAdmin {
         crate::admin_tenants::drop(self, name)
     }
 
+    fn tenant_state(&self, name: &str, op: crate::admin_tenant_state::StateOp) -> Answer {
+        crate::admin_tenant_state::apply(self, name, op)
+    }
+
     fn drain(&self, node: NodeId, drain: bool) -> Answer {
         let cmd = match self.ask(0, |tx| NodeMsg::Drain(node, drain, tx)).flatten() {
             None => return Err(AdminError::unavailable("Group 0 did not answer")),
@@ -903,6 +910,11 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             words.push(a.as_str());
             continue;
         };
+        // `--clear` of `tenant access` takes no value.
+        if name == "clear" {
+            opts.push((name.to_owned(), String::new()));
+            continue;
+        }
         let value = it.next().ok_or_else(|| format!("--{name} needs a value"))?.clone();
         match name {
             "node" => node = value,
@@ -917,7 +929,10 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
                 }
             }
             "collection" | "at" | "ttl" | "core" | "out" | "from" | "user" | "db" | "role"
-            | "expires-after-days" | "name" | "primary" => {
+            | "expires-after-days" | "name" | "primary" | "allow" => {
+                opts.push((name.to_owned(), value));
+            }
+            limit if crate::admin_tenants::LIMIT_OPTIONS.contains(&limit) => {
                 opts.push((name.to_owned(), value));
             }
             other => return Err(format!("unknown option --{other}")),
@@ -980,8 +995,11 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             AdminAction::TokenCreate { ttl }
         }
         words => {
-            match (crate::admin_tenants::parse(words), crate::admin_apikeys::parse(words, &opts)) {
-                (Some(t), _) => allow(&[]).map(|()| AdminAction::Tenant(t))?,
+            match (
+                crate::admin_tenants::parse(words, &opts),
+                crate::admin_apikeys::parse(words, &opts),
+            ) {
+                (Some(t), _) => AdminAction::Tenant(t?),
                 (None, Some(k)) => AdminAction::ApiKey(k?),
                 (None, None) => return Err(ADMIN_USAGE.to_owned()),
             }
@@ -1041,6 +1059,13 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   tenant create <name>
   tenant list
   tenant drop <name>
+  tenant limits <name> [--storage-bytes <n>] [--max-connections <n>] [--ops-per-second <n>]
+    [--max-api-keys <n>] [--max-time-ms <n>] [--max-concurrent-ops <n>]
+    [--max-write-bytes-per-second <n>] [--max-databases <n>] [--max-collections <n>]
+    [--max-search-indexes <n>] [--http on|off] [--mcp on|off] [--service-user <user>]
+  tenant access <name> [--allow <cidr>]... [--clear]
+  tenant suspend <name>
+  tenant resume <name>
   apikey create --user <u> --db <db> [--role <role>@<db>]... [--expires-after-days <n>]
   apikey list [--user <u>]
   apikey revoke <keyId>";
@@ -1084,10 +1109,13 @@ pub fn run(o: &AdminOpts, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         AdminAction::Restore { from } => {
             return crate::backup::run(o, Err(std::path::Path::new(from)), None, out, err);
         }
-        AdminAction::Tenant(t) => {
-            let (method, target) = crate::admin_tenants::request(t);
-            (method, target, String::new())
-        }
+        AdminAction::Tenant(t) => match crate::admin_tenants::request(t) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writeln!(err, "teseladb admin: {e}");
+                return 1;
+            }
+        },
         AdminAction::ApiKey(k) => match crate::admin_apikeys::request(k) {
             Ok(r) => r,
             Err(e) => {
@@ -1384,6 +1412,9 @@ mod tests {
         }
         fn drop_tenant(&self, name: &str) -> Answer {
             self.called(format!("drop tenant {name}"))
+        }
+        fn tenant_state(&self, name: &str, op: crate::admin_tenant_state::StateOp) -> Answer {
+            self.called(format!("tenant {name} {op:?}"))
         }
 
         fn privileges(&self, user: &UserName) -> Result<Vec<Privilege>, AdminError> {

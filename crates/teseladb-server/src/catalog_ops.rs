@@ -96,8 +96,9 @@ pub enum CatalogAnswer {
     Dump(Vec<u8>),
     /// Documents of a generated collection of `config`, in BSON.
     Documents(Vec<Vec<u8>>),
-    /// The tenants, by number and name.
-    Tenants(Vec<(u32, String)>),
+    /// The tenants, by number, with their names and states, and whether every node reads the
+    /// entries that change a state (007 FR-027).
+    Tenants(Vec<(u32, String, teseladb_meta::tenants::TenantState)>, bool),
     /// The catalog changes above a mark, the mark below which they are incomplete and the mark
     /// of the last entry applied.
     Ddl(Vec<teseladb_meta::ddl_log::DdlRecord>, teseladb_hlc::Hlc, teseladb_hlc::Hlc),
@@ -139,6 +140,8 @@ fn error_code(e: Group0Error) -> u8 {
         Group0Error::TenantNotFound => 10,
         Group0Error::InvalidTenantName => 11,
         Group0Error::NotEmpty => 12,
+        Group0Error::InvalidOptions => 13,
+        Group0Error::NotEveryNodeRunsIt => 14,
         _ => 2,
     }
 }
@@ -157,6 +160,8 @@ fn error_of(c: u8) -> Group0Error {
         10 => Group0Error::TenantNotFound,
         11 => Group0Error::InvalidTenantName,
         12 => Group0Error::NotEmpty,
+        13 => Group0Error::InvalidOptions,
+        14 => Group0Error::NotEveryNodeRunsIt,
         _ => Group0Error::NotBootstrapped,
     }
 }

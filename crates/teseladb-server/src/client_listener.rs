@@ -634,6 +634,7 @@ impl ClientListener {
                 mechanisms: cfg.mechanisms.clone(),
                 open: open.clone(),
                 stop: stop.clone(),
+                tenants_seen: None,
             };
             let t =
                 command_thread(format!("client-{k}")).spawn(with_command_stack(move || w.run()))?;
@@ -1267,15 +1268,65 @@ struct Worker {
     /// The port's counters.
     diag: Arc<Diag>,
     stop: Arc<AtomicBool>,
+    /// The tenants' states the worker last closed connections for (007 FR-034).
+    tenants_seen: Option<Arc<crate::routes::TenantStates>>,
+}
+
+/// How long a worker waits at most before it looks at the tenants' states again: a suspended
+/// tenant's connections close within the second after its entry applies (007 FR-034).
+pub const TENANT_CHECK: Duration = Duration::from_millis(250);
+
+/// Whether connection `conn` belongs to a tenant that `states` has suspended.
+fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
+    conn.auth
+        .user
+        .as_ref()
+        .is_some_and(|u| u.tenant != 0 && states.get(&u.tenant).is_some_and(|s| s.suspended))
 }
 
 impl Worker {
+    /// Closes the connections of the tenants suspended since the last look.
+    fn close_suspended(&mut self) {
+        let Some(h) = self.state.handle() else { return };
+        let states = h.routes.tenants();
+        if self.tenants_seen.as_ref().is_some_and(|seen| Arc::ptr_eq(seen, &states)) {
+            return;
+        }
+        let gone: Vec<u64> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.conn.as_ref().is_some_and(|conn| suspended(conn, &states)))
+            .map(|(t, _)| *t)
+            .collect();
+        for t in gone {
+            self.close(t);
+        }
+        // The cursors and change streams of the tenants suspended since the last look go too;
+        // each worker does it, and a second time kills nothing.
+        let before = |id: &u32| {
+            self.tenants_seen.as_ref().and_then(|seen| seen.get(id)).is_some_and(|s| s.suspended)
+        };
+        let held: Vec<u32> =
+            states.iter().filter(|(id, s)| s.suspended && !before(id)).map(|(id, _)| *id).collect();
+        if !held.is_empty() {
+            let tenant_of = |ns: &str| {
+                let db = ns.split_once('.').map_or(ns, |(db, _)| db);
+                teseladb_meta::tenants::split_db(db).0
+            };
+            lock(&self.shared).cursors.kill_namespaces(|ns| held.contains(&tenant_of(ns)));
+        }
+        self.tenants_seen = Some(states);
+    }
+
     fn run(mut self) {
         let mut inbox = Vec::new();
         let mut events = Vec::new();
         while !self.stop.load(Ordering::Acquire) {
             let next = self.awaits.first_key_value().map(|(&(d, _), _)| d);
-            let timeout = next.map(|d| d.saturating_duration_since(Instant::now()));
+            let timeout = next
+                .map_or(TENANT_CHECK, |d| d.saturating_duration_since(Instant::now()))
+                .min(TENANT_CHECK);
+            let timeout = Some(timeout);
             match self.poller.poll(timeout) {
                 Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
                 Err(_) => break,
@@ -1296,6 +1347,7 @@ impl Worker {
                 }
             }
             self.fire_awaits(&info);
+            self.close_suspended();
         }
         let tokens: Vec<u64> = self.conns.keys().copied().collect();
         for t in tokens {
@@ -1406,8 +1458,13 @@ impl Worker {
             shared: &self.shared,
             state: &*self.state,
         };
-        let alive =
-            c.finish(conn, req, action) && c.flush_after(info, &mut cmds) && c.watch(poller, token);
+        // A command that ran while its tenant was suspended closes its connection once answered.
+        let states = self.state.handle().map(|h| h.routes.tenants());
+        let held = states.as_ref().is_some_and(|s| suspended(&conn, s));
+        let alive = c.finish(conn, req, action)
+            && c.flush_after(info, &mut cmds)
+            && !held
+            && c.watch(poller, token);
         self.settle(token, alive);
     }
 

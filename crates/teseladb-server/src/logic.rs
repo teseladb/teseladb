@@ -225,6 +225,9 @@ pub struct NodeLogic {
     versions_op: Option<OpId>,
     /// The nodes' tags last published for the client workers.
     sent_tags: Option<crate::routes::NodeTags>,
+    /// The tenants' states last published for the client workers (007 FR-034), and the index of
+    /// Group 0 they were read at: they are read again only after Group 0 applies something.
+    sent_tenants: Option<(u64, crate::routes::TenantStates)>,
     create_op: Option<OpId>,
     balance_op: Option<OpId>,
     /// Group 0's automatic reassignment of the designated primary in flight (018 FR-007).
@@ -306,6 +309,7 @@ impl NodeLogic {
             tags_op: None,
             versions_op: None,
             sent_tags: None,
+            sent_tenants: None,
             create_op: None,
             balance_op: None,
             reassign_op: None,
@@ -873,9 +877,24 @@ impl NodeLogic {
         }
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
+        let applied = sm.applied;
+        let stale = self.sent_tenants.as_ref().is_none_or(|(at, _)| *at != applied);
+        let tenants: Option<crate::routes::TenantStates> = stale.then(|| {
+            sm.tenants
+                .list()
+                .into_iter()
+                .filter_map(|(id, _)| sm.tenants.state(id).map(|s| (id, s.clone())))
+                .collect()
+        });
         if self.sent_tags.as_ref() != Some(&tags) {
             routes.publish_tags(tags.clone());
             self.sent_tags = Some(tags);
+        }
+        if let Some(tenants) = tenants {
+            if self.sent_tenants.as_ref().is_none_or(|(_, sent)| *sent != tenants) {
+                routes.publish_tenants(Arc::new(tenants.clone()));
+            }
+            self.sent_tenants = Some((applied, tenants));
         }
     }
 
@@ -997,7 +1016,18 @@ impl NodeLogic {
             CatalogReq::Tenants => {
                 let a = match self.group0() {
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Tenants(
-                        sm.tenants.list().into_iter().map(|(id, n)| (id, n.to_owned())).collect(),
+                        sm.tenants
+                            .list()
+                            .into_iter()
+                            .map(|(id, n)| {
+                                let state = sm.tenants.state(id).cloned().unwrap_or_default();
+                                (id, n.to_owned(), state)
+                            })
+                            .collect(),
+                        teseladb_meta::node_versions::all_run(
+                            sm,
+                            teseladb_meta::group0::SNAPSHOT_VERSION,
+                        ),
                     ),
                     Some(_) | None => CatalogAnswer::Unavailable,
                 };

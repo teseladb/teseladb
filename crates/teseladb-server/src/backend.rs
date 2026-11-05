@@ -343,7 +343,7 @@ impl ServerBackend {
                     | CatalogAnswer::Principals(_)
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
-                    | CatalogAnswer::Tenants(_)
+                    | CatalogAnswer::Tenants(..)
                     | CatalogAnswer::Ddl(..)
                     | CatalogAnswer::Unavailable,
                 )
@@ -660,10 +660,10 @@ impl Backend for ServerBackend {
     fn tenant_named(&mut self, name: &str) -> Result<Option<u32>, CommandError> {
         let until = self.until();
         loop {
-            if let Some(CatalogAnswer::Tenants(all)) =
+            if let Some(CatalogAnswer::Tenants(all, _)) =
                 self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Tenants, tx), until)
             {
-                return Ok(all.into_iter().find(|(_, n)| n == name).map(|(id, _)| id));
+                return Ok(all.into_iter().find(|(_, n, _)| n == name).map(|(id, _, _)| id));
             }
             if Instant::now() >= until {
                 return Err(unavailable());
@@ -1232,6 +1232,10 @@ impl Backend for ServerBackend {
 
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
         Ok(self.h.routes.fcv_limit())
+    }
+
+    fn tenant_state(&mut self, tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {
+        self.h.routes.tenants().get(&tenant).cloned()
     }
 
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
