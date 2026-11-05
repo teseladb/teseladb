@@ -12,4 +12,5 @@ workspace = true
 
 [dependencies]
 teseladb-bson = { path = "../teseladb-bson" }
+teseladb-index = { path = "../teseladb-index" }
 teseladb-meta = { path = "../teseladb-meta" }

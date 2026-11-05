@@ -1348,8 +1348,18 @@ fn index_stage(
     let mut bounds = Document::new();
     for ((field, list), (_, dir)) in scan.bounds.iter().zip(&index.meta.key) {
         let against = (*dir < 0) != scan.backward;
+        // A hashed field's points are values, which the index reads by their hashes: RefDb
+        // shows the hashes (measured on 05-11-2026).
+        let hashed = *dir == teseladb_plan::rules::HASHED;
         let mut shown: Vec<Value> = list
             .iter()
+            .map(|b| match b {
+                _ if hashed && b.is_point() => {
+                    let h = Value::Int64(teseladb_plan::rules::hashed_value(&b.low));
+                    teseladb_plan::logical::Bound::point(h)
+                }
+                _ => b.clone(),
+            })
             .map(|b| Value::String(if against { b.reversed().shown() } else { b.shown() }))
             .collect();
         if against {

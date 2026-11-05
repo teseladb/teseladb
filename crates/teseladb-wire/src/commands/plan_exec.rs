@@ -194,8 +194,10 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
         let of_id = id_index || (sharded && entry.id == teseladb_range::capped::ID_INDEX);
         catalog.unique |= of_id;
         let pattern = Document::from(RawDoc::from_bytes(&catalog.key_pattern)?);
+        // An ordered field, or a hashed one, which an equality scans by its hash (010 T048).
         let ordered = pattern.iter().all(|(_, v)| {
             matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
+                || is_hashed(v)
         });
         let plannable = ordered
             && entry.buckets == 0
@@ -212,7 +214,14 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
         };
         let key = pattern
             .iter()
-            .map(|(k, v)| (k.to_owned(), if query_number(v) < 0.0 { -1 } else { 1 }))
+            .map(|(k, v)| {
+                let dir = match v {
+                    _ if is_hashed(v) => teseladb_plan::rules::HASHED,
+                    _ if query_number(v) < 0.0 => -1,
+                    _ => 1,
+                };
+                (k.to_owned(), dir)
+            })
             .collect();
         let meta = IndexMeta {
             name: entry.name.clone(),
@@ -224,6 +233,11 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
         out.push(PlanIndex { entry, pattern, multikey_paths, meta, catalog, dirs, id_index });
     }
     Ok(out)
+}
+
+/// Whether an index field is hashed.
+fn is_hashed(v: &Value) -> bool {
+    matches!(v, Value::String(s) if s == "hashed")
 }
 
 fn query_number(v: &Value) -> f64 {

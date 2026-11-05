@@ -10,7 +10,7 @@ use teseladb_plan::logical::{
     Bound, compare_values, conjunction, conjuncts, intersect, intervals, on_path, shown_value,
     sorted, union,
 };
-use teseladb_plan::rules::{Access, IndexMeta, IndexScan, Request, candidates};
+use teseladb_plan::rules::{Access, IndexMeta, IndexScan, Request, candidates, hashed_value};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))
@@ -675,4 +675,49 @@ fn more_edges_of_intervals_joins_and_intersections() {
     let parsed = doc(r#"{"$and":[{"g":{"$eq":"a"}},{"s":{"$eq":"x"}}]}"#);
     let request = Request { parsed: Some(&parsed), sort: &[], hint: None, intersect: true };
     assert!(candidates(&request, &c).iter().any(|a| matches!(a, Access::AndHash { .. })));
+}
+
+/// A hashed index scans the hash of each value of an equality or an `$in` on its hashed field,
+/// as points, and leaves the clause to the documents (two values may share a hash); a range on
+/// the hashed field scans all of it, and the index gives no order. Measured on a `refnode` 9.0.4
+/// on 05-11-2026: `{t: 2}` over `{t: "hashed"}` scans `[848411777775835583,
+/// 848411777775835583]` with `{t: {$eq: 2}}` on the FETCH (`sharding-key-hashed` step 4).
+#[test]
+fn a_hashed_index_scans_the_hashes_of_an_equality() {
+    let hashed = vec![index("t_hashed", &[("t", 0)]), index("t_hashed_f_1", &[("t", 0), ("f", 1)])];
+    // The points keep the values, in the order of their hashes, which are RefDb's.
+    assert_eq!(hashed_value(&Value::Int32(2)), 848_411_777_775_835_583);
+    assert_eq!(hashed_value(&Value::Int32(5)), 4_470_791_281_878_691_347);
+    assert_eq!(hashed_value(&Value::Null), 2_338_878_944_348_059_895);
+    let two = "[2, 2]";
+    let five = "[5, 5]";
+    let null = "[null, null]";
+    let p = plans(r#"{"t":{"$eq":2}}"#, &[], &hashed);
+    assert!(p[0].starts_with(&format!("t_hashed: t[\"{two}\"] | ")), "{p:?}");
+    assert!(
+        p[1].starts_with(&format!("t_hashed_f_1: t[\"{two}\"] f[\"[MinKey, MaxKey]\"] | ")),
+        "{p:?}"
+    );
+    let p = plans(r#"{"t":{"$in":[5,2]}}"#, &[], &hashed);
+    assert!(p[0].starts_with(&format!("t_hashed: t[\"{two}\", \"{five}\"] | ")), "{p:?}");
+    let p = plans(r#"{"t":{"$eq":null}}"#, &[], &hashed);
+    assert!(p[0].starts_with(&format!("t_hashed: t[\"{null}\"] | ")), "{p:?}");
+    let p = plans(r#"{"$and":[{"t":{"$eq":2}},{"f":{"$gt":10}}]}"#, &[], &hashed);
+    assert!(
+        p.iter().any(|s| s.starts_with(&format!("t_hashed_f_1: t[\"{two}\"] f[\"(10, inf]\"] | "))),
+        "{p:?}"
+    );
+    // A range on the hashed field gives no plan, and a hinted one scans the whole field.
+    assert_eq!(plans(r#"{"t":{"$gt":2}}"#, &[], &hashed), ["COLLSCAN"]);
+    let parsed = doc(r#"{"t":{"$gt":2}}"#);
+    let request = Request { parsed: Some(&parsed), sort: &[], hint: Some(0), intersect: false };
+    let p: Vec<String> = candidates(&request, &hashed).iter().map(|a| shown(a, &hashed)).collect();
+    assert!(p[0].starts_with("t_hashed: t[\"[MinKey, MaxKey]\"] | "), "{p:?}");
+    // No order from the hashed field.
+    let sort = [("t".to_owned(), 1)];
+    let parsed = doc(r#"{"f":{"$gt":1}}"#);
+    let request = Request { parsed: Some(&parsed), sort: &sort, hint: None, intersect: false };
+    assert!(
+        candidates(&request, &hashed).iter().all(|a| !matches!(a, Access::Index(s) if s.sorts))
+    );
 }

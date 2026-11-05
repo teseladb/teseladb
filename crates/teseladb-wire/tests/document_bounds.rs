@@ -74,3 +74,62 @@ fn a_comparison_with_a_document_scans_the_documents_of_the_index() {
         assert!(!read.is_empty(), "{filter:?}");
     }
 }
+
+/// An equality or an `$in` on a hashed field reads the hashed index by the values' hashes and
+/// filters the documents, as a `refnode` 9.0.4 does (measured on 05-11-2026): the same documents
+/// as reading the collection, and `explain` gives the hash as the bound.
+#[test]
+fn an_equality_on_a_hashed_field_scans_the_hashed_index() {
+    let mut m = Mem::new();
+    let docs: Vec<Value> =
+        (0..50).map(|i| Value::Document(Document::new().with("_id", i).with("t", i % 7))).collect();
+    let r = m.run("db", doc(&[("insert", "c".into()), ("documents", Value::Array(docs))]));
+    assert_eq!(r.get("n"), Some(&Value::Int32(50)), "{r:?}");
+    let k =
+        Document::new().with("key", Document::new().with("t", "hashed")).with("name", "t_hashed");
+    let r = m.run(
+        "db",
+        doc(&[("createIndexes", "c".into()), ("indexes", Value::Array(vec![k.into()]))]),
+    );
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    let collection = Value::Document(Document::new().with("$natural", 1));
+    let index = Value::from("t_hashed");
+    for filter in [
+        Document::new().with("t", 2),
+        Document::new()
+            .with("t", Document::new().with("$in", vec![Value::Int32(5), Value::Int32(2)])),
+    ] {
+        let scanned = ids(&mut m, &filter, index.clone());
+        let read = ids(&mut m, &filter, collection.clone());
+        assert_eq!(scanned, read, "{filter:?}");
+        assert!(!read.is_empty(), "{filter:?}");
+    }
+    let explain = doc(&[
+        (
+            "explain",
+            Value::Document(doc(&[
+                ("find", "c".into()),
+                ("filter", Value::Document(Document::new().with("t", 2))),
+            ])),
+        ),
+        ("verbosity", "queryPlanner".into()),
+    ]);
+    let r = m.run("db", explain);
+    // Through the router: the plan of the one shard.
+    let plan = match field(&r, "queryPlanner.winningPlan.shards") {
+        Value::Array(shards) => field(plan_doc(&shards[0]), "winningPlan"),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(field(plan_doc(plan), "stage"), &Value::from("FETCH"), "{r:?}");
+    let scan = field(plan_doc(plan), "inputStage");
+    assert_eq!(field(plan_doc(scan), "indexName"), &Value::from("t_hashed"), "{r:?}");
+    let bounds = Value::Array(vec![Value::from("[848411777775835583, 848411777775835583]")]);
+    assert_eq!(field(plan_doc(scan), "indexBounds.t"), &bounds, "{r:?}");
+}
+
+fn plan_doc(v: &Value) -> &Document {
+    match v {
+        Value::Document(d) => d,
+        other => panic!("{other:?}"),
+    }
+}

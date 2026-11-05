@@ -15,7 +15,7 @@ use crate::logical::{Bound, conjunction, conjuncts, intersect, intervals, on_pat
 pub struct IndexMeta {
     /// Name.
     pub name: String,
-    /// Fields and directions (`1`, `-1`).
+    /// Fields and directions (`1`, `-1`; `0` for a hashed field, which gives no order).
     pub key: Vec<(String, i32)>,
     /// Some document went through an array on one of its fields.
     pub multikey: bool,
@@ -262,9 +262,13 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         }
         let mut field_bounds: Option<Vec<Bound>> = None;
         let mut taken = Vec::new();
+        let hashed = index.key[pos].1 == HASHED;
         let on_field = clauses.iter().enumerate().filter_map(|(i, c)| {
             let (path, op, arg) = on_path(c)?;
-            let (b, exact) = intervals(op, arg).filter(|_| path == field)?;
+            if path != field {
+                return None;
+            }
+            let (b, exact) = if hashed { hashed_intervals(op, arg)? } else { intervals(op, arg)? };
             Some((i, op, b, exact))
         });
         let mut candidates: Vec<_> = on_field.collect();
@@ -303,6 +307,43 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         _ => std::cmp::Ordering::Equal,
     });
     IndexScan { index: pos, bounds, backward, residual: conjunction(&left), sorts, assigned, preds }
+}
+
+/// The direction of a hashed field in [`IndexMeta::key`].
+pub const HASHED: i32 = 0;
+
+/// The intervals an equality or an `$in` scans on a hashed field: a point for each value, in the
+/// order of their hashes, and never alone, since two values may share a hash (measured on a
+/// `refnode` 9.0.4 on 05-11-2026); `None` for any other clause, which scans all of the field. The
+/// points keep the values: the index hashes them when it reads, and `explain` shows their hashes
+/// ([`hashed_value`]).
+fn hashed_intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
+    let values: Vec<&Value> = match (op, arg) {
+        ("$eq", Value::Array(_) | Value::Regex { .. }) => return None,
+        ("$eq", v) => vec![v],
+        ("$in", Value::Array(items)) => {
+            if items.iter().any(|i| matches!(i, Value::Array(_) | Value::Regex { .. })) {
+                return None;
+            }
+            items.iter().collect()
+        }
+        _ => return None,
+    };
+    let mut hashed: Vec<(i64, &Value)> = values.into_iter().map(|v| (hashed_value(v), v)).collect();
+    hashed.sort_by_key(|(h, _)| *h);
+    hashed.dedup_by_key(|(h, _)| *h);
+    Some((hashed.into_iter().map(|(_, v)| Bound::point(v.clone())).collect(), false))
+}
+
+/// The hash a hashed index keeps of `v`.
+pub fn hashed_value(v: &Value) -> i64 {
+    let holder = Document::new().with("v", v.clone());
+    let bytes = holder.to_bytes().unwrap_or_default();
+    let raw = teseladb_bson::RawDoc::from_bytes(&bytes)
+        .ok()
+        .and_then(|d| d.get("v"))
+        .unwrap_or(teseladb_bson::RawValue::Null);
+    teseladb_index::keygen::hashed_key(raw)
 }
 
 /// Whether `index` with `bounds` reads in the order of `sort`, and backward: the sort's fields

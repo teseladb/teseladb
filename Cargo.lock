@@ -261,6 +261,7 @@ name = "teseladb-plan"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-index",
  "teseladb-meta",
 ]
 
