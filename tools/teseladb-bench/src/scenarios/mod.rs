@@ -302,6 +302,20 @@ mod tests {
         assert_eq!((h.count(), runs), (MIN_BATCHES, MIN_BATCHES * u64::from(BATCH)));
     }
 
+    /// The usage names every scenario the error of an unknown one lists.
+    #[test]
+    fn the_usage_names_every_scenario() {
+        let err = run(&Args { scenario: "nope".into(), ..Args::default() }).unwrap_err();
+        let list = err.split("available: ").nth(1).unwrap().trim_end_matches(')');
+        for name in list.split(", ").map(|n| n.split(' ').next().unwrap()) {
+            if name.starts_with("ycsb-") {
+                continue;
+            }
+            assert!(crate::cli::USAGE.contains(name), "{name} is not in the usage");
+        }
+        assert!(crate::cli::USAGE.contains("ycsb-a..ycsb-f"));
+    }
+
     #[test]
     fn unknown_scenario_is_an_error() {
         let err = run(&Args { scenario: "nope".into(), ..Args::default() }).unwrap_err();
