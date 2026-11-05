@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::{GROUP0, Group0Sm};
 use teseladb_meta::tenant_quota::{
-    EPOCH_MS, GUARD_MS, NodeReading, QuotaWindow, Reading, reading_at, window_of,
+    EPOCH_MS, GUARD_MS, NodeReading, QuotaRefusal, QuotaWindow, Reading, base_epoch, note,
+    reading_at, window_of,
 };
 use teseladb_meta::tenants::{TenantLimits, TenantState};
 use teseladb_raft::Role;
@@ -49,6 +50,8 @@ const IDLE_ONE_IN: u64 = 40;
 /// How long a reading takes, in ms, and how soon a node that could not read tries again.
 const READ_TAKES: (u64, u64) = (20, 600);
 const READ_RETRY: (u64, u64) = (50, 150);
+/// The readings a node keeps, as the server's: those of its epoch and the two before.
+const KEPT_READINGS: usize = 3;
 /// The admin's turns, in ms.
 const ADMIN_EVERY: (u64, u64) = (300, 1_500);
 /// Client numbers: the admin, then a writer per node and tenant, then a reader per node, then
@@ -196,15 +199,33 @@ impl Tenants {
         }
         let bytes = w.rng.range(WRITE_KIB.0, WRITE_KIB.1 + 1) << 10;
         let now = w.local(n).as_millis();
-        let view = &mut self.views[n as usize];
-        let readings: Vec<Reading> = view.readings.iter().map(|r| r.of(tenant)).collect();
-        let (limit, nodes, since) = (state.limits.storage_bytes, self.nodes as usize, view.since);
-        let window = view.windows.entry(tenant).or_default();
-        let r = window.admit(limit, nodes, since, now, &readings, bytes);
+        let (limit, nodes) = (state.limits.storage_bytes, self.nodes as usize);
+        let mut r = self.admit(n, tenant, (limit, nodes, now), bytes);
+        // A tenant the node has no reading of is read at once, as the server does.
+        let base = base_epoch(now);
+        if r == Err(QuotaRefusal::Unread) && base >= self.views[n as usize].since {
+            let used = self.data.get(&tenant).copied().unwrap_or(0);
+            note(&mut self.views[n as usize].readings, base, tenant, used, KEPT_READINGS);
+            r = self.admit(n, tenant, (limit, nodes, now), bytes);
+        }
         match r {
             Ok(()) => self.message(w, WRITE_TAKES, Pending::Write { tenant, bytes, writer }),
             Err(_) => Self::after(w, PAUSE, writer),
         }
+    }
+
+    /// Node `n`'s rule of FR-031 for a write of `bytes` of `tenant` at its wall-clock `now` under quota `limit`.
+    fn admit(
+        &mut self,
+        n: u32,
+        tenant: u32,
+        (limit, nodes, now): (u64, usize, u64),
+        bytes: u64,
+    ) -> Result<(), QuotaRefusal> {
+        let view = &mut self.views[n as usize];
+        let readings: Vec<Reading> = view.readings.iter().map(|r| r.of(tenant)).collect();
+        let since = view.since;
+        view.windows.entry(tenant).or_default().admit(limit, nodes, since, now, &readings, bytes)
     }
 
     /// A write commits: in the cluster even if its node crashed meanwhile, as a Raft entry may.
@@ -258,10 +279,9 @@ impl Tenants {
             return;
         }
         let readings = &mut self.views[n as usize].readings;
-        readings.push(reading);
-        readings.sort_by_key(|r| r.epoch);
-        let extra = readings.len().saturating_sub(3);
-        readings.drain(..extra);
+        for (tenant, used) in reading.used {
+            note(readings, reading.epoch, tenant, used, KEPT_READINGS);
+        }
     }
 
     /// Node `n` starts (again): it counts from the window after this one.

@@ -2,7 +2,8 @@
 //! epochs of the wall clock.
 
 use teseladb_meta::tenant_quota::{
-    EPOCH_MS, GUARD_MS, NodeReading, QuotaRefusal, QuotaWindow, Reading, reading_at, window_of,
+    EPOCH_MS, GUARD_MS, NodeReading, QuotaRefusal, QuotaWindow, Reading, base_epoch, note,
+    reading_at, window_of,
 };
 
 const LIMIT: u64 = 1000;
@@ -110,4 +111,25 @@ fn a_reading_says_nothing_of_a_tenant_it_did_not_read() {
     let r = NodeReading { epoch: 7, used: [(1, 300)].into_iter().collect() };
     assert_eq!(r.of(1), Reading { epoch: 7, used: Some(300) });
     assert_eq!(r.of(2), Reading { epoch: 7, used: None });
+}
+
+/// A tenant created a moment ago has no reading: one taken now stands for the base of the window, and lets it write.
+#[test]
+fn a_reading_of_one_tenant_taken_now_stands_for_the_base_of_its_window() {
+    let now = inside(102);
+    assert_eq!(base_epoch(now), 100);
+    let mut readings = vec![NodeReading { epoch: 101, used: [(1, 0)].into_iter().collect() }];
+    let mut w = QuotaWindow::default();
+    let of = |rs: &[NodeReading], t: u32| rs.iter().map(|r| r.of(t)).collect::<Vec<_>>();
+    assert_eq!(w.admit(LIMIT, 1, 0, now, &of(&readings, 2), 10), Err(QuotaRefusal::Unread));
+    note(&mut readings, base_epoch(now), 2, 0, 3);
+    assert_eq!(w.admit(LIMIT, 1, 0, now, &of(&readings, 2), 10), Ok(()));
+    // The reading of 100 now holds tenant 2; another tenant noted in it joins it, and only three epochs stay.
+    note(&mut readings, 100, 3, 7, 3);
+    assert_eq!(readings.iter().map(|r| r.epoch).collect::<Vec<_>>(), [100, 101]);
+    assert_eq!(readings[0].of(3), Reading { epoch: 100, used: Some(7) });
+    for e in [102, 103] {
+        note(&mut readings, e, 1, 0, 3);
+    }
+    assert_eq!(readings.iter().map(|r| r.epoch).collect::<Vec<_>>(), [101, 102, 103]);
 }

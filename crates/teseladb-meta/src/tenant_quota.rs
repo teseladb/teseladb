@@ -34,6 +34,27 @@ pub fn reading_at(epoch: u64) -> u64 {
     epoch * EPOCH_MS + GUARD_MS
 }
 
+/// The epoch a reading of one tenant that starts at wall-clock `now_ms` may stand for: the base of the window it is
+/// in. Such a reading saw every write of the tenant up to now, which the base's reading would have seen and more,
+/// and the writes it saw that the node also counts in its window are counted twice, never missed. A node that has no
+/// reading of a tenant it knows (one created a moment ago) reads it at once with this epoch.
+pub fn base_epoch(now_ms: u64) -> u64 {
+    window_of(now_ms).saturating_sub(2)
+}
+
+/// Keeps in `readings` what a reading of epoch `epoch` gave for `tenant`, and only the last `keep` epochs.
+pub fn note(readings: &mut Vec<NodeReading>, epoch: u64, tenant: u32, used: u64, keep: usize) {
+    match readings.iter_mut().find(|r| r.epoch == epoch) {
+        Some(r) => {
+            r.used.insert(tenant, used);
+        }
+        None => readings.push(NodeReading { epoch, used: [(tenant, used)].into_iter().collect() }),
+    }
+    readings.sort_by_key(|r| r.epoch);
+    let extra = readings.len().saturating_sub(keep);
+    readings.drain(..extra);
+}
+
 /// What a node's reading of an epoch gave for a tenant: the bytes it uses, or `None` if the
 /// tenant could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

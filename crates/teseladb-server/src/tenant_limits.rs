@@ -179,6 +179,18 @@ impl TenantLimiter {
         g.drain(..extra);
     }
 
+    /// Keeps what a reading of `tenant` alone gave for epoch `epoch` (FR-031,
+    /// [`teseladb_meta::tenant_quota::base_epoch`]).
+    pub fn record_tenant(&self, epoch: u64, tenant: u32, used: u64) {
+        let mut g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        teseladb_meta::tenant_quota::note(&mut g, epoch, tenant, used, KEPT_READINGS);
+    }
+
+    /// The first window this node counts whole.
+    pub fn since(&self) -> u64 {
+        self.since.get().copied().unwrap_or(0)
+    }
+
     /// Lets `tenant` write `bytes` more on this node at wall-clock `now_ms` if they fit in its
     /// part of quota `limit` among `nodes` nodes, by the node's readings (FR-031).
     pub fn admit_write(
@@ -193,7 +205,7 @@ impl TenantLimiter {
             let g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             g.iter().map(|r| r.of(tenant)).collect()
         };
-        let since = self.since.get().copied().unwrap_or(0);
+        let since = self.since();
         self.with(tenant, |t| t.window.admit(limit, nodes, since, now_ms, &readings, bytes))
     }
 
@@ -436,16 +448,29 @@ pub fn over_quota(name: &str, used: u64, limit: u64) -> teseladb_wire::error::Co
 
 /// Whether a write of `bytes` of `tenant` fits in its storage quota on this node (FR-031): the
 /// data it uses below the limit, and what this node let it write within its part of the margin
-/// of its last readings ([`teseladb_meta::tenant_quota`]).
+/// of its last readings ([`teseladb_meta::tenant_quota`]). A tenant this node has no reading of
+/// (created a moment ago) is read at once with `read`, when the node counts whole the window that
+/// reading stands for.
 fn check_quota(
     routes: &crate::routes::SharedRoutes,
     tenant: u32,
     limit: u64,
     bytes: u64,
+    read: &mut dyn FnMut() -> Option<u64>,
 ) -> Result<(), teseladb_wire::error::CommandError> {
     let name = || routes.tenant_name(tenant).unwrap_or_else(|| tenant.to_string());
     let now = crate::clock::wall_ms();
-    match routes.limiter().admit_write(tenant, limit, routes.nodes(), now, bytes) {
+    let limiter = routes.limiter();
+    let mut admitted = limiter.admit_write(tenant, limit, routes.nodes(), now, bytes);
+    let base = teseladb_meta::tenant_quota::base_epoch(now);
+    if admitted == Err(QuotaRefusal::Unread)
+        && base >= limiter.since()
+        && let Some(used) = read()
+    {
+        limiter.record_tenant(base, tenant, used);
+        admitted = limiter.admit_write(tenant, limit, routes.nodes(), now, bytes);
+    }
+    match admitted {
         Ok(()) => Ok(()),
         Err(QuotaRefusal::Full(used)) => Err(over_quota(&name(), used, limit)),
         Err(QuotaRefusal::ShareSpent(_)) => {
@@ -469,19 +494,20 @@ pub fn unread(name: &str) -> teseladb_wire::error::CommandError {
 
 /// Lets a command of `user` of `tenant` that writes `bytes` begin on this node: `None` when no
 /// limit counts it, or the milliseconds it waited; the error when it may not run. A command that
-/// makes the tenant's data grow (`grows`) fits in its storage quota first. A slot among the
+/// makes the tenant's data grow (`grows`) fits in its storage quota first; `read` reads the
+/// tenant's data when the node has no reading of it. A slot among the
 /// commands at once is waited for up to [`MAX_WAIT`] too.
 pub fn begin(
     routes: &crate::routes::SharedRoutes,
     tenant: u32,
     user: &teseladb_auth::users::UserName,
-    bytes: u64,
-    grows: bool,
+    (bytes, grows): (u64, bool),
+    read: &mut dyn FnMut() -> Option<u64>,
 ) -> Result<Option<u64>, teseladb_wire::error::CommandError> {
     let states = routes.tenants();
     let Some(state) = states.get(&tenant) else { return Ok(None) };
     if grows && state.limits.storage_bytes > 0 {
-        check_quota(routes, tenant, state.limits.storage_bytes, bytes)?;
+        check_quota(routes, tenant, state.limits.storage_bytes, bytes, read)?;
     }
     if is_service_user(&state.limits, user) {
         return Ok(None);

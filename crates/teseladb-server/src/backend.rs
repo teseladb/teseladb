@@ -1250,7 +1250,9 @@ impl Backend for ServerBackend {
         bytes: u64,
         grows: bool,
     ) -> Result<Option<u64>, CommandError> {
-        crate::tenant_limits::begin(&self.h.routes, tenant, user, bytes, grows)
+        let routes = self.h.routes.clone();
+        let mut read = || crate::tenant_limits::storage_of(self, tenant).ok();
+        crate::tenant_limits::begin(&routes, tenant, user, (bytes, grows), &mut read)
     }
 
     fn tenant_end(&mut self, tenant: u32) {
