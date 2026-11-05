@@ -416,3 +416,24 @@ fn data_size_limits_estimate_and_max_reached() {
         assert_eq!((code(&r), field(&r, "errmsg")), (14, &s(msg)), "{r:?}");
     }
 }
+
+/// A key pattern that is not `_id`'s is refused only on a collection that exists, and
+/// `logRotate` takes the generic arguments (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn data_size_checks_the_key_pattern_of_a_collection_that_exists() {
+    let mut m = five();
+    let key = || d(&[("_id", 1.into()), ("a", 1.into())]);
+    let cmd = |ns: &str| {
+        doc(&[
+            ("dataSize", s(ns)),
+            ("keyPattern", key()),
+            ("min", key()),
+            ("max", d(&[("_id", 3.into()), ("a", 1.into())])),
+        ])
+    };
+    assert_eq!(code(&m.run("admin", cmd("ds.c"))), 96);
+    let r = m.run("admin", cmd("ds.none"));
+    assert_eq!((int(&r, "size"), int(&r, "numObjects")), (0, 0), "{r:?}");
+    let r = m.run("admin", doc(&[("logRotate", 1.into()), ("comment", s("x"))]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}

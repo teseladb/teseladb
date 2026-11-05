@@ -118,3 +118,27 @@ fn constraint_without_a_validator_and_twice() {
         assert_eq!(field(&r, "cursor.firstBatch.0.options"), &Value::Document(want), "{r:?}");
     }
 }
+
+/// A collection name with a null character is refused by `create`, `insert` and
+/// `renameCollection` (measured on a `refnode` 9.0.4 on 03-11-2026).
+#[test]
+fn namespaces_with_a_null_character_are_refused() {
+    let mut m = Mem::new();
+    create(&mut m, "nm", "a");
+    let msg = Value::from("namespaces cannot have embedded null characters");
+    let cmds = [
+        ("nm", doc(&[("create", Value::from("a\0b"))])),
+        (
+            "nm",
+            doc(&[
+                ("insert", Value::from("a\0b")),
+                ("documents", Value::Array(vec![Value::Document(doc(&[]))])),
+            ]),
+        ),
+        ("admin", rename("nm.a", "nm.b\0c", &[])),
+    ];
+    for (db, cmd) in cmds {
+        let r = m.run(db, cmd);
+        assert_eq!((field(&r, "code"), field(&r, "errmsg")), (&Value::Int32(73), &msg), "{r:?}");
+    }
+}

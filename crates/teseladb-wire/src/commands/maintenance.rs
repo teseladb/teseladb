@@ -86,13 +86,6 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     };
     let ns = names::ns(db, coll);
     names::check(&ns)?;
-    if let Some(Value::Document(k)) = ctx.cmd.get("keyPattern") {
-        let id_only = k.len() == 1 && k.get("_id").is_some();
-        if !id_only {
-            let msg = "Couldn't find valid index containing key pattern";
-            return Err(CommandError::new(OPERATION_FAILED, msg));
-        }
-    }
     let bound = |field: &str| match ctx.cmd.get(field) {
         None => Ok(None),
         Some(Value::Document(d)) => Ok(Some(d.get("_id").cloned().unwrap_or(Value::MinKey))),
@@ -115,6 +108,15 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let started = ctx.backend.now_ms();
     let (mut size, mut objects, mut reached) = (0i64, 0i64, false);
     let coll = ctx.backend.collection(&ns)?;
+    // Only a collection that exists has indexes to look the pattern up in (measured on a `refnode`
+    // 9.0.4 on 03-11-2026): one that does not exist counts nothing.
+    if coll.is_some()
+        && let Some(Value::Document(k)) = ctx.cmd.get("keyPattern")
+        && !(k.len() == 1 && k.get("_id").is_some())
+    {
+        let msg = "Couldn't find valid index containing key pattern";
+        return Err(CommandError::new(OPERATION_FAILED, msg));
+    }
     if let Some(c) = &coll {
         for_each_match(ctx.backend, documents_of(c), &filter, None, ReadConcern::Local, |_, d| {
             size = size.saturating_add(i64::try_from(d.len()).unwrap_or(i64::MAX));
