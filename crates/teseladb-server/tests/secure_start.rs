@@ -979,27 +979,6 @@ fn start(data: &Path, log: &Path) -> Started {
     start_with(data, log, &[])
 }
 
-fn credentials(data: &Path) -> (String, String) {
-    let text = std::fs::read_to_string(data.join(ROOT_CREDENTIALS)).unwrap();
-    let get =
-        |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).unwrap().to_owned();
-    (get("user"), get("password"))
-}
-
-/// A client logged in as `root`, once core 0 created it.
-fn root_client(port: u16, ca: &Certificate, data: &Path) -> Client {
-    let (user, password) = credentials(data);
-    let until = Instant::now() + READY_WAIT;
-    loop {
-        let mut c = Client::new(port, ca);
-        if ok(&login(&mut c, &user, &password)) {
-            return c;
-        }
-        assert!(Instant::now() < until, "root never came");
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 /// A client certificate of the node's CA for `subject`, as `teseladb cert client` makes it.
 fn client_identity(data: &Path, subject: &[(&[u8], &str)]) -> teseladb_tls::CertifiedKey {
     use teseladb_x509::generate::{self, CertificateParams};

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
+use teseladb_server::pki::ROOT_CREDENTIALS;
 use teseladb_server::run;
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_bson::{Document, RawDoc, Value};
@@ -64,15 +65,14 @@ pub fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
         "127.0.0.1:0",
         "--admin-listen",
         "127.0.0.1:0",
-        // Several nodes on one machine: none opens the HTTP port of 019.
-        "--http-port",
-        "0",
         "--dbpath",
         data.to_str().unwrap(),
         "--logpath",
         log.to_str().unwrap(),
     ]
     .iter()
+    // Several nodes on one machine: none opens the HTTP port of 019 unless `extra` names one.
+    .chain(if extra.contains(&"--http-port") { &[][..] } else { &["--http-port", "0"][..] })
     .chain(extra)
     .map(|s| s.to_string())
     .collect();
@@ -217,4 +217,25 @@ pub fn run_once(args: &[&str]) -> (i32, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(&args, &mut out, &mut err, &|| true);
     (code, String::from_utf8(err).unwrap())
+}
+
+/// A client logged in as `root`, once core 0 created it.
+pub fn root_client(port: u16, ca: &Certificate, data: &Path) -> Client {
+    let (user, password) = credentials(data);
+    let until = Instant::now() + READY_WAIT;
+    loop {
+        let mut c = Client::new(port, ca);
+        if ok(&login(&mut c, &user, &password)) {
+            return c;
+        }
+        assert!(Instant::now() < until, "root never came");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+pub fn credentials(data: &Path) -> (String, String) {
+    let text = std::fs::read_to_string(data.join(ROOT_CREDENTIALS)).unwrap();
+    let get =
+        |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).unwrap().to_owned();
+    (get("user"), get("password"))
 }

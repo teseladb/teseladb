@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use started::{Client, dir, login, ok, run_once, start_with};
+use started::{Client, credentials, dir, ok, root_client, run_once, start_with};
 use teseladb_server::admin_http::{Method, request_with};
 use teseladb_server::pki::{CA_CERT, NODE_CERT};
 use teseladb_bson::{Document, Value};
@@ -77,17 +77,11 @@ fn operator(ca: &Ca) -> CertifiedKey {
     CertifiedKey { chain: vec![cert], key }
 }
 
-/// `root` with the bootstrap password, once the node has created it.
-fn root(port: u16, ca: &Certificate) -> Client {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let mut c = Client::new(port, ca);
-        if ok(&login(&mut c, "root", ROOT_PASSWORD)) {
-            return c;
-        }
-        assert!(std::time::Instant::now() < until, "root never signed in");
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+/// `root` of the node whose data is in `data`: its credentials file holds the bootstrap
+/// password, which signs in.
+fn root(port: u16, ca: &Certificate, data: &Path) -> Client {
+    assert_eq!(credentials(data), ("root".to_owned(), ROOT_PASSWORD.to_owned()));
+    root_client(port, ca, data)
 }
 
 #[test]
@@ -115,7 +109,7 @@ fn a_first_start_takes_the_ca_and_the_root_password_of_the_bootstrap_directory()
     let log_text = std::fs::read_to_string(&log).unwrap();
     assert!(!log_text.contains(ROOT_PASSWORD), "the password stays out of the log");
     // `root` signs in with the given password and makes the deployer an operator.
-    let mut c = root(node.port, &given.cert);
+    let mut c = root(node.port, &given.cert, &data);
     let roles = Value::Array(
         ["clusterAdmin", "clusterMonitor"]
             .iter()
@@ -138,7 +132,7 @@ fn a_first_start_takes_the_ca_and_the_root_password_of_the_bootstrap_directory()
     bootstrap(&other, &ca(4, "Another CA"), 0o600);
     let node = start_with(&data, &log, &["--bootstrap-dir", other.to_str().unwrap()]);
     assert_eq!(disk_cert(&data, CA_CERT).der(), given.cert.der());
-    root(node.port, &given.cert);
+    root(node.port, &given.cert, &data);
 }
 
 #[test]

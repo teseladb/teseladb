@@ -55,30 +55,59 @@ pub struct TlsPort {
     pub mode: TlsMode,
     /// The server side of TLS; `None` with `disabled`.
     config: Option<Arc<RwLock<Arc<ServerConfig>>>>,
+    /// The protocols this port offers on top of the shared server side, if any, with the copy
+    /// of the server side that offers them.
+    alpn: Option<Arc<Alpn>>,
+}
+
+/// The protocols a port offers (019 FR-001), and the server side with them made from the shared
+/// one it was made from last: made again only when a rotation changed the shared one.
+#[derive(Debug)]
+struct Alpn {
+    protocols: Vec<Vec<u8>>,
+    made: std::sync::Mutex<Option<(Arc<ServerConfig>, Arc<ServerConfig>)>>,
+}
+
+impl Alpn {
+    fn over(&self, base: Arc<ServerConfig>) -> Arc<ServerConfig> {
+        let mut made = self.made.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((from, with)) = made.as_ref()
+            && Arc::ptr_eq(from, &base)
+        {
+            return Arc::clone(with);
+        }
+        let mut c = (*base).clone();
+        c.alpn.clone_from(&self.protocols);
+        let with = Arc::new(c);
+        *made = Some((base, Arc::clone(&with)));
+        with
+    }
 }
 
 impl TlsPort {
     /// The port in `mode` with the server side `config`.
     pub fn new(mode: TlsMode, config: Option<ServerConfig>) -> TlsPort {
-        TlsPort { mode, config: config.map(|c| Arc::new(RwLock::new(Arc::new(c)))) }
+        TlsPort { mode, config: config.map(|c| Arc::new(RwLock::new(Arc::new(c)))), alpn: None }
     }
 
     /// The server side of TLS now; `None` with `disabled`.
     pub fn config(&self) -> Option<Arc<ServerConfig>> {
         // A writer that panicked left a whole value behind: the change is one assignment.
-        self.config.as_ref().map(|c| c.read().unwrap_or_else(PoisonError::into_inner).clone())
+        let base =
+            self.config.as_ref().map(|c| c.read().unwrap_or_else(PoisonError::into_inner).clone());
+        match (&self.alpn, base) {
+            (Some(alpn), Some(base)) => Some(alpn.over(base)),
+            (_, base) => base,
+        }
     }
 
-    /// A port of the same mode whose server side offers the protocols `alpn` (the HTTP port's
-    /// `h2` and `http/1.1`, 019 FR-001); later rotations of this one do not reach it.
+    /// A port of the same mode and server side that offers the protocols `alpn` (the HTTP
+    /// port's `h2` and `http/1.1`, 019 FR-001). It shares the server side: a rotation of this
+    /// port reaches it too (013 FR-036).
     #[must_use]
     pub fn with_alpn(&self, alpn: &[Vec<u8>]) -> TlsPort {
-        let config = self.config().map(|c| {
-            let mut c = (*c).clone();
-            c.alpn = alpn.to_vec();
-            c
-        });
-        TlsPort::new(self.mode, config)
+        let alpn = Alpn { protocols: alpn.to_vec(), made: std::sync::Mutex::new(None) };
+        TlsPort { mode: self.mode, config: self.config.clone(), alpn: Some(Arc::new(alpn)) }
     }
 
     /// Puts the server side of `other` in place of this one, in every clone; a port without TLS
@@ -92,14 +121,16 @@ impl TlsPort {
 
 impl Default for TlsPort {
     fn default() -> TlsPort {
-        TlsPort { mode: TlsMode::Disabled, config: None }
+        TlsPort { mode: TlsMode::Disabled, config: None, alpn: None }
     }
 }
 
 impl PartialEq for TlsPort {
-    /// The same mode and the same shared settings.
+    /// The same mode, the same shared settings and the same protocols.
     fn eq(&self, other: &TlsPort) -> bool {
+        let protocols = |p: &TlsPort| p.alpn.as_ref().map(|a| a.protocols.clone());
         self.mode == other.mode
+            && protocols(self) == protocols(other)
             && match (&self.config, &other.config) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -316,6 +347,27 @@ mod tests {
         assert_ne!(a, TlsPort { mode: TlsMode::AllowTls, ..a.clone() });
         assert_ne!(a, TlsPort::default());
         assert_eq!(TlsPort::default(), TlsPort::default());
+    }
+
+    /// 013 FR-036: the HTTP port's protocols ride on the shared server side, so a rotation of
+    /// the clients' port reaches it; its copy is made again only after a rotation.
+    #[test]
+    fn a_port_with_protocols_shares_the_rotations_of_its_base() {
+        let base = TlsPort::new(TlsMode::RequireTls, Some(config(1)));
+        let protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let http = base.with_alpn(&protocols);
+        assert_ne!(http, base);
+        assert_eq!(http, http.clone());
+        let first = http.config().unwrap();
+        assert_eq!(first.alpn, protocols);
+        assert!(base.config().unwrap().alpn.is_empty(), "the base keeps its own");
+        assert!(Arc::ptr_eq(&first, &http.config().unwrap()), "no copy without a rotation");
+        base.replace(&TlsPort::new(TlsMode::RequireTls, Some(config(2))));
+        let rotated = http.config().unwrap();
+        assert_eq!(rotated.identity.key.public_key(), PrivateKey::ed25519(&[2; 32]).public_key());
+        assert_eq!(rotated.alpn, protocols);
+        // Without TLS there is nothing to offer them on.
+        assert!(TlsPort::default().with_alpn(&protocols).config().is_none());
     }
 
     #[test]
