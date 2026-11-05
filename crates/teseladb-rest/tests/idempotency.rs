@@ -5,15 +5,15 @@
 
 use std::collections::HashMap;
 
-use teseladb_bson::{Document, Value};
-use teseladb_http::http1::Request;
-use teseladb_http::server::Response;
 use teseladb_rest::api::Executor;
 use teseladb_rest::idempotency::{
     COLL, DB, HEADER, Kind, MAX_KEY_LEN, REUSED, TTL_MS, handle, kind_of, request_hash, session,
     valid_key,
 };
 use teseladb_rest::routes::Op;
+use teseladb_bson::{Document, Value};
+use teseladb_http::http1::Request;
+use teseladb_http::server::Response;
 
 /// The records of `config.httpIdempotency` in memory, and every command the write ran.
 #[derive(Default)]

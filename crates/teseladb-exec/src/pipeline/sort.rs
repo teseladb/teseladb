@@ -6,8 +6,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::errors::{
     FIELD_DOLLAR, PATH_DOT_END, SORT_EMPTY, SORT_ILLEGAL_META, SORT_NOT_OBJECT, SORT_ORDER, error,

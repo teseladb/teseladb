@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_meta::command::{Group0Command, NodeState};
 use teseladb_router::table::RouteEntry;
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_types::{GroupId, NodeId};
 
 fn json(text: &str) -> Document {

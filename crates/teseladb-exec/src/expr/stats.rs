@@ -15,8 +15,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_mql::{DecOp, MqlError, dec_binary, decimal_math, decimal_to_f64};
+use teseladb_bson::{Decimal128, Document, Value};
 
 use super::{Eval, Expr, Scope, order};
 

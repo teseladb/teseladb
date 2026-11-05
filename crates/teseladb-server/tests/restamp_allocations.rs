@@ -3,10 +3,10 @@
 //! stamped before the command in place.
 
 use teseladb_auth::clustertime::{HmacKey, KEY_LEN, KeyRing};
-use teseladb_bson::Document;
 use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
 use teseladb_wire::hello::{restamp_cluster_time, with_cluster_time};
+use teseladb_bson::Document;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;

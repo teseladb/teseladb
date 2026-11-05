@@ -10,9 +10,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_raftlog::MemDisk;
-use teseladb_server::node::{Node, NodeConfig};
 
 fn with_admin() -> NodeConfig {
     joining(Vec::new())

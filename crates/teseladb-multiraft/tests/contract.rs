@@ -66,14 +66,15 @@ fn a_proposal_overwritten_by_another_leader_is_dropped() {
     let op = c.propose(old, b"old").unwrap();
     // The other two elect a leader and commit their own entry at the same index.
     let rest = c.others(old);
-    let new = loop {
-        c.tick();
-        if let Some(n) = rest.iter().copied().find(|n| {
-            c.nodes[n].core.status(G).is_some_and(|s| s.role == teseladb_raft::Role::Leader)
-        }) {
-            break n;
-        }
-    };
+    let new =
+        loop {
+            c.tick();
+            if let Some(n) = rest.iter().copied().find(|n| {
+                c.nodes[n].core.status(G).is_some_and(|s| s.role == teseladb_raft::Role::Leader)
+            }) {
+                break n;
+            }
+        };
     let mine = c.propose(new, b"new").unwrap();
     c.ticks(5);
     assert_eq!(c.results(new, mine), vec![Ok(Done::Applied(3))]);

@@ -8,8 +8,8 @@
 //! with `movePrimary`) and the collections to move, none in TeselaDB, whose collections live in the
 //! ranges; the next ones say `ongoing` with what remains.
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::command::{Group0Command, NodeState};
+use teseladb_bson::{Document, Value};
 use teseladb_types::NodeId;
 
 use super::primaries::{of_settings, shard_node};

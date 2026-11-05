@@ -6,8 +6,8 @@
 //! other errors (a wrong `format`, `base` or `subtype`) are not replaced. A `null` or missing
 //! input gives `onNull`, or `null`.
 
-use teseladb_bson::{Decimal, Decimal128, Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError, decimal_to_f64, stream_double, to_decimal128};
+use teseladb_bson::{Decimal, Decimal128, Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::convert_bin::{self as bin, Format, UUID_SUBTYPE};

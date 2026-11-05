@@ -2,8 +2,8 @@
 
 use std::cell::Cell;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 use teseladb_mql::{Extensions, GeoQuery, MqlError, Result, TextQuery, codes};
+use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 
 /// A document from Extended JSON.
 pub fn doc(json: &str) -> Document {

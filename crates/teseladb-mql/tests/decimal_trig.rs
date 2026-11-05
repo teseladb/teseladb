@@ -1,8 +1,8 @@
 //! Decimal trigonometric and hyperbolic functions (010 T007): correctly rounded to 34 digits in
 //! RefDb's form, and their special values and domains (measured on a `refrouter` 9.0.4).
 
-use teseladb_bson::Decimal128;
 use teseladb_mql::decimal_trig::{Trig, atan2, trig};
+use teseladb_bson::Decimal128;
 
 fn d(s: &str) -> Decimal128 {
     s.parse().unwrap_or_else(|e| panic!("{s}: {e:?}"))

@@ -12,11 +12,11 @@
 //! code ([`UNCODED`]). `split` with `find` or `bounds` cuts at the shard key of the chunk's middle
 //! document (its documents in key order, the one at half their number), as the shard does.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::{Direction, KeyBuilder, decode_untyped, values_len};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::command::Group0Command;
 use teseladb_router::table::RouteEntry;
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_types::{GroupId, NodeId};
 
 use super::names::parse_full;

@@ -3,8 +3,8 @@
 //! to 9999 as ISO-8601 text), and back. Reading refuses a BSON-only value in the input and a type
 //! wrapper of the wrong shape with RefDb's 241, which `onError` replaces.
 
-use teseladb_bson::{Decimal128, Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Decimal128, Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::convert_bin::{self as bin, UUID_SUBTYPE};

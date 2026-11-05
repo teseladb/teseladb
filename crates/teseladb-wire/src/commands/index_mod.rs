@@ -7,12 +7,12 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::spec::index_def;
 use teseladb_keys::{KeyBuilder, PrimaryKey, values_len};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::crud::MODIFY_CHUNK_KEYS;
 use super::indexes::{backfill, drop_one, in_stored_order};

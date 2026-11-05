@@ -13,7 +13,6 @@ use common::{Mem, doc, field};
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::scram::{ClientSession, Credentials, Mechanism};
 use teseladb_auth::users::{EXTERNAL_DB, RoleName, User, UserName};
-use teseladb_bson::{Document, Value};
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::commands::auth::{
     AUTHENTICATE, SASL_CONTINUE, SASL_START, SPECULATIVE_AUTHENTICATE, allowed_unauthenticated,
@@ -23,6 +22,7 @@ use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch, dispatch_with};
 use teseladb_wire::msg::OpMsg;
+use teseladb_bson::{Document, Value};
 use teseladb_x509::pem::{base64_decode, base64_encode};
 
 const ADMIN: &str = "admin";
@@ -1017,8 +1017,7 @@ fn refdb_oidc_logs_in_with_a_token() {
     use teseladb_crypto::HashAlgorithm;
     let issuer = "https://idp.test";
     let pem = include_str!("../../teseladb-auth/tests/fixtures/oidc/rsa2048.pem");
-    let teseladb_x509::PrivateKey::Rsa(key, _) =
-        teseladb_x509::PrivateKey::from_pem(pem, None).unwrap()
+    let teseladb_x509::PrivateKey::Rsa(key, _) = teseladb_x509::PrivateKey::from_pem(pem, None).unwrap()
     else {
         panic!("not RSA")
     };

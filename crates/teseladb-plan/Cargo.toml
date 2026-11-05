@@ -11,6 +11,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-bson = { path = "../teseladb-bson" }
+teseladb-bson = { workspace = true }
 teseladb-index = { path = "../teseladb-index" }
 teseladb-meta = { path = "../teseladb-meta" }

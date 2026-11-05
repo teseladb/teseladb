@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_mql::validation::{ValidationAction, ValidationLevel};
 use teseladb_mql::{Expr, Filter, FilterUse, MatchContext, Pred};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::args::{self, missing};
 use super::authz_collections::Generated;

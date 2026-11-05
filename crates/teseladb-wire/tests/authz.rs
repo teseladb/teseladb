@@ -13,7 +13,6 @@ use teseladb_auth::roles::Role;
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::scram::{Credentials, Mechanism};
 use teseladb_auth::users::{RoleName, User, UserName};
-use teseladb_bson::{Document, Value};
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::commands::auth::Authenticated;
 use teseladb_wire::commands::authorize::{QUOTE_KEEP, REDACTED};
@@ -21,6 +20,7 @@ use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
+use teseladb_bson::{Document, Value};
 
 const ADMIN: &str = "admin";
 const TEST: &str = "test";

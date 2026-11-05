@@ -3,13 +3,13 @@
 
 use std::f64::consts::PI;
 
-use teseladb_bson::{RawDoc, extjson};
 use teseladb_index::geo::geojson::{GeoError, Geometry, parse, type_name};
 use teseladb_index::geo::region::{Container, intersects, within};
 use teseladb_index::geo::sphere::{
     Cap, Crossing, Loop, Point, Polygon, crossing, distance_to_edge,
 };
 use teseladb_index::shell::shell_value;
+use teseladb_bson::{RawDoc, extjson};
 
 fn geo(text: &str) -> Result<Geometry, GeoError> {
     let bytes = extjson::parse(&format!("{{\"v\": {text}}}")).unwrap().to_bytes().unwrap();

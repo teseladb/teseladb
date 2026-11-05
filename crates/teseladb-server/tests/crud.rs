@@ -8,11 +8,11 @@ mod common;
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_server::node::Node;
+use teseladb_wire::commands::Timeouts;
 use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
 use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
-use teseladb_wire::commands::Timeouts;
 
 #[test]
 fn a_single_node_runs_the_crud_commands() {

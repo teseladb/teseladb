@@ -4,7 +4,6 @@
 //! document, its `__safeContent__` tags and the ESC and ECOC entries in one transaction (FR-003).
 //! A command is only processed when it carries `encryptionInformation`, as a `refnode` 9.0.4 does.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_fle::FleError;
 use teseladb_fle::esc::EscReader;
 use teseladb_fle::fields::{self, EncryptedFieldConfig};
@@ -12,6 +11,7 @@ use teseladb_fle::query::Rewriter;
 use teseladb_fle::tokens::Token;
 use teseladb_fle::write::WriteError;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::{Backend, Ctx};
 use crate::error::{Code, CommandError};

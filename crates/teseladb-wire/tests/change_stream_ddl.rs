@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::token::{EventKind, Position};
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "ddl";
 

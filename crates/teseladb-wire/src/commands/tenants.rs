@@ -4,10 +4,10 @@
 //! by their names; the node keeps them qualified by the tenant
 //! ([`teseladb_meta::tenants::qualified_db`]), and these functions translate between both.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::security::{Expect, SecurityOp};
 use teseladb_meta::tenants::{DEFAULT_TENANT, TENANT_FIELD, qualified_db, split_db};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use crate::error::{BAD_VALUE, CommandError, UNAUTHORIZED};

@@ -3,14 +3,14 @@
 //! and `OP_COMPRESSED`. The expected answers are the ones a `refrouter` gives (measured against
 //! RefDb 7.0, the newest that starts on the development machine; see the report of 006).
 
-use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_hash::crc32c;
 use teseladb_wire::compressed::{self, Compressor};
 use teseladb_wire::connection::{Connection, Kind};
 use teseladb_wire::error;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg, flags, opcode};
 use teseladb_wire::query::{AWAIT_CAPABLE, OpQuery, encode_reply};
 use teseladb_wire::{MAX_MESSAGE_SIZE, WireError};
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_hash::crc32c;
 
 fn bson(d: &Document) -> Vec<u8> {
     d.to_bytes().unwrap()

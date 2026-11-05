@@ -9,7 +9,6 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Kind, Lookup, Lsm, LsmConfig};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
-use teseladb_raftlog::MemDisk;
 use teseladb_range::command::{Command, IntentPut, Resolution};
 use teseladb_range::intents::{
     ABANDONED_AFTER_MS, Conflict, Intent, IntentOp, IntentOwner, Latest, Push, RecordError,
@@ -17,6 +16,7 @@ use teseladb_range::intents::{
     record_key, succ,
 };
 use teseladb_range::sm::{RangeSm, last_mark_key, live_key};
+use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 
 const G: GroupId = GroupId(9);

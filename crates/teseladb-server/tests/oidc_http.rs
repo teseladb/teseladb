@@ -13,6 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb_auth::sasl::SaslMechanism;
+use teseladb_server::client_listener::ClientConfig;
+use teseladb_server::http_listener::HttpPortConfig;
+use teseladb_server::https::Https;
+use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::oidc_client::{Oidc, QUIESCE};
+use teseladb_server::tls_stream::TlsStream;
 use teseladb_bson::{Document, Value as Bson, extjson};
 use teseladb_crypto::HashAlgorithm;
 use teseladb_crypto::rsa::RsaPrivateKey;
@@ -20,12 +26,6 @@ use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
 use teseladb_raftlog::MemDisk;
-use teseladb_server::client_listener::ClientConfig;
-use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::https::Https;
-use teseladb_server::node::{Node, NodeConfig};
-use teseladb_server::oidc_client::{Oidc, QUIESCE};
-use teseladb_server::tls_stream::TlsStream;
 use teseladb_tls::{CertifiedKey, ServerConfig, Trust};
 use teseladb_x509::PrivateKey;
 use teseladb_x509::ext::GeneralName;
@@ -46,10 +46,7 @@ fn key() -> RsaPrivateKey {
 }
 
 fn b64url(bytes: &[u8]) -> String {
-    teseladb_x509::pem::base64_encode(bytes)
-        .trim_end_matches('=')
-        .replace('+', "-")
-        .replace('/', "_")
+    teseladb_x509::pem::base64_encode(bytes).trim_end_matches('=').replace('+', "-").replace('/', "_")
 }
 
 fn jwks() -> String {

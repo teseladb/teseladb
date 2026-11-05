@@ -46,7 +46,8 @@ impl Sts {
 
     /// Sends `req`: the answer's status and body.
     pub fn send(&self, req: &StsRequest) -> Result<(u16, Vec<u8>), String> {
-        let mut http = client::post(&self.target, STS_CONTENT_TYPE, STS_BODY.as_bytes());
+        let mut http =
+            client::post(&self.target, crate::USER_AGENT, STS_CONTENT_TYPE, STS_BODY.as_bytes());
         for (name, value) in &req.headers {
             http = http.header(name, value);
         }

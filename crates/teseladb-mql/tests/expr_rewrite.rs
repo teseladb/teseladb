@@ -3,10 +3,10 @@
 //! clauses an optimised expression implies on its paths, and the scan's filter without the
 //! `$_internalExpr…` ones. The optimised expressions are given here as RefDb wrote them.
 
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_mql::{
     Filter, FilterUse, MatchContext, NoExtensions, OptimizedExpr, optimize_exprs, scan_filter,
 };
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

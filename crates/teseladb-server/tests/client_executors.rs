@@ -10,13 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::{ClientConfig, Hooks};
 use teseladb_server::diag::ProcessConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_raftlog::MemDisk;
 
 /// How long an executor of [`late`] waits before it runs.
 const LATE: Duration = Duration::from_millis(300);

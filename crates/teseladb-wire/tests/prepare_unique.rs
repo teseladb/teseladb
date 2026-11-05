@@ -7,9 +7,9 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_index::prepared::{guard_key, guards_of};
 use teseladb_keys::{KeyBuilder, KeyParts, PrimaryKey};
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "t";
 const NS: &str = "t.c";
@@ -483,8 +483,7 @@ fn a_write_probes_again_when_another_added_the_value_meanwhile() {
             planted = true;
             let guard = guard_key(start).expect("a prefix");
             data.insert(guard, 7u64.to_be_bytes().to_vec());
-            let other =
-                [start, PrimaryKey::id(teseladb_bson::RawValue::Int32(9)).as_bytes()].concat();
+            let other = [start, PrimaryKey::id(teseladb_bson::RawValue::Int32(9)).as_bytes()].concat();
             data.insert(other, vec![]);
         }
     }));
@@ -588,8 +587,8 @@ fn a_guard_spoiled_after_the_probe_fails_the_statement() {
 
 #[test]
 fn a_duplicate_that_comes_during_the_conversion_fails_it() {
-    use teseladb_bson::RawValue;
     use teseladb_keys::{Direction, FieldSpec, IndexKeySpec};
+    use teseladb_bson::RawValue;
     let mut m = Mem::new();
     insert(&mut m, vec![one(1, "p", 5)]);
     create(&mut m, index("p").with("prepareUnique", true));

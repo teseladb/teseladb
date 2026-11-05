@@ -3,10 +3,10 @@
 //! 31-10-2026): the options an aggregation cannot take are refused, and the read cannot change
 //! the view's collation.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_collation::{CollationSpec, ParsedCollation, parse_collation};
 use teseladb_meta::catalog::Namespace;
 use teseladb_plan::views::{Resolved, ViewError};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::{Backend, names};
 use crate::error::{

@@ -3,9 +3,9 @@
 //! expiry of a time series or a clustered collection (`expireAfterSeconds`), with the checks, the
 //! messages and the order of the options of a `refnode` 9.0.4 (measured on 02-11-2026).
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::{CollectionKind, Granularity};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use super::kinds::{

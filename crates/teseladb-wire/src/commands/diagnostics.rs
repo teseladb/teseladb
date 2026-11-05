@@ -7,11 +7,11 @@
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::RoleName;
-use teseladb_bson::{Document, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::IndexState;
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, Value};
 
 use super::admin::admin_only;
 use super::args::uuid_value;

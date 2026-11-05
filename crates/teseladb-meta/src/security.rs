@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_keys::{Direction, encode};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_types::{DecodeError, Decoder, Encoder};
 
 /// Whether an entry is a user, a role or an API key.

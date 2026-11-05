@@ -5,11 +5,11 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::commands::lock;
 use teseladb_wire::connection::Connection;
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::OpMsg;
+use teseladb_bson::{Document, Value, extjson};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

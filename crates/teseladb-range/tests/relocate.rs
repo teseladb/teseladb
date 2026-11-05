@@ -11,10 +11,10 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
-use teseladb_raftlog::MemDisk;
 use teseladb_range::command::{Command, KIND_RELOCATE, Put};
 use teseladb_range::relocate::{Copy, Step, step};
 use teseladb_range::sm::{RangeOutput, RangeSm};
+use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 
 const G: GroupId = GroupId(5);

@@ -2,8 +2,8 @@
 //! queries below were run on a `refnode` 9.0.4 (30-10-2026) and each query selects the `_id`s it
 //! selected there; the errors are its errors.
 
-use teseladb_bson::{RawDoc, extjson};
 use teseladb_index::geo::query::{GeoOperator, matches, parse_query};
+use teseladb_bson::{RawDoc, extjson};
 
 /// The documents, as extended JSON: their `p`.
 const DOCS: [(i32, &str); 17] = [

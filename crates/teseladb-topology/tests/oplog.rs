@@ -2,12 +2,12 @@
 //! entries are those RefDb 9.0.4 (`ref:9.0`) wrote for the same operations, field by field
 //! and in their order.
 
-use teseladb_bson::{Document, Value};
 use teseladb_topology::oplog::{
     APPLY_OPS_NS, DROP_REFUSED, DROP_REFUSED_CODE, NULL_OP_TIME, OPLOG_NS, OpType, Operation,
     OplogEntry, OplogError, TxnInfo, WRITE_REFUSED, transaction_entries,
 };
 use teseladb_topology::replset::{OpTime, Timestamp};
+use teseladb_bson::{Document, Value};
 
 const NS: &str = "ventas.pedidos";
 const UI: [u8; 16] = [0xe9; 16];

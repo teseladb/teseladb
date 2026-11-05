@@ -5,7 +5,6 @@
 //! `collMod` asked for and the options before, `rename` with `to` (and `dropTarget`, the
 //! collection it dropped), `drop` and `dropDatabase`.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::ddl::{ddl_key, index_change, shown};
 use teseladb_changestream::event::{ChangeEvent, Namespace as EventNs};
 use teseladb_changestream::stage::Scope;
@@ -13,6 +12,7 @@ use teseladb_changestream::token::{EventKind, ResumeToken};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::ddl_log::{DdlChange, DdlRecord};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::kinds;
 use crate::error::CommandError;

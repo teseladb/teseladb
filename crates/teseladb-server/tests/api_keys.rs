@@ -7,14 +7,14 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, Value, extjson};
-use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
-use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_bson::{Document, Value, extjson};
+use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+use teseladb_http::server::Settings;
+use teseladb_raftlog::MemDisk;
 
 const READY: Duration = Duration::from_secs(30);
 

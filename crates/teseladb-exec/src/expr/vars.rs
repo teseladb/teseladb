@@ -4,8 +4,8 @@
 //! or non-ASCII characters (`$let` may also rebind `CURRENT`), and a variable used outside its
 //! scope is 17276.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::array::eval_type;
 use super::values::{display, display_eval, int32_of};

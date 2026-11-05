@@ -10,10 +10,10 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lookup, Lsm, LsmConfig};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
-use teseladb_raftlog::MemDisk;
 use teseladb_range::command::{Absorbed, Command, IntentPut, Put, Resolution};
 use teseladb_range::intents::{IntentOp, TxnId, TxnStatus, record_key};
 use teseladb_range::sm::{RangeOutput, RangeSm, RangeState, split_value};
+use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 
 const G: GroupId = GroupId(3);

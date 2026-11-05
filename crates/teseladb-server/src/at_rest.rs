@@ -51,9 +51,13 @@ impl std::fmt::Debug for AtRestOpts {
     }
 }
 
+/// The domain of the at-rest labels: the one the files written before the move to `teseladb-crypto`
+/// carry, so that they still open.
+pub const AT_REST_DOMAIN: &str = "teseladb";
+
 /// The ring of master key `key` making keys of `mode`, seeded from the operating system.
 pub fn ring(key: &[u8; KEY_LEN], mode: CipherMode) -> Encryption {
-    Encryption(Arc::new(KeyRing::new(key, mode, teseladb_sys::fill_random)))
+    Encryption(Arc::new(KeyRing::new(key, mode, teseladb_sys::fill_random, AT_REST_DOMAIN)))
 }
 
 /// The at-rest master key derived from the cluster's master key.

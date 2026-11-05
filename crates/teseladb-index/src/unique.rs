@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{BsonError, Collator, Document, RawDoc, Value};
 use teseladb_keys::space::split_unique_value;
 use teseladb_keys::{KeyBuilder, KeyError};
+use teseladb_bson::{BsonError, Collator, Document, RawDoc, Value};
 
 use crate::delta::IndexSet;
 use crate::keygen::{KeyValue, KeygenError, key_values};

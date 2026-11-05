@@ -9,7 +9,6 @@
 //! a probe of those values ([`probe_error`]), the command reads the entries under their prefix and
 //! the version of their guard ([`probe`]) and runs the write again with them in its rules.
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_collation::{Collation, ParsedCollation, parse_collation};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::keygen::KeygenError;
@@ -19,6 +18,7 @@ use teseladb_index::unique::{UniqueError, UniqueGuard, conflicting_values, dupli
 use teseladb_keys::{KeyParts, PrimaryKey};
 use teseladb_range::command::Put;
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::Backend;
 use crate::error::{self, CommandError, DUPLICATE_KEY, INTERNAL_ERROR, WRITE_CONFLICT};

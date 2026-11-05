@@ -6,13 +6,13 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::command::Group0Command;
 use teseladb_router::table::RouteEntry;
-use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::commands::chunks::{collection_chunks, config_chunks};
 use teseladb_wire::commands::sharding::shard_key_of;
+use teseladb_bson::{Document, Value, extjson};
+use teseladb_types::{GroupId, NodeId};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

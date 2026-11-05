@@ -54,7 +54,8 @@ WARMUP=${FINAL_PERF_WARMUP:-$d_warm}
 IDLE_MAX=${FINAL_IDLE_MAX:-0.25}
 DATA=${FINAL_DATA_DIR:-$CARGO_TARGET_DIR/final-phase-data}
 
-# Fuzzing targets: `crate:test file[:test name]` (`lib` is the crate's own tests). The pending ones
+# Fuzzing targets: `crate:test file[:test name]` (`lib` is the crate's own tests); a `viuzi-*`
+# crate runs in the shared-crates next to the repository (001 FR-023). The pending ones
 # are those of plan step 1 (013 federated, OCSP and configuration, 016 T009, 019 T034); the others
 # already ran their 24 h and come back with FINAL_FUZZ_ALL=1.
 FUZZ_PENDING="teseladb-auth:fuzz_federated teseladb-auth:fuzz_config teseladb-x509:fuzz_ocsp
@@ -109,7 +110,7 @@ phase_table() {
   row 5 chaos-disk-full 600 "tests/compat/chaos/disk-full.sh --times ${CHAOS_TIMES:-5}$(quick_or ' --hold 2' '')"
   row 5 chaos-four-nodes 1800 "tests/compat/chaos/four-nodes.sh --times ${CHAOS_TIMES:-20}$(quick_or ' --hold 2' '')"
   perf_rows
-  row 6 integrity-crash-sim 3600 "TESELADB_CRASH_SEEDS=${d_crash:-20000} cargo test -q --offline --release -p teseladb-raftlog --test crash_sim"
+  row 6 integrity-crash-sim 3600 "VIUZI_CRASH_SEEDS=${d_crash:-20000} cargo test -q --offline --release --manifest-path ../../shared-crates/Cargo.toml -p teseladb-raftlog --test crash_sim"
   row 6 integrity-crash-lsm 3600 "TESELADB_LSM_CRASH_SEEDS=${d_crash:-100000} cargo test -q --offline --release -p teseladb-lsm --test crash"
   row 6 integrity-kill-real 3600 "TESELADB_KILL_ROUNDS=$(quick_or 2 500) cargo test -q --offline --release -p teseladb-io --test crash_real"
   row 6 integrity-kill-real-lsm 3600 "TESELADB_KILL_ROUNDS=$(quick_or 2 500) cargo test -q --offline --release -p teseladb-io --test crash_real_lsm"
@@ -158,8 +159,14 @@ perf_rows() {
 
 # --- helpers the phases call (they run with PHASE_DIR set to the phase's folder) ---
 
+fuzz_manifest() { # crate: sets `manifest` to the manifest option of a viuzi-* crate, empty for TeselaDB's own
+  manifest=()
+  [[ $1 == viuzi-* ]] && manifest=(--manifest-path ../../shared-crates/Cargo.toml)
+  return 0
+}
+
 fuzz_run() { # secs parallel target...: one core each, a marker per target that passed
-  local secs=$1 par=$2 t crate file name batch=() pids=() sel=() rc=0 i
+  local secs=$1 par=$2 t crate file name batch=() pids=() sel=() rc=0 i manifest=()
   shift 2
   for t in "$@"; do
     [[ -f $PHASE_DIR/$t.ok ]] && { echo "fuzz: $t passed in an earlier try"; continue; }
@@ -169,7 +176,8 @@ fuzz_run() { # secs parallel target...: one core each, a marker per target that 
   for t in ${batch[@]+"${batch[@]}"}; do
     IFS=: read -r crate file name <<<"$t"
     if [[ $file == lib ]]; then sel=(--lib); else sel=(--test "$file"); fi
-    cargo test -q --offline --release -j "$JOBS" --no-run -p "$crate" "${sel[@]}"
+    fuzz_manifest "$crate"
+    cargo test -q --offline --release -j "$JOBS" --no-run ${manifest[@]+"${manifest[@]}"} -p "$crate" "${sel[@]}"
   done
   for ((i = 0; i < ${#batch[@]}; i += par)); do
     pids=()
@@ -177,7 +185,9 @@ fuzz_run() { # secs parallel target...: one core each, a marker per target that 
       IFS=: read -r crate file name <<<"$t"
       if [[ $file == lib ]]; then sel=(--lib); else sel=(--test "$file"); fi
       echo "fuzz: $t for ${secs}s, log $PHASE_DIR/$t.log"
-      (TESELADB_FUZZ_SECS=$secs cargo test -q --offline --release -j 2 -p "$crate" "${sel[@]}" -- ${name:+"$name"} --nocapture \
+      fuzz_manifest "$crate"
+      (TESELADB_FUZZ_SECS=$secs VIUZI_FUZZ_SECS=$secs cargo test -q --offline --release -j 2 ${manifest[@]+"${manifest[@]}"} \
+        -p "$crate" "${sel[@]}" -- ${name:+"$name"} --nocapture \
         >"$PHASE_DIR/$t.log" 2>&1 && touch "$PHASE_DIR/$t.ok") &
       pids+=($!)
     done

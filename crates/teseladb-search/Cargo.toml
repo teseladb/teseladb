@@ -11,11 +11,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-bson = { path = "../teseladb-bson" }
-teseladb-crypto = { path = "../teseladb-crypto" }
-teseladb-deflate = { path = "../teseladb-deflate" }
-teseladb-hash = { path = "../teseladb-hash" }
+teseladb-bson = { workspace = true }
+teseladb-crypto = { workspace = true }
+teseladb-deflate = { workspace = true }
+teseladb-hash = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-mql = { path = "../teseladb-mql" }
-teseladb-types = { path = "../teseladb-types" }
+teseladb-types = { workspace = true }
 

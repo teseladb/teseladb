@@ -5,12 +5,12 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_session::retry::StatementKey;
 use teseladb_wire::commands::cross_range::{
     MAX_CONFLICT_ROUNDS, read_result, result_key, statement_txn, stored_result,
 };
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "x";
 

@@ -8,12 +8,12 @@ mod common;
 use std::sync::Mutex;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::txn::resolve_queued;
 use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::OpMsg;
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "v";
 

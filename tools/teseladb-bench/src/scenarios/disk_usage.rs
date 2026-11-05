@@ -12,10 +12,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use teseladb_bson::Value;
 use teseladb_io::FileDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_bson::Value;
 
 use super::ycsb::{insert_when_ready, record_doc};
 use super::ycsb_gen::Rng;

@@ -1,9 +1,9 @@
 //! Where the cores run (012 FR-006, acceptance scenario 1 of story 3): core `k` runs on the
 //! `k`-th CPU of `--cpu-list`, and a list shorter than the cores does not start a node.
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::affinity::Affinity;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_raftlog::MemDisk;
 
 /// The tests of this file start nodes one at a time: the threads of two nodes would share the
 /// names `core-0` and `core-1` that [`cpus_of`] looks for.

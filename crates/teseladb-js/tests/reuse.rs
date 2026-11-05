@@ -1,8 +1,8 @@
 //! The global objects are built once per program and shared by its calls (016 SC-004, D-119):
 //! a call sees the same globals as a fresh one, whatever the calls before it did.
 
-use teseladb_bson::{Document, Value};
 use teseladb_js::{JsCtx, JsError, Limits, Program};
+use teseladb_bson::{Document, Value};
 
 fn call(p: &Program) -> Result<Value, JsError> {
     p.call(None, &[], &mut JsCtx::default())

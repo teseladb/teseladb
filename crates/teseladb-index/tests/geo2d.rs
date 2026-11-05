@@ -5,11 +5,11 @@
 //! document `{_id: 1, loc: <value>}` inserted into a collection with `{loc: "2d"}` and the options
 //! shown, and its key read with `find` + `hint` + `returnKey`.
 
-use teseladb_bson::{RawDoc, extjson};
 use teseladb_index::geo::planar::{DEFAULT_GRID, Grid};
 use teseladb_index::keygen::{
     LOCATION_NOT_PAIR, NOT_LEGACY_PAIR, ONE_ELEMENT, OUT_OF_GRID, geo2d_keys,
 };
+use teseladb_bson::{RawDoc, extjson};
 
 fn keys(value: &str, grid: &Grid) -> Result<Vec<u64>, (i32, String, bool)> {
     let bytes = extjson::parse(&format!("{{\"v\": {value}}}")).unwrap().to_bytes().unwrap();

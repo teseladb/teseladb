@@ -8,9 +8,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
 
 /// The most a query on an idle range may take: its leader closes a mark at most 3 s behind its
 /// clock, every 200 ms, and 200 ms behind every 20 ms once something reads its changes.

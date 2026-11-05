@@ -1,8 +1,8 @@
 //! The specifications of the stages a node answers itself (measured on a `refrouter` 9.0.4); the
 //! pipeline checks them and its [`super::Env`] gives their documents.
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::errors::{
     BAD_VALUE, COLL_STATS_OBJECT, FAILED_TO_PARSE, INDEX_STATS_EMPTY, INVALID_OPTIONS,

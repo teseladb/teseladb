@@ -3,11 +3,11 @@
 //! ([`write`]); reads unpack the buckets their filter may match
 //! (`teseladb_exec::timeseries_read`).
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::{CollectionKind, Granularity};
 use teseladb_mql::timeseries_write::{BucketSpec, Full};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use super::crud::Writer;
@@ -706,9 +706,8 @@ fn rewrite<B: Backend + ?Sized>(
     stmt: u32,
 ) -> Result<bool, CommandError> {
     use super::mutation::Image;
-    let filter = teseladb_bson::Document::new()
-        .with("_id", Value::ObjectId(b.id))
-        .with("data", b.data.clone());
+    let filter =
+        teseladb_bson::Document::new().with("_id", Value::ObjectId(b.id)).with("data", b.data.clone());
     let mutation = match new {
         Some(mut doc) => {
             doc.remove("_id");

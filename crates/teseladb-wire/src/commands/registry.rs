@@ -4,9 +4,9 @@
 //! sessions it used since its last refresh (`logicalSessionRefreshMillis`) and removes the
 //! records unused for the session timeout, the work of RefDb's TTL index `lsidTTLIndex`.
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_session::session::{Owner, Uid};
+use teseladb_bson::{Document, Value};
 
 use super::crud::{Modify, Writer, modify};
 use super::mutation::Image;

@@ -6,12 +6,12 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::http_parameters::{
     DEFAULT_CONCURRENT_REQUESTS, DEFAULT_MCP_MAX_BYTES, DEFAULT_MCP_MAX_DOCUMENTS,
     DEFAULT_MCP_MAX_TIME_MS, DEFAULT_REQUESTS_PER_SECOND, HTTP_OPTIONS, HttpOptions, MCP_OPTIONS,
     McpOptions, http_options, mcp_options,
 };
+use teseladb_bson::{Document, Value};
 
 fn set(name: &str, value: &str) -> Document {
     let value = teseladb_bson::extjson::parse(value).expect("a value");

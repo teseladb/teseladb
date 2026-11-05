@@ -2,13 +2,13 @@
 //! `DropTenant`, one catalog per tenant with the collection numbers shared by all, and the users
 //! of a tenant.
 
-use teseladb_bson::Document;
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{Group0Error, Group0Result, Group0Sm};
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_meta::tenants::{DEFAULT_TENANT, TENANT_FIELD, qualified_db, split_db};
 use teseladb_multiraft::StateMachine;
+use teseladb_bson::Document;
 
 fn cluster() -> Group0Sm {
     let mut sm = Group0Sm::default();

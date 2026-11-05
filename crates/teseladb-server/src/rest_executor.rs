@@ -10,8 +10,6 @@ use std::time::Duration;
 use teseladb_auth::apikey::ApiKey;
 use teseladb_auth::bearer::{self, Bearer};
 use teseladb_auth::users::EXTERNAL_DB;
-use teseladb_http::http1::Request;
-use teseladb_http::server::Response;
 use teseladb_rest::api::{Executor, header};
 use teseladb_wire::commands::auth;
 use teseladb_wire::commands::{Shared, lock, new_object_id};
@@ -19,6 +17,8 @@ use teseladb_wire::connection::{Connection, Kind, Request as WireRequest};
 use teseladb_wire::dispatch::{self, Action, dispatch_with};
 use teseladb_wire::error::{CommandError, INTERNAL_ERROR};
 use teseladb_wire::msg::{Header, opcode};
+use teseladb_http::http1::Request;
+use teseladb_http::server::Response;
 
 use teseladb_types::{DecodeError, Decoder, Encoder};
 
@@ -342,11 +342,7 @@ impl Executor for NodeExecutor {
             .unwrap_or_default()
     }
 
-    fn run_internal(
-        &mut self,
-        db: &str,
-        command: teseladb_bson::Document,
-    ) -> teseladb_bson::Document {
+    fn run_internal(&mut self, db: &str, command: teseladb_bson::Document) -> teseladb_bson::Document {
         let (required, user) = (self.conn.auth.required, self.conn.auth.user.take());
         self.conn.auth.required = false;
         let reply = self.run(db, command);

@@ -7,10 +7,10 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_wire::commands::Backend;
 use teseladb_wire::commands::oplog::lower_bound;
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "e";
 

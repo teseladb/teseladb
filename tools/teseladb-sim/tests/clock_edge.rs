@@ -6,7 +6,6 @@
 //! renewal and dies just past that lease (research R3e of 002); after the heal no clock moves.
 
 use teseladb_hlc::MAX_CLOCK_OFFSET_MS;
-use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::edge_offset;
 use teseladb_sim::faults::{FaultAction, FaultPlan};
@@ -14,6 +13,7 @@ use teseladb_sim::registry::Registry;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
+use teseladb_raftlog::Completions;
 use teseladb_types::Nanos;
 
 /// When the fault comes.

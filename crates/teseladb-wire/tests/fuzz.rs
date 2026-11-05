@@ -9,13 +9,13 @@
 
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, Value};
-use teseladb_hash::crc32c;
-use teseladb_types::Rng;
 use teseladb_wire::compressed::{self, Compressor};
 use teseladb_wire::connection::Connection;
 use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology, dispatch};
 use teseladb_wire::msg::{HEADER_LEN, Header, flags, opcode};
+use teseladb_bson::{Document, Value};
+use teseladb_hash::crc32c;
+use teseladb_types::Rng;
 
 const DEFAULT_ROUNDS: u64 = 3_000;
 

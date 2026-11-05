@@ -2,9 +2,9 @@
 //! collection has fails as RefDb's planner fails (measured on a `refrouter` 9.0.4), with the
 //! query's tree, its sort and its projection in the message.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::IndexState as EntryState;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::{Backend, names};
 use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE};

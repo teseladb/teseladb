@@ -13,8 +13,8 @@ use std::path::Path;
 
 use teseladb_lsm::{FileRef, LsmError};
 use teseladb_multiraft::StateMachine;
-use teseladb_raftlog::{Disk, FileId, IoDone};
 use teseladb_range::snapshot::{Assembler, local_interval, split, write_ops};
+use teseladb_raftlog::{Disk, FileId, IoDone};
 use teseladb_types::GroupId;
 
 use crate::workloads::multirange::{as_range, remove_tree};

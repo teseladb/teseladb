@@ -9,8 +9,8 @@ mod funcs;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use crate::accum::Accumulator;
 use crate::expr::arith::type_name_of;

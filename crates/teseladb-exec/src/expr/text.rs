@@ -7,9 +7,9 @@
 //! `null` or missing input gives `null` (`false` for `$regexMatch`, `[]` for `$regexFindAll`).
 //! `$replaceAll` with a regular expression puts the replacement in as it is (no `$1`).
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::regex::Regex;
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::values::display;

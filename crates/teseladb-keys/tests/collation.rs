@@ -4,13 +4,13 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value, compare};
 use teseladb_collation::{Collation, Strength};
 use teseladb_keys::TypeBits;
 use teseladb_keys::{
     Direction, FieldBounds, FieldSpec, IndexKeySpec, Interval, KeyBuilder, PrimaryKey, bounds,
     encode_value_with,
 };
+use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value, compare};
 
 const WORDS: &[&str] = &[
     "",

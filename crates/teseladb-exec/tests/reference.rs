@@ -2,8 +2,8 @@
 //! stages one after another without moving or splitting any, as the oracle of the `queries`
 //! load compares the distributed result with it.
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_exec::reference::Reference;
+use teseladb_bson::{Document, Value, extjson};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

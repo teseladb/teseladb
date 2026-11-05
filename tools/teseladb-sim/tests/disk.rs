@@ -9,11 +9,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::Around;
-use teseladb_raftlog::SimDiskStats;
 use teseladb_sim::faults::{FaultAction, FaultPlan};
 use teseladb_sim::registry::Registry;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
+use teseladb_raftlog::SimDiskStats;
 use teseladb_types::Nanos;
 
 /// Every disk's counters at the end, by node.

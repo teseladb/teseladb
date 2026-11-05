@@ -6,8 +6,8 @@
 //! `planCacheClear` drop its entries; `explain` leaves none. `$planCacheStats` lists them, the
 //! newest first.
 
-use teseladb_bson::{Document, Value};
 use teseladb_plan::rules::Access;
+use teseladb_bson::{Document, Value};
 
 use super::{Backend, Ctx, args, lock, names};
 use crate::error::{BAD_VALUE, CommandError};
@@ -195,9 +195,7 @@ pub fn read_shape(
         d.filter(|d| !d.is_empty())
             .map(|d| {
                 let shown = d.to_bytes().ok().and_then(|b| {
-                    teseladb_bson::RawDoc::from_bytes(&b)
-                        .ok()
-                        .map(teseladb_bson::extjson::to_canonical)
+                    teseladb_bson::RawDoc::from_bytes(&b).ok().map(teseladb_bson::extjson::to_canonical)
                 });
                 shown.unwrap_or_default()
             })

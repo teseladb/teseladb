@@ -2,11 +2,11 @@
 //! descending and multikey keys over the key format of 003, one entry per array element, and
 //! documents with parallel arrays refused with `CannotIndexParallelArrays` (171).
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_index::keygen::{
     CANNOT_INDEX_PARALLEL_ARRAYS, IndexDef, IndexField, KeygenError, index_entries, key_values,
 };
 use teseladb_keys::{Direction, KeyBuilder, PrimaryKey};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 const ASC: Direction = Direction::Ascending;
 const DESC: Direction = Direction::Descending;

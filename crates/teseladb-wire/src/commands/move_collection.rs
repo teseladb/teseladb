@@ -17,12 +17,12 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::command::Group0Command;
 use teseladb_router::table::RouteEntry;
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_types::NodeId;
 
 use super::names::{full, parse_full};

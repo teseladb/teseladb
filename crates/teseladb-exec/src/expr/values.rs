@@ -3,8 +3,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, shell};
 use teseladb_mql::{MqlError, decimal_to_f64};
+use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, shell};
 
 /// `v` as RefDb writes a value of an expression in a message (its `Value` printer): strings
 /// in double quotes, `{a: 1}`, `[1, 2]`, doubles as C++ streams write them (`1.5`, `9.22337e+18`).

@@ -3,10 +3,10 @@
 //! whatever `j` says, `w: "majority"` once it is applied on the leader, `w: 0` never, and a `w`
 //! above the number of replicas fails with `UnsatisfiableWriteConcern` (100).
 
-use teseladb_raft::{HardState, NodeId, Role, Status};
 use teseladb_range::ack::{
     AckWhen, UNSATISFIABLE_WRITE_CONCERN, Unsatisfiable, W, WriteConcern, ack_when, acked,
 };
+use teseladb_raft::{HardState, NodeId, Role, Status};
 
 fn status(last_index: u64, persisted: u64, followers: &[u64]) -> Status {
     let mut progress = vec![(NodeId(1), 0)];

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::run;
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
+use teseladb_bson::{Document, RawDoc, Value};
 
 const READY_WAIT: Duration = Duration::from_secs(60);
 /// A value of the clients' documents that the log must not hold.

@@ -115,7 +115,6 @@ use std::sync::{Mutex, MutexGuard};
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::{RoleName, User, UserName};
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
@@ -124,6 +123,7 @@ use teseladb_range::read::ReadConcern;
 use teseladb_session::cursor::{CURSOR_TIMEOUT_MS, CursorTable};
 use teseladb_session::retry::StatementKey;
 use teseladb_session::session::{SESSION_TIMEOUT_MS, SessionTable};
+use teseladb_bson::{Document, Value};
 
 use crate::error::CommandError;
 use crate::failpoint::FailPoint;

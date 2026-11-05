@@ -3,12 +3,12 @@
 //! `sparse`, the grid of a `2d` index and the buckets; a `text` index has no keys here (011 builds
 //! it).
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::geo::planar::{DEFAULT_GRID, Grid};
 use teseladb_index::keygen::wildcard::WildcardProjection;
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField};
 use teseladb_index::spec::{index_def, is_text};
 use teseladb_keys::Direction;
+use teseladb_bson::{Document, RawDoc, Value};
 
 fn def(spec: Document, buckets: u8) -> Option<IndexDef> {
     let bytes = spec.to_bytes().unwrap();

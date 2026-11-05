@@ -19,8 +19,6 @@ use teseladb_hlc::Hlc;
 use teseladb_lsm::{Completions, Lsm};
 use teseladb_meta::command::Group0Command;
 use teseladb_multiraft::{Done, MultiRaftCore, NodeClock, OpError, OpId, StateMachine};
-use teseladb_raft::Role;
-use teseladb_raftlog::{IoDone, IoOp};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::checksum::Report;
 use teseladb_range::command::Put;
@@ -31,8 +29,10 @@ use teseladb_range::host::{
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::route::{Answer, Router};
-use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 use teseladb_wire::commands::mutation::Bound;
+use teseladb_raft::Role;
+use teseladb_raftlog::{IoDone, IoOp};
+use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 use crate::backup::source::Backups;
 use crate::checksums::Checksums;

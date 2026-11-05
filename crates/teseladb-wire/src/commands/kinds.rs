@@ -7,10 +7,10 @@
 //! (`teseladb-plan`), and the first view of a database brings its `system.views`, which lists
 //! the definitions.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::collection_types::{CollectionKind, Granularity};
 use teseladb_plan::views::{self, Definition};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::names::full;
 use super::{Backend, display};

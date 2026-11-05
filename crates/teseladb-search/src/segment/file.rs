@@ -24,9 +24,9 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_keys::Hlc;
 use teseladb_crypto::at_rest::{AtRestError, FileKey, KeyRing, WRAPPED_KEY_LEN};
 use teseladb_hash::crc32c;
-use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
 
 use crate::query::bm25::TermScorer;

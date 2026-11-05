@@ -5,10 +5,10 @@
 pub mod common;
 
 use common::{TestExt, bytes, canon, json, raw};
-use teseladb_bson::{RawValue, Value};
 use teseladb_collation::Collation;
 use teseladb_mql::update::{Now, Update, UpdateContext, upsert};
 use teseladb_mql::{ErrorCode, Filter, FilterUse, MatchContext, MqlError, NoExtensions, codes};
+use teseladb_bson::{RawValue, Value};
 
 const NOW: Now = Now { millis: 1_700_000_000_123, timestamp: (1_700_000_000, 7) };
 

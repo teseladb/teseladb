@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_meta::security::Principal;
+use teseladb_bson::{Document, Value, extjson};
 
 const ADMIN: &str = "admin";
 
@@ -324,8 +324,7 @@ fn more_shapes_of_direct_writes_and_of_what_shows_them() {
     let r = run(&mut m, "q", r#"{"updateUser": "e", "customData": {"c": 2}}"#);
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));
     let stored = Document::from(
-        teseladb_bson::RawDoc::from_bytes(m.security.get(Principal::User, "q", "e").unwrap())
-            .unwrap(),
+        teseladb_bson::RawDoc::from_bytes(m.security.get(Principal::User, "q", "e").unwrap()).unwrap(),
     );
     assert_eq!(stored.get("customData"), Some(&Value::Document(json(r#"{"c": 2}"#))));
     assert_eq!(stored.get("zzz"), Some(&Value::Int32(1)));

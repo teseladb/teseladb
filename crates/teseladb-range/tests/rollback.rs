@@ -9,12 +9,12 @@ mod common;
 use common::*;
 use teseladb_hlc::to_timestamp;
 use teseladb_multiraft::envelope;
-use teseladb_raftlog::LogEntry;
-use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_range::command::Command;
 use teseladb_range::rollback::{
     BadRollbackFile, ROLLBACK_DIR, RollbackDoc, RollbackFile, read_rollback_file, rollback_files,
 };
+use teseladb_raftlog::LogEntry;
+use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_types::Bytes;
 
 const W1: WriteConcern = WriteConcern { w: W::Nodes(1), j: false };

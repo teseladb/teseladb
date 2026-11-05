@@ -12,9 +12,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::Namespace;
 use teseladb_meta::command::SettingChange;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::names::{full, parse_full};
 use super::{Backend, Ctx, admin, lock};

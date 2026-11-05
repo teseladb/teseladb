@@ -6,9 +6,9 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::commands::reshard::{Action, Phase, Resharding, next_action, reshard_plan};
 use teseladb_wire::commands::{Ctx, Shared};
+use teseladb_bson::{Document, Value, extjson};
 
 const DB: &str = "rs";
 
@@ -696,9 +696,9 @@ fn the_steps_follow_the_model() {
 #[test]
 fn the_documents_to_copy_come_from_one_batch_and_the_ranges_live_bytes() {
     use teseladb_router::table::RouteEntry;
-    use teseladb_types::{GroupId, NodeId};
     use teseladb_wire::commands::Backend;
     use teseladb_wire::commands::reshard::approx_documents;
+    use teseladb_types::{GroupId, NodeId};
     let coll =
         |m: &Mem| m.catalog.collections.iter().find(|(ns, _)| ns.coll == "c").unwrap().1.clone();
     let mut small = sharded(&docs(10));

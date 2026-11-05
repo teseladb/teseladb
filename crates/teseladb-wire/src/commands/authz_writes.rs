@@ -9,7 +9,6 @@
 //! Enterprise 9.0.4 writes it: the first document inserted or updated, or the last removed.
 
 use teseladb_auth::audit::AuditType;
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::unique::duplicate_key;
 use teseladb_meta::catalog::Namespace;
 use teseladb_meta::security::{
@@ -17,6 +16,7 @@ use teseladb_meta::security::{
 };
 use teseladb_mql::update::{Update, UpdateContext};
 use teseladb_mql::{Filter, FilterUse, MatchContext};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::authz_collections::Generated;
 use super::crud::{Modify, now_of, upsert_doc, with_id};

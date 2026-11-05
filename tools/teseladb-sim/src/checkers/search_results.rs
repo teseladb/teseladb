@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::Document;
-use teseladb_bson::Value;
 use teseladb_hlc::Hlc;
 use teseladb_search::definition::{Definition, VectorDefinition};
 use teseladb_search::indexer::{Found, Indexer};
 use teseladb_search::query::vector_search::VectorQuery;
 use teseladb_search::vector_indexer::VectorIndexer;
+use teseladb_bson::Document;
+use teseladb_bson::Value;
 
 use crate::checkers::Violation;
 

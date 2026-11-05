@@ -4,8 +4,8 @@
 //! cluster's nodes (`config.shards`), in their order, with the attributes `replSetReconfig`
 //! stored in `members` (`{host, priority, votes, hidden, tags}`).
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_topology::replset::{ConfigError, Member, PresentationMode, ReplicaSet, whole_number};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use crate::error::{BAD_VALUE, CommandError};

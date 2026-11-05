@@ -1,8 +1,8 @@
 //! The decimal functions of 010's expressions at their edges (015 and 010 T007): NaN and the
 //! infinities, zero and negative arguments, and the sign of a power of a negative base.
 
-use teseladb_bson::Decimal128;
 use teseladb_mql::decimal_math::{exp, ln, log, log10, pow, sqrt};
+use teseladb_bson::Decimal128;
 
 fn d(s: &str) -> Decimal128 {
     s.parse().unwrap_or_else(|e| panic!("{s}: {e:?}"))

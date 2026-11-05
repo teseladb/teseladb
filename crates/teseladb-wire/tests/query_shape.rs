@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{RawDoc, extjson};
 use teseladb_wire::commands::query_shape::{representative, shape};
+use teseladb_bson::{RawDoc, extjson};
 
 const DB: &str = "xs";
 

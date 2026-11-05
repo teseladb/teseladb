@@ -2,9 +2,9 @@
 //! from the document before the write and the change stream's description of it. The expected
 //! diffs are those RefDb 9.0.4 (`ref:9.0`) wrote on 02-11-2026 for the same updates.
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::update_desc::{PathPart, UpdateDescription};
 use teseladb_topology::diff::update_entry;
+use teseladb_bson::{Document, Value};
 
 fn ints(v: &[i32]) -> Value {
     Value::Array(v.iter().copied().map(Value::Int32).collect())

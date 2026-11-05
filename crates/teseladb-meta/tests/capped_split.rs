@@ -1,12 +1,12 @@
 //! Group 0 never records a split inside a capped collection (015 T007, research R1): the cut
 //! moves to the start of the collection's keys, or to their end, or the split is refused.
 
-use teseladb_bson::Document;
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{Group0Error, Group0Result, Group0Sm};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
+use teseladb_bson::Document;
 use teseladb_types::{GroupId, NodeId};
 
 fn run(sm: &mut Group0Sm, cmd: Group0Command) -> Group0Result {

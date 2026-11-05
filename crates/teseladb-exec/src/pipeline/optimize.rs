@@ -3,8 +3,8 @@
 //! fails the command with «Failed to optimize pipeline» before any document is read; in a
 //! `$match`, after «Failed to optimize expression» as in a filter.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawValue, Value};
 
 use crate::expr::optimize::{optimize, optimize_filter};
 use crate::expr::{Ctx, Scope};

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use teseladb_crypto::at_rest::{FileKey, KeyRing, WRAPPED_KEY_LEN};
 use teseladb_keys::Hlc;
+use teseladb_crypto::at_rest::{FileKey, KeyRing, WRAPPED_KEY_LEN};
 use teseladb_types::Bytes;
 
 use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};

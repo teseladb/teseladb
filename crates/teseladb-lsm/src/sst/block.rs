@@ -561,10 +561,15 @@ mod tests {
     #[test]
     fn sealed_blocks_open_only_at_their_offset_with_their_key() {
         use teseladb_crypto::at_rest::{CipherMode, KeyRing};
-        let ring = KeyRing::new(&[5; 32], CipherMode::Cbc, |b: &mut [u8]| {
-            b.fill(1);
-            Ok(())
-        });
+        let ring = KeyRing::new(
+            &[5; 32],
+            CipherMode::Cbc,
+            |b: &mut [u8]| {
+                b.fill(1);
+                Ok(())
+            },
+            "test",
+        );
         let (key, _) = ring.new_file_key().unwrap();
         let payload = b"a payload that compresses, compresses, compresses".repeat(8);
         let dict = b"a payload that compresses".to_vec();

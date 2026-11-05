@@ -8,8 +8,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::{Command, DEFAULT_COMPRESSORS, parse_with};
 use teseladb_server::client_listener::{
     ClientConfig, ClientListener, DEFAULT_MAX_CONNECTIONS, NodeClockState, NodePresence, NodeState,
@@ -18,6 +16,8 @@ use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::compressed::{self, Compressor};
 use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg, flags, opcode};
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_raftlog::MemDisk;
 
 const PID: [u8; 12] = [9; 12];
 

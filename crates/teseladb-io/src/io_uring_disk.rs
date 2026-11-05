@@ -21,8 +21,8 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
 use teseladb_sys::uring::{Op, Probe, Ring, Target, opcode};
+use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
 use teseladb_types::Bytes;
 
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};

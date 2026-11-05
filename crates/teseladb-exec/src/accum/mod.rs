@@ -15,8 +15,8 @@ pub(crate) mod keep;
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawValue, Value};
 
 use crate::expr::forms::{Form, parse_percentile, percentiles};
 use crate::expr::stats::{Deviation, Extreme, Total};

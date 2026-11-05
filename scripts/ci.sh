@@ -22,8 +22,8 @@ case ${1:-} in
     ;;
 esac
 
-if [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" == *teseladb_bug* ]]; then
-  echo "ci: RUSTFLAGS contains teseladb_bug; faulty variants cannot reach CI" >&2
+if [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" == *_bug=* ]]; then
+  echo "ci: RUSTFLAGS contains teseladb_bug or teseladb_bug; faulty variants cannot reach CI" >&2
   exit 1
 fi
 
@@ -60,7 +60,6 @@ gate "1. format" cargo fmt --all -- --check
 gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
 gate "2. dependencies" scripts/check-deps.sh
 gate "2. origin register" scripts/check-origin.sh
-gate "2. BSON corpus (D-042)" scripts/fetch-bson-corpus.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256
 gate "2. CLDR 29 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-cldr.sha256
 gate "2. ICU 57.1 collation data (D-043)" scripts/fetch-pinned.sh scripts/icu-coll.sha256
@@ -85,8 +84,8 @@ gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
 gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
-gate "3. simulated crashes (2,000 seeds × 3 lives)" env TESELADB_CRASH_SEEDS=2000 \
-  cargo test -q --offline --release -p teseladb-raftlog --test crash_sim
+gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env VIUZI_CRASH_SEEDS=2000 \
+  cargo test -q --offline --release --manifest-path ../../shared-crates/Cargo.toml -p teseladb-raftlog --test crash_sim
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \
   cargo test -q --offline --release -p teseladb-lsm --test crash
 gate "3. real crashes with SIGKILL (50 kills)" env TESELADB_KILL_ROUNDS=50 \

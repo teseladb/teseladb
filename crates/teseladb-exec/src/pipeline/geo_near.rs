@@ -5,10 +5,10 @@
 //! GeoJSON point and in radians from a legacy pair; a 2d index measures on the plane, or in
 //! radians with `spherical`.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_index::geo::geojson::{self, Geometry};
 use teseladb_index::geo::sphere::{Point, distance_to_edge};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::errors::{BAD_VALUE, INDEX_NOT_FOUND, TYPE_MISMATCH, error};
 use super::stages::Match;

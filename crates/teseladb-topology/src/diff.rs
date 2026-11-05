@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::update_desc::{PathPart, UpdateDescription};
+use teseladb_bson::{Document, Value};
 
 /// `$v` of an update entry.
 const DIFF_VERSION: i32 = 2;

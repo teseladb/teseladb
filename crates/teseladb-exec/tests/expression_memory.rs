@@ -2,9 +2,9 @@
 //! constants are folded, with the bytes a `refnode` 9.0.4 counts (measured on 02-11-2026 at 100
 //! bytes; the same cases run through the protocol in `teseladb-wire/tests/expression_memory.rs`).
 
-use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::optimize::{optimize_filter, with_expression_memory_limit};
 use teseladb_exec::pipeline::optimize::optimize_stages;
+use teseladb_bson::{Document, RawValue, extjson};
 
 /// The error of `$project: {x: <x>}` folded under a limit of 100 bytes: `None` within it.
 fn folded(x: &str) -> Option<String> {

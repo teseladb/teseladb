@@ -2,9 +2,9 @@
 //! the administration port under [`TENANTS`], what a node answers on them, and the command line's
 //! part. A tenant goes only when it has no database and no user left.
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::Group0Error;
+use teseladb_bson::{Document, Value};
 
 use crate::admin::{AdminBackend, AdminError, Answer, NodeAdmin, json};
 use crate::admin_http::{HttpRequest, HttpResponse, Method};

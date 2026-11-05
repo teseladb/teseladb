@@ -3,9 +3,9 @@
 //! the data inside the untrusted block and `structuredContent`, within the documents, bytes and
 //! time of `mcpOptions`.
 
+use teseladb_rest::api::Executor;
 use teseladb_bson::{Document, RawDoc, Value as Bson, extjson};
 use teseladb_json::{Number, Object, Value, parse, to_string};
-use teseladb_rest::api::Executor;
 
 /// The limits of a call (`mcpOptions`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -20,10 +20,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use teseladb_keys::{DOCUMENTS, KeyParts};
-use teseladb_raftlog::{FileId, IoDone, IoErrno, IoOp};
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, RollbackFile, read_rollback_file};
-use teseladb_types::{Bytes, Nanos};
 use teseladb_wire::commands::mutation::DOCUMENT;
+use teseladb_raftlog::{FileId, IoDone, IoErrno, IoOp};
+use teseladb_types::{Bytes, Nanos};
 
 /// Directory, under `rollback/`, of the range's records that belong to no collection.
 pub const INTERNAL_DIR: &str = "teseladb-internal";
@@ -253,16 +253,16 @@ impl RollbackWriter {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use teseladb_bson::{Document, Value};
     use teseladb_hlc::Hlc;
     use teseladb_meta::catalog::CollectionEntry;
     use teseladb_multiraft::envelope;
-    use teseladb_raftlog::format::wal::EntryKind;
-    use teseladb_raftlog::{Disk, LogEntry, MemDisk};
     use teseladb_range::command::{Command, Put};
     use teseladb_range::rollback::rollback_files;
-    use teseladb_types::GroupId;
     use teseladb_wire::commands::crud::doc_key;
+    use teseladb_bson::{Document, Value};
+    use teseladb_raftlog::format::wal::EntryKind;
+    use teseladb_raftlog::{Disk, LogEntry, MemDisk};
+    use teseladb_types::GroupId;
 
     use super::*;
 

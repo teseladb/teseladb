@@ -6,11 +6,11 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::spec::index_def;
 use teseladb_keys::{KeyBuilder, PrimaryKey};
 use teseladb_meta::indexes::{IndexEntry, IndexState};
+use teseladb_bson::{Document, RawDoc, Value};
 
 const DB: &str = "t";
 

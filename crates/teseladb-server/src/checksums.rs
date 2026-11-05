@@ -17,10 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use teseladb_lsm::Lsm;
 use teseladb_multiraft::{MultiRaftCore, OpError, OpId};
-use teseladb_raft::Role;
 use teseladb_range::checksum::Report;
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
+use teseladb_raft::Role;
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 use crate::coresm::CoreSm;

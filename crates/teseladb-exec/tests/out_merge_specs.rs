@@ -2,13 +2,13 @@
 //! with the codes a `refrouter` 9.0.4 gives (the same cases run through the protocol in the tests of
 //! `teseladb-wire`).
 
-use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::out_merge::{
     Merge, MergeAction, Out, WhenMatched, WhenNotMatched, Write,
 };
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
+use teseladb_bson::{Document, RawValue, extjson};
 
 struct NoEnv;
 

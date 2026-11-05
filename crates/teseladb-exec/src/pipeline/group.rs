@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::Env;
 use super::errors::{
@@ -297,11 +297,7 @@ fn less(a: &Value, b: &Value, col: Option<&dyn teseladb_bson::Collator>) -> Resu
     Ok(order(&Some(a.clone()), &Some(b.clone()), col)? == std::cmp::Ordering::Less)
 }
 
-fn equal(
-    a: &Value,
-    b: &Value,
-    col: Option<&dyn teseladb_bson::Collator>,
-) -> Result<bool, MqlError> {
+fn equal(a: &Value, b: &Value, col: Option<&dyn teseladb_bson::Collator>) -> Result<bool, MqlError> {
     Ok(order(&Some(a.clone()), &Some(b.clone()), col)? == std::cmp::Ordering::Equal)
 }
 

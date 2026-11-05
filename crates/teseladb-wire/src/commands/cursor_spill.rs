@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use teseladb_bson::{Document, RawDoc};
 use teseladb_exec::pipeline::spill::SpillStore;
+use teseladb_bson::{Document, RawDoc};
 
 use super::mutation::from_mql;
 use crate::error::CommandError;

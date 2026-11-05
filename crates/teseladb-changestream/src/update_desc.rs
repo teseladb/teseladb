@@ -53,10 +53,8 @@ const PIPELINE: &str = "$pipeline";
 const UPDATES: &str = "changes";
 
 /// A description holds values of a document two levels below it, of any size the document has.
-pub(crate) const DESCRIPTION_LIMITS: teseladb_bson::Limits = teseladb_bson::Limits {
-    max_size: 2 * teseladb_bson::MAX_SIZE,
-    max_depth: teseladb_bson::MAX_DEPTH + 2,
-};
+pub(crate) const DESCRIPTION_LIMITS: teseladb_bson::Limits =
+    teseladb_bson::Limits { max_size: 2 * teseladb_bson::MAX_SIZE, max_depth: teseladb_bson::MAX_DEPTH + 2 };
 
 impl UpdateDescription {
     /// The `updateDescription` of the event; `expanded` is `showExpandedEvents`.

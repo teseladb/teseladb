@@ -8,8 +8,8 @@ mod common;
 use std::sync::Arc;
 
 use common::{get, open, small, ts};
-use teseladb_crypto::at_rest::{CipherMode, KeyRing};
 use teseladb_lsm::{Encryption, Lsm, LsmConfig};
+use teseladb_crypto::at_rest::{CipherMode, KeyRing};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
@@ -18,10 +18,15 @@ const SECRET_KEY: &[u8] = b"customer-4711";
 const SECRET_VALUE: &[u8] = b"card 4111-1111-1111-1111";
 
 fn encrypted(mode: CipherMode, master: [u8; 32]) -> LsmConfig {
-    let ring = KeyRing::new(&master, mode, |b: &mut [u8]| {
-        b.fill(3);
-        Ok(())
-    });
+    let ring = KeyRing::new(
+        &master,
+        mode,
+        |b: &mut [u8]| {
+            b.fill(3);
+            Ok(())
+        },
+        "test",
+    );
     LsmConfig { encryption: Some(Encryption(Arc::new(ring))), ..small() }
 }
 

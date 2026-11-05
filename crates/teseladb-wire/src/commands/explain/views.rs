@@ -4,9 +4,9 @@
 //! its stages (a `$match` as given), with the view's collation. A write on a view fails, after
 //! the shard's name for `update` and `delete`.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::Namespace;
 use teseladb_plan::views::Resolved;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::super::{Backend, Ctx, names, views};
 use super::{Verbosity, on_node};

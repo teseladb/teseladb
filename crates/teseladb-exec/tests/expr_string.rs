@@ -1,8 +1,8 @@
 //! String expressions (010 T007, FR-005), each result with the value and type a `refrouter` 9.0.4
 //! gave on 31-10-2026 (`$project` with `$type` beside each expression).
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_exec::expr::{Expr, Scope};
+use teseladb_bson::{Document, Value, extjson};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

@@ -3,8 +3,8 @@
 //! inside a `$function` on 02-11: `S:` and the string it is, `J:` and `JSON.stringify` of any
 //! other value, or `E:` with the name and message of what it threw.
 
-use teseladb_bson::Value;
 use teseladb_js::{JsCtx, Program};
+use teseladb_bson::Value;
 
 const CASES: &str = include_str!("measured/expressions.tsv");
 

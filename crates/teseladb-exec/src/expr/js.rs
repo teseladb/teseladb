@@ -5,8 +5,8 @@
 
 use std::fmt::Debug;
 
-use teseladb_bson::{RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{RawValue, Value};
 
 use super::{Ctx, Expr, Scope, arguments, error};
 

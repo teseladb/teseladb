@@ -1,8 +1,8 @@
 //! The command each route builds (FR-005, FR-007, contract `rest-api.md`): the fields of the body
 //! go as the command's options, the path names its database and collection.
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::error::{BAD_VALUE, COMMAND_NOT_SUPPORTED, CommandError, FAILED_TO_PARSE};
+use teseladb_bson::{Document, Value, extjson};
 
 use crate::routes::{Op, Params};
 

@@ -17,7 +17,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_mql::timeseries_write::BucketSpec;
 use teseladb_range::capped::{CappedLimits, CappedState, ID_INDEX, doc_key, seq_of, state_key};
@@ -27,6 +26,7 @@ use teseladb_wire::commands::index_maintenance::IndexRule;
 use teseladb_wire::commands::mutation::{
     Bound, CappedRule, DocMutation, Image, MutationResult, Rules, TimeSeriesRule,
 };
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use crate::checkers::Violation;
 use crate::workloads::Workload;

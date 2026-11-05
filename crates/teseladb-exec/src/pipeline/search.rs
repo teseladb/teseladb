@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::errors::{FAILED_TO_PARSE, error};
 use crate::expr::arith::raw_type_name;

@@ -4,7 +4,6 @@
 //! messages measured on a `refnode` 9.0.4. The caller runs the command inside a transaction: the
 //! client's, or one of the node's (`dispatch`).
 
-use teseladb_bson::{Document, Value};
 use teseladb_fle::esc::Overlay;
 use teseladb_fle::fields::{EncryptedFieldConfig, SAFE_CONTENT};
 use teseladb_fle::iev::IndexedValue;
@@ -13,6 +12,7 @@ use teseladb_fle::subtype::BlobSubtype;
 use teseladb_fle::tokens::Token;
 use teseladb_fle::write::{self as fw, Added, EcocEntry};
 use teseladb_meta::catalog::Namespace;
+use teseladb_bson::{Document, Value};
 
 use super::crud::write_error;
 use super::fle::{CtxEsc, binary, first_batch, from_fle, sub_command};

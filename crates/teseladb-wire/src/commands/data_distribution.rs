@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, Value};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, Value};
 
 use super::chunks::collection_chunks;
 use super::sharding::shard_key_of;

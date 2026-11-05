@@ -9,9 +9,9 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 use teseladb_auth::audit::{AuditType, Auditor, Client, Endpoint, Event};
 use teseladb_auth::audit_param::{self as param, IndexBuildState};
 use teseladb_auth::users::{RoleName, UserName};
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexState};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::{Backend, Ctx, Shared, lock};
 use crate::connection::Connection;

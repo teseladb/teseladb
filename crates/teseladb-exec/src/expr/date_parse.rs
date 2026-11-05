@@ -4,8 +4,8 @@
 //! the text or of the `timezone` argument, RefDb's truncation of microseconds and its error
 //! 159 for a date past them.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::calendar::Tz;

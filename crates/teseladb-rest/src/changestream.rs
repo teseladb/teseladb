@@ -5,9 +5,9 @@
 //! server sends the events of each `getMore` and a heartbeat comment after
 //! [`HEARTBEAT_MS`] without one.
 
+use teseladb_wire::error::{BAD_VALUE, CommandError};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::sse::Event;
-use teseladb_wire::error::{BAD_VALUE, CommandError};
 
 use crate::commands::check_session_fields;
 use crate::routes::{Params, query_param};

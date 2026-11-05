@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_bson::Document;
 use teseladb_io::FileDisk;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
+use teseladb_bson::Document;
+use teseladb_raftlog::MemDisk;
 
 fn with_admin() -> NodeConfig {
     NodeConfig { admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))), ..config(Vec::new()) }

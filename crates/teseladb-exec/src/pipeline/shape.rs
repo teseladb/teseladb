@@ -8,8 +8,8 @@
 //! the document as it came, then sets each path, turning what is in the way into documents
 //! (each element of an array).
 
-use teseladb_bson::{Decimal, Document, RawValue, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Decimal, Document, RawValue, Value};
 
 use super::errors::{
     NEW_ROOT, PROJECT_COLLISION, PROJECT_EMPTY, PROJECT_EMPTY_SUB, PROJECT_EXCLUSION_IN_INCLUSION,

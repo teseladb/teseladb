@@ -2,9 +2,9 @@
 //! that answers what one segment over the committed documents answers passes; one below its
 //! mark, one that misses or keeps a document, and one with another score are reported.
 
-use teseladb_bson::Document;
 use teseladb_hlc::Hlc;
 use teseladb_sim::checkers::search_results::{SearchLog, Write, check, expected};
+use teseladb_bson::Document;
 
 fn ts(ms: u64) -> Hlc {
     Hlc { physical: ms, logical: 0 }

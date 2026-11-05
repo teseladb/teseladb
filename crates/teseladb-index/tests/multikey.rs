@@ -4,9 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_index::keygen::{IndexDef, IndexField, key_values};
 use teseladb_keys::Direction;
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 const CASES: &str = include_str!("data/multikey-keys.json");
 

@@ -3,6 +3,22 @@ resolver = "3"
 # tools/* joins when teseladb-sim and teseladb-bench are copied (001 T029, T030).
 members = ["crates/*", "tools/*"]
 
+[workspace.dependencies]
+# The generic crates copied to shared-crates (D-137, constitution 3.0.0, principle V), next to this repository.
+teseladb-types = { path = "../../shared-crates/crates/teseladb-types" }
+teseladb-hash = { path = "../../shared-crates/crates/teseladb-hash" }
+teseladb-json = { path = "../../shared-crates/crates/teseladb-json" }
+teseladb-crypto = { path = "../../shared-crates/crates/teseladb-crypto" }
+teseladb-x509 = { path = "../../shared-crates/crates/teseladb-x509" }
+teseladb-tls = { path = "../../shared-crates/crates/teseladb-tls" }
+teseladb-bson = { path = "../../shared-crates/crates/teseladb-bson" }
+teseladb-compress = { path = "../../shared-crates/crates/teseladb-compress" }
+teseladb-deflate = { path = "../../shared-crates/crates/teseladb-deflate" }
+teseladb-http = { path = "../../shared-crates/crates/teseladb-http" }
+teseladb-tz = { path = "../../shared-crates/crates/teseladb-tz" }
+teseladb-raft = { path = "../../shared-crates/crates/teseladb-raft" }
+teseladb-raftlog = { path = "../../shared-crates/crates/teseladb-raftlog" }
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.98"
@@ -10,8 +26,8 @@ publish = false
 license = "LicenseRef-TeselaDB"
 
 [workspace.lints.rust]
-# Logic crates add `#![forbid(unsafe_code)]`; teseladb-sys and the CPU-intrinsics modules of teseladb-hash and
-# teseladb-crypto allow it locally and document every block with `// SAFETY:`.
+# Logic crates add `#![forbid(unsafe_code)]`; teseladb-sys allows it locally and documents every block with
+# `// SAFETY:`.
 unsafe_code = "deny"
 missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(teseladb_bug, values(any()))', 'cfg(coverage)'] }
@@ -29,8 +45,8 @@ unimplemented = "deny"
 opt-level = 1
 
 [profile.dev.package.teseladb-crypto]
-# The timing tests of teseladb-crypto (013 T005) measure optimized code: at opt-level 1 the
-# unoptimized harness loops show a class bias of their own on Apple cores.
+# teseladb-crypto is optimized in the tests too, as in shared-crates (013 T005): the key derivations of
+# SCRAM and the at-rest encryption run on every authenticated or encrypted operation of the tests.
 opt-level = 3
 
 [profile.release]

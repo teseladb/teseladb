@@ -11,13 +11,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-bson = { path = "../teseladb-bson" }
-teseladb-compress = { path = "../teseladb-compress" }
-teseladb-hash = { path = "../teseladb-hash" }
+teseladb-bson = { workspace = true }
+teseladb-compress = { workspace = true }
+teseladb-hash = { workspace = true }
 teseladb-index = { path = "../teseladb-index" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-plan = { path = "../teseladb-plan" }
-teseladb-tz = { path = "../teseladb-tz" }
+teseladb-tz = { workspace = true }
 
 [dev-dependencies]
 teseladb-collation = { path = "../teseladb-collation" }

@@ -2,8 +2,8 @@
 //! commands, `drop`, `collMod`, `renameCollection`), with the errors a `refrouter` 9.0.4 gives
 //! (measured).
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::Namespace;
+use teseladb_bson::{Document, Value};
 
 use super::Backend;
 use crate::error::{COLLECTION_UUID_MISMATCH, CommandError, INVALID_UUID, TYPE_MISMATCH};

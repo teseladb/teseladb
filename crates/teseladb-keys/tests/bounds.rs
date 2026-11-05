@@ -2,11 +2,11 @@
 //! satisfy the bounds falls in one of the intervals; on one field, only those do; with buckets
 //! there is one interval per bucket.
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, compare};
 use teseladb_keys::{
     Direction, FieldBounds, FieldSpec, IndexKeySpec, Interval, KeyBuilder, KeyParts, KeyRange,
     PrimaryKey, bounds,
 };
+use teseladb_bson::{Document, RawDoc, RawValue, Value, compare};
 use teseladb_types::Rng;
 
 /// Values as one document `{v0: …, v1: …}`, to borrow them as `RawValue`s.

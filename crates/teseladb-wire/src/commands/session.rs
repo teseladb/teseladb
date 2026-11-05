@@ -1,9 +1,9 @@
 //! `endSessions`, `refreshSessions`, `killSessions`, `killAllSessions` and `startSession`
 //! (FR-016): the node's sessions and the cursors that belong to them.
 
+pub use teseladb_session::session::{Owner, SessionMatch, Uid};
 use teseladb_bson::{Document, Value};
 use teseladb_hash::sha256;
-pub use teseladb_session::session::{Owner, SessionMatch, Uid};
 
 use super::args::{missing, uuid_value};
 use super::{Backend, Ctx, Shared, lock, new_uuid};

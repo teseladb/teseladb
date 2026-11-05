@@ -8,11 +8,11 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::Connection;
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
+use teseladb_bson::{Document, Value};
 
 fn node() -> NodeInfo {
     NodeInfo {

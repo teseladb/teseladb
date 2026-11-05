@@ -1,13 +1,13 @@
 //! The decimal helpers at their edges: conversions to and from decimals and integers, remainders,
 //! and the limits of the transcendental functions (010 T007).
 
-use teseladb_bson::{Decimal128, Document, RawDoc, Value};
 use teseladb_mql::decimal_math::{exp, from_f64_exact, log, pow};
 use teseladb_mql::decimal_trig::{Trig, atan2, trig};
 use teseladb_mql::{
     DecOp, dec_binary, decimal_exact, decimal_saturating, decimal_to_f64, exact_int64,
     to_decimal128,
 };
+use teseladb_bson::{Decimal128, Document, RawDoc, Value};
 
 fn d(s: &str) -> Decimal128 {
     s.parse().unwrap_or_else(|e| panic!("{s}: {e:?}"))

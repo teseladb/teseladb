@@ -6,9 +6,9 @@
 //! `jsMode`, `verbose`, `collation`, `bypassDocumentValidation` and `writeConcern` are read and
 //! change nothing in the result.
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::Namespace;
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, Value};
 
 use super::{Backend, Ctx};
 use crate::error::{self, CommandError};

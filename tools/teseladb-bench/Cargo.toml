@@ -11,26 +11,26 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-types = { path = "../../crates/teseladb-types" }
+teseladb-types = { workspace = true }
 teseladb-auth = { path = "../../crates/teseladb-auth" }
-teseladb-tls = { path = "../../crates/teseladb-tls" }
-teseladb-x509 = { path = "../../crates/teseladb-x509" }
-teseladb-json = { path = "../../crates/teseladb-json" }
+teseladb-tls = { workspace = true }
+teseladb-x509 = { workspace = true }
+teseladb-json = { workspace = true }
 teseladb-server = { path = "../../crates/teseladb-server" }
-teseladb-http = { path = "../../crates/teseladb-http" }
-teseladb-crypto = { path = "../../crates/teseladb-crypto" }
+teseladb-http = { workspace = true }
+teseladb-crypto = { workspace = true }
 teseladb-sys = { path = "../../crates/teseladb-sys" }
 teseladb-wire = { path = "../../crates/teseladb-wire" }
 teseladb-fle = { path = "../../crates/teseladb-fle" }
-teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }
+teseladb-raftlog = { workspace = true }
 teseladb-io = { path = "../../crates/teseladb-io" }
-teseladb-deflate = { path = "../../crates/teseladb-deflate" }
-teseladb-bson = { path = "../../crates/teseladb-bson" }
+teseladb-deflate = { workspace = true }
+teseladb-bson = { workspace = true }
 teseladb-js = { path = "../../crates/teseladb-js" }
 teseladb-keys = { path = "../../crates/teseladb-keys" }
 teseladb-meta = { path = "../../crates/teseladb-meta" }
 teseladb-lsm = { path = "../../crates/teseladb-lsm" }
 teseladb-collation = { path = "../../crates/teseladb-collation" }
 teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
-teseladb-raft = { path = "../../crates/teseladb-raft" }
+teseladb-raft = { workspace = true }
 teseladb-range = { path = "../../crates/teseladb-range" }

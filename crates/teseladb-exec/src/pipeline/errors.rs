@@ -1,9 +1,9 @@
 //! The error codes of pipelines and their stages, with RefDb's names (measured on a `refrouter`
 //! 9.0.4).
 
+use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::Document;
 use teseladb_bson::RawValue;
-use teseladb_mql::{ErrorCode, MqlError};
 
 use crate::expr::arith::raw_type_name;
 

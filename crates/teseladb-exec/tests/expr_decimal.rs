@@ -1,8 +1,8 @@
 //! Decimal `$sqrt`, `$exp`, `$ln`, `$log10`, `$log` and `$pow` (010 T007, FR-005): 34 digits, as a
 //! `refrouter` 9.0.4 gave each one on 31-10-2026.
 
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_exec::expr::{Expr, Scope};
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 fn eval(e: &str) -> String {
     let holder =

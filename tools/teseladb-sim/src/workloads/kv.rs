@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use teseladb_multiraft::{Done, GroupDesc, OpError, OpId, ReadMode};
-use teseladb_raftlog::Completions;
 use teseladb_testkv::{Command, KvOutput};
+use teseladb_raftlog::Completions;
 
 use crate::node::{NodeOutput, NodeSm, SmKind};
 use teseladb_types::{GroupId, Nanos, NodeId};

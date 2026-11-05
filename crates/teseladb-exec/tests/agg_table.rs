@@ -12,11 +12,11 @@
 
 use std::rc::Rc;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::{Ctx, Expr, Scope, truthy};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, GeoQuery, MqlError, NoExtensions, TextQuery};
+use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 
 const C: &str = include_str!("agg/c.json");
 const O: &str = include_str!("agg/o.json");

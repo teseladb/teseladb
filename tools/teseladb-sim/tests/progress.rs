@@ -1,11 +1,11 @@
 //! A seed whose simulated time stops moving fails instead of running forever.
 
-use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SAME_INSTANT_LIMIT, SimConfig, Verdict, run_workload};
+use teseladb_raftlog::Completions;
 
 /// A client that takes its next turn at the same instant, for ever.
 struct Spin;

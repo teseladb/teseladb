@@ -1,8 +1,8 @@
 //! The language (016 FR-002): each program is a function called with no arguments, and its result
 //! comes back as BSON. The expected values are those of RefDb 9.0.4's engine for the same code.
 
-use teseladb_bson::{Document, Value};
 use teseladb_js::{JsCtx, JsError, Program};
+use teseladb_bson::{Document, Value};
 
 fn call_with(src: &str, this: Option<&Document>, args: &[Value]) -> Result<Value, JsError> {
     let program = Program::compile(src)?;

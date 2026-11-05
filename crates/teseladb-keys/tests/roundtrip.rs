@@ -5,8 +5,8 @@
 mod common;
 
 use common::{pool, raw};
-use teseladb_bson::{Document, Value};
 use teseladb_keys::{Direction, TypeBits, decode, encode};
+use teseladb_bson::{Document, Value};
 
 fn bytes_of(v: &Value) -> Vec<u8> {
     Document::new().with("v", v.clone()).to_bytes().unwrap()
@@ -105,9 +105,9 @@ fn values_len_finds_where_the_values_of_a_key_end() {
 
 #[test]
 fn values_len_measures_strings_in_a_collations_order() {
-    use teseladb_bson::{Collator, RawDoc};
     use teseladb_collation::Collation;
     use teseladb_keys::{TypeBits as Bits, encode_value_with, values_len};
+    use teseladb_bson::{Collator, RawDoc};
     let c = Collation::for_locale("de@collation=phonebook").unwrap();
     let v = Value::Array(vec![Value::String("Straße".into()), Value::Symbol("Äpfel".into())]);
     let doc = Document::new().with("v", v).to_bytes().unwrap();
@@ -124,8 +124,8 @@ fn values_len_measures_strings_in_a_collations_order() {
 #[test]
 fn a_key_without_its_type_bits_comes_back_with_the_plainest_type() {
     // 018 FR-006: a range's bound read as shard key values.
-    use teseladb_bson::Decimal128;
     use teseladb_keys::decode_untyped;
+    use teseladb_bson::Decimal128;
     let untyped = |v: Value| {
         let doc = bytes_of(&v);
         let raw = teseladb_bson::RawDoc::from_bytes(&doc).unwrap();

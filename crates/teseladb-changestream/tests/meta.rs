@@ -2,13 +2,13 @@
 //! of an update by operators, the transaction (`lsid`, `txnNumber`) and the position of the
 //! document in the write, stored next to the document as a version of its own at the same mark.
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::meta::{
     ChangeMeta, DocWrite, META_FORMAT, META_FORMAT_RETRY, MetaError, Moved, RetryInfo, TxnInfo,
     doc_of_meta, history, history_with, lsid_document, meta_key,
 };
 use teseladb_changestream::update_desc::UpdateDescription;
 use teseladb_hlc::Hlc;
+use teseladb_bson::{Document, Value};
 
 fn desc() -> UpdateDescription {
     UpdateDescription {

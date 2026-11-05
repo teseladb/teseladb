@@ -2,8 +2,8 @@
 //! FR-014). The specification was checked when the index was created (`createIndexes`), so here
 //! a value of another kind is an error only for a specification the catalog should never hold.
 
-use teseladb_bson::{RawDoc, RawValue};
 use teseladb_keys::Direction;
+use teseladb_bson::{RawDoc, RawValue};
 
 use crate::geo::planar::{DEFAULT_GRID, Grid};
 use crate::keygen::wildcard::{

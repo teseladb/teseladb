@@ -3,8 +3,8 @@
 //! (RFC 9110, sections 8.3 and 12.5.1). A body and a reply may hold up to `maxMessageSizeBytes`,
 //! like a message of the wire protocol, although a stored document stops at 16 MiB.
 
-use teseladb_bson::{Document, Limits, MAX_DEPTH, RawDoc, extjson};
 use teseladb_wire::MAX_MESSAGE_SIZE;
+use teseladb_bson::{Document, Limits, MAX_DEPTH, RawDoc, extjson};
 
 /// Relaxed Extended JSON.
 pub const JSON: &str = "application/json";

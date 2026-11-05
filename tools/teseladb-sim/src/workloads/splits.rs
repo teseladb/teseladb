@@ -20,7 +20,6 @@
 use std::collections::BTreeMap;
 
 use teseladb_hlc::Hlc;
-use teseladb_raftlog::Completions;
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::host::{RangeError, ReadSpec, Reply, ReqId, TxnOp, TxnReq};
 use teseladb_range::intents::{IntentOp, TxnId};
@@ -28,6 +27,7 @@ use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, ReqNo, Route};
 use teseladb_txn::read::{lazy_resolve, learn, push_for};
+use teseladb_raftlog::Completions;
 use teseladb_types::{GroupId, NodeId};
 
 use crate::checkers::Violation;

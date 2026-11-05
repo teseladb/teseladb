@@ -2,10 +2,10 @@
 //! valid geometries of `geo-vectors.json` select the documents a real RefDb server selected
 //! (`tests/data/geo-predicates.json`, same with and without a `2dsphere` index).
 
-use teseladb_bson::{RawDoc, RawValue, Value, extjson};
 use teseladb_index::geo::geojson::{Geometry, number, parse, parse_indexed};
 use teseladb_index::geo::region::{Container, intersects, within};
 use teseladb_index::geo::sphere::{Cap, Point};
+use teseladb_bson::{RawDoc, RawValue, Value, extjson};
 
 const VECTORS: &str = include_str!("data/geo-vectors.json");
 const PREDICATES: &str = include_str!("data/geo-predicates.json");

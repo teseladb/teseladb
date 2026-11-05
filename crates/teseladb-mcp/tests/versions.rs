@@ -2,11 +2,11 @@
 //! RefDb MCP Server 3.2.2 answers it, the version of each 2026-07-28 request and
 //! `server/discover`.
 
-use teseladb_json::{Object, Value, parse, to_string};
 use teseladb_mcp::jsonrpc::{HEADER_MISMATCH, INVALID_PARAMS, UNSUPPORTED_PROTOCOL_VERSION};
 use teseladb_mcp::versions::{
     LATEST_SESSION_REVISION, Revision, discover_result, negotiate_initialize, request_revision,
 };
+use teseladb_json::{Object, Value, parse, to_string};
 
 const META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 

@@ -1,9 +1,9 @@
 //! Bucket bounds of time series reads (015 T013, FR-007): the filter's conditions on the time and
 //! meta fields skip the buckets that cannot match, and only those.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_exec::timeseries_read::Bounds;
 use teseladb_mql::timeseries_write::{BucketSpec, TsError};
+use teseladb_bson::{Document, RawDoc, Value};
 
 const T0: i64 = 1_767_225_600_000;
 const HOUR: i64 = 3_600_000;

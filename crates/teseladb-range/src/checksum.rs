@@ -15,10 +15,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use teseladb_hash::Sha256;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, Scan, Step};
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
+use teseladb_hash::Sha256;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 
 use crate::gc::Round;

@@ -1,11 +1,11 @@
 //! The `$changeStream` stage's options and the stages after it (014 FR-001), with the errors of a
 //! `refrouter` 9.0.4 (measured on 01-11).
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::stage::{
     BeforeChange, ChangeStreamSpec, FullDocument, Scope, Start, check_rest, codes,
 };
 use teseladb_changestream::token::{Position, ResumeToken};
+use teseladb_bson::{Document, Value};
 
 const NS: &str = "lane1errs.c";
 

@@ -4,10 +4,10 @@
 //! type of its change event and, for an `update`, its `updateDescription` and the `diff` of its
 //! oplog entry.
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_changestream::event::operation_type;
 use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::token::EventKind;
+use teseladb_bson::{Document, Value, extjson};
 
 const FIXTURE: &str = include_str!("fixtures/pipeline_updates.jsonl");
 

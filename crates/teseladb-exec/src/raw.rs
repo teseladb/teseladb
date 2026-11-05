@@ -2,8 +2,8 @@
 //! the extensions), through one conversion: a document past BSON's limits (more levels or bytes
 //! than a stored document may have) is a `BadValue`.
 
-use teseladb_bson::{BsonError, Document, RawDoc};
 use teseladb_mql::MqlError;
+use teseladb_bson::{BsonError, Document, RawDoc};
 
 use crate::expr::codes::BAD_VALUE;
 

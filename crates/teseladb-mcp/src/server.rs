@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use teseladb_rest::api::{Executor, header};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
 use teseladb_json::{Object, Value, to_string};
-use teseladb_rest::api::{Executor, header};
 
 use crate::calls::{Ctx, Limits, call};
 use crate::jsonrpc::{
@@ -236,10 +236,8 @@ impl Server {
                         let data = to_string(&note).unwrap_or_default();
                         out.extend(teseladb_http::sse::Event::data(data).encode());
                     }
-                    let mut headers = vec![(
-                        "Content-Type".to_owned(),
-                        teseladb_http::sse::EVENT_STREAM.to_owned(),
-                    )];
+                    let mut headers =
+                        vec![("Content-Type".to_owned(), teseladb_http::sse::EVENT_STREAM.to_owned())];
                     headers.extend(extra);
                     Response { status: 200, headers, body: out }
                 }

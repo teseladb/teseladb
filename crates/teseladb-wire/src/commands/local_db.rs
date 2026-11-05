@@ -8,8 +8,8 @@
 //! `startup_log` document has `_id` (`<hostname>-<start in ms>`), `hostname`, `startTime`,
 //! `startTimeLocal` (`Mon Nov  2 15:44:32.433`), `cmdLine`, `pid` and `buildinfo`.
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::Namespace;
+use teseladb_bson::{Document, Value};
 
 use super::Backend;
 use super::diagnostics::{ProcessFacts, build_info_of};

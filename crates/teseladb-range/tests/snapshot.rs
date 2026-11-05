@@ -9,10 +9,10 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Completions, Lookup, Lsm, LsmConfig};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
-use teseladb_raftlog::{Disk, FileId, MemDisk};
 use teseladb_range::command::{Command, DedupRecord, Put};
 use teseladb_range::sm::{RangeSm, dedup_key, parse_record_value};
 use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, SnapshotError, split, write_ops};
+use teseladb_raftlog::{Disk, FileId, MemDisk};
 use teseladb_types::{GroupId, Nanos, Rng};
 
 const G: GroupId = GroupId(7);

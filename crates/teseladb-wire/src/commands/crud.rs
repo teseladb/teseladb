@@ -6,7 +6,6 @@
 //!
 //! A collection that does not exist is created by the first write, as in RefDb.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::meta::RetryInfo;
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
@@ -17,6 +16,7 @@ use teseladb_mql::{Filter, FilterUse, MatchContext};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::read::ReadConcern;
 use teseladb_session::retry::{StatementKey, TxnCheck, check_txn_number};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::args::{self, missing};
 use super::index_maintenance::{IndexRule, probe, probe_requests};

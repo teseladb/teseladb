@@ -4,11 +4,11 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_range::host::Mutation;
 use teseladb_wire::commands::mutation::{Bound, DocMutation, Image, MutationResult, Rules};
 use teseladb_wire::error::CommandError;
+use teseladb_bson::{Document, Value};
 
 fn s(x: &str) -> Value {
     Value::from(x)

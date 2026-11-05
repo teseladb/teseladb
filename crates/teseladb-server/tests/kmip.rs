@@ -239,8 +239,7 @@ fn fixture(name: &str) -> Fixture {
     let port = server(&server_pki, keys.clone());
     // The node's certificate, of the server's CA.
     let node_key =
-        teseladb_x509::PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &[9; 40])
-            .unwrap();
+        teseladb_x509::PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &[9; 40]).unwrap();
     let cert = pki::issue_node(
         &server_pki.ca,
         &server_pki.ca_key,

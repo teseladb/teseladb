@@ -60,7 +60,11 @@ impl Compressor {
 
     fn compress(self, data: &[u8]) -> Vec<u8> {
         match self {
-            Compressor::Snappy => snappy::compress(data),
+            // A message's length is an `i32`, so its body is always under the 2³² − 1 bytes a
+            // Snappy stream declares.
+            Compressor::Snappy => {
+                snappy::compress(data).expect("a message body fits a Snappy stream")
+            }
             Compressor::Zlib => zlib::compress(data, ZLIB_LEVEL),
             Compressor::Zstd => zstd::compress(data),
         }

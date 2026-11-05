@@ -11,10 +11,10 @@
 //! The database of the collection exists from its creation, also if the transaction aborts, as on
 //! a `refrouter` 9.0.4 (measured: `listDatabases` lists it before the commit and after the abort).
 
-use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_range::intents::TxnId;
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, Value};
 
 use super::names::full;
 use super::query::documents_of;

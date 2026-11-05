@@ -6,12 +6,12 @@
 //! `system.views` comes as the collection it is in TeselaDB's catalog, as in 9.0.4. TeselaDB has
 //! no storage engine idents (`idxIdent`, `ident`), and lists in namespace order (DV-078).
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::IndexState;
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use super::index_maintenance::MULTIKEY_MARKS;

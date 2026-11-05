@@ -8,8 +8,8 @@ use std::cmp::Ordering;
 mod common;
 
 use common::{pool, raw};
-use teseladb_bson::compare;
 use teseladb_keys::{Direction, encode};
+use teseladb_bson::compare;
 
 const POOL: usize = 3_200;
 

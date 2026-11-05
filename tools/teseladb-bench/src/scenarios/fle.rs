@@ -8,8 +8,8 @@
 //! helper creates it. Target: under 5 ms at p50 with three nodes; `encrypted_insert` is the rate
 //! of the load.
 
-use teseladb_bson::{Document, Value};
 use teseladb_fle::tokens::{self, Collection, Token};
+use teseladb_bson::{Document, Value};
 
 use super::wire::each;
 use crate::cli::Args;

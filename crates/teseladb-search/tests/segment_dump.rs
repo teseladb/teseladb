@@ -2,12 +2,12 @@
 //! FR-013): same contents, same scores bit for bit, the applied mark it covers, and a damaged
 //! file or one of other analyzers is refused instead of served.
 
-use teseladb_bson::Document;
 use teseladb_keys::Hlc;
 use teseladb_search::definition::Definition;
 use teseladb_search::index::MemIndex;
 use teseladb_search::indexer::{DumpError, Found, Indexer};
 use teseladb_search::segment::file::{self, Segment};
+use teseladb_bson::Document;
 
 const TEXTS: [&str; 7] = [
     "gato perro",

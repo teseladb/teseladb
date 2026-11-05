@@ -14,9 +14,7 @@ use teseladb_raftlog::{
     CoreStore, IoDone, IoOp, LogEntry, ReadToken, ReleaseProvider, SnapshotMeta, Ticket,
     format::wal::EntryKind as WalKind,
 };
-use teseladb_types::{
-    Bytes, DecodeError, Decoder, Durability, Encoder, GroupId, Nanos, NodeId, Rng,
-};
+use teseladb_types::{Bytes, DecodeError, Decoder, Durability, Encoder, GroupId, Nanos, NodeId, Rng};
 
 use crate::chunks::{Reassembly, Received, split};
 use crate::config::{CoreConfig, GroupDesc, ReadMode, snapshot_timeout};

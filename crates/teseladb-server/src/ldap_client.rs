@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use teseladb_auth::ldap::{AuthzTemplate, LdapError, Login, Mapping, Step};
 use teseladb_auth::roles::ADMIN_DB;
 use teseladb_auth::users::RoleName;
-use teseladb_tls::{ClientConfig, Trust};
 use teseladb_wire::commands::LdapLogin;
+use teseladb_tls::{ClientConfig, Trust};
 
 use crate::cli::Password;
 use crate::tls_stream::TlsStream;

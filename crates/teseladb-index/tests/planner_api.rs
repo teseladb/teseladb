@@ -3,7 +3,6 @@
 //! `2dsphere` query, compared with `explain` on refnode 7.0.45 (image `ref:7.0`) and again on 9.0.4
 //! (image `ref:9.0`, same bounds), 30-10-2026.
 
-use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 use teseladb_index::geo::geojson::{Geometry, parse};
 use teseladb_index::geo::region::GeometryRegion;
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, hashed_key, index_entries};
@@ -12,6 +11,7 @@ use teseladb_index::planner_api::{
     geo_intervals,
 };
 use teseladb_keys::{Direction, FieldBounds, Hlc, Interval, KeyRange, PrimaryKey};
+use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 
 /// `explain` of `{loc: {$geoWithin: {$geometry: <triangle (0,0) (3,6) (6,1)>}}}`.
 const POLYGON_BOUNDS: &[&str] = &[

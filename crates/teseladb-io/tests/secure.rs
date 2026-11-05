@@ -7,7 +7,6 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teseladb_crypto::ec::NamedCurve;
 use teseladb_io::handshake::{
     Acceptor, AcceptorOptions, EnrollHandler, HandshakeError, Inbound, JoinHandler, JoinRequest,
     Outbound, connect_with, request_enroll, request_join_with,
@@ -15,6 +14,7 @@ use teseladb_io::handshake::{
 use teseladb_io::mailbox::{Notify, channel};
 use teseladb_io::peer::{EnrollAccepted, EnrollRequest, Hello, JoinAccepted, PeerMsg};
 use teseladb_io::secure::{Channel, PeerTls};
+use teseladb_crypto::ec::NamedCurve;
 use teseladb_tls::{CertifiedKey, ClientAuth, ClientConfig, ServerConfig, Trust};
 use teseladb_types::NodeId;
 use teseladb_x509::ext::GeneralName;

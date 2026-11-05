@@ -3,7 +3,6 @@
 //! awaitable `hello`, `loadBalanced`, and the errors a `refrouter` gives (measured against RefDb
 //! 7.0's `refrouter`; the version fields are 9.0's).
 
-use teseladb_bson::{Document, Value};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{
     Action, ClusterTime, NodeInfo, Topology, dispatch, hello_after_wait,
@@ -11,6 +10,7 @@ use teseladb_wire::dispatch::{
 use teseladb_wire::error;
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
 use teseladb_wire::{MAX_WIRE_VERSION, MIN_WIRE_VERSION};
+use teseladb_bson::{Document, Value};
 
 const PID: [u8; 12] = [0x6a, 0xe4, 0x6a, 0x38, 0x4b, 0x94, 0xcd, 0xb3, 0x52, 0xa3, 0x8f, 0x7c];
 

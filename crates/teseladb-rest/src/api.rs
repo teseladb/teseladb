@@ -2,10 +2,10 @@
 //! the executor of the wire protocol, and the reply as an HTTP answer with
 //! `TeselaDB-Operation-Time` (FR-011).
 
+use teseladb_wire::error::{BAD_VALUE, CURSOR_NOT_FOUND, CommandError};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
-use teseladb_wire::error::{BAD_VALUE, CURSOR_NOT_FOUND, CommandError};
 
 use crate::commands::{Shape, build};
 use crate::media::{Format, MediaError, decode, encode, request_format, response_format};

@@ -29,9 +29,9 @@ pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{Extensions, MqlError};
 use teseladb_plan::stages::named;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use crate::expr::{Ctx, Expr, Scope};
 use errors::{TYPE_MISMATCH, error};
@@ -844,10 +844,7 @@ pub(crate) fn has_text(m: RawDoc<'_>) -> bool {
 }
 
 /// A key that is the same for values that compare equal (groups and partitions).
-pub(crate) fn group_key(
-    v: &teseladb_bson::Value,
-    col: Option<&dyn teseladb_bson::Collator>,
-) -> Vec<u8> {
+pub(crate) fn group_key(v: &teseladb_bson::Value, col: Option<&dyn teseladb_bson::Collator>) -> Vec<u8> {
     group::canonical(v, col)
 }
 

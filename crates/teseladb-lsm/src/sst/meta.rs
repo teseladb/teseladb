@@ -17,9 +17,9 @@
 //! `lo` and `hi` are the lowest and highest logical keys the file touches, both included; a range
 //! tombstone counts with its start and its end.
 
+use teseladb_keys::{Hlc, VERSION_LEN};
 use teseladb_crypto::at_rest::WRAPPED_KEY_LEN;
 use teseladb_hash::crc32c;
-use teseladb_keys::{Hlc, VERSION_LEN};
 
 use super::{Bad, get_bytes, get_varint, put_bytes, put_varint};
 use crate::entry::RangeTombstone;

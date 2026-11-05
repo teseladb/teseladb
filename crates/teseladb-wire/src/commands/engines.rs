@@ -3,10 +3,10 @@
 //! the engines this node does not link yet answer as [`NoExtensions`] does; `$expr` and the
 //! expressions of projections and `let` come from 010's engine (`teseladb_exec::expr`).
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::expr::{Expr, Scope};
 use teseladb_index::geo::query::{GeoOperator, matches, parse_query};
 use teseladb_mql::{Extensions, GeoQuery, MqlError, NoExtensions, Result, TextQuery, codes};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 /// The shape of a `$geoWithin` or `$geoIntersects`; every error of a shape is a `BadValue`
 /// (`teseladb_index::geo::query::BAD_VALUE`).

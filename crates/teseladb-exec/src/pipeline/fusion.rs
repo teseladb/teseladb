@@ -9,8 +9,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::errors::{BAD_VALUE, FAILED_TO_PARSE, error, missing_field, unknown_field};
 use super::meta::{Meta, SCORE, SCORE_DETAILS};

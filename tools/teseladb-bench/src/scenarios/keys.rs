@@ -5,9 +5,9 @@
 
 use std::hint::black_box;
 
-use teseladb_bson::RawValue;
 use teseladb_collation::Collation;
 use teseladb_keys::{Direction, FieldSpec, IndexKeySpec, KeyBuilder, PrimaryKey};
+use teseladb_bson::RawValue;
 
 use super::per_op;
 use crate::cli::Args;

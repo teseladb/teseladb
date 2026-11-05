@@ -3,11 +3,11 @@
 //! it, and the versions of a logical key go from newest to oldest with the logical key taken out
 //! without decoding anything.
 
-use teseladb_bson::{Document, RawDoc, RawValue};
 use teseladb_keys::{
     Direction, FieldSpec, Hlc, IndexKeySpec, KeyBuilder, KeyParts, PrimaryKey, VersionedKey,
     bucket, space,
 };
+use teseladb_bson::{Document, RawDoc, RawValue};
 
 fn with<R>(v: impl Into<teseladb_bson::Value>, f: impl FnOnce(RawValue<'_>) -> R) -> R {
     let bytes = Document::new().with("v", v.into()).to_bytes().unwrap();

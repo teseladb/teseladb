@@ -11,7 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-bson = { path = "../teseladb-bson" }
+teseladb-bson = { workspace = true }
 
 [dev-dependencies]
 teseladb-collation = { path = "../teseladb-collation" }

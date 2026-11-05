@@ -2,9 +2,9 @@
 //! messages of `create` on a `refnode` 9.0.4, checked, and kept as `listCollections` shows it, with
 //! the names of the metadata collections and the default contention filled in.
 
+use teseladb_mql::types::{TypeSpec, by_alias, name_of};
 use teseladb_bson::types as t;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_mql::types::{TypeSpec, by_alias, name_of};
 
 use crate::error::*;
 use crate::idl::{Fields, wrong_type};

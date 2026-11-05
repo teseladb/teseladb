@@ -29,7 +29,11 @@ for t in "${targets[@]}"; do
   read -r crate test <<<"$t"
   log="$out/$crate-$test.log"
   echo "fuzz: $crate/$test for ${secs}s, log $log"
-  if ! TESELADB_FUZZ_SECS="$secs" CARGO_INCREMENTAL=0 cargo test -j 4 ${profile[@]+"${profile[@]}"} -p "$crate" --test "$test" -- --nocapture >"$log" 2>&1; then
+  # teseladb-http lives in the shared-crates next to the repository (001 FR-023).
+  manifest=()
+  [[ $crate == viuzi-* ]] && manifest=(--manifest-path "$root/../../shared-crates/Cargo.toml")
+  if ! TESELADB_FUZZ_SECS="$secs" VIUZI_FUZZ_SECS="$secs" CARGO_INCREMENTAL=0 cargo test -j 4 ${profile[@]+"${profile[@]}"} \
+    ${manifest[@]+"${manifest[@]}"} -p "$crate" --test "$test" -- --nocapture >"$log" 2>&1; then
     echo "fuzz: $crate/$test FOUND A FAILURE (see $log)"
     failed=1
   fi

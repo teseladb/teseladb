@@ -1,11 +1,11 @@
 //! 014 T017: the catalog events of a stream (FR-002, FR-014), as a `refrouter` 9.0.4 gives them
 //! (measured on 01-11).
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::ddl::{ddl_key, index_change, invalidate_of, invalidates, shown};
 use teseladb_changestream::stage::Scope;
 use teseladb_changestream::token::{EventKind, ResumeToken};
 use teseladb_hlc::Hlc;
+use teseladb_bson::{Document, Value};
 
 #[test]
 fn a_catalog_change_goes_by_its_mark_and_position_before_the_documents_of_that_mark() {

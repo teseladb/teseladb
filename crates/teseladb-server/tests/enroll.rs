@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::enroll::Token;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pki::{self, MASTER_KEY, PkiParams};
 use teseladb_server::run;
+use teseladb_raftlog::MemDisk;
 
 const WAIT: Duration = Duration::from_secs(60);
 

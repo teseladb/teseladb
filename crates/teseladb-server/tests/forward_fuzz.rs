@@ -12,8 +12,8 @@ use teseladb_server::data_wire::{
     RemoteReply, RemoteReq, decode_for, decode_reply, encode_for, encode_reply,
 };
 use teseladb_server::forward::{Fetch, FetchReply, Request};
-use teseladb_types::{GroupId, NodeId, Rng};
 use teseladb_wire::commands::write_block::WriteGate;
+use teseladb_types::{GroupId, NodeId, Rng};
 
 fn requests() -> Vec<RemoteReq> {
     let at = Hlc { physical: 7, logical: 1 };

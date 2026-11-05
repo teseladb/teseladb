@@ -3,8 +3,8 @@
 //! options (`writeConcern`, `readConcern`, `collation`, `lsid`, `txnNumber`) have their own
 //! readers.
 
-use teseladb_bson::{Document, Value};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, Value};
 
 use crate::concerns::{self, ReadConcernArgs, WriteConcernArgs};
 use crate::error::{CommandError, IDL_FAILED_TO_PARSE};

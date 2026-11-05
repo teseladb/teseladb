@@ -20,12 +20,12 @@ name = "cluster_local"
 harness = false
 
 [dependencies]
-teseladb-types = { path = "../teseladb-types" }
+teseladb-types = { workspace = true }
 teseladb-hlc = { path = "../teseladb-hlc" }
-teseladb-hash = { path = "../teseladb-hash" }
+teseladb-hash = { workspace = true }
 teseladb-sys = { path = "../teseladb-sys" }
-teseladb-raft = { path = "../teseladb-raft" }
-teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-raft = { workspace = true }
+teseladb-raftlog = { workspace = true }
 teseladb-io = { path = "../teseladb-io" }
 teseladb-multiraft = { path = "../teseladb-multiraft" }
 teseladb-meta = { path = "../teseladb-meta" }
@@ -33,7 +33,7 @@ teseladb-router = { path = "../teseladb-router" }
 teseladb-lsm = { path = "../teseladb-lsm" }
 teseladb-range = { path = "../teseladb-range" }
 teseladb-keys = { path = "../teseladb-keys" }
-teseladb-json = { path = "../teseladb-json" }
+teseladb-json = { workspace = true }
 teseladb-mcp = { path = "../teseladb-mcp" }
 teseladb-rest = { path = "../teseladb-rest" }
 teseladb-wire = { path = "../teseladb-wire" }
@@ -41,14 +41,14 @@ teseladb-topology = { path = "../teseladb-topology" }
 teseladb-exec = { path = "../teseladb-exec" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-auth = { path = "../teseladb-auth" }
-teseladb-bson = { path = "../teseladb-bson" }
+teseladb-bson = { workspace = true }
 teseladb-changestream = { path = "../teseladb-changestream" }
-teseladb-crypto = { path = "../teseladb-crypto" }
-teseladb-x509 = { path = "../teseladb-x509" }
-teseladb-tls = { path = "../teseladb-tls" }
-teseladb-http = { path = "../teseladb-http" }
+teseladb-crypto = { workspace = true }
+teseladb-x509 = { workspace = true }
+teseladb-tls = { workspace = true }
+teseladb-http = { workspace = true }
 teseladb-txn = { path = "../teseladb-txn" }
-teseladb-tz = { path = "../teseladb-tz" }
+teseladb-tz = { workspace = true }
 
 [dev-dependencies]
 teseladb-session = { path = "../teseladb-session" }

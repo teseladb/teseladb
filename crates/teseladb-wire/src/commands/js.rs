@@ -8,10 +8,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::expr::js::JsEngine;
 use teseladb_js::{JsCtx, JsError, Program};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 /// `JSInterpreterFailure`.
 pub const JS_INTERPRETER_FAILURE: ErrorCode = ErrorCode { code: 139, name: "JSInterpreterFailure" };

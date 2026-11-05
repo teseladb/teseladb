@@ -4,9 +4,9 @@
 //! constant that settles the filter, or the error (`!! code<TAB>message`) without the words
 //! «Failed to optimize expression» the filter adds.
 
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_exec::expr::optimize::{Optimized, optimize, optimize_filter};
 use teseladb_exec::expr::{Ctx, Scope, truthy};
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 fn canonical(d: &Document) -> String {
     let bytes = d.to_bytes().expect("small");
@@ -123,9 +123,7 @@ fn optimized_expr(e: &str) -> Result<String, i32> {
     teseladb_exec::expr::optimize::optimize_filter(&f, Some(&vars))
         .map(|d| {
             let bytes = d.to_bytes().expect("small");
-            teseladb_bson::extjson::to_relaxed(
-                teseladb_bson::RawDoc::from_bytes(&bytes).expect("doc"),
-            )
+            teseladb_bson::extjson::to_relaxed(teseladb_bson::RawDoc::from_bytes(&bytes).expect("doc"))
         })
         .map_err(|e| e.code.code)
 }

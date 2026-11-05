@@ -6,10 +6,10 @@
 use teseladb_auth::actions::ActionType;
 use teseladb_auth::privileges::{Privilege, PrivilegeError};
 use teseladb_auth::roles::ADMIN_DB;
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::Namespace;
 use teseladb_meta::security::{Expect, Principal, SecurityOp, id_key};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::args::missing;
 use super::names;

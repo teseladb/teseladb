@@ -2,10 +2,10 @@
 //! slot-based prefix `explain` shows, the system stage it answers itself, `aggregate: 1`'s
 //! first stage, and the defaults of an environment.
 
-use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
+use teseladb_bson::{Document, RawValue, extjson};
 
 struct Plain;
 

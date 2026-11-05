@@ -4,6 +4,9 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
+/// The `User-Agent` of the node's own HTTP requests (OCSP, OIDC, STS).
+pub const USER_AGENT: &str = "teseladb";
+
 pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
@@ -804,9 +807,8 @@ fn enroll_node(
     let addr = o.join.first().ok_or("--enroll-token needs --join <ip:port>")?;
     let mut seed = [0u8; enroll::KEY_RANDOM_LEN];
     random(&mut seed).map_err(|e| e.to_string())?;
-    let node_key =
-        teseladb_x509::PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &seed)
-            .map_err(|_| enroll::EnrollError::Key.to_string())?;
+    let node_key = teseladb_x509::PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &seed)
+        .map_err(|_| enroll::EnrollError::Key.to_string())?;
     seed.fill(0);
     let names: Vec<String> =
         o.bind_ip.split(',').map(str::trim).filter(|h| !h.is_empty()).map(str::to_owned).collect();

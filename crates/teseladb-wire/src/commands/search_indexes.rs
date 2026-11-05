@@ -5,9 +5,9 @@
 //! RefDb does. The definition's own rules are the search engine's; here only what decides the
 //! command's answer is checked.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, SearchIndexEntry, SearchIndexKind, SearchIndexStatus};
+use teseladb_bson::{Document, RawValue, Value};
 
 use teseladb_search::definition::{Definition, DefinitionError, VectorDefinition};
 

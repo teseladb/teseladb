@@ -2,9 +2,9 @@
 //! messages (measured on a `refnode` 9.0.4): an unknown field fails where it is, a missing
 //! required field after the walk, a field of the wrong type with its alias.
 
+use teseladb_mql::types::name_of;
 use teseladb_bson::types as t;
 use teseladb_bson::{RawDoc, RawValue};
-use teseladb_mql::types::name_of;
 
 use crate::error::{FleError, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, TYPE_MISMATCH, err};
 use crate::tokens::Token;

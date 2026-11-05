@@ -11,11 +11,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-hash = { path = "../teseladb-hash" }
+teseladb-hash = { workspace = true }
 teseladb-hlc = { path = "../teseladb-hlc" }
 teseladb-lsm = { path = "../teseladb-lsm" }
 teseladb-multiraft = { path = "../teseladb-multiraft" }
-teseladb-raft = { path = "../teseladb-raft" }
-teseladb-raftlog = { path = "../teseladb-raftlog" }
-teseladb-types = { path = "../teseladb-types" }
+teseladb-raft = { workspace = true }
+teseladb-raftlog = { workspace = true }
+teseladb-types = { workspace = true }
 

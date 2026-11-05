@@ -174,14 +174,19 @@ fn a_merge_drops_deletions_below_the_threshold_and_the_manifest_records_it() {
 
 #[test]
 fn a_sealed_segment_hides_its_text_and_opens_with_its_master_key() {
-    use teseladb_crypto::at_rest::{CipherMode, KeyRing};
     use teseladb_search::segment::file::{build_sealed, open_sealed};
+    use teseladb_crypto::at_rest::{CipherMode, KeyRing};
     let data = segment("secret-key-", &["confidential salary figures", "more private words"], 9);
     for mode in [CipherMode::Cbc, CipherMode::Gcm] {
-        let ring = KeyRing::new(&[4; 32], mode, |b: &mut [u8]| {
-            b.fill(2);
-            Ok(())
-        });
+        let ring = KeyRing::new(
+            &[4; 32],
+            mode,
+            |b: &mut [u8]| {
+                b.fill(2);
+                Ok(())
+            },
+            "test",
+        );
         let sealed = build_sealed(&data, &ring).unwrap();
         for leak in [&b"confidential"[..], b"salary", b"secret-key-"] {
             assert!(!sealed.windows(leak.len()).any(|w| w == leak), "{mode:?}");
@@ -192,10 +197,15 @@ fn a_sealed_segment_hides_its_text_and_opens_with_its_master_key() {
         assert_eq!(Segment::open(&clear).unwrap().to_data().unwrap(), data);
         // Without the ring, with another master key, or changed: refused.
         assert!(open_sealed(&sealed, None).is_err());
-        let other = KeyRing::new(&[5; 32], mode, |b: &mut [u8]| {
-            b.fill(2);
-            Ok(())
-        });
+        let other = KeyRing::new(
+            &[5; 32],
+            mode,
+            |b: &mut [u8]| {
+                b.fill(2);
+                Ok(())
+            },
+            "test",
+        );
         assert!(open_sealed(&sealed, Some(&other)).is_err());
         for at in [4096 + 40, sealed.len() - 10, 4100] {
             let mut bad = sealed.clone();

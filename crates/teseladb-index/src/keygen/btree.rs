@@ -9,9 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Collator, RawDoc, RawValue, Value};
 use teseladb_keys::space::unique_value;
 use teseladb_keys::{Key, KeyBuilder, PrimaryKey, TypeBits};
+use teseladb_bson::{Collator, RawDoc, RawValue, Value};
 
 use super::geo2d::{GEO2D_SUBTYPE, geo2d_keys};
 use super::geo2dsphere::geo2dsphere_keys;

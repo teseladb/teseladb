@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_hlc::Hlc;
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::spec::index_def;
@@ -24,6 +23,7 @@ use teseladb_wire::commands::cross_range::intent_writes;
 use teseladb_wire::commands::index_maintenance::{INDEX_ENTRY, IndexRule};
 use teseladb_wire::commands::mutation::{Bound, DOCUMENT, DocMutation, Image, Rules};
 use teseladb_wire::commands::ttl::expired_filter;
+use teseladb_bson::{Document, RawDoc, Value};
 
 use crate::checkers::Violation;
 use crate::checkers::index_consistency::{self, CHECKER, RangeState};

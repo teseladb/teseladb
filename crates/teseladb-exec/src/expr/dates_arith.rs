@@ -7,8 +7,8 @@
 //! 2000-01-01T00:00 local (weeks from the first `startOfWeek` on or after it), keeping the offset
 //! in force for hours and smaller units.
 
-use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
+use teseladb_bson::{Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::calendar::{

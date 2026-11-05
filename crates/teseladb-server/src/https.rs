@@ -26,8 +26,8 @@ const SYSTEM_CAS: [&str; 4] = [
 /// refuses (macOS's `/etc/ssl/cert.pem` has EC-ACC, with a negative serial number, which RFC 5280
 /// forbids); like Go's `AppendCertsFromPEM`, that root is left out and the others stay.
 pub fn bundle(path: &str, text: &str) -> Result<Vec<Certificate>, String> {
-    let ders = teseladb_x509::pem::parse_label(text, "CERTIFICATE")
-        .map_err(|e| format!("{path}: {e:?}"))?;
+    let ders =
+        teseladb_x509::pem::parse_label(text, "CERTIFICATE").map_err(|e| format!("{path}: {e:?}"))?;
     let cas: Vec<Certificate> = ders.iter().filter_map(|d| Certificate::from_der(d).ok()).collect();
     if cas.is_empty() {
         return Err(format!("{path}: no certificate"));
@@ -191,7 +191,7 @@ mod tests {
         let https = Https::new(Trust::anchors(vec![pki.ca.clone()]), Duration::from_secs(5));
         assert!(format!("{https:?}").contains("Https"));
         let url = |port: u16| Url::parse(&format!("https://localhost:{port}/x")).unwrap();
-        let req = |u: &Url| teseladb_http::client::get(u);
+        let req = |u: &Url| teseladb_http::client::get(u, crate::USER_AGENT);
         let port = server(config.clone(), b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         let r = https.send(&url(port), &req(&url(port))).unwrap();
         assert_eq!((r.status, r.body.as_slice()), (200, &b"ok"[..]));

@@ -4,11 +4,11 @@
 //! `setFeatureCompatibilityVersion` cannot go past it, so new features turn on once every node
 //! has them.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::command::NodeState;
 use teseladb_meta::group0::Group0Sm;
-use teseladb_types::NodeId;
 use teseladb_wire::commands::fcv::VERSIONS;
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_types::NodeId;
 
 /// Prefix of the Group 0 settings with each node's versions.
 pub const PREFIX: &[u8] = b"nodeVersions.";

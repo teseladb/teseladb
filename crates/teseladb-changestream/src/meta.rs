@@ -23,8 +23,8 @@
 //! (measured on 02-11-2026): the meta at the new key says where it came from, and the meta of the
 //! deletion at the old key that it gives no event.
 
-use teseladb_bson::{BsonError, Document, RawDoc, Value};
 use teseladb_hlc::Hlc;
+use teseladb_bson::{BsonError, Document, RawDoc, Value};
 
 use crate::update_desc::{DESCRIPTION_LIMITS, DescError, UpdateDescription};
 

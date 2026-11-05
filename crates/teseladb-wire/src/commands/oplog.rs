@@ -16,7 +16,6 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::changes::{Change, Versioned, changes, collection_of, gives_event};
 use teseladb_changestream::meta::{Moved, RetryInfo, lsid_document};
 use teseladb_changestream::token::EventKind;
@@ -30,6 +29,7 @@ use teseladb_topology::oplog::{
     OplogEntry, TxnInfo, WRITE_REFUSED, transaction_entries,
 };
 use teseladb_topology::replset::{OpTime, Timestamp};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::Backend;
 use super::change_stream::{Watched, history_floor, previous, watched_all};

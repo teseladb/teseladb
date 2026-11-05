@@ -40,15 +40,15 @@ use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::enroll_tokens::TOKEN_ID_LEN;
 use teseladb_meta::group0::{GROUP0, Group0Error, Group0Sm};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock, SNAPSHOT_ENTRIES};
+use teseladb_range::ack::{W, WriteConcern};
+use teseladb_sys::FileLock;
+use teseladb_wire::commands::{NodeSessions, Shared};
 use teseladb_raftlog::paths::core_dir;
 use teseladb_raftlog::{
     CoreStore, Disk, FileId, IoErrno, StorageConfig, StorageError, open_node, read_node_meta,
     write_atomic, write_node_meta,
 };
-use teseladb_range::ack::{W, WriteConcern};
-use teseladb_sys::FileLock;
 use teseladb_types::{GroupId, NodeId};
-use teseladb_wire::commands::{NodeSessions, Shared};
 
 use crate::admin::{NodeAdmin, answer};
 use crate::admin_http::{AdminListener, Handler};
@@ -1564,8 +1564,7 @@ mod tests {
             startup_log: log,
             ..NodeConfig::default()
         };
-        let Err(NodeError::Join(e)) =
-            Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None)
+        let Err(NodeError::Join(e)) = Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None)
         else {
             panic!("the join should fail");
         };

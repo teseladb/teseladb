@@ -7,8 +7,8 @@ mod common;
 use std::sync::Arc;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_exec::pipeline::spill::MemorySpill;
+use teseladb_bson::{Document, Value, extjson};
 
 const DB: &str = "advx";
 

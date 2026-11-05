@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use teseladb_keys::{Hlc, VERSION_LEN};
 use teseladb_crypto::at_rest::{KeyRing, TRAILER_LEN, WRAPPED_KEY_LEN};
 use teseladb_hash::crc32c;
-use teseladb_keys::{Hlc, VERSION_LEN};
 use teseladb_types::GroupId;
 
 use crate::sst::{ALIGN, Bad, PAD, get_bytes, get_varint, pad, put_bytes, put_varint};
@@ -572,10 +572,15 @@ mod tests {
     #[test]
     fn sealed_edits_read_with_their_ring_and_a_cut_one_is_a_tail() {
         use teseladb_crypto::at_rest::CipherMode;
-        let ring = KeyRing::new(&[5; 32], CipherMode::Gcm, |b: &mut [u8]| {
-            b.fill(1);
-            Ok(())
-        });
+        let ring = KeyRing::new(
+            &[5; 32],
+            CipherMode::Gcm,
+            |b: &mut [u8]| {
+                b.fill(1);
+                Ok(())
+            },
+            "test",
+        );
         let mut m = Vec::new();
         for n in 2..5 {
             let region = edit(n).encode_with(Some(&ring));
@@ -586,10 +591,15 @@ mod tests {
         assert_eq!((edits, end), ((2..5).map(edit).collect(), m.len() as u64));
         // No ring or another master key: the first sealed edit is an error, not a tail.
         assert_eq!(read(&m, None), Err(0));
-        let other = KeyRing::new(&[6; 32], CipherMode::Gcm, |b: &mut [u8]| {
-            b.fill(1);
-            Ok(())
-        });
+        let other = KeyRing::new(
+            &[6; 32],
+            CipherMode::Gcm,
+            |b: &mut [u8]| {
+                b.fill(1);
+                Ok(())
+            },
+            "test",
+        );
         assert_eq!(read(&m, Some(&other)), Err(0));
         // A cut last edit is a tail; a damaged one in the middle is corruption.
         let mut torn = m.clone();

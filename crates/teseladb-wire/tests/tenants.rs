@@ -7,13 +7,13 @@ mod common;
 
 use common::{Mem, doc, field};
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_keys::space::KeyParts;
 use teseladb_meta::security::Principal;
 use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::OpMsg;
+use teseladb_bson::{Document, RawDoc, Value};
 
 const ACME: &str = "acme";
 const PASSWORD: &str = "secret1";

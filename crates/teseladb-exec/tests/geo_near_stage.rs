@@ -2,11 +2,11 @@
 //! 2dsphere indexes, and the distances it gives, with the codes of a `refrouter` 9.0.4 (the same
 //! cases run through the protocol in the tests of `teseladb-wire`).
 
-use teseladb_bson::{Document, RawValue, Value, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::geo_near::GeoIndex;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
+use teseladb_bson::{Document, RawValue, Value, extjson};
 
 struct GeoEnv {
     indexes: Vec<GeoIndex>,

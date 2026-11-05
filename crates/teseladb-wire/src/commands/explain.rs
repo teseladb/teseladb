@@ -4,10 +4,10 @@
 //! counted, without writing anything. The plan is the one this node runs: a collection scan, or
 //! the key of an `_id` equality; sorts, skips, limits and projections over it.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_mql::update::{Update, UpdateContext};
 use teseladb_mql::{Filter, FilterUse, MatchContext};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::mutation::from_mql;
 use super::query::{

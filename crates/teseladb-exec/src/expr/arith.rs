@@ -3,8 +3,8 @@
 //! `double` operand gives a `double` and a `decimal` one a `decimal`; `null` or a missing operand
 //! gives `null`. `$add` and `$subtract` also take dates.
 
-use teseladb_bson::{Decimal, Decimal128, Document, Value};
 use teseladb_mql::{DecOp, MqlError, dec_binary, decimal_math, decimal_to_f64, to_decimal128};
+use teseladb_bson::{Decimal, Decimal128, Document, Value};
 
 use super::{Eval, Expr, Scope, codes, count, error};
 

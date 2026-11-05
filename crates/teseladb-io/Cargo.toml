@@ -11,17 +11,17 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-types = { path = "../teseladb-types" }
-teseladb-raftlog = { path = "../teseladb-raftlog" }
+teseladb-types = { workspace = true }
+teseladb-raftlog = { workspace = true }
 teseladb-sys = { path = "../teseladb-sys" }
-teseladb-raft = { path = "../teseladb-raft" }
-teseladb-deflate = { path = "../teseladb-deflate" }
+teseladb-raft = { workspace = true }
+teseladb-deflate = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
-teseladb-tls = { path = "../teseladb-tls" }
-teseladb-x509 = { path = "../teseladb-x509" }
+teseladb-tls = { workspace = true }
+teseladb-x509 = { workspace = true }
 
 [dev-dependencies]
-teseladb-crypto = { path = "../teseladb-crypto" }
+teseladb-crypto = { workspace = true }
 teseladb-lsm = { path = "../teseladb-lsm" }
 
 [[test]]

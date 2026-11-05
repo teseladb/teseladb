@@ -22,11 +22,11 @@ use std::time::{Duration, Instant};
 
 use teseladb_io::FileDisk;
 use teseladb_meta::bootstrap::DATA_START;
-use teseladb_raft::Role;
 use teseladb_server::cli::{self, Command as CliCommand};
 use teseladb_server::log::Format;
 use teseladb_server::node::{Node, lock_dir};
 use teseladb_server::{node_config, ready_line};
+use teseladb_raft::Role;
 
 /// First argument of this binary in node mode.
 const CHILD: &str = "--node-process";

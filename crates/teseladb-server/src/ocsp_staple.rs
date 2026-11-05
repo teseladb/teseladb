@@ -35,8 +35,9 @@ pub fn fetch(url: &str, id: &CertId, timeout: Duration) -> Result<Vec<u8>, Strin
     if target.scheme != Scheme::Http {
         return Err(format!("OCSP responder {url}: not HTTP"));
     }
-    let bytes =
-        post(&target, OCSP_REQUEST, &ocsp::request(id)).encode().map_err(crate::error_debug)?;
+    let bytes = post(&target, crate::USER_AGENT, OCSP_REQUEST, &ocsp::request(id))
+        .encode()
+        .map_err(crate::error_debug)?;
     let addr = (target.host.as_str(), target.port)
         .to_socket_addrs()
         .map_err(crate::error_text)?

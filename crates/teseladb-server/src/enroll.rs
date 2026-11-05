@@ -10,12 +10,12 @@
 
 use std::fmt;
 
+use teseladb_io::peer::{EnrollAccepted, EnrollRequest};
+use teseladb_meta::enroll_tokens::{EnrollToken, SECRET_HASH_LEN, TOKEN_ID_LEN};
 use teseladb_crypto::ec::{EcPrivateKey, NamedCurve, P256_RANDOM_LEN};
 use teseladb_crypto::hkdf::{expand_array, extract};
 use teseladb_crypto::modes::AesGcm;
 use teseladb_crypto::{Sha256, aes::Aes, sha256};
-use teseladb_io::peer::{EnrollAccepted, EnrollRequest};
-use teseladb_meta::enroll_tokens::{EnrollToken, SECRET_HASH_LEN, TOKEN_ID_LEN};
 use teseladb_x509::pem::{base64_decode_strict as base64_decode, base64_encode};
 use teseladb_x509::{Certificate, PrivateKey, PublicKey};
 

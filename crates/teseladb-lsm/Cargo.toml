@@ -11,10 +11,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-teseladb-compress = { path = "../teseladb-compress" }
-teseladb-crypto = { path = "../teseladb-crypto" }
-teseladb-deflate = { path = "../teseladb-deflate" }
-teseladb-hash = { path = "../teseladb-hash" }
+teseladb-compress = { workspace = true }
+teseladb-crypto = { workspace = true }
+teseladb-deflate = { workspace = true }
+teseladb-hash = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
-teseladb-raftlog = { path = "../teseladb-raftlog" }
-teseladb-types = { path = "../teseladb-types" }
+teseladb-raftlog = { workspace = true }
+teseladb-types = { workspace = true }

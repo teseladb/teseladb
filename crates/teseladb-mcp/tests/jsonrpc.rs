@@ -1,11 +1,11 @@
 //! JSON-RPC 2.0 as MCP uses it (019 FR-019, T024): requests, notifications, responses, the
 //! batches of revision 2025-03-26 and the error replies.
 
-use teseladb_json::{Number, Object, Value, parse};
 use teseladb_mcp::jsonrpc::{
     ErrorObject, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, Id, Incoming, METHOD_NOT_FOUND,
     Message, PARSE_ERROR, error_response, read, response,
 };
+use teseladb_json::{Number, Object, Value, parse};
 
 fn single(text: &str) -> Message {
     match read(text.as_bytes(), false) {

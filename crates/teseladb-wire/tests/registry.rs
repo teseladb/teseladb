@@ -7,10 +7,10 @@ mod common;
 use std::sync::Mutex;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
-use teseladb_hash::sha256;
 use teseladb_wire::commands::registry::{Refreshed, SESSIONS_COLL, SESSIONS_DB, refresh};
 use teseladb_wire::commands::{NodeSessions, Timeouts};
+use teseladb_bson::{Document, Value};
+use teseladb_hash::sha256;
 
 fn lsid(n: u8) -> Value {
     Value::Document(doc(&[("id", Value::Binary { subtype: 4, bytes: vec![n; 16] })]))

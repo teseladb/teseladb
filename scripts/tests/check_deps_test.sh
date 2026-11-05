@@ -69,6 +69,69 @@ d=$(fixture git-source)
 printf '\n[[package]]\nname = "foo"\nversion = "0.1.0"\nsource = "git+https://example.com/foo"\n' >> "$d/Cargo.lock"
 expect "git package in Cargo.lock" "$d" 1 "external package: foo"
 
+# The viuzi-* crates copied from TeselaDB come from the shared-crates next to the repository
+# (001 FR-023, constitution 3.0.0, principle V).
+viuzi() {
+  local d=$1 path=$2
+  printf '\n[[package]]\nname = "teseladb-bson"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
+  printf '[workspace]\nmembers = ["crates/*"]\n\n[workspace.dependencies]\nteseladb-bson = { path = "%s" }\n' \
+    "$path" > "$d/Cargo.toml"
+}
+d=$(fixture viuzi)
+viuzi "$d" ../../shared-crates/crates/teseladb-bson
+printf '\n[dependencies]\nteseladb-bson = { workspace = true }\n' >> "$d/crates/teseladb-types/Cargo.toml"
+expect "a viuzi crate from shared-crates" "$d" 0 "^check-deps: OK$"
+
+d=$(fixture viuzi-elsewhere)
+viuzi "$d" ../teseladb-bson
+expect "a viuzi crate from another path" "$d" 1 "Cargo.toml: teseladb-bson: path \.\./teseladb-bson, not \.\./\.\./shared-crates/crates/teseladb-bson"
+
+d=$(fixture viuzi-own-path)
+viuzi "$d" ../../shared-crates/crates/teseladb-bson
+printf '\n[dependencies]\nteseladb-bson = { path = "../../../teseladb-bson" }\n' >> "$d/crates/teseladb-types/Cargo.toml"
+expect "a member with its own path to a viuzi crate" "$d" 1 "crates/teseladb-types/Cargo.toml: teseladb-bson: not from the workspace's dependencies"
+
+# The shared-crates checkout is at the commit of scripts/shared-crates.rev, with nothing uncommitted.
+viuzi_repo() {
+  local d=$1
+  git init -q "$d/vrepo"
+  printf 'x\n' > "$d/vrepo/f"
+  git -C "$d/vrepo" add f
+  git -C "$d/vrepo" -c user.name=t -c user.email=t@t commit -qm x
+}
+d=$(fixture viuzi-rev)
+viuzi_repo "$d"
+git -C "$d/vrepo" rev-parse HEAD > "$d/scripts/shared-crates.rev"
+out=$(cd "$d" && TESELADB_VIUZI_REPO=vrepo scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 0 ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAILED: shared-crates at its commit (exit $rc): $out"
+fi
+d=$(fixture viuzi-rev-other)
+viuzi_repo "$d"
+echo 0000000000000000000000000000000000000000 > "$d/scripts/shared-crates.rev"
+out=$(cd "$d" && TESELADB_VIUZI_REPO=vrepo scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 1 ]] && grep -q "vrepo: at [0-9a-f]\{40\}, not 0000000000000000000000000000000000000000 (scripts/shared-crates.rev)" <<<"$out"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAILED: shared-crates at another commit (exit $rc): $out"
+fi
+d=$(fixture viuzi-rev-dirty)
+viuzi_repo "$d"
+git -C "$d/vrepo" rev-parse HEAD > "$d/scripts/shared-crates.rev"
+printf 'y\n' >> "$d/vrepo/f"
+out=$(cd "$d" && TESELADB_VIUZI_REPO=vrepo scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 1 ]] && grep -q "vrepo: uncommitted changes" <<<"$out"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAILED: shared-crates with uncommitted changes (exit $rc): $out"
+fi
+
+d=$(fixture outside)
+printf '\n[[package]]\nname = "foo"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
+expect "a path package outside the workspace" "$d" 1 "Cargo.lock: package outside the workspace: foo"
+
 for api in "std::fs::read" "std::net::TcpListener" "std::thread::spawn" "std::time::Instant" \
   "std::time::SystemTime" "std::process::exit" "std::env::var" "std::io::stdin" "std::io::stdout"; do
   d=$(fixture "api-${api//:/_}")
@@ -156,11 +219,18 @@ for lock in "std::sync::Mutex" "std::sync::{Arc, RwLock}" "std::sync::Condvar"; 
   expect "$lock in a hot-path crate" "$d" 1 "crates/teseladb-io/src/lib.rs:[0-9]+: .*\\(a lock in a hot-path crate\\)"
 done
 # Cryptography runs on every authenticated or encrypted operation (D-090: a generator per thread).
+# teseladb-crypto lives in shared-crates since 05-11-2026 (001 FR-023).
 d=$(fixture lock-crypto)
-mkdir -p "$d/crates/teseladb-crypto/src"
-printf '[package]\nname = "teseladb-crypto"\n' > "$d/crates/teseladb-crypto/Cargo.toml"
-printf 'use std::sync::Mutex;\n' > "$d/crates/teseladb-crypto/src/lib.rs"
-expect "a lock in teseladb-crypto" "$d" 1 "crates/teseladb-crypto/src/lib.rs:[0-9]+: .*\\(a lock in a hot-path crate\\)"
+mkdir -p "$d/viuzi/teseladb-crypto/src"
+printf 'use std::sync::Mutex;\n' > "$d/viuzi/teseladb-crypto/src/lib.rs"
+out=$(cd "$d" && TESELADB_ANOTHERPRODUCT=viuzi scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 1 ]] && grep -Eq "viuzi/teseladb-crypto/src/lib.rs:[0-9]+: .*\\(a lock in a hot-path crate\\)" <<<"$out"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  echo "FAILED: a lock in teseladb-crypto (exit $rc)"
+  echo "  | ${out//$'\n'/$'\n'  | }"
+fi
 d=$(fixture lock-elsewhere)
 printf 'use std::sync::Mutex;\n' >> "$d/crates/teseladb-types/src/lib.rs"
 printf '// A Mutex would hold up the core.\n' >> "$d/crates/teseladb-io/src/lib.rs"

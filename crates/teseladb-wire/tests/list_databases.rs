@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::catalog::{BLOCK_BYTES, collection_size};
+use teseladb_bson::{Document, Value};
 
 fn s(x: &str) -> Value {
     Value::from(x)

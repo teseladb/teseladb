@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::ttl::pass;
+use teseladb_bson::{Document, Value};
 
 const DB: &str = "t";
 

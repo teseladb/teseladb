@@ -7,8 +7,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{get, open, small, ts};
-use teseladb_hash::crc32c;
 use teseladb_lsm::{LsmConfig, LsmError};
+use teseladb_hash::crc32c;
 use teseladb_raftlog::{Disk, FileId, IoDone, IoOp, MemDisk, SimDisk};
 use teseladb_types::{Bytes, GroupId, Nanos};
 

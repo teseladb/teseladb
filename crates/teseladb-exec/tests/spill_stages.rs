@@ -3,11 +3,11 @@
 //! (`$group` in the order of its keys, as a `refnode` 9.0.4 gives a group that spilled), and
 //! leave nothing in the store.
 
-use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::spill::{Counting, MemorySpill, SpillStore};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
+use teseladb_bson::{Document, RawValue, extjson};
 
 /// The limit the tests give a stage: a few documents.
 const SMALL: usize = 2_000;

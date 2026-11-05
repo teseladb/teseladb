@@ -53,7 +53,7 @@ impl Oidc {
 
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
         let target = Url::parse(url).map_err(|e| format!("{url}: {e:?}"))?;
-        let answer = self.https.send(&target, &client::get(&target))?;
+        let answer = self.https.send(&target, &client::get(&target, crate::USER_AGENT))?;
         if answer.status != 200 {
             return Err(format!("{url}: HTTP {}", answer.status));
         }

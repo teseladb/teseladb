@@ -6,11 +6,11 @@ mod common;
 use std::net::IpAddr;
 
 use common::{Mem, doc, field};
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::commands::lock;
 use teseladb_wire::ingress::{
     Admission, BURST_CAPACITY_SECS, BYPASS, ENABLED, MAX_QUEUE_DEPTH, RATE_PER_SEC,
 };
+use teseladb_bson::{Document, Value, extjson};
 
 fn cmd(text: &str) -> Document {
     extjson::parse(text).expect("a command")

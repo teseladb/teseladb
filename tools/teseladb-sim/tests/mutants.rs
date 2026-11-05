@@ -30,11 +30,18 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The variant names the code declares under `crates/`, as `scripts/sim-mutants.sh` finds them.
+/// The variant names the code declares, as `scripts/sim-mutants.sh` finds them: under `crates/`
+/// with `teseladb_bug`, and in the viuzi-* crates next to the repository with `teseladb_bug`.
 fn declared() -> BTreeSet<String> {
+    let mut names = declared_in(&Path::new(ROOT).join("crates"), "teseladb_bug = \"");
+    names.extend(declared_in(&Path::new(ROOT).join("../../shared-crates/crates"), "teseladb_bug = \""));
+    names
+}
+
+/// The variant names of `marker` in the Rust files under `dir`.
+fn declared_in(dir: &Path, marker: &str) -> BTreeSet<String> {
     let mut files = Vec::new();
-    rust_files(&Path::new(ROOT).join("crates"), &mut files);
-    let marker = "teseladb_bug = \"";
+    rust_files(dir, &mut files);
     let mut names = BTreeSet::new();
     for f in files {
         let text = std::fs::read_to_string(&f).unwrap_or_default();

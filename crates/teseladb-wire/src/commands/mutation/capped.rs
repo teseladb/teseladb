@@ -8,12 +8,12 @@
 //! insert whose scan fell short, or read a document deleted since, is refused with
 //! [`is_refusal`] and the command scans again.
 
-use teseladb_bson::RawDoc;
 use teseladb_hlc::Hlc;
 use teseladb_range::capped::{
     self as cap, CappedError, CappedState, plan_delete, plan_insert, plan_update,
 };
 use teseladb_range::command::Put;
+use teseladb_bson::RawDoc;
 
 use super::{
     CappedRule, Checker, DocMutation, Evaluated, Lookup, MutationResult, Rules, Stored, WriteError,

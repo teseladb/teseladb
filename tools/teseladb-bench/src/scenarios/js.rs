@@ -4,8 +4,8 @@
 
 use std::hint::black_box;
 
-use teseladb_bson::{Document, Value};
 use teseladb_js::{JsCtx, Program};
+use teseladb_bson::{Document, Value};
 
 use super::per_op;
 use crate::cli::Args;

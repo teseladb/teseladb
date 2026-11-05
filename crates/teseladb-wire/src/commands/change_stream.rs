@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_changestream::changes::{Change, Versioned, changes, collection_of, gives_event};
 use teseladb_changestream::cursor::StreamPosition;
 use teseladb_changestream::ddl::{ddl_key, invalidate_of};
@@ -28,6 +27,7 @@ use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::ddl_log::{DdlChange, DdlRecord};
 use teseladb_range::read::ReadConcern;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::change_stream_ddl::Watch;
 use super::query::{QueryCursor, documents_of, keep};

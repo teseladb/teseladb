@@ -595,9 +595,8 @@ mod tests {
             now - 60,
             now + 600,
         );
-        let cert =
-            teseladb_x509::generate::issue(&p, &key.public_key(), &cluster.ca, &cluster.ca_key)
-                .unwrap();
+        let cert = teseladb_x509::generate::issue(&p, &key.public_key(), &cluster.ca, &cluster.ca_key)
+            .unwrap();
         let mut c = ClientConfig::new(Trust::anchors(vec![cluster.ca.clone()]));
         c.identity = Some(CertifiedKey { chain: vec![cert], key });
         assert_eq!(ask(Some(Arc::new(c))), format!("{:?}", Caller::User(name.x509_user_name())));
@@ -628,8 +627,7 @@ mod tests {
         assert_eq!(tls_copy.caller(&cluster.node_chain), Caller::Member);
         // A certificate of an issuer with another name is a user.
         let other_key = teseladb_x509::PrivateKey::ed25519(&[4; 32]);
-        let other_name =
-            teseladb_x509::Name::build(&[(teseladb_x509::oid::COMMON_NAME, "elsewhere")]);
+        let other_name = teseladb_x509::Name::build(&[(teseladb_x509::oid::COMMON_NAME, "elsewhere")]);
         let other = teseladb_x509::generate::self_signed(
             &teseladb_x509::generate::CertificateParams::node([6; 16], other_name, 0, i64::MAX / 2),
             &other_key,

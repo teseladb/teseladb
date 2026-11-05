@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::DATA_START;
 use teseladb_meta::group0::ReplicaRole;
-use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::data::DataStatus;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_raft::Role;
+use teseladb_raftlog::MemDisk;
 use teseladb_types::NodeId;
 
 const READY: Duration = Duration::from_secs(30);

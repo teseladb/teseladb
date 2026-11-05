@@ -4,11 +4,11 @@
 //! `DuplicateKey` with the index's `keyPattern` and the conflicting `keyValue` (message measured on
 //! a `refrouter` 9.0.4: `E11000 duplicate key error collection: msgs.c index: b_u dup key: { b: 0 }`).
 
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::keygen::{IndexDef, IndexField};
 use teseladb_index::unique::{UniqueError, UniqueGuard, conflicting_values, duplicate_key};
 use teseladb_keys::{Direction, PrimaryKey, space};
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 const ID: u32 = 4;
 

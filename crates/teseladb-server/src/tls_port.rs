@@ -5,9 +5,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use teseladb_tls::{
-    CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, ServerConfig, Trust, Version,
-};
+use teseladb_tls::{CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, ServerConfig, Trust, Version};
 use teseladb_x509::{Certificate, Crl, CrlCheck, PrivateKey};
 
 use crate::cli::{TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE, TLS_CRL_FILE, TlsOpts};

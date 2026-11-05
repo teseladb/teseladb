@@ -12,17 +12,17 @@ workspace = true
 
 [dependencies]
 teseladb-auth = { path = "../../crates/teseladb-auth" }
-teseladb-types = { path = "../../crates/teseladb-types" }
-teseladb-hash = { path = "../../crates/teseladb-hash" }
-teseladb-raftlog = { path = "../../crates/teseladb-raftlog" }
+teseladb-types = { workspace = true }
+teseladb-hash = { workspace = true }
+teseladb-raftlog = { workspace = true }
 teseladb-lsm = { path = "../../crates/teseladb-lsm" }
 teseladb-keys = { path = "../../crates/teseladb-keys" }
 teseladb-mql = { path = "../../crates/teseladb-mql" }
 teseladb-exec = { path = "../../crates/teseladb-exec" }
-teseladb-bson = { path = "../../crates/teseladb-bson" }
+teseladb-bson = { workspace = true }
 teseladb-index = { path = "../../crates/teseladb-index" }
-teseladb-json = { path = "../../crates/teseladb-json" }
-teseladb-raft = { path = "../../crates/teseladb-raft" }
+teseladb-json = { workspace = true }
+teseladb-raft = { workspace = true }
 teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
 teseladb-meta = { path = "../../crates/teseladb-meta" }
 teseladb-testkv = { path = "../../crates/teseladb-testkv" }

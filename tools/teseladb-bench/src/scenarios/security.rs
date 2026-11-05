@@ -13,10 +13,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
+use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_tls::{ClientConfig, Connection, ENTROPY_LEN, Trust};
 use teseladb_types::Histogram;
-use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::Certificate;
 
 use super::{DataDir, at, keep_going, msg, warm_up};

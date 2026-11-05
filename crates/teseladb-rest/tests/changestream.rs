@@ -2,11 +2,11 @@
 //! options from the URL or the body, `Last-Event-ID` as `resumeAfter`, and the events of a
 //! batch with their resume tokens.
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_rest::changestream::{
     AWAIT_MS, ERROR_EVENT, Scope, cursor_collection, error_event, events, get_more, open,
 };
 use teseladb_rest::routes::Params;
+use teseladb_bson::{Document, Value, extjson};
 
 fn d(t: &str) -> Document {
     extjson::parse(t).unwrap()

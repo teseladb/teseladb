@@ -16,12 +16,12 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_bson::{Document, Value};
 use teseladb_changestream::changes::{Versioned, changes};
 use teseladb_changestream::read::IntervalRead;
 use teseladb_hlc::Hlc;
 use teseladb_range::host::{RangeError, Reply};
 use teseladb_wire::commands::search_ops::segments_reached;
+use teseladb_bson::{Document, Value};
 
 use crate::checkers::Violation;
 use crate::checkers::search_results::{self, SearchLog, Segments, Write};

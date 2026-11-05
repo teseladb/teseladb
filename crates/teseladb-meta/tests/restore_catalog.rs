@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use teseladb_bson::Document;
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs, kind};
 use teseladb_meta::group0::{Group0Error, Group0Result, Group0Sm};
 use teseladb_meta::indexes::IndexCommand;
+use teseladb_bson::Document;
 
 fn run(sm: &mut Group0Sm, cmd: Group0Command) -> Group0Result {
     let index = sm.applied + 1;

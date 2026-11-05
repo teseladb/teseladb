@@ -8,9 +8,9 @@
 //! A double or integer argument gives a double, a decimal one a decimal (computed by
 //! `teseladb_mql::decimal_trig`); `null` or a missing argument gives `null`.
 
-use teseladb_bson::{Decimal128, Document, RawValue, Value};
 use teseladb_mql::decimal_trig::{Trig, atan2 as decimal_atan2, trig};
 use teseladb_mql::{ErrorCode, MqlError, stream_double};
+use teseladb_bson::{Decimal128, Document, RawValue, Value};
 
 use super::arith::type_name_of;
 use super::values::{display, f64_of};

@@ -9,8 +9,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value, compare};
 use teseladb_mql::timeseries_write::{BucketSpec, CONTROL, MAX, META, MIN, TsError};
+use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value, compare};
 
 /// What a filter says of the buckets it may match.
 #[derive(Clone, Debug, Default, PartialEq)]

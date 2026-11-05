@@ -6,8 +6,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output};
 
-use teseladb_bson::{Document, RawDoc};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
+use teseladb_bson::{Document, RawDoc};
 
 /// The commands the server refuses; it answers `ok: 1` to every other one.
 const REFUSED: [&str; 2] = ["find", "update"];

@@ -4,13 +4,13 @@
 //! creation): the intervals each index scans as `explain` writes them, the clauses left for the
 //! documents, the plans made and their order, and the choice by trial.
 
-use teseladb_bson::{Document, Value, extjson};
 use teseladb_plan::cost::{Trial, ranked, score, trial_works};
 use teseladb_plan::logical::{
     Bound, compare_values, conjunction, conjuncts, intersect, intervals, on_path, shown_value,
     sorted, union,
 };
 use teseladb_plan::rules::{Access, IndexMeta, IndexScan, Request, candidates, hashed_value};
+use teseladb_bson::{Document, Value, extjson};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

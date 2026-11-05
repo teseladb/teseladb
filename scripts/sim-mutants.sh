@@ -38,7 +38,11 @@ done
 
 known=()
 while IFS= read -r v; do known+=("$v"); done < <(
-  grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' crates 2>/dev/null | sed -E 's/.*"([a-z0-9_]+)"/\1/' | sort -u
+  {
+    grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' crates 2>/dev/null
+    # The variants of the viuzi-* crates TeselaDB uses (Raft and its log, 001 FR-023).
+    grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' "${TESELADB_ANOTHERPRODUCT:-../../shared-crates/crates}" 2>/dev/null
+  } | sed -E 's/.*"([a-z0-9_]+)"/\1/' | sort -u
 )
 if [[ ${#known[@]} -eq 0 ]]; then
   echo "sim-mutants: the code has no faulty variants"
@@ -102,7 +106,10 @@ simulator() {
     echo "$TESELADB_SIM_CMD"
     return
   fi
-  RUSTFLAGS="--cfg teseladb_bug=\"$v\"" CARGO_TARGET_DIR="$target" \
+  # A variant's name is declared in TeselaDB's crates or in the viuzi-* ones, never in both: both
+  # markers get it, and both are expected so that neither workspace warns about the other's.
+  RUSTFLAGS="--check-cfg cfg(teseladb_bug,values(any())) --check-cfg cfg(teseladb_bug,values(any())) \
+--cfg teseladb_bug=\"$v\" --cfg teseladb_bug=\"$v\"" CARGO_TARGET_DIR="$target" \
     cargo build -q --offline --release -p teseladb-sim >&2 || return 1
   echo "$target/release/teseladb-sim"
 }

@@ -4,11 +4,11 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use teseladb_bson::{Document, Value};
 use teseladb_server::cli::{Command, parse};
 use teseladb_server::diag::{Diag, PortStats, ProcessConfig};
 use teseladb_server::log::{self, Format, Level, Logger, RAM_LOG_LINES};
 use teseladb_server::parsed_options;
+use teseladb_bson::{Document, Value};
 
 fn opts(line: &str) -> teseladb_server::cli::StartOpts {
     let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();

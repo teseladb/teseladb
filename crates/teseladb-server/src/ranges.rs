@@ -20,11 +20,11 @@ use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::{Group0Sm, RangeDesc, ReplicaRole};
 use teseladb_meta::meta2::{Meta2Sm, in_interval};
 use teseladb_multiraft::{GroupDesc, MultiRaftCore, OpId, StateMachine};
-use teseladb_raft::{Role, Status};
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
-use teseladb_types::{GroupId, Nanos, NodeId};
 use teseladb_wire::commands::parameters;
+use teseladb_raft::{Role, Status};
+use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::coresm::CoreSm;
 use crate::hosting::Hosting;
@@ -1187,12 +1187,10 @@ mod tests {
         let ns = Namespace { db: "z".into(), coll: "t".into() };
         let options = teseladb_bson::Document::new().with(
             "$shardKey",
-            teseladb_bson::Document::new()
-                .with("key", teseladb_bson::Document::new().with("a", 1))
-                .with(
-                    "balancing",
-                    teseladb_bson::Document::new().with("maxChunkSizeBytes", 2i64 << 20),
-                ),
+            teseladb_bson::Document::new().with("key", teseladb_bson::Document::new().with("a", 1)).with(
+                "balancing",
+                teseladb_bson::Document::new().with("maxChunkSizeBytes", 2i64 << 20),
+            ),
         );
         let create = CatalogCommand::Create {
             ns,

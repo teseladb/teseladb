@@ -3,10 +3,10 @@
 //! document `{x: <result>}` in canonical extended JSON (`{}` when the result is missing), or
 //! `!! `, the error code, a tab and the message. Every expression reads `tests/expr/doc.json`.
 
-use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 use teseladb_exec::expr::{Ctx, Expr, Scope};
 use teseladb_exec::pipeline::Pipeline;
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 
 const DOC: &str = include_str!("expr/doc.json");
 

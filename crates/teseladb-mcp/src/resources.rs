@@ -1,9 +1,9 @@
 //! The resources of contract `mcp-server.md` (FR-022): the options in force, the connection,
 //! the cluster's status, the exports and the schema and indexes of a collection.
 
+use teseladb_rest::api::Executor;
 use teseladb_bson::Document;
 use teseladb_json::{Object, Value, to_string};
-use teseladb_rest::api::Executor;
 
 use crate::calls::{Ctx, call, to_json};
 use crate::jsonrpc::{ErrorObject, INVALID_PARAMS};

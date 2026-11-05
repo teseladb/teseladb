@@ -190,9 +190,9 @@ fn the_start_checks_the_key_file_and_warns() {
 /// the organization and unit of the node's certificate make a client certificate a member's.
 #[test]
 fn a_members_certificate_shares_the_nodes_organization() {
-    use teseladb_crypto::ec::NamedCurve;
     use teseladb_server::cluster_auth::{is_member, member_subject};
     use teseladb_server::tls_port::{TlsMode, TlsPort};
+    use teseladb_crypto::ec::NamedCurve;
     use teseladb_tls::{CertifiedKey, ServerConfig};
     use teseladb_x509::generate::{self, CertificateParams};
     use teseladb_x509::{Name, PrivateKey, oid};

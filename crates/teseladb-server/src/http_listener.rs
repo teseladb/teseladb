@@ -22,8 +22,11 @@ use teseladb_http::http1::Request;
 use teseladb_http::http2;
 use teseladb_http::limits::{RateLimiter, RateLimits};
 use teseladb_http::metrics::{Family, HttpMetrics};
-use teseladb_http::server::{Conn, Incoming, Response, Settings};
+
+/// The series of the HTTP port's routes: `teseladb_http_*` by `route`.
+pub const ROUTES: Family = Family::new("teseladb_http", "route");
 use teseladb_wire::commands::http_parameters::HttpOptions;
+use teseladb_http::server::{Conn, Incoming, Response, Settings};
 use teseladb_x509::Certificate;
 
 use crate::tls_port::{TlsPort, Transport};
@@ -296,9 +299,9 @@ impl Running {
         lock(&shared.limiter).finish(&self.credential);
         let mut m = lock(&shared.metrics);
         if self.streaming.is_some() {
-            m.stream_closed(Family::Route, &self.route);
+            m.stream_closed(ROUTES, &self.route);
         }
-        m.record(Family::Route, &self.route, status, self.started.elapsed().as_secs_f64());
+        m.record(ROUTES, &self.route, status, self.started.elapsed().as_secs_f64());
     }
 }
 
@@ -452,7 +455,7 @@ fn start(
     if Cors::is_preflight(&request.method, &request.headers) {
         let headers = cors.response_headers(origin, true);
         c.respond(id, Response { status: 204, headers, body: Vec::new() });
-        lock(&shared.metrics).record(Family::Route, PREFLIGHT, 204, 0.0);
+        lock(&shared.metrics).record(ROUTES, PREFLIGHT, 204, 0.0);
         return;
     }
     let credential = caller.credential();
@@ -466,7 +469,7 @@ fn start(
         r.headers.push(("Retry-After".to_owned(), limited.retry_after_secs.to_string()));
         r.headers.extend(cors.response_headers(origin, false));
         c.respond(id, r);
-        lock(&shared.metrics).record(Family::Route, &route, 429, 0.0);
+        lock(&shared.metrics).record(ROUTES, &route, 429, 0.0);
         return;
     }
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -522,7 +525,7 @@ fn deliver(
             c.start_stream(id, status, &headers);
             if let Some(r) = running.get_mut(&id) {
                 r.streaming = Some(status);
-                lock(&shared.metrics).stream_opened(Family::Route, &r.route);
+                lock(&shared.metrics).stream_opened(ROUTES, &r.route);
             }
             None
         }

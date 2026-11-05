@@ -20,12 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_hlc::Hlc;
 use teseladb_hlc::{from_timestamp, to_timestamp};
 use teseladb_meta::catalog::Catalog;
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::indexes::Indexes;
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_types::{Decoder, GroupId, NodeId};
 
 use crate::admin::{AdminError, AdminOpts, Answer, NodeAdmin};

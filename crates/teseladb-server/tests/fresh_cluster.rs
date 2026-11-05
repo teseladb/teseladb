@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::node::Node;
+use teseladb_bson::{Document, Value};
+use teseladb_raftlog::MemDisk;
 
 /// Well inside the 30 s of a command: a change waits for Group 0 and the fence, not for a
 /// command's deadline.

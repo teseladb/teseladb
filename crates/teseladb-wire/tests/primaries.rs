@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_wire::commands::primaries::{Primary, key, of_settings};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_types::NodeId;
-use teseladb_wire::commands::primaries::{Primary, key, of_settings};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

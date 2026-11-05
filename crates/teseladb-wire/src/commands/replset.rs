@@ -14,8 +14,8 @@
 //! designated; one in maintenance mode is `RECOVERING` to every member and to the drivers, as on
 //! RefDb 9.0.4 (measured on 02-11-2026, `f1.js`, `f2.js`).
 
-use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{Member, MemberId, ReplicaSet, whole_number};
+use teseladb_bson::{Document, Value};
 
 use super::presentation::{
     Hold, Presentation, REASON_STEP_UP, TOPOLOGY_PRESENTATION, holds, hosts, member_of, set_hold,

@@ -2,8 +2,8 @@
 //! into every element of an array on the way (an array of what each element gives, without the
 //! elements that give nothing); `"$$name.b"` reads a variable.
 
-use teseladb_bson::{Document, Value};
 use teseladb_mql::MqlError;
+use teseladb_bson::{Document, Value};
 
 use super::{Ctx, Eval, Expr, Scope, codes, error};
 

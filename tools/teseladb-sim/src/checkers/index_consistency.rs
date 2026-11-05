@@ -6,10 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use teseladb_bson::RawDoc;
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::verify::verify_range;
 use teseladb_keys::{Hlc, Key, PrimaryKey};
+use teseladb_bson::RawDoc;
 
 use crate::checkers::Violation;
 
@@ -87,9 +87,9 @@ pub fn check(state: &RangeState) -> Result<(), Violation> {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use teseladb_bson::{RawValue, extjson};
     use teseladb_index::keygen::{IndexDef, IndexField, entry_value, index_entries};
     use teseladb_keys::Direction;
+    use teseladb_bson::{RawValue, extjson};
 
     use super::*;
 

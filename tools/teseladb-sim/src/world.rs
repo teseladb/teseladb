@@ -20,13 +20,13 @@ use teseladb_multiraft::{
     CoreConfig, Done, GroupDesc, GroupHeartbeat, GroupHeartbeatResp, MultiRaftCore, NodeClock,
     Observation, OpError, OpId, PeerFrame, route_stray,
 };
+use teseladb_range::rollback::{RollbackFile, rollback_files};
+use teseladb_range::sm::RangeSm;
 use teseladb_raft::{Message, Role};
 use teseladb_raftlog::{
     Completions, CoreStore, Disk, FileId, IoDone, IoOp, LogEntry, SimDisk, SimDiskConfig,
     StorageConfig, StorageError,
 };
-use teseladb_range::rollback::{RollbackFile, rollback_files};
-use teseladb_range::sm::RangeSm;
 use teseladb_types::{Bytes, Decoder, Encoder, GroupId, Nanos, NodeId, Rng};
 
 use crate::checkers::Violation;

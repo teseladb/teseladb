@@ -21,13 +21,11 @@
 //!   zones (018); `tags` lists the zones' intervals (`_id`, `ns`, `min`, `max`, `tag`, measured on
 //!   9.0.4) and `shards` the zones of each node in `tags`, in the order they were added.
 
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::changelog::{Change, ChangeKind};
 use teseladb_meta::command::{NodeState, SettingChange};
 use teseladb_meta::group0::Group0Sm;
 use teseladb_meta::meta2::Meta2Sm;
 use teseladb_meta::zones::Zones;
-use teseladb_types::NodeId;
 use teseladb_wire::commands::cluster_admin::RW_DEFAULTS;
 use teseladb_wire::commands::config_db::COLLECTIONS;
 use teseladb_wire::commands::config_settings::{SETTINGS, SettingsWrite};
@@ -35,6 +33,8 @@ use teseladb_wire::commands::diagnostics::ANNOUNCED_VERSION;
 use teseladb_wire::commands::shard_name;
 use teseladb_wire::commands::sharding;
 use teseladb_wire::error::{BAD_VALUE, CommandError};
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_types::NodeId;
 
 use teseladb_meta::config_settings::PREFIX as SETTINGS_PREFIX;
 
@@ -656,10 +656,8 @@ mod tests {
             state: NodeState::Draining,
         };
         sm.apply_command(5, &drain);
-        let remove = Group0Command::SetNodeState {
-            node: teseladb_types::NodeId(3),
-            state: NodeState::Removed,
-        };
+        let remove =
+            Group0Command::SetNodeState { node: teseladb_types::NodeId(3), state: NodeState::Removed };
         sm.apply_command(6, &remove);
         let shards = documents(&sm, "shards");
         assert_eq!(shards.len(), 2, "the removed node is no shard");
