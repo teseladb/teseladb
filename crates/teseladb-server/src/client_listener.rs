@@ -928,6 +928,9 @@ struct Client {
     peer_ip: Option<IpAddr>,
     /// Whether the limiter of new connections let its first request through (006 FR-036).
     admitted: bool,
+    /// The tenant whose connections on this node count this one, once its user signed in (007
+    /// FR-032).
+    counted: Option<u32>,
 }
 
 /// Microseconds since the first connection's first request: the limiter's clock.
@@ -1276,6 +1279,34 @@ struct Worker {
 /// tenant's connections close within the second after its entry applies (007 FR-034).
 pub const TENANT_CHECK: Duration = Duration::from_millis(250);
 
+/// What signing in did to the count of a tenant's connections on this node.
+enum Counted {
+    /// Nothing: not signed in, of the default tenant or its service user.
+    No,
+    /// Counted for this tenant.
+    Yes(u32),
+    /// Past the tenant's `maxConnections`: the connection closes.
+    Over,
+}
+
+/// Counts connection `conn` for its tenant if its user just signed in (007 FR-032).
+fn count_connection(routes: &crate::routes::SharedRoutes, conn: &Connection) -> Counted {
+    let Some(user) = conn.auth.user.as_ref().filter(|u| u.tenant != 0) else { return Counted::No };
+    let states = routes.tenants();
+    let limits = states.get(&user.tenant).map(|s| s.limits.clone()).unwrap_or_default();
+    if crate::tenant_limits::is_service_user(&limits, &user.name) {
+        return Counted::No;
+    }
+    let wall_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    if routes.limiter().connect(user.tenant, limits.max_connections, wall_ms) {
+        Counted::Yes(user.tenant)
+    } else {
+        Counted::Over
+    }
+}
+
 /// Whether connection `conn` belongs to a tenant that `states` has suspended.
 fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
     conn.auth
@@ -1393,6 +1424,7 @@ impl Worker {
                     member_subject: crate::cluster_auth::member_subject(&self.tls),
                     peer_ip,
                     admitted: false,
+                    counted: None,
                 };
                 self.conns.insert(token, c);
             }
@@ -1410,6 +1442,9 @@ impl Worker {
     /// close when its connection comes back ([`Worker::gone`]).
     fn close(&mut self, token: u64) {
         if let Some(c) = self.conns.remove(&token) {
+            if let (Some(tenant), Some(h)) = (c.counted, self.state.handle()) {
+                h.routes.limiter().disconnect(tenant);
+            }
             if let Some(conn) = c.conn {
                 self.gone(conn);
             }
@@ -1461,6 +1496,21 @@ impl Worker {
         // A command that ran while its tenant was suspended closes its connection once answered.
         let states = self.state.handle().map(|h| h.routes.tenants());
         let held = states.as_ref().is_some_and(|s| suspended(&conn, s));
+        // A connection that just signed in counts for its tenant; past its limit it closes
+        // without its answer (007 FR-032).
+        if c.counted.is_none()
+            && let Some(over) = self.state.handle().map(|h| count_connection(&h.routes, &conn))
+        {
+            match over {
+                Counted::Yes(tenant) => c.counted = Some(tenant),
+                Counted::Over => {
+                    self.gone(conn);
+                    self.close(token);
+                    return;
+                }
+                Counted::No => {}
+            }
+        }
         let alive = c.finish(conn, req, action)
             && c.flush_after(info, &mut cmds)
             && !held

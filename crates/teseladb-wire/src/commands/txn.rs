@@ -1690,6 +1690,23 @@ impl Backend for TxnBackend<'_> {
         self.inner.tenant_named(name)
     }
 
+    fn tenant_state(&mut self, tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {
+        self.inner.tenant_state(tenant)
+    }
+
+    fn tenant_begin(
+        &mut self,
+        tenant: u32,
+        user: &teseladb_auth::users::UserName,
+        bytes: u64,
+    ) -> Result<Option<u64>, CommandError> {
+        self.inner.tenant_begin(tenant, user, bytes)
+    }
+
+    fn tenant_end(&mut self, tenant: u32) {
+        self.inner.tenant_end(tenant);
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let bound = Bound::decode(&op.mutation)?;
         if bound.rules().capped.is_some() {

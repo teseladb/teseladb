@@ -56,6 +56,12 @@ codes! {
     OVERFLOW = 15, "Overflow";
     /// Authentication failed (013).
     AUTHENTICATION_FAILED = 18, "AuthenticationFailed";
+    /// A tenant past its operations, operations at once or bytes written per second on a node
+    /// (007 FR-032; `error_codes.yml` of RefDb, categories `SystemOverloadedError` and
+    /// `RetriableError`).
+    INGRESS_REQUEST_RATE_LIMIT_EXCEEDED = 462, "IngressRequestRateLimitExceeded";
+    /// A tenant past its storage, database or collection quota (007 FR-031).
+    OUT_OF_DISK_SPACE = 14031, "OutOfDiskSpace";
     /// Invalid BSON.
     INVALID_BSON = 22, "InvalidBSON";
     /// Already set up, differently (`shardCollection` with another key, 018).

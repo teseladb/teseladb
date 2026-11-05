@@ -1238,6 +1238,19 @@ impl Backend for ServerBackend {
         self.h.routes.tenants().get(&tenant).cloned()
     }
 
+    fn tenant_begin(
+        &mut self,
+        tenant: u32,
+        user: &teseladb_auth::users::UserName,
+        bytes: u64,
+    ) -> Result<Option<u64>, CommandError> {
+        crate::tenant_limits::begin(&self.h.routes, tenant, user, bytes)
+    }
+
+    fn tenant_end(&mut self, tenant: u32) {
+        self.h.routes.limiter().end(tenant);
+    }
+
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError> {
         let key = [PARAMETER_PREFIX, name.as_bytes()].concat();
         let req = CatalogReq::SetSetting { key, value };

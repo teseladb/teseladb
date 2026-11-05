@@ -33,6 +33,8 @@ pub struct SharedRoutes {
     /// The state of each tenant but the default one: its limits, its access list and whether it
     /// is suspended (FR-030, FR-034, FR-035).
     tenants: Arc<RwLock<Arc<TenantStates>>>,
+    /// What this node counts and limits of each tenant (FR-032, FR-033).
+    limiter: Arc<crate::tenant_limits::TenantLimiter>,
 }
 
 /// The state of each tenant, by number.
@@ -99,6 +101,11 @@ impl SharedRoutes {
     /// Replaces the tenants' states with `states`.
     pub fn publish_tenants(&self, states: Arc<TenantStates>) {
         replace(&self.tenants, states);
+    }
+
+    /// What this node counts and limits of each tenant.
+    pub fn limiter(&self) -> &crate::tenant_limits::TenantLimiter {
+        &self.limiter
     }
 
     /// The tenants' states; the same `Arc` until core 0 publishes a change.

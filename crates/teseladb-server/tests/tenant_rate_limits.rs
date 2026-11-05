@@ -1,0 +1,233 @@
+//! 007 T052 (FR-032, SC-009): the limits of a tenant on each of three nodes. Past
+//! `maxConnections` a connection closes as it signs in, without an answer; past `opsPerSecond`,
+//! `maxConcurrentOps` or `maxWriteBytesPerSecond` a command fails without running with 462
+//! `IngressRequestRateLimitExceeded` and the labels `SystemOverloadedError` and `RetryableError`;
+//! each node applies the whole limits, and the service user is held by none of them.
+
+mod common;
+mod secured;
+
+use std::io::Read;
+use std::time::Duration;
+
+use common::{Client, batch, docs, ok, until};
+use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+use teseladb_server::node::Node;
+use teseladb_bson::{Document, Value};
+use teseladb_raftlog::MemDisk;
+
+const RATE_LIMITED: i32 = 462;
+
+fn code(r: &Document) -> Option<i32> {
+    match r.get("code") {
+        Some(Value::Int32(c)) => Some(*c),
+        _ => None,
+    }
+}
+
+fn labels(r: &Document) -> Vec<String> {
+    match r.get("errorLabels") {
+        Some(Value::Array(all)) => all
+            .iter()
+            .filter_map(|l| match l {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Three secured nodes with tenant `acme`, its user `ann` and `root` signed in on the first.
+fn cluster() -> (Vec<Node<MemDisk>>, Client) {
+    let first = start(Vec::new());
+    let seed = vec![first.peer_addr().to_string()];
+    let mut nodes = vec![first];
+    nodes.extend((0..2).map(|_| start(seed.clone())));
+    admin(&nodes[0], &["tenant", "create", "acme"]);
+    let mut root = Client::new(&nodes[0]);
+    assert!(ok(&login(&mut root, "root", ROOT_PASSWORD)));
+    let create = Document::new()
+        .with("createUser", "ann")
+        .with("pwd", PASSWORD)
+        .with("roles", Value::Array(vec![Value::from("readWriteAnyDatabase")]))
+        .with("mechanisms", Value::Array(vec![Value::from("SCRAM-SHA-256")]))
+        .with("$tenant", "acme");
+    assert!(ok(&root.run("admin", create)));
+    (nodes, root)
+}
+
+/// A connection of Ann on `node`, signed in once the user and the limits reached it.
+fn ann(node: &Node<MemDisk>) -> Client {
+    until("Ann signs in", || {
+        let mut c = Client::new(node);
+        ok(&login(&mut c, "ann", PASSWORD)).then_some(c)
+    })
+}
+
+/// Whether the node closed `c` without answering.
+fn closed(c: &mut Client) -> bool {
+    c.s.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let mut b = [0u8; 1];
+    matches!(c.s.read(&mut b), Ok(0) | Err(_))
+}
+
+fn stop(nodes: Vec<Node<MemDisk>>) {
+    for n in nodes.into_iter().rev() {
+        n.stop();
+    }
+}
+
+#[test]
+fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer() {
+    let (nodes, _root) = cluster();
+    admin(&nodes[0], &["tenant", "limits", "acme", "--max-connections", "2"]);
+    for node in &nodes {
+        let (a, b) = (ann(node), ann(node));
+        // The third signs in and the node closes it before answering.
+        let mut third = Client::new(node);
+        third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mech = teseladb_auth::scram::Mechanism::ScramSha256;
+        let prepared = mech.prepare_password("ann", PASSWORD, false).unwrap();
+        let (mut s, first) =
+            teseladb_auth::scram::ClientSession::start(mech, "ann", &prepared, "limits-nonce-01");
+        let start = Document::new()
+            .with("saslStart", 1)
+            .with("mechanism", mech.name())
+            .with("payload", Value::Binary { subtype: 0, bytes: first })
+            .with("options", Document::new().with("skipEmptyExchange", true));
+        let r = third.run("admin", start);
+        let fin = s.respond(&secured::payload(&r)).unwrap();
+        let next = Document::new()
+            .with("saslContinue", 1)
+            .with("conversationId", 1)
+            .with("payload", Value::Binary { subtype: 0, bytes: fin });
+        third.send("admin", next);
+        assert!(closed(&mut third), "the third connection got an answer");
+        // One closes, and another takes its place.
+        drop(a);
+        until("a place again", || {
+            let mut c = Client::new(node);
+            ok(&login(&mut c, "ann", PASSWORD)).then_some(())
+        });
+        drop(b);
+    }
+    stop(nodes);
+}
+
+#[test]
+fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labels() {
+    let (nodes, _root) = cluster();
+    admin(&nodes[0], &["tenant", "limits", "acme", "--ops-per-second", "20"]);
+    // Four connections ask as fast as they can for three seconds: the node serves the bucket's
+    // second and then 20 a second, give or take the 100 ms a command may wait.
+    let mut c = ann(&nodes[1]);
+    let find = || Document::new().with("find", "c").with("filter", Document::new());
+    let window = Duration::from_secs(3);
+    let loads: Vec<std::thread::JoinHandle<(usize, Option<Document>)>> = (0..4)
+        .map(|_| {
+            let mut conn = ann(&nodes[1]);
+            std::thread::spawn(move || {
+                let (end, mut served, mut refused) = (std::time::Instant::now() + window, 0, None);
+                while std::time::Instant::now() < end {
+                    let r = conn.run("app", find());
+                    if ok(&r) {
+                        served += 1;
+                    } else {
+                        refused = Some(r);
+                    }
+                }
+                (served, refused)
+            })
+        })
+        .collect();
+    let results: Vec<(usize, Option<Document>)> =
+        loads.into_iter().map(|t| t.join().unwrap()).collect();
+    let served: usize = results.iter().map(|(n, _)| n).sum();
+    assert!((70..=90).contains(&served), "{served} served in 3 s against 20 per second");
+    let refused = results.iter().find_map(|(_, r)| r.clone()).expect("a refused command");
+    assert_eq!(code(&refused), Some(RATE_LIMITED), "{refused:?}");
+    assert_eq!(
+        refused.get("codeName"),
+        Some(&Value::String("IngressRequestRateLimitExceeded".into()))
+    );
+    assert_eq!(labels(&refused), ["SystemOverloadedError", "RetryableError"]);
+    // `ping` spends no token.
+    assert!(ok(&c.run("admin", Document::new().with("ping", 1))));
+    // Bytes written per second.
+    admin(
+        &nodes[0],
+        &[
+            "tenant",
+            "limits",
+            "acme",
+            "--ops-per-second",
+            "0",
+            "--max-write-bytes-per-second",
+            "200000",
+        ],
+    );
+    let mut w = ann(&nodes[2]);
+    let big = |i: i32| {
+        let filler = "x".repeat(60_000);
+        Document::new().with("insert", "big").with(
+            "documents",
+            Value::Array(vec![Value::Document(Document::new().with("_id", i).with("f", filler))]),
+        )
+    };
+    let writes: Vec<Document> = (0..10).map(|i| w.run("app", big(i))).collect();
+    let refused = writes.iter().find(|r| !ok(r)).expect("a write past the bytes per second");
+    assert_eq!(code(refused), Some(RATE_LIMITED), "{refused:?}");
+    // The service user is held by no limit.
+    admin(
+        &nodes[0],
+        &[
+            "tenant",
+            "limits",
+            "acme",
+            "--max-write-bytes-per-second",
+            "0",
+            "--ops-per-second",
+            "5",
+            "--service-user",
+            "ann",
+        ],
+    );
+    let mut svc = ann(&nodes[0]);
+    let all_ok = (0..40).map(|_| svc.run("app", find())).all(|r| ok(&r));
+    assert!(all_ok, "the service user is not limited");
+    stop(nodes);
+}
+
+#[test]
+fn a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node() {
+    let (nodes, _root) = cluster();
+    let mut slow = ann(&nodes[0]);
+    assert!(
+        ok(&slow.run("app", Document::new().with("insert", "c").with("documents", docs(0..1))))
+    );
+    admin(&nodes[0], &["tenant", "limits", "acme", "--max-concurrent-ops", "1"]);
+    let mut other = ann(&nodes[0]);
+    until("the limit on the node", || {
+        // One command that takes a second holds the only slot (a node of a test has no host
+        // sleep for `sleep()`, so the call keeps its thread busy instead).
+        let sleepy = Document::new().with("find", "c").with(
+            "filter",
+            Document::new().with(
+                "$where",
+                "var s = Date.now(); while (Date.now() - s < 1000) {} return true;",
+            ),
+        );
+        slow.send("app", sleepy);
+        std::thread::sleep(Duration::from_millis(200));
+        let r = other.run("app", Document::new().with("find", "c"));
+        let held = code(&r) == Some(RATE_LIMITED);
+        let _ = slow.receive();
+        held.then_some(())
+    });
+    // Another node has its own slot.
+    let mut elsewhere = ann(&nodes[1]);
+    let r = elsewhere.run("app", Document::new().with("find", "c"));
+    assert_eq!(batch(&r, "firstBatch").len(), 1, "{r:?}");
+    stop(nodes);
+}

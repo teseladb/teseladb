@@ -470,13 +470,64 @@ fn command<B: Backend + ?Sized>(
         // The commands that answer without the node count here; the others in `run_op`.
         lock(s).counters.count(name, &req.command, false);
     }
-    let action = run_command(conn, req, node, cmds, (own_limit, privileges), mark)?;
+    // The limits of the tenant of the user signed in (007 FR-032): its wait counts in its
+    // `maxTimeMS`, and it ends with the command.
+    let limited = match (cmds.as_mut(), conn.auth.user.as_ref()) {
+        (Some((backend, _)), Some(u)) if u.tenant != 0 && !free_of_limits(name) => {
+            let bytes = if tenant_write(name) {
+                u64::from(req.header.length.max(0).unsigned_abs())
+            } else {
+                0
+            };
+            backend.tenant_begin(u.tenant, &u.name, bytes)?.map(|waited| (u.tenant, waited))
+        }
+        _ => None,
+    };
+    let own_limit = match (own_limit, limited) {
+        (Some(ms), Some((_, waited))) => Some(ms.saturating_sub(waited).max(1)),
+        (limit, _) => limit,
+    };
+    let reborrowed = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
+    let ran = run_command(conn, req, node, reborrowed, (own_limit, privileges), mark);
+    if let (Some((tenant, _)), Some((backend, _))) = (limited, cmds.as_mut()) {
+        backend.tenant_end(tenant);
+    }
+    let action = ran?;
     Ok(match (action, write_concern_error) {
         (Action::Reply(d), Some(wce)) if d.get("ok") == Some(&Value::Double(1.0)) => {
             Action::Reply(with_write_concern_error(d, wce))
         }
         (a, _) => a,
     })
+}
+
+/// The commands that spend no token of a tenant (007 FR-032): the handshake, the authentication,
+/// `ping`, `endSessions` and `killCursors`.
+fn free_of_limits(name: &str) -> bool {
+    is_hello(name)
+        || auth::is_auth_command(name)
+        || name == PING
+        || name == WHATS_MY_URI
+        || name == crate::commands::session::END_SESSIONS
+        || name == crate::commands::query::KILL_CURSORS
+}
+
+/// The commands whose bytes count against a tenant's bytes written per second (007 FR-032).
+const TENANT_WRITES: [&str; 10] = [
+    crate::commands::crud::INSERT,
+    crate::commands::crud::UPDATE,
+    crate::commands::crud::FIND_AND_MODIFY,
+    crate::commands::crud::BULK_WRITE,
+    crate::commands::apply_ops::APPLY_OPS,
+    crate::commands::catalog::CREATE,
+    crate::commands::indexes::CREATE_INDEXES,
+    crate::commands::search_indexes::CREATE_SEARCH_INDEXES,
+    crate::commands::catalog::COLL_MOD,
+    crate::commands::capped::CONVERT_TO_CAPPED,
+];
+
+fn tenant_write(name: &str) -> bool {
+    TENANT_WRITES.contains(&canonical(name))
 }
 
 /// Reply `d` with a failpoint's `writeConcernError` and its labels before `ok`, as a `refrouter`

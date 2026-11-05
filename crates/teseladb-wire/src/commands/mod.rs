@@ -499,6 +499,19 @@ pub trait Backend {
     fn gate_everywhere(&mut self, _want: write_block::WriteGate) -> Result<bool, CommandError> {
         Ok(true)
     }
+    /// Lets a command of user `user` of tenant `tenant` that writes `bytes` begin under the
+    /// tenant's limits on this node (007 FR-032): `None` when nothing limits it (no limits, its
+    /// service user), or the milliseconds it waited; an error 462 when it may not run.
+    fn tenant_begin(
+        &mut self,
+        _tenant: u32,
+        _user: &teseladb_auth::users::UserName,
+        _bytes: u64,
+    ) -> Result<Option<u64>, CommandError> {
+        Ok(None)
+    }
+    /// A command [`Backend::tenant_begin`] let run ended.
+    fn tenant_end(&mut self, _tenant: u32) {}
     /// The state of tenant `tenant`, as this node's copy of Group 0 has it (007 FR-030, FR-034);
     /// none for the default tenant or one that does not exist.
     fn tenant_state(&mut self, _tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {

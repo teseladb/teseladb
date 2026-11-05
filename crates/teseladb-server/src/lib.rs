@@ -71,6 +71,7 @@ pub mod search_segments;
 pub mod sessions_ops;
 pub mod spill;
 pub mod sts_client;
+pub mod tenant_limits;
 pub mod tls_port;
 pub mod tls_stream;
 pub mod transfer;
