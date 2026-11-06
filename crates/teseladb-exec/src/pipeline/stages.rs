@@ -247,6 +247,20 @@ impl Unwind {
         Ok(Unwind { path: p.split('.').map(str::to_owned).collect(), index, preserve })
     }
 
+    /// [`Unwind::run`], asking `env` whether to stop before each document it spreads.
+    pub fn run_checked(
+        &self,
+        docs: Vec<Document>,
+        env: &dyn Env,
+    ) -> Result<Vec<Document>, MqlError> {
+        let mut out = Vec::new();
+        for d in docs {
+            env.interrupted()?;
+            out.extend(self.run(vec![d]));
+        }
+        Ok(out)
+    }
+
     /// One document per element of the array at the path; any other value stays as it is.
     pub fn run(&self, docs: Vec<Document>) -> Vec<Document> {
         let segs: Vec<&str> = self.path.iter().map(String::as_str).collect();
@@ -718,6 +732,7 @@ impl Lookup {
         };
         let mut out = Vec::with_capacity(docs.len());
         for d in docs {
+            env.interrupted()?;
             // Without `from`, the equality applies to what the pipeline's `$documents` gives,
             // before its other stages (measured on a `refrouter` 9.0.4).
             let join = match (&self.local, &self.foreign) {

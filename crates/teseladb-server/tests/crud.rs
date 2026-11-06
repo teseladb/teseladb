@@ -774,3 +774,39 @@ fn concurrent_unique_inserts_from_every_node_keep_one_document_per_value() {
     drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
     drop(first.stop());
 }
+
+/// An aggregation that works in memory stops at its `maxTimeMS` (006 FR-012): a `$lookup` of
+/// every document with every other reads its collection once, and then it and the `$unwind` after
+/// it spread a million pairs without reading again, which ran past the limit before the stages
+/// asked the operation whether to stop.
+#[test]
+fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
+    const DOCUMENTS: i32 = 1_000;
+    const MAX_TIME_MS: i32 = 50;
+    const MAX_TIME_MS_EXPIRED: i32 = 50;
+    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let rows: Vec<Value> =
+        (0..DOCUMENTS).map(|n| Value::Document(Document::new().with("_id", n))).collect();
+    assert!(ok(&c.run("joins", Document::new().with("insert", "c").with("documents", rows))));
+    let lookup = Document::new().with(
+        "$lookup",
+        Document::new().with("from", "c").with("pipeline", Vec::<Value>::new()).with("as", "all"),
+    );
+    let pipeline = vec![
+        Value::Document(lookup),
+        Value::Document(Document::new().with("$unwind", "$all")),
+        Value::Document(Document::new().with("$count", "pairs")),
+    ];
+    let aggregate = Document::new()
+        .with("aggregate", "c")
+        .with("pipeline", pipeline)
+        .with("cursor", Document::new())
+        .with("maxTimeMS", MAX_TIME_MS);
+    let started = std::time::Instant::now();
+    let r = c.run("joins", aggregate);
+    assert_eq!(r.get("code"), Some(&Value::Int32(MAX_TIME_MS_EXPIRED)), "{r:?}");
+    assert!(started.elapsed() < Duration::from_secs(5), "it ran {:?}", started.elapsed());
+    drop(node.stop());
+}

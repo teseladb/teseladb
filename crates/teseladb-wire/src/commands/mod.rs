@@ -250,6 +250,12 @@ pub trait Backend {
     fn pause(&mut self) -> bool {
         self.txn_pause()
     }
+    /// The error that stops the running operation now, if any: its `maxTimeMS` passed or it was
+    /// killed (006 FR-012). Work that touches no storage, such as the stages of an aggregation in
+    /// memory, asks it as it goes; a backend without a running operation never stops one.
+    fn interrupted(&self) -> Result<(), crate::error::CommandError> {
+        Ok(())
+    }
     /// Sends request `op` of a client transaction to range `g` and waits for its answer, until
     /// the operation's deadline (008).
     fn txn_send(

@@ -38,6 +38,10 @@ impl Env for WithVars<'_> {
         self.inner.ext()
     }
 
+    fn interrupted(&self) -> Result<(), MqlError> {
+        self.inner.interrupted()
+    }
+
     fn vars(&self) -> Option<&Document> {
         Some(&self.vars.set)
     }
@@ -95,6 +99,10 @@ pub(super) struct Joined<'a> {
 impl Env for Joined<'_> {
     fn ext(&self) -> &dyn Extensions {
         self.inner.ext()
+    }
+
+    fn interrupted(&self) -> Result<(), MqlError> {
+        self.inner.interrupted()
     }
 
     fn vars(&self) -> Option<&Document> {

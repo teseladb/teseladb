@@ -45,6 +45,14 @@ pub trait Env {
     /// The extensions of the matcher (`$expr`, geometry, text).
     fn ext(&self) -> &dyn Extensions;
 
+    /// The error that stops the pipeline now, if any: the command's `maxTimeMS` passed or the
+    /// operation was killed (006 FR-012). The stages ask it before each stage, for each document a
+    /// `$lookup` joins and for each document `$unwind` spreads, so that a pipeline that works in
+    /// memory stops as one that reads does. Nothing stops a pipeline by default.
+    fn interrupted(&self) -> Result<(), MqlError> {
+        Ok(())
+    }
+
     /// The command's variables (`let`, `NOW`, `CLUSTER_TIME`).
     fn vars(&self) -> Option<&Document>;
 
@@ -482,6 +490,7 @@ impl Pipeline {
         // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
         let mut given: Vec<String> = Vec::new();
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
+            env.interrupted()?;
             sbe = sbe && *spec && sbe_capable(st);
             // A grouping stage reads a score a document lacks as nothing (measured on 9.0.4,
             // after a `$unionWith`).
@@ -941,7 +950,7 @@ fn run_stage(
             docs.into_iter().skip(usize::try_from(*n).unwrap_or(usize::MAX)).collect()
         }
         Stage::Count(field) => stages::run_count(field, docs.len()),
-        Stage::Unwind(u) => u.run(docs),
+        Stage::Unwind(u) => u.run_checked(docs, env)?,
         Stage::Group(g) => g.run(docs, env, sbe)?,
         Stage::SortByCount(e) => group::run_sort_by_count(e, docs, env, sbe)?,
         Stage::Bucket(b) => b.run(docs, env, sbe)?,

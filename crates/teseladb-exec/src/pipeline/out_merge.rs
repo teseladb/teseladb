@@ -516,6 +516,10 @@ impl Env for Scoped<'_> {
         self.inner.ext()
     }
 
+    fn interrupted(&self) -> Result<(), MqlError> {
+        self.inner.interrupted()
+    }
+
     fn vars(&self) -> Option<&Document> {
         Some(&self.vars)
     }

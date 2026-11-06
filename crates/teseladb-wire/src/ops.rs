@@ -647,6 +647,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.check().is_ok() && self.inner.txn_pause()
     }
 
+    fn interrupted(&self) -> Result<(), CommandError> {
+        self.check()
+    }
+
     fn txn_wait_clock(&mut self, until_ms: u64) -> bool {
         self.check().is_ok() && self.inner.txn_wait_clock(until_ms)
     }

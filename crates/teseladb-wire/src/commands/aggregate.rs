@@ -429,6 +429,14 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         &NodeExtensions
     }
 
+    fn interrupted(&self) -> Result<(), MqlError> {
+        // The stages run between the reads of the pipeline; a read under way checks for itself.
+        match self.backend.try_borrow() {
+            Ok(backend) => backend.interrupted().map_err(to_mql),
+            Err(_) => Ok(()),
+        }
+    }
+
     fn js(&self) -> Option<std::rc::Rc<dyn teseladb_exec::expr::js::JsEngine>> {
         Some(super::js::engine())
     }

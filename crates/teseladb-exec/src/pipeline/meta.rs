@@ -100,6 +100,10 @@ impl Env for RequiredEnv<'_> {
         self.inner.ext()
     }
 
+    fn interrupted(&self) -> Result<(), MqlError> {
+        self.inner.interrupted()
+    }
+
     fn vars(&self) -> Option<&Document> {
         self.vars.or_else(|| self.inner.vars())
     }
@@ -198,6 +202,10 @@ pub(crate) const SEARCH_META: &str = "SEARCH_META";
 impl Env for MetaEnv<'_> {
     fn ext(&self) -> &dyn Extensions {
         self.inner.ext()
+    }
+
+    fn interrupted(&self) -> Result<(), MqlError> {
+        self.inner.interrupted()
     }
 
     fn joined_text_source(
