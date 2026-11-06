@@ -2,7 +2,8 @@
 //! Group 0 so every node reads the same value, with the forms and errors of a `refrouter` 9.0.4
 //! (measured). Each specification adds its parameters to [`KNOWN`]; 006 has `defaultMaxTimeMS`,
 //! 013 `auditConfig` (FR-031) and 007 TeselaDB's own `teselaHistoryRetention` (FR-019, DV-016)
-//! and `teselaLoadSplitOpsPerSecond` (D-075), and 019 `httpOptions` and `mcpOptions` (DV-016). Each read and change goes to the audit log as on RefDb
+//! and `teselaLoadSplitOpsPerSecond` (D-075) and RefDb's `changeStreamOptions` (FR-019), and
+//! 019 `httpOptions` and `mcpOptions` (DV-016). Each read and change goes to the audit log as on RefDb
 //! Enterprise 9.0.4: `getClusterParameter` with the names asked for, `setClusterParameter` and
 //! `updateCachedClusterServerParameter` with the value before and the one given.
 
@@ -47,7 +48,7 @@ struct Known {
 }
 
 /// The cluster parameters TeselaDB has, in name order.
-const KNOWN: [Known; 7] = [
+const KNOWN: [Known; 8] = [
     Known {
         name: audit_log::AUDIT_CONFIG,
         default: audit_log::audit_config_default,
@@ -55,6 +56,14 @@ const KNOWN: [Known; 7] = [
         idl: audit_log::AUDIT_CONFIG_IDL,
         prefixed: false,
         nested: true,
+    },
+    Known {
+        name: CHANGE_STREAM_OPTIONS,
+        default: change_stream_default,
+        parse: change_stream_parse,
+        idl: "ClusterServerParameter",
+        prefixed: false,
+        nested: false,
     },
     Known {
         name: DEFAULT_MAX_TIME_MS,
@@ -118,6 +127,97 @@ const OPS_PER_SECOND: &str = "opsPerSecond";
 pub const DEFAULT_HISTORY_SECONDS: i64 = 24 * 60 * 60;
 /// Load split threshold without a value.
 pub const DEFAULT_LOAD_SPLIT_OPS: i64 = 2_500;
+
+/// `changeStreamOptions` (007 FR-019): `preAndPostImages.expireAfterSeconds`, how long the
+/// images of a change are served, `"off"` without a value.
+pub const CHANGE_STREAM_OPTIONS: &str = "changeStreamOptions";
+const PRE_AND_POST_IMAGES: &str = "preAndPostImages";
+const EXPIRE_AFTER_SECONDS: &str = "expireAfterSeconds";
+const OFF: &str = "off";
+
+fn change_stream_default() -> Document {
+    Document::new().with(PRE_AND_POST_IMAGES, Document::new().with(EXPIRE_AFTER_SECONDS, OFF))
+}
+
+/// Reads `changeStreamOptions` with the order of checks and the messages of a `refrouter` 9.0.4
+/// (measured on 07-11-2026): the parser's errors after «Failed parsing new changeStreamOptions
+/// value», the value's own without it, all `BadValue`.
+fn change_stream_parse(v: &Document) -> Result<Document, (Code, String)> {
+    let parser =
+        |why: String| (BAD_VALUE, format!("Failed parsing new {CHANGE_STREAM_OPTIONS} value{why}"));
+    let Some(images) = v.get(PRE_AND_POST_IMAGES) else {
+        let why = format!(
+            "BSON field '{CHANGE_STREAM_OPTIONS}.{PRE_AND_POST_IMAGES}' is missing but a required field"
+        );
+        return Err(parser(why));
+    };
+    if let Some((k, _)) = v.iter().find(|(k, _)| *k != PRE_AND_POST_IMAGES) {
+        return Err(parser(format!(
+            "BSON field '{CHANGE_STREAM_OPTIONS}.{k}' is an unknown field."
+        )));
+    }
+    let Value::Document(images) = images else {
+        return Err(parser(format!(
+            "invalid parameter: expected an object ({PRE_AND_POST_IMAGES})"
+        )));
+    };
+    let Some(expire) = images.get(EXPIRE_AFTER_SECONDS) else {
+        let why = format!(
+            "BSON field '{CHANGE_STREAM_OPTIONS}.{EXPIRE_AFTER_SECONDS}' is missing but a required field"
+        );
+        return Err(parser(why));
+    };
+    if let Some((k, _)) = images.iter().find(|(k, _)| *k != EXPIRE_AFTER_SECONDS) {
+        let why = format!(
+            "BSON field '{CHANGE_STREAM_OPTIONS}.{PRE_AND_POST_IMAGES}.{k}' is an unknown field."
+        );
+        return Err(parser(why));
+    }
+    let kept = match expire {
+        Value::String(s) if s == OFF => Value::from(OFF),
+        Value::String(_) => {
+            let why = format!("Non-numeric value of '{EXPIRE_AFTER_SECONDS}' should be '{OFF}'");
+            return Err((BAD_VALUE, why));
+        }
+        Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
+            let seconds = whole_seconds(expire).unwrap_or(0);
+            if seconds < 1 {
+                let why = format!("Numeric value of '{EXPIRE_AFTER_SECONDS}' should be positive");
+                return Err((BAD_VALUE, why));
+            }
+            Value::Int64(seconds)
+        }
+        other => {
+            let path =
+                format!("{CHANGE_STREAM_OPTIONS}.{PRE_AND_POST_IMAGES}.{EXPIRE_AFTER_SECONDS}");
+            let e = wrong_types(&path, other, &["string", "long"]);
+            return Err(parser(e.errmsg));
+        }
+    };
+    Ok(Document::new().with(PRE_AND_POST_IMAGES, Document::new().with(EXPIRE_AFTER_SECONDS, kept)))
+}
+
+/// The whole seconds of a number as a `long` takes it: a double truncated, a decimal rounded
+/// half to even (measured).
+fn whole_seconds(v: &Value) -> Option<i64> {
+    let x = number(v)?;
+    let whole = match v {
+        Value::Decimal128(_) => x.round_ties_even(),
+        _ => x.trunc(),
+    };
+    Some(if whole >= i64::MAX as f64 { i64::MAX } else { whole as i64 })
+}
+
+/// How long the images of a change are served, in milliseconds, from the stored value of
+/// `changeStreamOptions`: `None` while `expireAfterSeconds` is `"off"` or not set.
+pub fn images_expire_after_ms(stored: Option<&[u8]>) -> Option<u64> {
+    let doc = Document::from(RawDoc::from_bytes(stored?).ok()?);
+    let Some(Value::Document(images)) = doc.get(PRE_AND_POST_IMAGES) else { return None };
+    match images.get(EXPIRE_AFTER_SECONDS)? {
+        Value::Int64(n) => u64::try_from(*n).ok().map(|s| s.saturating_mul(1_000)),
+        _ => None,
+    }
+}
 
 fn history_default() -> Document {
     Document::new().with(SECONDS, DEFAULT_HISTORY_SECONDS)

@@ -729,6 +729,15 @@ fn poll<B: Backend + ?Sized>(
         CommandError::new(error::INTERNAL_ERROR, format!("a change stream read a bad meta: {e:?}"))
     })?;
     let mut events: Vec<(ChangeEvent, bool)> = Vec::new();
+    // `changeStreamOptions` (007 FR-019): past `expireAfterSeconds` an event has no images, as
+    // once RefDb removed its pre-image, from which it builds the post-image too.
+    let options = backend.cluster_parameters()?;
+    let expire = super::parameters::images_expire_after_ms(
+        options.get(super::parameters::CHANGE_STREAM_OPTIONS).map(Vec::as_slice),
+    );
+    let now_ms = backend.now_ms();
+    let fresh =
+        |at: &EventKey| expire.is_none_or(|ttl| now_ms.saturating_sub(at.ts.physical) <= ttl);
     // The document each key's last change left, for the pre-image of a later write of the same
     // transaction.
     let mut left: BTreeMap<&[u8], (&EventKey, Option<&Vec<u8>>)> = BTreeMap::new();
@@ -745,7 +754,8 @@ fn poll<B: Backend + ?Sized>(
         let same_txn = prior.filter(|(at, _)| {
             at.ts == change.event.ts && at.txn == change.event.txn && at.txn != 0
         });
-        let images = Images { on: w.images_at(&change.event), prior: same_txn.map(|(_, d)| d) };
+        let on = w.images_at(&change.event) && fresh(&change.event);
+        let images = Images { on, prior: same_txn.map(|(_, d)| d) };
         events.push((event_of(backend, stream, change, ns, &w.entry, images)?, false));
     }
     let watch = Watch {

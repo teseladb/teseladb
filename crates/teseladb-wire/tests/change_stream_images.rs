@@ -415,3 +415,49 @@ fn the_batches_before_the_one_of_an_event_too_large_come_out() {
     let gone = one_more(&mut m, plain);
     assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "{gone:?}");
 }
+
+/// `changeStreamOptions.preAndPostImages.expireAfterSeconds` (007 T046, FR-019) limits how long
+/// the images of an event are served: past it, `whenAvailable` gives `null` and `required` fails,
+/// as once RefDb removed them; `"off"` serves them again.
+#[test]
+fn images_older_than_their_expiry_are_not_served() {
+    let mut m = Mem::new();
+    run(
+        &mut m,
+        Document::new().with("create", "p").with("changeStreamPreAndPostImages", images(true)),
+    );
+    let expire = |m: &mut Mem, v: Value| {
+        let options =
+            Document::new().with("preAndPostImages", Document::new().with("expireAfterSeconds", v));
+        let set = Document::new()
+            .with("setClusterParameter", Document::new().with("changeStreamOptions", options));
+        let r = m.run("admin", set);
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    };
+    expire(&mut m, Value::Int32(60));
+    let both = || {
+        Document::new()
+            .with("fullDocument", "whenAvailable")
+            .with("fullDocumentBeforeChange", "whenAvailable")
+    };
+    let fresh = open(&mut m, "p", both());
+    let late = open(&mut m, "p", both());
+    let required = open(&mut m, "p", Document::new().with("fullDocumentBeforeChange", "required"));
+    writes(&mut m, "p");
+    // Within the minute the images are there.
+    let now = batch(&get_more(&mut m, fresh, "p"));
+    assert_eq!(
+        field(&now[1], "fullDocumentBeforeChange"),
+        &d(&[("_id", 1.into()), ("a", 1.into())])
+    );
+    // Two minutes later they expired.
+    m.now += 120_000;
+    let later = batch(&get_more(&mut m, late, "p"));
+    assert_eq!(later.len(), 4);
+    for e in &later[1..] {
+        assert_eq!(field(e, "fullDocumentBeforeChange"), &Value::Null);
+    }
+    assert_eq!(field(&later[1], "fullDocument"), &Value::Null);
+    let r = get_more(&mut m, required, "p");
+    assert_eq!(r.get("code"), Some(&Value::Int32(47)), "{r:?}");
+}

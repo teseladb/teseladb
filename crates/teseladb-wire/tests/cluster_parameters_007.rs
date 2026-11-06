@@ -7,8 +7,8 @@ mod common;
 
 use common::{Mem, doc, field};
 use teseladb_wire::commands::parameters::{
-    DEFAULT_HISTORY_SECONDS, DEFAULT_LOAD_SPLIT_OPS, HISTORY_RETENTION, LOAD_SPLIT_OPS,
-    history_retention_ms, load_split_ops,
+    CHANGE_STREAM_OPTIONS, DEFAULT_HISTORY_SECONDS, DEFAULT_LOAD_SPLIT_OPS, HISTORY_RETENTION,
+    LOAD_SPLIT_OPS, history_retention_ms, images_expire_after_ms, load_split_ops,
 };
 use teseladb_bson::{Document, Value};
 
@@ -104,4 +104,108 @@ fn values_that_are_not_whole_positive_numbers_are_refused() {
     assert_eq!(load_split_ops(Some(&[1, 2])), DEFAULT_LOAD_SPLIT_OPS as u64);
     let int32 = Document::new().with("opsPerSecond", 7).to_bytes().unwrap();
     assert_eq!(load_split_ops(Some(&int32)), 7);
+}
+
+/// `changeStreamOptions` with `preAndPostImages.expireAfterSeconds` as a `refrouter` 9.0.4 takes it
+/// (T046, FR-019; measured on 07-11-2026): `"off"` without a value, a whole number of seconds
+/// stored as a `long` (a double truncated, a decimal rounded half to even), and its errors.
+#[test]
+fn change_stream_options_take_off_or_a_positive_number_as_on_a_refrouter() {
+    let mut m = Mem::new();
+    let images = |v: Value| {
+        Document::new().with("preAndPostImages", Document::new().with("expireAfterSeconds", v))
+    };
+    let shown = |m: &mut Mem| {
+        let r = m.run("admin", get(CHANGE_STREAM_OPTIONS));
+        field(&r, "clusterParameters.0.preAndPostImages.expireAfterSeconds").clone()
+    };
+    assert_eq!(shown(&mut m), Value::from("off"));
+    assert_eq!(images_expire_after_ms(None), None);
+    let r = m.run("admin", get("*"));
+    assert!(format!("{r:?}").contains(CHANGE_STREAM_OPTIONS), "{r:?}");
+    for (given, kept) in [
+        (Value::Int32(3_600), 3_600),
+        (Value::Int64(10), 10),
+        (Value::Double(2.7), 2),
+        (Value::Decimal128("7.9".parse().unwrap()), 8),
+        (Value::Decimal128("2.5".parse().unwrap()), 2),
+        (Value::Decimal128("3.5".parse().unwrap()), 4),
+    ] {
+        let r = m.run("admin", set(CHANGE_STREAM_OPTIONS, images(given.clone())));
+        assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{given:?}: {r:?}");
+        assert_eq!(shown(&mut m), Value::Int64(kept), "{given:?}");
+    }
+    let stored = m.params.get(CHANGE_STREAM_OPTIONS).map(Vec::as_slice);
+    assert_eq!(images_expire_after_ms(stored), Some(4_000));
+    let r = m.run("admin", set(CHANGE_STREAM_OPTIONS, images(Value::from("off"))));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
+    assert_eq!(shown(&mut m), Value::from("off"));
+    assert_eq!(
+        images_expire_after_ms(m.params.get(CHANGE_STREAM_OPTIONS).map(Vec::as_slice)),
+        None
+    );
+
+    let prefix = "Failed parsing new changeStreamOptions value";
+    let positive = "Numeric value of 'expireAfterSeconds' should be positive".to_owned();
+    let refused = [
+        (images(Value::Int32(0)), positive.clone()),
+        (images(Value::Int32(-5)), positive.clone()),
+        (images(Value::Double(0.5)), positive.clone()),
+        (images(Value::Decimal128("0.4".parse().unwrap())), positive),
+        (
+            images(Value::from("never")),
+            "Non-numeric value of 'expireAfterSeconds' should be 'off'".into(),
+        ),
+        (
+            images(Value::from("Off")),
+            "Non-numeric value of 'expireAfterSeconds' should be 'off'".into(),
+        ),
+        (
+            images(Value::Boolean(true)),
+            format!(
+                "{prefix}BSON field 'changeStreamOptions.preAndPostImages.expireAfterSeconds' is the wrong type 'bool', expected types '[string, long]'"
+            ),
+        ),
+        (
+            Document::new().with("preAndPostImages", Document::new()),
+            format!(
+                "{prefix}BSON field 'changeStreamOptions.expireAfterSeconds' is missing but a required field"
+            ),
+        ),
+        (
+            Document::new(),
+            format!(
+                "{prefix}BSON field 'changeStreamOptions.preAndPostImages' is missing but a required field"
+            ),
+        ),
+        (
+            Document::new().with("other", 1),
+            format!(
+                "{prefix}BSON field 'changeStreamOptions.preAndPostImages' is missing but a required field"
+            ),
+        ),
+        (
+            images(Value::from("off")).with("other", 1),
+            format!("{prefix}BSON field 'changeStreamOptions.other' is an unknown field."),
+        ),
+        (
+            Document::new().with(
+                "preAndPostImages",
+                Document::new().with("expireAfterSeconds", 5).with("x", 1),
+            ),
+            format!(
+                "{prefix}BSON field 'changeStreamOptions.preAndPostImages.x' is an unknown field."
+            ),
+        ),
+        (
+            Document::new().with("preAndPostImages", 5),
+            format!("{prefix}invalid parameter: expected an object (preAndPostImages)"),
+        ),
+    ];
+    for (value, why) in refused {
+        let r = m.run("admin", set(CHANGE_STREAM_OPTIONS, value.clone()));
+        assert_eq!(code(&r), Some(&Value::Int32(2)), "{value:?}: {r:?}");
+        assert_eq!(r.get("errmsg"), Some(&Value::from(why.as_str())), "{value:?}");
+    }
+    assert_eq!(shown(&mut m), Value::from("off"), "a refused value changes nothing");
 }
