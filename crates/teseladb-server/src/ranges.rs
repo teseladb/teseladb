@@ -28,7 +28,7 @@ use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::coresm::CoreSm;
 use crate::hosting::Hosting;
-use crate::replicas::{Step, next_step};
+use crate::replicas::{Step, next_step, successor};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -414,10 +414,16 @@ impl Replicas {
         if measure {
             self.check_at = now + SIZE_CHECK_EVERY;
         }
+        // A range this core still runs and leads, though Group 0 moved it off this node: its leader
+        // brings the new replicas in and hands the range over before it leaves.
+        let me = self.me;
+        let leaving =
+            self.all.iter().filter(|d| self.open.contains(&d.group) && !d.nodes().contains(&me));
         let led: Vec<Led> = self
             .descs
             .values()
             .filter(|d| self.open.contains(&d.group))
+            .chain(leaving)
             .filter_map(|d| {
                 let st = core.status(d.group).filter(|s| s.role == Role::Leader)?;
                 let sm = core.state_machine(d.group).and_then(CoreSm::range)?;
@@ -435,7 +441,11 @@ impl Replicas {
                 continue;
             }
             self.replicas(core, &l, now, &mut out);
-            self.split(host, lsm, &l, (measure, now), &mut out);
+            if l.desc.nodes().contains(&me) {
+                self.split(host, lsm, &l, (measure, now), &mut out);
+            } else {
+                self.hand_over(core, &l, now);
+            }
         }
         out
     }
@@ -474,6 +484,19 @@ impl Replicas {
         }
         self.resend_at.insert(g, now + RESEND_EVERY);
         true
+    }
+
+    /// The leader of a range Group 0 moved off this node hands it to a new voter with the whole log.
+    fn hand_over(&mut self, core: &mut MultiRaftCore<CoreSm>, l: &Led, now: Nanos) {
+        let (g, st) = (l.desc.group, &l.st);
+        if self.conf_ops.contains_key(&g) {
+            return;
+        }
+        let conf = core.conf(g).cloned().unwrap_or_default();
+        let to = successor(&l.desc, &conf, &st.progress, st.hard_state.commit, self.me);
+        if let Some(to) = to.filter(|_| self.may_send(g, now)) {
+            core.transfer_leader(g, to);
+        }
     }
 
     /// The leader brings the range's configuration to Group 0's replicas.

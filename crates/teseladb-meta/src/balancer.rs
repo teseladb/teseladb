@@ -229,9 +229,12 @@ pub fn plan(v: &View<'_>) -> Vec<Decision> {
     if let Some((group, node)) = leaders {
         out.push(Decision::Command(Group0Command::SetLeaderHint { group, node, term: 0 }));
     }
+    // A range in the middle of a change may still run on a node the table no longer names: its
+    // group moves the replicas, and only once it settled does a draining node hold nothing.
+    let settled = v.ranges.values().all(|r| !r.settling);
     for (id, info) in &v.group0.nodes {
         let holds = v.ranges.values().any(|r| r.nodes().contains(id));
-        if info.state == NodeState::Draining && !holds && !v.voters.contains(id) {
+        if info.state == NodeState::Draining && settled && !holds && !v.voters.contains(id) {
             let cmd = Group0Command::SetNodeState { node: *id, state: NodeState::Removed };
             out.push(Decision::Command(cmd));
         }

@@ -304,6 +304,34 @@ fn a_drained_node_still_voting_in_group0_is_not_removed_yet() {
     assert!(!removed, "{:?}", w.plan());
 }
 
+#[test]
+fn a_drained_node_is_not_removed_while_a_range_still_moves_off_it() {
+    // The only replica of range 1 went from node 1 to node 2: the descriptor names node 2 as a
+    // learner while the range's own group, still on node 1, catches it up. Node 1 holds nothing in
+    // the table, but stopping it now would leave the range without a voter (021 FR-040, FR-041).
+    let mut sm = cluster(2);
+    add_range(&mut sm, 1, &[2]);
+    let r = sm.ranges.get_mut(&GroupId(1)).unwrap();
+    r.replicas = vec![(n(2), ReplicaRole::Learner)];
+    r.settling = true;
+    sm.nodes.get_mut(&n(1)).unwrap().state = NodeState::Draining;
+    let removed = |w: &World| {
+        w.plan().into_iter().any(|d| {
+            matches!(
+                d,
+                Decision::Command(Group0Command::SetNodeState { state: NodeState::Removed, .. })
+            )
+        })
+    };
+    let mut w = World::new(sm, &[2]);
+    assert!(!removed(&w), "{:?}", w.plan());
+    // Settled: node 2 votes alone, and node 1 goes.
+    let r = w.sm.ranges.get_mut(&GroupId(1)).unwrap();
+    r.replicas = vec![(n(2), ReplicaRole::Voter)];
+    r.settling = false;
+    assert!(removed(&w), "{:?}", w.plan());
+}
+
 /// Replica counts by node.
 fn counts(sm: &Group0Sm) -> BTreeMap<NodeId, usize> {
     let mut c: BTreeMap<NodeId, usize> = sm.nodes.keys().map(|n| (*n, 0)).collect();

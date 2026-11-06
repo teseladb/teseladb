@@ -241,6 +241,41 @@ fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
     }
 }
 
+/// A cluster of one node that changes it for another, as a dedicated cluster changes version or
+/// size (021 FR-040, FR-041): node 2 joins, node 1 drains until it is `removed` and stops, and node
+/// 2 alone answers for every document of node 1.
+#[test]
+fn a_node_that_replaces_the_only_one_answers_alone_once_it_left() {
+    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n1.wait_ready(READY));
+    let mut c1 = Client::new(&n1);
+    assert!(ok(&c1.run("db", Document::new().with("insert", "c").with("documents", docs(0..50)))));
+    let n2 = Node::start(with_admin(vec![n1.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
+        .unwrap();
+    assert!(n2.wait_ready(READY));
+    let at = n2.admin_addr().unwrap().to_string();
+    let one = n1.node_id().0.to_string();
+    let (code, _, err) = admin(&at, &["node", "drain", &one]);
+    assert_eq!(code, 0, "{err}");
+    until("node 1 is removed", || {
+        let (code, out, _) = admin(&at, &["--format", "json", "nodes"]);
+        let text: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        let removed =
+            format!("{{\"_id\":{one},\"voter\":false,\"learner\":false,\"state\":\"removed\"}}");
+        (code == 0 && text.contains(&removed)).then_some(())
+    });
+    n1.stop();
+    let mut c2 = Client::new(&n2);
+    let started = std::time::Instant::now();
+    let found = until("node 2 answers alone", || {
+        let r = c2.run("db", Document::new().with("find", "c").with("batchSize", 100));
+        ok(&r).then(|| batch(&r, "firstBatch"))
+    });
+    assert_eq!(found.len(), 50);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    n2.stop();
+}
+
 /// The leaders of each range, from `teseladb admin --format json ranges`: the node each range's
 /// descriptor names (`leaderHint`).
 fn leader_hints(at: &str) -> Vec<Option<i64>> {

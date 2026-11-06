@@ -49,6 +49,25 @@ pub fn next_step(
     (desc.settling && settled).then_some(Step::Settle { epoch: desc.replica_epoch })
 }
 
+/// The voter a leader `me` that Group 0's descriptor `desc` no longer names hands the range to,
+/// once the configuration has nothing else to do but remove `me`: a node the descriptor names,
+/// voting and with the log up to `commit`. Until then the leader carries out [`next_step`] as any
+/// other, so the range always has a voter with its data (021 FR-040, FR-041).
+pub fn successor(
+    desc: &RangeDesc,
+    conf: &ConfState,
+    progress: &[(NodeId, u64)],
+    commit: u64,
+    me: NodeId,
+) -> Option<NodeId> {
+    let wanted = desc.nodes();
+    if wanted.contains(&me) || next_step(desc, conf, progress, commit, me).is_some() {
+        return None;
+    }
+    let caught_up = |n: &NodeId| progress.iter().any(|(p, matched)| p == n && *matched >= commit);
+    conf.voters.iter().copied().find(|n| *n != me && wanted.contains(n) && caught_up(n))
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -106,6 +125,40 @@ mod tests {
         // Once settled in Group 0 there is nothing left.
         let d = desc(&[(1, V), (2, V), (3, V)], false);
         assert_eq!(next_step(&d, &all, &progress, 9, me), None);
+    }
+
+    #[test]
+    fn a_leader_the_descriptor_no_longer_names_brings_in_the_new_replica_then_hands_it_over() {
+        // The only replica moves from node 1, the leader, to node 2.
+        let d = desc(&[(2, L)], true);
+        let me = NodeId(1);
+        assert_eq!(next_step(&d, &conf(&[1], &[]), &[], 9, me), cc(ConfChangeKind::AddLearner, 2));
+        assert_eq!(successor(&d, &conf(&[1], &[]), &[], 9, me), None);
+        let behind = [(NodeId(2), 5)];
+        assert_eq!(next_step(&d, &conf(&[1], &[2]), &behind, 9, me), None);
+        assert_eq!(
+            successor(&d, &conf(&[1], &[2]), &behind, 9, me),
+            None,
+            "a learner leads nothing"
+        );
+        let caught_up = [(NodeId(2), 9)];
+        assert_eq!(
+            next_step(&d, &conf(&[1], &[2]), &caught_up, 9, me),
+            cc(ConfChangeKind::PromoteLearner, 2)
+        );
+        let both = conf(&[1, 2], &[]);
+        assert_eq!(next_step(&d, &both, &caught_up, 9, me), None);
+        assert_eq!(successor(&d, &both, &caught_up, 9, me), Some(NodeId(2)));
+        assert_eq!(successor(&d, &both, &behind, 9, me), None, "only with the whole log");
+        // The new leader removes node 1, then settles.
+        assert_eq!(next_step(&d, &both, &[], 9, NodeId(2)), cc(ConfChangeKind::Remove, 1));
+        assert_eq!(
+            next_step(&d, &conf(&[2], &[]), &[], 9, NodeId(2)),
+            Some(Step::Settle { epoch: 4 })
+        );
+        // A leader the descriptor still names hands nothing over.
+        let stays = desc(&[(1, V), (2, V)], false);
+        assert_eq!(successor(&stays, &both, &caught_up, 9, me), None);
     }
 
     #[test]
