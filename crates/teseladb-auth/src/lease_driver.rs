@@ -132,6 +132,7 @@ impl LeaseDriver {
     ) -> Vec<FenceMsg> {
         let Some(v) = host.view() else { return Vec::new() };
         let now = ms(now_ns);
+        self.lease.caught_up(v.applied);
         // A table belongs to one term: a replica that led, lost the term and won a later one
         // between two ticks starts afresh, since another leader may have granted leases between.
         if !v.leads || self.table.as_ref().is_some_and(|(_, term)| *term != v.term) {

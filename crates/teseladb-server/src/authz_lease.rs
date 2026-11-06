@@ -37,9 +37,12 @@ pub const DEADLINE_SKEW: Duration = Duration::from_millis(2 * MAX_CLOCK_OFFSET_M
 /// mark of another node the sender's clock took.
 pub const LATE_EVALUATION: Duration = Duration::from_millis(6 * MAX_CLOCK_OFFSET_MS.unsigned_abs());
 
-/// Until when the node may authorize, for its client workers. Its origin is taken before the
-/// node's runtime starts, so its clock reads at least the runtime's: a lease ends here no later
-/// than core 0 counts it.
+/// Until when the node may authorize, for its client workers. Core 0 publishes how long its
+/// lease has left and the gate closes that long after the publication on its own clock, which
+/// comes later than core 0's reading: a lease ends here no later than core 0 counts it, whatever
+/// the origin of either clock. (An end in core 0's clock compared with this one, whose origin
+/// comes before the cores start, made every lease end here already when core 0 took longer than
+/// a lease to start: seen on 06-11-2026, a node that replayed a large log authorized nothing.)
 #[derive(Debug)]
 pub struct AuthGate {
     origin: Instant,
@@ -142,8 +145,11 @@ impl AuthGate {
         now < self.until_ns.load(Ordering::Acquire)
     }
 
-    fn set(&self, until_ms: u64) {
-        self.until_ns.store(until_ms.saturating_mul(NANOS_PER_MS), Ordering::Release);
+    /// The lease has `left` from now: zero closes the gate.
+    fn set(&self, left: Duration) {
+        let left = u64::try_from(left.as_nanos()).unwrap_or(u64::MAX);
+        let until = if left == 0 { 0 } else { self.now().0.saturating_add(left) };
+        self.until_ns.store(until, Ordering::Release);
     }
 }
 
@@ -153,7 +159,15 @@ impl AuthGate {
 pub struct AuthLeaseDriver {
     driver: LeaseDriver,
     gate: Arc<AuthGate>,
+    /// Requests sent and answers received, for the line of a node without a lease.
+    asked: u64,
+    answered: u64,
+    /// When that line may be written again.
+    report_at: Nanos,
 }
+
+/// How often a node without a lease says why (013 FR-012): its client commands get 13436.
+const REPORT_EVERY: Nanos = Nanos(10_000_000_000);
 
 impl Default for AuthLeaseDriver {
     fn default() -> AuthLeaseDriver {
@@ -222,7 +236,13 @@ fn to_peer(m: FenceMsg) -> (NodeId, PeerMsg) {
 impl AuthLeaseDriver {
     /// A driver that publishes its lease in `gate`.
     pub fn with_gate(gate: Arc<AuthGate>) -> AuthLeaseDriver {
-        AuthLeaseDriver { driver: LeaseDriver::new(NODE_HEARTBEAT.0), gate }
+        AuthLeaseDriver {
+            driver: LeaseDriver::new(NODE_HEARTBEAT.0),
+            gate,
+            asked: 0,
+            answered: 0,
+            report_at: Nanos(0),
+        }
     }
 
     /// Whether this node holds its authorization lease at `now`.
@@ -251,7 +271,9 @@ impl AuthLeaseDriver {
         // What the node acknowledges waits for its running operations (009 FR-006).
         let acked = |applied: u64| pins.acked(applied, now);
         let out = self.driver.tick(&mut Host { core, now }, me.0, now.0, &acked);
-        self.publish();
+        self.publish(now);
+        self.asked += out.iter().filter(|m| matches!(m, FenceMsg::Ask { .. })).count() as u64;
+        self.report(core, now);
         out.into_iter().map(to_peer).collect()
     }
 
@@ -269,16 +291,47 @@ impl AuthLeaseDriver {
                 Ok(Vec::new())
             }
             PeerMsg::AuthLeaseGrant { seq, commit, fenced, .. } => {
+                self.answered += 1;
                 self.driver.on_grant(seq, commit, fenced, applied(core));
-                self.publish();
+                self.publish(now);
                 Ok(Vec::new())
             }
             other => Err(other),
         }
     }
 
-    fn publish(&self) {
-        self.gate.set(self.driver.until_ms());
+    /// Publishes what is left at `now`, on core 0's clock, of the lease.
+    fn publish(&self, now: Nanos) {
+        let until_ns = self.driver.until_ms().saturating_mul(NANOS_PER_MS);
+        self.gate.set(Duration::from_nanos(until_ns.saturating_sub(now.0)));
+    }
+
+    /// The line of a node without a lease, every [`REPORT_EVERY`]: what it knows of Group 0 and
+    /// how many requests and answers went, so that a node that keeps refusing says why.
+    fn report<S: StateMachine + Group0Holder>(&mut self, core: &MultiRaftCore<S>, now: Nanos) {
+        if self.holds(now) || now < self.report_at {
+            return;
+        }
+        let first = self.report_at == Nanos(0);
+        self.report_at = Nanos(now.0.saturating_add(REPORT_EVERY.0));
+        if first {
+            // A node that has just started has no lease yet: the line waits one period.
+            return;
+        }
+        let Some(st) = core.status(GROUP0) else { return };
+        crate::log::defer(crate::log::Pending {
+            id: 0,
+            msg: "no authorization lease: the node authorizes no command".to_owned(),
+            attr: format!(
+                "{{\"leader\":{},\"role\":\"{:?}\",\"commit\":{},\"applied\":{},\"asked\":{},\"answered\":{}}}",
+                st.leader.0,
+                st.role,
+                st.hard_state.commit,
+                applied(core),
+                self.asked,
+                self.answered,
+            ),
+        });
     }
 }
 
@@ -518,6 +571,40 @@ mod tests {
         );
     }
 
+    /// A buffer the log writes to.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A node that keeps refusing says why every ten seconds: what it knows of Group 0 and the
+    /// requests and answers that went (013 FR-012).
+    #[test]
+    fn a_node_without_a_lease_says_why() {
+        let mut c = Cluster::new();
+        c.steps(300);
+        let held = c.cut_off_the_leader();
+        assert!(held <= CUT_OFF_LIMIT);
+        let lines = Lines::default();
+        let log = crate::log::Logger::new(
+            crate::log::Level::Info,
+            crate::log::Format::Text,
+            Box::new(lines.clone()),
+        );
+        crate::log::drain(&log);
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("no authorization lease"), "{text}");
+        assert!(text.contains("asked"), "{text}");
+    }
+
     /// The same with Group 0 quiet: a quiescent leader no longer counts ticks towards stepping
     /// down, so its role alone would keep its lease for good.
     #[test]
@@ -609,9 +696,29 @@ mod tests {
     fn the_gate_follows_the_lease() {
         let gate = Arc::new(AuthGate::default());
         assert!(!gate.valid());
-        gate.set(u64::MAX / NANOS_PER_MS);
+        gate.set(Duration::from_secs(3_600));
         assert!(gate.valid());
-        gate.set(0);
+        gate.set(Duration::ZERO);
         assert!(!gate.valid());
+        gate.set(Duration::from_nanos(1));
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(!gate.valid(), "a lease that ran out");
+    }
+
+    /// The gate's origin comes before the cores start; core 0's clock starts with its runtime,
+    /// after replaying its log. A lease core 0 holds holds at the gate however long that took.
+    #[test]
+    fn a_lease_holds_at_the_gate_whatever_core_0_took_to_start() {
+        let gate = Arc::new(AuthGate {
+            origin: Instant::now() - Duration::from_secs(10),
+            ..AuthGate::default()
+        });
+        let d = AuthLeaseDriver::with_gate(Arc::clone(&gate));
+        // Without a lease the gate stays closed.
+        d.publish(Nanos::from_millis(2));
+        assert!(!gate.valid());
+        // A lease of core 0 that ends 1.75 s after its 2 ms holds at the gate, whose clock reads 10 s.
+        gate.set(Duration::from_millis(1_750));
+        assert!(gate.valid(), "core 0 at 2 ms, the gate at 10 s: the lease still holds");
     }
 }

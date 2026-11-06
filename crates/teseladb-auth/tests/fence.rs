@@ -18,12 +18,17 @@ fn a_node_holds_a_lease_from_when_it_asked() {
     assert_eq!(lease.until_ms(), until);
     assert!(lease.valid(until - 1));
     assert!(!lease.valid(until));
-    // A copy behind the leader gets nothing; a late or unknown answer neither.
+    // A copy behind the leader gets nothing yet; a late or unknown answer nothing at all.
     let seq = lease.ask(until);
     lease.granted(seq, 7, 6);
     assert!(!lease.valid(until));
     lease.granted(seq, 7, 7);
     assert!(!lease.valid(until), "the request was already answered");
+    lease.caught_up(6);
+    assert!(!lease.valid(until), "still behind");
+    lease.drop_lease();
+    lease.caught_up(7);
+    assert!(!lease.valid(until), "a restart forgets the answers that waited");
     // An answer to an earlier request still in flight counts, from when that request left: the
     // lease it gives ends no later than the one the leader counts from answering it.
     let old = lease.ask(until + 1);
@@ -41,6 +46,31 @@ fn a_node_holds_a_lease_from_when_it_asked() {
     assert!(!lease.valid(until + 3));
     lease.granted(back, 7, 7);
     assert!(!lease.valid(until + 3));
+}
+
+/// An answer that comes before the node's copy holds the leader's commit index gives its lease
+/// once the copy gets there, ending one lease after its request left (seen on 06-11-2026: a
+/// restarted node always one entry behind a Group 0 that kept writing never held a lease).
+#[test]
+fn an_answer_ahead_of_the_copy_gives_its_lease_once_the_copy_catches_up() {
+    let mut lease = AuthLease::new();
+    let first = lease.ask(100);
+    let second = lease.ask(200);
+    lease.granted(first, 9, 8);
+    lease.granted(second, 10, 8);
+    assert!(!lease.valid(150), "nothing while the copy is behind");
+    lease.caught_up(9);
+    assert_eq!(lease.until_ms(), 100 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
+    lease.caught_up(10);
+    assert_eq!(lease.until_ms(), 200 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
+    // With every slot waiting, a new answer takes the place of the one ending first.
+    let mut full = AuthLease::new();
+    for i in 0..9_u64 {
+        let seq = full.ask(1_000 + i);
+        full.granted(seq, 50, 0);
+    }
+    full.caught_up(50);
+    assert_eq!(full.until_ms(), 1_008 + AUTH_LEASE_MS - DRIFT_MARGIN_MS);
 }
 
 /// Answers slower than the period between requests keep the lease without a gap (seen in the

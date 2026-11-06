@@ -5,8 +5,9 @@
 (* at increasing indices of its log; some take privileges away (revocations), the others add   *)
 (* them. Each node authorizes every command with its own copy of Group 0, applied at its own    *)
 (* pace, and only while it holds an authorization lease. Group 0's heartbeat to a node carries  *)
-(* its commit index and the time it left; the node renews its lease up to that time plus Lease, *)
-(* and only if it has already applied that index. A node acknowledges what it has applied.      *)
+(* its commit index and the time it left; the node renews its lease up to that time plus Lease  *)
+(* once it has applied that index: a heartbeat that comes before waits until the node applies   *)
+(* it, and a crash forgets it. A node acknowledges what it has applied.                         *)
 (* Group 0 answers a revocation at index i once every node has acknowledged i or the last lease *)
 (* it granted to that node has run out. Nodes may crash (they stop applying, acknowledging and  *)
 (* receiving heartbeats, and keep the copy they had applied) and come back. Time is one clock:  *)
@@ -29,22 +30,25 @@ VARIABLES
     lease,      \* per node, until when it may authorize
     granted,    \* per node, the latest lease end Group 0 has sent it
     inflight,   \* per node, the heartbeat in flight to it ([commit, sent]) or NoMsg
+    waiting,    \* per node, the lease a heartbeat ahead of its copy gives once applied, or NoWait
     up,         \* nodes running
     crashes
 
 vars == <<now, commit, revoking, committedAt, answered, applied, acked, lease, granted,
-          inflight, up, crashes>>
+          inflight, waiting, up, crashes>>
 
 Index == 1..MaxChanges
 
 NoMsg == [commit |-> 0, sent |-> 0, none |-> TRUE]
+NoWait == [commit |-> 0, end |-> 0]
 
 Init ==
     /\ now = 0 /\ commit = 0 /\ revoking = {} /\ answered = {}
     /\ committedAt = [i \in Index |-> 0]
     /\ applied = [n \in Node |-> 0] /\ acked = [n \in Node |-> 0]
     /\ lease = [n \in Node |-> Lease] /\ granted = [n \in Node |-> Lease]
-    /\ inflight = [n \in Node |-> NoMsg] /\ up = Node /\ crashes = 0
+    /\ inflight = [n \in Node |-> NoMsg] /\ waiting = [n \in Node |-> NoWait]
+    /\ up = Node /\ crashes = 0
 
 \* Node n authorizes a command, with its copy of Group 0 at applied[n].
 CanAuth(n) == n \in up /\ now < lease[n]
@@ -52,7 +56,7 @@ CanAuth(n) == n \in up /\ now < lease[n]
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<commit, revoking, committedAt, answered, applied, acked, lease, granted,
+    /\ UNCHANGED <<waiting, commit, revoking, committedAt, answered, applied, acked, lease, granted,
                    inflight, up, crashes>>
 
 \* A change of users or roles commits: one that takes privileges away, or one that adds them.
@@ -61,24 +65,29 @@ Change(takesAway) ==
     /\ commit' = commit + 1
     /\ committedAt' = [committedAt EXCEPT ![commit + 1] = now]
     /\ revoking' = IF takesAway THEN revoking \cup {commit + 1} ELSE revoking
-    /\ UNCHANGED <<now, answered, applied, acked, lease, granted, inflight, up, crashes>>
+    /\ UNCHANGED <<waiting, now, answered, applied, acked, lease, granted, inflight, up, crashes>>
 
 \* Leases never end past MaxTime, so that the bound on time does not hide an answer.
 Heartbeat(n) ==
     /\ now + Lease <= MaxTime /\ inflight[n] = NoMsg
     /\ inflight' = [inflight EXCEPT ![n] = [commit |-> commit, sent |-> now, none |-> FALSE]]
     /\ granted' = [granted EXCEPT ![n] = IF now + Lease > @ THEN now + Lease ELSE @]
-    /\ UNCHANGED <<now, commit, revoking, committedAt, answered, applied, acked, lease, up,
+    /\ UNCHANGED <<waiting, now, commit, revoking, committedAt, answered, applied, acked, lease, up,
                    crashes>>
 
-\* The heartbeat in flight reaches n (or is lost when n is down or behind its commit index).
+\* The heartbeat in flight reaches n: it renews the lease if n has applied its commit index, waits
+\* for n to apply it if n is behind, and is lost when n is down.
 Receive(n) ==
     LET m == inflight[n] IN
     /\ m /= NoMsg
     /\ inflight' = [inflight EXCEPT ![n] = NoMsg]
     /\ IF n \in up /\ applied[n] >= m.commit
-       THEN lease' = [lease EXCEPT ![n] = IF m.sent + Lease > @ THEN m.sent + Lease ELSE @]
-       ELSE UNCHANGED lease
+       THEN /\ lease' = [lease EXCEPT ![n] = IF m.sent + Lease > @ THEN m.sent + Lease ELSE @]
+            /\ UNCHANGED waiting
+       ELSE /\ waiting' = IF n \in up /\ m.sent + Lease > waiting[n].end
+                          THEN [waiting EXCEPT ![n] = [commit |-> m.commit, end |-> m.sent + Lease]]
+                          ELSE waiting
+            /\ UNCHANGED lease
     /\ UNCHANGED <<now, commit, revoking, committedAt, answered, applied, acked, granted, up,
                    crashes>>
 
@@ -86,13 +95,17 @@ Receive(n) ==
 Apply(n) ==
     /\ n \in up /\ applied[n] < commit
     /\ applied' = [applied EXCEPT ![n] = @ + 1]
-    /\ UNCHANGED <<now, commit, revoking, committedAt, answered, acked, lease, granted,
+    /\ IF waiting[n] /= NoWait /\ applied[n] + 1 >= waiting[n].commit
+       THEN /\ lease' = [lease EXCEPT ![n] = IF waiting[n].end > @ THEN waiting[n].end ELSE @]
+            /\ waiting' = [waiting EXCEPT ![n] = NoWait]
+       ELSE UNCHANGED <<lease, waiting>>
+    /\ UNCHANGED <<now, commit, revoking, committedAt, answered, acked, granted,
                    inflight, up, crashes>>
 
 Ack(n) ==
     /\ n \in up /\ acked[n] < applied[n]
     /\ acked' = [acked EXCEPT ![n] = applied[n]]
-    /\ UNCHANGED <<now, commit, revoking, committedAt, answered, applied, lease, granted,
+    /\ UNCHANGED <<waiting, now, commit, revoking, committedAt, answered, applied, lease, granted,
                    inflight, up, crashes>>
 
 \* A change that adds privileges answers at once; a revocation waits for the fence.
@@ -100,19 +113,20 @@ Answer(i) ==
     /\ i <= commit /\ i \notin answered
     /\ i \in revoking => \A n \in Node : acked[n] >= i \/ granted[n] <= now
     /\ answered' = answered \cup {i}
-    /\ UNCHANGED <<now, commit, revoking, committedAt, applied, acked, lease, granted,
+    /\ UNCHANGED <<waiting, now, commit, revoking, committedAt, applied, acked, lease, granted,
                    inflight, up, crashes>>
 
 Crash(n) ==
     /\ n \in up /\ crashes < MaxCrashes
     /\ up' = up \ {n} /\ crashes' = crashes + 1
+    /\ waiting' = [waiting EXCEPT ![n] = NoWait]
     /\ UNCHANGED <<now, commit, revoking, committedAt, answered, applied, acked, lease, granted,
                    inflight>>
 
 Restart(n) ==
     /\ n \notin up
     /\ up' = up \cup {n}
-    /\ UNCHANGED <<now, commit, revoking, committedAt, answered, applied, acked, lease, granted,
+    /\ UNCHANGED <<waiting, now, commit, revoking, committedAt, answered, applied, acked, lease, granted,
                    inflight, crashes>>
 
 Next ==

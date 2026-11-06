@@ -97,6 +97,9 @@ pub struct AuthLease {
     /// `(seq, asked_ms)` of each request in flight.
     asked: [Option<(u64, u64)>; IN_FLIGHT],
     next_seq: u64,
+    /// `(commit, end_ms)` of each answer that came before the node's copy reached the leader's
+    /// commit index: it gives its lease once the copy gets there.
+    waiting: [Option<(u64, u64)>; IN_FLIGHT],
 }
 
 impl AuthLease {
@@ -127,16 +130,41 @@ impl AuthLease {
 
     /// The leader answered request `seq` with commit index `commit`; with the node's copy at
     /// `applied`, the lease runs from when that request left, less the drift margin. An answer
-    /// already taken or unknown, or a copy behind the leader, gives nothing.
+    /// already taken or unknown gives nothing. With the copy behind the leader the answer waits
+    /// for it ([`AuthLease::caught_up`]): the leader may commit more between its confirmation
+    /// round and its answer, and the node learns that commit index only with the next append, so
+    /// a follower always one entry behind would otherwise never hold a lease while Group 0 keeps
+    /// writing (seen on 06-11-2026: a restarted node of three authorized nothing for minutes).
     pub fn granted(&mut self, seq: u64, commit: u64, applied: u64) {
         let Some(slot) = self.asked.iter_mut().find(|a| a.is_some_and(|(s, _)| s == seq)) else {
             return;
         };
         let Some((_, asked_ms)) = slot.take() else { return };
-        if applied < commit {
+        let end = lease_end(asked_ms);
+        if applied >= commit {
+            self.until_ms = self.until_ms.max(end);
             return;
         }
-        self.until_ms = self.until_ms.max(lease_end(asked_ms));
+        let free = self.waiting.iter().position(Option::is_none);
+        let earliest = || {
+            let slots = self.waiting.iter().enumerate();
+            slots.min_by_key(|(_, w)| w.map(|(_, e)| e)).map_or(0, |(i, _)| i)
+        };
+        let at = free.unwrap_or_else(earliest);
+        self.waiting[at] = Some((commit, end));
+    }
+
+    /// The node's copy reached `applied`: every answer that waited for an index up to it gives
+    /// its lease, which still ends one lease after its request left.
+    pub fn caught_up(&mut self, applied: u64) {
+        for slot in &mut self.waiting {
+            if let Some((commit, end)) = *slot
+                && commit <= applied
+            {
+                self.until_ms = self.until_ms.max(end);
+                *slot = None;
+            }
+        }
     }
 
     /// When the lease ends (0 without one).
@@ -153,6 +181,7 @@ impl AuthLease {
     pub fn drop_lease(&mut self) {
         self.until_ms = 0;
         self.asked = [None; IN_FLIGHT];
+        self.waiting = [None; IN_FLIGHT];
     }
 }
 
