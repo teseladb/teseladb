@@ -54,6 +54,10 @@ const READ_RETRY: (u64, u64) = (50, 150);
 const KEPT_READINGS: usize = 3;
 /// The admin's turns, in ms.
 const ADMIN_EVERY: (u64, u64) = (300, 1_500);
+/// How long a run must last before a write of a tenant can be served: a node lets the first one through once
+/// the base of its epoch comes after its start (`base_epoch(now) >= window_of(start) + 1`), some 5.75 s after it
+/// starts, as the server does (007 FR-031); one epoch more covers the clocks' skew and the writers' pauses.
+const SERVED_BY_MS: u64 = 4 * EPOCH_MS;
 /// Client numbers: the admin, then a writer per node and tenant, then a reader per node, then
 /// writes and readings in flight.
 const ADMIN: u32 = 0;
@@ -350,11 +354,12 @@ impl Workload for Tenants {
 
     fn on_heal(&mut self, _w: &mut World) {}
 
-    fn finish(&mut self, _w: &mut World) -> Result<(), Violation> {
+    fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
         if let Some(v) = self.violation.take() {
             return Err(v);
         }
-        if self.served == 0 {
+        // A shorter run ends before any node could have read the tenants' data, so no write is owed yet.
+        if self.served == 0 && w.now().as_millis() >= SERVED_BY_MS {
             return Err(Violation::liveness(CHECKER, "no write of a tenant was served"));
         }
         Ok(())
@@ -386,12 +391,19 @@ mod tests {
 
     #[test]
     fn a_tenant_past_its_quota_or_without_writes_breaks_the_checker() {
-        let (mut w, mut wl) = world(6, 3);
+        let (mut w, mut wl) = world(6, 10);
         wl.data.insert(1, QUOTA + 3 * MAX_WRITE);
         wl.committed(&mut w, 1, 1, 1);
         let v = wl.violation.take().expect("a violation");
         assert!(v.detail.contains("past its quota"), "{v:?}");
         wl.served = 0;
         assert!(wl.finish(&mut w).is_err());
+    }
+
+    #[test]
+    fn a_run_too_short_for_a_first_write_owes_none() {
+        let (mut w, mut wl) = world(1, 1);
+        assert_eq!(wl.served, 0, "no node can let a write through in the first second");
+        assert!(wl.finish(&mut w).is_ok());
     }
 }

@@ -160,11 +160,17 @@ fn collections_databases_and_search_indexes_stop_at_their_limits() {
         ],
     );
     let mut c = ann(&nodes[2]);
+    // Before the limits reach this node the third collection is created; it goes again, or creating it once more,
+    // which a collection that exists answers with ok, would never be refused.
     let r = until("the limits on the node", || {
         assert!(ok(&c.run("app", Document::new().with("create", "a"))));
         assert!(ok(&c.run("app", Document::new().with("create", "b"))));
         let r = c.run("app", Document::new().with("create", "x"));
-        (!ok(&r)).then_some(r)
+        if ok(&r) {
+            assert!(ok(&c.run("app", Document::new().with("drop", "x"))));
+            return None;
+        }
+        Some(r)
     });
     assert_eq!(code(&r), Some(OUT_OF_DISK_SPACE), "{r:?}");
     assert_eq!(errmsg(&r), "tenant acme is over its collection quota: 2 of 2");

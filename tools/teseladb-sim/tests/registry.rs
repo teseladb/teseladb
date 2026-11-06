@@ -107,7 +107,8 @@ fn names_are_unique_and_the_builtin_workloads_are_there() {
             "search",
             "vector",
             "zones",
-            "authz-fence"
+            "authz-fence",
+            "tenants"
         ]
     );
     assert!(reg.register_workload("testkv", kv_copy).unwrap_err().contains("already registered"));
