@@ -84,6 +84,7 @@ gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
+gate "2. tests of the Docker Hub token of the releases" scripts/tests/dockerhub_token_test.sh
 gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
 # The published source of teseladb-raftlog, the one TeselaDB is built with (scripts/teseladb-src.sh).
