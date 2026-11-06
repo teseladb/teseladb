@@ -1163,7 +1163,7 @@ pub const USAGE: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
-                 [--bind_ip <addr>] [--port <n>]
+                 [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--admin-listen <ip:port>] [--join <ip:port>,...]
                  [--enroll-token <token>] [--bootstrap-dir <dir>]
                  [--tlsMode <mode>] [--tlsCertificateKeyFile <file>] [--tlsCAFile <file>]
