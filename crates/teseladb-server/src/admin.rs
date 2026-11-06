@@ -305,6 +305,33 @@ pub struct NodeAdmin {
     pub memory: Option<crate::memory::MemoryBudget>,
     /// The metrics of the HTTP port (019 FR-030), when the node opened it.
     pub http_metrics: Option<std::sync::Arc<std::sync::Mutex<teseladb_http::metrics::HttpMetrics>>>,
+    /// The data directory, whose file system `/metrics` measures (FR-038); `None` for a node kept
+    /// in memory.
+    pub data_dir: Option<std::path::PathBuf>,
+}
+
+/// Writes the state of the machine (007 FR-038): the disk of `data_dir`, the process's resident
+/// memory and how long the clients' commands took.
+fn machine_metrics(out: &mut String, data_dir: Option<&std::path::Path>) {
+    if let Some((used, total)) = data_dir.and_then(|d| teseladb_sys::host::fs_usage(d).ok()) {
+        let rows = [
+            (
+                "teseladb_disk_used_bytes",
+                "Bytes used on the file system of the data directory.",
+                used,
+            ),
+            ("teseladb_disk_total_bytes", "Bytes of the file system of the data directory.", total),
+        ];
+        for (name, help, n) in rows {
+            let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {n}");
+        }
+    }
+    if let Ok(m) = teseladb_sys::host::memory() {
+        let name = "teseladb_process_resident_memory_bytes";
+        let _ = writeln!(out, "# HELP {name} Resident bytes of the node's process.");
+        let _ = writeln!(out, "# TYPE {name} gauge\n{name} {}", m.resident);
+    }
+    teseladb_wire::commands::durations::render(out);
 }
 
 impl NodeAdmin {
@@ -510,6 +537,7 @@ impl AdminBackend for NodeAdmin {
             m.metrics(&mut out);
         }
         crate::tenant_limits::metrics(&self.handle.routes, &mut out);
+        machine_metrics(&mut out, self.data_dir.as_deref());
         if let Some(h) = &self.http_metrics {
             out.push_str(&h.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render());
         }

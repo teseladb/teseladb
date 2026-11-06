@@ -40,6 +40,7 @@ pub mod cursor_spill;
 pub mod data_distribution;
 pub mod diagnostic_data;
 pub mod diagnostics;
+pub mod durations;
 pub mod engines;
 pub mod explain;
 pub mod fcv;

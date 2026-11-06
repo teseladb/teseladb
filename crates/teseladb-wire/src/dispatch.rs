@@ -291,6 +291,7 @@ fn record(conn: &Connection, req: &Request, action: &Action, shared: &Shared, mi
         Some(Value::String(v)) => Some(v.as_str()),
         _ => None,
     };
+    crate::commands::durations::record(micros);
     let mut g = lock(shared);
     g.status.command(canonical(req.name()), &req.command, micros, failed, known);
     if let Some((_, Value::String(coll))) = req.command.iter().next()

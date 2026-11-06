@@ -1133,6 +1133,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                     certificates: cfg.client.as_ref().and_then(|c| c.certificates.clone()),
                     memory,
                     http_metrics: Some(http_metrics.clone()),
+                    data_dir: cfg.data_dir.clone(),
                 };
                 let handler: Handler = Arc::new(move |req, caller| answer(req, caller, &backend));
                 match AdminListener::spawn(at, handler, cfg.admin_tls.clone()) {
