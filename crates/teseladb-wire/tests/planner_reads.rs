@@ -285,3 +285,25 @@ fn a_distinct_scan_to_the_end_of_the_index_reads_no_key_after_it() {
         assert_eq!(field(&r, "executionStats.nReturned"), &Value::Int32(2), "{q}");
     }
 }
+
+/// The trial ends at the round where a plan reached its end (RefDb alternates the plans and
+/// stops there): a plan that would read up to the budget is not run past that round. Measured on
+/// the internal cluster of TeselaDB Cloud, a plan of a selective compound index that ended at 9
+/// documents waited for a plan of a broad index to read 157.000 entries, 20 s per planning.
+#[test]
+fn a_trial_reads_no_further_than_the_round_where_a_plan_ended() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut m = loaded(12_000);
+    index(&mut m, r#"{"key":{"b":1},"name":"aa"}"#);
+    index(&mut m, r#"{"key":{"a":1,"s":1},"name":"zz"}"#);
+    let scans = Rc::new(Cell::new(0_u32));
+    let seen = Rc::clone(&scans);
+    m.on_scan = Some(Box::new(move || seen.set(seen.get() + 1)));
+    // `zz` finds nothing at once; `aa` reads every key and nothing matches.
+    let r = run(&mut m, r#"{"find":"c","filter":{"a":9,"s":"w","b":{"$gte":0}}}"#);
+    assert_eq!(ids(&r), Vec::<i32>::new());
+    // The trial's least budget is 10.000 works; before, `b_1` read them all (10.054 reads).
+    assert!(scans.get() < 1_000, "{} reads", scans.get());
+}

@@ -15,7 +15,7 @@ use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::{IndexEntry, IndexState as EntryState};
 use teseladb_plan::checker::{FieldWalk, Visit, walk};
-use teseladb_plan::cost::{TRIAL_RESULTS, Trial, ranked, score, trial_works};
+use teseladb_plan::cost::{TRIAL_RESULTS, TRIAL_WORKS, Trial, ranked, score, trial_works};
 use teseladb_plan::logical::Bound;
 use teseladb_plan::rules::{
     Access, IndexMeta, IndexScan, Request, branch_scans, candidates, joined_or,
@@ -411,12 +411,7 @@ pub(crate) fn choose<B: Backend + ?Sized>(
         let winner = run(backend, coll, indexes, read, access, None)?;
         return Ok(Some(Chosen { winner, others: Vec::new(), planning_micros }));
     }
-    let documents = count_documents(backend, coll, read.concern)?;
-    let budget = trial_works(documents);
-    let mut trials = Vec::new();
-    for access in plans {
-        trials.push(run(backend, coll, indexes, read, access, Some(budget))?);
-    }
+    let mut trials = trial(backend, coll, indexes, read, &plans)?;
     // The trial ends at the round where a plan gave a batch of documents or reached its end.
     let stop = trials.iter().map(|t| t.trial.works).min().unwrap_or(0);
     for t in &mut trials {
@@ -440,6 +435,50 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     Ok(Some(Chosen { winner, others, planning_micros }))
 }
 
+/// The works the first round of a trial gives each plan; each round doubles them.
+const FIRST_ROUND_WORKS: u64 = 128;
+
+/// Whether a plan's trial ended before its budget: it gave a batch of documents or reached its end.
+fn ended(t: &Ran) -> bool {
+    t.trial.eof || t.trial.advanced >= TRIAL_RESULTS
+}
+
+/// The trials of `plans` up to the round where one of them ends. RefDb alternates the plans and
+/// stops at that round; here every plan runs again with twice the works until one ends, so none
+/// reads more than twice that round whatever the order of the plans (a plan of a broad index tried
+/// before one that ends at once read the whole budget, 157.000 entries, on the internal cluster of
+/// TeselaDB Cloud). The budget is RefDb's, [`trial_works`] of the collection's documents, which
+/// passes its least, [`TRIAL_WORKS`], only past 33.333 documents: they are counted, which reads
+/// them all, only when no plan ended within that least.
+fn trial<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    indexes: &[PlanIndex],
+    read: &ReadPlan<'_>,
+    plans: &[Access],
+) -> Result<Vec<Ran>, CommandError> {
+    let mut budget = TRIAL_WORKS;
+    let mut counted = false;
+    let mut works = FIRST_ROUND_WORKS;
+    loop {
+        let mut trials = Vec::with_capacity(plans.len());
+        for access in plans {
+            trials.push(run(backend, coll, indexes, read, access.clone(), Some(works))?);
+        }
+        if trials.iter().any(ended) {
+            return Ok(trials);
+        }
+        if works >= budget && !counted {
+            budget = trial_works(count_documents(backend, coll, read.concern)?);
+            counted = true;
+        }
+        if works >= budget {
+            return Ok(trials);
+        }
+        works = works.saturating_mul(2).min(budget);
+    }
+}
+
 /// The plan the planner chose, and the others it tried, best first.
 pub(crate) struct Chosen {
     pub(crate) winner: Ran,
@@ -458,8 +497,6 @@ fn subplanned<B: Backend + ?Sized>(
     branches: Vec<Vec<IndexScan>>,
 ) -> Result<Vec<IndexScan>, CommandError> {
     let mut out = Vec::new();
-    let documents = count_documents(backend, coll, read.concern)?;
-    let budget = trial_works(documents);
     let branch_read = ReadPlan {
         filter: read.filter,
         parsed: read.parsed,
@@ -477,11 +514,8 @@ fn subplanned<B: Backend + ?Sized>(
             out.extend(scans);
             continue;
         }
-        let mut trials = Vec::new();
-        for s in &scans {
-            let access = Access::Index(s.clone());
-            trials.push(run(backend, coll, indexes, &branch_read, access, Some(budget))?);
-        }
+        let plans: Vec<Access> = scans.iter().cloned().map(Access::Index).collect();
+        let trials = trial(backend, coll, indexes, &branch_read, &plans)?;
         let stop = trials.iter().map(|t| t.trial.works).min().unwrap_or(0);
         let cut: Vec<Trial> = trials.iter().map(|t| at_round(t, stop)).collect();
         let best = ranked(&cut).first().copied().unwrap_or(0);
