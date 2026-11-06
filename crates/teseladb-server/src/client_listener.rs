@@ -1326,6 +1326,29 @@ fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
 }
 
 impl Worker {
+    /// Stops counting the connections of a user that is now its tenant's service user (007 FR-032): a connection
+    /// counts when it signs in, by this core's view of the tenants, which can name the service user later than
+    /// Group 0 does, and a service user's connection counts for nothing.
+    fn uncount_service_users(
+        &mut self,
+        routes: &crate::routes::SharedRoutes,
+        states: &crate::routes::TenantStates,
+    ) {
+        for c in self.conns.values_mut() {
+            let Some(tenant) = c.counted else { continue };
+            let service =
+                c.conn.as_ref().and_then(|conn| conn.auth.user.as_ref()).is_some_and(|u| {
+                    states
+                        .get(&tenant)
+                        .is_some_and(|s| crate::tenant_limits::is_service_user(&s.limits, &u.name))
+                });
+            if service {
+                routes.limiter().disconnect(tenant);
+                c.counted = None;
+            }
+        }
+    }
+
     /// Closes the connections of the tenants suspended since the last look.
     fn close_suspended(&mut self) {
         let Some(h) = self.state.handle() else { return };
@@ -1342,6 +1365,7 @@ impl Worker {
         for t in gone {
             self.close(t);
         }
+        self.uncount_service_users(&h.routes, &states);
         // The cursors and change streams of the tenants suspended since the last look go too;
         // each worker does it, and a second time kills nothing.
         let before = |id: &u32| {

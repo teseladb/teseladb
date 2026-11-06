@@ -60,9 +60,13 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
         assert_eq!(batch(&r, "firstBatch").len(), 50, "{r:?}");
         assert!(ok(&svc.run("app", Document::new().with("find", "c"))));
     }
-    let second = until("the data read on the second node", || {
+    // A core may name the service user after Group 0 does: the service user's connection stops counting once it
+    // does, within a look at the tenants' states (client_listener::TENANT_CHECK).
+    let second = until("the data read and two connections on the second node", || {
         let out = admin(&nodes[1], &["tenant", "usage", "acme"]);
-        (field(&out, "storageBytes").parse::<u64>().unwrap_or(0) > 0).then_some(out)
+        (field(&out, "storageBytes").parse::<u64>().unwrap_or(0) > 0
+            && field(&out, "connections") == "2")
+            .then_some(out)
     });
     assert_eq!(field(&second, "connections"), "2", "{second}");
     let ops: u64 = field(&second, "opsTotal").parse().unwrap();
