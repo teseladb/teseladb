@@ -5,7 +5,8 @@
 # one image per architecture and installs the release from the public host to check it. Only production, a release of
 # main, pushes the images to Docker Hub, joined under the version and :latest; development builds and runs them locally.
 #   scripts/release/publish.sh <version> <stage dev|prd>
-# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow, and DOCKERHUB_TOKEN in production.
+# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow, and DOCKERHUB_TOKEN in production,
+# which the workflow reads from Vault (scripts/ci/dockerhub-token.sh).
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
