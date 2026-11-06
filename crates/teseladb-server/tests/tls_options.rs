@@ -84,6 +84,7 @@ fn the_port_comes_from_the_options_or_the_pki() {
     let opts = TlsOpts {
         mode: Some(TlsMode::PreferTls),
         certificate_key_file: Some(d.join("both.pem")),
+        public_certificate_key_file: None,
         certificate_key_file_password: Some(Password(password)),
         ca_file: Some(d.join(pki::CA_CERT)),
         crl_file: Some(d.join("ca.crl")),

@@ -334,17 +334,25 @@ fn the_tenant_max_time_ms_caps_its_commands_but_not_a_change_stream_or_a_commit(
     let r = ann.run("app", more);
     assert!(ok(&r), "{r:?}");
     assert!(at.elapsed() >= ms(wait / 2), "{:?}", at.elapsed());
-    // Committing a transaction is held by no cap either.
+    // Committing a transaction is held by no cap either. Its write is: on a busy machine it may
+    // pass the cap, which ends the transaction with a write error, and the transaction starts
+    // again with the next number, as a driver does.
     let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![3; 16] });
-    let txn = |cmd: Document| {
-        cmd.with("lsid", lsid.clone()).with("txnNumber", Value::Int64(1)).with("autocommit", false)
+    let txn = |cmd: Document, number: i64| {
+        cmd.with("lsid", lsid.clone())
+            .with("txnNumber", Value::Int64(number))
+            .with("autocommit", false)
     };
-    let write = txn(Document::new().with("insert", "c").with("documents", docs(100..101)))
-        .with("startTransaction", true);
-    let r = ann.run("app", write);
-    assert!(ok(&r), "{r:?}");
-    let commit =
-        txn(Document::new().with("commitTransaction", 1)).with("maxTimeMS", LARGE_MAX_TIME_MS);
+    let mut number = 0;
+    let number = until("a transaction whose write fits in the cap", || {
+        number += 1;
+        let insert = Document::new().with("insert", "c").with("documents", docs(100..101));
+        let r = ann.run("app", txn(insert, number).with("startTransaction", true));
+        assert!(ok(&r), "{r:?}");
+        r.get("writeErrors").is_none().then_some(number)
+    });
+    let commit = txn(Document::new().with("commitTransaction", 1), number)
+        .with("maxTimeMS", LARGE_MAX_TIME_MS);
     let r = ann.run("admin", commit);
     assert!(ok(&r), "{r:?}");
     drop(node.stop());

@@ -57,6 +57,16 @@ fn cluster() -> (Vec<Node<MemDisk>>, Client) {
     (nodes, root)
 }
 
+/// Waits until `node` holds limit `key` of `acme` at `value`: a change reaches the other nodes a
+/// moment after the node that took it.
+fn reached(node: &Node<MemDisk>, key: &str, value: u64) {
+    let want = format!("\"{key}\":{value}");
+    until(&format!("{key} {value} on the node"), || {
+        let out = admin(node, &["--format", "json", "tenant", "limits", "acme"]);
+        out.replace([' ', '\n'], "").contains(&want).then_some(())
+    });
+}
+
 /// A connection of Ann on `node`, signed in once the user and the limits reached it.
 fn ann(node: &Node<MemDisk>) -> Client {
     until("Ann signs in", || {
@@ -72,6 +82,30 @@ fn closed(c: &mut Client) -> bool {
     matches!(c.s.read(&mut b), Ok(0) | Err(_))
 }
 
+/// A connection of Ann on `node` that sends the last step of its sign-in without reading the
+/// answer.
+fn third_sign_in(node: &Node<MemDisk>) -> Client {
+    let mut third = Client::new(node);
+    third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mech = teseladb_auth::scram::Mechanism::ScramSha256;
+    let prepared = mech.prepare_password("ann", PASSWORD, false).unwrap();
+    let (mut s, first) =
+        teseladb_auth::scram::ClientSession::start(mech, "ann", &prepared, "limits-nonce-01");
+    let start = Document::new()
+        .with("saslStart", 1)
+        .with("mechanism", mech.name())
+        .with("payload", Value::Binary { subtype: 0, bytes: first })
+        .with("options", Document::new().with("skipEmptyExchange", true));
+    let r = third.run("admin", start);
+    let fin = s.respond(&secured::payload(&r)).unwrap();
+    let next = Document::new()
+        .with("saslContinue", 1)
+        .with("conversationId", 1)
+        .with("payload", Value::Binary { subtype: 0, bytes: fin });
+    third.send("admin", next);
+    third
+}
+
 fn stop(nodes: Vec<Node<MemDisk>>) {
     for n in nodes.into_iter().rev() {
         n.stop();
@@ -83,27 +117,14 @@ fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without
     let (nodes, _root) = cluster();
     admin(&nodes[0], &["tenant", "limits", "acme", "--max-connections", "2"]);
     for node in &nodes {
-        let (a, b) = (ann(node), ann(node));
-        // The third signs in and the node closes it before answering.
-        let mut third = Client::new(node);
-        third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mech = teseladb_auth::scram::Mechanism::ScramSha256;
-        let prepared = mech.prepare_password("ann", PASSWORD, false).unwrap();
-        let (mut s, first) =
-            teseladb_auth::scram::ClientSession::start(mech, "ann", &prepared, "limits-nonce-01");
-        let start = Document::new()
-            .with("saslStart", 1)
-            .with("mechanism", mech.name())
-            .with("payload", Value::Binary { subtype: 0, bytes: first })
-            .with("options", Document::new().with("skipEmptyExchange", true));
-        let r = third.run("admin", start);
-        let fin = s.respond(&secured::payload(&r)).unwrap();
-        let next = Document::new()
-            .with("saslContinue", 1)
-            .with("conversationId", 1)
-            .with("payload", Value::Binary { subtype: 0, bytes: fin });
-        third.send("admin", next);
-        assert!(closed(&mut third), "the third connection got an answer");
+        reached(node, "maxConnections", 2);
+        // The node applies the limit a moment after it holds it: until then it takes any number.
+        // Once it does, the third signs in and the node closes it before answering.
+        let (a, b) = until("the third connection closed without an answer", || {
+            let (a, b) = (ann(node), ann(node));
+            let mut third = third_sign_in(node);
+            closed(&mut third).then_some((a, b))
+        });
         // One closes, and another takes its place.
         drop(a);
         until("a place again", || {
@@ -123,6 +144,15 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
     // second and then 20 a second, give or take the 100 ms a command may wait.
     let mut c = ann(&nodes[1]);
     let find = || Document::new().with("find", "c").with("filter", Document::new());
+    reached(&nodes[1], "opsPerSecond", 20);
+    // Once the node applies it, 40 commands in a row take at least the second of the 20 past the
+    // bucket's; then a second fills the bucket again.
+    until("the rate limit applied on the node", || {
+        let started = std::time::Instant::now();
+        let served = (0..40).filter(|_| ok(&c.run("app", find()))).count();
+        (served == 40 && started.elapsed() >= Duration::from_millis(900)).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(1100));
     let window = Duration::from_secs(3);
     let loads: Vec<std::thread::JoinHandle<(usize, Option<Document>)>> = (0..4)
         .map(|_| {
@@ -164,9 +194,11 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
             "--ops-per-second",
             "0",
             "--max-write-bytes-per-second",
-            "200000",
+            "20000",
         ],
     );
+    // Each write of 60 KB leaves the bucket of 20 KB a second 40 KB below zero, so the next one
+    // waits three seconds, far more than a command may wait, however slow the writes are.
     let mut w = ann(&nodes[2]);
     let big = |i: i32| {
         let filler = "x".repeat(60_000);
@@ -175,9 +207,17 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
             Value::Array(vec![Value::Document(Document::new().with("_id", i).with("f", filler))]),
         )
     };
-    let writes: Vec<Document> = (0..10).map(|i| w.run("app", big(i))).collect();
-    let refused = writes.iter().find(|r| !ok(r)).expect("a write past the bytes per second");
-    assert_eq!(code(refused), Some(RATE_LIMITED), "{refused:?}");
+    reached(&nodes[2], "maxWriteBytesPerSecond", 20_000);
+    // The node applies it a moment after it holds it: until then every write passes.
+    let mut next_id = 0;
+    let refused = until("a write past the bytes per second", || {
+        (0..3).find_map(|_| {
+            next_id += 1;
+            let r = w.run("app", big(next_id));
+            (!ok(&r)).then_some(r)
+        })
+    });
+    assert_eq!(code(&refused), Some(RATE_LIMITED), "{refused:?}");
     // The service user is held by no limit.
     admin(
         &nodes[0],

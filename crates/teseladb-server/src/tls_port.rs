@@ -5,10 +5,15 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use teseladb_tls::{CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, ServerConfig, Trust, Version};
+use teseladb_tls::{
+    CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, ServerConfig, SniIdentity, Trust, Version,
+};
+use teseladb_x509::ext::GeneralName;
 use teseladb_x509::{Certificate, Crl, CrlCheck, PrivateKey};
 
-use crate::cli::{TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE, TLS_CRL_FILE, TlsOpts};
+use crate::cli::{
+    TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE, TLS_CRL_FILE, TLS_PUBLIC_CERTIFICATE_KEY_FILE, TlsOpts,
+};
 use crate::pki::Pki;
 
 /// First byte of a TLS handshake record.
@@ -246,10 +251,53 @@ fn read(path: &std::path::Path, option: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("--{option} {}: {e}", path.display()))
 }
 
+/// The chain and key of the PEM file `path` of the option `option`: its first certificate must be
+/// that of the key.
+fn certified_key(
+    path: &std::path::Path,
+    option: &str,
+    password: Option<&[u8]>,
+) -> Result<CertifiedKey, String> {
+    let text = read(path, option)?;
+    let bad = |what: &str| format!("--{option} {}: {what}", path.display());
+    let chain = Certificate::from_pem_all(&text).map_err(|e| bad(&e.to_string()))?;
+    let key = PrivateKey::from_pem(&text, password).map_err(|e| bad(&e.to_string()))?;
+    if chain.first().is_none_or(|leaf| leaf.public_key != key.public_key()) {
+        return Err(bad("the first certificate does not match the key"));
+    }
+    Ok(CertifiedKey { chain, key })
+}
+
+/// The DNS names of the subject alternative names of `leaf`.
+fn dns_names(leaf: &Certificate) -> Vec<String> {
+    leaf.subject_alt_names
+        .iter()
+        .filter_map(|n| match n {
+            GeneralName::Dns(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `--tlsPublicCertificateKeyFile` (013 FR-037): its chain and key, served to the clients that ask
+/// by SNI for one of the DNS names of its certificate.
+fn public_identity(path: &std::path::Path) -> Result<SniIdentity, String> {
+    let identity = certified_key(path, TLS_PUBLIC_CERTIFICATE_KEY_FILE, None)?;
+    let names = identity.chain.first().map(dns_names).unwrap_or_default();
+    if names.is_empty() {
+        return Err(format!(
+            "--{TLS_PUBLIC_CERTIFICATE_KEY_FILE} {}: the certificate has no DNS name",
+            path.display()
+        ));
+    }
+    Ok(SniIdentity { names, identity })
+}
+
 /// The TLS of the clients' port from the options of `teseladb start`: the certificate key file
 /// or the node certificate of the PKI; with `--tlsCAFile`, client certificates required (or
 /// optional with `--tlsAllowConnectionsWithoutCertificates`); with `--tlsCRLFile`, the leaf
-/// checked against it. TLS 1.2 and 1.3, as `refnode` accepts from clients.
+/// checked against it; with `--tlsPublicCertificateKeyFile`, that chain for the clients that ask
+/// for its names. TLS 1.2 and 1.3, as `refnode` accepts from clients.
 pub fn build(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
     let mode = opts.mode.unwrap_or(TlsMode::RequireTls);
     if mode == TlsMode::Disabled {
@@ -258,19 +306,14 @@ pub fn build(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
     let identity = match &opts.certificate_key_file {
         None => CertifiedKey { chain: pki.node_chain.clone(), key: pki.node_key.clone() },
         Some(path) => {
-            let text = read(path, TLS_CERTIFICATE_KEY_FILE)?;
-            let bad =
-                |what: &str| format!("--{TLS_CERTIFICATE_KEY_FILE} {}: {what}", path.display());
             let password = opts.certificate_key_file_password.as_ref().map(|p| p.0.as_bytes());
-            let chain = Certificate::from_pem_all(&text).map_err(|e| bad(&e.to_string()))?;
-            let key = PrivateKey::from_pem(&text, password).map_err(|e| bad(&e.to_string()))?;
-            if chain.first().is_none_or(|leaf| leaf.public_key != key.public_key()) {
-                return Err(bad("the first certificate does not match the key"));
-            }
-            CertifiedKey { chain, key }
+            certified_key(path, TLS_CERTIFICATE_KEY_FILE, password)?
         }
     };
     let mut config = ServerConfig::new(identity);
+    if let Some(path) = &opts.public_certificate_key_file {
+        config.sni.push(public_identity(path)?);
+    }
     config.min_version = Version::Tls12;
     if let Some(path) = &opts.ca_file {
         let anchors = Certificate::from_pem_all(&read(path, TLS_CA_FILE)?)

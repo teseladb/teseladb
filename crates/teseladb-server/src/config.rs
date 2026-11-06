@@ -49,6 +49,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("setParameter.enableTestCommands", Kind::Parameter("enableTestCommands")),
     ("net.tls.mode", Kind::Option(crate::cli::TLS_MODE)),
     ("net.tls.certificateKeyFile", Kind::Option(crate::cli::TLS_CERTIFICATE_KEY_FILE)),
+    ("net.tls.publicCertificateKeyFile", Kind::Option(crate::cli::TLS_PUBLIC_CERTIFICATE_KEY_FILE)),
     (
         "net.tls.certificateKeyFilePassword",
         Kind::Option(crate::cli::TLS_CERTIFICATE_KEY_FILE_PASSWORD),

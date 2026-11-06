@@ -359,6 +359,9 @@ pub fn parsed_options(o: &StartOpts) -> Document {
                 )]
             }
             cli::TLS_CA_FILE => vec![(vec!["net", "tls", "CAFile"], text())],
+            cli::TLS_PUBLIC_CERTIFICATE_KEY_FILE => {
+                vec![(vec!["net", "tls", "publicCertificateKeyFile"], text())]
+            }
             cli::ENABLE_ENCRYPTION => {
                 vec![(vec!["security", "enableEncryption"], Value::Boolean(true))]
             }

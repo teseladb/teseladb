@@ -161,6 +161,9 @@ pub const HTTP_PORT: &str = "http-port";
 pub const HTTP_BIND: &str = "http-bind";
 /// `--tlsCertificateKeyFile`.
 pub const TLS_CERTIFICATE_KEY_FILE: &str = "tlsCertificateKeyFile";
+/// `--tlsPublicCertificateKeyFile`: the chain served by SNI to the names of its certificate (013
+/// FR-037, D-142).
+pub const TLS_PUBLIC_CERTIFICATE_KEY_FILE: &str = "tlsPublicCertificateKeyFile";
 /// `--enroll-token`.
 pub const ENROLL_TOKEN: &str = "enroll-token";
 /// `--bootstrap-dir` (013 FR-035).
@@ -283,6 +286,9 @@ pub struct TlsOpts {
     pub mode: Option<TlsMode>,
     /// `--tlsCertificateKeyFile`: the port's chain and key; `None` takes the PKI's.
     pub certificate_key_file: Option<PathBuf>,
+    /// `--tlsPublicCertificateKeyFile`: a chain and key served to the clients that ask by SNI for
+    /// one of the DNS names of its certificate (013 FR-037).
+    pub public_certificate_key_file: Option<PathBuf>,
     /// `--tlsCertificateKeyFilePassword`.
     pub certificate_key_file_password: Option<Password>,
     /// `--tlsCAFile`: with it, clients send certificates signed by these CAs.
@@ -309,6 +315,7 @@ fn tls_opts(o: &Opts) -> Result<TlsOpts, CliError> {
     Ok(TlsOpts {
         mode,
         certificate_key_file: o.path(TLS_CERTIFICATE_KEY_FILE),
+        public_certificate_key_file: o.path(TLS_PUBLIC_CERTIFICATE_KEY_FILE),
         certificate_key_file_password: o.get(TLS_CERTIFICATE_KEY_FILE_PASSWORD).map(Password::from),
         ca_file: o.path(TLS_CA_FILE),
         crl_file: o.path(TLS_CRL_FILE),
@@ -370,6 +377,7 @@ const START: &[Spec] = &[
     (TLS_MODE, VALUE),
     (TLS_CERTIFICATE_KEY_FILE, VALUE),
     (TLS_CERTIFICATE_KEY_FILE_PASSWORD, VALUE),
+    (TLS_PUBLIC_CERTIFICATE_KEY_FILE, VALUE),
     (TLS_CA_FILE, VALUE),
     (TLS_CRL_FILE, VALUE),
     (TLS_ALLOW_WITHOUT_CERTIFICATES, FLAG),
@@ -1159,6 +1167,7 @@ usage:
                  [--peer-listen <ip:port>] [--admin-listen <ip:port>] [--join <ip:port>,...]
                  [--enroll-token <token>] [--bootstrap-dir <dir>]
                  [--tlsMode <mode>] [--tlsCertificateKeyFile <file>] [--tlsCAFile <file>]
+                 [--tlsPublicCertificateKeyFile <file>]
                  [--insecure [--insecure-allow-remote]] [--log-format text|json] [--config <file.yaml>]
                  [--logpath <file>] [--logappend] [--quiet | --verbose] [--maxConns <n>]
                  [--networkMessageCompressors <zstd,snappy,zlib|disabled>]
