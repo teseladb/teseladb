@@ -56,6 +56,8 @@ shellcheck_all() {
   docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -x "${files[@]}"
 }
 
+# The viuzi-* crates come from the private registry at the versions of Cargo.lock; every later step runs offline.
+gate "0. viuzi-* crates of Cargo.lock from the registry" cargo fetch --locked
 gate "1. format" cargo fmt --all -- --check
 gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
 gate "2. dependencies" scripts/check-deps.sh
@@ -84,8 +86,9 @@ gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
 gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
-gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env VIUZI_CRASH_SEEDS=2000 \
-  cargo test -q --offline --release --manifest-path ../../shared-crates/Cargo.toml -p teseladb-raftlog --test crash_sim
+# The published source of teseladb-raftlog, the one TeselaDB is built with (scripts/teseladb-src.sh).
+gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env VIUZI_CRASH_SEEDS=2000 CARGO_TARGET_DIR=target/viuzi \
+  cargo test -q --offline --release --manifest-path "$(scripts/teseladb-src.sh teseladb-raftlog)/Cargo.toml" --test crash_sim
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \
   cargo test -q --offline --release -p teseladb-lsm --test crash
 gate "3. real crashes with SIGKILL (50 kills)" env TESELADB_KILL_ROUNDS=50 \

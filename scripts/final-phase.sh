@@ -55,7 +55,7 @@ IDLE_MAX=${FINAL_IDLE_MAX:-0.25}
 DATA=${FINAL_DATA_DIR:-$CARGO_TARGET_DIR/final-phase-data}
 
 # Fuzzing targets: `crate:test file[:test name]` (`lib` is the crate's own tests); a `viuzi-*`
-# crate runs in the shared-crates next to the repository (001 FR-023). The pending ones
+# crate runs from its published source, the one TeselaDB is built with (scripts/teseladb-src.sh). The pending ones
 # are those of plan step 1 (013 federated, OCSP and configuration, 016 T009, 019 T034); the others
 # already ran their 24 h and come back with FINAL_FUZZ_ALL=1.
 FUZZ_PENDING="teseladb-auth:fuzz_federated teseladb-auth:fuzz_config teseladb-x509:fuzz_ocsp
@@ -110,7 +110,7 @@ phase_table() {
   row 5 chaos-disk-full 600 "tests/compat/chaos/disk-full.sh --times ${CHAOS_TIMES:-5}$(quick_or ' --hold 2' '')"
   row 5 chaos-four-nodes 1800 "tests/compat/chaos/four-nodes.sh --times ${CHAOS_TIMES:-20}$(quick_or ' --hold 2' '')"
   perf_rows
-  row 6 integrity-crash-sim 3600 "VIUZI_CRASH_SEEDS=${d_crash:-20000} cargo test -q --offline --release --manifest-path ../../shared-crates/Cargo.toml -p teseladb-raftlog --test crash_sim"
+  row 6 integrity-crash-sim 3600 "VIUZI_CRASH_SEEDS=${d_crash:-20000} CARGO_TARGET_DIR=target/viuzi cargo test -q --offline --release --manifest-path \"\$(scripts/teseladb-src.sh teseladb-raftlog)/Cargo.toml\" --test crash_sim"
   row 6 integrity-crash-lsm 3600 "TESELADB_LSM_CRASH_SEEDS=${d_crash:-100000} cargo test -q --offline --release -p teseladb-lsm --test crash"
   row 6 integrity-kill-real 3600 "TESELADB_KILL_ROUNDS=$(quick_or 2 500) cargo test -q --offline --release -p teseladb-io --test crash_real"
   row 6 integrity-kill-real-lsm 3600 "TESELADB_KILL_ROUNDS=$(quick_or 2 500) cargo test -q --offline --release -p teseladb-io --test crash_real_lsm"
@@ -161,7 +161,9 @@ perf_rows() {
 
 fuzz_manifest() { # crate: sets `manifest` to the manifest option of a viuzi-* crate, empty for TeselaDB's own
   manifest=()
-  [[ $1 == viuzi-* ]] && manifest=(--manifest-path ../../shared-crates/Cargo.toml)
+  # The published source of the crate, the one TeselaDB is built with (scripts/teseladb-src.sh).
+  # Its build goes to target/viuzi, not into Cargo's folder of sources.
+  [[ $1 == viuzi-* ]] && manifest=(--manifest-path "$(scripts/teseladb-src.sh "$1")/Cargo.toml" --target-dir target/viuzi)
   return 0
 }
 

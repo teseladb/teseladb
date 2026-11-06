@@ -401,6 +401,8 @@ dependencies = [
 [[package]]
 name = "teseladb-bson"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "f8b32f4db80c9b829daf072b37f064e8d8464f23987ffc03fdf950f7ba95cea2"
 dependencies = [
  "teseladb-json",
 ]
@@ -408,10 +410,14 @@ dependencies = [
 [[package]]
 name = "teseladb-compress"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "a7614f67db1f1becff2ad444705dea983bad7e20b93eae469719f27d5f67ecb2"
 
 [[package]]
 name = "teseladb-crypto"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "6c53999326b657c4ee5c2c34f9919ac30fac277938a9187d69199722cfe3084b"
 dependencies = [
  "teseladb-hash",
 ]
@@ -419,6 +425,8 @@ dependencies = [
 [[package]]
 name = "teseladb-deflate"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "7c6d5301233f6b51976c3c54d9a5016d6a173dab3df99c736200fb8c49cd336c"
 dependencies = [
  "teseladb-hash",
 ]
@@ -426,18 +434,26 @@ dependencies = [
 [[package]]
 name = "teseladb-hash"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "f0deadf61b0ebe934ab473bc9d40d2e347903b0aa1eca6984641165fb4d0d620"
 
 [[package]]
 name = "teseladb-http"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "e5d147264e694ad2fef3e6b9a17540dee517664d082d5866169407dd0073f51d"
 
 [[package]]
 name = "teseladb-json"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "d060682f91fecda4f614e3dba3495338169724d43a6a17bd5fd4a29849ad78c3"
 
 [[package]]
 name = "teseladb-raft"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "85b27f73369e5b67f0bd205fe239abd4d7ef7a96df841f78657c08eb2e17c73c"
 dependencies = [
  "teseladb-types",
 ]
@@ -445,6 +461,8 @@ dependencies = [
 [[package]]
 name = "teseladb-raftlog"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "311e245277078727d548756ad92aadd6c983f0a9ce08e41127ebe4b5794b5684"
 dependencies = [
  "teseladb-crypto",
  "teseladb-hash",
@@ -454,6 +472,8 @@ dependencies = [
 [[package]]
 name = "teseladb-tls"
 version = "0.2.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "770ccf788e7756a3b5bffc8e52b2ba82f3a2152296f2e41f8cf6ac8e3e4c14d1"
 dependencies = [
  "teseladb-crypto",
  "teseladb-x509",
@@ -462,14 +482,20 @@ dependencies = [
 [[package]]
 name = "teseladb-types"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "9515c27a3640eccd4ccb3caea6027ba02f34e49dc89b6357d3ba2b3a721da8c8"
 
 [[package]]
 name = "teseladb-tz"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "d5dbe996385305984d50961e4b4931ac00b8c09d1ac958d7309f3052dac01dbb"
 
 [[package]]
 name = "teseladb-x509"
 version = "0.1.0"
+source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+checksum = "95d865edd60fc12853868ae791c66fe9c8fa41d644f60d9e226132f712921da1"
 dependencies = [
  "teseladb-crypto",
 ]

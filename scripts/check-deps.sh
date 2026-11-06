@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Gate of the constitution's principles II and V (001 FR-012), one message per finding:
-#  - Cargo.lock only holds workspace packages and the viuzi-* crates of the shared-crates next to the
-#    repository (no `source`: no registries and no git), and every member takes a viuzi-* crate from
-#    the workspace's dependencies (001 FR-023, constitution 3.0.0, principle V);
+#  - Cargo.lock only holds workspace packages and the viuzi-* crates of the private registry viuzi
+#    (no crates.io, no other registry and no git), the workspace takes every viuzi-* crate at a
+#    published version of that registry and never by path, and every member takes it from the
+#    workspace's dependencies (001 FR-023, constitution 3.0.0, principle V; owner, 06-11-2026);
 #  - logic crates do not depend on the I/O crates nor use the network, files, threads, the system
 #    clock, the process, the environment or the standard input and output;
 #  - the Multi-Raft engine has no Git types and no crate links the test state machine;
@@ -29,7 +30,8 @@ SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
 HOT_CRATES=(teseladb-sys teseladb-io teseladb-multiraft teseladb-lsm teseladb-range teseladb-hlc
   teseladb-txn teseladb-index teseladb-meta teseladb-search)
 # The viuzi-* crates of the hot path (cryptography runs on every authenticated or encrypted
-# operation, D-090), read from the shared-crates checkout: $TESELADB_ANOTHERPRODUCT, or $VIUZI_PATH.
+# operation, D-090), read from the source of the registry that the build uses: $TESELADB_ANOTHERPRODUCT, or
+# the folder of scripts/teseladb-src.sh.
 HOT_VIUZI=(teseladb-raft teseladb-raftlog teseladb-crypto)
 # Crates that may use unsafe code: system calls and CPU intrinsics.
 UNSAFE_CRATES=(teseladb-sys)
@@ -60,24 +62,27 @@ contains() {
   return 1
 }
 
-# Where the viuzi-* crates come from: the shared-crates checkout next to the repository.
-VIUZI_PATH=../../shared-crates/crates
+# The source of the private registry of viuzi as Cargo.lock writes it.
+VIUZI_SOURCE="sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
 
 check_lock() {
   [[ -f Cargo.lock ]] || cargo metadata --offline --format-version 1 >/dev/null
   while IFS= read -r name; do
     finding "Cargo.lock: external package: $name"
-  done < <(awk '
+  done < <(awk -v viuzi="$VIUZI_SOURCE" '
     /^\[\[package\]\]/ { name = "" }
     /^name = / { name = $3; gsub(/"/, "", name) }
-    /^source = / { print name }
+    /^source = / {
+      source = $3; gsub(/"/, "", source)
+      if (!(name ~ /^viuzi-/ && source == viuzi)) print name
+    }
   ' Cargo.lock)
   local members=() m name
   for m in crates/*/Cargo.toml tools/*/Cargo.toml; do
     [[ -f $m ]] && members+=("$(awk -F'"' '/^name = / { print $2; exit }' "$m")")
   done
   while IFS= read -r name; do
-    [[ $name == viuzi-* ]] || contains "$name" "${members[@]}" ||
+    contains "$name" "${members[@]}" ||
       finding "Cargo.lock: package outside the workspace: $name"
   done < <(awk '
     /^\[\[package\]\]/ { if (name != "" && !src) print name; name = ""; src = 0 }
@@ -88,25 +93,15 @@ check_lock() {
   check_viuzi_paths
 }
 
-# The shared-crates checkout ($TESELADB_VIUZI_REPO, or next to the repository) is at the commit of
-# scripts/shared-crates.rev, with nothing uncommitted: the build uses that code and no other.
-check_viuzi_rev() {
-  [[ -f scripts/shared-crates.rev ]] || return 0
-  local repo=${TESELADB_VIUZI_REPO:-../../shared-crates} want head
-  want=$(tr -d '[:space:]' < scripts/shared-crates.rev)
-  head=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || { finding "$repo: not a git checkout"; return 0; }
-  [[ $head == "$want" ]] || finding "$repo: at $head, not $want (scripts/shared-crates.rev)"
-  [[ -z $(git -C "$repo" status --porcelain --untracked-files=no) ]] || finding "$repo: uncommitted changes"
-}
-
-# Each viuzi-* crate comes from $VIUZI_PATH through the workspace's dependencies.
+# Each viuzi-* crate comes from the registry viuzi at a version, through the workspace's dependencies.
 check_viuzi_paths() {
-  local name path m
+  local line name m
   if [[ -f Cargo.toml ]]; then
-    while IFS='|' read -r name path; do
-      [[ $path == "$VIUZI_PATH/$name" ]] ||
-        finding "Cargo.toml: $name: path $path, not $VIUZI_PATH/$name"
-    done < <(sed -nE 's/^(viuzi-[a-z0-9-]+) = \{ path = "([^"]*)".*/\1|\2/p' Cargo.toml)
+    while IFS= read -r line; do
+      name=${line%% =*}
+      [[ $line =~ ^viuzi-[a-z0-9-]+\ =\ \{\ version\ =\ \"[0-9]+\.[0-9]+\.[0-9]+\",\ registry\ =\ \"viuzi\"(,.*)?\ \}$ ]] ||
+        finding "Cargo.toml: $name: not a version of the registry viuzi ($line)"
+    done < <(grep -E '^viuzi-[a-z0-9-]+ = ' Cargo.toml)
   fi
   for m in crates/*/Cargo.toml tools/*/Cargo.toml; do
     [[ -f $m ]] || continue
@@ -240,7 +235,10 @@ check_hot_path_locks() {
     [[ -d crates/$crate/src ]] || continue
     while IFS= read -r f; do files+=("$f"); done < <(find "crates/$crate/src" -name '*.rs' | sort)
   done
-  local viuzi=${TESELADB_ANOTHERPRODUCT:-$VIUZI_PATH}
+  local viuzi=${TESELADB_ANOTHERPRODUCT:-}
+  if [[ -z $viuzi ]] && grep -q "^source = \"$VIUZI_SOURCE\"" Cargo.lock 2>/dev/null; then
+    viuzi=$(scripts/teseladb-src.sh) || { finding "scripts/teseladb-src.sh: the source of the viuzi-* crates is not there"; return 0; }
+  fi
   for crate in "${HOT_VIUZI[@]}"; do
     [[ -d $viuzi/$crate/src ]] || continue
     while IFS= read -r f; do files+=("$f"); done < <(find "$viuzi/$crate/src" -name '*.rs' | sort)
@@ -261,7 +259,6 @@ check_origin_word() {
 }
 
 check_lock
-check_viuzi_rev
 check_logic_crates
 check_tools
 check_engine_has_no_git

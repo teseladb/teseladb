@@ -41,7 +41,8 @@ while IFS= read -r v; do known+=("$v"); done < <(
   {
     grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' crates 2>/dev/null
     # The variants of the viuzi-* crates TeselaDB uses (Raft and its log, 001 FR-023).
-    grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' "${TESELADB_ANOTHERPRODUCT:-../../shared-crates/crates}" 2>/dev/null
+    # They are read from the published source TeselaDB is built with (scripts/teseladb-src.sh); -R follows its links.
+    grep -RhoE 'teseladb_bug = "[a-z0-9_]+"' "${TESELADB_ANOTHERPRODUCT:-$(scripts/teseladb-src.sh)}" 2>/dev/null
   } | sed -E 's/.*"([a-z0-9_]+)"/\1/' | sort -u
 )
 if [[ ${#known[@]} -eq 0 ]]; then

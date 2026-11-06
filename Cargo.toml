@@ -4,20 +4,21 @@ resolver = "3"
 members = ["crates/*", "tools/*"]
 
 [workspace.dependencies]
-# The generic crates copied to shared-crates (D-137, constitution 3.0.0, principle V), next to this repository.
-teseladb-types = { path = "../../shared-crates/crates/teseladb-types" }
-teseladb-hash = { path = "../../shared-crates/crates/teseladb-hash" }
-teseladb-json = { path = "../../shared-crates/crates/teseladb-json" }
-teseladb-crypto = { path = "../../shared-crates/crates/teseladb-crypto" }
-teseladb-x509 = { path = "../../shared-crates/crates/teseladb-x509" }
-teseladb-tls = { path = "../../shared-crates/crates/teseladb-tls" }
-teseladb-bson = { path = "../../shared-crates/crates/teseladb-bson" }
-teseladb-compress = { path = "../../shared-crates/crates/teseladb-compress" }
-teseladb-deflate = { path = "../../shared-crates/crates/teseladb-deflate" }
-teseladb-http = { path = "../../shared-crates/crates/teseladb-http" }
-teseladb-tz = { path = "../../shared-crates/crates/teseladb-tz" }
-teseladb-raft = { path = "../../shared-crates/crates/teseladb-raft" }
-teseladb-raftlog = { path = "../../shared-crates/crates/teseladb-raftlog" }
+# The generic crates copied to shared-crates (D-137, constitution 3.0.0, principle V), from the private Cargo registry viuzi
+# at the version they were published with (owner, 06-11-2026).
+teseladb-types = { version = "0.1.0", registry = "viuzi" }
+teseladb-hash = { version = "0.1.0", registry = "viuzi" }
+teseladb-json = { version = "0.1.0", registry = "viuzi" }
+teseladb-crypto = { version = "0.1.0", registry = "viuzi" }
+teseladb-x509 = { version = "0.1.0", registry = "viuzi" }
+teseladb-tls = { version = "0.2.0", registry = "viuzi" }
+teseladb-bson = { version = "0.1.0", registry = "viuzi" }
+teseladb-compress = { version = "0.1.0", registry = "viuzi" }
+teseladb-deflate = { version = "0.1.0", registry = "viuzi" }
+teseladb-http = { version = "0.1.0", registry = "viuzi" }
+teseladb-tz = { version = "0.1.0", registry = "viuzi" }
+teseladb-raft = { version = "0.1.0", registry = "viuzi" }
+teseladb-raftlog = { version = "0.1.0", registry = "viuzi" }
 
 [workspace.package]
 edition = "2024"
