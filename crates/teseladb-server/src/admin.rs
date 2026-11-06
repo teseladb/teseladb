@@ -104,7 +104,8 @@ pub trait AdminBackend: Send + Sync {
     fn healthy(&self) -> bool;
     /// The node's metrics in Prometheus' text format.
     fn metrics(&self) -> String;
-    /// `{nodes: [{_id, voter, learner}], group0Leader, self}`, `self` being the node that answers: whoever runs the
+    /// `{nodes: [{_id, voter, learner, state}], group0Leader, self}`, `state` being `active`, `draining` or `removed`
+    /// and `self` the node that answers: whoever runs the
     /// node ties its address to its number with it, to drain it (021 FR-040).
     fn nodes(&self) -> Answer;
     /// `{ranges: [{_id, start, end, core, voters, leaderHint}]}`, of collection `ns` if given.
@@ -253,6 +254,19 @@ fn range_route(rest: &str, req: &HttpRequest, b: &dyn AdminBackend) -> HttpRespo
         };
     }
     json(body_doc(req).and_then(|at| b.split(range, at)))
+}
+
+/// The state of node `node` as the port names it: `active`, `draining` or `removed` (007 FR-015).
+fn node_state(
+    states: &[(NodeId, teseladb_meta::command::NodeState)],
+    node: NodeId,
+) -> &'static str {
+    use teseladb_meta::command::NodeState;
+    match states.iter().find(|(id, _)| *id == node).map(|(_, s)| *s) {
+        Some(NodeState::Draining) => "draining",
+        Some(NodeState::Removed) => "removed",
+        Some(NodeState::Active) | None => "active",
+    }
 }
 
 /// `POST /admin/nodes/<id>/drain` and `/remove`.
@@ -557,7 +571,8 @@ impl AdminBackend for NodeAdmin {
                     Document::new()
                         .with("_id", node_value(*n))
                         .with("voter", v.voters.contains(n))
-                        .with("learner", v.learners.contains(n)),
+                        .with("learner", v.learners.contains(n))
+                        .with("state", node_state(&v.node_states, *n)),
                 )
             })
             .collect();
@@ -1223,10 +1238,20 @@ fn text(action: &AdminAction, doc: Option<&Document>, raw: &[u8]) -> String {
             let leader = show(doc.and_then(|d| d.get("group0Leader")));
             for n in list("nodes") {
                 let id = show(n.get("_id"));
-                let role =
-                    if n.get("voter") == Some(&Value::Boolean(true)) { "voter" } else { "learner" };
+                let yes = |k: &str| n.get(k) == Some(&Value::Boolean(true));
+                let role = if yes("voter") {
+                    "voter"
+                } else if yes("learner") {
+                    "learner"
+                } else {
+                    "-"
+                };
                 let lead = if id == leader { "\tGroup 0 leader" } else { "" };
-                let _ = writeln!(out, "{id}\t{role}{lead}");
+                let state = match n.get("state") {
+                    Some(Value::String(s)) if s != "active" => format!("\t{s}"),
+                    _ => String::new(),
+                };
+                let _ = writeln!(out, "{id}\t{role}{lead}{state}");
             }
         }
         AdminAction::Ranges { .. } => {
@@ -1664,16 +1689,29 @@ mod tests {
 
     #[test]
     fn the_text_form_has_a_line_per_node_or_range_and_the_bare_token() {
-        let node = |id: i64, voter: bool| {
-            Value::Document(Document::new().with("_id", id).with("voter", voter))
+        let node = |id: i64, voter: bool, learner: bool, state: &str| {
+            Value::Document(
+                Document::new()
+                    .with("_id", id)
+                    .with("voter", voter)
+                    .with("learner", learner)
+                    .with("state", state),
+            )
         };
         let nodes = Document::new().with("group0Leader", 2i64).with(
             "nodes",
-            Value::Array(vec![node(1, true), node(2, true), node(3, false), 7i64.into()]),
+            Value::Array(vec![
+                node(1, true, false, "active"),
+                node(2, true, false, "active"),
+                node(3, false, true, "active"),
+                node(4, false, false, "draining"),
+                node(5, false, false, "removed"),
+                7i64.into(),
+            ]),
         );
         assert_eq!(
             text(&AdminAction::Nodes, Some(&nodes), b""),
-            "1\tvoter\n2\tvoter\tGroup 0 leader\n3\tlearner\n"
+            "1\tvoter\n2\tvoter\tGroup 0 leader\n3\tlearner\n4\t-\tdraining\n5\t-\tremoved\n"
         );
         let range = Document::new()
             .with("_id", 4i64)

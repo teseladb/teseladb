@@ -1594,6 +1594,7 @@ mod tests {
             voters: Vec::new(),
             learners: Vec::new(),
             nodes: Vec::new(),
+            node_states: Vec::new(),
             addrs_current: false,
             data_range: None,
             root_pending: true,

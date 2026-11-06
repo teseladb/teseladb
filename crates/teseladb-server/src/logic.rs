@@ -105,6 +105,8 @@ pub struct Group0View {
     pub learners: Vec<NodeId>,
     /// Nodes of the cluster.
     pub nodes: Vec<NodeId>,
+    /// The state of each node of the cluster, removed ones too.
+    pub node_states: Vec<(NodeId, NodeState)>,
     /// Group 0 has this node's current name and addresses (always true without them).
     pub addrs_current: bool,
     /// Group 0's descriptor of the data range, once created (005 FR-016).
@@ -597,6 +599,7 @@ impl NodeLogic {
             voters: conf.map(|c| c.voters.clone()).unwrap_or_default(),
             learners: conf.map(|c| c.learners.clone()).unwrap_or_default(),
             nodes: sm.nodes.keys().copied().collect(),
+            node_states: sm.nodes.iter().map(|(id, info)| (*id, info.state)).collect(),
             addrs_current: self.addrs_current(),
             data_range: data_range(sm).cloned(),
             root_pending: self.root_user.is_some(),

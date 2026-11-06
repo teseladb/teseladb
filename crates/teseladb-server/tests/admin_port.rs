@@ -212,6 +212,15 @@ fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
         let v = n1.view(READY)?;
         (!v.voters.contains(&n3.node_id()) && v.voters.len() == 2).then_some(())
     });
+    // The list of nodes says each one's state: whoever drained node 3 sees it removed (021 FR-040).
+    until("the list says node 3 is removed", || {
+        let (code, out, _) = admin(&at, &["--format", "json", "nodes"]);
+        let text: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        let removed =
+            format!("{{\"_id\":{id},\"voter\":false,\"learner\":false,\"state\":\"removed\"}}");
+        (code == 0 && text.contains(&removed) && text.contains("\"state\":\"active\""))
+            .then_some(())
+    });
     for n in [n3, n2, n1] {
         n.stop();
     }
