@@ -214,7 +214,7 @@ fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
     let (code, err) =
         fails(&d.0.join("n3"), &d.0.join("n3.log"), &format!("{gone},{gone}"), &other);
     assert_eq!(code, 1);
-    assert_eq!(err.matches(&gone.to_string()).count() >= 2, true, "{err}");
+    assert!(err.matches(&gone.to_string()).count() >= 2, "{err}");
     drop(second);
     first.stop();
 }
