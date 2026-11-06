@@ -339,7 +339,8 @@ impl Executor for NodeExecutor {
     }
 
     fn cursor_ns(&mut self, id: i64) -> Option<String> {
-        lock(&self.shared).cursors.get(id).map(|c| c.ns.clone())
+        let ns = lock(&self.shared).cursors.get(id).map(|c| c.ns.clone())?;
+        Some(public_ns(&ns))
     }
 
     fn object_id(&mut self) -> [u8; 12] {
@@ -388,6 +389,15 @@ impl Executor for NodeExecutor {
         let body = Forwarded { who, request: request.clone(), resource }.encode();
         let answer = self.backend.forward_http(node, body)?;
         decode_response(&answer).ok()
+    }
+}
+
+/// Namespace `ns` of a cursor as the user who opened it names it: the node keeps a tenant's databases qualified by the
+/// tenant (007 FR-025), and the `getMore` of the cursor routes runs as that user, in its tenant, with the name it gives.
+fn public_ns(ns: &str) -> String {
+    match ns.split_once('.') {
+        Some((db, coll)) => format!("{}.{coll}", teseladb_meta::tenants::split_db(db).1),
+        None => teseladb_meta::tenants::split_db(ns).1.to_owned(),
     }
 }
 

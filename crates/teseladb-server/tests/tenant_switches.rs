@@ -237,6 +237,42 @@ fn the_switches_close_each_part_of_the_http_port_and_the_service_user_passes() {
     drop(node.stop());
 }
 
+/// The body of `r` as text.
+fn text(r: &Response) -> String {
+    String::from_utf8_lossy(&r.body).into_owned()
+}
+
+/// A cursor of a tenant's user through REST (019 contract `rest-api.md`): its `next` link gives the next batch, by the
+/// names the tenant gives its databases, and closing it works the same.
+#[test]
+fn a_tenant_users_rest_cursor_follows_its_next_link() {
+    let (node, mut root) = tenant_node();
+    let at = node.http_addrs()[0];
+    let docs =
+        Value::Array((0..5).map(|i| Value::Document(Document::new().with("_id", i))).collect());
+    let insert =
+        Document::new().with("insert", "items").with("documents", docs).with("$tenant", TENANT);
+    assert!(ok(&root.run("shop", insert)));
+    let key = key_of(&create_key(&mut root, "ann", true));
+    let bearer = format!("Bearer {key}");
+    let find = Request::new("POST", "/v1/databases/shop/collections/items/find")
+        .header("Authorization", &bearer)
+        .header("Content-Type", "application/json")
+        .body(br#"{"filter":{},"sort":{"_id":1},"batchSize":2}"#.to_vec());
+    let first = send(at, find);
+    assert_eq!(first.status, 200, "{}", text(&first));
+    let body = text(&first);
+    let next =
+        body.split("\"next\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap().to_owned();
+    let more = send(at, Request::new("GET", &next).header("Authorization", &bearer));
+    assert_eq!(more.status, 200, "{}", text(&more));
+    assert!(text(&more).contains("\"nextBatch\":[{\"_id\":2},{\"_id\":3}]"), "{}", text(&more));
+    let cursor = next.split('?').next().unwrap().to_owned();
+    let closed = send(at, Request::new("DELETE", &cursor).header("Authorization", &bearer));
+    assert_eq!(closed.status, 200, "{}", text(&closed));
+    drop(node.stop());
+}
+
 #[test]
 fn the_key_past_max_api_keys_is_refused_whoever_asks_and_the_service_user_has_no_cap() {
     let (node, mut root) = tenant_node();
