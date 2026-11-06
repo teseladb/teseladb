@@ -34,8 +34,9 @@ docker volume create "$VOLUME" >/dev/null
 trap 'docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true' EXIT
 tar -cf - --exclude=./target --exclude=./.git . | docker run --rm -i -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" sh -c 'mkdir -p /work/repo/src && tar -xf - -C /work/repo/src'
 # Cargo downloads the viuzi-* crates of Cargo.lock from the private registry with the JWT of the run.
+# The binary carries the release's full version (0.1.0-dev.N in development), which test-install.sh checks.
 docker run --rm -v "$VOLUME:/work" -w /work/repo/src -e CARGO_TARGET_DIR=/work/target -e CARGO_PROFILE_DIST_STRIP=debuginfo \
-  -e CARGO_REGISTRIES_VIUZI_TOKEN "$ZIGBUILD_IMAGE" sh -c '
+  -e CARGO_REGISTRIES_VIUZI_TOKEN -e TESELADB_RELEASE_VERSION="$VERSION" "$ZIGBUILD_IMAGE" sh -c '
   set -e
   rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
   # glibc 2.28 (Debian 10, RHEL 8 and later) for the Linux binaries.

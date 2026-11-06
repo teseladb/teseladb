@@ -93,8 +93,13 @@ use crate::node::{Node, NodeConfig, lock_dir};
 use teseladb_auth::audit::AuditType;
 use teseladb_bson::{Document, Value};
 
-/// Version of the binary.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version of the binary: the release's that built it (`TESELADB_RELEASE_VERSION`, such as `0.1.0-dev.10`, which
+/// `scripts/release/publish.sh` passes to the build), or the crate's. A release of development carries its full version,
+/// which the install check and `teseladb --version` compare.
+pub const VERSION: &str = match option_env!("TESELADB_RELEASE_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// Longest a node waits for Group 0 to have the cluster created before giving up.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -929,6 +934,13 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    /// A release's version is its crate's with the release's suffix (`0.1.0-dev.10` of `0.1.0`): `verify-tag` of the
+    /// release workflows refuses any other.
+    #[test]
+    fn the_version_is_the_crate_s_or_a_release_of_it() {
+        assert!(super::VERSION.starts_with(env!("CARGO_PKG_VERSION")), "{}", super::VERSION);
+    }
+
     use super::keytab;
 
     /// A keytab of MIT's format with one entry of `etype`.
