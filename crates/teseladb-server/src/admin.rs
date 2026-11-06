@@ -104,7 +104,8 @@ pub trait AdminBackend: Send + Sync {
     fn healthy(&self) -> bool;
     /// The node's metrics in Prometheus' text format.
     fn metrics(&self) -> String;
-    /// `{nodes: [{_id, voter, learner}], group0Leader}`.
+    /// `{nodes: [{_id, voter, learner}], group0Leader, self}`, `self` being the node that answers: whoever runs the
+    /// node ties its address to its number with it, to drain it (021 FR-040).
     fn nodes(&self) -> Answer;
     /// `{ranges: [{_id, start, end, core, voters, leaderHint}]}`, of collection `ns` if given.
     fn ranges(&self, ns: Option<&str>) -> Answer;
@@ -562,7 +563,8 @@ impl AdminBackend for NodeAdmin {
             .collect();
         Ok(Document::new()
             .with("nodes", Value::Array(nodes))
-            .with("group0Leader", node_value(v.leader)))
+            .with("group0Leader", node_value(v.leader))
+            .with("self", node_value(self.handle.node)))
     }
 
     fn ranges(&self, ns: Option<&str>) -> Answer {

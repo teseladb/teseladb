@@ -126,6 +126,10 @@ fn a_first_start_takes_the_ca_and_the_root_password_of_the_bootstrap_directory()
         request_with(&node.admin, Some(Arc::new(client)), Method::Get, "/admin/nodes", b"")
             .unwrap();
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    // The node says which one it is, so that whoever runs it ties its address to its number (021 FR-040).
+    let text: String =
+        String::from_utf8_lossy(&body).chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(text.contains("\"self\":1"), "{text}");
     drop(node);
     // A later start with another directory changes neither the CA nor root's password.
     let other = d.0.join("other");
