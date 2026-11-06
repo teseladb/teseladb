@@ -194,6 +194,31 @@ fn a_node_enrolls_with_a_token_once_and_joins_over_mtls() {
     first.stop();
 }
 
+/// `--join` is a list of seeds: a node enrolls through the first that accepts it, so a seed that is gone (a node
+/// drained and removed, a machine that left) does not stop it while another answers (013 FR-005, 021 FR-040).
+#[test]
+fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
+    let d = dir("seeds");
+    let first = member(&d.0.join("n1"));
+    let token = first.create_enroll_token(Duration::from_secs(3600)).unwrap();
+    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let seeds = format!("{gone},{}", first.peer_addr());
+    let second = enrolls(&d.0.join("n2"), &d.0.join("n2.log"), &seeds, &token);
+    let until = Instant::now() + WAIT;
+    while first.view(WAIT).is_none_or(|v| v.nodes.len() < 2) {
+        assert!(Instant::now() < until, "node 2 never joined");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Every seed refusing: the error names each one.
+    let other = first.create_enroll_token(Duration::from_secs(3600)).unwrap();
+    let (code, err) =
+        fails(&d.0.join("n3"), &d.0.join("n3.log"), &format!("{gone},{gone}"), &other);
+    assert_eq!(code, 1);
+    assert_eq!(err.matches(&gone.to_string()).count() >= 2, true, "{err}");
+    drop(second);
+    first.stop();
+}
+
 /// `teseladb admin token create` (013 T017, FR-005): the token the administration port issues
 /// enrolls a new node, which joins over mTLS.
 #[test]

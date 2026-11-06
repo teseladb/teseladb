@@ -718,8 +718,8 @@ fn secure(
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     let params = pki::PkiParams { now, node_names: pki::node_names(&o.bind_ip) };
     if let Some(token) = o.enroll_token.as_ref().filter(|_| pki::absent(&o.dbpath)) {
-        let at = o.join.first().map_or("", String::as_str);
-        log.info("enrolling with the cluster", &[("join", &at)]);
+        let at = o.join.join(",");
+        log.info("enrolling with the cluster", &[("join", &at.as_str())]);
         enroll_node(o, &token.0, &mut random)?;
         log.info("enrolled", &[]);
     }
@@ -821,7 +821,9 @@ fn enroll_node(
 ) -> Result<(), String> {
     use teseladb_tls::{ClientConfig, Trust};
     let token = enroll::Token::parse(text).map_err(|e| e.to_string())?;
-    let addr = o.join.first().ok_or("--enroll-token needs --join <ip:port>")?;
+    if o.join.is_empty() {
+        return Err("--enroll-token needs --join <ip:port>".to_owned());
+    }
     let mut seed = [0u8; enroll::KEY_RANDOM_LEN];
     random(&mut seed).map_err(|e| e.to_string())?;
     let node_key = teseladb_x509::PrivateKey::generate_ec(teseladb_crypto::ec::NamedCurve::P256, &seed)
@@ -838,9 +840,22 @@ fn enroll_node(
     let trust = Trust { pinned: Some(token.fingerprint), ..Trust::anchors(Vec::new()) };
     let client = ClientConfig::new(trust);
     let client = std::sync::Arc::new(if o.tls.fips_mode { client.fips() } else { client });
-    let accepted = teseladb_io::handshake::request_enroll(addr, &req, &client)
-        .map_err(|e| format!("enrollment, steps 1-2 (TLS with {addr} and the request): {e}"))?
-        .map_err(|e| format!("enrollment, step 3 ({addr} refused it): {e}"))?;
+    // `--join` is a list of seeds: the first that accepts the request enrolls the node, so a seed that is gone does not
+    // stop it while another answers. Each seed's failure goes in the error when none accepts.
+    let mut failures = Vec::new();
+    let mut accepted = None;
+    for addr in &o.join {
+        match teseladb_io::handshake::request_enroll(addr, &req, &client) {
+            Ok(Ok(a)) => {
+                accepted = Some(a);
+                break;
+            }
+            Ok(Err(e)) => failures.push(format!("enrollment, step 3 ({addr} refused it): {e}")),
+            Err(e) => failures
+                .push(format!("enrollment, steps 1-2 (TLS with {addr} and the request): {e}")),
+        }
+    }
+    let accepted = accepted.ok_or_else(|| failures.join("; "))?;
     let bad = |what: &str| format!("enrollment, step 3: the answer {what}");
     let ca = teseladb_x509::Certificate::from_der(&accepted.ca).map_err(|_| bad("has no CA"))?;
     if enroll::fingerprint(&ca) != token.fingerprint {
