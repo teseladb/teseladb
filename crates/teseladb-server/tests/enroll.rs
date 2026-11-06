@@ -46,6 +46,7 @@ fn member(data: &Path) -> Node<MemDisk> {
         cores: Some(1),
         peer_tls: Some(pki::peer_tls(&pki, false)),
         enroller: Some(teseladb_server::enroll::Enroller::new(&pki)),
+        admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         ..NodeConfig::default()
     };
     let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
@@ -215,6 +216,46 @@ fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
         fails(&d.0.join("n3"), &d.0.join("n3.log"), &format!("{gone},{gone}"), &other);
     assert_eq!(code, 1);
     assert!(err.matches(&gone.to_string()).count() >= 2, "{err}");
+    drop(second);
+    first.stop();
+}
+
+/// A node that leaves the cluster refuses an enrollment before it uses the token: the token still
+/// enrolls the node through the next seed (021 FR-040, a node in while another one leaves).
+#[test]
+fn a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused() {
+    let d = dir("drained-seed");
+    let first = member(&d.0.join("n1"));
+    let token = first.create_enroll_token(Duration::from_secs(3600)).unwrap();
+    let second =
+        enrolls(&d.0.join("n2"), &d.0.join("n2.log"), &first.peer_addr().to_string(), &token);
+    let until = Instant::now() + WAIT;
+    while first.view(WAIT).is_none_or(|v| v.nodes.len() < 2) {
+        assert!(Instant::now() < until, "node 2 never joined");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let log = std::fs::read_to_string(d.0.join("n2.log")).unwrap();
+    let second_peer = log
+        .lines()
+        .find_map(|l| l.split("peer port open addr=").nth(1))
+        .map(|a| a.split_whitespace().next().unwrap_or("").to_owned())
+        .unwrap_or_default();
+    assert!(!second_peer.is_empty(), "{log}");
+    let two = first.view(WAIT).unwrap().nodes.into_iter().find(|n| *n != first.node_id()).unwrap();
+    let admin = first.admin_addr().unwrap().to_string();
+    let drain: Vec<String> = ["admin", "--node", &admin, "node", "drain", &two.0.to_string()]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = run(&drain, &mut out, &mut err, &|| true);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let other = first.create_enroll_token(Duration::from_secs(3600)).unwrap();
+    let seeds = format!("{second_peer},{}", first.peer_addr());
+    let third = enrolls(&d.0.join("n3"), &d.0.join("n3.log"), &seeds, &other);
+    let text = std::fs::read_to_string(d.0.join("n3.log")).unwrap();
+    assert!(text.contains("enrolled"), "{text}");
+    drop(third);
     drop(second);
     first.stop();
 }

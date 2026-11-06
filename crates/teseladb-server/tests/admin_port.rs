@@ -53,6 +53,14 @@ fn every_subcommand_works_against_a_node() {
     let (code, out, _) = admin(&at, &["--format", "json", "nodes"]);
     assert_eq!(code, 0);
     assert!(out.starts_with("{\"nodes\": [") || out.starts_with("{\"nodes\":["), "{out}");
+    // The feature compatibility version the cluster runs and the one every node can go to, for whoever
+    // changes the nodes' version (021 FR-041).
+    let fcv = |at: &str| admin(at, &["--format", "json", "nodes"]).1.replace(' ', "");
+    assert!(
+        fcv(&at).contains(r#""featureCompatibilityVersion":{"current":"9.0","available":"9.0"}"#),
+        "{}",
+        fcv(&at)
+    );
     // A collection to split, and its ranges.
     let mut c = Client::new(&n);
     assert!(ok(&c.run("db", Document::new().with("insert", "c").with("documents", docs(0..10)))));
@@ -87,6 +95,13 @@ fn every_subcommand_works_against_a_node() {
     assert_eq!((code, err.contains("no right neighbour")), (1, true), "{err}");
     let (code, _, err) = admin(&at, &["range", "split", "77"]);
     assert_eq!((code, err.as_str()), (1, "teseladb admin: no range 77\n"));
+    let set = Document::new().with("setFeatureCompatibilityVersion", "8.0").with("confirm", true);
+    assert!(ok(&c.run("admin", set)));
+    assert!(
+        fcv(&at).contains(r#""featureCompatibilityVersion":{"current":"8.0","available":"9.0"}"#),
+        "{}",
+        fcv(&at)
+    );
     // Cluster parameters, through the same command a client runs.
     let (code, _, err) =
         admin(&at, &["config", "set", "defaultMaxTimeMS", r#"{"readOperations": 250}"#]);

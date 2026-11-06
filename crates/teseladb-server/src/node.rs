@@ -36,7 +36,7 @@ use teseladb_io::runtime::{CoreInput, CoreRuntime, CoreSender, CoreSenders, Runt
 use teseladb_io::secure::PeerTls;
 use teseladb_lsm::{Lsm, LsmConfig, LsmError};
 use teseladb_meta::bootstrap::{DATA_RANGE, data_range_core};
-use teseladb_meta::command::{Group0Command, NodeAddrs};
+use teseladb_meta::command::{Group0Command, NodeAddrs, NodeState};
 use teseladb_meta::enroll_tokens::TOKEN_ID_LEN;
 use teseladb_meta::group0::{GROUP0, Group0Error, Group0Sm};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock, SNAPSHOT_ENTRIES};
@@ -709,6 +709,8 @@ pub(crate) fn enroll_token(
 
 /// Pause before asking Group 0 again for a change it could not take.
 const GROUP0_RETRY: Duration = Duration::from_millis(50);
+/// How long a core may take to show its copy of Group 0.
+const GROUP0_WAIT: Duration = Duration::from_secs(5);
 
 /// Runs `cmd` on Group 0 through core 0 and waits for the outcome.
 pub(crate) fn group0_change(core0: &CoreSender<NodeMsg>, cmd: Group0Command) -> Result<(), String> {
@@ -767,14 +769,31 @@ fn refusal_text(e: &Group0Error) -> String {
     }
 }
 
+/// Whether node `me` is an active member as its copy of Group 0 sees it. A node that drains or was
+/// removed no longer hears from Group 0: a change it asked for could be taken without its knowing.
+fn active_member(core0: &CoreSender<NodeMsg>, me: NodeId) -> bool {
+    let (tx, rx) = mpsc::channel();
+    if core0.send_waiting(CoreInput::App(NodeMsg::View(tx))).is_err() {
+        return false;
+    }
+    rx.recv_timeout(GROUP0_WAIT).is_ok_and(|v| {
+        v.node_states.iter().any(|(id, state)| *id == me && *state == NodeState::Active)
+    })
+}
+
 /// A member's answer to an enrollment: the key is checked, Group 0 takes the token, and the node
-/// gets its certificate and the sealed keys.
+/// gets its certificate and the sealed keys. A node that leaves the cluster refuses before Group 0
+/// takes the token, which then enrolls the node through another seed.
 fn enroll_one(
     e: &Enroller,
     core0: &CoreSender<NodeMsg>,
+    me: NodeId,
     req: &EnrollRequest,
 ) -> Result<EnrollAccepted, String> {
     Enroller::public_key(req)?;
+    if !active_member(core0, me) {
+        return Err("this node is not an active member of the cluster".to_owned());
+    }
     let secret_hash = crate::enroll::secret_hash(&req.secret);
     group0_change(core0, Group0Command::ConsumeEnrollToken { id: req.token_id, secret_hash })?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -1051,7 +1070,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         });
         let enroll = cfg.enroller.clone().map(|e| {
             let core0 = senders[0].senders();
-            let handler: EnrollHandler = Arc::new(move |req| enroll_one(&e, &core0.sender(), &req));
+            let handler: EnrollHandler =
+                Arc::new(move |req| enroll_one(&e, &core0.sender(), node_id, &req));
             handler
         });
         let opts = AcceptorOptions { join: Some(join), enroll, tls: cfg.peer_tls.clone() };

@@ -104,9 +104,10 @@ pub trait AdminBackend: Send + Sync {
     fn healthy(&self) -> bool;
     /// The node's metrics in Prometheus' text format.
     fn metrics(&self) -> String;
-    /// `{nodes: [{_id, voter, learner, state}], group0Leader, self}`, `state` being `active`, `draining` or `removed`
-    /// and `self` the node that answers: whoever runs the
-    /// node ties its address to its number with it, to drain it (021 FR-040).
+    /// `{nodes: [{_id, voter, learner, state}], group0Leader, self, featureCompatibilityVersion: {current, available}}`,
+    /// `state` being `active`, `draining` or `removed`, `self` the node that answers (whoever runs the node ties its
+    /// address to its number with it, to drain it, 021 FR-040) and `available` the feature compatibility version every
+    /// node runs, where a change of version node by node ends (021 FR-041).
     fn nodes(&self) -> Answer;
     /// `{ranges: [{_id, start, end, core, voters, leaderHint}]}`, of collection `ns` if given.
     fn ranges(&self, ns: Option<&str>) -> Answer;
@@ -350,6 +351,24 @@ fn machine_metrics(out: &mut String, data_dir: Option<&std::path::Path>) {
 }
 
 impl NodeAdmin {
+    /// `{current, available}`: the feature compatibility version the cluster runs and the latest every node that is not
+    /// removed runs, the one `setFeatureCompatibilityVersion` can go to (007 FR-027).
+    fn fcv(&self) -> Result<Document, AdminError> {
+        let Some(CatalogAnswer::Settings(all)) =
+            self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Settings, tx))
+        else {
+            return Err(AdminError::unavailable("Group 0 did not answer"));
+        };
+        let current =
+            teseladb_wire::commands::fcv::version_of(&crate::backend::parameters_of(&all));
+        let available = self
+            .handle
+            .routes
+            .fcv_limit()
+            .unwrap_or_else(|| teseladb_wire::commands::fcv::VERSIONS[0].to_owned());
+        Ok(Document::new().with("current", current).with("available", available))
+    }
+
     /// Sends `msg` to core `core` and waits for its answer, as long as [`CORE_WAIT`].
     pub fn ask<T>(&self, core: usize, msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg) -> Option<T> {
         let (tx, rx) = mpsc::channel();
@@ -579,7 +598,8 @@ impl AdminBackend for NodeAdmin {
         Ok(Document::new()
             .with("nodes", Value::Array(nodes))
             .with("group0Leader", node_value(v.leader))
-            .with("self", node_value(self.handle.node)))
+            .with("self", node_value(self.handle.node))
+            .with("featureCompatibilityVersion", self.fcv()?))
     }
 
     fn ranges(&self, ns: Option<&str>) -> Answer {
