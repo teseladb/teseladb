@@ -299,3 +299,53 @@ fn range_leaders_publish_themselves_and_spread_over_the_nodes() {
         n.stop();
     }
 }
+
+/// A cluster that changes its nodes one at a time, as a change of size does (021 FR-040): a fourth node joins three,
+/// the first is drained until removed, and a fifth joins. Group 0 answers the administration port within moments of
+/// each change, through the node that stays.
+#[test]
+fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
+    const ANSWER: std::time::Duration = std::time::Duration::from_secs(15);
+    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n1.wait_ready(READY));
+    let seed = vec![n1.peer_addr().to_string()];
+    let n2 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+    let n3 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
+    let at2 = n2.admin_addr().unwrap().to_string();
+    let answers = |at: &str, what: &str| {
+        let started = std::time::Instant::now();
+        loop {
+            let (code, _, _) = admin(at, &["nodes"]);
+            if code == 0 {
+                return;
+            }
+            assert!(started.elapsed() < ANSWER, "Group 0 did not answer {what} in {ANSWER:?}");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    answers(&at2, "with three nodes");
+    let n4 = Node::start(with_admin(seed), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n4.wait_ready(READY));
+    answers(&at2, "after a fourth node joined");
+    let id1 = n1.node_id().0.to_string();
+    let (code, _, err) = admin(&at2, &["node", "drain", &id1]);
+    assert_eq!(code, 0, "{err}");
+    until("node 1 is removed", || {
+        let (code, out, _) = admin(&at2, &["--format", "json", "nodes"]);
+        let text: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        (code == 0
+            && text.contains(&format!(
+                "{{\"_id\":{id1},\"voter\":false,\"learner\":false,\"state\":\"removed\"}}"
+            )))
+        .then_some(())
+    });
+    answers(&at2, "after node 1 left");
+    let n5 = Node::start(with_admin(vec![n2.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
+        .unwrap();
+    assert!(n5.wait_ready(READY));
+    answers(&at2, "after a fifth node joined");
+    for n in [n5, n4, n3, n2, n1] {
+        n.stop();
+    }
+}
