@@ -803,7 +803,7 @@ impl RangeHost {
         self.now = now;
         let id = self.new_id();
         if keys.is_empty() || !keys.iter().all(|k| self.covers(g, k)) {
-            self.reply(id, Err(RangeError::OutOfRange));
+            self.reply(id, crossing(&keys, |k| self.covers(g, k), &work));
             return id;
         }
         self.count_load(g, &keys[0], now);
@@ -1309,5 +1309,25 @@ impl RangeHost {
                 moved
             }
         }
+    }
+}
+
+/// The refusal of a write request whose keys this range does not all hold. A mutation routed by
+/// its first key, which the range holds, with another key in another range needs a transaction
+/// across ranges, which the layer above runs: an `OutOfRange` would send it back here, by its
+/// first key, until its deadline. Anything else goes to the ranges again (`OutOfRange`).
+fn crossing(
+    keys: &[Vec<u8>],
+    covers: impl Fn(&[u8]) -> bool,
+    work: &Work,
+) -> Result<Reply, RangeError> {
+    let first_here = keys.first().is_some_and(|k| covers(k));
+    match (work, first_here, keys.iter().find(|k| !covers(k))) {
+        (Work::Mutation(_), true, Some(k)) => {
+            let msg =
+                format!("{CROSSES_RANGES}: {k:02x?}, which needs a transaction across ranges");
+            Err(RangeError::Mutation(MutationError(msg)))
+        }
+        _ => Err(RangeError::OutOfRange),
     }
 }

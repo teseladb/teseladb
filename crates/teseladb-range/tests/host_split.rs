@@ -75,6 +75,22 @@ fn a_leader_splits_its_range_and_the_new_range_keeps_the_idempotence_table() {
     for node in c.nodes.values() {
         assert_eq!(node.core.state_machine(G).and_then(RangeState::end), Some(AT));
     }
+    // A write whose keys are on both sides of the cut is refused as one that needs a
+    // transaction across ranges, which the layer above runs; the range cannot take it whole, and
+    // an `OutOfRange` would send it back to the same range until its deadline.
+    let (now, wall) = (c.now, c.wall_of(l));
+    let node = c.nodes.get_mut(&l).unwrap();
+    let m = Box::new(SetKey(b"\x01b".to_vec(), 8));
+    let keys = vec![b"\x01b".to_vec(), b"\x01q".to_vec()];
+    let w = WriteReq { g: G, keys, m, dedup: None, wc: MAJORITY };
+    let across = node.host.mutate(&mut node.core, w, now, wall);
+    c.follow();
+    match c.reply(l, across) {
+        Some(Err(RangeError::Mutation(e))) => {
+            assert!(e.0.starts_with(teseladb_range::host::CROSSES_RANGES), "{e:?}");
+        }
+        other => panic!("not refused as crossing ranges: {other:?}"),
+    }
     // A follower that leads next refuses the keys it gave away at once.
     let later = write_on(&mut c, l, G, b"\x01s", 5, 5);
     c.follow();
