@@ -31,11 +31,24 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The variant names the code declares, as `scripts/sim-mutants.sh` finds them: under `crates/`
-/// with `teseladb_bug`, and in the viuzi-* crates next to the repository with `teseladb_bug`.
+/// with `teseladb_bug`, and with `teseladb_bug` in the source of the viuzi-* crates TeselaDB is built
+/// with, the folder of `TESELADB_ANOTHERPRODUCT` or the one `scripts/teseladb-src.sh` prints.
 fn declared() -> BTreeSet<String> {
     let mut names = declared_in(&Path::new(ROOT).join("crates"), "teseladb_bug = \"");
-    names.extend(declared_in(&Path::new(ROOT).join("../../shared-crates/crates"), "teseladb_bug = \""));
+    names.extend(declared_in(&teseladb_src(), "teseladb_bug = \""));
     names
+}
+
+/// The folder of links to the viuzi-* crates of the build.
+fn teseladb_src() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TESELADB_ANOTHERPRODUCT") {
+        return PathBuf::from(dir);
+    }
+    let out = Command::new(Path::new(ROOT).join("scripts/teseladb-src.sh"))
+        .output()
+        .unwrap_or_else(|e| panic!("scripts/teseladb-src.sh: {e}"));
+    assert!(out.status.success(), "scripts/teseladb-src.sh: {}", String::from_utf8_lossy(&out.stderr));
+    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
 }
 
 /// The variant names of `marker` in the Rust files under `dir`.
