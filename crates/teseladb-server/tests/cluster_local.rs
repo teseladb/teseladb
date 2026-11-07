@@ -207,7 +207,7 @@ impl Proc {
         self.wait_line(what, |l| l.contains(what))
     }
 
-    /// The lines that contain each of `whats`, in whatever order they come: standard output and
+    /// The line of each of `whats` ([`Self::is`]), in whatever order they come: standard output and
     /// standard error reach the test through two threads, so a line a node writes to one after a
     /// line to the other may still arrive first.
     fn wait_each(&self, whats: &[&str]) -> Vec<String> {
@@ -219,12 +219,22 @@ impl Proc {
                 panic!("no {missing:?}")
             });
             for (what, slot) in whats.iter().zip(found.iter_mut()) {
-                if slot.is_none() && line.contains(what) {
+                if slot.is_none() && Self::is(&line, what) {
                     *slot = Some(line.clone());
                 }
             }
         }
         found.into_iter().flatten().collect()
+    }
+
+    /// Whether `line` is the one `what` names: the ready line starts with [`READY_LINE`], since the
+    /// log's `node ready node_id=…` event on standard error also contains it; any other, by its
+    /// text.
+    fn is(line: &str, what: &str) -> bool {
+        match what {
+            READY_LINE => line.starts_with(READY_LINE),
+            _ => line.contains(what),
+        }
     }
 
     /// The ready line's fields: node and inter-node address. The log's `node ready` event, on
