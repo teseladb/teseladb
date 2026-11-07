@@ -1,6 +1,6 @@
 [package]
 name = "teseladb-server"
-version = "0.1.0"
+version = "0.1.1"
 description = "The teseladb binary: command line, logging, node start-up with Group 0 on core 0 and the data range over its core's LSM, the inter-node port, joins, snapshot transfers and the in-process development cluster."
 edition.workspace = true
 rust-version.workspace = true
