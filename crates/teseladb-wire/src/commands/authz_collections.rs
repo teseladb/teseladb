@@ -7,7 +7,7 @@ use teseladb_auth::actions::ActionType;
 use teseladb_auth::privileges::{Privilege, PrivilegeError};
 use teseladb_auth::roles::ADMIN_DB;
 use teseladb_meta::catalog::Namespace;
-use teseladb_meta::security::{Expect, Principal, SecurityOp, id_key};
+use teseladb_meta::security::{Expect, Principal, SecurityError, SecurityOp, id_key, string_id};
 use teseladb_range::read::ReadConcern;
 use teseladb_bson::{Document, RawDoc, Value};
 
@@ -16,7 +16,7 @@ use super::names;
 use super::{Backend, Ctx};
 use crate::error::{
     BAD_VALUE, CommandError, EXPECTED_OBJECT, FAILED_TO_PARSE, INVALID_NAMESPACE, NO_SUCH_KEY,
-    TYPE_MISMATCH, UNAUTHORIZED,
+    ROLE_ALREADY_EXISTS, TYPE_MISMATCH, UNAUTHORIZED, USER_ALREADY_EXISTS,
 };
 use crate::types::{type_name, wrong_type};
 
@@ -198,7 +198,10 @@ impl MergeArgs {
 /// of `db` (of every database when it is empty) become exactly those of the temporary
 /// collections. A temporary collection that does not exist counts as empty; its documents of
 /// another database are left out. Everything is checked before anything changes, and the change
-/// is one batch of Group 0.
+/// is one batch of Group 0. A batch refused because a name or an `_id` is taken goes again while
+/// what it would write changes; the same batch refused twice meets a user or role of another
+/// tenant, which this tenant cannot see and names hold in the whole cluster (DV-023): the answer
+/// is the one `createUser` or `createRole` gives.
 pub fn merge<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     if ctx.db != ADMIN_DB {
         let msg = "_mergeAuthzCollections may only be run against the admin database.";
@@ -213,6 +216,7 @@ pub fn merge<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
         Some(ns) => Some(read_temp(ctx.backend, ns, Principal::Role, &a.db)?),
         None => None,
     };
+    let mut taken: Option<Vec<SecurityOp>> = None;
     for _ in 0..super::users::MAX_ATTEMPTS {
         let mut ops = Vec::new();
         if let Some(t) = &users {
@@ -224,11 +228,52 @@ pub fn merge<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
         if ops.is_empty() {
             return Ok(Document::new().with("ok", 1.0));
         }
-        if ctx.backend.security_write(ops)?.is_ok() {
-            return Ok(Document::new().with("ok", 1.0));
+        match ctx.backend.security_write(ops.clone())? {
+            Ok(()) => return Ok(Document::new().with("ok", 1.0)),
+            Err(SecurityError::Exists(_)) if taken.as_ref() == Some(&ops) => {
+                return Err(exists(ctx.backend, &ops)?);
+            }
+            Err(SecurityError::Exists(_)) => taken = Some(ops),
+            Err(SecurityError::NotFound(_) | SecurityError::Conflict) => taken = None,
         }
     }
     Err(super::users::conflict())
+}
+
+/// The error for the first user or role `ops` adds whose `_id`, or the `_id` `<db>.<name>` that
+/// `createUser` and `createRole` give, another tenant holds (the first one it adds if none is):
+/// `UserAlreadyExists` or `RoleAlreadyExists` with the words of those commands.
+fn exists<B: Backend + ?Sized>(
+    backend: &mut B,
+    ops: &[SecurityOp],
+) -> Result<CommandError, CommandError> {
+    let mut added = Vec::new();
+    for op in ops.iter().filter(|op| op.expect == Expect::Absent) {
+        let Some(doc) = &op.doc else { continue };
+        let d = Document::from(RawDoc::from_bytes(doc)?);
+        added.push((op, text_field(&d, op.kind.name_field())?, text_field(&d, DB)?));
+    }
+    let mut culprit = None;
+    for (op, name, db) in &added {
+        let named = string_id(&format!("{db}.{name}"));
+        if backend.principal_by_id(op.kind, &op.id)?.is_some()
+            || backend.principal_by_id(op.kind, &named)?.is_some()
+        {
+            culprit = Some((op, name, db));
+            break;
+        }
+    }
+    let first = added.first().map(|(op, name, db)| (op, name, db));
+    let Some((op, name, db)) = culprit.or(first) else { return Ok(super::users::conflict()) };
+    Ok(match op.kind {
+        Principal::Role => {
+            CommandError::new(ROLE_ALREADY_EXISTS, format!("Role \"{name}@{db}\" already exists"))
+        }
+        Principal::User => {
+            CommandError::new(USER_ALREADY_EXISTS, format!("User \"{name}@{db}\" already exists"))
+        }
+        Principal::ApiKey => no_collection(),
+    })
 }
 
 /// A user or role of a temporary collection: database, name and the document Group 0 keeps.
