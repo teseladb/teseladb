@@ -307,3 +307,65 @@ fn a_trial_reads_no_further_than_the_round_where_a_plan_ended() {
     // The trial's least budget is 10.000 works; before, `b_1` read them all (10.054 reads).
     assert!(scans.get() < 1_000, "{} reads", scans.get());
 }
+
+/// `count` sessions as a sign-in store keeps them: `subject` shared by 30 of them, a `family_id`
+/// of its own and an `expires_at` in the future, with an index on each of the three.
+fn sessions(count: i32) -> Mem {
+    let mut m = Mem::new();
+    let docs: Vec<String> = (0..count)
+        .map(|i| {
+            format!(
+                r#"{{"_id":{i},"subject":"u{}","family_id":"f{i}","expires_at":{{"$date":"2100-01-01T00:00:00Z"}}}}"#,
+                i % 30
+            )
+        })
+        .collect();
+    for chunk in docs.chunks(1000) {
+        let r = run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, chunk.join(",")));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    index(&mut m, r#"{"key":{"subject":1},"name":"subject_1"}"#);
+    index(&mut m, r#"{"key":{"family_id":1},"name":"family_id_1"}"#);
+    index(&mut m, r#"{"key":{"expires_at":1},"name":"expires_at_1","expireAfterSeconds":0}"#);
+    m
+}
+
+/// The session check of a sign-in store: one session by its subject and its family, open and
+/// not expired, of which the read wants one.
+const OPEN_SESSION: &str = r#"{"subject":"u7","family_id":"f7","revoked_at":{"$exists":false},"expires_at":{"$gt":{"$date":"2026-11-07T00:00:00Z"}}}"#;
+
+#[test]
+fn a_read_with_a_limit_ends_its_trial_at_the_limit_and_keeps_its_cached_plan() {
+    let mut m = sessions(6_000);
+    let find = format!(r#"{{"find":"c","filter":{OPEN_SESSION},"limit":1,"singleBatch":true}}"#);
+    let count = format!(r#"{{"count":"c","query":{OPEN_SESSION},"limit":1}}"#);
+    // Each read competes its plans or takes the cached one; none reads the range of
+    // `expires_at_1` (every session) nor counts the collection for the trial's budget. RefDb
+    // 9.0.4 ends the trial at min(limit, 101) results and keeps a cached plan that gives them.
+    // A trial gives each of the three plans its first round of 128 works, so a read with its
+    // fetches stays under 400 rows; before, a `findOne` read 55.889.
+    for round in 0..4 {
+        m.scanned_rows = 0;
+        let r = run(&mut m, &find);
+        assert_eq!(ids(&r), vec![7], "{r:?}");
+        assert!(m.scanned_rows < 400, "find, round {round}: {} rows read", m.scanned_rows);
+        m.scanned_rows = 0;
+        let r = run(&mut m, &count);
+        assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+        assert!(m.scanned_rows < 400, "count, round {round}: {} rows read", m.scanned_rows);
+    }
+    // After the first read the plan comes from the cache: its first batch of 16 entries of the
+    // subject, its document and the catalog, not a trial of every plan nor the 200 sessions of
+    // the subject.
+    m.scanned_rows = 0;
+    run(&mut m, &find);
+    assert!(m.scanned_rows < 40, "cached find: {} rows read", m.scanned_rows);
+    let r = run(&mut m, r#"{"aggregate":"c","pipeline":[{"$planCacheStats":{}}],"cursor":{}}"#);
+    let Value::Array(entries) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert!(
+        entries.iter().all(
+            |e| matches!(e, Value::Document(d) if field(d, "isActive") == &Value::Boolean(true))
+        ),
+        "a plan that gives its limit stays cached: {r:?}"
+    );
+}

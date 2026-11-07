@@ -438,9 +438,17 @@ pub(crate) fn choose<B: Backend + ?Sized>(
 /// The works the first round of a trial gives each plan; each round doubles them.
 const FIRST_ROUND_WORKS: u64 = 128;
 
-/// Whether a plan's trial ended before its budget: it gave a batch of documents or reached its end.
-fn ended(t: &Ran) -> bool {
-    t.trial.eof || t.trial.advanced >= TRIAL_RESULTS
+/// The documents that end the trial of `read`'s plans: RefDb's [`TRIAL_RESULTS`], or the read's
+/// limit when it is smaller (`getTrialPeriodNumToReturn`, measured on a `refnode` 9.0.4: a `findOne`
+/// ends its trial, and keeps its cached plan, at its first document).
+fn trial_results(read: &ReadPlan<'_>) -> u64 {
+    read.limit.filter(|l| *l > 0).map_or(TRIAL_RESULTS, |l| l.min(TRIAL_RESULTS))
+}
+
+/// Whether a plan's trial ended before its budget: it gave the trial's documents (`results`) or
+/// reached its end.
+fn ended(t: &Ran, results: u64) -> bool {
+    t.trial.eof || t.trial.advanced >= results
 }
 
 /// The trials of `plans` up to the round where one of them ends. RefDb alternates the plans and
@@ -465,7 +473,7 @@ fn trial<B: Backend + ?Sized>(
         for access in plans {
             trials.push(run(backend, coll, indexes, read, access.clone(), Some(works))?);
         }
-        if trials.iter().any(ended) {
+        if trials.iter().any(|t| ended(t, trial_results(read))) {
             return Ok(trials);
         }
         if works >= budget && !counted {
@@ -555,8 +563,14 @@ fn reads_keys_only(read: &ReadPlan<'_>, scans: &[IndexScan], indexes: &[PlanInde
         })
 }
 
+/// The index entries the run of a read with a limit reads first; each further read takes four
+/// times as many.
+const FIRST_LIMITED_ENTRIES: usize = 16;
+
 /// Runs `access` for `read`: for a trial (`budget` works at most), until it gives a batch, or
-/// to its end.
+/// to its end. A read with a limit and without a sort to make reads its index entries a few at a
+/// time, as RefDb's index scan does, and stops at its limit: before, a `findOne` by an index of
+/// equality read every entry of its value to give one document.
 fn run<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -565,6 +579,32 @@ fn run<B: Backend + ?Sized>(
     access: Access,
     budget: Option<u64>,
 ) -> Result<Ran, CommandError> {
+    let unsorted = read.sort.is_empty();
+    let mut most = match (budget, read.limit) {
+        (Some(b), _) => Some(usize::try_from(b.saturating_add(1)).unwrap_or(usize::MAX)),
+        (None, Some(_)) if unsorted => Some(FIRST_LIMITED_ENTRIES),
+        (None, _) => None,
+    };
+    loop {
+        let (ran, cut) = run_reading(backend, coll, indexes, read, access.clone(), budget, most)?;
+        match (cut, most) {
+            (true, Some(m)) => most = Some(m.saturating_mul(4)),
+            _ => return Ok(ran),
+        }
+    }
+}
+
+/// [`run`] reading at most `most` entries of an index scan of one interval; with it, whether the
+/// run used them all and the scan has more, so the caller reads again with more.
+fn run_reading<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    indexes: &[PlanIndex],
+    read: &ReadPlan<'_>,
+    access: Access,
+    budget: Option<u64>,
+    most: Option<usize>,
+) -> Result<(Ran, bool), CommandError> {
     let collation = None;
     let plan_filter = |f: &Document| -> Result<teseladb_mql::Filter, CommandError> {
         let bytes = f.to_bytes()?;
@@ -615,12 +655,15 @@ fn run<B: Backend + ?Sized>(
                 intersects: false,
                 eof: limit.is_none_or(|l| advanced < l),
             };
-            return Ok(ran);
+            return Ok((ran, false));
         }
         Access::Index(s) => vec![s.clone()],
         Access::Or(list) => list.clone(),
         Access::AndHash { scans, filter } => {
-            return intersected(backend, coll, indexes, read, (scans, filter.as_ref()), ran);
+            return Ok((
+                intersected(backend, coll, indexes, read, (scans, filter.as_ref()), ran)?,
+                false,
+            ));
         }
     };
     // A plan whose order is not the sort's gives nothing until it has read everything.
@@ -629,6 +672,7 @@ fn run<B: Backend + ?Sized>(
     let limit = if blocking { None } else { read.limit };
     let mut seen: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
     let mut ended = true;
+    let mut cut = false;
     let mut last_past = false;
     'scans: for s in &scans {
         let index = &indexes[s.index];
@@ -640,8 +684,10 @@ fn run<B: Backend + ?Sized>(
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
         let decode = read.index_keys && !index.id_index;
-        let scanned = entries(backend, (coll.tenant, coll.id), index, s, read.concern, decode)?;
+        let scanned =
+            entries(backend, (coll.tenant, coll.id), index, s, (read.concern, decode), most)?;
         ran.seeks += scanned.seeks;
+        let more = scanned.more;
         // A multikey scan drops the other entries of a document it gave before fetching it
         // again (`dupsDropped` of its `IXSCAN`, measured on a `refnode` 9.0.4).
         let mut own: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
@@ -701,6 +747,11 @@ fn run<B: Backend + ?Sized>(
                 }
             }
         }
+        // Every entry read and the scan goes on past them: the caller reads again with more.
+        if more {
+            cut = true;
+            break 'scans;
+        }
     }
     // A key read past the last interval is the work that ends the scan (measured).
     let ends_past = ended && last_past;
@@ -721,7 +772,7 @@ fn run<B: Backend + ?Sized>(
         intersects: false,
         eof: ended,
     };
-    Ok(ran)
+    Ok((ran, cut))
 }
 
 /// The document an index entry with primary key `pk` names, with its key. An index entry and its
@@ -777,9 +828,15 @@ fn intersected<B: Backend + ?Sized>(
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an intersection without scans"))?;
     let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
     for s in held {
-        let read_entries =
-            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, read.concern, false)?
-                .entries;
+        let read_entries = entries(
+            backend,
+            (coll.tenant, coll.id),
+            &indexes[s.index],
+            s,
+            (read.concern, false),
+            None,
+        )?
+        .entries;
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
@@ -793,7 +850,8 @@ fn intersected<B: Backend + ?Sized>(
     }
     let (mut last_keys, mut last_past) = (0, 0);
     let last_index = &indexes[last.index];
-    let scanned = entries(backend, (coll.tenant, coll.id), last_index, last, read.concern, false)?;
+    let scanned =
+        entries(backend, (coll.tenant, coll.id), last_index, last, (read.concern, false), None)?;
     for entry in scanned.entries {
         ran.keys += 1;
         last_keys += 1;
@@ -839,17 +897,27 @@ fn entries<B: Backend + ?Sized>(
     (tenant, collection): (u32, u32),
     index: &PlanIndex,
     scan: &IndexScan,
-    concern: ReadConcern,
-    decode: bool,
+    (concern, decode): (ReadConcern, bool),
+    most: Option<usize>,
 ) -> Result<Scanned, CommandError> {
     if checks_keys(scan) {
         return walked(backend, (tenant, collection), index, scan, concern, decode);
     }
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
     let (first, past) = index_span((tenant, collection), index);
+    // With `most`, a forward scan of one interval stops reading at that many entries: those after
+    // them are past what the caller takes (a trial's budget), and reading them made each trial of
+    // a range as long as the range (every unexpired session of a TTL index).
+    if let (Some(most), [r], false) = (most, ranges.as_slice(), scan.backward) {
+        let read =
+            range_entries(backend, (tenant, collection), index, r, (concern, decode), Some(most))?;
+        let more = read.len() >= most;
+        return Ok(Scanned { entries: read.into_iter().map(Some).collect(), seeks: 1, more });
+    }
     let mut lists = Vec::new();
     for r in &ranges {
-        let mut pks = range_entries(backend, (tenant, collection), index, r, (concern, decode))?;
+        let mut pks =
+            range_entries(backend, (tenant, collection), index, r, (concern, decode), None)?;
         if scan.backward {
             pks.reverse();
         }
@@ -879,13 +947,15 @@ fn entries<B: Backend + ?Sized>(
             out.push(None);
         }
     }
-    Ok(Scanned { entries: out, seeks: 1 })
+    Ok(Scanned { entries: out, seeks: 1, more: false })
 }
 
 /// The entries a scan examined, in its order, and its seeks.
 struct Scanned {
     entries: Vec<Option<Entry>>,
     seeks: u64,
+    /// Whether the scan stopped at the entries it was asked for and has more after them.
+    more: bool,
 }
 
 /// Whether a scan of `scan` checks each key against the intervals of a field after one with a
@@ -911,10 +981,11 @@ fn walked<B: Backend + ?Sized>(
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
     let (first, past) = index_span((tenant, collection), index);
     let (Some(low), Some(high)) = (ranges.first(), ranges.last()) else {
-        return Ok(Scanned { entries: Vec::new(), seeks: 1 });
+        return Ok(Scanned { entries: Vec::new(), seeks: 1, more: false });
     };
     let span = KeyRange { start: low.start.clone(), end: high.end.clone() };
-    let mut read = range_entries(backend, (tenant, collection), index, &span, (concern, true))?;
+    let mut read =
+        range_entries(backend, (tenant, collection), index, &span, (concern, true), None)?;
     if scan.backward {
         read.reverse();
     }
@@ -954,7 +1025,7 @@ fn walked<B: Backend + ?Sized>(
             out.push(None);
         }
     }
-    Ok(Scanned { entries: out, seeks: w.seeks })
+    Ok(Scanned { entries: out, seeks: w.seeks, more: false })
 }
 
 /// Whether `index` has an entry after the last interval of `scan`, a forward scan.
@@ -1027,6 +1098,7 @@ fn range_entries<B: Backend + ?Sized>(
     index: &PlanIndex,
     r: &KeyRange,
     (concern, decode): (ReadConcern, bool),
+    most: Option<usize>,
 ) -> Result<Vec<Entry>, CommandError> {
     let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
@@ -1039,8 +1111,9 @@ fn range_entries<B: Backend + ?Sized>(
     let mut pks = Vec::new();
     let mut from = r.start.clone();
     loop {
-        let rows = backend.scan(&from, &end, KEY_CHUNK, concern)?;
-        let short = rows.len() < KEY_CHUNK;
+        let chunk = most.map_or(KEY_CHUNK, |m| m.saturating_sub(pks.len()).clamp(1, KEY_CHUNK));
+        let rows = backend.scan(&from, &end, chunk, concern)?;
+        let short = rows.len() < chunk;
         for (key, value) in &rows {
             let rest = key.get(head..).ok_or_else(malformed)?;
             let cut = head + values_len(rest, &index.dirs).map_err(|_| malformed())?;
@@ -1057,6 +1130,7 @@ fn range_entries<B: Backend + ?Sized>(
             pks.push(Entry { pk: pk.to_vec(), key: found, values });
         }
         match rows.last() {
+            _ if most.is_some_and(|m| pks.len() >= m) => break,
             Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
             _ => break,
         }
@@ -1401,7 +1475,7 @@ fn cached_run<B: Backend + ?Sized>(
     let trial = run(backend, coll, indexes, read, access.clone(), Some(limit))?;
     let winner = if trial.trial.eof {
         trial
-    } else if trial.trial.advanced >= TRIAL_RESULTS {
+    } else if trial.trial.advanced >= trial_results(read) {
         run(backend, coll, indexes, read, access, None)?
     } else {
         return Ok(Cached::Replan(works, limit));
