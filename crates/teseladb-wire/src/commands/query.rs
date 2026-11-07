@@ -1832,7 +1832,15 @@ fn tail_more<B: Backend + ?Sized>(
     loop {
         // Each wait reads again past the newest document it saw.
         state.tail.iter_mut().for_each(|t| t.caught_up = false);
-        let (docs, _) = state.batch(backend, batch)?;
+        let (docs, _) = match state.batch(backend, batch) {
+            Ok(read) => read,
+            // The `maxTimeMS` of the `getMore` ran out during the wait, while it read again: like
+            // a `refnode` 9.0.4, an `awaitData` cursor answers an empty batch and stays open.
+            Err(e) if wait > 0 && e.code.code == crate::error::MAX_TIME_MS_EXPIRED.code => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
         if !docs.is_empty() || backend.now_ms() >= deadline || !backend.pause() {
             return Ok(docs);
         }

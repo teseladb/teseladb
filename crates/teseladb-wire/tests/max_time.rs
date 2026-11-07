@@ -630,6 +630,40 @@ fn get_more_takes_no_max_time_on_a_cursor_that_is_not_tailable() {
     assert!(ok(&r));
 }
 
+/// The `maxTimeMS` of an `awaitData` `getMore` is its wait: when the reads move the clock past
+/// it during the wait, counted from later, a `refnode` 9.0.4 answers an empty batch and keeps the
+/// cursor, never `MaxTimeMSExpired`.
+#[test]
+fn an_await_data_get_more_that_runs_out_during_its_wait_answers_an_empty_batch() {
+    let mut m = node(0);
+    let mut conn = Connection::new(1);
+    let capped = Document::new().with("create", "log").with("capped", true).with("size", 4096);
+    assert!(ok(&run(&mut m, &mut conn, DB, capped)));
+    let one = |id: i32| {
+        Document::new()
+            .with("insert", "log")
+            .with("documents", vec![Value::Document(Document::new().with("_id", id))])
+    };
+    assert!(ok(&run(&mut m, &mut conn, DB, one(1))));
+    let tail = Document::new().with("find", "log").with("tailable", true).with("awaitData", true);
+    let r = run(&mut m, &mut conn, DB, tail);
+    let Value::Int64(id) = field(&r, "cursor.id").clone() else { panic!("{r:?}") };
+    let more =
+        || Document::new().with("getMore", id).with("collection", "log").with(MAX_TIME_MS, 100);
+    m.tick = 30;
+    m.pause_ms = 60;
+    m.pauses_left = 10;
+    let r = run(&mut m, &mut conn, DB, more());
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(field(&r, "cursor.id"), &Value::Int64(id), "{r:?}");
+    assert_eq!(field(&r, "cursor.nextBatch"), &Value::Array(Vec::new()), "{r:?}");
+    assert!(ok(&run(&mut m, &mut conn, DB, one(2))));
+    m.pauses_left = 10;
+    let r = run(&mut m, &mut conn, DB, more());
+    let docs = vec![Value::Document(Document::new().with("_id", 2))];
+    assert_eq!(field(&r, "cursor.nextBatch"), &Value::Array(docs), "{r:?}");
+}
+
 #[test]
 fn the_table_gives_fresh_ids_and_forgets_ended_operations() {
     let mut t = OpTable::default();
