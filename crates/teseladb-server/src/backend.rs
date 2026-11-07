@@ -110,6 +110,9 @@ pub struct ServerBackend {
     oidc: Option<Arc<crate::oidc_client::Oidc>>,
     /// The pins of the running operation's reads of the indexes (009 FR-006).
     pins: Vec<u64>,
+    /// When the running operation took its first pin and the collections it pinned, for the log
+    /// of one that holds them too long.
+    pinned_since: Option<(Instant, Vec<u32>)>,
     /// The latest wait end of a write of the running operation that got no answer: a leader may
     /// still evaluate it until its deadline, so the pins wait for it (009 FR-006).
     unsettled: Option<Instant>,
@@ -151,6 +154,7 @@ impl ServerBackend {
             diag: None,
             oidc: None,
             pins: Vec::new(),
+            pinned_since: None,
             unsettled: None,
             read_pref: None,
             selection: None,
@@ -365,6 +369,9 @@ impl ServerBackend {
     /// deadline of a write that got no answer has passed (009 FR-006).
     fn release_pins(&mut self) {
         let late = self.unsettled.take();
+        if let Some((since, collections)) = self.pinned_since.take() {
+            log_long_pin(since.elapsed(), &collections, late.is_some());
+        }
         for pin in self.pins.drain(..) {
             match late {
                 Some(until) => self.h.auth.release_pin_after(pin, until),
@@ -624,6 +631,25 @@ fn take_ddl_tick(now_ms: u64) -> bool {
         && LAST_DDL_TICK_MS
             .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
+}
+
+/// Logs an operation that held its reads of the indexes longer than
+/// [`PIN_STALL`](crate::authz_lease::PIN_STALL), with its thread: while it ran, no change of the
+/// indexes could pass the fence (009 FR-006).
+fn log_long_pin(held: Duration, collections: &[u32], late: bool) {
+    if held < crate::authz_lease::PIN_STALL {
+        return;
+    }
+    let thread = thread::current().name().unwrap_or("unnamed").to_owned();
+    // TeselaDB's own line: it has no RefDb identifier.
+    crate::log::defer(crate::log::Pending {
+        id: 0,
+        msg: "an operation held the catalog changes of the indexes".to_owned(),
+        attr: format!(
+            "{{\"thread\":{thread:?},\"heldMillis\":{},\"collections\":{collections:?},\"late\":{late}}}",
+            held.as_millis()
+        ),
+    });
 }
 
 impl Drop for ServerBackend {
@@ -1056,6 +1082,11 @@ impl Backend for ServerBackend {
                 self.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Indexes(collection), tx), until)
             {
                 self.pins.push(pin);
+                let (_, collections) =
+                    self.pinned_since.get_or_insert_with(|| (Instant::now(), Vec::new()));
+                if !collections.contains(&collection) {
+                    collections.push(collection);
+                }
                 return Ok(all);
             }
             if Instant::now() >= until {

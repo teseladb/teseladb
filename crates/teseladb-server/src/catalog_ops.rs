@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry};
 use teseladb_meta::command::Group0Command;
@@ -253,7 +254,15 @@ pub struct CatalogOps {
     /// The last operation of the handle, and those whose answer waits for the fence.
     last: Option<OpId>,
     fenced: std::collections::BTreeSet<OpId>,
+    /// When each change of the handle started, and whether its stall was reported.
+    since: BTreeMap<OpId, (Instant, bool)>,
+    /// When each answer started to wait, by its index, and whether its stall was reported.
+    waiting_since: BTreeMap<u64, (Instant, bool)>,
 }
+
+/// A change of the catalog that waits longer than this is written to the log once, with what it
+/// waits for: its operation in Group 0, or this node's copy and the authorization fence.
+const STALL: Duration = Duration::from_secs(5);
 
 /// What core 0 does for a change: propose it as Group 0's leader, or forward it.
 pub enum Route {
@@ -281,6 +290,9 @@ impl CatalogOps {
     /// A change of the handle, proposed (`Ok(op)` of a proposal) or forwarded.
     pub fn local(&mut self, op: Result<OpId, OpError>, forwarded: bool, to: CatalogSender) {
         self.last = op.as_ref().ok().copied();
+        if let Ok(op) = &op {
+            self.since.insert(*op, (Instant::now(), false));
+        }
         match op {
             Ok(op) if forwarded => drop(self.forwarded.insert(op, to)),
             Ok(op) => drop(self.local.insert(op, to)),
@@ -316,6 +328,7 @@ impl CatalogOps {
         applied_here: u64,
     ) -> Option<Option<(NodeId, u64, Bytes)>> {
         let fence = self.fenced.remove(&op);
+        self.since.remove(&op);
         if let Some(to) = self.local.remove(&op) {
             match applied(commit, r) {
                 Some(a) if fence => self.waiting.push((a.index, true, answer(Some(a)), to)),
@@ -349,9 +362,46 @@ impl CatalogOps {
             .into_iter()
             .partition(|(i, fence, _, _)| *i <= applied_here && (!fence || *i <= fenced));
         self.waiting = rest;
-        for (_, _, a, to) in ready {
+        for (i, _, a, to) in ready {
+            self.waiting_since.remove(&i);
             let _ = to.send(a);
         }
+        for line in self.stalls(applied_here, fenced) {
+            crate::log::defer(line);
+        }
+    }
+
+    /// The changes that wait longer than [`STALL`] and were not reported yet, as log lines.
+    fn stalls(&mut self, applied_here: u64, fenced: u64) -> Vec<crate::log::Pending> {
+        let mut out = Vec::new();
+        for (op, (at, told)) in &mut self.since {
+            if !*told && at.elapsed() >= STALL {
+                *told = true;
+                let forwarded = self.forwarded.contains_key(op);
+                out.push(crate::log::Pending {
+                    id: 0,
+                    msg: "a catalog change waits for Group 0".to_owned(),
+                    attr: format!(
+                        "{{\"forwarded\":{forwarded},\"waitedMillis\":{}}}",
+                        at.elapsed().as_millis()
+                    ),
+                });
+            }
+        }
+        for (index, fence, _, _) in &self.waiting {
+            let (at, told) = self.waiting_since.entry(*index).or_insert((Instant::now(), false));
+            if !*told && at.elapsed() >= STALL {
+                *told = true;
+                out.push(crate::log::Pending {
+                    id: 0,
+                    msg: "a catalog change waits for this node's copy or the authorization fence".to_owned(),
+                    attr: format!(
+                        "{{\"index\":{index},\"fence\":{fence},\"applied\":{applied_here},\"fenced\":{fenced}}}"
+                    ),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -367,6 +417,25 @@ fn answer(a: Option<Applied>) -> CatalogAnswer {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_that_waits_too_long_is_reported_once() {
+        let mut ops = CatalogOps::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        ops.local(Ok(OpId(7)), true, tx.clone());
+        let long_ago = Instant::now().checked_sub(STALL).unwrap();
+        ops.since.insert(OpId(7), (long_ago, false));
+        ops.waiting.push((12, true, CatalogAnswer::Unavailable, tx));
+        ops.waiting_since.insert(12, (long_ago, false));
+        let lines = ops.stalls(12, 3);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].attr.contains("\"forwarded\":true"), "{}", lines[0].attr);
+        assert!(lines[1].attr.contains("\"fenced\":3"), "{}", lines[1].attr);
+        assert!(ops.stalls(12, 3).is_empty(), "once");
+        // The answer goes once the fence passes it, and nothing of it is left.
+        ops.poll(12, 12);
+        assert!(ops.waiting.is_empty() && ops.waiting_since.is_empty());
+    }
 
     #[test]
     fn fencing_nothing_changes_nothing() {

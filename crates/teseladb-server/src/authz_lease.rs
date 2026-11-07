@@ -78,7 +78,25 @@ struct Pins {
     at: BTreeMap<u64, u64>,
     /// When each pin released late goes, on core 0's clock.
     until: BTreeMap<u64, Nanos>,
+    /// The collection each pin read and when, and whether a stall of it was reported.
+    about: BTreeMap<u64, (u32, std::time::Instant, bool)>,
 }
+
+/// A pin that holds the node's acknowledgement back longer than [`PIN_STALL`]: what the log says of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StalledPin {
+    /// Group 0's index it read at.
+    pub at: u64,
+    /// The collection whose indexes it read.
+    pub collection: u32,
+    /// How long it has been held, in milliseconds.
+    pub held_ms: u128,
+    /// Whether its operation ended and it waits for its late release.
+    pub late: bool,
+}
+
+/// A pin held longer than this while the node's copy is past it is written to the log once.
+pub const PIN_STALL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl CatalogPins {
     /// Pins a read of the catalog at index `at`; the pin's number.
@@ -90,11 +108,41 @@ impl CatalogPins {
         pin
     }
 
+    /// Pins a read of the indexes of `collection` at index `at`, as [`CatalogPins::pin`], noting the collection and
+    /// when for [`CatalogPins::stalled`].
+    pub fn pin_for(&self, at: u64, collection: u32) -> u64 {
+        let pin = self.pin(at);
+        self.lock().about.insert(pin, (collection, std::time::Instant::now(), false));
+        pin
+    }
+
     /// Releases pin `pin`; a pin already released changes nothing.
     pub fn release(&self, pin: u64) {
         let mut p = self.lock();
         p.at.remove(&pin);
         p.until.remove(&pin);
+        p.about.remove(&pin);
+    }
+
+    /// The pins below `applied` held longer than [`PIN_STALL`] and not reported yet; each is reported once.
+    pub fn stalled(&self, applied: u64) -> Vec<StalledPin> {
+        let mut p = self.lock();
+        let Pins { at, until, about, .. } = &mut *p;
+        let mut out = Vec::new();
+        for (pin, (collection, since, told)) in about.iter_mut() {
+            let Some(index) = at.get(pin).copied() else { continue };
+            if *told || index >= applied || since.elapsed() < PIN_STALL {
+                continue;
+            }
+            *told = true;
+            out.push(StalledPin {
+                at: index,
+                collection: *collection,
+                held_ms: since.elapsed().as_millis(),
+                late: until.contains_key(pin),
+            });
+        }
+        out
     }
 
     /// Releases pin `pin` once core 0's clock reaches `at`: a write of the operation may still
@@ -115,6 +163,7 @@ impl CatalogPins {
         for pin in gone {
             p.at.remove(&pin);
             p.until.remove(&pin);
+            p.about.remove(&pin);
         }
         p.at.values().copied().fold(applied, u64::min)
     }
@@ -268,6 +317,17 @@ impl AuthLeaseDriver {
         now: Nanos,
     ) -> Vec<(NodeId, PeerMsg)> {
         let pins = &self.gate.pins;
+        for s in pins.stalled(applied(core)) {
+            // TeselaDB's own line: it has no RefDb identifier.
+            crate::log::defer(crate::log::Pending {
+                id: 0,
+                msg: "a running operation holds the catalog changes of the indexes".to_owned(),
+                attr: format!(
+                    "{{\"node\":{},\"at\":{},\"collection\":{},\"heldMillis\":{},\"late\":{}}}",
+                    me.0, s.at, s.collection, s.held_ms, s.late
+                ),
+            });
+        }
         // What the node acknowledges waits for its running operations (009 FR-006).
         let acked = |applied: u64| pins.acked(applied, now);
         let out = self.driver.tick(&mut Host { core, now }, me.0, now.0, &acked);
@@ -623,6 +683,35 @@ mod tests {
             "the quiet leader cut off authorized {} ms after the cut",
             held.as_millis()
         );
+    }
+
+    #[test]
+    fn a_pin_that_holds_the_node_back_too_long_is_reported_once() {
+        let pins = CatalogPins::default();
+        let old = pins.pin_for(4, 21);
+        let late = pins.pin_for(5, 22);
+        let fresh = pins.pin_for(6, 23);
+        let above = pins.pin_for(9, 24);
+        let long_ago = std::time::Instant::now().checked_sub(PIN_STALL).unwrap();
+        for pin in [old, late, above] {
+            pins.lock().about.get_mut(&pin).unwrap().1 = long_ago;
+        }
+        pins.release_at(late, Nanos::from_millis(1_000));
+        let stalled = pins.stalled(9);
+        let seen: Vec<(u64, u32, bool)> =
+            stalled.iter().map(|s| (s.at, s.collection, s.late)).collect();
+        assert_eq!(
+            seen,
+            [(4, 21, false), (5, 22, true)],
+            "the fresh one and the one at the copy are not"
+        );
+        assert!(stalled.iter().all(|s| s.held_ms >= PIN_STALL.as_millis()));
+        assert!(pins.stalled(9).is_empty(), "once");
+        pins.release(old);
+        pins.release(fresh);
+        assert!(!pins.lock().about.contains_key(&old) && !pins.lock().about.contains_key(&fresh));
+        assert_eq!(pins.acked(9, Nanos::from_millis(1_000)), 9, "the late one went at its time");
+        assert!(!pins.lock().about.contains_key(&late));
     }
 
     #[test]

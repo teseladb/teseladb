@@ -185,6 +185,19 @@ fn level_two_writes_each_command_in_system_profile() {
     assert_eq!(options.get("size").and_then(teseladb_wire::types::number), Some(1_048_576.0));
 }
 
+/// The write of a command's profile reads the indexes of `system.profile`: it ends with the command,
+/// or a server would hold every change of the indexes back until the connection's next command
+/// (009 FR-006; seen as `createIndexes` failing after 30 s while another connection sat idle).
+#[test]
+fn the_profile_of_a_command_ends_with_it() {
+    let mut m = node();
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":1}]}"#));
+    assert_eq!(profiled(&mut m).len(), 1, "the insert was profiled");
+    run(&mut m, DB, json(r#"{"insert":"c","documents":[{"_id":2}]}"#));
+    assert_eq!(m.open_index_reads, 0, "no read of the indexes outlives its command");
+}
+
 #[test]
 fn level_one_profiles_and_logs_only_slow_commands() {
     let mut m = node();

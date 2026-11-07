@@ -144,3 +144,61 @@ fn a_tenant_gets_limits_an_access_list_and_a_suspension_through_the_port() {
     assert_eq!((code, err.as_str()), (2, "--allow does not go with this subcommand\n"));
     node.stop();
 }
+
+/// `_mergeAuthzCollections` run in a tenant puts the users in that tenant, as `createUser` does,
+/// whatever tenant their documents named (021 FR-044, a copy restored into another cluster's
+/// tenant).
+#[test]
+fn users_merged_in_a_tenant_belong_to_it() {
+    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let at = node.admin_addr().unwrap().to_string();
+    let (code, _, err) = admin(&at, &["tenant", "create", "acme"]);
+    assert_eq!(code, 0, "{err}");
+    let mut c = Client::new(&node);
+    let create = Document::new()
+        .with("createUser", "moved")
+        .with("pwd", "moved-pw-123456")
+        .with("roles", Value::Array(Vec::new()));
+    assert!(ok(&c.run("admin", create)), "a user of the default tenant");
+    let info = Document::new()
+        .with("usersInfo", Document::new().with("user", "moved").with("db", "admin"))
+        .with("showCredentials", true);
+    let r = c.run("admin", info.clone());
+    let Some(Value::Array(users)) = r.get("users") else { panic!("{r:?}") };
+    let Some(Value::Document(user)) = users.first() else { panic!("{r:?}") };
+    let mut stored = Document::new();
+    for f in ["_id", "userId", "user", "db", "credentials", "roles"] {
+        if let Some(v) = user.get(f) {
+            stored.push(f, v.clone());
+        }
+    }
+    // The document of another cluster's tenant.
+    stored.push("tenantId", 99i64);
+    assert!(ok(&c.run("admin", Document::new().with("dropUser", "moved"))));
+    let temp = Document::new()
+        .with("insert", "temp_users")
+        .with("documents", Value::Array(vec![Value::Document(stored)]))
+        .with("$tenant", "acme");
+    assert!(ok(&c.run("admin", temp)), "the temporary collection");
+    let merge = Document::new()
+        .with("_mergeAuthzCollections", 1)
+        .with("tempUsersCollection", "admin.temp_users")
+        .with("db", "")
+        .with("drop", false)
+        .with("$tenant", "acme");
+    let r = c.run("admin", merge);
+    assert!(ok(&r), "{r:?}");
+    let users_of = |c: &mut Client, tenant: Option<&str>| {
+        let mut q = info.clone();
+        if let Some(t) = tenant {
+            q.push("$tenant", t);
+        }
+        match c.run("admin", q).get("users") {
+            Some(Value::Array(u)) => u.len(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(users_of(&mut c, Some("acme")), 1, "the user is the tenant's");
+    assert_eq!(users_of(&mut c, None), 0, "and not the default tenant's");
+}

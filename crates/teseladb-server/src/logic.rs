@@ -1066,7 +1066,7 @@ impl NodeLogic {
                     // (009 FR-006).
                     Some(sm) if sm.bootstrapped() => CatalogAnswer::Indexes(
                         sm.indexes.of(collection).cloned().collect(),
-                        self.authz.pins().pin(sm.applied),
+                        self.authz.pins().pin_for(sm.applied, collection),
                     ),
                     Some(_) | None => CatalogAnswer::Unavailable,
                 };

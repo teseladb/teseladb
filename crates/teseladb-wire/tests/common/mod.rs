@@ -108,6 +108,8 @@ pub struct Mem {
     pub concerns: Vec<teseladb_range::ack::WriteConcern>,
     /// Operations that ended.
     pub ended: usize,
+    /// Reads of the indexes since the last operation ended: a server pins each until then (009 FR-006).
+    pub open_index_reads: usize,
     /// Where a second range starts: a write whose outcome reaches the other side of it from its
     /// first key is refused as the range refuses it (009 FR-003).
     pub split: Option<Vec<u8>>,
@@ -383,6 +385,7 @@ impl Backend for Mem {
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
+        self.open_index_reads += 1;
         Ok(self.indexes.of(collection).cloned().collect())
     }
 
@@ -413,6 +416,7 @@ impl Backend for Mem {
 
     fn end_operation(&mut self) {
         self.ended += 1;
+        self.open_index_reads = 0;
     }
 
     fn fence(&mut self, start: &[u8], end: &[u8], on: bool) -> Result<Hlc, CommandError> {

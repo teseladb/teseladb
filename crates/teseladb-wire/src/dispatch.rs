@@ -827,6 +827,10 @@ fn run_op<B: Backend + ?Sized>(
         opid: id,
     };
     profile::after_command(backend, shared, &ended);
+    // The audit and the profile write after the guard ended the command: what they read of the
+    // indexes ends with it too, or every change of the indexes waits for this connection's next
+    // command (009 FR-006).
+    backend.end_operation();
     result.map(|r| r.map_err(|e| interrupted_find(e, name, &req.db, &req.command)))
 }
 
