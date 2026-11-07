@@ -514,3 +514,34 @@ fn a_rebuilt_index_takes_the_place_of_the_old_one() {
     let bytes = e.finish();
     assert_eq!(IndexCommand::decode(&mut Decoder::new(&bytes)), Ok(swap));
 }
+
+/// Each node notes the index of the last change of each collection's secondary indexes, which its barrier waits for (009
+/// FR-006): a change refused notes nothing, a change of the search indexes neither, and a snapshot does not carry it.
+#[test]
+fn the_last_change_of_each_collections_indexes_is_noted() {
+    let mut sm = cluster();
+    let a = collection(&mut sm, 2, ns("db", "a"));
+    let b = collection(&mut sm, 3, ns("db", "b"));
+    assert_eq!(sm.index_changes.last(a), None);
+    let Group0Result::Index(x) = apply(&mut sm, 4, index(a, "x_1")) else { panic!("index") };
+    assert_eq!(sm.index_changes.last(a), Some(4));
+    assert_eq!(apply(&mut sm, 5, index(a, "x_1")), Group0Result::Err(Group0Error::IndexExists));
+    assert_eq!(sm.index_changes.last(a), Some(4), "a refused change notes nothing");
+    let ready = IndexCommand::SetState { id: x.id, state: IndexState::Ready };
+    assert_eq!(apply(&mut sm, 6, Group0Command::Indexes(ready)), Group0Result::Ok);
+    assert_eq!(sm.index_changes.last(a), Some(6), "a change of state of its index");
+    assert_eq!(sm.index_changes.last(b), None, "the other collection's writes are not waited for");
+    let search = IndexCommand::CreateSearch {
+        id: [9; 12],
+        at_ms: 0,
+        collection: b,
+        name: "s".into(),
+        kind: SearchIndexKind::Search,
+        definition: vec![],
+    };
+    apply(&mut sm, 7, Group0Command::Indexes(search));
+    assert_eq!(sm.index_changes.last(b), None, "no write keeps a search index");
+    let back = restored(&sm);
+    assert_eq!(back.index_changes.last(a), None, "a snapshot does not carry it");
+    assert_eq!(back, sm, "and two states compare without it");
+}

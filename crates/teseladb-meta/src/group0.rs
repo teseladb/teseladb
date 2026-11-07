@@ -281,6 +281,38 @@ pub struct Group0Sm {
     pub tenants: Box<Tenants>,
     /// The catalog changes change streams read (014 FR-014), boxed for the same reason.
     pub ddl: Box<DdlLog>,
+    /// The index of the last change of the secondary indexes of each collection this node applied (009 FR-006), boxed
+    /// for the same reason.
+    pub index_changes: Box<IndexChanges>,
+}
+
+/// The Group 0 index of the last change of the secondary indexes of each collection that this node applied since it
+/// started: the barrier of a change waits only for the operations of its collection (009 FR-006). It is neither kept in
+/// a snapshot nor compared: a node that starts from a snapshot holds no read of the indexes older than it.
+#[derive(Clone, Debug, Default)]
+pub struct IndexChanges(BTreeMap<u32, u64>);
+
+impl PartialEq for IndexChanges {
+    /// Always equal: it is what this node saw, not part of Group 0's state.
+    fn eq(&self, _: &IndexChanges) -> bool {
+        true
+    }
+}
+
+impl Eq for IndexChanges {}
+
+impl IndexChanges {
+    /// Notes that the change at `index` changed the secondary indexes of `collection`.
+    pub fn note(&mut self, collection: u32, index: u64) {
+        let last = self.0.entry(collection).or_insert(index);
+        *last = (*last).max(index);
+    }
+
+    /// The index of the last change of the secondary indexes of `collection` this node applied.
+    #[must_use]
+    pub fn last(&self, collection: u32) -> Option<u64> {
+        self.0.get(&collection).copied()
+    }
 }
 
 impl Group0Sm {
@@ -635,12 +667,16 @@ impl Group0Sm {
             }
             Group0Command::Indexes(c) => {
                 let ddl = crate::ddl_log::index_changes(&self.catalog, &self.indexes, c);
+                let touched = self.indexes.collection_of(c);
                 let live: BTreeSet<u32> = self.catalog.collections.values().map(|e| e.id).collect();
                 let r = self
                     .indexes
                     .apply(c, |id| live.contains(&id))
                     .map_err(catalog_error)
                     .map(|entry| entry.map_or(Group0Result::Ok, Group0Result::Index));
+                if let (Some(collection), Ok(_)) = (touched, &r) {
+                    self.index_changes.note(collection, index);
+                }
                 self.record_ddl(mark, &r, ddl);
                 r
             }

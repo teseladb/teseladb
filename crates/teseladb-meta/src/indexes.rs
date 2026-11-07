@@ -326,6 +326,24 @@ pub struct Indexes {
 }
 
 impl Indexes {
+    /// The collection whose secondary indexes `cmd` changes, the one whose writers its barrier waits for (009
+    /// FR-006); `None` for a change of the search indexes, which no write keeps, or an index it does not know.
+    #[must_use]
+    pub fn collection_of(&self, cmd: &IndexCommand) -> Option<u32> {
+        let of = |id: &u32| self.indexes.get(id).map(|e| e.collection);
+        match cmd {
+            IndexCommand::Create { collection, .. } => Some(*collection),
+            IndexCommand::SetState { id, .. }
+            | IndexCommand::SetSpec { id, .. }
+            | IndexCommand::Drop { id } => of(id),
+            IndexCommand::Swap { old, .. } => of(old),
+            IndexCommand::CreateSearch { .. }
+            | IndexCommand::UpdateSearch { .. }
+            | IndexCommand::SetSearchStatus { .. }
+            | IndexCommand::DropSearch { .. } => None,
+        }
+    }
+
     /// The secondary indexes of collection `collection`, in the order they are listed: by place,
     /// then by identifier.
     pub fn of(&self, collection: u32) -> impl Iterator<Item = &IndexEntry> {

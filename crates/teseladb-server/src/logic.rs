@@ -2300,9 +2300,48 @@ mod tests {
         // Both nodes acknowledge at their next request: no lease has to run out.
         assert!(c.now < start + Nanos::from_millis(2 * AUTH_LEASE_MS), "{:?}", c.now);
         // A change of the indexes waits for the fence too, and a node holds the fence back while
-        // an operation that read the indexes before the change still runs (009 FR-006).
+        // an operation that read the indexes of the same collection before the change still runs
+        // (009 FR-006). The collection and its index first.
+        let collection = {
+            let (tx, rx) = channel();
+            let ns = teseladb_meta::catalog::Namespace { db: "db".into(), coll: "c".into() };
+            let create = teseladb_meta::catalog::CatalogCommand::Create {
+                ns,
+                uuid: [3; 16],
+                options: vec![],
+                if_absent: false,
+            };
+            let now = c.now;
+            c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Write(create), tx), now);
+            let mut answer = None;
+            c.run_until(|_| {
+                answer = rx.try_recv().ok();
+                answer.is_some()
+            });
+            match answer {
+                Some(CatalogAnswer::Done(Some(entry))) => entry.id,
+                other => panic!("the collection: {other:?}"),
+            }
+        };
+        let index_id = {
+            let (tx, rx) = channel();
+            let create = IndexCommand::Create {
+                collection,
+                name: "x_1".into(),
+                spec: vec![1, 2, 3],
+                buckets: 0,
+            };
+            let now = c.now;
+            c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Index(create), tx), now);
+            c.run_until(|_| rx.try_recv().is_ok());
+            c.logic(1).group0().map(|sm| sm.indexes.indexes.keys().copied().max().unwrap()).unwrap()
+        };
+        c.run_until(|c| {
+            c.logic(2).group0().is_some_and(|sm| sm.indexes.indexes.contains_key(&index_id))
+        });
+        let now = c.now;
         let (tx, rx) = channel();
-        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Indexes(1), tx), now);
+        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Indexes(collection), tx), now);
         let Ok(CatalogAnswer::Indexes(_, pin)) = rx.try_recv() else { panic!("an answer") };
         // The search indexes are read from the same copy, without a pin (011).
         let (search_tx, search_rx) = channel();
@@ -2313,7 +2352,7 @@ mod tests {
             "{search:?}"
         );
         let (tx, rx) = channel();
-        let index = IndexCommand::SetState { id: 1, state: IndexState::Ready };
+        let index = IndexCommand::SetState { id: index_id, state: IndexState::Ready };
         let now = c.now;
         c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Index(index), tx), now);
         let held = c.now;
@@ -2327,7 +2366,26 @@ mod tests {
             answer = rx.try_recv().ok();
             answer.is_some()
         });
-        assert!(matches!(answer, Some(CatalogAnswer::Refused(_))), "{answer:?}");
+        assert!(matches!(answer, Some(CatalogAnswer::Done(_))), "{answer:?}");
+        // A read taken after its collection's last change holds back nothing, and a change that
+        // touches no collection's indexes (an index Group 0 does not know) does not wait for it.
+        let (tx, rx) = channel();
+        let now = c.now;
+        c.logic(2).on_message(NodeMsg::Catalog(CatalogReq::Indexes(collection), tx), now);
+        let Ok(CatalogAnswer::Indexes(_, pin)) = rx.try_recv() else { panic!("an answer") };
+        let (tx, rx) = channel();
+        let other = IndexCommand::SetState { id: 999, state: IndexState::Ready };
+        c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Index(other), tx), now);
+        let mut answer = None;
+        c.run_until(|_| {
+            answer = rx.try_recv().ok();
+            answer.is_some()
+        });
+        assert!(
+            matches!(answer, Some(CatalogAnswer::Refused(_))),
+            "answered with the read held: {answer:?}"
+        );
+        c.logic(2).authz.pins().release(pin);
         // A catalog change or a kill forwarded to a node that does not lead Group 0 (and has no
         // sessions) is answered at once.
         let l = c.logic(2);

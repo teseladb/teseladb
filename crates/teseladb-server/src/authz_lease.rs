@@ -126,12 +126,23 @@ impl CatalogPins {
 
     /// The pins below `applied` held longer than [`PIN_STALL`] and not reported yet; each is reported once.
     pub fn stalled(&self, applied: u64) -> Vec<StalledPin> {
+        self.stalled_with(applied, &|_| Some(u64::MAX))
+    }
+
+    /// As [`CatalogPins::stalled`], only the pins that hold a change back: those after which a
+    /// change of their collection's indexes came, as `last_change` says.
+    pub fn stalled_with(
+        &self,
+        applied: u64,
+        last_change: &dyn Fn(u32) -> Option<u64>,
+    ) -> Vec<StalledPin> {
         let mut p = self.lock();
         let Pins { at, until, about, .. } = &mut *p;
         let mut out = Vec::new();
         for (pin, (collection, since, told)) in about.iter_mut() {
             let Some(index) = at.get(pin).copied() else { continue };
-            if *told || index >= applied || since.elapsed() < PIN_STALL {
+            let holds = last_change(*collection).is_some_and(|changed| changed > index);
+            if *told || !holds || index >= applied || since.elapsed() < PIN_STALL {
                 continue;
             }
             *told = true;
@@ -155,8 +166,27 @@ impl CatalogPins {
     }
 
     /// The index the node may acknowledge with its copy at `applied`, at `now` on core 0's
-    /// clock.
+    /// clock, every pin holding it back.
     pub fn acked(&self, applied: u64, now: Nanos) -> u64 {
+        self.acked_with(applied, now, &|_| Some(u64::MAX))
+    }
+
+    /// The collections of the pins held.
+    pub fn collections(&self) -> std::collections::BTreeSet<u32> {
+        self.lock().about.values().map(|(c, _, _)| *c).collect()
+    }
+
+    /// The index the node may acknowledge with its copy at `applied`, at `now` on core 0's
+    /// clock (009 FR-006): a read of the indexes of a collection holds it back only once a change
+    /// of that collection's indexes came after it, as `last_change` says; one of another
+    /// collection writes nothing the change needs. A pin whose collection is not known holds it
+    /// back always.
+    pub fn acked_with(
+        &self,
+        applied: u64,
+        now: Nanos,
+        last_change: &dyn Fn(u32) -> Option<u64>,
+    ) -> u64 {
         let mut p = self.lock();
         let gone: Vec<u64> =
             p.until.iter().filter(|(_, at)| **at <= now).map(|(k, _)| *k).collect();
@@ -165,7 +195,13 @@ impl CatalogPins {
             p.until.remove(&pin);
             p.about.remove(&pin);
         }
-        p.at.values().copied().fold(applied, u64::min)
+        p.at.iter()
+            .filter(|(pin, at)| {
+                let Some((collection, _, _)) = p.about.get(pin) else { return true };
+                last_change(*collection).is_some_and(|changed| changed > **at)
+            })
+            .map(|(_, at)| *at)
+            .fold(applied, u64::min)
     }
 
     /// The table: a thread that panicked holding it left it whole, since every change is one
@@ -317,7 +353,16 @@ impl AuthLeaseDriver {
         now: Nanos,
     ) -> Vec<(NodeId, PeerMsg)> {
         let pins = &self.gate.pins;
-        for s in pins.stalled(applied(core)) {
+        // The last change of the indexes of each pinned collection, read before the driver
+        // borrows the core (009 FR-006).
+        let changes: BTreeMap<u32, u64> = group0(core).map_or_else(BTreeMap::new, |sm| {
+            pins.collections()
+                .into_iter()
+                .filter_map(|c| sm.index_changes.last(c).map(|i| (c, i)))
+                .collect()
+        });
+        let last_change = |c: u32| changes.get(&c).copied();
+        for s in pins.stalled_with(applied(core), &last_change) {
             // TeselaDB's own line: it has no RefDb identifier.
             crate::log::defer(crate::log::Pending {
                 id: 0,
@@ -328,8 +373,9 @@ impl AuthLeaseDriver {
                 ),
             });
         }
-        // What the node acknowledges waits for its running operations (009 FR-006).
-        let acked = |applied: u64| pins.acked(applied, now);
+        // What the node acknowledges waits for the running operations of the collections whose
+        // indexes changed after they read them (009 FR-006).
+        let acked = |applied: u64| pins.acked_with(applied, now, &last_change);
         let out = self.driver.tick(&mut Host { core, now }, me.0, now.0, &acked);
         self.publish(now);
         self.asked += out.iter().filter(|m| matches!(m, FenceMsg::Ask { .. })).count() as u64;
@@ -729,6 +775,34 @@ mod tests {
         pins.release(a);
         pins.release(b);
         assert_eq!(pins.acked(9, now), 9);
+    }
+
+    /// A read of the indexes holds back only a later change of its own collection's indexes (009
+    /// FR-006): a long write on one collection does not hold back the changes of another.
+    #[test]
+    fn a_pin_holds_back_only_a_later_change_of_its_collection() {
+        let pins = CatalogPins::default();
+        let now = Nanos::ZERO;
+        let x = pins.pin_for(4, 21);
+        let y = pins.pin_for(5, 22);
+        let changes = |c: u32| match c {
+            21 => Some(7),
+            22 => Some(3),
+            _ => None,
+        };
+        assert_eq!(pins.acked_with(9, now, &changes), 4, "x's collection changed after it");
+        assert_eq!(pins.acked(9, now), 4, "every pin holds without the changes");
+        let unknown = pins.pin(2);
+        assert_eq!(pins.acked_with(9, now, &changes), 2, "a pin of no known collection holds");
+        pins.release(unknown);
+        pins.release(x);
+        assert_eq!(pins.acked_with(9, now, &changes), 9, "y read after its collection changed");
+        assert_eq!(pins.acked_with(9, now, &|_| None), 9, "no change, nothing held");
+        let long_ago = std::time::Instant::now().checked_sub(PIN_STALL).unwrap();
+        pins.lock().about.get_mut(&y).unwrap().1 = long_ago;
+        assert!(pins.stalled_with(9, &changes).is_empty(), "y holds nothing back");
+        assert_eq!(pins.stalled(9).len(), 1, "without the changes it would be reported");
+        assert_eq!(pins.collections(), [22].into_iter().collect());
     }
 
     /// A write that may still reach its range's leader keeps its operation's read of the catalog
