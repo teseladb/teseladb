@@ -9,7 +9,7 @@ use teseladb_index::planner_api::{CatalogIndex, IndexCatalog, IndexState};
 use teseladb_index::spec::catalog_index;
 use teseladb_keys::{
     DOCUMENT_BUCKETS, DOCUMENTS, Direction, FieldBounds, Hlc, Interval, KeyBuilder, KeyRange,
-    values_len,
+    next_prefix, values_len,
 };
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::CollectionKind;
@@ -699,7 +699,7 @@ fn run_reading<B: Backend + ?Sized>(
             ran.keys += 1;
             ran.child_keys[child] += 1;
             last_past = entry.is_none();
-            let Some(Entry { pk, key: index_key, .. }) = entry else {
+            let Some(Entry { pk, key: index_key, doc, .. }) = entry else {
                 ran.past += 1;
                 ran.child_past[child] += 1;
                 continue;
@@ -717,7 +717,7 @@ fn run_reading<B: Backend + ?Sized>(
                     continue;
                 }
             }
-            let Some((dk, bytes)) = indexed_document(backend, coll, &pk, read.concern)? else {
+            let Some((dk, bytes)) = fetched(backend, coll, (&pk, doc), read.concern)? else {
                 continue;
             };
             ran.docs += 1;
@@ -797,6 +797,19 @@ fn indexed_document<B: Backend + ?Sized>(
     Ok(backend.scan(key.as_bytes(), &next, 1, concern)?.into_iter().next())
 }
 
+/// The document of an entry: the one it was read with, or [`indexed_document`].
+fn fetched<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    (pk, doc): (&[u8], Option<(Vec<u8>, Vec<u8>)>),
+    concern: ReadConcern,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, CommandError> {
+    match doc {
+        Some(read) => Ok(Some(read)),
+        None => indexed_document(backend, coll, pk, concern),
+    }
+}
+
 /// Runs an intersection of index scans (`AND_HASH`): the primary keys of all but the last scan
 /// held, the last one's entries streamed in its order, and each document found in all of them
 /// read and filtered.
@@ -855,7 +868,7 @@ fn intersected<B: Backend + ?Sized>(
     for entry in scanned.entries {
         ran.keys += 1;
         last_keys += 1;
-        let Some(Entry { pk, .. }) = entry else {
+        let Some(Entry { pk, doc, .. }) = entry else {
             ran.past += 1;
             last_past += 1;
             continue;
@@ -863,7 +876,7 @@ fn intersected<B: Backend + ?Sized>(
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
-        let Some((dk, bytes)) = indexed_document(backend, coll, &pk, read.concern)? else {
+        let Some((dk, bytes)) = fetched(backend, coll, (&pk, doc), read.concern)? else {
             continue;
         };
         // A document both scans hold comes out of the intersection one unit of work later.
@@ -1049,6 +1062,9 @@ pub(crate) struct Entry {
     key: Option<Document>,
     /// The entry's values as stored, when decoded.
     values: Option<Vec<Value>>,
+    /// The document's key and bytes, when the entry was read with them: an entry of the index of
+    /// `_id` is its document.
+    doc: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 /// The key of a document in the index of `_id`: `{_id: value}`.
@@ -1103,8 +1119,14 @@ fn range_entries<B: Backend + ?Sized>(
     let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
     if index.id_index {
+        if let Some(one) = id_point(backend, (tenant, collection), (&r.start, &end), concern)? {
+            return Ok(one);
+        }
         let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern)?;
-        return Ok(pks.into_iter().map(|pk| Entry { pk, key: None, values: None }).collect());
+        return Ok(pks
+            .into_iter()
+            .map(|pk| Entry { pk, key: None, values: None, doc: None })
+            .collect());
     }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
@@ -1127,7 +1149,7 @@ fn range_entries<B: Backend + ?Sized>(
                 true => teseladb_keys::space::split_unique_value(value).map_err(|_| malformed())?.0,
                 false => &key[cut..],
             };
-            pks.push(Entry { pk: pk.to_vec(), key: found, values });
+            pks.push(Entry { pk: pk.to_vec(), key: found, values, doc: None });
         }
         match rows.last() {
             _ if most.is_some_and(|m| pks.len() >= m) => break,
@@ -1170,6 +1192,31 @@ fn in_bucket(docs: &[u8], bucket: u8, (from, to): (&[u8], &[u8])) -> (Vec<u8>, V
         }
     };
     (at(from), at(to))
+}
+
+/// The entry of the index of `_id` for one value, with its document, read in one bucket; `None`
+/// when `[from, to)` is not one value. Such a range holds every key that starts with the value's
+/// encoding, and since encodings are self-delimiting that is the value's own document alone, in
+/// the bucket of its hash.
+fn id_point<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    (from, to): (&[u8], &[u8]),
+    concern: ReadConcern,
+) -> Result<Option<Vec<Entry>>, CommandError> {
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
+    let Some(pk) = from.strip_prefix(docs.as_bytes()) else { return Ok(None) };
+    if next_prefix(from).as_deref() != Some(to) {
+        return Ok(None);
+    }
+    let key = KeyBuilder::document_of_pk(tenant, collection, pk);
+    let end = [key.as_bytes(), &[0]].concat();
+    let rows = backend.scan(key.as_bytes(), &end, 1, concern)?;
+    Ok(Some(
+        rows.into_iter()
+            .map(|(k, v)| Entry { pk: pk.to_vec(), key: None, values: None, doc: Some((k, v)) })
+            .collect(),
+    ))
 }
 
 /// The primary keys of the documents of `collection` within key range `[from, to)` of the

@@ -369,3 +369,55 @@ fn a_read_with_a_limit_ends_its_trial_at_the_limit_and_keeps_its_cached_plan() {
         "a plan that gives its limit stays cached: {r:?}"
     );
 }
+
+/// The reads of the range `cmd` makes on `m`, each of them a trip to a range's thread on a node.
+fn range_reads(m: &mut Mem, cmd: &str) -> (Document, usize) {
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&reads);
+    m.on_scan = Some(Box::new(move || counted.set(counted.get() + 1)));
+    let r = run(m, cmd);
+    m.on_scan = None;
+    (r, reads.get())
+}
+
+#[test]
+fn a_find_by_one_id_reads_one_bucket_with_its_document() {
+    let mut m = loaded(300);
+    let find = r#"{"find":"c","filter":{"_id":42}}"#;
+    run(&mut m, find);
+    // The cached plan: the document of 42 in the bucket of its hash, read once. Before, the
+    // value was looked for in each of the 16 buckets and its document read again.
+    let (r, reads) = range_reads(&mut m, find);
+    assert_eq!(ids(&r), vec![42], "{r:?}");
+    assert_eq!(reads, 1);
+}
+
+#[test]
+fn an_in_of_21_ids_reads_each_value_once() {
+    let mut m = loaded(300);
+    let wanted: Vec<i32> = (0..21).map(|i| i * 7).collect();
+    let list = wanted.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let filter = format!(r#"{{"_id":{{"$in":[{list}]}}}}"#);
+    let find = format!(r#"{{"find":"c","filter":{filter}}}"#);
+    run(&mut m, &find);
+    let (r, reads) = range_reads(&mut m, &find);
+    assert_eq!(ids(&r), wanted, "{r:?}");
+    // One read for each value with its document (408 before, with every bucket and a second
+    // read of each document), and the probes of the 21 stretches after them for an entry, which
+    // `keysExamined` counts as in 9.0.4: 21 values and an entry after each.
+    assert!(reads <= 21 + 21 * 3, "{reads} reads of the range");
+    let explain = run(
+        &mut m,
+        &format!(r#"{{"explain":{{"find":"c","filter":{filter}}},"verbosity":"executionStats"}}"#),
+    );
+    assert_eq!(
+        field(&explain, "executionStats.totalKeysExamined"),
+        &Value::Int32(42),
+        "{explain:?}"
+    );
+    assert_eq!(
+        field(&explain, "executionStats.totalDocsExamined"),
+        &Value::Int32(21),
+        "{explain:?}"
+    );
+}
