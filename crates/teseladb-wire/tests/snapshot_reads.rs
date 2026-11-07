@@ -118,6 +118,25 @@ fn a_snapshot_read_is_served_at_its_mark_and_says_which() {
     assert_eq!(&keys[..3], ["values", "atClusterTime", "ok"], "{r:?}");
 }
 
+/// A `snapshot` read whose mark from the clock meets a version in its uncertainty window reads
+/// again above it, and its cursor gives the mark it read at, not the one it started with: the
+/// client reads its other collections there, so a copy at one mark sees every write the first
+/// read saw (008 FR-008, FR-012).
+#[test]
+fn a_snapshot_read_that_reads_again_gives_the_mark_it_read_at() {
+    let mut m = node();
+    let version = (CLUSTER_TS.0, CLUSTER_TS.1 + 5);
+    m.uncertain_scan = Some(from_timestamp(version));
+    let r = run(&mut m, DB, find_with(concern(Level::Snapshot)).with("batchSize", 1));
+    assert_eq!(field(&r, "cursor.atClusterTime"), &ts(version.0, version.1), "{r:?}");
+    assert_eq!(m.scanned_at, Some(Some(from_timestamp(version))));
+    // The batches that follow read there too.
+    let id = field(&r, "cursor.id").clone();
+    let more = Document::new().with("getMore", id).with("collection", "c").with("batchSize", 1);
+    let r = run(&mut m, DB, more);
+    assert_eq!(field(&r, "cursor.atClusterTime"), &ts(version.0, version.1), "{r:?}");
+}
+
 #[test]
 fn a_read_after_a_cluster_time_is_served_at_the_cluster_time() {
     let mut m = node();

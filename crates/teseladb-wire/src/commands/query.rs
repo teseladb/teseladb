@@ -1159,9 +1159,11 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         }
     };
     state.return_key = a.return_key;
-    state.read_mark = ctx.backend.read_mark();
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (docs, short) = state.batch(ctx.backend, size).map_err(executor)?;
+    // The mark the first batch read at, which a read in its uncertainty window raised (FR-008):
+    // the batches that follow read there.
+    state.read_mark = ctx.backend.read_mark();
     // A `refrouter` 9.0 closes the cursor once the limit is reached (measured); a tailable one
     // stays open unless the collection had no document at all.
     let exhausted = match &state.tail {

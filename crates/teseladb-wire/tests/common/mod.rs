@@ -145,6 +145,9 @@ pub struct Mem {
     pub read_mark: Option<teseladb_txn::causal::ReadMark>,
     /// The mark of the last scan.
     pub scanned_at: Option<Option<Hlc>>,
+    /// A version the next scan outside a transaction meets in its uncertainty window: the scan
+    /// reads again at its mark and raises the command's, as a node's backend does (008 FR-008).
+    pub uncertain_scan: Option<Hlc>,
     /// Value types other than a document's, by key (written by transactions).
     pub types: BTreeMap<Vec<u8>, u8>,
     /// How many times a command read a collection's catalog entry.
@@ -948,6 +951,10 @@ impl Backend for Mem {
         limit: usize,
         _: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        if let (Some(version), Some(mut m)) = (self.uncertain_scan.take(), self.read_mark) {
+            m.at = m.at.max(version);
+            self.read_mark = Some(m);
+        }
         self.scanned_at = Some(self.read_mark.map(|m| m.at));
         if let Some(m) = self.read_mark {
             self.txn_read(m.at, m.uncertain_to)?;

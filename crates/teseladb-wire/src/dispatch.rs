@@ -686,8 +686,10 @@ fn run_command<B: Backend + ?Sized>(
         }
         let doc =
             run_op(conn, req, backend, shared, own_limit, privileges).ok_or_else(not_found)?;
-        // A `getMore` reads at its cursor's mark, which it set.
-        let at = if name == crate::commands::query::GET_MORE { backend.read_mark() } else { mark };
+        // The mark the reads were served at: the one set before the command, raised when a read
+        // met a version in its uncertainty window and read again above it (FR-008), or a
+        // `getMore`'s cursor's.
+        let at = backend.read_mark().or(mark);
         backend.set_read_mark(None);
         let doc = txn_concern::stamp(doc, at)?;
         return Ok(Action::Reply(with_cluster_time(doc, node)));
