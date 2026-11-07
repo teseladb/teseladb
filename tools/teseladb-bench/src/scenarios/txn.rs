@@ -14,13 +14,15 @@
 //!   a conflict and the share of reads that restart for their uncertainty window.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use teseladb_meta::group0::Group0Error;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_types::{Histogram, Rng};
 
 use super::wire::each;
 use crate::cli::Args;
-use crate::client::{Client, Target, check, debug, doc};
+use crate::client::{Client, Target, check, debug, doc, retry};
 use crate::load::{Load, drive};
 use crate::report::{Report, Target as Goal};
 
@@ -275,24 +277,43 @@ pub fn readers_run(args: &Args) -> Result<Report, String> {
     Ok(report)
 }
 
+/// How long a split waits for a cluster that has just started to take it.
+const SPLIT_WAIT: Duration = Duration::from_secs(30);
+const SPLIT_POLL: Duration = Duration::from_millis(100);
+
 /// Splits the local cluster's data range at document `at`, through the administration port of
-/// its first node, and waits until that node routes two ranges.
+/// its first node, and waits until that node routes two ranges. A cluster that has just started
+/// answers before its group 0 bootstraps, and then while it settles its first range: a split asked
+/// then is refused with `NotBootstrapped` or `RangeBusy`, and is asked again until the group takes
+/// it or [`SPLIT_WAIT`] passes. Any other refusal ends it.
 fn split(target: &Target, at: i64) -> Result<(), String> {
     let (Some(admin), Some(ranges)) = (target.admin_addr(), target.ranges()) else {
         return Ok(());
     };
     let at = format!("{{\"ns\": \"{DB}.{COLLECTION}\", \"_id\": {at}}}");
+    let not_yet = [Group0Error::NotBootstrapped, Group0Error::RangeBusy].map(|e| format!("{e:?}"));
     let mut errors = Vec::new();
-    for g in ranges {
-        let words = ["--node", &admin.to_string(), "range", "split", &g.to_string(), "--at", &at];
-        let opts = teseladb_server::admin::parse(&words.map(str::to_owned))?;
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        if teseladb_server::admin::run(&opts, &mut out, &mut err) == 0 {
-            return target.wait_ranges(2);
+    let took = retry(SPLIT_WAIT, SPLIT_POLL, || {
+        errors.clear();
+        for g in &ranges {
+            let words =
+                ["--node", &admin.to_string(), "range", "split", &g.to_string(), "--at", &at];
+            let opts = teseladb_server::admin::parse(&words.map(str::to_owned))?;
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            if teseladb_server::admin::run(&opts, &mut out, &mut err) == 0 {
+                return Ok(Some(()));
+            }
+            errors.push(String::from_utf8_lossy(&err).into_owned());
         }
-        errors.push(String::from_utf8_lossy(&err).into_owned());
+        match errors.iter().all(|e| not_yet.iter().any(|n| e.contains(n.as_str()))) {
+            true => Ok(None),
+            false => Err(format!("no range took the split: {errors:?}")),
+        }
+    })?;
+    match took {
+        Some(_) => target.wait_ranges(2),
+        None => Err(format!("no range took the split within {SPLIT_WAIT:?}: {errors:?}")),
     }
-    Err(format!("no range took the split: {errors:?}"))
 }
 
 /// `txn` (SC-004).
