@@ -33,6 +33,8 @@ const CHILD: &str = "--node-process";
 
 /// Longest a node takes to print its ready line.
 const READY: Duration = Duration::from_secs(30);
+/// The start of the line `teseladb start` writes to standard output once the node is ready.
+const READY_LINE: &str = "ready node_id=";
 
 /// Longest a node takes to answer a request of the test.
 const ANSWER: Duration = Duration::from_secs(10);
@@ -205,10 +207,35 @@ impl Proc {
         self.wait_line(what, |l| l.contains(what))
     }
 
+    /// The lines that contain each of `whats`, in whatever order they come: standard output and
+    /// standard error reach the test through two threads, so a line a node writes to one after a
+    /// line to the other may still arrive first.
+    fn wait_each(&self, whats: &[&str]) -> Vec<String> {
+        let mut found: Vec<Option<String>> = vec![None; whats.len()];
+        while found.iter().any(Option::is_none) {
+            let line = self.lines.recv_timeout(READY).unwrap_or_else(|_| {
+                let missing: Vec<&&str> =
+                    whats.iter().zip(&found).filter(|(_, f)| f.is_none()).map(|(w, _)| w).collect();
+                panic!("no {missing:?}")
+            });
+            for (what, slot) in whats.iter().zip(found.iter_mut()) {
+                if slot.is_none() && line.contains(what) {
+                    *slot = Some(line.clone());
+                }
+            }
+        }
+        found.into_iter().flatten().collect()
+    }
+
     /// The ready line's fields: node and inter-node address. The log's `node ready` event, on
     /// standard error, is not it.
     fn ready(&self) -> (u64, String) {
-        let line = self.wait_line("ready line", |l| l.starts_with("ready node_id="));
+        let line = self.wait_line("ready line", |l| l.starts_with(READY_LINE));
+        Self::ready_fields(&line)
+    }
+
+    /// The node and inter-node address of a ready line.
+    fn ready_fields(line: &str) -> (u64, String) {
         let field = |k: &str| {
             line.split_whitespace()
                 .find_map(|f| f.strip_prefix(k))
@@ -266,15 +293,15 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     assert_eq!(id1, 1);
     let p2 = Proc::start("2", Some(&seed));
     // The disk executor and O_DIRECT are logged before the node starts (012 FR-003, FR-007).
-    p2.wait_for("disk: ");
-    let (id2, peer2) = p2.ready();
+    let lines = p2.wait_each(&[READY_LINE, "disk: "]);
+    let (id2, peer2) = Proc::ready_fields(&lines[0]);
     let p3 = Proc::start("3", Some(&seed));
-    let (id3, _) = p3.ready();
+    // Its cores are pinned to the CPUs the process may use (012 FR-006), a line that goes to
+    // standard error right after the ready line goes to standard output; and node 3 votes in
+    // Group 0, so losing one of three voters keeps the quorum.
+    let lines = p3.wait_each(&[READY_LINE, "cores' CPUs cpus=", "Group 0 membership voter=true"]);
+    let (id3, _) = Proc::ready_fields(&lines[0]);
     assert_eq!((id2, id3), (2, 3));
-    // Its cores are pinned to the CPUs the process may use (012 FR-006).
-    p3.wait_for("cores' CPUs cpus=");
-    // Node 3 votes in Group 0: losing one of three voters keeps the quorum.
-    p3.wait_for("Group 0 membership voter=true");
     // The founder created the data range and leads it: its log says so (005 T029 finds the
     // leader to kill this way).
     p1.wait_for("data range leadership leader=true");
