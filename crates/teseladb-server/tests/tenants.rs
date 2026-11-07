@@ -202,3 +202,105 @@ fn users_merged_in_a_tenant_belong_to_it() {
     assert_eq!(users_of(&mut c, Some("acme")), 1, "the user is the tenant's");
     assert_eq!(users_of(&mut c, None), 0, "and not the default tenant's");
 }
+
+/// A user or role merged into a tenant whose name another tenant holds, as a copy of one tenant
+/// restored into another of the same cluster brings it: names are unique in the cluster
+/// (DV-023), so the merge answers that the name exists, the error of `createRole` and
+/// `createUser`, at once and with nothing written (021 FR-047).
+#[test]
+fn a_merged_role_or_user_whose_name_another_tenant_holds_is_refused_at_once() {
+    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let at = node.admin_addr().unwrap().to_string();
+    for t in ["acme", "beta"] {
+        let (code, _, err) = admin(&at, &["tenant", "create", t]);
+        assert_eq!(code, 0, "{err}");
+    }
+    let mut c = Client::new(&node);
+    let privileges = || {
+        let resource = Document::new().with("db", "shop").with("collection", "");
+        let find = Document::new()
+            .with("resource", resource)
+            .with("actions", Value::Array(vec![Value::from("find")]));
+        Value::Array(vec![Value::Document(find)])
+    };
+    let role = Document::new()
+        .with("createRole", "reporter")
+        .with("privileges", privileges())
+        .with("roles", Value::Array(Vec::new()))
+        .with("$tenant", "acme");
+    assert!(ok(&c.run("shop", role)), "a role of acme");
+    let user = Document::new()
+        .with("createUser", "clerk")
+        .with("pwd", "clerk-pw-123456")
+        .with("roles", Value::Array(Vec::new()))
+        .with("$tenant", "acme");
+    assert!(ok(&c.run("shop", user)), "a user of acme");
+    let role_with_id = |id: &str, name: &str| {
+        Document::new()
+            .with("_id", id)
+            .with("role", name)
+            .with("db", "shop")
+            .with("privileges", privileges())
+            .with("roles", Value::Array(Vec::new()))
+    };
+    let stored_role = |name: &str| role_with_id(&format!("shop.{name}"), name);
+    let stored_user = Document::new()
+        .with("_id", "shop.clerk")
+        .with("user", "clerk")
+        .with("db", "shop")
+        .with("credentials", Document::new())
+        .with("roles", Value::Array(Vec::new()));
+    let fill = |c: &mut Client, coll: &str, docs: Vec<Document>| {
+        // A `refrouter` refuses to drop a collection of `admin`: its documents go instead.
+        let all = Document::new().with("q", Document::new()).with("limit", 0);
+        let delete = Document::new()
+            .with("delete", coll)
+            .with("deletes", Value::Array(vec![Value::Document(all)]))
+            .with("$tenant", "beta");
+        assert!(ok(&c.run("admin", delete)), "the temporary collection {coll} emptied");
+        let docs = Value::Array(docs.into_iter().map(Value::Document).collect());
+        let insert =
+            Document::new().with("insert", coll).with("documents", docs).with("$tenant", "beta");
+        assert!(ok(&c.run("admin", insert)), "the temporary collection {coll}");
+    };
+    let merge = |c: &mut Client, field: &str, coll: &str| {
+        let cmd = Document::new()
+            .with("_mergeAuthzCollections", 1)
+            .with(field, format!("admin.{coll}"))
+            .with("db", "")
+            .with("drop", false)
+            .with("$tenant", "beta");
+        c.run("admin", cmd)
+    };
+    let refused = |r: &Document, code: i32, msg: &str| {
+        assert_eq!(r.get("code"), Some(&Value::Int32(code)), "{r:?}");
+        assert_eq!(r.get("errmsg"), Some(&Value::from(msg)), "{r:?}");
+    };
+    // A free role and the one acme holds: refused, and the free one is not written either.
+    fill(&mut c, "temp_roles", vec![stored_role("auditor"), stored_role("reporter")]);
+    let r = merge(&mut c, "tempRolesCollection", "temp_roles");
+    refused(&r, 51_002, "Role \"reporter@shop\" already exists");
+    let roles_of = |c: &mut Client, tenant: &str| {
+        let info = Document::new().with("rolesInfo", 1).with("$tenant", tenant);
+        match c.run("shop", info).get("roles") {
+            Some(Value::Array(r)) => r.len(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(roles_of(&mut c, "beta"), 0, "nothing of the refused merge");
+    // The name taken under another `_id`: the role with that name is the one named.
+    let renamed = role_with_id("copied.reporter", "reporter");
+    fill(&mut c, "temp_roles", vec![stored_role("auditor"), renamed]);
+    let r = merge(&mut c, "tempRolesCollection", "temp_roles");
+    refused(&r, 51_002, "Role \"reporter@shop\" already exists");
+    fill(&mut c, "temp_users", vec![stored_user]);
+    let r = merge(&mut c, "tempUsersCollection", "temp_users");
+    refused(&r, 51_003, "User \"clerk@shop\" already exists");
+    // Without the taken name the merge goes through, into beta.
+    fill(&mut c, "temp_roles", vec![stored_role("auditor")]);
+    let r = merge(&mut c, "tempRolesCollection", "temp_roles");
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(roles_of(&mut c, "beta"), 1);
+    assert_eq!(roles_of(&mut c, "acme"), 1);
+}
