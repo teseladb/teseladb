@@ -68,13 +68,26 @@ for file in LICENSE COMMERCIAL.md; do
 done
 
 step "build the image of each architecture"
+# debian:bookworm-slim by the digest of each platform, from the index sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3:
+# the classic builder mixes the layers of the platforms of an index pinned by its own digest (docker/release.Dockerfile).
+base_of() {
+  case $1 in
+    amd64) echo debian@sha256:a3bba7dc7dbcc1f37c2856c51fc9a7fac96608f50cb87b1b4e4d8b8c85ae988e ;;
+    arm64) echo debian@sha256:7ccb8b5b60c7654f5b795d94ee7d751cd0811500803f0b09cefcd555e755a55a ;;
+  esac
+}
 for pair in amd64=x86_64-unknown-linux-gnu arm64=aarch64-unknown-linux-gnu; do
   arch=${pair%%=*}
   triple=${pair#*=}
   mkdir -p "dist/image/$arch/data"
   install -m 0755 "target-release/$triple/dist/teseladb" "dist/image/$arch/teseladb"
   cp LICENSE COMMERCIAL.md "dist/image/$arch/"
-  DOCKER_BUILDKIT=0 docker build --platform "linux/$arch" -f docker/release.Dockerfile -t "$IMAGE:$VERSION-$arch" "dist/image/$arch"
+  DOCKER_BUILDKIT=0 docker build --platform "linux/$arch" --build-arg "BASE=$(base_of "$arch")" \
+    -f docker/release.Dockerfile -t "$IMAGE:$VERSION-$arch" "dist/image/$arch"
+  # Each layer must be the one its config declares, or the registry refuses the pull of this platform.
+  docker save "$IMAGE:$VERSION-$arch" -o "dist/image/$arch.tar"
+  scripts/release/check-image.sh "dist/image/$arch.tar"
+  rm -f "dist/image/$arch.tar"
 done
 
 if [[ $STAGE == prd ]]; then

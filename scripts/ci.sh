@@ -82,6 +82,7 @@ gate "1. shell scripts" shellcheck_all
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
+gate "2. tests of the check of the release images" scripts/tests/check_image_test.sh
 gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
 gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
 gate "2. tests of the Docker Hub token of the releases" scripts/tests/dockerhub_token_test.sh
