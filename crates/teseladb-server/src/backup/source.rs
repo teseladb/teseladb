@@ -9,8 +9,10 @@
 //!   backup. The export goes after its last piece, or after [`EXPORT_IDLE`] without a request.
 //! - A restore gives every replica of the range its files piece by piece, in order; once they
 //!   are all here the replica writes them on its disk and the LSM ingests them into the range's
-//!   interval, which must hold nothing (the ingestion refuses data already there). The data is
-//!   outside the log on every replica alike, as before any write to the restored collections.
+//!   interval, which must hold nothing. What a restore cut before it ingested (its coordinator
+//!   died or stopped waiting) is the only data a cluster without collections has there: the
+//!   LSM clears the interval and the ingestion goes again, once. The data is outside the log on
+//!   every replica alike, as before any write to the restored collections.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -65,19 +67,31 @@ struct Export {
 enum Restore {
     /// The pieces received, file by file.
     Staging(BTreeMap<u32, Vec<u8>>),
-    /// The files are written on the disk: operations left.
-    Writing { refs: Vec<FileRef>, left: usize, failed: bool },
-    /// The LSM ingests them.
-    Ingesting(u64),
+    /// The files are written on the disk: operations left. `serial` tells its writes from those
+    /// of a restore that a new one replaced.
+    Writing { serial: u64, refs: Vec<FileRef>, left: usize, failed: bool },
+    /// The LSM ingests them into `interval`; `cleared` once a clearing went first.
+    Ingesting(Ingestion),
+    /// The LSM clears the interval of what a cut restore left; then the ingestion goes again,
+    /// with `flushed` as the range's flushed index, which the clearing takes back to 0.
+    Clearing { id: u64, ingestion: Ingestion, flushed: u64 },
     /// The end: ingested, or why not.
     Done(Result<(), String>),
+}
+
+/// The files of a restore and where they go.
+struct Ingestion {
+    id: u64,
+    refs: Vec<FileRef>,
+    interval: (Vec<u8>, Vec<u8>),
+    cleared: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tag {
     Open(ExportKey, u64),
     Read { id: u64, key: ExportKey, serial: u64, file: u32, offset: u64 },
-    Write(GroupId),
+    Write(GroupId, u64),
     Cleanup,
 }
 
@@ -261,7 +275,7 @@ impl Backups {
             None => Err(failed("no restore of this range is under way")),
             Some(Restore::Done(Ok(()))) => Ok(RemoteReply::Restored { done: true }),
             Some(Restore::Done(Err(why))) => Err(failed(why)),
-            Some(Restore::Writing { .. } | Restore::Ingesting(_)) => {
+            Some(Restore::Writing { .. } | Restore::Ingesting(_) | Restore::Clearing { .. }) => {
                 Ok(RemoteReply::Restored { done: false })
             }
             Some(Restore::Staging(files)) => {
@@ -276,12 +290,12 @@ impl Backups {
                     self.file_id();
                 }
                 let (ops, refs) = write_ops(&bufs, &dir, first);
-                let left = ops.len();
-                self.ops.extend(ops.into_iter().map(|op| (op, Tag::Write(g))));
-                let state = match left {
-                    0 => Restore::Writing { refs, left: 1, failed: false },
-                    _ => Restore::Writing { refs, left, failed: false },
-                };
+                self.next += 1;
+                let serial = self.next;
+                // No file at all still waits for one write to end.
+                let left = ops.len().max(1);
+                self.ops.extend(ops.into_iter().map(|op| (op, Tag::Write(g, serial))));
+                let state = Restore::Writing { serial, refs, left, failed: false };
                 self.restores.insert(g, state);
                 Ok(RemoteReply::Restored { done: false })
             }
@@ -343,30 +357,76 @@ impl Backups {
 
     /// The LSM finished ingestion `id`: the range of a restore it ended well, which the caller
     /// snapshots at once, so that a replica added later receives the data in a snapshot and not
-    /// by replaying entries that lack it (as a range born from a split). Its result comes back if
-    /// it is not one of this module's.
+    /// by replaying entries that lack it (as a range born from a split). An interval that holds
+    /// data is cleared, once, and ingested again. Its result comes back if it is not one of this
+    /// module's.
     pub fn on_ingested(
         &mut self,
+        lsm: &mut Lsm,
         id: u64,
         r: Result<(), LsmError>,
     ) -> Result<Option<GroupId>, Result<(), LsmError>> {
         let Some(g) = self
             .restores
             .iter()
-            .find(|(_, s)| matches!(s, Restore::Ingesting(x) if *x == id))
+            .find(|(_, s)| matches!(s, Restore::Ingesting(i) if i.id == id))
             .map(|(g, _)| *g)
         else {
             return Err(r);
         };
-        let done = r.map_err(|e| match e {
-            LsmError::IngestOverlap => {
+        let Some(Restore::Ingesting(ingestion)) = self.restores.remove(&g) else {
+            unreachable!("found above")
+        };
+        let done = match r {
+            Ok(()) => {
+                // The LSM moved the files in: their directory is empty.
+                self.remove_dirs(&ingestion.refs);
+                self.restores.insert(g, Restore::Done(Ok(())));
+                return Ok(Some(g));
+            }
+            // What a restore cut before this one ingested: it goes first.
+            Err(LsmError::IngestOverlap) if !ingestion.cleared => {
+                let flushed = lsm.flushed_index(g);
+                let id = lsm.clear_range(g, vec![ingestion.interval.clone()]);
+                self.restores.insert(g, Restore::Clearing { id, ingestion, flushed });
+                return Ok(None);
+            }
+            Err(LsmError::IngestOverlap) => {
                 "the range is not empty: a restore needs an empty cluster".to_owned()
             }
-            other => format!("the ingestion failed: {other}"),
-        });
-        let ok = done.is_ok();
-        self.restores.insert(g, Restore::Done(done));
-        Ok(ok.then_some(g))
+            Err(other) => format!("the ingestion failed: {other}"),
+        };
+        self.fail(g, &ingestion.refs, done);
+        Ok(None)
+    }
+
+    /// The LSM finished clearing `id`; `false` if it is not one of this module's. The restore's
+    /// files are ingested again, with the range's flushed index of before the clearing.
+    pub fn on_cleared(&mut self, lsm: &mut Lsm, id: u64) -> bool {
+        let Some(g) = self
+            .restores
+            .iter()
+            .find(|(_, s)| matches!(s, Restore::Clearing { id: x, .. } if *x == id))
+            .map(|(g, _)| *g)
+        else {
+            return false;
+        };
+        let Some(Restore::Clearing { ingestion, flushed, .. }) = self.restores.remove(&g) else {
+            unreachable!("found above")
+        };
+        let intervals = vec![ingestion.interval.clone()];
+        let id = lsm.ingest_range(ingestion.refs.clone(), intervals, (g, flushed));
+        self.restores.insert(g, Restore::Ingesting(Ingestion { id, cleared: true, ..ingestion }));
+        true
+    }
+
+    /// Removes the directories of `files`, once the files are gone from them.
+    fn remove_dirs(&mut self, files: &[FileRef]) {
+        let dirs: std::collections::BTreeSet<PathBuf> =
+            files.iter().filter_map(|f| f.path.parent().map(PathBuf::from)).collect();
+        for path in dirs {
+            self.ops.push_back((IoOp::RemoveDir { path }, Tag::Cleanup));
+        }
     }
 
     /// Next disk operation.
@@ -390,7 +450,7 @@ impl Backups {
                 };
                 self.read(id, (key, serial), (file, offset), data);
             }
-            Tag::Write(g) => self.written(core, lsm, g, ok),
+            Tag::Write(g, serial) => self.written(core, lsm, (g, serial), ok),
         }
     }
 
@@ -439,10 +499,22 @@ impl Backups {
         }
     }
 
-    fn written(&mut self, core: &MultiRaftCore<CoreSm>, lsm: &mut Lsm, g: GroupId, ok: bool) {
-        let Some(Restore::Writing { refs, left, failed: f }) = self.restores.get_mut(&g) else {
+    fn written(
+        &mut self,
+        core: &MultiRaftCore<CoreSm>,
+        lsm: &mut Lsm,
+        (g, serial): (GroupId, u64),
+        ok: bool,
+    ) {
+        let Some(Restore::Writing { serial: of, refs, left, failed: f }) =
+            self.restores.get_mut(&g)
+        else {
             return;
         };
+        // A write of a restore that a new one replaced counts for nothing.
+        if *of != serial {
+            return;
+        }
         *left -= 1;
         *f |= !ok;
         if *left > 0 {
@@ -453,12 +525,24 @@ impl Backups {
             let (s, e) = sm.bounds();
             backed_up(s, e)
         });
-        let state = match (f, interval) {
-            (false, Some((s, e))) => Restore::Ingesting(lsm.ingest(refs, &s, &e)),
-            (true, _) => Restore::Done(Err("writing the restore's files failed".to_owned())),
-            (false, None) => Restore::Done(Err("the range left this core".to_owned())),
-        };
-        self.restores.insert(g, state);
+        match (f, interval) {
+            (false, Some((s, e))) => {
+                let id = lsm.ingest(refs.clone(), &s, &e);
+                let ingestion = Ingestion { id, refs, interval: (s, e), cleared: false };
+                self.restores.insert(g, Restore::Ingesting(ingestion));
+            }
+            (true, _) => self.fail(g, &refs, "writing the restore's files failed".to_owned()),
+            (false, None) => self.fail(g, &refs, "the range left this core".to_owned()),
+        }
+    }
+
+    /// Ends the restore of `g` with `why`, removing its files.
+    fn fail(&mut self, g: GroupId, refs: &[FileRef], why: String) {
+        for f in refs {
+            self.ops.push_back((IoOp::Remove { path: f.path.clone() }, Tag::Cleanup));
+        }
+        self.remove_dirs(refs);
+        self.restores.insert(g, Restore::Done(Err(why)));
     }
 
     /// Closes and removes the files of an export.
@@ -474,11 +558,8 @@ impl Backups {
             self.ops.push_back((IoOp::Close { file: *fid }, Tag::Cleanup));
             self.ops.push_back((IoOp::Remove { path: f.path.clone() }, Tag::Cleanup));
         }
-        let dirs: std::collections::BTreeSet<PathBuf> =
-            files.iter().filter_map(|(_, f)| f.path.parent().map(PathBuf::from)).collect();
-        for path in dirs {
-            self.ops.push_back((IoOp::RemoveDir { path }, Tag::Cleanup));
-        }
+        let refs: Vec<FileRef> = files.into_iter().map(|(_, f)| f).collect();
+        self.remove_dirs(&refs);
     }
 
     /// Removes the exports nobody asked for in [`EXPORT_IDLE`].
@@ -618,7 +699,8 @@ mod tests {
         let (core, host, lsm, mut disk) = world();
         let mut w = (core, host);
         let mut b = Backups::new("b".into(), 1);
-        assert_eq!(b.on_ingested(77, Ok(())), Err(Ok(())));
+        assert_eq!(b.on_ingested(&mut lsm.borrow_mut(), 77, Ok(())), Err(Ok(())));
+        assert!(!b.on_cleared(&mut lsm.borrow_mut(), 77));
         assert!(b.on_exported(77, Vec::new()).is_err());
         assert!(!b.on_host_reply(&mut lsm.borrow_mut(), 77, &Err(RangeError::Timeout)));
         assert!(ask(&mut b, &mut w, DATA_RANGE, piece(0, 0, b"not an sst")).is_ok());
@@ -627,34 +709,59 @@ mod tests {
             let done = disk.execute(op);
             b.on_io_done(&w.0, &mut lsm.borrow_mut(), done);
         }
-        let Some(Restore::Ingesting(id)) = b.restores.get(&DATA_RANGE) else { panic!("ingesting") };
-        let id = *id;
+        let Some(Restore::Ingesting(i)) = b.restores.get(&DATA_RANGE) else { panic!("ingesting") };
+        let id = i.id;
+        let still = Ok(RemoteReply::Restored { done: false });
+        assert_eq!(ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 }), still);
+        // Data there: the interval is cleared, and the files are ingested again once.
         assert_eq!(
-            ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 }),
-            Ok(RemoteReply::Restored { done: false })
+            b.on_ingested(&mut lsm.borrow_mut(), id, Err(LsmError::IngestOverlap)),
+            Ok(None)
         );
-        assert_eq!(b.on_ingested(id, Err(LsmError::IngestOverlap)), Ok(None));
+        let Some(Restore::Clearing { id: clearing, .. }) = b.restores.get(&DATA_RANGE) else {
+            panic!("clearing")
+        };
+        let clearing = *clearing;
+        assert_eq!(ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 }), still);
+        assert!(!b.on_cleared(&mut lsm.borrow_mut(), clearing + 1));
+        assert!(b.on_cleared(&mut lsm.borrow_mut(), clearing));
+        let Some(Restore::Ingesting(i)) = b.restores.get(&DATA_RANGE) else { panic!("again") };
+        assert!(i.cleared);
+        let id = i.id;
+        assert_eq!(
+            b.on_ingested(&mut lsm.borrow_mut(), id, Err(LsmError::IngestOverlap)),
+            Ok(None)
+        );
         let r = ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 });
         assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("not empty")), "{r:?}");
-        b.restores.insert(DATA_RANGE, Restore::Ingesting(5));
-        assert_eq!(b.on_ingested(5, Err(LsmError::ReadOnly)), Ok(None));
-        b.restores.insert(DATA_RANGE, Restore::Ingesting(6));
-        assert_eq!(b.on_ingested(6, Ok(())), Ok(Some(DATA_RANGE)));
+        let ingesting = |id| {
+            let refs = vec![FileRef { path: "r/a.sst".into(), size: 1 }];
+            Restore::Ingesting(Ingestion { id, refs, interval: (vec![1], vec![3]), cleared: false })
+        };
+        b.restores.insert(DATA_RANGE, ingesting(5));
+        assert_eq!(b.on_ingested(&mut lsm.borrow_mut(), 5, Err(LsmError::ReadOnly)), Ok(None));
+        let r = ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 });
+        assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("failed")), "{r:?}");
+        b.restores.insert(DATA_RANGE, ingesting(6));
+        assert_eq!(b.on_ingested(&mut lsm.borrow_mut(), 6, Ok(())), Ok(Some(DATA_RANGE)));
         assert_eq!(
             ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 }),
             Ok(RemoteReply::Restored { done: true })
         );
         // A range gone from the core when its files are written.
-        b.restores
-            .insert(GroupId(99), Restore::Writing { refs: Vec::new(), left: 1, failed: false });
-        b.written(&w.0, &mut lsm.borrow_mut(), GroupId(99), true);
+        let writing = Restore::Writing { serial: 4, refs: Vec::new(), left: 1, failed: false };
+        b.restores.insert(GroupId(99), writing);
+        // A write of a restore replaced since counts for nothing.
+        b.written(&w.0, &mut lsm.borrow_mut(), (GroupId(99), 3), true);
+        assert!(matches!(b.restores.get(&GroupId(99)), Some(Restore::Writing { left: 1, .. })));
+        b.written(&w.0, &mut lsm.borrow_mut(), (GroupId(99), 4), true);
         assert!(matches!(b.restores.get(&GroupId(99)), Some(Restore::Done(Err(_)))));
-        b.written(&w.0, &mut lsm.borrow_mut(), GroupId(98), true);
+        b.written(&w.0, &mut lsm.borrow_mut(), (GroupId(98), 4), true);
     }
 
     #[test]
     fn a_restore_of_several_files_or_of_none_writes_them_and_answers_go_to_their_own_job() {
-        let (core, host, _lsm, _disk) = world();
+        let (core, host, lsm, _disk) = world();
         let mut w = (core, host);
         let mut b = Backups::new("b".into(), 1);
         assert!(ask(&mut b, &mut w, DATA_RANGE, piece(0, 0, b"ab")).is_ok());
@@ -670,8 +777,10 @@ mod tests {
         assert!(ask(&mut b, &mut w, DATA_RANGE, ingest(0)).is_ok());
         assert!(matches!(b.restores.get(&DATA_RANGE), Some(Restore::Writing { left: 1, .. })));
         // Another job's ingestion or export, while one of this module's is under way.
-        b.restores.insert(DATA_RANGE, Restore::Ingesting(5));
-        assert_eq!(b.on_ingested(6, Ok(())), Err(Ok(())));
+        let refs = Vec::new();
+        let ingestion = Ingestion { id: 5, refs, interval: (vec![1], vec![3]), cleared: false };
+        b.restores.insert(DATA_RANGE, Restore::Ingesting(ingestion));
+        assert_eq!(b.on_ingested(&mut lsm.borrow_mut(), 6, Ok(())), Err(Ok(())));
         b.exports.insert((DATA_RANGE, AT), export(ExportState::Exporting(8)));
         assert!(b.on_exported(9, Vec::new()).is_err());
         assert!(matches!(b.exports[&(DATA_RANGE, AT)].state, ExportState::Exporting(8)));

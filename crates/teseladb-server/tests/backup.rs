@@ -8,8 +8,12 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_rest::media::{Format, decode};
+use teseladb_server::admin_http::{Method, request};
+use teseladb_server::backup::Cli;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_raftlog::MemDisk;
@@ -173,6 +177,62 @@ fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     let mut c = Client::new(&nodes[1]);
     until("the documents without the old leader", || (try_count(&mut c) == Some(30)).then_some(()));
     for n in nodes {
+        n.stop();
+    }
+}
+
+/// What the CLI's restore calls the node's port with: the answer's document, or its error.
+fn port(at: String) -> impl Fn(Method, &str, &[u8]) -> Result<Document, String> {
+    move |method, target, body| {
+        let (status, answer) = request(&at, method, target, body).map_err(|e| e.to_string())?;
+        let doc = decode(&answer, Format::Relaxed).map_err(|e| format!("{e:?}"))?;
+        match (status, doc.get("error")) {
+            (200, _) => Ok(doc),
+            (_, Some(Value::String(m))) => Err(m.clone()),
+            _ => Err(format!("HTTP {status}")),
+        }
+    }
+}
+
+/// A restore cut while a replica ingests (its worker died, or it waited for nothing) leaves the
+/// cluster without collections, and the next restore into it brings every document (007 FR-021).
+#[test]
+fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
+    let out = Dir::new("cut");
+    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n.wait_ready(READY));
+    let mut c = Client::new(&n);
+    let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..30)));
+    assert!(ok(&r), "{r:?}");
+    let at = n.admin_addr().unwrap().to_string();
+    let (code, text, err) = admin(&at, &["backup", "--out", out.0.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}{err}");
+    n.stop();
+    let n1 = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n1.wait_ready(READY));
+    let seed = vec![n1.peer_addr().to_string()];
+    let n2 = Node::start(joining(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+    let n3 = Node::start(joining(seed), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
+    let voters = |n: &Node<MemDisk>| n.data_status(ASK).map_or(0, |s| s.voters.len());
+    until("three replicas", || (voters(&n1) == 3).then_some(()));
+    let call = port(n1.admin_addr().unwrap().to_string());
+    let prepared = call(Method::Post, "/admin/restore/prepare", b"{}").unwrap();
+    let Some(Value::Int32(range)) = prepared.get("range") else { panic!("{prepared:?}") };
+    // The first replica gets the files and starts ingesting them; nobody waits for it.
+    let cut = Cli { call: &call, wait: Duration::ZERO }.restore(&out.0);
+    assert!(matches!(&cut, Err(m) if m.contains("did not ingest the files in time")), "{cut:?}");
+    let next = Cli { call: &call, wait: Duration::from_secs(60) }.restore(&out.0);
+    assert_eq!(next, Ok(()));
+    let mut c = Client::new(&n1);
+    until("the restored documents", || (try_count(&mut c) == Some(30)).then_some(()));
+    // A replica of a cluster with collections never clears its range for a restore.
+    let ingest = r#"{"files": 1, "at": {"$timestamp": {"t": 1, "i": 0}}}"#;
+    let refused =
+        call(Method::Post, &format!("/admin/restore/{range}/1/ingest"), ingest.as_bytes());
+    assert!(matches!(&refused, Err(m) if m.contains("it has collections")), "{refused:?}");
+    assert_eq!(count(&mut c), 30);
+    for n in [n1, n2, n3] {
         n.stop();
     }
 }

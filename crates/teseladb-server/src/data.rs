@@ -1038,7 +1038,8 @@ impl DataCore {
         }
         for (id, r) in c.ingested {
             let Err(r) = self.relocations.on_ingested(core, &lsm, id, r) else { continue };
-            let r = match self.backups.on_ingested(id, r) {
+            let restore = self.backups.on_ingested(&mut lsm.borrow_mut(), id, r);
+            let r = match restore {
                 Ok(restored) => {
                     if let Some(g) = restored {
                         // The log no longer rebuilds what was ingested: a replica behind it gets
@@ -1070,6 +1071,9 @@ impl DataCore {
         }
         for id in c.cleared {
             if self.relocations.on_cleared(&lsm, id) {
+                continue;
+            }
+            if self.backups.on_cleared(&mut lsm.borrow_mut(), id) {
                 continue;
             }
             self.transfers.on_cleared(core, &mut lsm.borrow_mut(), id);

@@ -338,11 +338,7 @@ pub fn run_op(a: &NodeAdmin, op: Op) -> Answer {
             }
         }
         Op::Prepare => {
-            if !a.catalog()?.collections.is_empty() {
-                return Err(AdminError::bad(
-                    "the cluster is not empty: it has collections, and a restore needs an empty cluster",
-                ));
-            }
+            no_collections(a)?;
             // A node that has just started may not know its data range yet.
             let until = Instant::now() + crate::admin::CORE_WAIT;
             let mut ranges = data_ranges(a);
@@ -368,6 +364,9 @@ pub fn run_op(a: &NodeAdmin, op: Op) -> Answer {
             Ok(Document::new().with("ok", 1.0))
         }
         Op::Ingest { range, node, files, at } => {
+            // The replica clears what a restore cut before this one left in its range, which
+            // only a cluster without collections may lose.
+            no_collections(a)?;
             // The node's clock passes the backup's mark: the frames it sends carry it to the
             // range's replicas, so every read after the restore sees the data.
             a.handle.clock.0.update(at);
@@ -380,6 +379,16 @@ pub fn run_op(a: &NodeAdmin, op: Op) -> Answer {
             a.group0(restore_catalog(&catalog)?)?;
             Ok(Document::new().with("ok", 1.0))
         }
+    }
+}
+
+/// `BadValue` unless the cluster has no collections, the only one a restore goes into.
+fn no_collections(a: &NodeAdmin) -> Result<(), AdminError> {
+    match a.catalog()?.collections.is_empty() {
+        true => Ok(()),
+        false => Err(AdminError::bad(
+            "the cluster is not empty: it has collections, and a restore needs an empty cluster",
+        )),
     }
 }
 
