@@ -357,7 +357,14 @@ pub fn build(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
 /// certificates asked for but optional (`/healthz` needs none), trusted when the cluster's CA or
 /// the `--tlsCAFile` of the clients' port signed them and checked against `--tlsCRLFile`.
 pub fn admin(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
-    let clients = build(&TlsOpts { mode: Some(TlsMode::RequireTls), ..opts.clone() }, pki)?;
+    // Only the trust of the clients' port counts here: the public certificate is not this port's, and a file that
+    // does not exist yet must not stop a node from starting (013 FR-037).
+    let trust = TlsOpts {
+        mode: Some(TlsMode::RequireTls),
+        public_certificate_key_file: None,
+        ..opts.clone()
+    };
+    let clients = build(&trust, pki)?;
     let mut config = ServerConfig::new(CertifiedKey {
         chain: pki.node_chain.clone(),
         key: pki.node_key.clone(),

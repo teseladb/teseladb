@@ -259,8 +259,10 @@ fn a_node_starts_before_its_public_file_and_serves_it_after_a_rotation() {
     let node = node_pki(&d);
     let file = d.join("public.pem");
     let o = opts(&file);
-    // Absent, then empty: the node starts either way.
+    // Absent, then empty: the node starts either way, with both the clients' port and the administration port, which
+    // has no use for the public certificate.
     assert!(tls_port::build_at_start(&o, &node).is_ok());
+    assert!(tls_port::admin(&o, &node).is_ok());
     std::fs::write(&file, "").unwrap();
     let port = tls_port::build_at_start(&o, &node).unwrap();
     let certs = Certificates::new(
