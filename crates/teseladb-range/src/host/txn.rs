@@ -553,14 +553,10 @@ impl RangeHost {
                 return true;
             }
         };
-        // Faulty variant (008 T043): the answer goes without confirming the leadership, so a
-        // leader that lost it may answer «pending» for a transaction its successor committed.
-        #[cfg(teseladb_bug = "push_read_without_lease")]
-        {
-            self.reply(id, Ok(record));
-            return true;
-        }
-        #[cfg(not(teseladb_bug = "push_read_without_lease"))]
+        // The answer waits for the leadership to be confirmed, as a read's does (005 FR-009). It
+        // has no faulty variant: a deposed leader gives a mark only while the clocks of the
+        // others vouch for its own (005 FR-006), so its mark stays below the read cache of the
+        // next leader, which commits above it anyway, and no run can tell the answer apart.
         match core.read(m.g, ReadMode::Lease, now) {
             Ok(op_id) => {
                 m.state = MutState::Answer(Box::new(record));

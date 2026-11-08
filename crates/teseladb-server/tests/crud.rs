@@ -874,3 +874,57 @@ fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
     drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
     drop(first.stop());
 }
+
+/// Readers that meet a live transaction's intent push it by reading its record (008 T042, T043):
+/// they all read the version below the intent and the range's log does not grow. Before, each
+/// push was a Raft proposal that raised the record's `min_commit_ts`.
+#[test]
+fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
+    use teseladb_meta::bootstrap::DATA_RANGE;
+    use teseladb_range::host::TxnOp;
+    use teseladb_range::intents::{IntentOp, RecordOp, TxnId};
+    use teseladb_range::read::ReadConcern;
+    use teseladb_server::data::{DataReply, DataReq};
+    use teseladb_server::data_wire::{RemoteReply, RemoteReq};
+    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
+    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
+    let scan =
+        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 10, concern: ReadConcern::Local };
+    let Ok(DataReply::Remote(RemoteReply::Rows(rows))) =
+        node.data(DataReq::Remote(DATA_RANGE, scan), READY)
+    else {
+        panic!("no rows")
+    };
+    let txn = TxnId(11);
+    let begin = TxnOp::EndTxn {
+        txn,
+        op: RecordOp::Begin {
+            lsid: 1,
+            txn_number: 1,
+            read_ts: teseladb_hlc::Hlc { physical: 1, logical: 0 },
+        },
+    };
+    let r =
+        node.data(DataReq::Remote(DATA_RANGE, RemoteReq::Txn { op: begin, deadline: None }), READY);
+    assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Record(_)))), "{r:?}");
+    let op = IntentOp::Put { value_type: 3, value: rows[0].1.clone() };
+    let put = TxnOp::PutIntents {
+        txn,
+        read_ts: teseladb_hlc::Hlc { physical: u64::MAX >> 1, logical: 0 },
+        writes: vec![(rows[0].0.clone(), op)],
+    };
+    let r =
+        node.data(DataReq::Remote(DATA_RANGE, RemoteReq::Txn { op: put, deadline: None }), READY);
+    assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Intents { .. }))), "{r:?}");
+    let applied = || node.data_status(READY).map(|s| s.applied).unwrap_or_default();
+    let before = applied();
+    for _ in 0..16 {
+        let r = c.run("held", Document::new().with("find", "c").with("filter", Document::new()));
+        assert_eq!(batch(&r, "firstBatch").len(), 1, "the version below the intent: {r:?}");
+    }
+    assert_eq!(applied(), before, "the pushes wrote to the range");
+    drop(node.stop());
+}

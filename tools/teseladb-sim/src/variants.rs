@@ -60,7 +60,7 @@ variants!(
     ("commit_below_push", "snapshot-isolation", Default, 1000),
     // A commit that ignores the reads of its record (008 T043): a reader pushed the transaction by
     // reading its record and read below the intent, and the transaction commits at or below that
-    // read.
+    // read: seed 6 of `txn-append` closes a cycle (measured 08-11-2026 on t043 d505e97).
     ("commit_below_record_reads", "snapshot-isolation", Default, 1000),
     // A recovery that looks for another transaction's record (008): it finds none, answers that
     // the transaction never began and leaves that record aborted; the transaction itself goes on
@@ -134,11 +134,9 @@ variants!(
     ("partial_double_count", "queries-oracle", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
     // A push by read that leaves no read in the cache of the record's key (008 T043): a commit
-    // evaluated after it goes at or below the reader's mark.
+    // evaluated after it goes at or below the reader's mark, and seed 5 of `txn-append` closes a
+    // cycle (measured 08-11-2026 on t043 d505e97).
     ("push_read_not_cached", "snapshot-isolation", Default, 1000),
-    // A push by read answered without confirming the leadership (008 T043): a leader that lost it
-    // answers «pending» for a transaction its successor committed below the reader's mark.
-    ("push_read_without_lease", "snapshot-isolation", Default, 1000),
     // A node that lets every write of a tenant through, whatever its quota (007 T059): the
     // `tenants` workload fills a tenant past its quota by more than a write per node.
     ("quota_ignored", "tenant_limits", Default, 200),
