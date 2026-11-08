@@ -1198,8 +1198,15 @@ fn point_pk<'a>(docs: &[u8], (from, to): (&'a [u8], &[u8])) -> Option<&'a [u8]> 
     (next_prefix(from).as_deref() == Some(to)).then_some(pk)
 }
 
-/// The entries of a scan of the index of `_id` whose intervals are all single values, read in one
-/// trip with the probes of the stretch after each (see [`entries`]); `None` for another scan.
+/// The entries of a scan of the index of `_id` whose intervals are all single values, with the
+/// stretch after each as [`entries`] reads it; `None` for another scan.
+///
+/// The documents go by the hash of their `_id`, so whether a stretch holds an entry is asked of
+/// the 16 buckets. One read of each bucket covers the stretches between the values, up to
+/// [`stretch_limit`] entries, and the stretch after the last value, which may run to the end of
+/// the collection, takes one entry of each bucket (010 T054). They go in one trip with the
+/// values. A bucket that holds more entries than its read took leaves the stretches past its last
+/// entry open, and those take one entry of that bucket each in a second trip.
 fn point_entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
@@ -1224,6 +1231,20 @@ fn point_entries<B: Backend + ?Sized>(
         true => (0..ranges.len()).rev().collect(),
         false => (0..ranges.len()).collect(),
     };
+    // The stretch after each value in the scan's order, as `entries` reads it, in key order.
+    let stretches: Vec<Option<(Vec<u8>, Vec<u8>)>> = order
+        .iter()
+        .enumerate()
+        .map(|(step, &i)| {
+            let (from, to) = match (backward, order.get(step + 1).copied()) {
+                (false, Some(n)) => (end_of(&ranges[i]), ranges[n].start.clone()),
+                (false, None) => (end_of(&ranges[i]), past.clone()),
+                (true, Some(n)) => (end_of(&ranges[n]), ranges[i].start.clone()),
+                (true, None) => (first.clone(), ranges[i].start.clone()),
+            };
+            (from < to).then_some((from, to))
+        })
+        .collect();
     let mut spans: Vec<Span> = pks
         .iter()
         .map(|pk| {
@@ -1232,22 +1253,55 @@ fn point_entries<B: Backend + ?Sized>(
             Span { start: key, end, limit: 1 }
         })
         .collect();
-    // The stretch after each value in the scan's order, as `entries` probes it.
-    let mut gaps = Vec::new();
-    for (step, &i) in order.iter().enumerate() {
-        let next = order.get(step + 1).copied();
-        let (from, to) = match (backward, next) {
-            (false, Some(n)) => (end_of(&ranges[i]), ranges[n].start.clone()),
-            (false, None) => (end_of(&ranges[i]), past.clone()),
-            (true, Some(n)) => (end_of(&ranges[n]), ranges[i].start.clone()),
-            (true, None) => (first.clone(), ranges[i].start.clone()),
-        };
-        let probes =
-            if from < to { gap_spans(tenant, collection, (&from, &to)) } else { Vec::new() };
-        gaps.push((spans.len(), probes.len()));
-        spans.extend(probes);
+    let last = order.len() - 1;
+    let outer_at = spans.len();
+    if let Some((from, to)) = &stretches[last] {
+        spans.extend(gap_spans(tenant, collection, (from, to)));
+    }
+    let outer_end = spans.len();
+    let between = Between::new(&stretches[..last]);
+    let limit = stretch_limit(ranges.len());
+    if let Some((lo, hi)) = between.bounds() {
+        spans.extend((0..DOCUMENT_BUCKETS).map(|bucket| {
+            let (start, end) = in_bucket(docs.as_bytes(), bucket, (lo, hi));
+            Span { start, end, limit }
+        }));
     }
     let rows = backend.scan_spans(&spans, concern)?;
+    let mut held = vec![false; order.len()];
+    held[last] = rows.get(outer_at..outer_end).is_some_and(|r| r.iter().any(|r| !r.is_empty()));
+    let head = docs.as_bytes().len();
+    let mut open = Vec::new();
+    for (bucket, read) in (0..DOCUMENT_BUCKETS).zip(rows.iter().skip(outer_end)) {
+        let keys: Vec<Vec<u8>> = read
+            .iter()
+            .map(|(k, _)| [docs.as_bytes(), k.get(head + 1..).unwrap_or_default()].concat())
+            .collect();
+        for k in &keys {
+            if let Some(step) = between.holding(k) {
+                held[step] = true;
+            }
+        }
+        // A read that took all it could leaves open the stretches past its last entry.
+        if let (true, Some(reached)) = (read.len() >= limit, keys.last()) {
+            open.extend(between.past(reached).map(|step| (step, bucket)));
+        }
+    }
+    open.retain(|(step, _)| !held[*step]);
+    if !open.is_empty() {
+        let probes: Vec<Span> = open
+            .iter()
+            .filter_map(|&(step, bucket)| {
+                let (from, to) = stretches[step].as_ref()?;
+                let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
+                Some(Span { start, end, limit: 1 })
+            })
+            .collect();
+        let found = backend.scan_spans(&probes, concern)?;
+        for (&(step, _), r) in open.iter().zip(&found) {
+            held[step] |= !r.is_empty();
+        }
+    }
     let mut out = Vec::new();
     for (step, &i) in order.iter().enumerate() {
         let found = rows.get(i).into_iter().flatten().map(|(k, v)| Entry {
@@ -1257,12 +1311,55 @@ fn point_entries<B: Backend + ?Sized>(
             doc: Some((k.clone(), v.clone())),
         });
         out.extend(found.map(Some));
-        let (at, n) = gaps[step];
-        if rows.get(at..at + n).is_some_and(|probe| probe.iter().any(|r| !r.is_empty())) {
+        if held[step] {
             out.push(None);
         }
     }
     Ok(Some(Scanned { entries: out, seeks: 1, more: false }))
+}
+
+/// The most entries one read of a bucket takes for the stretches between `values` single values:
+/// with the documents dense around the values, a bucket holds a few between each two, and with
+/// them sparse the read stops there and the open stretches take one entry each.
+fn stretch_limit(values: usize) -> usize {
+    2 * values + 1
+}
+
+/// The stretches between the values of a scan, by the step of the value they follow, in key
+/// order: they do not overlap, since the values are distinct and sorted.
+struct Between<'a> {
+    /// `(from, to, step)` of each stretch that is not empty, sorted by `from`.
+    sorted: Vec<(&'a [u8], &'a [u8], usize)>,
+}
+
+impl<'a> Between<'a> {
+    fn new(stretches: &'a [Option<(Vec<u8>, Vec<u8>)>]) -> Between<'a> {
+        let mut sorted: Vec<_> = stretches
+            .iter()
+            .enumerate()
+            .filter_map(|(step, s)| s.as_ref().map(|(f, t)| (f.as_slice(), t.as_slice(), step)))
+            .collect();
+        sorted.sort_unstable();
+        Between { sorted }
+    }
+
+    /// The keys from the start of the first stretch to the end of the last.
+    fn bounds(&self) -> Option<(&'a [u8], &'a [u8])> {
+        Some((self.sorted.first()?.0, self.sorted.last()?.1))
+    }
+
+    /// The step of the stretch that holds `key`, if any.
+    fn holding(&self, key: &[u8]) -> Option<usize> {
+        let at = self.sorted.partition_point(|(from, _, _)| *from <= key);
+        let (_, to, step) = self.sorted.get(at.checked_sub(1)?)?;
+        (key < *to).then_some(*step)
+    }
+
+    /// The steps of the stretches with keys past `key`.
+    fn past(&self, key: &[u8]) -> impl Iterator<Item = usize> + '_ {
+        let key = key.to_vec();
+        self.sorted.iter().filter(move |(_, to, _)| *to > key.as_slice()).map(|(_, _, s)| *s)
+    }
 }
 
 /// Key range `[from, to)` of the index of `_id`, whose keys follow the documents' prefix

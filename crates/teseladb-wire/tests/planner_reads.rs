@@ -437,3 +437,96 @@ fn an_in_of_ids_reads_its_values_and_the_entries_after_them_in_one_trip() {
     assert_eq!(ids(&r), wanted, "{r:?}");
     assert_eq!(trips, 1, "the values and the stretches after them, read together");
 }
+
+#[test]
+fn an_in_of_ids_reads_each_bucket_once_for_the_stretches_between_its_values() {
+    let mut m = loaded(300);
+    let wanted: Vec<i32> = (0..21).map(|i| i * 7).collect();
+    let list = wanted.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let find = format!(r#"{{"find":"c","filter":{{"_id":{{"$in":[{list}]}}}}}}"#);
+    run(&mut m, &find);
+    let (r, trips) = trips(&mut m, &find);
+    assert_eq!(ids(&r), wanted, "{r:?}");
+    assert_eq!(trips, 1);
+    // The 21 values, one read of each of the 16 buckets for the stretches between them and one
+    // probe of each bucket for the stretch after the last (010 T054). Before, a probe of each
+    // bucket for each stretch: 21 + 21 × 16 = 357.
+    assert!(m.spans_batched <= 21 + 16 + 16, "{} spans", m.spans_batched);
+}
+
+/// The `keysExamined` of `find` with `_id` in `values` (and `sort` on `_id` when `backward`) over
+/// the `_id` 0 to `count - 1`, counted as 9.0.4 counts a scan of single values: each value there,
+/// and one entry after each value when an `_id` lies between it and the next value the scan reads
+/// (or past the last, in the scan's direction).
+fn keys_examined_by_hand(count: i32, values: &[i32], backward: bool) -> i32 {
+    let mut order: Vec<i32> = values.to_vec();
+    order.sort_unstable();
+    order.dedup();
+    if backward {
+        order.reverse();
+    }
+    let there = |v: i32| (0..count).contains(&v);
+    let mut keys = 0;
+    for (i, &v) in order.iter().enumerate() {
+        keys += i32::from(there(v));
+        let between = match (order.get(i + 1), backward) {
+            (Some(&n), false) => (v + 1..n).any(there),
+            (Some(&n), true) => (n + 1..v).any(there),
+            (None, false) => (v + 1..count).any(there),
+            (None, true) => (0..v).any(there),
+        };
+        keys += i32::from(between);
+    }
+    keys
+}
+
+#[test]
+fn an_in_of_ids_counts_the_entries_after_its_values_as_9_0_4_over_any_spread() {
+    let count = 2000;
+    let mut m = loaded(count);
+    let cases: Vec<Vec<i32>> = vec![
+        // Far apart: each bucket has more entries between the values than one read takes.
+        (0..21).map(|i| i * 90).collect(),
+        // Values that are not there, before, among and after the documents.
+        vec![-5, 3, 1999, 2500, 7000],
+        // Next to each other: no entry between them.
+        vec![10, 11, 12, 13, 14],
+        // The last document and past it.
+        vec![1998, 1999, 2000],
+        // Dense and sparse together.
+        vec![0, 1, 2, 500, 501, 1500, 1999],
+    ];
+    for values in &cases {
+        for backward in [false, true] {
+            let list = values.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+            let sort = if backward { r#","sort":{"_id":-1}"# } else { "" };
+            let find = format!(r#"{{"find":"c","filter":{{"_id":{{"$in":[{list}]}}}}{sort}}}"#);
+            let explain =
+                run(&mut m, &format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#));
+            assert_eq!(
+                field(&explain, "executionStats.totalKeysExamined"),
+                &Value::Int32(keys_examined_by_hand(count, values, backward)),
+                "{values:?} backward {backward}: {explain:?}"
+            );
+            // `ids` gives them sorted.
+            let mut there: Vec<i32> =
+                values.iter().copied().filter(|v| (0..count).contains(v)).collect();
+            there.sort_unstable();
+            assert_eq!(ids(&run(&mut m, &find)), there, "{values:?} backward {backward}");
+        }
+    }
+}
+
+#[test]
+fn an_in_of_far_apart_ids_asks_the_open_stretches_in_a_second_trip() {
+    let mut m = loaded(2000);
+    let wanted: Vec<i32> = (0..21).map(|i| i * 90).collect();
+    let list = wanted.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let find = format!(r#"{{"find":"c","filter":{{"_id":{{"$in":[{list}]}}}}}}"#);
+    run(&mut m, &find);
+    let (r, trips) = trips(&mut m, &find);
+    assert_eq!(ids(&r), wanted, "{r:?}");
+    // Each bucket holds about 110 entries between 0 and 1800, more than its read takes (43):
+    // the stretches past its last entry go in a second trip.
+    assert_eq!(trips, 2);
+}
