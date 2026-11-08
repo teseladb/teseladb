@@ -1195,6 +1195,14 @@ impl Backend for ServerBackend {
         &mut self,
         prefix: &[u8],
     ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, CommandError> {
+        // Core 0 publishes its copy before it answers any change of it (H-017).
+        if let Some(all) = self.h.routes.settings() {
+            return Ok(all
+                .range(prefix.to_vec()..)
+                .take_while(|(k, _)| k.starts_with(prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect());
+        }
         let until = self.until();
         loop {
             if let Some(CatalogAnswer::Settings(all)) =

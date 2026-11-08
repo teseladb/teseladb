@@ -487,7 +487,7 @@ impl Pool {
         let give_back = self.give_back.clone();
         let name = format!("client-{}-run-{k}", self.worker);
         let run = move || {
-            for Job { token, mut conn, req } in rx {
+            while let Some(Job { token, mut conn, req }) = next_job(&rx) {
                 let info = state.info();
                 diag.stats.active.fetch_add(1, Ordering::Relaxed);
                 let action = dispatch_with(&mut conn, &req, &info, Some((&mut backend, &*shared)));
@@ -508,6 +508,25 @@ impl Pool {
         self.executors.push(tx);
         Some(k)
     }
+}
+
+/// The next job of an executor, or `None` once its worker dropped the sender. A job that arrives
+/// within a short spin is taken without the executor sleeping: the worker hands each command over
+/// and the wake-up of the executor was one of the waits of every request (H-013).
+fn next_job(rx: &mpsc::Receiver<Job>) -> Option<Job> {
+    let mut got = None;
+    teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || match rx.try_recv() {
+        Ok(job) => {
+            got = Some(Some(job));
+            true
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            got = Some(None);
+            true
+        }
+        Err(mpsc::TryRecvError::Empty) => false,
+    });
+    got.unwrap_or_else(|| rx.recv().ok())
 }
 
 /// What a worker's connections run the commands with: its executors when a node is behind the

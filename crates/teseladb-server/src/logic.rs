@@ -248,6 +248,8 @@ pub struct NodeLogic {
     sent_ranges: Option<Ranges>,
     /// The catalog last published in the routes (H-017).
     published_catalog: Option<Arc<teseladb_meta::catalog::Catalog>>,
+    /// The Group 0 index at which the settings were last looked at, and the settings published.
+    published_settings: (u64, Option<Arc<crate::routes::Settings>>),
     /// The routing table the client workers read (core 0 writes it).
     routes: Option<SharedRoutes>,
     /// The nodes' inter-node addresses: given to the other cores by core 0, which has them in
@@ -326,6 +328,7 @@ impl NodeLogic {
             group0_ops: BTreeSet::new(),
             sent_ranges: None,
             published_catalog: None,
+            published_settings: (0, None),
             routes: None,
             peers: BTreeMap::new(),
             catalog: CatalogOps::default(),
@@ -1003,17 +1006,28 @@ impl NodeLogic {
         self.catalog.poll(applied, self.authz.fenced());
     }
 
-    /// Publishes this node's copy of the catalog for the workers when it changed.
+    /// Publishes this node's copies of the catalog and of the cluster settings for the workers
+    /// when they changed (H-017).
     fn publish_catalog(&mut self) {
-        let (Some(routes), Some(sm)) = (&self.routes, self.group0()) else { return };
+        let (Some(routes), Some(sm)) = (self.routes.clone(), self.group0()) else { return };
         if !sm.bootstrapped() {
             return;
         }
         let same = self.published_catalog.as_ref().is_some_and(|c| Arc::ptr_eq(c, &sm.catalog));
-        if !same {
-            let catalog = Arc::clone(&sm.catalog);
+        let catalog = (!same).then(|| Arc::clone(&sm.catalog));
+        // The settings are compared only when Group 0 applied something since the last look.
+        let applied = sm.applied;
+        let settings = (self.published_settings.0 != applied
+            && self.published_settings.1.as_deref() != Some(&sm.settings))
+        .then(|| Arc::new(sm.settings.clone()));
+        if let Some(catalog) = catalog {
             routes.publish_catalog(Arc::clone(&catalog));
             self.published_catalog = Some(catalog);
+        }
+        self.published_settings.0 = applied;
+        if let Some(settings) = settings {
+            routes.publish_settings(Arc::clone(&settings));
+            self.published_settings.1 = Some(settings);
         }
     }
 
@@ -2158,6 +2172,36 @@ mod tests {
             if answered.is_some() {
                 // At the moment the answer leaves, the slot already has the database.
                 assert!(routes.catalog().unwrap().dbs.contains_key("probe"));
+            }
+            answered.is_some()
+        });
+        assert!(matches!(answered, Some(CatalogAnswer::Done(_))), "{answered:?}");
+    }
+
+    #[test]
+    fn the_settings_are_published_for_the_workers_before_a_change_of_them_is_answered() {
+        use crate::catalog_ops::CatalogAnswer;
+        // As the catalog (H-017): every command read the cluster settings from core 0 with a
+        // round trip between threads; the workers read them from the node's slot.
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let routes = SharedRoutes::default();
+        c.logic(1).routes = Some(routes.clone());
+        c.run_until(|_| routes.settings().is_some());
+        let (tx, rx) = channel();
+        let set = CatalogReq::SetSetting { key: b"probe".to_vec(), value: b"1".to_vec() };
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(set, tx), now);
+        let mut answered = None;
+        c.run_until(|_| {
+            answered = rx.try_recv().ok();
+            if answered.is_some() {
+                let settings = routes.settings().unwrap();
+                assert_eq!(
+                    settings.get(b"probe".as_slice()).map(Vec::as_slice),
+                    Some(b"1".as_slice())
+                );
             }
             answered.is_some()
         });
