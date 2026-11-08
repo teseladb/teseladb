@@ -482,6 +482,8 @@ struct Group0Spec {
 /// What a core's thread needs to build its state.
 struct CoreSpec {
     core: u16,
+    /// The node's cores, among which a split by load spreads its new half (007 FR-040).
+    node_cores: u16,
     node_id: NodeId,
     clock: NodeClock,
     storage: StorageConfig,
@@ -531,7 +533,8 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64())
         .with_segments(spec.search.clone());
     let clock = spec.clock.clone();
-    let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes);
+    let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes)
+        .with_cores(spec.node_cores);
     let data = data.with_backups(dir.join("backup"), random_u64());
     Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone()))
 }
@@ -1026,6 +1029,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             });
             let spec = CoreSpec {
                 core: k,
+                node_cores: cores,
                 node_id,
                 clock: clock.clone(),
                 storage: cfg.storage.clone(),

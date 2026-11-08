@@ -195,6 +195,11 @@ pub struct Replicas {
     capped: BTreeSet<(u32, u32)>,
     /// The split sizes of `Ranges::chunk_bytes` and `Ranges::chunk_size`.
     chunks: (BTreeMap<(u32, u32), u64>, Option<u64>),
+    /// The cores of the node, among which a new half of a split by load moves (FR-040).
+    cores: u16,
+    /// The splits by load this core asked for, by range, with their cut: the new half moves to the
+    /// least loaded core once Group 0 has it (FR-040, D-150).
+    load_cuts: BTreeMap<GroupId, Vec<u8>>,
 }
 
 impl Replicas {
@@ -217,6 +222,8 @@ impl Replicas {
             hosting: (Hosting::default(), 0),
             all: Vec::new(),
             capped: BTreeSet::new(),
+            cores: 1,
+            load_cuts: BTreeMap::new(),
             chunks: (BTreeMap::new(), None),
         }
     }
@@ -410,6 +417,7 @@ impl Replicas {
             let at_index = core.status(done.g).map_or(0, |s| s.applied);
             out.push(Group0Command::CompleteSplit { group: done.g, at: done.at, at_index });
         }
+        self.spread_load_halves(&mut out);
         let measure = now >= self.check_at;
         if measure {
             self.check_at = now + SIZE_CHECK_EVERY;
@@ -568,6 +576,7 @@ impl Replicas {
         // By size (FR-005) at the files' middle key, or else by load (FR-006) at the median of the
         // keys the leader served.
         let by_size = l.live >= split_bytes || size.bytes >= disk_limit;
+        let by_load = !by_size;
         let at = if by_size { size.cut } else { host.load_cut(g, now) };
         // A cut at a change meta (014) goes before its document, which it belongs with.
         let at = at.map(|k| {
@@ -581,8 +590,56 @@ impl Replicas {
         });
         // Measured once a second: a request Group 0 has not applied yet goes again then.
         if let Some(at) = at {
+            if by_load {
+                self.load_cuts.insert(g, at.clone());
+            }
             out.push(Group0Command::SplitRange { group: g, at });
         }
+    }
+
+    /// The node's cores, among which the new half of a split by load moves (FR-040).
+    pub fn set_cores(&mut self, cores: u16) {
+        self.cores = cores;
+    }
+
+    /// Asks Group 0 to move to the least loaded core of this node each new half of a split by load
+    /// that Group 0 has completed (FR-040, D-150): a split by load exists to spread the load, and a
+    /// range born from a split stays on the core of its parent.
+    fn spread_load_halves(&mut self, out: &mut Vec<Group0Command>) {
+        if self.load_cuts.is_empty() {
+            return;
+        }
+        let born: Vec<(GroupId, GroupId, u16)> = self
+            .load_cuts
+            .iter()
+            .filter_map(|(parent, at)| {
+                let half = self.all.iter().find(|d| d.start == *at && d.group != *parent)?;
+                Some((*parent, half.group, half.core))
+            })
+            .collect();
+        for (parent, half, now_on) in born {
+            self.load_cuts.remove(&parent);
+            let target = self.least_loaded_core();
+            if self.cores > 1 && target != now_on {
+                out.push(Group0Command::RelocateRange { group: half, core: target });
+            }
+        }
+    }
+
+    /// The core of this node with the fewest ranges, Group 0 counting on core 0, the lowest on a
+    /// tie (as Group 0 picks the core of a new range, FR-004).
+    fn least_loaded_core(&self) -> u16 {
+        let mut load = vec![0usize; usize::from(self.cores.max(1))];
+        load[0] += 1;
+        for d in &self.all {
+            if d.replicas.iter().any(|(n, _)| *n == self.me)
+                && let Some(l) = load.get_mut(usize::from(d.core))
+            {
+                *l += 1;
+            }
+        }
+        let best = load.iter().enumerate().min_by_key(|(c, l)| (**l, *c)).map_or(0, |(c, _)| c);
+        u16::try_from(best).unwrap_or(0)
     }
 
     /// The end of a configuration change; `false` if it is not one of this module's.
@@ -967,6 +1024,23 @@ mod tests {
         };
         assert!(at.as_slice() > &[3, 8][..] && at.as_slice() < &[3, 32][..], "{at:?}");
         assert!(o.host.load(G) >= 50);
+        // FR-040: once Group 0 has the new half, the leader asks to move it to the least loaded
+        // core of the node, so that the load that split it is spread (H-015 of the native tests:
+        // 16 halves stayed on the core of their parent). With 4 cores, core 0 holding both halves
+        // and core 1 another range, the least loaded one is core 2.
+        let at = at.clone();
+        let mut elsewhere = desc(3, &[4], &[5]);
+        elsewhere.core = 1;
+        o.r.set_cores(4);
+        o.set(vec![desc(1, &[1], &at), desc(2, &at, &[4]), elsewhere], &[]);
+        let asked = o.lead();
+        assert!(
+            asked.contains(&Group0Command::RelocateRange { group: GroupId(2), core: 2 }),
+            "{asked:?}"
+        );
+        // Asked once: the next round does not ask again.
+        o.run(1);
+        assert!(!o.lead().iter().any(|c| matches!(c, Group0Command::RelocateRange { .. })));
     }
 
     #[test]

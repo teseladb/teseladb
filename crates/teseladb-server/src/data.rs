@@ -280,6 +280,12 @@ impl DataCore {
         self
     }
 
+    /// The node's cores, among which the new half of a split by load moves (007 FR-040).
+    pub fn with_cores(mut self, cores: u16) -> DataCore {
+        self.replicas.set_cores(cores);
+        self
+    }
+
     /// Backups and restores with their files under `dir`; `nonce` tells this life's file names
     /// from an earlier one's (007 FR-021).
     pub fn with_backups(mut self, dir: PathBuf, nonce: u64) -> DataCore {
