@@ -5,7 +5,7 @@
 use teseladb_hlc::Hlc;
 use teseladb_multiraft::ReadMode;
 use teseladb_range::latch::{Latches, ReadWait};
-use teseladb_range::read::{ReadConcern, admit_read};
+use teseladb_range::read::{ReadConcern, admit_own_read, admit_read};
 use teseladb_range::tscache::TsCache;
 
 fn ts(physical: u64) -> Hlc {
@@ -83,5 +83,34 @@ fn local_and_available_reads_wait_for_every_latch_of_their_keys() {
     assert_eq!(
         admit_read(&latches, &mut cache, b"\x01d", b"\x01m", ts(10), ReadConcern::Local),
         ReadWait::Free
+    );
+}
+
+#[test]
+fn a_local_read_at_its_own_mark_reads_below_an_update_in_flight_instead_of_waiting() {
+    let mut latches = Latches::default();
+    let w = latches.acquire(&[b"\x01c".to_vec()]).unwrap();
+    latches.set_mark(w, ts(80));
+    let below = Hlc { physical: 79, logical: u32::MAX };
+    for c in [ReadConcern::Local, ReadConcern::Available] {
+        // YCSB's read of a key being updated: before, it waited for the update (H-010).
+        let mut cache = TsCache::new(ts(0), 16);
+        let (wait, at) = admit_own_read(&latches, &mut cache, b"\x01a", b"\x01m", ts(100), c);
+        assert_eq!((wait, at), (ReadWait::Free, below), "{c:?}");
+        // The read cache keeps the read's own mark: later writes still go above it.
+        assert_eq!(cache.floor_of(&[b"\x01c".to_vec()]), ts(100));
+    }
+    // `majority` and `linearizable` reads are as before.
+    let mut cache = TsCache::new(ts(0), 16);
+    assert_eq!(
+        admit_own_read(&latches, &mut cache, b"\x01a", b"\x01m", ts(100), ReadConcern::Majority),
+        (ReadWait::On(w), ts(100))
+    );
+    // Answered from the leader's log (`w: 1`): the read waits for it, so it sees it (DV-010).
+    latches.mark_answered(w);
+    let mut cache = TsCache::new(ts(0), 16);
+    assert_eq!(
+        admit_own_read(&latches, &mut cache, b"\x01a", b"\x01m", ts(100), ReadConcern::Local),
+        (ReadWait::On(w), ts(100))
     );
 }

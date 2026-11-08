@@ -211,6 +211,12 @@ impl RangeHost {
             p.replied = true;
             let r = p.answer();
             let applied = p.applied;
+            let latch = p.latch;
+            // From now on a `local` read waits for it: it saw the write answered (DV-010).
+            let leader = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut());
+            if let Some(l) = leader.filter(|l| l.term == m.term) {
+                l.latches.mark_answered(latch);
+            }
             self.reply(id, Ok(r));
             if applied {
                 // Nothing else to wait for: its latch went when it was applied.

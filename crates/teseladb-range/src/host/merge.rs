@@ -138,7 +138,7 @@ impl RangeHost {
         match &mut l.merge {
             MergeJob::Idle => false,
             MergeJob::Draining { merge } => {
-                if l.latches.read_wait(&start, &end, newest, true) != ReadWait::Free {
+                if l.latches.read_wait(&start, &end, newest, WaitFor::Every) != ReadWait::Free {
                     return false;
                 }
                 let cmd = Command::MergeFreeze { merge: *merge };

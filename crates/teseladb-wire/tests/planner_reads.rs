@@ -612,3 +612,17 @@ fn a_write_by_id_with_a_sort_reads_its_document_alone() {
     let r = run(&mut m, r#"{"find":"c","filter":{"x":{"$exists":true}}}"#);
     assert_eq!(ids(&r), vec![5, 6], "{r:?}");
 }
+
+#[test]
+fn an_id_range_gives_the_documents_it_read_and_asks_the_buckets_in_one_trip() {
+    let mut m = loaded(2_000);
+    // An entry of the index of `_id` is its document: the read keeps it instead of reading each
+    // document again, and asks the 16 buckets together. Before, YCSB-E's scan read each of its
+    // documents a second time, one trip each (14,7 ms against 0,12 ms in a `refnode` 9.0.4).
+    m.scanned_rows = 0;
+    m.span_reads = 0;
+    let r = run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}"#);
+    assert_eq!(ids(&r), vec![100, 101, 102, 103, 104], "{r:?}");
+    assert!(m.scanned_rows <= 16 * 5, "{} rows read", m.scanned_rows);
+    assert_eq!(m.span_reads, 1, "trips to the buckets");
+}

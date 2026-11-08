@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod buffers;
+pub mod counters;
 pub mod disk_thread;
 mod file_disk;
 pub mod handshake;

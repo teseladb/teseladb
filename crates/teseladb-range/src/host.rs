@@ -26,11 +26,11 @@ use crate::checksum::{CHECKSUM_EVERY_MS, Computer, Rebuild, Report, Tally};
 use crate::command::{Command, DedupKey};
 use crate::dedup;
 use crate::gc::{Periodic, Round};
-use crate::latch::{LatchId, Latches, ReadWait};
+use crate::latch::{LatchId, Latches, ReadWait, WaitFor};
 use crate::metrics::{Counters, RangeMetrics};
 use crate::mutate::{Outcome, Refused, evaluate};
 use crate::push::{ReadFault, ScanState, TxnView, Window, read_visible};
-use crate::read::{ReadConcern, admit_read};
+use crate::read::{ReadConcern, admit_own_read, admit_read};
 use crate::sm::{RangeState, dedup_key};
 use crate::tscache::TsCache;
 
@@ -1249,13 +1249,24 @@ impl RangeHost {
             // since (it may have gone up while the read waited), the compaction may have dropped the
             // versions the read needs (FR-013).
             let handed = self.gc_handed.iter().flatten().find(|(r, _)| *r == q.g).map(|(_, t)| *t);
-            if ts < handed.map_or(q.gc_floor, |t| t.max(q.gc_floor)) {
+            let floor = handed.map_or(q.gc_floor, |t| t.max(q.gc_floor));
+            if ts < floor {
                 self.reply(id, Err(RangeError::SnapshotTooOld));
                 return true;
             }
             let end =
                 q.scan.as_ref().map_or_else(|| [q.key.as_slice(), &[0]].concat(), |s| s.0.clone());
-            if admit_read(&l.latches, &mut l.cache, &q.key, &end, ts, q.concern) != ReadWait::Free {
+            // A mark the node chose may go just below the writes in flight instead of waiting
+            // for them (DV-010); a mark the client gave is read where it was given.
+            let (wait, ts) = match q.at {
+                None => match admit_own_read(&l.latches, &mut l.cache, &q.key, &end, ts, q.concern)
+                {
+                    (wait, at) if at >= floor => (wait, at),
+                    _ => (admit_read(&l.latches, &mut l.cache, &q.key, &end, ts, q.concern), ts),
+                },
+                Some(_) => (admit_read(&l.latches, &mut l.cache, &q.key, &end, ts, q.concern), ts),
+            };
+            if wait != ReadWait::Free {
                 if !q.waited {
                     q.waited = true;
                     self.count_wait(q.g);

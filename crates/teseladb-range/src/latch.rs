@@ -2,12 +2,26 @@
 //! evaluation to its application. It takes them before its mark exists and receives the mark when
 //! it is proposed. A read at t waits for the latches of the keys it covers with a mark at or below
 //! t, so no version shows up later below a mark already read; a `local` or `available` read waits
-//! for every latch of its keys (DV-010). A latch without a mark yet does not hold a read back: the
-//! read enters the read cache when it checks the latches, so that write is proposed above it.
+//! for every latch of its keys (DV-010), unless it chose its own mark and no write of its keys was
+//! answered before being applied (`w: 1` and `w: <n>`, D-034): then it reads just below the
+//! lowest mark in flight, where everything is applied, as a RefDb primary reads past a write it
+//! has not applied yet. A latch without a mark yet does not hold a read back: the read enters the
+//! read cache when it checks the latches, so that write is proposed above it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use teseladb_hlc::Hlc;
+
+/// Which latches a read waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitFor {
+    /// Those of writes proposed at or below its mark (`majority`, `linearizable`).
+    AtOrBelow,
+    /// Every one: a `local` or `available` read at a mark it was given (DV-010), and a split or
+    /// a merge, which copies what the range holds with the idempotence records of the writes in
+    /// flight.
+    Every,
+}
 
 /// A held set of latches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,6 +40,8 @@ pub enum ReadWait {
 #[derive(Clone, Debug, Default)]
 pub struct Latches {
     by_key: BTreeMap<Vec<u8>, (Option<Hlc>, LatchId)>,
+    /// The writes already answered to their client while their latches are held.
+    answered: BTreeSet<LatchId>,
     next: u64,
 }
 
@@ -65,9 +81,17 @@ impl Latches {
         }
     }
 
+    /// The write `id` was answered to its client before it was applied.
+    pub fn mark_answered(&mut self, id: LatchId) {
+        if self.by_key.values().any(|(_, h)| *h == id) {
+            self.answered.insert(id);
+        }
+    }
+
     /// Releases a write's latches once it is applied (or abandoned).
     pub fn release(&mut self, id: LatchId) {
         self.by_key.retain(|_, (_, holder)| *holder != id);
+        self.answered.remove(&id);
     }
 
     /// Whether `key` is held.
@@ -80,11 +104,28 @@ impl Latches {
         self.by_key.is_empty()
     }
 
-    /// What a read of `[start, end)` at `ts` waits for; `all` for `local` and `available` reads.
-    pub fn read_wait(&self, start: &[u8], end: &[u8], ts: Hlc, all: bool) -> ReadWait {
+    /// What a read of `[start, end)` at `ts` waits for, among the latches `which` names.
+    pub fn read_wait(&self, start: &[u8], end: &[u8], ts: Hlc, which: WaitFor) -> ReadWait {
         self.by_key
             .range(start.to_vec()..end.to_vec())
-            .find(|(_, (t, _))| all || t.is_some_and(|t| t <= ts))
+            .find(|(_, (t, _))| match which {
+                WaitFor::AtOrBelow => t.is_some_and(|t| t <= ts),
+                WaitFor::Every => true,
+            })
             .map_or(ReadWait::Free, |(_, (_, id))| ReadWait::On(*id))
+    }
+
+    /// The mark at which a `local` or `available` read of `[start, end)` that chose its own mark
+    /// `ts` reads without waiting: just below the lowest mark of a write in flight there, or `ts`.
+    /// A range applies its writes in the order of its log, which is the order of their marks, so
+    /// below the lowest one in flight every write is applied. `None` when a write of those keys
+    /// was answered before it was applied: the read waits for it, so it sees it (DV-010).
+    pub fn own_read_mark(&self, start: &[u8], end: &[u8], ts: Hlc) -> Option<Hlc> {
+        let held = || self.by_key.range(start.to_vec()..end.to_vec());
+        if held().any(|(_, (_, id))| self.answered.contains(id)) {
+            return None;
+        }
+        let lowest = held().filter_map(|(_, (t, _))| *t).filter(|t| *t <= ts).min();
+        Some(lowest.map_or(ts, crate::intents::pred))
     }
 }

@@ -4,7 +4,7 @@
 //! index entries an evaluation finds join its latches.
 
 use teseladb_hlc::Hlc;
-use teseladb_range::latch::{Latches, ReadWait};
+use teseladb_range::latch::{Latches, ReadWait, WaitFor};
 
 fn ts(p: u64) -> Hlc {
     Hlc { physical: p, logical: 0 }
@@ -36,20 +36,20 @@ fn a_read_waits_for_latches_at_or_below_its_mark() {
     let low = latches.acquire(&[b"b".to_vec()]).unwrap();
     let high = latches.acquire(&[b"d".to_vec()]).unwrap();
     // Before their marks exist only a `local` read waits for them.
-    assert_eq!(latches.read_wait(b"a", b"z", ts(99), false), ReadWait::Free);
-    assert_eq!(latches.read_wait(b"a", b"z", ts(99), true), ReadWait::On(low));
+    assert_eq!(latches.read_wait(b"a", b"z", ts(99), WaitFor::AtOrBelow), ReadWait::Free);
+    assert_eq!(latches.read_wait(b"a", b"z", ts(99), WaitFor::Every), ReadWait::On(low));
     latches.set_mark(low, ts(10));
     latches.set_mark(high, ts(30));
     // A read at 20 over [a, z) waits for the write at 10, not for the one at 30.
-    assert_eq!(latches.read_wait(b"a", b"z", ts(20), false), ReadWait::On(low));
-    assert_eq!(latches.read_wait(b"c", b"z", ts(20), false), ReadWait::Free);
+    assert_eq!(latches.read_wait(b"a", b"z", ts(20), WaitFor::AtOrBelow), ReadWait::On(low));
+    assert_eq!(latches.read_wait(b"c", b"z", ts(20), WaitFor::AtOrBelow), ReadWait::Free);
     // A point read is an interval of one key.
-    assert_eq!(latches.read_wait(b"b", b"b\0", ts(10), false), ReadWait::On(low));
+    assert_eq!(latches.read_wait(b"b", b"b\0", ts(10), WaitFor::AtOrBelow), ReadWait::On(low));
     // A `local` read waits for every latch of its keys.
-    assert_eq!(latches.read_wait(b"c", b"z", ts(20), true), ReadWait::On(high));
+    assert_eq!(latches.read_wait(b"c", b"z", ts(20), WaitFor::Every), ReadWait::On(high));
     latches.release(low);
     latches.release(high);
-    assert_eq!(latches.read_wait(b"a", b"z", ts(99), true), ReadWait::Free);
+    assert_eq!(latches.read_wait(b"a", b"z", ts(99), WaitFor::Every), ReadWait::Free);
 }
 
 #[test]
@@ -72,8 +72,60 @@ fn index_entries_join_the_latches_of_their_write() {
     assert!(!latches.is_held(b"idx/a"));
     // Its own keys again and new ones: they take the write's mark.
     assert_eq!(latches.extend(w, &[b"doc".to_vec(), b"idx/a".to_vec()]), Ok(()));
-    assert_eq!(latches.read_wait(b"idx/a", b"idx/a\0", ts(10), false), ReadWait::On(w));
+    assert_eq!(
+        latches.read_wait(b"idx/a", b"idx/a\0", ts(10), WaitFor::AtOrBelow),
+        ReadWait::On(w)
+    );
     latches.release(w);
     assert!(!latches.is_held(b"idx/a") && !latches.is_held(b"doc"));
     assert!(latches.is_held(b"idx/b"));
+}
+
+#[test]
+fn a_split_or_a_merge_waits_for_every_latch_of_what_it_copies() {
+    let mut latches = Latches::default();
+    // A split copies the documents and the idempotence records of the right half: a write in
+    // flight there has to be applied first, or its retry in the new range finds no record of it.
+    let w = latches.acquire(&[b"k".to_vec()]).unwrap();
+    assert_eq!(latches.read_wait(b"a", b"z", ts(0), WaitFor::Every), ReadWait::On(w));
+    latches.set_mark(w, ts(500));
+    assert_eq!(latches.read_wait(b"a", b"z", ts(10), WaitFor::Every), ReadWait::On(w));
+    assert_eq!(latches.read_wait(b"l", b"z", ts(10), WaitFor::Every), ReadWait::Free);
+    latches.release(w);
+    assert_eq!(latches.read_wait(b"a", b"z", ts(10), WaitFor::Every), ReadWait::Free);
+}
+
+#[test]
+fn a_read_at_its_own_mark_goes_just_below_the_writes_in_flight() {
+    let mut latches = Latches::default();
+    // Nothing in flight: the read keeps its mark.
+    assert_eq!(latches.own_read_mark(b"a", b"z", ts(50)), Some(ts(50)));
+    // Two `w: "majority"` writes in flight at 10 and 30, and one not proposed yet: the read goes
+    // just below 10, where every write of the range is applied (H-010).
+    let low = latches.acquire(&[b"b".to_vec()]).unwrap();
+    let high = latches.acquire(&[b"d".to_vec()]).unwrap();
+    let unproposed = latches.acquire(&[b"f".to_vec()]).unwrap();
+    latches.set_mark(low, ts(10));
+    latches.set_mark(high, ts(30));
+    let below_10 = Hlc { physical: 9, logical: u32::MAX };
+    assert_eq!(latches.own_read_mark(b"a", b"z", ts(50)), Some(below_10));
+    // Writes above the read's mark, or outside its keys, leave it where it is.
+    assert_eq!(latches.own_read_mark(b"a", b"z", ts(5)), Some(ts(5)));
+    assert_eq!(
+        latches.own_read_mark(b"c", b"z", ts(50)),
+        Some(Hlc { physical: 29, logical: u32::MAX })
+    );
+    assert_eq!(latches.own_read_mark(b"e", b"z", ts(50)), Some(ts(50)));
+    // A `w: 1` write answered before it is applied: the read waits for it instead (DV-010).
+    latches.mark_answered(high);
+    assert_eq!(latches.own_read_mark(b"a", b"z", ts(50)), None);
+    assert_eq!(latches.own_read_mark(b"a", b"c", ts(50)), Some(below_10));
+    // Released, it leaves nothing behind for the next write of its key.
+    latches.release(high);
+    let next = latches.acquire(&[b"d".to_vec()]).unwrap();
+    assert_eq!(latches.own_read_mark(b"c", b"e", ts(50)), Some(ts(50)));
+    for id in [low, unproposed, next] {
+        latches.release(id);
+    }
+    assert!(latches.is_empty());
 }

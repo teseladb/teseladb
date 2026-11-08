@@ -5,7 +5,7 @@
 
 use teseladb_hlc::Hlc;
 use teseladb_range::command::{Command, DedupKey, DedupRecord, Put};
-use teseladb_range::latch::{Latches, ReadWait};
+use teseladb_range::latch::{Latches, ReadWait, WaitFor};
 use teseladb_range::mutate::{Outcome, Refused, evaluate};
 use teseladb_range::tscache::TsCache;
 
@@ -89,7 +89,10 @@ fn an_index_entry_read_at_or_above_the_mark_asks_for_a_higher_one() {
         assert!(latches.is_held(key), "{key:?}");
     }
     latches.set_mark(id, ts(301));
-    assert_eq!(latches.read_wait(INDEX_OLD, b"\x01idx/a/0\0", ts(400), false), ReadWait::On(id));
+    assert_eq!(
+        latches.read_wait(INDEX_OLD, b"\x01idx/a/0\0", ts(400), WaitFor::AtOrBelow),
+        ReadWait::On(id)
+    );
 }
 
 #[test]

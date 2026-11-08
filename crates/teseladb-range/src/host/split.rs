@@ -111,7 +111,7 @@ impl RangeHost {
                 true
             }
             SplitJob::Draining { at, new_range } => {
-                if l.latches.read_wait(at, &end, newest, true) != ReadWait::Free {
+                if l.latches.read_wait(at, &end, newest, WaitFor::Every) != ReadWait::Free {
                     return false;
                 }
                 let scan = Box::new(RecordScan::new(&lsm, g));

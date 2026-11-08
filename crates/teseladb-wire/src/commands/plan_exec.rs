@@ -1130,10 +1130,10 @@ fn range_entries<B: Backend + ?Sized>(
         if let Some(one) = id_point(backend, (tenant, collection), (&r.start, &end), concern)? {
             return Ok(one);
         }
-        let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern, most)?;
-        return Ok(pks
+        let read = id_entries(backend, (tenant, collection), (&r.start, &end), concern, most)?;
+        return Ok(read
             .into_iter()
-            .map(|pk| Entry { pk, key: None, values: None, doc: None })
+            .map(|(pk, doc)| Entry { pk, key: None, values: None, doc: Some(doc) })
             .collect());
     }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
@@ -1404,42 +1404,58 @@ fn id_point<B: Backend + ?Sized>(
     ))
 }
 
-/// The primary keys of the index of `_id` in `[from, to)`, in key order: the first `most` when
-/// it says how many the caller takes. The documents go by the hash of their `_id` into
-/// [`DOCUMENT_BUCKETS`] buckets, each in key order, so the first `most` of the range are among the
-/// first `most` of each bucket and no bucket is read past them.
+/// The documents of the index of `_id` in `[from, to)` with their primary keys, in key order: the
+/// first `most` when it says how many the caller takes. The documents go by the hash of their
+/// `_id` into [`DOCUMENT_BUCKETS`] buckets, each in key order, so the first `most` of the range are
+/// among the first `most` of each bucket and no bucket is read past them. The buckets are asked
+/// together; one that holds more than its first read took is read on by itself. An entry of this
+/// index is its document, which the caller keeps instead of reading it again.
 fn id_entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
     most: Option<usize>,
-) -> Result<Vec<Vec<u8>>, CommandError> {
+) -> Result<IdRows, CommandError> {
     let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
     let head = docs.as_bytes().len();
-    let mut found = Vec::new();
-    for bucket in 0..DOCUMENT_BUCKETS {
-        let (mut low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
-        let mut taken = 0usize;
+    let first = most.map_or(KEY_CHUNK, |m| m.clamp(1, KEY_CHUNK));
+    let spans: Vec<Span> = (0..DOCUMENT_BUCKETS)
+        .map(|bucket| {
+            let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
+            Span { start, end, limit: first }
+        })
+        .collect();
+    let mut found: IdRows = Vec::new();
+    let reads = backend.scan_spans(&spans, concern)?;
+    for (span, mut rows) in spans.iter().zip(reads) {
+        let (mut taken, mut asked) = (0usize, first);
         loop {
-            let chunk = most.map_or(KEY_CHUNK, |m| m.saturating_sub(taken).clamp(1, KEY_CHUNK));
-            let rows = backend.scan(&low, &high, chunk, concern)?;
-            let short = rows.len() < chunk;
+            let short = rows.len() < asked;
             taken += rows.len();
-            found.extend(rows.iter().map(|(k, _)| k.get(head + 1..).unwrap_or_default().to_vec()));
-            match rows.last() {
+            let next = rows.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
+            found.extend(rows.into_iter().map(|(k, v)| {
+                let pk = k.get(head + 1..).unwrap_or_default().to_vec();
+                (pk, (k, v))
+            }));
+            asked = most.map_or(KEY_CHUNK, |m| m.saturating_sub(taken).clamp(1, KEY_CHUNK));
+            match next {
                 _ if most.is_some_and(|m| taken >= m) => break,
-                Some((k, _)) if !short => low = [k.as_slice(), &[0]].concat(),
+                Some(low) if !short => rows = backend.scan(&low, &span.end, asked, concern)?,
                 _ => break,
             }
         }
     }
-    found.sort();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
     if let Some(m) = most {
         found.truncate(m);
     }
     Ok(found)
 }
+
+/// The documents of a read of the index of `_id`: each primary key with its document's key and
+/// bytes.
+type IdRows = Vec<(Vec<u8>, (Vec<u8>, Vec<u8>))>;
 
 /// The key intervals of `index` for `bounds`.
 fn key_ranges(

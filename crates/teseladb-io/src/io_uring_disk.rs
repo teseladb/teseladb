@@ -389,9 +389,11 @@ impl IoUringDisk {
             }
             IoOp::Sync { file, .. } => {
                 self.files.get(file).ok_or(IoErrno::BadFile)?;
+                crate::counters::record_sync();
                 steps.push_back(Step::Fsync { on: On::File(*file) });
             }
             IoOp::SyncDir { path } => {
+                crate::counters::record_sync();
                 let c = cpath(&self.root.join(path));
                 steps.push_back(Step::Open { path: c, flags: O_RDONLY | O_DIRECTORY });
                 steps.push_back(Step::Fsync { on: On::Opened(0) });

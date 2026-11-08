@@ -101,11 +101,13 @@ pub fn write_whole(path: &Path, bytes: &[u8], direct: bool) -> io::Result<()> {
         d.write_all_at(&buf[..head], 0)?;
     }
     f.write_all_at(&bytes[head..], head as u64)?;
+    crate::counters::record_sync();
     f.sync_all()
 }
 
 /// Syncs directory `dir`, so that the creations, renames and removals in it are durable.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    crate::counters::record_sync();
     File::open(dir)?.sync_all()
 }
 
@@ -264,10 +266,12 @@ impl FileDisk {
                 Ok(Some(Bytes::from_vec(self.read(*file, *offset, *len as usize)?)))
             }
             IoOp::Sync { file, .. } => {
+                crate::counters::record_sync();
                 self.file(*file)?.file.sync_all().map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::SyncDir { path } => {
+                crate::counters::record_sync();
                 File::open(self.full(path)).and_then(|d| d.sync_all()).map_err(io_errno)?;
                 Ok(None)
             }
@@ -337,6 +341,22 @@ mod tests {
     fn ok(d: &mut FileDisk, op: IoOp) {
         let r = d.execute(op);
         assert!(matches!(r, IoDone::Ok(_)), "{r:?}");
+    }
+
+    #[test]
+    fn each_sync_of_a_file_or_a_folder_counts_once() {
+        // The node's metrics give the syncs to the disk (`teseladb_disk_syncs_total`), so that a
+        // write's cost in syncs can be measured (H-008 of the native tests against RefDb).
+        let root = temp_root("syncs");
+        let mut d = FileDisk::open(&root).unwrap();
+        d.set_direct_io(false);
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "core-00/wal/s.tmp".into(), prealloc: 0 });
+        let before = crate::counters::syncs();
+        ok(&mut d, IoOp::Sync { file: FileId(1), batch: 1 });
+        ok(&mut d, IoOp::SyncDir { path: "core-00/wal".into() });
+        // Other tests of the crate sync at the same time: at least these two counted.
+        assert!(crate::counters::syncs() >= before + 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
