@@ -30,4 +30,6 @@ fn compacted_and_missing_entries_are_different_gaps() {
     assert_eq!(view.term(9), Err(LogGap::Unavailable));
     assert_eq!((view.first_index(), view.last_index()), (5, 6));
     assert_eq!(view.snapshot_meta().index, 4);
+    // The index alone, without decoding the configuration (010 T054).
+    assert_eq!(view.snapshot_index(), 4);
 }

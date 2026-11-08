@@ -451,9 +451,9 @@ checksum = "d060682f91fecda4f614e3dba3495338169724d43a6a17bd5fd4a29849ad78c3"
 
 [[package]]
 name = "teseladb-raft"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "85b27f73369e5b67f0bd205fe239abd4d7ef7a96df841f78657c08eb2e17c73c"
+checksum = "8a88e63ae1da5d4d589b9cf02ade7bbccf5ec63d38f95731afdc0e544caadc7c"
 dependencies = [
  "teseladb-types",
 ]

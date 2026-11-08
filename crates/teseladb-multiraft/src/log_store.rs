@@ -103,6 +103,11 @@ impl LogStore for GroupStore<'_> {
         self.log().last_index()
     }
 
+    /// The index kept with the log, without decoding the group's configuration (010 T054).
+    fn snapshot_index(&self) -> u64 {
+        self.log().snapshot_index
+    }
+
     fn snapshot_meta(&self) -> SnapshotMeta {
         let log = self.log();
         SnapshotMeta {
