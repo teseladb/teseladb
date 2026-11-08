@@ -590,11 +590,26 @@ fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     let r = c.run("held", Document::new().with("find", "c").with("maxTimeMS", 2_000));
     assert!(start.elapsed() < Duration::from_millis(1_500), "it waited: {r:?}");
     assert_eq!(batch(&r, "firstBatch").len(), 1, "{r:?}");
-    // The transaction was pushed above the read: it can only commit after it.
+    // The read pushed the transaction by reading its record (008 T043): the record is as it was,
+    // and a commit with the coordinator's mark far below the read goes above it.
     let rows = scan(record_key(txn), vec![3]);
     let rec = TxnRecord::decode_row(&rows[0].1).expect("a record");
-    assert_eq!(rec.status, TxnStatus::Pending);
-    assert!(rec.min_commit_ts > hlc(1), "{rec:?}");
+    assert_eq!((rec.status, rec.min_commit_ts), (TxnStatus::Pending, hlc(0)), "{rec:?}");
+    let read_at = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis(),
+    )
+    .expect("a time")
+        - 1_500;
+    let commit = RecordOp::Commit { ts: hlc(2), spans: Vec::new() };
+    let Ok(DataReply::Remote(RemoteReply::Record(done))) = ask(TxnOp::EndTxn { txn, op: commit })
+    else {
+        panic!("no record")
+    };
+    assert_eq!(done.status, TxnStatus::Committed);
+    assert!(done.commit_ts > hlc(read_at), "the commit went below the read: {done:?}");
     drop(node.stop());
 }
 
