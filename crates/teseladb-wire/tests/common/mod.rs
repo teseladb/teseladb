@@ -687,7 +687,9 @@ impl Backend for Mem {
                 };
                 Ok(Reply::Record(TxnRecord { lsid, read_ts, ..record(txn, status, at) }))
             }
-            TxnOp::EndTxn { txn, .. } | TxnOp::PushTxn { txn, .. } => {
+            TxnOp::EndTxn { txn, .. }
+            | TxnOp::PushTxn { txn, .. }
+            | TxnOp::PushByRead { txn, .. } => {
                 Ok(Reply::Record(record(txn, TxnStatus::Pending, ts)))
             }
             TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
