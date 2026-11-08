@@ -12,8 +12,8 @@ use teseladb_multiraft::{ApplyCtx, StateMachine};
 use teseladb_range::command::{Command, IntentPut, Resolution};
 use teseladb_range::intents::{
     ABANDONED_AFTER_MS, Conflict, Intent, IntentOp, IntentOwner, Latest, Push, RecordError,
-    RecordOp, TXN_SPACE, TxnId, TxnRecord, TxnStatus, check_put, end_txn, pred, push_txn,
-    record_key, succ,
+    RecordOp, TXN_SPACE, TxnId, TxnRecord, TxnStatus, check_put, end_txn, end_txn_above, pred,
+    push_txn, record_key, succ,
 };
 use teseladb_range::sm::{RangeSm, last_mark_key, live_key};
 use teseladb_raftlog::MemDisk;
@@ -595,4 +595,24 @@ fn a_record_outside_the_range_stops_the_group() {
     let ctx = ApplyCtx { group: G, index: 1, term: 1, ts: ts(5) };
     let c = Command::EndTxn { record: record(T1, TxnStatus::Pending) };
     assert!(sm.apply(&c.encode(), &ctx).unwrap_err().0.contains("outside the range"));
+}
+
+#[test]
+fn a_commit_goes_above_the_reads_of_its_record() {
+    // A reader that read the record at 500 pushed the transaction past it through the read cache of the record's key
+    // (008 T043): the commit goes just above it, also when the coordinator's mark and the pushed minimum are lower.
+    let spans = vec![(b"\x01a".to_vec(), b"\x01c".to_vec())];
+    let pending = end_txn(None, T1, begin(), ts(110)).unwrap().encode();
+    let commit = |at| RecordOp::Commit { ts: ts(at), spans: spans.clone() };
+    let c = end_txn_above(Some(&pending), T1, commit(200), ts(510), ts(500)).unwrap();
+    assert_eq!((c.status, c.commit_ts), (TxnStatus::Committed, succ(ts(500))));
+    // A floor below the coordinator's mark leaves the mark.
+    let c = end_txn_above(Some(&pending), T1, commit(600), ts(610), ts(500)).unwrap();
+    assert_eq!(c.commit_ts, ts(600));
+    // Only a commit moves: a heartbeat keeps the record as `end_txn` leaves it.
+    let beat = RecordOp::Heartbeat { spans: spans.clone() };
+    assert_eq!(
+        end_txn_above(Some(&pending), T1, beat.clone(), ts(510), ts(500)),
+        end_txn(Some(&pending), T1, beat, ts(510))
+    );
 }

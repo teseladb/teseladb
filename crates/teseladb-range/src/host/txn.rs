@@ -12,7 +12,7 @@ use teseladb_multiraft::ReadMode;
 use crate::command::{IntentPut, Resolution};
 use crate::intents::{
     Conflict, Intent, IntentOp, Latest, Push, RecordError, RecordOp, TxnId, TxnRecord, TxnStatus,
-    check_put, end_txn, push_txn, record_key,
+    check_put, end_txn_above, push_txn, record_key,
 };
 use crate::mutate::live_size_of;
 
@@ -231,7 +231,7 @@ fn evaluate_txn(
     op: &TxnOp,
     keys: &[Vec<u8>],
     versions: &[Vec<Item>],
-    ts: Hlc,
+    (ts, read_floor): (Hlc, Hlc),
 ) -> Result<(Command, Option<TxnRecord>), RangeError> {
     match op {
         TxnOp::PutIntents { txn, read_ts, writes } => {
@@ -262,7 +262,8 @@ fn evaluate_txn(
         }
         TxnOp::EndTxn { txn, op } => {
             let stored = versions.first().and_then(|v| stored_record(v));
-            let record = end_txn(stored, *txn, op.clone(), ts).map_err(record_error)?;
+            let record =
+                end_txn_above(stored, *txn, op.clone(), ts, read_floor).map_err(record_error)?;
             Ok((Command::EndTxn { record: record.clone() }, Some(record)))
         }
         TxnOp::PushTxn { txn, push } => {
@@ -426,6 +427,8 @@ impl RangeHost {
         let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);
+        // The reads of the keys, the record's for an `EndTxn`: its commit goes above them (008 T043).
+        let read_floor = floor;
         // The commit is written at its mark: the entry goes above it.
         if let TxnOp::ResolveIntents { commit_ts, .. } = **op {
             floor = floor.max(commit_ts);
@@ -438,7 +441,7 @@ impl RangeHost {
             if deadline.is_some_and(|d| ts.physical > d) {
                 return Err(RangeError::Timeout);
             }
-            let (command, after) = evaluate_txn(op, keys, versions, ts)?;
+            let (command, after) = evaluate_txn(op, keys, versions, (ts, read_floor))?;
             record = after;
             Ok(command.encode())
         };

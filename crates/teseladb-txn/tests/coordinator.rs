@@ -495,6 +495,9 @@ fn a_split_in_the_middle_of_a_transaction_sends_its_requests_to_the_new_ranges()
     n.settle();
     n.route.learn(RECORDS, G4);
     n.advance(200, &[1]);
+    // G4's first leader starts its read cache 250 ms above its lease (005 FR-005), and the commit
+    // goes above the reads of its record there (008 T043): it waits for the clock (FR-008).
+    n.clock_wait(1);
     let Outcome::Committed(ts) = n.ended(1) else { panic!("not committed") };
     n.advance(1_000, &[1]);
     assert!(n.resolved(1));

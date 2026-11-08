@@ -370,11 +370,26 @@ fn fresh(txn: TxnId, status: TxnStatus, at: Hlc) -> TxnRecord {
 
 /// Evaluates `EndTxn(op)` on the record of `txn` (`stored`: its current value) at mark `at`: the
 /// record to write and to answer with (contract `txn-protocol.md`, «Transiciones del registro»).
+/// [`end_txn_above`] with no reads of the record to stay above.
 pub fn end_txn(
     stored: Option<&[u8]>,
     txn: TxnId,
     op: RecordOp,
     at: Hlc,
+) -> Result<TxnRecord, RecordError> {
+    end_txn_above(stored, txn, op, at, ZERO)
+}
+
+/// [`end_txn`] on a range whose read cache holds reads of the record's key up to `read_floor`
+/// (008 T043): a reader at a mark pushes a pending transaction past it by reading its record there,
+/// so a commit goes above the highest of the coordinator's mark, the pushed minimum and the mark
+/// just after `read_floor`.
+pub fn end_txn_above(
+    stored: Option<&[u8]>,
+    txn: TxnId,
+    op: RecordOp,
+    at: Hlc,
+    read_floor: Hlc,
 ) -> Result<TxnRecord, RecordError> {
     let current = decode_current(stored)?;
     match (current, op) {
@@ -408,7 +423,15 @@ pub fn end_txn(
         (Some(r), RecordOp::Begin { .. }) => Ok(r),
         (Some(r), RecordOp::Heartbeat { spans }) => Ok(TxnRecord { heartbeat_ts: at, spans, ..r }),
         (Some(r), RecordOp::Commit { ts, spans }) => {
-            #[cfg(not(teseladb_bug = "commit_below_push"))]
+            #[cfg(not(any(
+                teseladb_bug = "commit_below_push",
+                teseladb_bug = "commit_below_record_reads"
+            )))]
+            let commit_ts = ts.max(r.min_commit_ts).max(above(read_floor));
+            // Faulty variant (008 T043): the commit stays above the pushes written to the record
+            // and ignores the reads of it, so a version appears below a read that pushed it by
+            // reading the record.
+            #[cfg(teseladb_bug = "commit_below_record_reads")]
             let commit_ts = ts.max(r.min_commit_ts);
             // Faulty variant (008 T024): the commit takes the coordinator's mark and ignores the
             // pushes, so a version appears below a read that was served without it.
@@ -490,6 +513,11 @@ pub fn push_txn(
         }
         (Some(r), Push::AbortIfAbandoned { .. }) => r,
     })
+}
+
+/// The mark just above the reads up to `floor`, or none when nothing was read.
+fn above(floor: Hlc) -> Hlc {
+    if floor == ZERO { ZERO } else { succ(floor) }
 }
 
 /// The mark just above `t`: what a reader at `t` pushes a pending transaction to (005 FR-025).
