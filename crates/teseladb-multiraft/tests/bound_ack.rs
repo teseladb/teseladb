@@ -21,9 +21,17 @@ fn a_node_sends_nothing_until_its_bound_covers_a_mark_it_received() {
     let far = Hlc { physical: low + 10_000, logical: 0 };
     clocks[l.0 as usize - 1].0.raise_bound(far.physical + 1_000);
     clocks[l.0 as usize - 1].0.update(far);
+    // Until the mark reaches it the follower answers as usual: what it sends then carries
+    // nothing it could lose. The rule holds from the moment it takes the mark.
+    for _ in 0..20 {
+        if clocks[f.0 as usize - 1].0.peek() >= far {
+            break;
+        }
+        c.tick();
+    }
+    assert!(clocks[f.0 as usize - 1].0.peek() >= far, "the follower took the mark");
     c.sent.clear();
     c.ticks(20);
-    assert!(clocks[f.0 as usize - 1].0.peek() >= far, "the follower took the mark");
     assert!(
         !c.sent.iter().any(|(from, _, _)| *from == f),
         "no frame leaves the follower while its bound is below the mark"

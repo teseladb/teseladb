@@ -1841,25 +1841,48 @@ impl<S: StateMachine> MultiRaftCore<S> {
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_overwritten(g, &entries);
         let grp = self.groups.get_mut(&g).expect("group");
-        if !entries.is_empty() || hs.is_some() {
-            let hs = match grp.commit_cap {
-                Some(cap) => {
-                    hs.map(|h| teseladb_raftlog::HardState { commit: h.commit.min(cap), ..h })
-                }
-                None => hs,
-            };
+        let hs = match grp.commit_cap {
+            Some(cap) => hs.map(|h| teseladb_raftlog::HardState { commit: h.commit.min(cap), ..h }),
+            None => hs,
+        };
+        // Raft keeps the commit index as volatile state: a hard state that only moves it goes to
+        // disk with the next batch instead of taking a sync of its own, which the next write
+        // waited for (H-008 of the native tests). Nothing waits for it, as for a `Ready` with
+        // nothing to persist: an error writing it stops the store. The term, the vote and the
+        // entries are synced before anything that depends on them leaves.
+        let on_disk = self.store.hard_state(g);
+        let commit_only = entries.is_empty()
+            && hs.is_some_and(|h| on_disk.is_some_and(|d| d.term == h.term && d.vote == h.vote));
+        if commit_only {
+            if self.store.append_raft(g, &[], hs, Durability::Memory).is_err() {
+                self.stop(g);
+                return false;
+            }
+            self.nothing_to_persist(g, number, after);
+        } else if !entries.is_empty() || hs.is_some() {
             let Ok(t) = self.store.append_raft(g, &entries, hs, Durability::Strict) else {
                 // Disk full or store stopped: nothing is persisted or answered, and the group
                 // stops before an answer that depends on these entries can leave.
                 self.stop(g);
                 return false;
             };
+            let grp = self.groups.get_mut(&g).expect("group");
             let log = self.store.group(g).expect("group");
             let last = log.last_index();
             let last_term = log.term(last).unwrap_or(0);
             grp.persisting.push_back((t, after));
             self.waits.insert(t, Wait::Persist { group: g, number, last, last_term });
-        } else if let Some((_, queued)) = grp.persisting.back_mut() {
+        } else {
+            self.nothing_to_persist(g, number, after);
+        }
+        true
+    }
+
+    /// A `Ready` of `g` with nothing that has to be synced: its answers leave behind what is
+    /// still being persisted, or now.
+    fn nothing_to_persist(&mut self, g: GroupId, number: u64, after: Vec<Message>) {
+        let grp = self.groups.get_mut(&g).expect("group");
+        if let Some((_, queued)) = grp.persisting.back_mut() {
             // Answers that depend on what is still being persisted.
             queued.extend(after);
         } else {
@@ -1869,7 +1892,6 @@ impl<S: StateMachine> MultiRaftCore<S> {
             grp.raw.on_persisted(number, last, last_term, &GroupStore::new(&self.store, g));
             self.outbox.extend(after.into_iter().map(|m| (g, m)));
         }
-        true
     }
 
     /// Applies a committed entry; `false` if the group stopped.

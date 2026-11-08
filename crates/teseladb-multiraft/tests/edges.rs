@@ -384,13 +384,17 @@ fn messages_to_this_node_are_not_sent_and_the_state_is_visible() {
         frames,
         vec![(id(2), PeerFrame::Raft { wall_ms: 0, hlc: NO_HLC, msgs: vec![(G, to_two)] })]
     );
-    let c = Cluster::new(1);
+    let mut c = Cluster::new(1);
     let core = &c.nodes[&me].core;
     assert_eq!(core.group_ids(), vec![G]);
     assert_eq!(core.conf(G).unwrap().voters, vec![me]);
     assert!(core.conf(GroupId(1)).is_none());
     assert_eq!(core.store().group_ids(), vec![G]);
-    assert_eq!(core.next_deadline(), None);
+    // The commit of its first entry waits in the open batch, which goes to disk within 1 ms
+    // (H-008 of the native tests); once written, nothing is due.
+    assert_eq!(core.next_deadline(), Some(teseladb_types::Nanos::from_millis(1)));
+    c.tick();
+    assert_eq!(c.nodes[&me].core.next_deadline(), None);
     assert!(!ApplyError("x".into()).to_string().is_empty());
     assert!(!RestoreError("x".into()).to_string().is_empty());
 }

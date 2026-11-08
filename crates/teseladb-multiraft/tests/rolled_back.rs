@@ -95,6 +95,9 @@ fn a_leader_stopped_cleanly_keeps_the_entries_that_waited_behind_a_batch_in_flig
     c.ticks(5);
     c.propose(old, b"kept").unwrap();
     c.settle();
+    // The commit of `kept` waits in the open batch, which goes to disk within 1 ms (H-008 of
+    // the native tests): a tick lets it go, as the core loop does at its next deadline.
+    c.ticks(1);
     c.isolate(old);
     assert!(c.nodes[&old].core.writes_settled());
     // Its disk is slow: the first entry's batch goes out and stays in flight, and the second

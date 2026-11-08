@@ -3008,8 +3008,13 @@ mod tests {
         let (tx, rx) = channel();
         l.on_message(NodeMsg::View(tx), now);
         assert!(rx.try_recv().unwrap().bootstrapped);
-        // An idle core waits for nothing.
-        assert_eq!(l.next_deadline(), None);
+        // An idle core waits for nothing but, at most, the open batch with its last commit, which
+        // goes to disk within 1 ms (H-008 of the native tests against RefDb).
+        assert!(
+            l.next_deadline().is_none_or(|d| d <= now + Nanos::from_millis(1)),
+            "{:?}",
+            l.next_deadline()
+        );
         l.peer_unreachable(NodeId(2));
         // A forwarded request gets an empty answer.
         let fwd = PeerMsg::Forward { req: 3, deadline_ms: 100, hlc: None, body: Bytes::new() };
