@@ -300,10 +300,21 @@ impl ServerBackend {
     ) -> Option<T> {
         let (tx, rx): (mpsc::Sender<T>, Receiver<T>) = mpsc::channel();
         self.cores.get(core)?.send(CoreInput::App(msg(tx))).ok()?;
-        rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok()
+        // Most answers come within a short spin, which saves the wake-up of this thread (H-013).
+        let mut answer = None;
+        teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || {
+            answer = rx.try_recv().ok();
+            answer.is_some()
+        });
+        answer.or_else(|| rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok())
     }
 
     fn catalog(&mut self) -> Result<Arc<Catalog>, CommandError> {
+        // Core 0 publishes its copy before it answers any change of it (H-017); before the
+        // cluster exists there is none and core 0 answers that.
+        if let Some(c) = self.h.routes.catalog() {
+            return Ok(c);
+        }
         let until = self.until();
         loop {
             if let Some(CatalogAnswer::Catalog(c)) =

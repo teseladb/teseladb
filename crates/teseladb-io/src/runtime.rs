@@ -344,7 +344,34 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         #[cfg(target_os = "linux")]
         let timeout = if self.ring_ready() { Duration::ZERO } else { timeout };
         self.events.clear();
-        self.events.extend_from_slice(self.poller.poll(Some(timeout))?);
+        // A message or a socket event that arrives within a short spin is taken without
+        // sleeping: a wake-up costs several microseconds on every request that crosses threads
+        // (H-013). The spin looks at the mailbox and, without waiting, at the poller; the events
+        // it takes are not asked for again.
+        let mut failed = None;
+        let spun = !timeout.is_zero()
+            && crate::spin::spin_until(crate::spin::SPIN_BEFORE_SLEEP, || {
+                if !self.mailbox.is_empty() {
+                    return true;
+                }
+                match self.poller.poll(Some(Duration::ZERO)) {
+                    Ok(ev) => {
+                        self.events.extend_from_slice(ev);
+                        !self.events.is_empty()
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        true
+                    }
+                }
+            });
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if self.events.is_empty() {
+            let wait = if spun { Duration::ZERO } else { timeout };
+            self.events.extend_from_slice(self.poller.poll(Some(wait))?);
+        }
         let events = std::mem::take(&mut self.events);
         for e in &events {
             if is_socket(e.token) {

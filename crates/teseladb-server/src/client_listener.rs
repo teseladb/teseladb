@@ -1397,10 +1397,36 @@ impl Worker {
             let timeout = next
                 .map_or(TENANT_CHECK, |d| d.saturating_duration_since(Instant::now()))
                 .min(TENANT_CHECK);
-            let timeout = Some(timeout);
-            match self.poller.poll(timeout) {
-                Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
-                Err(_) => break,
+            // A reply or a request that arrives within a short spin is taken without sleeping
+            // (H-013): the spin looks at the mailbox and, without waiting, at the sockets; the
+            // events it takes are not asked for again.
+            let mut failed = false;
+            let mut seen = false;
+            let spun = teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || {
+                if !self.mailbox.is_empty() {
+                    return true;
+                }
+                match self.poller.poll(Some(Duration::ZERO)) {
+                    Ok(ev) => {
+                        seen |= !ev.is_empty();
+                        events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied());
+                        seen
+                    }
+                    Err(_) => {
+                        failed = true;
+                        true
+                    }
+                }
+            });
+            if failed {
+                break;
+            }
+            if !seen {
+                let timeout = Some(if spun { Duration::ZERO } else { timeout });
+                match self.poller.poll(timeout) {
+                    Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
+                    Err(_) => break,
+                }
             }
             let info = self.state.info();
             if info.topology.counter != self.seen {

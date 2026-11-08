@@ -18,6 +18,7 @@ pub mod peer;
 pub mod poller;
 pub mod runtime;
 pub mod secure;
+pub mod spin;
 pub mod spsc;
 pub mod timer;
 
