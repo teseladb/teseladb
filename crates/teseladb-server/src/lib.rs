@@ -730,7 +730,7 @@ fn secure(
     };
     let pki = pki::load_or_create_with(&o.dbpath, &params, bootstrap.as_ref(), &mut random)
         .map_err(|e| e.to_string())?;
-    let tls = tls_port::build(&o.tls, &pki)?;
+    let tls = tls_port::build_at_start(&o.tls, &pki)?;
     // A certificate that names an OCSP responder gets its answer stapled (013 FR-031).
     if !o.tls.ocsp_disabled {
         // The issuer: the next certificate of the chain, an authority of --tlsCAFile or the

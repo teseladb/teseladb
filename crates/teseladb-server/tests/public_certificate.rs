@@ -249,3 +249,42 @@ fn a_bad_public_file_names_the_option() {
     assert!(tls_port::build(&off, &node).unwrap().config().is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A cluster that starts before its first public certificate (021 FR-064): the node starts with
+/// the file absent or empty, serves the usual identity to every name, and serves the chain by SNI
+/// once `rotateCertificates` reads it (013 T057).
+#[test]
+fn a_node_starts_before_its_public_file_and_serves_it_after_a_rotation() {
+    let d = dir("later");
+    let node = node_pki(&d);
+    let file = d.join("public.pem");
+    let o = opts(&file);
+    // Absent, then empty: the node starts either way.
+    assert!(tls_port::build_at_start(&o, &node).is_ok());
+    std::fs::write(&file, "").unwrap();
+    let port = tls_port::build_at_start(&o, &node).unwrap();
+    let certs = Certificates::new(
+        d.clone(),
+        o.clone(),
+        port.clone(),
+        pki::peer_tls(&node, false),
+        vec![GeneralName::Dns(NODE_HOST.into())],
+    );
+    let l = listener(port);
+    let node_leaf = node.node_chain.first().unwrap().der().to_vec();
+    let node_ca = node.ca.clone();
+    assert_eq!(served(&l, &node_ca, NODE_HOST).unwrap().der(), node_leaf);
+    // A rotation while the file is still empty fails and leaves the node as it was.
+    assert!(certs.reload().unwrap_err().contains(TLS_PUBLIC_CERTIFICATE_KEY_FILE));
+    let public_one = public(51, vec![GeneralName::Dns(PROJECTS.into())]);
+    write(&file, &public_one);
+    certs.reload().unwrap();
+    assert_eq!(served(&l, &public_one.ca, PROJECT_HOST).unwrap().der(), public_one.leaf.der());
+    // A file with something that is not a chain still stops the start.
+    std::fs::write(&file, "nothing").unwrap();
+    assert!(
+        tls_port::build_at_start(&o, &node).unwrap_err().contains(TLS_PUBLIC_CERTIFICATE_KEY_FILE)
+    );
+    l.stop();
+    let _ = std::fs::remove_dir_all(&d);
+}

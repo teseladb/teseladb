@@ -293,6 +293,21 @@ fn public_identity(path: &std::path::Path) -> Result<SniIdentity, String> {
     Ok(SniIdentity { names, identity })
 }
 
+/// [`build`] for a node that starts: a `--tlsPublicCertificateKeyFile` that does not exist yet or is empty is left out
+/// (013 FR-037), as in a cluster that starts before its first public certificate, which `rotateCertificates` loads
+/// once the job's template writes it (021 FR-064). A file with anything else in it stops the start as in [`build`].
+pub fn build_at_start(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
+    let unwritten = opts
+        .public_certificate_key_file
+        .as_deref()
+        .is_some_and(|path| std::fs::metadata(path).map_or(true, |m| m.len() == 0));
+    if !unwritten {
+        return build(opts, pki);
+    }
+    let without = TlsOpts { public_certificate_key_file: None, ..opts.clone() };
+    build(&without, pki)
+}
+
 /// The TLS of the clients' port from the options of `teseladb start`: the certificate key file
 /// or the node certificate of the PKI; with `--tlsCAFile`, client certificates required (or
 /// optional with `--tlsAllowConnectionsWithoutCertificates`); with `--tlsCRLFile`, the leaf
