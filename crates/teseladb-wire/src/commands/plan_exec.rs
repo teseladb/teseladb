@@ -582,8 +582,13 @@ fn run<B: Backend + ?Sized>(
     budget: Option<u64>,
 ) -> Result<Ran, CommandError> {
     let in_order = read.sort.is_empty() || matches!(&access, Access::Index(s) if s.sorts);
+    // A scan in the read's order with nothing left to filter gives exactly what it reads: its
+    // first read takes the whole limit instead of growing to it and reading it all again.
+    let exact = matches!(&access, Access::Index(s)
+        if s.residual.is_none() && (read.sort.is_empty() || s.sorts));
     let mut most = match (budget, read.limit) {
         (Some(b), _) => Some(usize::try_from(b.saturating_add(1)).unwrap_or(usize::MAX)),
+        (None, Some(l)) if exact => Some(usize::try_from(l).unwrap_or(usize::MAX).max(1)),
         (None, Some(l)) if in_order => {
             Some(usize::try_from(l).unwrap_or(usize::MAX).clamp(1, FIRST_LIMITED_ENTRIES))
         }
@@ -1406,10 +1411,11 @@ fn id_point<B: Backend + ?Sized>(
 
 /// The documents of the index of `_id` in `[from, to)` with their primary keys, in key order: the
 /// first `most` when it says how many the caller takes. The documents go by the hash of their
-/// `_id` into [`DOCUMENT_BUCKETS`] buckets, each in key order, so the first `most` of the range are
-/// among the first `most` of each bucket and no bucket is read past them. The buckets are asked
-/// together; one that holds more than its first read took is read on by itself. An entry of this
-/// index is its document, which the caller keeps instead of reading it again.
+/// `_id` into [`DOCUMENT_BUCKETS`] buckets, each in key order, so they are merged as sorted lists:
+/// a few entries of each bucket are asked together, the lowest goes out each time, and only a
+/// bucket that runs out is read again. To give `n` documents the read takes little more than `n`
+/// (H-009b of the native tests: YCSB-E's scans of up to 100 read some 5.400 rows). An entry of
+/// this index is its document, which the caller keeps instead of reading it again.
 fn id_entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
@@ -1419,38 +1425,74 @@ fn id_entries<B: Backend + ?Sized>(
 ) -> Result<IdRows, CommandError> {
     let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
     let head = docs.as_bytes().len();
-    let first = most.map_or(KEY_CHUNK, |m| m.clamp(1, KEY_CHUNK));
+    let buckets = usize::from(DOCUMENT_BUCKETS);
+    // Each bucket holds about a sixteenth of what the read gives: two more cover an uneven share.
+    let per = most.map_or(KEY_CHUNK, |m| (m / buckets + 2).clamp(1, KEY_CHUNK));
     let spans: Vec<Span> = (0..DOCUMENT_BUCKETS)
         .map(|bucket| {
             let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
-            Span { start, end, limit: first }
+            Span { start, end, limit: per }
         })
         .collect();
-    let mut found: IdRows = Vec::new();
     let reads = backend.scan_spans(&spans, concern)?;
-    for (span, mut rows) in spans.iter().zip(reads) {
-        let (mut taken, mut asked) = (0usize, first);
-        loop {
-            let short = rows.len() < asked;
-            taken += rows.len();
-            let next = rows.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
-            found.extend(rows.into_iter().map(|(k, v)| {
-                let pk = k.get(head + 1..).unwrap_or_default().to_vec();
-                (pk, (k, v))
-            }));
-            asked = most.map_or(KEY_CHUNK, |m| m.saturating_sub(taken).clamp(1, KEY_CHUNK));
-            match next {
-                _ if most.is_some_and(|m| taken >= m) => break,
-                Some(low) if !short => rows = backend.scan(&low, &span.end, asked, concern)?,
-                _ => break,
-            }
+    let mut lanes: Vec<Lane> =
+        spans.into_iter().zip(reads).map(|(span, rows)| Lane::new(span.end, rows, per)).collect();
+    let pk_of = |key: &[u8]| key.get(head + 1..).unwrap_or_default().to_vec();
+    let mut found: IdRows = Vec::new();
+    while most.is_none_or(|m| found.len() < m) {
+        for lane in &mut lanes {
+            lane.refill(backend, per, concern)?;
         }
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    if let Some(m) = most {
-        found.truncate(m);
+        let lowest = lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.rows.front().map(|(k, _)| (i, pk_of(k))))
+            .min_by(|a, b| a.1.cmp(&b.1));
+        let Some((i, pk)) = lowest else { break };
+        let row = lanes[i].rows.pop_front().expect("the lane's first row");
+        found.push((pk, row));
     }
     Ok(found)
+}
+
+/// One bucket of a read of the index of `_id`: the rows read and not given yet, and where its read
+/// goes on when it may hold more.
+struct Lane {
+    rows: std::collections::VecDeque<(Vec<u8>, Vec<u8>)>,
+    next: Option<Vec<u8>>,
+    end: Vec<u8>,
+}
+
+impl Lane {
+    fn new(end: Vec<u8>, rows: Vec<(Vec<u8>, Vec<u8>)>, asked: usize) -> Lane {
+        let next = Self::after(&rows, asked);
+        Lane { rows: rows.into(), next, end }
+    }
+
+    /// The key after the last of `rows` when they filled what was asked: the bucket may hold more.
+    fn after(rows: &[(Vec<u8>, Vec<u8>)], asked: usize) -> Option<Vec<u8>> {
+        match rows.last() {
+            Some((k, _)) if rows.len() >= asked => Some([k.as_slice(), &[0]].concat()),
+            _ => None,
+        }
+    }
+
+    /// Reads on once its rows ran out and the bucket may hold more.
+    fn refill<B: Backend + ?Sized>(
+        &mut self,
+        backend: &mut B,
+        asked: usize,
+        concern: ReadConcern,
+    ) -> Result<(), CommandError> {
+        if !self.rows.is_empty() {
+            return Ok(());
+        }
+        let Some(low) = self.next.take() else { return Ok(()) };
+        let rows = backend.scan(&low, &self.end, asked, concern)?;
+        self.next = Self::after(&rows, asked);
+        self.rows.extend(rows);
+        Ok(())
+    }
 }
 
 /// The documents of a read of the index of `_id`: each primary key with its document's key and

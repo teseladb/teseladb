@@ -626,3 +626,21 @@ fn an_id_range_gives_the_documents_it_read_and_asks_the_buckets_in_one_trip() {
     assert!(m.scanned_rows <= 16 * 5, "{} rows read", m.scanned_rows);
     assert_eq!(m.span_reads, 1, "trips to the buckets");
 }
+
+#[test]
+fn a_long_id_scan_merges_the_buckets_and_reads_little_more_than_it_gives() {
+    let mut m = loaded(2_000);
+    // YCSB-E's scan asks for up to 100 documents. Before, the read began with 16 entries of each
+    // bucket and, short, read everything again with 64 and then 256: some 5.400 rows for 100
+    // documents, 11,7 ms against 0,115 ms in a `refnode` 9.0.4.
+    m.scanned_rows = 0;
+    let r =
+        run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":100}"#);
+    assert_eq!(ids(&r), (100..200).collect::<Vec<_>>(), "{r:?}");
+    assert!(m.scanned_rows < 200, "{} rows read for 100 documents", m.scanned_rows);
+    // Near the end of the collection some buckets run out: the merge still gives every document.
+    m.scanned_rows = 0;
+    let r =
+        run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":1950}},"sort":{"_id":1},"limit":100}"#);
+    assert_eq!(ids(&r), (1950..2000).collect::<Vec<_>>(), "{r:?}");
+}
