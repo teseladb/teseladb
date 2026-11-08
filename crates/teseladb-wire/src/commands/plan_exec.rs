@@ -25,7 +25,7 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::index_maintenance::MULTIKEY_MARKS;
 use super::mutation::from_mql;
-use super::{Backend, query};
+use super::{Backend, Span, query};
 use crate::error::{CommandError, INTERNAL_ERROR};
 
 /// The entries an index scan reads at a time.
@@ -917,6 +917,10 @@ fn entries<B: Backend + ?Sized>(
         return walked(backend, (tenant, collection), index, scan, concern, decode);
     }
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
+    let points = (ranges.as_slice(), scan.backward);
+    if let Some(read) = point_entries(backend, (tenant, collection), index, points, concern)? {
+        return Ok(read);
+    }
     let (first, past) = index_span((tenant, collection), index);
     // With `most`, a forward scan of one interval stops reading at that many entries: those after
     // them are past what the caller takes (a trial's budget), and reading them made each trial of
@@ -1171,14 +1175,94 @@ fn any_entry<B: Backend + ?Sized>(
     if !index.id_index {
         return Ok(!backend.scan(from, to, 1, concern)?.is_empty());
     }
-    let docs = KeyBuilder::index_prefix(tenant, index.entry.collection, DOCUMENTS);
-    for bucket in 0..DOCUMENT_BUCKETS {
-        let (low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
-        if !backend.scan(&low, &high, 1, concern)?.is_empty() {
-            return Ok(true);
+    let spans = gap_spans(tenant, index.entry.collection, (from, to));
+    Ok(backend.scan_spans(&spans, concern)?.iter().any(|rows| !rows.is_empty()))
+}
+
+/// The spans that hold the keys of the index of `_id` in `[from, to)`: one in each bucket of the
+/// documents, of one key, which a read takes in one trip.
+fn gap_spans(tenant: u32, collection: u32, (from, to): (&[u8], &[u8])) -> Vec<Span> {
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
+    (0..DOCUMENT_BUCKETS)
+        .map(|bucket| {
+            let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
+            Span { start, end, limit: 1 }
+        })
+        .collect()
+}
+
+/// The pk of the one document of the index of `_id` in `[from, to)`, when that range is one
+/// value (see [`id_point`]).
+fn point_pk<'a>(docs: &[u8], (from, to): (&'a [u8], &[u8])) -> Option<&'a [u8]> {
+    let pk = from.strip_prefix(docs)?;
+    (next_prefix(from).as_deref() == Some(to)).then_some(pk)
+}
+
+/// The entries of a scan of the index of `_id` whose intervals are all single values, read in one
+/// trip with the probes of the stretch after each (see [`entries`]); `None` for another scan.
+fn point_entries<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    index: &PlanIndex,
+    (ranges, backward): (&[KeyRange], bool),
+    concern: ReadConcern,
+) -> Result<Option<Scanned>, CommandError> {
+    if !index.id_index || ranges.len() < 2 {
+        return Ok(None);
+    }
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
+    let (first, past) = index_span((tenant, collection), index);
+    let end_of = |r: &KeyRange| r.end.clone().unwrap_or_else(|| past.clone());
+    let Some(pks) = ranges
+        .iter()
+        .map(|r| point_pk(docs.as_bytes(), (&r.start, &end_of(r))).map(<[u8]>::to_vec))
+        .collect::<Option<Vec<Vec<u8>>>>()
+    else {
+        return Ok(None);
+    };
+    let order: Vec<usize> = match backward {
+        true => (0..ranges.len()).rev().collect(),
+        false => (0..ranges.len()).collect(),
+    };
+    let mut spans: Vec<Span> = pks
+        .iter()
+        .map(|pk| {
+            let key = KeyBuilder::document_of_pk(tenant, collection, pk).as_bytes().to_vec();
+            let end = [key.as_slice(), &[0]].concat();
+            Span { start: key, end, limit: 1 }
+        })
+        .collect();
+    // The stretch after each value in the scan's order, as `entries` probes it.
+    let mut gaps = Vec::new();
+    for (step, &i) in order.iter().enumerate() {
+        let next = order.get(step + 1).copied();
+        let (from, to) = match (backward, next) {
+            (false, Some(n)) => (end_of(&ranges[i]), ranges[n].start.clone()),
+            (false, None) => (end_of(&ranges[i]), past.clone()),
+            (true, Some(n)) => (end_of(&ranges[n]), ranges[i].start.clone()),
+            (true, None) => (first.clone(), ranges[i].start.clone()),
+        };
+        let probes =
+            if from < to { gap_spans(tenant, collection, (&from, &to)) } else { Vec::new() };
+        gaps.push((spans.len(), probes.len()));
+        spans.extend(probes);
+    }
+    let rows = backend.scan_spans(&spans, concern)?;
+    let mut out = Vec::new();
+    for (step, &i) in order.iter().enumerate() {
+        let found = rows.get(i).into_iter().flatten().map(|(k, v)| Entry {
+            pk: pks[i].clone(),
+            key: None,
+            values: None,
+            doc: Some((k.clone(), v.clone())),
+        });
+        out.extend(found.map(Some));
+        let (at, n) = gaps[step];
+        if rows.get(at..at + n).is_some_and(|probe| probe.iter().any(|r| !r.is_empty())) {
+            out.push(None);
         }
     }
-    Ok(false)
+    Ok(Some(Scanned { entries: out, seeks: 1, more: false }))
 }
 
 /// Key range `[from, to)` of the index of `_id`, whose keys follow the documents' prefix

@@ -7,6 +7,7 @@
 mod across;
 mod intent_wait;
 mod span;
+mod spans;
 mod together;
 mod txn_reaper;
 
@@ -764,6 +765,14 @@ impl Backend for ServerBackend {
         let rows = self.scan_ranges(start, end, limit, concern);
         self.selection = None;
         rows
+    }
+
+    fn scan_spans(
+        &mut self,
+        spans: &[teseladb_wire::commands::Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
+        self.spans_together(spans, concern)
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

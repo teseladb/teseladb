@@ -393,19 +393,14 @@ fn a_find_by_one_id_reads_one_bucket_with_its_document() {
 }
 
 #[test]
-fn an_in_of_21_ids_reads_each_value_once() {
+fn an_in_of_21_ids_keeps_the_keys_examined_of_9_0_4() {
     let mut m = loaded(300);
     let wanted: Vec<i32> = (0..21).map(|i| i * 7).collect();
     let list = wanted.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
     let filter = format!(r#"{{"_id":{{"$in":[{list}]}}}}"#);
-    let find = format!(r#"{{"find":"c","filter":{filter}}}"#);
-    run(&mut m, &find);
-    let (r, reads) = range_reads(&mut m, &find);
+    let r = run(&mut m, &format!(r#"{{"find":"c","filter":{filter}}}"#));
     assert_eq!(ids(&r), wanted, "{r:?}");
-    // One read for each value with its document (408 before, with every bucket and a second
-    // read of each document), and the probes of the 21 stretches after them for an entry, which
-    // `keysExamined` counts as in 9.0.4: 21 values and an entry after each.
-    assert!(reads <= 21 + 21 * 3, "{reads} reads of the range");
+    // 21 values and an entry after each, as 9.0.4 counts them.
     let explain = run(
         &mut m,
         &format!(r#"{{"explain":{{"find":"c","filter":{filter}}},"verbosity":"executionStats"}}"#),
@@ -420,4 +415,25 @@ fn an_in_of_21_ids_reads_each_value_once() {
         &Value::Int32(21),
         "{explain:?}"
     );
+}
+
+/// The trips to the ranges `cmd` makes on `m`: a read of several spans at once is one trip.
+fn trips(m: &mut Mem, cmd: &str) -> (Document, usize) {
+    m.span_reads = 0;
+    m.spans_batched = 0;
+    let (r, scans) = range_reads(m, cmd);
+    // `range_reads` counts every read of a span; a read of several spans counts once.
+    (r, scans - m.spans_batched + m.span_reads)
+}
+
+#[test]
+fn an_in_of_ids_reads_its_values_and_the_entries_after_them_in_one_trip() {
+    let mut m = loaded(300);
+    let wanted: Vec<i32> = (0..21).map(|i| i * 7).collect();
+    let list = wanted.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let find = format!(r#"{{"find":"c","filter":{{"_id":{{"$in":[{list}]}}}}}}"#);
+    run(&mut m, &find);
+    let (r, trips) = trips(&mut m, &find);
+    assert_eq!(ids(&r), wanted, "{r:?}");
+    assert_eq!(trips, 1, "the values and the stretches after them, read together");
 }

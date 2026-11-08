@@ -130,6 +130,20 @@ use crate::error::CommandError;
 use crate::failpoint::FailPoint;
 use crate::ops::OpTable;
 
+/// What a read of a span gives: `(key, document)` in key order.
+pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// A span of keys `[start, end)` a read takes at most `limit` documents of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    /// Its first key.
+    pub start: Vec<u8>,
+    /// The key after its last.
+    pub end: Vec<u8>,
+    /// The most documents it gives.
+    pub limit: usize,
+}
+
 /// A write for the range: its keys, the encoded [`mutation::Bound`], its statement and its write
 /// concern.
 #[derive(Clone, Debug, PartialEq)]
@@ -415,6 +429,15 @@ pub trait Backend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+    /// Reads `spans` as [`Backend::scan`] reads each, in their order. A node sends them to their
+    /// ranges at once and then takes the answers, instead of one trip after the other.
+    fn scan_spans(
+        &mut self,
+        spans: &[Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<Rows>, CommandError> {
+        spans.iter().map(|s| self.scan(&s.start, &s.end, s.limit, concern)).collect()
+    }
     /// Bytes of the keys and documents stored in `[start, end)`, read in chunks of
     /// [`query::SCAN_CHUNK`].
     fn stored_bytes(&mut self, start: &[u8], end: &[u8]) -> Result<u64, CommandError> {

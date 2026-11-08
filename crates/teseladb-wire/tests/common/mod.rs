@@ -235,6 +235,10 @@ pub struct Mem {
     pub range_live: BTreeMap<teseladb_types::GroupId, u64>,
     /// Documents the scans gave.
     pub scanned_rows: usize,
+    /// Reads of several spans at once ([`Backend::scan_spans`]), each a trip to the ranges.
+    pub span_reads: usize,
+    /// The spans those reads read, each also counted by `on_scan`.
+    pub spans_batched: usize,
     /// Runs before each read of the changes (another client's writes while a resharding reads
     /// the history, 018).
     pub on_changes: Option<NodeHook>,
@@ -942,6 +946,16 @@ impl Backend for Mem {
             self.dedup.insert(k, out.result.clone());
         }
         Ok(out.result)
+    }
+
+    fn scan_spans(
+        &mut self,
+        spans: &[teseladb_wire::commands::Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
+        self.span_reads += 1;
+        self.spans_batched += spans.len();
+        spans.iter().map(|s| self.scan(&s.start, &s.end, s.limit, concern)).collect()
     }
 
     fn scan(

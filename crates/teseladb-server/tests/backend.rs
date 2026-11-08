@@ -1130,6 +1130,44 @@ fn reads_of_several_keys_go_together_and_each_gets_its_answer() {
     assert_eq!(found, vec![Some((3, vec![1])), None, Some((3, vec![2]))]);
 }
 
+/// The reads of several spans outside a transaction go to their ranges together and each span
+/// gets its own rows; a read without them (here a leader that changed) and a span that two
+/// ranges hold go again on their own (010 T053).
+#[test]
+fn reads_of_several_spans_go_together_and_each_gets_its_rows() {
+    use teseladb_wire::commands::Span;
+    let rows = |r: Vec<(Vec<u8>, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Rows(r)));
+    let span =
+        |start: &[u8], end: &[u8]| Span { start: start.to_vec(), end: end.to_vec(), limit: 1 };
+    let spans = vec![
+        span(&[1, 1], &[1, 1, 0]),
+        span(&[1, 2], &[1, 2, 0]),
+        span(&[2, 5], &[2, 5, 0]),
+        span(&[1, 9], &[3]),
+    ];
+    let (one, two, three) =
+        (vec![(vec![1, 1], vec![7])], vec![(vec![1, 2], vec![8])], vec![(vec![2, 5], vec![9])]);
+    let mut b = backend(
+        vec![
+            // The three spans one range holds, sent together: the first meets a leader that
+            // changed. Read one after the other, the first would take the second's rows.
+            Err(RangeError::NotLeader { hint: NodeId(0) }),
+            rows(two.clone()),
+            rows(three.clone()),
+            // The first again on its own, then the span of both ranges, range by range.
+            rows(one.clone()),
+            rows(vec![]),
+            rows(vec![(vec![2, 0], vec![4])]),
+        ],
+        vec![],
+    );
+    let found = b.scan_spans(&spans, ReadConcern::Local).unwrap();
+    assert_eq!(found, vec![one.clone(), two, three, vec![(vec![2, 0], vec![4])]]);
+    // One span alone is a scan.
+    let mut b = backend(vec![rows(one.clone())], vec![]);
+    assert_eq!(b.scan_spans(&spans[..1], ReadConcern::Local).unwrap(), vec![one]);
+}
+
 /// A commit's answer carries its mark into this node's clock: the next transaction of the node
 /// reads at or above what it committed and does not write under it (017 SC-002, 008 FR-008).
 #[test]
