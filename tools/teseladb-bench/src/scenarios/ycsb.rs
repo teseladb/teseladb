@@ -75,6 +75,18 @@ fn update(c: &mut Client, k: String, rng: &mut Rng) -> Result<(), String> {
     .map(drop)
 }
 
+/// The records of the collection (`count`), each a key YCSB numbered in order.
+fn count(c: &mut Client) -> Result<u64, String> {
+    let reply = c.command(DB, doc(vec![("count", Value::String(COLLECTION.into()))]))?;
+    let raw = teseladb_bson::RawDoc::from_bytes(&reply).map_err(|e| format!("{e:?}"))?;
+    let n = match raw.get("n") {
+        Some(teseladb_bson::RawValue::Int32(n)) => i64::from(n),
+        Some(teseladb_bson::RawValue::Int64(n)) => n,
+        other => return Err(format!("count without n: {other:?}")),
+    };
+    u64::try_from(n).map_err(|_| format!("a negative count: {n}"))
+}
+
 /// Runs workload `letter`.
 pub fn run(args: &Args, letter: char) -> Result<Report, String> {
     let target = Target::open(args.target.as_deref())?;
@@ -104,17 +116,25 @@ pub fn run_on(
     let workload =
         Workload::new(letter, records).ok_or(format!("unknown YCSB workload {letter}"))?;
     let addr = target.addr()?;
-    let mut setup = Client::connect(addr)?;
-    // The collection may not exist yet.
-    let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
-    let mut rng = Rng::new(SEED);
-    let mut i = 0;
-    while i < records {
-        let n = LOAD_BATCH.min(records - i);
-        insert(&mut setup, (i..i + n).map(|j| record(j, &mut rng)).collect())?;
-        i += n;
+    // With `--skip-load` the run phase reads and writes the records a run before loaded.
+    if !args.skip_load {
+        let mut setup = Client::connect(addr)?;
+        // The collection may not exist yet.
+        let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
+        let mut rng = Rng::new(SEED);
+        let mut i = 0;
+        while i < records {
+            let n = LOAD_BATCH.min(records - i);
+            insert(&mut setup, (i..i + n).map(|j| record(j, &mut rng)).collect())?;
+            i += n;
+        }
     }
-    let inserted = AtomicU64::new(records);
+    // The inserts go on after the records already there: a run before inserted past `records`.
+    let first_new = match args.skip_load {
+        true => records.max(count(&mut Client::connect(addr)?)?),
+        false => records,
+    };
+    let inserted = AtomicU64::new(first_new);
     let load = Load {
         warmup: args.warmup,
         duration: args.duration,

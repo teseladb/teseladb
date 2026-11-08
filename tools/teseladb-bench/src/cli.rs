@@ -36,6 +36,9 @@ pub struct Args {
     pub rate: Option<f64>,
     /// Most cores of `cores-curve` (012 FR-009).
     pub max_cores: u16,
+    /// YCSB's run phase alone, over the records a run before loaded (`--skip-load`), as YCSB
+    /// separates its load and run phases: the ranges the load left, split and spread, stay.
+    pub skip_load: bool,
 }
 
 /// Output format of `--format`.
@@ -71,6 +74,7 @@ impl Default for Args {
             concurrency: 1,
             rate: None,
             max_cores: 16,
+            skip_load: false,
         }
     }
 }
@@ -84,7 +88,7 @@ pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recove
                          search-phrase|search-fuzzy|search-visibility|vector-search|vector|cores-curve|disk-usage|\
                          ycsb-a..ycsb-f [--data dir] [--json file] \
                          [--duration 3s] [--warmup 10s] [--records N] [--groups N] [--format text|json] \
-                         [--target refdb://host:port] [--concurrency N] [--rate ops/s] [--max-cores N] \
+                         [--target refdb://host:port] [--concurrency N] [--rate ops/s] [--max-cores N] [--skip-load] \
                          [--baseline file] [--save-baseline file]\n       \
                          teseladb-bench --compare report.json --baseline file";
 
@@ -155,6 +159,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
                     other => return Err(format!("--format is text or json, not {other}")),
                 }
             }
+            "--skip-load" => out.skip_load = true,
             "-h" | "--help" => return Err(USAGE.into()),
             other => return Err(format!("unknown option: {other}\n{USAGE}")),
         }
@@ -199,6 +204,8 @@ mod tests {
         assert_eq!(a.max_cores, 16, "012 FR-009");
         assert_eq!(p("--scenario cores-curve --max-cores 4").unwrap().max_cores, 4);
         assert!(p("--scenario s --max-cores 0").unwrap_err().contains("--max-cores"));
+        assert!(!a.skip_load, "a YCSB run loads its records by default");
+        assert!(p("--scenario ycsb-e --skip-load --records 5").unwrap().skip_load);
     }
 
     #[test]
