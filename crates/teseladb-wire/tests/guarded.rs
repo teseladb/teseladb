@@ -111,3 +111,38 @@ fn an_operation_past_its_time_or_killed_stops_before_the_node() {
     assert!(!g.txn_pause());
     assert!(!g.txn_wait_clock(1), "a killed operation waits for no clock");
 }
+
+#[test]
+fn a_read_of_several_spans_goes_to_the_node_as_one_and_counts_its_documents() {
+    use teseladb_keys::space::KeyBuilder;
+    use teseladb_range::read::ReadConcern;
+    use teseladb_wire::commands::Span;
+    let mut m = Mem::new();
+    let keys: Vec<Vec<u8>> = [b"a", b"b", b"c"]
+        .iter()
+        .map(|pk| KeyBuilder::document_of_pk(1, 2, *pk).as_bytes().to_vec())
+        .collect();
+    for k in &keys {
+        m.data.insert(k.clone(), b"doc".to_vec());
+    }
+    let spans: Vec<Span> = keys
+        .iter()
+        .map(|k| Span { start: k.clone(), end: [k.as_slice(), &[0]].concat(), limit: 1 })
+        .collect();
+    let shared = Shared::default();
+    let id = lock(&shared).ops.begin(op(None));
+    let mut g = Guarded::new(&mut m, &shared, id);
+    let rows = g.scan_spans(&spans, ReadConcern::Local).unwrap();
+    drop(g);
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 1]);
+    // One trip with the three spans: the node sends them to their ranges together (010 T053).
+    assert_eq!((m.span_reads, m.spans_batched), (1, 3));
+    assert_eq!(lock(&shared).ops.take_report(id).docs, 3);
+    let id = lock(&shared).ops.begin(op(None));
+    assert!(lock(&shared).ops.kill(id));
+    let mut g = Guarded::new(&mut m, &shared, id);
+    let e = g.scan_spans(&spans, ReadConcern::Local).unwrap_err();
+    assert_eq!(e.code.code, INTERRUPTED);
+    drop(g);
+    assert_eq!(m.span_reads, 1, "a killed operation reads nothing");
+}

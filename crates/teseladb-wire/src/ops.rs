@@ -818,6 +818,21 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(rows)
     }
 
+    /// The spans go to the node together, as [`Backend::scan_spans`] of the backend underneath
+    /// sends them (010 T053); the default would read them one after the other.
+    fn scan_spans(
+        &mut self,
+        spans: &[crate::commands::Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<crate::commands::Rows>, CommandError> {
+        let all = self.call(|b| b.scan_spans(spans, concern))?;
+        self.check()?;
+        for rows in &all {
+            self.tally(rows);
+        }
+        Ok(all)
+    }
+
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
         self.inner.kill_everywhere(scope)
     }
