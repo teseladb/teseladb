@@ -246,6 +246,8 @@ pub struct NodeLogic {
     group0_ops: BTreeSet<OpId>,
     /// Group 0's ranges last given to the cores (core 0).
     sent_ranges: Option<Ranges>,
+    /// The catalog last published in the routes (H-017).
+    published_catalog: Option<Arc<teseladb_meta::catalog::Catalog>>,
     /// The routing table the client workers read (core 0 writes it).
     routes: Option<SharedRoutes>,
     /// The nodes' inter-node addresses: given to the other cores by core 0, which has them in
@@ -323,6 +325,7 @@ impl NodeLogic {
             zone: None,
             group0_ops: BTreeSet::new(),
             sent_ranges: None,
+            published_catalog: None,
             routes: None,
             peers: BTreeMap::new(),
             catalog: CatalogOps::default(),
@@ -995,7 +998,23 @@ impl NodeLogic {
         self.forward_group0();
         self.forward_relocations();
         let applied = self.group0().map_or(0, |sm| sm.applied);
+        // Before any change of the catalog is answered, the workers can read it (H-017).
+        self.publish_catalog();
         self.catalog.poll(applied, self.authz.fenced());
+    }
+
+    /// Publishes this node's copy of the catalog for the workers when it changed.
+    fn publish_catalog(&mut self) {
+        let (Some(routes), Some(sm)) = (&self.routes, self.group0()) else { return };
+        if !sm.bootstrapped() {
+            return;
+        }
+        let same = self.published_catalog.as_ref().is_some_and(|c| Arc::ptr_eq(c, &sm.catalog));
+        if !same {
+            let catalog = Arc::clone(&sm.catalog);
+            routes.publish_catalog(Arc::clone(&catalog));
+            self.published_catalog = Some(catalog);
+        }
     }
 
     /// A catalog request of the handle: read the local copy, or change it through Group 0's
@@ -2110,6 +2129,39 @@ mod tests {
             &Group0Command::SetSetting { key: key(NodeId(1)), value: ours() },
             NodeId(2)
         ));
+    }
+
+    #[test]
+    fn the_catalog_is_published_for_the_workers_before_a_change_of_it_is_answered() {
+        use crate::catalog_ops::CatalogAnswer;
+        // The workers read the catalog from the node's slot instead of asking core 0 for it on
+        // every command (H-017 of the native tests: a round trip between threads each time). A
+        // change is answered only once the slot holds it, so a client that creates a database and
+        // uses it at once never reads the catalog before it.
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        let routes = SharedRoutes::default();
+        c.logic(1).routes = Some(routes.clone());
+        c.run_until(|_| routes.catalog().is_some());
+        let own = Arc::clone(&c.logic(1).group0().unwrap().catalog);
+        assert!(Arc::ptr_eq(&routes.catalog().unwrap(), &own));
+        let (tx, rx) = channel();
+        let create = CatalogReq::Write(teseladb_meta::catalog::CatalogCommand::CreateDatabase {
+            db: "probe".into(),
+        });
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(create, tx), now);
+        let mut answered = None;
+        c.run_until(|_| {
+            answered = rx.try_recv().ok();
+            if answered.is_some() {
+                // At the moment the answer leaves, the slot already has the database.
+                assert!(routes.catalog().unwrap().dbs.contains_key("probe"));
+            }
+            answered.is_some()
+        });
+        assert!(matches!(answered, Some(CatalogAnswer::Done(_))), "{answered:?}");
     }
 
     #[test]

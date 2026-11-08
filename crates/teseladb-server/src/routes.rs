@@ -41,6 +41,10 @@ pub struct SharedRoutes {
     usage: Arc<RwLock<Arc<BTreeMap<u32, u64>>>>,
     /// The nodes of the cluster that are not removed, among which a tenant's margin is shared.
     nodes: Arc<std::sync::atomic::AtomicUsize>,
+    /// This node's copy of the catalog, which core 0 publishes before it answers any change of
+    /// it: the workers read it here instead of asking core 0 on every command (H-017 of the
+    /// native tests against RefDb, whose operations take the latest catalog the same way).
+    catalog: Arc<RwLock<Arc<Option<Arc<teseladb_meta::catalog::Catalog>>>>>,
 }
 
 /// The state of each tenant, by number.
@@ -97,6 +101,16 @@ impl SharedRoutes {
     /// Replaces the write gates with `gate`.
     pub fn publish_gate(&self, gate: WriteGate) {
         replace(&self.gate, Arc::new(gate));
+    }
+
+    /// Replaces the published catalog with `catalog`.
+    pub fn publish_catalog(&self, catalog: Arc<teseladb_meta::catalog::Catalog>) {
+        replace(&self.catalog, Arc::new(Some(catalog)));
+    }
+
+    /// The catalog core 0 published last; `None` before the cluster exists.
+    pub fn catalog(&self) -> Option<Arc<teseladb_meta::catalog::Catalog>> {
+        (*read(&self.catalog)).clone()
     }
 
     /// The write gates.
