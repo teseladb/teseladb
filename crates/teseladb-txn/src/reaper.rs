@@ -44,9 +44,9 @@ enum Step {
     Resolve(TxnId),
     /// A resolution before a record's removal; with the interval to search again after it, if it
     /// resolved what a search found.
-    GcResolve(TxnId, Option<(Vec<u8>, Vec<u8>)>),
+    GcResolve(TxnId, u64, Option<(Vec<u8>, Vec<u8>)>),
     /// A search of an interval's intents before a record's removal.
-    Find(TxnId, (Vec<u8>, Vec<u8>)),
+    Find(TxnId, u64, (Vec<u8>, Vec<u8>)),
     /// The record forgets its intervals.
     Resolved(TxnId),
     /// A look for the record of the next transaction of a final record's session.
@@ -63,6 +63,9 @@ struct Removal {
     before: Hlc,
     /// Resolutions and searches in flight.
     waiting: usize,
+    /// Which removal of the record this is: the answers of one that gave up, still in flight when the next scan
+    /// starts another, carry the old one and count for nothing.
+    generation: u64,
 }
 
 /// The reaper of one core.
@@ -78,6 +81,8 @@ pub struct Reaper {
     reaped: u64,
     /// Records on their way out.
     removals: BTreeMap<TxnId, Removal>,
+    /// The generation of the last removal started.
+    generations: u64,
     forgotten: u64,
     /// Records removed since the last [`Reaper::take_forgotten`].
     gone: Vec<TxnId>,
@@ -205,8 +210,14 @@ impl Reaper {
                     self.busy.remove(&rec.txn);
                 }
             },
-            Some(Step::GcResolve(txn, again)) => self.gc_resolved(route, txn, r.is_ok(), again),
-            Some(Step::Find(txn, span)) => self.found(route, txn, span, r),
+            Some(Step::GcResolve(txn, generation, again)) if self.current(txn, generation) => {
+                self.gc_resolved(route, txn, r.is_ok(), again);
+            }
+            Some(Step::Find(txn, generation, span)) if self.current(txn, generation) => {
+                self.found(route, txn, span, r);
+            }
+            // An answer of a removal that gave up.
+            Some(Step::GcResolve(..) | Step::Find(..)) => {}
             Some(Step::Resolved(txn)) => match (r, self.removals.get(&txn).map(|x| x.before)) {
                 (Ok(Reply::Record(_)), Some(before)) => {
                     let Some(g) = route.range_of(&record_key(txn)) else {
@@ -268,7 +279,9 @@ impl Reaper {
         let txn = r.txn;
         self.busy.insert(txn);
         let spans = r.spans.clone();
-        self.removals.insert(txn, Removal { rec: r, before, waiting: 0 });
+        self.generations += 1;
+        let generation = self.generations;
+        self.removals.insert(txn, Removal { rec: r, before, waiting: 0, generation });
         let mut by_range: BTreeMap<GroupId, Vec<Vec<u8>>> = BTreeMap::new();
         let mut prefixes = Vec::new();
         for span in spans {
@@ -301,17 +314,18 @@ impl Reaper {
     ) {
         let Some(x) = self.removals.get_mut(&txn) else { return };
         x.waiting += 1;
-        let (status, commit_ts) = (x.rec.status, x.rec.commit_ts);
+        let (status, commit_ts, generation) = (x.rec.status, x.rec.commit_ts, x.generation);
         let op = TxnOp::ResolveIntents { txn, status, commit_ts, keys };
-        self.send(g, op, Step::GcResolve(txn, again));
+        self.send(g, op, Step::GcResolve(txn, generation, again));
     }
 
     fn find(&mut self, route: &dyn Route, txn: TxnId, span: (Vec<u8>, Vec<u8>)) {
         let Some(g) = route.range_of(&span.0) else { return self.give_up(txn) };
         let Some(x) = self.removals.get_mut(&txn) else { return };
         x.waiting += 1;
+        let generation = x.generation;
         let op = TxnOp::FindIntents { txn, start: span.0.clone(), end: span.1.clone() };
-        self.send(g, op, Step::Find(txn, span));
+        self.send(g, op, Step::Find(txn, generation, span));
     }
 
     /// A resolution before a removal answered; one that resolved what a search found searches
@@ -370,6 +384,11 @@ impl Reaper {
         }
         let Some(g) = route.range_of(&record_key(txn)) else { return self.give_up(txn) };
         self.send(g, TxnOp::EndTxn { txn, op: RecordOp::Resolved }, Step::Resolved(txn));
+    }
+
+    /// Whether `generation` is the removal of `txn` under way.
+    fn current(&self, txn: TxnId, generation: u64) -> bool {
+        self.removals.get(&txn).is_some_and(|x| x.generation == generation)
     }
 
     /// A removal ends, done or not: the next scan looks at the record again.
