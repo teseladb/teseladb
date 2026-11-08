@@ -810,3 +810,67 @@ fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
     assert!(started.elapsed() < Duration::from_secs(5), "it ran {:?}", started.elapsed());
     drop(node.stop());
 }
+
+/// The reads of users and roles of a command see what any node wrote before them (013 T058, FR-009), as
+/// a `refrouter` reads them from the config servers.
+/// Rounds of a write on one node and reads on the others: the copies of Group 0 apply each entry within
+/// milliseconds, so one round rarely shows a stale read and a few dozen do.
+const PRINCIPAL_ROUNDS: usize = 40;
+
+fn roles_of(r: &Document) -> usize {
+    match r.get("roles") {
+        Some(Value::Array(a)) => a.len(),
+        _ => panic!("no roles in {r:?}"),
+    }
+}
+
+fn users_of(r: &Document) -> usize {
+    match r.get("users") {
+        Some(Value::Array(a)) => a.len(),
+        _ => panic!("no users in {r:?}"),
+    }
+}
+
+#[test]
+fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
+    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(first.wait_ready(READY));
+    let seed = vec![first.peer_addr().to_string()];
+    let others: Vec<Node<MemDisk>> = (0..2)
+        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
+        .collect();
+    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    for n in &nodes {
+        assert!(n.wait_ready(READY));
+    }
+    let mut clients: Vec<Client> = nodes.iter().map(|n| Client::new(n)).collect();
+    for round in 0..PRINCIPAL_ROUNDS {
+        let writer = round % clients.len();
+        let role = format!("r{round}");
+        let user = format!("u{round}");
+        let created = clients[writer].run(
+            "db",
+            Document::new()
+                .with("createRole", role.as_str())
+                .with("privileges", Value::Array(Vec::new()))
+                .with("roles", Value::Array(Vec::new())),
+        );
+        assert!(ok(&created), "{created:?}");
+        let created = clients[writer].run(
+            "db",
+            Document::new()
+                .with("createUser", user.as_str())
+                .with("pwd", "a-password-of-the-test")
+                .with("roles", Value::Array(Vec::new())),
+        );
+        assert!(ok(&created), "{created:?}");
+        for (i, c) in clients.iter_mut().enumerate() {
+            let r = c.run("db", Document::new().with("rolesInfo", role.as_str()));
+            assert_eq!(roles_of(&r), 1, "round {round}, node {i}: {r:?}");
+            let r = c.run("db", Document::new().with("usersInfo", user.as_str()));
+            assert_eq!(users_of(&r), 1, "round {round}, node {i}: {r:?}");
+        }
+    }
+    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+    drop(first.stop());
+}

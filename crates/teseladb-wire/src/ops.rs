@@ -833,6 +833,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(all)
     }
 
+    fn catalog_barrier(&mut self) -> Result<(), CommandError> {
+        self.call(|b| b.catalog_barrier())
+    }
+
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
         self.inner.kill_everywhere(scope)
     }

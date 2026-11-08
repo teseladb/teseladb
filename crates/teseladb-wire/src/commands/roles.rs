@@ -605,6 +605,7 @@ fn roles_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         other => Wanted::Roles(vec![wanted_role(other, ctx.db)?]),
     };
     let db = ctx.db.to_owned();
+    super::users::principals_barrier(ctx)?;
     let mut graph = Graph::new(ctx.backend);
     let (listing, mut found) = match wanted {
         Wanted::Database => {

@@ -600,3 +600,21 @@ fn graph_and_document_edges() {
     let shown = json(r#"{"_id": "test.bare", "user": "bare", "db": "test", "mechanisms": null}"#);
     assert_eq!(field(&r, "users"), &Value::Array(vec![Value::Document(shown)]));
 }
+
+#[test]
+fn roles_info_and_users_info_read_what_any_node_wrote_before_them() {
+    // A node whose copy of Group 0 is behind the writes of another node (013 T058): the reads of users
+    // and roles take the barrier first and find them, as a `refrouter` reads them from the config servers.
+    let mut m = Mem::new();
+    m.stale_security = true;
+    let r = m.run("db", json(r#"{"createRole":"r1","privileges":[],"roles":[]}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let r = m.run("db", json(r#"{"createUser":"u1","pwd":"a-password","roles":[]}"#));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let barriers = m.barriers;
+    let r = m.run("db", json(r#"{"rolesInfo":"r1"}"#));
+    assert!(matches!(r.get("roles"), Some(Value::Array(a)) if a.len() == 1), "{r:?}");
+    let r = m.run("db", json(r#"{"usersInfo":"u1"}"#));
+    assert!(matches!(r.get("users"), Some(Value::Array(a)) if a.len() == 1), "{r:?}");
+    assert_eq!(m.barriers, barriers + 2, "one barrier for each read");
+}
