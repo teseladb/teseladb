@@ -70,6 +70,9 @@ pub struct StartOpts {
     pub port: u16,
     /// Inter-node address.
     pub peer_listen: SocketAddr,
+    /// The IP or host name the other nodes call this one at, with the port of `peer_listen`
+    /// (`--advertise`, `teseladb.advertise`); `None`: the IP of `peer_listen`.
+    pub advertise: Option<String>,
     /// Administration address (`teseladb.adminListen`; 007).
     pub admin_listen: SocketAddr,
     /// Port of the REST API and MCP (`--http-port`, `teseladb.http.port`; 019 FR-002); 0 closes
@@ -356,6 +359,7 @@ const START: &[Spec] = &[
     ("bind_ip", VALUE),
     ("port", VALUE),
     ("peer-listen", VALUE),
+    ("advertise", VALUE),
     ("admin-listen", VALUE),
     (HTTP_PORT, VALUE),
     (HTTP_BIND, VALUE),
@@ -976,6 +980,49 @@ fn tags(items: &[String]) -> Result<Vec<(String, String)>, CliError> {
     Ok(tags)
 }
 
+/// `--advertise` (001 T052): an IP or a host name without a port, one other nodes can call. A
+/// `--peer-listen` on every address needs it, since the default, the IP of `--peer-listen`,
+/// would then be 0.0.0.0 or `::`, and every node would join with the same name.
+fn advertise(o: &Opts, peer_listen: SocketAddr) -> Result<Option<String>, CliError> {
+    let Some(host) = o.get("advertise") else {
+        if peer_listen.ip().is_unspecified() {
+            return err(format!(
+                "--peer-listen {peer_listen} listens on every address, which no other node can \
+                 call: give the address of this node with --advertise <ip or host name>"
+            ));
+        }
+        return Ok(None);
+    };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_unspecified() {
+            return err(format!("--advertise {host}: no node can call it"));
+        }
+        return Ok(Some(host.to_owned()));
+    }
+    if host.contains(':') && host.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok()) {
+        return err("--advertise: the port is the one of --peer-listen; give only the host");
+    }
+    if !is_host_name(host) {
+        return err(format!("--advertise: expected an IP or a host name, got `{host}`"));
+    }
+    Ok(Some(host.to_owned()))
+}
+
+/// A DNS name: labels of letters, digits and hyphens, none starting or ending with a hyphen.
+fn is_host_name(host: &str) -> bool {
+    const MAX_NAME: usize = 253;
+    const MAX_LABEL: usize = 63;
+    !host.is_empty()
+        && host.len() <= MAX_NAME
+        && host.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= MAX_LABEL
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 fn is_loopback(host: &str) -> bool {
     host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
@@ -1010,6 +1057,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
     let bind_ip = o.get("bind_ip").unwrap_or("127.0.0.1").to_string();
     let peer_listen = addr(o, "peer-listen", "127.0.0.1:27100")?;
     let admin_listen = addr(o, "admin-listen", "127.0.0.1:27200")?;
+    let advertise = advertise(o, peer_listen)?;
     // Without `--http-bind`, the addresses of `--bind_ip` (contract `cli-base.md` of 001).
     let http_bind = o.get(HTTP_BIND).unwrap_or(&bind_ip).to_string();
     if insecure && !insecure_allow_remote {
@@ -1042,6 +1090,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
         bind_ip,
         port: o.range("port", 27017, 0, u16::MAX)?,
         peer_listen,
+        advertise,
         admin_listen,
         http_port: o.range(HTTP_PORT, crate::http_listener::DEFAULT_HTTP_PORT, 0, u16::MAX)?,
         http_bind,
@@ -1164,7 +1213,8 @@ usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
-                 [--peer-listen <ip:port>] [--admin-listen <ip:port>] [--join <ip:port>,...]
+                 [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]
+                 [--join <ip:port>,...]
                  [--enroll-token <token>] [--bootstrap-dir <dir>]
                  [--tlsMode <mode>] [--tlsCertificateKeyFile <file>] [--tlsCAFile <file>]
                  [--tlsPublicCertificateKeyFile <file>]

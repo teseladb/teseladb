@@ -638,6 +638,8 @@ pub struct Node<D> {
     cluster_id: [u8; 16],
     cores: u16,
     peer_addr: SocketAddr,
+    /// The inter-node address the other nodes call, and the node's name in the cluster.
+    advertised_peer: String,
     /// What makes senders of the cores' mailboxes: the node is shared between threads, and each
     /// call makes its own sender (012 FR-005).
     senders: Vec<CoreSenders<NodeMsg>>,
@@ -801,6 +803,23 @@ fn enroll_one(
     e.accept(req, now, &mut |b| teseladb_sys::fill_random(b))
 }
 
+/// The inter-node address the other nodes call: `advertise` or the IP the node listens on, with
+/// the port it listens on (001 T052). An unspecified address (0.0.0.0, `::`) is refused: no node
+/// can call it, and a second node would join with the name of the first.
+fn advertised(advertise: Option<&str>, peer_addr: SocketAddr) -> Result<String, NodeError> {
+    let port = peer_addr.port();
+    let host = advertise.map_or_else(|| peer_addr.ip().to_string(), str::to_owned);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => Err(NodeError::Config(format!(
+            "the inter-node address {} cannot be called by another node: give the address of \
+             this node with --advertise",
+            SocketAddr::new(ip, port)
+        ))),
+        Ok(ip) => Ok(SocketAddr::new(ip, port).to_string()),
+        Err(_) => Ok(format!("{host}:{port}")),
+    }
+}
+
 /// What a new node learns before it creates anything: the cluster it joined, if any.
 fn join_first(
     cfg: &NodeConfig,
@@ -855,8 +874,7 @@ impl<D: Disk + Send + 'static> Node<D> {
         crate::install_js_host();
         let listener = crate::listen::bind(crate::listen::PEERS, cfg.listen_peer)?;
         let peer_addr = listener.local_addr()?;
-        let advertise = cfg.advertise.clone().unwrap_or_else(|| peer_addr.ip().to_string());
-        let advertised_peer = format!("{advertise}:{}", peer_addr.port());
+        let advertised_peer = advertised(cfg.advertise.as_deref(), peer_addr)?;
         let log = cfg.startup_log.clone();
         log.step("peer port open", &[("addr", &peer_addr)]);
 
@@ -943,7 +961,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             node_id,
             core: 0,
             cores,
-            peer_addr: advertised_peer,
+            peer_addr: advertised_peer.clone(),
             http_addr: cfg.admin_addr.clone(),
             native_addr: cfg.native_addr.clone(),
             versions: teseladb_io::peer::Versions::OWN,
@@ -1230,6 +1248,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             cluster_id: meta.cluster_id,
             cores,
             peer_addr,
+            advertised_peer,
             senders: senders.iter().map(CoreSender::senders).collect(),
             threads,
             acceptor,
@@ -1305,6 +1324,11 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// Address the inter-node port listens on.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
+    }
+
+    /// The inter-node address the other nodes call (`--advertise` with the port it listens on).
+    pub fn advertised_peer(&self) -> &str {
+        &self.advertised_peer
     }
 
     /// Addresses the clients' port listens on (none if the node does not open it).
@@ -1473,6 +1497,22 @@ mod tests {
     use teseladb_io::mailbox::{Notify, channel};
 
     use super::*;
+
+    /// The name a node gives the cluster (001 T052): the advertised host with the port it listens
+    /// on, an IPv6 in brackets, and never an unspecified address, which would name every node the
+    /// same.
+    #[test]
+    fn advertised_is_the_host_the_others_call_with_the_port_it_listens_on() {
+        let any = |port| SocketAddr::from(([0, 0, 0, 0], port));
+        assert_eq!(advertised(Some("tdb-n1"), any(27100)).ok().as_deref(), Some("tdb-n1:27100"));
+        assert_eq!(advertised(Some("fd00::5"), any(1)).ok().as_deref(), Some("[fd00::5]:1"));
+        let local = SocketAddr::from(([127, 0, 0, 1], 7));
+        assert_eq!(advertised(None, local).ok().as_deref(), Some("127.0.0.1:7"));
+        for (host, addr) in [(None, any(27100)), (Some("::"), local)] {
+            let Err(NodeError::Config(m)) = advertised(host, addr) else { panic!("{host:?}") };
+            assert!(m.contains("--advertise"), "{m}");
+        }
+    }
 
     struct Quiet;
 

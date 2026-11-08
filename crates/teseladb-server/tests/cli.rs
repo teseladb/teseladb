@@ -77,8 +77,10 @@ fn every_start_option_in_both_forms() {
     assert!(few.contains("--cpu-list names 2 CPUs for 4 cores"), "{few}");
     assert!(!start("start --insecure --logappend=no").logappend);
     // Addresses that are not loopback with --insecure only when asked for.
-    let o =
-        start("start --insecure --insecure-allow-remote --bind_ip 0.0.0.0 --peer-listen 0.0.0.0:1");
+    let o = start(
+        "start --insecure --insecure-allow-remote --bind_ip 0.0.0.0 --peer-listen 0.0.0.0:1 \
+         --advertise 10.0.0.5",
+    );
     assert!(o.insecure_allow_remote);
     assert_eq!(o.bind_ip, "0.0.0.0");
     // The bootstrap directory of a first start (013 FR-035), on the command line and in YAML;
@@ -94,9 +96,45 @@ fn every_start_option_in_both_forms() {
 fn secure_mode_is_the_default_and_listens_anywhere() {
     let o = start("start --dbpath /d");
     assert!(!o.insecure && !o.insecure_allow_remote);
-    let o = start("start --bind_ip 0.0.0.0 --peer-listen 0.0.0.0:1 --admin-listen 0.0.0.0:2");
+    let o = start(
+        "start --bind_ip 0.0.0.0 --peer-listen 0.0.0.0:1 --admin-listen 0.0.0.0:2 --advertise db1",
+    );
     assert_eq!(o.bind_ip, "0.0.0.0");
     assert!(bad("start --insecure-allow-remote").contains("--insecure"));
+}
+
+/// The address the other nodes call this one at (`--advertise`, `teseladb.advertise`): the IP of
+/// `--peer-listen` by default, a name or an IP otherwise, and needed when `--peer-listen` listens
+/// on every address, since no node can call 0.0.0.0 and the second would join with the name of
+/// the first.
+#[test]
+fn advertise_names_the_node_to_its_peers() {
+    assert_eq!(start("start --insecure").advertise, None);
+    assert_eq!(
+        start("start --peer-listen 0.0.0.0:1 --advertise tdb-n1").advertise.as_deref(),
+        Some("tdb-n1")
+    );
+    assert_eq!(
+        start("start --peer-listen [::]:1 --advertise=fd00::5").advertise.as_deref(),
+        Some("fd00::5")
+    );
+    let yaml = teseladb_server::config::yaml_args(b"teseladb:\n  advertise: tdb-n1\n").unwrap();
+    assert_eq!(yaml, ["--advertise=tdb-n1"]);
+    for (cmd, what) in [
+        (
+            "start --peer-listen 0.0.0.0:27100",
+            "--peer-listen 0.0.0.0:27100 listens on every address",
+        ),
+        ("start --peer-listen [::]:27100", "--advertise"),
+        ("start --advertise=", "--advertise: expected an IP or a host name"),
+        ("start --advertise tdb-n1:27100", "--advertise: the port is the one of --peer-listen"),
+        ("start --advertise 0.0.0.0", "--advertise 0.0.0.0: no node can call it"),
+        ("start --advertise ::", "--advertise ::: no node can call it"),
+        ("start --advertise bad/name", "--advertise: expected an IP or a host name"),
+    ] {
+        let m = bad(cmd);
+        assert!(m.contains(what), "{cmd}: {m}");
+    }
 }
 
 #[test]

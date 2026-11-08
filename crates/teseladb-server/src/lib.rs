@@ -200,7 +200,7 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
     NodeConfig {
         cores: o.cores,
         listen_peer: o.peer_listen,
-        advertise: None,
+        advertise: o.advertise.clone(),
         admin_addr: o.admin_listen.to_string(),
         admin_listen: Some(o.admin_listen),
         native_addr: format!("{}:{}", o.bind_ip, o.port),
@@ -897,7 +897,8 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
         return 1;
     }
     let id = node.node_id().0;
-    let peer = node.peer_addr().to_string();
+    // The address the other nodes call, the one a `--join` of another node gives.
+    let peer = node.advertised_peer().to_owned();
     let _ = out.write_all(ready_line(format, id, &node.cluster_id(), &peer).as_bytes());
     let _ = out.flush();
     log.info("node ready", &[("node_id", &id), ("cores", &node.cores())]);

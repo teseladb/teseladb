@@ -37,6 +37,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("teseladb.directIo", Kind::Option("direct-io")),
     ("teseladb.cpuList", Kind::Option("cpu-list")),
     ("teseladb.peerListen", Kind::Option("peer-listen")),
+    ("teseladb.advertise", Kind::Option("advertise")),
     ("teseladb.adminListen", Kind::Option("admin-listen")),
     ("teseladb.http.port", Kind::Option(crate::cli::HTTP_PORT)),
     ("teseladb.http.bind", Kind::Option(crate::cli::HTTP_BIND)),

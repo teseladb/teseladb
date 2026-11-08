@@ -36,6 +36,13 @@ const READY: Duration = Duration::from_secs(30);
 /// The start of the line `teseladb start` writes to standard output once the node is ready.
 const READY_LINE: &str = "ready node_id=";
 
+/// The inter-node port of most nodes of these tests.
+const LOOPBACK_PEER: &[&str] = &["--peer-listen", "127.0.0.1:0"];
+/// Every address, with the one the other nodes call (001 T051): `--insecure` takes it only with
+/// `--insecure-allow-remote`.
+const ANY_PEER: &[&str] =
+    &["--insecure-allow-remote", "--peer-listen", "0.0.0.0:0", "--advertise", "127.0.0.1"];
+
 /// Longest a node takes to answer a request of the test.
 const ANSWER: Duration = Duration::from_secs(10);
 
@@ -51,7 +58,11 @@ fn main() {
         node_process(&args[1..]);
         return;
     }
-    let tests: [(&str, fn()); 2] = [
+    let tests: [(&str, fn()); 3] = [
+        (
+            "two_nodes_on_every_address_join_with_the_address_they_advertise",
+            two_nodes_on_every_address_join_with_the_address_they_advertise,
+        ),
         (
             "three_processes_join_and_survive_the_loss_of_the_leader",
             three_processes_join_and_survive_the_loss_of_the_leader,
@@ -130,8 +141,15 @@ struct Proc {
 }
 
 impl Proc {
-    /// Starts `program` with `args` and `start`'s options for data directory `name`.
-    fn spawn(program: PathBuf, pre: &[&str], name: &str, join: Option<&str>) -> Proc {
+    /// Starts `program` with `args` and `start`'s options for data directory `name`, listening
+    /// between nodes as `peer` says.
+    fn spawn(
+        program: PathBuf,
+        pre: &[&str],
+        name: &str,
+        join: Option<&str>,
+        peer: &[&str],
+    ) -> Proc {
         let dir =
             std::env::temp_dir().join(format!("teseladb-local-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -147,11 +165,10 @@ impl Proc {
                 "--insecure",
                 "--cores",
                 "1",
-                "--peer-listen",
-                "127.0.0.1:0",
                 "--port",
                 "0",
             ])
+            .args(peer)
             .arg("--dbpath")
             .arg(&dir)
             .stdin(Stdio::piped())
@@ -183,13 +200,18 @@ impl Proc {
 
     /// `teseladb start`.
     fn start(name: &str, join: Option<&str>) -> Proc {
-        Proc::spawn(PathBuf::from(env!("CARGO_BIN_EXE_teseladb")), &[], name, join)
+        Proc::spawn(PathBuf::from(env!("CARGO_BIN_EXE_teseladb")), &[], name, join, LOOPBACK_PEER)
+    }
+
+    /// `teseladb start` listening between nodes on every address and calling itself `127.0.0.1`.
+    fn start_anywhere(name: &str, join: Option<&str>) -> Proc {
+        Proc::spawn(PathBuf::from(env!("CARGO_BIN_EXE_teseladb")), &[], name, join, ANY_PEER)
     }
 
     /// This binary in node mode.
     fn node(name: &str, join: Option<&str>) -> Proc {
         let me = std::env::current_exe().expect("this test's binary");
-        Proc::spawn(me, &[CHILD], name, join)
+        Proc::spawn(me, &[CHILD], name, join, LOOPBACK_PEER)
     }
 
     /// The first line for which `ok` holds.
@@ -328,6 +350,21 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     p4.signal("-TERM");
     assert_eq!(p4.child.wait().unwrap().code(), Some(0));
     drop((p2, p3));
+}
+
+/// Two nodes with `--peer-listen 0.0.0.0` (the guides of Docker Compose and systemd): each one
+/// advertises `127.0.0.1` with its own port, so the second joins as node 2 instead of taking the
+/// name of the first (001 T051).
+fn two_nodes_on_every_address_join_with_the_address_they_advertise() {
+    let p1 = Proc::start_anywhere("any1", None);
+    let (id1, seed) = p1.ready();
+    assert_eq!(id1, 1);
+    assert!(seed.starts_with("127.0.0.1:"), "the ready line gives the advertised address: {seed}");
+    let p2 = Proc::start_anywhere("any2", Some(&seed));
+    let (id2, peer2) = p2.ready();
+    assert_eq!(id2, 2);
+    assert!(peer2.starts_with("127.0.0.1:") && peer2 != seed, "{peer2} and {seed}");
+    drop((p1, p2));
 }
 
 fn a_write_is_confirmed_within_a_second_of_the_range_leaders_death() {
