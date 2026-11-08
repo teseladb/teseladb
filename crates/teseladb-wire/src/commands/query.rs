@@ -1068,8 +1068,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         },
         None => documents_of(&coll),
     };
-    // With a sort the whole collection is read, as without an `_id` equality.
-    if a.sort.is_some() || range == documents_of(&coll) {
+    // Only a read of the whole collection is a collection scan: an `_id` equality reads its
+    // document alone, with a sort or without one (a `refnode` 9.0.4 counts none then, measured).
+    if range == documents_of(&coll) {
         count_scan(ctx.shared, &ns);
     }
     let measured = measurements_of(&coll, ctx.cmd)?.is_some();
@@ -1155,7 +1156,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             return_key: false,
         },
         Some(sort) => {
-            sorted(ctx.backend, &coll, &a, sort, collation.as_ref(), planned).map_err(executor)?
+            sorted(ctx.backend, range, &a, sort, collation.as_ref(), planned).map_err(executor)?
         }
     };
     state.return_key = a.return_key;
@@ -1582,9 +1583,11 @@ pub fn options_collation(c: &CollectionEntry) -> Option<Document> {
     }
 }
 
+/// The documents of `range` that match, in the order of `sort`: the whole collection, or the key
+/// of an `_id` equality, which gives one document at most whatever the sort.
 fn sorted<B: Backend + ?Sized>(
     backend: &mut B,
-    coll: &CollectionEntry,
+    range: (Vec<u8>, Vec<u8>),
     a: &FindArgs,
     sort: &SortSpec,
     collation: Option<&Document>,
@@ -1596,7 +1599,6 @@ fn sorted<B: Backend + ?Sized>(
     let mut rows: Vec<(Vec<SortKey>, Document, Option<Document>)> = Vec::new();
     let mut memory = 0usize;
     let mut err = None;
-    let range = documents_of(coll);
     let vars = a.vars.as_ref();
     let mut keep = |bytes: &[u8], index_key: Option<Document>| -> Result<bool, CommandError> {
         memory += bytes.len();

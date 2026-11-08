@@ -563,14 +563,16 @@ fn reads_keys_only(read: &ReadPlan<'_>, scans: &[IndexScan], indexes: &[PlanInde
         })
 }
 
-/// The index entries the run of a read with a limit reads first; each further read takes four
-/// times as many.
+/// The most index entries the run of a read with a limit reads first (fewer when the limit is
+/// smaller); each further read takes four times as many.
 const FIRST_LIMITED_ENTRIES: usize = 16;
 
 /// Runs `access` for `read`: for a trial (`budget` works at most), until it gives a batch, or
-/// to its end. A read with a limit and without a sort to make reads its index entries a few at a
-/// time, as RefDb's index scan does, and stops at its limit: before, a `findOne` by an index of
-/// equality read every entry of its value to give one document.
+/// to its end. A read with a limit that needs no sort, or whose index scan already gives the
+/// sort's order, reads its index entries a few at a time, as RefDb's index scan does, and stops
+/// at its limit: before, a `findOne` by an index of equality read every entry of its value to give
+/// one document, and a YCSB scan (`_id` from a value, by `_id`, with a limit) read every document
+/// after that value.
 fn run<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -579,10 +581,12 @@ fn run<B: Backend + ?Sized>(
     access: Access,
     budget: Option<u64>,
 ) -> Result<Ran, CommandError> {
-    let unsorted = read.sort.is_empty();
+    let in_order = read.sort.is_empty() || matches!(&access, Access::Index(s) if s.sorts);
     let mut most = match (budget, read.limit) {
         (Some(b), _) => Some(usize::try_from(b.saturating_add(1)).unwrap_or(usize::MAX)),
-        (None, Some(_)) if unsorted => Some(FIRST_LIMITED_ENTRIES),
+        (None, Some(l)) if in_order => {
+            Some(usize::try_from(l).unwrap_or(usize::MAX).clamp(1, FIRST_LIMITED_ENTRIES))
+        }
         (None, _) => None,
     };
     loop {
@@ -1126,7 +1130,7 @@ fn range_entries<B: Backend + ?Sized>(
         if let Some(one) = id_point(backend, (tenant, collection), (&r.start, &end), concern)? {
             return Ok(one);
         }
-        let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern)?;
+        let pks = id_entries(backend, (tenant, collection), (&r.start, &end), concern, most)?;
         return Ok(pks
             .into_iter()
             .map(|pk| Entry { pk, key: None, values: None, doc: None })
@@ -1400,32 +1404,40 @@ fn id_point<B: Backend + ?Sized>(
     ))
 }
 
-/// The primary keys of the documents of `collection` within key range `[from, to)` of the
-/// index of `_id`, in key order. A document's key is its bucket and then its primary key, the
-/// `_id` as the index writes it: the range is read in every bucket and the keys put back in
-/// order.
+/// The primary keys of the index of `_id` in `[from, to)`, in key order: the first `most` when
+/// it says how many the caller takes. The documents go by the hash of their `_id` into
+/// [`DOCUMENT_BUCKETS`] buckets, each in key order, so the first `most` of the range are among the
+/// first `most` of each bucket and no bucket is read past them.
 fn id_entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
+    most: Option<usize>,
 ) -> Result<Vec<Vec<u8>>, CommandError> {
     let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
     let head = docs.as_bytes().len();
     let mut found = Vec::new();
     for bucket in 0..DOCUMENT_BUCKETS {
         let (mut low, high) = in_bucket(docs.as_bytes(), bucket, (from, to));
+        let mut taken = 0usize;
         loop {
-            let rows = backend.scan(&low, &high, KEY_CHUNK, concern)?;
-            let short = rows.len() < KEY_CHUNK;
+            let chunk = most.map_or(KEY_CHUNK, |m| m.saturating_sub(taken).clamp(1, KEY_CHUNK));
+            let rows = backend.scan(&low, &high, chunk, concern)?;
+            let short = rows.len() < chunk;
+            taken += rows.len();
             found.extend(rows.iter().map(|(k, _)| k.get(head + 1..).unwrap_or_default().to_vec()));
             match rows.last() {
+                _ if most.is_some_and(|m| taken >= m) => break,
                 Some((k, _)) if !short => low = [k.as_slice(), &[0]].concat(),
                 _ => break,
             }
         }
     }
     found.sort();
+    if let Some(m) = most {
+        found.truncate(m);
+    }
     Ok(found)
 }
 

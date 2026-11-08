@@ -1092,9 +1092,13 @@ fn modify_once<B: Backend + ?Sized>(
     if let Some(spec) = super::timeseries::spec_of(&coll)?.filter(|_| !raw) {
         return super::timeseries::modify(ctx.backend, w, (&coll, &spec), m, &rules, stmt);
     }
+    // An `_id` equality without a collation names one document at most, which no sort reorders:
+    // it is read by its key, as without a sort (before, the sort read every document).
+    let id_point = id_equality(&m.filter).is_some() && rules.collation.is_none();
+    let sort = m.sort.as_ref().filter(|_| !id_point);
     // A scan counts once the statement ends without an error (measured on a `refnode` 9.0.4).
-    let scans = m.sort.is_some() || id_equality(&m.filter).is_none();
-    let mut keys = match &m.sort {
+    let scans = sort.is_some() || id_equality(&m.filter).is_none();
+    let mut keys = match sort {
         Some(sort) => sorted_first(ctx.backend, &coll, m, rules.collation.as_ref(), sort)?,
         None => candidates(ctx.backend, &coll, m, rules.collation.as_ref())?,
     };

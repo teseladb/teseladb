@@ -530,3 +530,85 @@ fn an_in_of_far_apart_ids_asks_the_open_stretches_in_a_second_trip() {
     // the stretches past its last entry go in a second trip.
     assert_eq!(trips, 2);
 }
+
+#[test]
+fn an_id_equality_with_a_sort_reads_its_document_alone() {
+    let mut m = loaded(2_000);
+    let scans = |m: &mut Mem| {
+        let r = run(m, r#"{"serverStatus":1}"#);
+        field(&r, "metrics.queryExecutor.collectionScans.total").clone()
+    };
+    let before = scans(&mut m);
+    // YCSB's read: the sort and the limit change nothing on one document. A `refnode` 9.0.4
+    // answers the four through the index of `_id` and counts no collection scan (measured on
+    // 08-11-2026); before, each read every document, 11 ms a read on 20.000 documents.
+    let cases = [
+        (r#"{"find":"c","filter":{"_id":2},"sort":{"_id":1},"limit":1}"#, vec![2]),
+        (r#"{"find":"c","filter":{"_id":3},"sort":{"a":-1}}"#, vec![3]),
+        (r#"{"find":"c","filter":{"_id":3,"a":5},"sort":{"a":1}}"#, vec![]),
+        (r#"{"find":"c","filter":{"_id":{"$eq":4}},"sort":{"b":1},"skip":1}"#, vec![]),
+    ];
+    for (find, want) in cases {
+        m.scanned_rows = 0;
+        let r = run(&mut m, find);
+        assert_eq!(ids(&r), want, "{find}: {r:?}");
+        assert!(m.scanned_rows < 10, "{find}: {} rows read", m.scanned_rows);
+    }
+    // The sort key a projection asks for still comes from the sort.
+    let r = run(
+        &mut m,
+        r#"{"find":"c","filter":{"_id":1},"sort":{"a":1},"projection":{"k":{"$meta":"sortKey"}}}"#,
+    );
+    assert_eq!(field(&r, "cursor.firstBatch.0.k"), &Value::Array(vec![Value::Int32(1)]), "{r:?}");
+    assert_eq!(scans(&mut m), before);
+}
+
+#[test]
+fn an_ascending_id_read_with_a_limit_reads_that_many_of_each_bucket() {
+    let mut m = loaded(2_000);
+    // YCSB's scan and a `findOne` of the first `_id`: the documents go by the hash of their
+    // `_id` into 16 buckets, each in `_id` order, so the first `n` of the collection are among
+    // the first `n` of each bucket. Before, the read took every document of the range from each
+    // bucket and sorted them, 13 ms on 20.000 documents against 1,5 ms in a `refnode` 9.0.4.
+    let cases = [
+        (
+            r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}"#,
+            vec![100, 101, 102, 103, 104],
+        ),
+        (r#"{"find":"c","filter":{},"sort":{"_id":1},"limit":1}"#, vec![0]),
+        (
+            r#"{"find":"c","filter":{"_id":{"$gt":1990}},"sort":{"_id":1},"limit":20}"#,
+            (1991..2000).collect(),
+        ),
+    ];
+    for (find, want) in cases {
+        m.scanned_rows = 0;
+        let r = run(&mut m, find);
+        assert_eq!(ids(&r), want, "{find}: {r:?}");
+        assert!(m.scanned_rows < 200, "{find}: {} rows read", m.scanned_rows);
+    }
+}
+
+#[test]
+fn a_write_by_id_with_a_sort_reads_its_document_alone() {
+    let mut m = loaded(2_000);
+    // An `update` and a `findAndModify` by `_id` with a sort change that document, as on a
+    // `refnode` 9.0.4; before, each read every document to pick the first by the sort (27 to 31
+    // ms on 20.000 documents against 7 to 9 ms).
+    m.scanned_rows = 0;
+    let r = run(
+        &mut m,
+        r#"{"update":"c","updates":[{"q":{"_id":5},"u":{"$set":{"x":1}},"sort":{"a":1}}]}"#,
+    );
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
+    assert!(m.scanned_rows < 10, "update: {} rows read", m.scanned_rows);
+    m.scanned_rows = 0;
+    let r = run(
+        &mut m,
+        r#"{"findAndModify":"c","query":{"_id":6},"sort":{"_id":-1},"update":{"$set":{"x":2}},"new":true}"#,
+    );
+    assert_eq!(field(&r, "value.x"), &Value::Int32(2), "{r:?}");
+    assert!(m.scanned_rows < 10, "findAndModify: {} rows read", m.scanned_rows);
+    let r = run(&mut m, r#"{"find":"c","filter":{"x":{"$exists":true}}}"#);
+    assert_eq!(ids(&r), vec![5, 6], "{r:?}");
+}
