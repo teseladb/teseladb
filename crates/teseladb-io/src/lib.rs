@@ -7,6 +7,7 @@
 pub mod buffers;
 pub mod counters;
 pub mod disk_thread;
+mod drive_flush;
 mod file_disk;
 pub mod handshake;
 #[cfg(target_os = "linux")]

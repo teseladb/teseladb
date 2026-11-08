@@ -53,6 +53,35 @@ pub(crate) fn preallocate(file: &File, len: u64) -> io::Result<()> {
     file.set_len(len)
 }
 
+// ----- durability -----
+
+/// `F_FULLFSYNC` of `<sys/fcntl.h>`: flush the file to the drive and then the drive's cache.
+const F_FULLFSYNC: i32 = 51;
+
+unsafe extern "C" {
+    fn fsync(fd: i32) -> i32;
+}
+
+/// `fsync(2)`: the file's data and metadata go to the drive, which may still hold them in its
+/// cache.
+pub(crate) fn push_to_drive(file: &File) -> io::Result<()> {
+    // SAFETY: the descriptor is valid while `file` lives; `fsync` touches no memory of the caller.
+    if unsafe { fsync(file.as_raw_fd()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `fcntl(F_FULLFSYNC)`: the file goes to the drive and the drive writes its whole cache to
+/// permanent storage, so everything any file sent to that drive before is durable.
+pub(crate) fn flush_drive(file: &File) -> io::Result<()> {
+    // SAFETY: the descriptor is valid while `file` lives; `F_FULLFSYNC` takes no argument.
+    if unsafe { fcntl(file.as_raw_fd(), F_FULLFSYNC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 // ----- kqueue -----
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd, RawFd};
@@ -322,6 +351,22 @@ mod tests {
             elapsed < Duration::from_secs(1)
         });
         assert!(interrupted, "no wait was interrupted by the signal");
+    }
+
+    #[test]
+    fn a_file_goes_to_the_drive_and_the_drive_flushes_its_cache() {
+        let path =
+            std::env::temp_dir().join(format!("teseladb-sys-durable-{}", std::process::id()));
+        let mut file = File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"durable").unwrap();
+        push_to_drive(&file).unwrap();
+        flush_drive(&file).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // A descriptor that is not a file of a drive is an error of each call.
+        let pipe = std::process::Command::new("true").stdout(std::process::Stdio::piped()).spawn();
+        let out = pipe.unwrap().stdout.take().unwrap();
+        let not_a_drive = File::from(std::os::fd::OwnedFd::from(out));
+        assert!(flush_drive(&not_a_drive).is_err());
     }
 
     #[test]

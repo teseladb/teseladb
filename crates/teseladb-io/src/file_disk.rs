@@ -102,13 +102,13 @@ pub fn write_whole(path: &Path, bytes: &[u8], direct: bool) -> io::Result<()> {
     }
     f.write_all_at(&bytes[head..], head as u64)?;
     crate::counters::record_sync();
-    f.sync_all()
+    crate::drive_flush::make_durable(&f)
 }
 
 /// Syncs directory `dir`, so that the creations, renames and removals in it are durable.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     crate::counters::record_sync();
-    File::open(dir)?.sync_all()
+    crate::drive_flush::make_durable(&File::open(dir)?)
 }
 
 /// [`errno`] for `map_err`.
@@ -267,12 +267,14 @@ impl FileDisk {
             }
             IoOp::Sync { file, .. } => {
                 crate::counters::record_sync();
-                self.file(*file)?.file.sync_all().map_err(io_errno)?;
+                crate::drive_flush::make_durable(&self.file(*file)?.file).map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::SyncDir { path } => {
                 crate::counters::record_sync();
-                File::open(self.full(path)).and_then(|d| d.sync_all()).map_err(io_errno)?;
+                File::open(self.full(path))
+                    .and_then(|d| crate::drive_flush::make_durable(&d))
+                    .map_err(io_errno)?;
                 Ok(None)
             }
             IoOp::Truncate { file, len } => {

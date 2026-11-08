@@ -449,10 +449,16 @@ fn node_value(n: NodeId) -> Value {
 
 /// The disk's metrics: its syncs, which bound what a confirmed write costs (H-008 of the native
 /// tests against RefDb).
-fn disk_metrics(out: &mut String, syncs: u64) {
+fn disk_metrics(out: &mut String, syncs: u64, flushes: u64) {
     let name = "teseladb_disk_syncs_total";
     let _ = writeln!(out, "# HELP {name} Syncs of files and folders to the disk.");
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {syncs}");
+    let name = "teseladb_disk_device_flushes_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Flushes of a drive's cache, each shared by the syncs that waited for it."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {flushes}");
 }
 
 /// The transactions' metrics (008 FR-019).
@@ -569,7 +575,11 @@ impl AdminBackend for NodeAdmin {
             &self.handle.sessions,
         ));
         txn_metrics(&mut out, &status.txn);
-        disk_metrics(&mut out, teseladb_io::counters::syncs());
+        disk_metrics(
+            &mut out,
+            teseladb_io::counters::syncs(),
+            teseladb_io::counters::device_flushes(),
+        );
         let lags = crate::backend::range_lags(crate::clock::wall_ms());
         stream_metrics(&mut out, teseladb_wire::commands::change_stream::stream_metrics(), &lags);
         search_metrics(
@@ -1403,8 +1413,9 @@ mod tests {
     #[test]
     fn the_disk_metrics_give_the_syncs() {
         let mut out = String::new();
-        disk_metrics(&mut out, 7);
+        disk_metrics(&mut out, 7, 3);
         assert!(out.lines().any(|l| l == "teseladb_disk_syncs_total 7"), "{out}");
+        assert!(out.lines().any(|l| l == "teseladb_disk_device_flushes_total 3"), "{out}");
         assert!(out.lines().any(|l| l == "# TYPE teseladb_disk_syncs_total counter"), "{out}");
     }
 

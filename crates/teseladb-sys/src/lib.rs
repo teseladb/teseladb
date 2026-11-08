@@ -35,6 +35,32 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("TeselaDB only builds for Linux and macOS");
 
+/// Durability on macOS, where `fsync(2)` leaves the data in the drive's cache and only
+/// `F_FULLFSYNC` makes it durable, at the cost of flushing the whole drive (H-015 of the native
+/// tests): the disk threads push their files with [`push_to_drive`] and share one
+/// [`flush_drive`] for all of them.
+#[cfg(target_os = "macos")]
+pub mod drive {
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+
+    /// `fsync(2)`: the file's data and metadata go to the drive.
+    pub fn push_to_drive(file: &File) -> io::Result<()> {
+        crate::os::push_to_drive(file)
+    }
+
+    /// `fcntl(F_FULLFSYNC)`: the drive writes its whole cache to permanent storage.
+    pub fn flush_drive(file: &File) -> io::Result<()> {
+        crate::os::flush_drive(file)
+    }
+
+    /// The device the file lives on (`st_dev`).
+    pub fn device_of(file: &File) -> io::Result<u64> {
+        Ok(file.metadata()?.dev())
+    }
+}
+
 /// `flock(2)` operations.
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
