@@ -200,6 +200,10 @@ pub struct Replicas {
     /// The splits by load this core asked for, by range, with their cut: the new half moves to the
     /// least loaded core once Group 0 has it (FR-040, D-150).
     load_cuts: BTreeMap<GroupId, Vec<u8>>,
+    /// The core each range is moving to: the moves Group 0 recorded and those this core asked
+    /// for and Group 0 has not recorded yet, which the least loaded core counts (FR-040).
+    moving_to: BTreeMap<GroupId, u16>,
+    asked_moves: BTreeMap<GroupId, u16>,
 }
 
 impl Replicas {
@@ -224,6 +228,8 @@ impl Replicas {
             capped: BTreeSet::new(),
             cores: 1,
             load_cuts: BTreeMap::new(),
+            moving_to: BTreeMap::new(),
+            asked_moves: BTreeMap::new(),
             chunks: (BTreeMap::new(), None),
         }
     }
@@ -259,6 +265,13 @@ impl Replicas {
     /// Group 0's ranges changed.
     pub fn set(&mut self, ranges: &Ranges) {
         self.all.clone_from(&ranges.descs);
+        self.moving_to = ranges.relocations.iter().map(|(g, (core, _))| (*g, *core)).collect();
+        // A move Group 0 recorded, or one that ended, no longer waits as asked.
+        let all = &self.all;
+        let moving = &self.moving_to;
+        self.asked_moves.retain(|g, core| {
+            !moving.contains_key(g) && all.iter().any(|d| d.group == *g && d.core != *core)
+        });
         self.hosting.1 = u64::MAX;
         self.refresh();
         self.splits = ranges.splits.clone();
@@ -621,19 +634,27 @@ impl Replicas {
             self.load_cuts.remove(&parent);
             let target = self.least_loaded_core();
             if self.cores > 1 && target != now_on {
+                self.note_asked_move(half, target);
                 out.push(Group0Command::RelocateRange { group: half, core: target });
             }
         }
     }
 
+    /// A move of `g` to `core` this core asked for, counted until Group 0 records it.
+    pub fn note_asked_move(&mut self, g: GroupId, core: u16) {
+        self.asked_moves.insert(g, core);
+    }
+
     /// The core of this node with the fewest ranges, Group 0 counting on core 0, the lowest on a
-    /// tie (as Group 0 picks the core of a new range, FR-004).
+    /// tie (as Group 0 picks the core of a new range, FR-004). A range that is moving counts on the
+    /// core it moves to, so that halves asking at once do not all pick the same one.
     fn least_loaded_core(&self) -> u16 {
         let mut load = vec![0usize; usize::from(self.cores.max(1))];
         load[0] += 1;
         for d in &self.all {
+            let core = self.asked_moves.get(&d.group).or(self.moving_to.get(&d.group)).copied();
             if d.replicas.iter().any(|(n, _)| *n == self.me)
-                && let Some(l) = load.get_mut(usize::from(d.core))
+                && let Some(l) = load.get_mut(usize::from(core.unwrap_or(d.core)))
             {
                 *l += 1;
             }
@@ -1041,6 +1062,28 @@ mod tests {
         // Asked once: the next round does not ask again.
         o.run(1);
         assert!(!o.lead().iter().any(|c| matches!(c, Group0Command::RelocateRange { .. })));
+    }
+
+    #[test]
+    fn the_least_loaded_core_counts_the_moves_in_flight() {
+        // Several halves of splits by load asked for their core at once all chose the same one: the
+        // descriptors keep a range on its old core until the move ends (H-015 of the native tests:
+        // 10 ranges on 6 cores, 4 of them on one). A range counts on the core it is moving to,
+        // whether Group 0 recorded the move or this core just asked for it.
+        let mut r = Replicas::new(ME, 0, 1 << 30);
+        r.set_cores(4);
+        let mut moving = desc(2, &[2], &[3]);
+        moving.core = 0;
+        let ranges = Ranges {
+            descs: vec![desc(1, &[1], &[2]), moving, desc(3, &[3], &[4]), desc(4, &[4], &[5])],
+            relocations: BTreeMap::from([(GroupId(2), (2, 7))]),
+            ..Ranges::default()
+        };
+        r.set(&ranges);
+        r.note_asked_move(GroupId(3), 3);
+        // Core 0: ranges 1 and 4 and Group 0; core 2: range 2 on its way; core 3: range 3 asked;
+        // core 1: nothing.
+        assert_eq!(r.least_loaded_core(), 1);
     }
 
     #[test]
