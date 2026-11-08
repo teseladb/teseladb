@@ -954,6 +954,14 @@ impl Backend for ServerBackend {
         self.read_ddl(from)
     }
 
+    /// An empty entry of Group 0, answered once this node's copy applied it (`catalog_ops`): the
+    /// copy then holds every change committed before it (013 T058).
+    fn catalog_barrier(&mut self) -> Result<(), CommandError> {
+        self.group0_change(CatalogReq::Tick)?.map(drop).map_err(|e| {
+            CommandError::new(INTERNAL_ERROR, format!("Group 0 refused an empty entry: {e:?}"))
+        })
+    }
+
     fn txn_pause(&mut self) -> bool {
         thread::sleep(RETRY_PAUSE);
         Instant::now() < self.until()

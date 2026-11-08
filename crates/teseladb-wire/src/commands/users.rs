@@ -547,7 +547,9 @@ fn users_info<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let restrictions = show(cmd, USERS_INFO, "showAuthenticationRestrictions", false)?;
     let filter = args::doc(cmd, USERS_INFO, "filter")?;
     authenticated_mechanism(cmd)?;
-    let docs = match wanted(ctx.first(), ctx.db)? {
+    let wanted = wanted(ctx.first(), ctx.db)?;
+    principals_barrier(ctx)?;
+    let docs = match wanted {
         Wanted::Database => ctx.backend.principals(Principal::User, Some(ctx.db))?,
         Wanted::AllDatabases => ctx.backend.principals(Principal::User, None)?,
         Wanted::Users(names) => {
@@ -599,4 +601,12 @@ fn invalidate_user_cache<B: Backend + ?Sized>(
     }
     ctx.backend.invalidate_user_cache();
     Ok(ok())
+}
+
+/// The barrier the reads of users and roles of a command take first (013 T058): this node's copy of Group 0 then
+/// holds every change any node committed before the command.
+pub(crate) fn principals_barrier<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+) -> Result<(), CommandError> {
+    ctx.backend.catalog_barrier()
 }

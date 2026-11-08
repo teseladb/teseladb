@@ -86,6 +86,12 @@ pub struct Mem {
     pub facts: teseladb_wire::commands::diagnostics::ProcessFacts,
     /// The users and roles of Group 0.
     pub security: Security,
+    /// Whether the reads of users and roles see the copy of Group 0 as it was at the last
+    /// [`Backend::catalog_barrier`], as a node behind the writes of another one does (013 T058).
+    pub stale_security: bool,
+    /// The copy those reads see, and the barriers taken.
+    pub seen_security: Security,
+    pub barriers: usize,
     /// The next this many security writes find a concurrent change (`usize::MAX`: all).
     pub fail_security_writes: usize,
     /// A user removed just before the next security write.
@@ -1238,7 +1244,14 @@ impl Backend for Mem {
         db: &str,
         name: &str,
     ) -> Result<Option<Vec<u8>>, CommandError> {
-        Ok(self.security.get(kind, db, name).map(<[u8]>::to_vec))
+        let table = if self.stale_security { &self.seen_security } else { &self.security };
+        Ok(table.get(kind, db, name).map(<[u8]>::to_vec))
+    }
+
+    fn catalog_barrier(&mut self) -> Result<(), CommandError> {
+        self.barriers += 1;
+        self.seen_security = self.security.clone();
+        Ok(())
     }
 
     fn principals(
@@ -1246,7 +1259,8 @@ impl Backend for Mem {
         kind: Principal,
         db: Option<&str>,
     ) -> Result<Vec<Vec<u8>>, CommandError> {
-        Ok(self.security.list(kind, db).into_iter().map(<[u8]>::to_vec).collect())
+        let table = if self.stale_security { &self.seen_security } else { &self.security };
+        Ok(table.list(kind, db).into_iter().map(<[u8]>::to_vec).collect())
     }
 
     fn security_write(

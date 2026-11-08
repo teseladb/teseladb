@@ -429,6 +429,12 @@ pub trait Backend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+    /// Brings this node's copy of Group 0 up to every change committed before the call, so that a read of
+    /// users and roles after it sees what any node wrote (013 T058). A backend with a single copy has
+    /// nothing to wait for.
+    fn catalog_barrier(&mut self) -> Result<(), CommandError> {
+        Ok(())
+    }
     /// Reads `spans` as [`Backend::scan`] reads each, in their order. A node sends them to their
     /// ranges at once and then takes the answers, instead of one trip after the other.
     fn scan_spans(
