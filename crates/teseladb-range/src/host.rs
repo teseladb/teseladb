@@ -342,6 +342,9 @@ enum MutState {
     /// replica holds, so it goes only once the replica confirms it still leads, as a read does
     /// (its operation is in `RangeHost::ops`).
     Confirm(RangeError),
+    /// A read of a transaction's record that pushed it (008 T043): its answer goes once the
+    /// replica confirms it still leads (its operation is in `RangeHost::ops`).
+    Answer(Box<Reply>),
 }
 
 /// A proposed write: at `ts`, entry `index`; once applied it may still wait for the copies its
@@ -379,7 +382,7 @@ impl MutState {
     fn proposal(&mut self) -> &mut Proposal {
         match self {
             MutState::Proposed(p) => p,
-            MutState::Latch | MutState::Read(_) | MutState::Confirm(_) => {
+            MutState::Latch | MutState::Read(_) | MutState::Confirm(_) | MutState::Answer(_) => {
                 unreachable!("only a proposed write waits")
             }
         }
@@ -1036,6 +1039,9 @@ impl RangeHost {
         match req {
             Req::Mut(MutReq { state: MutState::Confirm(e), .. }) => {
                 self.reply(id, Err(r.map_or_else(op_error, |_| e)));
+            }
+            Req::Mut(MutReq { state: MutState::Answer(answer), .. }) => {
+                self.reply(id, r.map(|_| *answer).map_err(op_error));
             }
             Req::Mut(m) => {
                 let r = r.map(|d| matches!(&d, Done::Applied(o) if fence::refused(o)));

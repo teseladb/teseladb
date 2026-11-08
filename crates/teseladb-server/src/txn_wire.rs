@@ -18,6 +18,8 @@ const FIND_INTENTS: u8 = 5;
 const FORGET_RECORD: u8 = 6;
 /// Tag of `TxnOp::ReadRecord`.
 const READ_RECORD: u8 = 7;
+/// Tag of `TxnOp::PushByRead` (008 T043).
+const PUSH_BY_READ: u8 = 8;
 
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -188,6 +190,10 @@ pub fn put_op(e: &mut Encoder, op: &TxnOp) {
         TxnOp::ReadRecord { txn } => {
             e.u8(READ_RECORD).u128(txn.0);
         }
+        TxnOp::PushByRead { txn, at } => {
+            e.u8(PUSH_BY_READ).u128(txn.0);
+            put_hlc(e, *at);
+        }
     }
 }
 
@@ -221,6 +227,7 @@ pub fn get_op(d: &mut Decoder<'_>) -> Result<TxnOp, DecodeError> {
         }
         FORGET_RECORD => TxnOp::ForgetRecord { txn, before: get_hlc(d)? },
         READ_RECORD => TxnOp::ReadRecord { txn },
+        PUSH_BY_READ => TxnOp::PushByRead { txn, at: get_hlc(d)? },
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -262,6 +269,7 @@ mod tests {
             TxnOp::FindIntents { txn, start: vec![1, 2], end: vec![3] },
             TxnOp::ForgetRecord { txn, before: ts },
             TxnOp::ReadRecord { txn },
+            TxnOp::PushByRead { txn, at: ts },
             TxnOp::ResolveIntents {
                 txn,
                 status: TxnStatus::Committed,

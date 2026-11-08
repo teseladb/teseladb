@@ -1,15 +1,17 @@
 //! What a reader does when a read stops at an intent (008 FR-003, FR-005): it pushes the intent's
-//! transaction just above its mark, learns its state from the record the push leaves, reads again
-//! knowing it, and resolves the intents of a finished transaction it met (lazy resolution).
+//! transaction above its mark by reading its record there (008 T043), learns its state from the
+//! answer, reads again knowing it, and resolves the intents of a finished transaction it met (lazy
+//! resolution).
 
 use teseladb_hlc::Hlc;
 use teseladb_range::host::TxnOp;
-use teseladb_range::intents::{IntentOwner, Push, TxnRecord, TxnStatus, succ};
+use teseladb_range::intents::{IntentOwner, TxnRecord, TxnStatus};
 use teseladb_range::push::Known;
 
-/// The push a read at `read_ts` sends for the transaction whose intent it met.
+/// The push a read at `read_ts` sends for the transaction whose intent it met: a read of its
+/// record at that mark, which the transaction then commits above (008 T043).
 pub fn push_for(owner: &IntentOwner, read_ts: Hlc) -> TxnOp {
-    TxnOp::PushTxn { txn: owner.txn, push: Push::To(succ(read_ts)) }
+    TxnOp::PushByRead { txn: owner.txn, at: read_ts }
 }
 
 /// What the record a push left tells the reader.
@@ -69,7 +71,7 @@ mod tests {
         let at = Hlc { physical: 5, logical: 2 };
         assert_eq!(
             push_for(&owner, at),
-            TxnOp::PushTxn { txn: TxnId(4), push: Push::To(Hlc { physical: 5, logical: 3 }) }
+            TxnOp::PushByRead { txn: TxnId(4), at: Hlc { physical: 5, logical: 2 } }
         );
         assert_eq!(learn(&record(TxnStatus::Pending)), Known::Pushed);
         assert_eq!(learn(&record(TxnStatus::Aborted)), Known::Aborted);

@@ -515,6 +515,29 @@ pub fn push_txn(
     })
 }
 
+/// What a reader at a mark learns by reading the record of `txn` (`stored`: its current value) at
+/// `mark`, which goes into the read cache of the record's key (008 T043): a pending transaction,
+/// also one whose coordinator has not created its record yet, commits above `mark`, since
+/// [`end_txn_above`] goes above that cache; a finished one is as it is. Nothing is written.
+///
+/// # Errors
+///
+/// [`RecordError::Corrupt`] for a stored value that is not a record.
+pub fn pushed_by_read(
+    stored: Option<&[u8]>,
+    txn: TxnId,
+    mark: Hlc,
+) -> Result<TxnRecord, RecordError> {
+    let above = succ(mark);
+    Ok(match decode_current(stored)? {
+        None => TxnRecord { min_commit_ts: above, ..fresh(txn, TxnStatus::Pending, mark) },
+        Some(r) if r.status == TxnStatus::Pending => {
+            TxnRecord { min_commit_ts: r.min_commit_ts.max(above), ..r }
+        }
+        Some(r) => r,
+    })
+}
+
 /// The mark just above the reads up to `floor`, or none when nothing was read.
 fn above(floor: Hlc) -> Hlc {
     if floor == ZERO { ZERO } else { succ(floor) }

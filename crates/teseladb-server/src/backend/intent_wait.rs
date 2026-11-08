@@ -110,11 +110,12 @@ impl ServerBackend {
         at: Hlc,
         until: Instant,
     ) -> Option<Known> {
-        let to = match self.push_turn(owner, at, until)? {
-            Ok(known) => return Some(known),
-            Err(to) => to,
-        };
-        let push = TxnOp::PushTxn { txn: owner.txn, push: Push::To(to) };
+        // The node's other readers wait for this push; it reads the record at the reader's own
+        // mark (008 T043), which the leader's clock has reached or soon reaches.
+        if let Ok(known) = self.push_turn(owner, at, until)? {
+            return Some(known);
+        }
+        let push = teseladb_txn::read::push_for(owner, at);
         let record = self.h.routes.lookup(&owner.record_key).map(|e| e.group);
         let rec = match record.map(|g| self.ask_range(g, push)) {
             Some(Ok(RemoteReply::Record(rec))) => Some(rec),

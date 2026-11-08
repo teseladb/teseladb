@@ -196,7 +196,7 @@ impl RangeHost {
             return self.propose(core, id, m, latch, &current, now);
         }
         // A refused write waits for the core to confirm the leadership.
-        if matches!(m.state, MutState::Confirm(_)) {
+        if matches!(m.state, MutState::Confirm(_) | MutState::Answer(_)) {
             self.reqs.insert(id, Req::Mut(m));
             return moved;
         }

@@ -12,7 +12,7 @@ use teseladb_multiraft::ReadMode;
 use crate::command::{IntentPut, Resolution};
 use crate::intents::{
     Conflict, Intent, IntentOp, Latest, Push, RecordError, RecordOp, TxnId, TxnRecord, TxnStatus,
-    check_put, end_txn_above, push_txn, record_key,
+    check_put, end_txn_above, push_txn, pushed_by_read, record_key,
 };
 use crate::mutate::live_size_of;
 
@@ -76,6 +76,18 @@ pub enum TxnOp {
         /// End (excluded).
         end: Vec<u8>,
     },
+    /// A reader at `at` pushes `txn` above its mark by reading its record (008 T043): the leader
+    /// reads it at a mark of its clock at or above `at`, which goes into the read cache of the
+    /// record's key, and answers once it confirms it still leads, with the record as
+    /// [`pushed_by_read`] leaves it. Nothing is written; `EndTxn` commits above that cache. A mark
+    /// ahead of the leader's wall clock is refused with [`RangeError::Overloaded`], and the reader
+    /// goes again after a pause.
+    PushByRead {
+        /// The transaction.
+        txn: TxnId,
+        /// The reader's mark.
+        at: Hlc,
+    },
     /// Reads the record of `txn` without writing anything: it answers with the record, or
     /// `NoSuchTransaction` (the reaper looks for a session's next transaction, 008 record GC).
     ReadRecord {
@@ -120,7 +132,8 @@ impl TxnOp {
             TxnOp::EndTxn { txn, .. }
             | TxnOp::PushTxn { txn, .. }
             | TxnOp::ForgetRecord { txn, .. }
-            | TxnOp::ReadRecord { txn } => vec![record_key(*txn)],
+            | TxnOp::ReadRecord { txn }
+            | TxnOp::PushByRead { txn, .. } => vec![record_key(*txn)],
             TxnOp::ResolveIntents { keys, .. } => keys.clone(),
             TxnOp::FindIntents { start, .. } => vec![start.clone()],
         }
@@ -295,7 +308,7 @@ fn evaluate_txn(
                 false => Err(RangeError::WriteConflict),
             }
         }
-        TxnOp::FindIntents { .. } | TxnOp::ReadRecord { .. } => {
+        TxnOp::FindIntents { .. } | TxnOp::ReadRecord { .. } | TxnOp::PushByRead { .. } => {
             unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
@@ -387,6 +400,10 @@ impl RangeHost {
             self.release(m.g, m.term, latch);
             self.reply(id, answer);
             return true;
+        }
+        if let TxnOp::PushByRead { txn, at } = **op {
+            let stored = versions.first().and_then(|v| stored_record(v)).map(<[u8]>::to_vec);
+            return self.push_by_read(core, id, m, latch, (txn, at, stored), now);
         }
         if let TxnOp::FindIntents { txn, start, end } = &**op {
             let range_end = self.ranges.get(&m.g).map(|r| r.end.clone()).unwrap_or_default();
@@ -489,6 +506,68 @@ impl RangeHost {
                 Err(oe) => self.reply(id, Err(op_error(oe))),
             },
             Err((e, false)) => self.reply(id, Err(e)),
+        }
+        true
+    }
+
+    /// [`TxnOp::PushByRead`] once the record's latch is held: the read at a mark of the clock at or
+    /// above the reader's, which goes into the read cache of the record's key before the latch is
+    /// released (an `EndTxn` waiting for it then commits above), and its answer once the core
+    /// confirms the leadership, as a read's (005 FR-009).
+    fn push_by_read<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        id: ReqId,
+        mut m: MutReq,
+        latch: LatchId,
+        (txn, at, stored): (TxnId, Hlc, Option<Vec<u8>>),
+        now: Nanos,
+    ) -> bool {
+        // The cache keeps only reads at marks the leader's clock reached, which the next leader's
+        // cache starts above (005 FR-005): a mark ahead of the wall clock goes again later.
+        let mark = match at.physical <= self.wall_ms {
+            true => {
+                self.clock.0.update(at);
+                core.read_mark(now)
+            }
+            false => None,
+        };
+        let Some(mark) = mark.filter(|mark| *mark >= at) else {
+            self.release(m.g, m.term, latch);
+            self.reply(id, Err(RangeError::Overloaded));
+            return true;
+        };
+        let record = pushed_by_read(stored.as_deref(), txn, mark).map_err(record_error);
+        // Faulty variant (008 T043): the read does not go into the cache, so a commit evaluated
+        // after it may go at or below the reader's mark.
+        #[cfg(not(teseladb_bug = "push_read_not_cached"))]
+        if let Some(l) = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()) {
+            let key = record_key(txn);
+            l.cache.record(&key, &[key.as_slice(), &[0]].concat(), mark);
+        }
+        self.release(m.g, m.term, latch);
+        let record = match record {
+            Ok(r) => Reply::Record(r),
+            Err(e) => {
+                self.reply(id, Err(e));
+                return true;
+            }
+        };
+        // Faulty variant (008 T043): the answer goes without confirming the leadership, so a
+        // leader that lost it may answer «pending» for a transaction its successor committed.
+        #[cfg(teseladb_bug = "push_read_without_lease")]
+        {
+            self.reply(id, Ok(record));
+            return true;
+        }
+        #[cfg(not(teseladb_bug = "push_read_without_lease"))]
+        match core.read(m.g, ReadMode::Lease, now) {
+            Ok(op_id) => {
+                m.state = MutState::Answer(Box::new(record));
+                self.ops.insert(op_id, id);
+                self.reqs.insert(id, Req::Mut(m));
+            }
+            Err(oe) => self.reply(id, Err(op_error(oe))),
         }
         true
     }

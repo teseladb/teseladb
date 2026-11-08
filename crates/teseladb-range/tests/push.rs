@@ -572,3 +572,105 @@ fn the_leader_gives_a_stream_its_versions_up_to_the_closed_mark() {
         assert_eq!(n.answer(id), Err(RangeError::OutOfRange), "{start:?}..{end:?}");
     }
 }
+
+/// The record a push by read answers with.
+fn pushed_record(r: Result<Reply, RangeError>) -> teseladb_range::intents::TxnRecord {
+    match r {
+        Ok(Reply::Record(rec)) => rec,
+        other => panic!("not a record: {other:?}"),
+    }
+}
+
+#[test]
+fn a_reader_pushes_a_pending_transaction_by_reading_its_record() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    let at = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(A.to_vec(), put(b"new"))],
+    }));
+    let begin = RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old };
+    assert!(matches!(n.txn(TxnOp::EndTxn { txn: T1, op: begin }), Ok(Reply::Record(_))));
+    // A reader at a mark the leader's clock passed reads the record there (008 T043): it learns
+    // the transaction pending above its mark, and the record itself stays as it was.
+    let read_at = Hlc { physical: at.physical + 1, logical: 0 };
+    let rec = pushed_record(n.txn(TxnOp::PushByRead { txn: T1, at: read_at }));
+    assert_eq!(rec.status, TxnStatus::Pending);
+    assert!(rec.min_commit_ts > read_at, "{rec:?}");
+    let again = RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old };
+    let Ok(Reply::Record(stored)) = n.txn(TxnOp::EndTxn { txn: T1, op: again }) else {
+        panic!("no record")
+    };
+    assert!(stored.min_commit_ts < read_at, "nothing was written: {stored:?}");
+    // The commit, with the coordinator's mark below the read, goes above it.
+    let commit = RecordOp::Commit { ts: at, spans: vec![] };
+    let done = pushed_record(n.txn(TxnOp::EndTxn { txn: T1, op: commit }));
+    assert_eq!(done.status, TxnStatus::Committed);
+    assert!(done.commit_ts >= rec.min_commit_ts, "{done:?} below {rec:?}");
+    // A push by read of a finished transaction answers its record as it is.
+    assert_eq!(pushed_record(n.txn(TxnOp::PushByRead { txn: T1, at: read_at })), done);
+}
+
+#[test]
+fn a_push_by_read_before_the_record_exists_holds_the_coordinator_above_it() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    let at = intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(A.to_vec(), put(b"new"))],
+    }));
+    let read_at = Hlc { physical: at.physical + 1, logical: 0 };
+    let rec = pushed_record(n.txn(TxnOp::PushByRead { txn: T1, at: read_at }));
+    assert_eq!((rec.txn, rec.status), (T1, TxnStatus::Pending));
+    assert!(rec.min_commit_ts > read_at);
+    // The coordinator creates its record afterwards: its commit still goes above the read.
+    let begin = RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old };
+    assert!(matches!(n.txn(TxnOp::EndTxn { txn: T1, op: begin }), Ok(Reply::Record(_))));
+    let commit = RecordOp::Commit { ts: at, spans: vec![] };
+    let done = pushed_record(n.txn(TxnOp::EndTxn { txn: T1, op: commit }));
+    assert!(done.commit_ts >= rec.min_commit_ts, "{done:?} below {rec:?}");
+}
+
+#[test]
+fn a_push_by_read_and_a_commit_on_one_record_are_ordered() {
+    for push_first in [false, true] {
+        let mut n = Node::new();
+        let old = n.write(A, b"old");
+        let at = intents_mark(n.txn(TxnOp::PutIntents {
+            txn: T1,
+            read_ts: old,
+            writes: vec![(A.to_vec(), put(b"new"))],
+        }));
+        let begin = RecordOp::Begin { lsid: 1, txn_number: 1, read_ts: old };
+        assert!(matches!(n.txn(TxnOp::EndTxn { txn: T1, op: begin }), Ok(Reply::Record(_))));
+        let reader = Hlc { physical: at.physical + 1, logical: 0 };
+        let commit = TxnOp::EndTxn { txn: T1, op: RecordOp::Commit { ts: at, spans: vec![] } };
+        let push = TxnOp::PushByRead { txn: T1, at: reader };
+        let ops = if push_first { [push, commit] } else { [commit, push] };
+        let (now, wall) = (n.now, n.wall());
+        let ids =
+            ops.map(|op| n.host.txn(&mut n.core, TxnReq { g: G, op, wc: MAJORITY }, now, wall));
+        let answers = ids.map(|id| pushed_record(n.answer(id)));
+        let (pushed, committed) =
+            if push_first { (&answers[0], &answers[1]) } else { (&answers[1], &answers[0]) };
+        assert_eq!(committed.status, TxnStatus::Committed, "push first {push_first}");
+        if push_first {
+            assert_eq!(pushed.status, TxnStatus::Pending);
+            assert!(committed.commit_ts >= pushed.min_commit_ts, "the commit went above the read");
+        } else {
+            assert_eq!(pushed.status, TxnStatus::Committed);
+            assert_eq!(pushed.commit_ts, committed.commit_ts, "the reader learns the commit");
+        }
+    }
+}
+
+#[test]
+fn a_push_by_read_at_a_mark_ahead_of_the_leaders_wall_clock_is_refused_for_now() {
+    let mut n = Node::new();
+    let ahead = Hlc { physical: n.wall() + 60_000, logical: 0 };
+    // The reader goes again after a pause (`push_for_read`): the leader never reads its record
+    // at a mark its clock has not reached.
+    assert_eq!(n.txn(TxnOp::PushByRead { txn: T1, at: ahead }), Err(RangeError::Overloaded));
+}

@@ -1040,7 +1040,10 @@ mod tests {
             TxnOp::PutIntents { .. } | TxnOp::ResolveIntents { .. } | TxnOp::OnePhase { .. } => {
                 Ok(Reply::Intents { ts: ts(5) })
             }
-            TxnOp::FindIntents { .. } | TxnOp::ForgetRecord { .. } | TxnOp::ReadRecord { .. } => {
+            TxnOp::FindIntents { .. }
+            | TxnOp::ForgetRecord { .. }
+            | TxnOp::ReadRecord { .. }
+            | TxnOp::PushByRead { .. } => {
                 panic!("only the reaper sends {:?}", r.op)
             }
         }

@@ -24,9 +24,14 @@
 (* becomes a version before EndTxn), and for T035 "begin_ignores_push" (a coordinator that finds   *)
 (* the Pending record a push created starts it afresh, dropping its min_commit_ts) and             *)
 (* "commit_below_intent" (the commit timestamp ignores the intents' timestamps).                   *)
+(* With PushByRead (008 T043) a reader pushes a live transaction by reading its record: the read    *)
+(* raises the read cache of the record's key to its timestamp (recRead) and leaves the record as it *)
+(* is, and EndTxn(Committed) goes above that cache too. Pushing an abandoned transaction still      *)
+(* writes the record. The reads are lease reads at or below the leader's clock (HlcLease covers     *)
+(* them), so one clock is enough here. Mutant "commit_below_record_reads" ignores recRead.         *)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant
+CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant, PushByRead
 
 NoTxn == 0
 None == "none"
@@ -51,11 +56,12 @@ VARIABLES
     intent,    \* intent on each key: [t, ts]
     ver,       \* committed versions of each key: set of [t, ts]
     maxRead,   \* the highest timestamp a read was served at, per key (the read cache)
+    recRead,   \* the read cache of each transaction's record key: the highest push by a read
     reads,     \* ghost: reads served: [k, rts, seen]
     abortedFor, \* ghost: transactions a reader saw aborted
     broken     \* ghost: a read missed a commit at or below its timestamp
 
-vars == <<now, coord, readTs, rec, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+vars == <<now, coord, readTs, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 Max(a, b) == IF a > b THEN a ELSE b
 NoIntent == [t |-> NoTxn, ts |-> 0]
@@ -69,6 +75,7 @@ TypeOK ==
     /\ wrote \in [Txns -> SUBSET Keys]
     /\ intent \in [Keys -> [t : Txns \cup {NoTxn}, ts : 0..MaxTs + 1]]
     /\ maxRead \in [Keys -> 0..MaxTs]
+    /\ recRead \in [Txns -> 0..MaxTs]
     /\ broken \in BOOLEAN
 
 Init ==
@@ -81,6 +88,7 @@ Init ==
     /\ intent = [k \in Keys |-> NoIntent]
     /\ ver = [k \in Keys |-> {}]
     /\ maxRead = [k \in Keys |-> 0]
+    /\ recRead = [t \in Txns |-> 0]
     /\ reads = {}
     /\ abortedFor = {}
     /\ broken = FALSE
@@ -88,13 +96,13 @@ Init ==
 Tick ==
     /\ now < MaxTs
     /\ now' = now + 1
-    /\ UNCHANGED <<coord, readTs, rec, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<coord, readTs, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 Begin(t) ==
     /\ coord[t] = Idle
     /\ coord' = [coord EXCEPT ![t] = Writing]
     /\ readTs' = [readTs EXCEPT ![t] = now]
-    /\ UNCHANGED <<now, rec, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The coordinator creates its record: Pending, or it adopts the one a push created; over an
 \* Aborted record it fails with NoSuchTransaction (the mutant overwrites it).
@@ -112,7 +120,7 @@ CreateRecord(t) ==
        \/ /\ rec[t].st = Pending /\ rec[t].minC > 0 /\ Mutant = "begin_ignores_push"
           /\ rec' = [rec EXCEPT ![t].minC = 0]
           /\ UNCHANGED coord
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* PutIntents on key k: a conflict ends the transaction (the driver retries it).
 PutIntent(t, k) ==
@@ -127,7 +135,7 @@ PutIntent(t, k) ==
              ELSE /\ intent' = [intent EXCEPT ![k] = [t |-> t, ts |-> Max(now, maxRead[k] + 1)]]
                   /\ wrote' = [wrote EXCEPT ![t] = @ \cup {k}]
                   /\ UNCHANGED <<coord, rec>>
-    /\ UNCHANGED <<now, readTs, alive, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* EndTxn(Committed) in the record's range.
 Commit(t) ==
@@ -137,42 +145,44 @@ Commit(t) ==
                                         /\ \E k \in Keys : intent[k].t = t /\ intent[k].ts = m
                                         /\ \A k \in Keys : intent[k].t = t => intent[k].ts <= m
                                ELSE 0, now)
+           readFloor == IF recRead[t] > 0 THEN recRead[t] + 1 ELSE 0
            cts == CASE Mutant = "commit_below_push" -> intentMax
                     [] Mutant = "commit_below_intent" -> Max(now, rec[t].minC)
-                    [] OTHER -> Max(intentMax, rec[t].minC)
+                    [] Mutant = "commit_below_record_reads" -> Max(intentMax, rec[t].minC)
+                    [] OTHER -> Max(Max(intentMax, rec[t].minC), readFloor)
        IN /\ cts <= MaxTs + 1
           /\ rec' = [rec EXCEPT ![t] = [@ EXCEPT !.st = Committed, !.cts = cts]]
           /\ coord' = [coord EXCEPT ![t] = Done]
           /\ broken' = (\/ broken
                          \/ (\E r \in reads : r.k \in wrote[t] /\ r.rts >= cts /\ t \notin r.seen)
                          \/ t \in abortedFor)
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, reads, abortedFor>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor>>
 
 \* EndTxn(Aborted) by the coordinator.
 Abort(t) ==
     /\ coord[t] = Writing /\ alive[t]
     /\ rec' = [rec EXCEPT ![t].st = IF @ = Pending \/ @ = None THEN Aborted ELSE @]
     /\ coord' = [coord EXCEPT ![t] = Done]
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The coordinator stops sending heartbeats: it died, or it is only late and may come back.
 Stall(t) ==
     /\ coord[t] \in {Idle, Writing} /\ alive[t]
     /\ alive' = [alive EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* A late coordinator comes back; a dead one never does.
 Resume(t) ==
     /\ ~alive[t] /\ coord[t] \in {Idle, Writing}
     /\ alive' = [alive EXCEPT ![t] = TRUE]
-    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The reaper (or a writer's push) aborts a transaction without heartbeat; a missing record is
 \* created Aborted.
 Reap(t) ==
     /\ ~alive[t] /\ rec[t].st \in {None, Pending}
     /\ rec' = [rec EXCEPT ![t].st = Aborted]
-    /\ UNCHANGED <<now, coord, readTs, alive, wrote, intent, ver, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* ResolveIntents of a finished record (in the background or by a reader): the mutant turns an
 \* intent into a version before the record is committed.
@@ -185,11 +195,13 @@ Resolve(t, k) ==
        \/ /\ Mutant = "resolve_before_commit" /\ rec[t].st = Pending
           /\ ver' = [ver EXCEPT ![k] = @ \cup {[t |-> t, ts |-> intent[k].ts]}]
     /\ intent' = [intent EXCEPT ![k] = NoIntent]
-    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, maxRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, maxRead, recRead, reads, abortedFor, broken>>
 
-\* What a push does to the record of t for a reader at rts: the record after it.
+\* What a push does to the record of t for a reader at rts: the record after it. Pushed by a read, a
+\* live transaction's record stays as it is.
 Pushed(t, rts) ==
     CASE ~alive[t] /\ rec[t].st \in {None, Pending} -> [rec[t] EXCEPT !.st = Aborted]
+      [] PushByRead /\ rec[t].st \in {None, Pending} -> rec[t]
       [] rec[t].st = None -> [st |-> Pending, minC |-> rts + 1, cts |-> 0]
       [] rec[t].st = Pending -> [rec[t] EXCEPT !.minC = Max(@, rts + 1)]
       [] OTHER -> rec[t]
@@ -212,6 +224,8 @@ Read(k) ==
                  (IF owner # NoTxn /\ after[owner].st = Aborted THEN {owner} ELSE {})
           /\ reads' = reads \cup {[k |-> k, rts |-> rts, seen |-> seen]}
           /\ maxRead' = [maxRead EXCEPT ![k] = Max(@, rts)]
+          /\ recRead' = IF mustPush /\ PushByRead /\ alive[owner]
+                           THEN [recRead EXCEPT ![owner] = Max(@, rts)] ELSE recRead
           \* A version written at or below the read after it was served breaks it too.
           /\ broken' = broken
     /\ UNCHANGED <<now, coord, readTs, alive, wrote, intent, ver>>
