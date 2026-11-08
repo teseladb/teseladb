@@ -175,6 +175,10 @@ struct Group<S> {
     /// `Ready` carries at most this commit, or a restart would take the old entries the snapshot
     /// replaces for committed and apply them (seed 4058 of `txn-bank`).
     commit_cap: Option<u64>,
+    /// The latest hard state that only moved the commit index, which is not in the log yet: the
+    /// next batch with entries writes it (H-008 of the native tests). Kept here and not in the
+    /// store, which refuses any call while its disk is full.
+    unwritten_hs: Option<teseladb_raftlog::HardState>,
     /// When a replica that needs a snapshot last refused the leader's entries.
     refused_at: Nanos,
     /// After a restart, its own snapshot `(index, data)` waiting for the state machine's data.
@@ -560,6 +564,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             parked: None,
             replaced_hs: None,
             commit_cap: None,
+            unwritten_hs: None,
             refused_at: Nanos::ZERO,
             own: None,
             own_stale: false,
@@ -1840,26 +1845,30 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant (005 T033): the entries another leader's log replaces leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_overwritten(g, &entries);
+        // Raft keeps the commit index as volatile state: a hard state that only moves it stays in
+        // the store's memory and goes to disk with the next batch that is synced, never with a
+        // sync of its own (H-008 of the native tests: the next write waited for that sync, and
+        // with the load spread over many ranges each commit took one). The term, the vote and the
+        // entries are synced before anything that depends on them leaves.
+        let on_disk = self.store.hard_state(g);
         let grp = self.groups.get_mut(&g).expect("group");
+        let latest = grp.unwritten_hs.or(on_disk);
+        let commit_only = entries.is_empty()
+            && hs.is_some_and(|h| latest.is_some_and(|d| d.term == h.term && d.vote == h.vote));
+        // A batch with entries carries the commit left out of the log.
+        let hs = match hs {
+            None if !entries.is_empty() => grp.unwritten_hs,
+            hs => hs,
+        };
         let hs = match grp.commit_cap {
             Some(cap) => hs.map(|h| teseladb_raftlog::HardState { commit: h.commit.min(cap), ..h }),
             None => hs,
         };
-        // Raft keeps the commit index as volatile state: a hard state that only moves it goes to
-        // disk with the next batch instead of taking a sync of its own, which the next write
-        // waited for (H-008 of the native tests). Nothing waits for it, as for a `Ready` with
-        // nothing to persist: an error writing it stops the store. The term, the vote and the
-        // entries are synced before anything that depends on them leaves.
-        let on_disk = self.store.hard_state(g);
-        let commit_only = entries.is_empty()
-            && hs.is_some_and(|h| on_disk.is_some_and(|d| d.term == h.term && d.vote == h.vote));
         if commit_only {
-            if self.store.append_raft(g, &[], hs, Durability::Memory).is_err() {
-                self.stop(g);
-                return false;
-            }
+            grp.unwritten_hs = hs;
             self.nothing_to_persist(g, number, after);
         } else if !entries.is_empty() || hs.is_some() {
+            grp.unwritten_hs = None;
             let Ok(t) = self.store.append_raft(g, &entries, hs, Durability::Strict) else {
                 // Disk full or store stopped: nothing is persisted or answered, and the group
                 // stops before an answer that depends on these entries can leave.

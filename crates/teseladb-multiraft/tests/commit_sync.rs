@@ -95,10 +95,18 @@ impl Single {
     /// Proposes one entry and steps a tenth of a millisecond at a time until it is answered, as a
     /// client that sends its next write once the last one is answered.
     fn write(&mut self, i: u64) {
+        self.write_then(i, Nanos::ZERO);
+    }
+
+    /// [`Single::write`], and then `pause` with no write, as a range that gets one write in a
+    /// while because the load is spread over many ranges.
+    fn write_then(&mut self, i: u64, pause: Nanos) {
         let op = self.core.propose(G, &i.to_le_bytes(), self.now).unwrap();
         for _ in 0..1_000 {
             self.settle();
             if self.done.iter().any(|(o, r)| *o == op && r.is_ok()) {
+                self.now = self.now + pause;
+                self.settle();
                 return;
             }
             self.now = self.now + STEP;
@@ -119,6 +127,28 @@ fn a_write_of_a_single_voter_takes_one_sync_and_survives_a_restart() {
     assert!(syncs <= WRITES + 1, "{syncs} syncs for {WRITES} writes");
     // The commit index on disk may lag: after a restart the entries, all of them synced, commit
     // again and the state machine has every write.
+    let Single { disk, now, .. } = s;
+    let mut s = Single::open(disk, now);
+    for _ in 0..20 {
+        s.tick();
+    }
+    assert!(!s.core.has_stopped_group());
+    assert_eq!(s.core.state_machine(G).unwrap().entries, WRITES + 1);
+}
+
+#[test]
+fn a_range_with_one_write_in_a_while_still_takes_one_sync_a_write() {
+    // With the load spread over 16 ranges each core gets one write in a while: the commit of one
+    // write waited 1 ms for the next and then went to disk alone, with its own sync (2,56 syncs
+    // an insert, 9,21 ms, H-008 of the native tests). It goes with the next write instead.
+    let mut s = Single::open(MemDisk::new(), Nanos::ZERO);
+    s.write(0);
+    let before = s.core.store().metrics().syncs;
+    for i in 1..=WRITES {
+        s.write_then(i, Nanos::from_millis(2));
+    }
+    let syncs = s.core.store().metrics().syncs - before;
+    assert!(syncs <= WRITES + 1, "{syncs} syncs for {WRITES} writes");
     let Single { disk, now, .. } = s;
     let mut s = Single::open(disk, now);
     for _ in 0..20 {
