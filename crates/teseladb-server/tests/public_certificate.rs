@@ -109,7 +109,7 @@ fn listener(port: TlsPort) -> ClientListener {
         tls: port,
         ..ClientConfig::new(Vec::new())
     };
-    ClientListener::spawn(&cfg, 1, Arc::new(Fixed)).unwrap()
+    ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap()
 }
 
 /// The leaf the server sends to a client that asks for `host` and trusts `anchor`, or the error

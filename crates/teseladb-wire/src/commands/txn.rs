@@ -1667,6 +1667,19 @@ impl Backend for TxnBackend<'_> {
         self.inner.txn_scan(start, end, limit, at, view, uncertain_to)
     }
 
+    fn txn_scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        self.contact(start);
+        self.inner.txn_scan_back(start, end, limit, at, view, uncertain_to)
+    }
+
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
         self.inner.index_write(cmd)
     }
@@ -1734,6 +1747,21 @@ impl Backend for TxnBackend<'_> {
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
         self.inner
             .txn_scan(start, end, limit, at, &view, window)
+            .map_err(|e| self.run.note_uncertain(e))
+    }
+
+    fn scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        _concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `scan`, from the last key down (H-003).
+        self.contact(start);
+        let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
+        self.inner
+            .txn_scan_back(start, end, limit, at, &view, window)
             .map_err(|e| self.run.note_uncertain(e))
     }
 

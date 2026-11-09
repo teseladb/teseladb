@@ -221,6 +221,7 @@ impl Diag {
             voluntary_switches: u.voluntary_switches,
             involuntary_switches: u.involuntary_switches,
             threads: int(m.threads),
+            pageins: m.pageins,
         }
     }
 

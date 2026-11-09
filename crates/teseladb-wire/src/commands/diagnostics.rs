@@ -16,6 +16,7 @@ use teseladb_bson::{Document, Value};
 use super::admin::admin_only;
 use super::args::uuid_value;
 use super::catalog::collection_size;
+use super::coll_stats_shards as shards;
 use super::command_list::COMMANDS;
 use super::names::{self, full};
 use super::query::{SCAN_CHUNK, documents_of};
@@ -135,6 +136,8 @@ pub struct ResourceUse {
     pub involuntary_switches: i64,
     /// Threads of the process.
     pub threads: i64,
+    /// The task's page-ins on macOS, where `extra_info` has only them; `None` elsewhere.
+    pub pageins: Option<i32>,
 }
 
 /// The host as `hostInfo` describes it.
@@ -516,10 +519,15 @@ fn mem(r: &ResourceUse) -> Document {
         .with("supported", true)
 }
 
+/// What RefDb 9.0.4 says of the process in `extra_info`, which varies by platform: on macOS the
+/// task's page-ins as `page_faults` (`processinfo_osx.cpp`), on Linux `getrusage(2)` and the
+/// threads.
 fn extra_info(r: &ResourceUse) -> Document {
-    Document::new()
-        .with("note", "fields vary by platform")
-        .with("user_time_us", Value::Int64(r.user_time_us))
+    let note = Document::new().with("note", "fields vary by platform");
+    if let Some(pageins) = r.pageins {
+        return note.with("page_faults", pageins);
+    }
+    note.with("user_time_us", Value::Int64(r.user_time_us))
         .with("system_time_us", Value::Int64(r.system_time_us))
         .with("maximum_resident_set_kb", Value::Int64(r.max_resident_kb))
         .with("input_blocks", Value::Int64(r.input_blocks))
@@ -650,10 +658,42 @@ fn scale(cmd: &Document, name: &str) -> Result<i64, CommandError> {
 }
 
 /// What a collection holds: its documents, their bytes and the bytes of their keys.
-struct Tally {
-    count: i64,
-    bytes: u64,
-    key_bytes: u64,
+pub(super) struct Tally {
+    pub(super) count: i64,
+    pub(super) bytes: u64,
+    pub(super) key_bytes: u64,
+}
+
+/// Key intervals `[start, end)`: the ranges of one node, for the part of a collection it holds.
+pub(super) type Spans = [(Vec<u8>, Vec<u8>)];
+
+/// The parts of `[start, end)` inside `within`, or the whole interval without it.
+pub(super) fn clip(
+    (start, end): (&[u8], &[u8]),
+    within: Option<&Spans>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let Some(within) = within else { return vec![(start.to_vec(), end.to_vec())] };
+    within
+        .iter()
+        .map(|(s, e)| {
+            (s.as_slice().max(start), if e.is_empty() { end } else { e.as_slice().min(end) })
+        })
+        .filter(|(s, e)| s < e)
+        .map(|(s, e)| (s.to_vec(), e.to_vec()))
+        .collect()
+}
+
+/// The stored bytes of `[start, end)` inside `within`.
+pub(super) fn stored_within<B: Backend + ?Sized>(
+    backend: &mut B,
+    span: (&[u8], &[u8]),
+    within: Option<&Spans>,
+) -> Result<u64, CommandError> {
+    let mut total = 0;
+    for (s, e) in clip(span, within) {
+        total += backend.stored_bytes(&s, &e)?;
+    }
+    Ok(total)
 }
 
 /// Documents, their bytes and the bytes of their keys in a collection.
@@ -661,28 +701,39 @@ fn tally<B: Backend + ?Sized>(
     backend: &mut B,
     c: &teseladb_meta::catalog::CollectionEntry,
 ) -> Result<Tally, CommandError> {
-    let (mut start, end) = documents_of(c);
+    tally_within(backend, c, None)
+}
+
+/// [`tally`] of the part of the collection inside `within`.
+pub(super) fn tally_within<B: Backend + ?Sized>(
+    backend: &mut B,
+    c: &teseladb_meta::catalog::CollectionEntry,
+    within: Option<&Spans>,
+) -> Result<Tally, CommandError> {
+    let (docs_start, docs_end) = documents_of(c);
     let mut t = Tally { count: 0, bytes: 0, key_bytes: 0 };
-    loop {
-        let chunk = backend.scan(&start, &end, SCAN_CHUNK, ReadConcern::Local)?;
-        let Some((last, _)) = chunk.last() else { break };
-        let next = [last.as_slice(), &[0]].concat();
-        for (key, doc) in &chunk {
-            t.count += 1;
-            t.bytes += doc.len() as u64;
-            t.key_bytes += key.len() as u64;
+    for (mut start, end) in clip((&docs_start, &docs_end), within) {
+        loop {
+            let chunk = backend.scan(&start, &end, SCAN_CHUNK, ReadConcern::Local)?;
+            let Some((last, _)) = chunk.last() else { break };
+            let next = [last.as_slice(), &[0]].concat();
+            for (key, doc) in &chunk {
+                t.count += 1;
+                t.bytes += doc.len() as u64;
+                t.key_bytes += key.len() as u64;
+            }
+            if chunk.len() < SCAN_CHUNK {
+                break;
+            }
+            start = next;
         }
-        if chunk.len() < SCAN_CHUNK {
-            break;
-        }
-        start = next;
     }
     Ok(t)
 }
 
 /// Bytes `stored` takes in whole storage blocks, at least one (an empty index takes 4096 bytes
 /// in RefEngine, measured on 9.0.4; DV-037).
-fn in_blocks(stored: u64) -> u64 {
+pub(super) fn in_blocks(stored: u64) -> u64 {
     stored.div_ceil(INDEX_BYTES).max(1) * INDEX_BYTES
 }
 
@@ -695,6 +746,17 @@ fn index_sizes<B: Backend + ?Sized>(
     kind: &CollectionKind,
     key_bytes: u64,
 ) -> Result<Vec<(String, u64)>, CommandError> {
+    index_sizes_within(backend, (ns, c), kind, key_bytes, None)
+}
+
+/// [`index_sizes`] of the part of the indexes inside `within`.
+pub(super) fn index_sizes_within<B: Backend + ?Sized>(
+    backend: &mut B,
+    (ns, c): (&teseladb_meta::catalog::Namespace, &teseladb_meta::catalog::CollectionEntry),
+    kind: &CollectionKind,
+    key_bytes: u64,
+    within: Option<&Spans>,
+) -> Result<Vec<(String, u64)>, CommandError> {
     let prefix = |id: u32| KeyBuilder::index_prefix(c.tenant, c.id, id).as_bytes().to_vec();
     let mut out = Vec::new();
     match kind {
@@ -703,7 +765,8 @@ fn index_sizes<B: Backend + ?Sized>(
         CollectionKind::Capped { .. } => {
             let start = prefix(teseladb_range::capped::ID_INDEX);
             let end = KeyBuilder::collection_end(c.tenant, c.id).as_bytes().to_vec();
-            out.push(("_id_".to_owned(), in_blocks(backend.stored_bytes(&start, &end)?)));
+            let stored = stored_within(backend, (&start, &end), within)?;
+            out.push(("_id_".to_owned(), in_blocks(stored)));
         }
         _ => out.push(("_id_".to_owned(), in_blocks(key_bytes))),
     }
@@ -711,7 +774,7 @@ fn index_sizes<B: Backend + ?Sized>(
         if e.state == IndexState::Dropping {
             continue;
         }
-        let bytes = backend.stored_bytes(&prefix(e.id), &prefix(e.id + 1))?;
+        let bytes = stored_within(backend, (&prefix(e.id), &prefix(e.id + 1)), within)?;
         out.push((e.name, in_blocks(bytes)));
     }
     Ok(out)
@@ -854,7 +917,7 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
 }
 
 /// Bytes TeselaDB counts for the `_id` index of a collection (DV-037).
-const INDEX_BYTES: u64 = super::catalog::BLOCK_BYTES;
+pub(super) const INDEX_BYTES: u64 = super::catalog::BLOCK_BYTES;
 
 /// `collStats` (obsolete in 9.0 but still sent by tools, DV-021).
 pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
@@ -874,13 +937,17 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     names::check(&ns)?;
     let scaled =
         |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
-    let mut d = Document::new().with("sharded", false);
     let Some(c) = ctx.backend.collection(&ns)? else {
         // In a database the catalog does not have, `refrouter` 9.0.4 fails (measured).
         if !super::catalog::has_database(ctx.backend, &ns.db)? {
             return Err(super::catalog::missing_namespace(ctx.backend, &ns, String::new())?);
         }
-        return Ok(d
+        let primary = shards::primary_of(ctx.backend, &ns.db)?;
+        let one =
+            Document::new().with(primary.as_str(), shards::missing_shard_doc(&full(&ns), scale));
+        return Ok(Document::new()
+            .with("sharded", false)
+            .with("primary", primary)
             .with("ns", full(&ns))
             .with("count", 0)
             .with("size", 0)
@@ -889,13 +956,20 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             .with("totalSize", 0)
             .with("indexSizes", Document::new())
             .with("avgObjSize", 0.0)
-            .with("maxSize", 0)
+            .with("maxSize", Value::Int64(0))
             .with("nindexes", 0)
             .with("scaleFactor", number(scale))
             .with("nchunks", 1)
+            .with("shards", one)
             .with("ok", 1.0));
     };
     super::kinds::not_a_view(&ns, &c)?;
+    // A collection with a shard key, or the primary shard of its database (T055).
+    let key = super::sharding::presented_key(&ns, &c)?;
+    let mut d = Document::new().with("sharded", key.is_some());
+    if key.is_none() {
+        d.push("primary", shards::primary_of(ctx.backend, &ns.db)?);
+    }
     let Tally { count, bytes, key_bytes } = tally(ctx.backend, &c)?;
     let (start, end) = documents_of(&c);
     let storage = collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
@@ -936,17 +1010,88 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     }
     let nindexes = index_count(&kind, sizes.len());
     let mut index_sizes = Document::new();
-    for (name, b) in sizes {
-        index_sizes.push(name, scaled(b));
+    for (name, b) in &sizes {
+        index_sizes.push(name, scaled(*b));
     }
     let avg_value = if series { Value::Int32(0) } else { Value::Double(avg) };
+    let nchunks = match &key {
+        // The record of sessions is one chunk (006 FR-038).
+        Some(_) if super::sharding::is_sessions_record(&ns) => 1,
+        Some(k) => {
+            let entries = ctx.backend.route_entries()?;
+            super::chunks::collection_chunks(&entries, &c, k).len().max(1)
+        }
+        None => 1,
+    };
+    let down = |b: u64| i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX);
+    let whole = shards::Part {
+        count,
+        size: down(bytes),
+        storage: down(storage),
+        index_sizes: sizes.iter().map(|(n, b)| (n.clone(), down(*b))).collect(),
+    };
+    let shown = shards::Kind {
+        capped: match &kind {
+            CollectionKind::Capped { max, .. } => {
+                Some((number(max.map_or(0, |m| i64::try_from(m).unwrap_or(i64::MAX))), max_size))
+            }
+            _ => None,
+        },
+        series: match d.get("timeseries") {
+            Some(Value::Document(ts)) => Some(ts.clone()),
+            _ => None,
+        },
+    };
+    let parts = shard_parts(ctx.backend, (&ns, &c), &kind, whole, scale)?;
+    let mut per_shard = Document::new();
+    for (name, p) in parts {
+        per_shard.push(name, shards::shard_doc(&full(&ns), &p, &shown, nindexes, scale));
+    }
     Ok(d.with("indexSizes", index_sizes)
         .with("avgObjSize", avg_value)
-        .with("maxSize", number(max_size))
+        .with("maxSize", Value::Int64(max_size))
         .with("nindexes", nindexes)
         .with("scaleFactor", number(scale))
-        .with("nchunks", 1)
+        .with("nchunks", i32::try_from(nchunks).unwrap_or(i32::MAX))
+        .with("shards", per_shard)
         .with("ok", 1.0))
+}
+
+/// What each shard holds of collection `c` for `collStats`: a node per name. With one node, or
+/// none known, the whole collection under it (or under its database's primary); with several,
+/// each node's ranges measured on their own.
+fn shard_parts<B: Backend + ?Sized>(
+    backend: &mut B,
+    (ns, c): (&teseladb_meta::catalog::Namespace, &teseladb_meta::catalog::CollectionEntry),
+    kind: &CollectionKind,
+    whole: shards::Part,
+    scale: i64,
+) -> Result<Vec<(String, shards::Part)>, CommandError> {
+    let holders = shards::holders(backend, c)?;
+    if holders.len() <= 1 {
+        let name = match holders.keys().next() {
+            Some(node) => super::shard_name(*node),
+            None => shards::primary_of(backend, &ns.db)?,
+        };
+        return Ok(vec![(name, whole)]);
+    }
+    let down = |b: u64| i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX);
+    let mut out = Vec::new();
+    for (node, spans) in holders {
+        let t = tally_within(backend, c, Some(&spans))?;
+        let (start, end) = documents_of(c);
+        let stored = stored_within(backend, (&start, &end), Some(&spans))?;
+        let storage = collection_size(stored) - INDEX_BYTES;
+        let sizes = index_sizes_within(backend, (ns, c), kind, t.key_bytes, Some(&spans))?;
+        let part = shards::Part {
+            count: t.count,
+            size: down(t.bytes),
+            storage: down(storage),
+            index_sizes: sizes.into_iter().map(|(n, b)| (n, down(b))).collect(),
+        };
+        out.push((super::shard_name(node), part));
+    }
+    Ok(out)
 }
 
 /// The help of `getParameter`, as 9.0.4 writes it, with TeselaDB's parameters.

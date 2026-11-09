@@ -341,10 +341,11 @@ impl SpecialCollections {
 
 impl Script for SpecialCollections {
     fn plan(&mut self, w: &mut World, client: u32) -> Vec<Step> {
-        // Once the faults stop, turns check until one has committed: no seed ends unchecked.
-        // Once the faults stop, turns check both collections until each check has committed.
-        let series_unchecked = self.healed && self.series_checked == 0;
-        let capped_unchecked = self.healed && self.checked == 0;
+        // Once a collection has a committed write, and again once the faults stop, turns check it
+        // until one check has committed: no seed ends unchecked, also one without faults, which
+        // never heals.
+        let series_unchecked = (self.healed || self.measured > 0) && self.series_checked == 0;
+        let capped_unchecked = (self.healed || self.inserted > 0) && self.checked == 0;
         if (series_unchecked && !capped_unchecked) || (!capped_unchecked && w.rng.chance(TS_SHARE))
         {
             let turn = if series_unchecked || w.rng.chance(CHECK_SHARE) {
@@ -365,7 +366,7 @@ impl Script for SpecialCollections {
         }
         let n = w.rng.range(0, self.sent.len().max(1) as u64) as usize;
         let victim = self.sent.iter().nth(n).cloned();
-        let turn = if (self.healed && self.checked == 0) || w.rng.chance(CHECK_SHARE) {
+        let turn = if capped_unchecked || w.rng.chance(CHECK_SHARE) {
             Turn::Check
         } else if let Some(id) = victim.filter(|_| w.rng.chance(DELETE_SHARE)) {
             Turn::Delete { id }

@@ -1133,13 +1133,12 @@ impl<D: Disk + Send + 'static> Node<D> {
                 let port_state = Arc::new(NodeClockState::clone(&state).on_replica_set_port());
                 replica_port = Some(crate::replica_port::PortKeeper::spawn(
                     c.clone(),
-                    cores,
                     port_state,
                     presence.clone(),
                     cfg.client_hooks,
                 ));
                 let state = Arc::new(state);
-                match ClientListener::spawn_with(c, cores, state, cfg.client_hooks) {
+                match ClientListener::spawn_with(c, state, cfg.client_hooks) {
                     Ok(l) => {
                         for a in l.addrs() {
                             log.step("listening for clients", &[("addr", a)]);

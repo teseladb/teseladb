@@ -106,6 +106,7 @@ fn a_write_puts_and_deletes_at_the_entry_mark() {
         deletes: vec![],
         dedup: None,
         live_delta: 0,
+        docs: None,
     };
     assert_eq!(r.apply(1, ts(10), &w1), Ok(RangeOutput::Applied { ts: ts(10) }));
     let w2 = Command::Write {
@@ -113,6 +114,7 @@ fn a_write_puts_and_deletes_at_the_entry_mark() {
         deletes: vec![b"\x01doc2".to_vec()],
         dedup: None,
         live_delta: 0,
+        docs: None,
     };
     r.apply(2, ts(20), &w2).unwrap();
     assert_eq!(r.sm.applied_index(), 2);
@@ -136,6 +138,7 @@ fn the_dedup_record_is_written_with_the_entry() {
         deletes: vec![],
         dedup: Some(record.clone()),
         live_delta: 0,
+        docs: None,
     };
     r.apply(1, ts(10), &w).unwrap();
     let key = dedup_key(G, record.lsid, record.txn_number, record.stmt_id);
@@ -167,6 +170,7 @@ fn two_replicas_applying_the_same_entries_hold_the_same_state() {
                     deletes: vec![key(&mut rng)],
                     dedup: None,
                     live_delta: 0,
+                    docs: None,
                 }
             }
         };
@@ -226,6 +230,7 @@ fn an_unknown_kind_or_a_key_outside_the_range_stops_the_group() {
             deletes: vec![],
             dedup: None,
             live_delta: 0,
+            docs: None,
         };
         assert!(r.apply(1, ts(10), &w).is_err(), "{key:?}");
         let d = Command::Write {
@@ -233,6 +238,7 @@ fn an_unknown_kind_or_a_key_outside_the_range_stops_the_group() {
             deletes: vec![key.to_vec()],
             dedup: None,
             live_delta: 0,
+            docs: None,
         };
         assert!(r.apply(1, ts(10), &d).is_err(), "{key:?}");
     }
@@ -251,6 +257,7 @@ fn a_snapshot_restores_only_over_data_the_lsm_already_holds() {
             deletes: vec![],
             dedup: None,
             live_delta: 0,
+            docs: None,
         },
     )
     .unwrap();
@@ -280,6 +287,7 @@ fn a_stopped_core_stops_the_group_without_applying() {
         deletes: vec![],
         dedup: None,
         live_delta: 0,
+        docs: None,
     };
     r.apply(1, ts(10), &w).unwrap();
     r.lsm.borrow_mut().flush();
@@ -344,6 +352,7 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
         deletes: vec![],
         dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
         live_delta: 0,
+        docs: None,
     };
     r.apply(1, ts(10), &write(0)).unwrap();
     r.apply(2, ts(11), &Command::PurgeDedup { keys: vec![dedup_key(G, 7, 1, 0)] }).unwrap();
@@ -386,6 +395,7 @@ fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
         deletes: vec![],
         dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
         live_delta: 0,
+        docs: None,
     };
     r.apply(1, ts(10), &write(0)).unwrap();
     r.apply(2, ts(1_000), &write(1)).unwrap();
@@ -430,4 +440,126 @@ fn a_purge_of_a_key_past_the_range_s_records_is_refused() {
         let e = r.apply(1, ts(10), &Command::PurgeDedup { keys: vec![key] }).unwrap_err();
         assert!(e.contains("not one of its idempotence records"), "{e}");
     }
+}
+
+/// A document of collection `c` of a tenant whose keys fall inside `[START, END)`.
+fn doc_key(c: u32, pk: &[u8]) -> Vec<u8> {
+    teseladb_keys::space::KeyBuilder::document_of_pk(0x6100_0000, c, pk).as_bytes().to_vec()
+}
+
+fn doc_put(key: &[u8]) -> Put {
+    Put { key: key.to_vec(), value_type: teseladb_range::doc_count::DOCUMENT_VALUE, value: vec![9] }
+}
+
+#[test]
+fn a_counted_write_keeps_each_collections_documents_exact_across_a_restart() {
+    // 007 FR-039 (H-004): the counts change with the leader's delta, in the entry's own writes.
+    let mut r = Replica::new();
+    let coll = (0x6100_0000, 4);
+    assert_eq!(r.sm.doc_counts().map(|c| c.len()), Some(0), "a new range counts nothing, exactly");
+    let (a, b) = (doc_key(4, b"a"), doc_key(4, b"b"));
+    let insert = Command::Write {
+        puts: vec![doc_put(&a), doc_put(&b)],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: Some(vec![(coll, 2)]),
+    };
+    r.apply(1, ts(10), &insert).unwrap();
+    let delete = Command::Write {
+        puts: vec![],
+        deletes: vec![a.clone()],
+        dedup: None,
+        live_delta: 0,
+        docs: Some(vec![(coll, -1)]),
+    };
+    r.apply(2, ts(20), &delete).unwrap();
+    assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(1));
+    let r = r.restart();
+    assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(1), "kept on disk");
+}
+
+#[test]
+fn a_write_of_documents_without_its_change_leaves_the_counts_estimated() {
+    let mut r = Replica::new();
+    // A write of other keys does not touch them.
+    let other = Command::Write {
+        puts: vec![put(b"\x01doc1", b"v")],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: None,
+    };
+    r.apply(1, ts(10), &other).unwrap();
+    assert!(r.sm.doc_counts().is_some());
+    let uncounted = Command::Write {
+        puts: vec![doc_put(&doc_key(4, b"a"))],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: None,
+    };
+    r.apply(2, ts(20), &uncounted).unwrap();
+    assert_eq!(r.sm.doc_counts(), None);
+    assert_eq!(r.sm.counts().dirty_at, 2);
+    let r = r.restart();
+    assert_eq!(r.sm.counts().dirty_at, 2, "still estimated after a restart");
+}
+
+fn counted(key: &[u8], n: i64) -> Command {
+    Command::Write {
+        puts: vec![doc_put(key)],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: Some(vec![((0x6100_0000, 4), n)]),
+    }
+}
+
+fn uncounted(key: &[u8]) -> Command {
+    Command::Write {
+        puts: vec![doc_put(key)],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: None,
+    }
+}
+
+#[test]
+fn a_recount_adds_the_counted_writes_after_its_entry_and_nothing_else() {
+    let coll = (0x6100_0000, 4);
+    let adjust = |base, n| Command::AdjustCounts { base, counts: vec![(coll, n)] };
+    // Estimated at 1; the leader counted 5 at entry 2; a counted insert at 3 follows.
+    let mut r = Replica::new();
+    r.apply(1, ts(10), &uncounted(&doc_key(4, b"a"))).unwrap();
+    r.apply(2, ts(20), &counted(&doc_key(4, b"b"), 1)).unwrap();
+    r.apply(3, ts(30), &counted(&doc_key(4, b"c"), 1)).unwrap();
+    r.apply(4, ts(40), &adjust(2, 5)).unwrap();
+    assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(6));
+    // A write without its change after the recount's entry: it stays estimated.
+    let mut r = Replica::new();
+    r.apply(1, ts(10), &uncounted(&doc_key(4, b"a"))).unwrap();
+    r.apply(2, ts(20), &uncounted(&doc_key(4, b"b"))).unwrap();
+    r.apply(3, ts(30), &adjust(1, 5)).unwrap();
+    assert_eq!(r.sm.doc_counts(), None);
+    // A replica that opened after the recount's entry does not know the writes in between.
+    let mut r = Replica::new();
+    r.apply(1, ts(10), &uncounted(&doc_key(4, b"a"))).unwrap();
+    r.apply(2, ts(20), &counted(&doc_key(4, b"b"), 1)).unwrap();
+    let mut r = r.restart();
+    r.apply(3, ts(30), &adjust(1, 5)).unwrap();
+    assert_eq!(r.sm.doc_counts(), None, "it never takes numbers without the writes after them");
+}
+
+#[test]
+fn data_ingested_without_an_entry_leaves_the_counts_estimated_across_a_restart() {
+    // A restore's ingest (018) adds documents that no entry counted: the counts may not stay exact.
+    let mut r = Replica::new();
+    r.apply(1, ts(10), &counted(&doc_key(4, b"a"), 1)).unwrap();
+    assert!(r.sm.doc_counts().is_some());
+    r.sm.data_ingested();
+    assert_eq!(r.sm.doc_counts(), None);
+    let r = r.restart();
+    assert_eq!(r.sm.doc_counts(), None, "still estimated after a restart");
 }

@@ -285,9 +285,9 @@ impl Default for Indexes {
 
 impl Script for Indexes {
     fn plan(&mut self, w: &mut World, client: u32) -> Vec<Step> {
-        // Once the faults stop, every turn checks until one check has committed: no seed ends
-        // unchecked.
-        let unchecked = self.healed && self.checked == 0;
+        // Once a write has committed, and again once the faults stop, every turn checks until one
+        // check has committed: no seed ends unchecked, also one without faults, which never heals.
+        let unchecked = (self.healed || self.written > 0) && self.checked == 0;
         if unchecked || w.rng.chance(CHECK_SHARE) {
             self.turns.insert(client, Turn::Check);
             let docs = (0..DOCS).map(doc_key);

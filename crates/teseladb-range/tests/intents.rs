@@ -422,6 +422,7 @@ fn a_replica_applies_intents_records_and_resolutions_and_keeps_them_across_a_res
         deletes: vec![],
         dedup: None,
         live_delta: 6,
+        docs: None,
     };
     r.apply(1, 10, &write).unwrap();
     let c = intents_of(T1, &[(b"\x01a", put(b"new"), None), (b"\x01b", IntentOp::Delete, None)]);
@@ -517,6 +518,7 @@ fn a_restart_from_an_older_snapshot_does_not_write_again_what_the_lsm_holds() {
         deletes: vec![],
         dedup: None,
         live_delta: 6,
+        docs: None,
     };
     r.apply(1, 10, &write).unwrap();
     let snap = r.sm.snapshot();

@@ -416,6 +416,8 @@ impl WriteConcernArgs {
 
     /// The range's write concern: an unknown mode or tag set writes as `"majority"`, and
     /// `w: 0` keeps [`W::Zero`] (D-034; `j: false` does not lower `"majority"` nor `w: <n>`).
+    /// Without `j`, `w: <n>` acknowledges in memory and `"majority"` on disk, as a replica set of
+    /// RefDb with `writeConcernMajorityJournalDefault: true`, its default (H-007).
     pub fn to_range(&self) -> WriteConcern {
         let w = match &self.w {
             Some(WArg::Nodes(0)) => W::Zero,
@@ -425,7 +427,7 @@ impl WriteConcernArgs {
         let j = match self.sync {
             Sync::Journal | Sync::Fsync => true,
             Sync::None => false,
-            Sync::Unset => w != W::Zero,
+            Sync::Unset => w == W::Majority,
         };
         WriteConcern { w, j }
     }

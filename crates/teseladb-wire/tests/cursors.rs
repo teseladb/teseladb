@@ -112,19 +112,70 @@ fn a_get_more_on_another_namespace_is_refused_and_the_cursor_stays_open() {
     assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
 }
 
-/// A `getMore` in a session other than its cursor's: a `refrouter` 9.0.4 refuses it with 13
-/// `Unauthorized` naming both sessions, `none` for a missing one (measured on 03-11-2026).
+/// A `getMore` in a session other than its cursor's, on a node without authorization: a `refrouter`
+/// 9.0.4 refuses it in `validateLSID` (`cluster_find.cpp`) with 50799, 50800 or 50801 (measured
+/// on the native `refrouter` on 09-11-2026).
 #[test]
-fn a_get_more_from_another_session_names_both_sessions() {
+fn a_get_more_from_another_session_without_authorization_is_refused_as_a_refrouter() {
     let mut m = node();
-    let anon = format!("{ANONYMOUS_UID} -  - ");
+    let named = |n: u8| format!("{} - {ANONYMOUS_UID} -  - ", uuid(n));
+    let without = open(&mut m, None);
+    let r = get_more(&mut m, "db", without, "c", Some(2));
+    assert_eq!(code(&r), 50799);
+    assert_eq!(field(&r, "codeName"), &s("Location50799"));
+    assert_eq!(
+        errmsg(&r),
+        format!(
+            "Cannot run getMore on cursor {without}, which was not created in a session, in \
+             session {}",
+            named(2)
+        )
+    );
+    let with = open(&mut m, Some(1));
+    let r = get_more(&mut m, "db", with, "c", None);
+    assert_eq!(code(&r), 50800);
+    assert_eq!(
+        errmsg(&r),
+        format!(
+            "Cannot run getMore on cursor {with}, which was created in session {}, without an \
+             lsid",
+            named(1)
+        )
+    );
+    let r = get_more(&mut m, "db", with, "c", Some(2));
+    assert_eq!(code(&r), 50801);
+    assert_eq!(
+        errmsg(&r),
+        format!(
+            "Cannot run getMore on cursor {with}, which was created in session {}, in session {}",
+            named(1),
+            named(2)
+        )
+    );
+    // Refused, it is still there for its own session.
+    let r = get_more(&mut m, "db", with, "c", Some(1));
+    assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
+}
+
+/// The same `getMore` from a user authenticated on a node that authorizes commands: the session
+/// check of `AuthorizationSessionImpl` refuses it first with 13 `Unauthorized`, naming both
+/// sessions, `none` for a missing one (measured on a `refrouter` 9.0.4 with users on 03-11-2026).
+#[test]
+fn a_get_more_from_another_session_of_an_authenticated_user_is_unauthorized() {
+    use teseladb_auth::actions::ActionType;
+    use teseladb_auth::privileges::{Privilege, Resource};
+    let mut m = node();
+    m.user = Some(teseladb_auth::users::UserName { user: "u".into(), db: "admin".into() });
+    let any = Resource::Any;
+    m.user_privileges = Some(vec![Privilege { resource: any, actions: vec![ActionType::Find] }]);
     let refused = |cursor: &str, op: &str| {
         format!(
             "Cursor session id ({cursor}) is not the same as the operation context's session id \
              ({op})"
         )
     };
-    let named = |n: u8| format!("{} - {anon}", uuid(n));
+    let uid = sha256(b"u@admin");
+    let named = |n: u8| format!("{} - {} -  - ", uuid(n), base64(&uid));
     let without = open(&mut m, None);
     let r = get_more(&mut m, "db", without, "c", Some(2));
     assert_eq!((code(&r), errmsg(&r)), (13, refused("none", &named(2))));
@@ -134,9 +185,13 @@ fn a_get_more_from_another_session_names_both_sessions() {
     assert_eq!((code(&r), errmsg(&r)), (13, refused(&named(1), "none")));
     let r = get_more(&mut m, "db", with, "c", Some(2));
     assert_eq!((code(&r), errmsg(&r)), (13, refused(&named(1), &named(2))));
-    // Refused, it is still there for its own session.
-    let r = get_more(&mut m, "db", with, "c", Some(1));
-    assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
+    // A user with `impersonate` on the cluster sidesteps the check, as `__system` does.
+    let all = vec![ActionType::Find, ActionType::Impersonate];
+    m.user_privileges = Some(vec![
+        Privilege { resource: Resource::Any, actions: vec![ActionType::Find] },
+        Privilege { resource: Resource::Cluster, actions: all },
+    ]);
+    assert_eq!(code(&get_more(&mut m, "db", with, "c", Some(2))), 50801);
 }
 
 /// The same refusals from a member of a replica set, as a `refnode` 9.0.4 gives them (measured on

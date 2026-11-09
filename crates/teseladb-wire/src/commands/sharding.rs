@@ -52,6 +52,29 @@ pub fn shard_key_of(coll: &CollectionEntry) -> Result<Option<ShardKey>, CommandE
     Ok(Some(ShardKey { key, unique: matches!(d.get("unique"), Some(Value::Boolean(true))) }))
 }
 
+/// The size of a chunk of `config.system.sessions` in a `refrouter` 9.0.4's `config.collections`.
+const SESSIONS_CHUNK_BYTES: i64 = 200_000;
+
+/// Whether `ns` is the cluster's record of sessions, `config.system.sessions`, which a cluster of
+/// RefDb shards by `{_id: 1}` (006 FR-038). Its documents stay keyed as in any collection
+/// without a shard key; it is presented as sharded, in one chunk.
+pub fn is_sessions_record(ns: &Namespace) -> bool {
+    ns.db == super::registry::SESSIONS_DB && ns.coll == super::registry::SESSIONS_COLL
+}
+
+/// The shard key the record of sessions is presented with.
+pub fn sessions_key() -> ShardKey {
+    ShardKey { key: Document::new().with("_id", 1), unique: false }
+}
+
+/// The shard key collection `ns` is presented with: its own, or that of the record of sessions.
+pub fn presented_key(
+    ns: &Namespace,
+    c: &CollectionEntry,
+) -> Result<Option<ShardKey>, CommandError> {
+    Ok(shard_key_of(c)?.or_else(|| is_sessions_record(ns).then(sessions_key)))
+}
+
 /// Whether `coll` has a shard key: its documents are keyed by it ([`document_key`]).
 pub fn is_sharded(coll: &CollectionEntry) -> bool {
     RawDoc::from_bytes(&coll.options).is_ok_and(|o| o.get(SHARD_KEY).is_some())
@@ -638,6 +661,10 @@ pub fn tracked_entry(
 ) -> Result<Option<Document>, CommandError> {
     if let Some(k) = shard_key_of(c)? {
         return Ok(Some(config_entry(ns, c, &k)));
+    }
+    if is_sessions_record(ns) {
+        let entry = config_entry(ns, c, &sessions_key());
+        return Ok(Some(entry.with("maxChunkSizeBytes", Value::Int64(SESSIONS_CHUNK_BYTES))));
     }
     let Some(by) = super::move_collection::unsplittable_by(c) else { return Ok(None) };
     let id = ShardKey { key: Document::new().with("_id", 1), unique: false };

@@ -61,7 +61,7 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
         assert!(ok(&svc.run("app", Document::new().with("find", "c"))));
     }
     // A core may name the service user after Group 0 does: the service user's connection stops counting once it
-    // does, within a look at the tenants' states (client_listener::TENANT_CHECK).
+    // does, when the publication of the new states wakes the connections' threads.
     let second = until("the data read and two connections on the second node", || {
         let out = admin(&nodes[1], &["tenant", "usage", "acme"]);
         (field(&out, "storageBytes").parse::<u64>().unwrap_or(0) > 0

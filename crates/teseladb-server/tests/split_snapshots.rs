@@ -450,8 +450,13 @@ impl Run {
                 continue;
             }
             let put = Put { key: key.clone(), value_type: DOC, value: value_of(&key) };
-            let cmd =
-                Command::Write { puts: vec![put], deletes: vec![], dedup: None, live_delta: 0 };
+            let cmd = Command::Write {
+                puts: vec![put],
+                deletes: vec![],
+                dedup: None,
+                live_delta: 0,
+                docs: None,
+            };
             self.propose(l, g, &cmd, Asked::Write(key));
         }
     }

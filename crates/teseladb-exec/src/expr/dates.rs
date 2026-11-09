@@ -124,8 +124,11 @@ pub(super) fn parse(
 }
 
 fn parse_field(name: &str, f: Field, arg: RawValue<'_>, ctx: &Ctx) -> Result<DateExpr, MqlError> {
+    // An object is an expression when its first field is an operator; otherwise, an empty one
+    // included, it names the date and the time zone (RefDb r9.0.4,
+    // `parseDateExpressionAcceptingTimeZone`).
     if let RawValue::Document(d) = arg
-        && d.iter().next().is_some_and(|(k, _)| !k.starts_with('$'))
+        && !d.iter().next().is_some_and(|(k, _)| k.starts_with('$'))
     {
         let (mut date, mut timezone) = (None, None);
         for (k, v) in d.iter() {

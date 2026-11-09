@@ -324,6 +324,8 @@ impl MultiRangeWorkload {
         let n = &w.nodes[node as usize];
         let Some(lsm) = n.cores[core as usize].lsm.clone() else { return };
         let mut host = RangeHost::new(lsm, n.hlc.clone());
+        // Half the nodes write the counted format (007 FR-039), as during an upgrade.
+        host.set_counted_writes(node.is_multiple_of(2));
         let Some(c) = w.cluster_core(node, core) else { return };
         for g in c.group_ids() {
             if let Some(sm) = c.state_machine(g).and_then(as_range) {
@@ -698,18 +700,26 @@ impl MultiRangeWorkload {
         }
     }
 
-    /// Starts a merge of two neighbours drawn at random, unless one of them splits.
+    /// Starts a merge of two neighbours drawn at random among those that do not split. With no
+    /// split in progress every pair may merge and the draw is the one it always was, so that a
+    /// profile's seeds keep their runs; with one, the draw is among the pairs without the range
+    /// that splits, so that the adverse profile overlaps them whenever three ranges allow it.
     fn start_merge(&mut self, w: &mut World, now: Nanos) {
-        let i = w.rng.range(1, self.table.len() as u64) as usize;
         let mut by_start: Vec<(Vec<u8>, GroupId)> =
             self.table.iter().map(|(g, (s, _))| (s.clone(), *g)).collect();
         by_start.sort();
-        let (left, right) = (by_start[i - 1].1, by_start[i].1);
         let splitting = |g: GroupId| self.split.as_ref().is_some_and(|s| s.0 == g);
-        if !splitting(left) && !splitting(right) {
-            self.next_merge += 1;
-            self.merge = Some(Merge { left, right, id: self.next_merge, since: now });
-        }
+        let free: Vec<usize> = (1..by_start.len())
+            .filter(|&i| !splitting(by_start[i - 1].1) && !splitting(by_start[i].1))
+            .collect();
+        let i = match self.split {
+            None => w.rng.range(1, self.table.len() as u64) as usize,
+            Some(_) if free.is_empty() => return,
+            Some(_) => free[w.rng.range(0, free.len() as u64) as usize],
+        };
+        let (left, right) = (by_start[i - 1].1, by_start[i].1);
+        self.next_merge += 1;
+        self.merge = Some(Merge { left, right, id: self.next_merge, since: now });
     }
 
     /// The lowest applied index of the replicas of `g` where `done` holds, if any.

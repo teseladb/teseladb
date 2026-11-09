@@ -13,7 +13,7 @@ fn samples() -> Vec<Command> {
     let ts = Hlc { physical: 1_700_000_000_000, logical: (5 << 10) | 7 };
     vec![
         Command::Noop,
-        Command::Write { puts: vec![], deletes: vec![], dedup: None, live_delta: 0 },
+        Command::Write { puts: vec![], deletes: vec![], dedup: None, live_delta: 0, docs: None },
         Command::Write {
             puts: vec![
                 Put { key: b"doc/1".to_vec(), value_type: 1, value: b"{a:1}".to_vec() },
@@ -27,6 +27,7 @@ fn samples() -> Vec<Command> {
                 result: b"n=1".to_vec(),
             }),
             live_delta: 0,
+            docs: None,
         },
         Command::SetGcThreshold { ts },
         Command::ComputeChecksum { at: ts },
@@ -82,8 +83,13 @@ fn every_command_survives_its_encoding() {
 
 #[test]
 fn the_live_delta_is_a_signed_varint_at_the_end_of_a_write() {
-    let write =
-        |live_delta| Command::Write { puts: vec![], deletes: vec![], dedup: None, live_delta };
+    let write = |live_delta| Command::Write {
+        puts: vec![],
+        deletes: vec![],
+        dedup: None,
+        live_delta,
+        docs: None,
+    };
     // Kind, no puts, no deletes, no record, then the delta in zigzag LEB128 (D-068).
     for (delta, tail) in [
         (0i64, vec![0u8]),

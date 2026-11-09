@@ -1416,11 +1416,14 @@ fn index_stage(
     s.tail.push("keyPattern", index.pattern.clone());
     s.tail.push("indexName", index.entry.name.as_str());
     s.tail.push("isMultiKey", index.meta.multikey);
-    let mut paths = Document::new();
-    for (field, list) in &index.multikey_paths {
-        paths.push(field, Value::Array(list.iter().map(|p| Value::String(p.clone())).collect()));
+    if super::plan_exec::shows_multikey_paths(&index.pattern) {
+        let mut paths = Document::new();
+        for (field, list) in &index.multikey_paths {
+            let list = list.iter().map(|p| Value::String(p.clone())).collect();
+            paths.push(field, Value::Array(list));
+        }
+        s.tail.push("multiKeyPaths", paths);
     }
-    s.tail.push("multiKeyPaths", paths);
     s.tail.push("isUnique", index.unique());
     s.tail.push("isSparse", index.sparse());
     s.tail.push("isPartial", index.partial());

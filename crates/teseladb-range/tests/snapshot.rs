@@ -58,7 +58,8 @@ impl Replica {
 
     fn write(&mut self, index: u64, doc: &[u8], value: Vec<u8>, dedup: Option<DedupRecord>) {
         let put = Put { key: doc.to_vec(), value_type: 1, value };
-        let c = Command::Write { puts: vec![put], deletes: vec![], dedup, live_delta: 0 };
+        let c =
+            Command::Write { puts: vec![put], deletes: vec![], dedup, live_delta: 0, docs: None };
         let ctx = ApplyCtx { group: G, index, term: 1, ts: ts(index) };
         self.sm.apply(&c.encode(), &ctx).unwrap();
     }

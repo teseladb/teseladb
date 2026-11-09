@@ -126,9 +126,13 @@ fn check_folded(name: &str, v: &Optimized) -> Result<(), MqlError> {
 /// or each document.
 const VOLATILE: [&str; 5] = ["$rand", "$meta", "$createObjectId", "$function", "$accumulator"];
 
+/// The operators RefDb r9.0.4 does not fold even over constants (their `optimize` returns
+/// themselves): their errors come when the pipeline runs, not when it is optimised.
+const NOT_FOLDED: [&str; 4] = ["$zip", "$hash", "$serializeEJSON", "$deserializeEJSON"];
+
 /// Operators whose argument is a document of named arguments, each an expression unless
 /// [`RAW_ARGUMENTS`] says otherwise, with the order `explain` writes them in.
-const NAMED: [(&str, &[&str]); 31] = [
+const NAMED: [(&str, &[&str]); 34] = [
     ("$getField", &["field", "input"]),
     ("$setField", &["field", "input", "value"]),
     ("$unsetField", &["field", "input"]),
@@ -151,6 +155,9 @@ const NAMED: [(&str, &[&str]); 31] = [
     ("$ltrim", &["input", "chars"]),
     ("$rtrim", &["input", "chars"]),
     ("$zip", &["inputs", "defaults", "useLongestLength"]),
+    ("$hash", &["input", "algorithm"]),
+    ("$serializeEJSON", &["input", "relaxed", "onError"]),
+    ("$deserializeEJSON", &["input", "onError"]),
     ("$sortArray", &["input", "sortBy"]),
     ("$firstN", &["n", "input"]),
     ("$lastN", &["n", "input"]),
@@ -333,6 +340,15 @@ impl Walk<'_> {
             let rebuilt = Value::Document(Document::new().with(name, full.clone()));
             return self.named(name, &full, &rebuilt);
         }
+        // `$hexHash` is `$hash` converted to hexadecimal text (RefDb r9.0.4, `parseHexHash`).
+        if name == "$hexHash" {
+            let full = Document::new()
+                .with("input", Document::new().with("$hash", arg.clone()))
+                .with("to", "string")
+                .with("format", "hex");
+            let rebuilt = Value::Document(Document::new().with("$convert", full.clone()));
+            return self.named("$convert", &full, &rebuilt);
+        }
         if name == "$getField" && !matches!(arg, Value::Document(_)) {
             let full = Document::new().with("field", arg.clone()).with("input", "$$CURRENT");
             let rebuilt = Value::Document(Document::new().with(name, full.clone()));
@@ -383,6 +399,13 @@ impl Walk<'_> {
         {
             let written = match (args.get(k), k) {
                 (Some(v), k) if RAW_ARGUMENTS.contains(&k) => v.clone(),
+                // Each input of `$zip` is an expression of its own (RefDb r9.0.4).
+                (Some(Value::Array(items)), "inputs") if name == "$zip" => {
+                    let parts: Vec<Optimized> =
+                        items.iter().map(|i| self.value(i)).collect::<Result<_, _>>()?;
+                    all_const &= parts.iter().all(Optimized::is_const);
+                    Value::Array(parts.iter().map(Optimized::written).collect())
+                }
                 (Some(v), _) => {
                     let p = self.value(v)?;
                     all_const &= p.is_const();
@@ -401,7 +424,7 @@ impl Walk<'_> {
         }
         // The variables of `$map`, `$filter` and `$reduce` make them read their input.
         let binds = matches!(name, "$map" | "$filter" | "$reduce");
-        if all_const && !binds {
+        if all_const && !binds && !NOT_FOLDED.contains(&name) {
             return self.fold(whole);
         }
         Ok(Optimized::Expr(Value::Document(Document::new().with(name, out))))

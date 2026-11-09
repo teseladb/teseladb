@@ -422,6 +422,8 @@ impl RangeDocsWorkload {
         let lsm =
             n.cores[self.core as usize].lsm.clone().expect("a core with a range opens its LSM");
         let mut host = RangeHost::new(lsm, n.hlc.clone());
+        // Half the nodes write the counted format (007 FR-039), as during an upgrade.
+        host.set_counted_writes(node.is_multiple_of(2));
         host.add_range(G, START.to_vec(), END.to_vec());
         self.hosts.insert(node, host);
     }
@@ -736,6 +738,7 @@ impl RangeDocsWorkload {
             g: G,
             key: doc(k),
             scan: None,
+            backward: false,
             at: again.as_ref().map(|(ts, ..)| *ts),
             concern: ReadConcern::Local,
             view: TxnView::default(),
@@ -1563,9 +1566,12 @@ mod tests {
     #[test]
     fn a_crash_drops_the_follower_reads_and_exports_of_the_node_and_its_restart_their_files() {
         let (mut w, mut wl) = world(1);
-        // A follower read in flight keeps its client busy until the crash drops it.
-        wl.follower_reads = Some(BTreeMap::from([((2, 7), (0, 1)), ((1, 7), (1, 1))]));
-        assert!(wl.busy(0));
+        // A follower read in flight keeps its client busy until the crash drops it. The clients
+        // are ones the workload has none of, so that nothing else of theirs is in flight when
+        // node 2 crashes (the workload's own clients may have a write on it, which goes again).
+        let (reader, other) = (CLIENTS + 1, CLIENTS + 2);
+        wl.follower_reads = Some(BTreeMap::from([((2, 7), (reader, 1)), ((1, 7), (other, 1))]));
+        assert!(wl.busy(reader));
         // An export for node 2 its source 0 still writes, and an abandoned one of each source.
         let exporting = Transfer::Exporting {
             leader: 0,
@@ -1585,8 +1591,8 @@ mod tests {
         wl.abandoned.push((1, vec![u64::MAX], "export-test-1".into()));
         wl.on_crash(&mut w, 2);
         w.crash_node(2);
-        assert!(!wl.busy(0), "its read is gone");
-        assert!(wl.busy(1), "a read on another node stays");
+        assert!(!wl.busy(reader), "its read is gone");
+        assert!(wl.busy(other), "a read on another node stays");
         assert_eq!(wl.abandoned.len(), 2, "the export for it goes once written");
         wl.on_crash(&mut w, 1);
         w.crash_node(1);

@@ -40,6 +40,7 @@ impl ServerBackend {
                 let req = RemoteReq::ReadWith {
                     key: key.clone(),
                     scan: scan.then(|| (point_end(key), 1)),
+                    backward: false,
                     at: Some(at),
                     concern: ReadConcern::Majority,
                     view: view.clone(),

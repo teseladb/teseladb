@@ -197,6 +197,11 @@ impl SharedRoutes {
         self.table().lookup(key).cloned().map(|e| self.local(e))
     }
 
+    /// The range that holds the keys just below `bound`, as the table knows it (H-003).
+    pub fn lookup_below(&self, bound: &[u8]) -> Option<RouteEntry> {
+        self.table().lookup_below(bound).cloned().map(|e| self.local(e))
+    }
+
     /// The entry of range `g`.
     pub fn entry(&self, g: GroupId) -> Option<RouteEntry> {
         self.table().entry(g).cloned().map(|e| self.local(e))

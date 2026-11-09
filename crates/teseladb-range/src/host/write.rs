@@ -3,6 +3,7 @@
 //! its write concern, and the latch kept while an entry's outcome is uncertain.
 
 use super::*;
+use crate::ack::AckWhen;
 use teseladb_multiraft::ReadMode;
 
 /// Why the evaluation inside a proposal stopped.
@@ -13,6 +14,9 @@ enum Eval {
     Read(Vec<Vec<u8>>),
     /// Its mark is past its deadline (009 FR-006).
     Expired,
+    /// It changes nothing (005 FR-026): its answer, at the mark it was evaluated at, goes once
+    /// the replica confirms it still leads, without an entry.
+    NoChange(Vec<u8>, Hlc),
 }
 
 impl From<MutationError> for Eval {
@@ -247,6 +251,17 @@ impl RangeHost {
         !done.is_empty()
     }
 
+    /// A write of a range on its way to another core is not proposed (H-025): it gives its latch
+    /// back and is refused with `NotLeader` and no hint, which its client tries again.
+    pub(super) fn refuse_moving(&mut self, id: ReqId, m: &MutReq, latch: LatchId) -> bool {
+        if !self.is_moving(m.g) {
+            return false;
+        }
+        self.release(m.g, m.term, latch);
+        self.reply(id, Err(RangeError::NotLeader { hint: NodeId(0) }));
+        true
+    }
+
     pub(super) fn release(&mut self, g: GroupId, term: u64, latch: LatchId) {
         // A latch of an older term is not this term's.
         let leader = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut());
@@ -265,6 +280,9 @@ impl RangeHost {
         current: &[Option<(u8, Vec<u8>)>],
         now: Nanos,
     ) -> bool {
+        if self.refuse_moving(id, &m, latch) {
+            return true;
+        }
         let current: Vec<Option<(u8, &[u8])>> =
             current.iter().map(|c| c.as_ref().map(|(t, v)| (*t, v.as_slice()))).collect();
         let interval = self.ranges.get(&m.g).map(|r| (r.start.clone(), r.end.clone()));
@@ -281,12 +299,18 @@ impl RangeHost {
         #[cfg(teseladb_bug = "write_below_read")]
         let floor = Hlc { physical: 0, logical: 0 }.min(floor);
         let mut floor = floor;
+        let counted = self.counted_writes;
         // Keys the mutation asked to read (`Mutation::reads`): they join its keys for the retry.
         let mut more = Vec::new();
+        // A mutation without change, answered without an entry (005 FR-026).
+        let mut no_change = None;
         let outcome = loop {
             let (mut change, mut result) = (Vec::new(), Vec::new());
             let Work::Mutation(mutation) = &m.work else { unreachable!("a mutation") };
             let (dedup, deadline) = (&m.dedup, m.deadline);
+            // What the replica has applied is committed, so a write without change meets these
+            // write concerns at once; a stored result of its statement was looked up before.
+            let shortcut = no_change_meets(m.ack);
             let build = |ts| {
                 let f = |c: &[Option<(u8, &[u8])>], t: Hlc| {
                     if deadline.is_some_and(|d| t.physical > d) {
@@ -303,10 +327,23 @@ impl RangeHost {
                     }
                     let unread: Vec<Vec<u8>> =
                         mutation.reads(&o).into_iter().filter(|k| !m.keys.contains(k)).collect();
-                    if unread.is_empty() { Ok(o) } else { Err(Eval::Read(unread)) }
+                    if !unread.is_empty() {
+                        return Err(Eval::Read(unread));
+                    }
+                    if shortcut && o.puts.is_empty() && o.deletes.is_empty() {
+                        return Err(Eval::NoChange(o.result, t));
+                    }
+                    Ok(o)
                 };
                 let read = (m.keys.as_slice(), current.as_slice());
-                let e = evaluate(&mut l.latches, &l.cache, latch, read, ts, f, *dedup)?;
+                let mut e = evaluate(&mut l.latches, &l.cache, latch, read, ts, f, *dedup)?;
+                // With every node reading it, the write says how many documents of each
+                // collection it adds or removes (007 FR-039).
+                if let (true, Command::Write { puts, deletes, docs, .. }) =
+                    (counted, &mut e.command)
+                {
+                    *docs = Some(crate::doc_count::doc_delta(read.0, read.1, puts, deletes));
+                }
                 (change, result) = (e.change, e.result);
                 Ok::<_, Refused<Eval>>(e.command.encode())
             };
@@ -326,6 +363,11 @@ impl RangeHost {
                 Err(ProposeAt::Build(Refused::Failed(Eval::Failed(e)))) => {
                     break Err(Some(RangeError::Mutation(e)));
                 }
+                // Its latch was given back: the answer goes once the replica confirms it leads.
+                Err(ProposeAt::Build(Refused::Failed(Eval::NoChange(result, ts)))) => {
+                    no_change = Some((result, ts));
+                    break Err(None);
+                }
                 Err(ProposeAt::Build(Refused::Failed(Eval::Expired))) => {
                     break Err(Some(RangeError::Timeout));
                 }
@@ -335,6 +377,19 @@ impl RangeHost {
                 }
             }
         };
+        if let Some((result, ts)) = no_change {
+            // What the replica holds goes out only while it leads (005 FR-009), as a read.
+            let answer = Reply::Mutated { ts, change: Vec::new(), result };
+            match core.read(m.g, ReadMode::Lease, now) {
+                Ok(op) => {
+                    m.state = MutState::Answer(Box::new(answer));
+                    self.ops.insert(op, id);
+                    self.reqs.insert(id, Req::Mut(m));
+                }
+                Err(oe) => self.reply(id, Err(op_error(oe))),
+            }
+            return true;
+        }
         match outcome {
             Ok((op, ts, change, result)) => {
                 let index = core.status(m.g).map_or(0, |st| st.last_index);
@@ -374,4 +429,12 @@ impl RangeHost {
         }
         true
     }
+}
+
+/// Whether the acknowledgement `ack` of a write that changes nothing holds once the leader has
+/// applied what it read (005 FR-026): what is applied is committed by a majority, so `w: 0`,
+/// `w: 1` without `j` and `w: "majority"` hold; the leader's own journal (`j` with `w: 1`) and a
+/// number of replicas still go through Raft.
+fn no_change_meets(ack: AckWhen) -> bool {
+    matches!(ack, AckWhen::Never | AckWhen::LeaderLog | AckWhen::Applied)
 }

@@ -38,7 +38,6 @@ impl PortKeeper {
     /// Starts the keeper of a node whose main clients' port is `main`.
     pub fn spawn(
         main: ClientConfig,
-        workers: u16,
         state: Arc<NodeClockState>,
         presence: Arc<NodePresence>,
         hooks: Hooks,
@@ -47,7 +46,7 @@ impl PortKeeper {
         let flag = stop.clone();
         let thread = thread::Builder::new()
             .name("replica-set-port".into())
-            .spawn(move || keep(&main, workers, &state, &presence, hooks, &flag))
+            .spawn(move || keep(&main, &state, &presence, hooks, &flag))
             .ok();
         PortKeeper { stop, thread }
     }
@@ -61,7 +60,6 @@ impl PortKeeper {
 
 fn keep(
     main: &ClientConfig,
-    workers: u16,
     state: &Arc<NodeClockState>,
     presence: &NodePresence,
     hooks: Hooks,
@@ -81,7 +79,7 @@ fn keep(
             if let Some(port) = wanted {
                 let cfg = ClientConfig { addrs: addrs_on(&main.addrs, port), ..main.clone() };
                 let st: Arc<dyn crate::client_listener::NodeState> = state.clone();
-                match ClientListener::spawn_with(&cfg, workers, st, hooks) {
+                match ClientListener::spawn_with(&cfg, st, hooks) {
                     Ok(l) => open = Some((port, l)),
                     Err(e) => crate::log::defer(crate::log::Pending {
                         id: 0,

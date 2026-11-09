@@ -36,8 +36,12 @@ impl ServerBackend {
                 let entry = self.h.routes.lookup(&s.start)?;
                 let within = entry.end.is_empty() || s.end.as_slice() <= entry.end.as_slice();
                 let limit = u32::try_from(s.limit).ok().filter(|_| within)?;
-                let req =
-                    scan_req(&prefer, &entry, (s.start.clone(), s.end.clone(), limit), concern);
+                let req = scan_req(
+                    &prefer,
+                    &entry,
+                    (s.start.clone(), s.end.clone(), limit),
+                    (concern, false),
+                );
                 let (tx, rx) = mpsc::channel();
                 let msg = NodeMsg::Data(DataReq::Remote(entry.group, req), tx);
                 self.cores.get(usize::from(entry.core))?.send(CoreInput::App(msg)).ok()?;

@@ -13,6 +13,7 @@ pub mod client;
 pub mod closed_ts;
 pub mod command;
 pub mod dedup;
+pub mod doc_count;
 pub mod fence;
 pub mod gc;
 pub mod host;

@@ -26,11 +26,6 @@ use crate::error::{
 use crate::types::wrong_type;
 use teseladb_collation::ParsedCollation;
 
-/// The structure a `refrouter` 9.0.4 names in the errors of the fields of `listCollections`: the type
-/// of `filter` and an unknown field (measured in the battery's `crud-opt-catalog` and
-/// `errors-idl` on 04-11-2026).
-pub const LIST_COLLECTION_STRUCT: &str = "ListCollection";
-
 /// `create`.
 pub const CREATE: &str = "create";
 /// `drop`.
@@ -935,7 +930,7 @@ pub fn list_collections<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     let name_only = args::bool_field(ctx.cmd, LIST_COLLECTIONS, "nameOnly")?.unwrap_or(false);
-    let filter = args::doc(ctx.cmd, LIST_COLLECTION_STRUCT, "filter")?.cloned();
+    let filter = args::doc(ctx.cmd, LIST_COLLECTIONS, "filter")?.cloned();
     let batch = match args::doc(ctx.cmd, LIST_COLLECTIONS, "cursor")? {
         Some(c) => args::int(c, "cursor", "batchSize")?.map(|n| usize::try_from(n).unwrap_or(0)),
         None => None,
@@ -943,8 +938,14 @@ pub fn list_collections<B: Backend + ?Sized>(
     let db = ctx.db.to_owned();
     let only = super::authorize::collection_filter(ctx.backend, &db, ctx.cmd);
     let mut docs = Vec::new();
+    // A `refrouter` lists `config` from its config server, which does not hold the record of
+    // sessions; a member of a replica set holds it (006 FR-038).
+    let hide_sessions =
+        db == super::config_db::CONFIG_DB && !super::config_db::as_member(ctx.backend)?;
     for (ns, c) in ctx.backend.collections()?.into_iter().filter(|(ns, _)| ns.db == db) {
-        if !super::authorize::collection_shown(only.as_deref(), &db, &ns.coll) {
+        if !super::authorize::collection_shown(only.as_deref(), &db, &ns.coll)
+            || (hide_sessions && super::sharding::is_sessions_record(&ns))
+        {
             continue;
         }
         let kind = kinds::kind_of(&c)?;

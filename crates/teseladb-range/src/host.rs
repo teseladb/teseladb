@@ -12,7 +12,7 @@
 //! LSM's I/O and passes the core's results to [`RangeHost::on_done`].
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use teseladb_hlc::Hlc;
@@ -39,6 +39,7 @@ mod feed;
 mod fence;
 mod merge;
 mod purge;
+mod recount;
 mod split;
 mod txn;
 mod write;
@@ -271,6 +272,8 @@ pub(crate) struct Leader {
     pub(crate) last_closed: (Hlc, u64),
     /// The spans of the fences it proposed and the range has not applied yet (018).
     pub(crate) fencing: Vec<crate::fence::Span>,
+    /// Its recount of the live documents of each collection (007 FR-039).
+    recount: recount::RecountJob,
 }
 
 impl Leader {
@@ -342,8 +345,9 @@ enum MutState {
     /// replica holds, so it goes only once the replica confirms it still leads, as a read does
     /// (its operation is in `RangeHost::ops`).
     Confirm(RangeError),
-    /// A read of a transaction's record that pushed it (008 T043): its answer goes once the
-    /// replica confirms it still leads (its operation is in `RangeHost::ops`).
+    /// A read of a transaction's record that pushed it (008 T043), or a mutation that changed
+    /// nothing (005 FR-026): its answer goes once the replica confirms it still leads (its
+    /// operation is in `RangeHost::ops`).
     Answer(Box<Reply>),
 }
 
@@ -439,6 +443,8 @@ pub(crate) struct GetReq {
     key: Vec<u8>,
     /// A scan's end and the most documents it returns (`None`: a point read).
     scan: Option<(Vec<u8>, usize)>,
+    /// A scan from the last key down (H-003).
+    backward: bool,
     /// The mark it reads at, if the client gave one (`get_at`); otherwise the clock's.
     at: Option<Hlc>,
     /// The range's GC threshold when the read arrived: a read below it fails (FR-013).
@@ -463,6 +469,8 @@ pub struct ReadSpec {
     pub key: Vec<u8>,
     /// A scan's end and the most documents it returns (`None`: a point read).
     pub scan: Option<(Vec<u8>, usize)>,
+    /// A scan from the last key down, the documents nearest its end first (H-003).
+    pub backward: bool,
     /// The mark it reads at (`None`: the clock's).
     pub at: Option<Hlc>,
     /// Read concern.
@@ -486,6 +494,8 @@ pub struct ScanReq {
     pub concern: ReadConcern,
     /// Most documents.
     pub limit: usize,
+    /// From the last key down, the documents nearest `end` first (H-003).
+    pub backward: bool,
 }
 
 pub(crate) enum Req {
@@ -512,6 +522,12 @@ pub struct RangeHost {
     /// entry may still be applied at its mark, so the reads above it wait until it is or the term
     /// ends.
     uncertain: Vec<(GroupId, u64, LatchId, u64)>,
+    /// Ranges that Group 0 moves to another core of the node (007 FR-011): their writes are
+    /// refused before the proposal, so that none goes into the log past `Relocate` (H-025).
+    moving: BTreeSet<GroupId>,
+    /// Every node reads the writes that carry their change of documents (007 FR-039): the
+    /// leaders write them.
+    counted_writes: bool,
     wall_ms: u64,
     /// Monotonic time of the last call.
     now: Nanos,
@@ -561,7 +577,13 @@ fn reading(lsm: &RefCell<Lsm>, q: &GetReq, ts: Hlc) -> GetState {
     match &q.scan {
         Some((end, _)) => {
             let mark = (ts, window_of(q));
-            GetState::Scanning(Box::new(ScanState::new(lsm, (&q.key, end), mark, &q.view)))
+            GetState::Scanning(Box::new(ScanState::new(
+                lsm,
+                (&q.key, end),
+                mark,
+                &q.view,
+                q.backward,
+            )))
         }
         None => GetState::Read(ts),
     }
@@ -589,6 +611,8 @@ impl RangeHost {
             splits: Vec::new(),
             next: 1,
             uncertain: Vec::new(),
+            moving: BTreeSet::new(),
+            counted_writes: false,
             wall_ms: 0,
             now: Nanos::ZERO,
             gc_handed: None,
@@ -690,6 +714,25 @@ impl RangeHost {
         self.reports.retain(|r| r.range != g);
         self.rebuilds.retain(|r| r.range != g);
         true
+    }
+
+    /// The ranges that Group 0 moves from this core to another one of the node (007 FR-011). A
+    /// write of one of them that reaches its proposal is refused with `NotLeader` and no hint: the
+    /// `Relocate` entry hands the log past it to the new core, and the old core could only answer
+    /// such a write that its outcome is unknown (H-025). A move called off lets them through again.
+    pub fn set_moving(&mut self, groups: impl IntoIterator<Item = GroupId>) {
+        self.moving = groups.into_iter().collect();
+    }
+
+    /// Whether every node of the cluster reads the writes that carry their change of each
+    /// collection's documents (007 FR-039): from then on this core's leaders write them.
+    pub fn set_counted_writes(&mut self, on: bool) {
+        self.counted_writes = on;
+    }
+
+    /// Whether range `g` is on its way to another core.
+    pub(crate) fn is_moving(&self, g: GroupId) -> bool {
+        self.moving.contains(&g)
     }
 
     /// The core's LSM.
@@ -858,6 +901,7 @@ impl RangeHost {
             g,
             key: key.to_vec(),
             scan: None,
+            backward: false,
             at: None,
             gc_floor: ZERO,
             concern,
@@ -888,6 +932,7 @@ impl RangeHost {
             g,
             key: key.to_vec(),
             scan: None,
+            backward: false,
             at: Some(ts),
             gc_floor: core.state_machine(g).map_or(ZERO, RangeState::gc_threshold),
             concern,
@@ -910,7 +955,7 @@ impl RangeHost {
     ) -> ReqId {
         self.wall_ms = wall_ms;
         self.now = now;
-        let ReadSpec { g, key, scan, at, concern, view, uncertain_to } = spec;
+        let ReadSpec { g, key, scan, backward, at, concern, view, uncertain_to } = spec;
         let ends_inside = scan.as_ref().is_none_or(|(end, _)| {
             self.ranges.get(&g).is_some_and(|r| *end <= r.end) && key < *end
         });
@@ -923,6 +968,7 @@ impl RangeHost {
             g,
             key,
             scan,
+            backward,
             at,
             gc_floor,
             concern,
@@ -944,7 +990,7 @@ impl RangeHost {
     ) -> ReqId {
         self.wall_ms = wall_ms;
         self.now = now;
-        let ScanReq { g, start, end, concern, limit } = r;
+        let ScanReq { g, start, end, concern, limit, backward } = r;
         // The scan stays inside the range: its start is checked with the keys, its end here.
         let ends_inside = self.ranges.get(&g).is_some_and(|r| end <= r.end) && start < end;
         let scan = Some((end, limit));
@@ -952,6 +998,7 @@ impl RangeHost {
             g,
             key: start,
             scan,
+            backward,
             at: None,
             gc_floor: ZERO,
             concern,
@@ -1102,6 +1149,7 @@ impl RangeHost {
             moved |= self.round_step(core, g, Periodic::Gc, now);
             moved |= self.round_step(core, g, Periodic::Checksum, now);
             moved |= self.close_step(core, g, now);
+            moved |= self.recount_step(core, g, now);
         }
         let ids: Vec<ReqId> = self.reqs.keys().copied().collect();
         for id in ids {
@@ -1150,6 +1198,7 @@ impl RangeHost {
             streams_until: Nanos::ZERO,
             last_closed: (ZERO, 0),
             fencing: Vec::new(),
+            recount: recount::RecountJob::default(),
         });
         let lost: Vec<ReqId> = self
             .reqs

@@ -18,13 +18,36 @@ use teseladb_types::{GroupId, NodeId, Rng};
 fn requests() -> Vec<RemoteReq> {
     let at = Hlc { physical: 7, logical: 1 };
     vec![
-        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 10, concern: ReadConcern::Majority },
+        RemoteReq::Scan {
+            start: vec![1],
+            end: vec![2],
+            limit: 10,
+            concern: ReadConcern::Majority,
+            backward: false,
+        },
         RemoteReq::FollowerScan {
             start: vec![1],
             end: vec![],
             limit: 3,
             max_stale_ms: Some(90_000),
             nodes: vec![(NodeId(2), false), (NodeId(1), true)],
+            backward: false,
+        },
+        // Backward scans (H-003) go under tags of their own.
+        RemoteReq::Scan {
+            start: vec![1],
+            end: vec![9],
+            limit: 1,
+            concern: ReadConcern::Local,
+            backward: true,
+        },
+        RemoteReq::FollowerScan {
+            start: vec![],
+            end: vec![5],
+            limit: 2,
+            max_stale_ms: None,
+            nodes: vec![(NodeId(3), true)],
+            backward: true,
         },
         RemoteReq::Read { key: vec![1, 2, 3], at: Some(at) },
         RemoteReq::Read { key: vec![], at: None },

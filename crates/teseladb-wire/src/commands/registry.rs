@@ -60,6 +60,36 @@ fn collection<B: Backend + ?Sized>(
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the sessions' record was not created"))
 }
 
+/// RefDb's TTL index of the record (006 FR-038).
+pub const TTL_INDEX: &str = "lsidTTLIndex";
+
+/// Creates the record's TTL index on `lastUse` if collection `c` lacks it, expiring records after
+/// the session timeout `timeout_ms`, as RefDb's `lsidTTLIndex` does.
+fn ttl_index<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    c: &CollectionEntry,
+    timeout_ms: u64,
+) -> Result<(), CommandError> {
+    if backend.indexes(c.id)?.iter().any(|e| e.name == TTL_INDEX) {
+        return Ok(());
+    }
+    let seconds = i32::try_from(timeout_ms / 1_000).unwrap_or(i32::MAX);
+    let spec = Document::new()
+        .with("key", Document::new().with("lastUse", 1))
+        .with("name", TTL_INDEX)
+        .with("expireAfterSeconds", seconds);
+    let create = Document::new()
+        .with("createIndexes", SESSIONS_COLL)
+        .with("indexes", Value::Array(vec![Value::Document(spec)]));
+    let mut ctx = Ctx { backend, shared, db: SESSIONS_DB, cmd: &create };
+    let r = super::indexes::create_indexes(&mut ctx)?;
+    match r.get("ok") {
+        Some(Value::Double(ok)) if *ok == 1.0 => Ok(()),
+        _ => Err(CommandError::new(INTERNAL_ERROR, format!("the sessions' TTL index: {r:?}"))),
+    }
+}
+
 fn statement(filter: Document, update: Option<Value>, multi: bool) -> Modify {
     Modify {
         filter,
@@ -119,7 +149,8 @@ fn refresh_records<B: Backend + ?Sized>(
     if used.is_empty() && !exists {
         return Ok(Refreshed::default());
     }
-    collection(backend, &space)?;
+    let c = collection(backend, &space)?;
+    ttl_index(backend, shared, &c, timeout)?;
     let cmd = Document::new().with("update", SESSIONS_COLL);
     let mut ctx = Ctx { backend, shared, db: SESSIONS_DB, cmd: &cmd };
     let mut w = Writer::new(&ctx, "update")?;

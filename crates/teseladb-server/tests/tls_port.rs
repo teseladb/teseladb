@@ -80,7 +80,7 @@ fn listener(mode: TlsMode, auth: ClientAuth, pki: &Pki) -> ClientListener {
         tls: TlsPort::new(mode, Some(sc)),
         ..ClientConfig::new(Vec::new())
     };
-    ClientListener::spawn(&cfg, 1, Arc::new(Fixed)).unwrap()
+    ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap()
 }
 
 fn ping() -> Vec<u8> {

@@ -291,6 +291,7 @@ fn evaluate_txn(
                     deletes: Vec::new(),
                     dedup: None,
                     live_delta: 0,
+                    docs: None,
                 };
                 return Ok((none, Some(record)));
             }
@@ -441,6 +442,9 @@ impl RangeHost {
         versions: &[Vec<Item>],
         now: Nanos,
     ) -> bool {
+        if self.refuse_moving(id, &m, latch) {
+            return true;
+        }
         let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);

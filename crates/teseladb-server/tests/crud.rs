@@ -339,8 +339,13 @@ fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
     // The document's key, and an intent of transaction 9 on it.
-    let scan =
-        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 10, concern: ReadConcern::Local };
+    let scan = RemoteReq::Scan {
+        start: vec![1],
+        end: vec![2],
+        limit: 10,
+        concern: ReadConcern::Local,
+        backward: false,
+    };
     let Ok(DataReply::Remote(RemoteReply::Rows(rows))) =
         node.data(DataReq::Remote(DATA_RANGE, scan), READY)
     else {
@@ -420,6 +425,7 @@ fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
             end: vec![2],
             limit: 100,
             concern: ReadConcern::Local,
+            backward: false,
         };
         let Ok(DataReply::Remote(RemoteReply::Rows(rows))) =
             node.data(DataReq::Remote(DATA_RANGE, scan), READY)
@@ -498,7 +504,8 @@ fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
     let try_scan = |start: Vec<u8>, end: Vec<u8>| {
-        let req = RemoteReq::Scan { start, end, limit: 10, concern: ReadConcern::Local };
+        let req =
+            RemoteReq::Scan { start, end, limit: 10, concern: ReadConcern::Local, backward: false };
         match node.data(DataReq::Remote(DATA_RANGE, req), READY) {
             Ok(DataReply::Remote(RemoteReply::Rows(rows))) => Some(rows),
             _ => None,
@@ -567,7 +574,8 @@ fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
     let scan = |start: Vec<u8>, end: Vec<u8>| {
-        let req = RemoteReq::Scan { start, end, limit: 10, concern: ReadConcern::Local };
+        let req =
+            RemoteReq::Scan { start, end, limit: 10, concern: ReadConcern::Local, backward: false };
         match node.data(DataReq::Remote(DATA_RANGE, req), READY) {
             Ok(DataReply::Remote(RemoteReply::Rows(rows))) => rows,
             other => panic!("no rows: {other:?}"),
@@ -634,6 +642,7 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
             end: vec![2],
             limit: 100,
             concern: ReadConcern::Local,
+            backward: false,
         };
         let Ok(DataReply::Remote(RemoteReply::Rows(rows))) =
             node.data(DataReq::Remote(DATA_RANGE, scan), READY)
@@ -906,8 +915,13 @@ fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
     let mut c = Client::new(&node);
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
-    let scan =
-        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 10, concern: ReadConcern::Local };
+    let scan = RemoteReq::Scan {
+        start: vec![1],
+        end: vec![2],
+        limit: 10,
+        concern: ReadConcern::Local,
+        backward: false,
+    };
     let Ok(DataReply::Remote(RemoteReply::Rows(rows))) =
         node.data(DataReq::Remote(DATA_RANGE, scan), READY)
     else {

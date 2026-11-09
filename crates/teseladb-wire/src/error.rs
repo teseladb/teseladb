@@ -207,6 +207,8 @@ codes! {
     INVALID_FCV = 4_926_900, "Location4926900";
     /// A change of the feature compatibility version without `confirm: true`.
     FCV_NOT_CONFIRMED = 7_369_100, "Location7369100";
+    /// A downgrade of the feature compatibility version that a collection's options prevent.
+    CANNOT_DOWNGRADE = 332, "CannotDowngrade";
     /// A change of the feature compatibility version RefDb does not allow from the current one.
     FCV_BAD_TRANSITION = 5_147_403, "Location5147403";
     /// Two fields of a compound index go through different arrays (009).
@@ -301,6 +303,12 @@ codes! {
     CS_SPLIT_NOT_LAST = 7_182_802, "Location7182802";
     /// `getMore` in a session on a cursor opened outside any, on a member of a replica set.
     CURSOR_NOT_IN_SESSION = 50736, "Location50736";
+    /// `getMore` in a session on a cursor opened outside any, on a `refrouter` (`validateLSID`).
+    ROUTER_CURSOR_NOT_IN_SESSION = 50799, "Location50799";
+    /// `getMore` without a session on a session's cursor, on a `refrouter`.
+    ROUTER_CURSOR_SESSION_REQUIRED = 50800, "Location50800";
+    /// `getMore` in a session other than its cursor's, on a `refrouter`.
+    ROUTER_CURSOR_OTHER_SESSION = 50801, "Location50801";
     /// `killOp` without `op`.
     KILL_OP_MISSING_OP = 50759, "Location50759";
     /// `killOp` with an `op` of a type it does not take.

@@ -1137,8 +1137,12 @@ fn reads_of_several_keys_go_together_and_each_gets_its_answer() {
 fn reads_of_several_spans_go_together_and_each_gets_its_rows() {
     use teseladb_wire::commands::Span;
     let rows = |r: Vec<(Vec<u8>, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Rows(r)));
-    let span =
-        |start: &[u8], end: &[u8]| Span { start: start.to_vec(), end: end.to_vec(), limit: 1 };
+    let span = |start: &[u8], end: &[u8]| Span {
+        start: start.to_vec(),
+        end: end.to_vec(),
+        limit: 1,
+        backward: false,
+    };
     let spans = vec![
         span(&[1, 1], &[1, 1, 0]),
         span(&[1, 2], &[1, 2, 0]),

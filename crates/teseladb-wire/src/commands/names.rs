@@ -72,7 +72,12 @@ fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     }
     // A client may name a collection as a resharding's copy (measured on a `refrouter` 9.0.4,
     // 03-11-2026): it is no copy of any resharding, and its documents cannot be written.
-    let allowed = ns.coll == SYSTEM_JS || ns.coll.starts_with(super::reshard::TEMP_PREFIX);
+    // `config.system.sessions` holds the cluster's record of sessions (006 FR-016), so it is no
+    // longer refused (DV-042): its TTL index is created as in RefDb (FR-038).
+    let sessions =
+        ns.db == super::registry::SESSIONS_DB && ns.coll == super::registry::SESSIONS_COLL;
+    let allowed =
+        ns.coll == SYSTEM_JS || ns.coll.starts_with(super::reshard::TEMP_PREFIX) || sessions;
     if system && ns.coll.starts_with(SYSTEM_PREFIX) && !allowed {
         return Err(CommandError::new(
             INVALID_NAMESPACE,

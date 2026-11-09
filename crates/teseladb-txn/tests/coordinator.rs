@@ -268,6 +268,7 @@ impl Node {
             g: G2,
             key: vec![TXN_SPACE],
             scan: Some((vec![TXN_SPACE + 1], usize::MAX)),
+            backward: false,
             at: None,
             concern: ReadConcern::Local,
             view: Default::default(),

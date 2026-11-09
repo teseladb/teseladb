@@ -69,8 +69,15 @@ fn without_faults_every_operation_is_answered() {
 /// as lost although the original had been applied over the newest of them.
 #[test]
 fn a_retried_write_acknowledged_with_w1_names_no_predecessor() {
+    // The case comes in about one seed of fifty (measured on 09-11-2026, seeds 1 to 400): the seeds
+    // run until it has come `WANTED` times, so that a change of the runs' order of events does not
+    // leave it untested.
+    const WANTED: u64 = 3;
+    const MAX_SEEDS: u64 = 1_000;
     let mut total = RetryStats::default();
-    for seed in 1..=40 {
+    let mut seed = 0;
+    while total.w1_blind < WANTED && seed < MAX_SEEDS {
+        seed += 1;
         let stats = Rc::new(Cell::new(RetryStats::default()));
         let wl = RangeDocsWorkload::counting(3, 2, Rc::clone(&stats));
         let cfg = SimConfig { fault_rate_pct: DOUBLE_FAULTS, ..cfg(FaultPlan::Heavy) };
@@ -79,7 +86,11 @@ fn a_retried_write_acknowledged_with_w1_names_no_predecessor() {
         total.w1_blind += stats.get().w1_blind;
         total.w1_blind_named += stats.get().w1_blind_named;
     }
-    assert!(total.w1_blind > 0, "no retried write was acknowledged with w: 1: {total:?}");
+    assert!(
+        total.w1_blind >= WANTED,
+        "only {} retried writes acknowledged with w: 1 in {seed} seeds: {total:?}",
+        total.w1_blind
+    );
     assert_eq!(total.w1_blind_named, 0, "{total:?}");
 }
 

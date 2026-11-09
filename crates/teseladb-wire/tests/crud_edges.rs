@@ -841,8 +841,8 @@ fn boolean_options_take_the_types_refdb_takes() {
         (&ins[..], "ordered", Value::Int32(1), "BSON field 'insert.ordered' is the wrong type 'int', expected type 'bool'".to_owned()),
         (&ins[..], "bypassDocumentValidation", s("x"), format!("BSON field 'insert.bypassDocumentValidation' is the wrong type 'string', expected types {safe}")),
         (&[("listCollections", 1.into())][..], "nameOnly", Value::Int32(1), "BSON field 'listCollections.nameOnly' is the wrong type 'int', expected type 'bool'".to_owned()),
-        // A `refrouter` 9.0.4 names `filter` after its own structure (crud-opt-catalog, 04-11-2026).
-        (&[("listCollections", 1.into())][..], "filter", Value::Int32(1), "BSON field 'ListCollection.filter' is the wrong type 'int', expected type 'object'".to_owned()),
+        // RefDb r9.0.4 list_collections.idl names the command, `listCollections` (09-11-2026).
+        (&[("listCollections", 1.into())][..], "filter", Value::Int32(1), "BSON field 'listCollections.filter' is the wrong type 'int', expected type 'object'".to_owned()),
         (&[("listDatabases", 1.into())][..], "nameOnly", s("x"), "BSON field 'listDatabases.nameOnly' is the wrong type 'string', expected types '[decimal, long, int, bool, double]'".to_owned()),
         (&[("findAndModify", s("c")), ("remove", true.into())][..], "new", s("x"), format!("BSON field 'findAndModify.new' is the wrong type 'string', expected types {safe}")),
     ] {
@@ -1319,10 +1319,10 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
     );
 }
 
-/// A field `listCollections` does not take is named after the structure of a `refrouter` 9.0.4,
-/// `ListCollection` (battery's `errors-idl`, 04-11-2026); other commands by their own name.
+/// A field `listCollections` does not take is named after the command, `listCollections`, like
+/// every other command (RefDb r9.0.4 list_collections.idl).
 #[test]
-fn an_unknown_field_of_list_collections_names_its_structure() {
+fn an_unknown_field_of_list_collections_names_the_command() {
     use teseladb_wire::generic::check_unknown_fields;
     let unknown = |name: &str| {
         let cmd = doc(&[(name, 1.into()), ("zzUnknown", 1.into())]);
@@ -1330,7 +1330,8 @@ fn an_unknown_field_of_list_collections_names_its_structure() {
         (e.code.code, e.errmsg)
     };
     let msg = |s: &str| format!("BSON field '{s}.zzUnknown' is an unknown field.");
-    assert_eq!(unknown("listCollections"), (40415, msg("ListCollection")));
+    // RefDb r9.0.4 list_collections.idl: `cpp_name: listCollections` (refrouter and refnode, 09-11-2026).
+    assert_eq!(unknown("listCollections"), (40415, msg("listCollections")));
     assert_eq!(unknown("find"), (40415, msg("find")));
 }
 
@@ -1361,5 +1362,52 @@ fn type_number_leaves_min_key_out_of_a_sorted_find() {
             &Value::Array(vec![(d(&[("_id", 1.into())]))]),
             "{sort:?} {r:?}"
         );
+    }
+}
+
+/// A filter 200 levels below the command, the most a command may nest, reads like any other
+/// filter: a `refrouter` 9.0.4 answers an empty batch over a collection holding a document of 180
+/// levels (measured on the native `refrouter` on 09-11-2026, scenario `bson-errors`).
+#[test]
+fn a_filter_as_deep_as_a_command_may_nest_is_read() {
+    let mut m = Mem::new();
+    let stored = d(&[("_id", 1.into()), ("a", nested(179))]);
+    let r = m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(vec![stored]))]));
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+
+    // `filter` is the first level below the command; `{a: … {x: 1}}` takes the other 199.
+    let r = m.run("db", doc(&[("find", s("c")), ("filter", nested(199)), ("limit", 1.into())]));
+
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(Vec::new()));
+    // The other reads and writes that take a filter as deep (the first level of a pipeline's
+    // `$match` and of an update's `q` sits one or two levels further down, within the 200).
+    let f = || nested(199);
+    let shallower = || nested(197);
+    for cmd in [
+        doc(&[("count", s("c")), ("query", f())]),
+        doc(&[("distinct", s("c")), ("key", s("a")), ("query", f())]),
+        doc(&[
+            ("delete", s("c")),
+            ("deletes", Value::Array(vec![d(&[("q", shallower()), ("limit", 0.into())])])),
+        ]),
+        doc(&[
+            ("update", s("c")),
+            (
+                "updates",
+                Value::Array(vec![d(&[
+                    ("q", shallower()),
+                    ("u", d(&[("$set", d(&[("b", 1.into())]))])),
+                ])]),
+            ),
+        ]),
+        doc(&[
+            ("aggregate", s("c")),
+            ("pipeline", Value::Array(vec![d(&[("$match", shallower())])])),
+            ("cursor", d(&[])),
+        ]),
+    ] {
+        let r = m.run("db", cmd.clone());
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{cmd:?} {r:?}");
     }
 }

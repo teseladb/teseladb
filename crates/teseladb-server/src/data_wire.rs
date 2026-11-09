@@ -40,6 +40,8 @@ pub enum RemoteReq {
         limit: u32,
         /// Read concern.
         concern: ReadConcern,
+        /// From the last key down, the documents nearest `end` first (H-003).
+        backward: bool,
     },
     /// A scan with a read preference (007 FR-013): on the first of `nodes` (each with whether it
     /// leads the range), a follower at its closed mark no older than `max_stale_ms`, the leader as
@@ -55,6 +57,8 @@ pub enum RemoteReq {
         max_stale_ms: Option<u64>,
         /// The replicas to try, in order, and whether each one leads the range.
         nodes: Vec<(NodeId, bool)>,
+        /// From the last key down (H-003).
+        backward: bool,
     },
     /// A read of `key` at mark `at`, or at a mark the leader takes under the clock rule, with its
     /// value type (009 FR-003).
@@ -72,6 +76,8 @@ pub enum RemoteReq {
         key: Vec<u8>,
         /// The scan's end and most documents (`None`: a read of `key`).
         scan: Option<(Vec<u8>, u32)>,
+        /// A scan from the last key down (H-003).
+        backward: bool,
         /// Mark.
         at: Option<Hlc>,
         /// Read concern.
@@ -136,6 +142,14 @@ pub enum RemoteReq {
     /// The range's live bytes (007 FR-005, D-068), which its state machine keeps: what the
     /// commands that weigh the data read without scanning it (018 FR-017).
     Live,
+    /// The live documents of a collection the range holds, from its leader's counts (007
+    /// FR-039).
+    DocCount {
+        /// Tenant.
+        tenant: u32,
+        /// Collection.
+        collection: u32,
+    },
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -223,6 +237,11 @@ pub enum RemoteReply {
         /// The bytes.
         bytes: u64,
     },
+    /// The live documents of a collection in the range; `None` while its counts are estimated.
+    DocCount {
+        /// Documents.
+        n: Option<u64>,
+    },
 }
 
 const WRITE: u8 = 0;
@@ -237,6 +256,11 @@ const RESTORE_INGEST: u8 = 8;
 const CHANGES: u8 = 9;
 const FENCE: u8 = 10;
 const LIVE: u8 = 11;
+// A backward scan goes under a tag of its own (H-003): a forward one is encoded as before.
+const SCAN_BACK: u8 = 12;
+const FOLLOWER_SCAN_BACK: u8 = 13;
+const READ_WITH_BACK: u8 = 14;
+const DOC_COUNT: u8 = 15;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -354,11 +378,13 @@ impl RemoteReq {
                 put_wc(&mut e, *wc);
                 put_deadline(&mut e, *deadline);
             }
-            RemoteReq::Scan { start, end, limit, concern } => {
-                e.u8(SCAN).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
+            RemoteReq::Scan { start, end, limit, concern, backward } => {
+                let tag = if *backward { SCAN_BACK } else { SCAN };
+                e.u8(tag).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
             }
-            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes } => {
-                e.u8(FOLLOWER_SCAN).bytes(start).bytes(end).u32(*limit);
+            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward } => {
+                let tag = if *backward { FOLLOWER_SCAN_BACK } else { FOLLOWER_SCAN };
+                e.u8(tag).bytes(start).bytes(end).u32(*limit);
                 e.bool(max_stale_ms.is_some()).u64(max_stale_ms.unwrap_or(0));
                 e.var(nodes.len() as u64);
                 for (node, leads) in nodes {
@@ -374,8 +400,9 @@ impl RemoteReq {
                 crate::txn_wire::put_op(&mut e, op);
                 put_deadline(&mut e, *deadline);
             }
-            RemoteReq::ReadWith { key, scan, at, concern, view, uncertain_to } => {
-                e.u8(READ_WITH).bytes(key).bool(scan.is_some());
+            RemoteReq::ReadWith { key, scan, backward, at, concern, view, uncertain_to } => {
+                let tag = if *backward { READ_WITH_BACK } else { READ_WITH };
+                e.u8(tag).bytes(key).bool(scan.is_some());
                 if let Some((end, limit)) = scan {
                     e.bytes(end).u32(*limit);
                 }
@@ -409,6 +436,9 @@ impl RemoteReq {
             RemoteReq::Live => {
                 e.u8(LIVE);
             }
+            RemoteReq::DocCount { tenant, collection } => {
+                e.u8(DOC_COUNT).u32(*tenant).u32(*collection);
+            }
         }
         e.finish()
     }
@@ -417,7 +447,8 @@ impl RemoteReq {
     pub fn decode(b: &[u8]) -> Result<RemoteReq, DecodeError> {
         let mut d = Decoder::new(b);
         let at = d.position();
-        let r = match d.u8()? {
+        let tag = d.u8()?;
+        let r = match tag {
             WRITE => {
                 let n = d.var()?;
                 if n > d.remaining() as u64 {
@@ -434,13 +465,14 @@ impl RemoteReq {
                 let wc = get_wc(&mut d)?;
                 RemoteReq::Write { keys, mutation, dedup, wc, deadline: get_deadline(&mut d)? }
             }
-            SCAN => RemoteReq::Scan {
+            SCAN | SCAN_BACK => RemoteReq::Scan {
                 start: d.bytes()?.to_vec(),
                 end: d.bytes()?.to_vec(),
                 limit: d.u32()?,
                 concern: get_concern(&mut d)?,
+                backward: tag == SCAN_BACK,
             },
-            FOLLOWER_SCAN => {
+            FOLLOWER_SCAN | FOLLOWER_SCAN_BACK => {
                 let (start, end, limit) = (d.bytes()?.to_vec(), d.bytes()?.to_vec(), d.u32()?);
                 let (some, stale) = (d.bool()?, d.u64()?);
                 let n = d.var()?;
@@ -457,6 +489,7 @@ impl RemoteReq {
                     limit,
                     max_stale_ms: some.then_some(stale),
                     nodes,
+                    backward: tag == FOLLOWER_SCAN_BACK,
                 }
             }
             READ => {
@@ -468,7 +501,7 @@ impl RemoteReq {
                 let op = crate::txn_wire::get_op(&mut d)?;
                 RemoteReq::Txn { op, deadline: get_deadline(&mut d)? }
             }
-            READ_WITH => {
+            READ_WITH | READ_WITH_BACK => {
                 let key = d.bytes()?.to_vec();
                 let scan = match d.bool()? {
                     true => Some((d.bytes()?.to_vec(), d.u32()?)),
@@ -479,7 +512,8 @@ impl RemoteReq {
                 let view = get_view(&mut d)?;
                 let (window, to) = (d.bool()?, get_hlc(&mut d)?);
                 let (at, uncertain_to) = (some.then_some(mark), window.then_some(to));
-                RemoteReq::ReadWith { key, scan, at, concern, view, uncertain_to }
+                let backward = tag == READ_WITH_BACK;
+                RemoteReq::ReadWith { key, scan, backward, at, concern, view, uncertain_to }
             }
             BACKUP_FETCH => {
                 RemoteReq::BackupFetch { at: get_hlc(&mut d)?, file: d.u32()?, offset: d.u64()? }
@@ -506,6 +540,7 @@ impl RemoteReq {
                 on: d.bool()?,
             },
             LIVE => RemoteReq::Live,
+            DOC_COUNT => RemoteReq::DocCount { tenant: d.u32()?, collection: d.u32()? },
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -524,6 +559,7 @@ const OK_RESTORED: u8 = 7;
 const OK_CHANGES: u8 = 8;
 const OK_FENCED: u8 = 9;
 const OK_LIVE: u8 = 10;
+const OK_DOC_COUNT: u8 = 11;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -651,6 +687,9 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
         Ok(RemoteReply::Live { bytes }) => {
             e.u8(OK_LIVE).u64(*bytes);
         }
+        Ok(RemoteReply::DocCount { n }) => {
+            e.u8(OK_DOC_COUNT).bool(n.is_some()).u64(n.unwrap_or(0));
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -724,6 +763,10 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
         }
         OK_FENCED => Ok(RemoteReply::Fenced { ts: get_mark(&mut d)? }),
         OK_LIVE => Ok(RemoteReply::Live { bytes: d.u64()? }),
+        OK_DOC_COUNT => {
+            let (some, n) = (d.bool()?, d.u64()?);
+            Ok(RemoteReply::DocCount { n: some.then_some(n) })
+        }
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -763,27 +806,61 @@ mod tests {
             RemoteReq::Scan {
                 start: vec![1],
                 end: vec![2],
+                limit: 1,
+                concern: ReadConcern::Majority,
+                backward: true,
+            },
+            RemoteReq::FollowerScan {
+                start: vec![1],
+                end: vec![],
+                limit: 4,
+                max_stale_ms: Some(5),
+                nodes: vec![(NodeId(1), false)],
+                backward: true,
+            },
+            RemoteReq::ReadWith {
+                key: vec![1],
+                scan: Some((vec![3], 2)),
+                backward: true,
+                at: None,
+                concern: ReadConcern::Majority,
+                view: TxnView::default(),
+                uncertain_to: None,
+            },
+            RemoteReq::Scan {
+                start: vec![1],
+                end: vec![2],
                 limit: 10,
                 concern: ReadConcern::Majority,
+                backward: false,
             },
             RemoteReq::Scan {
                 start: vec![],
                 end: vec![],
                 limit: 0,
                 concern: ReadConcern::Linearizable,
+                backward: false,
             },
-            RemoteReq::Scan { start: vec![], end: vec![], limit: 0, concern: ReadConcern::Local },
+            RemoteReq::Scan {
+                start: vec![],
+                end: vec![],
+                limit: 0,
+                concern: ReadConcern::Local,
+                backward: false,
+            },
             RemoteReq::Scan {
                 start: vec![],
                 end: vec![],
                 limit: 0,
                 concern: ReadConcern::Available,
+                backward: false,
             },
             RemoteReq::Read { key: vec![1, 2], at: Some(Hlc { physical: 4, logical: 1 }) },
             RemoteReq::Read { key: vec![3], at: None },
             RemoteReq::ReadWith {
                 key: vec![1],
                 scan: Some((vec![2], 9)),
+                backward: false,
                 at: Some(Hlc { physical: 4, logical: 1 }),
                 concern: ReadConcern::Local,
                 view: TxnView {
@@ -800,6 +877,7 @@ mod tests {
             RemoteReq::ReadWith {
                 key: vec![1],
                 scan: None,
+                backward: false,
                 at: None,
                 concern: ReadConcern::Majority,
                 view: TxnView::default(),
@@ -952,9 +1030,14 @@ mod tests {
         let n = bad_wc.len();
         bad_wc[n - 15] = 9;
         assert!(RemoteReq::decode(&bad_wc).is_err());
-        let mut bad_rc =
-            RemoteReq::Scan { start: vec![], end: vec![], limit: 0, concern: ReadConcern::Local }
-                .encode();
+        let mut bad_rc = RemoteReq::Scan {
+            start: vec![],
+            end: vec![],
+            limit: 0,
+            concern: ReadConcern::Local,
+            backward: false,
+        }
+        .encode();
         let n = bad_rc.len();
         bad_rc[n - 1] = 9;
         assert!(RemoteReq::decode(&bad_rc).is_err());

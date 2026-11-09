@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 teseladb-hash = { workspace = true }
 teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-keys = { path = "../teseladb-keys" }
 teseladb-lsm = { path = "../teseladb-lsm" }
 teseladb-multiraft = { path = "../teseladb-multiraft" }
 teseladb-raft = { workspace = true }

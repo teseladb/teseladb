@@ -43,8 +43,8 @@ fn config(max_connections: usize) -> ClientConfig {
     }
 }
 
-fn listener(max: usize, workers: u16) -> ClientListener {
-    ClientListener::spawn(&config(max), workers, Arc::new(Fixed)).unwrap()
+fn listener(max: usize) -> ClientListener {
+    ClientListener::spawn(&config(max), Arc::new(Fixed)).unwrap()
 }
 
 fn connect(l: &ClientListener) -> TcpStream {
@@ -86,7 +86,7 @@ fn hello() -> Document {
 
 #[test]
 fn handshake_and_ping_over_sockets() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 3);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut clients: Vec<TcpStream> = (0..6).map(|_| connect(&l)).collect();
     let mut ids = Vec::new();
     for (k, c) in clients.iter_mut().enumerate() {
@@ -119,7 +119,7 @@ fn handshake_and_ping_over_sockets() {
 
 #[test]
 fn compressed_requests_get_compressed_replies() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut c = connect(&l);
     let list = vec![Value::from("zstd"), Value::from("zlib")];
     send(&mut c, 1, 0, &hello().with("compression", list));
@@ -143,7 +143,7 @@ fn compressed_requests_get_compressed_replies() {
 
 #[test]
 fn awaitable_hello_and_exhaust() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 2);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let wait = hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 200);
     // Without exhaust: one reply after the wait, then the connection serves the next request.
@@ -171,7 +171,7 @@ fn awaitable_hello_and_exhaust() {
 
 #[test]
 fn connection_limit_closes_new_connections() {
-    let l = listener(2, 1);
+    let l = listener(2);
     let mut a = connect(&l);
     let mut b = connect(&l);
     for s in [&mut a, &mut b] {
@@ -199,7 +199,7 @@ fn connection_limit_closes_new_connections() {
 
 #[test]
 fn faults_close_only_their_connection() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut good = connect(&l);
     let mut bad = connect(&l);
     // A message length over the limit, and a required flag nobody knows.
@@ -220,9 +220,9 @@ fn faults_close_only_their_connection() {
 
 #[test]
 fn spawn_fails_on_a_busy_address() {
-    let first = listener(1, 1);
+    let first = listener(1);
     let cfg = ClientConfig { addrs: first.addrs().to_vec(), ..config(1) };
-    assert!(ClientListener::spawn(&cfg, 1, Arc::new(Fixed)).is_err());
+    assert!(ClientListener::spawn(&cfg, Arc::new(Fixed)).is_err());
     first.stop();
 }
 
@@ -324,7 +324,7 @@ fn a_node_opens_the_clients_port() {
 fn a_slow_reader_gets_every_reply() {
     // Thousands of pipelined pings without reading: the replies fill the socket, the worker
     // waits until it can write, and every reply arrives in order.
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     assert!(format!("{l:?}").contains("ClientListener"));
     let mut c = connect(&l);
     let n = 20_000;
@@ -345,7 +345,7 @@ fn a_slow_reader_gets_every_reply() {
 
 #[test]
 fn clients_that_vanish_are_closed() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let wait = hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 100);
     // An exhaust stream and a plain wait whose clients go away before the answer.
@@ -412,7 +412,7 @@ fn dev_cluster_with_test_commands_answers_configure_fail_point() {
 
 #[test]
 fn a_waiting_client_that_hangs_up_is_closed_before_its_deadline() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let mut w = connect(&l);
     send(&mut w, 1, 0, &hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 400));
@@ -458,7 +458,7 @@ fn serving_a_node_without_clients_port() {
 fn a_client_that_closes_with_replies_unread_is_closed() {
     // The client pipelines requests and closes without reading: the worker's writes fail
     // (connection reset) and it closes the connection.
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     for _ in 0..3 {
         let mut c = connect(&l);
         let ping = Document::new().with("ping", 1).with("$db", "admin").to_bytes().unwrap();
@@ -489,7 +489,7 @@ fn configuration_file_keys_of_the_clients_port() {
 
 #[test]
 fn a_fault_behind_a_waiting_hello_closes_the_connection_after_the_answer() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let mut w = connect(&l);
     send(&mut w, 1, 0, &hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 500));
@@ -507,7 +507,7 @@ fn a_fault_behind_a_waiting_hello_closes_the_connection_after_the_answer() {
 
 #[test]
 fn the_replies_before_a_fault_reach_the_client() {
-    let l = listener(DEFAULT_MAX_CONNECTIONS, 1);
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut c = connect(&l);
     let mut both = OpMsg::encode(1, 0, 0, &hello().to_bytes().unwrap());
     both.extend(OpMsg::encode(2, 0, 1 << 5, &hello().to_bytes().unwrap()));
@@ -526,7 +526,7 @@ fn a_drained_node_closes_its_clients_port() {
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
     assert_eq!(state.info().topology.counter, 0);
-    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), 2, Arc::new(state)).unwrap();
+    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
     let mut s = connect(&l);
     send(&mut s, 1, 0, &hello());
     let (_, _, d) = recv(&mut s).unwrap();
@@ -763,23 +763,37 @@ fn a_replica_set_port_that_is_taken_waits_for_another() {
     drop(node.stop());
 }
 
-/// Each worker of a clients' port is woken at a change of `topologyVersion`; a port that stops
-/// leaves the list at the next change, so opening and closing the replica set port again and
-/// again keeps nothing (018 FR-016).
+/// Each connection's thread is woken at a change of `topologyVersion` (or of the tenants'
+/// states); a connection that closes leaves the list, and so do those of a port that stops, so
+/// opening and closing connections or the replica set port again and again keeps nothing (018
+/// FR-016, H-013).
 #[test]
-fn a_stopped_port_is_no_longer_woken() {
+fn a_closed_connection_is_no_longer_woken() {
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = Arc::new(NodeClockState::new(clock, 7).with_presence(presence.clone()));
-    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), 2, state.clone()).unwrap();
+    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), state).unwrap();
+    assert_eq!(presence.watchers(), 0, "no connection, no thread");
+    let mut a = connect(&l);
+    let mut b = connect(&l);
+    for (id, s) in [(1, &mut a), (2, &mut b)] {
+        send(s, id, 0, &hello());
+        assert!(recv(s).is_some());
+    }
     assert_eq!(presence.watchers(), 2);
+    drop(a);
+    let settled = |want: usize| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while presence.watchers() != want && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        presence.watchers()
+    };
+    assert_eq!(settled(1), 1, "the closed connection's thread ended");
     presence.set(1, false);
     l.stop();
-    assert_eq!(presence.watchers(), 0);
-    presence.set(2, false);
-    let again = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), 1, state).unwrap();
-    assert_eq!(presence.watchers(), 1);
-    again.stop();
+    assert_eq!(settled(0), 0, "the port's stop ends the others");
+    drop(b);
 }
 
 /// The limiter of new connections (006 FR-036, measured on a `refnode` 9.0.4): with a bucket of
@@ -796,7 +810,7 @@ fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_buck
         Setting::QueueDepth(1),
         Setting::Enabled(true),
     ];
-    let l = ClientListener::spawn(&cfg, 2, Arc::new(Fixed)).unwrap();
+    let l = ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap();
     let mut silent = connect(&l);
     let start = Instant::now();
     let mut clients: Vec<TcpStream> = (0..5).map(|_| connect(&l)).collect();

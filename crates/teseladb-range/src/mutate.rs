@@ -98,7 +98,7 @@ where
         stmt_id: k.stmt_id,
         result: result.clone(),
     });
-    let command = Command::Write { puts, deletes, dedup, live_delta };
+    let command = Command::Write { puts, deletes, dedup, live_delta, docs: None };
     Ok(Evaluated { command, change, result, latch: id })
 }
 

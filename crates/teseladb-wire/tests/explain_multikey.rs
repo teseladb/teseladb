@@ -119,3 +119,61 @@ fn a_multikey_scan_drops_the_repeats_of_a_document() {
     let r = explain(&mut m, r#"{"find":"mk","filter":{"a":{"$gte":0}}}"#);
     assert_eq!(ixscan(&r), (Value::Int32(4), Value::Int32(1), Value::Int32(3)));
 }
+
+/// Only btree and `2dsphere` indexes track the paths through arrays (RefDb r9.0.4
+/// `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`): the `IXSCAN` of a
+/// hashed index has no `multiKeyPaths`, a wildcard one does, and `$listCatalog` keeps
+/// `multikeyPaths` for btree indexes only (measured on the native `refrouter` 9.0.4 on 09-11-2026).
+#[test]
+fn only_indexes_that_track_paths_through_arrays_show_them() {
+    let mut m = Mem::new();
+    for text in [
+        r#"{"insert":"h","documents":[{"_id":1,"a":1,"t":"x"}]}"#,
+        r#"{"createIndexes":"h","indexes":[{"key":{"a":"hashed"},"name":"a_hashed"},{"key":{"t":"text"},"name":"t_text"},{"key":{"$**":1},"name":"w"}]}"#,
+    ] {
+        let r = m.run("db", extjson::parse(text).expect("command"));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+
+    let hashed = explain(&mut m, r#"{"find":"h","filter":{"a":1},"hint":"a_hashed"}"#);
+    let wildcard = explain(&mut m, r#"{"find":"h","filter":{"zz":1},"hint":"w"}"#);
+    let catalog = m.run(
+        "db",
+        extjson::parse(r#"{"aggregate":"h","pipeline":[{"$listCatalog":{}}],"cursor":{}}"#)
+            .expect("command"),
+    );
+
+    let paths = |r: &Document| {
+        let plan = field(r, "queryPlanner.winningPlan");
+        let ixscan = first_ixscan(plan).unwrap_or_else(|| panic!("no IXSCAN in {r:?}"));
+        ixscan.get("multiKeyPaths").is_some()
+    };
+    assert!(!paths(&hashed), "{hashed:?}");
+    assert!(paths(&wildcard), "{wildcard:?}");
+    let Value::Array(docs) = field(&catalog, "cursor.firstBatch") else { panic!("{catalog:?}") };
+    let Some(Value::Document(entry)) = docs.first() else { panic!("{catalog:?}") };
+    let Value::Array(indexes) = field(entry, "md.indexes") else { panic!("{entry:?}") };
+    let tracked: Vec<(String, bool)> = indexes
+        .iter()
+        .filter_map(|i| match i {
+            Value::Document(i) => Some(i),
+            _ => None,
+        })
+        .map(|i| match field(i, "spec.name") {
+            Value::String(n) => (n.clone(), i.get("multikeyPaths").is_some()),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let want = [("_id_", true), ("a_hashed", false), ("t_text", false), ("w", false)];
+    assert_eq!(tracked, want.map(|(n, t)| (n.to_owned(), t)).to_vec());
+}
+
+/// The first `IXSCAN` stage under `v`, depth first.
+fn first_ixscan(v: &Value) -> Option<&Document> {
+    match v {
+        Value::Document(d) if d.get("stage") == Some(&Value::String("IXSCAN".into())) => Some(d),
+        Value::Document(d) => d.iter().find_map(|(_, v)| first_ixscan(v)),
+        Value::Array(a) => a.iter().find_map(first_ixscan),
+        _ => None,
+    }
+}

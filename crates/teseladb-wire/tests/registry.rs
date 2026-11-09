@@ -78,3 +78,96 @@ fn a_refresh_with_nothing_to_record_creates_nothing() {
     assert_eq!(refresh(&mut m, &shared, 0, now).unwrap(), Refreshed::default());
     assert!(m.catalog.collections.is_empty());
 }
+
+/// The record has RefDb's TTL index `lsidTTLIndex` on `lastUse`, with the session timeout, from
+/// the refresh that creates it (006 FR-038; measured on the native `refrouter` 9.0.4 on 09-11-2026:
+/// `{v: 2, key: {lastUse: 1}, name: "lsidTTLIndex", expireAfterSeconds: 1800}`).
+#[test]
+fn the_record_has_the_ttl_index_of_refdb() {
+    let mut m = Mem::new();
+    let t0 = m.now;
+    m.run("admin", doc(&[("refreshSessions", Value::Array(vec![lsid(1)]))]));
+    let shared = std::mem::take(&mut m.shared);
+    refresh(&mut m, &shared, 0, t0).unwrap();
+    refresh(&mut m, &shared, 0, t0 + 1).unwrap();
+    m.shared = shared;
+
+    let r = m.run(SESSIONS_DB, doc(&[("listIndexes", Value::from(SESSIONS_COLL))]));
+
+    let Value::Array(listed) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(listed.len(), 2, "{r:?}");
+    let Value::Document(ttl) = &listed[1] else { panic!("{r:?}") };
+    assert_eq!(ttl.get("name"), Some(&Value::from("lsidTTLIndex")));
+    assert_eq!(ttl.get("key"), Some(&Value::Document(doc(&[("lastUse", 1.into())]))));
+    assert_eq!(ttl.get("expireAfterSeconds"), Some(&Value::Int32(1800)));
+}
+
+/// Once created, the record shows as a `refrouter` 9.0.4 shows it, a collection sharded by `{_id: 1}`
+/// that lives on the shards (006 FR-038, measured on the native `refrouter` on 09-11-2026).
+#[test]
+fn the_record_shows_as_a_sharded_collection() {
+    let mut m = Mem::new();
+    let t0 = m.now;
+    m.run("admin", doc(&[("refreshSessions", Value::Array(vec![lsid(1)]))]));
+    let shared = std::mem::take(&mut m.shared);
+    refresh(&mut m, &shared, 0, t0).unwrap();
+    m.shared = shared;
+    let find = |m: &mut Mem, coll: &str| {
+        let r = m.run("config", doc(&[("find", Value::from(coll))]));
+        match field(&r, "cursor.firstBatch") {
+            Value::Array(a) => a.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let is_sessions = |v: &Value| match v {
+        Value::Document(d) => d.get("_id") == Some(&Value::from("config.system.sessions")),
+        _ => false,
+    };
+
+    let collections = find(&mut m, "collections");
+    // The node generates `config.chunks` from Group 0's ranges with `config_chunks`.
+    let chunks: Vec<Value> =
+        teseladb_wire::commands::chunks::config_chunks(&m.routes, m.catalog.collections.iter())
+            .into_iter()
+            .map(Value::Document)
+            .collect();
+    let stats = m.run(SESSIONS_DB, doc(&[("collStats", Value::from(SESSIONS_COLL))]));
+    let listed =
+        m.run(SESSIONS_DB, doc(&[("listCollections", 1.into()), ("nameOnly", true.into())]));
+    let distribution = m.run(
+        "admin",
+        doc(&[
+            ("aggregate", 1.into()),
+            (
+                "pipeline",
+                Value::Array(vec![Value::Document(doc(&[(
+                    "$shardedDataDistribution",
+                    Value::Document(Document::new()),
+                )]))]),
+            ),
+            ("cursor", Value::Document(Document::new())),
+        ]),
+    );
+
+    let Some(Value::Document(entry)) = collections.iter().find(|v| is_sessions(v)) else {
+        panic!("{collections:?}")
+    };
+    assert_eq!(entry.get("key"), Some(&Value::Document(doc(&[("_id", 1.into())]))));
+    assert_eq!(entry.get("unique"), Some(&Value::Boolean(false)));
+    assert_eq!(entry.get("maxChunkSizeBytes"), Some(&Value::Int64(200_000)));
+    let uuid = entry.get("uuid").cloned();
+    let own: Vec<&Value> = chunks
+        .iter()
+        .filter(|c| matches!(c, Value::Document(d) if d.get("uuid").cloned() == uuid))
+        .collect();
+    assert_eq!(own.len(), 1, "{chunks:?}");
+    let Value::Document(chunk) = own[0] else { panic!() };
+    assert_eq!(chunk.get("min"), Some(&Value::Document(doc(&[("_id", Value::MinKey)]))));
+    assert_eq!(chunk.get("max"), Some(&Value::Document(doc(&[("_id", Value::MaxKey)]))));
+    assert_eq!(
+        (field(&stats, "sharded"), field(&stats, "nchunks")),
+        (&Value::Boolean(true), &Value::Int32(1))
+    );
+    assert!(!format!("{listed:?}").contains("system.sessions"), "{listed:?}");
+    assert!(format!("{distribution:?}").contains("config.system.sessions"), "{distribution:?}");
+}

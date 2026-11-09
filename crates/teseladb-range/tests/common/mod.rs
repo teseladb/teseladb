@@ -209,10 +209,22 @@ impl Cluster {
         m: Box<dyn Mutation>,
         dedup: Option<DedupKey>,
     ) -> ReqId {
+        self.mutate_with_wc(n, keys, m, dedup, MAJORITY)
+    }
+
+    /// [`Cluster::mutate_with`] with write concern `wc`.
+    pub fn mutate_with_wc(
+        &mut self,
+        n: NodeId,
+        keys: &[&[u8]],
+        m: Box<dyn Mutation>,
+        dedup: Option<DedupKey>,
+        wc: WriteConcern,
+    ) -> ReqId {
         let (now, wall) = (self.now, self.wall_of(n));
         let node = self.nodes.get_mut(&n).unwrap();
         let keys = keys.iter().map(|k| k.to_vec()).collect();
-        let w = WriteReq { g: G, keys, m, dedup, wc: MAJORITY };
+        let w = WriteReq { g: G, keys, m, dedup, wc };
         node.host.mutate(&mut node.core, w, now, wall)
     }
 
@@ -231,6 +243,22 @@ impl Cluster {
             end: end.to_vec(),
             concern: ReadConcern::Majority,
             limit,
+            backward: false,
+        };
+        node.host.scan(&mut node.core, r, now, wall)
+    }
+
+    /// A scan of `[start, end)` from its last key down, at most `limit` documents (H-003).
+    pub fn scan_back(&mut self, n: NodeId, start: &[u8], end: &[u8], limit: usize) -> ReqId {
+        let (now, wall) = (self.now, self.wall_of(n));
+        let node = self.nodes.get_mut(&n).unwrap();
+        let r = ScanReq {
+            g: G,
+            start: start.to_vec(),
+            end: end.to_vec(),
+            concern: ReadConcern::Majority,
+            limit,
+            backward: true,
         };
         node.host.scan(&mut node.core, r, now, wall)
     }

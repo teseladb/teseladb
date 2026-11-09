@@ -268,6 +268,7 @@ const UNSTABLE_FIELDS: [(&str, &[(&str, Kind)]); 13] = [
         &[
             ("changeStreamPreAndPostImages", Kind::Object),
             ("timeseriesBucketsMayHaveMixedSchemaData", Kind::Bool),
+            ("_removeLegacyTimeseriesBucketingParametersHaveChanged", Kind::Bool),
             ("dryRun", Kind::Bool),
             ("collectionUUID", Kind::Uuid),
             ("recordIdsReplicated", Kind::Bool),

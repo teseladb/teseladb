@@ -388,6 +388,7 @@ fn command<B: Backend + ?Sized>(
     let api = api_version::parse(&req.command, name)?;
     api_version::check_command(name, &api)?;
     api_version::check_strict(&req.command, name, &api)?;
+    crate::internal_fields::check_privileged(req, canonical(name))?;
     let own_limit = generic.max_time_ms;
     if let Some((backend, _)) = cmds.as_mut() {
         backend.set_read_preference(generic.read_pref);

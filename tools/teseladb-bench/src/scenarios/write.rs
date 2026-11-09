@@ -243,6 +243,7 @@ impl Cluster {
             g: G,
             key: key.to_vec(),
             scan: None,
+            backward: false,
             at: None,
             concern: ReadConcern::Local,
             view: teseladb_range::push::TxnView::default(),

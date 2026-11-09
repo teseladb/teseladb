@@ -212,6 +212,7 @@ impl Backups {
                 g: key.0,
                 key: interval.0.clone(),
                 scan: Some((interval.1.clone(), 1)),
+                backward: false,
                 at: Some(key.1),
                 concern: ReadConcern::Linearizable,
                 view: TxnView::default(),
@@ -652,6 +653,7 @@ mod tests {
             end: vec![],
             limit: 1,
             concern: ReadConcern::Majority,
+            backward: false,
         };
         assert!(matches!(ask(&mut b, &mut w, DATA_RANGE, scan), Err(RangeError::NotLeader { .. })));
         assert!(b.take_replies().is_empty());

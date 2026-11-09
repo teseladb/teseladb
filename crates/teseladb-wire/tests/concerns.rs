@@ -355,6 +355,16 @@ fn write_concerns_read_as_refdb_reads_them() {
     );
     assert_eq!(wc(&[("w", "x".into())]).to_range(), WriteConcern { w: W::Majority, j: true });
     assert_eq!(default_write_concern().to_range(), WriteConcern { w: W::Majority, j: true });
+    // Without `j`, `w: <n>` acknowledges in memory and `"majority"` on the journal, as a replica
+    // set of RefDb 9.0.4 (`writeConcernMajorityJournalDefault: true`); H-007.
+    assert_eq!(wc(&[("w", 1.into())]).to_range(), WriteConcern { w: W::Nodes(1), j: false });
+    assert_eq!(wc(&[("w", 2.into())]).to_range(), WriteConcern { w: W::Nodes(2), j: false });
+    let majority = wc(&[("w", "majority".into())]).to_range();
+    assert_eq!(majority, WriteConcern { w: W::Majority, j: true });
+    assert_eq!(
+        wc(&[("w", 1.into()), ("j", true.into())]).to_range(),
+        WriteConcern { w: W::Nodes(1), j: true }
+    );
 }
 
 #[test]
@@ -539,8 +549,7 @@ fn strict_commands_reject_unknown_fields() {
         let good = d(&[(name, 1.into()), (ok_field, 1.into())]);
         assert!(check_unknown_fields(&good, name).is_ok(), "{name}.{ok_field}");
         let bad = d(&[(name, 1.into()), ("zz", 1.into())]);
-        // `listCollections` is named after the structure of a `refrouter` 9.0.4 (measured, 04-11).
-        let owner = if name == "listCollections" { "ListCollection" } else { canonical(name) };
+        let owner = canonical(name);
         let want = format!("BSON field '{owner}.zz' is an unknown field.");
         assert_eq!(err(check_unknown_fields(&bad, name)), (40415, want));
     }

@@ -95,14 +95,26 @@ fn metadata<B: Backend + ?Sized>(
     Ok(md)
 }
 
-/// An index of `md`, whose fields went through arrays at `paths` (`(field, path)`).
+/// An index of `md`, whose fields went through arrays at `paths` (`(field, path)`). Only the
+/// indexes that keep those paths have `multikeyPaths`.
 fn index(spec: Document, paths: &[(String, String)]) -> Value {
-    let mut multikey_paths = Document::new();
     // The node stored the specification with its key.
     let key = match spec.get("key") {
         Some(Value::Document(key)) => key.clone(),
         _ => Document::new(),
     };
+    let mut out =
+        Document::new().with("spec", spec).with("ready", true).with("multikey", !paths.is_empty());
+    if super::plan_exec::tracks_multikey_paths(&key) {
+        out.push("multikeyPaths", multikey_bits(&key, paths));
+    }
+    Value::Document(out)
+}
+
+/// For each field of `key`, one byte per component of its path: 1 where the field went through
+/// an array at that prefix.
+fn multikey_bits(key: &Document, paths: &[(String, String)]) -> Document {
+    let mut multikey_paths = Document::new();
     for (field, _) in key.iter() {
         let mut prefix = String::new();
         let bytes: Vec<u8> = field
@@ -117,13 +129,7 @@ fn index(spec: Document, paths: &[(String, String)]) -> Value {
             .collect();
         multikey_paths.push(field, Value::Binary { subtype: 0, bytes });
     }
-    Value::Document(
-        Document::new()
-            .with("spec", spec)
-            .with("ready", true)
-            .with("multikey", !paths.is_empty())
-            .with("multikeyPaths", multikey_paths),
-    )
+    multikey_paths
 }
 
 /// The multikey marks of index `id` of `c`: `(field, path)`.

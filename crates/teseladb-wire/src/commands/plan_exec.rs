@@ -235,6 +235,24 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
     Ok(out)
 }
 
+/// Whether an index of key `pattern` keeps the paths through arrays of its fields: btree and
+/// `2dsphere` indexes do, the others (hashed, text, 2d, wildcard) do not (RefDb r9.0.4
+/// `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`).
+pub(crate) fn tracks_multikey_paths(pattern: &Document) -> bool {
+    pattern
+        .iter()
+        .all(|(k, v)| !k.ends_with("$**") && !matches!(v, Value::String(s) if s != GEO_2DSPHERE))
+}
+
+/// Whether the `IXSCAN` of an index of key `pattern` shows `multiKeyPaths`: those that keep the
+/// paths, and wildcard indexes, whose stage names the path it expanded.
+pub(crate) fn shows_multikey_paths(pattern: &Document) -> bool {
+    !pattern.iter().any(|(_, v)| matches!(v, Value::String(s) if s != GEO_2DSPHERE))
+}
+
+/// The index type that keeps the paths through arrays besides btree.
+const GEO_2DSPHERE: &str = "2dsphere";
+
 /// Whether an index field is hashed.
 fn is_hashed(v: &Value) -> bool {
     matches!(v, Value::String(s) if s == "hashed")
@@ -616,9 +634,9 @@ fn run_reading<B: Backend + ?Sized>(
 ) -> Result<(Ran, bool), CommandError> {
     let collation = None;
     let plan_filter = |f: &Document| -> Result<teseladb_mql::Filter, CommandError> {
-        let bytes = f.to_bytes()?;
-        teseladb_mql::Filter::parse(RawDoc::from_bytes(&bytes)?, teseladb_mql::FilterUse::Query)
-            .map_err(from_mql)
+        let bytes = super::query::raw_bytes(f)?;
+        let raw = RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?;
+        teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)
     };
     let ext = super::engines::NodeExtensions;
     let ctx = teseladb_mql::MatchContext { collation, ext: &ext, vars: read.vars };
@@ -834,10 +852,10 @@ fn intersected<B: Backend + ?Sized>(
     let ctx = teseladb_mql::MatchContext { collation: None, ext: &ext, vars: read.vars };
     let filter = match filter {
         Some(f) => {
-            let bytes = f.to_bytes()?;
+            let bytes = super::query::raw_bytes(f)?;
             Some(
                 teseladb_mql::Filter::parse(
-                    RawDoc::from_bytes(&bytes)?,
+                    RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?,
                     teseladb_mql::FilterUse::Query,
                 )
                 .map_err(from_mql)?,
@@ -931,19 +949,26 @@ fn entries<B: Backend + ?Sized>(
         return Ok(read);
     }
     let (first, past) = index_span((tenant, collection), index);
-    // With `most`, a forward scan of one interval stops reading at that many entries: those after
-    // them are past what the caller takes (a trial's budget), and reading them made each trial of
-    // a range as long as the range (every unexpired session of a TTL index).
-    if let (Some(most), [r], false) = (most, ranges.as_slice(), scan.backward) {
-        let read =
-            range_entries(backend, (tenant, collection), index, r, (concern, decode), Some(most))?;
+    // With `most`, a scan of one interval stops reading at that many entries: those after them
+    // are past what the caller takes (a trial's budget), and reading them made each trial of a
+    // range as long as the range (every unexpired session of a TTL index). A backward one reads
+    // from the interval's end down (H-003).
+    if let (Some(most), [r]) = (most, ranges.as_slice()) {
+        let way = (Some(most), scan.backward);
+        let read = range_entries(backend, (tenant, collection), index, r, (concern, decode), way)?;
         let more = read.len() >= most;
         return Ok(Scanned { entries: read.into_iter().map(Some).collect(), seeks: 1, more });
     }
     let mut lists = Vec::new();
     for r in &ranges {
-        let mut pks =
-            range_entries(backend, (tenant, collection), index, r, (concern, decode), None)?;
+        let mut pks = range_entries(
+            backend,
+            (tenant, collection),
+            index,
+            r,
+            (concern, decode),
+            (None, false),
+        )?;
         if scan.backward {
             pks.reverse();
         }
@@ -1011,7 +1036,7 @@ fn walked<B: Backend + ?Sized>(
     };
     let span = KeyRange { start: low.start.clone(), end: high.end.clone() };
     let mut read =
-        range_entries(backend, (tenant, collection), index, &span, (concern, true), None)?;
+        range_entries(backend, (tenant, collection), index, &span, (concern, true), (None, false))?;
     if scan.backward {
         read.reverse();
     }
@@ -1127,7 +1152,7 @@ fn range_entries<B: Backend + ?Sized>(
     index: &PlanIndex,
     r: &KeyRange,
     (concern, decode): (ReadConcern, bool),
-    most: Option<usize>,
+    (most, backward): (Option<usize>, bool),
 ) -> Result<Vec<Entry>, CommandError> {
     let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
@@ -1135,7 +1160,8 @@ fn range_entries<B: Backend + ?Sized>(
         if let Some(one) = id_point(backend, (tenant, collection), (&r.start, &end), concern)? {
             return Ok(one);
         }
-        let read = id_entries(backend, (tenant, collection), (&r.start, &end), concern, most)?;
+        let span = (r.start.as_slice(), end.as_slice());
+        let read = id_entries(backend, (tenant, collection), span, concern, (most, backward))?;
         return Ok(read
             .into_iter()
             .map(|(pk, doc)| Entry { pk, key: None, values: None, doc: Some(doc) })
@@ -1144,10 +1170,14 @@ fn range_entries<B: Backend + ?Sized>(
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
     let malformed = || CommandError::new(INTERNAL_ERROR, "an index entry that does not decode");
     let mut pks = Vec::new();
-    let mut from = r.start.clone();
+    // Forward from `from`; backward below `to` (H-003).
+    let (mut from, mut to) = (r.start.clone(), end.clone());
     loop {
         let chunk = most.map_or(KEY_CHUNK, |m| m.saturating_sub(pks.len()).clamp(1, KEY_CHUNK));
-        let rows = backend.scan(&from, &end, chunk, concern)?;
+        let rows = match backward {
+            true => backend.scan_back(&r.start, &to, chunk, concern)?,
+            false => backend.scan(&from, &end, chunk, concern)?,
+        };
         let short = rows.len() < chunk;
         for (key, value) in &rows {
             let rest = key.get(head..).ok_or_else(malformed)?;
@@ -1166,6 +1196,7 @@ fn range_entries<B: Backend + ?Sized>(
         }
         match rows.last() {
             _ if most.is_some_and(|m| pks.len() >= m) => break,
+            Some((k, _)) if !short && backward => to.clone_from(k),
             Some((k, _)) if !short => from = [k.as_slice(), &[0]].concat(),
             _ => break,
         }
@@ -1195,7 +1226,7 @@ fn gap_spans(tenant: u32, collection: u32, (from, to): (&[u8], &[u8])) -> Vec<Sp
     (0..DOCUMENT_BUCKETS)
         .map(|bucket| {
             let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
-            Span { start, end, limit: 1 }
+            Span { start, end, limit: 1, backward: false }
         })
         .collect()
 }
@@ -1259,7 +1290,7 @@ fn point_entries<B: Backend + ?Sized>(
         .map(|pk| {
             let key = KeyBuilder::document_of_pk(tenant, collection, pk).as_bytes().to_vec();
             let end = [key.as_slice(), &[0]].concat();
-            Span { start: key, end, limit: 1 }
+            Span { start: key, end, limit: 1, backward: false }
         })
         .collect();
     let last = order.len() - 1;
@@ -1273,7 +1304,7 @@ fn point_entries<B: Backend + ?Sized>(
     if let Some((lo, hi)) = between.bounds() {
         spans.extend((0..DOCUMENT_BUCKETS).map(|bucket| {
             let (start, end) = in_bucket(docs.as_bytes(), bucket, (lo, hi));
-            Span { start, end, limit }
+            Span { start, end, limit, backward: false }
         }));
     }
     let rows = backend.scan_spans(&spans, concern)?;
@@ -1303,7 +1334,7 @@ fn point_entries<B: Backend + ?Sized>(
             .filter_map(|&(step, bucket)| {
                 let (from, to) = stretches[step].as_ref()?;
                 let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
-                Some(Span { start, end, limit: 1 })
+                Some(Span { start, end, limit: 1, backward: false })
             })
             .collect();
         let found = backend.scan_spans(&probes, concern)?;
@@ -1400,11 +1431,20 @@ fn id_point<B: Backend + ?Sized>(
         return Ok(None);
     }
     let key = KeyBuilder::document_of_pk(tenant, collection, pk);
-    let end = [key.as_bytes(), &[0]].concat();
-    let rows = backend.scan(key.as_bytes(), &end, 1, concern)?;
+    // A point read, as RefDb's `IDHACK` plan reads one `_id` (H-013): the node reads the key
+    // with its filters instead of opening a scan.
+    let key = key.as_bytes().to_vec();
+    let found = backend.points(std::slice::from_ref(&key), concern)?;
     Ok(Some(
-        rows.into_iter()
-            .map(|(k, v)| Entry { pk: pk.to_vec(), key: None, values: None, doc: Some((k, v)) })
+        found
+            .into_iter()
+            .flatten()
+            .map(|v| Entry {
+                pk: pk.to_vec(),
+                key: None,
+                values: None,
+                doc: Some((key.clone(), v)),
+            })
             .collect(),
     ))
 }
@@ -1421,7 +1461,7 @@ fn id_entries<B: Backend + ?Sized>(
     (tenant, collection): (u32, u32),
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
-    most: Option<usize>,
+    (most, backward): (Option<usize>, bool),
 ) -> Result<IdRows, CommandError> {
     let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
     let head = docs.as_bytes().len();
@@ -1431,24 +1471,28 @@ fn id_entries<B: Backend + ?Sized>(
     let spans: Vec<Span> = (0..DOCUMENT_BUCKETS)
         .map(|bucket| {
             let (start, end) = in_bucket(docs.as_bytes(), bucket, (from, to));
-            Span { start, end, limit: per }
+            Span { start, end, limit: per, backward }
         })
         .collect();
     let reads = backend.scan_spans(&spans, concern)?;
     let mut lanes: Vec<Lane> =
-        spans.into_iter().zip(reads).map(|(span, rows)| Lane::new(span.end, rows, per)).collect();
+        spans.into_iter().zip(reads).map(|(span, rows)| Lane::new(span, rows, per)).collect();
     let pk_of = |key: &[u8]| key.get(head + 1..).unwrap_or_default().to_vec();
     let mut found: IdRows = Vec::new();
     while most.is_none_or(|m| found.len() < m) {
         for lane in &mut lanes {
             lane.refill(backend, per, concern)?;
         }
-        let lowest = lanes
+        // The next key in the read's direction: the lowest, or backward the highest (H-003).
+        let heads = lanes
             .iter()
             .enumerate()
-            .filter_map(|(i, l)| l.rows.front().map(|(k, _)| (i, pk_of(k))))
-            .min_by(|a, b| a.1.cmp(&b.1));
-        let Some((i, pk)) = lowest else { break };
+            .filter_map(|(i, l)| l.rows.front().map(|(k, _)| (i, pk_of(k))));
+        let next = match backward {
+            true => heads.max_by(|a, b| a.1.cmp(&b.1)),
+            false => heads.min_by(|a, b| a.1.cmp(&b.1)),
+        };
+        let Some((i, pk)) = next else { break };
         let row = lanes[i].rows.pop_front().expect("the lane's first row");
         found.push((pk, row));
     }
@@ -1459,19 +1503,22 @@ fn id_entries<B: Backend + ?Sized>(
 /// goes on when it may hold more.
 struct Lane {
     rows: std::collections::VecDeque<(Vec<u8>, Vec<u8>)>,
+    /// Where the read goes on: forward, its first key; backward, the key it stops below.
     next: Option<Vec<u8>>,
-    end: Vec<u8>,
+    span: Span,
 }
 
 impl Lane {
-    fn new(end: Vec<u8>, rows: Vec<(Vec<u8>, Vec<u8>)>, asked: usize) -> Lane {
-        let next = Self::after(&rows, asked);
-        Lane { rows: rows.into(), next, end }
+    fn new(span: Span, rows: Vec<(Vec<u8>, Vec<u8>)>, asked: usize) -> Lane {
+        let next = Self::after(&rows, asked, span.backward);
+        Lane { rows: rows.into(), next, span }
     }
 
-    /// The key after the last of `rows` when they filled what was asked: the bucket may hold more.
-    fn after(rows: &[(Vec<u8>, Vec<u8>)], asked: usize) -> Option<Vec<u8>> {
+    /// Where the read goes on after `rows`, when they filled what was asked and the bucket may
+    /// hold more: the key after the last one, or backward the last one itself (excluded).
+    fn after(rows: &[(Vec<u8>, Vec<u8>)], asked: usize, backward: bool) -> Option<Vec<u8>> {
         match rows.last() {
+            Some((k, _)) if rows.len() >= asked && backward => Some(k.clone()),
             Some((k, _)) if rows.len() >= asked => Some([k.as_slice(), &[0]].concat()),
             _ => None,
         }
@@ -1487,9 +1534,12 @@ impl Lane {
         if !self.rows.is_empty() {
             return Ok(());
         }
-        let Some(low) = self.next.take() else { return Ok(()) };
-        let rows = backend.scan(&low, &self.end, asked, concern)?;
-        self.next = Self::after(&rows, asked);
+        let Some(next) = self.next.take() else { return Ok(()) };
+        let rows = match self.span.backward {
+            true => backend.scan_back(&self.span.start, &next, asked, concern)?,
+            false => backend.scan(&next, &self.span.end, asked, concern)?,
+        };
+        self.next = Self::after(&rows, asked, self.span.backward);
         self.rows.extend(rows);
         Ok(())
     }
@@ -1585,10 +1635,9 @@ pub(crate) fn parsed_filter(
     vars: Option<&Document>,
 ) -> Result<Document, CommandError> {
     let filter = teseladb_exec::expr::optimize::optimize_filter(filter, vars).map_err(from_mql)?;
-    let bytes = filter.to_bytes()?;
-    let f =
-        teseladb_mql::Filter::parse(RawDoc::from_bytes(&bytes)?, teseladb_mql::FilterUse::Query)
-            .map_err(from_mql)?;
+    let bytes = super::query::raw_bytes(&filter)?;
+    let raw = RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?;
+    let f = teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)?;
     Ok(f.parsed_query())
 }
 

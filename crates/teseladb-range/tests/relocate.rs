@@ -82,6 +82,7 @@ fn write(key: &[u8]) -> Command {
         deletes: vec![],
         dedup: None,
         live_delta: 4,
+        docs: None,
     }
 }
 

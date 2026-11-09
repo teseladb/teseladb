@@ -485,8 +485,9 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         let Some((shared, _)) = &self.node else { return self.collection(name) };
         let ns = names::ns(self.db, name);
         let stage = Document::new().with("$match", filter.clone());
-        let bytes = stage.to_bytes().map_err(|e| to_mql(e.into()))?;
-        let raw = RawDoc::from_bytes(&bytes).map_err(|e| to_mql(e.into()))?;
+        let limits = crate::msg::command_limits();
+        let bytes = stage.to_bytes_with(limits).map_err(|e| to_mql(e.into()))?;
+        let raw = RawDoc::from_bytes_with(&bytes, limits).map_err(|e| to_mql(e.into()))?;
         let mut backend = self.backend.borrow_mut();
         let cmd = Document::new();
         let mut ctx = Ctx { backend: &mut **backend, shared, db: self.db, cmd: &cmd };
@@ -736,7 +737,7 @@ fn read_through_on<B: Backend + ?Sized>(
     )?;
     let mut stages: Vec<Vec<u8>> = view.map(|v| v.pipeline).unwrap_or_default();
     for d in extra {
-        stages.push(d.to_bytes()?);
+        stages.push(super::query::raw_bytes(d)?);
     }
     if stages.is_empty() {
         return Ok(Ok((docs, true)));
@@ -969,8 +970,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         _ => (target(ctx)?, true),
     };
     let ns_text = names::full(&ns);
-    let cmd_bytes = ctx.cmd.to_bytes()?;
-    let raw_cmd = RawDoc::from_bytes(&cmd_bytes)?;
+    let cmd_bytes = super::query::raw_bytes(ctx.cmd)?;
+    let raw_cmd = RawDoc::from_bytes_with(&cmd_bytes, crate::msg::command_limits())?;
     let a = aggregate_args(&mut *ctx.backend, ctx.cmd)?;
     if matches!(ctx.cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) {
         return super::explain::aggregate_flag(ctx);

@@ -95,6 +95,8 @@ pub struct Ranges {
     pub chunk_bytes: BTreeMap<(u32, u32), u64>,
     /// The split size of the other ranges, once `config.settings` has a `chunksize`.
     pub chunk_size: Option<u64>,
+    /// Every node reads the writes that carry their change of documents (007 FR-039).
+    pub counted_writes: bool,
 }
 
 /// The stored value of cluster parameter `name` in a copy of Group 0.
@@ -159,6 +161,7 @@ impl Ranges {
                 })
                 .collect(),
             chunk_size: teseladb_meta::config_settings::chunk_size_bytes(&sm.settings),
+            counted_writes: crate::node_versions::counted_writes(sm),
         }
     }
 }

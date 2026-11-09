@@ -1,8 +1,9 @@
-//! The executors of the clients' port of a node (006 FR-014, T046 coverage): a worker that cannot
-//! start an executor, a request that arrives while an executor runs the one before, a client that
-//! is gone before its reply (its logout still reaches the audit log), a worker that stops while an
-//! executor runs, and the keeper's TTL monitor and refresh on a short period. The executors start
-//! through [`Hooks`], which these tests make fail or start late.
+//! The connections' threads of the clients' port of a node (006 FR-014, T046 coverage; one thread
+//! per connection since H-013): a connection whose thread cannot start, a request that arrives
+//! while its thread runs the one before, a client that is gone before its reply (its logout still
+//! reaches the audit log), a port that stops while a thread runs, and the keeper's TTL monitor and
+//! refresh on a short period. The threads start through [`Hooks`], which these tests make fail or
+//! start late.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -18,10 +19,10 @@ use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_raftlog::MemDisk;
 
-/// How long an executor of [`late`] waits before it runs.
+/// How long a thread of [`late`] waits before it runs.
 const LATE: Duration = Duration::from_millis(300);
 
-/// A node of one core, everything in memory, whose clients' port starts its executors with
+/// A node of one core, everything in memory, whose clients' port starts its threads with
 /// `hooks` and refreshes the sessions every 10 ms.
 fn node(hooks: Hooks) -> Node<MemDisk> {
     node_with(hooks, ClientConfig::new(Vec::new()))
@@ -44,18 +45,18 @@ fn node_with(hooks: Hooks, client: ClientConfig) -> Node<MemDisk> {
     n
 }
 
-/// An executor that cannot start.
+/// A connection's thread that cannot start.
 fn refused(_: String, _: Box<dyn FnOnce() + Send>) -> io::Result<()> {
     Err(io::Error::other("no thread"))
 }
 
-/// An executor whose thread ends before it runs anything.
+/// A connection's thread that ends before it runs anything.
 fn dropped(_: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
     drop(run);
     Ok(())
 }
 
-/// An executor that starts [`LATE`].
+/// A connection's thread that starts [`LATE`] late.
 fn late(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
     let delayed = move || {
         thread::sleep(LATE);
@@ -122,8 +123,8 @@ fn eventually(ok: impl Fn() -> bool) -> bool {
 }
 
 #[test]
-fn a_worker_that_cannot_start_an_executor_closes_the_connection() {
-    let n = node(Hooks { spawn_executor: refused, ..Hooks::default() });
+fn a_connection_whose_thread_cannot_start_is_closed() {
+    let n = node(Hooks { spawn_connection: refused, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
     assert_eq!(ok(reply(&mut c)), None);
@@ -131,19 +132,19 @@ fn a_worker_that_cannot_start_an_executor_closes_the_connection() {
 }
 
 #[test]
-fn a_worker_whose_executor_is_gone_closes_the_connection() {
-    let n = node(Hooks { spawn_executor: dropped, ..Hooks::default() });
+fn a_connection_whose_thread_is_gone_is_closed() {
+    let n = node(Hooks { spawn_connection: dropped, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
     assert_eq!(ok(reply(&mut c)), None);
     drop(n.stop());
 }
 
-/// Bytes that are no message, arriving while an executor runs the request before them: its
-/// reply goes out, then the connection closes.
+/// Bytes that are no message, arriving while the thread runs the request before them: its reply
+/// goes out, then the connection closes.
 #[test]
-fn a_fault_behind_a_request_on_its_executor_closes_after_the_reply() {
-    let n = node(Hooks { spawn_executor: late, ..Hooks::default() });
+fn a_fault_behind_a_running_request_closes_after_the_reply() {
+    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
     thread::sleep(LATE / 3);
@@ -186,11 +187,11 @@ fn a_refresh_that_fails_goes_again() {
 }
 
 #[test]
-fn a_request_that_arrives_while_an_executor_runs_the_one_before_follows_it() {
-    let n = node(Hooks { spawn_executor: late, ..Hooks::default() });
+fn a_request_that_arrives_while_the_one_before_runs_follows_it() {
+    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
-    // The first request is on its executor, which has not started yet.
+    // The first request waits for its connection's thread, which has not started yet.
     thread::sleep(LATE / 3);
     build_info(&mut c, 2);
     assert_eq!(ok(reply(&mut c)), Some((1, Some(Value::Double(1.0)))));
@@ -200,7 +201,7 @@ fn a_request_that_arrives_while_an_executor_runs_the_one_before_follows_it() {
 
 #[test]
 fn a_client_gone_before_its_reply_is_closed() {
-    let n = node(Hooks { spawn_executor: late, ..Hooks::default() });
+    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
     c.shutdown(std::net::Shutdown::Both).unwrap();
@@ -212,13 +213,13 @@ fn a_client_gone_before_its_reply_is_closed() {
 }
 
 #[test]
-fn a_node_that_stops_while_an_executor_runs_does_not_wait_for_it() {
-    let n = node(Hooks { spawn_executor: late, ..Hooks::default() });
+fn a_node_that_stops_while_a_thread_runs_does_not_wait_for_it() {
+    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
     let mut c = connect(&n);
     build_info(&mut c, 1);
     thread::sleep(LATE / 3);
     drop(n.stop());
-    // The executor finishes after its worker is gone, and ends.
+    // The thread starts after the port stopped, sees it and closes its connection.
     thread::sleep(LATE);
     assert_eq!(ok(reply(&mut c)), None);
 }
@@ -251,7 +252,7 @@ fn payload(d: &Document) -> Vec<u8> {
 fn log_in(s: &mut TcpStream, user: &str, password: &str) {
     let mech = Mechanism::ScramSha256;
     let prepared = mech.prepare_password(user, password, false).unwrap();
-    let (mut session, first) = ClientSession::start(mech, user, &prepared, "executors-nonce");
+    let (mut session, first) = ClientSession::start(mech, user, &prepared, "threads-nonce");
     let start = Document::new()
         .with("saslStart", 1)
         .with("mechanism", mech.name())
@@ -271,13 +272,13 @@ fn log_in(s: &mut TcpStream, user: &str, password: &str) {
     assert_eq!(r.get("done"), Some(&Value::Boolean(true)), "{r:?}");
 }
 
-/// A logged-in client that leaves while an executor runs its command (a `getMore` waiting for new
-/// documents of a capped collection): the connection comes back to a worker that already closed
-/// it, and its logout is recorded then, as RefDb Enterprise 9.0.4 records the logout of every
+/// A logged-in client that leaves while its thread runs its command (a `getMore` waiting for new
+/// documents of a capped collection): the thread closes the connection when the command ends, and
+/// its logout is recorded then, as RefDb Enterprise 9.0.4 records the logout of every
 /// authenticated client that disconnects.
 #[test]
 fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
-    let dir = std::env::temp_dir().join(format!("teseladb-executors-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("teseladb-threads-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("audit.json");
@@ -315,7 +316,7 @@ fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
         Document::new().with("getMore", id).with("collection", "log").with("maxTimeMS", 2_000);
     let more = more.with("$db", "app").to_bytes().unwrap();
     c.write_all(&OpMsg::encode(5, 0, 0, &more)).unwrap();
-    // The `getMore` waits on its executor when the client leaves.
+    // The `getMore` waits on its thread when the client leaves.
     thread::sleep(LATE);
     c.shutdown(std::net::Shutdown::Both).unwrap();
     drop(c);

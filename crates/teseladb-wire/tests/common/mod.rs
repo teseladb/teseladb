@@ -100,6 +100,11 @@ pub struct Mem {
     pub drop_role_before_write: Option<(String, String)>,
     /// The node lost its authorization lease (013 FR-012).
     pub lease_lost: bool,
+    /// The user the running command's connection authenticated as.
+    pub user: Option<UserName>,
+    /// The privileges of that user when the node authorizes commands; `None` without
+    /// authorization.
+    pub user_privileges: Option<Vec<teseladb_auth::privileges::Privilege>>,
     /// The warning lines the commands logged: identifier, message, attributes.
     pub logged: Vec<(i32, String, Document)>,
     /// The `message` of each certificate rotation that ran.
@@ -354,6 +359,44 @@ impl Mem {
             return Err(teseladb_wire::error::from_range(&e, ctx));
         }
         Ok(())
+    }
+
+    /// A scan in key order, or from the last key down (H-003), with the hooks of the tests.
+    fn scan_dir(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        backward: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        if let (Some(version), Some(mut m)) = (self.uncertain_scan.take(), self.read_mark) {
+            m.at = m.at.max(version);
+            self.read_mark = Some(m);
+        }
+        self.scanned_at = Some(self.read_mark.map(|m| m.at));
+        if let Some(m) = self.read_mark {
+            self.txn_read(m.at, m.uncertain_to)?;
+        }
+        self.now += self.tick;
+        if let Some(f) = self.on_scan.as_mut() {
+            f();
+        }
+        if let Some(f) = self.on_scan_data.as_mut() {
+            f(start, &mut self.data);
+        }
+        // As a range's scan: the versions that only serve the history are no documents.
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let stored = self.stored(start.to_vec()..end.to_vec());
+        let pairs: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = match backward {
+            true => Box::new(stored.into_iter().rev()),
+            false => Box::new(stored.into_iter()),
+        };
+        let rows: Vec<(Vec<u8>, Vec<u8>)> =
+            pairs.take(limit).map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.scanned_rows += rows.len();
+        Ok(rows)
     }
 }
 
@@ -963,7 +1006,13 @@ impl Backend for Mem {
     ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
         self.span_reads += 1;
         self.spans_batched += spans.len();
-        spans.iter().map(|s| self.scan(&s.start, &s.end, s.limit, concern)).collect()
+        spans
+            .iter()
+            .map(|s| match s.backward {
+                true => self.scan_back(&s.start, &s.end, s.limit, concern),
+                false => self.scan(&s.start, &s.end, s.limit, concern),
+            })
+            .collect()
     }
 
     fn scan(
@@ -973,33 +1022,17 @@ impl Backend for Mem {
         limit: usize,
         _: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        if let (Some(version), Some(mut m)) = (self.uncertain_scan.take(), self.read_mark) {
-            m.at = m.at.max(version);
-            self.read_mark = Some(m);
-        }
-        self.scanned_at = Some(self.read_mark.map(|m| m.at));
-        if let Some(m) = self.read_mark {
-            self.txn_read(m.at, m.uncertain_to)?;
-        }
-        self.now += self.tick;
-        if let Some(f) = self.on_scan.as_mut() {
-            f();
-        }
-        if let Some(f) = self.on_scan_data.as_mut() {
-            f(start, &mut self.data);
-        }
-        // As a range's scan: the versions that only serve the history are no documents.
-        if start >= end {
-            return Ok(Vec::new());
-        }
-        let rows: Vec<(Vec<u8>, Vec<u8>)> = self
-            .stored(start.to_vec()..end.to_vec())
-            .into_iter()
-            .take(limit)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        self.scanned_rows += rows.len();
-        Ok(rows)
+        self.scan_dir(start, end, limit, false)
+    }
+
+    fn scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        _: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        self.scan_dir(start, end, limit, true)
     }
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
@@ -1286,6 +1319,14 @@ impl Backend for Mem {
 
     fn authorization_lease(&self) -> bool {
         !self.lease_lost
+    }
+
+    fn authenticated_user(&self) -> Option<UserName> {
+        self.user.clone()
+    }
+
+    fn privileges(&self) -> Option<Vec<teseladb_auth::privileges::Privilege>> {
+        self.user_privileges.clone()
     }
 
     /// Deterministic bytes: the tests need nonces, not secrecy.

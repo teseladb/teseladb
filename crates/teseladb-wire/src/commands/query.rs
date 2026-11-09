@@ -174,7 +174,7 @@ struct Plan {
 
 /// A part of a command (filter, projection) or a stored document in BSON, within a command's
 /// limits.
-fn raw_bytes(d: &Document) -> Result<Vec<u8>, CommandError> {
+pub(crate) fn raw_bytes(d: &Document) -> Result<Vec<u8>, CommandError> {
     d.to_bytes_with(command_limits()).map_err(CommandError::from)
 }
 
@@ -1508,8 +1508,8 @@ pub(crate) fn check_projection(
 ) -> Result<(), CommandError> {
     let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
     let ctx = teseladb_exec::expr::Ctx::checked(names);
-    let bytes = projection.to_bytes()?;
-    check_computed(RawDoc::from_bytes(&bytes)?, &ctx)
+    let bytes = raw_bytes(projection)?;
+    check_computed(RawDoc::from_bytes_with(&bytes, command_limits())?, &ctx)
 }
 
 fn check_computed(fields: RawDoc<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<(), CommandError> {
@@ -1566,9 +1566,9 @@ pub(crate) fn check_filter_syntax(
     super::engines::check_geo(&plan.filter).map_err(from_mql)?;
     super::js::check_where(&plan.filter).map_err(from_mql)?;
     let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
-    let bytes = filter.to_bytes()?;
+    let bytes = raw_bytes(filter)?;
     teseladb_exec::pipeline::check_exprs(
-        RawDoc::from_bytes(&bytes)?,
+        RawDoc::from_bytes_with(&bytes, command_limits())?,
         &teseladb_exec::expr::Ctx::checked(names),
     )
     .map_err(from_mql)
@@ -1739,8 +1739,11 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         Ok(c) => c,
         Err((e, owner)) => {
             let member = super::config_db::as_member(ctx.backend)?;
-            let uid = super::txn::user_uid(ctx.backend.authenticated_user().as_ref());
-            return Err(get_more_refused((id, &ns_text, lsid), e, owner, (member, &uid)));
+            let user = ctx.backend.authenticated_user();
+            let uid = super::txn::user_uid(user.as_ref());
+            let checked = user.is_some() && checks_cursor_sessions(ctx.backend);
+            let node = Refuser { member, checked, uid: &uid };
+            return Err(get_more_refused((id, &ns_text, lsid), e, owner, node));
         }
     };
     // `failGetMoreAfterCursorCheckout` (FR-034): the cursor was taken, and the error kills it as
@@ -1849,33 +1852,53 @@ fn tail_more<B: Backend + ?Sized>(
     }
 }
 
+/// Whether the session check of RefDb's `AuthorizationSessionImpl` applies to the running
+/// command's user: the node authorizes commands and the user has no `impersonate` on the cluster
+/// (`__system`). The caller has checked that a user is authenticated.
+fn checks_cursor_sessions<B: Backend + ?Sized>(backend: &B) -> bool {
+    backend.privileges().is_some_and(|p| {
+        !teseladb_auth::authz::allows(
+            &p,
+            &teseladb_auth::authz::Target::Cluster,
+            teseladb_auth::actions::ActionType::Impersonate,
+        )
+    })
+}
+
+/// The node refusing a `getMore`: whether it presents itself as a member of a replica set,
+/// whether the authorization's session check applies, and the user's `uid`.
+struct Refuser<'a> {
+    member: bool,
+    checked: bool,
+    uid: &'a str,
+}
+
 /// The error of a `getMore` on `ns` in session `lsid` that cursor `id`, of namespace and session
-/// `owner`, refused with `e`: as a `refrouter` 9.0.4 gives it, or as a `refnode` 9.0.4 when the node
-/// presents itself as a member of a replica set (`member`), with the sessions named with `uid`,
-/// the user's (measured on 03-11-2026).
+/// `owner`, refused with `e`, as RefDb 9.0.4 gives it. With an authenticated user on a node
+/// that authorizes, a session mismatch is 13 `Unauthorized` naming both sessions
+/// (`AuthorizationSessionImpl::checkCursorSessionPrivilege`); otherwise a `refrouter` answers 50799,
+/// 50800 or 50801 (`validateLSID` in `cluster_find.cpp`) and a member of a replica set 50736,
+/// 50737 or 50738. Sessions are named with the user's `uid`.
 fn get_more_refused(
     (id, ns, lsid): (i64, &str, Option<u128>),
     e: CursorError,
     owner: Option<(String, Option<u128>)>,
-    (member, uid): (bool, &str),
+    node: Refuser<'_>,
 ) -> CommandError {
     let (cursor_ns, cursor_lsid) = owner.unwrap_or_default();
-    let named = |l: u128| session_text(l).replace(super::ANONYMOUS_UID, uid);
+    let named = |l: u128| session_text(l).replace(super::ANONYMOUS_UID, node.uid);
     let created = |l: Option<u128>| named(l.unwrap_or_default());
     let shown = |l: Option<u128>| l.map_or_else(|| NO_SESSION.to_owned(), named);
-    let other_session = || {
-        CommandError::new(
-            UNAUTHORIZED,
-            format!(
-                "Cursor session id ({}) is not the same as the operation context's session id \
-                 ({})",
-                shown(cursor_lsid),
-                shown(lsid)
-            ),
-        )
+    let codes = match node.member {
+        true => [CURSOR_NOT_IN_SESSION, CURSOR_SESSION_REQUIRED, CURSOR_OTHER_SESSION],
+        false => [
+            crate::error::ROUTER_CURSOR_NOT_IN_SESSION,
+            crate::error::ROUTER_CURSOR_SESSION_REQUIRED,
+            crate::error::ROUTER_CURSOR_OTHER_SESSION,
+        ],
     };
     match e {
-        CursorError::NotFound if member => {
+        CursorError::NotFound if node.member => {
             CommandError::new(CURSOR_NOT_FOUND, format!("cursor id {id} not found"))
         }
         CursorError::NotFound => {
@@ -1889,12 +1912,20 @@ fn get_more_refused(
             ),
         ),
         CursorError::NotInSession | CursorError::SessionRequired | CursorError::OtherSession
-            if !member =>
+            if node.checked =>
         {
-            other_session()
+            CommandError::new(
+                UNAUTHORIZED,
+                format!(
+                    "Cursor session id ({}) is not the same as the operation context's session \
+                     id ({})",
+                    shown(cursor_lsid),
+                    shown(lsid)
+                ),
+            )
         }
         CursorError::NotInSession => CommandError::new(
-            CURSOR_NOT_IN_SESSION,
+            codes[0],
             format!(
                 "Cannot run getMore on cursor {id}, which was not created in a session, in \
                  session {}",
@@ -1902,7 +1933,7 @@ fn get_more_refused(
             ),
         ),
         CursorError::SessionRequired => CommandError::new(
-            CURSOR_SESSION_REQUIRED,
+            codes[1],
             format!(
                 "Cannot run getMore on cursor {id}, which was created in session {}, without \
                  an lsid",
@@ -1910,7 +1941,7 @@ fn get_more_refused(
             ),
         ),
         CursorError::OtherSession => CommandError::new(
-            CURSOR_OTHER_SESSION,
+            codes[2],
             format!(
                 "Cannot run getMore on cursor {id}, which was created in session {}, in \
                  session {}",
@@ -2050,6 +2081,13 @@ fn count_on_node<B: Backend + ?Sized>(
                 super::hints::Hinted { filter: &filter, sort: None, projection: None, vars: None };
             super::hints::check_hint(ctx.backend, (ns, &c), ctx.cmd, &hinted)?;
             let ns_text = full(ns);
+            // Without a filter, the counts its ranges keep answer without reading a document
+            // (007 FR-039, H-004); when one is estimated, the documents are read as before.
+            if filter.is_empty()
+                && let Some(n) = ctx.backend.doc_count(c.tenant, c.id)?
+            {
+                return Ok(counted(node, bound.map_or(n, |b| n.min(b)), skip, limit));
+            }
             // An index plan that wins counts its documents (T019).
             if collation.is_none()
                 && let Some(docs) = planned(ctx, (ns, &c), &filter, bound, concern, None)

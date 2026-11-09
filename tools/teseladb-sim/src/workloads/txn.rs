@@ -324,6 +324,8 @@ impl TxnDriver {
         let lsm =
             n.cores[self.core as usize].lsm.clone().expect("a core with a range opens its LSM");
         let mut host = RangeHost::new(lsm, n.hlc.clone());
+        // Half the nodes write the counted format (007 FR-039), as during an upgrade.
+        host.set_counted_writes(node.is_multiple_of(2));
         host.add_range(self.ranges.0, START.to_vec(), self.cut.to_vec());
         host.add_range(self.ranges.1, self.cut.to_vec(), END.to_vec());
         self.hosts.insert(node, host);
@@ -463,6 +465,7 @@ impl TxnDriver {
             g,
             key,
             scan: None,
+            backward: false,
             at: Some(c.coord.read_ts()),
             concern: ReadConcern::Majority,
             view: c.view.clone(),
@@ -1024,6 +1027,7 @@ impl TxnDriver {
             g,
             key: vec![teseladb_range::intents::TXN_SPACE],
             scan: Some((vec![teseladb_range::intents::TXN_SPACE + 1], usize::MAX)),
+            backward: false,
             at: None,
             concern: ReadConcern::Local,
             view: TxnView::default(),

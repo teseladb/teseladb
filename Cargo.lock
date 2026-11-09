@@ -215,6 +215,7 @@ name = "teseladb-range"
 version = "0.1.0"
 dependencies = [
  "teseladb-hlc",
+ "teseladb-keys",
  "teseladb-lsm",
  "teseladb-multiraft",
  "teseladb-hash",

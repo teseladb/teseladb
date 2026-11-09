@@ -105,6 +105,7 @@ fn write(key: &[u8], v: u8, stmt: u32) -> Command {
         deletes: vec![],
         dedup: Some(record(stmt)),
         live_delta: 0,
+        docs: None,
     }
 }
 
@@ -412,6 +413,7 @@ fn the_live_bytes_follow_the_writes_and_split_between_the_halves() {
         deletes: vec![],
         dedup: None,
         live_delta: delta,
+        docs: None,
     };
     apply(&mut g, G, 1, ts(1), &sized(b"\x01b", 40)).unwrap();
     apply(&mut g, G, 2, ts(2), &sized(b"\x01q", 60)).unwrap();

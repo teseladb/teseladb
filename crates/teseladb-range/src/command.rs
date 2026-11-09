@@ -43,6 +43,19 @@ pub const KIND_RELOCATE: u16 = 14;
 pub const KIND_FORGET_RECORD: u16 = 15;
 /// `kind` of [`Command::Fence`] (018).
 pub const KIND_FENCE: u16 = 16;
+/// The format of the range commands this binary reads and writes: 1 adds
+/// [`KIND_WRITE_COUNTED`] (007 FR-039). A node records it in Group 0 (FR-027), and a leader writes
+/// a command of a format only once every node that is not removed records it.
+pub const FORMAT: u8 = 1;
+/// The format that brings [`KIND_WRITE_COUNTED`].
+pub const FORMAT_COUNTED: u8 = 1;
+/// `kind` of a [`Command::Write`] that carries the change of each collection's live documents
+/// (007 FR-039): a format a node of the version before does not read, so a leader writes it only
+/// once every node says it reads it.
+pub const KIND_WRITE_COUNTED: u16 = 17;
+/// `kind` of [`Command::AdjustCounts`] (007 FR-039), of the same format as
+/// [`KIND_WRITE_COUNTED`].
+pub const KIND_ADJUST_COUNTS: u16 = 18;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -150,6 +163,9 @@ pub enum Command {
         /// Change of the range's live bytes (007 FR-005, D-068): the new versions' sizes minus the
         /// sizes of the versions they replace or delete, which the leader read under latches.
         live_delta: i64,
+        /// Change of each collection's live documents (007 FR-039), computed as `live_delta`;
+        /// `None`: not counted, and a write of documents without it leaves the counts estimated.
+        docs: Option<Vec<(crate::doc_count::Coll, i64)>>,
     },
     /// Raises the GC threshold if it is higher.
     SetGcThreshold {
@@ -260,6 +276,15 @@ pub enum Command {
         /// Whether the fence goes up.
         on: bool,
     },
+    /// The live documents of each collection that the leader counted at entry `base` (007
+    /// FR-039): each replica adds the changes its counted writes made after `base`, and its
+    /// counts are exact again if no entry left them estimated after it.
+    AdjustCounts {
+        /// The entry the leader counted at.
+        base: u64,
+        /// Live documents of each collection at `base`.
+        counts: Vec<(crate::doc_count::Coll, u64)>,
+    },
     /// First entry of a range born from a split: its parent, the entry that cut it and its end,
     /// so that a replica that replays the range's log from its first entry knows its bounds.
     SplitGenesis {
@@ -318,7 +343,8 @@ impl Command {
     pub fn kind(&self) -> u16 {
         match self {
             Command::Noop => KIND_NOOP,
-            Command::Write { .. } => KIND_WRITE,
+            Command::Write { docs: Some(_), .. } => KIND_WRITE_COUNTED,
+            Command::Write { docs: None, .. } => KIND_WRITE,
             Command::SetGcThreshold { .. } => KIND_SET_GC_THRESHOLD,
             Command::SetClosedTs { .. } => KIND_SET_CLOSED_TS,
             Command::ComputeChecksum { .. } => KIND_COMPUTE_CHECKSUM,
@@ -334,6 +360,7 @@ impl Command {
             Command::ResolveIntents { .. } => KIND_RESOLVE_INTENTS,
             Command::PushTxn { .. } => KIND_PUSH_TXN,
             Command::Fence { .. } => KIND_FENCE,
+            Command::AdjustCounts { .. } => KIND_ADJUST_COUNTS,
         }
     }
 
@@ -343,7 +370,7 @@ impl Command {
         e.u16(self.kind());
         match self {
             Command::Noop => {}
-            Command::Write { puts, deletes, dedup, live_delta } => {
+            Command::Write { puts, deletes, dedup, live_delta, docs } => {
                 e.var(puts.len() as u64);
                 for p in puts {
                     e.bytes(&p.key).u8(p.value_type).bytes(&p.value);
@@ -357,6 +384,12 @@ impl Command {
                     put_record(&mut e, r);
                 }
                 e.var(zigzag(*live_delta));
+                if let Some(docs) = docs {
+                    e.var(docs.len() as u64);
+                    for ((tenant, collection), n) in docs {
+                        e.u32(*tenant).u32(*collection).var(zigzag(*n));
+                    }
+                }
             }
             Command::SetGcThreshold { ts } => put_hlc(&mut e, *ts),
             Command::SetClosedTs { closed } => put_hlc(&mut e, *closed),
@@ -394,6 +427,12 @@ impl Command {
             }
             Command::Fence { start, end, on } => {
                 e.bytes(start).bytes(end).bool(*on);
+            }
+            Command::AdjustCounts { base, counts } => {
+                e.u64(*base).var(counts.len() as u64);
+                for ((tenant, collection), n) in counts {
+                    e.u32(*tenant).u32(*collection).u64(*n);
+                }
             }
             Command::SplitGenesis { parent, at_index, end } => {
                 e.u64(parent.0).u64(*at_index).bytes(end);
@@ -433,9 +472,10 @@ impl Command {
     pub fn decode(payload: &[u8]) -> Result<Command, DecodeError> {
         let mut d = Decoder::new(payload);
         let at = d.position();
-        let command = match d.u16()? {
+        let kind = d.u16()?;
+        let command = match kind {
             KIND_NOOP => Command::Noop,
-            KIND_WRITE => {
+            KIND_WRITE | KIND_WRITE_COUNTED => {
                 let n = d.var()?;
                 let mut puts = Vec::new();
                 for _ in 0..n {
@@ -450,7 +490,20 @@ impl Command {
                     deletes.push(d.bytes()?.to_vec());
                 }
                 let dedup = if d.bool()? { Some(get_record(&mut d)?) } else { None };
-                Command::Write { puts, deletes, dedup, live_delta: unzigzag(d.var()?) }
+                let live_delta = unzigzag(d.var()?);
+                let docs = match kind == KIND_WRITE_COUNTED {
+                    true => {
+                        let n = d.var()?;
+                        let mut docs = Vec::new();
+                        for _ in 0..n {
+                            let coll = (d.u32()?, d.u32()?);
+                            docs.push((coll, unzigzag(d.var()?)));
+                        }
+                        Some(docs)
+                    }
+                    false => None,
+                };
+                Command::Write { puts, deletes, dedup, live_delta, docs }
             }
             KIND_SET_GC_THRESHOLD => Command::SetGcThreshold { ts: get_hlc(&mut d)? },
             KIND_SET_CLOSED_TS => Command::SetClosedTs { closed: get_hlc(&mut d)? },
@@ -479,6 +532,14 @@ impl Command {
             KIND_FENCE => {
                 let (start, end) = (d.bytes()?.to_vec(), d.bytes()?.to_vec());
                 Command::Fence { start, end, on: d.bool()? }
+            }
+            KIND_ADJUST_COUNTS => {
+                let (base, n) = (d.u64()?, d.var()?);
+                let mut counts = Vec::new();
+                for _ in 0..n {
+                    counts.push(((d.u32()?, d.u32()?), d.u64()?));
+                }
+                Command::AdjustCounts { base, counts }
             }
             KIND_MERGE => {
                 let (right, merge) = (GroupId(d.u64()?), d.u64()?);

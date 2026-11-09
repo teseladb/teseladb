@@ -29,7 +29,7 @@ impl RangeHost {
         self.wall_ms = wall_ms;
         self.now = now;
         // A follower's mark is the client's or one its leader closed: no uncertainty window.
-        let ReadSpec { g, key, scan, at, concern, view, uncertain_to: _ } = spec;
+        let ReadSpec { g, key, scan, backward, at, concern, view, uncertain_to: _ } = spec;
         let id = self.new_id();
         let ends_inside = scan.as_ref().is_none_or(|(end, _)| {
             self.ranges.get(&g).is_some_and(|r| *end <= r.end) && key < *end
@@ -66,6 +66,7 @@ impl RangeHost {
                 (&key, end),
                 (ts, None),
                 &view,
+                backward,
             ))),
             None => GetState::Read(ts),
         };
@@ -73,6 +74,7 @@ impl RangeHost {
             g,
             key,
             scan,
+            backward,
             at: Some(ts),
             gc_floor,
             concern,

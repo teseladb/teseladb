@@ -65,6 +65,7 @@ impl ServerBackend {
                 end: end.clone(),
                 limit: PAGE,
                 concern: ReadConcern::Local,
+                backward: false,
             };
             let msg = |tx| NodeMsg::Data(DataReq::Remote(e.group, scan), tx);
             let Some(Ok(DataReply::Remote(RemoteReply::Rows(rows)))) =

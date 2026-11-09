@@ -293,6 +293,14 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> std::io::Result<bool> {
 mod tests {
     use super::*;
 
+    /// macOS counts the task's page-ins apart, and `extra_info` shows them (RefDb's
+    /// `processinfo_osx.cpp`).
+    #[test]
+    fn the_task_counts_its_page_ins() {
+        let pageins = memory().unwrap().pageins;
+        assert!(pageins.is_some_and(|n| n >= 0), "{pageins:?}");
+    }
+
     unsafe extern "C" {
         fn pthread_kill(thread: std::os::unix::thread::RawPthread, sig: i32) -> i32;
         fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
@@ -479,6 +487,7 @@ pub(crate) fn memory() -> io::Result<crate::host::Memory> {
         resident: t.resident_size,
         virtual_size: t.virtual_size,
         threads: u64::try_from(t.threadnum).unwrap_or(0),
+        pageins: Some(t.pageins),
     })
 }
 

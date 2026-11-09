@@ -83,7 +83,7 @@ fn apply(sm: &mut RangeSm, g: GroupId, index: u64, at: Hlc, c: &Command) -> Rang
 
 fn write(key: &[u8], v: u8) -> Command {
     let puts = vec![Put { key: key.to_vec(), value_type: 1, value: vec![v] }];
-    Command::Write { puts, deletes: vec![], dedup: None, live_delta: 0 }
+    Command::Write { puts, deletes: vec![], dedup: None, live_delta: 0, docs: None }
 }
 
 fn fence(on: bool) -> Command {

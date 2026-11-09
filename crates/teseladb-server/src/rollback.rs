@@ -354,6 +354,7 @@ mod tests {
             deletes: vec![key(7, 4)],
             dedup: None,
             live_delta: 0,
+            docs: None,
         };
         let ts = Hlc { physical: 1_793_363_696_789, logical: 1 };
         let data = envelope::encode(ts, &write.encode());
@@ -378,6 +379,7 @@ mod tests {
             deletes: Vec::new(),
             dedup: None,
             live_delta: 0,
+            docs: None,
         };
         let data = envelope::encode(ts, &only_docs.encode());
         let e =
@@ -397,6 +399,7 @@ mod tests {
                     deletes: Vec::new(),
                     dedup: None,
                     live_delta: 0,
+                    docs: None,
                 }
                 .encode(),
             )),

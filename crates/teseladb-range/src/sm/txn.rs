@@ -43,6 +43,16 @@ impl RangeSm {
         let (live_key, live_value) =
             (live_key(self.range), live.unwrap_or(self.live).to_be_bytes());
         let mut versions: Vec<VersionWrite<'_>> = versions.into_iter().collect();
+        // A commit of documents does not say by how many each collection changes: the counts
+        // are estimated from this entry (007 FR-039, T073 step 6).
+        let documents = versions.iter().any(|v| {
+            matches!(v.kind, Kind::Put | Kind::Delete)
+                && crate::doc_count::document_of(v.key).is_some()
+        });
+        let counts = documents.then(|| self.counts_dirty_write(ctx.index)).flatten();
+        if let Some((key, value)) = &counts {
+            versions.push(VersionWrite { key, ts: ctx.ts, kind: Kind::Put, value });
+        }
         versions.push(VersionWrite { key: &mark_key, ts: ctx.ts, kind: Kind::Put, value: &mark });
         if live.is_some() {
             versions.push(VersionWrite {

@@ -94,6 +94,10 @@ impl RangeState for CoreSm {
         self.range().map_or(ZERO, RangeState::gc_threshold)
     }
 
+    fn counts_dirty(&self) -> bool {
+        self.range().is_some_and(RangeState::counts_dirty)
+    }
+
     fn checksum_request(&self) -> Option<(u64, Hlc)> {
         self.range().and_then(RangeState::checksum_request)
     }

@@ -15,6 +15,8 @@ pub use teseladb_meta::node_versions::{PREFIX, key};
 const PROTOCOL: &str = "protocol";
 const PROTOCOL_MIN: &str = "protocolMin";
 const FCV: &str = "fcv";
+/// The format of the range commands a node reads (007 FR-039).
+const RANGE: &str = "range";
 
 /// What this binary runs: the peer protocol, Group 0's snapshot format and the latest feature
 /// compatibility version.
@@ -23,7 +25,8 @@ pub fn ours() -> Vec<u8> {
         .with(PROTOCOL, i64::from(teseladb_io::peer::PROTOCOL_VERSION))
         .with(PROTOCOL_MIN, i64::from(teseladb_io::peer::PROTOCOL_MIN))
         .with(FORMAT, i64::from(teseladb_meta::group0::SNAPSHOT_VERSION))
-        .with(FCV, VERSIONS[0]);
+        .with(FCV, VERSIONS[0])
+        .with(RANGE, i64::from(teseladb_range::command::FORMAT));
     d.to_bytes().unwrap_or_default()
 }
 
@@ -34,6 +37,26 @@ fn fcv_of(value: &[u8]) -> Option<String> {
         Some(Value::String(v)) => Some(v.clone()),
         _ => None,
     }
+}
+
+/// The format of the range commands a node's setting `value` says it reads: 0 for a node that
+/// recorded its versions before it recorded this one.
+fn range_format_of(value: &[u8]) -> u8 {
+    match RawDoc::from_bytes(value).ok().and_then(|d| d.get(RANGE)) {
+        Some(teseladb_bson::RawValue::Int64(v)) => u8::try_from(v).unwrap_or(0),
+        Some(teseladb_bson::RawValue::Int32(v)) => u8::try_from(v).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Whether every node that is not removed reads the writes that carry their change of each
+/// collection's documents (007 FR-039). A node that recorded nothing yet runs this binary.
+pub fn counted_writes(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| range_format_of(v) >= teseladb_range::command::FORMAT_COUNTED)
 }
 
 /// The highest feature compatibility version every node that is not removed runs, if one runs
@@ -100,5 +123,22 @@ mod tests {
         assert_eq!(range, (Some(Value::Int64(i64::from(min))), Some(Value::Int64(i64::from(max)))));
         assert_eq!(fcv_of(b"x"), None);
         assert_eq!(key(NodeId(12)), b"nodeVersions.12".to_vec());
+    }
+
+    #[test]
+    fn counted_writes_wait_for_every_node_that_is_not_removed() {
+        use NodeState::{Active, Removed};
+        // A node of the version before recorded its versions without the range format.
+        let old = Document::new().with(FCV, "9.0").to_bytes().unwrap();
+        let mut sm = with_nodes(&[(1, Active, None), (2, Active, None)]);
+        assert!(counted_writes(&sm), "nodes that recorded nothing run this binary");
+        sm.settings.insert(key(NodeId(1)), ours());
+        sm.settings.insert(key(NodeId(2)), old.clone());
+        assert!(!counted_writes(&sm));
+        sm.settings.insert(key(NodeId(2)), ours());
+        assert!(counted_writes(&sm));
+        let mut sm = with_nodes(&[(1, Active, None), (2, Removed, None)]);
+        sm.settings.insert(key(NodeId(2)), old);
+        assert!(counted_writes(&sm), "a removed node does not count");
     }
 }

@@ -36,12 +36,13 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         view
     };
     match req {
-        RemoteReq::Scan { start, end, limit, concern } => {
+        RemoteReq::Scan { start, end, limit, concern, backward } => {
             let view = with(&TxnView::default());
             let uncertain_to = None;
             RemoteReq::ReadWith {
                 key: start,
                 scan: Some((end, limit)),
+                backward,
                 at,
                 concern,
                 view,
@@ -49,12 +50,13 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
             }
         }
         // On the leader at the mark the follower read at: the intents it met are resolved there.
-        RemoteReq::FollowerScan { start, end, limit, .. } => {
+        RemoteReq::FollowerScan { start, end, limit, backward, .. } => {
             let (concern, view) = (ReadConcern::Majority, with(&TxnView::default()));
             let uncertain_to = None;
             RemoteReq::ReadWith {
                 key: start,
                 scan: Some((end, limit)),
+                backward,
                 at,
                 concern,
                 view,
@@ -63,11 +65,13 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         }
         RemoteReq::Read { key, .. } => {
             let (concern, view) = (ReadConcern::Majority, with(&TxnView::default()));
-            RemoteReq::ReadWith { key, scan: None, at, concern, view, uncertain_to: None }
+            let backward = false;
+            RemoteReq::ReadWith { key, scan: None, backward, at, concern, view, uncertain_to: None }
         }
         // Again at its mark, with its window.
-        RemoteReq::ReadWith { key, scan, concern, view, uncertain_to, .. } => {
-            RemoteReq::ReadWith { key, scan, at, concern, view: with(&view), uncertain_to }
+        RemoteReq::ReadWith { key, scan, backward, concern, view, uncertain_to, .. } => {
+            let view = with(&view);
+            RemoteReq::ReadWith { key, scan, backward, at, concern, view, uncertain_to }
         }
         other @ (RemoteReq::Write { .. }
         | RemoteReq::Txn { .. }
@@ -76,7 +80,8 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         | RemoteReq::RestoreIngest { .. }
         | RemoteReq::Changes { .. }
         | RemoteReq::Fence { .. }
-        | RemoteReq::Live) => other,
+        | RemoteReq::Live
+        | RemoteReq::DocCount { .. }) => other,
     }
 }
 
@@ -181,8 +186,13 @@ mod tests {
     #[test]
     fn a_read_that_met_intents_goes_again_at_its_mark_with_what_it_learned() {
         let learned = (ts(7), TxnView { own: None, known: [(TxnId(2), Known::Pushed)].into() });
-        let scan =
-            RemoteReq::Scan { start: vec![1], end: vec![2], limit: 5, concern: ReadConcern::Local };
+        let scan = RemoteReq::Scan {
+            start: vec![1],
+            end: vec![2],
+            limit: 5,
+            concern: ReadConcern::Local,
+            backward: false,
+        };
         // Nothing met yet: it goes as it is.
         assert_eq!(pin(scan.clone(), None), scan);
         assert_eq!(
@@ -190,6 +200,7 @@ mod tests {
             RemoteReq::ReadWith {
                 key: vec![1],
                 scan: Some((vec![2], 5)),
+                backward: false,
                 at: Some(ts(7)),
                 concern: ReadConcern::Local,
                 view: learned.1.clone(),
@@ -203,12 +214,14 @@ mod tests {
             limit: 5,
             max_stale_ms: Some(90_000),
             nodes: vec![(teseladb_types::NodeId(2), true)],
+            backward: false,
         };
         assert_eq!(
             pin(follower, Some(&learned)),
             RemoteReq::ReadWith {
                 key: vec![1],
                 scan: Some((vec![2], 5)),
+                backward: false,
                 at: Some(ts(7)),
                 concern: ReadConcern::Majority,
                 view: learned.1.clone(),
@@ -220,6 +233,7 @@ mod tests {
             RemoteReq::ReadWith {
                 key: vec![1],
                 scan: None,
+                backward: false,
                 at: Some(ts(7)),
                 concern: ReadConcern::Majority,
                 view: learned.1.clone(),
@@ -231,6 +245,7 @@ mod tests {
         let read = RemoteReq::ReadWith {
             key: vec![1],
             scan: None,
+            backward: false,
             at: Some(ts(5)),
             concern: ReadConcern::Majority,
             view: own,

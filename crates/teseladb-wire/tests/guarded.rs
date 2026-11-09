@@ -127,7 +127,12 @@ fn a_read_of_several_spans_goes_to_the_node_as_one_and_counts_its_documents() {
     }
     let spans: Vec<Span> = keys
         .iter()
-        .map(|k| Span { start: k.clone(), end: [k.as_slice(), &[0]].concat(), limit: 1 })
+        .map(|k| Span {
+            start: k.clone(),
+            end: [k.as_slice(), &[0]].concat(),
+            limit: 1,
+            backward: false,
+        })
         .collect();
     let shared = Shared::default();
     let id = lock(&shared).ops.begin(op(None));

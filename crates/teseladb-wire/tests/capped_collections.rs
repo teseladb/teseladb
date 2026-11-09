@@ -399,6 +399,7 @@ fn coll_stats_shows_each_kind_as_a_refrouter_does() {
         keys(&r),
         [
             "sharded",
+            "primary",
             "capped",
             "max",
             "ns",
@@ -413,19 +414,72 @@ fn coll_stats_shows_each_kind_as_a_refrouter_does() {
             "nindexes",
             "scaleFactor",
             "nchunks",
+            "shards",
             "ok"
         ]
     );
+    // `maxSize` is a `long` in the router's answer and an `int` in a shard's (measured on the
+    // native `refrouter` 9.0.4 on 09-11-2026, scenario `capped-collections`).
     assert_eq!(
         (field(&r, "capped"), field(&r, "max"), field(&r, "maxSize")),
-        (&Value::Boolean(true), &Value::Int32(10), &Value::Int32(4096))
+        (&Value::Boolean(true), &Value::Int32(10), &Value::Int64(4096))
     );
+    let shard = |r: &Document| match field(r, "shards") {
+        Value::Document(s) => match s.iter().next() {
+            Some((_, Value::Document(d))) => d.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        keys(&shard(&r)),
+        [
+            "ns",
+            "size",
+            "count",
+            "avgObjSize",
+            "numOrphanDocs",
+            "storageSize",
+            "freeStorageSize",
+            "capped",
+            "max",
+            "maxSize",
+            "nindexes",
+            "indexBuilds",
+            "totalIndexSize",
+            "indexSizes",
+            "totalSize",
+            "scaleFactor",
+            "ok"
+        ]
+    );
+    assert_eq!(shard(&r).get("maxSize"), Some(&Value::Int32(4096)));
     let r = run(&mut m, r#"{"collStats":"cap2"}"#);
-    assert_eq!((field(&r, "max"), field(&r, "maxSize")), (&Value::Int32(0), &Value::Int32(4096)));
+    assert_eq!((field(&r, "max"), field(&r, "maxSize")), (&Value::Int32(0), &Value::Int64(4096)));
     let r = run(&mut m, r#"{"collStats":"cl"}"#);
     assert_eq!(
         (field(&r, "indexSizes"), field(&r, "totalIndexSize")),
         (&Value::Document(Document::new()), &Value::Int32(0))
+    );
+    // Without documents, a shard's document has no average size.
+    assert_eq!(
+        keys(&shard(&r)),
+        [
+            "ns",
+            "size",
+            "count",
+            "numOrphanDocs",
+            "storageSize",
+            "freeStorageSize",
+            "capped",
+            "nindexes",
+            "indexBuilds",
+            "totalIndexSize",
+            "indexSizes",
+            "totalSize",
+            "scaleFactor",
+            "ok"
+        ]
     );
     let r = run(&mut m, r#"{"collStats":"v"}"#);
     assert_eq!(field(&r, "code"), &Value::Int32(166), "{r:?}");
@@ -433,6 +487,25 @@ fn coll_stats_shows_each_kind_as_a_refrouter_does() {
     assert!(r.get("count").is_none(), "{r:?}");
     assert_eq!(field(&r, "timeseries.bucketCount"), &Value::Int32(2));
     assert_eq!(field(&r, "timeseries.bucketsNs"), &Value::String("m.ts".into()));
+    assert_eq!(
+        keys(&shard(&r)),
+        [
+            "ns",
+            "size",
+            "timeseries",
+            "numOrphanDocs",
+            "storageSize",
+            "freeStorageSize",
+            "capped",
+            "nindexes",
+            "indexBuilds",
+            "totalIndexSize",
+            "indexSizes",
+            "totalSize",
+            "scaleFactor",
+            "ok"
+        ]
+    );
 }
 
 /// A collection of more documents than one read of the node gives is copied whole.

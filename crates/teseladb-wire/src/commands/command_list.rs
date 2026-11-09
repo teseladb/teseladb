@@ -50,7 +50,7 @@ pub(crate) fn in_api_v1(name: &str) -> bool {
 const T: bool = true;
 const F: bool = false;
 
-pub(super) const COMMANDS: [CommandInfo; 161] = [
+pub(super) const COMMANDS: [CommandInfo; 163] = [
     c("_mergeAuthzCollections", "no help defined", [T, T, F, T, F, F]),
     c(
         "abortMoveCollection",
@@ -376,6 +376,11 @@ pub(super) const COMMANDS: [CommandInfo; 161] = [
         [T, T, T, T, F, F],
     ),
     c(
+        "resetPlacementHistory",
+        "Invoke adminCommand({resetPlacementHistory: 1}) to reset the log of namespace placement changes. Meant to be used only under the guidance of tech support.",
+        [T, T, F, T, F, F],
+    ),
+    c(
         "reshardCollection",
         "Reshard an already sharded collection on a new shard key.",
         [T, T, F, T, F, F],
@@ -452,6 +457,11 @@ pub(super) const COMMANDS: [CommandInfo; 161] = [
         [T, T, F, T, F, F],
     ),
     c("unshardCollection", "Unshard a sharded collection.", [T, T, F, T, F, F]),
+    c(
+        "untrackUnshardedCollection",
+        "Internal command, which is exposed for emergency use only. Safely unregisters from the sharding catalog a tracked unsharded collection. Requires the collection to be placed on its primary shard to succeed.",
+        [T, T, F, T, F, F],
+    ),
     c("update", "update documents", [T, T, F, F, F, T]),
     c("updateRole", "no help defined", [T, T, F, F, F, F]),
     c(

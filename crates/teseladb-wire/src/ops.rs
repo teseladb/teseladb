@@ -691,6 +691,20 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(rows)
     }
 
+    fn txn_scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        let rows = self.call(|b| b.txn_scan_back(start, end, limit, at, view, uncertain_to))?;
+        self.tally(&rows);
+        Ok(rows)
+    }
+
     fn txn_gets(
         &mut self,
         keys: &[Vec<u8>],
@@ -813,6 +827,43 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         // A read that ran past the deadline stops the operation once it returns; a write
         // that returned is done and keeps its result.
         let rows = self.call(|b| b.scan(start, end, limit, concern))?;
+        self.check()?;
+        self.tally(&rows);
+        Ok(rows)
+    }
+
+    fn doc_count(&mut self, tenant: u32, collection: u32) -> Result<Option<u64>, CommandError> {
+        let n = self.call(|b| b.doc_count(tenant, collection))?;
+        self.check()?;
+        Ok(n)
+    }
+
+    fn points(
+        &mut self,
+        keys: &[Vec<u8>],
+        concern: ReadConcern,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        // As `scan`: the backend underneath reads them as point reads where it can (H-013).
+        let found = self.call(|b| b.points(keys, concern))?;
+        self.check()?;
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = keys
+            .iter()
+            .zip(&found)
+            .filter_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+            .collect();
+        self.tally(&rows);
+        Ok(found)
+    }
+
+    fn scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `scan`: the deadline stops the operation once the read returns.
+        let rows = self.call(|b| b.scan_back(start, end, limit, concern))?;
         self.check()?;
         self.tally(&rows);
         Ok(rows)

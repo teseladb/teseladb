@@ -18,8 +18,15 @@ fn run(m: &mut Mem, cmd: &str) -> Document {
 }
 
 fn ids(r: &Document) -> Vec<i32> {
+    let mut out = ids_in_order(r);
+    out.sort_unstable();
+    out
+}
+
+/// The `_id` of the first batch's documents, in the order of the answer.
+fn ids_in_order(r: &Document) -> Vec<i32> {
     let Value::Array(b) = field(r, "cursor.firstBatch") else { panic!("{r:?}") };
-    let mut out: Vec<i32> = b
+    let out: Vec<i32> = b
         .iter()
         .map(|d| match d {
             Value::Document(d) => match field(d, "_id") {
@@ -29,7 +36,6 @@ fn ids(r: &Document) -> Vec<i32> {
             other => panic!("{other:?}"),
         })
         .collect();
-    out.sort_unstable();
     out
 }
 
@@ -586,6 +592,35 @@ fn an_ascending_id_read_with_a_limit_reads_that_many_of_each_bucket() {
         let r = run(&mut m, find);
         assert_eq!(ids(&r), want, "{find}: {r:?}");
         assert!(m.scanned_rows < 200, "{find}: {} rows read", m.scanned_rows);
+    }
+}
+
+#[test]
+fn a_descending_id_read_with_a_limit_reads_from_the_end_of_each_bucket() {
+    let mut m = loaded(2_000);
+    // H-003: `find().sort({_id: -1}).limit(1)` read the whole collection and turned it round,
+    // 22 ms on 20.000 documents against 0,6 ms in a `refnode` 9.0.4. Each bucket is now read from
+    // its end down and the buckets merged from the highest `_id`.
+    let cases = [
+        (r#"{"find":"c","filter":{},"sort":{"_id":-1},"limit":1}"#, vec![1999]),
+        (
+            r#"{"find":"c","filter":{"_id":{"$lte":100}},"sort":{"_id":-1},"limit":5}"#,
+            vec![100, 99, 98, 97, 96],
+        ),
+        (
+            r#"{"find":"c","filter":{"_id":{"$lt":10}},"sort":{"_id":-1},"limit":20}"#,
+            (0..10).rev().collect(),
+        ),
+        (
+            r#"{"aggregate":"c","pipeline":[{"$sort":{"_id":-1}},{"$limit":3}],"cursor":{}}"#,
+            vec![1999, 1998, 1997],
+        ),
+    ];
+    for (cmd, want) in cases {
+        m.scanned_rows = 0;
+        let r = run(&mut m, cmd);
+        assert_eq!(ids_in_order(&r), want, "{cmd}: {r:?}");
+        assert!(m.scanned_rows < 200, "{cmd}: {} rows read", m.scanned_rows);
     }
 }
 

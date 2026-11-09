@@ -109,8 +109,16 @@ pub fn check(req: &Request, name: &str) -> Result<(), CommandError> {
             let msg = "the 'isTimeseriesNamespace' parameter cannot be used on refrouter";
             Err(CommandError::new(TIMESERIES_NS_ON_ROUTER, msg))
         }
-        // An internal privilege no user has.
-        "collMod" if cmd.get(REMOVE_LEGACY_BUCKETING).is_some() => {
+        _ => Ok(()),
+    }
+}
+
+/// Refuses the internal fields of command `req` (named `name`) that ask a privilege no user has:
+/// a `refrouter` 9.0.4 checks it after the API parameters, so `apiStrict` refuses an unstable one
+/// first (RefDb r9.0.4 `coll_mod.idl`, measured on 09-11-2026).
+pub fn check_privileged(req: &Request, name: &str) -> Result<(), CommandError> {
+    match name {
+        "collMod" if req.command.get(REMOVE_LEGACY_BUCKETING).is_some() => {
             Err(crate::commands::authorize::unauthorized(req))
         }
         _ => Ok(()),

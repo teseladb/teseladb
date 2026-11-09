@@ -188,6 +188,14 @@ pub fn move_primary<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
     if !ctx.backend.databases()?.contains(&db) {
         return Err(CommandError::new(NAMESPACE_NOT_FOUND, format!("database {db} not found")));
     }
+    // A cluster of one shard moves no data, whatever the target (`assertDataMovementAllowed` of
+    // RefDb r9.0.4, before the target is looked up).
+    if ctx.backend.config_documents(super::config_db::SHARDS)?.len() < 2 {
+        return Err(CommandError::new(
+            crate::error::ILLEGAL_OPERATION,
+            "Cannot migrate data in a cluster before a second shard has been successfully added",
+        ));
+    }
     let node = shard_node(ctx.backend, &to)?.ok_or_else(|| {
         let msg = format!(
             "requested primary shard {to} does not exist :: caused by :: Shard {to} not found"

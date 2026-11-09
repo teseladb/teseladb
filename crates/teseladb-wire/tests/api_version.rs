@@ -260,3 +260,23 @@ fn the_api_test_commands_answer_their_parameters_with_enable_test_commands() {
         &Value::Array(vec![Value::from("1")])
     );
 }
+
+/// `collMod`'s `_removeLegacyTimeseriesBucketingParametersHaveChanged` is `stability: unstable`
+/// in RefDb r9.0.4 `coll_mod.idl`: with `apiStrict` it is refused with 323 before the internal
+/// privilege it needs is checked; without it, that privilege no user has refuses it with 13
+/// (measured on the native `refrouter` 9.0.4 on 09-11-2026, scenario `api-strict`).
+#[test]
+fn the_internal_coll_mod_field_is_unstable_before_it_is_unauthorized() {
+    let mut m = setup();
+    let field = "_removeLegacyTimeseriesBucketingParametersHaveChanged";
+    let cmd = format!(r#"{{"collMod":"c","{field}":true}}"#);
+
+    let refused = strict(&mut m, &cmd);
+    let loose = send(&mut m, "api", json(&cmd));
+
+    assert_eq!(
+        failure(&refused),
+        (323, format!("BSON field '{field}' is not allowed with apiStrict:true."))
+    );
+    assert_eq!(failure(&loose).0, 13);
+}

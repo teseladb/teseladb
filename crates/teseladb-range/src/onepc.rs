@@ -41,5 +41,5 @@ pub fn one_phase(
             }
         }
     }
-    Ok(Command::Write { puts, deletes, dedup: None, live_delta })
+    Ok(Command::Write { puts, deletes, dedup: None, live_delta, docs: None })
 }

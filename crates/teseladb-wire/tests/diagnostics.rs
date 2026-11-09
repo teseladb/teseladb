@@ -734,3 +734,132 @@ fn list_commands_names_what_the_dispatch_takes() {
     assert!(accepts("findandmodify", true, false) && accepts("ismaster", false, false));
     assert!(!table.contains(&"findandmodify") && !table.contains(&"ismaster"));
 }
+
+/// `extra_info` varies by platform as RefDb 9.0.4's does: on macOS (`processinfo_osx.cpp`) it
+/// has the note and the task's page-ins as `page_faults`, an `int`; on Linux the counters of
+/// `getrusage(2)` and the threads (measured on the native `refrouter` on 09-11-2026).
+#[test]
+fn extra_info_has_the_fields_of_the_platform() {
+    let mut m = node();
+    m.facts.resources.pageins = Some(3479);
+
+    let r = m.run("admin", doc(&[("serverStatus", 1.into())]));
+
+    assert_eq!(keys(field(&r, "extra_info")), ["note", "page_faults"]);
+    assert_eq!(field(&r, "extra_info.page_faults"), &Value::Int32(3479));
+    assert_eq!(field(&r, "extra_info.note"), &s("fields vary by platform"));
+}
+
+/// `collStats` as a `refrouter` 9.0.4 answers it (010 FR-018, T055; measured on the native `refrouter`
+/// on 09-11-2026): `sharded` from the shard key, `primary` after it for a collection without one,
+/// `maxSize` a `long`, and after `nchunks` a document per shard that holds the collection, here a
+/// node; a collection that does not exist in a database that does gets the short one.
+#[test]
+fn coll_stats_names_the_primary_and_each_shard() {
+    let mut m = node();
+    m.databases_docs = Some(vec![doc(&[("_id", s("db")), ("primary", s("node1"))])]);
+    let docs = Value::Array(vec![d(&[("a", 1.into())]), d(&[("a", 2.into())])]);
+    m.run("db", doc(&[("insert", s("c")), ("documents", docs.clone())]));
+    m.run("db", doc(&[("insert", s("k")), ("documents", docs)]));
+    let index = Value::Array(vec![d(&[("key", d(&[("a", 1.into())])), ("name", s("a_1"))])]);
+    m.run("db", doc(&[("createIndexes", s("k")), ("indexes", index)]));
+    let r = m.run("admin", doc(&[("shardCollection", s("db.k")), ("key", d(&[("a", 1.into())]))]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+
+    let plain = m.run("db", doc(&[("collStats", s("c"))]));
+    let sharded = m.run("db", doc(&[("collStats", s("k"))]));
+    let missing = m.run("db", doc(&[("collStats", s("nope"))]));
+
+    assert_eq!(&keys(&Value::Document(plain.clone()))[..2], ["sharded", "primary"]);
+    assert_eq!(field(&plain, "primary"), &s("node1"));
+    assert_eq!(field(&plain, "maxSize"), &Value::Int64(0));
+    let top = keys(&Value::Document(plain.clone()));
+    let at = |k: &str| top.iter().position(|x| x == k).unwrap_or_else(|| panic!("{k} in {top:?}"));
+    assert_eq!((at("nchunks") + 1, at("shards") + 1), (at("shards"), at("ok")));
+    assert_eq!(keys(field(&plain, "shards")), ["node1"]);
+    assert_eq!(
+        keys(field(&plain, "shards.node1")),
+        [
+            "ns",
+            "size",
+            "count",
+            "avgObjSize",
+            "numOrphanDocs",
+            "storageSize",
+            "freeStorageSize",
+            "capped",
+            "nindexes",
+            "indexBuilds",
+            "totalIndexSize",
+            "indexSizes",
+            "totalSize",
+            "scaleFactor",
+            "ok"
+        ]
+    );
+    assert_eq!(field(&plain, "shards.node1.count"), field(&plain, "count"));
+    assert_eq!(field(&plain, "shards.node1.size"), field(&plain, "size"));
+    assert!(matches!(field(&plain, "shards.node1.avgObjSize"), Value::Int32(_)));
+
+    assert_eq!(field(&sharded, "sharded"), &Value::Boolean(true));
+    assert_eq!(sharded.get("primary"), None);
+    assert_eq!(keys(field(&sharded, "shards")), ["node1"]);
+
+    assert_eq!(field(&missing, "primary"), &s("node1"));
+    assert_eq!(
+        keys(field(&missing, "shards.node1")),
+        [
+            "ns",
+            "size",
+            "count",
+            "numOrphanDocs",
+            "storageSize",
+            "totalSize",
+            "nindexes",
+            "totalIndexSize",
+            "indexSizes",
+            "scaleFactor",
+            "ok"
+        ]
+    );
+}
+
+/// A collection whose ranges two nodes lead: each node's document of `collStats` measures its own
+/// ranges, and their counts and sizes add up to the collection's (T055).
+#[test]
+fn coll_stats_measures_each_node_on_its_ranges() {
+    use teseladb_router::table::RouteEntry;
+    use teseladb_types::{GroupId, NodeId};
+    let mut m = node();
+    let docs = Value::Array((0..40).map(|i| d(&[("_id", Value::Int32(i))])).collect());
+    m.run("db", doc(&[("insert", s("c")), ("documents", docs)]));
+    let ns = teseladb_meta::catalog::Namespace { db: "db".into(), coll: "c".into() };
+    let c = m.catalog.get(&ns).cloned().expect("the collection");
+    let (start, _) = teseladb_wire::commands::query::documents_of(&c);
+    // The documents' area cut in the middle of its hash buckets.
+    let cut = [start.as_slice(), &[8]].concat();
+    let entry = |group: u64, start: Vec<u8>, end: Vec<u8>, node: u64| RouteEntry {
+        group: GroupId(group),
+        start,
+        end,
+        core: 0,
+        voters: vec![NodeId(node)],
+        generation: 1,
+        leader_hint: Some(NodeId(node)),
+        moved_ms: 0,
+        replica_epoch: 1,
+    };
+    m.routes = vec![entry(1, Vec::new(), cut.clone(), 1), entry(2, cut, Vec::new(), 2)];
+
+    let r = m.run("db", doc(&[("collStats", s("c"))]));
+
+    assert_eq!(keys(field(&r, "shards")), ["node1", "node2"], "{r:?}");
+    let count = |k: &str| match field(&r, k) {
+        Value::Int32(n) => i64::from(*n),
+        other => panic!("{other:?}"),
+    };
+    let (one, two) = (count("shards.node1.count"), count("shards.node2.count"));
+    assert!(one > 0 && two > 0, "{one} {two}");
+    assert_eq!(one + two, count("count"));
+    assert_eq!(count("shards.node1.size") + count("shards.node2.size"), count("size"));
+}

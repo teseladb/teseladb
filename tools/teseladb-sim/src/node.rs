@@ -247,6 +247,13 @@ impl StateMachine for NodeSm {
 /// What a range's host follows (005 FR-013, FR-014); the other machines are no range of a host and
 /// have no threshold or checksum.
 impl RangeState for NodeSm {
+    fn counts_dirty(&self) -> bool {
+        match self {
+            NodeSm::Range(sm) => sm.counts_dirty(),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => false,
+        }
+    }
+
     fn gc_threshold(&self) -> Hlc {
         match self {
             NodeSm::Range(sm) => sm.gc_threshold(),

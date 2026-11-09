@@ -371,6 +371,8 @@ impl DataCore {
         self.leaders.set(ranges);
         self.replicas.set(ranges);
         self.relocations.set_intents(&ranges.relocations);
+        self.host.set_moving(self.relocations.leaving());
+        self.host.set_counted_writes(ranges.counted_writes);
         self.collections.clone_from(&ranges.collections);
         if let Some(ms) = ranges.history_ms {
             self.host.set_gc_ttl_ms(ms);
@@ -524,11 +526,11 @@ impl DataCore {
     /// The scan `r` without its first candidate, which refused it.
     fn next_candidate(r: RemoteReq) -> RemoteReq {
         match r {
-            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, mut nodes } => {
+            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, mut nodes, backward } => {
                 if !nodes.is_empty() {
                     nodes.remove(0);
                 }
-                RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes }
+                RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward }
             }
             other => other,
         }
@@ -555,16 +557,19 @@ impl DataCore {
                     None => self.host.mutate(core, w, now, wall_ms),
                 }
             }
-            RemoteReq::Scan { start, end, limit, concern } => {
+            RemoteReq::Scan { start, end, limit, concern, backward } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-                let req = ScanReq { g, start, end, concern, limit };
+                let req = ScanReq { g, start, end, concern, limit, backward };
                 self.host.scan(core, req, now, wall_ms)
             }
-            // The leader scans as for `primary`; a follower at its closed mark.
-            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes } => {
+            // The leader scans as for `primary`; a follower at its closed mark. The replica that
+            // leads serves it as the leader even when the router did not know it led yet.
+            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-                if nodes.first().is_some_and(|(_, leads)| *leads) {
-                    let req = ScanReq { g, start, end, concern: ReadConcern::Majority, limit };
+                let leads = core.status(g).is_some_and(|st| st.role == Role::Leader);
+                if leads || nodes.first().is_some_and(|(_, leads)| *leads) {
+                    let concern = ReadConcern::Majority;
+                    let req = ScanReq { g, start, end, concern, limit, backward };
                     self.host.scan(core, req, now, wall_ms)
                 } else {
                     let view = teseladb_range::push::TxnView::default();
@@ -574,6 +579,7 @@ impl DataCore {
                         g,
                         key: start,
                         scan,
+                        backward,
                         at: None,
                         concern,
                         view,
@@ -590,10 +596,10 @@ impl DataCore {
                 self.host.get(core, g, &key, ReadConcern::Majority, now, wall_ms)
             }
             // A read that knows about transactions whose intents it met (008 FR-003).
-            RemoteReq::ReadWith { key, scan, at, concern, view, uncertain_to } => {
+            RemoteReq::ReadWith { key, scan, backward, at, concern, view, uncertain_to } => {
                 let scan =
                     scan.map(|(end, limit)| (end, usize::try_from(limit).unwrap_or(usize::MAX)));
-                let spec = ReadSpec { g, key, scan, at, concern, view, uncertain_to };
+                let spec = ReadSpec { g, key, scan, backward, at, concern, view, uncertain_to };
                 self.host.read_with(core, spec, now, wall_ms)
             }
             // Every request of a transaction waits for the range's majority (008).
@@ -616,6 +622,20 @@ impl DataCore {
                 let live = core.state_machine(g).and_then(CoreSm::range).map(|sm| sm.live_bytes());
                 let hint = core.status(g).map_or(NodeId(0), |s| s.leader);
                 let r = live.map(|bytes| RemoteReply::Live { bytes });
+                self.send_answer(core, client, r.ok_or(RangeError::NotLeader { hint }), now);
+                return;
+            }
+            // A collection's live documents, from the leader's counts (007 FR-039): only the
+            // leader has applied every write it acknowledged.
+            RemoteReq::DocCount { tenant, collection } => {
+                let st = core.status(g);
+                let leads =
+                    st.as_ref().is_some_and(|s| s.role == Role::Leader) && core.leader_ready(g);
+                let sm = core.state_machine(g).and_then(CoreSm::range).filter(|_| leads);
+                let hint = st.map_or(NodeId(0), |s| s.leader);
+                let r = sm.map(|sm| RemoteReply::DocCount {
+                    n: sm.doc_counts().map(|c| c.get(&(tenant, collection)).copied().unwrap_or(0)),
+                });
                 self.send_answer(core, client, r.ok_or(RangeError::NotLeader { hint }), now);
                 return;
             }
@@ -1292,6 +1312,22 @@ mod tests {
         assert_eq!(core.snapshot_index(G), before);
     }
 
+    /// A scan with a read preference that names this node as a follower, while its replica
+    /// leads (the router had no hint of the leader yet): the leader takes it as the leader, with
+    /// what it has applied. As a follower it had no closed mark yet and refused it at once (a
+    /// follower's closed mark runs seconds behind the writes).
+    #[test]
+    fn a_follower_scan_on_the_leader_reads_as_the_leader() {
+        let (mut core, mut d, mut disk) = setup_disk(&[1]);
+        let now = lead_alone(&mut core, &mut d, &mut disk);
+        let (tx, rx) = channel();
+        let req = DataReq::Remote(G, follower(&[(1, false)]));
+        d.request(&mut core, req, tx, (now, 0));
+        d.poll(&mut core, (now, 0));
+        let refused = matches!(rx.try_recv(), Ok(Err(RangeError::NotLeader { .. })));
+        assert!(!refused, "refused as a follower");
+    }
+
     /// A change stream's read reaches the leader's host and comes back with its rows (014 FR-003).
     #[test]
     fn a_change_streams_read_runs_on_the_leader() {
@@ -1412,7 +1448,8 @@ mod tests {
     }
 
     fn scan() -> RemoteReq {
-        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 1, concern: ReadConcern::Local }
+        let concern = ReadConcern::Local;
+        RemoteReq::Scan { start: vec![1], end: vec![2], limit: 1, concern, backward: false }
     }
 
     /// Sends a request for `G` and gives the forward it became.
@@ -1521,6 +1558,7 @@ mod tests {
             limit: 1,
             max_stale_ms: None,
             nodes: nodes.iter().map(|(n, l)| (NodeId(*n), *l)).collect(),
+            backward: false,
         }
     }
 

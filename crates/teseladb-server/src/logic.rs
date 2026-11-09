@@ -902,6 +902,10 @@ impl NodeLogic {
         if let Some(tenants) = tenants {
             if self.sent_tenants.as_ref().is_none_or(|(_, sent)| *sent != tenants) {
                 routes.publish_tenants(Arc::new(tenants.clone()));
+                // The connections' threads look at the new states now (007 FR-034).
+                if let Some(p) = &self.presence {
+                    p.wake();
+                }
             }
             self.sent_tenants = Some((applied, tenants));
             if let Some(sm) = self.group0() {
@@ -2618,6 +2622,7 @@ mod tests {
             end: vec![2],
             limit: 10,
             concern: ReadConcern::Local,
+            backward: false,
         };
         let nobody = c.data(1, DataReq::Remote(GroupId(77), scan.clone()));
         assert_eq!(nobody, Err(RangeError::NotLeader { hint: NodeId(0) }));
@@ -2800,6 +2805,7 @@ mod tests {
                 limit: 10,
                 max_stale_ms,
                 nodes,
+                backward: false,
             };
             DataReq::Remote(DATA_RANGE, r)
         };

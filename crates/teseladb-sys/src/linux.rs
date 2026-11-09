@@ -204,6 +204,12 @@ pub(crate) fn pin_to_cpu(cpu: usize) -> std::io::Result<bool> {
 mod tests {
     use super::*;
 
+    /// Linux has no page-ins apart from `getrusage(2)`.
+    #[test]
+    fn there_are_no_page_ins_apart() {
+        assert_eq!(memory().unwrap().pageins, None);
+    }
+
     unsafe extern "C" {
         fn pthread_kill(thread: std::os::unix::thread::RawPthread, sig: i32) -> i32;
         fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
@@ -354,7 +360,12 @@ pub(crate) fn memory() -> io::Result<crate::host::Memory> {
         .find_map(|l| l.strip_prefix("Threads:"))
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0);
-    Ok(crate::host::Memory { resident: resident * page, virtual_size: size * page, threads })
+    Ok(crate::host::Memory {
+        resident: resident * page,
+        virtual_size: size * page,
+        threads,
+        pageins: None,
+    })
 }
 
 /// `NAME` and `VERSION_ID` of `/etc/os-release`, as RefDb shows them in `hostInfo`.

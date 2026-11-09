@@ -10,7 +10,6 @@ use teseladb_range::read::ReadConcern;
 use teseladb_bson::{Document, Value};
 
 use super::chunks::collection_chunks;
-use super::sharding::shard_key_of;
 use super::{Backend, shard_name};
 use crate::error::CommandError;
 
@@ -22,7 +21,7 @@ pub fn documents<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<Document>, 
     let entries = backend.route_entries()?;
     let mut out = Vec::new();
     for (ns, coll) in backend.collections()? {
-        let Some(key) = shard_key_of(&coll)? else { continue };
+        let Some(key) = super::sharding::presented_key(&ns, &coll)? else { continue };
         let mut owned: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
         for chunk in collection_chunks(&entries, &coll, &key) {
             let (docs, bytes) = owned.entry(chunk.node.0).or_default();

@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use teseladb_hlc::Hlc;
-use teseladb_lsm::{Found, Kind, Lookup, Lsm, Scan, Step, TimeScan};
+use teseladb_lsm::{BackScan, Found, Kind, Lookup, Lsm, Scan, Step, TimeScan};
 
 use crate::intents::{Intent, IntentOp, IntentOwner, TxnId, pred};
 use crate::sm::split_value;
@@ -199,6 +199,23 @@ struct OwnScan {
     scan: TimeScan,
     next: Option<(Vec<u8>, Visible)>,
     done: bool,
+    /// A backward scan's intents, read whole and taken from the last one (a transaction has few).
+    rest: Vec<(Vec<u8>, Visible)>,
+}
+
+/// The LSM's scan of a [`ScanState`], in key order or from the last key down (H-003).
+enum MainScan {
+    Forward(Scan),
+    Backward(BackScan),
+}
+
+impl MainScan {
+    fn next(&mut self, lsm: &mut Lsm) -> Step {
+        match self {
+            MainScan::Forward(s) => s.next(lsm),
+            MainScan::Backward(s) => s.next(lsm),
+        }
+    }
 }
 
 /// The keys of `[start, end)` that hold an intent of `txn`, in key order, at most `limit` of them
@@ -232,7 +249,9 @@ pub fn intent_keys(
 /// A scan in progress for a reader with a [`TxnView`]: the LSM's scan at the read mark, where
 /// each intent is decided as a point read is, merged with the reader's own intents above the mark.
 pub struct ScanState {
-    main: Scan,
+    main: MainScan,
+    /// From the last key down (H-003).
+    backward: bool,
     read_ts: Hlc,
     /// The end of its uncertainty window.
     uncertain_to: Option<Hlc>,
@@ -252,12 +271,13 @@ impl ScanState {
     }
 
     /// A scan of `[start, end)` at `read_ts`, with its uncertainty window up to `uncertain_to`,
-    /// for a reader with `view`.
+    /// for a reader with `view`; `backward` reads it from the last key down (H-003).
     pub fn new(
         lsm: &RefCell<Lsm>,
         (start, end): (&[u8], &[u8]),
         (read_ts, uncertain_to): (Hlc, Option<Hlc>),
         view: &TxnView,
+        backward: bool,
     ) -> ScanState {
         let v = lsm.borrow().view();
         let own = view.own.map(|txn| OwnScan {
@@ -265,9 +285,15 @@ impl ScanState {
             scan: v.scan_time(start, end, read_ts, NEWEST),
             next: None,
             done: false,
+            rest: Vec::new(),
         });
+        let main = match backward {
+            true => MainScan::Backward(v.scan_back(start, end, read_ts)),
+            false => MainScan::Forward(v.scan(start, end, read_ts)),
+        };
         ScanState {
-            main: v.scan(start, end, read_ts),
+            main,
+            backward,
             read_ts,
             uncertain_to,
             own,
@@ -308,15 +334,21 @@ impl ScanState {
         Some(Ok(()))
     }
 
-    /// Fills the next own intent, if the reader has a transaction.
+    /// Fills the next own intent, if the reader has a transaction: the next in key order, or for
+    /// a backward scan the last one not taken, once all of them are read.
     fn fill_own(&mut self, lsm: &RefCell<Lsm>) -> Option<Result<(), ReadFault>> {
+        let backward = self.backward;
         let Some(o) = self.own.as_mut() else { return Some(Ok(())) };
-        while o.next.is_none() && !o.done {
+        while (backward || o.next.is_none()) && !o.done {
             let step = o.scan.next(&mut lsm.borrow_mut());
             match step {
                 Step::Item(i) if i.kind == Kind::Intent => match Intent::decode(&i.value) {
                     Ok(intent) if intent.txn == o.txn => {
-                        o.next = Some((i.key, op_value(intent.op)))
+                        let found = (i.key, op_value(intent.op));
+                        match backward {
+                            true => o.rest.push(found),
+                            false => o.next = Some(found),
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => return Some(Err(ReadFault::Unavailable)),
@@ -326,6 +358,9 @@ impl ScanState {
                 Step::Miss(_) => return None,
                 Step::Failed(_) => return Some(Err(ReadFault::Unavailable)),
             }
+        }
+        if backward && o.next.is_none() {
+            o.next = o.rest.pop();
         }
         Some(Ok(()))
     }
@@ -351,9 +386,14 @@ impl ScanState {
                 (Some(m), None) => m,
                 (None, Some(o)) => o,
                 (Some(m), Some(o)) => {
-                    // The reader's own intent wins over what the main scan saw on its key.
-                    if o.0 <= m.0 {
-                        if o.0 < m.0 {
+                    // The reader's own intent wins over what the main scan saw on its key; the
+                    // one that comes first in the scan's direction goes first.
+                    let first = |a: &[u8], b: &[u8]| match self.backward {
+                        true => a > b,
+                        false => a < b,
+                    };
+                    if o.0 == m.0 || first(&o.0, &m.0) {
+                        if o.0 != m.0 {
                             self.main_next = Some(m);
                         }
                         o

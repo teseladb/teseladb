@@ -338,6 +338,7 @@ impl SplitsWorkload {
             g,
             key: key.clone(),
             scan: None,
+            backward: false,
             at: Some(r.at),
             concern: ReadConcern::Majority,
             view: r.view.clone(),

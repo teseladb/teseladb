@@ -55,6 +55,8 @@ pub struct Memory {
     pub virtual_size: u64,
     /// Threads.
     pub threads: u64,
+    /// The task's page-ins, which macOS counts apart from `getrusage(2)`; `None` on Linux.
+    pub pageins: Option<i32>,
 }
 
 const RUSAGE_SELF: i32 = 0;

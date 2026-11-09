@@ -13,25 +13,45 @@ use teseladb_types::Nanos;
 /// The first client number that carries a message (the admin and one turn per node come first).
 const FIRST_MESSAGE: u32 = 1_000;
 
-/// What the test does to the world just before a message arrives.
+/// What the test does to the world.
 type Before = Box<dyn FnMut(&mut World, &mut AuthzFence)>;
 
-/// Runs the world's events until `until`; before each of the first messages to arrive, the next
-/// action of `before`. Returns how many actions ran.
-fn run(w: &mut World, wl: &mut AuthzFence, until: Nanos, mut before: Vec<Before>) -> usize {
+/// The event an action waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// The next message of the fence that arrives: the action happens while it is on its way.
+    Message,
+    /// The next tick of a core: for an action that has no message to wait for, such as the heal
+    /// of a cluster cut in three, where the fence sends none.
+    Tick,
+}
+
+/// Runs the world's events until `until`; the actions of `before`, in order, each just before
+/// the next event of its trigger. Returns how many actions ran.
+fn run(
+    w: &mut World,
+    wl: &mut AuthzFence,
+    until: Nanos,
+    mut before: Vec<(Trigger, Before)>,
+) -> usize {
     before.reverse();
     let mut ran = 0;
+    let mut act_on = |w: &mut World, wl: &mut AuthzFence, now: Trigger| {
+        if before.last().is_some_and(|(t, _)| *t == now)
+            && let Some((_, mut act)) = before.pop()
+        {
+            act(w, wl);
+            ran += 1;
+        }
+    };
     while let Some((at, _, ev)) = w.pop() {
         if at > until {
             break;
         }
         match ev {
             Event::Client { client } => {
-                if client >= FIRST_MESSAGE
-                    && let Some(mut act) = before.pop()
-                {
-                    act(w, wl);
-                    ran += 1;
+                if client >= FIRST_MESSAGE {
+                    act_on(w, wl, Trigger::Message);
                 }
                 wl.on_client(w, client);
             }
@@ -41,6 +61,7 @@ fn run(w: &mut World, wl: &mut AuthzFence, until: Nanos, mut before: Vec<Before>
                 }
             }
             Event::Tick { node, core, life } => {
+                act_on(w, wl, Trigger::Tick);
                 if let Some(c) = w.on_tick(node, core, life) {
                     wl.on_completions(w, node, core, c);
                 }
@@ -90,11 +111,12 @@ fn messages_to_a_node_restarted_cut_off_or_frozen() {
     let mut wl = AuthzFence::new(3);
     let mut w = World::with_clocks(7, 3, 1, false, true, wl.clocks());
     wl.start(&mut w);
-    let acts: Vec<Before> = vec![
-        Box::new(crash_and_restart),
-        Box::new(cut_everyone),
-        Box::new(heal),
-        Box::new(freeze_everyone),
+    let acts: Vec<(Trigger, Before)> = vec![
+        (Trigger::Message, Box::new(crash_and_restart)),
+        (Trigger::Message, Box::new(cut_everyone)),
+        // Cut in three, the fence sends nothing: the heal comes with the next tick.
+        (Trigger::Tick, Box::new(heal)),
+        (Trigger::Message, Box::new(freeze_everyone)),
     ];
     let ran = run(&mut w, &mut wl, Nanos::from_secs(10), acts);
     assert_eq!(ran, 4, "every action found a message on its way");

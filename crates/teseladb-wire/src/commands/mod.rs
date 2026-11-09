@@ -32,6 +32,7 @@ pub mod coll_mod_kinds;
 mod command_list;
 mod min_max;
 pub(crate) use command_list::in_api_v1;
+mod coll_stats_shards;
 pub mod config_db;
 pub mod config_settings;
 pub mod cross_range;
@@ -68,6 +69,7 @@ pub mod oplog;
 pub mod out_merge;
 pub mod parameters;
 pub mod partial_filter;
+pub mod placement;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
 pub mod presentation;
@@ -142,6 +144,8 @@ pub struct Span {
     pub end: Vec<u8>,
     /// The most documents it gives.
     pub limit: usize,
+    /// From its last key down, those nearest `end` first (H-003).
+    pub backward: bool,
 }
 
 /// A write for the range: its keys, the encoded [`mutation::Bound`], its statement and its write
@@ -299,6 +303,23 @@ pub trait Backend {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+
+    /// [`Backend::txn_scan`] from the last key down (H-003); by default, in key order and the
+    /// last documents kept.
+    fn txn_scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: teseladb_hlc::Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        let mut rows = self.txn_scan(start, end, usize::MAX, at, view, uncertain_to)?;
+        rows.reverse();
+        rows.truncate(limit);
+        Ok(rows)
+    }
     /// Reads each of `keys` as [`Backend::txn_get`] reads it, all at mark `at`: a backend that
     /// can send the reads together answers them in one round instead of one round each
     /// (017 SC-002).
@@ -429,6 +450,27 @@ pub trait Backend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+    /// The live documents of collection `collection` of tenant `tenant`, added up from the counts
+    /// its ranges keep (007 FR-039), when every one of them is exact; `None` when one is
+    /// estimated or the backend keeps none, and the caller counts by reading.
+    fn doc_count(&mut self, _tenant: u32, _collection: u32) -> Result<Option<u64>, CommandError> {
+        Ok(None)
+    }
+    /// Reads at most `limit` documents of `[start, end)` from the last key down: those nearest
+    /// `end` first (H-003). A backend without a backward read reads the interval in key order and
+    /// keeps its last documents.
+    fn scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        let mut rows = self.scan(start, end, usize::MAX, concern)?;
+        rows.reverse();
+        rows.truncate(limit);
+        Ok(rows)
+    }
     /// Brings this node's copy of Group 0 up to every change committed before the call, so that a read of
     /// users and roles after it sees what any node wrote (013 T058). A backend with a single copy has
     /// nothing to wait for.
@@ -442,7 +484,13 @@ pub trait Backend {
         spans: &[Span],
         concern: ReadConcern,
     ) -> Result<Vec<Rows>, CommandError> {
-        spans.iter().map(|s| self.scan(&s.start, &s.end, s.limit, concern)).collect()
+        spans
+            .iter()
+            .map(|s| match s.backward {
+                true => self.scan_back(&s.start, &s.end, s.limit, concern),
+                false => self.scan(&s.start, &s.end, s.limit, concern),
+            })
+            .collect()
     }
     /// Bytes of the keys and documents stored in `[start, end)`, read in chunks of
     /// [`query::SCAN_CHUNK`].
@@ -1005,7 +1053,7 @@ impl<B: Backend + ?Sized> Ctx<'_, B> {
 }
 
 /// The commands of this module.
-const NAMES: [&str; 122] = [
+const NAMES: [&str; 124] = [
     apply_ops::APPLY_OPS,
     fle::COMPACT,
     fle::CLEANUP,
@@ -1038,6 +1086,8 @@ const NAMES: [&str; 122] = [
     reshard::REFINE_COLLECTION_SHARD_KEY,
     reshard::ABORT_RESHARD_COLLECTION,
     move_collection::MOVE_COLLECTION,
+    placement::UNTRACK_UNSHARDED_COLLECTION,
+    placement::RESET_PLACEMENT_HISTORY,
     move_collection::UNSHARD_COLLECTION,
     move_collection::REWRITE_COLLECTION,
     move_collection::ABORT_MOVE_COLLECTION,
@@ -1475,6 +1525,8 @@ fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         reshard::REFINE_COLLECTION_SHARD_KEY => reshard::refine_collection_shard_key(ctx),
         reshard::ABORT_RESHARD_COLLECTION => reshard::abort_reshard_collection(ctx),
         move_collection::MOVE_COLLECTION => move_collection::move_collection(ctx),
+        placement::UNTRACK_UNSHARDED_COLLECTION => placement::untrack_unsharded_collection(ctx),
+        placement::RESET_PLACEMENT_HISTORY => placement::reset_placement_history(ctx),
         move_collection::UNSHARD_COLLECTION => move_collection::unshard_collection(ctx),
         move_collection::REWRITE_COLLECTION => move_collection::rewrite_collection(ctx),
         move_collection::ABORT_MOVE_COLLECTION => move_collection::abort_move_collection(ctx),

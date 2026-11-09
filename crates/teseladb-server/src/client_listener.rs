@@ -1,11 +1,12 @@
-//! The clients' port (006 FR-005): an acceptor that hands each connection to one of the node's
-//! client workers in turn, one worker per core, each with its own poller; the protocol is
-//! `teseladb-wire`'s, which turns bytes into requests and replies into bytes.
+//! The clients' port (006 FR-005): an acceptor that gives each connection a thread of its own, a
+//! worker of that one connection with its own poller; the protocol is `teseladb-wire`'s, which
+//! turns bytes into requests and replies into bytes.
 //!
-//! A worker only reads, writes and parses: a command of a node runs on one of the worker's
-//! executor threads, which waits for the cores, so a command that waits (for a majority, a
-//! leader or its `maxTimeMS`) never holds up the worker's other connections. A connection has at
-//! most one command running; what arrives meanwhile waits in its backlog, in order.
+//! The connection's thread reads its requests, runs their commands against the node's cores and
+//! writes their replies, as RefDb's thread per connection (`ServiceExecutorSynchronous`) does:
+//! a command that waits (for a majority, a leader or its `maxTimeMS`) holds up only its own
+//! connection, and no request changes threads on its way (H-013 of the native tests). What
+//! arrives while a command runs waits in the socket, in order.
 //!
 //! Beyond `--maxConns` open connections a new one is closed at once, as `refnode` does with
 //! `net.maxIncomingConnections`. An awaitable `hello` waits in its worker until its deadline (or
@@ -15,12 +16,11 @@ use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teseladb_hlc::to_timestamp;
-use teseladb_io::mailbox::{self, Mailbox, MailboxSender};
 use teseladb_io::poller::{Interest, Poller, WAKE_TOKEN, Waker};
 use teseladb_multiraft::NodeClock;
 use teseladb_txn::reaper::Reaper;
@@ -32,8 +32,7 @@ use teseladb_wire::commands::{
 use teseladb_wire::compressed::Compressor;
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{
-    Action, ClusterTime, NodeInfo, Topology, answers_without_waiting, dispatch_with,
-    hello_after_wait,
+    Action, ClusterTime, NodeInfo, Topology, dispatch_with, hello_after_wait,
 };
 
 use crate::backend::{NodeHandle, SCAN_EVERY, ServerBackend};
@@ -223,17 +222,22 @@ impl NodePresence {
         let before = self.counter.swap(counter, Ordering::AcqRel);
         self.closed.store(closed, Ordering::Release);
         if before != counter {
-            let mut watchers =
-                self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            watchers.retain(|w| match w.upgrade() {
-                // A wake-up that fails finds the worker stopping, which needs none.
-                Some(waker) => {
-                    let _ = waker.wake();
-                    true
-                }
-                None => false,
-            });
+            self.wake();
         }
+    }
+
+    /// Wakes every client worker: the node's state or the tenants' states changed (007 FR-034),
+    /// and an idle connection's thread sleeps until something wakes it.
+    pub fn wake(&self) {
+        let mut watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        watchers.retain(|w| match w.upgrade() {
+            // A wake-up that fails finds the worker stopping, which needs none.
+            Some(waker) => {
+                let _ = waker.wake();
+                true
+            }
+            None => false,
+        });
     }
 
     /// The replica set port and this node's member on it (`None`: closed).
@@ -254,10 +258,13 @@ impl NodePresence {
         self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
-    /// Wakes `waker` at every change of the counter.
+    /// Wakes `waker` at every change of the counter or of the tenants' states. The workers of
+    /// connections that closed leave the list here, since one comes with each connection.
     pub fn watch(&self, waker: &Arc<Waker>) {
         let weak = Arc::downgrade(waker);
-        self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(weak);
+        let mut watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        watchers.retain(|w| w.strong_count() > 0);
+        watchers.push(weak);
     }
 
     /// How many client workers it wakes.
@@ -386,31 +393,16 @@ impl NodeState for NodeClockState {
     }
 }
 
-/// A request of connection `token` for an executor, with the connection it runs on.
-struct Job {
-    token: u64,
-    conn: Connection,
-    req: Request,
-}
-
-/// What an executor gives back: the connection and the request's action.
-struct Finished {
-    token: u64,
-    conn: Connection,
-    req: Request,
-    action: Action,
-}
-
 /// Starts a thread named after its first argument that runs its second.
 pub type SpawnFn = fn(String, Box<dyn FnOnce() + Send>) -> io::Result<()>;
 
-/// How a client listener starts its executors and how often it runs the TTL monitor: in
-/// production [`Hooks::default`]; a test gives a spawn that fails or starts late, and a short TTL
-/// period, to reach what a running node meets only by chance.
+/// How a client listener starts the threads of its connections and how often it runs the TTL
+/// monitor: in production [`Hooks::default`]; a test gives a spawn that fails or starts late, and
+/// a short TTL period, to reach what a running node meets only by chance.
 #[derive(Clone, Copy, Debug)]
 pub struct Hooks {
-    /// Starts an executor's thread.
-    pub spawn_executor: SpawnFn,
+    /// Starts a connection's thread.
+    pub spawn_connection: SpawnFn,
     /// Period of the TTL monitor.
     pub ttl_every: Duration,
 }
@@ -418,7 +410,7 @@ pub struct Hooks {
 impl Default for Hooks {
     fn default() -> Hooks {
         Hooks {
-            spawn_executor: spawn_thread,
+            spawn_connection: spawn_thread,
             ttl_every: Duration::from_secs(teseladb_wire::commands::ttl::TTL_MONITOR_SECS),
         }
     }
@@ -443,111 +435,17 @@ pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() ->
     }
 }
 
-/// A worker's executors: threads that run the commands of its connections against the node,
-/// started when none is idle and kept for the next ones.
-struct Pool {
-    spawn: SpawnFn,
-    handle: NodeHandle,
-    shared: Arc<Shared>,
-    state: Arc<dyn NodeState>,
-    diag: Arc<Diag>,
-    done: MailboxSender<WorkerMsg>,
-    /// Name of the worker, for its executors' threads.
-    worker: u16,
-    executors: Vec<mpsc::Sender<Job>>,
-    idle: Vec<usize>,
-    /// Executors that finished a command give their number back here.
-    returned: mpsc::Receiver<usize>,
-    give_back: mpsc::Sender<usize>,
-}
-
-impl Pool {
-    /// Hands `job` to an idle executor, starting one if none is; the job back if no thread
-    /// could start.
-    fn run(&mut self, job: Job) -> Result<(), Box<Job>> {
-        self.idle.extend(self.returned.try_iter());
-        let k = match self.idle.pop() {
-            Some(k) => k,
-            None => match self.start() {
-                Some(k) => k,
-                None => return Err(Box::new(job)),
-            },
-        };
-        self.executors[k].send(job).map_err(|mpsc::SendError(job)| Box::new(job))
-    }
-
-    fn start(&mut self) -> Option<usize> {
-        let k = self.executors.len();
-        let (tx, rx) = mpsc::channel::<Job>();
-        let seed = seed(self.worker) ^ ((k as u64) << 32);
-        let mut backend =
-            ServerBackend::new(self.handle.clone(), seed).with_diag(self.diag.clone());
-        let (shared, state, diag, done) =
-            (self.shared.clone(), self.state.clone(), self.diag.clone(), self.done.clone());
-        let give_back = self.give_back.clone();
-        let name = format!("client-{}-run-{k}", self.worker);
-        let run = move || {
-            while let Some(Job { token, mut conn, req }) = next_job(&rx) {
-                let info = state.info();
-                diag.stats.active.fetch_add(1, Ordering::Relaxed);
-                let action = dispatch_with(&mut conn, &req, &info, Some((&mut backend, &*shared)));
-                diag.stats.active.fetch_sub(1, Ordering::Relaxed);
-                let finished = Finished { token, conn, req, action };
-                // Idle again: the pool reads it before it picks an executor.
-                let _ = give_back.send(k);
-                if done.send_waiting(WorkerMsg::Done(Box::new(finished))).is_err() {
-                    return;
-                }
-                // With the answer on its way, the intents of a transaction it ended (008 FR-005).
-                teseladb_wire::commands::txn::resolve_queued(&mut backend, &shared);
-            }
-        };
-        // The thread ends when the worker drops its sender; it is not joined, since a command
-        // may still be waiting for its deadline when the port stops.
-        (self.spawn)(name, Box::new(run)).ok()?;
-        self.executors.push(tx);
-        Some(k)
-    }
-}
-
-/// The next job of an executor, or `None` once its worker dropped the sender. A job that arrives
-/// within a short spin is taken without the executor sleeping: the worker hands each command over
-/// and the wake-up of the executor was one of the waits of every request (H-013).
-fn next_job(rx: &mpsc::Receiver<Job>) -> Option<Job> {
-    let mut got = None;
-    teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || match rx.try_recv() {
-        Ok(job) => {
-            got = Some(Some(job));
-            true
-        }
-        Err(mpsc::TryRecvError::Disconnected) => {
-            got = Some(None);
-            true
-        }
-        Err(mpsc::TryRecvError::Empty) => false,
-    });
-    got.unwrap_or_else(|| rx.recv().ok())
-}
-
-/// What a worker's connections run the commands with: its executors when a node is behind the
-/// port, except for the commands that never wait, which the worker runs with its own backend.
+/// What a connection's commands run with: its backend when a node is behind the port.
 struct Cmds<'a> {
-    pool: Option<&'a mut Pool>,
     inline: Option<&'a mut ServerBackend>,
     shared: &'a Shared,
     state: &'a dyn NodeState,
 }
 
-/// The seed of worker `k`'s random numbers: the clock and the worker.
-fn seed(k: u16) -> u64 {
+/// The seed of the random numbers of backend `k`: the clock and the number.
+fn seed(k: u64) -> u64 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
-    nanos ^ (u64::from(k) << 48) ^ 0x9e37_79b9_7f4a_7c15
-}
-
-/// A connection for a worker, or a command an executor finished.
-enum WorkerMsg {
-    Conn(TcpStream, i32),
-    Done(Box<Finished>),
+    nanos ^ (k << 40) ^ 0x9e37_79b9_7f4a_7c15
 }
 
 /// The running clients' port.
@@ -555,7 +453,6 @@ pub struct ClientListener {
     addrs: Vec<SocketAddr>,
     stop: Arc<AtomicBool>,
     acceptor: (Arc<Waker>, JoinHandle<()>),
-    workers: Vec<(Arc<Waker>, JoinHandle<()>)>,
     /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
     keeper: Option<JoinHandle<()>>,
     /// The thread that builds the node's search indexes, with a node behind the port.
@@ -572,20 +469,15 @@ impl std::fmt::Debug for ClientListener {
 }
 
 impl ClientListener {
-    /// Listens on `cfg.addrs` with `workers` workers.
-    pub fn spawn(
-        cfg: &ClientConfig,
-        workers: u16,
-        state: Arc<dyn NodeState>,
-    ) -> io::Result<ClientListener> {
-        ClientListener::spawn_with(cfg, workers, state, Hooks::default())
+    /// Listens on `cfg.addrs`, with a thread for each connection.
+    pub fn spawn(cfg: &ClientConfig, state: Arc<dyn NodeState>) -> io::Result<ClientListener> {
+        ClientListener::spawn_with(cfg, state, Hooks::default())
     }
 
     /// [`ClientListener::spawn`] with `hooks`, for tests.
     #[doc(hidden)]
     pub fn spawn_with(
         cfg: &ClientConfig,
-        workers: u16,
         state: Arc<dyn NodeState>,
         hooks: Hooks,
     ) -> io::Result<ClientListener> {
@@ -612,56 +504,18 @@ impl ClientListener {
             Some(h) => h.sessions,
             None => Arc::new(Mutex::new(cfg.sessions())),
         };
-        let mut handles = Vec::new();
-        let mut senders = Vec::new();
-        for k in 0..workers.max(1) {
-            let poller = Poller::new()?;
-            let waker = Arc::new(poller.waker());
-            state.watch_topology(&waker);
-            let (tx, rx) = mailbox::channel(waker.clone());
-            let pool = state.handle().map(|handle| {
-                let (give_back, returned) = mpsc::channel();
-                Pool {
-                    spawn: hooks.spawn_executor,
-                    handle,
-                    shared: shared.clone(),
-                    state: state.clone(),
-                    diag: diag.clone(),
-                    done: tx.clone(),
-                    worker: k,
-                    executors: Vec::new(),
-                    idle: Vec::new(),
-                    returned,
-                    give_back,
-                }
-            });
-            let w = Worker {
-                poller,
-                mailbox: rx,
-                conns: BTreeMap::new(),
-                awaits: BTreeMap::new(),
-                seen: state.info().topology.counter,
-                next_token: 1,
-                state: state.clone(),
-                pool,
-                inline: state
-                    .handle()
-                    .map(|h| ServerBackend::new(h, seed(k)).with_diag(diag.clone())),
-                shared: shared.clone(),
-                diag: diag.clone(),
-                compressors: cfg.compressors.clone(),
-                tls: cfg.tls.clone(),
-                auth: cfg.auth,
-                mechanisms: cfg.mechanisms.clone(),
-                open: open.clone(),
-                stop: stop.clone(),
-                tenants_seen: None,
-            };
-            let t =
-                command_thread(format!("client-{k}")).spawn(with_command_stack(move || w.run()))?;
-            handles.push((waker, t));
-            senders.push(tx);
-        }
+        let parts = PortParts {
+            state: state.clone(),
+            shared: shared.clone(),
+            diag: diag.clone(),
+            compressors: cfg.compressors.clone(),
+            tls: cfg.tls.clone(),
+            auth: cfg.auth,
+            mechanisms: cfg.mechanisms.clone(),
+            open: open.clone(),
+            stop: stop.clone(),
+            spawn: hooks.spawn_connection,
+        };
         let poller = Poller::new()?;
         for (i, l) in listeners.iter().enumerate() {
             l.set_nonblocking(true)?;
@@ -671,7 +525,8 @@ impl ClientListener {
         let acceptor = Acceptor {
             poller,
             listeners,
-            workers: senders,
+            parts,
+            live: Vec::new(),
             max: cfg.max_connections,
             open: open.clone(),
             stop: stop.clone(),
@@ -683,15 +538,14 @@ impl ClientListener {
             thread::Builder::new().name("client-accept".into()).spawn(move || acceptor.run())?;
         let builder = match state.handle() {
             Some(h) => {
-                let backend =
-                    ServerBackend::new(h, seed(workers.saturating_add(1))).with_diag(diag.clone());
+                let backend = ServerBackend::new(h, seed(u64::MAX - 1)).with_diag(diag.clone());
                 Some(crate::search_builder::spawn(backend, shared.clone(), stop.clone())?)
             }
             None => None,
         };
         let usage = match state.handle() {
             Some(h) => {
-                let backend = ServerBackend::new(h, seed(workers.saturating_add(2)));
+                let backend = ServerBackend::new(h, seed(u64::MAX - 2));
                 Some(crate::tenant_limits::spawn_reader(backend, stop.clone())?)
             }
             None => None,
@@ -699,7 +553,7 @@ impl ClientListener {
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
-                    backend: ServerBackend::new(h, seed(workers)).with_diag(diag.clone()),
+                    backend: ServerBackend::new(h, seed(u64::MAX)).with_diag(diag.clone()),
                     capture: cfg.process.dbpath.as_deref().map(Capture::new),
                     shared,
                     refresh_every: cfg.refresh_every,
@@ -711,16 +565,7 @@ impl ClientListener {
             }
             None => None,
         };
-        Ok(ClientListener {
-            addrs,
-            stop,
-            acceptor: (waker, t),
-            workers: handles,
-            keeper,
-            builder,
-            usage,
-            open,
-        })
+        Ok(ClientListener { addrs, stop, acceptor: (waker, t), keeper, builder, usage, open })
     }
 
     /// The addresses it listens on (with the ports the system chose for port 0).
@@ -733,15 +578,15 @@ impl ClientListener {
         self.open.load(Ordering::Acquire)
     }
 
-    /// Stops accepting, closes every connection and waits for the threads.
+    /// Stops accepting, wakes every connection's thread to close it and waits for the acceptor
+    /// and the keepers; a connection's thread running a command closes it when the command ends,
+    /// unwaited.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        let threads = std::iter::once(self.acceptor).chain(self.workers);
-        for (waker, t) in threads {
-            // A thread that already ended needs no wake-up, and its end is all `join` waits for.
-            let _ = waker.wake();
-            let _ = t.join();
-        }
+        let (waker, t) = self.acceptor;
+        // A thread that already ended needs no wake-up, and its end is all `join` waits for.
+        let _ = waker.wake();
+        let _ = t.join();
         for k in self.keeper.into_iter().chain(self.builder).chain(self.usage) {
             k.thread().unpark();
             let _ = k.join();
@@ -845,7 +690,11 @@ impl Keeper {
 struct Acceptor {
     poller: Poller,
     listeners: Vec<TcpListener>,
-    workers: Vec<MailboxSender<WorkerMsg>>,
+    /// What each connection's thread starts with.
+    parts: PortParts,
+    /// The wakers of the connections' threads, to stop them; a thread that ended leaves its
+    /// entry dead, dropped at the next connection.
+    live: Vec<std::sync::Weak<Waker>>,
     max: usize,
     open: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
@@ -860,16 +709,20 @@ impl Acceptor {
         while !self.stop.load(Ordering::Acquire) {
             match self.poller.poll(None) {
                 Ok(events) => ready.extend(events.iter().map(|e| e.token)),
-                Err(_) => return,
+                Err(_) => break,
             }
             for token in ready.drain(..).filter(|&t| t != WAKE_TOKEN) {
                 self.accept(token as usize);
             }
         }
+        // The port stops: each connection's thread closes its connection.
+        for w in self.live.iter().filter_map(std::sync::Weak::upgrade) {
+            let _ = w.wake();
+        }
     }
 
     /// Accepts every pending connection of listener `i` (non-blocking: it stops when none is
-    /// left).
+    /// left), each on a thread of its own.
     fn accept(&mut self, i: usize) {
         while let Ok((stream, _)) = self.listeners[i].accept() {
             // A drained node's port takes no connection (007 FR-015).
@@ -885,10 +738,64 @@ impl Acceptor {
             PortStats::add(&self.diag.stats.total_created, 1);
             let id = self.next_id;
             self.next_id = self.next_id.wrapping_add(1).max(1);
-            let worker = &self.workers[id as usize % self.workers.len()];
-            // A worker only goes away when the listener stops, after this thread.
-            let _ = worker.send_waiting(WorkerMsg::Conn(stream, id));
+            if let Some(waker) = self.parts.serve(stream, id) {
+                self.live.retain(|w| w.strong_count() > 0);
+                self.live.push(Arc::downgrade(&waker));
+            }
         }
+    }
+}
+
+/// What a connection's thread needs besides its socket: the port's configuration and the node.
+struct PortParts {
+    state: Arc<dyn NodeState>,
+    shared: Arc<Shared>,
+    diag: Arc<Diag>,
+    compressors: Vec<Compressor>,
+    tls: TlsPort,
+    auth: bool,
+    mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    open: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    spawn: SpawnFn,
+}
+
+impl PortParts {
+    /// Starts the thread of connection `id` on `stream`: a [`Worker`] of that one connection that
+    /// reads it, runs its commands and writes their replies (H-013, RefDb's thread per
+    /// connection); its waker, to stop it. Without a thread the connection closes: the worker,
+    /// dropped without running, closes it.
+    fn serve(&self, stream: TcpStream, id: i32) -> Option<Arc<Waker>> {
+        let Ok(poller) = Poller::new() else {
+            self.open.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        };
+        let waker = Arc::new(poller.waker());
+        let mut w = Worker {
+            poller,
+            waker: waker.clone(),
+            conns: BTreeMap::new(),
+            awaits: BTreeMap::new(),
+            seen: self.state.info().topology.counter,
+            next_token: 1,
+            state: self.state.clone(),
+            inline: self
+                .state
+                .handle()
+                .map(|h| ServerBackend::new(h, seed(id as u64)).with_diag(self.diag.clone())),
+            shared: self.shared.clone(),
+            compressors: self.compressors.clone(),
+            tls: self.tls.clone(),
+            auth: self.auth,
+            mechanisms: self.mechanisms.clone(),
+            open: self.open.clone(),
+            diag: self.diag.clone(),
+            stop: self.stop.clone(),
+            tenants_seen: None,
+        };
+        w.add(stream, id);
+        let run = with_command_stack(move || w.run());
+        (self.spawn)(format!("conn{id}"), Box::new(run)).ok().map(|()| waker)
     }
 }
 
@@ -932,12 +839,10 @@ struct Client {
     stream: TcpStream,
     /// Plain or TLS between the socket and `conn`.
     transport: Transport,
-    /// The connection; `None` while an executor runs one of its commands.
+    /// The connection; `None` while the failpoint holds one of its requests.
     conn: Option<Connection>,
-    /// What arrived while the connection was with an executor.
+    /// What arrived while the failpoint held the connection's request.
     backlog: Vec<u8>,
-    /// Its token in the worker.
-    token: u64,
     /// When it was accepted, until its TLS handshake is counted (`None` after, or in clear).
     handshake_from: Option<Instant>,
     out: Vec<u8>,
@@ -1065,9 +970,10 @@ impl Client {
         self.write() && served
     }
 
-    /// Runs request `req` of `conn`: on an executor, whose action comes back to
-    /// [`Client::finish`], or here when no node is behind the port. `false` if the connection must
-    /// close.
+    /// Runs request `req` of `conn` on this thread with the connection's backend, or without one
+    /// when no node is behind the port, and queues its action. A connection that just signed in
+    /// counts for its tenant, and past its limit closes without its answer (007 FR-032); one whose
+    /// tenant is suspended closes once answered. `false` if the connection must close.
     fn handle(
         &mut self,
         mut conn: Connection,
@@ -1085,45 +991,33 @@ impl Client {
             self.apply(conn, req, Action::Reply(e.to_document()));
             return false;
         }
-        // With `enableTestCommands` every request goes where the failpoint sees it, the
-        // monitors' `hello` too (006 FR-034).
-        let tests = lock(cmds.shared).failpoint.is_some();
-        let pool = cmds.pool.as_deref_mut().filter(|_| tests || !answers_without_waiting(&req));
-        match pool {
-            Some(pool) => match pool.run(Job { token: self.token, conn, req }) {
-                Ok(()) => true,
-                // No thread could start: the connection closes, as when it cannot be served.
-                Err(job) => {
-                    self.conn = Some(job.conn);
-                    false
+        stats.active.fetch_add(1, Ordering::Relaxed);
+        let fresh;
+        let (info, commands) = match cmds.inline.as_deref_mut() {
+            Some(b) => {
+                // A write moves the cluster time: each reply reads it after its command.
+                fresh = cmds.state.info();
+                (&fresh, Some((b, cmds.shared)))
+            }
+            None => (info, None),
+        };
+        let action = dispatch_with(&mut conn, &req, info, commands);
+        stats.active.fetch_sub(1, Ordering::Relaxed);
+        certify(&mut conn, &self.transport, self.member_subject.as_deref());
+        let Some(h) = cmds.state.handle() else { return self.apply(conn, req, action) };
+        // A command that ran while its tenant was suspended closes its connection once answered.
+        let held = suspended(&conn, &h.routes.tenants());
+        if self.counted.is_none() {
+            match count_connection(&h.routes, &conn) {
+                Counted::Yes(tenant) => self.counted = Some(tenant),
+                Counted::Over => {
+                    self.conn = Some(conn);
+                    return false;
                 }
-            },
-            None => {
-                stats.active.fetch_add(1, Ordering::Relaxed);
-                let fresh;
-                let (info, commands) = match cmds.inline.as_deref_mut() {
-                    Some(b) => {
-                        // A write moves the cluster time: each reply reads it after its command.
-                        fresh = cmds.state.info();
-                        (&fresh, Some((b, cmds.shared)))
-                    }
-                    None => (info, None),
-                };
-                let action = dispatch_with(&mut conn, &req, info, commands);
-                stats.active.fetch_sub(1, Ordering::Relaxed);
-                self.apply(conn, req, action)
+                Counted::No => {}
             }
         }
-    }
-
-    /// Takes back the connection an executor ran `req` on, with what arrived meanwhile, and
-    /// queues the request's action; `false` if the connection must close.
-    fn finish(&mut self, mut conn: Connection, req: Request, action: Action) -> bool {
-        if !self.backlog.is_empty() {
-            conn.receive(&std::mem::take(&mut self.backlog));
-        }
-        certify(&mut conn, &self.transport, self.member_subject.as_deref());
-        self.apply(conn, req, action)
+        self.apply(conn, req, action) && !held
     }
 
     /// Queues the reply of `conn`'s request `req`, or the wait it asks for, and keeps `conn`;
@@ -1150,7 +1044,7 @@ impl Client {
                 true
             }
             Action::Delay { ms } => {
-                // What arrives meanwhile goes to the backlog, as while an executor runs.
+                // What arrives meanwhile goes to the backlog, until the held request runs.
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 self.waiting = true;
                 self.new_wait = Some(Pending::Held { conn: Box::new(conn), req, deadline });
@@ -1172,7 +1066,7 @@ impl Client {
         info: &NodeInfo,
         shared: &Shared,
     ) -> (Option<Pending>, bool) {
-        // A connection waiting for a `hello` is never with an executor.
+        // A connection waiting for a `hello` has its connection.
         let Some(conn) = self.conn.as_mut() else { return (None, true) };
         let streamed = p.response_to != p.req.header.request_id;
         let fault = match (&p.held, streamed) {
@@ -1260,6 +1154,27 @@ impl Client {
     }
 }
 
+impl Drop for Worker {
+    /// Closes what is left: the connection of a port that stops, or one whose thread never ran.
+    fn drop(&mut self) {
+        let tokens: Vec<u64> = self.conns.keys().copied().collect();
+        for t in tokens {
+            self.close(t);
+        }
+        for p in std::mem::take(&mut self.awaits).into_values() {
+            match p {
+                Pending::Held { conn, .. } => self.gone(*conn),
+                // It leaves the limiter's queue as interrupted (006 FR-036).
+                Pending::Queued { conn, .. } => {
+                    lock(&self.shared).ingress.abandon();
+                    self.gone(*conn);
+                }
+                Pending::Hello(_) => {}
+            }
+        }
+    }
+}
+
 /// Records on `conn` the REFDB-X509 user of the client certificate `transport` received, if
 /// any and not yet recorded; a member's when its subject has the organization, unit or domain
 /// components of `member` (013 FR-034).
@@ -1275,7 +1190,9 @@ fn certify(conn: &mut Connection, transport: &Transport, member: Option<&teselad
 
 struct Worker {
     poller: Poller,
-    mailbox: Mailbox<WorkerMsg>,
+    /// Its poller's waker, which the acceptor and the node's presence hold weakly: it lives while
+    /// the worker does, and the worker registers it with the node's presence when it starts.
+    waker: Arc<Waker>,
     conns: BTreeMap<u64, Client>,
     /// Deadlines of the awaitable `hello`s with their connection; an entry whose connection
     /// closed or already answered is skipped.
@@ -1284,9 +1201,7 @@ struct Worker {
     seen: i64,
     next_token: u64,
     state: Arc<dyn NodeState>,
-    /// The executors of the commands, if a node is behind the port.
-    pool: Option<Pool>,
-    /// The backend of the commands the worker runs itself ([`answers_without_waiting`]).
+    /// The backend of the connection's commands, if a node is behind the port.
     inline: Option<ServerBackend>,
     /// The node's cursors and sessions, shared by its workers.
     shared: Arc<Shared>,
@@ -1303,10 +1218,6 @@ struct Worker {
     /// The tenants' states the worker last closed connections for (007 FR-034).
     tenants_seen: Option<Arc<crate::routes::TenantStates>>,
 }
-
-/// How long a worker waits at most before it looks at the tenants' states again: a suspended
-/// tenant's connections close within the second after its entry applies (007 FR-034).
-pub const TENANT_CHECK: Duration = Duration::from_millis(250);
 
 /// What signing in did to the count of a tenant's connections on this node.
 enum Counted {
@@ -1408,40 +1319,44 @@ impl Worker {
         self.tenants_seen = Some(states);
     }
 
+    /// Serves its connection until it closes or the port stops; dropping the worker closes what
+    /// is left ([`Drop`]).
     fn run(mut self) {
-        let mut inbox = Vec::new();
+        // A change of the node's state wakes it, to answer the waiting `hello`s.
+        self.state.watch_topology(&self.waker);
         let mut events = Vec::new();
-        while !self.stop.load(Ordering::Acquire) {
-            let next = self.awaits.first_key_value().map(|(&(d, _), _)| d);
-            let timeout = next
-                .map_or(TENANT_CHECK, |d| d.saturating_duration_since(Instant::now()))
-                .min(TENANT_CHECK);
-            // A reply or a request that arrives within a short spin is taken without sleeping
-            // (H-013): the spin looks at the mailbox and, without waiting, at the sockets; the
-            // events it takes are not asked for again.
+        while !self.stop.load(Ordering::Acquire) && !self.conns.is_empty() {
+            // Only an awaitable `hello` or a held request needs a deadline: an idle connection
+            // sleeps until its socket, a change of the node or the port's stop wakes it.
+            let timeout = self
+                .awaits
+                .first_key_value()
+                .map(|(&(d, _), _)| d.saturating_duration_since(Instant::now()));
+            // The next request of a client that answers quickly arrives within a short spin and
+            // is taken without sleeping (H-013): the spin looks at the socket without waiting, and
+            // the events it takes are not asked for again.
             let mut failed = false;
             let mut seen = false;
-            let spun = teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || {
-                if !self.mailbox.is_empty() {
-                    return true;
-                }
-                match self.poller.poll(Some(Duration::ZERO)) {
+            let spun =
+                teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || match self
+                    .poller
+                    .poll(Some(Duration::ZERO))
+                {
                     Ok(ev) => {
-                        seen |= !ev.is_empty();
+                        seen |= ev.iter().any(|e| e.token != WAKE_TOKEN);
                         events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied());
-                        seen
+                        seen || ev.iter().any(|e| e.token == WAKE_TOKEN)
                     }
                     Err(_) => {
                         failed = true;
                         true
                     }
-                }
-            });
+                });
             if failed {
                 break;
             }
             if !seen {
-                let timeout = Some(if spun { Duration::ZERO } else { timeout });
+                let timeout = if spun { Some(Duration::ZERO) } else { timeout };
                 match self.poller.poll(timeout) {
                     Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
                     Err(_) => break,
@@ -1452,26 +1367,16 @@ impl Worker {
                 self.seen = info.topology.counter;
                 self.hasten_hellos();
             }
+            let ran = !events.is_empty();
             for e in events.drain(..) {
                 self.on_event(e.token, e.readable || e.hangup, &info);
             }
-            self.mailbox.drain_into(&mut inbox);
-            for msg in inbox.drain(..) {
-                match msg {
-                    WorkerMsg::Conn(stream, id) => self.add(stream, id),
-                    WorkerMsg::Done(f) => self.done(*f, &info),
-                }
-            }
             self.fire_awaits(&info);
             self.close_suspended();
-        }
-        let tokens: Vec<u64> = self.conns.keys().copied().collect();
-        for t in tokens {
-            self.close(t);
-        }
-        for p in std::mem::take(&mut self.awaits).into_values() {
-            if let Pending::Held { conn, .. } | Pending::Queued { conn, .. } = p {
-                self.gone(*conn);
+            // With the answers on their way, the intents of a transaction a command ended (008
+            // FR-005).
+            if ran && let Some(backend) = self.inline.as_mut() {
+                teseladb_wire::commands::txn::resolve_queued(backend, &self.shared);
             }
         }
     }
@@ -1498,7 +1403,6 @@ impl Worker {
                     transport,
                     conn: Some(conn),
                     backlog: Vec::new(),
-                    token,
                     handshake_from: Some(Instant::now()),
                     out: Vec::new(),
                     pos: 0,
@@ -1523,7 +1427,7 @@ impl Worker {
         }
     }
 
-    /// Closes connection `token`; one with an executor, or held by the failpoint, records its
+    /// Closes connection `token`; one held by the failpoint records its
     /// close when its connection comes back ([`Worker::gone`]).
     fn close(&mut self, token: u64) {
         if let Some(c) = self.conns.remove(&token) {
@@ -1551,55 +1455,10 @@ impl Worker {
     fn on_event(&mut self, token: u64, readable: bool, info: &NodeInfo) {
         let poller = &self.poller;
         let alive = self.conns.get_mut(&token).is_some_and(|c| {
-            let mut cmds = Cmds {
-                pool: self.pool.as_mut(),
-                inline: self.inline.as_mut(),
-                shared: &self.shared,
-                state: &*self.state,
-            };
+            let mut cmds =
+                Cmds { inline: self.inline.as_mut(), shared: &self.shared, state: &*self.state };
             (!readable || c.read()) && c.flush_after(info, &mut cmds) && c.watch(poller, token)
         });
-        self.settle(token, alive);
-    }
-
-    /// A command an executor finished: its connection, if still open, gets the reply and runs
-    /// what arrived meanwhile.
-    fn done(&mut self, f: Finished, info: &NodeInfo) {
-        let Finished { token, conn, req, action } = f;
-        let poller = &self.poller;
-        let Some(c) = self.conns.get_mut(&token) else {
-            // The client left while the command ran: its close is recorded now.
-            self.gone(conn);
-            return;
-        };
-        let mut cmds = Cmds {
-            pool: self.pool.as_mut(),
-            inline: self.inline.as_mut(),
-            shared: &self.shared,
-            state: &*self.state,
-        };
-        // A command that ran while its tenant was suspended closes its connection once answered.
-        let states = self.state.handle().map(|h| h.routes.tenants());
-        let held = states.as_ref().is_some_and(|s| suspended(&conn, s));
-        // A connection that just signed in counts for its tenant; past its limit it closes
-        // without its answer (007 FR-032).
-        if c.counted.is_none()
-            && let Some(over) = self.state.handle().map(|h| count_connection(&h.routes, &conn))
-        {
-            match over {
-                Counted::Yes(tenant) => c.counted = Some(tenant),
-                Counted::Over => {
-                    self.gone(conn);
-                    self.close(token);
-                    return;
-                }
-                Counted::No => {}
-            }
-        }
-        let alive = c.finish(conn, req, action)
-            && c.flush_after(info, &mut cmds)
-            && !held
-            && c.watch(poller, token);
         self.settle(token, alive);
     }
 
@@ -1656,12 +1515,8 @@ impl Worker {
                 }
                 continue;
             };
-            let mut cmds = Cmds {
-                pool: self.pool.as_mut(),
-                inline: self.inline.as_mut(),
-                shared: &self.shared,
-                state: &*self.state,
-            };
+            let mut cmds =
+                Cmds { inline: self.inline.as_mut(), shared: &self.shared, state: &*self.state };
             let resumed = match p {
                 Pending::Hello(p) => {
                     let (next, open) = c.fire(p, info, &self.shared);

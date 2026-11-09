@@ -154,6 +154,30 @@ pub fn collection_chunks(
     out
 }
 
+/// The single chunk the record of sessions is presented as: all its documents, from `MinKey` to
+/// `MaxKey` of `_id`, on the node that serves its first range.
+fn sessions_chunk(entries: &[RouteEntry], coll: &CollectionEntry) -> Vec<Chunk> {
+    let key = super::sharding::sessions_key();
+    let (lo, hi) = documents_area(coll.tenant, coll.id);
+    let first = collection_chunks(entries, coll, &key).into_iter().next();
+    let edge = |v: Value| Document::new().with("_id", v);
+    let (group, node, voters, replica_epoch, moved_ms) = match first {
+        Some(c) => (c.group, c.node, c.voters, c.replica_epoch, c.moved_ms),
+        None => (GroupId(0), NodeId(1), vec![NodeId(1)], 0, 0),
+    };
+    vec![Chunk {
+        group,
+        start: lo,
+        end: hi,
+        min: edge(Value::MinKey),
+        max: edge(Value::MaxKey),
+        node,
+        voters,
+        replica_epoch,
+        moved_ms,
+    }]
+}
+
 /// A collection with a shard key, as a chunk command finds it.
 struct Sharded {
     coll: CollectionEntry,
@@ -784,13 +808,19 @@ pub fn config_chunks<'a>(
     collections: impl Iterator<Item = (&'a Namespace, &'a CollectionEntry)>,
 ) -> Vec<Document> {
     let mut out = Vec::new();
-    for (_, coll) in collections {
-        let Ok(Some(key)) = shard_key_of(coll) else { continue };
+    for (ns, coll) in collections {
+        let chunks = match shard_key_of(coll) {
+            Ok(Some(key)) => collection_chunks(entries, coll, &key),
+            // The record of sessions, presented as one chunk of `{_id: 1}` (006 FR-038) on the
+            // node of its first range.
+            _ if super::sharding::is_sessions_record(ns) => sessions_chunk(entries, coll),
+            _ => continue,
+        };
         let since = Value::Timestamp {
             time: u32::try_from(coll.created_index).unwrap_or(u32::MAX),
             increment: 1,
         };
-        for (i, c) in collection_chunks(entries, coll, &key).into_iter().enumerate() {
+        for (i, c) in chunks.into_iter().enumerate() {
             let mut id = [0u8; 12];
             id[..4].copy_from_slice(&coll.id.to_be_bytes());
             id[4..].copy_from_slice(&c.group.0.to_be_bytes());

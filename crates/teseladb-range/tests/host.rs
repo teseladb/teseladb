@@ -377,6 +377,11 @@ fn a_scan_returns_the_visible_documents_up_to_its_limit() {
         end: end.to_vec(),
         concern,
         limit,
+        backward: false,
+    };
+    let back = |start: &[u8], end: &[u8], limit| ScanReq {
+        backward: true,
+        ..scan(start, end, ReadConcern::Majority, limit)
     };
     let all =
         n.host.scan(&mut n.core, scan(b"\x01a", b"\x01z", ReadConcern::Majority, 10), now, wall);
@@ -387,6 +392,9 @@ fn a_scan_returns_the_visible_documents_up_to_its_limit() {
         n.host.scan(&mut n.core, scan(b"\x01m", b"\x01m", ReadConcern::Majority, 10), now, wall);
     let none =
         n.host.scan(&mut n.core, scan(b"\x01d", b"\x01e", ReadConcern::Majority, 10), now, wall);
+    let last = n.host.scan(&mut n.core, back(b"\x01a", b"\x01z", 1), now, wall);
+    let all_back = n.host.scan(&mut n.core, back(b"\x01a", b"\x01z", 10), now, wall);
+    let below_c = n.host.scan(&mut n.core, back(b"\x01a", b"\x01c", 10), now, wall);
     n.settle();
     let rows = |r: Option<&Result<Reply, RangeError>>| match r {
         Some(Ok(Reply::Batch(rows))) => {
@@ -403,6 +411,10 @@ fn a_scan_returns_the_visible_documents_up_to_its_limit() {
     assert_eq!(n.reply(outside), Some(&Err(RangeError::OutOfRange)));
     assert_eq!(n.reply(empty), Some(&Err(RangeError::OutOfRange)), "an empty interval");
     assert_eq!(n.reply(none), Some(&Ok(Reply::Batch(vec![]))));
+    // Backward (H-003): from the last key down, the deleted one skipped, the end excluded.
+    assert_eq!(rows(n.reply(last)), vec![(b"\x01c".to_vec(), 3)]);
+    assert_eq!(rows(n.reply(all_back)), vec![(b"\x01c".to_vec(), 3), (b"\x01a".to_vec(), 1)]);
+    assert_eq!(rows(n.reply(below_c)), vec![(b"\x01a".to_vec(), 1)]);
 }
 
 #[test]

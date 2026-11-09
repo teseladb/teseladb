@@ -199,15 +199,18 @@ impl ServerBackend {
     /// the mark it read at.
     fn scan_at(
         &mut self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
+        (start, end, limit): (&[u8], &[u8], usize),
         mut mark: teseladb_txn::causal::ReadMark,
+        backward: bool,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         let view = TxnView::default();
         let mut restarts = 0;
         loop {
-            match self.txn_scan(start, end, limit, mark.at, &view, mark.uncertain_to) {
+            let rows = match backward {
+                true => self.txn_scan_back(start, end, limit, mark.at, &view, mark.uncertain_to),
+                false => self.txn_scan(start, end, limit, mark.at, &view, mark.uncertain_to),
+            };
+            match rows {
                 Err(mut e) => match e.take_uncertain() {
                     Some(ts) if restarts < teseladb_txn::uncertainty::MAX_RESTARTS => {
                         txn_stats::uncertainty_restart(&mut lock(&self.h.sessions));
@@ -239,8 +242,9 @@ impl ServerBackend {
                 true => end.to_vec(),
                 false => e.end.clone(),
             };
-            let build =
-                |e: &RouteEntry, _| scan_req(&prefer, e, (from.clone(), stop(e), left), concern);
+            let build = |e: &RouteEntry, _| {
+                scan_req(&prefer, e, (from.clone(), stop(e), left), (concern, false))
+            };
             match self.data(&from, true, build)? {
                 (e, RemoteReply::Rows(more)) => {
                     rows.extend(more);
@@ -256,10 +260,59 @@ impl ServerBackend {
                     | RemoteReply::Restored { .. }
                     | RemoteReply::Changes { .. }
                     | RemoteReply::Fenced { .. }
-                    | RemoteReply::Live { .. },
+                    | RemoteReply::Live { .. }
+                    | RemoteReply::DocCount { .. },
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Range by range from the last one down, until the limit or the start (H-003): each range
+    /// is asked for its part of `[start, to)` from its last key down, and `to` moves to where
+    /// that part begins. `make` builds the request of a range for its part and the documents
+    /// still missing. A range that ends below `to` (it split since the table was read) is routed
+    /// again, without taking its rows.
+    fn scan_ranges_back(
+        &mut self,
+        (start, end, limit): (&[u8], &[u8], usize),
+        make: &PartRequest<'_>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut to = end.to_vec();
+        let until = self.until();
+        while start < to.as_slice() && rows.len() < limit {
+            let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
+            let part = |e: &RouteEntry| {
+                let lo = e.start.as_slice().max(start).to_vec();
+                let hi = match e.end.is_empty() || to.as_slice() <= e.end.as_slice() {
+                    true => to.clone(),
+                    false => e.end.clone(),
+                };
+                (lo, hi)
+            };
+            let key =
+                self.h.routes.lookup_below(&to).map_or_else(|| start.to_vec(), |e| part(&e).0);
+            let build = |e: &RouteEntry, _| {
+                let (lo, hi) = part(e);
+                make(e, (lo, hi, left))
+            };
+            match self.data(&key, true, build)? {
+                (e, RemoteReply::Rows(more)) => {
+                    let (lo, hi) = part(&e);
+                    if hi != to {
+                        if Instant::now() >= until {
+                            return Err(self.range_timeout());
+                        }
+                        thread::sleep(RETRY_PAUSE);
+                        continue;
+                    }
+                    rows.extend(more);
+                    to = lo;
+                }
+                _ => return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows")),
             }
         }
         Ok(rows)
@@ -750,7 +803,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Restored { .. }
             | RemoteReply::Changes { .. }
             | RemoteReply::Fenced { .. }
-            | RemoteReply::Live { .. } => {
+            | RemoteReply::Live { .. }
+            | RemoteReply::DocCount { .. } => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -765,7 +819,7 @@ impl Backend for ServerBackend {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         // At the command's mark: on the leaders, which serve it once their clock gets there.
         if let Some(mark) = self.read_mark {
-            return self.scan_at(start, end, limit, mark);
+            return self.scan_at((start, end, limit), mark, false);
         }
         // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
         self.selection = self
@@ -774,6 +828,70 @@ impl Backend for ServerBackend {
             .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
             .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
         let rows = self.scan_ranges(start, end, limit, concern);
+        self.selection = None;
+        rows
+    }
+
+    fn points(
+        &mut self,
+        keys: &[Vec<u8>],
+        concern: ReadConcern,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        // A read at the command's mark or with a read preference goes as a scan of each key,
+        // which those paths serve; otherwise each key is a point read on its leader, which skips
+        // the files its filters rule out (H-013).
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        if self.read_mark.is_some() || !primary {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                let rows = self.scan(k, &[k.as_slice(), &[0]].concat(), 1, concern)?;
+                out.push(rows.into_iter().next().map(|(_, v)| v));
+            }
+            return Ok(out);
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
+                key: key.clone(),
+                scan: None,
+                backward: false,
+                at: None,
+                concern,
+                view: TxnView::default(),
+                uncertain_to: None,
+            };
+            match self.data(key, true, build)? {
+                (_, RemoteReply::Value { value, .. }) => out.push(
+                    // A version that only serves the history is no document, as in a scan.
+                    value.filter(|(t, _)| *t != teseladb_range::HISTORY_VALUE).map(|(_, v)| v),
+                ),
+                _ => {
+                    return Err(CommandError::new(INTERNAL_ERROR, "a read answered with no value"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `scan`, from the last key down (H-003).
+        if let Some(mark) = self.read_mark {
+            return self.scan_at((start, end, limit), mark, true);
+        }
+        self.selection = self
+            .read_pref
+            .as_ref()
+            .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
+            .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
+        let prefer = (self.read_pref.clone(), self.h.node, self.h.routes.tags());
+        let make = |e: &RouteEntry, part| scan_req(&prefer, e, part, (concern, true));
+        let rows = self.scan_ranges_back((start, end, limit), &make);
         self.selection = None;
         rows
     }
@@ -1019,6 +1137,7 @@ impl Backend for ServerBackend {
         let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
             key: key.to_vec(),
             scan: None,
+            backward: false,
             at: Some(at),
             concern: ReadConcern::Majority,
             view: view.clone(),
@@ -1051,6 +1170,7 @@ impl Backend for ServerBackend {
             let build = |e: &RouteEntry, _| RemoteReq::ReadWith {
                 key: from.clone(),
                 scan: Some((stop(e), left)),
+                backward: false,
                 at: Some(at),
                 concern: ReadConcern::Majority,
                 view: view.clone(),
@@ -1065,6 +1185,28 @@ impl Backend for ServerBackend {
             }
         }
         Ok(rows)
+    }
+
+    fn txn_scan_back(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `txn_scan`, range by range from the last one down (H-003).
+        let make = |_: &RouteEntry, (lo, hi, left): (Vec<u8>, Vec<u8>, u32)| RemoteReq::ReadWith {
+            key: lo,
+            scan: Some((hi, left)),
+            backward: true,
+            at: Some(at),
+            concern: ReadConcern::Majority,
+            view: view.clone(),
+            uncertain_to,
+        };
+        self.scan_ranges_back((start, end, limit), &make)
     }
 
     fn txn_gets(
@@ -1232,6 +1374,42 @@ impl Backend for ServerBackend {
             }
             thread::sleep(RETRY_PAUSE);
         }
+    }
+
+    fn doc_count(&mut self, tenant: u32, collection: u32) -> Result<Option<u64>, CommandError> {
+        // At the command's mark, with a read preference or inside a transaction, the documents
+        // are read as before; otherwise each range of the collection answers from its leader's
+        // counts (007 FR-039), and one that is estimated sends the count back to the read.
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        if self.read_mark.is_some() || !primary {
+            return Ok(None);
+        }
+        let docs = teseladb_keys::space::KeyBuilder::index_prefix(tenant, collection, 0);
+        let start = docs.as_bytes().to_vec();
+        let end = teseladb_keys::space::KeyBuilder::index_prefix(tenant, collection, 1);
+        let end = end.as_bytes().to_vec();
+        let mut total = 0u64;
+        let mut from = start;
+        while from < end {
+            let req = |_: &RouteEntry, _| RemoteReq::DocCount { tenant, collection };
+            match self.data(&from, true, req)? {
+                (e, RemoteReply::DocCount { n: Some(n) }) => {
+                    total = total.saturating_add(n);
+                    if e.end.is_empty() || e.end >= end {
+                        break;
+                    }
+                    from = e.end;
+                }
+                (_, RemoteReply::DocCount { n: None }) => return Ok(None),
+                _ => {
+                    return Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        "a count came with something else",
+                    ));
+                }
+            }
+        }
+        Ok(Some(total))
     }
 
     fn range_live_bytes(&mut self, e: &RouteEntry) -> Result<u64, CommandError> {
@@ -1595,17 +1773,22 @@ impl Backend for ServerBackend {
     }
 }
 
-/// The scan of `[start, end)` of at most `limit` documents in range `e`: on the leader, or, with a
-/// read preference other than `primary` (`prefer`: the preference, this node and the nodes' tags),
-/// on its candidates in turn (007 FR-013).
-fn scan_req(
+/// The request of a range for its part `(start, end, documents still missing)` of a backward
+/// read (H-003).
+type PartRequest<'a> = dyn Fn(&RouteEntry, (Vec<u8>, Vec<u8>, u32)) -> RemoteReq + 'a;
+
+/// The scan of `[start, end)` of at most `limit` documents in range `e`, from its last key down
+/// if `backward` (H-003): on the leader, or, with a read preference other than `primary`
+/// (`prefer`: the preference, this node and the nodes' tags), on its candidates in turn (007
+/// FR-013).
+pub(crate) fn scan_req(
     (pref, me, tags): &(Option<ReadPreference>, NodeId, Arc<crate::routes::NodeTags>),
     e: &RouteEntry,
     (start, end, limit): (Vec<u8>, Vec<u8>, u32),
-    concern: ReadConcern,
+    (concern, backward): (ReadConcern, bool),
 ) -> RemoteReq {
     let Some(pref) = pref.as_ref().filter(|p| p.mode != Mode::Primary) else {
-        return RemoteReq::Scan { start, end, limit, concern };
+        return RemoteReq::Scan { start, end, limit, concern, backward };
     };
     let replicas: Vec<Replica> = e
         .voters
@@ -1620,5 +1803,6 @@ fn scan_req(
         .collect();
     let nodes =
         candidates(pref, &replicas).into_iter().map(|n| (n, e.leader_hint == Some(n))).collect();
-    RemoteReq::FollowerScan { start, end, limit, max_stale_ms: pref.max_staleness_ms, nodes }
+    let max_stale_ms = pref.max_staleness_ms;
+    RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward }
 }

@@ -110,3 +110,49 @@ fn a_version_above_what_a_node_runs_is_refused() {
     assert_eq!(r.get("code"), Some(&Value::Int32(20)), "{r:?}");
     assert_eq!(version(&mut m), Value::from("8.0"));
 }
+
+/// A downgrade finds the collections whose options the target version lacks, as RefDb r9.0.4
+/// does in `userCollectionsUassertsForDowngrade` (`legacy_fcv_step.cpp`): `validationAction:
+/// "errorAndLog"` exists from 8.1 and the level `constraint` and `prepareConstraintValidationLevel`
+/// from 9.0. It refuses with 332 `CannotDowngrade` naming the first such collection, after the
+/// confirmation, and leaves the version (measured on the native `refrouter` 9.0.4 on 09-11-2026).
+#[test]
+fn a_downgrade_refuses_collections_with_options_of_newer_versions() {
+    let mut m = Mem::new();
+    let created = m.run(
+        "db",
+        doc(&[("create", Value::from("p")), ("prepareConstraintValidationLevel", true.into())]),
+    );
+    assert_eq!(field(&created, "ok"), &Value::Double(1.0), "{created:?}");
+
+    let unconfirmed = m.run("admin", set(Value::from("8.3"), None));
+    let refused = m.run("admin", set(Value::from("8.3"), YES));
+
+    assert_eq!(unconfirmed.get("code"), Some(&Value::Int32(7_369_100)), "{unconfirmed:?}");
+    assert_eq!(refused.get("code"), Some(&Value::Int32(332)), "{refused:?}");
+    assert_eq!(refused.get("codeName"), Some(&Value::from("CannotDowngrade")));
+    let Some(Value::String(msg)) = refused.get("errmsg") else { panic!("{refused:?}") };
+    let start = "Cannot downgrade the cluster when there are collections with \
+                 prepareConstraintValidationLevel set. Please unset the option or drop the \
+                 collection(s) before downgrading. First detected collection with \
+                 prepareConstraintValidationLevel set: db.p (UUID: ";
+    assert!(msg.starts_with(start) && msg.ends_with(")."), "{msg}");
+    assert_eq!(version(&mut m), Value::from("9.0"));
+
+    // `errorAndLog` exists from 8.1: 8.3 keeps it, 8.0 does not.
+    let mut m = Mem::new();
+    let created = m.run(
+        "db",
+        doc(&[
+            ("create", Value::from("e")),
+            ("validator", doc(&[("a", 1.into())]).into()),
+            ("validationAction", Value::from("errorAndLog")),
+        ]),
+    );
+    assert_eq!(field(&created, "ok"), &Value::Double(1.0), "{created:?}");
+    let refused = m.run("admin", set(Value::from("8.0"), YES));
+    let Some(Value::String(msg)) = refused.get("errmsg") else { panic!("{refused:?}") };
+    assert!(msg.contains("'errorAndLog' enabled: db.e (UUID: "), "{msg}");
+    let r = m.run("admin", set(Value::from("8.3"), YES));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}

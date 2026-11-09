@@ -237,6 +237,8 @@ impl RelocateWorkload {
         self.lose(w, node);
         let Some(lsm) = Self::lsm(w, node, core) else { return };
         let mut host = RangeHost::new(lsm, w.nodes[node as usize].hlc.clone());
+        // Half the nodes write the counted format (007 FR-039), as during an upgrade.
+        host.set_counted_writes(node.is_multiple_of(2));
         host.add_range(G, START.to_vec(), END.to_vec());
         self.hosts.insert(node, (core, host));
     }

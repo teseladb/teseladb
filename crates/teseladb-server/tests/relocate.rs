@@ -127,3 +127,69 @@ fn a_moved_range_survives_a_restart_on_its_new_core() {
     assert_eq!(all(&mut c), 40);
     n.stop();
 }
+
+/// Writes that are not retryable keep answering while their range changes cores (007 FR-011):
+/// the core that is to hand the range over refuses new writes of it before proposing them, so
+/// none lands after the `Relocate` entry with its outcome unknown, and the node sends them again to
+/// the range's new core (H-025 of the native tests: 25 of them failed with «interrupted at
+/// shutdown» under YCSB-A while the ranges moved).
+#[test]
+fn writes_keep_answering_while_their_range_changes_cores() {
+    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    assert!(n.wait_ready(READY));
+    let at = n.admin_addr().unwrap().to_string();
+    let mut c = Client::new(&n);
+    assert!(ok(&c.run("db", Document::new().with("insert", "c").with("documents", docs(0..10)))));
+    let from = until("range 1", || core_of_range_1(&at));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Eight writers, as YCSB-A's clients: each inserts its own documents and updates them.
+    let writers: Vec<_> = (0..8)
+        .map(|k| {
+            let stop = stop.clone();
+            let mut w = Client::new(&n);
+            std::thread::spawn(move || {
+                let (mut sent, mut failed) = (0, Vec::new());
+                let mut id = 1_000 + k * 100_000;
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    let one =
+                        Document::new().with("insert", "c").with("documents", docs(id..id + 1));
+                    let set = Document::new().with("$set", Document::new().with("v", id));
+                    let update =
+                        Document::new().with("q", Document::new().with("_id", id)).with("u", set);
+                    let up = Document::new()
+                        .with("update", "c")
+                        .with("updates", teseladb_bson::Value::Array(vec![update.into()]));
+                    for cmd in [one, up] {
+                        let r = w.run("db", cmd);
+                        if !ok(&r) {
+                            failed.push(format!("{r:?}"));
+                        }
+                        sent += 1;
+                    }
+                    id += 1;
+                }
+                (sent, failed)
+            })
+        })
+        .collect();
+    for core in [1 - from, from, 1 - from, from, 1 - from, from, 1 - from, from] {
+        // A split by load, which the writers bring about, keeps the range busy for a moment.
+        until("the core change accepted", || {
+            let (code, _, err) =
+                admin(&at, &["range", "relocate", "1", "--core", &core.to_string()]);
+            assert!(code == 0 || err.contains("RangeBusy"), "{err}");
+            (code == 0).then_some(())
+        });
+        until("the range on its core", || (core_of_range_1(&at) == Some(core)).then_some(()));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    let (mut sent, mut failed) = (0, Vec::new());
+    for w in writers {
+        let (s, f) = w.join().unwrap();
+        sent += s;
+        failed.extend(f);
+    }
+    assert!(sent > 0);
+    assert!(failed.is_empty(), "{} of {sent} writes failed: {:?}", failed.len(), failed.first());
+    n.stop();
+}

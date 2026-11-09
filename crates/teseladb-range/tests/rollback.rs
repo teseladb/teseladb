@@ -127,12 +127,14 @@ fn a_rollback_file_keeps_each_version_lost_per_range_and_drops_deletions() {
         deletes: vec![b"\x01c".to_vec()],
         dedup: None,
         live_delta: 0,
+        docs: None,
     };
     let only_delete = Command::Write {
         puts: vec![],
         deletes: vec![b"\x01d".to_vec()],
         dedup: None,
         live_delta: 0,
+        docs: None,
     };
     let other = Command::SetGcThreshold { ts };
     let g8 = GroupId(8);
@@ -151,6 +153,7 @@ fn a_rollback_file_keeps_each_version_lost_per_range_and_drops_deletions() {
                     deletes: vec![],
                     dedup: None,
                     live_delta: 0,
+                    docs: None,
                 },
             ),
         ),
@@ -193,8 +196,13 @@ fn an_entry_that_does_not_decode_is_kept_whole() {
 #[test]
 fn a_damaged_rollback_file_is_refused() {
     let ts = Hlc { physical: 5_000, logical: 0 };
-    let write =
-        Command::Write { puts: vec![put(b"k", b"v")], deletes: vec![], dedup: None, live_delta: 0 };
+    let write = Command::Write {
+        puts: vec![put(b"k", b"v")],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: None,
+    };
     let RollbackFile { bytes, .. } = rollback_files(&[(G, entry(1, 1, ts, &write))], 0).remove(0);
     assert!(read_rollback_file(&bytes[..bytes.len() - 1]).is_err(), "cut short");
     let mut longer = bytes.clone();

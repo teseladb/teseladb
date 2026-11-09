@@ -106,6 +106,9 @@ const ROWS: &[Row] = &[
     ("configureCollectionBalancing", On::FullNs, &[A::SplitChunk]),
     ("clearJumboFlag", On::FullNs, &[A::ClearJumboFlag]),
     ("moveCollection", On::FullNs, &[A::MoveCollection]),
+    // An internal privilege on the cluster, and `moveChunk` on `admin` (RefDb r9.0.4).
+    ("untrackUnshardedCollection", On::Cluster, &[A::Internal]),
+    ("resetPlacementHistory", On::Db, &[A::MoveChunk]),
     ("abortMoveCollection", On::FullNs, &[A::MoveCollection]),
     ("unshardCollection", On::FullNs, &[A::UnshardCollection]),
     ("abortUnshardCollection", On::FullNs, &[A::UnshardCollection]),

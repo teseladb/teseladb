@@ -177,6 +177,13 @@ impl Relocations {
         self.intents = intents.clone();
     }
 
+    /// The ranges that Group 0 moves to another core than this one: a range this core leads
+    /// proposes no more writes from the moment the intent arrives, before its `Relocate`, so that
+    /// no write goes into the log handed to the new core (H-025).
+    pub fn leaving(&self) -> impl Iterator<Item = GroupId> + '_ {
+        self.intents.iter().filter(|(_, (target, _))| *target != self.core).map(|(g, _)| *g)
+    }
+
     /// Messages for other cores of the node, with their core.
     pub fn take_msgs(&mut self) -> Vec<(u16, RelocateMsg)> {
         std::mem::take(&mut self.msgs)
@@ -698,6 +705,7 @@ mod tests {
             };
             self.r.set(&ranges);
             self.rel.set_intents(&ranges.relocations);
+            self.host.set_moving(self.rel.leaving());
         }
 
         /// One turn of 10 ms of the core, as the data core runs it; `fault` is spent once used.
@@ -956,6 +964,15 @@ mod tests {
         assert_eq!(n.cores[1].rel.holder(G), Some(0));
         assert_eq!(n.cores[0].rel.holder(G), None, "this core");
         assert_eq!(n.cores[1].rel.holder(GroupId(55)), None, "nobody");
+    }
+
+    #[test]
+    fn only_the_ranges_moving_to_another_core_are_leaving() {
+        let mut n = Node::new();
+        let arriving = GroupId(56);
+        n.cores[0].rel.set_intents(&BTreeMap::from([(G, (1, 8)), (arriving, (0, 9))]));
+        assert_eq!(n.cores[0].rel.leaving().collect::<Vec<_>>(), vec![G]);
+        assert_eq!(n.cores[1].rel.leaving().count(), 0, "no intent known yet");
     }
 
     #[test]

@@ -136,3 +136,69 @@ fn enable_sharding_takes_a_primary_shard() {
     let p = Primary { node: NodeId(7), last_mod: 3 };
     assert_eq!(Primary::decode(&p.encode()), Some(p));
 }
+
+/// A cluster of one shard moves no data: a `refrouter` 9.0.4 refuses `movePrimary` with 20 after the
+/// checks of the database and before it looks for the target shard (`assertDataMovementAllowed`
+/// of `shardsvr_move_primary_command.cpp`, r9.0.4; measured on the native `refrouter` of one shard on
+/// 09-11-2026, scenario `sharding-moves`).
+#[test]
+fn move_primary_needs_a_second_shard() {
+    let mut m = Mem::new();
+    m.shards = vec!["node1".into()];
+    ok(&admin(&mut m, r#"{"enableSharding":"newdb"}"#));
+    let alone =
+        "Cannot migrate data in a cluster before a second shard has been successfully added";
+
+    fails(&admin(&mut m, r#"{"movePrimary":"newdb","to":"noSuchShard"}"#), 20, alone);
+    fails(&admin(&mut m, r#"{"movePrimary":"newdb","to":"node1"}"#), 20, alone);
+    fails(&admin(&mut m, r#"{"movePrimary":"nodb","to":"node1"}"#), 26, "database nodb not found");
+    fails(
+        &admin(&mut m, r#"{"movePrimary":"admin","to":"node1"}"#),
+        72,
+        "cannot move primary of internal database admin",
+    );
+}
+
+/// `untrackUnshardedCollection` and `resetPlacementHistory` as a `refrouter` 9.0.4 answers them
+/// (measured on the native `refrouter` on 09-11-2026, scenario `sharding-moves`): the first forgets
+/// the tracking of a collection without shard key, accepts one it does not track or that does not
+/// exist, refuses a sharded one; the second has no log of placements to reset here. Both take
+/// fields they do not know and run only against `admin`.
+#[test]
+fn untrack_and_reset_placement_history_answer_as_a_refrouter() {
+    let mut m = cluster();
+    ok(&m.run("u", json(r#"{"insert":"c","documents":[{"a":1}]}"#)));
+    ok(&m.run("u", json(r#"{"insert":"k","documents":[{"a":1}]}"#)));
+    ok(&m.run("u", json(r#"{"createIndexes":"k","indexes":[{"key":{"a":1},"name":"a_1"}]}"#)));
+    ok(&admin(&mut m, r#"{"shardCollection":"u.k","key":{"a":1}}"#));
+
+    ok(&admin(&mut m, r#"{"untrackUnshardedCollection":"u.c"}"#));
+    ok(&admin(&mut m, r#"{"untrackUnshardedCollection":"u.none","foo":1}"#));
+    fails(
+        &admin(&mut m, r#"{"untrackUnshardedCollection":"u.k"}"#),
+        73,
+        "Collection u.k must not be sharded",
+    );
+    fails(
+        &admin(&mut m, r#"{"untrackUnshardedCollection":"nodb.c"}"#),
+        26,
+        "database nodb not found",
+    );
+    fails(
+        &admin(&mut m, r#"{"untrackUnshardedCollection":5}"#),
+        14,
+        "BSON field 'untrackUnshardedCollection.untrackUnshardedCollection' is the wrong type 'int', expected type 'string'",
+    );
+    fails(
+        &m.run("u", json(r#"{"untrackUnshardedCollection":"u.c"}"#)),
+        13,
+        "untrackUnshardedCollection may only be run against the admin database.",
+    );
+    ok(&admin(&mut m, r#"{"resetPlacementHistory":1,"foo":1}"#));
+    ok(&admin(&mut m, r#"{"resetPlacementHistory":"x"}"#));
+    fails(
+        &m.run("u", json(r#"{"resetPlacementHistory":1}"#)),
+        13,
+        "resetPlacementHistory may only be run against the admin database.",
+    );
+}

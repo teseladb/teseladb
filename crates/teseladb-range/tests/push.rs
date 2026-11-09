@@ -28,6 +28,7 @@ impl Node {
             g: G,
             key: key.to_vec(),
             scan: None,
+            backward: false,
             at,
             concern: ReadConcern::Majority,
             view,
@@ -39,10 +40,26 @@ impl Node {
     }
 
     fn scan_view(&mut self, at: Hlc, limit: usize, view: TxnView) -> Result<Reply, RangeError> {
+        self.scan_dir(at, limit, view, false)
+    }
+
+    /// [`Node::scan_view`] from the last key down (H-003).
+    fn scan_back(&mut self, at: Hlc, limit: usize, view: TxnView) -> Result<Reply, RangeError> {
+        self.scan_dir(at, limit, view, true)
+    }
+
+    fn scan_dir(
+        &mut self,
+        at: Hlc,
+        limit: usize,
+        view: TxnView,
+        backward: bool,
+    ) -> Result<Reply, RangeError> {
         let spec = ReadSpec {
             g: G,
             key: b"\x01".to_vec(),
             scan: Some((b"\x02".to_vec(), limit)),
+            backward,
             at: Some(at),
             concern: ReadConcern::Majority,
             view,
@@ -175,24 +192,37 @@ fn scans_apply_the_same_rules_key_by_key() {
     };
     let got = rows(n.scan_view(read_at, 10, view.clone()));
     let want = [(A, b"a0"), (B, b"b1"), (C, b"c1"), (D, b"d0")];
-    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
-    assert_eq!(rows(n.scan_view(read_at, 2, view)).len(), 2);
+    let want: Vec<_> = want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+    assert_eq!(got, want);
+    assert_eq!(rows(n.scan_view(read_at, 2, view.clone())).len(), 2);
+    // Backward (H-003): the same documents from the last one down, and its limit takes the last.
+    let back = |w: &[(Vec<u8>, Vec<u8>)]| w.iter().rev().cloned().collect::<Vec<_>>();
+    assert_eq!(rows(n.scan_back(read_at, 10, view.clone())), back(&want));
+    assert_eq!(rows(n.scan_back(read_at, 2, view)), back(&want)[..2]);
+    // Knowing nothing, a backward scan stops at the last intent first, T2's deletion.
+    let r = n.scan_back(read_at, 10, TxnView::default());
+    let stopped =
+        matches!(r, Err(RangeError::ReadIntent { owner: IntentOwner { txn: T2, .. }, .. }));
+    assert!(stopped, "{r:?}");
     // Transaction 1, at a mark above its intents, finds them in the scan itself.
     let own = TxnView { own: Some(T1), known: BTreeMap::from([(T2, Known::Pushed)]) };
-    let got = rows(n.scan_view(read_at, 10, own));
-    let want = [(A, b"a0"), (B, b"b1"), (C, b"c1"), (D, b"d0")];
-    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+    let got = rows(n.scan_view(read_at, 10, own.clone()));
+    assert_eq!(got, want);
+    assert_eq!(rows(n.scan_back(read_at, 10, own)), back(&want));
     // Transaction 2 reads its own deletion and, below its intents, T1's are above it: unseen.
     let own = TxnView { own: Some(T2), known: BTreeMap::new() };
-    let got = rows(n.scan_view(old, 10, own));
-    let want = [(A, b"a0"), (B, b"b0")];
-    assert_eq!(got, want.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect::<Vec<_>>());
+    let got = rows(n.scan_view(old, 10, own.clone()));
+    let want: Vec<_> =
+        [(A, b"a0"), (B, b"b0")].iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+    assert_eq!(got, want);
+    assert_eq!(rows(n.scan_back(old, 10, own)), back(&want));
     // A scan that ends past the range, or on a range this node lacks, is not its to answer.
     for (g, end) in [(G, [END, b"\x01"].concat()), (GroupId(99), b"\x02".to_vec())] {
         let spec = ReadSpec {
             g,
             key: A.to_vec(),
             scan: Some((end, 10)),
+            backward: false,
             at: Some(read_at),
             concern: ReadConcern::Majority,
             view: TxnView::default(),
@@ -214,6 +244,7 @@ fn a_read_at_a_mark_ahead_of_the_leaders_clock_waits_for_it() {
         g: G,
         key: A.to_vec(),
         scan: None,
+        backward: false,
         at: Some(ahead),
         concern: ReadConcern::Majority,
         view: TxnView::default(),
@@ -253,6 +284,7 @@ fn a_version_in_the_uncertainty_window_stops_the_read() {
             g: G,
             key: if scan { b"\x01".to_vec() } else { A.to_vec() },
             scan: scan.then(|| (b"\x02".to_vec(), 10)),
+            backward: false,
             at: Some(mark),
             concern: ReadConcern::Majority,
             view,
@@ -286,6 +318,7 @@ fn a_version_in_the_uncertainty_window_stops_the_read() {
         g: G,
         key: C.to_vec(),
         scan: None,
+        backward: false,
         at: Some(mark),
         concern: ReadConcern::Majority,
         view: own,
@@ -315,6 +348,7 @@ fn a_known_commit_in_the_uncertainty_window_stops_the_read() {
             g: G,
             key: if scan { b"\x01".to_vec() } else { A.to_vec() },
             scan: scan.then(|| (b"\x02".to_vec(), 10)),
+            backward: false,
             at: Some(read_at),
             concern: ReadConcern::Majority,
             view: knowing(T1, Known::Committed(commit)),
