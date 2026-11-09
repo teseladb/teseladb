@@ -142,7 +142,7 @@ pub enum Op {
 /// Random operations over `keys` logical keys, with timestamps that mostly grow.
 pub struct Gen {
     rng: Rng,
-    clock: u64,
+    pub clock: u64,
     keys: u64,
 }
 

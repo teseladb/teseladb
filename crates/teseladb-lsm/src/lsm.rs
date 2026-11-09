@@ -10,9 +10,8 @@ mod requests;
 mod schedule;
 mod write;
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 use teseladb_raftlog::{Disk, IoOp};
@@ -176,7 +175,7 @@ enum Request {
 #[derive(Debug)]
 pub struct Lsm {
     pub(crate) cfg: LsmConfig,
-    pub(crate) version: Rc<Version>,
+    pub(crate) version: Arc<Version>,
     pub(crate) reader: Reader,
     pub(crate) state: State,
     pub(crate) manifest: ManifestFile,
@@ -207,11 +206,13 @@ pub struct Lsm {
     budget_at: Option<Nanos>,
     requests: std::collections::VecDeque<Request>,
     next_request: u64,
-    pub(crate) obsolete: Vec<Rc<Table>>,
+    pub(crate) obsolete: Vec<Arc<Table>>,
     done: Completions,
     pub(crate) counters: Counters,
     /// Bytes compactions wrote per collection since its dictionary was trained (004 FR-022).
     pub(crate) dict_written: crate::dict::Written,
+    /// The version readers on other threads take (FR-026).
+    pub(crate) shared: crate::concurrent::SharedLsm,
 }
 
 impl Lsm {
@@ -231,16 +232,19 @@ impl Lsm {
         for (level, t) in r.tables {
             reader.cache.pin_meta(t.number, t.meta.clone());
             let level = usize::from(level).min(cfg.levels);
-            v.levels[level].push(Rc::new(t));
+            v.levels[level].push(Arc::new(t));
         }
         v.levels[0].sort_by_key(|t| std::cmp::Reverse(t.number));
         for level in &mut v.levels[1..] {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
         let flushed = r.state.flushed.clone();
+        let version = Arc::new(v);
+        let shared =
+            crate::concurrent::SharedLsm::new(version.clone(), cfg.cache_bytes, cfg.dir.clone());
         let lsm = Lsm {
             cfg: cfg.clone(),
-            version: Rc::new(v),
+            version,
             reader,
             next_file: r.state.next_file,
             state: r.state,
@@ -271,6 +275,7 @@ impl Lsm {
             done: Completions::default(),
             counters: Counters::default(),
             dict_written: crate::dict::Written::new(),
+            shared,
         };
         Ok((lsm, flushed))
     }
@@ -285,18 +290,30 @@ impl Lsm {
     /// Freezes the active memtable so the next jobs flush it.
     fn freeze(&mut self) {
         let active = self.version.memtables[0].clone();
-        if active.borrow().is_empty() && active.borrow().applied.is_empty() {
+        if active.is_empty() && active.applied().is_empty() {
             return;
         }
-        active.borrow_mut().freeze();
+        active.freeze();
         let mut v = self.version.clone_shallow();
-        v.memtables.insert(0, Rc::new(RefCell::new(Memtable::default())));
-        self.version = Rc::new(v);
+        v.memtables.insert(0, Arc::new(Memtable::default()));
+        self.version = Arc::new(v);
     }
 
     /// Freezes the active memtable now (before a shutdown, an export or a test).
     pub fn flush(&mut self) {
         self.freeze();
+    }
+
+    /// The handle readers on other threads keep (FR-026).
+    pub fn shared(&self) -> crate::concurrent::SharedLsm {
+        self.shared.clone()
+    }
+
+    /// Publishes the current version to readers on other threads; the core calls it after each
+    /// batch it applies. Writes to the active memtable are seen without it; a new memtable or new
+    /// files are not.
+    pub fn publish(&self) {
+        self.shared.publish(self.version.clone());
     }
 
     /// A view of the current memtables and files.
@@ -317,7 +334,7 @@ impl Lsm {
         self.version
             .memtables
             .iter()
-            .filter_map(|m| m.borrow().applied.get(&range).copied())
+            .filter_map(|m| m.applied_of(range))
             .filter(|a| a.last > flushed)
             .map(|a| a.first)
             .min()

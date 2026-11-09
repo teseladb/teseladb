@@ -7,10 +7,9 @@
 //! it holds) is written and synced. A crash before the edit is durable leaves an unlisted file,
 //! which recovery deletes; the log of each range still has the entries.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_raftlog::IoOp;
 use teseladb_types::{Bytes, GroupId};
@@ -97,12 +96,13 @@ pub(crate) enum Next {
 /// A flush of the oldest frozen memtable.
 #[derive(Debug)]
 pub(crate) struct FlushJob {
-    mem: Rc<RefCell<Memtable>>,
+    mem: Arc<Memtable>,
     number: u64,
     dir: PathBuf,
     chunk: usize,
     writer: Option<TableWriter>,
-    next_entry: usize,
+    /// The last internal key written; the next chunk starts after it.
+    last: Option<Vec<u8>>,
     table: Option<Table>,
     edit: Edit,
     queued: VecDeque<IoOp>,
@@ -120,19 +120,17 @@ impl FlushJob {
     /// A flush of `mem` into file `number`; `next_file` is the counter after it.
     pub(crate) fn new(
         cfg: &LsmConfig,
-        mem: Rc<RefCell<Memtable>>,
+        mem: Arc<Memtable>,
         number: u64,
         next_file: u64,
     ) -> FlushJob {
-        let m = mem.borrow();
-        let has_data = !m.is_empty();
+        let has_data = !mem.is_empty();
         let edit = Edit {
-            flushed: m.applied.iter().map(|(r, a)| (*r, a.last)).collect(),
+            flushed: mem.applied().iter().map(|(r, a)| (*r, a.last)).collect(),
             resets: Vec::new(),
             next_file,
             ..Edit::default()
         };
-        drop(m);
         let mut queued = VecDeque::new();
         if has_data {
             queued.push_back(IoOp::Create {
@@ -150,7 +148,7 @@ impl FlushJob {
                 let ring = cfg.encryption.as_ref().map(|e| &*e.0);
                 TableWriter::new(cfg.block_bytes, cfg.codec).sealed(ring)
             }),
-            next_entry: 0,
+            last: None,
             table: None,
             edit,
             queued,
@@ -160,15 +158,22 @@ impl FlushJob {
 
     fn fill(&mut self) {
         let file = file_id(self.number);
-        let mem = self.mem.borrow();
+        let mem = Arc::clone(&self.mem);
         let w = self.writer.as_mut().expect("a flush with data has a writer");
-        let entries = mem.sorted();
-        while self.next_entry < entries.len() && w.pending() < self.chunk {
-            let (k, s) = &entries[self.next_entry];
-            w.add(&k.0, s.kind, &s.value);
-            self.next_entry += 1;
+        let resume = self.last.take();
+        let mut entries = mem.from(resume.as_deref()).peekable();
+        let mut last = None;
+        while w.pending() < self.chunk
+            && let Some((k, s)) = entries.next()
+        {
+            w.add(k, s.kind, &s.value);
+            last = Some(k);
         }
-        if self.next_entry < entries.len() {
+        let more = entries.peek().is_some();
+        let next = last.map(<[u8]>::to_vec);
+        drop(entries);
+        self.last = next.or(resume);
+        if more {
             let (at, chunk) = w.take().expect("a full chunk");
             self.queued.push_back(IoOp::WriteAt {
                 file,
@@ -180,7 +185,7 @@ impl FlushJob {
         }
         let w = self.writer.take().expect("a flush with data has a writer");
         let (at, chunk, table) = w
-            .finish(self.number, mem.tombstones.clone())
+            .finish(self.number, mem.tombstones().cloned().collect())
             .expect("a memtable with data writes a file");
         self.queued.push_back(IoOp::WriteAt {
             file,

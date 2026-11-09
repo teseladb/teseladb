@@ -2,15 +2,14 @@
 //! walks by key; a file cursor seeks through the index and loads its blocks through the
 //! [`Reader`], waiting when one is not cached.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_types::Bytes;
 
 use crate::entry::{self, Kind};
 use crate::error::LsmError;
 use crate::memtable::Memtable;
-use crate::read::{Fetch, ReadToken, Reader, corrupt};
+use crate::read::{Blocks, Fetch, ReadToken, corrupt};
 use crate::sst::block::BlockCursor;
 use crate::sst::reader::Table;
 
@@ -29,7 +28,7 @@ pub(crate) enum Pos {
 /// A cursor over a memtable: it walks by key, so the active memtable may take writes or be
 /// frozen while it is open.
 pub(crate) struct MemCursor {
-    mem: Rc<RefCell<Memtable>>,
+    mem: Arc<Memtable>,
     pos: usize,
     key: Vec<u8>,
     kind: Kind,
@@ -41,7 +40,7 @@ type Found = Option<(usize, Vec<u8>, Kind, Bytes)>;
 
 impl MemCursor {
     /// A cursor over `mem`, at no entry until it seeks.
-    pub(crate) fn new(mem: Rc<RefCell<Memtable>>) -> MemCursor {
+    pub(crate) fn new(mem: Arc<Memtable>) -> MemCursor {
         MemCursor {
             mem,
             pos: 0,
@@ -65,18 +64,15 @@ impl MemCursor {
 /// A cursor over one source.
 pub(crate) enum Cursor {
     Mem(MemCursor),
-    Table { table: Rc<Table>, pos: Pos },
+    Table { table: Arc<Table>, pos: Pos },
 }
 
 impl Cursor {
     pub(crate) fn seek(&mut self, target: Vec<u8>) {
         match self {
             Cursor::Mem(m) => {
-                let found = m
-                    .mem
-                    .borrow()
-                    .seek(&target)
-                    .map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
+                let found =
+                    m.mem.seek(&target).map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
                 m.set(found);
             }
             Cursor::Table { pos, .. } => *pos = Pos::Seek(target),
@@ -89,7 +85,6 @@ impl Cursor {
             Cursor::Mem(m) => {
                 let found = m
                     .mem
-                    .borrow()
                     .next_after(m.pos, &m.key)
                     .map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
                 m.set(found);
@@ -107,7 +102,7 @@ impl Cursor {
     }
 
     /// Loads what the cursor needs; `Some(token)` if it waits for a read.
-    pub(crate) fn ready(&mut self, r: &mut Reader) -> Result<Option<ReadToken>, LsmError> {
+    pub(crate) fn ready<B: Blocks>(&mut self, r: &mut B) -> Result<Option<ReadToken>, LsmError> {
         let Cursor::Table { table, pos } = self else {
             return Ok(None);
         };

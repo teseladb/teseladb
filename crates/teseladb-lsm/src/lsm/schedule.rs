@@ -3,7 +3,7 @@
 //! the version, the manifest state and the completions. Compactions spend a budget refilled at
 //! `compaction_bytes_per_sec`.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_types::Nanos;
 
@@ -17,7 +17,7 @@ use crate::sst::reader::Table;
 impl Lsm {
     pub(super) fn schedule(&mut self) -> Option<Job> {
         let (free, held): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.obsolete).into_iter().partition(|t| Rc::strong_count(t) == 1);
+            std::mem::take(&mut self.obsolete).into_iter().partition(|t| Arc::strong_count(t) == 1);
         self.obsolete = held;
         if !free.is_empty() {
             let numbers: Vec<u64> = free.iter().map(|t| t.number).collect();
@@ -78,9 +78,9 @@ impl Lsm {
                     self.reader.cache.pin_meta(t.number, t.meta.clone());
                     self.counters.written_bytes += t.size;
                     self.counters.note_codes(&t);
-                    v.levels[0].insert(0, Rc::new(*t));
+                    v.levels[0].insert(0, Arc::new(*t));
                 }
-                self.version = Rc::new(v);
+                self.version = Arc::new(v);
                 self.done.flushed.extend(edit.flushed);
             }
             Outcome::Rotated { manifest } => self.manifest = manifest,
@@ -146,12 +146,12 @@ impl Lsm {
             self.reader.cache.pin_meta(t.number, t.meta.clone());
             self.counters.written_bytes += t.size;
             self.counters.note_codes(&t);
-            v.levels[usize::from(level)].push(Rc::new(t));
+            v.levels[usize::from(level)].push(Arc::new(t));
         }
         for level in &mut v.levels[1..] {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
-        self.version = Rc::new(v);
+        self.version = Arc::new(v);
     }
 
     /// Adds the compaction budgets earned since the last call, up to one second of each.

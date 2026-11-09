@@ -2,7 +2,6 @@
 //! and [`TableWriter::finish`] adds the filter, properties, index and footer.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use teseladb_keys::Hlc;
@@ -30,7 +29,7 @@ pub(crate) struct TableWriter {
     block_bytes: usize,
     codec: Codec,
     /// The dictionaries its blocks may use ([`Codec::ZstdDict`]); none for a flush or an export.
-    dicts: Option<Rc<CurrentDictionaries>>,
+    dicts: Option<Arc<CurrentDictionaries>>,
     /// The dictionary of the file: that of the first block whose collection has one. Blocks of
     /// another collection use zstd alone.
     file_dict: Option<(u64, Arc<[u8]>)>,
@@ -90,7 +89,7 @@ impl TableWriter {
     }
 
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
-    pub(crate) fn with_dicts(self, dicts: Rc<CurrentDictionaries>) -> TableWriter {
+    pub(crate) fn with_dicts(self, dicts: Arc<CurrentDictionaries>) -> TableWriter {
         TableWriter { dicts: Some(dicts), ..self }
     }
 
@@ -303,7 +302,7 @@ mod tests {
         let value = br#"{"name": "customer", "city": "Bilbao", "zip": "48001"}"#.repeat(3);
         let dict: Arc<[u8]> = Arc::from(&value[..60]);
         let prefix = data_key(7, 0)[..9].to_vec();
-        let dicts = Rc::new(BTreeMap::from([(prefix, (4u64, dict.clone()))]));
+        let dicts = Arc::new(BTreeMap::from([(prefix, (4u64, dict.clone()))]));
         let mut w = TableWriter::new(4096, Codec::ZstdDict).with_dicts(dicts);
         let mut file = Vec::new();
         // Collection 7 has a dictionary, collection 8 none, and the system space is not data.

@@ -13,7 +13,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_raftlog::{IoErrno, IoOp};
 use teseladb_types::{Bytes, GroupId};
@@ -42,7 +42,7 @@ pub struct FileRef {
 #[derive(Debug)]
 enum Pending {
     /// The block of an existing file where interval `.2` would begin (block `.1`).
-    Check(Rc<Table>, usize, usize),
+    Check(Arc<Table>, usize, usize),
     /// The footer page of file `i` of the ingestion.
     Footer(usize),
     /// The meta bytes of file `i`, from `start`.
@@ -60,7 +60,7 @@ pub(crate) struct IngestJob {
     intervals: Vec<(Vec<u8>, Vec<u8>)>,
     flushed: Option<(GroupId, u64)>,
     /// Files to read one block of, with the interval they are checked for.
-    checks: VecDeque<(Rc<Table>, usize)>,
+    checks: VecDeque<(Arc<Table>, usize)>,
     opened: Vec<Table>,
     /// Files opened so far (closed again if the ingestion fails).
     opens: usize,
@@ -74,13 +74,12 @@ pub(crate) struct IngestJob {
 
 /// Whether the memtables and files of `v` hold nothing in `[start, end)` that can be told without
 /// reading; the files that need one block read go in `checks`.
-fn quick_check(v: &Version, start: &[u8], end: &[u8], checks: &mut VecDeque<Rc<Table>>) -> bool {
+fn quick_check(v: &Version, start: &[u8], end: &[u8], checks: &mut VecDeque<Arc<Table>>) -> bool {
     let first = entry::first_version(start);
     for m in &v.memtables {
-        let m = m.borrow();
         let has_key = m.seek(&first).is_some_and(|(_, k, _)| entry::logical(k) < end);
         let has_tombstone =
-            m.tombstones.iter().any(|t| t.start.as_slice() < end && start < t.end.as_slice());
+            m.tombstones().any(|t| t.start.as_slice() < end && start < t.end.as_slice());
         if has_key || has_tombstone {
             return false;
         }

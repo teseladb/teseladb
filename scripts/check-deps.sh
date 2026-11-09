@@ -35,6 +35,9 @@ HOT_CRATES=(teseladb-sys teseladb-io teseladb-multiraft teseladb-lsm teseladb-ra
 HOT_VIUZI=(teseladb-raft teseladb-raftlog teseladb-crypto)
 # Crates that may use unsafe code: system calls and CPU intrinsics.
 UNSAFE_CRATES=(teseladb-sys)
+# Modules that D-151 admits with unsafe code for a measured performance gain: their crate denies
+# it and only these files allow it; Miri runs their tests in the gates (scripts/ci.sh).
+UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs)
 # Built in two halves so that this script does not contain the word itself.
 ORIGIN_WORD="raf""tree"
 
@@ -117,7 +120,30 @@ forbidden_io() {
   [[ $# -gt 0 ]] || return 0
   awk '
     function report(line, text) { printf "%s:%d: %s\n", FILENAME, line, text }
-    FNR == 1 { depth = 0 }
+    function count(s, ch,   t) { t = s; return gsub(ch, "", t) }
+    FNR == 1 { depth = 0; pending = 0; skipping = 0 }
+    # The item after `#[cfg(test)]` is test code, which may run threads and time the way tests
+    # in tests/ do; principle II is about the logic.
+    {
+      plain = $0
+      sub(/\/\/.*/, "", plain)
+      if (skipping) {
+        tdepth += count(plain, "\\{") - count(plain, "\\}")
+        if (tdepth <= 0) skipping = 0
+        next
+      }
+      if (plain ~ /^[[:space:]]*#\[cfg\(test\)\]/) { pending = 1; next }
+      if (pending) {
+        if (count(plain, "\\{") > 0) {
+          tdepth = count(plain, "\\{") - count(plain, "\\}")
+          pending = 0
+          if (tdepth > 0) skipping = 1
+          next
+        }
+        if (plain ~ /;/) pending = 0
+        next
+      }
+    }
     {
       code = $0
       sub(/\/\/.*/, "", code)
@@ -225,8 +251,17 @@ check_unsafe_forbidden() {
     [[ -f $root ]] || continue
     crate=$(basename "$(dirname "$(dirname "$root")")")
     contains "$crate" "${UNSAFE_CRATES[@]}" && continue
-    grep -q '^#!\[forbid(unsafe_code)\]' "$root" || finding "$root: no #![forbid(unsafe_code)]"
+    if grep -q "^crates/$crate/" < <(printf '%s\n' "${UNSAFE_MODULES[@]}"); then
+      grep -q '^#!\[deny(unsafe_code)\]' "$root" || finding "$root: no #![deny(unsafe_code)]"
+    else
+      grep -q '^#!\[forbid(unsafe_code)\]' "$root" || finding "$root: no #![forbid(unsafe_code)]"
+    fi
   done
+  # The permission only in the admitted modules.
+  local f
+  while IFS= read -r f; do
+    contains "$f" "${UNSAFE_MODULES[@]}" || finding "$f: allows unsafe code outside the modules of D-151"
+  done < <(grep -rl '^#!\[allow(unsafe_code)\]' crates/*/src tools/*/src 2>/dev/null | grep -v '^crates/teseladb-sys/' | sort)
 }
 
 check_hot_path_locks() {

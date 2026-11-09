@@ -7,7 +7,7 @@
 //! resolved, and its commit, if any, is a version of its own. Range tombstones of the interval
 //! are given apart ([`TimeScan::tombstones`]).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 
@@ -19,7 +19,7 @@ use crate::version::{Version, View};
 
 /// A scan by time in progress: call [`TimeScan::next`] until [`Step::Done`].
 pub struct TimeScan {
-    version: Rc<Version>,
+    version: Arc<Version>,
     start: Vec<u8>,
     end: Vec<u8>,
     from: Hlc,
@@ -58,11 +58,11 @@ impl TimeScan {
         max > self.from && min <= self.to
     }
 
-    fn take_tombstones(&mut self, ts: &[RangeTombstone]) {
+    fn take_tombstones<'a>(&mut self, ts: impl IntoIterator<Item = &'a RangeTombstone>) {
         let (from, to) = (self.from, self.to);
         let (start, end) = (self.start.as_slice(), self.end.as_slice());
         self.tombstones.extend(
-            ts.iter()
+            ts.into_iter()
                 .filter(|t| {
                     from < t.ts
                         && t.ts <= to
@@ -78,13 +78,11 @@ impl TimeScan {
         let v = self.version.clone();
         let mut cursors = Vec::new();
         for m in &v.memtables {
-            let mem = m.borrow();
-            let (Some(min), Some(max)) = (mem.min_ts, mem.max_ts) else { continue };
+            let (Some(min), Some(max)) = m.times() else { continue };
             if !self.in_time(min, max) {
                 continue;
             }
-            self.take_tombstones(&mem.tombstones);
-            drop(mem);
+            self.take_tombstones(m.tombstones());
             let mut c = Cursor::Mem(MemCursor::new(m.clone()));
             c.seek(first.clone());
             cursors.push(c);

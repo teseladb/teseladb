@@ -12,7 +12,7 @@
 //!   key is not there.
 
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 use teseladb_raftlog::{IoErrno, IoOp};
@@ -89,12 +89,50 @@ pub(crate) enum Fetch {
     Wait(ReadToken),
 }
 
+/// Where a read gets the blocks of the files: the core's [`Reader`], which queues the reads it
+/// misses for the disk thread, or a reader on another thread (FR-026), which asks its caller.
+pub(crate) trait Blocks {
+    /// Block `i` of `table`, or the read it waits for.
+    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError>;
+    /// The core's failure, which ends every read.
+    fn failure(&self) -> Option<&LsmError>;
+    /// Starts a read attempt.
+    fn begin(&mut self) {}
+    /// Ends a read attempt that missed nothing.
+    fn finish(&mut self) {}
+    /// Counts a point read that searched `probes` files.
+    fn counted(&mut self, _probes: u64) {}
+}
+
+impl Blocks for Reader {
+    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
+        Reader::block(self, table, i)
+    }
+
+    fn failure(&self) -> Option<&LsmError> {
+        self.failure.as_ref()
+    }
+
+    fn begin(&mut self) {
+        Reader::begin(self);
+    }
+
+    fn finish(&mut self) {
+        Reader::finish(self);
+    }
+
+    fn counted(&mut self, probes: u64) {
+        self.gets += 1;
+        self.probes += probes;
+    }
+}
+
 /// Reads of blocks: the cache and the reads in flight.
 #[derive(Debug)]
 pub(crate) struct Reader {
     pub(crate) cache: BlockCache,
     queue: VecDeque<IoOp>,
-    waiting: HashMap<u64, (Rc<Table>, usize)>,
+    waiting: HashMap<u64, (Arc<Table>, usize)>,
     by_block: HashMap<(u64, usize), u64>,
     next_token: u64,
     pub(crate) failure: Option<LsmError>,
@@ -141,7 +179,7 @@ impl Reader {
 
     /// Block `i` of `table`, from the cache or after a read.
     /// Reads check the core's failure before they start, and nothing sets it while they run.
-    pub(crate) fn block(&mut self, table: &Rc<Table>, i: usize) -> Result<Fetch, LsmError> {
+    pub(crate) fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
         let key = (table.number, i);
         let cached = match self.fresh.get(&key) {
             Some((payload, _)) => {
@@ -207,7 +245,12 @@ impl Reader {
 }
 
 /// The newest timestamp of a range tombstone over `key` that a read at `read` sees.
-fn note_tombstones(hidden: &mut Option<Hlc>, tombstones: &[RangeTombstone], key: &[u8], read: Hlc) {
+fn note_tombstones<'a>(
+    hidden: &mut Option<Hlc>,
+    tombstones: impl IntoIterator<Item = &'a RangeTombstone>,
+    key: &[u8],
+    read: Hlc,
+) {
     for t in tombstones {
         if t.start.as_slice() <= key && key < t.end.as_slice() && t.ts <= read {
             *hidden = Some(hidden.map_or(t.ts, |h| h.max(t.ts)));
@@ -263,9 +306,9 @@ fn get_in_memtable(
 }
 
 /// Walks one file for the key; `Ok(Some(token))` if a block is missing.
-fn get_in_table(
-    r: &mut Reader,
-    t: &Rc<Table>,
+fn get_in_table<B: Blocks>(
+    r: &mut B,
+    t: &Arc<Table>,
     key: &[u8],
     target: &[u8],
     retracted: &mut Vec<Hlc>,
@@ -302,7 +345,7 @@ fn get_in_table(
     Ok(None)
 }
 
-pub(crate) fn get(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup {
+pub(crate) fn get<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc) -> Lookup {
     r.begin();
     let found = get_once(r, v, key, read);
     if !matches!(found, Lookup::Miss(_)) {
@@ -311,8 +354,8 @@ pub(crate) fn get(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup 
     found
 }
 
-pub(crate) fn get_once(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup {
-    if let Some(e) = &r.failure {
+pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc) -> Lookup {
+    if let Some(e) = r.failure() {
         return Lookup::Failed(e.clone());
     }
     let target = entry::internal_key(key, read);
@@ -320,11 +363,10 @@ pub(crate) fn get_once(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lo
     let mut best: Option<Found> = None;
     let mut hidden: Option<Hlc> = None;
     for m in &v.memtables {
-        let m = m.borrow();
-        note_tombstones(&mut hidden, &m.tombstones, key, read);
-        let newer = best.as_ref().is_none_or(|b| m.max_ts.is_some_and(|t| t > b.ts));
-        if newer && m.min_ts.is_some_and(|t| t <= read) {
-            get_in_memtable(&m, key, &target, &mut retracted, &mut best);
+        note_tombstones(&mut hidden, m.tombstones(), key, read);
+        let newer = best.as_ref().is_none_or(|b| m.may_hold_after(b.ts));
+        if newer && m.may_hold_at(read) {
+            get_in_memtable(m, key, &target, &mut retracted, &mut best);
         }
     }
     let hashes = filter::hashes(key);
@@ -351,8 +393,7 @@ pub(crate) fn get_once(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lo
     if let Some(token) = waiting {
         return Lookup::Miss(token);
     }
-    r.gets += 1;
-    r.probes += probes;
+    r.counted(probes);
     match best {
         Some(b) if b.kind != Kind::Delete && hidden.is_none_or(|h| b.ts > h) => Lookup::Hit(b),
         _ => Lookup::NotFound,
@@ -389,7 +430,7 @@ struct KeyState {
 
 /// A range read in progress: call [`Scan::next`] until [`Step::Done`].
 pub struct Scan {
-    version: Rc<Version>,
+    version: Arc<Version>,
     start: Vec<u8>,
     end: Vec<u8>,
     read: Hlc,
@@ -415,9 +456,7 @@ impl Scan {
         let v = &self.version;
         let mut cursors = Vec::new();
         for m in &v.memtables {
-            let mem = m.borrow();
-            self.tombstones.extend(mem.tombstones.iter().filter(|t| t.ts <= self.read).cloned());
-            drop(mem);
+            self.tombstones.extend(m.tombstones().filter(|t| t.ts <= self.read).cloned());
             let mut c = Cursor::Mem(MemCursor::new(m.clone()));
             c.seek(first.clone());
             cursors.push(c);
@@ -451,17 +490,21 @@ impl Scan {
 
     /// The next key's visible version.
     pub fn next(&mut self, lsm: &mut Lsm) -> Step {
-        lsm.reader.begin();
-        let step = self.step(lsm);
+        self.next_with(&mut lsm.reader)
+    }
+
+    /// [`Scan::next`] with the blocks from `r`.
+    pub(crate) fn next_with<B: Blocks>(&mut self, r: &mut B) -> Step {
+        r.begin();
+        let step = self.step(r);
         if !matches!(step, Step::Miss(_)) {
-            lsm.reader.finish();
+            r.finish();
         }
         step
     }
 
-    fn step(&mut self, lsm: &mut Lsm) -> Step {
-        let r = &mut lsm.reader;
-        if let Some(e) = &r.failure {
+    fn step<B: Blocks>(&mut self, r: &mut B) -> Step {
+        if let Some(e) = r.failure() {
             return Step::Failed(e.clone());
         }
         if self.finished {

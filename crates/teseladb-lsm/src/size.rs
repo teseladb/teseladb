@@ -30,7 +30,6 @@ impl Lsm {
         let mut pieces: Vec<(Vec<u8>, u64)> = Vec::new();
         let probe = [start, &[0; VERSION_LEN][..]].concat();
         for m in &self.version.memtables {
-            let m = m.borrow();
             let mut at = m.seek(&probe);
             while let Some((pos, key, slot)) = at {
                 let k = logical(key);

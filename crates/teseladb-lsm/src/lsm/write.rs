@@ -1,6 +1,8 @@
 //! The write path of [`Lsm`]: puts, deletions, entries, intents and their resolution, and range
 //! tombstones go into the active memtable, which freezes once it holds `memtable_bytes`.
 
+use std::sync::Arc;
+
 use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
 
@@ -36,12 +38,12 @@ impl Lsm {
         value: &[u8],
     ) {
         self.note_pressure();
-        self.version.memtables[0].borrow_mut().insert(range, index, key, ts, kind, value);
+        self.version.memtables[0].insert(range, index, key, ts, kind, value);
         self.counters.user_bytes += (key.len() + value.len()) as u64;
     }
 
     fn freeze_if_full(&mut self) {
-        if self.version.memtables[0].borrow().bytes() >= self.cfg.memtable_bytes {
+        if self.version.memtables[0].bytes() >= self.cfg.memtable_bytes {
             self.freeze();
         }
     }
@@ -165,7 +167,7 @@ impl Lsm {
         ts: Hlc,
     ) -> Result<(), LsmError> {
         self.writable()?;
-        let mut m = self.version.memtables[0].borrow_mut();
+        let m = Arc::clone(&self.version.memtables[0]);
         if start < end {
             m.insert_tombstone(
                 range,
@@ -186,6 +188,6 @@ impl Lsm {
     /// A tombstone of a clearing: index 0, so its flush never raises the range's flushed index.
     pub(super) fn insert_tombstone(&mut self, range: GroupId, start: &[u8], end: &[u8]) {
         let t = RangeTombstone { start: start.to_vec(), end: end.to_vec(), ts: CLEARED };
-        self.version.memtables[0].borrow_mut().insert_tombstone(range, 0, t);
+        self.version.memtables[0].insert_tombstone(range, 0, t);
     }
 }

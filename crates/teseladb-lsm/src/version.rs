@@ -10,8 +10,7 @@
 //! source wins. Data only moves down, and level 0 always goes to level 1 whole, so an older copy
 //! is never above a newer one.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::memtable::Memtable;
 use crate::sst::reader::Table;
@@ -20,27 +19,27 @@ use crate::sst::reader::Table;
 #[derive(Debug)]
 pub(crate) struct Version {
     /// The active memtable, then the frozen ones from the newest.
-    pub(crate) memtables: Vec<Rc<RefCell<Memtable>>>,
+    pub(crate) memtables: Vec<Arc<Memtable>>,
     /// Level 0 from the newest file, then levels 1 and down sorted by key.
-    pub(crate) levels: Vec<Vec<Rc<Table>>>,
+    pub(crate) levels: Vec<Vec<Arc<Table>>>,
 }
 
 impl Version {
     /// An empty version with `levels` levels below level 0.
     pub(crate) fn empty(levels: usize) -> Version {
         Version {
-            memtables: vec![Rc::new(RefCell::new(Memtable::default()))],
+            memtables: vec![Arc::new(Memtable::default())],
             levels: vec![Vec::new(); levels + 1],
         }
     }
 
     /// Every file in order of precedence.
-    pub(crate) fn tables(&self) -> impl Iterator<Item = &Rc<Table>> {
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &Arc<Table>> {
         self.levels.iter().flatten()
     }
 
     /// Files of `level` that touch `[lo, hi]`.
-    pub(crate) fn overlapping(&self, level: usize, lo: &[u8], hi: &[u8]) -> Vec<Rc<Table>> {
+    pub(crate) fn overlapping(&self, level: usize, lo: &[u8], hi: &[u8]) -> Vec<Arc<Table>> {
         self.levels[level]
             .iter()
             .filter(|t| t.props.lo.as_slice() <= hi && lo <= t.props.hi.as_slice())
@@ -57,7 +56,7 @@ impl Version {
 /// A fixed view for reads: what was there when it was taken stays readable while it lives.
 #[derive(Clone, Debug)]
 pub struct View {
-    pub(crate) version: Rc<Version>,
+    pub(crate) version: Arc<Version>,
 }
 
 #[cfg(test)]
@@ -73,6 +72,6 @@ mod tests {
         assert_eq!(v.tables().count(), 0);
         assert!(v.overlapping(1, b"a", b"z").is_empty());
         let c = v.clone_shallow();
-        assert!(Rc::ptr_eq(&c.memtables[0], &v.memtables[0]));
+        assert!(Arc::ptr_eq(&c.memtables[0], &v.memtables[0]));
     }
 }

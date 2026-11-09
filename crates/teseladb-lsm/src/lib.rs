@@ -41,10 +41,11 @@
 //! assert_eq!(flushed[&GroupId(1)], 1);
 //! ```
 #![cfg_attr(coverage, feature(coverage_attribute))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod cache;
 mod compaction;
+mod concurrent;
 mod config;
 mod cursor;
 mod dict;
@@ -61,11 +62,16 @@ mod range_tombstone;
 mod read;
 mod read_back;
 mod recovery;
+mod shared;
 mod size;
+mod skiplist;
 pub mod sst;
 mod time_iter;
 mod version;
 
+pub use concurrent::{
+    BlockNeed, SharedLsm, SharedRead, SharedScan, SharedStep, SharedView, ViewCache,
+};
 pub use config::{Codec, Encryption, LsmConfig};
 
 /// First byte of the stored value of a version that only serves the history of its key (the

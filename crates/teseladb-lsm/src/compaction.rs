@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 use teseladb_raftlog::{IoErrno, IoOp};
@@ -43,7 +43,7 @@ pub(crate) const JOB_TOKEN: u64 = u64::MAX;
 #[derive(Debug)]
 pub(crate) struct Plan {
     /// Inputs with their level, in order of precedence.
-    pub(crate) inputs: Vec<(u8, Rc<Table>)>,
+    pub(crate) inputs: Vec<(u8, Arc<Table>)>,
     pub(crate) output_level: usize,
     /// Nothing below the output level touches the inputs' keys.
     pub(crate) bottommost: bool,
@@ -52,13 +52,13 @@ pub(crate) struct Plan {
     pub(crate) cuts: Vec<Vec<u8>>,
 }
 
-fn span(inputs: &[(u8, Rc<Table>)]) -> (Vec<u8>, Vec<u8>) {
+fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
     let lo = inputs.iter().map(|(_, t)| t.props.lo.clone()).min().expect("inputs");
     let hi = inputs.iter().map(|(_, t)| t.props.hi.clone()).max().expect("inputs");
     (lo, hi)
 }
 
-fn plan(v: &Version, inputs: Vec<(u8, Rc<Table>)>, output_level: usize) -> Plan {
+fn plan(v: &Version, inputs: Vec<(u8, Arc<Table>)>, output_level: usize) -> Plan {
     let (lo, hi) = span(&inputs);
     let bottommost =
         (output_level + 1..v.levels.len()).all(|l| v.overlapping(l, &lo, &hi).is_empty());
@@ -97,7 +97,7 @@ pub(crate) fn pick(
     all: bool,
 ) -> Option<Plan> {
     if all {
-        let inputs: Vec<(u8, Rc<Table>)> = v
+        let inputs: Vec<(u8, Arc<Table>)> = v
             .levels
             .iter()
             .enumerate()
@@ -107,7 +107,7 @@ pub(crate) fn pick(
     }
     let l0 = &v.levels[0];
     if l0.len() >= cfg.l0_trigger {
-        let mut inputs: Vec<(u8, Rc<Table>)> = l0.iter().map(|t| (0, t.clone())).collect();
+        let mut inputs: Vec<(u8, Arc<Table>)> = l0.iter().map(|t| (0, t.clone())).collect();
         let (lo, hi) = span(&inputs);
         inputs.extend(v.overlapping(1, &lo, &hi).into_iter().map(|t| (1, t)));
         return Some(plan(v, inputs, 1));
@@ -135,7 +135,7 @@ pub(crate) fn pick(
 /// files of the last level that span the intervals are rewritten in that level, cut at the edges
 /// of the intervals, and the ingestion finds the last level free.
 pub(crate) fn room_for_ingest(v: &Version, intervals: &[(Vec<u8>, Vec<u8>)]) -> Option<Plan> {
-    let spanning = |level: usize| -> Vec<Rc<Table>> {
+    let spanning = |level: usize| -> Vec<Arc<Table>> {
         let files = v.levels[level].iter();
         files
             .filter(|t| {
@@ -172,7 +172,7 @@ pub(crate) struct ExportSpec {
 /// One input read in order.
 #[derive(Debug)]
 struct Lane {
-    table: Rc<Table>,
+    table: Arc<Table>,
     next_block: usize,
     blocks: VecDeque<Block>,
     cur: Option<BlockCursor>,
@@ -370,7 +370,7 @@ impl CompactJob {
     /// An export of `spec` from the files `inputs` (in order of precedence).
     pub(crate) fn export(
         cfg: &LsmConfig,
-        inputs: Vec<(u8, Rc<Table>)>,
+        inputs: Vec<(u8, Arc<Table>)>,
         spec: ExportSpec,
     ) -> CompactJob {
         let first = entry::first_version(&spec.start);

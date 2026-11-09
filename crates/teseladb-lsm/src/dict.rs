@@ -9,7 +9,6 @@
 //! which run one at a time, change which files use a dictionary.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::config::LsmConfig;
@@ -34,7 +33,7 @@ pub(crate) struct Training {
     size: usize,
     cap: usize,
     /// The newest dictionary of each collection when the compaction started: its outputs use it.
-    pub(crate) current: Rc<CurrentDictionaries>,
+    pub(crate) current: Arc<CurrentDictionaries>,
     /// The collection of each dictionary, by version.
     versions: BTreeMap<u64, Vec<u8>>,
     /// Files that use each dictionary when the compaction started.
@@ -59,7 +58,7 @@ impl Training {
             renew: cfg.dict_renew_bytes,
             size: cfg.dict_bytes,
             cap: cfg.dict_bytes.saturating_mul(SAMPLES_PER_BYTE).min(MAX_SAMPLES),
-            current: Rc::new(state.current_dictionaries()),
+            current: Arc::new(state.current_dictionaries()),
             versions,
             used,
             before,

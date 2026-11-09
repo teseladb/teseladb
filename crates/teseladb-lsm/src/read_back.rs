@@ -7,7 +7,7 @@
 //! that key as a point read does, which decides its versions, retractions, intents and range
 //! tombstones. A read of the last `n` keys costs `n` such steps, not a read of the whole range.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 
@@ -20,7 +20,7 @@ use crate::version::{Version, View};
 
 /// A backward range read in progress: call [`BackScan::next`] until [`Step::Done`].
 pub struct BackScan {
-    version: Rc<Version>,
+    version: Arc<Version>,
     start: Vec<u8>,
     /// Every key at or above it is behind the scan (excluded).
     bound: Vec<u8>,
@@ -131,7 +131,7 @@ impl BackScan {
             }
         };
         for m in &self.version.memtables {
-            if let Some(ikey) = m.borrow().before(&target) {
+            if let Some(ikey) = m.before(&target) {
                 keep(ikey);
             }
         }
@@ -165,7 +165,7 @@ impl BackScan {
 
 /// The last internal key of table `t` before `target`: from the block `target` falls in, or the
 /// last key of the block before it, which the index holds.
-fn table_before(r: &mut Reader, t: &Rc<Table>, target: &[u8]) -> Result<InTable, crate::LsmError> {
+fn table_before(r: &mut Reader, t: &Arc<Table>, target: &[u8]) -> Result<InTable, crate::LsmError> {
     let Some(i) = t.find_block(target) else {
         // Every key of the file is below the target: its last one.
         return Ok(InTable::Ready(t.blocks().checked_sub(1).map(|l| t.last_key(l).to_vec())));

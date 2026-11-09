@@ -68,7 +68,7 @@ impl Lsm {
             stalls_total: c.stalls,
             rejects_total: c.rejects,
             cache_bytes: r.cache.used(),
-            memtable_bytes: v.memtables.iter().map(|m| m.borrow().bytes()).sum(),
+            memtable_bytes: v.memtables.iter().map(|m| m.bytes()).sum(),
             files: v.tables().count(),
             blocks_written: c.blocks,
             block_bytes_written: c.block_bytes,

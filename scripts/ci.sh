@@ -79,6 +79,9 @@ gate "3. tests" cargo test --workspace --offline -q
 gate "1. lints for x86_64 Linux" cargo clippy --workspace --all-targets --offline \
   --target x86_64-unknown-linux-musl -- -D warnings
 gate "1. shell scripts" shellcheck_all
+# The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
+gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable::
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh

@@ -6,14 +6,24 @@
 //!   every block cached, under 1.5 µs and 100 µs at p50;
 //! - `lsm.get_disk`: a point read whose block comes from the disk (the page cache may serve
 //!   it), without a target;
-//! - `lsm.compaction_mb_s`: one compaction of every file, without a target.
+//! - `lsm.compaction_mb_s`: one compaction of every file, without a target;
+//! - `lsm.get_cached_shared`: the cached point read from another thread over the published view,
+//!   at most 10 % above `lsm.get_cached` at p50 (FR-026, SC-008);
+//! - `lsm.get_shared_1_reader` and `lsm.get_shared_8_readers`: point reads per second of one and
+//!   of eight reader threads while the core writes and publishes; eight give at least six times
+//!   what one gives (SC-008).
 
+use std::collections::HashMap;
+use std::fs::File;
 use std::hint::black_box;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
-use teseladb_lsm::{Lookup, Lsm, LsmConfig, Step};
+use teseladb_lsm::{BlockNeed, Lookup, Lsm, LsmConfig, SharedLsm, SharedRead, Step, ViewCache};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Histogram, Nanos, Rng};
 
@@ -87,6 +97,143 @@ fn write_batch(
     Ok(ns)
 }
 
+/// A reader on another thread (FR-026): the published view, and the blocks it misses read from
+/// their files, as a connection's thread reads them.
+struct SharedReader {
+    shared: SharedLsm,
+    view: ViewCache,
+    root: PathBuf,
+    files: HashMap<String, File>,
+}
+
+impl SharedReader {
+    fn new(shared: SharedLsm, root: &Path) -> SharedReader {
+        SharedReader {
+            shared,
+            view: ViewCache::default(),
+            root: root.to_path_buf(),
+            files: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: &[u8]) -> bool {
+        loop {
+            let view = self.shared.view_cached(&mut self.view);
+            match view.get(&self.shared, key, ts(u64::MAX)) {
+                SharedRead::Hit(_) => return true,
+                SharedRead::Need(need) => {
+                    let bytes = self.read(&need);
+                    if self.shared.supply(&need, &bytes).is_err() {
+                        return false;
+                    }
+                }
+                SharedRead::NotFound | SharedRead::Failed(_) => return false,
+            }
+        }
+    }
+
+    /// The bytes `need` names, up to the end of the file.
+    fn read(&mut self, need: &BlockNeed) -> Vec<u8> {
+        let root = &self.root;
+        let f = self.files.entry(need.path.clone()).or_insert_with(|| {
+            File::open(root.join(&need.path)).unwrap_or_else(|e| panic!("{}: {e}", need.path))
+        });
+        let mut buf = vec![0; usize::try_from(need.len).unwrap_or(0)];
+        let mut got = 0;
+        while got < buf.len() {
+            match f.read_at(&mut buf[got..], need.offset + got as u64) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(e) => panic!("{}: {e}", need.path),
+            }
+        }
+        buf.truncate(got);
+        buf
+    }
+}
+
+/// Point reads per second of `readers` threads over `KEYS` while the core writes new keys and
+/// publishes its version after each batch.
+fn shared_throughput(
+    args: &Args,
+    lsm: &mut Lsm,
+    disk: &mut dyn Disk,
+    root: &Path,
+    readers: usize,
+    clock: &Instant,
+) -> Result<f64, String> {
+    let shared = lsm.shared();
+    let stop = AtomicBool::new(false);
+    let reads = AtomicU64::new(0);
+    let mut next = KEYS * 10;
+    let elapsed = std::thread::scope(|s| -> Result<f64, String> {
+        for r in 0..readers {
+            let (shared, stop, reads) = (shared.clone(), &stop, &reads);
+            s.spawn(move || {
+                let mut reader = SharedReader::new(shared, root);
+                let mut rng = Rng::new(11 + r as u64);
+                let mut n = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    black_box(reader.get(&key(rng.range(0, KEYS))));
+                    n += 1;
+                }
+                reads.fetch_add(n, Ordering::Relaxed);
+            });
+        }
+        let start = Instant::now();
+        while start.elapsed() < args.duration {
+            for _ in 0..BATCH {
+                next += 1;
+                lsm.put(G, next, &key(next), ts(2), &VALUE).map_err(msg)?;
+            }
+            lsm.publish();
+            drain(lsm, disk, clock);
+        }
+        stop.store(true, Ordering::Relaxed);
+        Ok(start.elapsed().as_secs_f64())
+    })?;
+    Ok(reads.load(Ordering::Relaxed) as f64 / elapsed)
+}
+
+/// The cached point read from another thread over the published view (FR-026, SC-008), on the
+/// same LSM and at the same moment as the core's own cached read, so that the two differ only by
+/// the path: it writes nothing.
+fn shared_latency(args: &Args, lsm: &Lsm, root: &Path) -> Result<Histogram, String> {
+    lsm.publish();
+    let shared = lsm.shared();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut reader = SharedReader::new(shared.clone(), root);
+            for i in (0..KEYS).step_by(50) {
+                reader.get(&key(i));
+            }
+            let mut rng = Rng::new(7);
+            super::per_op(args.warmup, args.duration, || {
+                black_box(reader.get(&key(rng.range(0, KEYS))));
+            })
+        })
+        .join()
+        .map_err(|_| "a reader thread failed".to_string())
+    })
+}
+
+/// Reads per second of one and of eight threads while the core writes and publishes (SC-008).
+fn shared_scaling(
+    args: &Args,
+    lsm: &mut Lsm,
+    disk: &mut dyn Disk,
+    root: &Path,
+    clock: &Instant,
+    report: &mut Report,
+) -> Result<(), String> {
+    lsm.publish();
+    let one = shared_throughput(args, lsm, disk, root, 1, clock)?;
+    report.push("lsm.get_shared_1_reader", "op/s", one, None);
+    let eight = shared_throughput(args, lsm, disk, root, 8, clock)?;
+    report.push("lsm.get_shared_8_readers", "op/s", eight, Some(Target::AtLeast(one * 6.0)));
+    Ok(())
+}
+
 /// An LSM in its own subfolder of the data folder, with its own disk executor.
 fn open(dir: &DataDir, name: &str, cfg: &LsmConfig) -> Result<(Lsm, FileDisk), String> {
     let path = dir.path.join(name);
@@ -142,6 +289,9 @@ pub fn run(args: &Args) -> Result<Report, String> {
         black_box(scan_1000(&mut lsm, &mut disk, from, &clock));
     });
     report.latency("lsm.scan_1000_cached", &scan, Some(100_000.0), None);
+    let cached_p50 = cached.percentile(50.0) as f64;
+    let shared = shared_latency(args, &lsm, &dir.path.join("read"))?;
+    report.latency("lsm.get_cached_shared", &shared, Some(cached_p50 * 1.1), None);
     // Reads from the disk: the same files under a new LSM without a block cache, so every read
     // goes to the disk (the operating system's page cache may still serve it).
     drop((lsm, disk));
@@ -167,6 +317,12 @@ pub fn run(args: &Args) -> Result<Report, String> {
     drain(&mut cold, &mut disk, &clock);
     let compaction_mb_s = before as f64 / t.elapsed().as_secs_f64() / 1e6;
     report.push("lsm.compaction_mb_s", "MB/s", compaction_mb_s, None);
+    // The scaling of the reads from other threads, last: it writes too, which would change the
+    // phases above.
+    drop((cold, disk));
+    let (mut lsm, mut disk) = open(&dir, "read", &cfg)?;
+    let root = dir.path.join("read");
+    shared_scaling(args, &mut lsm, &mut disk, &root, &clock, &mut report)?;
     Ok(report)
 }
 

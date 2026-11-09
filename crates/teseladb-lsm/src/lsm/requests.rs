@@ -2,7 +2,7 @@
 //! and clearings. Exports, ingestions and clearings queue up and become background jobs in their
 //! turn, and their outcome arrives in [`Completions`](super::Completions).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
@@ -114,7 +114,7 @@ impl Lsm {
         }
         match self.requests.pop_front().expect("checked") {
             Request::Export(spec) => {
-                let inputs: Vec<(u8, Rc<Table>)> = self
+                let inputs: Vec<(u8, Arc<Table>)> = self
                     .version
                     .levels
                     .iter()

@@ -220,6 +220,31 @@ else
   echo "FAILED: a lock in teseladb-crypto (exit $rc)"
   echo "  | ${out//$'\n'/$'\n'  | }"
 fi
+d=$(fixture test-threads)
+printf '#[cfg(test)]\nmod tests {\n    fn t() {\n        std::thread::spawn(|| ());\n    }\n}\n' \
+  >> "$d/crates/teseladb-types/src/lib.rs"
+expect "threads in the tests of a logic crate" "$d" 0 "^check-deps: OK$"
+
+d=$(fixture io-after-test)
+printf '#[cfg(test)]\nfn helper() {}\npub fn g() {\n    let _ = std::fs::read("x");\n}\n' \
+  >> "$d/crates/teseladb-types/src/lib.rs"
+expect "I/O after a test item" "$d" 1 "crates/teseladb-types/src/lib.rs:6: .*std::fs::read"
+
+d=$(fixture unsafe-module)
+mkdir -p "$d/crates/teseladb-lsm/src"
+printf '[package]\nname = "teseladb-lsm"\n' > "$d/crates/teseladb-lsm/Cargo.toml"
+printf '#![deny(unsafe_code)]\nmod skiplist;\n' > "$d/crates/teseladb-lsm/src/lib.rs"
+printf '#![allow(unsafe_code)]\npub fn f() {}\n' > "$d/crates/teseladb-lsm/src/skiplist.rs"
+expect "a module of D-151 allows unsafe code" "$d" 0 "^check-deps: OK$"
+printf '#![forbid(unsafe_code)]\nmod skiplist;\n' > "$d/crates/teseladb-lsm/src/lib.rs"
+expect "the crate of a module of D-151 denies unsafe code" "$d" 1 \
+  "crates/teseladb-lsm/src/lib.rs: no #!\\[deny\\(unsafe_code\\)\\]"
+
+d=$(fixture unsafe-elsewhere)
+printf '#![allow(unsafe_code)]\npub fn g() {}\n' > "$d/crates/teseladb-types/src/other.rs"
+expect "unsafe code allowed outside the modules of D-151" "$d" 1 \
+  "crates/teseladb-types/src/other.rs: allows unsafe code outside the modules of D-151"
+
 d=$(fixture lock-elsewhere)
 printf 'use std::sync::Mutex;\n' >> "$d/crates/teseladb-types/src/lib.rs"
 printf '// A Mutex would hold up the core.\n' >> "$d/crates/teseladb-io/src/lib.rs"
