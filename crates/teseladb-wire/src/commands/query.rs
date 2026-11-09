@@ -188,14 +188,7 @@ impl Plan {
         let filter =
             Filter::parse(RawDoc::from_bytes_with(&fb, command_limits())?, FilterUse::Query)
                 .map_err(from_mql)?;
-        let projection = match projection {
-            Some(p) if !p.is_empty() => {
-                let pb = raw_bytes(p)?;
-                let raw = RawDoc::from_bytes_with(&pb, command_limits())?;
-                Some(Projection::parse(raw).map_err(from_mql)?)
-            }
-            Some(_) | None => None,
-        };
+        let projection = parse_projection(projection)?;
         Ok(Plan { filter, projection, collation: collation_of(collation)?, vars: None })
     }
 
@@ -265,6 +258,29 @@ impl Plan {
             None => Ok(()),
         }
     }
+}
+
+/// Projection `p` parsed; `None` when there is none or it is empty.
+fn parse_projection(p: Option<&Document>) -> Result<Option<Projection>, CommandError> {
+    match p {
+        Some(p) if !p.is_empty() => {
+            let pb = raw_bytes(p)?;
+            let raw = RawDoc::from_bytes_with(&pb, command_limits())?;
+            Ok(Some(Projection::parse(raw).map_err(from_mql)?))
+        }
+        Some(_) | None => Ok(None),
+    }
+}
+
+/// Whether projection `p` is one RefDb's express path takes: each field, by its path,
+/// included or excluded with a number or a boolean; no positional `$`, operator, computed value
+/// or nested form.
+fn simple_projection(p: &Document) -> bool {
+    p.iter().all(|(k, v)| {
+        !k.starts_with('$')
+            && !k.ends_with(".$")
+            && matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Boolean(_))
+    })
 }
 
 /// The documents interval of collection `c`.
@@ -1186,10 +1202,19 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
 }
 
+/// What a simple projection of the express path needs: no collation, variable, position, sort
+/// key or index key (it names fields only).
+const EXPRESS_PROJECTION: ProjectionContext<'static> = ProjectionContext {
+    matcher: MatchContext { collation: None, ext: &super::engines::NodeExtensions, vars: None },
+    position: None,
+    sort_key: None,
+    index_key: None,
+};
+
 /// A `find` of one `_id` by equality, answered without the planner as RefDb's express path
 /// answers it (the conditions are in H-013 of the native tests' findings), which TeselaDB's
 /// `explain` already shows as `EXPRESS_IXSCAN`. The filter is the
-/// `_id` alone; no projection, `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
+/// `_id` alone; a simple projection or none ([`simple_projection`]); no `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
 /// `showRecordId` or tailable cursor; a sort only of fields in either direction (one document
 /// is in any order); no collation, the command's or the collection's; not a time series. The
 /// document is read as before, at the key of its `_id` with the same note of the `_id` index,
@@ -1207,7 +1232,7 @@ fn express_find<B: Backend + ?Sized>(
             if s.iter().all(|(_, v)| matches!(v, Value::Int32(1 | -1) | Value::Int64(1 | -1))
                 || matches!(v, Value::Double(d) if *d == 1.0 || *d == -1.0)));
     let eligible = a.filter.len() == 1
-        && a.projection.is_none()
+        && a.projection.as_ref().is_none_or(simple_projection)
         && a.skip == 0
         && a.bounds.is_none()
         && !a.return_key
@@ -1226,6 +1251,9 @@ fn express_find<B: Backend + ?Sized>(
     if measurements_of(coll, ctx.cmd)?.is_some() {
         return Ok(None);
     }
+    // Parsed before the read: a projection that mixes inclusion and exclusion fails also for an
+    // `_id` that is not there.
+    let projection = parse_projection(a.projection.as_ref())?;
     let docs = match super::crud::id_doc_key(ctx.backend, coll, &id)? {
         Some(key) => {
             // The read goes through the index of `_id` (`$indexStats` counts it).
@@ -1235,7 +1263,11 @@ fn express_find<B: Backend + ?Sized>(
             let mut docs = Vec::with_capacity(rows.len());
             for (_, bytes) in rows {
                 // A stored document always parses: one that does not is a fault, not a miss.
-                docs.push(Document::from(RawDoc::from_bytes(&bytes)?));
+                let raw = RawDoc::from_bytes(&bytes)?;
+                docs.push(match &projection {
+                    None => Document::from(raw),
+                    Some(p) => p.apply(raw, &EXPRESS_PROJECTION).map_err(from_mql)?,
+                });
             }
             docs
         }
@@ -2416,4 +2448,37 @@ fn planned<B: Backend + ?Sized>(
         ),
     };
     super::plan_exec::planned_documents(ctx.backend, coll, &read, note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::simple_projection;
+    use teseladb_bson::extjson;
+
+    fn simple(text: &str) -> bool {
+        simple_projection(&extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}")))
+    }
+
+    #[test]
+    fn a_simple_projection_includes_or_excludes_fields_with_numbers_or_booleans() {
+        for p in [r#"{}"#, r#"{"v":1}"#, r#"{"_id":0,"a.b":1}"#, r#"{"v":true}"#, r#"{"v":0.5}"#] {
+            assert!(simple(p), "{p}");
+        }
+        let long = r#"{"v":{"$numberLong":"0"}}"#;
+        assert!(simple(long), "{long}");
+        for p in [
+            r#"{"a":{"b":1}}"#,
+            r#"{"a.$":1}"#,
+            r#"{"a":{"$slice":1}}"#,
+            r#"{"a":{"$elemMatch":{"b":1}}}"#,
+            r#"{"s":{"$meta":"textScore"}}"#,
+            r#"{"w":"$v"}"#,
+            r#"{"w":"text"}"#,
+            r#"{"w":[1]}"#,
+            r#"{"$v":1}"#,
+            r#"{"v":null}"#,
+        ] {
+            assert!(!simple(p), "{p}");
+        }
+    }
 }

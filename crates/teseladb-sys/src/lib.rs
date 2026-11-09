@@ -50,6 +50,13 @@ pub mod drive {
         crate::os::push_to_drive(file)
     }
 
+    /// [`push_to_drive`] of the file open at descriptor `fd`, which another thread holds open
+    /// while it waits for this push (the leader of a group commit pushes each file of its
+    /// group). A descriptor that is not open fails with `EBADF`.
+    pub fn push_descriptor(fd: std::os::fd::RawFd) -> io::Result<()> {
+        crate::os::push_descriptor(fd)
+    }
+
     /// `fcntl(F_FULLFSYNC)`: the drive writes its whole cache to permanent storage.
     pub fn flush_drive(file: &File) -> io::Result<()> {
         crate::os::flush_drive(file)

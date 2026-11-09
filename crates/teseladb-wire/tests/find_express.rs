@@ -1,7 +1,7 @@
 //! A `find` of one `_id` by equality goes without the planner (H-013 of the native tests, as
 //! RefDb's express path): it answers what the planned read answers for every kind of `_id`,
-//! with a sort or without one, and the commands it does not take (a projection, a collation, a
-//! `skip`, a `batchSize`) still answer as before.
+//! with a sort or without one and with a simple projection, and the commands it does not take (a
+//! projection with an operator, a collation, a `skip`, a `batchSize`) still answer as before.
 
 mod common;
 
@@ -71,9 +71,9 @@ fn a_find_by_id_answers_what_the_planned_read_answers() {
 fn a_find_by_id_the_express_path_does_not_take_answers_as_before() {
     let mut m = Mem::new();
     run(&mut m, r#"{"insert":"c","documents":[{"_id":"a","v":1},{"_id":"B","v":2}]}"#);
-    // A projection.
-    let r = run(&mut m, r#"{"find":"c","filter":{"_id":"a"},"projection":{"v":0}}"#);
-    assert_eq!(batch(&r), vec![json(r#"{"_id":"a"}"#)]);
+    // A projection with an operator.
+    let r = run(&mut m, r#"{"find":"c","filter":{"_id":"a"},"projection":{"w":"$v"}}"#);
+    assert_eq!(batch(&r), vec![json(r#"{"_id":"a","w":1}"#)]);
     // A collation that makes "b" equal to "B".
     let r = run(
         &mut m,
@@ -92,4 +92,47 @@ fn a_find_by_id_the_express_path_does_not_take_answers_as_before() {
     run(&mut m, r#"{"create":"ci","collation":{"locale":"en","strength":2}}"#);
     run(&mut m, r#"{"insert":"ci","documents":[{"_id":"A","v":1}]}"#);
     assert_eq!(batch(&run(&mut m, r#"{"find":"ci","filter":{"_id":"a"}}"#)).len(), 1);
+}
+
+#[test]
+fn a_find_by_id_with_a_simple_projection_answers_what_the_planned_read_answers() {
+    let mut m = Mem::new();
+    let docs = r#"[{"_id":1,"v":1,"w":"x","a":{"b":2,"c":[1,2]},"z":null},{"_id":2,"v":2}]"#;
+    run(&mut m, &format!(r#"{{"insert":"c","documents":{docs}}}"#));
+    let projections = [
+        r#"{"v":1}"#,
+        r#"{"v":0}"#,
+        r#"{"_id":0}"#,
+        r#"{"_id":0,"v":1}"#,
+        r#"{"_id":1,"w":0}"#,
+        r#"{"a.b":1}"#,
+        r#"{"a.b":0}"#,
+        r#"{"a":{"c":1}}"#,
+        r#"{"v":true,"w":true}"#,
+        r#"{"v":false}"#,
+        r#"{"v":1.5,"missing":1}"#,
+        r#"{"v":{"$numberLong":"1"}}"#,
+        r#"{}"#,
+        r#"{"a.c":{"$slice":1}}"#,
+        r#"{"w":"$v"}"#,
+    ];
+    for f in [r#"{"_id":1}"#, r#"{"_id":2}"#, r#"{"_id":3}"#] {
+        for p in projections {
+            let express = run(&mut m, &format!(r#"{{"find":"c","filter":{f},"projection":{p}}}"#));
+            let planned_filter = format!(r#"{{"$and":[{f},{{"_id":{{"$exists":true}}}}]}}"#);
+            let planned = run(
+                &mut m,
+                &format!(r#"{{"find":"c","filter":{planned_filter},"projection":{p}}}"#),
+            );
+            assert_eq!(batch(&express), batch(&planned), "{f} {p}");
+        }
+    }
+    // A projection that mixes inclusion and exclusion fails before any document is read, on
+    // either path and also for an `_id` that is not there.
+    for f in [r#"{"_id":1}"#, r#"{"_id":3}"#] {
+        let r =
+            run(&mut m, &format!(r#"{{"find":"c","filter":{f},"projection":{{"v":1,"w":0}}}}"#));
+        assert_eq!(field(&r, "ok"), &Value::Double(0.0), "{r:?}");
+        assert_eq!(field(&r, "code"), &Value::Int32(31254), "{r:?}");
+    }
 }
