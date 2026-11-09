@@ -136,6 +136,10 @@ variants!(
     // the majority acknowledged below its mark (`mvcc`, seed 3, measured 09-11-2026).
     ("outside_ignores_latches", "mvcc", Default, 1000),
     ("partial_double_count", "queries-oracle", Default, 1000),
+    // A proposal the leader refuses leaves its value pending (005 T054): the next write of the key
+    // goes on a value that never was in the log, and `range-docs` finds a write acknowledged with
+    // `w: 1` in no value and no rollback file (`rollback`, seed 2, measured 09-11-2026).
+    ("pending_on_refusal", "rollback", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
     // A push by read that leaves no read in the cache of the record's key (008 T043): a commit
     // evaluated after it goes at or below the reader's mark, and seed 5 of `txn-append` closes a
@@ -161,6 +165,9 @@ variants!(
     // `txn-bank`, whose read of every account misses one side of a transfer. `scripts/sim-mutants.sh`
     // takes the first workload by name within the lowest seed, so `indexes` decides.
     ("reader_ignores_push_result", "index_consistency", Default, 1000),
+    // Reads that do not wait for the pipelined writes of their keys (005 T054): `range-docs` sees
+    // a read miss a write committed below its mark (`mvcc`, seed 1, measured 09-11-2026).
+    ("reads_skip_pipelined", "mvcc", Default, 1000),
     // A reaper that removes a client transaction's record as soon as it is final (008 record GC):
     // `txn_recovery` finds a removal with no later transaction of its session and its session's
     // time not over.

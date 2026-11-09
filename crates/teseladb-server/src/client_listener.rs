@@ -907,6 +907,13 @@ impl Client {
                     }
                     self.note_handshake();
                     self.note_certificate();
+                    // A read that did not fill the chunk took what was there: the poller is
+                    // level-triggered and reports the socket again if more came, so a second
+                    // read that would only find it empty is not made (H-013, as AnotherProduct reads once
+                    // per readable event).
+                    if n < chunk.len() {
+                        return true;
+                    }
                 }
                 Err(e) => return e.kind() == ErrorKind::WouldBlock,
             }

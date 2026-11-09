@@ -590,3 +590,87 @@ fn a_merge_waits_until_no_read_outside_can_take_a_mark_through_the_last_view() {
     // A range never published has nothing to wait for.
     assert!(n.host.views_settled(GroupId(99), n.now));
 }
+
+/// The index of the newest entry of the range's log on this node.
+fn last_index(n: &Node) -> u64 {
+    n.core.status(G).expect("the range").last_index
+}
+
+#[test]
+fn a_second_write_to_a_document_goes_on_the_first_pending_one() {
+    // 005 FR-029: the second write is proposed before the first is applied, evaluated on its
+    // pending value; each is answered once its own entry commits.
+    let mut n = Node::new();
+    let before = last_index(&n);
+    let w1 = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    let w2 = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    assert_eq!(last_index(&n), before + 2, "both proposed before either applied");
+    assert!(n.reply(w1).is_none() && n.reply(w2).is_none(), "neither answered before it commits");
+    // A read waits for the pending writes of its key.
+    let r = n.get(b"\x01count", ReadConcern::Majority);
+    assert!(n.reply(r).is_none(), "the read waits");
+    n.settle();
+    let ts = |id| match n.reply(id) {
+        Some(Ok(Reply::Mutated { ts, .. })) => *ts,
+        other => panic!("{other:?}"),
+    };
+    assert!(ts(w2) > ts(w1), "the second above the first");
+    match n.reply(r) {
+        Some(Ok(Reply::Value { value, .. })) => {
+            assert_eq!(value.as_ref().map(|v| v.1.clone()), Some(vec![2]))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_write_refused_before_the_log_leaves_nothing_for_the_next() {
+    // A mutation that fails is never proposed: the next write to the document is evaluated on
+    // what is applied, not on a value that never existed.
+    let mut n = Node::new();
+    let w1 = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    let refused = n.mutate(b"\x01count", Box::new(Refuse), MAJORITY);
+    let w3 = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    assert!(matches!(n.reply(w1), Some(Ok(Reply::Mutated { .. }))));
+    assert!(
+        matches!(n.reply(refused), Some(Err(RangeError::Mutation(_)))),
+        "{:?}",
+        n.reply(refused)
+    );
+    assert!(matches!(n.reply(w3), Some(Ok(Reply::Mutated { .. }))));
+    let r = n.get(b"\x01count", ReadConcern::Majority);
+    n.settle();
+    match n.reply(r) {
+        Some(Ok(Reply::Value { value, .. })) => {
+            assert_eq!(value.as_ref().map(|v| v.1.clone()), Some(vec![2]))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Fails when the counter is at one: a compare-and-swap that finds another value.
+struct FailAtOne;
+
+impl Mutation for FailAtOne {
+    fn eval(&self, current: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
+        match current[0] {
+            Some((_, [1])) => Err(MutationError("found 1".into())),
+            _ => Ok(Outcome { puts: vec![], deletes: vec![], change: vec![], result: vec![] }),
+        }
+    }
+}
+
+#[test]
+fn a_write_that_fails_on_a_pending_one_answers_only_after_it_commits() {
+    // 005 FR-029: a failure is a read of what the write found; found on a pending write, it is
+    // not given before that write commits (one the leader then lost would never have existed).
+    let mut n = Node::new();
+    let w1 = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    let w2 = n.mutate(b"\x01count", Box::new(FailAtOne), MAJORITY);
+    assert!(n.reply(w2).is_none(), "not answered on the pending value");
+    n.settle();
+    let at = |id| n.replies.iter().position(|(r, _)| *r == id).expect("answered");
+    assert!(at(w1) < at(w2), "the failure goes after the write it found");
+    assert!(matches!(n.reply(w2), Some(Err(RangeError::Mutation(_)))), "{:?}", n.reply(w2));
+}

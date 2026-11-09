@@ -106,8 +106,8 @@ impl ServerBackend {
         let (g, core) = self.h.routes.route_of(&mut self.outside.routes, key)?;
         let core = usize::from(core);
         let view = self.h.views.get(core)?.get(g)?;
-        let value = self.serve(core, &view, key, concern)?;
-        self.tally(core, g, key);
+        let (value, at) = self.serve(core, &view, key, concern)?;
+        self.tally(core, g, key, at);
         Some(value)
     }
 
@@ -117,14 +117,18 @@ impl ServerBackend {
         view: &RangeView,
         key: &[u8],
         concern: ReadConcern,
-    ) -> Option<Option<Vec<u8>>> {
+    ) -> Option<(Option<Vec<u8>>, Instant)> {
         if self.outside.caches.len() <= core {
             self.outside.caches.resize_with(core + 1, ViewCache::default);
         }
         let origin = self.h.origin;
-        // The node's monotonic time, as its cores count it; the view asks once its mark is taken.
-        let now = move || {
-            let since = Instant::now().saturating_duration_since(origin);
+        // The node's monotonic time, as its cores count it; the view asks once its mark is taken,
+        // and the read's tally counts it at that same instant.
+        let asked = std::cell::Cell::new(None);
+        let now = || {
+            let at = Instant::now();
+            asked.set(Some(at));
+            let since = at.saturating_duration_since(origin);
             Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
         };
         for _ in 0..=MAX_BLOCKS {
@@ -132,7 +136,8 @@ impl ServerBackend {
             match view.read(&mut self.outside.caches[core], key, wall, now, concern) {
                 // A version that only serves the history is no document, as in the core's reads.
                 FastRead::Found { value, .. } => {
-                    return Some(value.filter(|(t, _)| *t != HISTORY_VALUE).map(|(_, v)| v));
+                    let value = value.filter(|(t, _)| *t != HISTORY_VALUE).map(|(_, v)| v);
+                    return Some((value, asked.get().unwrap_or_else(Instant::now)));
                 }
                 FastRead::Need(need) => {
                     let dir = self.h.data_dir.as_deref()?;
@@ -146,9 +151,8 @@ impl ServerBackend {
     }
 
     /// Counts a read of `key` served outside core `core` for range `g`'s load.
-    fn tally(&mut self, core: usize, g: GroupId, key: &[u8]) {
+    fn tally(&mut self, core: usize, g: GroupId, key: &[u8], now: Instant) {
         let r = Backend::random(self);
-        let now = Instant::now();
         let t = self.outside.tallies.entry((core, g)).or_insert_with(|| Tally {
             ops: 0,
             keys: Vec::with_capacity(SAMPLES),

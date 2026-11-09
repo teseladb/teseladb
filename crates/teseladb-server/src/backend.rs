@@ -1777,7 +1777,10 @@ impl Backend for ServerBackend {
     }
 
     fn thread_cpu_nanos(&mut self) -> Option<u64> {
-        teseladb_sys::host::thread_cpu_nanos().ok()
+        // As RefDb 9.0.4, whose operation CPU timers exist on Linux alone: elsewhere no
+        // operation reports `cpuNanos`, and none pays the system calls that read a thread's CPU
+        // time (four per operation, H-013 of the native tests on macOS).
+        if cfg!(target_os = "linux") { teseladb_sys::host::thread_cpu_nanos().ok() } else { None }
     }
 
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {

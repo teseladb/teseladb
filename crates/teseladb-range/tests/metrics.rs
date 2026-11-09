@@ -75,15 +75,22 @@ fn a_write_waiting_for_another_writes_latch_counts_once() {
     let l = c.elect();
     let followers = c.others(l);
     c.slow.extend(followers);
-    let first = c.mutate(l, KEY, 1, MAJORITY);
-    let second = c.mutate(l, KEY, 2, MAJORITY);
+    // A write and a retry of the same statement: since 005 FR-029 a second write of the key goes
+    // on the first, pending, but a retry waits for its original (its idempotence record).
+    let stmt = DedupKey { lsid: 7, txn_number: 1, stmt_id: 0 };
+    let first = c.mutate_with(l, &[KEY], Box::new(Set(1)), Some(stmt));
+    let retry = c.mutate_with(l, &[KEY], Box::new(Set(1)), Some(stmt));
     for _ in 0..5 {
         c.settle();
     }
-    assert_eq!((c.reply(l, first), c.reply(l, second)), (None, None));
-    assert_eq!(metrics(&c, l).latch_waits, 1, "the second write waits for the first");
+    assert_eq!((c.reply(l, first), c.reply(l, retry)), (None, None));
+    assert_eq!(metrics(&c, l).latch_waits, 1, "the retry waits for the original");
     c.slow.clear();
     c.ticks(10);
-    assert!(matches!(c.reply(l, second), Some(Ok(_))));
-    assert_eq!(metrics(&c, l).propose_latency.count(), 2);
+    assert!(matches!(c.reply(l, retry), Some(Ok(_))));
+    assert_eq!(
+        metrics(&c, l).propose_latency.count(),
+        1,
+        "the retry answers the original's result"
+    );
 }

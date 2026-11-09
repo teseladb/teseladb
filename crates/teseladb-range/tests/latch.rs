@@ -129,3 +129,45 @@ fn a_read_at_its_own_mark_goes_just_below_the_writes_in_flight() {
     }
     assert!(latches.is_empty());
 }
+
+#[test]
+fn a_pipelined_write_lets_the_next_plain_write_go_on_it_and_holds_the_rest() {
+    // 005 FR-029: once the first write's entry is in the log, the next write without a
+    // transaction takes the key and sees the pending value; a transaction and the reads still
+    // wait for the first to be applied.
+    let mut latches = Latches::default();
+    let doc = b"doc".to_vec();
+    // A retryable write takes its idempotence record with its keys, as the host does.
+    let first = latches.acquire_pipelined(&[doc.clone(), b"record".to_vec()]).unwrap();
+    assert_eq!(
+        latches.acquire_pipelined(std::slice::from_ref(&doc)),
+        Err(first),
+        "not yet proposed"
+    );
+    latches.set_mark(first, ts(5));
+    let mut written = std::collections::BTreeMap::new();
+    written.insert(doc.clone(), Some((3u8, vec![1])));
+    written.insert(b"index".to_vec(), None);
+    latches.pipeline(first, ts(5), &[b"record".to_vec()], written);
+    assert_eq!(latches.pending_value(&doc), Some(&Some((3, vec![1]))));
+    assert_eq!(latches.pending_value(b"index"), Some(&None), "a delete is pending too");
+    let second = latches.acquire_pipelined(std::slice::from_ref(&doc)).expect("goes on the first");
+    // A transaction, and a retry of the first statement (its record), wait for the first.
+    assert_eq!(latches.acquire(std::slice::from_ref(&doc)), Err(first));
+    assert_eq!(latches.acquire_pipelined(&[b"record".to_vec()]), Err(first));
+    // A read at or above the first's mark waits for it.
+    assert_eq!(latches.read_wait(b"d", b"e", ts(9), WaitFor::AtOrBelow), ReadWait::On(first));
+    assert!(latches.is_held(b"index"));
+    // The second, proposed after it, is the newest pending value.
+    latches.set_mark(second, ts(7));
+    let mut written = std::collections::BTreeMap::new();
+    written.insert(doc.clone(), Some((3u8, vec![2])));
+    latches.pipeline(second, ts(7), &[], written);
+    assert_eq!(latches.pending_value(&doc), Some(&Some((3, vec![2]))));
+    latches.release(first);
+    assert_eq!(latches.read_wait(b"d", b"e", ts(9), WaitFor::AtOrBelow), ReadWait::On(second));
+    latches.release(second);
+    assert_eq!(latches.pending_value(&doc), None);
+    assert!(latches.is_empty());
+    assert_eq!(latches.held().load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -408,6 +408,9 @@ pub(crate) struct MutReq {
     state: MutState,
     /// It already waited for a latch (counted once, FR-022).
     waited: bool,
+    /// It takes its latches only once the pending writes of its keys are applied (FR-029): its
+    /// evaluation on them failed, and a failure answers only what is committed.
+    settled: bool,
     /// The mark's physical part past which the leader no longer evaluates it (009 FR-006): the
     /// operation that sent it may have ended and released what it read of the catalog.
     deadline: Option<u64>,
@@ -877,7 +880,8 @@ impl RangeHost {
         }
         self.refresh(core, g);
         let (state, waited) = (MutState::Latch, false);
-        let req = MutReq { g, term: 0, keys, work, dedup, ack, state, waited, deadline };
+        let req =
+            MutReq { g, term: 0, keys, work, dedup, ack, state, waited, settled: false, deadline };
         self.reqs.insert(id, Req::Mut(req));
         self.step(core, id, now);
         id

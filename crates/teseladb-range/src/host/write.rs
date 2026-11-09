@@ -125,7 +125,13 @@ impl RangeHost {
             // A retry of the same statement waits for the original (FR-011).
             let record = m.dedup.map(|k| dedup_key(m.g, k.lsid, k.txn_number, k.stmt_id));
             let keys: Vec<Vec<u8>> = m.keys.iter().cloned().chain(record).collect();
-            match l.latches.acquire(&keys) {
+            // A write without a transaction goes on the pending writes of its keys (FR-029); a
+            // transaction's waits for them to be applied.
+            let taken = match m.work {
+                Work::Mutation(_) if !m.settled => l.latches.acquire_pipelined(&keys),
+                Work::Mutation(_) | Work::Txn(_) => l.latches.acquire(&keys),
+            };
+            match taken {
                 Ok(latch) => {
                     m.state = MutState::Read(latch);
                     m.term = l.term;
@@ -166,7 +172,13 @@ impl RangeHost {
             }
             let mut current = Vec::with_capacity(m.keys.len());
             let view = TxnView::default();
+            let leader = self.ranges.get(&m.g).and_then(|r| r.leader.as_ref());
             for k in &m.keys {
+                // The value a pending write of the key leaves, which this one goes on (FR-029).
+                if let Some(v) = leader.and_then(|l| l.latches.pending_value(k)) {
+                    current.push(v.clone());
+                    continue;
+                }
                 // An intent of a transaction stops the write with its owner (008 FR-002): the
                 // layer above waits for it, or pushes it if it is abandoned, and writes again.
                 match read_visible(&self.lsm, k, (NEWEST, None), &view) {
@@ -292,6 +304,9 @@ impl RangeHost {
             interval.as_ref().is_some_and(|(s, e)| s.as_slice() <= k && k < e.as_slice())
         };
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
+        // Evaluated on a pending write of its keys (FR-029): its answer waits for that write to
+        // commit, so a write without change still goes through the log, behind it.
+        let on_pending = m.keys.iter().any(|k| l.latches.pending_value(k).is_some());
         let floor = l.cache.floor_of(&m.keys);
         // Faulty variant (005 T017): the write ignores the reads of its keys and may go below one;
         // the core no longer raises the new leader's clock to the cache's minimum either
@@ -310,7 +325,10 @@ impl RangeHost {
             let (dedup, deadline) = (&m.dedup, m.deadline);
             // What the replica has applied is committed, so a write without change meets these
             // write concerns at once; a stored result of its statement was looked up before.
-            let shortcut = no_change_meets(m.ack);
+            let shortcut = no_change_meets(m.ack) && !on_pending;
+            // What the write leaves under each key it writes, for the next writes of those keys
+            // while it is pending (FR-029).
+            let mut written: BTreeMap<Vec<u8>, crate::latch::Pending> = BTreeMap::new();
             let build = |ts| {
                 let f = |c: &[Option<(u8, &[u8])>], t: Hlc| {
                     if deadline.is_some_and(|d| t.physical > d) {
@@ -344,12 +362,26 @@ impl RangeHost {
                 {
                     *docs = Some(crate::doc_count::doc_delta(read.0, read.1, puts, deletes));
                 }
+                if let Command::Write { puts, deletes, .. } = &e.command {
+                    written = deletes.iter().map(|k| (k.clone(), None)).collect();
+                    written.extend(
+                        puts.iter().map(|p| (p.key.clone(), Some((p.value_type, p.value.clone())))),
+                    );
+                }
                 (change, result) = (e.change, e.result);
                 Ok::<_, Refused<Eval>>(e.command.encode())
             };
             match core.propose_at(m.g, floor, now, build) {
                 Ok((op, ts)) => {
                     l.latches.set_mark(latch, ts);
+                    // In the leader's log: the next writes of its keys go on it (FR-029); the
+                    // reads and the transactions still wait for it to be applied.
+                    let records: Vec<Vec<u8>> = m
+                        .dedup
+                        .map(|k| dedup_key(m.g, k.lsid, k.txn_number, k.stmt_id))
+                        .into_iter()
+                        .collect();
+                    l.latches.pipeline(latch, ts, &records, std::mem::take(&mut written));
                     break Ok((op, ts, change, result));
                 }
                 Err(ProposeAt::Build(Refused::Below(f))) => floor = f,
@@ -372,8 +404,19 @@ impl RangeHost {
                     break Err(Some(RangeError::Timeout));
                 }
                 Err(ProposeAt::Op(e)) => {
-                    l.latches.release(latch);
-                    break Err(Some(op_error(e)));
+                    // Faulty variant (005 T054): a refused proposal leaves its value pending, and
+                    // the next write of its keys goes on a value that never was in the log.
+                    #[cfg(teseladb_bug = "pending_on_refusal")]
+                    {
+                        let written = std::mem::take(&mut written);
+                        l.latches.pipeline(latch, floor, &[], written);
+                        break Err(Some(op_error(e)));
+                    }
+                    #[cfg(not(teseladb_bug = "pending_on_refusal"))]
+                    {
+                        l.latches.release(latch);
+                        break Err(Some(op_error(e)));
+                    }
                 }
             }
         };
@@ -412,6 +455,14 @@ impl RangeHost {
             }
             Err(None) => {
                 m.keys.extend(more);
+                m.state = MutState::Latch;
+                self.reqs.insert(id, Req::Mut(m));
+            }
+            // A failure evaluated on pending writes may stem from one that never commits: the
+            // write waits for them to be applied and is evaluated again on what is committed
+            // (FR-029).
+            Err(Some(RangeError::Mutation(_))) if on_pending => {
+                m.settled = true;
                 m.state = MutState::Latch;
                 self.reqs.insert(id, Req::Mut(m));
             }

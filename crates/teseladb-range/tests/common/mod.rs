@@ -269,7 +269,7 @@ impl Cluster {
 }
 
 /// Writes one byte at its document.
-pub struct Set(u8);
+pub struct Set(pub u8);
 
 impl Mutation for Set {
     fn eval(&self, current: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {

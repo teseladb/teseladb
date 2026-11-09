@@ -27,18 +27,21 @@ fn a_range_on_its_way_out_refuses_new_writes_before_proposing_them() {
 }
 
 #[test]
-fn a_write_waiting_for_its_latch_is_refused_once_the_range_starts_moving() {
+fn writes_proposed_before_the_move_finish_and_a_later_one_is_refused() {
+    // Since 005 FR-029 a second write of a key goes on the first, pending, so both are in the
+    // log before the move starts; a write that arrives once it started is refused.
     let mut c = Cluster::standard();
     let l = c.elect();
     c.settle();
-    // The first write holds the key's latch until it applies; the second waits for it.
     let first = c.mutate(l, KEY, 1, MAJORITY);
     let second = c.mutate(l, KEY, 2, MAJORITY);
     c.nodes.get_mut(&l).unwrap().host.set_moving([G]);
+    let later = c.mutate(l, KEY, 3, MAJORITY);
     c.ticks(4);
 
     assert!(matches!(c.reply(l, first), Some(Ok(Reply::Mutated { .. }))), "proposed before");
-    assert!(matches!(c.reply(l, second), Some(Err(RangeError::NotLeader { hint: NodeId(0) }))));
+    assert!(matches!(c.reply(l, second), Some(Ok(Reply::Mutated { .. }))), "proposed before");
+    assert!(matches!(c.reply(l, later), Some(Err(RangeError::NotLeader { hint: NodeId(0) }))));
 }
 
 #[test]
