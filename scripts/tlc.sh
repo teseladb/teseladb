@@ -35,10 +35,21 @@ fetch_jar() {
   mv "$JAR.tmp" "$JAR"
 }
 
-# Where TLC runs: Java on the host or, failing that, Docker. On macOS `java` may exist as a
-# launcher without a JDK behind it: check that it works.
+# The Java on the host that works, if any: `$JAVA_HOME`, the `java` of the path, or a Homebrew
+# OpenJDK that is installed without being linked. On macOS `java` may exist as a launcher without
+# a JDK behind it, so each one is tried.
+JAVA=
+for candidate in ${JAVA_HOME:+"$JAVA_HOME/bin/java"} java \
+  /opt/homebrew/opt/openjdk/bin/java /usr/local/opt/openjdk/bin/java; do
+  if "$candidate" -version >/dev/null 2>&1; then
+    JAVA=$candidate
+    break
+  fi
+done
+
+# Where TLC runs: Java on the host or, failing that, Docker.
 runner() {
-  if java -version >/dev/null 2>&1; then
+  if [[ -n $JAVA ]]; then
     echo java
   elif docker version >/dev/null 2>&1; then
     echo docker
@@ -54,7 +65,7 @@ tlc() {
   local how=$1 model=$2 cfg=$3 meta=/tmp/tlc-states-$$-$RANDOM
   shift 3
   if [[ $how == java ]]; then
-    java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -metadir "$meta" -config "$cfg" \
+    "$JAVA" -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -metadir "$meta" -config "$cfg" \
       "$model" "$@"
     return
   fi

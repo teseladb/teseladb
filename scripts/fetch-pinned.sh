@@ -5,7 +5,9 @@
 # `<sha256>  <path>` line per file; a file is fetched from `<source>/<path>` into `<dest>/<path>`.
 # Optional `# mirror <base URL>` lines name other places with the same files, tried in order when
 # the source does not answer or serves other bytes; every copy is held to the same SHA-256. Each
-# download is retried (TESELADB_FETCH_RETRIES times, 4 by default) before moving on.
+# download is retried (TESELADB_FETCH_RETRIES times, 4 by default) before moving on. The files
+# are fetched TESELADB_FETCH_JOBS at a time (8 by default): a list of a thousand small files
+# otherwise spends its time waiting on one connection after another.
 # A file already there with the right SHA-256 is not downloaded again; one that does not match is
 # never left in place. Prints the destination directory.
 #   scripts/fetch-pinned.sh scripts/unicode-cldr.sha256
@@ -37,12 +39,17 @@ sha_of() {
   shasum -a 256 "$1" | cut -d' ' -f1
 }
 
-fetched=0
-while read -r sha name; do
-  [[ -z $sha || $sha == \#* ]] && continue
+JOBS=${TESELADB_FETCH_JOBS:-8}
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/fetch-pinned.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# Fetches file `name` with SHA-256 `sha` unless it is there already; records the download in
+# `<WORK>/fetched.<shard>` and a failure in `<WORK>/failed`.
+fetch_one() {
+  local sha=$1 name=$2 shard=$3 file got place
   file=$DEST/$name
   if [[ -f $file && $(sha_of "$file") == "$sha" ]]; then
-    continue
+    return 0
   fi
   mkdir -p "$(dirname "$file")"
   rm -f "$file"
@@ -61,9 +68,34 @@ while read -r sha name; do
   done
   if [[ ! -f $file ]]; then
     echo "fetch-pinned: cannot download $name from ${PLACES[*]}" >&2
-    exit 1
+    echo "$name" >>"$WORK/failed"
+    return 0
   fi
-  fetched=$((fetched + 1))
-done <"$LIST"
+  echo "$name" >>"$WORK/fetched.$shard"
+}
+
+# Shard `k` of `JOBS`: the list's file lines whose number modulo `JOBS` is `k`, one after another.
+shard() {
+  local k=$1 i=0 sha name
+  while read -r sha name; do
+    [[ -z $sha || $sha == \#* ]] && continue
+    if (( i % JOBS == k )); then
+      fetch_one "$sha" "$name" "$k"
+    fi
+    i=$((i + 1))
+  done <"$LIST"
+}
+
+for ((k = 0; k < JOBS; k++)); do
+  shard "$k" &
+done
+wait
+if [[ -s $WORK/failed ]]; then
+  exit 1
+fi
+fetched=0
+for f in "$WORK"/fetched.*; do
+  [[ -f $f ]] && fetched=$((fetched + $(wc -l <"$f")))
+done
 echo "fetch-pinned: $fetched downloaded" >&2
 echo "$DEST"
