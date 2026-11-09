@@ -29,6 +29,7 @@ use teseladb_lsm::{
 use teseladb_multiraft::NodeClock;
 use teseladb_types::{GroupId, Nanos};
 
+use crate::doc_count::{Coll, Counts};
 use crate::read::ReadConcern;
 use crate::sm::split_value;
 use crate::tscache::word;
@@ -47,6 +48,9 @@ pub struct RangeView {
     gc_floor: Hlc,
     held: Arc<AtomicU32>,
     outside: Arc<AtomicU64>,
+    /// The live documents of each collection when the core published the view, if exact (007
+    /// FR-039).
+    counts: Option<Arc<Counts>>,
     lsm: SharedLsm,
     clock: NodeClock,
 }
@@ -83,6 +87,7 @@ pub(crate) struct ViewParts {
     pub(crate) gc_floor: Hlc,
     pub(crate) held: Arc<AtomicU32>,
     pub(crate) outside: Arc<AtomicU64>,
+    pub(crate) counts: Option<Arc<Counts>>,
 }
 
 impl RangeView {
@@ -96,6 +101,7 @@ impl RangeView {
             gc_floor: p.gc_floor,
             held: p.held,
             outside: p.outside,
+            counts: p.counts,
             lsm,
             clock,
         }
@@ -207,6 +213,26 @@ impl RangeView {
             }
         }
         Some((ts, rows))
+    }
+}
+
+impl RangeView {
+    /// The live documents of collection `coll` in the range, read as [`RangeView::read`] reads a
+    /// key (the counts are those of the state the view's LSM version holds), with the wall clock
+    /// and the monotonic time of `clocks` (H-004 of the native tests). `None` when the counts
+    /// are estimated or the read goes to the core.
+    pub fn count(
+        &self,
+        coll: Coll,
+        (wall_ms, now): (u64, impl FnOnce() -> Nanos),
+        concern: ReadConcern,
+    ) -> Option<u64> {
+        let counts = self.counts.as_ref()?;
+        if !matches!(concern, ReadConcern::Local | ReadConcern::Majority) {
+            return None;
+        }
+        self.mark(wall_ms, now)?;
+        Some(counts.docs.get(&coll).copied().unwrap_or(0))
     }
 }
 

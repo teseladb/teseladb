@@ -124,3 +124,37 @@ fn after_a_split_each_half_recounts_its_documents() {
         assert_eq!(counts_of(&c, n, NEW), Some(BTreeMap::from([(COLL, right)])), "right, {n:?}");
     }
 }
+
+/// The count of a collection read from the view the leader published, without its core (H-004
+/// of the native tests, 005 FR-028): exact counts only, and none while a write holds a latch.
+#[test]
+fn the_leaders_view_gives_the_exact_count_of_a_collection() {
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    c.settle();
+    for node in c.nodes.values_mut() {
+        node.host.set_counted_writes(true);
+    }
+    for pk in [&b"a"[..], b"b", b"c"] {
+        write(&mut c, l, &doc(pk), 1);
+    }
+    let count = |c: &Cluster, coll: (u32, u32)| {
+        let view = c.nodes[&l].host.views().get(G)?;
+        view.count(coll, (c.wall_of(l), || c.now), ReadConcern::Local)
+    };
+    // The leader publishes its view once its lease can serve reads.
+    c.ticks(20);
+    assert_eq!(count(&c, COLL), Some(3));
+    assert_eq!(count(&c, (COLL.0, COLL.1 + 1)), Some(0), "a collection without documents here");
+    // A write in flight holds its latch: the count goes to the core.
+    c.mutate_with(l, &[&doc(b"d")], Box::new(SetKey(doc(b"d"), 1)), None);
+    assert_eq!(count(&c, COLL), None);
+    c.settle();
+    assert_eq!(count(&c, COLL), Some(4));
+    // Estimated counts are not given.
+    for node in c.nodes.values_mut() {
+        node.host.set_counted_writes(false);
+    }
+    write(&mut c, l, &doc(b"e"), 1);
+    assert_eq!(count(&c, COLL), None);
+}

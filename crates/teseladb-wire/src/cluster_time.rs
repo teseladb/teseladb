@@ -60,20 +60,25 @@ pub(crate) fn subtype_name(subtype: u8) -> &'static str {
 
 /// A number as a 64-bit integer the way RefDb reads `keyId`: a double truncated, a decimal
 /// rounded half to even, both saturated and NaN as 0 (measured).
-fn key_id(path: &str, v: &Value) -> Result<i64, CommandError> {
+fn key_id(path: impl Fn() -> String, v: &Value) -> Result<i64, CommandError> {
     match v {
         Value::Int32(n) => Ok(i64::from(*n)),
         Value::Int64(n) => Ok(*n),
         // `as` truncates toward zero, saturates and gives 0 for NaN.
         Value::Double(d) => Ok(*d as i64),
         Value::Decimal128(d) => Ok(decimal_saturating(*d)),
-        other => Err(wrong_types(path, other, &KEY_ID_TYPES)),
+        other => Err(wrong_types(&path(), other, &KEY_ID_TYPES)),
     }
 }
 
-/// The hash and the key id of a `signature` subdocument at `path`.
-fn signature(path: &str, doc: &Document) -> Result<([u8; KEY_LEN], i64), CommandError> {
-    let (hash_path, id_path) = (format!("{path}.hash"), format!("{path}.keyId"));
+/// The hash and the key id of a `signature` subdocument at `path()`. The paths of the error
+/// messages are written only for an error: every command carries a `$clusterTime`.
+fn signature(
+    path: impl Fn() -> String,
+    doc: &Document,
+) -> Result<([u8; KEY_LEN], i64), CommandError> {
+    let hash_path = || format!("{}.hash", path());
+    let id_path = || format!("{}.keyId", path());
     let (mut hash, mut id) = (None, None);
     for (k, v) in doc.iter() {
         match (k, v) {
@@ -82,31 +87,33 @@ fn signature(path: &str, doc: &Document) -> Result<([u8; KEY_LEN], i64), Command
             ("hash", Value::Binary { subtype: GENERAL, bytes }) => hash = Some(bytes.as_slice()),
             ("hash", Value::Binary { subtype, .. }) => {
                 let msg = format!(
-                    "BSON field '{hash_path}' is the wrong binData type '{}', expected type 'general'",
+                    "BSON field '{}' is the wrong binData type '{}', expected type 'general'",
+                    hash_path(),
                     subtype_name(*subtype)
                 );
                 return Err(CommandError::new(TYPE_MISMATCH, msg));
             }
-            ("hash", other) => return Err(wrong_type(&hash_path, other, "binData")),
-            ("keyId", other) => id = Some(key_id(&id_path, other)?),
+            ("hash", other) => return Err(wrong_type(&hash_path(), other, "binData")),
+            ("keyId", other) => id = Some(key_id(id_path, other)?),
             _ => {}
         }
     }
-    let hash = hash.ok_or_else(|| missing(&hash_path))?;
-    let id = id.ok_or_else(|| missing(&id_path))?;
+    let hash = hash.ok_or_else(|| missing(&hash_path()))?;
+    let id = id.ok_or_else(|| missing(&id_path()))?;
     let hash = clustertime::hash(hash).map_err(|e| error(&e))?;
     Ok((hash, id))
 }
 
 /// Reads the `$clusterTime` of command `name`; `None` without one.
 pub fn parse(cmd: &Document, name: &str) -> Result<Option<GivenTime>, CommandError> {
-    let path = format!("{name}.{CLUSTER_TIME}");
+    // The paths of the error messages are written only for an error.
+    let path = || format!("{name}.{CLUSTER_TIME}");
     let doc = match cmd.get(CLUSTER_TIME) {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::Document(d)) => d,
-        Some(other) => return Err(wrong_type(&path, other, "object")),
+        Some(other) => return Err(wrong_type(&path(), other, "object")),
     };
-    let (time_path, sig_path) = (format!("{path}.clusterTime"), format!("{path}.signature"));
+    let time_path = || format!("{}.clusterTime", path());
     let (mut time, mut sig) = (None, None);
     for (k, v) in doc.iter() {
         match (k, v) {
@@ -114,14 +121,18 @@ pub fn parse(cmd: &Document, name: &str) -> Result<Option<GivenTime>, CommandErr
             ("clusterTime", Value::Timestamp { time: secs, increment }) => {
                 time = Some(Time { secs: *secs, inc: *increment });
             }
-            ("clusterTime", other) => return Err(wrong_type(&time_path, other, "timestamp")),
+            ("clusterTime", other) => return Err(wrong_type(&time_path(), other, "timestamp")),
             ("signature", Value::Null) => sig = None,
-            ("signature", Value::Document(d)) => sig = Some(signature(&sig_path, d)?),
-            ("signature", other) => return Err(wrong_type(&sig_path, other, "object")),
+            ("signature", Value::Document(d)) => {
+                sig = Some(signature(|| format!("{}.signature", path()), d)?);
+            }
+            ("signature", other) => {
+                return Err(wrong_type(&format!("{}.signature", path()), other, "object"));
+            }
             _ => {}
         }
     }
-    let time = time.ok_or_else(|| missing(&time_path))?;
+    let time = time.ok_or_else(|| missing(&time_path()))?;
     Ok(Some(GivenTime { time, signature: sig }))
 }
 

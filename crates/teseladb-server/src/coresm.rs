@@ -98,6 +98,10 @@ impl RangeState for CoreSm {
         self.range().is_some_and(RangeState::counts_dirty)
     }
 
+    fn shared_counts(&self) -> Option<std::sync::Arc<teseladb_range::doc_count::Counts>> {
+        self.range().and_then(RangeState::shared_counts)
+    }
+
     fn checksum_request(&self) -> Option<(u64, Hlc)> {
         self.range().and_then(RangeState::checksum_request)
     }

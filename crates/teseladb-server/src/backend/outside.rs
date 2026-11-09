@@ -213,6 +213,36 @@ impl ServerBackend {
         Some((boundary, rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
     }
 
+    /// The live documents of collection `coll` in `[start, end)`, its documents' keys, added up
+    /// from the counts each range's view carries, on this thread (H-004 of the native tests,
+    /// 005 FR-028); `None` when a range has no view, its counts are estimated or a write holds
+    /// a latch, and the count goes to the cores.
+    pub(super) fn count_outside(
+        &mut self,
+        coll: (u32, u32),
+        (start, end): (&[u8], &[u8]),
+    ) -> Option<u64> {
+        let origin = self.h.origin;
+        let now = || {
+            let since = Instant::now().saturating_duration_since(origin);
+            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+        };
+        let mut total = 0u64;
+        let mut from = start.to_vec();
+        loop {
+            let (g, core, range_end) = self.h.routes.span_of(&mut self.outside.routes, &from)?;
+            let range_end = range_end.to_vec();
+            let view = self.h.views.get(usize::from(core))?.get(g)?;
+            let clocks = (crate::clock::wall_ms(), now);
+            total = total.saturating_add(view.count(coll, clocks, ReadConcern::Local)?);
+            self.tally(usize::from(core), g, &from, Instant::now());
+            if range_end.is_empty() || range_end.as_slice() >= end {
+                return Some(total);
+            }
+            from = range_end;
+        }
+    }
+
     /// Counts a read of `key` served outside core `core` for range `g`'s load.
     fn tally(&mut self, core: usize, g: GroupId, key: &[u8], now: Instant) {
         let r = Backend::random(self);

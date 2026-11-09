@@ -1456,6 +1456,9 @@ impl Backend for ServerBackend {
         let start = docs.as_bytes().to_vec();
         let end = teseladb_keys::space::KeyBuilder::index_prefix(tenant, collection, 1);
         let end = end.as_bytes().to_vec();
+        if let Some(n) = self.count_outside((tenant, collection), (&start, &end)) {
+            return Ok(Some(n));
+        }
         if let Some(n) = self.doc_count_together((tenant, collection), (&start, &end)) {
             return Ok(Some(n));
         }

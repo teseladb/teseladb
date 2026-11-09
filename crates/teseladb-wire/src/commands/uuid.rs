@@ -22,7 +22,8 @@ pub fn invalid_uuid() -> CommandError {
 
 /// The command's `collectionUUID`, if any.
 pub fn expected(cmd: &Document, name: &str) -> Result<Option<[u8; 16]>, CommandError> {
-    let path = format!("{name}.{COLLECTION_UUID}");
+    // The path is written only for an error: every command looks for a `collectionUUID`.
+    let path = || format!("{name}.{COLLECTION_UUID}");
     match cmd.get(COLLECTION_UUID) {
         None => Ok(None),
         Some(Value::Binary { subtype: UUID_SUBTYPE, bytes }) => {
@@ -31,11 +32,12 @@ pub fn expected(cmd: &Document, name: &str) -> Result<Option<[u8; 16]>, CommandE
         Some(Value::Binary { subtype: OLD_UUID_SUBTYPE, .. }) => Err(CommandError::new(
             TYPE_MISMATCH,
             format!(
-                "BSON field '{path}' is the wrong binData type 'UUID(deprecated)', expected type 'UUID'"
+                "BSON field '{}' is the wrong binData type 'UUID(deprecated)', expected type 'UUID'",
+                path()
             ),
         )),
         Some(Value::Binary { .. }) => Err(invalid_uuid()),
-        Some(v) => Err(crate::types::wrong_type(&path, v, "binData")),
+        Some(v) => Err(crate::types::wrong_type(&path(), v, "binData")),
     }
 }
 

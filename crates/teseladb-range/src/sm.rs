@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{EntryWrite, Kind, Lookup, Lsm, LsmError};
@@ -202,6 +203,10 @@ pub trait RangeState {
     fn counts_dirty(&self) -> bool {
         false
     }
+    /// The live documents of each collection when they are exact, shared with whoever reads them
+    /// from the range's published view (H-004 of the native tests). Without a default: a state
+    /// machine that wraps a range's has to hand them on, or no view carries them.
+    fn shared_counts(&self) -> Option<Arc<Counts>>;
     /// Whether a write fence holds `key` (018, [`crate::fence`]).
     fn fenced(&self, _key: &[u8]) -> bool {
         false
@@ -272,8 +277,9 @@ pub struct RangeSm {
     cut: Option<GroupId>,
     /// Its write fences (018).
     fences: Vec<Span>,
-    /// Live documents of each collection (007 FR-039).
-    counts: Counts,
+    /// Live documents of each collection (007 FR-039), shared with the leader's published view
+    /// and replaced, never changed in place, by each entry that changes them.
+    counts: Arc<Counts>,
     /// The changes of the counted writes applied since [`RangeSm::recent_from`], by entry: what
     /// a recount at an earlier entry adds to bring its counts up to now.
     recent: std::collections::VecDeque<(u64, Vec<(Coll, i64)>)>,
@@ -521,10 +527,10 @@ impl RangeSm {
             cut: s.cut,
             // A range without counts that has applied nothing and was not cut from another is
             // new and empty: its counts are exact. Any other one has data that was not counted.
-            counts: s.counts.unwrap_or_else(|| match applied == 0 && !s.from_split {
+            counts: Arc::new(s.counts.unwrap_or_else(|| match applied == 0 && !s.from_split {
                 true => Counts::default(),
                 false => Counts::unknown(applied),
-            }),
+            })),
             recent: std::collections::VecDeque::new(),
             recent_from: applied,
             fences: s.fences,
@@ -540,7 +546,7 @@ impl RangeSm {
         // the highest mark of the last mark's millisecond: above every exact count, which only a
         // counted write or a recount writes, and both move the last mark. A later exact count in
         // that same millisecond would read as estimated, which only sends `count` back to reading.
-        self.counts = Counts::unknown(self.applied);
+        self.counts = Arc::new(Counts::unknown(self.applied));
         self.recent.clear();
         self.recent_from = self.applied;
         let ts = Hlc { physical: self.last_mark.physical, logical: u32::MAX };
@@ -736,7 +742,7 @@ impl RangeSm {
         writes.push(EntryWrite { key: &live_key, kind: Kind::Put, value: &live_value });
         // The live documents of each collection go in the same entry (007 FR-039): with the
         // change the leader computed, or estimated from here when a write of documents lacks it.
-        let mut counts = self.counts.clone();
+        let mut counts = Counts::clone(&self.counts);
         match docs {
             Some(delta) => counts.apply(delta),
             None if doc_count::touches_documents(puts, deletes) => counts.dirty(ctx.index),
@@ -745,7 +751,7 @@ impl RangeSm {
         if let Some(delta) = docs.filter(|d| !d.is_empty()) {
             self.remember(ctx.index, delta.to_vec());
         }
-        let counts_value = (counts != self.counts).then(|| counts.encode());
+        let counts_value = (counts != *self.counts).then(|| counts.encode());
         let counts_key = local_key(self.range, COUNTS);
         if let Some(v) = &counts_value {
             writes.push(EntryWrite { key: &counts_key, kind: Kind::Put, value: v });
@@ -753,7 +759,9 @@ impl RangeSm {
         self.write(ctx.index, ctx.ts, &writes)?;
         self.last_mark = ctx.ts;
         self.live = live;
-        self.counts = counts;
+        if counts_value.is_some() {
+            self.counts = Arc::new(counts);
+        }
         Ok(())
     }
 
@@ -796,7 +804,7 @@ impl RangeSm {
                 EntryWrite { key: &mark_key, kind: Kind::Put, value: &mark },
             ],
         )?;
-        self.counts = now;
+        self.counts = Arc::new(now);
         self.last_mark = ctx.ts;
         Ok(())
     }
@@ -805,10 +813,10 @@ impl RangeSm {
     /// transaction's writes, a split, a merge or a snapshot): the counts are estimated from it
     /// until a recount (007 FR-039). The local key goes with the entry's other writes.
     fn counts_dirty_write(&mut self, index: u64) -> Option<(Vec<u8>, Vec<u8>)> {
-        let mut counts = self.counts.clone();
+        let mut counts = Counts::clone(&self.counts);
         counts.dirty(index);
-        (counts != self.counts).then(|| {
-            self.counts = counts;
+        (counts != *self.counts).then(|| {
+            self.counts = Arc::new(counts);
             (local_key(self.range, COUNTS), self.counts.encode())
         })
     }
@@ -1029,6 +1037,10 @@ impl RangeState for RangeSm {
         !self.counts.exact()
     }
 
+    fn shared_counts(&self) -> Option<Arc<Counts>> {
+        self.counts.exact().then(|| Arc::clone(&self.counts))
+    }
+
     fn checksum_request(&self) -> Option<(u64, Hlc)> {
         self.checksum
     }
@@ -1242,7 +1254,7 @@ impl StateMachine for RangeSm {
         self.fences = fences;
         // The snapshot does not carry the counts yet (007 T073, step 4): they are estimated from
         // its index until a recount.
-        self.counts = Counts::unknown(applied);
+        self.counts = Arc::new(Counts::unknown(applied));
         self.recent.clear();
         self.recent_from = applied;
         // A split below the snapshot's index may be the last one: none below it leaves.

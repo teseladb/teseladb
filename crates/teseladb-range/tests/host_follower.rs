@@ -166,8 +166,12 @@ fn a_state_without_closed_marks_has_none() {
         fn frozen(&self) -> bool {
             false
         }
+        fn shared_counts(&self) -> Option<std::sync::Arc<teseladb_range::doc_count::Counts>> {
+            None
+        }
     }
     assert_eq!(NoRange.closed_mark(), None);
+    assert!(NoRange.shared_counts().is_none());
     assert!(!NoRange.frozen() && NoRange.end().is_none() && NoRange.checksum_request().is_none());
     assert_eq!(NoRange.gc_threshold(), Hlc { physical: 0, logical: 0 });
 }

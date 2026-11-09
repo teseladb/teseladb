@@ -21,10 +21,14 @@ pub fn check(ns: &Namespace) -> Result<(), CommandError> {
         let msg = "namespaces cannot have embedded null characters";
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
-    let full = format!("{}.{}", ns.db, ns.coll);
-    let shown = if ns.coll.is_empty() { ns.db.clone() } else { full.clone() };
-    let invalid =
-        || CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {shown}"));
+    // The name is written only for an error: every command checks its namespace.
+    let invalid = || {
+        let shown = match ns.coll.is_empty() {
+            true => ns.db.clone(),
+            false => format!("{}.{}", ns.db, ns.coll),
+        };
+        CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified: {shown}"))
+    };
     if ns.db.contains('.') {
         let msg = format!("'.' is an invalid character in a db name: {}", ns.db);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
@@ -65,7 +69,8 @@ pub const SYSTEM_JS: &str = "system.js";
 /// Faults of `db.coll`'s name; a `system.` collection other than `system.js` and the
 /// `system.resharding.` ones is one when `system` says so.
 fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
-    let full = format!("{}.{}", ns.db, ns.coll);
+    // The full name is written only for an error: every write checks its namespace.
+    let full = || format!("{}.{}", ns.db, ns.coll);
     if ns.coll.contains('$') {
         let msg = format!("Invalid collection name: {}", ns.coll);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
@@ -81,17 +86,18 @@ fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     if system && ns.coll.starts_with(SYSTEM_PREFIX) && !allowed {
         return Err(CommandError::new(
             INVALID_NAMESPACE,
-            format!("Invalid system namespace: {full}"),
+            format!("Invalid system namespace: {}", full()),
         ));
     }
-    if full.len() > MAX_NAMESPACE {
+    if ns.db.len() + 1 + ns.coll.len() > MAX_NAMESPACE {
         let msg = format!(
-            "Fully qualified namespace is too long. Namespace: {full} Max: {MAX_NAMESPACE}"
+            "Fully qualified namespace is too long. Namespace: {} Max: {MAX_NAMESPACE}",
+            full()
         );
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
     if ns.coll.contains(".system.") {
-        return Err(CommandError::new(BAD_VALUE, format!("Invalid namespace: {full}")));
+        return Err(CommandError::new(BAD_VALUE, format!("Invalid namespace: {}", full())));
     }
     if super::config_db::generated(ns) {
         return Err(super::config_db::not_writable(ns));

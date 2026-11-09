@@ -28,6 +28,17 @@ pub struct BackScan {
     /// The key found below the bound, waiting for its point read.
     pending: Option<Vec<u8>>,
     finished: bool,
+    /// For each file of the version, in its order, the keys of the block the bound last fell in:
+    /// the bound only goes down, so each block is read once per scan and then searched by
+    /// bisection (H-003 of the native tests; AnotherProduct's `BlockIter::Prev` keeps the entries it
+    /// decoded for the same reason).
+    blocks: Vec<Option<Decoded>>,
+}
+
+/// The internal keys of block `index` of a file, in order.
+struct Decoded {
+    index: usize,
+    keys: Vec<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BackScan {
@@ -51,6 +62,7 @@ impl View {
             read: ts,
             pending: None,
             finished: start >= end,
+            blocks: Vec::new(),
         }
     }
 }
@@ -125,7 +137,7 @@ impl BackScan {
     }
 
     /// The largest logical key below the bound and at or above the start, over every source.
-    fn below<B: Blocks>(&self, r: &mut B) -> Below {
+    fn below<B: Blocks>(&mut self, r: &mut B) -> Below {
         let target = entry::first_version(&self.bound);
         let mut best: Option<Vec<u8>> = None;
         let mut keep = |ikey: &[u8]| {
@@ -140,7 +152,11 @@ impl BackScan {
             }
         }
         let mut waiting = None;
-        for t in self.version.tables() {
+        let tables = self.version.tables().count();
+        if self.blocks.len() < tables {
+            self.blocks.resize_with(tables, || None);
+        }
+        for (n, t) in self.version.tables().enumerate() {
             if t.props.lo.as_slice() >= self.bound.as_slice()
                 || t.props.hi.as_slice() < self.start.as_slice()
                 || t.props.min_ts > self.read
@@ -148,7 +164,7 @@ impl BackScan {
             {
                 continue;
             }
-            match table_before(r, t, &target) {
+            match table_before(r, t, &target, &mut self.blocks[n]) {
                 Ok(InTable::Ready(Some(ikey))) => keep(&ikey),
                 Ok(InTable::Ready(None)) => {}
                 Ok(InTable::Wait(token)) => {
@@ -168,28 +184,36 @@ impl BackScan {
 }
 
 /// The last internal key of table `t` before `target`: from the block `target` falls in, or the
-/// last key of the block before it, which the index holds.
+/// last key of the block before it, which the index holds. The block's keys stay in `cached` for
+/// the next, lower, target.
 fn table_before<B: Blocks>(
     r: &mut B,
     t: &Arc<Table>,
     target: &[u8],
+    cached: &mut Option<Decoded>,
 ) -> Result<InTable, crate::LsmError> {
     let Some(i) = t.find_block(target) else {
         // Every key of the file is below the target: its last one.
         return Ok(InTable::Ready(t.blocks().checked_sub(1).map(|l| t.last_key(l).to_vec())));
     };
-    let block = match r.block(t, i)? {
-        Fetch::Ready(b) => b,
-        Fetch::Wait(token) => return Ok(InTable::Wait(token)),
+    if cached.as_ref().is_none_or(|d| d.index != i) {
+        let block = match r.block(t, i)? {
+            Fetch::Ready(b) => b,
+            Fetch::Wait(token) => return Ok(InTable::Wait(token)),
+        };
+        let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
+        let mut keys = Vec::new();
+        while c.valid() {
+            keys.push(c.key().to_vec());
+            c.advance().map_err(|_| corrupt(t, i))?;
+        }
+        *cached = Some(Decoded { index: i, keys });
+    }
+    let keys = cached.as_ref().map_or(&[][..], |d| d.keys.as_slice());
+    let below = keys.partition_point(|k| entry::compare(k, target).is_lt());
+    let last = match below {
+        0 => i.checked_sub(1).map(|p| t.last_key(p).to_vec()),
+        n => keys.get(n - 1).cloned(),
     };
-    let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
-    let mut last = None;
-    while c.valid() && entry::compare(c.key(), target).is_lt() {
-        last = Some(c.key().to_vec());
-        c.advance().map_err(|_| corrupt(t, i))?;
-    }
-    if last.is_none() && i > 0 {
-        last = Some(t.last_key(i - 1).to_vec());
-    }
     Ok(InTable::Ready(last))
 }

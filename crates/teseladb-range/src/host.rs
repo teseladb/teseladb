@@ -1225,6 +1225,7 @@ impl RangeHost {
                 gc_floor: handed.unwrap_or(ZERO),
                 held: l.latches.held(),
                 outside: l.cache.outside(),
+                counts: core.state_machine(*g).and_then(RangeState::shared_counts),
             };
             let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());
             views.insert(*g, std::sync::Arc::new(view));
