@@ -275,6 +275,14 @@ fn open_ended_ranges_and_unknown_ranges() {
     assert_eq!(router.route(b"zzz").unwrap().group, GroupId(2));
     assert_eq!(router.route(b"b").unwrap().group, GroupId(1));
     assert!(router.route(b"0").is_none());
+    // The range of the keys just below a bound (H-003): a bound at a range's start belongs to
+    // the range before it; nothing below the first range's start.
+    let below = |key: &[u8]| router.table().lookup_below(key).map(|e| e.group);
+    assert_eq!(below(b"c"), Some(GroupId(1)));
+    assert_eq!(below(b"c\0"), Some(GroupId(2)));
+    assert_eq!(below(b"\xff"), Some(GroupId(2)));
+    assert_eq!(below(b"b"), Some(GroupId(1)));
+    assert_eq!(below(b"a"), None);
     assert!(!entry(b"b", b"c", 5, 1).contains(b"a"));
     // An open-ended range learnt later replaces both.
     let all = vec![entry(b"a", b"", 3, 1)];

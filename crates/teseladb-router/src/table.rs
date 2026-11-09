@@ -118,6 +118,17 @@ impl RouteTable {
             .filter(|e| e.contains(key))
     }
 
+    /// The range that holds the keys just below `bound` (H-003): the one a backward read of an
+    /// interval that ends at `bound` reads first.
+    pub fn lookup_below(&self, bound: &[u8]) -> Option<&RouteEntry> {
+        let below = (Bound::Unbounded, Bound::Excluded(bound));
+        self.by_start
+            .range::<[u8], _>(below)
+            .next_back()
+            .map(|(_, e)| e)
+            .filter(|e| e.end.is_empty() || bound <= e.end.as_slice())
+    }
+
     /// The entry of range `g`.
     pub fn entry(&self, g: GroupId) -> Option<&RouteEntry> {
         self.by_start.values().find(|e| e.group == g)
