@@ -22,7 +22,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use teseladb_hlc::{Hlc, Next};
-use teseladb_lsm::{BlockNeed, Kind, Published, SharedLsm, SharedRead, ViewCache};
+use teseladb_lsm::{
+    BlockNeed, Kind, Published, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep,
+    ViewCache,
+};
 use teseladb_multiraft::NodeClock;
 use teseladb_types::{GroupId, Nanos};
 
@@ -103,6 +106,28 @@ impl RangeView {
         &self.lsm
     }
 
+    /// The mark of a read outside the core, with the wall clock at `wall_ms`; `now` gives the
+    /// monotonic time once it is taken. `None` when the read goes to the core.
+    fn mark(&self, wall_ms: u64, now: impl FnOnce() -> Nanos) -> Option<Hlc> {
+        let Next::Mark(ts) = self.clock.0.now(wall_ms) else { return None };
+        if ts < self.gc_floor {
+            return None;
+        }
+        // The bound first, then the latches: a write counted after this check takes a mark
+        // above the bound.
+        self.outside.fetch_max(word(ts), Ordering::SeqCst);
+        // Faulty variant (005 T049): a read outside the core that does not look at the writes
+        // holding latches, which may then take a mark below it.
+        #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
+        let writing = self.held.load(Ordering::SeqCst) != 0;
+        #[cfg(teseladb_bug = "outside_ignores_latches")]
+        let writing = {
+            let _ignored = &self.held;
+            false
+        };
+        (!writing && now() < self.valid_until).then_some(ts)
+    }
+
     /// Reads `key` at a mark of the node's clock, with the wall clock at `wall_ms`, if this
     /// thread can serve it; `now` gives the monotonic time once the mark is taken.
     pub fn read(
@@ -119,25 +144,7 @@ impl RangeView {
         if !servable {
             return FastRead::Core;
         }
-        let Next::Mark(ts) = self.clock.0.now(wall_ms) else { return FastRead::Core };
-        if ts < self.gc_floor {
-            return FastRead::Core;
-        }
-        // The bound first, then the latches: a write counted after this check takes a mark
-        // above the bound.
-        self.outside.fetch_max(word(ts), Ordering::SeqCst);
-        // Faulty variant (005 T049): a read outside the core that does not look at the writes
-        // holding latches, which may then take a mark below it.
-        #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
-        let writing = self.held.load(Ordering::SeqCst) != 0;
-        #[cfg(teseladb_bug = "outside_ignores_latches")]
-        let writing = {
-            let _ignored = &self.held;
-            false
-        };
-        if writing || now() >= self.valid_until {
-            return FastRead::Core;
-        }
+        let Some(ts) = self.mark(wall_ms, now) else { return FastRead::Core };
         let view = self.lsm.view_cached(cache);
         match view.get(&self.lsm, key, ts) {
             SharedRead::Hit(f) if f.kind == Kind::Intent => FastRead::Core,
@@ -147,6 +154,73 @@ impl RangeView {
             SharedRead::NotFound => FastRead::Found { ts, value: None },
             SharedRead::Need(need) => FastRead::Need(need),
             SharedRead::Failed(_) => FastRead::Core,
+        }
+    }
+}
+
+impl RangeView {
+    /// The documents of `[start, end)` with their value types, at most `limit` (more than none),
+    /// in key order (from the last key down when `backward`, H-003), read at one mark of the node's clock as [`RangeView::read`] reads a key,
+    /// with the wall clock and the monotonic time of `clocks`; with the mark. A block the shared cache lacks goes to
+    /// `supply`, which reads it, gives it to [`SharedLsm::supply`](teseladb_lsm::SharedLsm) and
+    /// says whether it could; then the scan goes on. `None` when the scan goes to the core: a
+    /// span past the range, an intent, a block that could not be read, a failed read, and
+    /// whatever [`RangeView::read`] sends there. Versions that only serve the history are no
+    /// documents, as in the core's scans.
+    pub fn scan(
+        &self,
+        cache: &mut ViewCache,
+        (start, end): (&[u8], &[u8]),
+        (limit, backward): (usize, bool),
+        (wall_ms, now): (u64, impl FnOnce() -> Nanos),
+        concern: ReadConcern,
+        mut supply: impl FnMut(&BlockNeed) -> bool,
+    ) -> Option<(Hlc, Vec<crate::push::Row>)> {
+        let servable = matches!(concern, ReadConcern::Local | ReadConcern::Majority)
+            && limit > 0
+            && self.start.as_slice() <= start
+            && start <= end
+            && end <= self.end.as_slice();
+        if !servable {
+            return None;
+        }
+        let ts = self.mark(wall_ms, now)?;
+        let view = self.lsm.view_cached(cache);
+        let mut scan = match backward {
+            false => Either::Forward(view.scan(start, end, ts)),
+            true => Either::Backward(view.scan_back(start, end, ts)),
+        };
+        let mut rows = Vec::new();
+        while rows.len() < limit {
+            match scan.next(&self.lsm) {
+                SharedStep::Item(i) if i.kind == Kind::Intent => return None,
+                SharedStep::Item(i) => {
+                    if let Some((t, v)) = split_value(&i.value)
+                        && t != crate::HISTORY_VALUE
+                    {
+                        rows.push((i.key, (t, v.to_vec())));
+                    }
+                }
+                SharedStep::Done => break,
+                SharedStep::Need(need) if supply(&need) => {}
+                SharedStep::Need(_) | SharedStep::Failed(_) => return None,
+            }
+        }
+        Some((ts, rows))
+    }
+}
+
+/// A scan of the shared LSM in either direction.
+enum Either {
+    Forward(SharedScan),
+    Backward(SharedBackScan),
+}
+
+impl Either {
+    fn next(&mut self, lsm: &SharedLsm) -> SharedStep {
+        match self {
+            Either::Forward(s) => s.next(lsm),
+            Either::Backward(s) => s.next(lsm),
         }
     }
 }

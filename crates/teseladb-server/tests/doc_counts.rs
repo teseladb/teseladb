@@ -60,3 +60,41 @@ fn a_count_without_a_filter_adds_up_the_ranges_counts() {
     assert_eq!(batch(&c.run("app", find), "firstBatch").len(), 320);
     node.stop();
 }
+
+/// A collection split in three ranges: the count adds up each one's, asked of all of them at
+/// once (H-004 of the native tests).
+#[test]
+fn a_count_adds_up_the_counts_of_every_range_of_the_collection() {
+    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let insert = Document::new().with("insert", "c").with("documents", docs(0..300));
+    assert!(ok(&c.run("app", insert)));
+    let shard = Document::new()
+        .with("shardCollection", "app.c")
+        .with("key", Document::new().with("_id", 1));
+    let r = c.run("admin", shard);
+    assert!(ok(&r), "{r:?}");
+    for at in [100, 200] {
+        let split =
+            Document::new().with("split", "app.c").with("middle", Document::new().with("_id", at));
+        // A split of a range still splitting answers `ConflictingOperationInProgress`, which a
+        // client tries again.
+        until("the split", || ok(&c.run("admin", split.clone())).then_some(()));
+    }
+    let ranges = |c: &mut Client| {
+        let r = c.run("config", Document::new().with("find", "chunks").with("batchSize", 100));
+        batch(&r, "firstBatch").len()
+    };
+    until("three ranges", || (ranges(&mut c) >= 3).then_some(()));
+    let n = until("a count without a scan", || {
+        let before = scans(&mut c);
+        let n = count(&mut c);
+        (scans(&mut c) == before).then_some(n)
+    });
+    assert_eq!(n, 300);
+    let more = Document::new().with("insert", "c").with("documents", docs(1_000..1_050));
+    assert!(ok(&c.run("app", more)));
+    assert_eq!(count(&mut c), 350);
+    node.stop();
+}

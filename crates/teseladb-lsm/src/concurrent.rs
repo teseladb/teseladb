@@ -17,6 +17,7 @@ use teseladb_types::Bytes;
 use crate::cache::BlockCache;
 use crate::error::LsmError;
 use crate::read::{self, Blocks, Fetch, Found, Item, Lookup, ReadToken, Scan, Step, corrupt};
+use crate::read_back::BackScan;
 use crate::shared::{Published, TryCell};
 use crate::sst::block::Block;
 use crate::sst::reader::Table;
@@ -221,6 +222,31 @@ impl SharedView {
     /// A scan of `[start, end)` at `ts`: one visible version per key, in key order.
     pub fn scan(&self, start: &[u8], end: &[u8], ts: Hlc) -> SharedScan {
         SharedScan { scan: View { version: self.version.clone() }.scan(start, end, ts) }
+    }
+
+    /// [`SharedView::scan`] from the last key down (H-003 of the native tests).
+    pub fn scan_back(&self, start: &[u8], end: &[u8], ts: Hlc) -> SharedBackScan {
+        SharedBackScan { scan: View { version: self.version.clone() }.scan_back(start, end, ts) }
+    }
+}
+
+/// A backward scan from another thread: call [`SharedBackScan::next`] until
+/// [`SharedStep::Done`].
+#[derive(Debug)]
+pub struct SharedBackScan {
+    scan: BackScan,
+}
+
+impl SharedBackScan {
+    /// The previous key's visible version.
+    pub fn next(&mut self, shared: &SharedLsm) -> SharedStep {
+        let mut s = Source { inner: &shared.inner, need: None };
+        match self.scan.next_with(&mut s) {
+            Step::Item(i) => SharedStep::Item(i),
+            Step::Done => SharedStep::Done,
+            Step::Miss(_) => SharedStep::Need(s.need.expect("a miss names its block")),
+            Step::Failed(e) => SharedStep::Failed(e),
+        }
     }
 }
 

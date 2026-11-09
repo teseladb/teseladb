@@ -863,10 +863,13 @@ impl RangeSm {
             crate::fence::encode(&crate::fence::clip(&self.fences, at, &self.end)),
         );
         // Each half's documents are counted again (007 FR-039): the split does not say how many
-        // of each collection go to the new range.
+        // of each collection go to the new range. The new range numbers its own entries from the
+        // start, so its counts are estimated from its first one: marked at this range's index,
+        // every recount of the new range took place "before" it and was refused until its log
+        // got that far (H-004 of the native tests).
         let own_counts = self.counts_dirty_write(ctx.index);
         let (new_counts_key, new_counts) =
-            (local_key(new_range, COUNTS), Counts::unknown(ctx.index).encode());
+            (local_key(new_range, COUNTS), Counts::unknown(0).encode());
         let writes: Vec<EntryWrite<'_>> = born
             .iter()
             .map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v })

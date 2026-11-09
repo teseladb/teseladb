@@ -272,17 +272,6 @@ fn parse_projection(p: Option<&Document>) -> Result<Option<Projection>, CommandE
     }
 }
 
-/// Whether projection `p` is one RefDb's express path takes: each field, by its path,
-/// included or excluded with a number or a boolean; no positional `$`, operator, computed value
-/// or nested form.
-fn simple_projection(p: &Document) -> bool {
-    p.iter().all(|(k, v)| {
-        !k.starts_with('$')
-            && !k.ends_with(".$")
-            && matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Boolean(_))
-    })
-}
-
 /// The documents interval of collection `c`.
 pub fn documents_of(c: &CollectionEntry) -> (Vec<u8>, Vec<u8>) {
     let start = KeyBuilder::index_prefix(c.tenant, c.id, DOCUMENTS).as_bytes().to_vec();
@@ -530,7 +519,7 @@ impl QueryCursor {
             }
             match self.buffered.pop_front() {
                 Some(d) => {
-                    let n = d.to_bytes().map_or(0, |b| b.len());
+                    let n = crate::bson_len::encoded_len(&d);
                     if bytes + n > MAX_BATCH_BYTES && !out.is_empty() {
                         self.buffered.push_front(d);
                         return Ok(self.finish(out, false));
@@ -1214,7 +1203,7 @@ const EXPRESS_PROJECTION: ProjectionContext<'static> = ProjectionContext {
 /// A `find` of one `_id` by equality, answered without the planner as RefDb's express path
 /// answers it (the conditions are in H-013 of the native tests' findings), which TeselaDB's
 /// `explain` already shows as `EXPRESS_IXSCAN`. The filter is the
-/// `_id` alone; a simple projection or none ([`simple_projection`]); no `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
+/// `_id` alone; a simple projection or none ([`super::explain::simple_projection`]); no `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
 /// `showRecordId` or tailable cursor; a sort only of fields in either direction (one document
 /// is in any order); no collation, the command's or the collection's; not a time series. The
 /// document is read as before, at the key of its `_id` with the same note of the `_id` index,
@@ -1232,7 +1221,7 @@ fn express_find<B: Backend + ?Sized>(
             if s.iter().all(|(_, v)| matches!(v, Value::Int32(1 | -1) | Value::Int64(1 | -1))
                 || matches!(v, Value::Double(d) if *d == 1.0 || *d == -1.0)));
     let eligible = a.filter.len() == 1
-        && a.projection.as_ref().is_none_or(simple_projection)
+        && a.projection.as_ref().is_none_or(super::explain::simple_projection)
         && a.skip == 0
         && a.bounds.is_none()
         && !a.return_key
@@ -1254,27 +1243,32 @@ fn express_find<B: Backend + ?Sized>(
     // Parsed before the read: a projection that mixes inclusion and exclusion fails also for an
     // `_id` that is not there.
     let projection = parse_projection(a.projection.as_ref())?;
-    let docs = match super::crud::id_doc_key(ctx.backend, coll, &id)? {
-        Some(key) => {
-            // The read goes through the index of `_id` (`$indexStats` counts it).
-            ctx.backend.note_plan(super::plan_exec::used_id_index(false));
-            let end = after(&key);
-            let rows = ctx.backend.scan(&key, &end, 1, a.concern)?;
-            let mut docs = Vec::with_capacity(rows.len());
-            for (_, bytes) in rows {
-                // A stored document always parses: one that does not is a fault, not a miss.
-                let raw = RawDoc::from_bytes(&bytes)?;
-                docs.push(match &projection {
-                    None => Document::from(raw),
-                    Some(p) => p.apply(raw, &EXPRESS_PROJECTION).map_err(from_mql)?,
-                });
-            }
-            docs
-        }
-        // A capped collection without that `_id`: nothing to read.
-        None => Vec::new(),
-    };
+    let mut docs = Vec::with_capacity(1);
+    for bytes in read_by_id(ctx.backend, coll, &id, a.concern)? {
+        // A stored document always parses: one that does not is a fault, not a miss.
+        let raw = RawDoc::from_bytes(&bytes)?;
+        docs.push(match &projection {
+            None => Document::from(raw),
+            Some(p) => p.apply(raw, &EXPRESS_PROJECTION).map_err(from_mql)?,
+        });
+    }
     Ok(Some(cursor_reply(0, ns_text, "firstBatch", docs)))
+}
+
+/// The stored document of `_id` `id` in `coll`, read at its key as RefDb's express path
+/// reads it, with the same note of the index of `_id` (`$indexStats` counts it); none when it is
+/// not there.
+pub(crate) fn read_by_id<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    id: &Value,
+    concern: ReadConcern,
+) -> Result<Vec<Vec<u8>>, CommandError> {
+    // A capped collection without that `_id` has no key for it: nothing to read.
+    let Some(key) = super::crud::id_doc_key(backend, coll, id)? else { return Ok(Vec::new()) };
+    backend.note_plan(super::plan_exec::used_id_index(false));
+    let end = after(&key);
+    Ok(backend.scan(&key, &end, 1, concern)?.into_iter().map(|(_, bytes)| bytes).collect())
 }
 
 /// A `find` with `$near` or `$nearSphere`: its stages read through the aggregation engine,
@@ -1698,11 +1692,13 @@ fn sorted<B: Backend + ?Sized>(
     let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
     let coll_collation = collation_of(collation)?;
     let col: Option<&dyn teseladb_bson::Collator> = coll_collation.as_ref().map(|c| c as _);
-    let mut rows: Vec<(Vec<SortKey>, Document, Option<Document>)> = Vec::new();
+    // Each document stays in its stored bytes until the plan gives it (H-009 of the native
+    // tests: a tree built for the sort, written again and read again cost more than the read).
+    let mut rows: Vec<(Vec<SortKey>, Vec<u8>, Option<Document>)> = Vec::new();
     let mut memory = 0usize;
     let mut err = None;
     let vars = a.vars.as_ref();
-    let mut keep = |bytes: &[u8], index_key: Option<Document>| -> Result<bool, CommandError> {
+    let mut keep = |bytes: Vec<u8>, index_key: Option<Document>| -> Result<bool, CommandError> {
         memory += bytes.len();
         if memory > SORT_MEMORY_LIMIT && !a.allow_disk_use {
             err = Some(CommandError::new(
@@ -1711,15 +1707,15 @@ fn sorted<B: Backend + ?Sized>(
             ));
             return Ok(false);
         }
-        let raw = RawDoc::from_bytes(bytes)?;
-        rows.push((sort.keys(raw, col), Document::from(raw), index_key));
+        let keys = sort.keys(RawDoc::from_bytes(&bytes)?, col);
+        rows.push((keys, bytes, index_key));
         Ok(true)
     };
     match planned {
         // The plan's documents, in its order (an index that gives the sort's order keeps it).
         Some((docs, keys)) => {
             let mut keys = keys.into_iter();
-            for d in &docs {
+            for d in docs {
                 if !keep(d, keys.next().flatten())? {
                     break;
                 }
@@ -1727,7 +1723,7 @@ fn sorted<B: Backend + ?Sized>(
         }
         None => {
             for_each_match_with(backend, range, &a.filter, collation, vars, a.concern, |_, b| {
-                keep(b, None)
+                keep(b.to_vec(), None)
             })?;
         }
     }
@@ -1738,8 +1734,7 @@ fn sorted<B: Backend + ?Sized>(
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
-    for (key, d, index_key) in rows.into_iter().skip(skip).take(take) {
-        let bytes = raw_bytes(&d)?;
+    for (key, bytes, index_key) in rows.into_iter().skip(skip).take(take) {
         let raw = RawDoc::from_bytes(&bytes)?;
         let key: Vec<Value> = key.into_iter().map(|k| k.0).collect();
         docs.push(plan.matched(raw, Some(&key), index_key.as_ref())?);
@@ -2452,7 +2447,7 @@ fn planned<B: Backend + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::simple_projection;
+    use super::super::explain::simple_projection;
     use teseladb_bson::extjson;
 
     fn simple(text: &str) -> bool {
@@ -2460,14 +2455,15 @@ mod tests {
     }
 
     #[test]
-    fn a_simple_projection_includes_or_excludes_fields_with_numbers_or_booleans() {
-        for p in [r#"{}"#, r#"{"v":1}"#, r#"{"_id":0,"a.b":1}"#, r#"{"v":true}"#, r#"{"v":0.5}"#] {
+    fn a_simple_projection_includes_or_excludes_top_fields_with_numbers_or_booleans() {
+        for p in [r#"{}"#, r#"{"v":1}"#, r#"{"_id":0,"w":1}"#, r#"{"v":true}"#, r#"{"v":0.5}"#] {
             assert!(simple(p), "{p}");
         }
         let long = r#"{"v":{"$numberLong":"0"}}"#;
         assert!(simple(long), "{long}");
         for p in [
             r#"{"a":{"b":1}}"#,
+            r#"{"a.b":1}"#,
             r#"{"a.$":1}"#,
             r#"{"a":{"$slice":1}}"#,
             r#"{"a":{"$elemMatch":{"b":1}}}"#,
@@ -2475,7 +2471,6 @@ mod tests {
             r#"{"w":"$v"}"#,
             r#"{"w":"text"}"#,
             r#"{"w":[1]}"#,
-            r#"{"$v":1}"#,
             r#"{"v":null}"#,
         ] {
             assert!(!simple(p), "{p}");

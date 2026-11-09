@@ -136,6 +136,9 @@ fn moved_clause(st: &Step, c: &Document) -> Option<Document> {
             through_exclusion(&dropped, f)
         }
         Kind::AddFields(p) => through_set(&flat(p), f),
+        // A `$sort` changes no document: a `$match` after it runs before it (RefDb's
+        // `$sort` + `$match` sequence optimization, measured on a `refrouter` 9.0.4).
+        Kind::Sort(_) => Passing::Same,
         _ => Passing::Changed,
     };
     let mut renames: Vec<(String, String)> = Vec::new();

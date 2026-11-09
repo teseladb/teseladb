@@ -113,6 +113,36 @@ impl SharedRoutes {
     /// changed, so a read touches no lock and no counter other workers write (H-013, as a
     /// thread keeps AnotherProduct's `SuperVersion`).
     pub fn route_of(&self, cache: &mut RouteCache, key: &[u8]) -> Option<(GroupId, u16)> {
+        self.span_of(cache, key).map(|(g, core, _)| (g, core))
+    }
+
+    /// [`Routes::route_of`] with the end of the key's range (empty: the end of the keys).
+    pub fn span_of<'a>(
+        &self,
+        cache: &'a mut RouteCache,
+        key: &[u8],
+    ) -> Option<(GroupId, u16, &'a [u8])> {
+        self.refresh(cache);
+        let e = cache.table.as_ref()?.1.lookup(key)?;
+        let single = *cache.cores.1.entry(e.group).or_insert_with(|| self.hosting.single(e.group));
+        Some((e.group, single.unwrap_or(e.core), e.end.as_slice()))
+    }
+
+    /// The range that holds the keys just below `bound` (a backward read's first, H-003), as
+    /// [`Routes::span_of`] gives it, with that range's start.
+    pub fn span_below<'a>(
+        &self,
+        cache: &'a mut RouteCache,
+        bound: &[u8],
+    ) -> Option<(GroupId, u16, &'a [u8])> {
+        self.refresh(cache);
+        let e = cache.table.as_ref()?.1.lookup_below(bound)?;
+        let single = *cache.cores.1.entry(e.group).or_insert_with(|| self.hosting.single(e.group));
+        Some((e.group, single.unwrap_or(e.core), e.start.as_slice()))
+    }
+
+    /// Takes again into `cache` the table or the cores that changed since it read them.
+    fn refresh(&self, cache: &mut RouteCache) {
         let tv = self.table_version.load(Ordering::Acquire);
         if cache.table.as_ref().is_none_or(|(v, _)| *v != tv) {
             cache.table = Some((tv, self.table()));
@@ -121,9 +151,6 @@ impl SharedRoutes {
         if cache.cores.0 != hv {
             cache.cores = (hv, BTreeMap::new());
         }
-        let e = cache.table.as_ref()?.1.lookup(key)?;
-        let single = *cache.cores.1.entry(e.group).or_insert_with(|| self.hosting.single(e.group));
-        Some((e.group, single.unwrap_or(e.core)))
     }
 
     /// Replaces the nodes' tags with `tags`.

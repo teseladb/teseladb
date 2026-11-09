@@ -14,7 +14,7 @@
 
 use teseladb_exec::pipeline::Pipeline;
 use teseladb_exec::pipeline::spill::{Counting, SpillStats, SpillStore};
-use teseladb_meta::catalog::Namespace;
+use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::super::mutation::from_mql;
@@ -173,9 +173,6 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     };
     let pipeline = checked(&stages)?;
     let steps = swapped(stages.into_iter().map(Step::new).collect());
-    let engine_from = query_part(&steps, true);
-    let engine = engine_runs(&pipeline, &steps, engine_from);
-    let first = if engine { engine_from } else { query_part(&steps, false) };
     let i = leading_matches(&steps);
     let mut filter = Document::new();
     let leading = steps[..i].iter().filter_map(|s| match &s.kind {
@@ -186,6 +183,12 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         filter.push(k, v.clone());
     }
     let coll = ctx.backend.collection(ns)?;
+    let classic_from = query_part(&steps, false);
+    let express = express_id(coll.as_ref(), &filter, &steps[i..classic_from], inner)?;
+    let engine_from = query_part(&steps, true);
+    // The express path keeps the slot-based engine out (measured on a `refrouter` 9.0.4).
+    let engine = express.is_none() && engine_runs(&pipeline, &steps, engine_from);
+    let first = if engine { engine_from } else { classic_from };
     let run = verbosity >= Verbosity::ExecutionStats;
     let read = Read {
         filter: &filter,
@@ -222,7 +225,10 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         index_keys: false,
         key_only: false,
     };
-    let chosen = super::planned_read(ctx, coll.as_ref(), &plan_read, None)?;
+    let chosen = match (&express, coll.as_ref()) {
+        (Some(_), _) | (None, None) => None,
+        (None, Some(_)) => super::planned_read(ctx, coll.as_ref(), &plan_read, None)?,
+    };
     let access = chosen.as_ref().map(|(indexes, c)| {
         (
             (
@@ -237,9 +243,14 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
                 .collect::<Vec<(Stage, bool)>>(),
         )
     });
-    let (mut input, rejected) = match access {
-        Some((a, r)) => (Some(a), r),
-        None => (None, Vec::new()),
+    let (mut input, rejected) = match (access, &express, coll.as_ref()) {
+        (Some((a, r)), _, _) => (Some(a), r),
+        (None, Some(id), Some(c)) => {
+            let found = if run { super::read_id(ctx, c, id, read.concern)? } else { 0 };
+            let stage = super::express_stage(super::super::catalog::is_clustered(c)?, found);
+            (Some((stage, true)), Vec::new())
+        }
+        (None, _, _) => (None, Vec::new()),
     };
     let counted = Run { examined, matched };
     let mut ids = Ids { next: engine.then_some(1) };
@@ -257,6 +268,9 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         engine_plan(ns, &steps, (first, &foreign), base, &mut ids)?
     } else {
         let mut plan = query_plan(ns, &steps, (i, first), &shown, &counted, &mut ids, input.take());
+        if express.is_some() {
+            plan = folded_into_express(plan);
+        }
         if makes_sort_keys(&steps[first..]) {
             let mut keys = Stage::new("SORT_KEY_GENERATOR");
             keys.returned = plan.returned;
@@ -282,8 +296,15 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         planner.push(k, v);
     }
     planner.push("optimizationTimeMillis", 0);
+    // Behind the express path, a pipeline that needs no field of the documents reads empty
+    // ones (measured on a `refrouter` 9.0.4).
+    let needs_nothing = || {
+        teseladb_exec::pipeline::deps::needed(&docs(&steps[last..])).is_some_and(|f| f.is_empty())
+    };
     if remaining.is_empty() {
         planner.push("optimizedPipeline", true);
+    } else if express.is_some() && needs_nothing() {
+        planner.push("cursorType", "emptyDocuments");
     } else {
         planner.push("cursorType", "regular");
     }
@@ -388,6 +409,57 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     out.push("command", command);
     out.push("ok", 1.0);
     Ok(out)
+}
+
+/// The `_id` a pipeline reads by RefDb's express path: its leading filter is that `_id`
+/// equality alone, with no collation, on a collection that is not a time series, and its query
+/// part skips nothing (measured on a `refrouter` 9.0.4: a `$skip` plans an index scan).
+fn express_id(
+    coll: Option<&CollectionEntry>,
+    filter: &Document,
+    query: &[Step],
+    inner: &Document,
+) -> Result<Option<Value>, CommandError> {
+    let Some(c) = coll else { return Ok(None) };
+    if filter.len() != 1
+        || inner.get("collation").is_some()
+        || super::super::query::options_collation(c).is_some()
+        || super::super::timeseries::spec_of(c)?.is_some()
+        || query.iter().any(|s| matches!(s.kind, Kind::Skip(_)))
+    {
+        return Ok(None);
+    }
+    Ok(super::super::crud::id_equality(filter))
+}
+
+/// The classic plan over an express stage as RefDb shows it: the sort and the limit of one
+/// document folded in, a simple projection in the stage, and any other projection over
+/// `IDHACK` (measured on a `refrouter` 9.0.4).
+fn folded_into_express(plan: Stage) -> Stage {
+    let mut chain = Vec::new();
+    let mut at = Some(plan);
+    while let Some(mut s) = at {
+        at = s.input.take().map(|i| *i);
+        chain.push(s);
+    }
+    let Some(mut express) = chain.pop() else { return Stage::new("EOF") };
+    match chain.into_iter().find(|s| s.name.starts_with("PROJECTION_")) {
+        Some(p) if p.name == "PROJECTION_SIMPLE" => {
+            if let Some(by) = p.tail.get("transformBy") {
+                express.head.push("projection", by.clone());
+                express.head.push("projectionCovered", false);
+            }
+            express
+        }
+        Some(mut p) => {
+            let mut idhack = Stage::new("IDHACK");
+            idhack.counters = std::mem::take(&mut express.counters);
+            idhack.returned = express.returned;
+            p.returned = express.returned;
+            p.over(idhack)
+        }
+        None => express,
+    }
 }
 
 /// The target of `$out` as `explain` writes it: its collection, then its database (the

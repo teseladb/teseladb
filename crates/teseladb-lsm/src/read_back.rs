@@ -13,7 +13,7 @@ use teseladb_keys::Hlc;
 
 use crate::entry;
 use crate::lsm::Lsm;
-use crate::read::{Fetch, Item, Lookup, ReadToken, Reader, Step, corrupt, get_once};
+use crate::read::{Blocks, Fetch, Item, Lookup, ReadToken, Step, corrupt, get_once};
 use crate::sst::block::BlockCursor;
 use crate::sst::reader::Table;
 use crate::version::{Version, View};
@@ -76,7 +76,11 @@ enum Below {
 impl BackScan {
     /// The previous key's visible version.
     pub fn next(&mut self, lsm: &mut Lsm) -> Step {
-        let r = &mut lsm.reader;
+        self.next_with(&mut lsm.reader)
+    }
+
+    /// [`BackScan::next`] reading its blocks through `r`, as a reader on another thread does.
+    pub(crate) fn next_with<B: Blocks>(&mut self, r: &mut B) -> Step {
         r.begin();
         let step = self.step(r);
         if !matches!(step, Step::Miss(_)) {
@@ -85,9 +89,9 @@ impl BackScan {
         step
     }
 
-    fn step(&mut self, r: &mut Reader) -> Step {
+    fn step<B: Blocks>(&mut self, r: &mut B) -> Step {
         loop {
-            if let Some(e) = &r.failure {
+            if let Some(e) = r.failure() {
                 return Step::Failed(e.clone());
             }
             if self.finished {
@@ -121,7 +125,7 @@ impl BackScan {
     }
 
     /// The largest logical key below the bound and at or above the start, over every source.
-    fn below(&self, r: &mut Reader) -> Below {
+    fn below<B: Blocks>(&self, r: &mut B) -> Below {
         let target = entry::first_version(&self.bound);
         let mut best: Option<Vec<u8>> = None;
         let mut keep = |ikey: &[u8]| {
@@ -165,7 +169,11 @@ impl BackScan {
 
 /// The last internal key of table `t` before `target`: from the block `target` falls in, or the
 /// last key of the block before it, which the index holds.
-fn table_before(r: &mut Reader, t: &Arc<Table>, target: &[u8]) -> Result<InTable, crate::LsmError> {
+fn table_before<B: Blocks>(
+    r: &mut B,
+    t: &Arc<Table>,
+    target: &[u8],
+) -> Result<InTable, crate::LsmError> {
     let Some(i) = t.find_block(target) else {
         // Every key of the file is below the target: its last one.
         return Ok(InTable::Ready(t.blocks().checked_sub(1).map(|l| t.last_key(l).to_vec())));

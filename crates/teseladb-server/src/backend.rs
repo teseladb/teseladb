@@ -249,7 +249,19 @@ impl ServerBackend {
         let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let prefer = (self.read_pref.clone(), self.h.node, self.h.routes.tags());
         let mut from = start.to_vec();
+        // Each range's part on this thread when its view serves it (005 FR-028), for a read at
+        // the latest mark on the leaders.
+        let outside = self.read_mark.is_none()
+            && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         while from.as_slice() < end && rows.len() < limit {
+            if outside
+                && let Some((stop, more)) =
+                    self.scan_outside((&from, end), (limit - rows.len(), false), concern)
+            {
+                rows.extend(more);
+                from = stop;
+                continue;
+            }
             let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
             let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
                 true => end.to_vec(),
@@ -292,11 +304,26 @@ impl ServerBackend {
         &mut self,
         (start, end, limit): (&[u8], &[u8], usize),
         make: &PartRequest<'_>,
+        outside: Option<ReadConcern>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut to = end.to_vec();
         let until = self.until();
+        // Each range's part on this thread when its view serves it (005 FR-028), for a read at
+        // the latest mark on the leaders (`outside`: its concern).
+        let outside = outside.filter(|_| {
+            self.read_mark.is_none()
+                && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary)
+        });
         while start < to.as_slice() && rows.len() < limit {
+            if let Some(concern) = outside
+                && let Some((lo, more)) =
+                    self.scan_outside((start, &to), (limit - rows.len(), true), concern)
+            {
+                rows.extend(more);
+                to = lo;
+                continue;
+            }
             let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
             let part = |e: &RouteEntry| {
                 let lo = e.start.as_slice().max(start).to_vec();
@@ -921,7 +948,7 @@ impl Backend for ServerBackend {
             .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
         let prefer = (self.read_pref.clone(), self.h.node, self.h.routes.tags());
         let make = |e: &RouteEntry, part| scan_req(&prefer, e, part, (concern, true));
-        let rows = self.scan_ranges_back((start, end, limit), &make);
+        let rows = self.scan_ranges_back((start, end, limit), &make, Some(concern));
         self.selection = None;
         rows
     }
@@ -1236,7 +1263,7 @@ impl Backend for ServerBackend {
             view: view.clone(),
             uncertain_to,
         };
-        self.scan_ranges_back((start, end, limit), &make)
+        self.scan_ranges_back((start, end, limit), &make, None)
     }
 
     fn txn_gets(
@@ -1429,6 +1456,9 @@ impl Backend for ServerBackend {
         let start = docs.as_bytes().to_vec();
         let end = teseladb_keys::space::KeyBuilder::index_prefix(tenant, collection, 1);
         let end = end.as_bytes().to_vec();
+        if let Some(n) = self.doc_count_together((tenant, collection), (&start, &end)) {
+            return Ok(Some(n));
+        }
         let mut total = 0u64;
         let mut from = start;
         while from < end {

@@ -76,3 +76,51 @@ fn the_leader_recounts_estimated_counts_and_every_replica_takes_them() {
         assert_eq!(counts(&c, *n), Some(BTreeMap::from([(COLL, 3)])), "node {n:?}");
     }
 }
+
+fn counts_of(c: &Cluster, n: NodeId, g: GroupId) -> Option<BTreeMap<(u32, u32), u64>> {
+    c.nodes[&n].core.state_machine(g).and_then(RangeSm::doc_counts).cloned()
+}
+
+/// A split leaves the counts of both halves estimated (each one's documents were counted by no
+/// entry of its own) and their leaders recount them (H-004 of the native tests: after a split
+/// every count read the documents).
+#[test]
+fn after_a_split_each_half_recounts_its_documents() {
+    const NEW: GroupId = GroupId(9);
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    c.settle();
+    for node in c.nodes.values_mut() {
+        node.host.set_counted_writes(true);
+    }
+    let keys: Vec<Vec<u8>> = [&b"a"[..], b"b", b"x", b"y", b"z"].iter().map(|pk| doc(pk)).collect();
+    for k in &keys {
+        write(&mut c, l, k, 1);
+    }
+    // The documents go by the hash of their key: the cut splits them by that order.
+    let at = doc(b"m");
+    let left = u64::try_from(keys.iter().filter(|k| **k < at).count()).unwrap();
+    let right = u64::try_from(keys.len()).unwrap() - left;
+    assert!(left > 0 && right > 0, "documents on both sides of the cut");
+    assert!(c.nodes.get_mut(&l).unwrap().host.split(G, &at, NEW));
+    c.follow();
+    c.nodes.get_mut(&l).unwrap().host.take_splits();
+    let at_index = c.nodes[&l].core.status(G).unwrap().applied;
+    let voters: Vec<NodeId> = c.nodes.keys().copied().collect();
+    for node in c.nodes.values_mut() {
+        let lsm = node.host.lsm().clone();
+        let sm = RangeSm::open(NEW, at.clone(), END.to_vec(), lsm, &mut node.disk).unwrap();
+        let desc = GroupDesc { group: NEW, voters: voters.clone(), learners: vec![] };
+        node.core.create_group(desc, sm).unwrap();
+        node.host.add_born_range(NEW, at.clone(), END.to_vec(), G, at_index);
+    }
+    // Both leaders recount within a second or two.
+    for _ in 0..400 {
+        c.ticks_following(1);
+    }
+    c.settle();
+    for n in voters {
+        assert_eq!(counts_of(&c, n, G), Some(BTreeMap::from([(COLL, left)])), "left, {n:?}");
+        assert_eq!(counts_of(&c, n, NEW), Some(BTreeMap::from([(COLL, right)])), "right, {n:?}");
+    }
+}

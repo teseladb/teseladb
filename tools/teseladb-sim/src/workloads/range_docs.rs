@@ -22,9 +22,10 @@
 //!
 //! `outside-reads` (005 T049, FR-028) is the same workload with a share of the `local` and
 //! `majority` reads served as a connection's thread serves them: from the view the leader's core
-//! published, without a request to the core, reading from the disk the blocks the view lacks. They
-//! go into the linearizability history like any read: a read outside the core that misses a
-//! write acknowledged before it, or that a later write goes below, shows there.
+//! published, without a request to the core, reading from the disk the blocks the view lacks; half
+//! of them as the scan of a span of their one key, as a find by a range of `_id` reads. They go
+//! into the linearizability history like any read: a read outside the core that misses a write
+//! acknowledged before it, or that a later write goes below, shows there.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -79,6 +80,8 @@ const FOLLOWER_SHARE: f64 = 0.3;
 const FOLLOWER_AT_MARK: f64 = 0.5;
 /// In `outside-reads`, share of the `local` and `majority` reads served outside the core.
 const OUTSIDE_SHARE: f64 = 0.6;
+/// In `outside-reads`, share of the reads outside the core served as a scan.
+const OUTSIDE_SCAN_SHARE: f64 = 0.5;
 /// Blocks one read outside the core reads from the disk before it goes to the core.
 const OUTSIDE_BLOCKS: usize = 8;
 /// Share of the writes that go with [`W1`].
@@ -785,6 +788,30 @@ impl RangeDocsWorkload {
     ) -> Option<(Hlc, Option<(u8, Vec<u8>)>)> {
         let view = self.hosts.get(&node)?.views().get(G)?;
         let cache = self.outside.as_mut()?.caches.entry(node).or_default();
+        // Half of them as the scan of a span of that one key (a find by a range of `_id`).
+        if w.rng.chance(OUTSIDE_SCAN_SHARE) {
+            // In either direction (H-003: `sort({_id: -1})` reads from the last key down).
+            let backward = w.rng.chance(0.5);
+            let key = doc(k);
+            let end = [key.as_slice(), &[0]].concat();
+            let (now, wall) = Self::times(w, node);
+            let core = self.core as usize;
+            let mut blocks = 0;
+            let supply = |need: &teseladb_lsm::BlockNeed| {
+                blocks += 1;
+                let disk = &mut w.nodes[node as usize].cores[core].disk;
+                let Ok(file) = disk.read_all(Path::new(&need.path)) else { return false };
+                let start = usize::try_from(need.offset).unwrap_or(usize::MAX);
+                let len = usize::try_from(need.len).unwrap_or(usize::MAX);
+                let bytes = file.get(start..start.saturating_add(len).min(file.len()));
+                blocks <= OUTSIDE_BLOCKS
+                    && bytes.is_some_and(|b| view.lsm().supply(need, b).is_ok())
+            };
+            let (ts, rows) =
+                view.scan(cache, (&key, &end), (1, backward), (wall, || now), concern, supply)?;
+            let value = rows.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+            return Some((ts, value));
+        }
         for _ in 0..=OUTSIDE_BLOCKS {
             let (now, wall) = Self::times(w, node);
             match view.read(cache, &doc(k), wall, || now, concern) {

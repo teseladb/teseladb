@@ -102,3 +102,73 @@ fn a_read_by_id_is_served_without_the_core_also_from_the_files() {
     assert!(served_outside() - served >= 64, "served outside: {}", served_outside() - served);
     assert!(blocks_read_outside() > blocks, "no block read from the files");
 }
+
+fn find_with(c: &mut Client, filter: Document, limit: i32) -> Vec<Value> {
+    find_sorted(c, filter, limit, 1)
+}
+
+/// The documents of `filter` sorted by `_id` in direction `way` (1 or -1), at most `limit`.
+fn find_sorted(c: &mut Client, filter: Document, limit: i32, way: i32) -> Vec<Value> {
+    let cmd = Document::new()
+        .with("find", COLL)
+        .with("filter", filter)
+        .with("sort", Document::new().with("_id", way))
+        .with("limit", limit);
+    let r = c.run(DB, cmd);
+    assert!(ok(&r), "{r:?}");
+    batch(&r, "firstBatch")
+}
+
+/// The scans of an `_id` range in both directions and of `$in` (H-009, H-003 and H-011 of the
+/// native tests) go outside the core too, the blocks they lack read from the files, and answer what the core answers.
+#[test]
+fn scans_by_id_are_served_without_the_core_also_from_the_files() {
+    let dir = Dir::new("scans");
+    let lsm = LsmConfig { memtable_bytes: MEMTABLE, ..LsmConfig::default() };
+    let cfg = NodeConfig { data_dir: Some(dir.0.clone()), lsm, ..config(Vec::new()) };
+    let path = dir.0.clone();
+    let lock = lock_dir(&dir.0).expect("locks the directory");
+    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    for from in (0..DOCS).step_by(1_000) {
+        let r = c.run(
+            DB,
+            Document::new().with("insert", COLL).with("documents", docs(from..from + 1_000)),
+        );
+        assert!(ok(&r), "{r:?}");
+    }
+    until("the documents in table files", || (tables(&dir.0) > 0).then_some(()));
+    let (served, blocks) = (served_outside(), blocks_read_outside());
+    // Ranges alone: no read of one key, so every read counted outside is a scan.
+    for from in (0..DOCS).step_by(97) {
+        let gte = Document::new().with("_id", Document::new().with("$gte", from));
+        let found = find_with(&mut c, gte, 10);
+        let want: Vec<i32> = (from..DOCS.min(from + 10)).collect();
+        let got: Vec<Option<Value>> = found.iter().map(|d| field(d, "_id")).collect();
+        assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
+    }
+    assert!(served_outside() - served >= 64, "scans outside: {}", served_outside() - served);
+    assert!(blocks_read_outside() > blocks, "no block read from the files");
+    // From the last key down (H-003): `$lte` with a descending sort.
+    let served = served_outside();
+    for to in (0..DOCS).step_by(97) {
+        let lte = Document::new().with("_id", Document::new().with("$lte", to));
+        let found = find_sorted(&mut c, lte, 10, -1);
+        let want: Vec<i32> = (0.max(to - 9)..=to).rev().collect();
+        let got: Vec<Option<Value>> = found.iter().map(|d| field(d, "_id")).collect();
+        assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
+    }
+    let back = served_outside() - served;
+    assert!(back >= 64, "backward scans outside: {back}");
+    for from in (0..DOCS).step_by(97) {
+        let ids = vec![Value::Int32(from), Value::Int32(DOCS + 5), Value::Int32((from + 3) % DOCS)];
+        let within = Document::new().with("_id", Document::new().with("$in", ids));
+        let found = find_with(&mut c, within, 10);
+        let mut want = vec![from, (from + 3) % DOCS];
+        want.sort_unstable();
+        want.dedup();
+        let got: Vec<Option<Value>> = found.iter().map(|d| field(d, "_id")).collect();
+        assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
+    }
+}

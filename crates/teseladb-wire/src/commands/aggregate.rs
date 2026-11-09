@@ -1264,6 +1264,23 @@ fn planned_read<B: Backend + ?Sized>(
         return Ok(None);
     }
     let Some(coll) = ctx.backend.collection(ns)? else { return Ok(None) };
+    // An `_id` equality alone reads by RefDb's express path, without the planner and with no
+    // index key (H-011 of the native tests; measured on a `refnode` 9.0.4). The caller runs
+    // with no collation, and the pipeline applies its stages to what this reads.
+    let express = match filter.len() {
+        1 => super::crud::id_equality(&filter),
+        _ => None,
+    };
+    if let Some(id) =
+        express.filter(|_| super::timeseries::spec_of(&coll).is_ok_and(|t| t.is_none()))
+    {
+        let docs = super::query::read_by_id(ctx.backend, &coll, &id, concern)?
+            .iter()
+            .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
+            .collect::<Result<Vec<_>, CommandError>>()?;
+        let metas = index_keys.then(|| docs.iter().map(|_| Meta::new()).collect());
+        return Ok(Some((docs, metas)));
+    }
     let parsed = super::plan_exec::parsed_filter(&filter, vars)?;
     let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
     let read = super::plan_exec::ReadPlan {

@@ -18,6 +18,7 @@ use teseladb_range::host::{
     WriteReq,
 };
 use teseladb_range::mutate::Outcome;
+use teseladb_range::push::Row;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
 use teseladb_range::view::FastRead;
@@ -558,6 +559,90 @@ fn a_read_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
         read_outside(&n, b"\x01count", ReadConcern::Local, Nanos::ZERO),
         FastRead::Found { .. }
     ));
+}
+
+/// A scan from a connection's thread (005 FR-028), as [`read_outside`]; no block is read.
+fn scan_outside(
+    n: &Node,
+    span: (&[u8], &[u8]),
+    limit: usize,
+    concern: ReadConcern,
+) -> Option<(Hlc, Vec<Row>)> {
+    scan_outside_way(n, span, (limit, false), concern)
+}
+
+/// [`scan_outside`] in either direction (`backward`: from the span's last key down).
+fn scan_outside_way(
+    n: &Node,
+    span: (&[u8], &[u8]),
+    (limit, backward): (usize, bool),
+    concern: ReadConcern,
+) -> Option<(Hlc, Vec<Row>)> {
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = ViewCache::default();
+    view.scan(&mut cache, span, (limit, backward), (n.wall(), || n.now), concern, |_| false)
+}
+
+#[test]
+fn a_scan_outside_the_core_gives_the_documents_of_the_span_and_a_later_write_goes_above_it() {
+    let mut n = Node::new();
+    for (k, v) in
+        [(&b"\x01b"[..], Some(2)), (b"\x01a", Some(1)), (b"\x01c", Some(3)), (b"\x01b", None)]
+    {
+        n.mutate(k, Box::new(SetKey(k.to_vec(), v)), MAJORITY);
+        n.settle();
+    }
+    let (mark, rows) =
+        scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).expect("served outside");
+    assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![1])), (b"\x01c".to_vec(), (1, vec![3]))]);
+    let (_, first) =
+        scan_outside(&n, (b"\x01a", b"\x01y"), 1, ReadConcern::Majority).expect("served outside");
+    assert_eq!(first, vec![(b"\x01a".to_vec(), (1, vec![1]))], "no more than the limit");
+    let (_, none) =
+        scan_outside(&n, (b"\x01d", b"\x01y"), 10, ReadConcern::Local).expect("served outside");
+    assert!(none.is_empty());
+    // From the last key down, as `sort({_id: -1})` reads (H-003).
+    let back = (b"\x01a".as_slice(), b"\x01y".as_slice());
+    let (_, last) = scan_outside_way(&n, back, (1, true), ReadConcern::Local).expect("served");
+    assert_eq!(last, vec![(b"\x01c".to_vec(), (1, vec![3]))]);
+    let (_, all) = scan_outside_way(&n, back, (10, true), ReadConcern::Local).expect("served");
+    assert_eq!(all, vec![(b"\x01c".to_vec(), (1, vec![3])), (b"\x01a".to_vec(), (1, vec![1]))]);
+    // The next write of the range goes above the scan's mark (the read bound).
+    let w = n.mutate(b"\x01d", Box::new(SetKey(b"\x01d".to_vec(), Some(4))), MAJORITY);
+    n.settle();
+    match n.reply(w) {
+        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > mark, "{ts:?} above {mark:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    // A write in flight on the range.
+    let w = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(2))), MAJORITY);
+    assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
+    n.settle();
+    assert!(n.reply(w).is_some());
+    // A span past the range, a linearizable read and no limit go to the core.
+    assert!(scan_outside(&n, (b"\x01a", b"\x02"), 10, ReadConcern::Local).is_none());
+    assert!(scan_outside(&n, span, 10, ReadConcern::Linearizable).is_none());
+    assert!(scan_outside(&n, span, 0, ReadConcern::Local).is_none());
+    // Far past what the core published as valid when the mark is taken.
+    let view = n.host.views().get(G).expect("the view");
+    let late = n.now + Nanos::from_secs(60);
+    let mut cache = ViewCache::default();
+    let r =
+        view.scan(&mut cache, span, (10, false), (n.wall(), || late), ReadConcern::Local, |_| {
+            false
+        });
+    assert!(r.is_none());
+    // Back to normal once the write is applied.
+    let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");
+    assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![2]))]);
 }
 
 #[test]

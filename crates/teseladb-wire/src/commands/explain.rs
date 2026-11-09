@@ -689,8 +689,9 @@ pub(super) fn matches_nothing(shown: &Document) -> bool {
     shown.len() == 1 && shown.get(teseladb_mql::ops::ALWAYS_FALSE).is_some()
 }
 
-/// Whether a projection only keeps or drops fields (`PROJECTION_SIMPLE`).
-fn simple_projection(p: &Document) -> bool {
+/// Whether a projection only keeps or drops fields (`PROJECTION_SIMPLE`), with no dotted path:
+/// the projections RefDb's express path takes (measured on a `refnode` 9.0.4).
+pub(crate) fn simple_projection(p: &Document) -> bool {
     p.iter().all(|(k, v)| {
         !k.contains('.')
             && matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Boolean(_))
@@ -741,6 +742,21 @@ fn scan<B: Backend + ?Sized>(
         },
     )?;
     Ok((examined, matched))
+}
+
+/// The stage of RefDb's express path that read an `_id` equality and found `found` documents.
+/// A collection kept in `_id` order reads the document itself, with no key (measured on a
+/// `refnode` 9.0.4, 015 FR-014); an `_id` that is not there examines no key.
+fn express_stage(clustered: bool, found: u64) -> Stage {
+    let mut s = Stage::new(if clustered { "EXPRESS_CLUSTERED_IXSCAN" } else { "EXPRESS_IXSCAN" });
+    if !clustered {
+        s.head.push("keyPattern", Document::new().with("_id", 1));
+        s.head.push("indexName", "_id_");
+    }
+    s.counters.push("keysExamined", long(if clustered { 0 } else { found }));
+    s.counters.push("docsExamined", long(found));
+    s.returned = found;
+    s
 }
 
 /// `find`: an `_id` equality reads its key (`EXPRESS_IXSCAN`); anything else scans, then sorts
@@ -795,19 +811,7 @@ fn find<B: Backend + ?Sized>(
     let id = crud::id_equality(&a.filter).filter(|_| collation.is_none() && a.skip == 0);
     if let (Some(id), Some(c)) = (id, coll.as_ref()) {
         let found = if run { read_id(ctx, c, &id, a.concern)? } else { 0 };
-        // A collection kept in `_id` order reads the document itself, with no key (measured on
-        // a `refnode` 9.0.4, 015 FR-014).
-        let clustered = super::catalog::is_clustered(c)?;
-        let mut s =
-            Stage::new(if clustered { "EXPRESS_CLUSTERED_IXSCAN" } else { "EXPRESS_IXSCAN" });
-        if !clustered {
-            s.head.push("keyPattern", Document::new().with("_id", 1));
-            s.head.push("indexName", "_id_");
-        }
-        // An `_id` that is not there examines no key (measured on a `refnode` 9.0.4).
-        s.counters.push("keysExamined", long(if clustered { 0 } else { found }));
-        s.counters.push("docsExamined", long(found));
-        s.returned = found;
+        let mut s = express_stage(super::catalog::is_clustered(c)?, found);
         let plan = match &projection {
             Some(p) if simple_projection(p) => {
                 s.head.push("projection", p.clone());

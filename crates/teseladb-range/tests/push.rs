@@ -708,3 +708,35 @@ fn a_push_by_read_at_a_mark_ahead_of_the_leaders_wall_clock_is_refused_for_now()
     // at a mark its clock has not reached.
     assert_eq!(n.txn(TxnOp::PushByRead { txn: T1, at: ahead }), Err(RangeError::Overloaded));
 }
+
+/// A read outside the core (005 FR-028) that meets an intent leaves it to the core, which
+/// decides it: the scan of a span with one, and the read of its key.
+#[test]
+fn a_read_outside_the_core_that_meets_an_intent_goes_to_the_core() {
+    let mut n = Node::new();
+    let old = n.write(A, b"old");
+    n.write(C, b"c");
+    intents_mark(n.txn(TxnOp::PutIntents {
+        txn: T1,
+        read_ts: old,
+        writes: vec![(A.to_vec(), put(b"new"))],
+    }));
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = teseladb_lsm::ViewCache::default();
+    let clocks = (n.wall(), || n.now);
+    let span: (&[u8], &[u8]) = (A, D);
+    assert!(
+        view.scan(&mut cache, span, (10, false), clocks, ReadConcern::Local, |_| false).is_none()
+    );
+    let clocks = (n.wall(), || n.now);
+    assert!(
+        view.scan(&mut cache, span, (10, true), clocks, ReadConcern::Local, |_| false).is_none()
+    );
+    let read = view.read(&mut cache, A, n.wall(), || n.now, ReadConcern::Local);
+    assert!(matches!(read, teseladb_range::view::FastRead::Core));
+    // A span past the intent is served.
+    let (_, rows) = view
+        .scan(&mut cache, (C, D), (10, false), (n.wall(), || n.now), ReadConcern::Local, |_| false)
+        .expect("served outside");
+    assert_eq!(rows.len(), 1);
+}

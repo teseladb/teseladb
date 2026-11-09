@@ -1,9 +1,10 @@
-//! Reads of one key served on the client worker's thread, without the range's core (005 FR-028,
-//! H-013 of the native tests). The worker finds the key's range in the routing table, takes the
-//! view its core published and reads the key there; a block the shared cache lacks it reads from
-//! its file itself and hands to the cache. Whatever the view cannot serve goes to the core as
-//! before: a write holding a latch, an intent, a lease not checked for this moment, a file that
-//! cannot be read (the core reads it again and reports its error).
+//! Reads of one key, and scans of a span one range holds, served on the client worker's thread,
+//! without the range's core (005 FR-028, H-013, H-011 and H-009 of the native tests). The worker
+//! finds the key's range in the routing table, takes the view its core published and reads the
+//! key or the span there; a block the shared cache lacks it reads from its file itself and hands
+//! to the cache. Whatever the view cannot serve goes to the core as before: a write holding a
+//! latch, an intent, a lease not checked for this moment, a file that cannot be read (the core
+//! reads it again and reports its error).
 //!
 //! The reads served here still count for their range's split by load (007 FR-006): the worker
 //! tallies them per range and reports each tally to the core in one message, with a sample of
@@ -20,7 +21,7 @@ use teseladb_lsm::{BlockNeed, ViewCache};
 use teseladb_range::HISTORY_VALUE;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::view::{FastRead, RangeView};
-use teseladb_wire::commands::Backend;
+use teseladb_wire::commands::{Backend, Rows};
 use teseladb_types::{GroupId, Nanos};
 
 use super::ServerBackend;
@@ -28,6 +29,9 @@ use crate::logic::NodeMsg;
 
 /// Blocks one read may read from their files before it goes to the core instead.
 const MAX_BLOCKS: usize = 8;
+/// Blocks one scan may read from their files before it goes to the core instead: a scan of a
+/// YCSB-E length (up to 100 documents) spans a few blocks of each table it reads.
+const MAX_SCAN_BLOCKS: usize = 64;
 /// Files a worker keeps open between reads.
 const MAX_FILES: usize = 64;
 /// Reads of a range a worker tallies before it reports them to the core.
@@ -75,24 +79,22 @@ struct Tally {
     since: Instant,
 }
 
-impl Outside {
-    /// The bytes of the block `need` names, from its file under `dir`; `None` if they cannot be
-    /// read here.
-    fn block(&mut self, dir: &Path, need: &BlockNeed) -> Option<Vec<u8>> {
-        if !self.files.contains_key(&need.path) {
-            if self.files.len() >= MAX_FILES {
-                self.files.clear();
-            }
-            let file = File::open(dir.join(&need.path)).ok()?;
-            self.files.insert(need.path.clone(), file);
+/// The bytes of the block `need` names, from its file under `dir`, keeping the file open in
+/// `files`; `None` if they cannot be read here.
+fn block(files: &mut BTreeMap<String, File>, dir: &Path, need: &BlockNeed) -> Option<Vec<u8>> {
+    if !files.contains_key(&need.path) {
+        if files.len() >= MAX_FILES {
+            files.clear();
         }
-        let file = self.files.get(&need.path)?;
-        let mut buf = vec![0; usize::try_from(need.len).ok()?];
-        let got = teseladb_io::read_up_to(file, &mut buf, need.offset).ok()?;
-        buf.truncate(got);
-        BLOCKS.fetch_add(1, Ordering::Relaxed);
-        Some(buf)
+        let file = File::open(dir.join(&need.path)).ok()?;
+        files.insert(need.path.clone(), file);
     }
+    let file = files.get(&need.path)?;
+    let mut buf = vec![0; usize::try_from(need.len).ok()?];
+    let got = teseladb_io::read_up_to(file, &mut buf, need.offset).ok()?;
+    buf.truncate(got);
+    BLOCKS.fetch_add(1, Ordering::Relaxed);
+    Some(buf)
 }
 
 impl ServerBackend {
@@ -141,13 +143,74 @@ impl ServerBackend {
                 }
                 FastRead::Need(need) => {
                     let dir = self.h.data_dir.as_deref()?;
-                    let bytes = self.outside.block(dir, &need)?;
+                    let bytes = block(&mut self.outside.files, dir, &need)?;
                     view.lsm().supply(&need, &bytes).ok()?;
                 }
                 FastRead::Core => return None,
             }
         }
         None
+    }
+
+    /// The documents of `[start, end)` that one range holds, at most `limit`, read on this thread
+    /// when its view serves them (005 FR-028, H-011, H-009 and H-003 of the native tests): from
+    /// `start` up, or from `end` down when `backward`; with where that range's part of the span
+    /// ends (or starts, backward). `None` when the read goes to the core. The
+    /// blocks it lacks it reads from their files, at most [`MAX_SCAN_BLOCKS`].
+    pub(super) fn scan_outside(
+        &mut self,
+        (start, end): (&[u8], &[u8]),
+        (limit, backward): (usize, bool),
+        concern: ReadConcern,
+    ) -> Option<(Vec<u8>, Rows)> {
+        // Forward, the part of the range of `start`; backward, of the range of the keys just
+        // below `end` (H-003). The boundary returned is where the next part starts or ends.
+        let (g, core, (lo, hi)) = match backward {
+            false => {
+                let (g, core, range_end) =
+                    self.h.routes.span_of(&mut self.outside.routes, start)?;
+                let hi = match range_end.is_empty() || end <= range_end {
+                    true => end.to_vec(),
+                    false => range_end.to_vec(),
+                };
+                (g, core, (start.to_vec(), hi))
+            }
+            true => {
+                let (g, core, range_start) =
+                    self.h.routes.span_below(&mut self.outside.routes, end)?;
+                (g, core, (range_start.max(start).to_vec(), end.to_vec()))
+            }
+        };
+        let core = usize::from(core);
+        let view = self.h.views.get(core)?.get(g)?;
+        if self.outside.caches.len() <= core {
+            self.outside.caches.resize_with(core + 1, ViewCache::default);
+        }
+        let origin = self.h.origin;
+        let asked = std::cell::Cell::new(None);
+        let now = || {
+            let at = Instant::now();
+            asked.set(Some(at));
+            let since = at.saturating_duration_since(origin);
+            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+        };
+        let dir = self.h.data_dir.clone();
+        let Outside { caches, files, .. } = &mut self.outside;
+        let mut blocks = 0;
+        let supply = |need: &BlockNeed| {
+            blocks += 1;
+            let Some(dir) = dir.as_deref().filter(|_| blocks <= MAX_SCAN_BLOCKS) else {
+                return false;
+            };
+            block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
+        };
+        let clocks = (crate::clock::wall_ms(), now);
+        let span = (lo.as_slice(), hi.as_slice());
+        let way = (limit, backward);
+        let (_, rows) = view.scan(&mut caches[core], span, way, clocks, concern, supply)?;
+        self.tally(core, g, &lo, asked.get().unwrap_or_else(Instant::now));
+        let boundary = if backward { lo } else { hi };
+        Some((boundary, rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
     }
 
     /// Counts a read of `key` served outside core `core` for range `g`'s load.

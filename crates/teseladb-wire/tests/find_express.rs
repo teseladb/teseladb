@@ -136,3 +136,51 @@ fn a_find_by_id_with_a_simple_projection_answers_what_the_planned_read_answers()
         assert_eq!(field(&r, "code"), &Value::Int32(31254), "{r:?}");
     }
 }
+
+#[test]
+fn an_aggregate_by_id_answers_what_the_planned_read_answers() {
+    let mut m = Mem::new();
+    let docs = r#"[{"_id":1,"g":"a","n":3,"t":[1,2],"o":{"k":1}},{"_id":2,"g":"b","n":1},
+        {"_id":{"a":1},"g":"c","n":2},{"_id":"s","g":"a","n":5}]"#;
+    run(&mut m, &format!(r#"{{"insert":"c","documents":{docs}}}"#));
+    run(&mut m, r#"{"create":"capped","capped":true,"size":4096}"#);
+    run(&mut m, &format!(r#"{{"insert":"capped","documents":{docs}}}"#));
+    run(&mut m, r#"{"create":"ci","collation":{"locale":"en","strength":2}}"#);
+    run(&mut m, r#"{"insert":"ci","documents":[{"_id":"A","n":1},{"_id":"b","n":2}]}"#);
+    let rests = [
+        "",
+        r#",{"$group":{"_id":1,"n":{"$sum":1}}}"#,
+        r#",{"$count":"n"}"#,
+        r#",{"$project":{"g":1}}"#,
+        r#",{"$project":{"w":"$g","_id":0}}"#,
+        r#",{"$sort":{"n":-1}},{"$limit":1}"#,
+        r#",{"$skip":1}"#,
+        r#",{"$unwind":"$t"}"#,
+    ];
+    for coll in ["c", "capped", "ci"] {
+        for id in [r#"1"#, r#"{"$eq":1}"#, r#"{"a":1}"#, r#""s""#, r#""a""#, r#"99"#] {
+            for rest in rests {
+                let express = format!(
+                    r#"{{"aggregate":"{coll}","pipeline":[{{"$match":{{"_id":{id}}}}}{rest}],"cursor":{{}}}}"#
+                );
+                let planned = format!(
+                    r#"{{"aggregate":"{coll}","pipeline":[{{"$match":{{"$and":[{{"_id":{id}}},{{"n":{{"$exists":true}}}}]}}}}{rest}],"cursor":{{}}}}"#
+                );
+                let (e, p) = (run(&mut m, &express), run(&mut m, &planned));
+                assert_eq!(field(&e, "ok"), field(&p, "ok"), "{express}: {e:?}");
+                if field(&p, "ok") == &Value::Double(1.0) {
+                    assert_eq!(batch(&e), batch(&p), "{express}");
+                }
+            }
+            // The express path reads no index key, also for an `_id` that is a document
+            // (measured on a `refnode` 9.0.4).
+            let keyed = format!(
+                r#"{{"aggregate":"{coll}","pipeline":[{{"$match":{{"_id":{id}}}}},{{"$set":{{"m":{{"$meta":"indexKey"}}}}}}],"cursor":{{}}}}"#
+            );
+            let plain = format!(
+                r#"{{"aggregate":"{coll}","pipeline":[{{"$match":{{"_id":{id}}}}}],"cursor":{{}}}}"#
+            );
+            assert_eq!(batch(&run(&mut m, &keyed)), batch(&run(&mut m, &plain)), "{keyed}");
+        }
+    }
+}

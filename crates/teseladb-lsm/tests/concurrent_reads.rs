@@ -1,8 +1,8 @@
 //! Reads from other threads over the published view (004 FR-026, T042). Reader threads take the
 //! view the core published and read it without the core, asking the test's main thread for the
 //! blocks they miss, as a connection's thread reads them from the file itself:
-//! - while the core flushes and compacts, every read matches the model and a file a view still
-//!   uses is not deleted;
+//! - while the core flushes and compacts, every read matches the model (scans in both directions)
+//!   and a file a view still uses is not deleted;
 //! - while the core writes new keys, a reader sees every key published before its mark.
 
 mod common;
@@ -55,6 +55,26 @@ fn scan(
             SharedStep::Done => return out,
             SharedStep::Need(need) => supply(shared, ask, need),
             SharedStep::Failed(e) => panic!("scan failed: {e}"),
+        }
+    }
+}
+
+/// The scan of `[start, end)` at `at` over `view` from its last key down.
+fn scan_back(
+    shared: &SharedLsm,
+    view: &SharedView,
+    ask: &mpsc::Sender<Ask>,
+    (start, end): (&[u8], &[u8]),
+    at: Hlc,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut s = view.scan_back(start, end, at);
+    loop {
+        match s.next(shared) {
+            SharedStep::Item(i) => out.push((i.key, i.ts, i.kind, i.value.to_vec())),
+            SharedStep::Done => return out,
+            SharedStep::Need(need) => supply(shared, ask, need),
+            SharedStep::Failed(e) => panic!("backward scan failed: {e}"),
         }
     }
 }
@@ -113,6 +133,9 @@ fn rounds(seed: u64, readers: usize) {
                     }
                     let all = scan(&shared, &view, &ask, (b"", b"\xff"), at);
                     assert_eq!(all, model.scan(b"", b"\xff", at), "scan at {at:?}");
+                    let mut back = scan_back(&shared, &view, &ask, (b"", b"\xff"), at);
+                    back.reverse();
+                    assert_eq!(back, all, "backward scan at {at:?}");
                     done.send(()).expect("the main thread");
                 }
             })

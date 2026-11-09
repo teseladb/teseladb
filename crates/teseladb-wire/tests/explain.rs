@@ -172,6 +172,16 @@ fn explain_of_aggregate_answers_as_refdb() {
     check(include_str!("explain/aggregate.out"));
 }
 
+/// Pipelines whose leading `$match` is one `_id` equality (`tests/explain/agg_express.out`,
+/// recorded on a native `refrouter` 9.0.4 on 09-11-2026, H-011 of the native tests): RefDb reads
+/// them by the express path (`EXPRESS_IXSCAN`, or `IDHACK` under a projection it cannot take),
+/// with its sort and limit folded in, a simple projection in the stage and the rest of the
+/// pipeline after a `$cursor`, never in the slot-based engine.
+#[test]
+fn explain_of_aggregate_by_id_answers_as_refdb() {
+    check(include_str!("explain/agg_express.out"));
+}
+
 /// More pipelines (`tests/explain/aggregate2.out`): the forms of the stages after the plan and
 /// the stages RefDb moves before others.
 #[test]
