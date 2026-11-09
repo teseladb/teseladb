@@ -148,6 +148,7 @@ impl PlanIndex {
             fields: self.pattern.iter().map(|(k, _)| k.to_owned()).collect(),
             sparse: self.catalog.sparse,
             collation,
+            hidden: self.catalog.hidden,
         }
     }
 }

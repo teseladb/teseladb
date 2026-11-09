@@ -275,6 +275,21 @@ fn expression(v: &Value, used: &mut BTreeSet<String>) -> Option<()> {
         Value::Document(d) => match d.iter().next() {
             Some(("$literal" | "$const", _)) => Some(()),
             Some(("$rand", _)) => Some(()),
+            // The path a `distinct` on a view reads, given as a constant (measured on a `refrouter`
+            // 9.0.4).
+            Some(("$_internalFindAllValuesAtPath", Value::Array(args))) => {
+                let path = match args.first() {
+                    Some(Value::Document(c)) => c.get("$const").or_else(|| c.get("$literal")),
+                    other => other,
+                };
+                match path {
+                    Some(Value::String(p)) => {
+                        used.insert(p.clone());
+                        Some(())
+                    }
+                    _ => None,
+                }
+            }
             Some(("$meta" | "$function" | "$accumulator", _)) => None,
             // The named arguments of `$top` and the like sort by fields.
             _ => d.iter().try_for_each(|(k, x)| match (k, x) {

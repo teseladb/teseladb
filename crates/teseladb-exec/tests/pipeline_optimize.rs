@@ -205,6 +205,14 @@ fn fields_of_facets_projections_windows_and_named_arguments() {
     assert_eq!(fields(r#"[{"$project":{"_id":false,"a":{"$literal":1}}}]"#), Some(Vec::new()));
     assert_eq!(fields(r#"[{"$project":{"a":{"$meta":"textScore"}}}]"#), None);
     assert_eq!(fields(r#"[{"$project":{"a":{"$rand":{}}}}]"#), list(&["_id"]));
+    // A `distinct` on a view reads the values at its key's path, which the expression names as
+    // a constant (measured on a `refrouter` 9.0.4: the plan cache shape keeps `s`).
+    assert_eq!(
+        fields(
+            r#"[{"$replaceRoot":{"newRoot":{"u":{"$_internalFindAllValuesAtPath":[{"$const":"s"}]}}}},{"$unwind":"$u"},{"$group":{"_id":"$u"}}]"#
+        ),
+        list(&["s"])
+    );
     assert_eq!(
         fields(r#"[{"$group":{"_id":null,"t":{"$topN":{"n":2,"output":"$s","sortBy":{"k":1}}}}}]"#),
         list(&["k", "s"])

@@ -14,7 +14,7 @@ const O: &str = include_str!("aggregate/o.json");
 const DB: &str = "xa";
 
 /// The fields left out of the comparison.
-const IGNORED: [&str; 36] = [
+const IGNORED: [&str; 33] = [
     "optimizationTimeMillis",
     "expressionEvaluationPeakMemoryBytes",
     "totalDataSizeSortedBytesEstimate",
@@ -25,9 +25,6 @@ const IGNORED: [&str; 36] = [
     "host",
     "shardName",
     "connectionString",
-    "queryHash",
-    "planCacheShapeHash",
-    "planCacheKey",
     "queryShapeHash",
     "optimizationTimeMicros",
     "executionTimeMillis",
@@ -392,14 +389,12 @@ fn check_on(m: &mut Mem, file: &str, fresh: bool) {
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
-/// The fields of a plan cache entry that belong to the moment or to RefDb's own hashes and
-/// sizes, and the work counters of each stage, left out of the comparison.
-const CACHE_VOLATILE: [&str; 22] = [
+/// The fields of a plan cache entry that belong to the moment or to RefDb's own sizes and
+/// solution hash, and the work counters of each stage, left out of the comparison; the plan
+/// cache hashes are compared (H-028).
+const CACHE_VOLATILE: [&str; 19] = [
     "totalDataSizeSorted",
     "timeOfCreation",
-    "queryHash",
-    "planCacheShapeHash",
-    "planCacheKey",
     "estimatedSizeBytes",
     "solutionHash",
     "host",

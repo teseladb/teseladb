@@ -93,7 +93,13 @@ pub(super) fn on_view<B: Backend + ?Sized>(
     }
     let mut reply = super::aggregate::aggregate(ctx, &source, &aggregate, verbosity, command)?;
     if name == "distinct" {
-        reply = with_distinct_tail(reply, &distinct_tail(&key), &key);
+        let indexes = match ctx.backend.collection(&source) {
+            Ok(Some(c)) => super::super::plan_exec::plan_indexes(ctx.backend, &c)
+                .map(|i| super::super::plan_exec::key_indexes(&i))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        reply = with_distinct_tail(reply, &distinct_tail(&key), &key, &indexes);
     }
     Ok(reply)
 }
@@ -141,7 +147,12 @@ fn distinct_tail(key: &str) -> Vec<Document> {
 
 /// The reply of the explain of a `distinct` of `key` on a view: after the plan, which keeps
 /// the key alone, come RefDb's own stages (`tail`).
-fn with_distinct_tail(reply: Document, tail: &[Document], key: &str) -> Document {
+fn with_distinct_tail(
+    reply: Document,
+    tail: &[Document],
+    key: &str,
+    indexes: &[super::super::plan_hash::KeyIndex],
+) -> Document {
     let tail: Vec<Value> = tail.iter().cloned().map(Value::Document).collect();
     let mut out = Document::new();
     for (k, v) in reply.iter() {
@@ -150,7 +161,7 @@ fn with_distinct_tail(reply: Document, tail: &[Document], key: &str) -> Document
                 let mut shards = Document::new();
                 for (node, section) in s.iter() {
                     if let Value::Document(sec) = section {
-                        shards.push(node, distinct_section(sec, &tail, key));
+                        shards.push(node, distinct_section(sec, &tail, key, indexes));
                     }
                 }
                 Value::Document(shards)
@@ -163,8 +174,14 @@ fn with_distinct_tail(reply: Document, tail: &[Document], key: &str) -> Document
 }
 
 /// A node's section of a `distinct` on a view: its plan under a `$cursor` keeping only `key`,
-/// then RefDb's stages.
-fn distinct_section(sec: &Document, tail: &[Value], key: &str) -> Document {
+/// then RefDb's stages. The plan cache hashes are those of a read of `key` alone (measured on a
+/// `refrouter` 9.0.4: a view on `{$match: {g: "a"}}` gives the shape `eqg||s||ftr`).
+fn distinct_section(
+    sec: &Document,
+    tail: &[Value],
+    key: &str,
+    indexes: &[super::super::plan_hash::KeyIndex],
+) -> Document {
     let mut out = Document::new();
     for (k, v) in sec.iter() {
         match k {
@@ -177,11 +194,30 @@ fn distinct_section(sec: &Document, tail: &[Value], key: &str) -> Document {
         Some(Value::Document(q)) => q.clone(),
         _ => Document::new(),
     };
+    let keep = Document::new().with(key, 1).with("_id", 0);
+    let hashes = match planner.get("parsedQuery") {
+        Some(Value::Document(parsed)) => {
+            let input = super::super::plan_hash::ShapeInput {
+                parsed: Some(parsed),
+                original: Some(parsed),
+                projection: Some(&keep),
+                ..Default::default()
+            };
+            super::super::plan_hash::hashes(&input, indexes).to_vec()
+        }
+        _ => Vec::new(),
+    };
     {
         let mut renamed = Document::new();
         for (k, v) in planner.iter() {
             match (k, v) {
                 ("optimizedPipeline", _) => renamed.push("cursorType", "regular"),
+                ("queryHash" | "planCacheShapeHash" | "planCacheKey", _) => {
+                    match hashes.iter().find(|(h, _)| *h == k) {
+                        Some((_, value)) => renamed.push(k, value.as_str()),
+                        None => renamed.push(k, v.clone()),
+                    }
+                }
                 ("winningPlan", Value::Document(w)) => {
                     let mut plan = Document::new().with("isCached", false);
                     let mut input = Document::new();

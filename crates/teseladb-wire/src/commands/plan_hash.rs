@@ -86,6 +86,8 @@ pub(crate) struct KeyIndex {
     pub sparse: bool,
     /// Its collation, unless simple.
     pub collation: Option<CollationSpec>,
+    /// Hidden: it counts for the plan cache key and answers no `distinct`.
+    pub hidden: bool,
 }
 
 /// The indexability digits of filter `parsed` over `indexes` for a read with collation
@@ -112,8 +114,56 @@ pub(crate) fn distinct_key<'a>(
     if parsed.get("$or").is_some() {
         return None;
     }
-    let indexed = indexes.iter().any(|i| i.fields.iter().any(|f| f == key));
+    // A hidden index answers no `distinct` (measured: with only a hidden index on the key, an
+    // empty filter keeps no key).
+    let indexed = indexes.iter().any(|i| !i.hidden && i.fields.iter().any(|f| f == key));
     (indexed || !parsed.is_empty()).then_some(key)
+}
+
+/// The key of a `$group` stage by one field that an index starting with that field may answer
+/// as a `distinct` (measured on a `refrouter` 9.0.4: with an index on `g`, `$group: {_id: "$g"}`
+/// over a `$match` adds the key `g` to the shape; without it, nothing).
+pub(crate) fn group_key<'a>(stage: Option<&'a Document>, indexes: &[KeyIndex]) -> Option<&'a str> {
+    let Some(Value::Document(group)) = stage?.get("$group") else { return None };
+    let Some(Value::String(path)) = group.get("_id") else { return None };
+    let field = path.strip_prefix('$').filter(|f| !f.starts_with('$'))?;
+    indexes
+        .iter()
+        .any(|i| !i.hidden && i.fields.first().is_some_and(|f| f == field))
+        .then_some(field)
+}
+
+/// The fields a pipeline's query reads as its shape counts them, from the paths its stages use
+/// (`fields`) and its first stage: a `$project` that computes `_id` does not read `_id`, and one
+/// that computes a field inside a subdocument reads that subdocument too (measured on a `refrouter`
+/// 9.0.4: `{o: {k: 1, z: "$n"}}` reads `_id`, `n`, `o` and `o.k`).
+pub(crate) fn shaped_fields(mut fields: Vec<String>, first: Option<&Document>) -> Vec<String> {
+    let Some(Value::Document(spec)) = first.and_then(|st| st.get("$project")) else {
+        return fields;
+    };
+    let computed = |v: &Value| !matches!(v, Value::Boolean(_)) && number(v).is_none();
+    if spec.get("_id").is_some_and(computed)
+        && !dependencies(spec.get("_id").unwrap_or(&Value::Null)).is_some_and(|d| d.contains("_id"))
+    {
+        fields.retain(|f| f != "_id");
+    }
+    for (k, v) in spec.iter() {
+        let Value::Document(sub) = v else { continue };
+        if sub.iter().any(|(sk, _)| sk.starts_with('$')) || !sub.iter().any(|(_, x)| computed(x)) {
+            continue;
+        }
+        if !fields.iter().any(|f| f == k) {
+            fields.push(k.to_owned());
+        }
+        for (sk, x) in sub.iter().filter(|(_, x)| !computed(x)) {
+            let path = format!("{k}.{sk}");
+            let included = number(x).is_some_and(|n| n != 0.0) || matches!(x, Value::Boolean(true));
+            if included && !fields.contains(&path) {
+                fields.push(path);
+            }
+        }
+    }
+    fields
 }
 
 /// The three hashes of a read (`queryHash`, `planCacheShapeHash`, `planCacheKey`) over the
@@ -207,7 +257,7 @@ fn user(s: &str, out: &mut String) {
 }
 
 /// The code of an operator of a field.
-fn op_code(op: &str) -> &'static str {
+fn op_code(op: &str) -> &str {
     match op {
         "$lt" => "lt",
         "$lte" => "le",
@@ -230,7 +280,9 @@ fn op_code(op: &str) -> &'static str {
         "$_internalExprGte" => "ege",
         "$_internalExprLt" => "elt",
         "$_internalExprLte" => "ele",
-        _ => "eq",
+        "$_internalEqHash" => "ieh",
+        // The internal operators of `$jsonSchema` keep their name without `$_`.
+        _ => op.strip_prefix("$_").filter(|o| o.starts_with("internalSchema")).unwrap_or("eq"),
     }
 }
 
@@ -797,6 +849,7 @@ mod tests {
             fields: fields.iter().map(|f| (*f).to_owned()).collect(),
             sparse,
             collation: None,
+            hidden: false,
         }
     }
 

@@ -201,8 +201,13 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     // The planner chooses how the filter reads, with the query's sort and limit (measured: an
     // `_id` range through its index, a sort on `_id` read backward).
     let (sort, limit) = sort_and_limit(&steps[i..first]);
-    let hashes =
-        pipeline_hashes(ctx, coll.as_ref(), (&shown, &filter), sort.as_ref(), &steps[first..]);
+    let hashes = pipeline_hashes(
+        ctx,
+        coll.as_ref(),
+        (&shown, &filter),
+        sort.as_ref(),
+        (&steps[i..first], &steps[first..]),
+    );
     let plan_read = super::super::plan_exec::ReadPlan {
         filter: &filter,
         parsed: &shown,
@@ -1008,27 +1013,39 @@ fn number_chain(mut stage: Stage, ids: &mut Ids) -> Stage {
 }
 
 /// The plan cache hashes of the query a pipeline runs (H-028): its filter, the sort it pushes
-/// down and the fields the stages after it use (measured on a `refrouter` 9.0.4: `$sort`, `$limit`
-/// and `$project: {s: 1}` over a `$match` give the shape `eqg|as|_id-s`).
+/// down, the fields the stages after its `$match` use (the `$sort`, `$skip` and `$limit` the query
+/// takes over use none), and the key of a `$group` an index may answer as a `distinct`. Measured
+/// on a `refrouter` 9.0.4: `$sort`, `$limit` and `$project: {s: 1}` over a `$match` give the shape
+/// `eqg|as|_id-s`, and `$group` by `$g` with an index on `g` adds the key `g`.
 fn pipeline_hashes<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     coll: Option<&teseladb_meta::catalog::CollectionEntry>,
     (shown, filter): (&Document, &Document),
     sort: Option<&Document>,
-    rest: &[Step],
+    (pushed, after): (&[Step], &[Step]),
 ) -> Vec<(&'static str, String)> {
     let Some(coll) = coll else { return Vec::new() };
     let indexes = match super::super::plan_exec::plan_indexes(ctx.backend, coll) {
         Ok(i) => super::super::plan_exec::key_indexes(&i),
         Err(_) => return Vec::new(),
     };
-    let fields = teseladb_exec::pipeline::deps::needed(&docs(rest)).filter(|f| !f.is_empty());
-    let projection = fields.as_deref().map(|f| dependency_projection(f, false));
+    let used: Vec<Step> = pushed
+        .iter()
+        .filter(|st| !matches!(st.kind, Kind::Sort(_) | Kind::Skip(_) | Kind::Limit(_)))
+        .chain(after)
+        .cloned()
+        .collect();
+    let stages = docs(&used);
+    let projection = teseladb_exec::pipeline::deps::needed(&stages)
+        .filter(|f| !f.is_empty())
+        .map(|f| super::super::plan_hash::shaped_fields(f, stages.first()))
+        .map(|f| dependency_projection(&f, false));
     let input = super::super::plan_hash::ShapeInput {
         parsed: Some(shown),
         original: Some(filter),
         sort,
         projection: projection.as_ref(),
+        distinct: super::super::plan_hash::group_key(stages.first(), &indexes),
         ..Default::default()
     };
     super::super::plan_hash::hashes(&input, &indexes).into_iter().collect()

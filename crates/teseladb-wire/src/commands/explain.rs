@@ -104,10 +104,14 @@ impl Stage {
         self
     }
 
-    /// The `works` of the stage: one per document it read or got, and one to end.
+    /// The `works` of the stage: one per document it read or got, and one to end. A stage over
+    /// several inputs (`OR`, `MERGE_SORT`) works once for each work of one of them, so its works
+    /// are theirs added (measured on a `refnode` 9.0.4: an `OR` of two scans of two works each
+    /// works 4 times, with one `needTime` when the first ends).
     fn works(&self) -> i64 {
         match &self.input {
             Some(i) => i.works(),
+            None if !self.inputs.is_empty() => self.inputs.iter().map(Stage::works).sum(),
             None => {
                 count(self.counters.get("docsExamined"))
                     .max(count(self.counters.get("keysExamined")))
@@ -132,6 +136,13 @@ impl Stage {
 
     /// The stage with what running it counted.
     fn executed(&self) -> Document {
+        self.executed_saving(0)
+    }
+
+    /// [`Stage::executed`] for a plan that saved and restored its state `saves` times: a plan
+    /// chosen among several does it once when the trial ends (measured on a `refnode` 9.0.4: the
+    /// winner of a multi-plan shows `saveState` and `restoreState` 1 in each stage).
+    fn executed_saving(&self, saves: u64) -> Document {
         let mut d = Document::new().with("stage", self.name);
         if let Some(id) = self.id {
             d.push("planNodeId", Value::Int32(i32::try_from(id).unwrap_or(i32::MAX)));
@@ -144,8 +155,9 @@ impl Stage {
         d.push("works", long(works.unsigned_abs()));
         d.push("advanced", long(self.returned));
         d.push("needTime", long((works - returned - 1).max(0).unsigned_abs()));
-        for k in ["needYield", "saveState", "restoreState"] {
-            d.push(k, 0);
+        d.push("needYield", 0);
+        for k in ["saveState", "restoreState"] {
+            d.push(k, long(saves));
         }
         d.push("isEOF", 1);
         extend(&mut d, &self.lead);
@@ -153,7 +165,7 @@ impl Stage {
         for (k, v) in self.tail.iter() {
             if k == "inputStages" {
                 let run: Vec<Value> =
-                    self.inputs.iter().map(|i| Value::Document(i.executed())).collect();
+                    self.inputs.iter().map(|i| Value::Document(i.executed_saving(saves))).collect();
                 d.push(k, Value::Array(run));
             } else {
                 d.push(k, v.clone());
@@ -161,7 +173,7 @@ impl Stage {
         }
         extend(&mut d, &self.counters);
         if let Some(i) = &self.input {
-            d.push("inputStage", i.executed());
+            d.push("inputStage", i.executed_saving(saves));
         }
         d
     }
@@ -584,7 +596,7 @@ fn stats(e: &Explained, node: &str, verbosity: Verbosity) -> Document {
     let keys = long(e.plan.total("keysExamined").unsigned_abs());
     let docs = long(e.plan.total("docsExamined").unsigned_abs());
     let mut executed = Document::new().with("isCached", false);
-    extend(&mut executed, &e.plan.executed());
+    extend(&mut executed, &e.plan.executed_saving(u64::from(!e.rejected.is_empty())));
     let mut shard = Document::new()
         .with("shardName", node)
         .with("executionSuccess", true)

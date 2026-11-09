@@ -803,6 +803,56 @@ fn a_collection_created_in_id_order_reads_an_id_interval_as_one() {
 }
 
 #[test]
+fn an_or_works_once_for_each_work_of_its_scans() {
+    // Measured on a `refnode` 9.0.4 (battery `plan-or-join2`): an `OR` works once for each work
+    // of its scans (two scans of 2 works: 4), with one `needTime` when its first scan ends.
+    // Here `a` = 3 finds `_id` 3 and 13 (3 works) and `b` = 5 finds 5, 12 and 19 (4 works).
+    let mut m = loaded(20);
+    index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
+    index(&mut m, r#"{"key":{"b":1},"name":"b_1"}"#);
+    let r = run(
+        &mut m,
+        r#"{"explain":{"find":"c","filter":{"$or":[{"a":3},{"b":5}]}},"verbosity":"executionStats"}"#,
+    );
+    let top = "executionStats.executionStages.shards.0.executionStages";
+    let mut path = top.to_owned();
+    loop {
+        let Value::Document(st) = field(&r, &path).clone() else { panic!("{r:?}") };
+        if st.get("stage") == Some(&Value::String("OR".into())) {
+            assert_eq!(st.get("works"), Some(&Value::Int32(7)), "{st:?}");
+            assert_eq!(st.get("advanced"), Some(&Value::Int32(5)), "{st:?}");
+            assert_eq!(st.get("needTime"), Some(&Value::Int32(1)), "{st:?}");
+            break;
+        }
+        assert!(st.get("inputStage").is_some(), "no OR stage: {r:?}");
+        path.push_str(".inputStage");
+    }
+}
+
+#[test]
+fn a_plan_chosen_among_several_saved_its_state_once() {
+    // Measured on a `refnode` 9.0.4 (battery `plan-plans`): the winner of competing plans shows
+    // `saveState` and `restoreState` 1 in each stage; a plan alone, 0.
+    let mut m = loaded(20);
+    index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
+    index(&mut m, r#"{"key":{"b":1},"name":"b_1"}"#);
+    let top = "executionStats.executionStages.shards.0.executionStages";
+    let explain = |m: &mut Mem, filter: &str| {
+        run(
+            m,
+            &format!(
+                r#"{{"explain":{{"find":"c","filter":{filter}}},"verbosity":"executionStats"}}"#
+            ),
+        )
+    };
+    let r = explain(&mut m, r#"{"a":3,"b":3}"#);
+    assert_eq!(field(&r, &format!("{top}.saveState")), &Value::Int32(1), "{r:?}");
+    assert_eq!(field(&r, &format!("{top}.inputStage.restoreState")), &Value::Int32(1), "{r:?}");
+    let r = explain(&mut m, r#"{"a":3}"#);
+    assert_eq!(field(&r, &format!("{top}.saveState")), &Value::Int32(0), "{r:?}");
+}
+
+#[test]
 fn a_collection_in_id_order_keeps_it_through_coll_mod() {
     // The native battery (api-strict) found `collMod` dropping the hidden option: the documents
     // written after it went to hash buckets and came out of `_id` order.
