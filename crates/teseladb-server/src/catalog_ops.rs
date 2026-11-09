@@ -325,14 +325,16 @@ impl CatalogOps {
         op: OpId,
         r: Result<Done<CoreOutput>, OpError>,
         commit: u64,
-        applied_here: u64,
     ) -> Option<Option<(NodeId, u64, Bytes)>> {
         let fence = self.fenced.remove(&op);
         self.since.remove(&op);
+        // A change goes to its client only through `poll`, which runs after core 0 published
+        // its copy (H-017): an answer sent here came before the copy, and the client's next read
+        // missed the change.
         if let Some(to) = self.local.remove(&op) {
             match applied(commit, r) {
-                Some(a) if fence => self.waiting.push((a.index, true, answer(Some(a)), to)),
-                a => drop(to.send(answer(a))),
+                Some(a) => self.waiting.push((a.index, fence, answer(Some(a)), to)),
+                None => drop(to.send(answer(None))),
             }
             return Some(None);
         }
@@ -346,11 +348,11 @@ impl CatalogOps {
             Ok(_) | Err(_) => None,
         };
         match a {
-            Some(a) if a.index > applied_here || fence => {
+            Some(a) => {
                 let index = a.index;
                 self.waiting.push((index, fence, answer(Some(a)), to));
             }
-            a => drop(to.send(answer(a))),
+            None => drop(to.send(answer(None))),
         }
         Some(None)
     }
@@ -435,6 +437,30 @@ mod tests {
         // The answer goes once the fence passes it, and nothing of it is left.
         ops.poll(12, 12);
         assert!(ops.waiting.is_empty() && ops.waiting_since.is_empty());
+    }
+
+    #[test]
+    fn a_change_is_answered_only_once_the_copy_was_published() {
+        // H-017: core 0 publishes its copy of the catalog before it answers any change of it;
+        // `poll` runs after that publication, so every answer waits for it (a resharding read
+        // its new collection right after creating it and did not find it).
+        let mut ops = CatalogOps::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        ops.local(Ok(OpId(5)), false, tx);
+        let done = Ok(Done::Applied(CoreOutput::Group0(Group0Result::Ok)));
+        assert_eq!(ops.on_done(OpId(5), done, 10), Some(None));
+        assert!(rx.try_recv().is_err(), "answered before the copy was published");
+        ops.poll(10, 0);
+        assert!(rx.try_recv().is_ok());
+        // A change forwarded to the leader, already applied here, waits for the same poll.
+        let (tx, rx) = std::sync::mpsc::channel();
+        ops.local(Ok(OpId(6)), true, tx);
+        let body = encode_applied(Some(&Applied { index: 11, result: Ok(None) }));
+        let done = Ok(Done::Forwarded(Bytes::from_vec(body)));
+        assert_eq!(ops.on_done(OpId(6), done, 11), Some(None));
+        assert!(rx.try_recv().is_err(), "answered before the copy was published");
+        ops.poll(11, 0);
+        assert!(rx.try_recv().is_ok());
     }
 
     #[test]

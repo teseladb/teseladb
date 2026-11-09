@@ -520,7 +520,12 @@ impl DataCore {
             self.request(core, DataReq::Remote(g, r), reply, (now, wall_ms));
             return;
         };
-        while nodes.first().is_some_and(|(n, _)| *n == self.me) && !self.host_has(g) {
+        // This node is skipped without a replica, and when it leads the range and the request
+        // does not let the leader serve it (`secondary`, which never reads the primary).
+        let leads = core.status(g).is_some_and(|st| st.role == Role::Leader);
+        while nodes.first().is_some_and(|(n, leader_ok)| {
+            *n == self.me && (!self.host_has(g) || (leads && !*leader_ok))
+        }) {
             nodes.remove(0);
         }
         let Some(&(node, _)) = nodes.first() else {
@@ -577,11 +582,13 @@ impl DataCore {
                 self.host.scan(core, req, now, wall_ms)
             }
             // The leader scans as for `primary`; a follower at its closed mark. The replica that
-            // leads serves it as the leader even when the router did not know it led yet.
-            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward } => {
+            // leads serves it as the leader even when the router did not know it led yet, if the
+            // request lets the leader serve it (each candidate's flag); `follower_scan` skipped it
+            // otherwise.
+            RemoteReq::FollowerScan { start, end, limit, max_stale_ms, backward, .. } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
                 let leads = core.status(g).is_some_and(|st| st.role == Role::Leader);
-                if leads || nodes.first().is_some_and(|(_, leads)| *leads) {
+                if leads {
                     let concern = ReadConcern::Majority;
                     let req = ScanReq { g, start, end, concern, limit, backward };
                     self.host.scan(core, req, now, wall_ms)
@@ -1326,20 +1333,28 @@ mod tests {
         assert_eq!(core.snapshot_index(G), before);
     }
 
-    /// A scan with a read preference that names this node as a follower, while its replica
-    /// leads (the router had no hint of the leader yet): the leader takes it as the leader, with
-    /// what it has applied. As a follower it had no closed mark yet and refused it at once (a
-    /// follower's closed mark runs seconds behind the writes).
+    /// A scan with a read preference that lets the leader serve it (`secondaryPreferred`,
+    /// `nearest`) and names this node, while its replica leads (the router had no hint of the
+    /// leader yet): the leader takes it as the leader, with what it has applied. As a follower it
+    /// had no closed mark yet and refused it at once (a follower's closed mark runs seconds
+    /// behind the writes). A `secondary` read never reads the primary: the leader passes it on,
+    /// and with no other candidate it is refused.
     #[test]
-    fn a_follower_scan_on_the_leader_reads_as_the_leader() {
+    fn a_follower_scan_on_the_leader_reads_as_the_leader_when_the_preference_lets_it() {
         let (mut core, mut d, mut disk) = setup_disk(&[1]);
         let now = lead_alone(&mut core, &mut d, &mut disk);
+        let (tx, rx) = channel();
+        let req = DataReq::Remote(G, follower(&[(1, true)]));
+        d.request(&mut core, req, tx, (now, 0));
+        d.poll(&mut core, (now, 0));
+        let refused = matches!(rx.try_recv(), Ok(Err(RangeError::NotLeader { .. })));
+        assert!(!refused, "refused as a follower");
         let (tx, rx) = channel();
         let req = DataReq::Remote(G, follower(&[(1, false)]));
         d.request(&mut core, req, tx, (now, 0));
         d.poll(&mut core, (now, 0));
         let refused = matches!(rx.try_recv(), Ok(Err(RangeError::NotLeader { .. })));
-        assert!(!refused, "refused as a follower");
+        assert!(refused, "a secondary read served by the primary");
     }
 
     /// A change stream's read reaches the leader's host and comes back with its rows (014 FR-003).

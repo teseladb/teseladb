@@ -16,6 +16,7 @@ use teseladb_auth::lease_driver::{FenceMsg, Group0Host, Group0View, LeaseDriver}
 use teseladb_hlc::guard::MAX_CLOCK_OFFSET_MS;
 use teseladb_io::peer::PeerMsg;
 use teseladb_meta::group0::{GROUP0, Group0Sm};
+use teseladb_meta::indexes::{IndexEntry, Indexes};
 use teseladb_meta::liveness::NODE_HEARTBEAT;
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_raft::Role;
@@ -70,6 +71,11 @@ impl Default for AuthGate {
 #[derive(Debug, Default)]
 pub struct CatalogPins {
     held: Mutex<Pins>,
+    /// The indexes of the catalog core 0 published for the connection threads, and the Group 0
+    /// index they are at (009 FR-021): a thread reads and pins them without a message.
+    published: Mutex<Option<(u64, Arc<Indexes>)>>,
+    /// The index of [`CatalogPins::published`], which a thread reads again after pinning.
+    published_at: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +105,30 @@ pub struct StalledPin {
 pub const PIN_STALL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl CatalogPins {
+    /// Core 0 publishes its copy of the indexes at Group 0 index `at` (009 FR-021). It does so
+    /// before it acknowledges `at`: [`CatalogPins::acked_with`] goes no higher than what it
+    /// published, so a thread that read an older publication and pinned it is seen
+    /// (`CatalogPins.tla`).
+    pub fn publish(&self, at: u64, indexes: Arc<Indexes>) {
+        *self.published.lock().unwrap_or_else(PoisonError::into_inner) = Some((at, indexes));
+        self.published_at.store(at, Ordering::SeqCst);
+    }
+
+    /// The indexes of `collection` as core 0 published them, read and pinned without a message
+    /// (009 FR-021): the thread pins the publication's index, then reads the publication again
+    /// and starts over if it moved. `None` while nothing is published.
+    pub fn pin_published(&self, collection: u32) -> Option<(Vec<IndexEntry>, u64)> {
+        loop {
+            let (at, indexes) =
+                self.published.lock().unwrap_or_else(PoisonError::into_inner).clone()?;
+            let pin = self.pin_for(at, collection);
+            if self.published_at.load(Ordering::SeqCst) == at {
+                return Some((indexes.of(collection).cloned().collect(), pin));
+            }
+            self.release(pin);
+        }
+    }
+
     /// Pins a read of the catalog at index `at`; the pin's number.
     pub fn pin(&self, at: u64) -> u64 {
         let mut p = self.lock();
@@ -187,6 +217,9 @@ impl CatalogPins {
         now: Nanos,
         last_change: &dyn Fn(u32) -> Option<u64>,
     ) -> u64 {
+        // Nothing above what the threads can read (009 FR-021), once anything is published.
+        let published = self.published_at.load(Ordering::SeqCst);
+        let applied = if published == 0 { applied } else { applied.min(published) };
         let mut p = self.lock();
         let gone: Vec<u64> =
             p.until.iter().filter(|(_, at)| **at <= now).map(|(k, _)| *k).collect();
@@ -758,6 +791,37 @@ mod tests {
         assert!(!pins.lock().about.contains_key(&old) && !pins.lock().about.contains_key(&fresh));
         assert_eq!(pins.acked(9, Nanos::from_millis(1_000)), 9, "the late one went at its time");
         assert!(!pins.lock().about.contains_key(&late));
+    }
+
+    #[test]
+    fn a_thread_pins_the_published_indexes_and_the_node_acknowledges_no_more_than_it_published() {
+        // 009 FR-021: core 0 publishes the indexes at a Group 0 index; a thread reads and pins
+        // them without a message, and the node acknowledges nothing above what it published.
+        let pins = CatalogPins::default();
+        let now = Nanos::ZERO;
+        assert!(pins.pin_published(7).is_none(), "nothing published yet: the message path");
+        let mut idx = Indexes::default();
+        idx.indexes.insert(
+            3,
+            teseladb_meta::indexes::IndexEntry {
+                id: 3,
+                collection: 7,
+                name: "a_1".to_owned(),
+                spec: Vec::new(),
+                buckets: 0,
+                state: teseladb_meta::indexes::IndexState::Ready,
+            },
+        );
+        pins.publish(5, Arc::new(idx));
+        assert_eq!(pins.acked(9, now), 5, "not above what the threads can read");
+        let (entries, pin) = pins.pin_published(7).expect("published");
+        assert_eq!(entries.iter().map(|e| e.id).collect::<Vec<_>>(), [3]);
+        assert!(pins.pin_published(8).expect("published").0.is_empty(), "another collection");
+        // A change of collection 7 after index 5 waits for the pinned read.
+        pins.publish(9, Arc::new(Indexes::default()));
+        assert_eq!(pins.acked_with(9, now, &|c| (c == 7).then_some(8)), 5);
+        pins.release(pin);
+        assert_eq!(pins.acked_with(9, now, &|c| (c == 7).then_some(8)), 9);
     }
 
     #[test]

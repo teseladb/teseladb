@@ -43,9 +43,10 @@ pub enum RemoteReq {
         /// From the last key down, the documents nearest `end` first (H-003).
         backward: bool,
     },
-    /// A scan with a read preference (007 FR-013): on the first of `nodes` (each with whether it
-    /// leads the range), a follower at its closed mark no older than `max_stale_ms`, the leader as
-    /// [`RemoteReq::Scan`]; a follower that cannot serve it sends it to the next one.
+    /// A scan with a read preference (007 FR-013): on the first of `nodes` (each with whether the
+    /// leader may serve it, should that replica lead the range), a follower at its closed mark no
+    /// older than `max_stale_ms`, the leader as [`RemoteReq::Scan`]; a replica that cannot serve
+    /// it, or the leader of a `secondary` read, sends it to the next one.
     FollowerScan {
         /// First key.
         start: Vec<u8>,
@@ -55,7 +56,8 @@ pub enum RemoteReq {
         limit: u32,
         /// How old the data may be (`maxStalenessSeconds`), in milliseconds.
         max_stale_ms: Option<u64>,
-        /// The replicas to try, in order, and whether each one leads the range.
+        /// The replicas to try, in order, and whether the leader may serve the read on each (false
+        /// for `secondary`, which never reads the primary).
         nodes: Vec<(NodeId, bool)>,
         /// From the last key down (H-003).
         backward: bool,

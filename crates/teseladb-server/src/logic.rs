@@ -253,6 +253,8 @@ pub struct NodeLogic {
     published_catalog: Option<Arc<teseladb_meta::catalog::Catalog>>,
     /// The Group 0 index at which the settings were last looked at, and the settings published.
     published_settings: (u64, Option<Arc<crate::routes::Settings>>),
+    /// The Group 0 index of the indexes it published for the threads, and the copy (009 FR-021).
+    published_indexes: (u64, Option<Arc<teseladb_meta::indexes::Indexes>>),
     /// The routing table the client workers read (core 0 writes it).
     routes: Option<SharedRoutes>,
     /// The nodes' inter-node addresses: given to the other cores by core 0, which has them in
@@ -332,6 +334,7 @@ impl NodeLogic {
             sent_ranges: None,
             published_catalog: None,
             published_settings: (0, None),
+            published_indexes: (0, None),
             routes: None,
             peers: BTreeMap::new(),
             catalog: CatalogOps::default(),
@@ -1009,8 +1012,10 @@ impl NodeLogic {
         self.forward_group0();
         self.forward_relocations();
         let applied = self.group0().map_or(0, |sm| sm.applied);
-        // Before any change of the catalog is answered, the workers can read it (H-017).
+        // Before any change of the catalog is answered, the workers can read it (H-017), and its
+        // indexes, which they pin without a message (009 FR-021).
         self.publish_catalog();
+        self.publish_indexes();
         self.catalog.poll(applied, self.authz.fenced());
     }
 
@@ -1037,6 +1042,23 @@ impl NodeLogic {
             routes.publish_settings(Arc::clone(&settings));
             self.published_settings.1 = Some(settings);
         }
+    }
+
+    /// Publishes this node's copy of the indexes at every Group 0 index it applies, for the
+    /// threads to read and pin without a message (009 FR-021); the copy is made again only when
+    /// they changed. The node acknowledges to the fence no index above it.
+    fn publish_indexes(&mut self) {
+        let Some(sm) = self.group0().filter(|sm| sm.bootstrapped()) else { return };
+        let applied = sm.applied;
+        if self.published_indexes.0 == applied {
+            return;
+        }
+        let indexes = match &self.published_indexes.1 {
+            Some(i) if **i == sm.indexes => Arc::clone(i),
+            Some(_) | None => Arc::new(sm.indexes.clone()),
+        };
+        self.authz.pins().publish(applied, Arc::clone(&indexes));
+        self.published_indexes = (applied, Some(indexes));
     }
 
     /// A catalog request of the handle: read the local copy, or change it through Group 0's
@@ -1594,9 +1616,7 @@ impl NodeLogic {
         }
         if self.catalog.owns(op) {
             let commit = self.core.status(GROUP0).map_or(0, |s| s.hard_state.commit);
-            let applied = self.group0().map_or(0, |sm| sm.applied);
-            if let Some(Some((node, req, body))) = self.catalog.on_done(op, result, commit, applied)
-            {
+            if let Some(Some((node, req, body))) = self.catalog.on_done(op, result, commit) {
                 self.core.answer_forward(node, req, body);
             }
             return;
@@ -2473,6 +2493,27 @@ mod tests {
         while c.now < held + NODE_HEARTBEAT + NODE_HEARTBEAT + NODE_HEARTBEAT {
             c.step();
             assert!(rx.try_recv().is_err(), "answered while a read before it runs");
+        }
+        c.logic(2).authz.pins().release(pin);
+        let mut answer = None;
+        c.run_until(|_| {
+            answer = rx.try_recv().ok();
+            answer.is_some()
+        });
+        assert!(matches!(answer, Some(CatalogAnswer::Done(_))), "{answer:?}");
+        // A read pinned on the published copy, without a message (009 FR-021), holds a later
+        // change of its collection back the same way.
+        let (entries, pin) =
+            c.logic(2).authz.pins().pin_published(collection).expect("node 2 published its copy");
+        assert!(entries.iter().any(|e| e.id == index_id));
+        let (tx, rx) = channel();
+        let index = IndexCommand::SetState { id: index_id, state: IndexState::Building };
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(CatalogReq::Index(index), tx), now);
+        let held = c.now;
+        while c.now < held + NODE_HEARTBEAT + NODE_HEARTBEAT + NODE_HEARTBEAT {
+            c.step();
+            assert!(rx.try_recv().is_err(), "answered while a published read before it runs");
         }
         c.logic(2).authz.pins().release(pin);
         let mut answer = None;

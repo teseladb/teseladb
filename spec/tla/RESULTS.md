@@ -13,6 +13,7 @@ Cada modelo explica en su cabecera qué comprueba; `scripts/ci.sh` vuelve a gene
 | `CoreRelocate` | `CoreRelocate.cfg` | 154.193 | 44.316 | 31 | 2 s |
 | `HlcLatches` | `HlcLatches.cfg` | 235.682 | 57.254 | 19 | 1 s |
 | `PipelinedWrites` | `PipelinedWrites.cfg` | 2.353 | 846 | 20 | 1 s |
+| `CatalogPins` | `CatalogPins.cfg` | 517.500 | 125.226 | 28 | 3 s |
 | `HlcLease` | `HlcLease.cfg` | 101.694.096 | 47.323.569 | 15 | 336 s |
 | `HlcLease` | `HlcLease.back.cfg` | 238.565.421 | 113.603.871 | 15 | 1284 s |
 | `HlcUncertainty` | `HlcUncertainty.cfg` | 70.912.878 | 39.096.622 | 19 | 327 s |

@@ -266,7 +266,7 @@ fn forwarded_catalog_answers_wait_for_this_copy() {
     ops.local(Ok(OpId(1)), true, tx);
     assert!(ops.owns(OpId(1)));
     let body = encode_applied(Some(&Applied { index: 10, result: Ok(None) }));
-    assert_eq!(ops.on_done(OpId(1), Ok(Done::Forwarded(Bytes::from_vec(body))), 0, 5), Some(None));
+    assert_eq!(ops.on_done(OpId(1), Ok(Done::Forwarded(Bytes::from_vec(body))), 0), Some(None));
     assert!(rx.try_recv().is_err());
     ops.poll(9, 0);
     assert!(rx.try_recv().is_err());
@@ -281,16 +281,19 @@ fn forwarded_catalog_answers_wait_for_this_copy() {
     let applied = Ok(Done::Applied(CoreOutput::Group0(teseladb_meta::group0::Group0Result::Err(
         Group0Error::NamespaceExists,
     ))));
-    assert_eq!(ops.on_done(OpId(2), applied, 4, 4), Some(None));
+    assert_eq!(ops.on_done(OpId(2), applied, 4), Some(None));
+    // Its answer, as every answer with a result, waits for the poll after the copy is published.
+    assert!(rx.try_recv().is_err());
+    ops.poll(4, 0);
     assert_eq!(rx.try_recv(), Ok(CatalogAnswer::Refused(Group0Error::NamespaceExists)));
     assert_eq!(ops.remote(None, (NodeId(2), 1)), Some(encode_applied(None)));
     assert_eq!(ops.remote(Some(OpId(3)), (NodeId(2), 1)), None);
-    let out = ops.on_done(OpId(3), Err(OpError::Timeout), 4, 4);
+    let out = ops.on_done(OpId(3), Err(OpError::Timeout), 4);
     assert!(matches!(out, Some(Some((NodeId(2), 1, _)))));
-    assert_eq!(ops.on_done(OpId(9), Err(OpError::Timeout), 4, 4), None);
+    assert_eq!(ops.on_done(OpId(9), Err(OpError::Timeout), 4), None);
     let (tx, rx) = std::sync::mpsc::channel();
     ops.local(Ok(OpId(4)), true, tx);
-    assert_eq!(ops.on_done(OpId(4), Err(OpError::Timeout), 4, 4), Some(None));
+    assert_eq!(ops.on_done(OpId(4), Err(OpError::Timeout), 4), Some(None));
     assert_eq!(rx.try_recv(), Ok(CatalogAnswer::Unavailable));
 }
 

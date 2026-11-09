@@ -114,7 +114,7 @@ pub(crate) fn make_durable(file: &std::fs::File) -> io::Result<()> {
         drive::push_to_drive(file)?;
         let flush = || {
             crate::counters::record_device_flush();
-            drive::flush_drive(file)
+            timed(|| drive::flush_drive(file))
         };
         match flusher_for(drive::device_of(file)?) {
             Some(f) => f.after_push(flush).map(drop),
@@ -124,8 +124,17 @@ pub(crate) fn make_durable(file: &std::fs::File) -> io::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         crate::counters::record_device_flush();
-        file.sync_all()
+        timed(|| file.sync_all())
     }
+}
+
+/// Runs a flush of a drive's cache and counts how long it took.
+fn timed<T>(flush: impl FnOnce() -> T) -> T {
+    let start = std::time::Instant::now();
+    let out = flush();
+    let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    crate::counters::record_device_flush_micros(micros);
+    out
 }
 
 #[cfg(test)]

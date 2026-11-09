@@ -1276,6 +1276,17 @@ impl Backend for ServerBackend {
     }
 
     fn indexes(&mut self, collection: u32) -> Result<Vec<IndexEntry>, CommandError> {
+        // Core 0's published copy, pinned here without a message (009 FR-021); before anything
+        // is published, core 0 answers and pins it.
+        if let Some((all, pin)) = self.h.auth.pins.pin_published(collection) {
+            self.pins.push(pin);
+            let (_, collections) =
+                self.pinned_since.get_or_insert_with(|| (Instant::now(), Vec::new()));
+            if !collections.contains(&collection) {
+                collections.push(collection);
+            }
+            return Ok(all);
+        }
         let until = self.until();
         loop {
             if let Some(CatalogAnswer::Indexes(all, pin)) =
@@ -1838,8 +1849,10 @@ pub(crate) fn scan_req(
             tags: tags.get(n).cloned().unwrap_or_default(),
         })
         .collect();
-    let nodes =
-        candidates(pref, &replicas).into_iter().map(|n| (n, e.leader_hint == Some(n))).collect();
+    // Each candidate goes with whether the leader may serve the read, should it turn out to lead
+    // the range: `secondary` never reads the primary, whatever the router knows of the leader.
+    let leader_ok = pref.mode != Mode::Secondary;
+    let nodes = candidates(pref, &replicas).into_iter().map(|n| (n, leader_ok)).collect();
     let max_stale_ms = pref.max_staleness_ms;
     RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward }
 }
