@@ -803,6 +803,22 @@ fn a_collection_created_in_id_order_reads_an_id_interval_as_one() {
 }
 
 #[test]
+fn a_collection_in_id_order_keeps_it_through_coll_mod() {
+    // The native battery (api-strict) found `collMod` dropping the hidden option: the documents
+    // written after it went to hash buckets and came out of `_id` order.
+    let mut m = Mem::new();
+    m.ordered_ids = true;
+    run(&mut m, r#"{"insert":"c","documents":[{"_id":1,"x":1}]}"#);
+    let r = run(&mut m, r#"{"collMod":"c","validator":{}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    run(&mut m, r#"{"insert":"c","documents":[{"_id":2}]}"#);
+    let r = run(&mut m, r#"{"find":"c","filter":{}}"#);
+    assert_eq!(ids_in_order(&r), vec![1, 2], "{r:?}");
+    let r = run(&mut m, r#"{"listCollections":1,"filter":{"name":"c"}}"#);
+    assert!(!format!("{r:?}").contains("orderedIds"), "{r:?}");
+}
+
+#[test]
 fn a_collection_created_before_keeps_its_hash_buckets() {
     let mut m = loaded(2_000);
     // The cluster reads the new layout from now on; `c` was created before it.

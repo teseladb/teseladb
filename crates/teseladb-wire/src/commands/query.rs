@@ -1115,7 +1115,13 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 .with("query", a.filter.clone())
                 .with("sort", sort_doc.clone())
                 .with("projection", projection.clone()),
-            shape: super::plan_cache::read_shape(&parsed, Some(&sort_doc), Some(&projection), None),
+            shape: super::plan_cache::read_shape(
+                &parsed,
+                &a.filter,
+                Some(&sort_doc),
+                Some(&projection),
+                None,
+            ),
         };
         let planned =
             super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note).map_err(executor)?;
@@ -2331,7 +2337,17 @@ fn planned<B: Backend + ?Sized>(
                 None => d,
             }
         },
-        shape: super::plan_cache::read_shape(&parsed, None, None, distinct),
+        shape: super::plan_cache::read_shape(
+            &parsed,
+            filter,
+            None,
+            None,
+            super::plan_hash::distinct_key(
+                &parsed,
+                distinct,
+                &super::plan_exec::key_indexes(&indexes),
+            ),
+        ),
     };
     super::plan_exec::planned_documents(ctx.backend, coll, &read, note)
 }

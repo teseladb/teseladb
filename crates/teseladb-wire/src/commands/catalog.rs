@@ -94,12 +94,20 @@ fn options_from(cmd: &Document) -> Document {
 
 pub(crate) fn options_of(c: &CollectionEntry) -> Result<Document, CommandError> {
     let mut options = stored_options(c)?;
-    options.remove(ID_INDEX_VERSION);
-    options.remove(super::sharding::SHARD_KEY);
-    options.remove(super::timeseries_range::EXTENDED_RANGE);
-    options.remove(ORDERED_IDS);
+    for hidden in HIDDEN_OPTIONS {
+        options.remove(hidden);
+    }
     Ok(options)
 }
+
+/// What the catalog keeps with a collection's options that is not one of them: `options_of`
+/// leaves them out and a rewrite of the options (`collMod`) keeps them.
+const HIDDEN_OPTIONS: [&str; 4] = [
+    ID_INDEX_VERSION,
+    super::sharding::SHARD_KEY,
+    super::timeseries_range::EXTENDED_RANGE,
+    ORDERED_IDS,
+];
 
 /// The option of a collection that keeps its documents in `_id` order without hash bucket
 /// (D-153, 003 FR-012): set when it is created while every node reads that layout. It is not a
@@ -738,9 +746,7 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         options.push(PREPARE_CONSTRAINT, true);
     }
     let stored = stored_options(&c)?;
-    for hidden in
-        [ID_INDEX_VERSION, super::sharding::SHARD_KEY, super::timeseries_range::EXTENDED_RANGE]
-    {
+    for hidden in HIDDEN_OPTIONS {
         if let Some(v) = stored.get(hidden) {
             options.push(hidden, v.clone());
         }

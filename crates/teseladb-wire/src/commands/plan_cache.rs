@@ -22,8 +22,10 @@ const WORKS_GROWTH: u64 = 2;
 /// What a read whose plans competed learned.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Learned {
-    /// The read's shape.
+    /// The read's shape ([`read_shape`]).
     pub shape: String,
+    /// `planCacheKey`: the shape's hash with the indexability of its predicates.
+    pub key: String,
     /// The collection and its indexes when the read ran ([`catalog_signature`]).
     pub catalog: String,
     /// `createdFromQuery`.
@@ -119,8 +121,8 @@ impl PlanCache {
             .filter(|e| e.ns == ns)
             .map(|e| {
                 let l = &e.learned;
-                let hash = hex(&l.shape);
-                let key = hex(&format!("{}{}", l.shape, ns));
+                let hash = super::plan_hash::shape_hash(&l.shape);
+                let key = l.key.clone();
                 let plan_bytes = l.plan.to_bytes().unwrap_or_default();
                 let solution = i64::from(teseladb_hash::crc32c(&plan_bytes));
                 let mut d = Document::new()
@@ -175,7 +177,7 @@ pub fn plan_cache_clear<B: Backend + ?Sized>(
         None => None,
         Some(q) => {
             let parsed = super::plan_exec::parsed_filter(&q, None)?;
-            Some(read_shape(&parsed, sort.as_ref(), projection.as_ref(), None))
+            Some(read_shape(&parsed, &q, sort.as_ref(), projection.as_ref(), None))
         }
     };
     lock(ctx.shared).plan_cache.clear(&names::full(&ns), shape.as_deref());
@@ -183,31 +185,24 @@ pub fn plan_cache_clear<B: Backend + ?Sized>(
     Ok(Document::new().with("ok", 1.0).with(node, Document::new().with("ok", 1.0)))
 }
 
-/// The shape of a read: its parsed filter's, its sort, its projection and the key of a
-/// `distinct`.
+/// The shape of a read as a `refnode` 9.0.4 keys its plan cache ([`super::plan_hash`]): its
+/// parsed filter (`original` as the command wrote it), its sort, its projection and the key of a
+/// `distinct`, with the simple collation the cached reads have.
 pub fn read_shape(
     parsed: &Document,
+    original: &Document,
     sort: Option<&Document>,
     projection: Option<&Document>,
     distinct: Option<&str>,
 ) -> String {
-    let keys = |d: Option<&Document>| -> String {
-        d.filter(|d| !d.is_empty())
-            .map(|d| {
-                let shown = d.to_bytes().ok().and_then(|b| {
-                    teseladb_bson::RawDoc::from_bytes(&b).ok().map(teseladb_bson::extjson::to_canonical)
-                });
-                shown.unwrap_or_default()
-            })
-            .unwrap_or_default()
-    };
-    format!(
-        "{}|{}|{}|{}",
-        shape_of(&Value::Document(parsed.clone())),
-        keys(sort),
-        keys(projection),
-        distinct.unwrap_or_default()
-    )
+    super::plan_hash::shape_key(&super::plan_hash::ShapeInput {
+        parsed: Some(parsed),
+        original: Some(original),
+        sort,
+        projection,
+        distinct,
+        ..Default::default()
+    })
 }
 
 /// The collection `coll` and its indexes as the planner sees them, which an entry was learned
@@ -223,32 +218,6 @@ pub fn catalog_signature(
     format!("{}|{}", coll.id, names.join(","))
 }
 
-/// A hash of `text` as RefDb writes its plan hashes: eight hexadecimal digits.
-pub(crate) fn hex(text: &str) -> String {
-    format!("{:08X}", teseladb_hash::crc32c(text.as_bytes()))
-}
-
-/// The shape of parsed filter `v`: its fields and operators, each value as `?`.
-pub fn shape_of(v: &Value) -> String {
-    match v {
-        Value::Document(d) => {
-            let fields: Vec<String> = d
-                .iter()
-                .map(|(k, x)| match (k, x) {
-                    ("$and" | "$or" | "$nor", Value::Array(items)) => {
-                        let parts: Vec<String> = items.iter().map(shape_of).collect();
-                        format!("{k}:[{}]", parts.join(","))
-                    }
-                    (k, Value::Document(_)) => format!("{k}:{}", shape_of(x)),
-                    (k, _) => format!("{k}:?"),
-                })
-                .collect();
-            format!("{{{}}}", fields.join(","))
-        }
-        _ => "?".to_owned(),
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -257,6 +226,7 @@ mod tests {
     fn learned(shape: &str, works: u64) -> Learned {
         Learned {
             shape: shape.to_owned(),
+            key: String::new(),
             catalog: String::new(),
             from: Document::new(),
             works,
@@ -317,15 +287,16 @@ mod tests {
     #[test]
     fn shapes_keep_operators_and_drop_values() {
         let parsed = |n: i32| {
-            Value::Document(Document::new().with(
+            Document::new().with(
                 "$and",
                 vec![
                     Value::Document(Document::new().with("g", Document::new().with("$eq", n))),
                     Value::Document(Document::new().with("n", Document::new().with("$gt", n))),
                 ],
-            ))
+            )
         };
-        assert_eq!(shape_of(&parsed(1)), shape_of(&parsed(5)));
-        assert_eq!(shape_of(&parsed(1)), "{$and:[{g:{$eq:?}},{n:{$gt:?}}]}");
+        let shape = |n| read_shape(&parsed(n), &parsed(n), None, None, None);
+        assert_eq!(shape(1), shape(5));
+        assert_eq!(shape(1), "an[eqg,gtn]||||ftr");
     }
 }

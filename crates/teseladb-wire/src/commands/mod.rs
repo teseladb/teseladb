@@ -72,6 +72,7 @@ pub mod partial_filter;
 pub mod placement;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
+pub(crate) mod plan_hash;
 pub mod presentation;
 pub mod primaries;
 pub mod profile;

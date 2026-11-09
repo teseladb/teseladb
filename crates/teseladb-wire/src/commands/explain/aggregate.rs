@@ -201,6 +201,8 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     // The planner chooses how the filter reads, with the query's sort and limit (measured: an
     // `_id` range through its index, a sort on `_id` read backward).
     let (sort, limit) = sort_and_limit(&steps[i..first]);
+    let hashes =
+        pipeline_hashes(ctx, coll.as_ref(), (&shown, &filter), sort.as_ref(), &steps[first..]);
     let plan_read = super::super::plan_exec::ReadPlan {
         filter: &filter,
         parsed: &shown,
@@ -268,8 +270,11 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     let mut planner = Document::new()
         .with("namespace", names::full(ns))
         .with("parsedQuery", shown.clone())
-        .with("indexFilterSet", false)
-        .with("optimizationTimeMillis", 0);
+        .with("indexFilterSet", false);
+    for (k, v) in hashes {
+        planner.push(k, v);
+    }
+    planner.push("optimizationTimeMillis", 0);
     if remaining.is_empty() {
         planner.push("optimizedPipeline", true);
     } else {
@@ -1000,6 +1005,33 @@ fn number_chain(mut stage: Stage, ids: &mut Ids) -> Stage {
     }
     stage.id = ids.take();
     stage
+}
+
+/// The plan cache hashes of the query a pipeline runs (H-028): its filter, the sort it pushes
+/// down and the fields the stages after it use (measured on a `refrouter` 9.0.4: `$sort`, `$limit`
+/// and `$project: {s: 1}` over a `$match` give the shape `eqg|as|_id-s`).
+fn pipeline_hashes<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    coll: Option<&teseladb_meta::catalog::CollectionEntry>,
+    (shown, filter): (&Document, &Document),
+    sort: Option<&Document>,
+    rest: &[Step],
+) -> Vec<(&'static str, String)> {
+    let Some(coll) = coll else { return Vec::new() };
+    let indexes = match super::super::plan_exec::plan_indexes(ctx.backend, coll) {
+        Ok(i) => super::super::plan_exec::key_indexes(&i),
+        Err(_) => return Vec::new(),
+    };
+    let fields = teseladb_exec::pipeline::deps::needed(&docs(rest)).filter(|f| !f.is_empty());
+    let projection = fields.as_deref().map(|f| dependency_projection(f, false));
+    let input = super::super::plan_hash::ShapeInput {
+        parsed: Some(shown),
+        original: Some(filter),
+        sort,
+        projection: projection.as_ref(),
+        ..Default::default()
+    };
+    super::super::plan_hash::hashes(&input, &indexes).into_iter().collect()
 }
 
 /// Whether projection `p`, which only keeps or drops fields, leaves the fields of sort `s` as

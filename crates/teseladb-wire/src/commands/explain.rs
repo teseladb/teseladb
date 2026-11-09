@@ -379,6 +379,66 @@ fn command_collation(command: &Document) -> Option<&Document> {
     })
 }
 
+/// The filter, sort, projection and key of `distinct` of an explained command, as it wrote them.
+fn read_parts(
+    command: &Document,
+) -> (Option<&Document>, Option<&Document>, Option<&Document>, Option<&str>) {
+    fn doc<'d>(d: &'d Document, k: &str) -> Option<&'d Document> {
+        match d.get(k) {
+            Some(Value::Document(x)) => Some(x),
+            _ => None,
+        }
+    }
+    let first = |k: &str| match command.get(k) {
+        Some(Value::Array(items)) => match items.first() {
+            Some(Value::Document(st)) => Some(st),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(st) = first("updates").or_else(|| first("deletes")) {
+        return (doc(st, "q"), doc(st, "sort"), None, None);
+    }
+    let filter = doc(command, "filter").or_else(|| doc(command, "query"));
+    // The `fields` of `findAndModify` shape its reply, not its read (measured on a `refrouter` 9.0.4).
+    let projection = doc(command, "projection");
+    let key = match (command.get("distinct"), command.get("key")) {
+        (Some(_), Some(Value::String(k))) => Some(k.as_str()),
+        _ => None,
+    };
+    (filter, doc(command, "sort"), projection, key)
+}
+
+/// `queryHash`, `planCacheShapeHash` and `planCacheKey` of the explained read, as a `refnode`
+/// 9.0.4 computes them (H-028); none when the collection does not exist.
+fn plan_hashes<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    parsed: &Document,
+    command: &Document,
+) -> Vec<(&'static str, String)> {
+    let Ok(Some(coll)) = ctx.backend.collection(ns) else { return Vec::new() };
+    let indexes = match super::plan_exec::plan_indexes(ctx.backend, &coll) {
+        Ok(i) => super::plan_exec::key_indexes(&i),
+        Err(_) => return Vec::new(),
+    };
+    let given =
+        command_collation(command).cloned().or_else(|| super::query::options_collation(&coll));
+    let Ok(collation) = super::views::spec_of(given.as_ref()) else { return Vec::new() };
+    let (original, sort, projection, key) = read_parts(command);
+    let api_strict = ctx.cmd.get("apiStrict").or_else(|| command.get("apiStrict"));
+    let input = super::plan_hash::ShapeInput {
+        parsed: Some(parsed),
+        original,
+        sort,
+        projection,
+        collation: collation.as_ref(),
+        distinct: super::plan_hash::distinct_key(parsed, key, &indexes),
+        api_strict: api_strict == Some(&Value::Boolean(true)),
+    };
+    super::plan_hash::hashes(&input, &indexes).into_iter().collect()
+}
+
 /// The reply: the router's plan with the node's section, the counters, the node and the
 /// command.
 fn reply<B: Backend + ?Sized>(
@@ -403,6 +463,11 @@ fn reply<B: Backend + ?Sized>(
             section.push("collation", spec.to_document());
         }
         section.push("indexFilterSet", false);
+        if let Value::Document(parsed) = &e.parsed {
+            for (k, v) in plan_hashes(ctx, ns, parsed, &command) {
+                section.push(k, v);
+            }
+        }
     }
     // The planning time, as a `refnode` 9.0.4 gives it next to the milliseconds (H-028).
     section.push("optimizationTimeMillis", 0);
@@ -844,6 +909,7 @@ fn find<B: Backend + ?Sized>(
             let no_doc = Document::new();
             let read_shape = super::plan_cache::read_shape(
                 &shown,
+                &a.filter,
                 sort.as_ref().or(Some(&no_doc)),
                 projection.as_ref().or(Some(&no_doc)),
                 None,
@@ -1111,6 +1177,7 @@ pub(crate) fn learned(
     let scores = all.iter().filter_map(|r| r.tried.map(|t| t.score)).collect();
     Some(super::plan_cache::Learned {
         shape,
+        key: String::new(),
         catalog: String::new(),
         from,
         works: won.works,

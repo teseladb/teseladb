@@ -133,6 +133,28 @@ impl PlanIndex {
     pub fn partial(&self) -> bool {
         self.catalog.partial
     }
+
+    /// The index as the plan cache key sees it (H-028): a hidden one counts too (measured on a
+    /// `refrouter` 9.0.4).
+    pub(crate) fn key_index(&self) -> super::plan_hash::KeyIndex {
+        let collation = RawDoc::from_bytes(&self.entry.spec).ok().and_then(|spec| {
+            let c = match Document::from(spec).get("collation") {
+                Some(Value::Document(c)) => c.clone(),
+                _ => return None,
+            };
+            super::views::spec_of(Some(&c)).ok().flatten()
+        });
+        super::plan_hash::KeyIndex {
+            fields: self.pattern.iter().map(|(k, _)| k.to_owned()).collect(),
+            sparse: self.catalog.sparse,
+            collation,
+        }
+    }
+}
+
+/// The indexes of a read as the plan cache key sees them (H-028).
+pub(crate) fn key_indexes(indexes: &[PlanIndex]) -> Vec<super::plan_hash::KeyIndex> {
+    indexes.iter().map(PlanIndex::key_index).collect()
 }
 
 std::thread_local! {
@@ -1753,12 +1775,14 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
 ) -> Result<Option<Planned>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
     // The hashes of the read's shape, as `$planCacheStats` shows them, for the profiler.
-    let hash = super::plan_cache::hex(&note.shape);
+    let hash = super::plan_hash::shape_hash(&note.shape);
     let ns = super::names::full(note.ns);
+    let digits = super::plan_hash::indexability(read.parsed, &key_indexes(&indexes), None);
+    let cache_key = super::plan_hash::cache_key_hash(&note.shape, &digits);
     let hashes = Document::new()
         .with("planCacheShapeHash", hash.clone())
         .with("queryHash", hash)
-        .with("planCacheKey", super::plan_cache::hex(&format!("{}{ns}", note.shape)));
+        .with("planCacheKey", cache_key.clone());
     let report = |plan: Option<Document>, planning: u64| {
         let mut d = hashes.clone();
         d.push("filter", read.parsed.clone());
@@ -1831,6 +1855,7 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         )
     {
         learned.catalog = catalog;
+        learned.key = cache_key;
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
         super::lock(note.shared).plan_cache.learn(&ns, learned, now);
     }
