@@ -311,7 +311,7 @@ pub(crate) fn get(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup 
     found
 }
 
-fn get_once(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup {
+pub(crate) fn get_once(r: &mut Reader, v: &Version, key: &[u8], read: Hlc) -> Lookup {
     if let Some(e) = &r.failure {
         return Lookup::Failed(e.clone());
     }

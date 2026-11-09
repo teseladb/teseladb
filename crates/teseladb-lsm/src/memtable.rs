@@ -161,6 +161,15 @@ impl Memtable {
         self.frozen.get(next).map(|(k, s)| (next, &*k.0, s))
     }
 
+    /// The last version before the internal key `at`.
+    pub(crate) fn before(&self, at: &[u8]) -> Option<&[u8]> {
+        if self.frozen.is_empty() {
+            return self.tree.range(..IKey(at.into())).next_back().map(|(k, _)| &*k.0);
+        }
+        let i = self.frozen.partition_point(|(k, _)| entry::compare(&k.0, at).is_lt());
+        i.checked_sub(1).map(|i| &*self.frozen[i].0.0)
+    }
+
     /// Every version in order, once frozen (what a flush writes).
     pub(crate) fn sorted(&self) -> &[(IKey, Slot)] {
         &self.frozen

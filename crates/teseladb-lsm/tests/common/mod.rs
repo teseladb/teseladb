@@ -83,6 +83,43 @@ pub fn scan(
     }
 }
 
+/// A whole backward scan of `[start, end)` at `ts`, from its last key down, running the I/O it
+/// waits for.
+pub fn scan_back(
+    lsm: &mut Lsm,
+    disk: &mut dyn Disk,
+    view: &View,
+    start: &[u8],
+    end: &[u8],
+    at: Hlc,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut s = view.scan_back(start, end, at);
+    let mut stuck = 0;
+    loop {
+        match s.next(lsm) {
+            Step::Item(i) => {
+                stuck = 0;
+                out.push((i.key, i.ts, i.kind, i.value.to_vec()));
+            }
+            Step::Miss(_) => {
+                stuck += 1;
+                assert!(stuck < MAX_ROUNDS, "backward scan never finished");
+                lsm.run_io(disk, Nanos::ZERO);
+            }
+            Step::Done => return out,
+            Step::Failed(e) => panic!("backward scan failed: {e}"),
+        }
+    }
+}
+
+/// What the model holds in `[start, end)` at `at`, from the last key down.
+pub fn model_back(model: &Model, start: &[u8], end: &[u8], at: Hlc) -> Vec<Row> {
+    let mut rows = model.scan(start, end, at);
+    rows.reverse();
+    rows
+}
+
 /// An operation of the random histories.
 #[derive(Clone, Debug)]
 pub enum Op {
@@ -268,6 +305,28 @@ pub fn check_all(lsm: &mut Lsm, disk: &mut dyn Disk, model: &Model, until: u64) 
             model.scan(b"", b"\xff", read),
             "at {at}"
         );
+        assert_eq!(
+            scan_back(lsm, disk, &view, b"", b"\xff", read),
+            model_back(model, b"", b"\xff", read),
+            "backward at {at}"
+        );
+        // Backward scans that start and end between keys and on keys.
+        let keys = model.keys();
+        for w in keys.windows(3).step_by(5) {
+            let (start, end) = (w[0].as_slice(), w[2].as_slice());
+            assert_eq!(
+                scan_back(lsm, disk, &view, start, end, read),
+                model_back(model, start, end, read),
+                "backward {start:?}..{end:?} at {at}"
+            );
+            let mut past = w[1].clone();
+            past.push(0);
+            assert_eq!(
+                scan_back(lsm, disk, &view, start, &past, read),
+                model_back(model, start, &past, read),
+                "backward {start:?}..{past:?} at {at}"
+            );
+        }
     }
 }
 

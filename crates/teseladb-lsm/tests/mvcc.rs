@@ -6,8 +6,9 @@ mod common;
 
 use common::model::Model;
 use common::{get, history, open, scan, small, ts};
+use teseladb_lsm::Step;
 use teseladb_lsm::{Commit, EntryWrite, Kind, LsmConfig, VersionWrite};
-use teseladb_raftlog::MemDisk;
+use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
 const G: GroupId = GroupId(1);
@@ -318,4 +319,39 @@ fn entries_applied_again_below_the_flushed_index_do_not_hold_the_log_back() {
     assert_eq!(lsm.release_floor(G), None, "everything it applied is in a file");
     lsm.put(G, 4, b"k", ts(4, 0), b"v").unwrap();
     assert_eq!(lsm.release_floor(G), Some(3), "only entry 4 is in memory alone");
+}
+
+#[test]
+fn a_backward_scan_reads_its_last_keys_without_reading_the_rest() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    for i in 0..2_000u32 {
+        let key = format!("k{i:05}");
+        lsm.put(G, u64::from(i) + 1, key.as_bytes(), ts(1, 0), &[7; 64]).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let blocks: u64 = lsm.metrics().blocks_written.iter().sum();
+    drop(lsm);
+    // Cold: every block it needs is read from disk.
+    let mut lsm = open(&small(), &mut disk);
+    let v = lsm.view();
+    let mut s = v.scan_back(b"k", b"l", ts(2, 0));
+    let (mut reads, mut keys) = (0, Vec::new());
+    while keys.len() < 3 {
+        match s.next(&mut lsm) {
+            Step::Item(i) => keys.push(i.key),
+            Step::Miss(_) => {
+                while let Some(op) = lsm.poll_io(Nanos::ZERO) {
+                    reads += 1;
+                    let done = disk.execute(op);
+                    lsm.on_io_done(done, Nanos::ZERO);
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(keys, [b"k01999".to_vec(), b"k01998".to_vec(), b"k01997".to_vec()]);
+    assert!(blocks >= 20, "the data spans {blocks} blocks");
+    assert!(reads <= 2, "{reads} block reads for the last three keys");
 }

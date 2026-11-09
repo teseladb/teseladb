@@ -171,6 +171,11 @@ impl Table {
         (i < self.index.len()).then_some(i)
     }
 
+    /// The last internal key of data block `i`.
+    pub(crate) fn last_key(&self, i: usize) -> &[u8] {
+        &self.index[i].0
+    }
+
     /// Where block `i` is.
     pub(crate) fn handle(&self, i: usize) -> Handle {
         self.index[i].1

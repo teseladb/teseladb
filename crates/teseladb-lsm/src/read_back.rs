@@ -1,0 +1,187 @@
+//! Backward range reads (H-003): the keys of `[start, end)` from the last one down, one visible
+//! version per key, as a forward [`Scan`](crate::Scan) gives them reversed.
+//!
+//! Each step finds the largest logical key below the current bound in every source (AnotherProduct's
+//! `SeekForPrev`: a memtable answers from its ordered keys; a file from its block index, which
+//! holds each block's last key, reading at most the one block the bound falls in) and then reads
+//! that key as a point read does, which decides its versions, retractions, intents and range
+//! tombstones. A read of the last `n` keys costs `n` such steps, not a read of the whole range.
+
+use std::rc::Rc;
+
+use teseladb_keys::Hlc;
+
+use crate::entry;
+use crate::lsm::Lsm;
+use crate::read::{Fetch, Item, Lookup, ReadToken, Reader, Step, corrupt, get_once};
+use crate::sst::block::BlockCursor;
+use crate::sst::reader::Table;
+use crate::version::{Version, View};
+
+/// A backward range read in progress: call [`BackScan::next`] until [`Step::Done`].
+pub struct BackScan {
+    version: Rc<Version>,
+    start: Vec<u8>,
+    /// Every key at or above it is behind the scan (excluded).
+    bound: Vec<u8>,
+    read: Hlc,
+    /// The key found below the bound, waiting for its point read.
+    pending: Option<Vec<u8>>,
+    finished: bool,
+}
+
+impl std::fmt::Debug for BackScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackScan")
+            .field("start", &self.start)
+            .field("bound", &self.bound)
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
+impl View {
+    /// A backward scan of `[start, end)` at `ts`: one visible version per key, from the last key
+    /// down (H-003).
+    pub fn scan_back(&self, start: &[u8], end: &[u8], ts: Hlc) -> BackScan {
+        BackScan {
+            version: self.version.clone(),
+            start: start.to_vec(),
+            bound: end.to_vec(),
+            read: ts,
+            pending: None,
+            finished: start >= end,
+        }
+    }
+}
+
+/// What one file has below a bound.
+enum InTable {
+    /// Its last internal key below the bound, if any.
+    Ready(Option<Vec<u8>>),
+    /// The block it needs is being read.
+    Wait(ReadToken),
+}
+
+/// What the sources have below a bound.
+enum Below {
+    /// The largest logical key below the bound.
+    Key(Vec<u8>),
+    /// Nothing at or above the scan's start.
+    Nothing,
+    /// A block is being read, or the read failed.
+    Wait(Step),
+}
+
+impl BackScan {
+    /// The previous key's visible version.
+    pub fn next(&mut self, lsm: &mut Lsm) -> Step {
+        let r = &mut lsm.reader;
+        r.begin();
+        let step = self.step(r);
+        if !matches!(step, Step::Miss(_)) {
+            r.finish();
+        }
+        step
+    }
+
+    fn step(&mut self, r: &mut Reader) -> Step {
+        loop {
+            if let Some(e) = &r.failure {
+                return Step::Failed(e.clone());
+            }
+            if self.finished {
+                return Step::Done;
+            }
+            let key = match self.pending.take() {
+                Some(k) => k,
+                None => match self.below(r) {
+                    Below::Key(k) => k,
+                    Below::Nothing => {
+                        self.finished = true;
+                        return Step::Done;
+                    }
+                    Below::Wait(step) => return step,
+                },
+            };
+            match get_once(r, &self.version, &key, self.read) {
+                Lookup::Hit(f) => {
+                    self.bound.clone_from(&key);
+                    return Step::Item(Item { key, ts: f.ts, kind: f.kind, value: f.value });
+                }
+                // Deleted, retracted or newer than the read: the scan goes on below it.
+                Lookup::NotFound => self.bound = key,
+                Lookup::Miss(t) => {
+                    self.pending = Some(key);
+                    return Step::Miss(t);
+                }
+                Lookup::Failed(e) => return Step::Failed(e),
+            }
+        }
+    }
+
+    /// The largest logical key below the bound and at or above the start, over every source.
+    fn below(&self, r: &mut Reader) -> Below {
+        let target = entry::first_version(&self.bound);
+        let mut best: Option<Vec<u8>> = None;
+        let mut keep = |ikey: &[u8]| {
+            let logical = entry::logical(ikey);
+            if logical >= self.start.as_slice() && best.as_deref().is_none_or(|b| logical > b) {
+                best = Some(logical.to_vec());
+            }
+        };
+        for m in &self.version.memtables {
+            if let Some(ikey) = m.borrow().before(&target) {
+                keep(ikey);
+            }
+        }
+        let mut waiting = None;
+        for t in self.version.tables() {
+            if t.props.lo.as_slice() >= self.bound.as_slice()
+                || t.props.hi.as_slice() < self.start.as_slice()
+                || t.props.min_ts > self.read
+                || t.props.versions == 0
+            {
+                continue;
+            }
+            match table_before(r, t, &target) {
+                Ok(InTable::Ready(Some(ikey))) => keep(&ikey),
+                Ok(InTable::Ready(None)) => {}
+                Ok(InTable::Wait(token)) => {
+                    waiting.get_or_insert(token);
+                }
+                Err(e) => return Below::Wait(Step::Failed(e)),
+            }
+        }
+        if let Some(token) = waiting {
+            return Below::Wait(Step::Miss(token));
+        }
+        match best {
+            Some(k) => Below::Key(k),
+            None => Below::Nothing,
+        }
+    }
+}
+
+/// The last internal key of table `t` before `target`: from the block `target` falls in, or the
+/// last key of the block before it, which the index holds.
+fn table_before(r: &mut Reader, t: &Rc<Table>, target: &[u8]) -> Result<InTable, crate::LsmError> {
+    let Some(i) = t.find_block(target) else {
+        // Every key of the file is below the target: its last one.
+        return Ok(InTable::Ready(t.blocks().checked_sub(1).map(|l| t.last_key(l).to_vec())));
+    };
+    let block = match r.block(t, i)? {
+        Fetch::Ready(b) => b,
+        Fetch::Wait(token) => return Ok(InTable::Wait(token)),
+    };
+    let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
+    let mut last = None;
+    while c.valid() && entry::compare(c.key(), target).is_lt() {
+        last = Some(c.key().to_vec());
+        c.advance().map_err(|_| corrupt(t, i))?;
+    }
+    if last.is_none() && i > 0 {
+        last = Some(t.last_key(i - 1).to_vec());
+    }
+    Ok(InTable::Ready(last))
+}
