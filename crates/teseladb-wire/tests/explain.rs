@@ -655,3 +655,42 @@ fn id_equalities_of_explained_finds() {
         assert_eq!(stages_of(stages), want, "{find}: {r:?}");
     }
 }
+
+#[test]
+fn explain_gives_the_planning_microseconds_and_a_long_child_time() {
+    // H-028: a `refnode` 9.0.4 gives `optimizationTimeMicros` right after the milliseconds and the
+    // router's `totalChildMillis` as a long (measured on 09-11-2026).
+    let mut m = Mem::new();
+    let insert = extjson::parse(r#"{"insert":"c","documents":[{"_id":1}]}"#).unwrap();
+    m.run(DB, insert);
+    let cmd = r#"{"explain":{"find":"c","filter":{"_id":{"$gt":0}}},"verbosity":"executionStats"}"#;
+    let r = m.run(DB, extjson::parse(cmd).unwrap());
+    let shard = field(&r, "queryPlanner.winningPlan.shards.0").clone();
+    let Value::Document(shard) = shard else { panic!("{r:?}") };
+    let keys: Vec<&str> = shard.iter().map(|(k, _)| k).collect();
+    let at = keys.iter().position(|k| *k == "optimizationTimeMillis").expect("milliseconds");
+    assert_eq!(keys.get(at + 1), Some(&"optimizationTimeMicros"), "{keys:?}");
+    let child = field(&r, "executionStats.executionStages.totalChildMillis");
+    assert!(matches!(child, Value::Int64(_)), "{child:?}");
+}
+
+#[test]
+fn explain_echoes_the_session_and_cluster_time_it_was_sent() {
+    // H-028: a `refrouter` 9.0.4 echoes `lsid` and `$clusterTime` of `explain` after the command's own
+    // fields and before `$db`, except in an `aggregate` (measured on 09-11-2026).
+    let mut m = Mem::new();
+    let lsid = r#"{"id":{"$binary":{"base64":"AAAAAAAAAAAAAAAAAAAAAA==","subType":"04"}}}"#;
+    let time = r#"{"clusterTime":{"$timestamp":{"t":1,"i":1}},"signature":{"hash":{"$binary":{"base64":"AAAAAAAAAAAAAAAAAAAAAAAAAAA=","subType":"00"}},"keyId":0}}"#;
+    let cmd = format!(
+        r#"{{"explain":{{"find":"c","filter":{{"a":1}}}},"lsid":{lsid},"$clusterTime":{time}}}"#
+    );
+    let r = m.run(DB, extjson::parse(&cmd).unwrap());
+    let Value::Document(echo) = field(&r, "command").clone() else { panic!("{r:?}") };
+    let keys: Vec<&str> = echo.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, ["find", "filter", "lsid", "$clusterTime", "$db"], "{r:?}");
+    let agg =
+        format!(r#"{{"explain":{{"aggregate":"c","pipeline":[],"cursor":{{}}}},"lsid":{lsid}}}"#);
+    let r = m.run(DB, extjson::parse(&agg).unwrap());
+    let Value::Document(echo) = field(&r, "command").clone() else { panic!("{r:?}") };
+    assert!(echo.get("lsid").is_none(), "{echo:?}");
+}

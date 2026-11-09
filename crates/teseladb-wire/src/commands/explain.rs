@@ -270,7 +270,7 @@ pub fn explain<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         });
     }
     crate::generic::parse(&inner, &name)?;
-    let command = echoed(&inner, &name, ctx.db);
+    let command = echoed(&inner, &name, ctx.db, ctx.cmd);
     let run = verbosity >= Verbosity::ExecutionStats;
     let mut sub = Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd: &inner };
     let ns = super::query::target(&sub)?;
@@ -302,7 +302,7 @@ pub(crate) fn aggregate_flag<B: Backend + ?Sized>(
         .iter()
         .filter(|(k, _)| *k != EXPLAIN && *k != "$db")
         .fold(Document::new(), |d, (k, v)| d.with(k, v.clone()));
-    let command = echoed(&inner, "aggregate", ctx.db);
+    let command = echoed(&inner, "aggregate", ctx.db, ctx.cmd);
     let ns = super::query::target(ctx)?;
     if let Some(view) = super::views::resolve(ctx.backend, &ns)? {
         return views::on_view(ctx, &ns, &view, ("aggregate", &inner), Verbosity::QueryPlanner);
@@ -311,7 +311,7 @@ pub(crate) fn aggregate_flag<B: Backend + ?Sized>(
 }
 
 /// and `aggregate` with its implicit read concern, both without `$db`; the others with `$db`.
-fn echoed(inner: &Document, name: &str, db: &str) -> Document {
+fn echoed(inner: &Document, name: &str, db: &str, outer: &Document) -> Document {
     let mut out = Document::new();
     match name {
         "aggregate" => {
@@ -337,6 +337,7 @@ fn echoed(inner: &Document, name: &str, db: &str) -> Document {
             for (k, v) in inner.iter().filter(|(k, _)| *k != name && !ORDER.contains(k)) {
                 out.push(k, v.clone());
             }
+            session_fields(&mut out, outer);
             return out;
         }
         _ => {
@@ -345,8 +346,20 @@ fn echoed(inner: &Document, name: &str, db: &str) -> Document {
             }
         }
     }
+    session_fields(&mut out, outer);
     out.push("$db", db);
     out
+}
+
+/// The session and the cluster time the client sent with `explain`, which a `refrouter` 9.0.4 echoes
+/// after the explained command's own fields, except in an `aggregate` (measured on 09-11-2026,
+/// H-028).
+fn session_fields(out: &mut Document, outer: &Document) {
+    for k in ["lsid", "$clusterTime"] {
+        if let Some(v) = outer.get(k) {
+            out.push(k, v.clone());
+        }
+    }
 }
 
 /// The collation of an explained command, or of its first write statement.
@@ -391,7 +404,9 @@ fn reply<B: Backend + ?Sized>(
         }
         section.push("indexFilterSet", false);
     }
+    // The planning time, as a `refnode` 9.0.4 gives it next to the milliseconds (H-028).
     section.push("optimizationTimeMillis", 0);
+    section.push("optimizationTimeMicros", 0);
     for k in [
         "maxIndexedOrSolutionsReached",
         "maxIndexedAndSolutionsReached",
@@ -528,7 +543,7 @@ fn stats(e: &Explained, node: &str, verbosity: Verbosity) -> Document {
             router_stage(e, returned)
                 .with("totalKeysExamined", keys)
                 .with("totalDocsExamined", docs)
-                .with("totalChildMillis", 0)
+                .with("totalChildMillis", 0i64)
                 .with("shards", vec![Value::Document(shard)]),
         );
     if verbosity == Verbosity::AllPlansExecution {
