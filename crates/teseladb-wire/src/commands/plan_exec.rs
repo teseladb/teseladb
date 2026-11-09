@@ -1276,7 +1276,10 @@ fn any_entry<B: Backend + ?Sized>(
     (from, to): (&[u8], &[u8]),
     concern: ReadConcern,
 ) -> Result<bool, CommandError> {
-    if !index.id_index {
+    // A collection kept in `_id` order holds its keys in order, without hash buckets (D-153):
+    // the stretch is read as it is. Probing the buckets there found nothing, so `$in` counted
+    // fewer keys than RefDb examines and read 16 spans per stretch (H-011 of the native tests).
+    if !index.id_index || index.ordered {
         return Ok(!backend.scan(from, to, 1, concern)?.is_empty());
     }
     let spans = gap_spans(tenant, index.entry.collection, (from, to));

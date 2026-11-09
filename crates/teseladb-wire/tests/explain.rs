@@ -366,6 +366,41 @@ fn check(file: &str) {
     check_in(file, true);
 }
 
+/// The same replies on collections kept in `_id` order, the layout a node creates once every
+/// node reads it (D-153): RefDb's index of `_id` is in order too, so the plans and their
+/// counters are the same (H-011 of the native tests: `$in` counted fewer keys on that layout,
+/// which only the hash-bucket layout of these tests ran).
+#[test]
+fn explain_answers_as_refdb_on_collections_in_id_order() {
+    let files = [
+        (include_str!("explain/explain.out"), true),
+        (include_str!("explain/aggregate.out"), true),
+        (include_str!("explain/agg_express.out"), true),
+        (include_str!("explain/id_express.out"), true),
+        (include_str!("explain/aggregate2.out"), true),
+        (include_str!("explain/filters.out"), true),
+        (include_str!("explain/views.out"), false),
+        (include_str!("explain/plans.out"), false),
+        (include_str!("explain/plan_reads.out"), false),
+        (include_str!("explain/shards.out"), false),
+        (include_str!("explain/plan_writes.out"), false),
+        (include_str!("explain/plan_more.out"), false),
+        (include_str!("explain/plans_more.out"), false),
+        (include_str!("explain/edges.out"), false),
+        (include_str!("explain/agg_index.out"), false),
+        (include_str!("explain/plan_id.out"), false),
+        (include_str!("explain/plan_distinct.out"), false),
+        (include_str!("explain/shards2.out"), false),
+        (include_str!("explain/plan_checked.out"), false),
+    ];
+    for (file, fresh) in files {
+        let mut m = Mem::new();
+        m.ordered_ids = true;
+        load(&mut m);
+        check_on(&mut m, file, fresh);
+    }
+}
+
 /// Checks each command of `file` against RefDb's reply, each on a node of its own (`fresh`)
 /// or all on one.
 fn check_in(file: &str, fresh: bool) {
@@ -380,7 +415,9 @@ fn check_on(m: &mut Mem, file: &str, fresh: bool) {
     for line in file.lines().filter(|l| !l.is_empty()) {
         let (cmd, want) = line.split_once('\t').expect("a command and its reply");
         if fresh {
+            let ordered = m.ordered_ids;
             *m = Mem::new();
+            m.ordered_ids = ordered;
             load(m);
         }
         let c = extjson::parse(cmd).expect("command");

@@ -172,3 +172,45 @@ fn scans_by_id_are_served_without_the_core_also_from_the_files() {
         assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
     }
 }
+
+/// `$in` of `_id`s examines, as RefDb, each value's key and the key after it that ends its
+/// interval (`totalKeysExamined`, measured on a `refnode` 9.0.4): the reads of the stretches
+/// between the values find those keys also when they are served outside the core.
+#[test]
+fn an_in_of_ids_examines_the_keys_refdb_examines() {
+    let node = Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..100)));
+    assert!(ok(&r), "{r:?}");
+    for (values, keys) in
+        [(vec![5, 1000], 2), (vec![5, 50], 4), (vec![5, 6], 3), (vec![99, 1000], 1)]
+    {
+        let ids: Vec<Value> = values.iter().map(|v| Value::Int32(*v)).collect();
+        let find = Document::new()
+            .with("find", COLL)
+            .with("filter", Document::new().with("_id", Document::new().with("$in", ids)));
+        let explain = Document::new().with("explain", find).with("verbosity", "executionStats");
+        let r = c.run(DB, explain);
+        assert!(ok(&r), "{r:?}");
+        let examined = examined_keys(&r);
+        assert_eq!(examined, Some(keys), "{values:?}: {r:?}");
+    }
+    node.stop();
+}
+
+/// `executionStats.totalKeysExamined` of an `explain`, in its shard section or at the top.
+fn examined_keys(r: &Document) -> Option<i64> {
+    fn find(v: &Value) -> Option<i64> {
+        match v {
+            Value::Document(d) => d.iter().find_map(|(k, x)| match (k, x) {
+                ("totalKeysExamined", Value::Int64(n)) => Some(*n),
+                ("totalKeysExamined", Value::Int32(n)) => Some(i64::from(*n)),
+                _ => find(x),
+            }),
+            Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(&Value::Document(r.clone()))
+}
