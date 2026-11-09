@@ -205,6 +205,8 @@ pub struct Mem {
     pub no_route: bool,
     /// The highest feature compatibility version some node runs (007 FR-027).
     pub fcv_limit: Option<String>,
+    /// Every node keeps the documents of a new collection in `_id` order (D-153).
+    pub ordered_ids: bool,
     /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
@@ -1237,6 +1239,10 @@ impl Backend for Mem {
 
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
         Ok(self.fcv_limit.clone())
+    }
+
+    fn ordered_ids(&mut self) -> Result<bool, CommandError> {
+        Ok(self.ordered_ids)
     }
 
     fn set_read_mark(&mut self, at: Option<teseladb_txn::causal::ReadMark>) {

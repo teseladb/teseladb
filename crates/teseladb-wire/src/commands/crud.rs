@@ -293,7 +293,12 @@ pub fn ensure_collection<B: Backend + ?Sized>(
     }
     names::check_writable(ns)?;
     let uuid = super::new_uuid(ctx.backend);
-    let options = Document::new().to_bytes()?;
+    // A new collection keeps its documents in `_id` order once every node reads it (D-153).
+    let mut options = Document::new();
+    if ctx.backend.ordered_ids()? {
+        options.push(super::catalog::ORDERED_IDS, true);
+    }
+    let options = options.to_bytes()?;
     let cmd = CatalogCommand::Create { ns: ns.clone(), uuid, options, if_absent: true };
     super::catalog::write_adding_database(ctx.backend, &ns.db, cmd)?.ok_or_else(|| {
         CommandError::new(crate::error::INTERNAL_ERROR, "the collection was not created")
@@ -401,6 +406,10 @@ pub fn doc_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandErr
                 crate::error::INTERNAL_ERROR,
                 "a capped document has no _id key",
             ));
+        }
+        // Created in `_id` order (D-153): keyed as a clustered collection.
+        CollectionKind::Normal if super::catalog::in_id_order(coll)? => {
+            KeyBuilder::document_clustered(coll.tenant, coll.id, id)
         }
         CollectionKind::Normal | CollectionKind::View { .. } | CollectionKind::TimeSeries(_) => {
             KeyBuilder::document(coll.tenant, coll.id, id)

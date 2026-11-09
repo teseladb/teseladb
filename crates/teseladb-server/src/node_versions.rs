@@ -17,6 +17,10 @@ const PROTOCOL_MIN: &str = "protocolMin";
 const FCV: &str = "fcv";
 /// The format of the range commands a node reads (007 FR-039).
 const RANGE: &str = "range";
+/// The document key layouts a node reads: 1 adds the `_id` order of new collections (D-153).
+const KEYS: &str = "keys";
+/// The layout version that brings the `_id` order of new collections.
+const KEYS_ORDERED: u8 = 1;
 
 /// What this binary runs: the peer protocol, Group 0's snapshot format and the latest feature
 /// compatibility version.
@@ -26,7 +30,8 @@ pub fn ours() -> Vec<u8> {
         .with(PROTOCOL_MIN, i64::from(teseladb_io::peer::PROTOCOL_MIN))
         .with(FORMAT, i64::from(teseladb_meta::group0::SNAPSHOT_VERSION))
         .with(FCV, VERSIONS[0])
-        .with(RANGE, i64::from(teseladb_range::command::FORMAT));
+        .with(RANGE, i64::from(teseladb_range::command::FORMAT))
+        .with(KEYS, i64::from(KEYS_ORDERED));
     d.to_bytes().unwrap_or_default()
 }
 
@@ -39,10 +44,10 @@ fn fcv_of(value: &[u8]) -> Option<String> {
     }
 }
 
-/// The format of the range commands a node's setting `value` says it reads: 0 for a node that
-/// recorded its versions before it recorded this one.
-fn range_format_of(value: &[u8]) -> u8 {
-    match RawDoc::from_bytes(value).ok().and_then(|d| d.get(RANGE)) {
+/// The version a node's setting `value` records under `field`: 0 for a node that recorded its
+/// versions before it recorded that one.
+fn version_of(value: &[u8], field: &str) -> u8 {
+    match RawDoc::from_bytes(value).ok().and_then(|d| d.get(field)) {
         Some(teseladb_bson::RawValue::Int64(v)) => u8::try_from(v).unwrap_or(0),
         Some(teseladb_bson::RawValue::Int32(v)) => u8::try_from(v).unwrap_or(0),
         _ => 0,
@@ -56,7 +61,18 @@ pub fn counted_writes(sm: &Group0Sm) -> bool {
         .values()
         .filter(|n| n.state != NodeState::Removed)
         .filter_map(|n| sm.settings.get(&key(n.id)))
-        .all(|v| range_format_of(v) >= teseladb_range::command::FORMAT_COUNTED)
+        .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_COUNTED)
+}
+
+/// Whether every node that is not removed keeps the documents of a new collection in `_id`
+/// order (D-153): a node of the version before would key them by the hash bucket of their `_id`.
+/// A node that recorded nothing yet runs this binary.
+pub fn ordered_ids(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, KEYS) >= KEYS_ORDERED)
 }
 
 /// The highest feature compatibility version every node that is not removed runs, if one runs
@@ -137,6 +153,9 @@ mod tests {
         assert!(!counted_writes(&sm));
         sm.settings.insert(key(NodeId(2)), ours());
         assert!(counted_writes(&sm));
+        assert!(ordered_ids(&sm));
+        sm.settings.insert(key(NodeId(2)), Document::new().with(FCV, "9.0").to_bytes().unwrap());
+        assert!(!ordered_ids(&sm), "a node of the version before keys documents by hash");
         let mut sm = with_nodes(&[(1, Active, None), (2, Removed, None)]);
         sm.settings.insert(key(NodeId(2)), old);
         assert!(counted_writes(&sm), "a removed node does not count");

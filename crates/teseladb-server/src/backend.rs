@@ -1484,6 +1484,10 @@ impl Backend for ServerBackend {
         Ok(self.h.routes.fcv_limit())
     }
 
+    fn ordered_ids(&mut self) -> Result<bool, CommandError> {
+        Ok(self.h.routes.ordered_ids())
+    }
+
     fn tenant_state(&mut self, tenant: u32) -> Option<teseladb_meta::tenants::TenantState> {
         self.h.routes.tenants().get(&tenant).cloned()
     }

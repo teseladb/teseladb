@@ -30,6 +30,8 @@ pub struct SharedRoutes {
     /// The highest feature compatibility version every node runs, when one runs less than this
     /// binary's latest (FR-027).
     fcv_limit: Arc<RwLock<Arc<Option<String>>>>,
+    /// Every node keeps the documents of a new collection in `_id` order (D-153).
+    ordered_ids: Arc<std::sync::atomic::AtomicBool>,
     /// The state of each tenant but the default one: its limits, its access list and whether it
     /// is suspended (FR-030, FR-034, FR-035).
     tenants: Arc<RwLock<Arc<TenantStates>>>,
@@ -186,6 +188,16 @@ impl SharedRoutes {
     /// The nodes' feature compatibility version limit.
     pub fn fcv_limit(&self) -> Option<String> {
         (*read(&self.fcv_limit)).clone()
+    }
+
+    /// Records whether every node keeps the documents of a new collection in `_id` order.
+    pub fn publish_ordered_ids(&self, on: bool) {
+        self.ordered_ids.store(on, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a new collection keeps its documents in `_id` order (D-153).
+    pub fn ordered_ids(&self) -> bool {
+        self.ordered_ids.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn table(&self) -> Arc<RouteTable> {

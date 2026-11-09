@@ -103,12 +103,25 @@ pub(crate) struct PlanIndex {
     dirs: Vec<Direction>,
     /// The index of `_id`, whose entries are the collection's documents.
     id_index: bool,
+    /// The collection keeps its documents in `_id` order without hash bucket (a clustered
+    /// collection, 015 FR-009, or one created in that order, D-153): the entries of its index of
+    /// `_id` are read as an interval.
+    ordered: bool,
+    /// The collection is clustered: `explain` shows the scans of its `_id` as a clustered scan.
+    clustered: bool,
 }
 
 impl PlanIndex {
     /// Unique.
     pub fn unique(&self) -> bool {
         self.catalog.unique
+    }
+
+    /// The index of `_id` of a clustered collection, whose entries are its documents (015
+    /// FR-009): `explain` shows its scans as RefDb's `CLUSTERED_IXSCAN`. A collection created in
+    /// `_id` order (D-153) shows the index `_id_` of any collection.
+    pub fn clustered(&self) -> bool {
+        self.clustered
     }
 
     /// Sparse.
@@ -157,7 +170,10 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
 ) -> Result<Vec<PlanIndex>, CommandError> {
-    if !matches!(super::kinds::kind_of(coll)?, CollectionKind::Normal) {
+    if !matches!(
+        super::kinds::kind_of(coll)?,
+        CollectionKind::Normal | CollectionKind::Clustered { .. }
+    ) {
         return Ok(Vec::new());
     }
     stored_indexes(backend, coll)
@@ -171,6 +187,8 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
 ) -> Result<Vec<PlanIndex>, CommandError> {
     // A collection with a shard key keeps `_id` in an index of its own (018 FR-001).
     let sharded = super::sharding::is_sharded(coll);
+    let in_order = in_id_order(coll)?;
+    let is_clustered = matches!(super::kinds::kind_of(coll)?, CollectionKind::Clustered { .. });
     let id_entry = IndexEntry {
         id: if sharded { teseladb_range::capped::ID_INDEX } else { DOCUMENTS },
         collection: coll.id,
@@ -230,7 +248,18 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
             plannable,
         };
         let dirs = catalog.def.key_spec().fields.iter().map(|f| f.direction).collect();
-        out.push(PlanIndex { entry, pattern, multikey_paths, meta, catalog, dirs, id_index });
+        let (ordered, clustered) = (in_order && id_index, is_clustered && id_index);
+        out.push(PlanIndex {
+            entry,
+            pattern,
+            multikey_paths,
+            meta,
+            catalog,
+            dirs,
+            id_index,
+            ordered,
+            clustered,
+        });
     }
     Ok(out)
 }
@@ -802,6 +831,13 @@ fn run_reading<B: Backend + ?Sized>(
     Ok((ran, cut))
 }
 
+/// Whether `coll` keeps its documents in `_id` order without hash bucket (a clustered collection,
+/// 015 FR-009, or one created in that order, D-153): its document keys are the keys of its index
+/// of `_id`.
+pub(crate) fn in_id_order(coll: &CollectionEntry) -> Result<bool, CommandError> {
+    super::catalog::in_id_order(coll)
+}
+
 /// The document an index entry with primary key `pk` names, with its key. An index entry and its
 /// document are written in the same write, but a read that is not at a snapshot reads the index
 /// and the documents one after the other: a delete in between leaves an entry whose document is
@@ -815,6 +851,7 @@ fn indexed_document<B: Backend + ?Sized>(
     // The buckets of a time series are kept in `_id` order without hash bucket, as the
     // documents of a collection with a shard key (015 FR-008).
     let unbucketed = super::sharding::is_sharded(coll)
+        || in_id_order(coll)?
         || matches!(super::kinds::kind_of(coll)?, CollectionKind::TimeSeries(_));
     let key = match unbucketed {
         true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
@@ -1156,6 +1193,10 @@ fn range_entries<B: Backend + ?Sized>(
 ) -> Result<Vec<Entry>, CommandError> {
     let (_, past) = index_span((tenant, collection), index);
     let end = r.end.clone().unwrap_or(past);
+    if index.ordered {
+        let span = (r.start.as_slice(), end.as_slice());
+        return ordered_entries(backend, (tenant, collection), span, concern, (most, backward));
+    }
     if index.id_index {
         if let Some(one) = id_point(backend, (tenant, collection), (&r.start, &end), concern)? {
             return Ok(one);
@@ -1254,7 +1295,8 @@ fn point_entries<B: Backend + ?Sized>(
     (ranges, backward): (&[KeyRange], bool),
     concern: ReadConcern,
 ) -> Result<Option<Scanned>, CommandError> {
-    if !index.id_index || ranges.len() < 2 {
+    // In `_id` order, each value's interval is read as one, without buckets.
+    if !index.id_index || index.ordered || ranges.len() < 2 {
         return Ok(None);
     }
     let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
@@ -1447,6 +1489,41 @@ fn id_point<B: Backend + ?Sized>(
             })
             .collect(),
     ))
+}
+
+/// The documents of `[from, to)` of a collection kept in `_id` order (015 FR-009, H-027): its
+/// document keys are the keys of its index of `_id`, so the interval is read as it is, from its
+/// end down when `backward`, a chunk at a time and no further than `most` documents.
+fn ordered_entries<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    (from, to): (&[u8], &[u8]),
+    concern: ReadConcern,
+    (most, backward): (Option<usize>, bool),
+) -> Result<Vec<Entry>, CommandError> {
+    let head = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS).as_bytes().len();
+    let (mut lo, mut hi) = (from.to_vec(), to.to_vec());
+    let mut out = Vec::new();
+    loop {
+        let chunk = most.map_or(KEY_CHUNK, |m| m.saturating_sub(out.len()).clamp(1, KEY_CHUNK));
+        let rows = match backward {
+            true => backend.scan_back(&lo, &hi, chunk, concern)?,
+            false => backend.scan(&lo, &hi, chunk, concern)?,
+        };
+        let short = rows.len() < chunk;
+        let last = rows.last().map(|(k, _)| k.clone());
+        for (key, value) in rows {
+            let pk = key.get(head..).unwrap_or_default().to_vec();
+            out.push(Entry { pk, key: None, values: None, doc: Some((key, value)) });
+        }
+        match last {
+            _ if most.is_some_and(|m| out.len() >= m) => break,
+            Some(k) if !short && backward => hi = k,
+            Some(k) if !short => lo = [k.as_slice(), &[0]].concat(),
+            _ => break,
+        }
+    }
+    Ok(out)
 }
 
 /// The documents of the index of `_id` in `[from, to)` with their primary keys, in key order: the

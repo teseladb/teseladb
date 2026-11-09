@@ -817,6 +817,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.fcv_limit())
     }
 
+    fn ordered_ids(&mut self) -> Result<bool, CommandError> {
+        self.call(|b| b.ordered_ids())
+    }
+
     fn scan(
         &mut self,
         start: &[u8],

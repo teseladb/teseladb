@@ -703,11 +703,17 @@ fn find<B: Backend + ?Sized>(
     let id = crud::id_equality(&a.filter).filter(|_| collation.is_none() && a.skip == 0);
     if let (Some(id), Some(c)) = (id, coll.as_ref()) {
         let found = if run { read_id(ctx, c, &id, a.concern)? } else { 0 };
-        let mut s = Stage::new("EXPRESS_IXSCAN");
-        s.head.push("keyPattern", Document::new().with("_id", 1));
-        s.head.push("indexName", "_id_");
+        // A collection kept in `_id` order reads the document itself, with no key (measured on
+        // a `refnode` 9.0.4, 015 FR-014).
+        let clustered = super::catalog::is_clustered(c)?;
+        let mut s =
+            Stage::new(if clustered { "EXPRESS_CLUSTERED_IXSCAN" } else { "EXPRESS_IXSCAN" });
+        if !clustered {
+            s.head.push("keyPattern", Document::new().with("_id", 1));
+            s.head.push("indexName", "_id_");
+        }
         // An `_id` that is not there examines no key (measured on a `refnode` 9.0.4).
-        s.counters.push("keysExamined", long(found));
+        s.counters.push("keysExamined", long(if clustered { 0 } else { found }));
         s.counters.push("docsExamined", long(found));
         s.returned = found;
         let plan = match &projection {
@@ -1186,6 +1192,12 @@ fn planned_access(
     let returned = u64::try_from(r.found.len()).unwrap_or(u64::MAX);
     match &r.access {
         teseladb_plan::rules::Access::Collscan => collscan(ns, shown, r.docs, returned),
+        // A collection kept in `_id` order reads its documents as the scan of its `_id` (015
+        // FR-014): no fetch over it.
+        teseladb_plan::rules::Access::Index(scan) if indexes[scan.index].clustered() => {
+            let docs = if run { r.keys } else { 0 };
+            clustered_stage(ns, shown, scan, docs, returned)
+        }
         teseladb_plan::rules::Access::Index(scan) => {
             let keys = if run { r.keys } else { 0 };
             let within = if run { r.keys.saturating_sub(r.past) } else { 0 };
@@ -1400,6 +1412,70 @@ fn multikey_dups(ix: &mut Stage, index: &super::plan_exec::PlanIndex, within: u6
     ix.counters.insert("dupsTested", long(within));
     ix.counters.insert("dupsDropped", long(dups));
     ix.returned = within.saturating_sub(dups);
+}
+
+/// The scan of the `_id` of a collection kept in `_id` order, as a `refnode` 9.0.4 shows it
+/// (measured on 09-11-2026, 015 FR-014): `CLUSTERED_IXSCAN` with the ends of its intervals, the
+/// `_id` condition as its filter when it has several intervals and the rest of the filter in an
+/// `$and`; without bounds, a `COLLSCAN` in the scan's direction.
+fn clustered_stage(
+    ns: &Namespace,
+    shown: &Document,
+    scan: &teseladb_plan::rules::IndexScan,
+    docs: u64,
+    returned: u64,
+) -> Stage {
+    let direction = if scan.backward { "backward" } else { "forward" };
+    let intervals = scan.bounds.first().map(|(_, b)| b.as_slice()).unwrap_or_default();
+    let all = teseladb_plan::logical::Bound::all();
+    if intervals.iter().all(|b| *b == all) {
+        let mut s = Stage::new("COLLSCAN");
+        if let Some(f) = scan.residual.as_ref() {
+            s.head.push("filter", f.clone());
+        }
+        s.tail.push("nss", names::full(ns));
+        s.tail.push("direction", direction);
+        s.counters.push("docsExamined", long(docs));
+        s.counters.push("seeks", 0);
+        s.returned = returned;
+        return s;
+    }
+    let mut s = Stage::new("CLUSTERED_IXSCAN");
+    let mut filter: Vec<Value> = Vec::new();
+    if intervals.len() > 1
+        && let Some(id) = shown.get("_id")
+    {
+        filter.push(Value::Document(Document::new().with("_id", id.clone())));
+    }
+    if let Some(rest) = scan.residual.as_ref() {
+        match rest.get("$and") {
+            Some(Value::Array(items)) if rest.len() == 1 => filter.extend(items.iter().cloned()),
+            _ => filter.extend(
+                rest.iter().map(|(k, v)| Value::Document(Document::new().with(k, v.clone()))),
+            ),
+        }
+    }
+    match filter.len() {
+        0 => {}
+        1 if scan.residual.is_none() => s.head.push("filter", filter.remove(0)),
+        _ => s.head.push("filter", Document::new().with("$and", Value::Array(filter))),
+    }
+    s.tail.push("nss", names::full(ns));
+    s.tail.push("direction", direction);
+    // The lowest number is `NaN` in the order of `_id`, which a clustered scan shows as its
+    // lower end where an index scan shows `-inf` (measured).
+    let low = match intervals.first().map(|b| &b.low) {
+        Some(Value::Double(v)) if *v == f64::NEG_INFINITY => Value::Double(f64::NAN),
+        Some(v) => v.clone(),
+        None => Value::Null,
+    };
+    let high = intervals.last().map_or(Value::Null, |b| b.high.clone());
+    s.tail.push("minRecord", low);
+    s.tail.push("maxRecord", high);
+    s.counters.push("docsExamined", long(docs));
+    s.counters.push("seeks", 1);
+    s.returned = returned;
+    s
 }
 
 fn index_stage(

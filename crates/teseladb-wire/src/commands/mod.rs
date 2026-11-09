@@ -612,6 +612,11 @@ pub trait Backend {
     fn fcv_limit(&mut self) -> Result<Option<String>, CommandError> {
         Ok(None)
     }
+    /// Whether a new collection keeps its documents in `_id` order (D-153): every node of the
+    /// cluster reads that layout. A backend that does not say keeps the hash bucket.
+    fn ordered_ids(&mut self) -> Result<bool, CommandError> {
+        Ok(false)
+    }
     /// Sets a cluster parameter in Group 0 and waits until this node's copy applied it.
     fn set_cluster_parameter(&mut self, name: &str, value: Vec<u8>) -> Result<(), CommandError>;
     /// The time, on the monotonic clock of [`Backend::now_micros`] in milliseconds, at which the

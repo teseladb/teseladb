@@ -884,6 +884,7 @@ impl NodeLogic {
         if routes.fcv_limit() != limit {
             routes.publish_fcv_limit(limit);
         }
+        routes.publish_ordered_ids(crate::node_versions::ordered_ids(sm));
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
         let applied = sm.applied;

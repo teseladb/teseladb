@@ -679,3 +679,138 @@ fn a_long_id_scan_merges_the_buckets_and_reads_little_more_than_it_gives() {
         run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":1950}},"sort":{"_id":1},"limit":100}"#);
     assert_eq!(ids(&r), (1950..2000).collect::<Vec<_>>(), "{r:?}");
 }
+
+/// `count` documents in a collection clustered by `_id` (015 FR-009).
+fn loaded_clustered(count: i32) -> Mem {
+    let mut m = Mem::new();
+    let r = run(&mut m, r#"{"create":"c","clusteredIndex":{"key":{"_id":1},"unique":true}}"#);
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let docs: Vec<String> =
+        (0..count).map(|i| format!(r#"{{"_id":{i},"a":{},"b":{}}}"#, i % 10, i % 7)).collect();
+    for chunk in docs.chunks(1000) {
+        let r = run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, chunk.join(",")));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    m
+}
+
+#[test]
+fn a_clustered_collection_reads_only_the_interval_of_its_id_conditions() {
+    let mut m = loaded_clustered(2_000);
+    // H-027: a range of `_id` read the whole collection and sorted it (50 of 50 documents
+    // examined where a `refnode` 9.0.4 examines 3, with `CLUSTERED_IXSCAN`).
+    let cases = [
+        (
+            r#"{"find":"c","filter":{"_id":{"$gte":10,"$lt":20}},"sort":{"_id":1},"limit":3}"#,
+            vec![10, 11, 12],
+        ),
+        (r#"{"find":"c","filter":{"_id":{"$lte":30}},"sort":{"_id":-1},"limit":2}"#, vec![30, 29]),
+        (r#"{"find":"c","filter":{},"sort":{"_id":-1},"limit":1}"#, vec![1999]),
+        (r#"{"find":"c","filter":{"_id":7}}"#, vec![7]),
+        (r#"{"find":"c","filter":{"_id":{"$in":[3,1500]}},"sort":{"_id":1}}"#, vec![3, 1500]),
+    ];
+    for (cmd, want) in cases {
+        m.scanned_rows = 0;
+        let r = run(&mut m, cmd);
+        assert_eq!(ids_in_order(&r), want, "{cmd}: {r:?}");
+        assert!(m.scanned_rows < 20, "{cmd}: {} rows read", m.scanned_rows);
+    }
+}
+
+#[test]
+fn a_clustered_collection_uses_its_secondary_indexes() {
+    let mut m = loaded_clustered(2_000);
+    index(&mut m, r#"{"key":{"a":1,"b":1},"name":"ab"}"#);
+    m.scanned_rows = 0;
+    let r = run(&mut m, r#"{"find":"c","filter":{"a":3,"b":5}}"#);
+    let want = expected(2_000, |i| i % 10 == 3 && i % 7 == 5);
+    assert_eq!(ids(&r), want, "{r:?}");
+    assert!(m.scanned_rows < 200, "{} rows read", m.scanned_rows);
+}
+
+#[test]
+fn explain_shows_a_clustered_scan_as_a_refnode_does() {
+    let mut m = loaded_clustered(50);
+    let explain = |m: &mut Mem, find: &str| {
+        run(m, &format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#))
+    };
+    // Measured on a `refnode` 9.0.4 on 09-11-2026 (015 FR-014).
+    let r = explain(
+        &mut m,
+        r#"{"find":"c","filter":{"_id":{"$gte":10,"$lt":20}},"sort":{"_id":1},"limit":3}"#,
+    );
+    let plan = "queryPlanner.winningPlan.shards.0.winningPlan";
+    let scan = field(&r, &format!("{plan}.inputStage")).clone();
+    let Value::Document(scan) = scan else { panic!("{r:?}") };
+    assert_eq!(field(&r, &format!("{plan}.stage")), &Value::String("LIMIT".into()), "{r:?}");
+    assert_eq!(scan.get("stage"), Some(&Value::String("CLUSTERED_IXSCAN".into())), "{scan:?}");
+    assert_eq!(scan.get("direction"), Some(&Value::String("forward".into())));
+    assert_eq!(scan.get("minRecord"), Some(&Value::Int32(10)));
+    assert_eq!(scan.get("maxRecord"), Some(&Value::Int32(20)));
+    assert_eq!(scan.get("inputStage"), None, "no fetch under a clustered scan");
+    let stages = "executionStats.executionStages.shards.0.executionStages";
+    let docs = field(&r, &format!("{stages}.inputStage.docsExamined"));
+    assert_eq!(docs, &Value::Int32(3));
+    // One `_id`: the express clustered stage, which examines no key.
+    let r = explain(&mut m, r#"{"find":"c","filter":{"_id":7}}"#);
+    let stage = field(&r, &format!("{plan}.stage"));
+    assert_eq!(stage, &Value::String("EXPRESS_CLUSTERED_IXSCAN".into()), "{r:?}");
+    // Backward below a value: `NaN` as the lower end of the numbers, as a `refnode` shows it.
+    let r = explain(&mut m, r#"{"find":"c","filter":{"_id":{"$lt":5}},"sort":{"_id":-1}}"#);
+    let Value::Document(scan) = field(&r, plan).clone() else { panic!("{r:?}") };
+    assert_eq!(scan.get("direction"), Some(&Value::String("backward".into())), "{scan:?}");
+    assert!(matches!(scan.get("minRecord"), Some(Value::Double(v)) if v.is_nan()), "{scan:?}");
+    // Several `_id` intervals: the condition as the scan's filter, between its ends.
+    let r = explain(&mut m, r#"{"find":"c","filter":{"_id":{"$in":[3,7]}}}"#);
+    let Value::Document(scan) = field(&r, plan).clone() else { panic!("{r:?}") };
+    assert_eq!(scan.get("minRecord"), Some(&Value::Int32(3)), "{scan:?}");
+    assert_eq!(scan.get("maxRecord"), Some(&Value::Int32(7)));
+    assert!(scan.get("filter").is_some(), "{scan:?}");
+}
+
+#[test]
+fn a_collection_created_in_id_order_reads_an_id_interval_as_one() {
+    // D-153 (H-016): with every node reading the layout, a new collection keeps its documents in
+    // `_id` order, so a short `_id` interval is one read instead of one per hash bucket.
+    let mut m = Mem::new();
+    m.ordered_ids = true;
+    let docs: Vec<String> =
+        (0..2_000).map(|i| format!(r#"{{"_id":{i},"a":{}}}"#, i % 10)).collect();
+    for chunk in docs.chunks(1000) {
+        let r = run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, chunk.join(",")));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    m.span_reads = 0;
+    m.scanned_rows = 0;
+    let r = run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}"#);
+    assert_eq!(ids_in_order(&r), vec![100, 101, 102, 103, 104], "{r:?}");
+    assert!(m.scanned_rows < 20, "{} rows read", m.scanned_rows);
+    assert_eq!(m.span_reads, 0, "no read of the 16 buckets");
+    // Without a sort, the documents come in `_id` order, as a `refnode` gives them in insertion
+    // order for increasing `_id`s.
+    let r = run(&mut m, r#"{"find":"c","filter":{},"limit":3}"#);
+    assert_eq!(ids_in_order(&r), vec![0, 1, 2], "{r:?}");
+    // It shows as any collection: the `_id_` index in `explain`, no option in `listCollections`.
+    let r = run(
+        &mut m,
+        r#"{"explain":{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}}"#,
+    );
+    let plan = format!("{r:?}");
+    assert!(plan.contains("\"IXSCAN\"") && plan.contains("\"_id_\""), "{plan}");
+    assert!(!plan.contains("CLUSTERED"), "{plan}");
+    let r = run(&mut m, r#"{"listCollections":1,"filter":{"name":"c"}}"#);
+    assert!(!format!("{r:?}").contains("orderedIds"), "{r:?}");
+}
+
+#[test]
+fn a_collection_created_before_keeps_its_hash_buckets() {
+    let mut m = loaded(2_000);
+    // The cluster reads the new layout from now on; `c` was created before it.
+    m.ordered_ids = true;
+    run(&mut m, r#"{"insert":"c","documents":[{"_id":5000,"a":1}]}"#);
+    m.span_reads = 0;
+    let r =
+        run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":1998}},"sort":{"_id":1},"limit":3}"#);
+    assert_eq!(ids_in_order(&r), vec![1998, 1999, 5000], "{r:?}");
+    assert!(m.span_reads > 0, "read through its buckets");
+}

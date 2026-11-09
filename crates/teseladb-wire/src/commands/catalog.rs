@@ -97,7 +97,27 @@ pub(crate) fn options_of(c: &CollectionEntry) -> Result<Document, CommandError> 
     options.remove(ID_INDEX_VERSION);
     options.remove(super::sharding::SHARD_KEY);
     options.remove(super::timeseries_range::EXTENDED_RANGE);
+    options.remove(ORDERED_IDS);
     Ok(options)
+}
+
+/// The option of a collection that keeps its documents in `_id` order without hash bucket
+/// (D-153, 003 FR-012): set when it is created while every node reads that layout. It is not a
+/// collection option, and `listCollections` does not show it.
+pub(crate) const ORDERED_IDS: &str = "$orderedIds";
+
+/// Whether `c` keeps its documents in `_id` order: a clustered collection (015 FR-009) or a
+/// collection created with [`ORDERED_IDS`].
+pub(crate) fn in_id_order(c: &CollectionEntry) -> Result<bool, CommandError> {
+    Ok(match kinds::kind_of(c)? {
+        CollectionKind::Clustered { .. } => true,
+        CollectionKind::Normal => {
+            matches!(stored_options(c)?.get(ORDERED_IDS), Some(Value::Boolean(true)))
+        }
+        CollectionKind::Capped { .. }
+        | CollectionKind::View { .. }
+        | CollectionKind::TimeSeries(_) => false,
+    })
 }
 
 /// The options as the catalog keeps them, with the version of the `_id` index when it is not
@@ -314,6 +334,10 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     let mut stored = options.clone();
     if version != index_spec::DEFAULT_VERSION {
         stored.push(ID_INDEX_VERSION, version);
+    }
+    // A new collection keeps its documents in `_id` order once every node reads it (D-153).
+    if asked == kinds::Asked::Normal && ctx.backend.ordered_ids()? {
+        stored.push(ORDERED_IDS, true);
     }
     let bytes = stored.to_bytes()?;
     let uuid = super::new_uuid(ctx.backend);
