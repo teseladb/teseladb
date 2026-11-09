@@ -95,6 +95,11 @@ fn every_subcommand_works_against_a_node() {
     assert_eq!((code, err.contains("no right neighbour")), (1, true), "{err}");
     let (code, _, err) = admin(&at, &["range", "split", "77"]);
     assert_eq!((code, err.as_str()), (1, "teseladb admin: no range 77\n"));
+    // Without `--at`, by the middle of the range's data, which the node measures on request: a
+    // range with too little data to have a middle is refused.
+    let (code, _, err) = admin(&at, &["range", "split", "1"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("no data of the range to cut it by size"), "{err}");
     let set = Document::new().with("setFeatureCompatibilityVersion", "8.0").with("confirm", true);
     assert!(ok(&c.run("admin", set)));
     assert!(

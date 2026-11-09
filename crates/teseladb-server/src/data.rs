@@ -84,6 +84,11 @@ pub enum DataReq {
     },
     /// The state of this node's replica of a range.
     Status(GroupId),
+    /// Where a split by size would cut this node's replica of a range: the middle key of its
+    /// data. Asked apart from [`DataReq::Status`] because measuring walks the range's memtable,
+    /// which periodic status checks did on the core of the data range several times a second
+    /// (H-007 of the native tests).
+    Cut(GroupId),
     /// A write or a scan of the CRUD commands (006 FR-014) for a range: run here if this replica
     /// leads it, or forwarded to its leader.
     Remote(GroupId, RemoteReq),
@@ -117,9 +122,6 @@ pub struct DataStatus {
     pub exports: usize,
     /// The range's bounds as its state machine applied them (empty: no replica).
     pub bounds: (Vec<u8>, Vec<u8>),
-    /// Where a split by size would cut this replica's data: the middle key of its SST files
-    /// (`None`: no replica, or no files to cut).
-    pub cut: Option<Vec<u8>>,
     /// Replicas of this core whose data a checksum had rebuilt since it started (FR-014).
     pub rebuilt: u64,
     /// This replica is being rebuilt.
@@ -135,6 +137,8 @@ pub enum DataReply {
     Get(Option<Vec<u8>>),
     /// The replica's state.
     Status(DataStatus),
+    /// The answer to a [`DataReq::Cut`] (`None`: no replica, or no data to cut).
+    Cut(Option<Vec<u8>>),
     /// The answer to a [`DataReq::Remote`].
     Remote(RemoteReply),
 }
@@ -421,6 +425,13 @@ impl DataCore {
     ) {
         self.wall_ms = wall_ms;
         let id = match req {
+            DataReq::Cut(g) => {
+                let sm = core.state_machine(g).and_then(CoreSm::range);
+                let cut = sm
+                    .and_then(|s| self.lsm.borrow().interval_size(s.bounds().0, s.bounds().1).cut);
+                let _ = reply.send(Ok(DataReply::Cut(cut)));
+                return;
+            }
             DataReq::Status(g) => {
                 let _ = reply.send(Ok(DataReply::Status(self.status(core, g))));
                 return;
@@ -715,7 +726,6 @@ impl DataCore {
             ingested: self.transfers.ingested(),
             exports: self.transfers.exports(),
             bounds: sm.map(|s| (s.bounds().0.to_vec(), s.bounds().1.to_vec())).unwrap_or_default(),
-            cut: sm.and_then(|s| self.lsm.borrow().interval_size(s.bounds().0, s.bounds().1).cut),
             rebuilt: self.checksums.rebuilt(),
             rebuilding: self.checksums.rebuilding(g),
         }

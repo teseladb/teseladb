@@ -412,6 +412,15 @@ impl NodeAdmin {
         }
     }
 
+    /// Where a split by size would cut this node's replica of range `g`.
+    fn cut(&self, g: GroupId) -> Option<Vec<u8>> {
+        let core = usize::from(self.handle.routes.entry(g)?.core);
+        match self.ask(core, |tx| NodeMsg::Data(DataReq::Cut(g), tx))? {
+            Ok(DataReply::Cut(cut)) => cut,
+            _ => None,
+        }
+    }
+
     pub(crate) fn group0(&self, cmd: Group0Command) -> Result<(), AdminError> {
         crate::node::group0_change(&self.core0()?, cmd).map_err(AdminError::unavailable)
     }
@@ -678,7 +687,7 @@ impl AdminBackend for NodeAdmin {
                 teseladb_wire::commands::sharding::split_point(&coll, &at)
                     .map_err(|e| AdminError::bad(e.errmsg))?
             }
-            None => self.status(range).and_then(|s| s.cut).ok_or_else(|| {
+            None => self.cut(range).ok_or_else(|| {
                 AdminError::unavailable(
                     "this node has no data of the range to cut it by size: give --at, or ask a node with a replica",
                 )

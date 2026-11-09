@@ -1417,7 +1417,9 @@ impl<D: Disk + Send + 'static> Node<D> {
             DataReq::Put { key, .. } | DataReq::Get { key } => {
                 self.routes.lookup(key).map(|e| e.group)
             }
-            DataReq::Status(g) | DataReq::Remote(g, _) | DataReq::At(_, g, _) => Some(*g),
+            DataReq::Status(g) | DataReq::Cut(g) | DataReq::Remote(g, _) | DataReq::At(_, g, _) => {
+                Some(*g)
+            }
         };
         let (tx, rx) = mpsc::channel();
         let core = usize::from(self.core_of(g.unwrap_or(DATA_RANGE)));
