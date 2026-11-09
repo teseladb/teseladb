@@ -1875,6 +1875,17 @@ fn distinct<B: Backend + ?Sized>(
             trials: Vec::new(),
         });
     };
+    // One `_id` reads by the express path (measured on a `refrouter` 9.0.4, H-011).
+    if let Some(id) = super::query::express_id(c, &query, collation.as_ref(), ctx.cmd)? {
+        let found = if run { read_id(ctx, c, &id, concern)? } else { 0 };
+        return Ok(Explained {
+            parsed: Value::Document(shown),
+            router_stage: "SINGLE_SHARD",
+            plan: express_stage(super::catalog::is_clustered(c)?, found),
+            rejected: Vec::new(),
+            trials: Vec::new(),
+        });
+    }
     let (examined, matched) =
         if run { scan(ctx, Some(c), &read, None, |_| Ok(()))? } else { (0, 0) };
     if let (None, true) = (collation.as_ref(), query.is_empty()) {

@@ -1255,6 +1255,26 @@ fn express_find<B: Backend + ?Sized>(
     Ok(Some(cursor_reply(0, ns_text, "firstBatch", docs)))
 }
 
+/// The `_id` a `count` or `distinct` reads by RefDb's express path (`IDHACK` or
+/// `EXPRESS_IXSCAN`, measured on a `refrouter` 9.0.4, H-011 of the native tests): its query is that
+/// `_id` equality alone, with no collation (the command's or the collection's, `collation`), no
+/// `hint`, on a collection that is not a time series.
+pub(crate) fn express_id(
+    coll: &CollectionEntry,
+    query: &Document,
+    collation: Option<&Document>,
+    cmd: &Document,
+) -> Result<Option<Value>, CommandError> {
+    if query.len() != 1
+        || collation.is_some()
+        || cmd.get("hint").is_some()
+        || super::timeseries::spec_of(coll)?.is_some()
+    {
+        return Ok(None);
+    }
+    Ok(super::crud::id_equality(query))
+}
+
 /// The stored document of `_id` `id` in `coll`, read at its key as RefDb's express path
 /// reads it, with the same note of the index of `_id` (`$indexStats` counts it); none when it is
 /// not there.
@@ -2185,6 +2205,12 @@ fn count_on_node<B: Backend + ?Sized>(
             {
                 return Ok(counted(node, bound.map_or(n, |b| n.min(b)), skip, limit));
             }
+            // One `_id` counts its document without the planner (`IDHACK`, as RefDb).
+            if let Some(id) = express_id(&c, &filter, collation.as_ref(), ctx.cmd)? {
+                let n =
+                    u64::try_from(read_by_id(ctx.backend, &c, &id, concern)?.len()).unwrap_or(0);
+                return Ok(counted(node, bound.map_or(n, |b| n.min(b)), skip, limit));
+            }
             // An index plan that wins counts its documents (T019).
             if collation.is_none()
                 && let Some(docs) = planned(ctx, (ns, &c), &filter, bound, concern, None)
@@ -2335,6 +2361,15 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
                 super::hints::Hinted { filter: &filter, sort: None, projection: None, vars: None };
             super::hints::check_hint(ctx.backend, (&ns, &c), ctx.cmd, &hinted)?;
             let ns_text = full(&ns);
+            // One `_id` reads its document without the planner, as RefDb's express path.
+            if let Some(id) = express_id(&c, &filter, collation_doc.as_ref(), ctx.cmd)? {
+                for bytes in read_by_id(ctx.backend, &c, &id, concern)? {
+                    add_distinct(&mut found, &bytes, &key, &spec, col)?;
+                }
+                return Ok(Document::new()
+                    .with("values", sorted_values(found, &spec, col))
+                    .with("ok", 1.0));
+            }
             // An index plan that wins gives the documents (T019).
             let through = if collation_doc.is_none() {
                 planned(ctx, (&ns, &c), &filter, None, concern, Some(&key))
