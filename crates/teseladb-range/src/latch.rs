@@ -9,6 +9,8 @@
 //! read cache when it checks the latches, so that write is proposed above it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use teseladb_hlc::Hlc;
 
@@ -43,6 +45,11 @@ pub struct Latches {
     /// The writes already answered to their client while their latches are held.
     answered: BTreeSet<LatchId>,
     next: u64,
+    /// The writes holding latches, and how many they are for the reads outside the core (005
+    /// FR-028): a write is counted when it takes its first latch, before it gets a mark, and a
+    /// read outside the core that sees any goes to the core.
+    holders: BTreeSet<LatchId>,
+    held: Arc<AtomicU32>,
 }
 
 impl Latches {
@@ -69,6 +76,10 @@ impl Latches {
         for k in keys {
             self.by_key.insert(k.clone(), (ts, id));
         }
+        if !keys.is_empty() && self.holders.insert(id) {
+            self.held
+                .store(u32::try_from(self.holders.len()).unwrap_or(u32::MAX), Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -92,6 +103,15 @@ impl Latches {
     pub fn release(&mut self, id: LatchId) {
         self.by_key.retain(|_, (_, holder)| *holder != id);
         self.answered.remove(&id);
+        if self.holders.remove(&id) {
+            self.held
+                .store(u32::try_from(self.holders.len()).unwrap_or(u32::MAX), Ordering::SeqCst);
+        }
+    }
+
+    /// How many writes hold latches, for the reads outside the core (005 FR-028).
+    pub fn held(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.held)
     }
 
     /// Whether `key` is held.

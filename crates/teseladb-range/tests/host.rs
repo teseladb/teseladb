@@ -8,16 +8,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use teseladb_hlc::Hlc;
+use teseladb_lsm::ViewCache;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::{DedupKey, Put};
 use teseladb_range::host::{
-    DeleteReq, Mutation, MutationError, RangeError, RangeHost, Reply, ReqId, ScanReq, WriteReq,
+    DeleteReq, Mutation, MutationError, RangeError, RangeHost, Reply, ReqId, ScanReq, VIEW_SPAN,
+    WriteReq,
 };
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
+use teseladb_range::view::FastRead;
 use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -494,4 +497,96 @@ fn a_write_past_its_deadline_is_not_evaluated() {
     let on_time = n.host.mutate_until(&mut n.core, w(Box::new(Inc)), wall + 60_000, (now, wall));
     n.settle();
     assert!(matches!(n.reply(on_time), Some(Ok(Reply::Mutated { .. }))));
+}
+
+/// A read from a connection's thread (005 FR-028), at the node's wall clock and monotonic time.
+fn read_outside(n: &Node, key: &[u8], concern: ReadConcern, later: Nanos) -> FastRead {
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = ViewCache::default();
+    view.read(&mut cache, key, n.wall(), || n.now + later, concern)
+}
+
+#[test]
+fn a_read_outside_the_core_sees_the_range_and_a_later_write_goes_above_it() {
+    let mut n = Node::new();
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    let FastRead::Found { ts: read, value } =
+        read_outside(&n, b"\x01count", ReadConcern::Majority, Nanos::ZERO)
+    else {
+        panic!("served outside the core")
+    };
+    assert_eq!(value, Some((1, vec![1])));
+    let FastRead::Found { value: none, .. } =
+        read_outside(&n, b"\x01nothing", ReadConcern::Local, Nanos::ZERO)
+    else {
+        panic!("served outside the core")
+    };
+    assert_eq!(none, None);
+    // The next write of the range goes above the read's mark (the read bound).
+    let w = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    match n.reply(w) {
+        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > read, "{ts:?} above {read:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_read_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
+    let mut n = Node::new();
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    // A write in flight on the range: the read cannot see its latch.
+    let w = n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    assert!(matches!(
+        read_outside(&n, b"\x01count", ReadConcern::Local, Nanos::ZERO),
+        FastRead::Core
+    ));
+    n.settle();
+    assert!(n.reply(w).is_some());
+    // Far past what the core published as valid when the mark is taken (a thread stopped before
+    // it): the lease may have gone, and the read goes to the core.
+    let late = Nanos::from_secs(60);
+    assert!(matches!(read_outside(&n, b"\x01count", ReadConcern::Local, late), FastRead::Core));
+    // Linearizable reads and keys of another range always go to the core.
+    let lin = read_outside(&n, b"\x01count", ReadConcern::Linearizable, Nanos::ZERO);
+    assert!(matches!(lin, FastRead::Core));
+    assert!(matches!(read_outside(&n, b"\x02zz", ReadConcern::Local, Nanos::ZERO), FastRead::Core));
+    // Back to normal once the write is applied.
+    assert!(matches!(
+        read_outside(&n, b"\x01count", ReadConcern::Local, Nanos::ZERO),
+        FastRead::Found { .. }
+    ));
+}
+
+#[test]
+fn the_views_go_where_the_node_reads_them_and_reads_outside_count_as_load() {
+    let mut n = Node::new();
+    let shared = teseladb_range::view::RangeViews::default();
+    n.host.set_views(shared.clone());
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    assert!(shared.get(G).is_some(), "published where the node reads it");
+    // 300 reads in one second, then one more a second later closes it.
+    let keys = vec![b"\x01a".to_vec(), b"\x01b".to_vec()];
+    n.host.count_outside(G, 300, &keys, n.now);
+    n.host.count_outside(G, 1, &keys, n.now + Nanos::from_secs(1));
+    assert!(n.host.load(G) >= 300, "{}", n.host.load(G));
+    // A range this node does not lead counts nothing.
+    n.host.count_outside(GroupId(99), 300, &keys, n.now);
+}
+
+#[test]
+fn a_merge_waits_until_no_read_outside_can_take_a_mark_through_the_last_view() {
+    let mut n = Node::new();
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    assert!(n.host.views().get(G).is_some());
+    // Published at `n.now`: a read outside may take a mark until `n.now + VIEW_SPAN`.
+    assert!(!n.host.views_settled(G, n.now));
+    assert!(!n.host.views_settled(G, n.now + VIEW_SPAN - Nanos(1)));
+    assert!(n.host.views_settled(G, n.now + VIEW_SPAN));
+    // A range never published has nothing to wait for.
+    assert!(n.host.views_settled(GroupId(99), n.now));
 }

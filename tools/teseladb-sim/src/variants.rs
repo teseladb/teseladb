@@ -131,6 +131,10 @@ variants!(
     ("no_timer_after_lost_vote", "liveness", Heavy, 1000),
     // A coordinator that combines one range's partial group twice (010 T026): the `queries`
     // workload's next group differs from the reference evaluator's.
+    // A read outside the core that does not look at the writes holding latches (005 T049): a
+    // write in flight then takes a mark below it, and `outside-reads` sees a read miss a write
+    // the majority acknowledged below its mark (`mvcc`, seed 3, measured 09-11-2026).
+    ("outside_ignores_latches", "mvcc", Default, 1000),
     ("partial_double_count", "queries-oracle", Default, 1000),
     ("plain_write_fails_on_intent", "plain_writes", Default, 1000),
     // A push by read that leaves no read in the cache of the record's key (008 T043): a commit

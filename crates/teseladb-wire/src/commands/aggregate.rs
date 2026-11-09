@@ -375,7 +375,8 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
             let histograms = matches!(l.get("histograms"), Some(Value::Boolean(true)));
             d.push(
                 "latencyStats",
-                super::lock(shared).status.collection_latency(&ns_text, histograms),
+                super::txn_stats::status(&super::lock(shared))
+                    .collection_latency(&ns_text, histograms),
             );
         }
         if let Some(Value::Document(st)) = spec.get("storageStats") {
@@ -1273,7 +1274,9 @@ fn planned_read<B: Backend + ?Sized>(
         hint: None,
         vars,
         concern,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: index_keys && !super::query::id_point(&filter),
         key_only: false,
     };

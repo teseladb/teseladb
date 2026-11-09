@@ -5,6 +5,7 @@
 //! cluster's write gates, which every write looks at (FR-029).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use teseladb_meta::group0::RangeDesc;
@@ -14,6 +15,15 @@ use teseladb_types::{GroupId, NodeId};
 
 use crate::hosting::Hosting;
 
+/// The routing table and the cores of its ranges as one worker last read them
+/// ([`SharedRoutes::route_of`]).
+#[derive(Debug, Default)]
+pub struct RouteCache {
+    table: Option<(u64, Arc<RouteTable>)>,
+    /// The hosting version they were read at, and the single core of each range read since.
+    cores: (u64, BTreeMap<GroupId, Option<u16>>),
+}
+
 /// Every node's tags, by node.
 pub type NodeTags = BTreeMap<NodeId, Vec<(String, String)>>;
 
@@ -21,6 +31,8 @@ pub type NodeTags = BTreeMap<NodeId, Vec<(String, String)>>;
 #[derive(Clone, Debug, Default)]
 pub struct SharedRoutes {
     table: Arc<RwLock<Arc<RouteTable>>>,
+    /// Grows after every new table: a worker keeps the table it read until it moves.
+    table_version: Arc<AtomicU64>,
     tags: Arc<RwLock<Arc<NodeTags>>>,
     /// Which cores of the node hold each range: a range on its way to another core is sent to
     /// the core that holds it (007 FR-011).
@@ -93,6 +105,25 @@ impl SharedRoutes {
         let mut t = RouteTable::default();
         t.refresh_ranges(ranges.iter());
         replace(&self.table, Arc::new(t));
+        self.table_version.fetch_add(1, Ordering::Release);
+    }
+
+    /// The range that holds `key` and the core of this node that holds it, from the table and
+    /// cores `cache` keeps for one worker: it reads them again only when the table or the cores
+    /// changed, so a read touches no lock and no counter other workers write (H-013, as a
+    /// thread keeps AnotherProduct's `SuperVersion`).
+    pub fn route_of(&self, cache: &mut RouteCache, key: &[u8]) -> Option<(GroupId, u16)> {
+        let tv = self.table_version.load(Ordering::Acquire);
+        if cache.table.as_ref().is_none_or(|(v, _)| *v != tv) {
+            cache.table = Some((tv, self.table()));
+        }
+        let hv = self.hosting.version();
+        if cache.cores.0 != hv {
+            cache.cores = (hv, BTreeMap::new());
+        }
+        let e = cache.table.as_ref()?.1.lookup(key)?;
+        let single = *cache.cores.1.entry(e.group).or_insert_with(|| self.hosting.single(e.group));
+        Some((e.group, single.unwrap_or(e.core)))
     }
 
     /// Replaces the nodes' tags with `tags`.
@@ -247,6 +278,24 @@ mod tests {
             settling: false,
             moved_ms: 0,
         }
+    }
+
+    #[test]
+    fn a_worker_keeps_the_table_until_the_table_or_the_cores_change() {
+        let hosting = Hosting::default();
+        let routes = SharedRoutes::default().with_hosting(hosting.clone());
+        let mut cache = RouteCache::default();
+        assert_eq!(routes.route_of(&mut cache, &[1]), None);
+        routes.publish(&[range(1, &[1], &[3])]);
+        assert_eq!(routes.route_of(&mut cache, &[2]), Some((GroupId(1), 1)));
+        // A split: the new table is read once it is published.
+        routes.publish(&[range(1, &[1], &[2]), range(2, &[2], &[3])]);
+        assert_eq!(routes.route_of(&mut cache, &[2]), Some((GroupId(2), 1)));
+        // The range moves to core 3 of this node: the cores are read again.
+        hosting.add(GroupId(2), 3);
+        assert_eq!(routes.route_of(&mut cache, &[2]), Some((GroupId(2), 3)));
+        assert_eq!(routes.route_of(&mut cache, &[1]), Some((GroupId(1), 1)));
+        assert_eq!(routes.route_of(&mut cache, &[3]), None);
     }
 
     #[test]

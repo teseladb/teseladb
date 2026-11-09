@@ -151,3 +151,29 @@ fn a_read_of_several_spans_goes_to_the_node_as_one_and_counts_its_documents() {
     drop(g);
     assert_eq!(m.span_reads, 1, "a killed operation reads nothing");
 }
+
+#[test]
+fn a_kill_of_an_operation_stops_its_calls_also_after_an_inner_one_on_its_thread_ended() {
+    let mut m = Mem::new();
+    let shared = Shared::default();
+    // Killed before it starts (a refused command): its first call stops.
+    let refused = lock(&shared).ops.begin(Op { killed: true, ..op(None) });
+    let e = Guarded::new(&mut m, &shared, refused).database_mark("db").unwrap_err();
+    assert_eq!(e.code.code, INTERRUPTED);
+    lock(&shared).ops.end(refused);
+    let outer = lock(&shared).ops.begin(op(None));
+    let mut m2 = Mem::new();
+    let mut g = Guarded::new(&mut m, &shared, outer);
+    assert!(g.database_mark("db").is_ok());
+    {
+        // An operation inside it, on the same thread: `killOp` of the outer one while it runs.
+        let inner = lock(&shared).ops.begin(op(None));
+        let mut h = Guarded::new(&mut m2, &shared, inner);
+        assert!(lock(&shared).ops.kill(outer));
+        assert!(h.database_mark("db").is_ok(), "the inner operation was not killed");
+        drop(h);
+        lock(&shared).ops.end(inner);
+    }
+    let e = g.database_mark("db").unwrap_err();
+    assert_eq!(e.code.code, INTERRUPTED);
+}

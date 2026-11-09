@@ -31,6 +31,7 @@ pub mod rollback;
 pub mod sm;
 pub mod snapshot;
 pub mod tscache;
+pub mod view;
 
 /// First byte of the stored value of a version that only serves the history of its key (014): no
 /// scan returns it and it is not live data.

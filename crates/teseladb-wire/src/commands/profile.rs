@@ -44,6 +44,16 @@ pub struct Profiler {
     filters: BTreeMap<String, Document>,
 }
 
+impl Profiler {
+    /// Milliseconds up to which an operation leaves nothing to the profiler or to the slow
+    /// query log: [`Profiler::slowms`] while no database is profiled or has a filter, `-1`
+    /// otherwise.
+    pub fn quiet_ms(&self) -> i64 {
+        let watched = self.levels.values().any(|l| *l > 0) || !self.filters.is_empty();
+        if watched { -1 } else { self.slowms }
+    }
+}
+
 impl Default for Profiler {
     fn default() -> Profiler {
         Profiler {
@@ -145,6 +155,8 @@ pub fn profile<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         }
         None => {}
     }
+    let quiet = p.quiet_ms();
+    g.hot.profiler_quiet_ms.store(quiet, std::sync::atomic::Ordering::Relaxed);
     Ok(reply.with("ok", 1.0))
 }
 
@@ -526,6 +538,11 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
     }
     // A password is never profiled; the slow query log hides it.
     if NOT_PROFILED.contains(&name) && !WITH_PASSWORD.contains(&name) {
+        return;
+    }
+    // Nothing profiled and not slow: nothing to read under the node's lock (H-013).
+    let quiet = super::hot::of(shared).profiler_quiet_ms.load(std::sync::atomic::Ordering::Relaxed);
+    if i64::try_from(e.micros / 1000).unwrap_or(i64::MAX) <= quiet {
         return;
     }
     let (level, filter, slowms, rate) = {

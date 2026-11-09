@@ -292,19 +292,21 @@ fn record(conn: &Connection, req: &Request, action: &Action, shared: &Shared, mi
         _ => None,
     };
     crate::commands::durations::record(micros);
-    let mut g = lock(shared);
-    g.status.command(canonical(req.name()), &req.command, micros, failed, known);
+    // This thread's stripe of the node's command counters, not the node's lock (H-013).
+    let hot = crate::commands::hot::of(shared);
+    let mut g = hot.stats.stripe();
+    g.command(canonical(req.name()), &req.command, micros, failed, known);
     if let Some((_, Value::String(coll))) = req.command.iter().next()
         && known
     {
-        g.status.collection_op(&format!("{}.{coll}", req.db), canonical(req.name()), micros);
+        g.collection_op(&format!("{}.{coll}", req.db), canonical(req.name()), micros);
     }
-    g.status.api_version(conn.hello.app_name.as_deref(), version);
+    g.api_version(conn.hello.app_name.as_deref(), version);
     let Action::Reply(d) = action else { return };
     if d.get("code") == Some(&Value::Int32(MAX_TIME_MS_EXPIRED.code)) {
         // Its own `maxTimeMS`, or the cluster's `defaultMaxTimeMS`.
         let own = req.command.get("maxTimeMS").is_some();
-        let k = &mut g.status.killed_max_time;
+        let k = &mut g.killed_max_time;
         if own { k.0 += 1 } else { k.1 += 1 }
     }
     if req.name() == crate::commands::crud::INSERT
@@ -315,7 +317,7 @@ fn record(conn: &Connection, req: &Request, action: &Action, shared: &Shared, mi
             .iter()
             .filter(|e| matches!(e, Value::Document(e) if e.get("code") == Some(&duplicate)))
             .count();
-        g.status.duplicate_inserts += i64::try_from(n).unwrap_or(i64::MAX);
+        g.duplicate_inserts += i64::try_from(n).unwrap_or(i64::MAX);
     }
 }
 
@@ -447,6 +449,10 @@ fn command<B: Backend + ?Sized>(
     let fault = match conn.fault.take() {
         Some(f) => Some(f),
         None => shared.and_then(|s| {
+            // Only a `failCommand` turned on is looked at under the node's lock (H-013).
+            if !crate::commands::hot::of(s).fail_command.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
             // The handshake names its application in the command itself.
             let app = conn.hello.app_name.clone().or_else(|| handshake_app(name, &req.command));
             lock(s).failpoint.as_mut().and_then(|fp| fp.check(canonical(name), app.as_deref()))
@@ -683,6 +689,8 @@ fn run_command<B: Backend + ?Sized>(
             let mut g = lock(shared);
             let fp = g.failpoint.as_mut().ok_or_else(not_found)?;
             let doc = fp.configure(&req.db, &req.command)?;
+            let on = fp.fail_command_on();
+            g.hot.fail_command.store(on, std::sync::atomic::Ordering::SeqCst);
             return Ok(Action::Reply(with_cluster_time(doc, node)));
         }
         let doc =
@@ -753,12 +761,12 @@ fn run_op<B: Backend + ?Sized>(
         progress: None,
         metrics: None,
     };
-    let id = lock(shared).ops.begin(op);
     let started_micros = backend.now_micros();
     let started_cpu = backend.thread_cpu_nanos();
     let outer_limit = crate::commands::js::set_op_limit(limit);
-    let (result, mut events) = {
-        let mut guarded = Guarded::new(backend, shared, id);
+    let (id, result, mut events, own_report) = {
+        let mut guarded = Guarded::begin(backend, shared, op);
+        let id = guarded.id();
         let (db, cmd) = (req.db.as_str(), &req.command);
         // A statement of a client transaction runs inside it (008 FR-009).
         let result = match (refusal, txn::fields(name, cmd)) {
@@ -788,7 +796,7 @@ fn run_op<B: Backend + ?Sized>(
                 })
             }
         };
-        (result, guarded.take_audit())
+        (id, result, guarded.take_audit(), guarded.take_report())
     };
     crate::commands::js::set_op_limit(outer_limit);
     if let Some(Ok(reply)) = &result
@@ -797,22 +805,22 @@ fn run_op<B: Backend + ?Sized>(
     {
         events.push(e);
     }
+    let ns = op_ns(&req.db, &req.command);
+    let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+    // The operation's end in one take of the node's lock (H-013): its report, its entry, the
+    // counters and the indexes it used.
     let report = {
         let mut g = lock(shared);
-        let report = g.ops.take_report(id);
+        let mut report = g.ops.take_report(id);
+        report.absorb(own_report);
         g.ops.end(id);
         g.counters.count(name, &req.command, matches!(result, Some(Err(_))));
-        report
-    };
-    audit::record(shared, conn, backend, events, 0);
-    let ns = op_ns(&req.db, &req.command);
-    if !report.used.is_empty() {
-        let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
-        let mut g = lock(shared);
         for name in &report.used {
             g.index_usage.used(&ns, name, now);
         }
-    }
+        report
+    };
+    audit::record(shared, conn, backend, events, 0);
     let ended = profile::Ended {
         db: &req.db,
         command: &req.command,

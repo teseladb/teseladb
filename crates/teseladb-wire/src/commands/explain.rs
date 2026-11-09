@@ -844,7 +844,9 @@ fn find<B: Backend + ?Sized>(
             hint,
             vars: a.vars.as_ref(),
             concern: a.concern,
-            intersect: super::lock(ctx.shared).params.hash_intersection,
+            intersect: super::hot::of(ctx.shared)
+                .hash_intersection
+                .load(std::sync::atomic::Ordering::Relaxed),
             index_keys: false,
             key_only: ctx.cmd.get("returnKey") == Some(&Value::Boolean(true)),
         };
@@ -1772,7 +1774,9 @@ fn count_plan<B: Backend + ?Sized>(
         hint: None,
         vars: None,
         concern,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };
@@ -1905,7 +1909,9 @@ fn distinct<B: Backend + ?Sized>(
         hint: None,
         vars: None,
         concern,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };
@@ -2181,7 +2187,9 @@ fn update_on_node<B: Backend + ?Sized>(
         hint: None,
         vars,
         concern: teseladb_range::read::ReadConcern::Local,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };
@@ -2295,7 +2303,9 @@ fn delete_on_node<B: Backend + ?Sized>(
         hint: None,
         vars,
         concern: teseladb_range::read::ReadConcern::Local,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };
@@ -2369,7 +2379,9 @@ fn find_and_modify<B: Backend + ?Sized>(
         hint: None,
         vars: vars.as_ref(),
         concern: teseladb_range::read::ReadConcern::Local,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };

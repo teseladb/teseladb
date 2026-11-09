@@ -93,10 +93,17 @@ pub enum SharedStep {
     Failed(LsmError),
 }
 
-/// The view one reader thread keeps between its reads ([`SharedLsm::view_cached`]).
-#[derive(Debug, Default)]
+/// The view one reader thread keeps between its reads ([`SharedLsm::view_cached`]), with the LSM
+/// it came from: another LSM (one opened again) starts its versions again.
+#[derive(Default)]
 pub struct ViewCache {
-    held: Option<(u64, SharedView)>,
+    held: Option<(Arc<Inner>, u64, SharedView)>,
+}
+
+impl std::fmt::Debug for ViewCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewCache").field("version", &self.held.as_ref().map(|h| h.1)).finish()
+    }
 }
 
 /// A version the core published, read from any thread.
@@ -129,12 +136,15 @@ impl SharedLsm {
     /// before the core answered a write is seen by any read that starts after that answer.
     pub fn view_cached<'a>(&self, cache: &'a mut ViewCache) -> &'a SharedView {
         let now = self.inner.current.version();
-        let stale = cache.held.as_ref().is_none_or(|(v, _)| *v != now);
+        let stale = cache
+            .held
+            .as_ref()
+            .is_none_or(|(lsm, v, _)| *v != now || !Arc::ptr_eq(lsm, &self.inner));
         if stale {
             let (v, version) = self.inner.current.load_versioned();
-            cache.held = Some((v, SharedView { version }));
+            cache.held = Some((self.inner.clone(), v, SharedView { version }));
         }
-        &cache.held.as_ref().expect("just taken").1
+        &cache.held.as_ref().expect("just taken").2
     }
 
     pub(crate) fn publish(&self, version: Arc<Version>) {

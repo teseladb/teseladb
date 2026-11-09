@@ -184,7 +184,10 @@ fn accumulator_groups_with_init_accumulate_merge_and_finalize() {
 fn without_javascript_each_use_fails_as_on_a_node_with_noscripting() {
     let mut m = Mem::new();
     load(&mut m);
-    teseladb_wire::commands::lock(&m.shared).params.javascript_enabled = false;
+    teseladb_wire::commands::lock(&m.shared)
+        .hot
+        .javascript_enabled
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     let r = m.run(
         DB,
         Document::new().with("find", "c").with("filter", doc(&[("$where", "true".into())])),

@@ -73,6 +73,7 @@ pub use concurrent::{
     BlockNeed, SharedLsm, SharedRead, SharedScan, SharedStep, SharedView, ViewCache,
 };
 pub use config::{Codec, Encryption, LsmConfig};
+pub use shared::Published;
 
 /// First byte of the stored value of a version that only serves the history of its key (the
 /// change description of 014 next to each document): it is read at its own mark, never below the

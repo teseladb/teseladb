@@ -54,6 +54,10 @@ pub use txn::{CONTINUES, FIND_BATCH, TxnOp, TxnReq, continues, last_activity};
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
 /// The newest mark: a write reads the current versions at it.
 const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+/// How long a published view serves reads on other threads before the core checks the lease and
+/// the clock rule again (005 FR-028): a core polls far more often. It stays under the 250 ms
+/// a new leader's read cache starts above the clock (`LEASE_MARGIN_MS`).
+pub const VIEW_SPAN: Nanos = Nanos::from_millis(50);
 /// How far ahead of this node's clock a client's mark may be: twice the most two clocks of the
 /// cluster differ (D-004). A mark further ahead comes from a clock outside the cluster's rule,
 /// and waiting for it would hold the read for that long.
@@ -511,6 +515,11 @@ pub(crate) enum Req {
 pub struct RangeHost {
     pub(crate) lsm: Rc<RefCell<Lsm>>,
     clock: NodeClock,
+    /// The views of the ranges it leads, for reads outside the core (005 FR-028).
+    views: crate::view::RangeViews,
+    /// The latest `valid_until` each range's view was published with: a read outside the core
+    /// may take its mark until then.
+    views_until: BTreeMap<GroupId, Nanos>,
     pub(crate) ranges: BTreeMap<GroupId, Range>,
     pub(crate) reqs: BTreeMap<ReqId, Req>,
     pub(crate) ops: BTreeMap<OpId, ReqId>,
@@ -604,6 +613,8 @@ impl RangeHost {
         RangeHost {
             lsm,
             clock,
+            views: crate::view::RangeViews::default(),
+            views_until: BTreeMap::new(),
             ranges: BTreeMap::new(),
             reqs: BTreeMap::new(),
             ops: BTreeMap::new(),
@@ -1155,7 +1166,76 @@ impl RangeHost {
         for id in ids {
             moved |= self.step(core, id, now);
         }
+        self.publish_views(core, now);
         moved
+    }
+
+    /// Publishes the views of the ranges this host leads in `views`, which the node's handle
+    /// reads (005 FR-028).
+    pub fn set_views(&mut self, views: crate::view::RangeViews) {
+        self.views = views;
+    }
+
+    /// Counts for range `g`'s split by load (007 FR-006) `ops` reads served on other threads, of
+    /// which `keys` are a sample (005 FR-028).
+    pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
+        if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
+            l.load.record_sampled(keys, ops, now);
+        }
+    }
+
+    /// The views of the ranges this host leads, for reads on other threads (005 FR-028).
+    pub fn views(&self) -> crate::view::RangeViews {
+        self.views.clone()
+    }
+
+    /// Publishes the LSM's version and a view of each range it leads and may serve reads of on
+    /// other threads for [`VIEW_SPAN`]: caught up with its term, with the lease and the clock rule
+    /// holding now and at the end of the span, and no split or merge in progress (the keys may
+    /// change range). The embedder takes the replies after `poll`, so a write is answered after
+    /// the view that shows it.
+    fn publish_views<S: StateMachine + RangeState>(&mut self, core: &MultiRaftCore<S>, now: Nanos) {
+        self.lsm.borrow().publish();
+        let shared = self.lsm.borrow().shared();
+        let until = now + VIEW_SPAN;
+        let mut views = BTreeMap::new();
+        for (g, r) in &self.ranges {
+            let Some(l) = r.leader.as_ref() else { continue };
+            let still = matches!(l.split, split::SplitJob::Idle)
+                && matches!(l.merge, merge::MergeJob::Idle)
+                && !r.frozen
+                && !self.moving.contains(g);
+            if !still
+                || !l.caught_up(core, *g)
+                || !core.lease_readable(*g, now)
+                || !core.lease_readable(*g, until)
+            {
+                continue;
+            }
+            let handed = self.gc_handed.iter().flatten().find(|(r, _)| r == g).map(|(_, t)| *t);
+            let parts = crate::view::ViewParts {
+                g: *g,
+                term: l.term,
+                range: (r.start.clone(), r.end.clone()),
+                valid_until: until,
+                gc_floor: handed.unwrap_or(ZERO),
+                held: l.latches.held(),
+                outside: l.cache.outside(),
+            };
+            let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());
+            views.insert(*g, std::sync::Arc::new(view));
+            self.views_until.insert(*g, until);
+        }
+        self.views.publish(views);
+        self.views_until.retain(|_, u| now < *u);
+    }
+
+    /// Whether no read outside the core can still take a mark through a view of range `g`: the
+    /// last one published is past its `valid_until` at `now` (005 FR-028). A merge waits for it
+    /// on the right range's replicas, so the frames they send after carry a clock above every mark
+    /// those reads took, and the merged range writes above them.
+    pub fn views_settled(&self, g: GroupId, now: Nanos) -> bool {
+        self.views_until.get(&g).is_none_or(|u| now >= *u)
     }
 
     /// Follows the leadership of `g`: a new term gets new latches and a read cache whose minimum

@@ -93,11 +93,15 @@ pub struct RuntimeConfig {
     pub seed: u64,
     /// TLS for the connections this core dials (013 FR-006); `None` in clear.
     pub tls: Option<PeerTls>,
+    /// Where the core's monotonic time starts; `None`: when the runtime is built. The cores of a
+    /// node share one, so a time one core publishes means the same on any thread of the node
+    /// (005 FR-028).
+    pub origin: Option<Instant>,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        RuntimeConfig { tick: Duration::from_millis(10), seed: 1, tls: None }
+        RuntimeConfig { tick: Duration::from_millis(10), seed: 1, tls: None, origin: None }
     }
 }
 
@@ -231,6 +235,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 Exec::Thread(DiskThread::spawn(name, disk, sender.clone(), CoreInput::Disk)?)
             }
         };
+        let start = cfg.origin.unwrap_or_else(Instant::now);
         let rt = CoreRuntime {
             logic,
             hello,
@@ -247,7 +252,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             links: BTreeMap::new(),
             learned: BTreeMap::new(),
             timers: TimerWheel::new(0),
-            start: Instant::now(),
+            start,
             next_token: 1,
             stopped: false,
             disk_gone: false,

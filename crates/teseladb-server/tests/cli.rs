@@ -404,7 +404,7 @@ fn set_parameter_takes_every_parameter_settable_at_startup() {
     ));
     let s = teseladb_server::client_config(&o).sessions();
     assert_eq!(s.params.cursor_timeout_ms, 1000);
-    assert!(s.params.hash_intersection);
+    assert!(s.hot.hash_intersection.load(std::sync::atomic::Ordering::Relaxed));
     assert!((s.params.query_stats_sample_rate() - 0.5).abs() < f64::EPSILON);
     assert_eq!(s.ingress.value(ENABLED), teseladb_bson::Value::Boolean(true));
     let bad_value = |name: &str, v: &str, why: &str| {

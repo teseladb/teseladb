@@ -14,7 +14,7 @@ use std::thread;
 use common::model::{Model, Row};
 use common::{Gen, Op, apply, open, small, ts};
 use teseladb_keys::Hlc;
-use teseladb_lsm::{BlockNeed, Lsm, SharedLsm, SharedRead, SharedStep, SharedView};
+use teseladb_lsm::{BlockNeed, Lsm, SharedLsm, SharedRead, SharedStep, SharedView, ViewCache};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
@@ -246,4 +246,24 @@ fn a_reader_sees_what_its_mark_sees() {
     assert_eq!(read(&after, ts(1, 5)), Some(b"one".to_vec()));
     assert_eq!(read(&after, ts(9, 0)), Some(b"two".to_vec()));
     assert_eq!(read(&after, ts(0, 9)), None);
+}
+
+#[test]
+fn a_cached_view_belongs_to_its_lsm() {
+    // Two LSMs at the same published version: a thread's cache taken from one is not the other's
+    // (a core whose LSM opens again starts its versions again).
+    let cfg = small();
+    let (mut d1, mut d2) = (MemDisk::new(), MemDisk::new());
+    let (mut one, mut two) = (open(&cfg, &mut d1), open(&cfg, &mut d2));
+    one.put(GroupId(1), 1, b"k", ts(1, 0), b"one").expect("write");
+    two.put(GroupId(1), 1, b"k", ts(1, 0), b"two").expect("write");
+    one.publish();
+    two.publish();
+    let (s1, s2) = (one.shared(), two.shared());
+    let mut cache = ViewCache::default();
+    let (ask, _asks) = mpsc::channel();
+    let first = s1.view_cached(&mut cache).clone();
+    assert_eq!(get(&s1, &first, &ask, b"k", ts(5, 0)).map(|r| r.3), Some(b"one".to_vec()));
+    let second = s2.view_cached(&mut cache).clone();
+    assert_eq!(get(&s2, &second, &ask, b"k", ts(5, 0)).map(|r| r.3), Some(b"two".to_vec()));
 }

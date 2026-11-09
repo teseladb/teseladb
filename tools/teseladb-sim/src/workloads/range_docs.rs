@@ -19,6 +19,12 @@
 //! the mvcc rules judge them. A read at a mark never misses a version the majority acknowledged at
 //! or below it, a later write never goes at or below it, and a read again at a mark sees what an
 //! earlier one saw there, whichever replica answers.
+//!
+//! `outside-reads` (005 T049, FR-028) is the same workload with a share of the `local` and
+//! `majority` reads served as a connection's thread serves them: from the view the leader's core
+//! published, without a request to the core, reading from the disk the blocks the view lacks. They
+//! go into the linearizability history like any read: a read outside the core that misses a
+//! write acknowledged before it, or that a later write goes below, shows there.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -26,7 +32,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use teseladb_keys::Hlc;
-use teseladb_lsm::{FileRef, LsmError};
+use teseladb_lsm::{FileRef, LsmError, ViewCache};
 use teseladb_multiraft::{Done, GroupDesc, OpError, OpId, StateMachine};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::checksum::Report;
@@ -39,6 +45,7 @@ use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
 use teseladb_range::snapshot::{Assembler, local_interval, split, write_ops};
+use teseladb_range::view::FastRead;
 use teseladb_raftlog::{Completions, Disk, FileId, IoOp, SimDisk};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -70,6 +77,10 @@ const READ_THEN_WRITE: f64 = 0.5;
 /// those, the share at the mark of the client's last read of the document.
 const FOLLOWER_SHARE: f64 = 0.3;
 const FOLLOWER_AT_MARK: f64 = 0.5;
+/// In `outside-reads`, share of the `local` and `majority` reads served outside the core.
+const OUTSIDE_SHARE: f64 = 0.6;
+/// Blocks one read outside the core reads from the disk before it goes to the core.
+const OUTSIDE_BLOCKS: usize = 8;
 /// Share of the writes that go with [`W1`].
 const W1_SHARE: f64 = 0.1;
 /// While a leader at the edge of the clock margin is cut off (`LeaderClockEdge`, heavy plan), its
@@ -305,8 +316,21 @@ pub struct RangeDocsWorkload {
     follower_reads: Option<BTreeMap<(u32, ReqId), (u32, u64)>>,
     /// Reads on followers answered with a version or its absence.
     follower_served: u64,
+    /// In `outside-reads`, what the reads outside the core keep.
+    outside: Option<Outside>,
     /// Documents read through the leader at the edge of the clock margin cut off at that time.
     edge_docs: (Nanos, Vec<u64>),
+}
+
+/// The reads served outside the core of `outside-reads`.
+#[derive(Debug, Default)]
+struct Outside {
+    /// The LSM version each node's reads took last, as a connection's thread keeps it.
+    caches: BTreeMap<u32, ViewCache>,
+    /// Reads served.
+    served: u64,
+    /// The request number of the next one: from the top down, never one of a host.
+    next: ReqId,
 }
 
 /// A client's turn while a leader at the edge of the clock margin is cut off.
@@ -329,6 +353,15 @@ impl RangeDocsWorkload {
         Box::new(RangeDocsWorkload {
             name: "follower-reads",
             follower_reads: Some(BTreeMap::new()),
+            ..Self::new(nodes, cores, Rc::default())
+        })
+    }
+
+    /// `outside-reads`: the workload with reads served outside the core (005 FR-028).
+    pub fn outside_reads(nodes: u32, cores: u16) -> Box<dyn Workload> {
+        Box::new(RangeDocsWorkload {
+            name: "outside-reads",
+            outside: Some(Outside { next: ReqId::MAX, ..Outside::default() }),
             ..Self::new(nodes, cores, Rc::default())
         })
     }
@@ -372,6 +405,7 @@ impl RangeDocsWorkload {
             name: "range-docs",
             follower_reads: None,
             follower_served: 0,
+            outside: None,
             edge_docs: (Nanos::ZERO, Vec::new()),
         }
     }
@@ -532,6 +566,21 @@ impl RangeDocsWorkload {
             _ => Change::Delete,
         };
         let wc = if w.rng.chance(W1_SHARE) { W1 } else { MAJORITY };
+        // Drawn only in `outside-reads`: the other workloads keep their draws.
+        let outside = self.outside.is_some()
+            && read.is_some_and(|c| matches!(c, ReadConcern::Local | ReadConcern::Majority))
+            && w.rng.chance(OUTSIDE_SHARE);
+        if let Some(concern) = read.filter(|_| outside)
+            && let Some((ts, value)) = self.read_outside(w, node, k, concern)
+        {
+            let o = self.outside.as_mut().expect("drawn only with it");
+            let req = o.next;
+            (o.next, o.served) = (o.next - 1, o.served + 1);
+            self.history.ops.push(rec);
+            self.pending.insert((node, req), self.history.ops.len() - 1);
+            self.answer(w, node, req, Ok(Reply::Value { ts, value }));
+            return;
+        }
         let (now, wall) = Self::times(w, node);
         let core = self.core;
         let host = self.hosts.get_mut(&node).expect("a live node has its host");
@@ -723,6 +772,35 @@ impl RangeDocsWorkload {
         disk.execute(IoOp::SyncDir { path: dir });
         let at = w.now() + REBUILD_DOWN;
         w.schedule(at, Event::Restart { node });
+    }
+
+    /// Document `k` read on `node` outside its core, as a connection's thread reads it: the mark
+    /// and the visible version, or `None` when the read goes to the core.
+    fn read_outside(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        k: u64,
+        concern: ReadConcern,
+    ) -> Option<(Hlc, Option<(u8, Vec<u8>)>)> {
+        let view = self.hosts.get(&node)?.views().get(G)?;
+        let cache = self.outside.as_mut()?.caches.entry(node).or_default();
+        for _ in 0..=OUTSIDE_BLOCKS {
+            let (now, wall) = Self::times(w, node);
+            match view.read(cache, &doc(k), wall, || now, concern) {
+                FastRead::Found { ts, value } => return Some((ts, value)),
+                FastRead::Need(need) => {
+                    let disk = &mut w.nodes[node as usize].cores[self.core as usize].disk;
+                    let file = disk.read_all(Path::new(&need.path)).ok()?;
+                    let start = usize::try_from(need.offset).ok()?;
+                    let end = start.saturating_add(usize::try_from(need.len).ok()?);
+                    let bytes = file.get(start..end.min(file.len()))?;
+                    view.lsm().supply(&need, bytes).ok()?;
+                }
+                FastRead::Core => return None,
+            }
+        }
+        None
     }
 
     /// A read of document `k` on `node` without its leader, for `client`: at the mark of the
@@ -1271,6 +1349,9 @@ impl Workload for RangeDocsWorkload {
         if let Some(f) = self.follower_reads.as_mut() {
             f.retain(|(n, _), _| *n != node);
         }
+        if let Some(o) = self.outside.as_mut() {
+            o.caches.remove(&node);
+        }
         self.hosts.remove(&node);
         // An export for it that its source is still writing goes once written.
         if let Some((_, Transfer::Exporting { leader, exports, dir, .. })) =
@@ -1336,6 +1417,11 @@ impl Workload for RangeDocsWorkload {
         // The leaders close marks: a run where no follower ever read means they do not.
         if self.follower_reads.is_some() && self.follower_served == 0 {
             return Err(Violation::liveness("liveness", "no read on a follower was served"));
+        }
+        // The leaders publish their views: a run where no read was served outside the core means
+        // they do not.
+        if self.outside.as_ref().is_some_and(|o| o.served == 0) {
+            return Err(Violation::liveness("liveness", "no read outside the core was served"));
         }
         // A write acknowledged by the majority and lost comes before a `w: 1` one missing from
         // the rollback files: the second check judges losses as the first one does, and a lost

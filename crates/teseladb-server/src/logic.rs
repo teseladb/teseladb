@@ -165,6 +165,9 @@ pub enum NodeMsg {
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
     /// range moved between cores), with the node that sent it.
     Stray(NodeId, PeerFrame),
+    /// Reads a client worker served of a range of this core on its own thread: the range, how
+    /// many, and a sample of their keys, for its split by load (005 FR-028, 007 FR-006).
+    OutsideLoad(GroupId, u64, Vec<Vec<u8>>),
 }
 
 /// Requests other nodes forward to the node's HTTP port: the node that sent each, its request
@@ -1472,7 +1475,12 @@ impl NodeLogic {
                     }
                     // An empty answer is a "no" (a core without the ranges).
                     (Ok(Request::MergeProbe { range, merge }), Some(data)) => {
-                        data.on_merge_probe(&mut self.core, (f.from, f.req), (range, merge));
+                        data.on_merge_probe(
+                            &mut self.core,
+                            (f.from, f.req),
+                            (range, merge),
+                            self.now,
+                        );
                     }
                     // A `Meta2` range's leader takes it; anyone else drops it and the sender
                     // tries again.
@@ -1790,6 +1798,11 @@ impl CoreLogic for NodeLogic {
                 }
             }
             NodeMsg::Stray(from, frame) => self.core.on_stray(from, frame, now),
+            NodeMsg::OutsideLoad(g, ops, keys) => {
+                if let Some(data) = &mut self.data {
+                    data.count_outside(g, ops, &keys, now);
+                }
+            }
         }
         self.data_step();
     }

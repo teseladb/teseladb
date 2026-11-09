@@ -128,13 +128,15 @@ const REFRESH_MS: u64 = 1_000;
 /// The settings a node last read, and when.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cache {
-    entries: BTreeMap<String, Entry>,
+    /// Shared with the commands that read them: every command takes them, and a copy of the map
+    /// under the node's lock made each one hold it longer (H-013).
+    entries: std::sync::Arc<BTreeMap<String, Entry>>,
     read_ms: Option<u64>,
 }
 
 impl Cache {
     /// The entries, if read less than [`REFRESH_MS`] before `now_ms`.
-    fn fresh(&self, now_ms: u64) -> Option<BTreeMap<String, Entry>> {
+    fn fresh(&self, now_ms: u64) -> Option<std::sync::Arc<BTreeMap<String, Entry>>> {
         let read = self.read_ms?;
         (now_ms.saturating_sub(read) < REFRESH_MS).then(|| self.entries.clone())
     }
@@ -421,7 +423,7 @@ pub fn applying<B: Backend + ?Sized>(
     let entries = match cached {
         Some(e) => e,
         None => {
-            let e = stored(backend)?;
+            let e = std::sync::Arc::new(stored(backend)?);
             super::lock(shared).query_settings = Cache { entries: e.clone(), read_ms: Some(now) };
             e
         }

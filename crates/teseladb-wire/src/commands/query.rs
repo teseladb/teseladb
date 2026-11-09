@@ -1019,6 +1019,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     if super::views::has_text(&a.filter) {
         return text_find(ctx, &ns);
     }
+    if let Some(reply) = express_find(ctx, &ns_text, &coll, &a)? {
+        return Ok(reply);
+    }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     // Its errors come before the statement joins a transaction (008, measured on 03-11-2026).
     Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())
@@ -1098,7 +1101,9 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             },
             vars: a.vars.as_ref(),
             concern: a.concern,
-            intersect: super::lock(ctx.shared).params.hash_intersection,
+            intersect: super::hot::of(ctx.shared)
+                .hash_intersection
+                .load(std::sync::atomic::Ordering::Relaxed),
             index_keys: min_max.is_some()
                 || (reads_index_key(a.projection.as_ref()) && !id_point(&a.filter)),
             key_only: a.return_key,
@@ -1179,6 +1184,65 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     };
     let id = keep(ctx, &ns_text, state, exhausted, a.no_timeout)?;
     Ok(cursor_reply(id, &ns_text, "firstBatch", docs))
+}
+
+/// A `find` of one `_id` by equality, answered without the planner as RefDb's express path
+/// answers it (the conditions are in H-013 of the native tests' findings), which TeselaDB's
+/// `explain` already shows as `EXPRESS_IXSCAN`. The filter is the
+/// `_id` alone; no projection, `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
+/// `showRecordId` or tailable cursor; a sort only of fields in either direction (one document
+/// is in any order); no collation, the command's or the collection's; not a time series. The
+/// document is read as before, at the key of its `_id` with the same note of the `_id` index,
+/// and the filter is not applied again: without a collation that key is the equality itself
+/// (H-013 of the native tests: planning and filtering were most of a read by `_id`). `None`
+/// when the command is not one of those.
+fn express_find<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns_text: &str,
+    coll: &CollectionEntry,
+    a: &FindArgs,
+) -> Result<Option<Document>, CommandError> {
+    let plain_sort = a.sort.is_none()
+        || matches!(ctx.cmd.get("sort"), Some(Value::Document(s))
+            if s.iter().all(|(_, v)| matches!(v, Value::Int32(1 | -1) | Value::Int64(1 | -1))
+                || matches!(v, Value::Double(d) if *d == 1.0 || *d == -1.0)));
+    let eligible = a.filter.len() == 1
+        && a.projection.is_none()
+        && a.skip == 0
+        && a.bounds.is_none()
+        && !a.return_key
+        && a.batch_size.is_none()
+        && a.tailable.is_none()
+        && a.natural.is_none()
+        && a.collation.is_none()
+        && plain_sort
+        && ctx.cmd.get("hint").is_none()
+        && !matches!(ctx.cmd.get("showRecordId"), Some(Value::Boolean(true)))
+        && options_collation(coll).is_none();
+    if !eligible {
+        return Ok(None);
+    }
+    let Some(id) = super::crud::id_equality(&a.filter) else { return Ok(None) };
+    if measurements_of(coll, ctx.cmd)?.is_some() {
+        return Ok(None);
+    }
+    let docs = match super::crud::id_doc_key(ctx.backend, coll, &id)? {
+        Some(key) => {
+            // The read goes through the index of `_id` (`$indexStats` counts it).
+            ctx.backend.note_plan(super::plan_exec::used_id_index(false));
+            let end = after(&key);
+            let rows = ctx.backend.scan(&key, &end, 1, a.concern)?;
+            let mut docs = Vec::with_capacity(rows.len());
+            for (_, bytes) in rows {
+                // A stored document always parses: one that does not is a fault, not a miss.
+                docs.push(Document::from(RawDoc::from_bytes(&bytes)?));
+            }
+            docs
+        }
+        // A capped collection without that `_id`: nothing to read.
+        None => Vec::new(),
+    };
+    Ok(Some(cursor_reply(0, ns_text, "firstBatch", docs)))
 }
 
 /// A `find` with `$near` or `$nearSphere`: its stages read through the aggregation engine,
@@ -2320,7 +2384,9 @@ fn planned<B: Backend + ?Sized>(
         hint: super::hints::position(ctx.cmd.get("hint"), &indexes)?,
         vars: None,
         concern,
-        intersect: super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };

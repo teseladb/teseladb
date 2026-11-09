@@ -216,7 +216,9 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
         hint: None,
         vars: None,
         concern: teseladb_range::read::ReadConcern::Local,
-        intersect: super::super::lock(ctx.shared).params.hash_intersection,
+        intersect: super::super::hot::of(ctx.shared)
+            .hash_intersection
+            .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
     };

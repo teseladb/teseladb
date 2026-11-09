@@ -108,6 +108,9 @@ fn cores_with_ops(
         routes,
         auth: Arc::default(),
         shutdown: Arc::default(),
+        views: Vec::new(),
+        origin: std::time::Instant::now(),
+        data_dir: None,
     }
 }
 

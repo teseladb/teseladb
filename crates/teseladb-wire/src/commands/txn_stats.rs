@@ -121,6 +121,7 @@ pub fn pushed(g: &mut NodeSessions) {
 /// running a command, and the intents their coordinators have yet to resolve.
 pub fn status(g: &NodeSessions) -> StatusCounters {
     let mut status = g.status.clone();
+    g.hot.stats.add_to(&mut status);
     status.txn.open = count(&g.txns, |s| s.is_open());
     status.txn.active = count(&g.txns, |s| s.is_active());
     let unresolved: usize = g.txn_resolving.iter().map(|c| c.unresolved()).sum();

@@ -217,6 +217,21 @@ pub struct OpReport {
     pub used: Vec<String>,
 }
 
+impl OpReport {
+    /// Adds `o`, a later part of the same operation's report: its plan, when it has one,
+    /// replaces this one's.
+    pub fn absorb(&mut self, o: OpReport) {
+        self.keys += o.keys;
+        self.docs += o.docs;
+        self.keys_written.0 += o.keys_written.0;
+        self.keys_written.1 += o.keys_written.1;
+        self.used.extend(o.used);
+        if o.plan.is_some() {
+            self.plan = o.plan;
+        }
+    }
+}
+
 /// What an operation has examined so far (`$queryStats`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpReads {
@@ -232,6 +247,10 @@ pub struct OpTable {
     last: u32,
     ops: BTreeMap<u32, Op>,
     reports: BTreeMap<u32, OpReport>,
+    /// Each operation's own flag of `killOp`, which its calls read without this table's lock
+    /// (H-013 of the native tests: every call of every worker took the node's lock to read
+    /// `killed`; RefDb's `OperationContext` keeps its kill code in an atomic the same way).
+    cancels: BTreeMap<u32, Interrupt>,
 }
 
 /// The flag `killOp` raises for one operation.
@@ -264,6 +283,9 @@ impl OpTable {
             }
         }
         self.last = id;
+        let cancel = Interrupt::default();
+        cancel.0.store(op.killed, std::sync::atomic::Ordering::SeqCst);
+        self.cancels.insert(id, cancel);
         self.ops.insert(id, op);
         id
     }
@@ -272,6 +294,12 @@ impl OpTable {
     pub fn end(&mut self, id: u32) {
         self.ops.remove(&id);
         self.reports.remove(&id);
+        self.cancels.remove(&id);
+    }
+
+    /// The flag `killOp` raises for operation `id`; a flag nobody raises for one not running.
+    pub fn cancel(&self, id: u32) -> Interrupt {
+        self.cancels.get(&id).cloned().unwrap_or_default()
     }
 
     /// What operation `id` has read and planned so far.
@@ -289,6 +317,9 @@ impl OpTable {
         match self.ops.get_mut(&id) {
             Some(op) => {
                 op.killed = true;
+                if let Some(c) = self.cancels.get(&id) {
+                    c.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 if let Some(f) = &op.interrupt {
                     f.0.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -329,6 +360,15 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
     shared: &'a Shared,
     id: u32,
     deadline_ms: Option<u64>,
+    /// The operation's flag of `killOp`, read by every call without the table's lock.
+    cancel: Interrupt,
+    /// The user its connection authenticated as, which does not change while it runs: read
+    /// once, with the rest of its entry (H-013).
+    user: Option<UserName>,
+    /// What the operation read, planned and wrote so far: only it writes it, so it keeps it and
+    /// hands it to the table once, when it ends, instead of taking the node's lock on every read
+    /// (H-013).
+    report: OpReport,
     /// The tenant the operation works in (007 FR-025): it sees its databases by their names,
     /// and the node by their qualified names.
     tenant: u32,
@@ -342,19 +382,59 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
 impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// Operation `id` of `shared`'s table, over `inner`, with its deadline.
     pub fn new(inner: &'a mut B, shared: &'a Shared, id: u32) -> Guarded<'a, B> {
-        let (deadline_ms, tenant) =
-            lock(shared).ops.get(id).map_or((None, 0), |o| (o.deadline_ms, o.tenant));
-        inner.set_deadline(deadline_ms);
+        let g = lock(shared);
+        Self::under(inner, shared, id, g)
+    }
+
+    /// Records `op` in `shared`'s table and runs it over `inner`, in one take of the node's
+    /// lock (H-013).
+    pub fn begin(inner: &'a mut B, shared: &'a Shared, op: Op) -> Guarded<'a, B> {
+        let mut g = lock(shared);
+        let id = g.ops.begin(op);
+        Self::under(inner, shared, id, g)
+    }
+
+    /// The operation's id in its table.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    fn under(
+        inner: &'a mut B,
+        shared: &'a Shared,
+        id: u32,
+        mut g: std::sync::MutexGuard<'_, crate::commands::NodeSessions>,
+    ) -> Guarded<'a, B> {
         let flag = crate::commands::js::thread_interrupt();
         let outer_interrupt = flag.raised();
-        let mut g = lock(shared);
+        let (deadline_ms, tenant, user) =
+            g.ops.get(id).map_or((None, 0, None), |o| (o.deadline_ms, o.tenant, o.user.clone()));
         let killed = g.ops.get(id).is_some_and(|o| o.killed);
         flag.0.store(killed, std::sync::atomic::Ordering::SeqCst);
         if let Some(op) = g.ops.get_mut(id) {
             op.interrupt = Some(flag);
         }
+        let cancel = g.ops.cancel(id);
         drop(g);
-        Guarded { inner, shared, id, deadline_ms, tenant, audit: Vec::new(), outer_interrupt }
+        inner.set_deadline(deadline_ms);
+        Guarded {
+            inner,
+            shared,
+            id,
+            deadline_ms,
+            cancel,
+            user,
+            report: OpReport::default(),
+            tenant,
+            audit: Vec::new(),
+            outer_interrupt,
+        }
+    }
+
+    /// What the operation read, planned and wrote so far, taken: the caller hands it to the
+    /// table with the end of the operation, in one take of the node's lock.
+    pub fn take_report(&mut self) -> OpReport {
+        std::mem::take(&mut self.report)
     }
 
     /// The audit events of the catalog changes made so far, taken.
@@ -366,7 +446,7 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// document is a row of a collection's documents, an index entry a row of one of its indexes
     /// (also the `_id` entries of a capped collection), and the rest (multikey marks, guards of
     /// `prepareUnique`, the node's own tables) is neither.
-    fn tally(&self, rows: &[(Vec<u8>, Vec<u8>)]) {
+    fn tally(&mut self, rows: &[(Vec<u8>, Vec<u8>)]) {
         let (mut keys, mut docs) = (0u64, 0u64);
         for (key, _) in rows {
             match space_of(key) {
@@ -380,17 +460,13 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
                 _ => {}
             }
         }
-        if keys + docs > 0 {
-            let mut g = lock(self.shared);
-            let r = g.ops.report_mut(self.id);
-            r.keys += keys;
-            r.docs += docs;
-        }
+        self.report.keys += keys;
+        self.report.docs += docs;
     }
 
     /// The error that stops the operation now, if any.
     pub fn check(&self) -> Result<(), CommandError> {
-        if lock(self.shared).ops.get(self.id).is_some_and(|o| o.killed) {
+        if self.cancel.raised() {
             return Err(CommandError::new(INTERRUPTED, INTERRUPTED_MESSAGE));
         }
         match self.deadline_ms {
@@ -458,6 +534,10 @@ impl<B: Backend + ?Sized> Guarded<'_, B> {
 
 impl<B: Backend + ?Sized> Drop for Guarded<'_, B> {
     fn drop(&mut self) {
+        if self.report != OpReport::default() {
+            let report = std::mem::take(&mut self.report);
+            lock(self.shared).ops.report_mut(self.id).absorb(report);
+        }
         self.inner.set_deadline(None);
         self.inner.end_operation();
         let flag = crate::commands::js::thread_interrupt();
@@ -734,9 +814,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn op_reads(&mut self) -> OpReads {
-        let mut g = lock(self.shared);
-        let r = g.ops.report_mut(self.id);
-        OpReads { keys: r.keys, docs: r.docs }
+        OpReads { keys: self.report.keys, docs: self.report.docs }
     }
 
     fn op_client(&mut self) -> Option<Document> {
@@ -744,13 +822,12 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn op_plan(&mut self) -> Option<Document> {
-        lock(self.shared).ops.report_mut(self.id).plan.clone()
+        self.report.plan.clone()
     }
 
     fn note_plan(&mut self, plan: Document) {
         let mut plan = plan;
-        let mut g = lock(self.shared);
-        let report = g.ops.report_mut(self.id);
+        let report = &mut self.report;
         if let Some(Value::Document(used)) = plan.remove(crate::commands::plan_exec::USED_INDEXES)
             && let Some(Value::Array(names)) = used.get("names")
         {
@@ -794,8 +871,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         if let Ok(r) = crate::commands::mutation::MutationResult::decode(&result)
             && r.keys != (0, 0)
         {
-            let mut g = lock(self.shared);
-            let k = &mut g.ops.report_mut(self.id).keys_written;
+            let k = &mut self.report.keys_written;
             k.0 += u64::try_from(r.keys.0).unwrap_or(0);
             k.1 += u64::try_from(r.keys.1).unwrap_or(0);
         }
@@ -1024,7 +1100,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn authenticated_user(&self) -> Option<UserName> {
-        lock(self.shared).ops.get(self.id).and_then(|o| o.user.clone())
+        self.user.clone()
     }
 
     fn authorization_lease(&self) -> bool {

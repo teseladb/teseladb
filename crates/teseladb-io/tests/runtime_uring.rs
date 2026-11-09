@@ -93,7 +93,7 @@ fn the_core_drives_its_disk_through_its_own_ring() {
     let n = io.len();
     let seen = Arc::new(AtomicUsize::new(0));
     let logic = Writer { io, done: Vec::new(), seen: Arc::clone(&seen) };
-    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 1, tls: None };
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 1, tls: None, origin: None };
     let (rt, tx) = CoreRuntime::new(logic, disk, hello(), cfg).unwrap();
     assert_eq!(threads_named("disk-7"), 0, "no disk thread");
     let core = thread::spawn(move || rt.run().unwrap());

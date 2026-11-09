@@ -111,6 +111,22 @@ impl Load {
         }
     }
 
+    /// `ops` operations at `now`, of which `keys` are a uniform sample: the reads a connection's
+    /// thread served without the core (005 FR-028), reported in batches. Each key stands for an
+    /// equal share of them, as if the core had served them.
+    pub fn record_sampled(&mut self, keys: &[Vec<u8>], ops: u64, now: Nanos) {
+        let n = keys.len() as u64;
+        if n == 0 {
+            return;
+        }
+        for (i, key) in (0u64..).zip(keys) {
+            let share = ops / n + u64::from(i < ops % n);
+            for _ in 0..share {
+                self.record(key, now);
+            }
+        }
+    }
+
     /// Operations in the last whole second.
     pub fn ops_per_second(&self) -> u64 {
         self.last

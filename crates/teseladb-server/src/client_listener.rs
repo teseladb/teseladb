@@ -120,7 +120,9 @@ impl ClientConfig {
         s.audit = self.audit.as_ref().map(crate::audit_log::AuditLog::for_node);
         s.params.monitor_ms = i64::try_from(self.reap_every.as_millis()).unwrap_or(i64::MAX);
         s.params.redact_client_log_data = self.redact_client_log_data;
-        s.params.javascript_enabled = self.javascript_enabled;
+        s.hot
+            .javascript_enabled
+            .store(self.javascript_enabled, std::sync::atomic::Ordering::Relaxed);
         s.params.audit_authorization_success = self.audit_authorization_success;
         s.params.ocsp_enabled = self.ocsp_enabled;
         s.params.use_internal_authz_for_x509 = self.use_internal_authz_for_x509;
@@ -182,6 +184,12 @@ pub trait NodeState: Send + Sync + 'static {
     /// How the data commands reach the node's cores; `None` answers only the handshake and
     /// `ping` (a port without a node behind it).
     fn handle(&self) -> Option<NodeHandle> {
+        None
+    }
+
+    /// The node's routing table, without a copy of the whole handle: the workers read it on
+    /// every request (H-013: copying the handle moved a dozen counters every thread shares).
+    fn routes(&self) -> Option<&crate::routes::SharedRoutes> {
         None
     }
 
@@ -382,6 +390,10 @@ impl NodeState for NodeClockState {
 
     fn handle(&self) -> Option<NodeHandle> {
         self.handle.clone()
+    }
+
+    fn routes(&self) -> Option<&crate::routes::SharedRoutes> {
+        self.handle.as_ref().map(|h| &h.routes)
     }
 
     fn watch_topology(&self, waker: &Arc<Waker>) {
@@ -1004,11 +1016,11 @@ impl Client {
         let action = dispatch_with(&mut conn, &req, info, commands);
         stats.active.fetch_sub(1, Ordering::Relaxed);
         certify(&mut conn, &self.transport, self.member_subject.as_deref());
-        let Some(h) = cmds.state.handle() else { return self.apply(conn, req, action) };
+        let Some(routes) = cmds.state.routes() else { return self.apply(conn, req, action) };
         // A command that ran while its tenant was suspended closes its connection once answered.
-        let held = suspended(&conn, &h.routes.tenants());
+        let held = suspended(&conn, &routes.tenants());
         if self.counted.is_none() {
-            match count_connection(&h.routes, &conn) {
+            match count_connection(routes, &conn) {
                 Counted::Yes(tenant) => self.counted = Some(tenant),
                 Counted::Over => {
                     self.conn = Some(conn);
@@ -1281,11 +1293,13 @@ impl Worker {
 
     /// Closes the connections of the tenants suspended since the last look.
     fn close_suspended(&mut self) {
-        let Some(h) = self.state.handle() else { return };
-        let states = h.routes.tenants();
+        let Some(routes) = self.state.routes() else { return };
+        let states = routes.tenants();
         if self.tenants_seen.as_ref().is_some_and(|seen| Arc::ptr_eq(seen, &states)) {
             return;
         }
+        // The tenants changed (rare): the closes below borrow the worker.
+        let routes = routes.clone();
         let gone: Vec<u64> = self
             .conns
             .iter()
@@ -1295,7 +1309,7 @@ impl Worker {
         for t in gone {
             self.close(t);
         }
-        self.uncount_service_users(&h.routes, &states);
+        self.uncount_service_users(&routes, &states);
         // The cursors and change streams of the tenants suspended since the last look go too;
         // each worker does it, and a second time kills nothing.
         let before = |id: &u32| {
@@ -1431,8 +1445,8 @@ impl Worker {
     /// close when its connection comes back ([`Worker::gone`]).
     fn close(&mut self, token: u64) {
         if let Some(c) = self.conns.remove(&token) {
-            if let (Some(tenant), Some(h)) = (c.counted, self.state.handle()) {
-                h.routes.limiter().disconnect(tenant);
+            if let (Some(tenant), Some(routes)) = (c.counted, self.state.routes()) {
+                routes.limiter().disconnect(tenant);
             }
             if let Some(conn) = c.conn {
                 self.gone(conn);

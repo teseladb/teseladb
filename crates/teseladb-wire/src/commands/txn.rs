@@ -1373,6 +1373,7 @@ fn end(
     let run = match !resolved && !matches!(answer, CommitAnswer::Unknown(_)) {
         true => {
             g.txn_resolving.push(run.coord);
+            g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
             None
         }
         false => Some(run),
@@ -1417,7 +1418,16 @@ const RESOLVE_ROUNDS: u32 = 4;
 /// Resolves the intents of the transactions that answered their commit or abort (FR-005): the
 /// worker that answered runs it after the answer went out, and the keeper for those it left.
 pub fn resolve_queued(backend: &mut dyn Backend, shared: &Shared) {
-    let queued = std::mem::take(&mut lock(shared).txn_resolving);
+    // Every command ends here: only a queue with coordinators takes the node's lock (H-013).
+    let flag = &super::hot::of(shared).txn_resolving;
+    if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let queued = {
+        let mut g = lock(shared);
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::mem::take(&mut g.txn_resolving)
+    };
     for mut coord in queued {
         let mut done = false;
         for _ in 0..RESOLVE_ROUNDS {
@@ -1436,7 +1446,9 @@ pub fn resolve_queued(backend: &mut dyn Backend, shared: &Shared) {
             }
         }
         if !done {
-            lock(shared).txn_resolving.push(coord);
+            let mut g = lock(shared);
+            g.txn_resolving.push(coord);
+            g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }

@@ -97,10 +97,16 @@ fn range_sm(core: &MultiRaftCore<CoreSm>, g: GroupId) -> Option<&RangeSm> {
     core.state_machine(g).and_then(CoreSm::range)
 }
 
-/// Whether this node's replica of `right` is frozen for `merge` with its data on disk.
-pub fn ready(core: &MultiRaftCore<CoreSm>, lsm: &Lsm, right: GroupId, merge: u64) -> bool {
+/// Whether this node's replica of `right` is frozen for `merge` with its data on disk, and no
+/// read outside the core can still take a mark through a view of it (005 FR-028).
+pub fn ready(
+    (core, lsm, host): (&MultiRaftCore<CoreSm>, &Lsm, &RangeHost),
+    (right, merge): (GroupId, u64),
+    now: Nanos,
+) -> bool {
     let awaiting = core.awaited_snapshot(right).is_some();
     replica_ready(range_sm(core, right), lsm.flushed_index(right), awaiting, merge)
+        && host.views_settled(right, now)
 }
 
 /// Whether replica `sm`, whose LSM flushed up to `flushed`, is frozen for `merge` with its data
@@ -111,8 +117,12 @@ fn replica_ready(sm: Option<&RangeSm>, flushed: u64, awaiting: bool, merge: u64)
 }
 
 /// The answer to a probe.
-pub fn probe_answer(core: &MultiRaftCore<CoreSm>, lsm: &Lsm, right: GroupId, merge: u64) -> Bytes {
-    Bytes::from_vec(vec![u8::from(ready(core, lsm, right, merge))])
+pub fn probe_answer(
+    on: (&MultiRaftCore<CoreSm>, &Lsm, &RangeHost),
+    of: (GroupId, u64),
+    now: Nanos,
+) -> Bytes {
+    Bytes::from_vec(vec![u8::from(ready(on, of, now))])
 }
 
 impl Merges {
@@ -231,7 +241,7 @@ impl Merges {
         if p.merge != merge {
             *p = Pending { merge, since: now, ready: BTreeSet::new() };
         }
-        if ready(core, lsm, right, merge) {
+        if ready((core, lsm, host), (right, merge), now) {
             p.ready.insert(self.me);
         }
         let waiting: Vec<NodeId> = d.nodes().into_iter().filter(|n| !p.ready.contains(n)).collect();

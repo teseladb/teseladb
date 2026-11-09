@@ -706,6 +706,18 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
     }
 
+    /// Whether a read of `g` with the lease could be served at monotonic time `at` (005 FR-028):
+    /// this replica leads it, its clock is in margin and vouched, and the lease covers `at`, as
+    /// [`MultiRaftCore::read`] and [`MultiRaftCore::read_mark`] check when a read arrives. The host
+    /// asks it for now and for the end of what it publishes.
+    pub fn lease_readable(&self, g: GroupId, at: Nanos) -> bool {
+        let Some(grp) = self.groups.get(&g) else { return false };
+        let others = self.groups.values().any(|g| g.raw.conf().voters.len() > 1);
+        self.clock_rule.in_margin(at)
+            && (!others || self.clock_rule.vouched(at))
+            && grp.raw.can_lease_read(at)
+    }
+
     /// Group 0's `ClockReport` (005 FR-006): this node's offset from the median of the voters.
     /// Out of margin, the node hands over its leaderships at once.
     pub fn on_clock_report(&mut self, offset_ms: i64, now: Nanos) {

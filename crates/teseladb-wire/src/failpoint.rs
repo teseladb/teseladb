@@ -173,6 +173,12 @@ fn error_reply(n: i32, labels: Option<&Value>) -> Document {
 }
 
 impl FailPoint {
+    /// Whether `failCommand` is on; once off, [`FailPoint::check`] lets every command run
+    /// untouched until `configureFailPoint` turns it on again.
+    pub fn fail_command_on(&self) -> bool {
+        self.mode != Mode::Off
+    }
+
     /// Runs `configureFailPoint` sent to database `db`: the reply with how many times the
     /// failpoint fired so far.
     pub fn configure(&mut self, db: &str, cmd: &Document) -> Result<Document, CommandError> {
@@ -250,6 +256,9 @@ impl FailPoint {
     /// What the failpoint does to command `name` of a connection whose client named
     /// itself `app`; `None` lets it run untouched.
     pub fn check(&mut self, name: &str, app: Option<&str>) -> Option<Fault> {
+        if !self.fail_command_on() {
+            return None;
+        }
         if name == CONFIGURE_FAIL_POINT || self.mode == Mode::Off {
             return None;
         }

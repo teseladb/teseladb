@@ -173,20 +173,13 @@ pub struct ServerParams {
     /// Whether the connections the node opens use TLS (`preferTLS` or `requireTLS`): the modes
     /// other than `keyFile` need it.
     pub tls_outgoing: bool,
-    /// `internalQueryPlannerEnableHashIntersection`.
-    pub hash_intersection: bool,
     /// `internalQueryMaxMemoryUsageBytesPerOperation`.
     pub operation_memory: i64,
-    /// `internalQueryMaxSingleExpressionMemoryUsageBytes`.
-    pub expression_memory: i64,
     /// `internalQueryStatsRateLimit`.
     pub query_stats_rate_limit: i64,
     /// The bits of `internalQueryStatsSampleRate` (an `f64`, kept as bits so the parameters
     /// compare exactly).
     pub query_stats_sample_bits: u64,
-    /// Whether server-side JavaScript runs: `false` with `--noscripting` or
-    /// `security.javascriptEnabled: false` (016 FR-009).
-    pub javascript_enabled: bool,
     /// `ocspStaplingRefreshPeriodSecs` as the start gave it; `-1`, the period of the response.
     pub ocsp_stapling_refresh_secs: i64,
     /// `ocspValidationRefreshPeriodSecs` as the start gave it; `-1`, the period of the response.
@@ -218,15 +211,9 @@ impl Default for ServerParams {
             use_internal_authz_for_x509: false,
             cluster_auth_mode: ClusterAuthMode::Undefined,
             tls_outgoing: true,
-            hash_intersection: false,
             operation_memory: MAX_OPERATION_MEMORY_DEFAULT,
-            expression_memory: i64::try_from(
-                teseladb_exec::expr::optimize::EXPRESSION_MEMORY_DEFAULT,
-            )
-            .unwrap_or(i64::MAX),
             query_stats_rate_limit: 0,
             query_stats_sample_bits: QUERY_STATS_SAMPLE_RATE_DEFAULT.to_bits(),
-            javascript_enabled: true,
             ocsp_stapling_refresh_secs: -1,
             ocsp_validation_refresh_secs: -1,
             tls_ocsp_stapling_timeout_secs: -1,
@@ -298,9 +285,13 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         }
         REDACT_CLIENT_LOG_DATA => Value::Boolean(s.params.redact_client_log_data),
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
-        HASH_INTERSECTION => Value::Boolean(s.params.hash_intersection),
+        HASH_INTERSECTION => {
+            Value::Boolean(s.hot.hash_intersection.load(std::sync::atomic::Ordering::Relaxed))
+        }
         MAX_OPERATION_MEMORY => Value::Int64(s.params.operation_memory),
-        MAX_EXPRESSION_MEMORY => Value::Int64(s.params.expression_memory),
+        MAX_EXPRESSION_MEMORY => {
+            Value::Int64(s.hot.expression_memory.load(std::sync::atomic::Ordering::Relaxed))
+        }
         QUERY_STATS_RATE_LIMIT => Value::Int32(clamp_i32(s.params.query_stats_rate_limit)),
         QUERY_STATS_SAMPLE_RATE => rate_value(s.params.query_stats_sample_rate()),
         TRANSACTION_LIFETIME_LIMIT_SECONDS => {
@@ -589,9 +580,13 @@ fn apply(g: &mut NodeSessions, name: &str, change: Change) {
         }
         REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
         USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
-        HASH_INTERSECTION => g.params.hash_intersection = n != 0,
+        HASH_INTERSECTION => {
+            g.hot.hash_intersection.store(n != 0, std::sync::atomic::Ordering::Relaxed)
+        }
         MAX_OPERATION_MEMORY => g.params.operation_memory = n,
-        MAX_EXPRESSION_MEMORY => g.params.expression_memory = n,
+        MAX_EXPRESSION_MEMORY => {
+            g.hot.expression_memory.store(n, std::sync::atomic::Ordering::Relaxed)
+        }
         QUERY_STATS_RATE_LIMIT => g.params.query_stats_rate_limit = n,
         QUERY_STATS_SAMPLE_RATE => {
             g.params.query_stats_sample_bits = u64::from_ne_bytes(n.to_ne_bytes());

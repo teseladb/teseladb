@@ -6,11 +6,13 @@
 
 mod across;
 mod intent_wait;
+mod outside;
 mod span;
 mod spans;
 mod together;
 mod txn_reaper;
 
+pub use outside::{blocks_read_outside, served_outside};
 pub(crate) use txn_reaper::SCAN_EVERY;
 
 use crate::authz_lease::{AuthGate, DEADLINE_SKEW};
@@ -92,6 +94,14 @@ pub struct NodeHandle {
     pub auth: Arc<AuthGate>,
     /// Set by `shutdown` (007 FR-018): the node stops once its loop sees it.
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Where each core, in core order, publishes the views of the ranges it leads: a read of one
+    /// key is served from them on the worker's thread when it can (005 FR-028, H-013).
+    pub views: Vec<teseladb_range::view::RangeViews>,
+    /// Where the monotonic time of the node's cores starts, which the views' times count from.
+    pub origin: Instant,
+    /// The node's data directory, whose files a read outside the cores reads its blocks from;
+    /// `None` for a node in memory, whose reads all go to the cores.
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 /// The [`Backend`] of one client worker.
@@ -128,6 +138,8 @@ pub struct ServerBackend {
     /// with its own node number, which in the same millisecond and sequence sorts below another
     /// node's, so the cluster time this backend reads at is never below it (017 SC-002).
     committed: Hlc,
+    /// What its reads served without the cores keep (005 FR-028).
+    outside: outside::Outside,
 }
 
 impl ServerBackend {
@@ -161,6 +173,7 @@ impl ServerBackend {
             selection: None,
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
+            outside: outside::Outside::default(),
         }
     }
 
@@ -720,6 +733,7 @@ fn log_long_pin(held: Duration, collections: &[u32], late: bool) {
 impl Drop for ServerBackend {
     fn drop(&mut self) {
         self.release_pins();
+        self.report_outside();
     }
 }
 
@@ -821,6 +835,17 @@ impl Backend for ServerBackend {
         if let Some(mark) = self.read_mark {
             return self.scan_at((start, end, limit), mark, false);
         }
+        // A scan of one key on its leader, on this thread when its range's view serves it (005
+        // FR-028): a find by `_id` asks for one.
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        let one_key = end.len() == start.len() + 1 && end.starts_with(start) && end.ends_with(&[0]);
+        if primary
+            && one_key
+            && limit > 0
+            && let Some(value) = self.read_outside(start, concern)
+        {
+            return Ok(value.map(|v| (start.to_vec(), v)).into_iter().collect());
+        }
         // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
         self.selection = self
             .read_pref
@@ -851,6 +876,11 @@ impl Backend for ServerBackend {
         }
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
+            // On this thread when the key's range published a view that serves it (005 FR-028).
+            if let Some(value) = self.read_outside(key, concern) {
+                out.push(value);
+                continue;
+            }
             let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
                 key: key.clone(),
                 scan: None,

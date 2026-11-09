@@ -21,8 +21,9 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-/// A value the core publishes and readers on any thread take.
-pub(crate) struct Published<T> {
+/// A value the core publishes and readers on any thread take (a range's view, 005 FR-028, uses it
+/// too).
+pub struct Published<T> {
     /// From `Arc::into_raw`; the cell holds one reference to it.
     ptr: AtomicPtr<T>,
     epoch: AtomicUsize,
@@ -41,7 +42,8 @@ unsafe impl<T: Send + Sync> Send for Published<T> {}
 unsafe impl<T: Send + Sync> Sync for Published<T> {}
 
 impl<T> Published<T> {
-    pub(crate) fn new(value: Arc<T>) -> Published<T> {
+    /// A cell that publishes `value` first.
+    pub fn new(value: Arc<T>) -> Published<T> {
         Published {
             ptr: AtomicPtr::new(Arc::into_raw(value).cast_mut()),
             epoch: AtomicUsize::new(0),
@@ -52,18 +54,18 @@ impl<T> Published<T> {
     }
 
     /// How many values were published; it moves after the value does.
-    pub(crate) fn version(&self) -> u64 {
+    pub fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
     }
 
     /// The published value and its version, which may already be behind the value.
-    pub(crate) fn load_versioned(&self) -> (u64, Arc<T>) {
+    pub fn load_versioned(&self) -> (u64, Arc<T>) {
         let v = self.version();
         (v, self.load())
     }
 
     /// The published value.
-    pub(crate) fn load(&self) -> Arc<T> {
+    pub fn load(&self) -> Arc<T> {
         let e = loop {
             let e = self.epoch.load(Ordering::SeqCst) & 1;
             self.readers[e].fetch_add(1, Ordering::SeqCst);
@@ -86,7 +88,7 @@ impl<T> Published<T> {
     }
 
     /// Publishes `value`; only one thread stores (the core).
-    pub(crate) fn store(&self, value: Arc<T>) {
+    pub fn store(&self, value: Arc<T>) {
         if ptr_eq(self.ptr.load(Ordering::SeqCst), &value) {
             return;
         }

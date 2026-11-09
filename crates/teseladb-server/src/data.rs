@@ -286,6 +286,19 @@ impl DataCore {
         self
     }
 
+    /// Publishes the views of the ranges this core leads in `views`, which the node's client
+    /// workers read (005 FR-028).
+    pub fn with_views(mut self, views: teseladb_range::view::RangeViews) -> DataCore {
+        self.host.set_views(views);
+        self
+    }
+
+    /// Reads a client worker served of range `g` without this core: `ops` of them, sampled by
+    /// `keys`, for the range's split by load (005 FR-028, 007 FR-006).
+    pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
+        self.host.count_outside(g, ops, keys, now);
+    }
+
     /// Backups and restores with their files under `dir`; `nonce` tells this life's file names
     /// from an earlier one's (007 FR-021).
     pub fn with_backups(mut self, dir: PathBuf, nonce: u64) -> DataCore {
@@ -353,9 +366,10 @@ impl DataCore {
         &self,
         core: &mut MultiRaftCore<CoreSm>,
         from: (NodeId, u64),
-        (range, merge): (GroupId, u64),
+        of: (GroupId, u64),
+        now: Nanos,
     ) {
-        let answer = crate::merges::probe_answer(core, &self.lsm.borrow(), range, merge);
+        let answer = crate::merges::probe_answer((core, &self.lsm.borrow(), &self.host), of, now);
         core.answer_forward(from.0, from.1, answer);
     }
 

@@ -168,7 +168,7 @@ fn start(id: u64, toy: Toy) -> Node {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let h = hello(id, &addr);
-    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: id, tls: None };
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: id, tls: None, origin: None };
     let (rt, tx) = CoreRuntime::new(toy, MemDisk::new(), h.clone(), cfg).unwrap();
     let acceptor = Acceptor::spawn(listener, h, vec![tx.clone()], CoreInput::Inbound).unwrap();
     let thread = thread::spawn(move || rt.run().unwrap().0);
@@ -517,7 +517,7 @@ fn the_acceptor_closes_failed_handshakes() {
 fn the_logic_is_reachable_before_the_loop_runs() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 40, tls: None };
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 40, tls: None, origin: None };
     let (mut rt, tx) =
         CoreRuntime::new(Toy::default(), MemDisk::new(), hello(40, &addr), cfg).unwrap();
     rt.logic().addrs.insert(NodeId(41), "set before running".into());

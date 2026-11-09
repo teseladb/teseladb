@@ -41,6 +41,7 @@ use teseladb_meta::enroll_tokens::TOKEN_ID_LEN;
 use teseladb_meta::group0::{GROUP0, Group0Error, Group0Sm};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock, SNAPSHOT_ENTRIES};
 use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::view::RangeViews;
 use teseladb_sys::FileLock;
 use teseladb_wire::commands::{NodeSessions, Shared};
 use teseladb_raftlog::paths::core_dir;
@@ -521,6 +522,10 @@ struct CoreSpec {
     hosting: Hosting,
     /// The CPU the core's thread is pinned to (012 FR-006).
     cpu: Option<usize>,
+    /// Where the core publishes the views of the ranges it leads (005 FR-028).
+    views: RangeViews,
+    /// Where the monotonic time of every core of the node starts (005 FR-028).
+    origin: Instant,
 }
 
 /// The data ranges of a core: its LSM recovered. Its ranges open as Group 0 gives them, each from
@@ -536,6 +541,7 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes)
         .with_cores(spec.node_cores);
     let data = data.with_backups(dir.join("backup"), random_u64());
+    let data = data.with_views(spec.views.clone());
     Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone()))
 }
 
@@ -621,8 +627,12 @@ fn run_core<D: Disk + Send + 'static>(
             return Ok(None);
         }
     };
-    let rcfg =
-        RuntimeConfig { tick: spec.tick, seed: spec.seed ^ 0x5eed, tls: spec.peer_tls.clone() };
+    let rcfg = RuntimeConfig {
+        tick: spec.tick,
+        seed: spec.seed ^ 0x5eed,
+        tls: spec.peer_tls.clone(),
+        origin: Some(spec.origin),
+    };
     match CoreRuntime::new(logic, disk, spec.hello, rcfg) {
         Ok((rt, tx)) => {
             let _ = ready.send(Ok(tx));
@@ -1005,6 +1015,10 @@ impl<D: Disk + Send + 'static> Node<D> {
             cfg.clustertime_sealer.as_ref().map(|s| (s.clone(), Arc::new(KeySlot::default())));
         let loads = Arc::new(SharedLoads::new(usize::from(cores), cfg.data_dir.clone()));
         let presence = Arc::new(NodePresence::default());
+        // One origin for the monotonic time of every core, and where each core publishes the
+        // views of its ranges: the client workers read both (005 FR-028).
+        let origin = Instant::now();
+        let views: Vec<RangeViews> = (0..cores).map(|_| RangeViews::default()).collect();
         // The HTTP requests other nodes forward to this node's port; without a port, the
         // receiver drops and core 0 answers them empty.
         let (http_forwards_tx, http_forwards_rx) = mpsc::channel();
@@ -1052,6 +1066,8 @@ impl<D: Disk + Send + 'static> Node<D> {
                 http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
                 hosting: hosting.clone(),
                 cpu: cpus[usize::from(k)],
+                views: views[usize::from(k)].clone(),
+                origin,
             };
             let (tx, rx) = mpsc::channel();
             let spawned = thread::Builder::new()
@@ -1123,6 +1139,9 @@ impl<D: Disk + Send + 'static> Node<D> {
                     routes: routes.clone(),
                     auth: auth.clone(),
                     shutdown: shutdown.clone(),
+                    views: views.clone(),
+                    origin,
+                    data_dir: cfg.data_dir.clone(),
                 };
                 let mut state = NodeClockState::new(clock.clone(), random_u64())
                     .with_handle(handle)
@@ -1169,6 +1188,9 @@ impl<D: Disk + Send + 'static> Node<D> {
                         routes: routes.clone(),
                         auth: auth.clone(),
                         shutdown: shutdown.clone(),
+                        views: views.clone(),
+                        origin,
+                        data_dir: cfg.data_dir.clone(),
                     },
                     enroller: cfg.enroller.clone(),
                     certificates: cfg.client.as_ref().and_then(|c| c.certificates.clone()),
@@ -1201,6 +1223,9 @@ impl<D: Disk + Send + 'static> Node<D> {
                     routes: routes.clone(),
                     auth: auth.clone(),
                     shutdown: shutdown.clone(),
+                    views: views.clone(),
+                    origin,
+                    data_dir: cfg.data_dir.clone(),
                 };
                 let mut state = NodeClockState::new(clock.clone(), random_u64())
                     .with_handle(handle.clone())

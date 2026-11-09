@@ -132,8 +132,9 @@ pub(crate) fn errno(e: &io::Error) -> IoErrno {
     }
 }
 
-/// Reads until `buf` is full or the end of the file is reached; retries interrupted reads.
-fn read_up_to(f: &impl FileExt, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+/// Reads until `buf` is full or the end of the file is reached; retries interrupted reads. The
+/// client workers read the blocks of a read outside the cores with it too (005 FR-028).
+pub fn read_up_to(f: &impl FileExt, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     let mut got = 0;
     while got < buf.len() {
         match f.read_at(&mut buf[got..], offset + got as u64) {

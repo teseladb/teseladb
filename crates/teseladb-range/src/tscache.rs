@@ -22,8 +22,10 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use teseladb_hlc::Hlc;
+use teseladb_hlc::{Hlc, LOGICAL_BITS};
 
 /// The most two nodes' clocks differ (D-004), in milliseconds.
 pub const LEASE_MARGIN_MS: u64 = 250;
@@ -43,6 +45,23 @@ pub struct TsCache {
     /// The highest mark recorded: a read above it is on a mark no segment has.
     top: Hlc,
     capacity: usize,
+    /// The bound of the reads served outside the core (005 FR-028), as a [`word`]: a read on a
+    /// connection's thread raises it to its mark before it reads, and every write goes above it
+    /// as above the cache.
+    outside: Arc<AtomicU64>,
+}
+
+/// A mark as one ordered word: its physical part above its logical part. A logical part wider
+/// than a clock's marks (an end-of-millisecond bound) rounds up, which only raises later writes.
+pub fn word(h: Hlc) -> u64 {
+    let logical = u64::from(h.logical).min((1 << LOGICAL_BITS) - 1);
+    h.physical.saturating_mul(1 << LOGICAL_BITS) | logical
+}
+
+/// The mark of a [`word`].
+pub fn unword(w: u64) -> Hlc {
+    let logical = u32::try_from(w & ((1 << LOGICAL_BITS) - 1)).unwrap_or(u32::MAX);
+    Hlc { physical: w >> LOGICAL_BITS, logical }
 }
 
 impl TsCache {
@@ -54,6 +73,7 @@ impl TsCache {
             marks: BinaryHeap::new(),
             top: floor,
             capacity: capacity.max(1),
+            outside: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -108,10 +128,20 @@ impl TsCache {
         }
     }
 
+    /// The bound of the reads served outside the core, which they raise (005 FR-028).
+    pub fn outside(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.outside)
+    }
+
+    /// The minimum, with the reads served outside the core: no write goes at or below it.
+    fn base(&self) -> Hlc {
+        self.floor.max(unword(self.outside.load(Ordering::SeqCst)))
+    }
+
     /// The highest mark a read of any key in `[start, end)` was served at.
     pub fn max_over(&self, start: &[u8], end: &[u8]) -> Hlc {
         if start >= end {
-            return self.floor;
+            return self.base();
         }
         let before = self
             .segments
@@ -123,13 +153,13 @@ impl TsCache {
             .segments
             .range::<[u8], _>(bounds(Excluded(start), Excluded(end)))
             .map(|(_, (_, m))| *m);
-        before.into_iter().chain(inside).fold(self.floor, Hlc::max)
+        before.into_iter().chain(inside).fold(self.base(), Hlc::max)
     }
 
     /// The highest read of any of `keys`: a write of them gets a mark above it (with `succ`,
     /// FR-025, when the node's clock is behind; `MultiRaftCore::propose_at`).
     pub fn floor_of(&self, keys: &[Vec<u8>]) -> Hlc {
-        keys.iter().map(|k| self.at(k)).fold(self.floor, Hlc::max)
+        keys.iter().map(|k| self.at(k)).fold(self.base(), Hlc::max)
     }
 
     /// The mark of the segment holding `key`, or the minimum. `[key, key·00)` holds only `key`:

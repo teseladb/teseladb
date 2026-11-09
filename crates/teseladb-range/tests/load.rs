@@ -92,3 +92,32 @@ fn the_reservoir_keeps_a_fixed_number_of_keys_and_the_same_seed_samples_the_same
     assert_eq!(run(3), run(3));
     assert_eq!(LOAD_SECONDS, 10);
 }
+
+#[test]
+fn reads_served_outside_the_core_count_by_their_batches_and_their_samples() {
+    // 005 FR-028: a connection's thread reports 400 reads a second in batches of 40, with 8 keys
+    // of each batch as its sample.
+    let mut load = Load::new(100, 7);
+    let mut now = Nanos::ZERO;
+    let mut next = 0u32;
+    for _ in 0..11 * 10 {
+        let keys: Vec<Vec<u8>> = (0..8)
+            .map(|_| {
+                next = (next + 1) % 1000;
+                key(next)
+            })
+            .collect();
+        load.record_sampled(&keys, 40, now);
+        now = now + Nanos(100_000_000);
+    }
+    assert_eq!(load.ops_per_second(), 400);
+    let cut = load.cut(now, &key(0)).expect("a cut after ten seconds");
+    let at = u32::from_be_bytes(cut[1..].try_into().unwrap());
+    assert!((350..650).contains(&at), "{at}");
+    // A batch without samples or without reads counts nothing.
+    let mut load = Load::new(100, 7);
+    load.record_sampled(&[], 40, Nanos::ZERO);
+    load.record_sampled(&[key(1)], 0, Nanos::ZERO);
+    load.record_sampled(&[key(1)], 1, Nanos(1_000_000_000));
+    assert_eq!(load.ops_per_second(), 0);
+}

@@ -48,6 +48,7 @@ pub mod fcv;
 pub mod fle;
 pub mod fle_write;
 pub mod hints;
+pub mod hot;
 pub mod http_parameters;
 pub mod index_build;
 pub mod index_maintenance;
@@ -867,6 +868,9 @@ pub struct NodeSessions {
     pub counters: diagnostics::OpCounters,
     /// The rest of what `serverStatus` reports (006 T046).
     pub status: status::StatusCounters,
+    /// What the commands read and write without this lock ([`hot`]): its command counters
+    /// plus `status` are what `serverStatus` reports.
+    pub hot: std::sync::Arc<hot::Hot>,
     /// The audit log, on a node started with `--auditDestination` (013 FR-016).
     pub audit: Option<audit::Audit>,
     /// The sessions' client transactions (008 FR-009).
@@ -954,6 +958,7 @@ impl NodeSessions {
             ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
+            hot: std::sync::Arc::default(),
             audit: None,
             txns: txn::Transactions::new(),
             rw_defaults: cluster_admin::Defaults::default(),
@@ -1213,7 +1218,8 @@ pub fn run<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Option<Result<Document,
     Some(session_info(ctx).and_then(|()| {
         // The cluster's default concerns apply to the commands without their own (007 FR-018).
         let d = cluster_admin::current(ctx)?;
-        let limit = lock(ctx.shared).params.expression_memory;
+        let limit =
+            hot::of(ctx.shared).expression_memory.load(std::sync::atomic::Ordering::Relaxed);
         let limit = u64::try_from(limit).unwrap_or(u64::MAX);
         teseladb_exec::expr::optimize::with_expression_memory_limit(limit, || {
             // A failed sample never fails the command.
@@ -1480,7 +1486,7 @@ fn returned(reply: &Document) -> i64 {
 /// Runs the command of `ctx` by its name.
 fn dispatch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     engines::reseed(ctx.backend.random());
-    let enabled = lock(ctx.shared).params.javascript_enabled;
+    let enabled = hot::of(ctx.shared).javascript_enabled.load(std::sync::atomic::Ordering::Relaxed);
     let max_time = match ctx.cmd.get("maxTimeMS") {
         Some(Value::Int32(n)) => u64::try_from(*n).ok(),
         Some(Value::Int64(n)) => u64::try_from(*n).ok(),
