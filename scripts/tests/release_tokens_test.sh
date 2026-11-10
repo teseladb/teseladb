@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Tests of scripts/ci/dockerhub-token.sh against a Vault and a token endpoint of Forgejo that a local server plays: a
-# refused login says Vault's reason, a secret without the key says so, and a good one writes DOCKERHUB_TOKEN for the
-# next steps.
-#   scripts/tests/dockerhub_token_test.sh
+# Tests of scripts/ci/release-tokens.sh against a Vault and a token endpoint of Forgejo that a local server plays: a
+# refused login says Vault's reason, a secret without one of its keys says which, and a good one writes DOCKERHUB_TOKEN
+# and GH_TOKEN for the next steps.
+#   scripts/tests/release_tokens_test.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-SCRIPT=$PWD/scripts/ci/dockerhub-token.sh
+SCRIPT=$PWD/scripts/ci/release-tokens.sh
 WORK=$(mktemp -d)
 SERVER=""
 cleanup() {
@@ -66,7 +66,7 @@ check() {
     passed=$((passed + 1))
   else
     failed=$((failed + 1))
-    echo "FAIL $name: exit $code, wanted $want_code and «$want_text»:" >&2
+    echo "FAIL $name: exit $code, wanted $want_code and «${want_text}»:" >&2
     cat "$WORK/out" >&2
   fi
 }
@@ -81,7 +81,17 @@ check "a secret without the key" 1 "has no dockerhub_token: \"the key is missing
 
 answers '{"auth": {"client_token": "tok"}}' '{"data": {"data": {"dockerhub_token": "hub-token"}}}'
 run
-check "the token for the next steps" 0 "DOCKERHUB_TOKEN=hub-token"
+check "a secret without the GitHub token" 1 "has no github_token: \"the key is missing\""
+
+answers '{"auth": {"client_token": "tok"}}' '{"data": {"data": {"dockerhub_token": "hub-token", "github_token": "gh-token"}}}'
+run
+check "the Docker Hub token for the next steps" 0 "DOCKERHUB_TOKEN=hub-token"
+check "the GitHub token for the next steps" 0 "GH_TOKEN=gh-token"
+if grep -v "^::add-mask::" "$WORK/out" | grep -qE "hub-token|gh-token"; then
+  failed=$((failed + 1)); echo "FAIL a token reached the log unmasked" >&2; cat "$WORK/out" >&2
+else
+  passed=$((passed + 1))
+fi
 
 answers '{}' '{}'
 VAULT_ADDR="" ACTIONS_ID_TOKEN_REQUEST_URL=x ACTIONS_ID_TOKEN_REQUEST_TOKEN=t FORGEJO_ENV="$WORK/env" "$SCRIPT" teseladb prd >"$WORK/out" 2>&1 && code=0 || code=$?
@@ -89,5 +99,5 @@ check "a runner without Vault" 1 "this runner has no address of Vault"
 "$SCRIPT" teseladb staging >"$WORK/out" 2>&1 && code=0 || code=$?
 check "an unknown stage" 2 "unknown stage staging"
 
-echo "dockerhub_token_test: $passed passed, $failed failed"
+echo "release_tokens_test: $passed passed, $failed failed"
 [[ $failed -eq 0 ]]

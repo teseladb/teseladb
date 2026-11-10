@@ -7,7 +7,7 @@
 #   scripts/release/publish.sh <version> <stage dev|prd>
 # Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER, AWS_ACCOUNT_ID and CARGO_REGISTRIES_VIUZI_TOKEN (the JWT of the run that
 # reads the viuzi-* crates of the private registry) from the workflow, and DOCKERHUB_TOKEN in production,
-# which the workflow reads from Vault (scripts/ci/dockerhub-token.sh).
+# which the workflow reads from Vault (scripts/ci/release-tokens.sh).
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
