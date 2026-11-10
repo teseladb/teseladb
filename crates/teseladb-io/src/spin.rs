@@ -10,6 +10,43 @@ use std::time::{Duration, Instant};
 /// the test machine (4,6 µs one way), in the range of a context switch round trip.
 pub const SPIN_BEFORE_SLEEP: Duration = Duration::from_micros(20);
 
+/// Longest an [`AdaptiveSpin`] spins: about ten wake-ups of a thread, past which sleeping costs
+/// less than spinning.
+pub const SPIN_CAP: Duration = Duration::from_micros(60);
+
+/// A spin window that follows the waits it serves (H-042), as HotSpot's adaptive spinning
+/// lengthens or shortens a monitor's spin by whether the last spins caught the lock: a wait that
+/// ended a little past the window lengthens it to that wait with a margin, up to [`SPIN_CAP`]; a
+/// wait longer than the cap (a write that waits for the disk) brings it back to
+/// [`SPIN_BEFORE_SLEEP`], so a thread does not keep spinning for waits it never catches.
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveSpin {
+    window: Duration,
+}
+
+impl Default for AdaptiveSpin {
+    fn default() -> AdaptiveSpin {
+        AdaptiveSpin { window: SPIN_BEFORE_SLEEP }
+    }
+}
+
+impl AdaptiveSpin {
+    /// How long the next wait spins before it sleeps.
+    pub fn window(&self) -> Duration {
+        self.window
+    }
+
+    /// A wait took `waited`.
+    pub fn observe(&mut self, waited: Duration) {
+        self.window = if waited > SPIN_CAP {
+            SPIN_BEFORE_SLEEP
+        } else {
+            // A quarter more than the wait, so its usual spread still ends inside the spin.
+            (waited + waited / 4).clamp(SPIN_BEFORE_SLEEP, SPIN_CAP)
+        };
+    }
+}
+
 /// Spins until `ready` says so or `window` passes; whether it did.
 pub fn spin_until(window: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
@@ -30,6 +67,20 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn an_adaptive_spin_follows_short_waits_and_drops_after_a_long_one() {
+        let mut s = AdaptiveSpin::default();
+        assert_eq!(s.window(), SPIN_BEFORE_SLEEP);
+        s.observe(Duration::from_micros(28));
+        assert_eq!(s.window(), Duration::from_micros(35), "a quarter more than the wait");
+        s.observe(Duration::from_micros(5));
+        assert_eq!(s.window(), SPIN_BEFORE_SLEEP, "never below the base window");
+        s.observe(Duration::from_micros(55));
+        assert_eq!(s.window(), SPIN_CAP, "never above the cap");
+        s.observe(Duration::from_millis(4));
+        assert_eq!(s.window(), SPIN_BEFORE_SLEEP, "a wait for the disk is not spun for");
+    }
 
     #[test]
     fn a_spin_ends_as_soon_as_its_condition_holds() {

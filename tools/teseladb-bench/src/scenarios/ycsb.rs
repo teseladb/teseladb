@@ -3,11 +3,9 @@
 //! phase inserts `--records` records of ten fields of 100 bytes; the timed phase runs the
 //! workload's mix with `--concurrency` connections, in a closed loop or at `--rate`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use teseladb_bson::{Document, Value};
 
-use super::ycsb_gen::{FIELDS, KeyChooser, MAX_SCAN, Op, Rng, Workload, field, key};
+use super::ycsb_gen::{AckedCounter, FIELDS, KeyChooser, MAX_SCAN, Op, Rng, Workload, field, key};
 use crate::cli::Args;
 use crate::client::{Client, Target, doc};
 use crate::load::{Load, drive};
@@ -134,7 +132,7 @@ pub fn run_on(
         true => records.max(count(&mut Client::connect(addr)?)?),
         false => records,
     };
-    let inserted = AtomicU64::new(first_new);
+    let inserted = AckedCounter::new(first_new);
     let load = Load {
         warmup: args.warmup,
         duration: args.duration,
@@ -146,14 +144,17 @@ pub fn run_on(
         |w| Ok((Client::connect(addr)?, Rng::new(SEED + 1 + w as u64))),
         |(c, rng)| {
             let op = workload.next_op(rng);
-            let n = inserted.load(Ordering::Relaxed);
+            // Among the keys whose insert ended, as YCSB's core workload picks them.
+            let n = inserted.limit();
             let k = key(workload.keys.next(rng, n));
             match op {
                 Op::Read => find(c, by_id(k), 1)?,
                 Op::Update => update(c, k, rng)?,
                 Op::Insert => {
-                    let next = inserted.fetch_add(1, Ordering::Relaxed);
-                    insert(c, vec![record(next, rng)])?;
+                    let next = inserted.next();
+                    let done = insert(c, vec![record(next, rng)]);
+                    inserted.acknowledge(next);
+                    done?;
                 }
                 Op::Scan => {
                     let from = Value::Document(doc(vec![("$gte", Value::String(k))]));

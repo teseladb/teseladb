@@ -3,7 +3,7 @@
 
 use teseladb_bson::{Document, RawDoc, Value};
 
-use super::{MutationResult, f, read_capped, read_error, read_mark, read_timeseries};
+use super::{Fields, MutationResult, f, read_capped, read_error, read_mark, read_timeseries};
 use crate::error::INTERNAL_ERROR;
 
 fn bytes(d: &Document) -> Vec<u8> {
@@ -19,8 +19,8 @@ fn malformed_rules_are_internal_errors() {
     ];
     for d in &rules {
         let b = bytes(d);
-        let raw = RawDoc::from_bytes(&b).expect("reads");
-        let e = read_timeseries(raw).err().or_else(|| read_capped(raw).err());
+        let fields = Fields::of(RawDoc::from_bytes(&b).expect("reads"));
+        let e = read_timeseries(&fields).err().or_else(|| read_capped(&fields).err());
         assert_eq!(e.map(|e| e.code), Some(INTERNAL_ERROR), "{d:?}");
     }
 }
@@ -44,4 +44,15 @@ fn a_malformed_mark_reads_as_none() {
     let raw = RawDoc::from_bytes(&b).expect("reads");
     assert_eq!(read_mark(raw.get("m")), None);
     assert_eq!(read_mark(None), None);
+}
+
+#[test]
+fn fields_read_once_answer_as_the_document_does() {
+    // H-042: the first field of a name, and none for a missing one, as `RawDoc::get`.
+    let b = bytes(&Document::new().with("a", 1).with("b", "x").with("a", 2));
+    let raw = RawDoc::from_bytes(&b).expect("reads");
+    let fields = Fields::of(raw);
+    for k in ["a", "b", "c"] {
+        assert_eq!(fields.get(k), raw.get(k), "{k}");
+    }
 }

@@ -413,7 +413,7 @@ fn moved_entries(
 const DOC_PREFIX: usize = 13;
 
 /// The time series rule a mutation carries.
-fn read_timeseries(d: RawDoc<'_>) -> Result<Option<TimeSeriesRule>, CommandError> {
+fn read_timeseries(d: &Fields<'_>) -> Result<Option<TimeSeriesRule>, CommandError> {
     let Some(v) = d.get(f::TIMESERIES) else { return Ok(None) };
     let RawValue::Document(t) = v else { return Err(bad_rules()) };
     let int = |k: &str| match t.get(k) {
@@ -440,7 +440,7 @@ fn read_timeseries(d: RawDoc<'_>) -> Result<Option<TimeSeriesRule>, CommandError
 }
 
 /// The capped rule a mutation carries.
-fn read_capped(d: RawDoc<'_>) -> Result<Option<CappedRule>, CommandError> {
+fn read_capped(d: &Fields<'_>) -> Result<Option<CappedRule>, CommandError> {
     let Some(v) = d.get(f::CAPPED) else { return Ok(None) };
     let RawValue::Document(c) = v else { return Err(bad_rules()) };
     let int = |k: &str| match c.get(k) {
@@ -456,32 +456,65 @@ fn read_capped(d: RawDoc<'_>) -> Result<Option<CappedRule>, CommandError> {
     Ok(Some(CappedRule { limits, oldest }))
 }
 
-fn get_doc(d: RawDoc<'_>, k: &str) -> Option<Document> {
-    match d.get(k) {
+/// A document's fields by name.
+trait FieldSource<'a> {
+    /// The first field named `k`.
+    fn look(&self, k: &str) -> Option<RawValue<'a>>;
+}
+
+impl<'a> FieldSource<'a> for RawDoc<'a> {
+    fn look(&self, k: &str) -> Option<RawValue<'a>> {
+        self.get(k)
+    }
+}
+
+/// A document's fields read once (H-042): a mutation's rules look up some twenty fields, most of
+/// them absent, and each [`RawDoc::get`] reads the elements again from the first. RefDb's IDL
+/// parsers read a command's elements in one pass the same way.
+struct Fields<'a>(Vec<(&'a str, RawValue<'a>)>);
+
+impl<'a> Fields<'a> {
+    fn of(d: RawDoc<'a>) -> Fields<'a> {
+        Fields(d.iter().collect())
+    }
+
+    fn get(&self, k: &str) -> Option<RawValue<'a>> {
+        self.0.iter().find(|(name, _)| *name == k).map(|(_, v)| *v)
+    }
+}
+
+impl<'a> FieldSource<'a> for Fields<'a> {
+    fn look(&self, k: &str) -> Option<RawValue<'a>> {
+        self.get(k)
+    }
+}
+
+fn get_doc<'a>(d: &impl FieldSource<'a>, k: &str) -> Option<Document> {
+    match d.look(k) {
         Some(RawValue::Document(x)) => Some(Document::from(x)),
         _ => None,
     }
 }
 
-fn get_str(d: RawDoc<'_>, k: &str) -> String {
-    match d.get(k) {
+fn get_str<'a>(d: &impl FieldSource<'a>, k: &str) -> String {
+    match d.look(k) {
         Some(RawValue::String(s)) => s.to_owned(),
         _ => String::new(),
     }
 }
 
-fn get_bool(d: RawDoc<'_>, k: &str) -> bool {
-    matches!(d.get(k), Some(RawValue::Boolean(true)))
+fn get_bool<'a>(d: &impl FieldSource<'a>, k: &str) -> bool {
+    matches!(d.look(k), Some(RawValue::Boolean(true)))
 }
 
-fn get_i32(d: RawDoc<'_>, k: &str) -> i32 {
-    match d.get(k) {
+fn get_i32<'a>(d: &impl FieldSource<'a>, k: &str) -> i32 {
+    match d.look(k) {
         Some(RawValue::Int32(n)) => n,
         _ => 0,
     }
 }
 
-fn read_rules(d: RawDoc<'_>) -> Result<Rules, CommandError> {
+fn read_rules(d: &Fields<'_>) -> Result<Rules, CommandError> {
     let validator =
         get_doc(d, f::VALIDATOR).map(|v| (v, get_str(d, f::LEVEL), get_str(d, f::ACTION)));
     let collection = match d.get(f::COLLECTION_ID) {
@@ -589,11 +622,11 @@ impl DocMutation {
     /// Reads what [`DocMutation::encode`] wrote.
     pub fn decode(b: &[u8]) -> Result<DocMutation, CommandError> {
         let bad = || CommandError::new(INTERNAL_ERROR, "malformed mutation");
-        let d = RawDoc::from_bytes_with(b, MUTATION_LIMITS)?;
-        let rules = read_rules(d)?;
-        let filter = || get_doc(d, f::FILTER).ok_or_else(bad);
-        let multi = get_bool(d, f::MULTI);
-        let image = Image::from_code(get_i32(d, f::IMAGE));
+        let d = Fields::of(RawDoc::from_bytes_with(b, MUTATION_LIMITS)?);
+        let rules = read_rules(&d)?;
+        let filter = || get_doc(&d, f::FILTER).ok_or_else(bad);
+        let multi = get_bool(&d, f::MULTI);
+        let image = Image::from_code(get_i32(&d, f::IMAGE));
         match (d.get(f::KIND), d.get(f::DOCS)) {
             (Some(RawValue::Int32(INSERT)), Some(RawValue::Array(a))) => {
                 let docs = a
@@ -603,7 +636,7 @@ impl DocMutation {
                         _ => Err(bad()),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(DocMutation::Insert { docs, ordered: get_bool(d, f::ORDERED), rules })
+                Ok(DocMutation::Insert { docs, ordered: get_bool(&d, f::ORDERED), rules })
             }
             (Some(RawValue::Int32(UPDATE)), _) => {
                 let update = d.get(f::UPDATE).map(Value::from).ok_or_else(bad)?;
@@ -611,7 +644,7 @@ impl DocMutation {
                     Some(RawValue::Array(a)) => Some(a.iter().map(Value::from).collect()),
                     _ => None,
                 };
-                let upsert = get_doc(d, f::UPSERT);
+                let upsert = get_doc(&d, f::UPSERT);
                 let filter = filter()?;
                 Ok(DocMutation::Update {
                     filter,
@@ -687,7 +720,7 @@ impl MutationResult {
             n: num(f::N),
             n_modified: num(f::N_MODIFIED),
             upserted: d.get(f::UPSERTED).map(Value::from),
-            value: get_doc(d, f::VALUE),
+            value: get_doc(&d, f::VALUE),
             attempt: num(f::ATTEMPT),
             keys: (num(f::KEYS_INSERTED), num(f::KEYS_DELETED)),
             mark: read_mark(d.get(f::MARK)),
@@ -735,7 +768,7 @@ fn read_error(e: RawDoc<'_>) -> Option<WriteError> {
     let Some(RawValue::Int64(index)) = e.get(f::INDEX) else { return None };
     let Some(RawValue::Int32(code)) = e.get(f::CODE) else { return None };
     let code = crate::error::code(code).unwrap_or(INTERNAL_ERROR);
-    let mut error = CommandError::new(code, get_str(e, f::ERRMSG));
+    let mut error = CommandError::new(code, get_str(&e, f::ERRMSG));
     for (k, v) in Document::from(e).iter() {
         if ![f::INDEX, f::CODE, f::ERRMSG].contains(&k) {
             error.extra.push(k, v.clone());

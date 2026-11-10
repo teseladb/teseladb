@@ -290,3 +290,28 @@ fn a_cached_view_belongs_to_its_lsm() {
     let second = s2.view_cached(&mut cache).clone();
     assert_eq!(get(&s2, &second, &ask, b"k", ts(5, 0)).map(|r| r.3), Some(b"two".to_vec()));
 }
+
+#[test]
+fn may_exist_answers_without_reading_a_block() {
+    // H-042, as AnotherProduct's `KeyMayExist`: a key with a version in a memtable or in a file whose
+    // filter does not rule it out may exist; an absent key is ruled out without any block.
+    let cfg = small();
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    let shared = lsm.shared();
+    lsm.put(GroupId(1), 1, b"k", ts(1, 0), b"one").expect("write");
+    lsm.publish();
+    let view = shared.view();
+    assert!(view.may_exist(b"k"), "in the memtable");
+    assert!(!view.may_exist(b"absent"), "nowhere");
+    lsm.flush();
+    let mut flushed = 0;
+    for _ in 0..100 {
+        flushed += lsm.run_io(&mut disk, Nanos::ZERO).flushed.len();
+    }
+    assert!(flushed > 0, "the memtable went to a file");
+    lsm.publish();
+    let view = shared.view();
+    assert!(view.may_exist(b"k"), "in a file, its filter says so");
+    assert!(!view.may_exist(b"absent"), "the file's filter rules it out");
+}

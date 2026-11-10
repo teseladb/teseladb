@@ -296,6 +296,12 @@ impl RangeView {
             return FastWrite::Core;
         }
         let view = self.lsm.view_cached(cache);
+        // A key that may have a version goes to the core without reading a block (H-042): an
+        // update or a delete of a document that exists, the usual one, cost a read here only to
+        // learn it, and the filters of the LSM's files rule out an absent key on their own.
+        if w.absent_only && w.keys.iter().any(|k| view.may_exist(k)) {
+            return FastWrite::Core;
+        }
         if let Some(r) = &record {
             match view.get(&self.lsm, r, NEWEST) {
                 SharedRead::NotFound => {}

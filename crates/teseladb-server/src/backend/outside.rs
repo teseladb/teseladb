@@ -16,10 +16,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use teseladb_hlc::Hlc;
 use teseladb_io::runtime::CoreInput;
 use teseladb_lsm::{BlockNeed, ViewCache};
 use teseladb_range::HISTORY_VALUE;
 use teseladb_range::command::DedupKey;
+use teseladb_range::host::{Mutation, MutationError};
+use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::view::{FastRead, FastWrite, NoChange, RangeView};
 use teseladb_wire::commands::mutation::Bound;
@@ -28,6 +31,52 @@ use teseladb_types::{GroupId, Nanos};
 
 use super::ServerBackend;
 use crate::logic::NodeMsg;
+
+/// A write's mutation decoded the first time the view evaluates it (H-042): most updates reach a
+/// document that exists, and the view sends those to the core after reading their keys, without
+/// evaluating them (`absent_only`), so decoding the mutation first was work thrown away.
+struct LazyBound<'a> {
+    bytes: &'a [u8],
+    bound: std::cell::OnceCell<Option<Bound>>,
+}
+
+impl<'a> LazyBound<'a> {
+    fn new(bytes: &'a [u8]) -> LazyBound<'a> {
+        LazyBound { bytes, bound: std::cell::OnceCell::new() }
+    }
+
+    fn get(&self) -> Result<&Bound, MutationError> {
+        self.bound
+            .get_or_init(|| Bound::decode(self.bytes).ok())
+            .as_ref()
+            .ok_or_else(|| MutationError("a malformed mutation".to_owned()))
+    }
+
+    /// Whether it was decoded.
+    #[cfg(test)]
+    fn decoded(&self) -> bool {
+        self.bound.get().is_some()
+    }
+}
+
+impl Mutation for LazyBound<'_> {
+    fn eval(&self, current: &[Option<(u8, &[u8])>], ts: Hlc) -> Result<Outcome, MutationError> {
+        self.get()?.eval(current, ts)
+    }
+
+    fn eval_with(
+        &self,
+        keys: &[Vec<u8>],
+        current: &[Option<(u8, &[u8])>],
+        ts: Hlc,
+    ) -> Result<Outcome, MutationError> {
+        self.get()?.eval_with(keys, current, ts)
+    }
+
+    fn reads(&self, outcome: &Outcome) -> Vec<Vec<u8>> {
+        self.get().map_or_else(|_| Vec::new(), |b| b.reads(outcome))
+    }
+}
 
 /// Blocks one read may read from their files before it goes to the core instead.
 const MAX_BLOCKS: usize = 8;
@@ -145,7 +194,7 @@ impl ServerBackend {
         let core = usize::from(core);
         let view = self.h.views.get(core)?.get(g)?;
         // The mutation as it was sent: its result carries that send's number (`attempt`).
-        let bound = Bound::decode(&op.mutation).ok()?;
+        let bound = LazyBound::new(&op.mutation);
         let dedup = op.dedup.map(|k| DedupKey {
             lsid: k.lsid,
             txn_number: k.txn_number,
@@ -371,5 +420,24 @@ impl ServerBackend {
         if let Some(tx) = self.cores.get(core) {
             let _ = tx.send(CoreInput::App(NodeMsg::OutsideLoad(g, t.ops, t.keys)));
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod lazy_tests {
+    use super::*;
+
+    #[test]
+    fn a_mutation_is_decoded_only_when_it_is_evaluated() {
+        // H-042: bytes that do not decode fail only once something evaluates them.
+        let lazy = LazyBound::new(b"not a mutation");
+        assert!(!lazy.decoded(), "nothing asked for it");
+        let none = Outcome { puts: vec![], deletes: vec![], change: vec![], result: vec![] };
+        assert!(lazy.reads(&none).is_empty());
+        assert!(lazy.decoded());
+        let ts = Hlc { physical: 1, logical: 0 };
+        assert!(lazy.eval(&[], ts).is_err(), "malformed");
+        assert!(lazy.eval_with(&[], &[], ts).is_err());
     }
 }

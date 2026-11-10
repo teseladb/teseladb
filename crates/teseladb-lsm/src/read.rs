@@ -345,6 +345,25 @@ fn get_in_table<B: Blocks>(
     Ok(None)
 }
 
+/// Whether `key` may have a version in `v`, without reading a block (H-042, as AnotherProduct's
+/// `KeyMayExist`): a memtable holds an entry of it, or a file covering it whose filter does not
+/// rule it out. `false` is certain; `true` may be a false positive of a filter, or a version that
+/// deletes the key.
+pub(crate) fn may_exist(v: &Version, key: &[u8]) -> bool {
+    let newest = entry::internal_key(key, Hlc { physical: u64::MAX, logical: u32::MAX });
+    let in_memtable = v
+        .memtables
+        .iter()
+        .any(|m| m.seek(&newest).is_some_and(|(_, k, _)| entry::split(k).0 == key));
+    if in_memtable {
+        return true;
+    }
+    let hashes = filter::hashes(key);
+    v.tables().any(|t| {
+        t.props.lo.as_slice() <= key && key <= t.props.hi.as_slice() && t.may_contain(hashes)
+    })
+}
+
 pub(crate) fn get<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc) -> Lookup {
     r.begin();
     let found = get_once(r, v, key, read);

@@ -141,6 +141,9 @@ pub struct ServerBackend {
     committed: Hlc,
     /// What its reads served without the cores keep (005 FR-028).
     outside: outside::Outside,
+    /// How long it spins for a core's answer before it sleeps, after the answers it waited for
+    /// (H-042).
+    spin: std::cell::Cell<teseladb_io::spin::AdaptiveSpin>,
 }
 
 impl ServerBackend {
@@ -175,6 +178,7 @@ impl ServerBackend {
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
             outside: outside::Outside::default(),
+            spin: std::cell::Cell::default(),
         }
     }
 
@@ -393,14 +397,21 @@ impl ServerBackend {
         until: Instant,
     ) -> Option<T> {
         let (tx, rx): (mpsc::Sender<T>, Receiver<T>) = mpsc::channel();
+        let asked = Instant::now();
         self.cores.get(core)?.send(CoreInput::App(msg(tx))).ok()?;
-        // Most answers come within a short spin, which saves the wake-up of this thread (H-013).
+        // Most answers come within a short spin, which saves the wake-up of this thread (H-013);
+        // the spin follows how long the last answers took (H-042).
+        let mut spin = self.spin.get();
         let mut answer = None;
-        teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || {
+        teseladb_io::spin::spin_until(spin.window(), || {
             answer = rx.try_recv().ok();
             answer.is_some()
         });
-        answer.or_else(|| rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok())
+        let answer = answer
+            .or_else(|| rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok());
+        spin.observe(asked.elapsed());
+        self.spin.set(spin);
+        answer
     }
 
     fn catalog(&mut self) -> Result<Arc<Catalog>, CommandError> {

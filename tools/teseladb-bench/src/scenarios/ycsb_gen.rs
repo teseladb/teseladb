@@ -5,6 +5,10 @@
 //! uniform ([`Rng::below`]), zipfian, scrambled zipfian and «latest» distributions, the workloads A to F and the
 //! records of ten fields of 100 bytes.
 
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// Exponent of the zipfian distribution in YCSB.
 pub const ZIPF_THETA: f64 = 0.99;
 /// Fields of a record.
@@ -107,6 +111,51 @@ impl KeyChooser {
             KeyChooser::ScrambledZipfian(z) => fnv64(z.next(rng)) % n,
             KeyChooser::Latest(z) => n - 1 - z.next(rng).min(n - 1),
         }
+    }
+}
+
+/// The keys inserted during the run, as YCSB's `AcknowledgedCounterGenerator`: [`AckedCounter::next`]
+/// hands out the next key, and the keys a read may pick ([`AckedCounter::limit`]) go up to the
+/// highest one whose insert ended with every lower one ended too. A read never picks a key whose
+/// insert is still in flight, which would measure a lookup of a missing key instead of a read of a
+/// recent one. YCSB acknowledges a key once its insert ends, failed or not, so a failure does not
+/// stall the limit.
+#[derive(Debug)]
+pub struct AckedCounter {
+    next: AtomicU64,
+    limit: AtomicU64,
+    ended: Mutex<BTreeSet<u64>>,
+}
+
+impl AckedCounter {
+    /// A counter whose first new key is `first`: the keys below it are all there.
+    pub fn new(first: u64) -> AckedCounter {
+        AckedCounter {
+            next: AtomicU64::new(first),
+            limit: AtomicU64::new(first),
+            ended: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// The key of the next insert.
+    pub fn next(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The insert of `key` ended.
+    pub fn acknowledge(&self, key: u64) {
+        let mut ended = self.ended.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        ended.insert(key);
+        let mut limit = self.limit.load(Ordering::Acquire);
+        while ended.remove(&limit) {
+            limit += 1;
+        }
+        self.limit.store(limit, Ordering::Release);
+    }
+
+    /// How many keys a read may pick: every key below it was inserted.
+    pub fn limit(&self) -> u64 {
+        self.limit.load(Ordering::Acquire)
     }
 }
 
@@ -254,6 +303,20 @@ mod tests {
         assert!((got - tail).abs() < tail * 0.1, "{got} vs {tail}");
         let probs: f64 = (0..n).map(|i| probability(&z, i)).sum();
         assert!((probs - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reads_reach_only_keys_whose_insert_ended_with_every_lower_one() {
+        let c = AckedCounter::new(10);
+        let (a, b, d) = (c.next(), c.next(), c.next());
+        assert_eq!((a, b, d), (10, 11, 12));
+        assert_eq!(c.limit(), 10, "nothing ended yet");
+        c.acknowledge(b);
+        assert_eq!(c.limit(), 10, "11 ended, 10 still in flight");
+        c.acknowledge(a);
+        assert_eq!(c.limit(), 12, "10 and 11 ended");
+        c.acknowledge(d);
+        assert_eq!(c.limit(), 13);
     }
 
     #[test]

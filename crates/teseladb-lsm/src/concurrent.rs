@@ -219,6 +219,11 @@ impl SharedView {
         }
     }
 
+    /// Whether `key` may have a version, without reading a block: `false` is certain (H-042).
+    pub fn may_exist(&self, key: &[u8]) -> bool {
+        read::may_exist(&self.version, key)
+    }
+
     /// A scan of `[start, end)` at `ts`: one visible version per key, in key order.
     pub fn scan(&self, start: &[u8], end: &[u8], ts: Hlc) -> SharedScan {
         SharedScan { scan: View { version: self.version.clone() }.scan(start, end, ts) }
