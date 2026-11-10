@@ -13,6 +13,8 @@ use std::time::Duration;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_server::node::Node;
+use teseladb_server::tenant_limits::{RETRYABLE, SYSTEM_OVERLOADED};
+use teseladb_wire::error::RETRYABLE_WRITE_ERROR;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
 
@@ -218,6 +220,22 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
         })
     });
     assert_eq!(code(&refused), Some(RATE_LIMITED), "{refused:?}");
+    assert_eq!(labels(&refused), [SYSTEM_OVERLOADED, RETRYABLE]);
+    // A retryable write (its session and `txnNumber`) also takes the label a driver retries a
+    // write on (D-148).
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![7; 16] });
+    let retried = until("a retryable write past the bytes per second", || {
+        (0..3).find_map(|_| {
+            next_id += 1;
+            let cmd = big(next_id)
+                .with("lsid", lsid.clone())
+                .with("txnNumber", Value::Int64(i64::from(next_id)));
+            let r = w.run("app", cmd);
+            (!ok(&r)).then_some(r)
+        })
+    });
+    assert_eq!(code(&retried), Some(RATE_LIMITED), "{retried:?}");
+    assert_eq!(labels(&retried), [SYSTEM_OVERLOADED, RETRYABLE, RETRYABLE_WRITE_ERROR]);
     // The service user is held by no limit.
     admin(
         &nodes[0],

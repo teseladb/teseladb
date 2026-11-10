@@ -1003,9 +1003,11 @@ impl Client {
         PortStats::add(&stats.requests, 1);
         PortStats::add(&stats.bytes_in, usize::try_from(req.header.length).unwrap_or(0));
         // A drained node answers every request with `ShutdownInProgress` and closes the
-        // connection after the reply (007 FR-015).
+        // connection after the reply (007 FR-015), labelled by D-148 so that the
+        // driver retries a retryable write on another node (D-148).
         if cmds.state.closed() {
             let e = CommandError::new(SHUTDOWN_IN_PROGRESS, "the node is drained");
+            let e = teseladb_wire::error::with_retryable_labels(e, &req.command);
             self.apply(conn, req, Action::Reply(e.to_document()));
             return false;
         }

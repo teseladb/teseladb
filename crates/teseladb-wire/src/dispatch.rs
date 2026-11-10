@@ -153,7 +153,8 @@ fn run_message<B: Backend + ?Sized>(
     let inner = cmds.as_mut().map(|(b, s)| (&mut **b, *s));
     let action = match resolved.and_then(|()| command(conn, req, node, inner)) {
         Ok(a) => a,
-        Err(e) => error(&e, node),
+        // Every error of a retryable code is labelled by D-148, whatever path produced it.
+        Err(e) => error(&crate::error::with_retryable_labels(e, &req.command), node),
     };
     // The cluster time after the command: a write's is at or above its own mark (008
     // FR-013).

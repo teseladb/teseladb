@@ -70,6 +70,8 @@ struct Toy {
     in_flight: usize,
     /// Says it is at rest ([`CoreLogic::resting`]).
     rests: bool,
+    /// Wakes from rest ([`CoreLogic::wake`]).
+    wakes: u64,
 }
 
 fn ack(req: u64) -> PeerMsg {
@@ -83,6 +85,11 @@ impl CoreLogic for Toy {
         assert!(wall_ms > 0);
         self.ticks += 1;
         self.shared_ticks.store(self.ticks, Ordering::Relaxed);
+    }
+
+    fn wake(&mut self, _now: Nanos, wall_ms: u64) {
+        assert!(wall_ms > 0);
+        self.wakes += 1;
     }
 
     fn poll_io(&mut self, _now: Nanos) -> Option<IoOp> {
@@ -649,10 +656,12 @@ fn a_core_at_rest_ticks_ten_times_less_and_ticks_at_once_when_work_arrives() {
     run_for(&mut rt, Duration::from_secs(2));
     let rested = rt.logic().ticks;
     assert!(rested <= 140, "{rested} ticks in 2 s");
-    // Work ends the rest: the turn that takes it ticks first, with a fresh wall clock.
+    // Work ends the rest: the turn that takes it wakes the logic first, with a fresh wall clock,
+    // and leaves the whole tick for its time.
     tx.send(CoreInput::App(Cmd::Addr(NodeId(61), "x".into()))).ok().unwrap();
     rt.turn().unwrap();
-    assert_eq!(rt.logic().ticks, rested + 1, "a tick before the work");
+    assert_eq!(rt.logic().wakes, 1, "the clock part of a tick before the work");
+    assert_eq!(rt.logic().ticks, rested, "and no whole tick");
     // And the ticks go back to every 10 ms: about 20 in 200 ms, against 2 at rest.
     run_for(&mut rt, Duration::from_millis(200));
     assert!(rt.logic().ticks >= rested + 8, "{} ticks", rt.logic().ticks - rested);

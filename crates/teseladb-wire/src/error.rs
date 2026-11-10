@@ -1,6 +1,7 @@
 //! RefDb's error codes, the error of a command and its reply document (contract
 //! `error-codes.md`, FR-021), and the translation of the range's errors (005) into them.
 
+use crate::commands::txn::{ABORT_TRANSACTION, COMMIT_TRANSACTION};
 use teseladb_range::host::{MutationError, RangeError};
 use teseladb_bson::{Document, Value};
 
@@ -57,8 +58,8 @@ codes! {
     /// Authentication failed (013).
     AUTHENTICATION_FAILED = 18, "AuthenticationFailed";
     /// A tenant past its operations, operations at once or bytes written per second on a node
-    /// (007 FR-032; `error_codes.yml` of RefDb, categories `SystemOverloadedError` and
-    /// `RetriableError`).
+    /// (007 FR-032; labelled `SystemOverloadedError`, and retried as the codes of
+    /// [`RETRYABLE_CODES`], D-148).
     INGRESS_REQUEST_RATE_LIMIT_EXCEEDED = 462, "IngressRequestRateLimitExceeded";
     /// A tenant past its storage, database or collection quota (007 FR-031).
     OUT_OF_DISK_SPACE = 14031, "OutOfDiskSpace";
@@ -744,6 +745,52 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
     }
 }
 
+/// The codes labelled for a retry (D-148): a node that is not or no longer the primary, one
+/// shutting down or cut off, and a tenant past its limits (462).
+const RETRYABLE_CODES: [Code; 13] = [
+    HOST_UNREACHABLE,
+    HOST_NOT_FOUND,
+    NETWORK_TIMEOUT,
+    SHUTDOWN_IN_PROGRESS,
+    PRIMARY_STEPPED_DOWN,
+    EXCEEDED_TIME_LIMIT,
+    INGRESS_REQUEST_RATE_LIMIT_EXCEEDED,
+    SOCKET_EXCEPTION,
+    NOT_WRITABLE_PRIMARY,
+    INTERRUPTED_AT_SHUTDOWN,
+    INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,
+    NOT_PRIMARY_NO_SECONDARY_OK,
+    NOT_PRIMARY_OR_SECONDARY,
+];
+
+/// `err` with the label D-148 gives an error of [`RETRYABLE_CODES`] (`ShutdownInProgress` of a
+/// drained node, `NotPrimaryOrSecondary` of a lost lease, a tenant's refusal, …) for command
+/// `cmd`. With `txnNumber` and `autocommit`, a statement of a transaction other
+/// than its commit or abort gets `TransientTransactionError` (the driver repeats the transaction)
+/// and the commit and the abort get `RetryableWriteError`; with `txnNumber` alone, a retryable
+/// write, it gets `RetryableWriteError` (the driver repeats the statement on another node). The
+/// labels the error has are kept, and one that already says how to retry it gets no other. An
+/// error answered before the command is dispatched takes its labels from here (D-148).
+#[must_use]
+pub fn with_retryable_labels(err: CommandError, cmd: &Document) -> CommandError {
+    let labelled = |l: &str| err.labels.contains(&l);
+    if !RETRYABLE_CODES.contains(&err.code)
+        || labelled(TRANSIENT_TRANSACTION_ERROR)
+        || labelled(RETRYABLE_WRITE_ERROR)
+        || cmd.get("txnNumber").is_none()
+    {
+        return err;
+    }
+    let ends_transaction = cmd
+        .iter()
+        .next()
+        .is_some_and(|(name, _)| [COMMIT_TRANSACTION, ABORT_TRANSACTION].contains(&name));
+    match cmd.get("autocommit").is_some() && !ends_transaction {
+        true => err.with_label(TRANSIENT_TRANSACTION_ERROR),
+        false => err.with_label(RETRYABLE_WRITE_ERROR),
+    }
+}
+
 /// An error of the node's own data that should not happen (an index definition or a bucket the
 /// node wrote and cannot read back), as `InternalError` with the error's description.
 pub fn internal(e: impl std::fmt::Debug) -> CommandError {
@@ -754,6 +801,57 @@ pub fn internal(e: impl std::fmt::Debug) -> CommandError {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_answered_before_dispatch_takes_the_labels_of_its_code_and_command() {
+        let drained = || CommandError::new(SHUTDOWN_IN_PROGRESS, "the node is drained");
+        let labels = |cmd: Document| with_retryable_labels(drained(), &cmd).labels;
+        let txn = Value::Int64(3);
+        // A retryable write (`txnNumber` without `autocommit`): the driver repeats the statement
+        // on another node.
+        for name in ["insert", "update", "delete", "findAndModify", "bulkWrite"] {
+            let cmd = Document::new().with(name, "c").with("txnNumber", txn.clone());
+            assert_eq!(labels(cmd), [RETRYABLE_WRITE_ERROR], "{name}");
+        }
+        // Without `txnNumber`: no label.
+        assert!(labels(Document::new().with("insert", "c")).is_empty());
+        assert!(labels(Document::new().with("find", "c")).is_empty());
+        // Inside a transaction: the transaction is repeated, its commit and abort retried.
+        let in_txn = |name: &str| {
+            Document::new().with(name, 1).with("txnNumber", txn.clone()).with("autocommit", false)
+        };
+        assert_eq!(labels(in_txn("insert")), [TRANSIENT_TRANSACTION_ERROR]);
+        assert_eq!(labels(in_txn("find")), [TRANSIENT_TRANSACTION_ERROR]);
+        assert_eq!(labels(in_txn(COMMIT_TRANSACTION)), [RETRYABLE_WRITE_ERROR]);
+        assert_eq!(labels(in_txn(ABORT_TRANSACTION)), [RETRYABLE_WRITE_ERROR]);
+        // `autocommit` without `txnNumber` is no transaction for the labels.
+        assert!(labels(Document::new().with("find", "c").with("autocommit", false)).is_empty());
+        assert!(labels(Document::new()).is_empty(), "an empty command");
+        // Another category gets nothing; an error that already says how to retry keeps it.
+        let insert = Document::new().with("insert", "c").with("txnNumber", txn.clone());
+        let bad = CommandError::new(BAD_VALUE, "x");
+        assert!(with_retryable_labels(bad, &insert).labels.is_empty());
+        let own =
+            CommandError::new(NOT_WRITABLE_PRIMARY, "x").with_label(TRANSIENT_TRANSACTION_ERROR);
+        assert_eq!(with_retryable_labels(own, &insert).labels, [TRANSIENT_TRANSACTION_ERROR]);
+        let lost = CommandError::new(NOT_PRIMARY_OR_SECONDARY, "the lease is lost");
+        assert_eq!(with_retryable_labels(lost, &insert).labels, [RETRYABLE_WRITE_ERROR]);
+        // A tenant's refusal keeps the labels it has and, being of the category, takes the one
+        // its statement is retried on.
+        let refused = || {
+            CommandError::new(INGRESS_REQUEST_RATE_LIMIT_EXCEEDED, "x")
+                .with_label("SystemOverloadedError")
+                .with_label("RetryableError")
+        };
+        assert_eq!(
+            with_retryable_labels(refused(), &insert).labels,
+            ["SystemOverloadedError", "RetryableError", RETRYABLE_WRITE_ERROR]
+        );
+        assert_eq!(
+            with_retryable_labels(refused(), &in_txn("insert")).labels,
+            ["SystemOverloadedError", "RetryableError", TRANSIENT_TRANSACTION_ERROR]
+        );
+    }
 
     #[test]
     fn an_internal_error_carries_its_description() {

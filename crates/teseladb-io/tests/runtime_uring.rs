@@ -53,6 +53,8 @@ impl CoreLogic for Writer {
     fn resting(&self) -> bool {
         false
     }
+
+    fn wake(&mut self, _now: Nanos, _wall_ms: u64) {}
 }
 
 fn hello() -> Hello {

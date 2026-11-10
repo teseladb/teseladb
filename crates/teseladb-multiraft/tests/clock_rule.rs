@@ -7,6 +7,7 @@ mod common;
 use common::*;
 use teseladb_multiraft::{CoreConfig, Done, NodeClock, OpError, PeerFrame, ReadMode};
 use teseladb_raft::{MessageType, Role};
+use teseladb_types::Nanos;
 
 /// A frame from a peer whose HLC says nothing yet.
 const NO_HLC: teseladb_hlc::Hlc = teseladb_hlc::Hlc { physical: 0, logical: 0 };
@@ -240,4 +241,24 @@ fn a_frames_hlc_moves_the_receivers_clock_past_it() {
             assert!(hlc.physical >= ahead.physical, "{hlc:?}");
         }
     }
+}
+
+/// A core at rest wakes with `on_wake` alone (H-044): its marks come from the wall clock it reads
+/// then and a jump back is caught, as a tick would (005 FR-007), without the groups' tick.
+#[test]
+fn a_core_waking_from_rest_reads_and_checks_the_clock_before_any_mark() {
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.ticks(5);
+    // A second without ticks, as a core at rest.
+    let now = c.now + Nanos::from_secs(1);
+    let wall = WALL0 + now.as_millis();
+    let core = &mut c.nodes.get_mut(&l).unwrap().core;
+    core.on_wake(now, wall);
+    let mark = core.read_mark(now).expect("a mark in margin");
+    assert!(mark.physical >= wall, "{mark:?} below the wall clock read on waking {wall}");
+    // The wall clock jumps back 400 ms while the monotonic one moves on: no mark.
+    let later = now + Nanos::from_millis(10);
+    core.on_wake(later, wall - 400);
+    assert_eq!(core.read_mark(later), None, "a jump back is caught on waking");
 }

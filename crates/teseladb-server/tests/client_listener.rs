@@ -554,6 +554,53 @@ fn a_drained_node_closes_its_clients_port() {
     l.stop();
 }
 
+/// A drained node's `ShutdownInProgress` carries the label of D-148: a
+/// retryable write gets `RetryableWriteError`, so the driver retries it on another node instead
+/// of failing it (e2e of dedicated clusters, 10-11-2026: writes lost while a node was drained
+/// during a resize); a statement of a transaction gets `TransientTransactionError`.
+#[test]
+fn a_drained_node_labels_its_shutdown_as_the_driver_retries_it() {
+    let presence = Arc::new(NodePresence::default());
+    let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
+    let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
+    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
+    // A drained node drops new connections and closes each open one after its answer: one
+    // connection per command, opened while the node still serves.
+    let mut open: Vec<_> = (0..3)
+        .map(|i| {
+            let mut s = connect(&l);
+            send(&mut s, i, 0, &hello());
+            recv(&mut s).unwrap();
+            s
+        })
+        .collect();
+    presence.set(1, true);
+    let mut labels = |cmd: Document| {
+        let mut s = open.pop().unwrap();
+        send(&mut s, 9, 0, &cmd);
+        let (_, _, d) = recv(&mut s).unwrap();
+        assert_eq!(d.get("code"), Some(&Value::Int32(91)), "{d:?}");
+        match d.get("errorLabels") {
+            Some(Value::Array(a)) => a.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let insert = Document::new()
+        .with("insert", "c")
+        .with("documents", vec![Value::Document(Document::new().with("_id", 1))])
+        .with("txnNumber", Value::Int64(1))
+        .with("$db", "app");
+    assert_eq!(labels(insert), [Value::String("RetryableWriteError".into())]);
+    let in_txn = Document::new()
+        .with("find", "c")
+        .with("txnNumber", Value::Int64(2))
+        .with("autocommit", false)
+        .with("$db", "app");
+    assert_eq!(labels(in_txn), [Value::String("TransientTransactionError".into())]);
+    assert!(labels(Document::new().with("ping", 1).with("$db", "admin")).is_empty());
+    l.stop();
+}
+
 /// A running node answers the `hello`s waiting on its `topologyVersion` as soon as it applies a
 /// change of `topologyPresentation` (018 FR-015, T016): the awaitable `hello` of a driver's
 /// monitor returns well before its `maxAwaitTimeMS` with the replica set presentation and a

@@ -1036,15 +1036,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
 
     /// Global tick of the core; `wall_ms` is the node's wall clock.
     pub fn on_tick(&mut self, now: Nanos, wall_ms: u64) {
-        self.now = now;
-        self.wall_ms = wall_ms;
-        self.clock_rule.tick(now, wall_ms);
-        // The HLC is not below the highest time the node read while in margin (005 FR-005,
-        // FR-006), so the bound on disk covers that time across a restart: a node whose wall
-        // clock went back waits to pass it also after a restart.
-        self.cfg.clock.0.update(Hlc { physical: self.clock_rule.peak_ms(), logical: 0 });
-        self.apply_clock_rule(now);
-        self.keep_lease_clock();
+        self.on_wake(now, wall_ms);
         self.ping_and_suspect(now);
         let ids: Vec<GroupId> = self.groups.keys().copied().collect();
         for g in ids {
@@ -2493,6 +2485,23 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// applied): only a restart brings it back.
     pub fn has_stopped_group(&self) -> bool {
         self.groups.values().any(|g| g.stopped)
+    }
+
+    /// The clock part of a tick (H-044): the time and the wall clock read now, checked for a jump
+    /// (005 FR-007), the HLC raised to the highest time read in margin and the lease's clock. A
+    /// core that wakes from rest runs it before its work instead of a whole tick, so that every
+    /// mark still comes from a wall clock read and checked in that instant, and the groups' duties
+    /// wait for the next tick.
+    pub fn on_wake(&mut self, now: Nanos, wall_ms: u64) {
+        self.now = now;
+        self.wall_ms = wall_ms;
+        self.clock_rule.tick(now, wall_ms);
+        // The HLC is not below the highest time the node read while in margin (005 FR-005,
+        // FR-006), so the bound on disk covers that time across a restart: a node whose wall
+        // clock went back waits to pass it also after a restart.
+        self.cfg.clock.0.update(Hlc { physical: self.clock_rule.peak_ms(), logical: 0 });
+        self.apply_clock_rule(now);
+        self.keep_lease_clock();
     }
 
     /// Whether every group of the core is quiescent or stopped: nothing moves until something

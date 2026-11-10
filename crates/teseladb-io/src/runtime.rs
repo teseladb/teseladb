@@ -51,6 +51,10 @@ pub trait CoreLogic {
     type Msg: Send + 'static;
     /// Periodic tick; `wall_ms` is the node's wall clock.
     fn tick(&mut self, now: Nanos, wall_ms: u64);
+    /// The core leaves its rest for work that arrived: the clock part of a tick, so that what
+    /// the work stamps comes from a wall clock read now (005 FR-007); the rest of the tick comes
+    /// at its time (H-044).
+    fn wake(&mut self, now: Nanos, wall_ms: u64);
     /// Next disk operation, if any.
     fn poll_io(&mut self, now: Nanos) -> Option<IoOp>;
     /// Result of a disk operation, in submission order.
@@ -429,9 +433,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             let now = self.now();
             self.busy_at = now;
             if self.resting {
-                // The rest ends with a tick before the work, as every mark comes from a tick.
+                // The rest ends with the clock part of a tick before the work, as every mark
+                // comes from a wall clock read and checked then; the whole tick comes at its time.
                 self.resting = false;
-                self.logic.tick(now, wall_ms());
+                self.logic.wake(now, wall_ms());
                 self.next_tick = Nanos(now.0 + step.0);
             }
         }
