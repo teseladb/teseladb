@@ -56,6 +56,9 @@ pub const DOCUMENT: u8 = 1;
 /// memtable holds the range's log back (`StateMachine::release_floor`), so an idle range would
 /// keep its whole log and never take a snapshot.
 pub const IDLE_FLUSH: Nanos = Nanos::from_secs(1);
+/// Longest a memtable holds back a range's log before it is flushed, however busy its core:
+/// RefEngine's checkpoint period (`syncPeriodSecs`), after which RefDb removes old journal files.
+pub const CHECKPOINT_EVERY: Nanos = Nanos::from_secs(60);
 
 pub use crate::idle_flush::IdleFlush;
 /// How long a replica waits for a snapshot that does not come before it asks for its range as

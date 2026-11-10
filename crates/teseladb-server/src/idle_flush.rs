@@ -1,11 +1,12 @@
 //! When a core flushes its memtable without being full: once its ranges applied nothing for
-//! [`IDLE_FLUSH`] while one of them holds its log back, or at once, once per snapshot, while a
+//! [`IDLE_FLUSH`] while one of them holds its log back; at once, once per snapshot, while a
 //! snapshot someone waits for (a replica, or the split or replica change of its range) is held
-//! back by the release floor.
+//! back by the release floor; and every [`CHECKPOINT_EVERY`] while a range holds its log back,
+//! however busy the core is (a core that never goes quiet kept its whole WAL, 001 FR-005).
 
 use teseladb_types::Nanos;
 
-use crate::data::IDLE_FLUSH;
+use crate::data::{CHECKPOINT_EVERY, IDLE_FLUSH};
 
 /// The state of a core's flushes that the memtable's size does not ask for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -19,6 +20,8 @@ pub struct IdleFlush {
     /// The mark of the waiting snapshots the memtable was flushed for
     /// ([`teseladb_multiraft::MultiRaftCore::snapshot_flush_mark`]); `None` while none waits.
     pub served: Option<u64>,
+    /// When it last flushed.
+    pub flushed_at: Nanos,
 }
 
 impl IdleFlush {
@@ -36,16 +39,25 @@ impl IdleFlush {
         // A snapshot waited for is flushed for once per mark, however busy the core: the replica
         // that needs it, or the split or replica change of its range, waits for it.
         let for_snapshot = awaits.is_some() && awaits != self.served;
+        // What the memtable holds back of the log is flushed at least this often, as RefEngine
+        // checkpoints every 60 s so that RefDb can remove its old journal files: a core that
+        // always applies something is never idle.
+        let checkpoint = held && now.saturating_since(self.flushed_at) >= CHECKPOINT_EVERY;
         let mut next = IdleFlush { served: awaits, ..self };
-        if applied != self.seen {
+        let flush = if applied == self.seen {
+            let idle = !self.flushed && held && now.saturating_since(self.since) >= IDLE_FLUSH;
+            if idle {
+                next.flushed = true;
+            }
+            idle || for_snapshot || checkpoint
+        } else {
             next = IdleFlush { seen: applied, since: now, flushed: false, ..next };
-            return (next, for_snapshot);
+            for_snapshot || checkpoint
+        };
+        if flush {
+            next.flushed_at = now;
         }
-        let idle = !self.flushed && held && now.saturating_since(self.since) >= IDLE_FLUSH;
-        if idle {
-            next.flushed = true;
-        }
-        (next, idle || for_snapshot)
+        (next, flush)
     }
 }
 
@@ -61,7 +73,7 @@ mod tests {
     #[test]
     fn a_snapshot_waited_for_flushes_the_memtable_at_once() {
         let t0 = Nanos::from_secs(5);
-        let busy = IdleFlush { seen: 7, since: t0, flushed: false, served: None };
+        let busy = IdleFlush { seen: 7, since: t0, flushed: false, served: None, flushed_at: t0 };
         // Applied moved: no idle flush, but a waited snapshot flushes now.
         assert!(!busy.step(8, true, None, t0).1);
         let (next, flush) = busy.step(8, true, Some(1), t0);
@@ -74,13 +86,13 @@ mod tests {
         assert!(!flush);
         assert!(next.step(10, true, Some(2), t0).1);
         // Quiet for IDLE_FLUSH with the log held: the idle flush, once.
-        let quiet = IdleFlush { seen: 7, since: t0, flushed: false, served: None };
+        let quiet = IdleFlush { seen: 7, since: t0, flushed: false, served: None, flushed_at: t0 };
         assert!(!quiet.step(7, true, None, t0 + Nanos::from_millis(999)).1);
         let (quiet, flush) = quiet.step(7, true, None, t0 + IDLE_FLUSH);
         assert!(flush);
         assert!(!quiet.step(7, true, None, t0 + IDLE_FLUSH + IDLE_FLUSH).1);
         // Nothing held: nothing to flush.
-        let empty = IdleFlush { seen: 7, since: t0, flushed: false, served: None };
+        let empty = IdleFlush { seen: 7, since: t0, flushed: false, served: None, flushed_at: t0 };
         assert!(!empty.step(7, false, None, t0 + IDLE_FLUSH).1);
     }
 
@@ -92,7 +104,7 @@ mod tests {
     #[test]
     fn each_snapshot_that_begins_to_wait_gets_its_flush() {
         let t0 = Nanos::from_secs(5);
-        let busy = IdleFlush { seen: 7, since: t0, flushed: false, served: None };
+        let busy = IdleFlush { seen: 7, since: t0, flushed: false, served: None, flushed_at: t0 };
         let (next, flush) = busy.step(8, true, Some(4), t0);
         assert!(flush);
         let (next, flush) = next.step(9, true, Some(4), t0);
@@ -100,5 +112,27 @@ mod tests {
         let (next, flush) = next.step(10, true, Some(5), t0);
         assert!(flush, "another snapshot waits now, with no pass in between without one");
         assert!(!next.step(11, true, Some(5), t0).1);
+    }
+
+    /// A core that applies something every few seconds is never idle: what its memtable holds
+    /// back of the log is flushed every `CHECKPOINT_EVERY` (production, 10-11-2026: 6,4 GB of WAL
+    /// never released under a job queue that wrote all day).
+    #[test]
+    fn a_busy_core_flushes_what_holds_its_log_every_checkpoint() {
+        let t0 = Nanos::from_secs(5);
+        let mut s = IdleFlush { seen: 0, since: t0, flushed: false, served: None, flushed_at: t0 };
+        let mut flushes = Vec::new();
+        for second in 1..=130u64 {
+            let now = t0 + Nanos::from_secs(second);
+            let (next, flush) = s.step(second, true, None, now);
+            if flush {
+                flushes.push(second);
+            }
+            s = next;
+        }
+        assert_eq!(flushes, [60, 120], "once a minute while it holds the log back");
+        // Nothing held back: no flush, however long.
+        let free = IdleFlush { seen: 0, since: t0, flushed: false, served: None, flushed_at: t0 };
+        assert!(!free.step(1, false, None, t0 + Nanos::from_secs(600)).1);
     }
 }

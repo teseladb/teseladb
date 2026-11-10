@@ -211,6 +211,8 @@ struct Group<S> {
     /// A snapshot taken at an entry the state machine still holds in memory (`HOLDS_LOG`): it is
     /// saved once the release floor reaches it.
     pending_snap: Option<(SnapshotMeta, Bytes)>,
+    /// When it last took a snapshot or looked for one by age (001 FR-005).
+    snap_at: Nanos,
     /// The index whose state `pending_snap` holds.
     pending_state: u64,
     /// Reads served `(with the lease, with ReadIndex)` (005 FR-022).
@@ -579,6 +581,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             snap_index,
             snap_state: snap_index,
             pending_snap: None,
+            snap_at: self.now,
             pending_state: 0,
             terms: TermRuns::default(),
             read_counts: (0, 0),
@@ -1052,6 +1055,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             grp.raw.tick(&GroupStore::new(&self.store, g), &mut self.rng, now);
             self.declare_floor(g);
             self.save_pending_snapshot(g);
+            self.snapshot_by_age(g, now);
             self.drive(g);
         }
         self.retry_reads();
@@ -2023,9 +2027,23 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
     }
 
+    /// A group whose latest snapshot is older than `snapshot_age` takes one if it applied entries
+    /// since (001 FR-005), as AnotherProduct compacts each region's log on a periodic tick: otherwise a group
+    /// with little traffic holds the core's shared WAL from its oldest segment on. Without forcing
+    /// a flush: a snapshot past the LSM's floor waits for it as any other does.
+    fn snapshot_by_age(&mut self, g: GroupId, now: Nanos) {
+        let grp = &self.groups[&g];
+        if now.0 < grp.snap_at.0.saturating_add(self.cfg.snapshot_age.0) {
+            return;
+        }
+        self.take_snapshot_now(g);
+        self.groups.get_mut(&g).expect("group").snap_at = now;
+    }
+
     /// Takes the snapshot of `g` at its applied entry `index` of term `term`.
     fn take_snapshot(&mut self, g: GroupId, index: u64, term: u64) {
         let grp = self.groups.get_mut(&g).expect("group");
+        grp.snap_at = self.now;
         // The terms of the entries since the last snapshot join those below it; the log has them
         // all, since it is only compacted up to a snapshot.
         let mut terms = grp.terms.clone();

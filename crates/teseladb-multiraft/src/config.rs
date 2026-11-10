@@ -10,6 +10,10 @@ use teseladb_types::{GroupId, Nanos, NodeId};
 pub const DEFAULT_TIMEOUT: Nanos = Nanos::from_secs(5);
 /// Default entries applied past the latest snapshot that trigger a new one.
 pub const SNAPSHOT_ENTRIES: u64 = 4096;
+/// Default age past which a group with entries applied since its latest snapshot takes a new one
+/// (001 FR-005): the core's WAL releases a segment only once every group with entries in it has
+/// them under its snapshot, and a group far from `snapshot_entries` would hold it forever.
+pub const SNAPSHOT_AGE: Nanos = Nanos::from_secs(10);
 /// Default proposals a group keeps waiting for their entry.
 pub const MAX_PENDING_PROPOSALS: usize = 4096;
 /// Part of a snapshot transfer's deadline that does not depend on its size.
@@ -66,6 +70,8 @@ pub struct CoreConfig {
     pub op_timeout: Nanos,
     /// Entries applied past the latest snapshot that trigger a new one.
     pub snapshot_entries: u64,
+    /// Age of the latest snapshot past which a group with entries applied since takes a new one.
+    pub snapshot_age: Nanos,
     /// Proposals a group keeps waiting for their entry before answering `Overloaded`.
     pub max_pending_proposals: usize,
     /// Record what the simulator's Raft checker needs ([`crate::Observation`]).
@@ -86,6 +92,7 @@ impl CoreConfig {
             raft: RaftConfig::new(node_id),
             op_timeout: DEFAULT_TIMEOUT,
             snapshot_entries: SNAPSHOT_ENTRIES,
+            snapshot_age: SNAPSHOT_AGE,
             max_pending_proposals: MAX_PENDING_PROPOSALS,
             observe: false,
             instance: 0,

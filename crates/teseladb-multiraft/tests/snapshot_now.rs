@@ -45,3 +45,22 @@ fn a_snapshot_waiting_for_the_release_floor_holds_the_next_one_and_the_close() {
     assert!(!core.snapshot_now(G), "the waiting one is saved now, and nothing is new");
     assert!(core.snapshot_index(G).unwrap() > 0);
 }
+
+/// A group with little traffic snapshots by age (001 FR-005): the core's WAL only releases a
+/// segment once every group with entries in it has them under its snapshot, and a group far from
+/// `snapshot_entries` used to hold its segments and every later one forever.
+#[test]
+fn a_quiet_group_snapshots_once_its_snapshot_is_old_and_not_again_without_entries() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(3);
+    assert!(c.nodes.values().all(|n| n.core.snapshot_index(G) == Some(0)), "far from 4096");
+    // Ten seconds of ticks of 10 ms, and a few more.
+    c.ticks(1_010);
+    let at: Vec<u64> = c.nodes.values().map(|n| n.core.snapshot_index(G).unwrap()).collect();
+    assert!(at.iter().all(|&i| i > 0), "every replica snapshots by age: {at:?}");
+    c.ticks(1_010);
+    let again: Vec<u64> = c.nodes.values().map(|n| n.core.snapshot_index(G).unwrap()).collect();
+    assert_eq!(again, at, "nothing applied since: no new one");
+}
