@@ -50,6 +50,6 @@ production at the same time, in every cluster. Three nodes of 8 GB use 24 GB and
 - the versions published during the license term, with their updates;
 - support terms and, for enterprise customers, escrow of the source code, if agreed.
 
-The price goes by the total RAM of your nodes and the rights agreed. To ask for a license, contact VIUZI ESP through
+The price goes by the total RAM of your nodes and the rights agreed. To ask for a license, contact VIUZI ESP S.L. through
 https://teseladb.com/pricing, saying who your organization is, how much RAM your deployment uses and how you plan to use
 TeselaDB.
