@@ -43,7 +43,7 @@ use crate::coresm::{CoreOutput, CoreSm, Group0Holder};
 use crate::data::{DataCore, DataReq, DataSender, IoOwner};
 use crate::forward::{GATE_BEHIND, GATE_HELD, Request};
 use crate::frames::{from_wire, to_wire};
-use crate::liveness::{LivenessDriver, SharedLoads, core_load};
+use crate::liveness::{LivenessDriver, NodeRoles, SharedLoads, core_load};
 use crate::node::FOUNDER;
 use crate::ranges::Ranges;
 use crate::relocations::RelocateMsg;
@@ -273,6 +273,10 @@ pub struct NodeLogic {
     sessions: Option<Arc<Shared>>,
     /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
     loads: Option<(usize, Arc<SharedLoads>)>,
+    /// Where it publishes the roles the node logs (H-039).
+    roles: Option<Arc<NodeRoles>>,
+    /// Whether this core held the data range at its last publication.
+    held_data: bool,
     /// When this core next publishes its load in `loads`.
     load_next: Nanos,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
@@ -346,6 +350,8 @@ impl NodeLogic {
             op_lists: NodeQueries::default(),
             sessions: None,
             loads: None,
+            roles: None,
+            held_data: false,
             load_next: Nanos::ZERO,
             presence: None,
             http_forwards: None,
@@ -398,8 +404,31 @@ impl NodeLogic {
         NodeLogic { loads: Some((usize::from(core), loads)), ..self }
     }
 
-    /// The node's load for the heartbeat, after publishing this core's: the operations of its
-    /// data ranges' leaders count.
+    /// Publishes in `roles` what the node logs of its roles (H-039).
+    pub fn with_roles(self, roles: Arc<NodeRoles>) -> NodeLogic {
+        NodeLogic { roles: Some(roles), ..self }
+    }
+
+    /// Core 0's place in Group 0 and this core's role in the data range, if it holds it.
+    fn publish_roles(&mut self) {
+        let Some(roles) = self.roles.clone() else { return };
+        if let Some((me, _)) = &self.me {
+            let voter = self.core.conf(GROUP0).is_some_and(|c| c.voters.contains(me));
+            let leader = self.core.status(GROUP0).map_or(NodeId(0), |s| s.leader);
+            roles.publish_group0(voter, leader);
+        }
+        let data = teseladb_meta::bootstrap::DATA_RANGE;
+        match self.core.status(data) {
+            Some(st) => {
+                roles.publish_data(Some(st.role), st.hard_state.term);
+                self.held_data = true;
+            }
+            // The replica left this core: no replica, as the node used to log it.
+            None if std::mem::take(&mut self.held_data) => roles.publish_data(None, 0),
+            None => {}
+        }
+    }
+
     /// Publishes this core's load once per [`NODE_HEARTBEAT`] and, when core 0's heartbeat is due
     /// (`due`), returns the node's: the sum of the cores and the space of the disk. Each tick
     /// used to do both on every core, a `statvfs` and a walk of every group per tick and core
@@ -1681,6 +1710,7 @@ impl CoreLogic for NodeLogic {
         let due = self.me.is_some() && self.liveness.due(now);
         let load = self.node_load(now, due);
         self.publish_presence();
+        self.publish_roles();
         if let Some((me, _)) = &self.me {
             let out = self.liveness.tick_with(&mut self.core, (*me, load), now, wall_ms);
             self.outbound.extend(out);
@@ -1750,6 +1780,12 @@ impl CoreLogic for NodeLogic {
     fn io_settled(&self) -> bool {
         // The log waits for the rollback files (005 FR-010), so both go to disk before a stop.
         self.core.writes_settled() && self.rollback.idle()
+    }
+
+    fn resting(&self) -> bool {
+        // Every group at rest, nothing in the host and nothing on its way to the disk: the
+        // node's own periodic duties are timed in `Nanos` and tolerate the longer tick (H-037).
+        self.core.all_quiesced() && self.io_settled() && self.data.as_ref().is_none_or(|d| d.idle())
     }
 
     fn on_peer(&mut self, from: NodeId, msg: PeerMsg, now: Nanos) {

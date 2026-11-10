@@ -1360,6 +1360,12 @@ impl Backend for ServerBackend {
         &mut self,
         collection: u32,
     ) -> Result<Vec<teseladb_meta::indexes::SearchIndexEntry>, CommandError> {
+        // Core 0 publishes them with the indexes before it answers any change of them (009
+        // FR-021, H-039): no message, so the search builder's look every 250 ms no longer keeps
+        // core 0 awake.
+        if let Some(all) = self.h.auth.pins.published_search(collection) {
+            return Ok(all);
+        }
         let until = self.until();
         loop {
             let ask = |tx| NodeMsg::Catalog(CatalogReq::SearchIndexes(collection), tx);

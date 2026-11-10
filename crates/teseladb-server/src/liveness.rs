@@ -9,7 +9,7 @@
 //! directory's disk when its heartbeat is due, not at every tick.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use teseladb_io::peer::PeerMsg;
 use teseladb_meta::clock::ClockSample;
@@ -85,6 +85,59 @@ impl SharedLoads {
             sum = NodeLoad { free_bytes: total_bytes.saturating_sub(used), total_bytes, ..sum };
         }
         sum
+    }
+}
+
+/// Whether this node votes in Group 0, and the leader it knows.
+pub type Group0Place = (bool, NodeId);
+/// The role of this node's replica of the data range (`None`: no replica) and its term.
+pub type DataPlace = (Option<Role>, u64);
+
+/// What the node logs of its roles, as its cores publish them at their ticks (H-039): core 0 its
+/// place in Group 0 and the core that holds the data range its role there. The main thread reads
+/// them every 50 ms to log a change (005 SC-004) without a message to any core, which kept those
+/// cores and their groups from resting.
+#[derive(Debug, Default)]
+pub struct NodeRoles {
+    /// 0 unknown, 1 not a voter, 2 a voter.
+    group0_voter: AtomicU8,
+    group0_leader: AtomicU64,
+    /// 0 unknown, 1 no replica, else the role's code plus 2.
+    data_role: AtomicU8,
+    data_term: AtomicU64,
+}
+
+const ROLES: [Role; 5] =
+    [Role::Follower, Role::PreCandidate, Role::Candidate, Role::Leader, Role::Learner];
+
+impl NodeRoles {
+    /// Core 0's place in Group 0.
+    pub fn publish_group0(&self, voter: bool, leader: NodeId) {
+        self.group0_leader.store(leader.0, Ordering::Relaxed);
+        self.group0_voter.store(1 + u8::from(voter), Ordering::Release);
+    }
+
+    /// Whether this node votes in Group 0 and the leader it knows; `None` before core 0 said.
+    pub fn group0(&self) -> Option<Group0Place> {
+        let voter = self.group0_voter.load(Ordering::Acquire);
+        (voter != 0).then(|| (voter == 2, NodeId(self.group0_leader.load(Ordering::Relaxed))))
+    }
+
+    /// The role and term of this node's replica of the data range (`None`: no replica).
+    pub fn publish_data(&self, role: Option<Role>, term: u64) {
+        let code = role.and_then(|r| ROLES.iter().position(|x| *x == r)).map_or(1, |i| i as u8 + 2);
+        self.data_term.store(term, Ordering::Relaxed);
+        self.data_role.store(code, Ordering::Release);
+    }
+
+    /// The role and term of the data range's replica; `None` before its core said.
+    pub fn data(&self) -> Option<DataPlace> {
+        let code = self.data_role.load(Ordering::Acquire);
+        if code == 0 {
+            return None;
+        }
+        let role = usize::from(code).checked_sub(2).and_then(|i| ROLES.get(i)).copied();
+        Some((role, self.data_term.load(Ordering::Relaxed)))
     }
 }
 
@@ -369,6 +422,22 @@ mod tests {
         assert!(n.core.status(GROUP0).is_some_and(|s| s.role != Role::Leader));
         c.steps(10);
         assert_eq!(c.leader(), Some(l), "its own clock rule did not take it");
+    }
+
+    #[test]
+    fn the_roles_read_back_as_the_cores_published_them() {
+        let roles = NodeRoles::default();
+        assert_eq!((roles.group0(), roles.data()), (None, None), "nothing published yet");
+        roles.publish_group0(true, NodeId(3));
+        assert_eq!(roles.group0(), Some((true, NodeId(3))));
+        roles.publish_group0(false, NodeId(0));
+        assert_eq!(roles.group0(), Some((false, NodeId(0))));
+        for r in ROLES {
+            roles.publish_data(Some(r), 7);
+            assert_eq!(roles.data(), Some((Some(r), 7)));
+        }
+        roles.publish_data(None, 0);
+        assert_eq!(roles.data(), Some((None, 0)), "no replica");
     }
 
     #[test]

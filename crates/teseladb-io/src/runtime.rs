@@ -36,6 +36,15 @@ pub const STOP_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 /// while the core waits for it is noticed.
 const STOP_SETTLE_POLL: Duration = Duration::from_millis(10);
 
+/// How long a core goes without work, with its logic at rest, before it ticks every
+/// [`REST_TICK`].
+pub const REST_AFTER: Nanos = Nanos::from_secs(1);
+/// The tick of a core at rest. Linux stops the tick of an idle CPU the same way (`NO_HZ_IDLE`),
+/// and AnotherProduct ticks only the replicas that are not quiescent; the first work ends the rest
+/// with a tick, so a mark still comes from a wall clock read in the same tick that checked it for
+/// jumps (005 FR-007).
+pub const REST_TICK: Duration = Duration::from_millis(100);
+
 /// What a core does; the runtime only moves bytes and time.
 pub trait CoreLogic {
     /// Messages other threads send to this core.
@@ -62,6 +71,10 @@ pub trait CoreLogic {
     /// is in flight. A stop waits for it, so that a clean stop loses nothing the logic
     /// acknowledged (005 FR-010: a `w: 1` write is in the leader's log once confirmed).
     fn io_settled(&self) -> bool;
+    /// Whether the logic has nothing to do until something arrives: its groups are at rest and
+    /// none of its work waits for a tick. A core whose logic rests and that had no work for
+    /// [`REST_AFTER`] ticks every [`REST_TICK`] instead of every tick (H-037).
+    fn resting(&self) -> bool;
 }
 
 /// Input of a core's mailbox.
@@ -208,6 +221,10 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     worked: bool,
     /// Turns that spun, for the tests.
     spins: u64,
+    /// The last turn with work, or that handed something to the disk or the network.
+    busy_at: Nanos,
+    /// It ticks every [`REST_TICK`].
+    resting: bool,
 }
 
 fn wall_ms() -> u64 {
@@ -267,6 +284,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             fired: Vec::new(),
             worked: false,
             spins: 0,
+            busy_at: Nanos::ZERO,
+            resting: false,
         };
         Ok((rt, sender))
     }
@@ -405,13 +424,26 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         self.events = events;
         self.mailbox.drain_into(&mut self.inputs);
         self.worked = worked || !self.inputs.is_empty();
+        let step = Nanos(self.cfg.tick.as_nanos() as u64);
+        if self.worked {
+            let now = self.now();
+            self.busy_at = now;
+            if self.resting {
+                // The rest ends with a tick before the work, as every mark comes from a tick.
+                self.resting = false;
+                self.logic.tick(now, wall_ms());
+                self.next_tick = Nanos(now.0 + step.0);
+            }
+        }
         for input in std::mem::take(&mut self.inputs) {
             self.on_input(input)?;
         }
         let now = self.now();
         if now >= self.next_tick {
             self.logic.tick(now, wall_ms());
-            let step = Nanos(self.cfg.tick.as_nanos() as u64);
+            self.resting =
+                self.logic.resting() && now.0.saturating_sub(self.busy_at.0) >= REST_AFTER.0;
+            let step = if self.resting { Nanos(REST_TICK.as_nanos() as u64) } else { step };
             self.next_tick = Nanos(self.next_tick.0 + step.0).max(Nanos(now.0 + 1));
         }
         self.timers.advance(now.as_millis(), &mut self.fired);
@@ -448,19 +480,30 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     }
 
     /// Hands the logic's disk operations and frames to their executors.
+    /// Anything handed out keeps the core from resting ([`REST_AFTER`]).
     fn pump(&mut self, now: Nanos) {
-        if !self.submit_io(now) {
+        let (handed, alive) = self.submit_io(now);
+        if handed > 0 {
+            self.busy_at = now;
+        }
+        if !alive {
             return;
         }
         self.logic.take_outbound(&mut self.outbox);
+        if !self.outbox.is_empty() {
+            self.busy_at = now;
+        }
         for (node, msg) in std::mem::take(&mut self.outbox) {
             self.send_to(node, &msg);
         }
     }
 
-    /// Hands the logic's disk operations to their executor; `false` if the disk is gone.
-    fn submit_io(&mut self, now: Nanos) -> bool {
+    /// Hands the logic's disk operations to their executor: how many, and `false` if the disk
+    /// is gone.
+    fn submit_io(&mut self, now: Nanos) -> (usize, bool) {
+        let mut handed = 0;
         while let Some(op) = self.logic.poll_io(now) {
+            handed += 1;
             let gone = match &mut self.disk {
                 Exec::Thread(t) => t.submit(op).is_err(),
                 #[cfg(target_os = "linux")]
@@ -472,7 +515,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             if gone {
                 // The disk thread is gone: nothing can be made durable any more.
                 (self.stopped, self.disk_gone) = (true, true);
-                return false;
+                return (handed, false);
             }
         }
         // One `io_uring_enter` for the whole turn.
@@ -481,9 +524,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             && ring(d).flush().is_err()
         {
             (self.stopped, self.disk_gone) = (true, true);
-            return false;
+            return (handed, false);
         }
-        true
+        (handed, true)
     }
 
     fn on_input(&mut self, input: CoreInput<L::Msg>) -> io::Result<()> {

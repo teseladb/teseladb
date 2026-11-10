@@ -119,3 +119,37 @@ fn wake_leader_leaves_a_quiet_follower_alone() {
     assert!(!c.nodes.get_mut(&f).unwrap().core.wake_leader(G));
     assert!(c.nodes[&f].core.is_quiesced(G));
 }
+
+/// The core is at rest once every group of it is (H-037): before, a group still awake keeps it busy.
+#[test]
+fn a_core_rests_when_all_its_groups_are_quiet() {
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(10);
+    assert!(!c.nodes[&l].core.all_quiesced(), "just wrote");
+    c.ticks(400);
+    assert!(c.nodes[&l].core.all_quiesced());
+    assert!(c.nodes.get_mut(&l).unwrap().core.wake_leader(G));
+    assert!(!c.nodes[&l].core.all_quiesced(), "woken");
+}
+
+/// Alone in its group, the leader is the majority of the round (013 FR-012, H-039): the round is
+/// answered as it leaves and the quiet group is not woken; with other voters it still needs them.
+#[test]
+fn a_sole_voter_answers_its_confirm_round_without_waking() {
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(400);
+    assert!(c.nodes[&l].core.is_quiesced(G));
+    let now = c.now;
+    c.nodes.get_mut(&l).unwrap().core.send_confirm_round(G, now);
+    assert!(c.nodes[&l].core.is_quiesced(G), "still quiet");
+    assert_eq!(c.nodes[&l].core.quorum_heard_at(G), Some(now), "heard as it left");
+    c.ticks(5);
+    let later = c.now;
+    c.nodes.get_mut(&l).unwrap().core.send_confirm_round(G, later);
+    assert_eq!(c.nodes[&l].core.quorum_heard_at(G), Some(later));
+    assert!(c.nodes[&l].core.all_quiesced());
+}

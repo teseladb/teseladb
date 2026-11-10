@@ -175,3 +175,16 @@ fn a_state_without_closed_marks_has_none() {
     assert!(!NoRange.frozen() && NoRange.end().is_none() && NoRange.checksum_request().is_none());
     assert_eq!(NoRange.gc_threshold(), Hlc { physical: 0, logical: 0 });
 }
+
+#[test]
+fn a_range_with_no_other_replica_writes_no_closed_mark_in_its_log() {
+    let mut c = Cluster::single();
+    let l = c.elect();
+    let last = |c: &Cluster| c.nodes[&l].core.status(G).unwrap().last_index;
+    let before = last(&c);
+    // Past several `LOG_EVERY` and past the moment the leader goes quiet and loses its lease.
+    c.ticks(12 * SECOND);
+    // Nobody reads a closed mark from its log: no follower and no change stream.
+    assert_eq!(last(&c), before, "entries written while idle");
+    assert_eq!(c.nodes[&l].core.state_machine(G).unwrap().closed_mark(), None);
+}

@@ -1237,6 +1237,11 @@ impl RangeHost {
     /// holding now and at the end of the span, and no split or merge in progress (the keys may
     /// change range). The embedder takes the replies after `poll`, so a write is answered after
     /// the view that shows it.
+    /// Whether no request waits in the host (H-037).
+    pub fn idle(&self) -> bool {
+        self.reqs.is_empty()
+    }
+
     fn publish_views<S: StateMachine + RangeState>(&mut self, core: &MultiRaftCore<S>, now: Nanos) {
         self.lsm.borrow().publish();
         let shared = self.lsm.borrow().shared();

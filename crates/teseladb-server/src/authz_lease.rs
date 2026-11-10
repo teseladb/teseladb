@@ -16,7 +16,7 @@ use teseladb_auth::lease_driver::{FenceMsg, Group0Host, Group0View, LeaseDriver}
 use teseladb_hlc::guard::MAX_CLOCK_OFFSET_MS;
 use teseladb_io::peer::PeerMsg;
 use teseladb_meta::group0::{GROUP0, Group0Sm};
-use teseladb_meta::indexes::{IndexEntry, Indexes};
+use teseladb_meta::indexes::{IndexEntry, Indexes, SearchIndexEntry};
 use teseladb_meta::liveness::NODE_HEARTBEAT;
 use teseladb_multiraft::{MultiRaftCore, StateMachine};
 use teseladb_raft::Role;
@@ -127,6 +127,14 @@ impl CatalogPins {
             }
             self.release(pin);
         }
+    }
+
+    /// The search indexes of `collection` as core 0 published them, without a pin: no write
+    /// waits for their changes (009 FR-021, H-039). `None` while nothing is published.
+    pub fn published_search(&self, collection: u32) -> Option<Vec<SearchIndexEntry>> {
+        let published = self.published.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_, indexes) = published.as_ref()?;
+        Some(indexes.search_of(collection).cloned().collect())
     }
 
     /// Pins a read of the catalog at index `at`; the pin's number.
@@ -822,6 +830,28 @@ mod tests {
         assert_eq!(pins.acked_with(9, now, &|c| (c == 7).then_some(8)), 5);
         pins.release(pin);
         assert_eq!(pins.acked_with(9, now, &|c| (c == 7).then_some(8)), 9);
+    }
+
+    #[test]
+    fn the_published_search_indexes_are_read_without_a_message_nor_a_pin() {
+        let pins = CatalogPins::default();
+        assert!(pins.published_search(7).is_none(), "nothing published yet: the message path");
+        let mut idx = Indexes::default();
+        let entry = SearchIndexEntry {
+            id: [1; 12],
+            collection: 7,
+            name: "default".to_owned(),
+            kind: teseladb_meta::indexes::SearchIndexKind::Search,
+            definition: Vec::new(),
+            status: teseladb_meta::indexes::SearchIndexStatus::Ready,
+            version: 2,
+            defined_ms: 0,
+        };
+        idx.search.insert((7, "default".to_owned()), entry.clone());
+        pins.publish(5, Arc::new(idx));
+        assert_eq!(pins.published_search(7), Some(vec![entry]));
+        assert_eq!(pins.published_search(8), Some(Vec::new()), "another collection");
+        assert_eq!(pins.acked(9, Nanos::ZERO), 5, "no pin held");
     }
 
     #[test]

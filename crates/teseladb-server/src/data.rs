@@ -801,6 +801,11 @@ impl DataCore {
         }
     }
 
+    /// Whether no request waits in the host (H-037).
+    pub fn idle(&self) -> bool {
+        self.host.idle()
+    }
+
     /// Moves the host's requests, the replicas, the leaders' duties and the transfers.
     pub fn poll(&mut self, core: &mut MultiRaftCore<CoreSm>, (now, wall_ms): (Nanos, u64)) {
         self.wall_ms = wall_ms;

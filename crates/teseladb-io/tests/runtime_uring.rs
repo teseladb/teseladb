@@ -49,6 +49,10 @@ impl CoreLogic for Writer {
     fn io_settled(&self) -> bool {
         self.io.is_empty()
     }
+
+    fn resting(&self) -> bool {
+        false
+    }
 }
 
 fn hello() -> Hello {

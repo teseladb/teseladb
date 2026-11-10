@@ -920,23 +920,25 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     let (mut voter, mut leading) = (false, false);
     let mut role = None;
     while !stop() && !node.shutdown_requested() {
-        if let Some(v) = node.view(STOP_POLL) {
-            let now_voter = v.voters.contains(&node.node_id());
-            if now_voter != voter {
-                voter = now_voter;
-                log.info("Group 0 membership", &[("voter", &voter), ("leader", &v.leader.0)]);
-            }
+        // As the cores published them at their last tick: asking the cores every 50 ms kept
+        // core 0 and the data range's core from resting (H-039).
+        let (group0, data) = node.roles();
+        if let Some((now_voter, leader)) = group0
+            && now_voter != voter
+        {
+            voter = now_voter;
+            log.info("Group 0 membership", &[("voter", &voter), ("leader", &leader.0)]);
         }
-        if let Some(s) = node.data_status(STOP_POLL) {
-            if role != Some((s.role, s.term)) {
-                role = Some((s.role, s.term));
-                let name = s.role.map_or_else(|| "none".to_string(), |r| format!("{r:?}"));
-                log.info("data range role", &[("role", &name), ("term", &s.term)]);
+        if let Some((now_role, term)) = data {
+            if role != Some((now_role, term)) {
+                role = Some((now_role, term));
+                let name = now_role.map_or_else(|| "none".to_string(), |r| format!("{r:?}"));
+                log.info("data range role", &[("role", &name), ("term", &term)]);
             }
-            let now_leading = s.role == Some(teseladb_raft::Role::Leader);
+            let now_leading = now_role == Some(teseladb_raft::Role::Leader);
             if now_leading != leading {
                 leading = now_leading;
-                log.info("data range leadership", &[("leader", &leading), ("term", &s.term)]);
+                log.info("data range leadership", &[("leader", &leading), ("term", &term)]);
             }
         }
         crate::log::drain(log);

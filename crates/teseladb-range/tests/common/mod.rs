@@ -57,6 +57,11 @@ pub fn id(i: u64) -> NodeId {
 
 impl Cluster {
     pub fn new(lsm: LsmConfig, pending: usize) -> Cluster {
+        Cluster::of(3, lsm, pending)
+    }
+
+    /// The range on `nodes` voters.
+    pub fn of(nodes: u64, lsm: LsmConfig, pending: usize) -> Cluster {
         let mut c = Cluster {
             nodes: BTreeMap::new(),
             now: Nanos::ZERO,
@@ -65,8 +70,8 @@ impl Cluster {
             wall_ahead: 0,
             skew: BTreeMap::new(),
         };
-        let voters: Vec<NodeId> = (1..=3).map(id).collect();
-        for i in 1..=3 {
+        let voters: Vec<NodeId> = (1..=nodes).map(id).collect();
+        for i in 1..=nodes {
             let mut disk = MemDisk::new();
             let clock = NodeClock::for_node(id(i));
             let store = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap().0;
@@ -92,6 +97,11 @@ impl Cluster {
 
     pub fn standard() -> Cluster {
         Cluster::new(LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() }, 1024)
+    }
+
+    /// The range on a single voter, as on a node of its own.
+    pub fn single() -> Cluster {
+        Cluster::of(1, LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() }, 1024)
     }
 
     pub fn wall(&self) -> u64 {

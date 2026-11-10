@@ -68,6 +68,8 @@ struct Toy {
     one_by_one: bool,
     /// Operations handed out and not done yet.
     in_flight: usize,
+    /// Says it is at rest ([`CoreLogic::resting`]).
+    rests: bool,
 }
 
 fn ack(req: u64) -> PeerMsg {
@@ -155,6 +157,10 @@ impl CoreLogic for Toy {
 
     fn io_settled(&self) -> bool {
         self.io.is_empty() && self.in_flight == 0
+    }
+
+    fn resting(&self) -> bool {
+        self.rests
     }
 }
 
@@ -624,4 +630,45 @@ fn an_idle_core_sleeps_without_spinning_and_spins_only_after_work() {
         rt.turn().unwrap();
     }
     assert_eq!(rt.spins(), 1);
+}
+
+#[test]
+fn a_core_at_rest_ticks_ten_times_less_and_ticks_at_once_when_work_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let cfg = RuntimeConfig { tick: Duration::from_millis(10), seed: 60, tls: None, origin: None };
+    let toy = Toy { rests: true, ..Toy::default() };
+    let (mut rt, tx) = CoreRuntime::new(toy, MemDisk::new(), hello(60, &addr), cfg).unwrap();
+    let run_for = |rt: &mut CoreRuntime<Toy, MemDisk>, d: Duration| {
+        let start = Instant::now();
+        while start.elapsed() < d {
+            rt.turn().unwrap();
+        }
+    };
+    // A second at 10 ms before it rests, then 100 ms: about 100 + 10 in 2 s, against 200.
+    run_for(&mut rt, Duration::from_secs(2));
+    let rested = rt.logic().ticks;
+    assert!(rested <= 140, "{rested} ticks in 2 s");
+    // Work ends the rest: the turn that takes it ticks first, with a fresh wall clock.
+    tx.send(CoreInput::App(Cmd::Addr(NodeId(61), "x".into()))).ok().unwrap();
+    rt.turn().unwrap();
+    assert_eq!(rt.logic().ticks, rested + 1, "a tick before the work");
+    // And the ticks go back to every 10 ms: about 20 in 200 ms, against 2 at rest.
+    run_for(&mut rt, Duration::from_millis(200));
+    assert!(rt.logic().ticks >= rested + 8, "{} ticks", rt.logic().ticks - rested);
+}
+
+#[test]
+fn a_core_whose_logic_is_busy_never_rests() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let cfg = RuntimeConfig { tick: Duration::from_millis(10), seed: 62, tls: None, origin: None };
+    let (mut rt, _tx) =
+        CoreRuntime::new(Toy::default(), MemDisk::new(), hello(62, &addr), cfg).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(1_500) {
+        rt.turn().unwrap();
+    }
+    // Every 10 ms all along: about 150.
+    assert!(rt.logic().ticks >= 120, "{} ticks", rt.logic().ticks);
 }

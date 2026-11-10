@@ -164,6 +164,8 @@ struct Group<S> {
     stopped: bool,
     /// A received snapshot is being made durable: no new `Ready` until then.
     installing: bool,
+    /// The last confirm round a sole voter answered itself, with its term (013 FR-012, H-039).
+    alone_heard: Option<(u64, Nanos)>,
     /// A snapshot from the leader waiting for its data, with the rest of its `Ready`.
     parked: Option<(Snapshot, Deferred)>,
     /// The hard state of a parked `Ready` that a newer snapshot replaced: it goes with the next
@@ -561,6 +563,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             loading,
             stopped: false,
             installing: false,
+            alone_heard: None,
             parked: None,
             replaced_hs: None,
             commit_cap: None,
@@ -2313,13 +2316,36 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// the voters acknowledged ([`RawNode::quorum_heard_at`]): no later leader of `g` was elected
     /// before it. `None` if it does not lead `g` or no round of its term was acknowledged yet.
     pub fn quorum_heard_at(&self, g: GroupId) -> Option<Nanos> {
-        self.groups.get(&g).filter(|grp| !grp.stopped).and_then(|grp| grp.raw.quorum_heard_at())
+        let grp = self.groups.get(&g).filter(|grp| !grp.stopped)?;
+        let raft = grp.raw.quorum_heard_at();
+        // A round its sole voter answered, while it still leads alone in that term.
+        let alone = grp.alone_heard.filter(|(term, _)| self.leads_alone(g, grp, *term));
+        raft.max(alone.map(|(_, at)| at))
+    }
+
+    /// Whether group `g` (`grp`) is led by this replica, its only voter, in term `term`.
+    fn leads_alone(&self, g: GroupId, grp: &Group<S>, term: u64) -> bool {
+        let st = grp.raw.status(&GroupStore::new(&self.store, g));
+        st.role == Role::Leader
+            && st.hard_state.term == term
+            && grp.raw.conf().voters == [self.cfg.node_id]
     }
 
     /// As leader of `g`, sends a heartbeat round now (waking `g` if it is quiet): once a majority
     /// answers it, [`MultiRaftCore::quorum_heard_at`] reaches the time it left.
     pub fn send_confirm_round(&mut self, g: GroupId, now: Nanos) {
         self.now = now;
+        // Alone in its group the leader is the majority: the round is answered as it leaves,
+        // and the quiet group is not woken for it (013 FR-012, H-039; anotherproduct answers a
+        // `ReadIndex` of a single-node cluster the same way).
+        if let Some(grp) = self.groups.get(&g).filter(|grp| !grp.stopped && !grp.installing) {
+            let term = grp.raw.status(&GroupStore::new(&self.store, g)).hard_state.term;
+            if self.leads_alone(g, grp, term) {
+                let at = grp.alone_heard.map_or(now, |(_, at)| at.max(now));
+                self.groups.get_mut(&g).expect("just read").alone_heard = Some((term, at));
+                return;
+            }
+        }
         let Ok(grp) = usable(&mut self.groups, g) else { return };
         if grp.installing {
             return;
@@ -2449,6 +2475,12 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// applied): only a restart brings it back.
     pub fn has_stopped_group(&self) -> bool {
         self.groups.values().any(|g| g.stopped)
+    }
+
+    /// Whether every group of the core is quiescent or stopped: nothing moves until something
+    /// arrives (H-037).
+    pub fn all_quiesced(&self) -> bool {
+        self.groups.values().all(|grp| grp.stopped || grp.raw.is_quiesced())
     }
 
     /// Groups with a state machine.

@@ -61,7 +61,7 @@ use crate::coresm::CoreSm;
 use crate::data::{DataCore, DataError, DataReply, DataReq, DataStatus};
 use crate::enroll::{Enroller, SECRET_LEN, Token};
 use crate::hosting::Hosting;
-use crate::liveness::SharedLoads;
+use crate::liveness::{DataPlace, Group0Place, NodeRoles, SharedLoads};
 use crate::logic::{Group0View, NodeLogic, NodeMsg};
 use crate::ranges::SPLIT_BYTES;
 use crate::routes::SharedRoutes;
@@ -514,6 +514,8 @@ struct CoreSpec {
     peer_tls: Option<PeerTls>,
     /// Where every core publishes its load for core 0's heartbeat (007 FR-010).
     loads: Arc<SharedLoads>,
+    /// Where the cores publish the roles the node logs (H-039).
+    roles: Arc<NodeRoles>,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
     presence: Option<Arc<NodePresence>>,
     /// Where core 0 hands the HTTP requests other nodes forward (019 FR-008).
@@ -596,7 +598,7 @@ fn build_core<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<NodeLogic, NodeE
     if let Some(s) = &spec.sessions {
         logic = logic.with_sessions(s.clone());
     }
-    logic = logic.with_loads(spec.core, spec.loads.clone());
+    logic = logic.with_loads(spec.core, spec.loads.clone()).with_roles(spec.roles.clone());
     if let Some(p) = &spec.presence {
         logic = logic.with_presence(p.clone());
     }
@@ -676,6 +678,8 @@ pub struct Node<D> {
     lsm: LsmConfig,
     /// Set by a client's `shutdown` (007 FR-018).
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// The roles the cores publish (H-039).
+    roles: Arc<NodeRoles>,
     _lock: Option<FileLock>,
 }
 
@@ -1015,6 +1019,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             cfg.clustertime_sealer.as_ref().map(|s| (s.clone(), Arc::new(KeySlot::default())));
         let loads = Arc::new(SharedLoads::new(usize::from(cores), cfg.data_dir.clone()));
         let presence = Arc::new(NodePresence::default());
+        let roles = Arc::new(NodeRoles::default());
         // One origin for the monotonic time of every core, and where each core publishes the
         // views of its ranges: the client workers read both (005 FR-028).
         let origin = Instant::now();
@@ -1062,6 +1067,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 clustertime_keys: if k == 0 { keys.clone() } else { None },
                 peer_tls: cfg.peer_tls.clone(),
                 loads: loads.clone(),
+                roles: roles.clone(),
                 presence: (k == 0).then(|| presence.clone()),
                 http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
                 hosting: hosting.clone(),
@@ -1291,6 +1297,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             cpus,
             lsm,
             shutdown,
+            roles,
             _lock: lock,
         })
     }
@@ -1362,6 +1369,12 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// Addresses the clients' port listens on (none if the node does not open it).
     pub fn client_addrs(&self) -> &[SocketAddr] {
         self.client.as_ref().map_or(&[], |c| c.addrs())
+    }
+
+    /// Whether this node votes in Group 0 with the leader it knows, and its replica's role and
+    /// term in the data range, as the cores published them at their last tick: no message (H-039).
+    pub fn roles(&self) -> (Option<Group0Place>, Option<DataPlace>) {
+        (self.roles.group0(), self.roles.data())
     }
 
     /// Core 0's view of Group 0; `None` if it does not answer within `timeout`.

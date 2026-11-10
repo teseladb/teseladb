@@ -123,6 +123,14 @@ impl RangeHost {
         if leased && now < l.log_close_at {
             return false;
         }
+        // Only another replica or a change stream reads the mark from the log: a range alone
+        // without streams keeps it in memory, and its quiet group is not woken by a write
+        // every close (007 FR-012, H-038 of the native tests; AnotherProduct carries the closed
+        // timestamps of idle ranges outside Raft for the same reason).
+        let alone = core.conf(g).is_some_and(|c| c.voters.len() + c.learners.len() <= 1);
+        if alone && !streams {
+            return false;
+        }
         l.log_close_at = now + LOG_EVERY;
         core.propose(g, &Command::SetClosedTs { closed: c }.encode(), now).is_ok()
     }
