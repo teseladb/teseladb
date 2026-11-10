@@ -12,7 +12,7 @@ teseladb-json = { version = "0.1.0", registry = "viuzi" }
 teseladb-crypto = { version = "0.1.0", registry = "viuzi" }
 teseladb-x509 = { version = "0.1.0", registry = "viuzi" }
 teseladb-tls = { version = "0.2.0", registry = "viuzi" }
-teseladb-bson = { version = "0.1.0", registry = "viuzi" }
+teseladb-bson = { version = "0.1.2", registry = "viuzi" }
 teseladb-compress = { version = "0.1.0", registry = "viuzi" }
 teseladb-deflate = { version = "0.1.0", registry = "viuzi" }
 teseladb-http = { version = "0.1.0", registry = "viuzi" }

@@ -37,6 +37,7 @@ pub mod diagnostic_capture;
 pub mod enroll;
 pub mod forward;
 pub mod frames;
+pub mod hlc_bound;
 pub mod hosting;
 pub mod http_listener;
 pub mod http_service;

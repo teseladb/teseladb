@@ -1,9 +1,10 @@
-//! The node's HLC and its upper bound in `node.meta` (005 FR-003): every core shares one clock,
-//! no mark goes out at or above the bound on disk, and a thread writes a new bound one second
-//! ahead half a second before marks reach the current one. On start the node waits until its
-//! physical clock passes the bound on disk, so a clock that went back never repeats a mark. While
-//! a write of the bound fails, proposals that reach it answer `Overloaded`; the thread retries and
-//! keeps the error for [`ClockKeeper::error`].
+//! The node's HLC and its upper bound in `hlc.bound` (005 FR-003, D-158): every core shares one
+//! clock, no mark goes out at or above the bound on disk, and a thread writes a new bound one
+//! second ahead half a second before marks reach the current one. On start the node waits until
+//! its physical clock passes the bound on disk, so a clock that went back never repeats a mark; a
+//! node that stops cleanly writes the exact bound, so its next start does not wait. While a write
+//! of the bound fails, proposals that reach it answer `Overloaded`; the thread retries and keeps
+//! the error for [`ClockKeeper::error`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -13,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use teseladb_hlc::wait_on_start;
 use teseladb_multiraft::NodeClock;
 use teseladb_raftlog::{Disk, NodeMeta, StorageError, write_node_meta};
+
+use crate::hlc_bound::BoundFile;
 use teseladb_types::NodeId;
 
 /// How often the thread checks whether a new bound is due.
@@ -23,13 +26,26 @@ pub(crate) fn wall_ms() -> u64 {
 }
 
 /// Writes a new bound if one is due.
-fn renew(clock: &NodeClock, disk: &mut dyn Disk, meta: &mut NodeMeta) -> Result<(), StorageError> {
+fn renew(clock: &NodeClock, disk: &mut dyn Disk, file: &mut BoundFile) -> Result<(), StorageError> {
     if let Some(bound) = clock.0.renewal() {
-        meta.hlc_upper_bound = bound;
-        write_node_meta(disk, meta)?;
+        file.write(disk, bound)?;
         clock.0.raise_bound(bound);
     }
     Ok(())
+}
+
+/// Seals the clock and writes its exact bound, in `hlc.bound` and in `node.meta` (which a binary
+/// before D-158 reads): the node gives no more marks.
+fn seal(
+    clock: &NodeClock,
+    disk: &mut dyn Disk,
+    file: &mut BoundFile,
+    meta: &mut NodeMeta,
+) -> Result<(), StorageError> {
+    let exact = clock.0.seal();
+    file.write(disk, exact)?;
+    meta.hlc_upper_bound = exact;
+    write_node_meta(disk, meta)
 }
 
 /// The thread that keeps the bound ahead.
@@ -46,37 +62,41 @@ impl ClockKeeper {
         self.error.lock().map_or(None, |e| e.clone())
     }
 
-    /// Stops the thread.
+    /// Stops the thread, which seals the clock and writes its exact bound: called once nothing
+    /// asks the clock for marks any more.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
         let _ = self.thread.join();
     }
 }
 
-/// Waits until the clock passes the bound in `meta` and starts the thread that keeps the bound
-/// ahead of the marks. `meta` is the node's `node.meta` on `disk`, with its identifier.
+/// Waits until the clock passes the bound on disk, the higher of `hlc.bound` and of `meta`, and
+/// starts the thread that keeps the bound ahead of the marks. `meta` is the node's `node.meta` on
+/// `disk`, with its identifier.
 pub fn start_clock<D: Disk + Send + 'static>(
     mut disk: D,
     mut meta: NodeMeta,
 ) -> Result<(NodeClock, ClockKeeper), StorageError> {
-    if let Some(until) = wait_on_start(meta.hlc_upper_bound, wall_ms()) {
+    let (mut file, bound) = BoundFile::open(&mut disk, meta.hlc_upper_bound)?;
+    if let Some(until) = wait_on_start(bound, wall_ms()) {
         while wall_ms() < until {
             thread::sleep(Duration::from_millis((until - wall_ms()).min(50)));
         }
     }
-    let clock = NodeClock::with_bound(NodeId(meta.node_id), meta.hlc_upper_bound);
+    let clock = NodeClock::with_bound(NodeId(meta.node_id), bound);
     let stop = Arc::new(AtomicBool::new(false));
     let error = Arc::new(Mutex::new(None));
     let (c, s, e) = (clock.clone(), stop.clone(), error.clone());
     let thread = thread::Builder::new()
         .name("hlc-bound".into())
         .spawn(move || {
+            // Nothing panics while holding the lock, so it is never poisoned.
+            let keep = |result| *e.lock().unwrap_or_else(PoisonError::into_inner) = result;
             while !s.load(Ordering::Acquire) {
-                let result = renew(&c, &mut disk, &mut meta).err();
-                // Nothing panics while holding the lock, so it is never poisoned.
-                *e.lock().unwrap_or_else(PoisonError::into_inner) = result;
+                keep(renew(&c, &mut disk, &mut file).err());
                 thread::sleep(PERIOD);
             }
+            keep(seal(&c, &mut disk, &mut file, &mut meta).err());
         })
         .map_err(|_| StorageError::Io { op: "spawn", errno: teseladb_raftlog::IoErrno::Io })?;
     Ok((clock, ClockKeeper { stop, error, thread }))
@@ -143,6 +163,10 @@ mod tests {
         assert!(until(|| clock.0.bound().is_some_and(|b| b > wall)));
         let first = clock.0.bound().unwrap();
         assert_eq!(keeper.error(), None);
+        // A mark asked for at the bound is refused and makes a renewal due at once.
+        let ask = || {
+            let _ = clock.0.now(first);
+        };
         fail.store(true, Ordering::Release);
         assert!(
             until(|| {

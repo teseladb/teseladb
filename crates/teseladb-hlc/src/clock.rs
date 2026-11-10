@@ -137,6 +137,21 @@ impl HlcClock {
         self.bound.fetch_max(bound, Ordering::AcqRel);
     }
 
+    /// The exact bound of a node that stops cleanly (D-158): one millisecond past the last mark
+    /// issued or received, which no mark reaches from then on. A mark taken while it seals either
+    /// is below the bound it returns or is refused.
+    pub fn seal(&self) -> u64 {
+        let mut exact = unpack(self.word.load(Ordering::SeqCst)).0 + 1;
+        loop {
+            self.bound.store(exact, Ordering::SeqCst);
+            let last = unpack(self.word.load(Ordering::SeqCst)).0;
+            if last < exact {
+                return exact;
+            }
+            exact = last + 1;
+        }
+    }
+
     /// The last mark issued or received.
     pub fn peek(&self) -> Hlc {
         let (ms, seq) = unpack(self.word.load(Ordering::Acquire));
@@ -161,7 +176,13 @@ impl HlcClock {
                 return Next::AboveBound;
             }
             let new = pack(nms, nseq, self.node);
-            match self.word.compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire) {
+            match self.word.compare_exchange_weak(cur, new, Ordering::SeqCst, Ordering::Acquire) {
+                // Checked again after it is taken: a bound sealed meanwhile ([`HlcClock::seal`])
+                // either saw this mark or is seen here.
+                Ok(_) if nms >= self.bound.load(Ordering::SeqCst) => {
+                    self.wanted.fetch_max(nms, Ordering::AcqRel);
+                    return Next::AboveBound;
+                }
                 Ok(_) => return Next::Mark(mark(nms, nseq, self.node)),
                 Err(seen) => cur = seen,
             }

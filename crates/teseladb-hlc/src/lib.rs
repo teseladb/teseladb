@@ -21,6 +21,6 @@ pub use clock::{
     node_of, seq_of, succ,
 };
 pub use guard::{ClockGuard, MAX_CLOCK_OFFSET_MS, PEER_WINDOW, PeerClocks, may_lead};
-pub use persist::{AHEAD_MS, RENEW_MS, wait_on_start};
+pub use persist::{AHEAD_MS, MAX_RECEIVED_AHEAD_MS, RENEW_MS, wait_on_start};
 pub use teseladb_keys::Hlc;
 pub use timestamp::{from_timestamp, to_timestamp};

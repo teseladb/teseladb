@@ -1708,7 +1708,13 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 let d = Deferred { number: rd.number, entries, hs, after, from, index: 0 };
                 self.install(g, snap, d)
             }
-            None => self.persist(g, rd.number, entries, hs, after),
+            // Raft drops a snapshot at or below what it committed, or one whose entries it has
+            // (a transfer that arrives again): nothing of it is being installed any more, and the
+            // group may close (H-047 of the native tests).
+            None => {
+                self.installing_from.remove(&g);
+                self.persist(g, rd.number, entries, hs, after)
+            }
         };
         if !ok {
             return;

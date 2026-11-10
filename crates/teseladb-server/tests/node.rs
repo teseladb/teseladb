@@ -344,39 +344,58 @@ fn wall_ms() -> u64 {
 
 fn bound_on_disk(dir: &Dir) -> u64 {
     let mut disk = FileDisk::open(&dir.0).unwrap();
+    let (_, bound) = teseladb_server::hlc_bound::read_bound(&mut disk).unwrap().expect("hlc.bound");
+    bound
+}
+
+fn meta_bound(dir: &Dir) -> u64 {
+    let mut disk = FileDisk::open(&dir.0).unwrap();
     teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta").hlc_upper_bound
 }
 
 #[test]
 fn the_clock_bound_stays_ahead_and_a_restart_waits_past_it() {
-    // 005 FR-003: no mark goes out above the bound in `node.meta`, which stays about a second
-    // ahead of the marks while the node runs; a node whose clock is behind the bound waits before starting.
+    // 005 FR-003, D-158: no mark goes out above the bound in `hlc.bound`, which stays at most
+    // `AHEAD_MS` ahead of the marks while the node runs; a node that stops cleanly writes the
+    // exact bound, and one whose clock is behind the bound waits before starting.
     let dir = Dir::new("hlc-bound");
     let n = start(&dir, Some(1), Vec::new()).unwrap();
     ready(&n);
-    // Never more than a second ahead. A thread that waited too long under load may leave it
+    // Never more than `AHEAD_MS` ahead. A thread that waited too long under load may leave it
     // behind the clock for a moment (no mark goes out then); it gets ahead again.
     let (bound, now) = (bound_on_disk(&dir), wall_ms());
     assert!(bound <= now + teseladb_hlc::AHEAD_MS, "bound {bound}, clock {now}");
-    let end = Instant::now() + READY;
+    let renewed = READY + Duration::from_millis(teseladb_hlc::AHEAD_MS);
+    let end = Instant::now() + renewed;
     while bound_on_disk(&dir) <= wall_ms() && Instant::now() < end {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(bound_on_disk(&dir) > wall_ms(), "the bound gets ahead of the clock");
     let bound = bound_on_disk(&dir);
+    let end = Instant::now() + renewed;
     while bound_on_disk(&dir) == bound && Instant::now() < end {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(bound_on_disk(&dir) > bound, "the bound moves while the node runs");
     assert!(n.clock_error().is_none());
+    let running = bound_on_disk(&dir);
+    n.stop();
+    // A clean stop leaves the exact bound, one millisecond past the last mark, in both files: no
+    // higher than the bound it ran under (a leader with a read cache takes its clock ahead of
+    // the wall clock by the cache's margin, so the exact bound may be ahead of it too).
+    let exact = bound_on_disk(&dir);
+    assert!(exact <= running, "exact bound {exact} above the running one {running}");
+    assert_eq!(meta_bound(&dir), exact);
+    let n = start(&dir, None, Vec::new()).unwrap();
+    assert!(bound_on_disk(&dir) >= exact, "the bound never goes back");
+    ready(&n);
     n.stop();
 
     // The bound is ahead of the clock, as after the clock went back.
     let ahead = wall_ms() + 700;
     let mut disk = FileDisk::open(&dir.0).unwrap();
-    let mut meta = teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta");
-    meta.hlc_upper_bound = ahead;
-    teseladb_raftlog::write_node_meta(&mut disk, &meta).unwrap();
+    teseladb_server::hlc_bound::BoundFile::open(&mut disk, ahead).unwrap();
+    drop(disk);
     let n = start(&dir, None, Vec::new()).unwrap();
     assert!(wall_ms() > ahead, "it started before its clock passed the bound");
     assert!(bound_on_disk(&dir) >= ahead, "the bound never goes back");

@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
-use teseladb_multiraft::{Done, Durable, GroupDesc, GroupImport, OpError, OpId};
+use teseladb_multiraft::{Done, Durable, GroupDesc, GroupImport, OpError, OpId, StateMachine};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Command;
 use teseladb_range::host::{RangeHost, ReqId, WriteReq};
@@ -64,8 +64,8 @@ const HANDOVER_FILES: u32 = 1 << 21;
 
 /// A hand-over of the range on one node, from core `from` to core `to`.
 enum Move {
-    /// The old core exports the range's intervals.
-    Exporting { jobs: Vec<u64>, files: Vec<FileRef>, dir: String },
+    /// The old core exports the range's intervals; `at` is the index its copy had applied then.
+    Exporting { jobs: Vec<u64>, files: Vec<FileRef>, dir: String, at: u64 },
     /// The target core removes a copy imported before a restart and never started.
     Dropping { imp: GroupImport, bytes: Vec<Vec<u8>> },
     /// The target core empties what its LSM kept of the range.
@@ -440,7 +440,7 @@ impl RelocateWorkload {
         let Some(x) = w.cluster_core(node, from) else { return };
         // `running` found the group there: it is the range.
         let sm = x.state_machine(G).and_then(as_range).expect("the range");
-        let intervals = sm.intervals();
+        let (intervals, at) = (sm.intervals(), sm.applied_index());
         let to = match sm.relocated() {
             Some((t, _)) if sm.halted() => t,
             _ => return,
@@ -452,7 +452,7 @@ impl RelocateWorkload {
             .iter()
             .map(|(s, e)| lsm.borrow_mut().export(s, e, NEWEST, dir.clone().into()))
             .collect();
-        self.moves.insert(node, (from, to, Move::Exporting { jobs, files: vec![], dir }));
+        self.moves.insert(node, (from, to, Move::Exporting { jobs, files: vec![], dir, at }));
         w.pump(node, from);
     }
 
@@ -470,7 +470,7 @@ impl RelocateWorkload {
             return;
         }
         let next = match m {
-            Move::Exporting { mut jobs, mut files, dir } => {
+            Move::Exporting { mut jobs, mut files, dir, at } => {
                 let done = &mut w.nodes[node as usize].cores[from as usize].lsm_done.exported;
                 for (id, f) in std::mem::take(done) {
                     match jobs.iter().position(|j| *j == id) {
@@ -482,9 +482,9 @@ impl RelocateWorkload {
                     }
                 }
                 if !jobs.is_empty() {
-                    Some(Move::Exporting { jobs, files, dir })
+                    Some(Move::Exporting { jobs, files, dir, at })
                 } else {
-                    self.hand(w, node, (from, to), (files, dir))
+                    self.hand(w, node, (from, to), (files, dir, at))
                 }
             }
             Move::Dropping { imp, bytes } => {
@@ -571,18 +571,21 @@ impl RelocateWorkload {
         w: &mut World,
         node: u32,
         (from, to): (u16, u16),
-        (files, dir): (Vec<FileRef>, String),
+        (files, dir, at): (Vec<FileRef>, String, u64),
     ) -> Option<Move> {
         let c = w.cluster_core(node, from).expect("powered on and not frozen");
-        // Restored from its snapshot, its state does not move it: it runs on there.
-        if !c.state_machine(G).and_then(as_range).is_some_and(RangeSm::halted) {
+        // Restored from its snapshot, its state does not move it: it runs on there. A halted copy
+        // that installed a snapshot while its export ran holds a newer state than its files: it
+        // is exported again, as the server does (H-046 of the native tests).
+        let sm = c.state_machine(G).and_then(as_range);
+        if !sm.is_some_and(|sm| sm.halted() && sm.applied_index() == at) {
             remove_tree(&mut w.nodes[node as usize].cores[from as usize].disk, &dir);
             return None;
         }
         let c = w.cluster_core(node, from).expect("powered on and not frozen");
         // Something of the group is in flight with the disk: it goes on the next turn.
         let Ok(imp) = c.export_group(G) else {
-            return Some(Move::Exporting { jobs: vec![], files, dir });
+            return Some(Move::Exporting { jobs: vec![], files, dir, at });
         };
         if let Some((_, host)) = self.hosts.get_mut(&node) {
             host.remove_range(G);

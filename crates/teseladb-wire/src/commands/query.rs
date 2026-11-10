@@ -233,7 +233,9 @@ impl Plan {
             return Ok(None);
         };
         match &self.projection {
-            None => Ok(Some(Document::from(doc))),
+            // A document read back is canonical BSON (it was stored as `to_bytes` wrote it): the
+            // reply copies its bytes instead of building and writing its values again (H-009c).
+            None => Ok(Some(Document::from_canonical(doc))),
             Some(p) => {
                 let pctx = ProjectionContext { matcher: ctx, position, sort_key, index_key };
                 p.apply(doc, &pctx).map(Some).map_err(from_mql)

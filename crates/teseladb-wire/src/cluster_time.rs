@@ -7,7 +7,7 @@
 //! on a `refrouter` without `--keyFile`.
 
 use teseladb_auth::clustertime::{self, ClusterTimeError, KEY_LEN, Time};
-use teseladb_hlc::AHEAD_MS;
+use teseladb_hlc::MAX_RECEIVED_AHEAD_MS;
 use teseladb_mql::decimal_saturating;
 use teseladb_bson::{Document, Value};
 
@@ -158,7 +158,7 @@ pub fn check(cmd: &Document, name: &str, node: &NodeInfo) -> Result<(), CommandE
 
 /// Takes the `$clusterTime` of command `name`, already checked, into the node's clock (008
 /// FR-013), as a `refrouter` 9.0.4 advances its clock with it: a write that follows lands above what
-/// the client saw, even on another node. One more than [`AHEAD_MS`] ahead of the node's wall
+/// the client saw, even on another node. One more than [`MAX_RECEIVED_AHEAD_MS`] ahead of the node's wall
 /// clock fails with 205 and the node's clock is left alone (DV-101): a `refrouter` allows 365 days,
 /// but the HLC's bound on disk would then keep the node from starting again until its wall clock
 /// passed it.
@@ -170,7 +170,7 @@ pub fn take<B: Backend + ?Sized>(
     let Some(given) = parse(cmd, name)? else { return Ok(()) };
     let mark = teseladb_hlc::from_timestamp((given.time.secs, given.time.inc));
     let wall = backend.wall_ms();
-    if mark.physical > wall.saturating_add(AHEAD_MS) {
+    if mark.physical > wall.saturating_add(MAX_RECEIVED_AHEAD_MS) {
         let msg = format!(
             "New $clusterTime, {}, is too far from this node's wall clock time, {}.",
             given.time.secs,

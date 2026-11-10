@@ -6,8 +6,12 @@ use teseladb_bson::{Document, Value};
 /// The old binary subtype, written with its own length inside.
 const BINARY_OLD: u8 = 2;
 
-/// The bytes `doc` takes written as BSON: its length, each element and the closing zero.
+/// The bytes `doc` takes written as BSON: its length, each element and the closing zero; a
+/// document read back with its canonical bytes is as long as they are (H-009c).
 pub(crate) fn encoded_len(doc: &Document) -> usize {
+    if let Some(b) = doc.canonical_bytes() {
+        return b.len();
+    }
     5 + doc.iter().map(|(k, v)| element_len(k.len(), v)).sum::<usize>()
 }
 
@@ -76,5 +80,12 @@ mod tests {
             Document::new().with("x", Value::Document(d)).with("i", i)
         });
         assert_eq!(encoded_len(&deep), deep.to_bytes().expect("writes").len());
+        // A document read back with its bytes, and the same one once it changes.
+        let bytes = doc.to_bytes().expect("writes");
+        let mut kept =
+            Document::from_canonical(teseladb_bson::RawDoc::from_bytes(&bytes).expect("valid"));
+        assert_eq!(encoded_len(&kept), bytes.len());
+        kept.insert("more", 1);
+        assert_eq!(encoded_len(&kept), kept.to_bytes().expect("writes").len());
     }
 }

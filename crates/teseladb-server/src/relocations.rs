@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_meta::command::Group0Command;
-use teseladb_multiraft::{Durable, GroupImport, MultiRaftCore, OpError};
+use teseladb_multiraft::{Durable, GroupImport, MultiRaftCore, OpError, StateMachine};
 use teseladb_range::command::Command;
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
@@ -89,12 +89,13 @@ pub enum RelocateMsg {
 
 /// What the old core does with a range it hands over.
 enum Out {
-    /// Its intervals are being exported: the LSM jobs left and the files so far.
-    Exporting { target: u16, jobs: Vec<u64>, files: Vec<FileRef> },
+    /// Its intervals are being exported: the LSM jobs left and the files so far. `at` is the
+    /// index the copy had applied when the export was asked for: the files hold that state.
+    Exporting { target: u16, jobs: Vec<u64>, files: Vec<FileRef>, at: u64 },
     /// The exported files are being read.
-    Reading { target: u16, refs: Vec<FileRef>, data: Vec<Option<Vec<u8>>>, failed: bool },
-    /// Read whole: it goes once the group closes.
-    Read { target: u16, files: Vec<Vec<u8>> },
+    Reading { target: u16, refs: Vec<FileRef>, data: Vec<Option<Vec<u8>>>, failed: bool, at: u64 },
+    /// Read whole: it goes once the group closes, if its copy still holds the state `at`.
+    Read { target: u16, files: Vec<Vec<u8>>, at: u64 },
     /// Handed over: waits for the import.
     Sent { intervals: Intervals },
     /// Imported by the target core: its group goes.
@@ -237,22 +238,24 @@ impl Relocations {
         for d in core.take_durable() {
             self.durable(replicas, lsm, d);
         }
-        let halted: Vec<(GroupId, u16, Intervals)> = replicas
+        let halted: Vec<(GroupId, u16, Intervals, u64)> = replicas
             .open_groups()
             .filter(|g| !self.out.contains_key(g))
             .filter_map(|g| range_sm(core, g).map(|sm| (g, sm)))
             .filter(|(_, sm)| sm.halted())
-            .filter_map(|(g, sm)| sm.relocated().map(|(t, _)| (g, t, sm.intervals())))
+            .filter_map(|(g, sm)| {
+                sm.relocated().map(|(t, _)| (g, t, sm.intervals(), sm.applied_index()))
+            })
             .collect();
         // A halted replica is a running copy whose state moves it to another core: it is handed
         // over (`relocate::step` gives `Hand`).
-        for (g, target, intervals) in halted {
+        for (g, target, intervals, at) in halted {
             let dir = self.name("out", g);
             let jobs = intervals
                 .iter()
                 .map(|(start, end)| lsm.borrow_mut().export(start, end, NEWEST, dir.clone()))
                 .collect();
-            self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new() });
+            self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at });
         }
         self.send_read(core, host, replicas);
         self.retire(core, replicas);
@@ -330,8 +333,20 @@ impl Relocations {
             .map(|(g, _)| *g)
             .collect();
         for g in ready {
+            let at = match self.out.get(&g) {
+                Some(Out::Read { at, .. }) => *at,
+                _ => continue,
+            };
             let intervals = match range_sm(core, g) {
-                Some(sm) if sm.halted() => sm.intervals(),
+                Some(sm) if sm.halted() && sm.applied_index() == at => sm.intervals(),
+                // A halted copy applies no entry, but it may install a snapshot of the range
+                // while its export runs: the files hold the state before it, and the group would
+                // go with the state after it, so the writes between the two would be lost (H-046
+                // of the native tests). It is exported again.
+                Some(sm) if sm.halted() => {
+                    self.out.remove(&g);
+                    continue;
+                }
                 // Restored from its snapshot, its state does not move it: it runs on here.
                 Some(_) => {
                     self.out.remove(&g);
@@ -344,7 +359,7 @@ impl Relocations {
             host.remove_range(g);
             replicas.hold(g);
             let sent = Out::Sent { intervals: intervals.clone() };
-            let Some(Out::Read { target, files }) = self.out.insert(g, sent) else {
+            let Some(Out::Read { target, files, .. }) = self.out.insert(g, sent) else {
                 continue;
             };
             let h = Handover { group: g, from: self.core, imp, intervals, files };
@@ -489,12 +504,12 @@ impl Relocations {
     /// An LSM export finished; the files back if it is not one of this module's.
     pub fn on_exported(&mut self, id: u64, written: Vec<FileRef>) -> Result<(), Vec<FileRef>> {
         let found = self.out.iter_mut().find_map(|(g, o)| match o {
-            Out::Exporting { target, jobs, files } if jobs.contains(&id) => {
-                Some((*g, target, jobs, files))
+            Out::Exporting { target, jobs, files, at } if jobs.contains(&id) => {
+                Some((*g, target, jobs, files, *at))
             }
             _ => None,
         });
-        let Some((g, target, jobs, files)) = found else { return Err(written) };
+        let Some((g, target, jobs, files, at)) = found else { return Err(written) };
         jobs.retain(|j| *j != id);
         files.extend(written);
         if !jobs.is_empty() {
@@ -511,8 +526,8 @@ impl Relocations {
         }
         let data = vec![None; refs.len()];
         let next = match refs.is_empty() {
-            true => Out::Read { target, files: Vec::new() },
-            false => Out::Reading { target, refs, data, failed: false },
+            true => Out::Read { target, files: Vec::new(), at },
+            false => Out::Reading { target, refs, data, failed: false, at },
         };
         self.out.insert(g, next);
         Ok(())
@@ -599,7 +614,7 @@ impl Relocations {
 
     /// A read of file `i` of the export of `g` came back.
     fn read(&mut self, g: GroupId, i: usize, done: IoDone) {
-        let Some(Out::Reading { target, refs, data, failed }) = self.out.get_mut(&g) else {
+        let Some(Out::Reading { target, refs, data, failed, at }) = self.out.get_mut(&g) else {
             return;
         };
         match done {
@@ -617,9 +632,9 @@ impl Relocations {
             self.out.remove(&g);
             return;
         }
-        let target = *target;
+        let (target, at) = (*target, *at);
         let files = std::mem::take(data).into_iter().flatten().collect();
-        self.out.insert(g, Out::Read { target, files });
+        self.out.insert(g, Out::Read { target, files, at });
     }
 }
 
@@ -907,7 +922,7 @@ mod tests {
         // the state it really has: once read, its files go only if it is still halted.
         let mut n = Node::new();
         let c = &mut n.cores[0];
-        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new() });
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: 0 });
         let lsm = c.lsm.clone();
         c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, Nanos::from_secs(9));
         assert!(c.rel.take_msgs().is_empty() && c.r.is_open(G) && c.core.status(G).is_some());
@@ -1034,9 +1049,10 @@ mod tests {
     fn job_completions_of_other_jobs_go_back() {
         let mut n = Node::new();
         let c = &mut n.cores[1];
-        c.rel
-            .out
-            .insert(GroupId(55), Out::Exporting { target: 0, jobs: vec![5], files: Vec::new() });
+        c.rel.out.insert(
+            GroupId(55),
+            Out::Exporting { target: 0, jobs: vec![5], files: Vec::new(), at: 0 },
+        );
         c.rel.inbound.insert(
             GroupId(56),
             In::Ingesting { h: handover(GroupId(56), Vec::new()), refs: Vec::new(), job: 5 },
@@ -1075,7 +1091,8 @@ mod tests {
         let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
         n.run_until(halted, &mut [Fault::None; 2]);
         let c = &mut n.cores[0];
-        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new() });
+        let at = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at });
         // An entry on its way to the disk: the group cannot close yet.
         let payload = Command::Relocate { core: 1, intent: 7 }.encode();
         let build = |_| Ok::<_, std::convert::Infallible>(payload);
@@ -1085,6 +1102,28 @@ mod tests {
         c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, now);
         assert!(matches!(c.rel.out.get(&G), Some(Out::Read { .. })), "it waits");
         assert!(c.rel.take_msgs().is_empty() && c.core.status(G).is_some());
+    }
+
+    #[test]
+    fn an_export_older_than_the_state_it_would_go_with_is_exported_again() {
+        // H-046 of the native tests: a halted copy that installs a snapshot while its export runs
+        // would hand over the files from before the snapshot with the state after it.
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
+        n.run_until(halted, &mut [Fault::None; 2]);
+        let c = &mut n.cores[0];
+        let applied = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: applied - 1 });
+        let lsm = c.lsm.clone();
+        c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, n.now);
+        assert!(c.rel.take_msgs().is_empty(), "nothing is handed over");
+        assert!(c.core.status(G).is_some(), "the group stays open");
+        c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, n.now);
+        assert!(
+            matches!(c.rel.out.get(&G), Some(Out::Exporting { at, .. }) if *at == applied),
+            "exported again, at the state it goes with"
+        );
     }
 
     #[test]

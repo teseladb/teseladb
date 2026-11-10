@@ -1518,9 +1518,11 @@ impl<D: Disk + Send + 'static> Node<D> {
             h.stop();
         }
         self.acceptor.stop();
-        self.clock.stop();
         let senders: Vec<_> = self.senders.iter().map(CoreSenders::sender).collect();
-        stop_cores(&senders, self.threads)
+        let disks = stop_cores(&senders, self.threads);
+        // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
+        self.clock.stop();
+        disks
     }
 }
 

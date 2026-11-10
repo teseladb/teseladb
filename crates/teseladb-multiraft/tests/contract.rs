@@ -501,8 +501,8 @@ fn no_entry_is_proposed_at_or_above_the_bound_on_disk() {
     // A mark from a node far ahead takes the leader's clock to its bound.
     clock.update(teseladb_hlc::Hlc { physical: bound, logical: 0 });
     assert_eq!(c.propose(l, b"b"), Err(OpError::Overloaded));
-    assert_eq!(clock.renewal(), Some(bound + 1_000));
-    clock.raise_bound(bound + 1_000);
+    assert_eq!(clock.renewal(), Some(bound + teseladb_hlc::AHEAD_MS));
+    clock.raise_bound(bound + teseladb_hlc::AHEAD_MS);
     c.propose(l, b"b").unwrap();
     c.settle();
     // The followers took the mark: as the server's clock thread does, each writes a bound above

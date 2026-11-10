@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use teseladb_hlc::{
-    HlcClock, MAX_PHYSICAL, MAX_SEQ, Next, from_timestamp, node_of, seq_of, succ, to_timestamp,
-    wait_on_start,
+    AHEAD_MS, HlcClock, MAX_PHYSICAL, MAX_SEQ, Next, RENEW_MS, from_timestamp, node_of, seq_of,
+    succ, to_timestamp, wait_on_start,
 };
 use teseladb_keys::Hlc;
 
@@ -113,26 +113,29 @@ fn succ_is_the_next_mark_the_node_can_assign() {
 fn a_restart_never_assigns_below_what_was_assigned() {
     // A node whose `node.meta` holds no bound yet: nothing goes out until one is written.
     let c = HlcClock::with_bound(3, 0).unwrap();
-    assert_eq!(c.renewal(), Some(1_000), "an empty bound is due at once, below any mark");
-    c.raise_bound(1_000);
+    assert_eq!(c.renewal(), Some(AHEAD_MS), "an empty bound is due at once, below any mark");
+    c.raise_bound(AHEAD_MS);
     assert_eq!(c.renewal(), None, "no mark asked for yet");
-    assert_eq!(c.now(5_000), Next::AboveBound, "nothing above the persisted bound");
-    assert_eq!(c.renewal(), Some(6_000), "persist 6 000 first, above the mark asked for");
-    c.raise_bound(6_000);
-    assert_eq!(c.bound(), Some(6_000));
-    assert_eq!(take(&c, 5_000).physical, 5_000);
+    let far = AHEAD_MS + 5_000;
+    assert_eq!(c.now(far), Next::AboveBound, "nothing above the persisted bound");
+    assert_eq!(c.renewal(), Some(far + AHEAD_MS), "persist first, above the mark asked for");
+    c.raise_bound(far + AHEAD_MS);
+    assert_eq!(c.bound(), Some(far + AHEAD_MS));
+    assert_eq!(take(&c, far).physical, far);
     assert_eq!(c.renewal(), None);
-    // Half a second before the bound it is renewed, while marks keep going out below it.
-    assert_eq!(take(&c, 5_500).physical, 5_500);
-    assert_eq!(c.renewal(), Some(6_500));
+    // `RENEW_MS` before the bound it is renewed, while marks keep going out below it.
+    let near = far + AHEAD_MS - RENEW_MS;
+    assert_eq!(take(&c, near).physical, near);
+    assert_eq!(c.renewal(), Some(near + AHEAD_MS));
     // A mark received from a node ahead takes the clock past the bound: the renewal follows it.
-    c.update(mark(6_200, 0, 9));
-    assert_eq!(c.now(5_600), Next::AboveBound);
-    assert_eq!(c.renewal(), Some(7_200));
-    c.raise_bound(7_200);
-    c.raise_bound(6_100);
-    assert_eq!(c.bound(), Some(7_200), "an older write does not take the bound back");
-    assert_eq!(take(&c, 5_600), mark(6_200, 1, 3));
+    let ahead = far + AHEAD_MS + 200;
+    c.update(mark(ahead, 0, 9));
+    assert_eq!(c.now(near + 100), Next::AboveBound);
+    assert_eq!(c.renewal(), Some(ahead + AHEAD_MS));
+    c.raise_bound(ahead + AHEAD_MS);
+    c.raise_bound(far);
+    assert_eq!(c.bound(), Some(ahead + AHEAD_MS), "an older write does not take the bound back");
+    assert_eq!(take(&c, near + 100), mark(ahead, 1, 3));
     // After a restart with the physical clock behind, the node waits until it passes the bound.
     assert_eq!(wait_on_start(6_500, 4_000), Some(6_501));
     assert_eq!(wait_on_start(6_500, 6_501), None);
@@ -148,13 +151,57 @@ fn the_bound_follows_the_marks_and_not_an_idle_wall_clock() {
     // the bound with it; when NTP steps that clock back, a restart waits for the marks it gave
     // out, not for the time its clock read.
     let c = HlcClock::with_bound(3, 6_000).unwrap();
-    assert_eq!(take(&c, 5_000).physical, 5_000);
+    assert_eq!(take(&c, 1_000).physical, 1_000);
     assert_eq!(c.renewal(), None, "the wall clock alone does not renew it");
     // A mark asked for far ahead is refused and renews the bound above it.
     assert_eq!(c.now(60_000), Next::AboveBound);
-    assert_eq!(c.renewal(), Some(61_000));
-    c.raise_bound(61_000);
+    assert_eq!(c.renewal(), Some(60_000 + AHEAD_MS));
+    c.raise_bound(60_000 + AHEAD_MS);
     assert_eq!(take(&c, 60_000).physical, 60_000);
+}
+
+#[test]
+fn a_sealed_clock_gives_no_mark_at_or_past_its_exact_bound() {
+    // D-158: a node that stops cleanly writes one millisecond past its last mark.
+    let c = HlcClock::with_bound(3, 100_000).unwrap();
+    assert_eq!(take(&c, 50_000).physical, 50_000);
+    assert_eq!(c.seal(), 50_001);
+    assert_eq!(c.bound(), Some(50_001));
+    // The same millisecond still fits under it; the next one does not.
+    assert_eq!(take(&c, 50_000), mark(50_000, 1, 3));
+    assert_eq!(c.now(50_001), Next::AboveBound);
+    // A mark received past the bound is sealed with it.
+    c.update(mark(70_000, 0, 9));
+    assert_eq!(c.seal(), 70_001);
+}
+
+#[test]
+fn a_mark_taken_while_the_clock_seals_is_below_the_bound_or_refused() {
+    // Threads take marks with a wall clock that keeps moving while another seals: every mark given
+    // out is below the bound the seal returns.
+    for round in 0..200u64 {
+        let c = Arc::new(HlcClock::with_bound(3, u64::MAX - 1).unwrap());
+        let wall = Arc::new(std::sync::atomic::AtomicU64::new(1_000 + round));
+        let takers: Vec<_> = (0..4)
+            .map(|_| {
+                let (c, wall) = (c.clone(), wall.clone());
+                std::thread::spawn(move || {
+                    let mut given = Vec::new();
+                    for _ in 0..2_000 {
+                        let w = wall.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Next::Mark(m) = c.now(w) {
+                            given.push(m.physical);
+                        }
+                    }
+                    given
+                })
+            })
+            .collect();
+        std::thread::yield_now();
+        let exact = c.seal();
+        let given: Vec<u64> = takers.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        assert!(given.iter().all(|&m| m < exact), "a mark at or past {exact}");
+    }
 }
 
 #[test]
