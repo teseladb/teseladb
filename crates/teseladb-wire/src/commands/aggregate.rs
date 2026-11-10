@@ -1280,7 +1280,6 @@ fn planned_read<B: Backend + ?Sized>(
         return Ok(Some((docs, metas)));
     }
     let parsed = super::plan_exec::parsed_filter(&filter, vars)?;
-    let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
     let read = super::plan_exec::ReadPlan {
         filter: &filter,
         parsed: &parsed,
@@ -1295,7 +1294,8 @@ fn planned_read<B: Backend + ?Sized>(
         index_keys: index_keys && !super::query::id_point(&filter),
         key_only: false,
     };
-    if indexes.is_empty() || super::explain::matches_nothing(&parsed) {
+    // The planner builds the list of indexes itself: only whether there is one is asked here.
+    if !super::plan_exec::plannable_kind(&coll)? || super::explain::matches_nothing(&parsed) {
         return Ok(None);
     }
     let note = super::plan_exec::CacheNote {

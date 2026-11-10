@@ -1105,9 +1105,13 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             sort,
             // `min` and `max` take the plan's keys after it ran: it is not cut before.
             limit: a.limit.filter(|_| min_max.is_none()).map(|l| a.skip.saturating_add(l)),
-            hint: {
-                let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
-                super::hints::position(ctx.cmd.get("hint"), &indexes)?
+            // The indexes are read for a hint only: without one, the planner reads them.
+            hint: match ctx.cmd.get("hint") {
+                None => None,
+                Some(h) => {
+                    let indexes = super::plan_exec::plan_indexes(ctx.backend, &coll)?;
+                    super::hints::position(Some(h), &indexes)?
+                }
             },
             vars: a.vars.as_ref(),
             concern: a.concern,

@@ -193,13 +193,19 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
 ) -> Result<Vec<PlanIndex>, CommandError> {
-    if !matches!(
-        super::kinds::kind_of(coll)?,
-        CollectionKind::Normal | CollectionKind::Clustered { .. }
-    ) {
+    if !plannable_kind(coll)? {
         return Ok(Vec::new());
     }
     stored_indexes(backend, coll)
+}
+
+/// Whether the planner considers the indexes of `coll`: a plain or clustered collection, which
+/// always has its index of `_id` ([`plan_indexes`] gives none otherwise).
+pub(crate) fn plannable_kind(coll: &CollectionEntry) -> Result<bool, CommandError> {
+    Ok(matches!(
+        super::kinds::kind_of(coll)?,
+        CollectionKind::Normal | CollectionKind::Clustered { .. }
+    ))
 }
 
 /// The parts of an index that its catalog entries alone decide, with those entries: the
