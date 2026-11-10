@@ -42,6 +42,8 @@ pub struct Hot {
     /// Milliseconds up to which an operation that ended leaves nothing to the profiler or to the
     /// slow query log: `slowms` while no database is profiled or has a filter, `-1` otherwise.
     pub profiler_quiet_ms: AtomicI64,
+    /// The commands in progress, in stripes of their own locks (H-013).
+    pub ops: crate::ops::Ops,
 }
 
 impl Default for Hot {
@@ -55,6 +57,7 @@ impl Default for Hot {
             expression_memory: AtomicI64::new(i64::try_from(expression).unwrap_or(i64::MAX)),
             javascript_enabled: AtomicBool::new(true),
             profiler_quiet_ms: AtomicI64::new(super::profile::Profiler::default().quiet_ms()),
+            ops: crate::ops::Ops::default(),
         }
     }
 }

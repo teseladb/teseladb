@@ -9,7 +9,7 @@ use teseladb_bson::{Document, Value};
 
 use super::catalog::passes;
 use super::session::KillScope;
-use super::{Backend, Ctx, lock};
+use super::{Backend, Ctx};
 use crate::error::{
     BAD_VALUE, CommandError, FAILED_TO_PARSE, KILL_OP_FORMAT, KILL_OP_MISSING_OP, KILL_OP_OP_TYPE,
     KILL_OP_RANGE, OVERFLOW, SHARD_NOT_FOUND, UNAUTHORIZED,
@@ -170,7 +170,7 @@ pub fn kill_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
     match op_target(ctx.backend, v)? {
         Target::Local(id) => {
             if let Some(id) = id {
-                lock(ctx.shared).ops.kill(id);
+                super::hot::of(ctx.shared).ops.kill(id);
             }
             Ok(Document::new().with("ok", 1.0))
         }
@@ -178,7 +178,7 @@ pub fn kill_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
             let mine = ctx.backend.node();
             match (node, u32::try_from(id)) {
                 (Some(n), Ok(op)) if n == mine => {
-                    lock(ctx.shared).ops.kill(op);
+                    super::hot::of(ctx.shared).ops.kill(op);
                 }
                 (Some(n), Ok(op)) => ctx.backend.kill_everywhere(&KillScope::Op { node: n, op })?,
                 _ => {}
@@ -252,7 +252,8 @@ pub fn node_operations(
     now_ms: u64,
 ) -> Vec<Document> {
     let shard = super::shard_name(node);
-    lock(shared).ops.iter().map(|(id, op)| describe(id, op, now_ms, (&shard, host))).collect()
+    let ops = super::hot::of(shared).ops.snapshot();
+    ops.iter().map(|(id, op)| describe(*id, op, now_ms, (&shard, host))).collect()
 }
 
 /// The operations of every node of the cluster, this one's first, as `currentOp` describes

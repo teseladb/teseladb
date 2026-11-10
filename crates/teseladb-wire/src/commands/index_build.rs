@@ -19,7 +19,7 @@ use teseladb_range::read::ReadConcern;
 use super::crud::{MODIFY_CHUNK_KEYS, Writer};
 use super::mutation::{Bound, DocMutation, Rules};
 use super::query::documents_of;
-use super::{Backend, Shared, lock};
+use super::{Backend, Shared};
 use crate::error::{
     CommandError, DUPLICATE_KEY, FAILED_TO_PARSE, INTERNAL_ERROR, INTERRUPTED,
     UNKNOWN_REPL_WRITE_CONCERN,
@@ -191,22 +191,25 @@ impl<'a> BuildOp<'a> {
             progress: None,
             metrics: None,
         };
-        let id = lock(shared).ops.begin_named(op, |id| format!("{BUILD_DESC}{id}"));
+        let id = super::hot::of(shared).ops.begin_named(op, |id| format!("{BUILD_DESC}{id}"));
         BuildOp { shared, id }
     }
 
     /// Records how far the backfill went; whether `killOp` marked the build.
     fn report(&self, p: Progress) -> bool {
-        lock(self.shared).ops.get_mut(self.id).is_some_and(|o| {
-            o.progress = Some(p);
-            o.killed
+        let id = self.id;
+        super::hot::of(self.shared).ops.with(id, |t| {
+            t.get_mut(id).is_some_and(|o| {
+                o.progress = Some(p);
+                o.killed
+            })
         })
     }
 }
 
 impl Drop for BuildOp<'_> {
     fn drop(&mut self) {
-        lock(self.shared).ops.end(self.id);
+        super::hot::of(self.shared).ops.end(self.id);
     }
 }
 

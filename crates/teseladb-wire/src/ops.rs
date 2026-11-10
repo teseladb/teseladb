@@ -19,7 +19,7 @@ use teseladb_bson::{Document, RawDoc, Value};
 
 use crate::commands::session::KillScope;
 use crate::commands::tenants;
-use crate::commands::{Backend, Shared, WriteOp, lock};
+use crate::commands::{Backend, Shared, WriteOp};
 use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, INTERRUPTED, MAX_TIME_MS_EXPIRED};
 use crate::types::wrong_types;
 
@@ -283,11 +283,16 @@ impl OpTable {
             }
         }
         self.last = id;
+        self.insert_at(id, op);
+        id
+    }
+
+    /// Records `op` under `id`, which no running operation has ([`Ops::begin`] chose it).
+    fn insert_at(&mut self, id: u32, op: Op) {
         let cancel = Interrupt::default();
         cancel.0.store(op.killed, std::sync::atomic::Ordering::SeqCst);
         self.cancels.insert(id, cancel);
         self.ops.insert(id, op);
-        id
     }
 
     /// The operation ended.
@@ -353,6 +358,81 @@ impl OpTable {
     }
 }
 
+/// Stripes of the node's operations: operation `id` lives in stripe `id % OP_STRIPES`.
+const OP_STRIPES: usize = 16;
+
+/// The node's commands in progress, in stripes that each take their own lock (H-013 of the native
+/// tests): an operation begins and ends taking only its stripe's, not the node's, and with 8
+/// connections the node's lock was where their threads queued. `currentOp` and `killOp` go
+/// through the stripes; RefDb likewise registers each operation with its client, under that
+/// client's own lock, and `currentOp` visits the clients one by one.
+#[derive(Debug, Default)]
+pub struct Ops {
+    /// The last id given.
+    last: std::sync::atomic::AtomicU32,
+    stripes: [std::sync::Mutex<OpTable>; OP_STRIPES],
+}
+
+impl Ops {
+    fn stripe(&self, id: u32) -> std::sync::MutexGuard<'_, OpTable> {
+        let i = usize::try_from(id).unwrap_or(0) % OP_STRIPES;
+        // A thread that panicked while holding a stripe left it as it was: still usable.
+        self.stripes[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records `op` and gives its id: the next one after the last given, from 1, never 0, and
+    /// never one still in use.
+    pub fn begin(&self, op: Op) -> u32 {
+        loop {
+            let id = self.last.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_add(1);
+            if id == 0 {
+                continue;
+            }
+            let mut t = self.stripe(id);
+            if t.get(id).is_none() {
+                t.insert_at(id, op);
+                return id;
+            }
+        }
+    }
+
+    /// Records `op` with the `desc` its id gives it (an operation of the node itself) and
+    /// gives its id.
+    pub fn begin_named(&self, op: Op, desc: impl FnOnce(u32) -> String) -> u32 {
+        let id = self.begin(op);
+        if let Some(o) = self.stripe(id).get_mut(id) {
+            o.desc = Some(desc(id));
+        }
+        id
+    }
+
+    /// Runs `f` on the stripe that holds operation `id`.
+    pub fn with<R>(&self, id: u32, f: impl FnOnce(&mut OpTable) -> R) -> R {
+        f(&mut self.stripe(id))
+    }
+
+    /// The operation ended.
+    pub fn end(&self, id: u32) {
+        self.stripe(id).end(id);
+    }
+
+    /// Marks operation `id` for interruption; whether it was running.
+    pub fn kill(&self, id: u32) -> bool {
+        self.stripe(id).kill(id)
+    }
+
+    /// The operations in progress, by id.
+    pub fn snapshot(&self) -> Vec<(u32, Op)> {
+        let mut all: Vec<(u32, Op)> = Vec::new();
+        for i in 0..OP_STRIPES {
+            let t = self.stripes[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            all.extend(t.iter().map(|(id, op)| (id, op.clone())));
+        }
+        all.sort_unstable_by_key(|(id, _)| *id);
+        all
+    }
+}
+
 /// A backend whose every call first checks the operation's deadline and whether `killOp` marked
 /// it.
 pub struct Guarded<'a, B: Backend + ?Sized> {
@@ -382,16 +462,14 @@ pub struct Guarded<'a, B: Backend + ?Sized> {
 impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// Operation `id` of `shared`'s table, over `inner`, with its deadline.
     pub fn new(inner: &'a mut B, shared: &'a Shared, id: u32) -> Guarded<'a, B> {
-        let g = lock(shared);
-        Self::under(inner, shared, id, g)
+        Self::under(inner, shared, id)
     }
 
-    /// Records `op` in `shared`'s table and runs it over `inner`, in one take of the node's
-    /// lock (H-013).
+    /// Records `op` in `shared`'s table and runs it over `inner`, taking only the lock of its
+    /// stripe of the table (H-013).
     pub fn begin(inner: &'a mut B, shared: &'a Shared, op: Op) -> Guarded<'a, B> {
-        let mut g = lock(shared);
-        let id = g.ops.begin(op);
-        Self::under(inner, shared, id, g)
+        let id = crate::commands::hot::of(shared).ops.begin(op);
+        Self::under(inner, shared, id)
     }
 
     /// The operation's id in its table.
@@ -399,23 +477,21 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
         self.id
     }
 
-    fn under(
-        inner: &'a mut B,
-        shared: &'a Shared,
-        id: u32,
-        mut g: std::sync::MutexGuard<'_, crate::commands::NodeSessions>,
-    ) -> Guarded<'a, B> {
+    fn under(inner: &'a mut B, shared: &'a Shared, id: u32) -> Guarded<'a, B> {
         let flag = crate::commands::js::thread_interrupt();
         let outer_interrupt = flag.raised();
-        let (deadline_ms, tenant, user) =
-            g.ops.get(id).map_or((None, 0, None), |o| (o.deadline_ms, o.tenant, o.user.clone()));
-        let killed = g.ops.get(id).is_some_and(|o| o.killed);
-        flag.0.store(killed, std::sync::atomic::Ordering::SeqCst);
-        if let Some(op) = g.ops.get_mut(id) {
-            op.interrupt = Some(flag);
-        }
-        let cancel = g.ops.cancel(id);
-        drop(g);
+        let ((deadline_ms, tenant, user), cancel) =
+            crate::commands::hot::of(shared).ops.with(id, |t| {
+                let entry = t
+                    .get(id)
+                    .map_or((None, 0, None), |o| (o.deadline_ms, o.tenant, o.user.clone()));
+                let killed = t.get(id).is_some_and(|o| o.killed);
+                flag.0.store(killed, std::sync::atomic::Ordering::SeqCst);
+                if let Some(op) = t.get_mut(id) {
+                    op.interrupt = Some(flag);
+                }
+                (entry, t.cancel(id))
+            });
         inner.set_deadline(deadline_ms);
         Guarded {
             inner,
@@ -536,7 +612,8 @@ impl<B: Backend + ?Sized> Drop for Guarded<'_, B> {
     fn drop(&mut self) {
         if self.report != OpReport::default() {
             let report = std::mem::take(&mut self.report);
-            lock(self.shared).ops.report_mut(self.id).absorb(report);
+            let id = self.id;
+            crate::commands::hot::of(self.shared).ops.with(id, |t| t.report_mut(id).absorb(report));
         }
         self.inner.set_deadline(None);
         self.inner.end_operation();
@@ -818,7 +895,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn op_client(&mut self) -> Option<Document> {
-        lock(self.shared).ops.get(self.id).and_then(|o| o.metadata.clone())
+        let id = self.id;
+        crate::commands::hot::of(self.shared)
+            .ops
+            .with(id, |t| t.get(id).and_then(|o| o.metadata.clone()))
     }
 
     fn op_plan(&mut self) -> Option<Document> {
@@ -1108,7 +1188,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn privileges(&self) -> Option<Vec<Privilege>> {
-        lock(self.shared).ops.get(self.id).and_then(|o| o.privileges.clone())
+        let id = self.id;
+        crate::commands::hot::of(self.shared)
+            .ops
+            .with(id, |t| t.get(id).and_then(|o| o.privileges.clone()))
     }
 
     fn invalidate_user_cache(&mut self) {
@@ -1116,7 +1199,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn authenticated_roles(&self) -> Option<Vec<RoleName>> {
-        lock(self.shared).ops.get(self.id).and_then(|o| o.roles.clone())
+        let id = self.id;
+        crate::commands::hot::of(self.shared)
+            .ops
+            .with(id, |t| t.get(id).and_then(|o| o.roles.clone()))
     }
 
     fn process(&mut self) -> crate::commands::diagnostics::ProcessFacts {
@@ -1192,5 +1278,79 @@ mod tests {
         t.ops.insert(1, op.clone());
         assert_eq!(t.begin(op.clone()), u32::MAX);
         assert_eq!(t.begin(op), 2);
+    }
+
+    fn sample_op(conn: i32) -> Op {
+        Op {
+            conn,
+            client: None,
+            metadata: None,
+            app_name: None,
+            op: op_type("find"),
+            ns: String::new(),
+            command: Document::new(),
+            started_ms: 0,
+            deadline_ms: None,
+            killed: false,
+            interrupt: None,
+            user: None,
+            tenant: 0,
+            privileges: None,
+            roles: None,
+            desc: None,
+            progress: None,
+            metrics: None,
+        }
+    }
+
+    #[test]
+    fn operations_begun_on_many_threads_get_distinct_ids_and_end_alone() {
+        let ops = std::sync::Arc::new(Ops::default());
+        let workers: Vec<_> = (0..8)
+            .map(|w| {
+                let ops = ops.clone();
+                std::thread::spawn(move || {
+                    let mut ids = Vec::new();
+                    for _ in 0..500 {
+                        let id = ops.begin(sample_op(w));
+                        ops.with(id, |t| t.report_mut(id).docs += 1);
+                        ids.push(id);
+                    }
+                    ids
+                })
+            })
+            .collect();
+        let mut all: Vec<u32> = workers.into_iter().flat_map(|w| w.join().unwrap()).collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n, "no id given twice");
+        assert_eq!(ops.snapshot().len(), n);
+        let id = all[17];
+        assert!(ops.kill(id));
+        assert!(ops.with(id, |t| t.get(id).is_some_and(|o| o.killed)));
+        assert!(ops.with(id, |t| t.cancel(id)).raised());
+        assert_eq!(ops.with(id, |t| t.take_report(id)).docs, 1);
+        for id in &all {
+            ops.end(*id);
+        }
+        assert!(ops.snapshot().is_empty());
+        assert!(!ops.kill(id), "an operation that ended is not running");
+    }
+
+    #[test]
+    fn the_snapshot_lists_every_operation_by_id() {
+        let ops = Ops::default();
+        let ids: Vec<u32> = (0..40).map(|c| ops.begin(sample_op(c))).collect();
+        let named = ops.begin_named(sample_op(99), |id| format!("build {id}"));
+        let listed: Vec<u32> = ops.snapshot().iter().map(|(id, _)| *id).collect();
+        let mut want = ids.clone();
+        want.push(named);
+        want.sort_unstable();
+        assert_eq!(listed, want);
+        assert_eq!(
+            ops.with(named, |t| t.get(named).and_then(|o| o.desc.clone())),
+            Some(format!("build {named}"))
+        );
     }
 }

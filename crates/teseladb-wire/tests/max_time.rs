@@ -223,7 +223,10 @@ fn a_find_past_its_time_limit_fails_and_no_limit_is_zero() {
     assert!(ok(&run(&mut m, &mut conn, DB, find(Value::Int32(0)))));
     assert!(ok(&run(&mut m, &mut conn, DB, find(Value::Int32(100_000)))));
     assert_eq!(m.deadline, None, "the deadline ends with the command");
-    assert!(lock(&m.shared).ops.iter().next().is_none(), "the operation left the table");
+    assert!(
+        teseladb_wire::commands::hot::of(&m.shared).ops.snapshot().is_empty(),
+        "the operation left the table"
+    );
 }
 
 #[test]
@@ -318,9 +321,14 @@ fn kill_op_interrupts_a_running_find() {
     let shared: Arc<Shared> = Arc::new(Mutex::new(NodeSessions::new(Timeouts::default())));
     let killer = Arc::clone(&shared);
     m.on_scan = Some(Box::new(move || {
-        let ids: Vec<u32> = lock(&killer).ops.iter().map(|(id, _)| id).collect();
+        let ids: Vec<u32> = teseladb_wire::commands::hot::of(&killer)
+            .ops
+            .snapshot()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
         for id in ids {
-            lock(&killer).ops.kill(id);
+            teseladb_wire::commands::hot::of(&killer).ops.kill(id);
         }
     }));
     let mut conn = Connection::new(1);
@@ -364,7 +372,7 @@ fn op(conn: i32) -> Op {
 #[test]
 fn current_op_lists_and_filters_the_node_operations() {
     let mut m = node(0);
-    let id = lock(&m.shared).ops.begin(op(7));
+    let id = teseladb_wire::commands::hot::of(&m.shared).ops.begin(op(7));
     let mut conn = Connection::new(1);
     let r =
         run(&mut m, &mut conn, "admin", Document::new().with("currentOp", 1).with("$all", true));
@@ -417,7 +425,7 @@ fn current_op_lists_and_filters_the_node_operations() {
     let r = run(&mut m, &mut conn, DB, Document::new().with("currentOp", 1));
     assert_eq!(error(&r), (13, "currentOp may only be run against the admin database.".to_owned()));
     // A killed operation shows it.
-    lock(&m.shared).ops.kill(id);
+    teseladb_wire::commands::hot::of(&m.shared).ops.kill(id);
     let r =
         run(&mut m, &mut conn, "admin", Document::new().with("currentOp", 1).with("op", "query"));
     let Value::Array(a) = field(&r, "inprog") else { panic!() };
@@ -478,7 +486,7 @@ fn current_op_lists_the_operations_of_every_node() {
 #[test]
 fn kill_op_reads_its_op_as_a_refrouter_does() {
     let mut m = node(0);
-    let id = lock(&m.shared).ops.begin(op(7));
+    let id = teseladb_wire::commands::hot::of(&m.shared).ops.begin(op(7));
     let mut conn = Connection::new(1);
     let kill = |v: Value| Document::new().with("killOp", 1).with("op", v);
     let cases: [(Value, i32, &str); 11] = [
@@ -532,10 +540,14 @@ fn kill_op_reads_its_op_as_a_refrouter_does() {
     for v in [Value::Int32(-1), Value::Int32(424_242), Value::Double(3.0)] {
         assert!(ok(&run(&mut m, &mut conn, "admin", kill(v))));
     }
-    assert!(!lock(&m.shared).ops.get(id).unwrap().killed);
+    assert!(
+        !teseladb_wire::commands::hot::of(&m.shared).ops.with(id, |t| t.get(id).unwrap().killed)
+    );
     let as_decimal = Value::Decimal128(Decimal128::from_parts(false, u128::from(id), 0).unwrap());
     assert!(ok(&run(&mut m, &mut conn, "admin", kill(as_decimal))));
-    assert!(lock(&m.shared).ops.get(id).unwrap().killed);
+    assert!(
+        teseladb_wire::commands::hot::of(&m.shared).ops.with(id, |t| t.get(id).unwrap().killed)
+    );
 }
 
 /// `killOp` with a `shardid:opid` as a `refrouter` 9.0.4 reads it (measured, DV-031, D-102): the
@@ -546,7 +558,7 @@ fn kill_op_reads_its_op_as_a_refrouter_does() {
 fn kill_op_takes_a_node_and_its_operation() {
     let mut m = node(0);
     m.shards = vec!["node1".to_owned(), "node2".to_owned()];
-    let id = lock(&m.shared).ops.begin(op(7));
+    let id = teseladb_wire::commands::hot::of(&m.shared).ops.begin(op(7));
     let mut conn = Connection::new(1);
     let kill = |v: &str| Document::new().with("killOp", 1).with("op", v);
     let cases: [(&str, i32, &str); 12] = [
@@ -586,7 +598,9 @@ fn kill_op_takes_a_node_and_its_operation() {
     {
         assert_eq!(run(&mut m, &mut conn, "admin", kill(v)), answer(shard, n), "{v}");
     }
-    assert!(!lock(&m.shared).ops.get(id).unwrap().killed);
+    assert!(
+        !teseladb_wire::commands::hot::of(&m.shared).ops.with(id, |t| t.get(id).unwrap().killed)
+    );
     assert!(m.killed.is_empty());
     // An operation of another node: that node stops it.
     assert_eq!(run(&mut m, &mut conn, "admin", kill("node2:+12")), answer("node2", 12));
@@ -595,7 +609,9 @@ fn kill_op_takes_a_node_and_its_operation() {
     let mine = format!("node1:{id}");
     let n = i32::try_from(id).unwrap();
     assert_eq!(run(&mut m, &mut conn, "admin", kill(&mine)), answer("node1", n));
-    assert!(lock(&m.shared).ops.get(id).unwrap().killed);
+    assert!(
+        teseladb_wire::commands::hot::of(&m.shared).ops.with(id, |t| t.get(id).unwrap().killed)
+    );
     assert_eq!(m.killed.len(), 1);
 }
 
@@ -689,7 +705,7 @@ fn a_guarded_backend_stops_at_its_deadline() {
     let shared: Shared = Mutex::new(NodeSessions::new(Timeouts::default()));
     let mut o = op(1);
     o.deadline_ms = Some(m.now + 5);
-    let id = lock(&shared).ops.begin(o);
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(o);
     {
         let mut g = Guarded::new(&mut m, &shared, id);
         assert!(g.check().is_ok());
@@ -973,7 +989,7 @@ fn max_time_counts_on_the_monotonic_clock_and_not_on_the_cluster_time() {
     let shared: Shared = Mutex::new(NodeSessions::new(Timeouts::default()));
     let mut o = op(1);
     o.deadline_ms = Some(10_005);
-    let id = lock(&shared).ops.begin(o);
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(o);
     // The cluster time jumps a second ahead: the operation goes on.
     m.now += 1_000;
     assert!(Guarded::new(&mut m, &shared, id).check().is_ok());

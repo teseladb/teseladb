@@ -9,7 +9,7 @@ use teseladb_meta::command::Group0Command;
 use teseladb_meta::security::Principal;
 use teseladb_range::intents::IntentOp;
 use teseladb_wire::commands::write_block::WriteGate;
-use teseladb_wire::commands::{Backend, Shared, lock};
+use teseladb_wire::commands::{Backend, Shared};
 use teseladb_wire::ops::{Guarded, Op, op_type};
 use teseladb_bson::{Document, Value};
 use teseladb_types::{GroupId, NodeId};
@@ -48,7 +48,7 @@ fn a_live_operation_reaches_the_node_with_each_call() {
     m.tenants = vec![(7, "acme".to_owned())];
     m.fcv_limit = Some("8.3".to_owned());
     let shared = Shared::default();
-    let id = lock(&shared).ops.begin(op(None));
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
     let mut g = Guarded::new(&mut m, &shared, id);
     assert_eq!(g.database_mark("db").unwrap(), None);
     assert_eq!(g.tenant_named("acme").unwrap(), Some(7));
@@ -99,13 +99,13 @@ fn an_operation_past_its_time_or_killed_stops_before_the_node() {
     let shared = Shared::default();
     // The time limit ends at the node's clock now.
     let now_ms = m.now_micros() / 1000;
-    let id = lock(&shared).ops.begin(op(Some(now_ms)));
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op(Some(now_ms)));
     let mut g = Guarded::new(&mut m, &shared, id);
     let e = g.voters(b"a", b"b").unwrap_err();
     assert_eq!(e.code.code, MAX_TIME);
     drop(g);
-    let id = lock(&shared).ops.begin(op(None));
-    assert!(lock(&shared).ops.kill(id));
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
+    assert!(teseladb_wire::commands::hot::of(&shared).ops.kill(id));
     let mut g = Guarded::new(&mut m, &shared, id);
     assert_eq!(g.tenant_named("x").unwrap_err().code.code, INTERRUPTED);
     assert!(!g.txn_pause());
@@ -135,16 +135,19 @@ fn a_read_of_several_spans_goes_to_the_node_as_one_and_counts_its_documents() {
         })
         .collect();
     let shared = Shared::default();
-    let id = lock(&shared).ops.begin(op(None));
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
     let mut g = Guarded::new(&mut m, &shared, id);
     let rows = g.scan_spans(&spans, ReadConcern::Local).unwrap();
     drop(g);
     assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 1]);
     // One trip with the three spans: the node sends them to their ranges together (010 T053).
     assert_eq!((m.span_reads, m.spans_batched), (1, 3));
-    assert_eq!(lock(&shared).ops.take_report(id).docs, 3);
-    let id = lock(&shared).ops.begin(op(None));
-    assert!(lock(&shared).ops.kill(id));
+    assert_eq!(
+        teseladb_wire::commands::hot::of(&shared).ops.with(id, |t| t.take_report(id)).docs,
+        3
+    );
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
+    assert!(teseladb_wire::commands::hot::of(&shared).ops.kill(id));
     let mut g = Guarded::new(&mut m, &shared, id);
     let e = g.scan_spans(&spans, ReadConcern::Local).unwrap_err();
     assert_eq!(e.code.code, INTERRUPTED);
@@ -157,22 +160,23 @@ fn a_kill_of_an_operation_stops_its_calls_also_after_an_inner_one_on_its_thread_
     let mut m = Mem::new();
     let shared = Shared::default();
     // Killed before it starts (a refused command): its first call stops.
-    let refused = lock(&shared).ops.begin(Op { killed: true, ..op(None) });
+    let refused =
+        teseladb_wire::commands::hot::of(&shared).ops.begin(Op { killed: true, ..op(None) });
     let e = Guarded::new(&mut m, &shared, refused).database_mark("db").unwrap_err();
     assert_eq!(e.code.code, INTERRUPTED);
-    lock(&shared).ops.end(refused);
-    let outer = lock(&shared).ops.begin(op(None));
+    teseladb_wire::commands::hot::of(&shared).ops.end(refused);
+    let outer = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
     let mut m2 = Mem::new();
     let mut g = Guarded::new(&mut m, &shared, outer);
     assert!(g.database_mark("db").is_ok());
     {
         // An operation inside it, on the same thread: `killOp` of the outer one while it runs.
-        let inner = lock(&shared).ops.begin(op(None));
+        let inner = teseladb_wire::commands::hot::of(&shared).ops.begin(op(None));
         let mut h = Guarded::new(&mut m2, &shared, inner);
-        assert!(lock(&shared).ops.kill(outer));
+        assert!(teseladb_wire::commands::hot::of(&shared).ops.kill(outer));
         assert!(h.database_mark("db").is_ok(), "the inner operation was not killed");
         drop(h);
-        lock(&shared).ops.end(inner);
+        teseladb_wire::commands::hot::of(&shared).ops.end(inner);
     }
     let e = g.database_mark("db").unwrap_err();
     assert_eq!(e.code.code, INTERRUPTED);

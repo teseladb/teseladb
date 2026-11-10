@@ -158,7 +158,7 @@ pub fn kill_local(shared: &Shared, scope: &KillScope) {
             g.cursors.kill_all_sessions();
         }
         KillScope::Op { op, .. } => {
-            g.ops.kill(*op);
+            super::hot::of(shared).ops.kill(*op);
         }
     }
 }

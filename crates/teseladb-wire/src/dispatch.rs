@@ -807,13 +807,16 @@ fn run_op<B: Backend + ?Sized>(
     }
     let ns = op_ns(&req.db, &req.command);
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
-    // The operation's end in one take of the node's lock (H-013): its report, its entry, the
-    // counters and the indexes it used.
+    // The operation's end: its report and its entry under the lock of its stripe of the table,
+    // then the counters and the indexes it used in one take of the node's lock (H-013).
+    let mut report = crate::commands::hot::of(shared).ops.with(id, |t| {
+        let report = t.take_report(id);
+        t.end(id);
+        report
+    });
+    report.absorb(own_report);
     let report = {
         let mut g = lock(shared);
-        let mut report = g.ops.take_report(id);
-        report.absorb(own_report);
-        g.ops.end(id);
         g.counters.count(name, &req.command, matches!(result, Some(Err(_))));
         for name in &report.used {
             g.index_usage.used(&ns, name, now);

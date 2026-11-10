@@ -41,7 +41,7 @@ use super::crud::{
 use super::mutation::{Bound, DocMutation, Image, Rules};
 use super::names::{full, parse_full};
 use super::sharding::{SHARD_KEY, ShardKey, document_key, same_value, shard_key_of};
-use super::{Backend, Ctx, Shared, display, lock, uuid_text};
+use super::{Backend, Ctx, Shared, display, uuid_text};
 use crate::error::{
     BAD_VALUE, CommandError, ILLEGAL_OPERATION, INTERNAL_ERROR, INVALID_NAMESPACE, INVALID_OPTIONS,
     MAX_TIME_MS_EXPIRED, NAMESPACE_NOT_FOUND, NAMESPACE_NOT_SHARDED, NO_SUCH_RESHARD_COLLECTION,
@@ -449,18 +449,17 @@ pub(super) fn abort<B: Backend + ?Sized>(
             "Could not find in-progress resharding operation with matching provenance",
         ));
     }
-    let mut s = lock(ctx.shared);
+    let ops = &super::hot::of(ctx.shared).ops;
     for id in found {
-        s.ops.kill(id);
+        ops.kill(id);
     }
     Ok(ok())
 }
 
 /// The reshardings of namespace `ns` in `currentOp`, with their provenance; 339 when none.
 pub(super) fn running(shared: &Shared, ns: &str) -> Result<Vec<(u32, String)>, CommandError> {
-    let s = lock(shared);
-    let found: Vec<(u32, String)> = s
-        .ops
+    let ops = super::hot::of(shared).ops.snapshot();
+    let found: Vec<(u32, String)> = ops
         .iter()
         .filter(|(_, o)| {
             o.ns == ns && o.desc.as_deref().is_some_and(|d| d.starts_with(METRICS_DESC))
@@ -470,7 +469,7 @@ pub(super) fn running(shared: &Shared, ns: &str) -> Result<Vec<(u32, String)>, C
                 Some(Value::String(p)) => p.clone(),
                 _ => String::new(),
             };
-            (id, provenance)
+            (*id, provenance)
         })
         .collect();
     if found.is_empty() {
@@ -741,7 +740,7 @@ impl Resharding {
         copy_indexes(backend, &old, &temp, &plan)?;
         let to_copy = i64::try_from(approx_documents(backend, &old)?).unwrap_or(i64::MAX);
         let mark = backend.read_versions(&[])?.0;
-        let op = lock(shared).ops.begin(Op {
+        let op = super::hot::of(shared).ops.begin(Op {
             conn: 0,
             client: None,
             metadata: None,
@@ -1022,7 +1021,7 @@ impl Resharding {
 
     /// Takes the operation out of `currentOp`.
     pub fn finish(&self, shared: &Shared) {
-        lock(shared).ops.end(self.op);
+        super::hot::of(shared).ops.end(self.op);
     }
 
     fn modify_old<B: Backend + ?Sized>(
@@ -1056,7 +1055,8 @@ impl Resharding {
     }
 
     fn check_killed(&self, shared: &Shared) -> Result<(), CommandError> {
-        if lock(shared).ops.get(self.op).is_some_and(|o| o.killed) {
+        let op = self.op;
+        if super::hot::of(shared).ops.with(op, |t| t.get(op).is_some_and(|o| o.killed)) {
             return Err(CommandError::new(
                 RESHARD_COLLECTION_ABORTED,
                 "resharding aborted by user",
@@ -1154,9 +1154,12 @@ impl Resharding {
             .with("documentsCopied", self.copied)
             .with("bytesCopied", self.bytes)
             .with("oplogEntriesApplied", self.applied);
-        if let Some(o) = lock(shared).ops.get_mut(self.op) {
-            o.metrics = Some(metrics);
-        }
+        let op = self.op;
+        super::hot::of(shared).ops.with(op, |t| {
+            if let Some(o) = t.get_mut(op) {
+                o.metrics = Some(metrics);
+            }
+        });
     }
 }
 

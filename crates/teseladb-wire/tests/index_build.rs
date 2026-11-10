@@ -10,7 +10,7 @@ use teseladb_index::build::{BUILD_DESC, Progress};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::indexes::{IndexCommand, IndexState};
 use teseladb_range::ack::W;
-use teseladb_wire::commands::{Ctx, Shared, lock, run};
+use teseladb_wire::commands::{Ctx, Shared, run};
 use teseladb_wire::ops::{Op, op_type};
 use teseladb_bson::{Decimal128, Document, Value};
 
@@ -182,11 +182,11 @@ fn run_on_db(m: &mut Mem, shared: &'static Shared, db: &str, cmd: &Document) -> 
 
 /// The build's operation, while it runs.
 fn build_op(shared: &Shared) -> Option<(u32, Op)> {
-    lock(shared)
+    teseladb_wire::commands::hot::of(shared)
         .ops
-        .iter()
+        .snapshot()
+        .into_iter()
         .find(|(_, o)| o.desc.as_deref().is_some_and(|d| d.starts_with(BUILD_DESC)))
-        .map(|(id, o)| (id, o.clone()))
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn current_op_lists_a_build_as_a_refnode_does() {
         progress: Some(Progress { done: 500, total: 1000 }),
         metrics: None,
     };
-    lock(shared).ops.begin(op);
+    teseladb_wire::commands::hot::of(shared).ops.begin(op);
     let r = run_on_db(&mut m, shared, "admin", &doc(&[("currentOp", Value::Int32(1))]));
     let Some(Value::Array(ops)) = r.get("inprog") else { panic!("{r:?}") };
     let Value::Document(d) = &ops[0] else { panic!() };
@@ -275,7 +275,7 @@ fn kill_op_stops_a_build_and_leaves_nothing() {
         if let Some((id, op)) = build_op(shared)
             && op.progress.is_some_and(|p| p.done > 0)
         {
-            lock(shared).ops.kill(id);
+            teseladb_wire::commands::hot::of(shared).ops.kill(id);
         }
     }));
     let r = run_on(&mut m, shared, &create("a", None));
@@ -381,7 +381,7 @@ fn rules_with_a_bad_delete_only_flag_are_malformed() {
 fn the_guarded_backend_passes_voters_and_ends_the_operation() {
     let mut m = seeded(1);
     let shared = leaked();
-    let id = lock(shared).ops.begin(Op {
+    let id = teseladb_wire::commands::hot::of(shared).ops.begin(Op {
         conn: 1,
         client: None,
         metadata: None,

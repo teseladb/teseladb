@@ -132,7 +132,6 @@ use teseladb_bson::{Document, Value};
 
 use crate::error::CommandError;
 use crate::failpoint::FailPoint;
-use crate::ops::OpTable;
 
 /// What a read of a span gives: `(key, document)` in key order.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
@@ -860,8 +859,6 @@ pub struct NodeSessions {
     pub sessions: SessionTable,
     /// The `failCommand` failpoint, with `enableTestCommands` only.
     pub failpoint: Option<FailPoint>,
-    /// Commands in progress.
-    pub ops: OpTable,
     /// The node's server parameters (`setParameter`).
     pub params: server_params::ServerParams,
     /// What the node counted of its commands (`serverStatus`).
@@ -955,7 +952,6 @@ impl NodeSessions {
             search: search_ops::SearchIndexes::default(),
             spill: Spill::default(),
             ingress: crate::ingress::Limiter::default(),
-            ops: OpTable::default(),
             counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
             hot: std::sync::Arc::default(),

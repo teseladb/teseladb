@@ -2328,7 +2328,7 @@ mod tests {
         c.run_until(|_| rx.try_recv().is_ok());
         // `currentOp` asks every other node for its operations: node 2 answers with its own.
         let shared = Arc::new(Shared::default());
-        teseladb_wire::commands::lock(&shared).ops.begin(teseladb_wire::ops::Op {
+        teseladb_wire::commands::hot::of(&shared).ops.begin(teseladb_wire::ops::Op {
             conn: 4,
             client: None,
             metadata: None,
