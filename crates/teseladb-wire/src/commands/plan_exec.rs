@@ -1908,7 +1908,7 @@ pub(crate) fn planned_documents<B: Backend + ?Sized>(
     read: &ReadPlan<'_>,
     note: CacheNote<'_>,
 ) -> Result<Option<Vec<Vec<u8>>>, CommandError> {
-    Ok(planned_keyed(backend, coll, read, note)?.map(|(docs, _)| docs))
+    Ok(planned_keyed(backend, coll, read, note)?.map(|(docs, _, _)| docs))
 }
 
 /// [`planned_documents`] with the index key each document was found by, when `read` wants them
@@ -1988,11 +1988,12 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     let found = std::mem::take(&mut chosen.winner.found);
     chosen.winner.found = vec![(Vec::new(), Vec::new()); found.len()];
     let keys = std::mem::take(&mut chosen.winner.index_keys);
+    let in_order = super::explain::sorted(&chosen.winner);
     let ran = Box::new((chosen, from_cache, replanned));
     let shown = Shown { ns: note.ns.clone(), shape, parsed: read.parsed.clone() };
     let planning = ran.0.planning_micros;
     backend.note_plan_lazy(shown.pending(indexes, Some(ran), planning));
-    Ok(Some((found.into_iter().map(|(_, d)| d).collect(), keys)))
+    Ok(Some((found.into_iter().map(|(_, d)| d).collect(), keys, in_order)))
 }
 
 /// What a read's plan report shows, kept to build it when something reads it ([`Shown::pending`]).
@@ -2112,7 +2113,7 @@ fn cached_run<B: Backend + ?Sized>(
 }
 
 /// The documents a plan found, in order, and the index key of each when the read wants them.
-pub(crate) type Planned = (Vec<Vec<u8>>, Vec<Option<Document>>);
+pub(crate) type Planned = (Vec<Vec<u8>>, Vec<Option<Document>>, bool);
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]

@@ -33,12 +33,28 @@ pub struct BackScan {
     /// bisection (H-003 of the native tests; AnotherProduct's `BlockIter::Prev` keeps the entries it
     /// decoded for the same reason).
     blocks: Vec<Option<Decoded>>,
+    /// The largest logical key a step found so far, kept between steps so that each step
+    /// copies into it instead of allocating one per source.
+    best: Vec<u8>,
 }
 
-/// The internal keys of block `index` of a file, in order.
+/// The internal keys of block `index` of a file, in order: one buffer and where each key ends,
+/// two allocations per block instead of one per key, as a block iterator keeps its entries.
 struct Decoded {
     index: usize,
-    keys: Vec<Vec<u8>>,
+    bytes: Vec<u8>,
+    ends: Vec<usize>,
+}
+
+impl Decoded {
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn key(&self, n: usize) -> &[u8] {
+        let start = n.checked_sub(1).map_or(0, |p| self.ends[p]);
+        &self.bytes[start..self.ends[n]]
+    }
 }
 
 impl std::fmt::Debug for BackScan {
@@ -63,6 +79,7 @@ impl View {
             pending: None,
             finished: start >= end,
             blocks: Vec::new(),
+            best: Vec::new(),
         }
     }
 }
@@ -70,9 +87,18 @@ impl View {
 /// What one file has below a bound.
 enum InTable {
     /// Its last internal key below the bound, if any.
-    Ready(Option<Vec<u8>>),
+    Ready(Option<Last>),
     /// The block it needs is being read.
     Wait(ReadToken),
+}
+
+/// Where a file's last internal key below a bound is, read without copying it.
+#[derive(Clone, Copy)]
+enum Last {
+    /// Key `n` of the block the file keeps decoded.
+    Decoded(usize),
+    /// The last key of block `n`, which the file's index holds.
+    OfBlock(usize),
 }
 
 /// What the sources have below a bound.
@@ -139,11 +165,14 @@ impl BackScan {
     /// The largest logical key below the bound and at or above the start, over every source.
     fn below<B: Blocks>(&mut self, r: &mut B) -> Below {
         let target = entry::first_version(&self.bound);
-        let mut best: Option<Vec<u8>> = None;
+        let mut found = false;
+        let (start, best) = (&self.start, &mut self.best);
         let mut keep = |ikey: &[u8]| {
             let logical = entry::logical(ikey);
-            if logical >= self.start.as_slice() && best.as_deref().is_none_or(|b| logical > b) {
-                best = Some(logical.to_vec());
+            if logical >= start.as_slice() && (!found || logical > best.as_slice()) {
+                best.clear();
+                best.extend_from_slice(logical);
+                found = true;
             }
         };
         for m in &self.version.memtables {
@@ -165,7 +194,10 @@ impl BackScan {
                 continue;
             }
             match table_before(r, t, &target, &mut self.blocks[n]) {
-                Ok(InTable::Ready(Some(ikey))) => keep(&ikey),
+                Ok(InTable::Ready(Some(Last::Decoded(k)))) => {
+                    keep(self.blocks[n].as_ref().expect("decoded just now").key(k));
+                }
+                Ok(InTable::Ready(Some(Last::OfBlock(b)))) => keep(t.last_key(b)),
                 Ok(InTable::Ready(None)) => {}
                 Ok(InTable::Wait(token)) => {
                     waiting.get_or_insert(token);
@@ -176,9 +208,9 @@ impl BackScan {
         if let Some(token) = waiting {
             return Below::Wait(Step::Miss(token));
         }
-        match best {
-            Some(k) => Below::Key(k),
-            None => Below::Nothing,
+        match found {
+            true => Below::Key(self.best.clone()),
+            false => Below::Nothing,
         }
     }
 }
@@ -194,7 +226,7 @@ fn table_before<B: Blocks>(
 ) -> Result<InTable, crate::LsmError> {
     let Some(i) = t.find_block(target) else {
         // Every key of the file is below the target: its last one.
-        return Ok(InTable::Ready(t.blocks().checked_sub(1).map(|l| t.last_key(l).to_vec())));
+        return Ok(InTable::Ready(t.blocks().checked_sub(1).map(Last::OfBlock)));
     };
     if cached.as_ref().is_none_or(|d| d.index != i) {
         let block = match r.block(t, i)? {
@@ -202,18 +234,32 @@ fn table_before<B: Blocks>(
             Fetch::Wait(token) => return Ok(InTable::Wait(token)),
         };
         let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
-        let mut keys = Vec::new();
+        // The buffers of the block decoded before are reused.
+        let (mut bytes, mut ends) =
+            cached.take().map_or_else(|| (Vec::new(), Vec::new()), |d| (d.bytes, d.ends));
+        bytes.clear();
+        ends.clear();
         while c.valid() {
-            keys.push(c.key().to_vec());
+            bytes.extend_from_slice(c.key());
+            ends.push(bytes.len());
             c.advance().map_err(|_| corrupt(t, i))?;
         }
-        *cached = Some(Decoded { index: i, keys });
+        *cached = Some(Decoded { index: i, bytes, ends });
     }
-    let keys = cached.as_ref().map_or(&[][..], |d| d.keys.as_slice());
-    let below = keys.partition_point(|k| entry::compare(k, target).is_lt());
-    let last = match below {
-        0 => i.checked_sub(1).map(|p| t.last_key(p).to_vec()),
-        n => keys.get(n - 1).cloned(),
+    let Some(d) = cached.as_ref() else { return Ok(InTable::Ready(None)) };
+    // The first key at or above the target, by bisection over the decoded keys.
+    let (mut lo, mut hi) = (0, d.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if entry::compare(d.key(mid), target).is_lt() {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let last = match lo {
+        0 => i.checked_sub(1).map(Last::OfBlock),
+        n => Some(Last::Decoded(n - 1)),
     };
     Ok(InTable::Ready(last))
 }

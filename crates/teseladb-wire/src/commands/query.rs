@@ -1151,7 +1151,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         _ if measured => measurements_cursor(ctx.backend, (&coll, ctx.cmd), &a, collation.as_ref())
             .map_err(executor)?,
         None if planned.is_some() => {
-            planned_cursor(planned.unwrap_or_default(), &a, collation.as_ref()).map_err(executor)?
+            planned_cursor(first, planned.unwrap_or_default(), &a).map_err(executor)?
         }
         None if a.natural == Some(false) => {
             backward(ctx.backend, range, &a, collation.as_ref()).map_err(executor)?
@@ -1176,9 +1176,20 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             held: 0,
             return_key: false,
         },
-        Some(sort) => {
-            sorted(ctx.backend, range, &a, sort, collation.as_ref(), planned).map_err(executor)?
+        // A plan whose index reads in the sort's order gives its documents sorted, as an
+        // `IXSCAN` with no `SORT` stage above it: they are not sorted again unless the
+        // projection shows their sort key. Past the sort's memory limit without `allowDiskUse`
+        // they go through the sort, which refuses them as before (measured on a `refrouter` 9.0.4).
+        Some(_)
+            if planned.as_ref().is_some_and(|p| {
+                p.2 && (a.allow_disk_use
+                    || p.0.iter().map(Vec::len).sum::<usize>() <= SORT_MEMORY_LIMIT)
+            }) && !reads_meta(a.projection.as_ref(), "sortKey") =>
+        {
+            planned_cursor(first, planned.unwrap_or_default(), &a).map_err(executor)?
         }
+        Some(sort) => sorted(ctx.backend, (first, range), &a, sort, collation.as_ref(), planned)
+            .map_err(executor)?,
     };
     state.return_key = a.return_key;
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
@@ -1417,11 +1428,11 @@ fn sort_directions(sort: &Document) -> Vec<(String, i32)> {
 /// The documents of plan `planned` whose index key is within `bounds` (`min` and `max` of the
 /// index with key pattern `pattern`).
 fn bounded(
-    (rows, keys): super::plan_exec::Planned,
+    (rows, keys, in_order): super::plan_exec::Planned,
     bounds: &super::min_max::Bounds,
     pattern: &Document,
 ) -> Result<super::plan_exec::Planned, CommandError> {
-    let mut kept: super::plan_exec::Planned = (Vec::new(), Vec::new());
+    let mut kept: super::plan_exec::Planned = (Vec::new(), Vec::new(), in_order);
     for (row, key) in rows.into_iter().zip(keys) {
         let inside = match &key {
             Some(k) => super::min_max::within(bounds, pattern, k)?,
@@ -1435,12 +1446,13 @@ fn bounded(
     Ok(kept)
 }
 
+/// The command's filter and projection come parsed in `plan`.
 fn planned_cursor(
-    (rows, keys): super::plan_exec::Planned,
+    plan: Plan,
+    (rows, keys, _): super::plan_exec::Planned,
     a: &FindArgs,
-    collation: Option<&Document>,
 ) -> Result<QueryCursor, CommandError> {
-    let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
+    let plan = plan.with_vars(a.vars.as_ref());
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
@@ -1742,15 +1754,16 @@ pub fn options_collation(c: &CollectionEntry) -> Option<Document> {
 
 /// The documents of `range` that match, in the order of `sort`: the whole collection, or the key
 /// of an `_id` equality, which gives one document at most whatever the sort.
+/// The command's filter and projection come parsed in `plan`.
 fn sorted<B: Backend + ?Sized>(
     backend: &mut B,
-    range: (Vec<u8>, Vec<u8>),
+    (plan, range): (Plan, (Vec<u8>, Vec<u8>)),
     a: &FindArgs,
     sort: &SortSpec,
     collation: Option<&Document>,
     planned: Option<super::plan_exec::Planned>,
 ) -> Result<QueryCursor, CommandError> {
-    let plan = Plan::new(&a.filter, a.projection.as_ref(), collation)?.with_vars(a.vars.as_ref());
+    let plan = plan.with_vars(a.vars.as_ref());
     let coll_collation = collation_of(collation)?;
     let col: Option<&dyn teseladb_bson::Collator> = coll_collation.as_ref().map(|c| c as _);
     // Each document stays in its stored bytes until the plan gives it (H-009 of the native
@@ -1774,7 +1787,7 @@ fn sorted<B: Backend + ?Sized>(
     };
     match planned {
         // The plan's documents, in its order (an index that gives the sort's order keeps it).
-        Some((docs, keys)) => {
+        Some((docs, keys, _)) => {
             let mut keys = keys.into_iter();
             for d in docs {
                 if !keep(d, keys.next().flatten())? {
@@ -1820,17 +1833,22 @@ pub(crate) fn id_point(filter: &Document) -> bool {
 
 /// Whether projection `p` reads `{$meta: "indexKey"}`, at any depth.
 fn reads_index_key(p: Option<&Document>) -> bool {
-    fn reads(v: &Value) -> bool {
+    reads_meta(p, "indexKey")
+}
+
+/// Whether projection `p` reads `{$meta: <meta>}`, at any depth.
+fn reads_meta(p: Option<&Document>, meta: &str) -> bool {
+    fn reads(v: &Value, meta: &str) -> bool {
         match v {
             Value::Document(d) => {
-                matches!(d.get("$meta"), Some(Value::String(m)) if m == "indexKey")
-                    || d.iter().any(|(_, v)| reads(v))
+                matches!(d.get("$meta"), Some(Value::String(m)) if m == meta)
+                    || d.iter().any(|(_, v)| reads(v, meta))
             }
-            Value::Array(a) => a.iter().any(reads),
+            Value::Array(a) => a.iter().any(|v| reads(v, meta)),
             _ => false,
         }
     }
-    p.is_some_and(|d| d.iter().any(|(_, v)| reads(v)))
+    p.is_some_and(|d| d.iter().any(|(_, v)| reads(v, meta)))
 }
 
 /// `getMore`.

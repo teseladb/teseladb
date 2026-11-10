@@ -1307,7 +1307,7 @@ fn planned_read<B: Backend + ?Sized>(
             .with("projection", Document::new()),
         shape: super::plan_cache::read_shape(&parsed, &filter, sort.as_ref(), None, None),
     };
-    let Some((found, keys)) = super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note)?
+    let Some((found, keys, _)) = super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note)?
     else {
         return Ok(None);
     };
