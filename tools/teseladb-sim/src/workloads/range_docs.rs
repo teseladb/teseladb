@@ -25,7 +25,10 @@
 //! published, without a request to the core, reading from the disk the blocks the view lacks; half
 //! of them as the scan of a span of their one key, as a find by a range of `_id` reads. They go
 //! into the linearizability history like any read: a read outside the core that misses a write
-//! acknowledged before it, or that a later write goes below, shows there.
+//! acknowledged before it, or that a later write goes below, shows there. A share of its deletes
+//! are first offered to the view as a connection's thread offers a write that may change nothing
+//! (FR-030): one of an absent document is answered there, at the view's mark, and goes into the
+//! history like any answered write.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -46,7 +49,7 @@ use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
 use teseladb_range::snapshot::{Assembler, local_interval, split, write_ops};
-use teseladb_range::view::FastRead;
+use teseladb_range::view::{FastRead, FastWrite, NoChange};
 use teseladb_raftlog::{Completions, Disk, FileId, IoOp, SimDisk};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -332,6 +335,8 @@ struct Outside {
     caches: BTreeMap<u32, ViewCache>,
     /// Reads served.
     served: u64,
+    /// Deletes of absent documents answered by the view.
+    unchanged: u64,
     /// The request number of the next one: from the top down, never one of a host.
     next: ReqId,
 }
@@ -584,6 +589,21 @@ impl RangeDocsWorkload {
             self.answer(w, node, req, Ok(Reply::Value { ts, value }));
             return;
         }
+        // In `outside-reads`, every delete is offered to the view first (FR-030).
+        let unchanged = read.is_none() && self.outside.is_some() && change == Change::Delete;
+        if unchanged && let Some((ts, result)) = self.delete_outside(w, node, (k, client, id), wc) {
+            let o = self.outside.as_mut().expect("drawn only with it");
+            let req = o.next;
+            (o.next, o.unchanged) = (o.next - 1, o.unchanged + 1);
+            let rec = OpRecord { kind: OpKind::Write, new: None, w1: wc == W1, ..rec };
+            let write = Write { change, wc, retried: false, select_until: Nanos::ZERO };
+            self.writes.insert(self.history.ops.len(), write);
+            self.history.ops.push(rec);
+            self.pending.insert((node, req), self.history.ops.len() - 1);
+            let reply = Reply::Mutated { ts, change: result.clone(), result };
+            self.answer(w, node, req, Ok(reply));
+            return;
+        }
         let (now, wall) = Self::times(w, node);
         let core = self.core;
         let host = self.hosts.get_mut(&node).expect("a live node has its host");
@@ -825,6 +845,47 @@ impl RangeDocsWorkload {
                     view.lsm().supply(&need, bytes).ok()?;
                 }
                 FastRead::Core => return None,
+            }
+        }
+        None
+    }
+
+    /// The delete of document `k` by operation `id` of `client` offered to `node`'s view, as a
+    /// connection's thread offers a write that may change nothing (005 FR-030): its mark and
+    /// result when the view answers it, `None` when it goes to the core.
+    fn delete_outside(
+        &mut self,
+        w: &mut World,
+        node: u32,
+        (k, client, id): (u64, u32, u64),
+        wc: WriteConcern,
+    ) -> Option<(Hlc, Vec<u8>)> {
+        let view = self.hosts.get(&node)?.views().get(G)?;
+        let cache = self.outside.as_mut()?.caches.entry(node).or_default();
+        let key = doc(k);
+        let mutation = DocChange { key: key.clone(), change: Change::Delete };
+        let keys = [key];
+        let w8 = NoChange {
+            mutation: &mutation,
+            keys: &keys,
+            dedup: Some(dedup_key(client, id)),
+            wc,
+            deadline: None,
+            absent_only: true,
+        };
+        for _ in 0..=OUTSIDE_BLOCKS {
+            let (now, wall) = Self::times(w, node);
+            match view.no_change(cache, &w8, wall, || now) {
+                FastWrite::Answered { ts, result } => return Some((ts, result)),
+                FastWrite::Need(need) => {
+                    let disk = &mut w.nodes[node as usize].cores[self.core as usize].disk;
+                    let file = disk.read_all(Path::new(&need.path)).ok()?;
+                    let start = usize::try_from(need.offset).ok()?;
+                    let end = start.saturating_add(usize::try_from(need.len).ok()?);
+                    let bytes = file.get(start..end.min(file.len()))?;
+                    view.lsm().supply(&need, bytes).ok()?;
+                }
+                FastWrite::Core => return None,
             }
         }
         None

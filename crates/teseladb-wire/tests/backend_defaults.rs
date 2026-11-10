@@ -67,6 +67,9 @@ impl Backend for Bare {
     fn write(&mut self, _op: WriteOp) -> Result<Vec<u8>, CommandError> {
         Err(none())
     }
+    fn write_unchanged(&mut self, _op: &WriteOp) -> Option<Vec<u8>> {
+        None
+    }
     fn read_versions(&mut self, _keys: &[Vec<u8>]) -> Result<Versions, CommandError> {
         Err(none())
     }

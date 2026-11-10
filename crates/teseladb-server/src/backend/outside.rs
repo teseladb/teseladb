@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 use teseladb_io::runtime::CoreInput;
 use teseladb_lsm::{BlockNeed, ViewCache};
 use teseladb_range::HISTORY_VALUE;
+use teseladb_range::command::DedupKey;
 use teseladb_range::read::ReadConcern;
-use teseladb_range::view::{FastRead, RangeView};
-use teseladb_wire::commands::{Backend, Rows};
+use teseladb_range::view::{FastRead, FastWrite, NoChange, RangeView};
+use teseladb_wire::commands::mutation::Bound;
+use teseladb_wire::commands::{Backend, Rows, WriteOp};
 use teseladb_types::{GroupId, Nanos};
 
 use super::ServerBackend;
@@ -50,6 +52,15 @@ static BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// as each tally is reported (every [`REPORT_OPS`] reads or [`REPORT_AGE`] of a range).
 pub fn served_outside() -> u64 {
     SERVED.load(Ordering::Relaxed)
+}
+
+/// Writes answered on a worker's thread because they changed nothing (005 FR-030).
+static UNCHANGED: AtomicU64 = AtomicU64::new(0);
+
+/// Writes that changed nothing the node's client workers answered without the cores since the
+/// process started (005 FR-030).
+pub fn unchanged_outside() -> u64 {
+    UNCHANGED.load(Ordering::Relaxed)
 }
 
 /// Reads a range's view sent back to its core since the process started.
@@ -123,6 +134,60 @@ impl ServerBackend {
         };
         self.tally(core, g, key, at);
         Some(value)
+    }
+
+    /// The encoded result of `op` answered on this thread when its documents are absent and it
+    /// changes nothing (005 FR-030, H-005 of the native tests), at a mark of the node's clock;
+    /// `None` when it goes to its range's core.
+    pub(super) fn write_outside(&mut self, op: &WriteOp) -> Option<Vec<u8>> {
+        let first = op.keys.first()?;
+        let (g, core) = self.h.routes.route_of(&mut self.outside.routes, first)?;
+        let core = usize::from(core);
+        let view = self.h.views.get(core)?.get(g)?;
+        // The mutation as it was sent: its result carries that send's number (`attempt`).
+        let bound = Bound::decode(&op.mutation).ok()?;
+        let dedup = op.dedup.map(|k| DedupKey {
+            lsid: k.lsid,
+            txn_number: k.txn_number,
+            stmt_id: k.stmt_id,
+        });
+        let deadline = Some(self.deadline_of(self.until()));
+        let w = NoChange {
+            mutation: &bound,
+            keys: &op.keys,
+            dedup,
+            wc: op.wc,
+            deadline,
+            absent_only: true,
+        };
+        if self.outside.caches.len() <= core {
+            self.outside.caches.resize_with(core + 1, ViewCache::default);
+        }
+        let origin = self.h.origin;
+        let now = || {
+            let since = Instant::now().saturating_duration_since(origin);
+            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+        };
+        for _ in 0..=MAX_BLOCKS {
+            let wall = crate::clock::wall_ms();
+            match view.no_change(&mut self.outside.caches[core], &w, wall, now) {
+                FastWrite::Answered { ts, result } => {
+                    // Its mark comes into the node's clock, as a write's does.
+                    self.h.clock.0.update(ts);
+                    self.committed = self.committed.max(ts);
+                    self.tally(core, g, first, Instant::now());
+                    UNCHANGED.fetch_add(1, Ordering::Relaxed);
+                    return Some(result);
+                }
+                FastWrite::Need(need) => {
+                    let dir = self.h.data_dir.as_deref()?;
+                    let bytes = block(&mut self.outside.files, dir, &need)?;
+                    view.lsm().supply(&need, &bytes).ok()?;
+                }
+                FastWrite::Core => return None,
+            }
+        }
+        None
     }
 
     fn serve(

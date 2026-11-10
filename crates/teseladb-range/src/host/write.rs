@@ -325,7 +325,7 @@ impl RangeHost {
             let (dedup, deadline) = (&m.dedup, m.deadline);
             // What the replica has applied is committed, so a write without change meets these
             // write concerns at once; a stored result of its statement was looked up before.
-            let shortcut = no_change_meets(m.ack) && !on_pending;
+            let shortcut = m.ack.met_by_applied() && !on_pending;
             // What the write leaves under each key it writes, for the next writes of those keys
             // while it is pending (FR-029).
             let mut written: BTreeMap<Vec<u8>, crate::latch::Pending> = BTreeMap::new();
@@ -480,12 +480,4 @@ impl RangeHost {
         }
         true
     }
-}
-
-/// Whether the acknowledgement `ack` of a write that changes nothing holds once the leader has
-/// applied what it read (005 FR-026): what is applied is committed by a majority, so `w: 0`,
-/// `w: 1` without `j` and `w: "majority"` hold; the leader's own journal (`j` with `w: 1`) and a
-/// number of replicas still go through Raft.
-fn no_change_meets(ack: AckWhen) -> bool {
-    matches!(ack, AckWhen::Never | AckWhen::LeaderLog | AckWhen::Applied)
 }

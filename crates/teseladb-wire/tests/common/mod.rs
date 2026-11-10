@@ -927,6 +927,11 @@ impl Backend for Mem {
         Ok(())
     }
 
+    /// Every write goes through [`Backend::write`], where the test backend applies it.
+    fn write_unchanged(&mut self, _op: &WriteOp) -> Option<Vec<u8>> {
+        None
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         if let Some(e) = self.fail_next.take() {
             return Err(e);

@@ -214,3 +214,48 @@ fn examined_keys(r: &Document) -> Option<i64> {
     }
     find(&Value::Document(r.clone()))
 }
+
+fn lsid(n: u8) -> Document {
+    Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![n; 16] })
+}
+
+/// A retryable `delete` of `_id` `id`, statement 0 of transaction `txn` of session 1.
+fn delete_once(c: &mut Client, id: i32, txn: i64) -> Document {
+    let one = Document::new().with("q", Document::new().with("_id", id)).with("limit", 1);
+    let cmd = Document::new()
+        .with("delete", COLL)
+        .with("deletes", vec![one.into()])
+        .with("lsid", lsid(1))
+        .with("txnNumber", Value::Int64(txn));
+    c.run(DB, cmd)
+}
+
+/// 005 FR-030 (H-005 of the native tests): a delete or an update without upsert of an absent
+/// `_id` is answered on the worker's thread with what the core answers; a retry of a statement
+/// that deleted still gets its stored result, and a delete that finds its document goes to the
+/// core and deletes it.
+#[test]
+fn a_write_of_an_absent_id_is_answered_without_the_core() {
+    let node = Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..10)));
+    assert!(ok(&r), "{r:?}");
+    let before = teseladb_server::backend::unchanged_outside();
+    let r = delete_once(&mut c, 1_000, 1);
+    assert!(ok(&r) && r.get("n") == Some(&Value::Int32(0)), "{r:?}");
+    let q = Document::new().with("_id", 1_001);
+    let u = Document::new().with("$set", Document::new().with("x", 1));
+    let update = Document::new().with("q", q).with("u", u);
+    let r = c.run(DB, Document::new().with("update", COLL).with("updates", vec![update.into()]));
+    assert!(ok(&r), "{r:?}");
+    assert_eq!((r.get("n"), r.get("nModified")), (Some(&Value::Int32(0)), Some(&Value::Int32(0))));
+    assert_eq!(teseladb_server::backend::unchanged_outside() - before, 2, "both without the core");
+    // A document that is there goes to the core and is deleted; the retry gets its result.
+    let r = delete_once(&mut c, 3, 2);
+    assert!(r.get("n") == Some(&Value::Int32(1)), "{r:?}");
+    let again = delete_once(&mut c, 3, 2);
+    assert_eq!(again.get("n"), Some(&Value::Int32(1)), "{again:?}");
+    assert_eq!(again.get("retriedStmtIds"), Some(&Value::Array(vec![Value::Int32(0)])));
+    assert!(find(&mut c, 3).is_empty());
+}

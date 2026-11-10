@@ -239,6 +239,10 @@ pub trait Backend {
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError>;
     /// Runs a write; the mutation's encoded result.
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError>;
+    /// The encoded result of `op` answered without its range's core, when its keys have no
+    /// version and it changes nothing (005 FR-030); `None` when it goes as a [`Backend::write`].
+    /// It has no default: a backend that wraps another forwards it, or the shortcut is lost.
+    fn write_unchanged(&mut self, op: &WriteOp) -> Option<Vec<u8>>;
     /// The newest committed versions of `keys` (value type and value, `None` without one) and a
     /// mark at which they are all current: what a write that spans ranges evaluates with
     /// (009 FR-003).

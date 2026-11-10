@@ -12,7 +12,7 @@ mod spans;
 mod together;
 mod txn_reaper;
 
-pub use outside::{blocks_read_outside, declined_outside, served_outside};
+pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
 pub(crate) use txn_reaper::SCAN_EVERY;
 
 use crate::authz_lease::{AuthGate, DEADLINE_SKEW};
@@ -807,6 +807,10 @@ impl Backend for ServerBackend {
             }
             thread::sleep(RETRY_PAUSE);
         }
+    }
+
+    fn write_unchanged(&mut self, op: &WriteOp) -> Option<Vec<u8>> {
+        self.write_outside(op)
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {

@@ -49,6 +49,22 @@ pub enum AckWhen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsatisfiable;
 
+impl AckWhen {
+    /// Whether this acknowledgement of a write that changes nothing holds once the leader has
+    /// applied what it read (005 FR-026): what is applied is committed by a majority, so `w: 0`,
+    /// `w: 1` without `j` and `w: "majority"` hold; the leader's own journal (`j` with `w: 1`) and
+    /// a number of replicas still go through Raft.
+    pub fn met_by_applied(self) -> bool {
+        matches!(self, AckWhen::Never | AckWhen::LeaderLog | AckWhen::Applied)
+    }
+}
+
+/// Whether `wc` holds for a write that changes nothing without an entry, whatever the range's
+/// replicas (005 FR-030): [`AckWhen::met_by_applied`] of its acknowledgement point.
+pub fn met_without_entry(wc: WriteConcern) -> bool {
+    ack_when(wc, usize::MAX).is_ok_and(AckWhen::met_by_applied)
+}
+
 /// The acknowledgement point of `wc` on a range of `replicas` replicas.
 pub fn ack_when(wc: WriteConcern, replicas: usize) -> Result<AckWhen, Unsatisfiable> {
     Ok(match wc.w {

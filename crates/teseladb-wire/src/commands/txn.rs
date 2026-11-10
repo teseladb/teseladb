@@ -1737,6 +1737,11 @@ impl Backend for TxnBackend<'_> {
         self.inner.tenant_name(tenant)
     }
 
+    /// A transaction's writes are its own intents: none is answered outside it.
+    fn write_unchanged(&mut self, _op: &WriteOp) -> Option<Vec<u8>> {
+        None
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let bound = Bound::decode(&op.mutation)?;
         if bound.rules().capped.is_some() {

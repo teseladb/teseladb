@@ -1108,6 +1108,15 @@ impl Bound {
         }
     }
 
+    /// Whether the write changes nothing when its documents are absent: a delete, or an update
+    /// without upsert (005 FR-030).
+    pub fn unchanged_when_absent(&self) -> bool {
+        matches!(
+            &self.mutation,
+            DocMutation::Delete { .. } | DocMutation::Update { upsert: None, .. }
+        )
+    }
+
     /// Whether the write keeps secondary indexes, whose entries may be in another range.
     pub fn keeps_indexes(&self) -> bool {
         !self.rules().indexes.is_empty()

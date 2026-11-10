@@ -555,6 +555,18 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
 
     /// Runs a call of the node: the check before, and after a failure the check again, since a
     /// call that waited until the deadline failed because of it.
+    /// What a write's index keys were, for the profiler (a result that does not read as a
+    /// mutation's counts nothing).
+    fn note_keys_written(&mut self, result: &[u8]) {
+        if let Ok(r) = crate::commands::mutation::MutationResult::decode(result)
+            && r.keys != (0, 0)
+        {
+            let k = &mut self.report.keys_written;
+            k.0 += u64::try_from(r.keys.0).unwrap_or(0);
+            k.1 += u64::try_from(r.keys.1).unwrap_or(0);
+        }
+    }
+
     fn call<T>(
         &mut self,
         f: impl FnOnce(&mut B) -> Result<T, CommandError>,
@@ -946,16 +958,15 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let result = self.call(|b| b.write(op))?;
-        // What the write's index keys were, for the profiler (a result that does not read as a
-        // mutation's counts nothing).
-        if let Ok(r) = crate::commands::mutation::MutationResult::decode(&result)
-            && r.keys != (0, 0)
-        {
-            let k = &mut self.report.keys_written;
-            k.0 += u64::try_from(r.keys.0).unwrap_or(0);
-            k.1 += u64::try_from(r.keys.1).unwrap_or(0);
-        }
+        self.note_keys_written(&result);
         Ok(result)
+    }
+
+    fn write_unchanged(&mut self, op: &WriteOp) -> Option<Vec<u8>> {
+        // An interrupted operation goes as a write, which reports the interruption.
+        let result = self.call(|b| Ok(b.write_unchanged(op))).ok().flatten()?;
+        self.note_keys_written(&result);
+        Some(result)
     }
 
     fn write_gate(&mut self) -> Result<crate::commands::write_block::WriteGate, CommandError> {

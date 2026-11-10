@@ -195,7 +195,13 @@ impl Writer {
                 }
                 _ => None,
             };
-            let written = match earlier {
+            // A delete or an update without upsert of absent documents may be answered without
+            // the range's core (005 FR-030).
+            let unchanged = match earlier {
+                None if b.unchanged_when_absent() => backend.write_unchanged(&op),
+                _ => None,
+            };
+            let written = match earlier.or(unchanged) {
                 Some(result) => Ok(result),
                 None => match backend.write(op.clone()) {
                     Err(e)

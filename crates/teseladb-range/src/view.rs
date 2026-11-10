@@ -31,10 +31,13 @@ use teseladb_lsm::{
 use teseladb_multiraft::NodeClock;
 use teseladb_types::{GroupId, Nanos};
 
+use crate::ack::{WriteConcern, met_without_entry};
+use crate::command::DedupKey;
 use crate::doc_count::{Coll, Counts};
+use crate::host::Mutation;
 use crate::latch::KeySlots;
 use crate::read::ReadConcern;
-use crate::sm::split_value;
+use crate::sm::{dedup_key, split_value};
 use crate::tscache::word;
 
 /// The view of one range.
@@ -118,10 +121,15 @@ impl RangeView {
         &self.lsm
     }
 
-    /// The mark of a read outside the core of `key`, or of the whole range with `None`, with the
+    /// The mark of a read outside the core of `keys`, or of the whole range with `None`, with the
     /// wall clock at `wall_ms`; `now` gives the monotonic time once it is taken. `None` when the
     /// read goes to the core.
-    fn mark(&self, key: Option<&[u8]>, wall_ms: u64, now: impl FnOnce() -> Nanos) -> Option<Hlc> {
+    fn mark(
+        &self,
+        keys: Option<&[&[u8]]>,
+        wall_ms: u64,
+        now: impl FnOnce() -> Nanos,
+    ) -> Option<Hlc> {
         let Next::Mark(ts) = self.clock.0.now(wall_ms) else { return None };
         if ts < self.gc_floor {
             return None;
@@ -132,13 +140,13 @@ impl RangeView {
         // Faulty variant (005 T049): a read outside the core that does not look at the writes
         // holding latches, which may then take a mark below it.
         #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
-        let writing = match key {
-            Some(key) => self.keys.maybe_held(key),
+        let writing = match keys {
+            Some(keys) => keys.iter().any(|k| self.keys.maybe_held(k)),
             None => self.held.load(Ordering::SeqCst) != 0,
         };
         #[cfg(teseladb_bug = "outside_ignores_latches")]
         let writing = {
-            let _ignored = (&self.held, &self.keys, key);
+            let _ignored = (&self.held, &self.keys, keys);
             false
         };
         (!writing && now() < self.valid_until).then_some(ts)
@@ -160,7 +168,7 @@ impl RangeView {
         if !servable {
             return FastRead::Core;
         }
-        let Some(ts) = self.mark(Some(key), wall_ms, now) else { return FastRead::Core };
+        let Some(ts) = self.mark(Some(&[key]), wall_ms, now) else { return FastRead::Core };
         let view = self.lsm.view_cached(cache);
         match view.get(&self.lsm, key, ts) {
             SharedRead::Hit(f) if f.kind == Kind::Intent => FastRead::Core,
@@ -226,7 +234,106 @@ impl RangeView {
     }
 }
 
+/// What a mutation answered outside the core gives (005 FR-030).
+#[derive(Debug)]
+pub enum FastWrite {
+    /// It changes nothing: its result, at the mark it was evaluated at.
+    Answered {
+        /// The mark.
+        ts: Hlc,
+        /// The mutation's result.
+        result: Vec<u8>,
+    },
+    /// A block to read from its file and give to [`SharedLsm::supply`]; then it runs again.
+    Need(BlockNeed),
+    /// The mutation goes to the core.
+    Core,
+}
+
+/// A mutation to answer outside the core if it changes nothing (005 FR-030).
+pub struct NoChange<'a> {
+    /// The mutation.
+    pub mutation: &'a dyn Mutation,
+    /// Its keys, which it reads.
+    pub keys: &'a [Vec<u8>],
+    /// Its statement, for a retryable write.
+    pub dedup: Option<DedupKey>,
+    /// Its write concern.
+    pub wc: WriteConcern,
+    /// The cluster time past which it is not evaluated (009 FR-006).
+    pub deadline: Option<u64>,
+    /// It goes to the core as soon as one of its keys has a version, without being evaluated: a
+    /// delete or an update without upsert changes nothing only when its documents are absent,
+    /// and evaluating one that changes something here would only repeat the core's work.
+    pub absent_only: bool,
+}
+
+/// The mark idempotence records are read at: they are never rewritten, so the newest is the one.
+const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+
 impl RangeView {
+    /// Answers `w` on this thread if it changes nothing, as the core answers it without an entry
+    /// (005 FR-026, FR-030): at a mark taken as [`RangeView::read`] takes one for its keys and
+    /// its idempotence record, with no record of its statement, no intent on its keys, an
+    /// evaluation without versions, deletes or other keys to read, and a mark within its
+    /// deadline. Anything else goes to the core, which answers as before.
+    pub fn no_change(
+        &self,
+        cache: &mut ViewCache,
+        w: &NoChange<'_>,
+        wall_ms: u64,
+        now: impl FnOnce() -> Nanos,
+    ) -> FastWrite {
+        let inside = |k: &Vec<u8>| self.start.as_slice() <= k.as_slice() && k < &self.end;
+        if !met_without_entry(w.wc) || w.keys.is_empty() || !w.keys.iter().all(inside) {
+            return FastWrite::Core;
+        }
+        let record = w.dedup.map(|k| dedup_key(self.g, k.lsid, k.txn_number, k.stmt_id));
+        let watched: Vec<&[u8]> =
+            w.keys.iter().map(Vec::as_slice).chain(record.as_deref()).collect();
+        let Some(ts) = self.mark(Some(&watched), wall_ms, now) else { return FastWrite::Core };
+        if w.deadline.is_some_and(|d| ts.physical > d) {
+            return FastWrite::Core;
+        }
+        let view = self.lsm.view_cached(cache);
+        if let Some(r) = &record {
+            match view.get(&self.lsm, r, NEWEST) {
+                SharedRead::NotFound => {}
+                SharedRead::Need(need) => return FastWrite::Need(need),
+                // A stored result goes back through the core, which answers it.
+                SharedRead::Hit(_) | SharedRead::Failed(_) => return FastWrite::Core,
+            }
+        }
+        let mut current = Vec::with_capacity(w.keys.len());
+        for k in w.keys {
+            match view.get(&self.lsm, k, ts) {
+                SharedRead::Hit(f) if f.kind == Kind::Intent => return FastWrite::Core,
+                SharedRead::Hit(f) => {
+                    let version = split_value(&f.value).map(|(t, v)| (t, v.to_vec()));
+                    if w.absent_only && version.is_some() {
+                        return FastWrite::Core;
+                    }
+                    current.push(version);
+                }
+                SharedRead::NotFound => current.push(None),
+                SharedRead::Need(need) => return FastWrite::Need(need),
+                SharedRead::Failed(_) => return FastWrite::Core,
+            }
+        }
+        let current: Vec<Option<(u8, &[u8])>> =
+            current.iter().map(|c| c.as_ref().map(|(t, v)| (*t, v.as_slice()))).collect();
+        match w.mutation.eval_with(w.keys, &current, ts) {
+            Ok(o)
+                if o.puts.is_empty()
+                    && o.deletes.is_empty()
+                    && w.mutation.reads(&o).iter().all(|k| w.keys.contains(k)) =>
+            {
+                FastWrite::Answered { ts, result: o.result }
+            }
+            _ => FastWrite::Core,
+        }
+    }
+
     /// The live documents of collection `coll` in the range, read as [`RangeView::read`] reads a
     /// key (the counts are those of the state the view's LSM version holds), with the wall clock
     /// and the monotonic time of `clocks` (H-004 of the native tests). `None` when the counts
