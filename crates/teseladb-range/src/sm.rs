@@ -207,6 +207,10 @@ pub trait RangeState {
     /// from the range's published view (H-004 of the native tests). Without a default: a state
     /// machine that wraps a range's has to hand them on, or no view carries them.
     fn shared_counts(&self) -> Option<Arc<Counts>>;
+    /// The index of the last applied entry that may have changed the transaction records (008
+    /// FR-007, H-040): the applied index when the range opened or restored a snapshot. Without a
+    /// default, so a wrapping state machine hands it on.
+    fn txn_mark(&self) -> u64;
     /// Whether a write fence holds `key` (018, [`crate::fence`]).
     fn fenced(&self, _key: &[u8]) -> bool {
         false
@@ -221,6 +225,8 @@ pub struct RangeSm {
     lsm: Rc<RefCell<Lsm>>,
     applied: u64,
     last_write: u64,
+    /// The last applied entry that may have changed the transaction records (H-040).
+    txn_mark: u64,
     gc_threshold: Hlc,
     last_mark: Hlc,
     checksum: Option<(u64, Hlc)>,
@@ -506,6 +512,7 @@ impl RangeSm {
             lsm,
             applied,
             last_write: applied,
+            txn_mark: applied,
             gc_threshold: s.gc,
             last_mark: s.mark,
             checksum: None,
@@ -1041,6 +1048,10 @@ impl RangeState for RangeSm {
         self.counts.exact().then(|| Arc::clone(&self.counts))
     }
 
+    fn txn_mark(&self) -> u64 {
+        self.txn_mark
+    }
+
     fn checksum_request(&self) -> Option<(u64, Hlc)> {
         self.checksum
     }
@@ -1088,6 +1099,7 @@ impl StateMachine for RangeSm {
         }
         let cmd = Command::decode(payload)
             .map_err(|e| ApplyError(format!("range {}: entry {}: {e}", self.range.0, ctx.index)))?;
+        let touches_records = touches_records(&cmd);
         let out = match cmd {
             Command::Noop => RangeOutput::Applied { ts: ctx.ts },
             Command::Write { puts, deletes, .. }
@@ -1205,6 +1217,9 @@ impl StateMachine for RangeSm {
                 RangeOutput::Applied { ts: ctx.ts }
             }
         };
+        if touches_records {
+            self.txn_mark = ctx.index;
+        }
         self.applied = ctx.index;
         Ok(out)
     }
@@ -1241,6 +1256,8 @@ impl StateMachine for RangeSm {
                 self.range.0
             )));
         }
+        // A snapshot may bring records: the reaper reads the range again (H-040).
+        self.txn_mark = applied;
         self.applied = applied;
         self.last_write = last_write;
         self.gc_threshold = gc;
@@ -1303,5 +1320,25 @@ impl StateMachine for RangeSm {
             }
             Err(_) => true,
         }
+    }
+}
+
+/// Whether `cmd` may change the transaction records (008 FR-007, H-040): a document write that
+/// names none, and the commands that only touch the range's own state, do not; any other command
+/// counts, so a new kind of entry is read again rather than missed.
+fn touches_records(cmd: &Command) -> bool {
+    match cmd {
+        Command::Noop
+        | Command::SetClosedTs { .. }
+        | Command::SetGcThreshold { .. }
+        | Command::ComputeChecksum { .. }
+        | Command::AdjustCounts { .. }
+        | Command::Fence { .. } => false,
+        Command::Write { puts, deletes, .. } => puts
+            .iter()
+            .map(|p| &p.key)
+            .chain(deletes)
+            .any(|k| k.first() == Some(&crate::intents::TXN_SPACE)),
+        _ => true,
     }
 }

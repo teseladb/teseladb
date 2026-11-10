@@ -12,6 +12,7 @@ use teseladb_range::intents::{
     IntentOp, IntentOwner, Push, RecordOp, TxnId, TxnRecord, TxnStatus, record_key,
 };
 use txn_node::*;
+use teseladb_types::GroupId;
 
 #[test]
 fn put_intents_conflict_with_newer_versions_and_other_transactions() {
@@ -192,4 +193,20 @@ fn a_transaction_request_past_its_deadline_is_not_evaluated() {
     let on_time = n.host.txn_until(&mut n.core, req(one_phase), wall + 60_000, (now, wall));
     assert!(n.answer(on_time).is_ok());
     assert_eq!(n.get(A), Some(b"v".to_vec()));
+}
+
+#[test]
+fn the_record_mark_moves_only_with_entries_that_touch_the_records() {
+    // 008 FR-007, H-040: the reaper reads no range whose mark did not move since it found it empty.
+    let mut n = Node::new();
+    let views = n.host.views();
+    let start = views.txn_mark(G).expect("published as the range opened");
+    n.write(A, b"x");
+    assert_eq!(views.txn_mark(G), Some(start), "a document write leaves it");
+    record(n.txn(TxnOp::EndTxn { txn: T1, op: begin(Hlc { physical: 5, logical: 0 }) }));
+    let moved = views.txn_mark(G).expect("published");
+    assert!(moved > start, "a record moves it: {start} {moved}");
+    n.write(B, b"y");
+    assert_eq!(views.txn_mark(G), Some(moved));
+    assert_eq!(views.txn_mark(GroupId(999)), None, "not a range of the core");
 }

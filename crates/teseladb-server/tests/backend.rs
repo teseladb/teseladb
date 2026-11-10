@@ -1076,7 +1076,6 @@ fn tenants_settings_and_other_operations_wait_for_core_zero() {
 /// is not a record; a range this node does not lead is left alone.
 #[test]
 fn the_reaper_reads_every_page_of_the_records_it_leads() {
-    use std::collections::BTreeMap;
     use teseladb_server::data::DataStatus;
     let leader = DataStatus { role: Some(teseladb_raft::Role::Leader), ..DataStatus::default() };
     let page: Vec<(Vec<u8>, Vec<u8>)> = (0..256u16)
@@ -1095,9 +1094,9 @@ fn the_reaper_reads_every_page_of_the_records_it_leads() {
     // Each pass creates the reaper of the range's core once its records are read: the second
     // pass finds its leader's answer next, so the first read both pages.
     let pass = |b: &mut ServerBackend| {
-        let mut reapers = BTreeMap::new();
+        let mut reapers = teseladb_server::backend::Reapers::default();
         assert_eq!(b.reap_transactions(&mut reapers), 0);
-        reapers.len()
+        reapers.cores()
     };
     assert_eq!(pass(&mut b), 1);
     assert_eq!(pass(&mut b), 1);

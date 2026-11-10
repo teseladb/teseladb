@@ -23,7 +23,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_hlc::to_timestamp;
 use teseladb_io::poller::{Interest, Poller, WAKE_TOKEN, Waker};
 use teseladb_multiraft::NodeClock;
-use teseladb_txn::reaper::Reaper;
 use teseladb_wire::commands::diagnostic_data;
 use teseladb_wire::commands::registry::{REFRESH_INTERVAL_MS, refresh};
 use teseladb_wire::commands::{
@@ -571,7 +570,7 @@ impl ClientListener {
                     refresh_every: cfg.refresh_every,
                     ttl_every: hooks.ttl_every,
                     stop: stop.clone(),
-                    reapers: BTreeMap::new(),
+                    reapers: crate::backend::Reapers::default(),
                 };
                 Some(thread::Builder::new().name("client-sessions".into()).spawn(move || k.run())?)
             }
@@ -617,7 +616,7 @@ struct Keeper {
     ttl_every: Duration,
     stop: Arc<AtomicBool>,
     /// The reapers of abandoned transactions, one per core (008 FR-007).
-    reapers: BTreeMap<u16, Reaper>,
+    reapers: crate::backend::Reapers,
     /// The periodic diagnostic capture of a node with a data directory (010 FR-024).
     capture: Option<Capture>,
 }

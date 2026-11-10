@@ -261,6 +261,13 @@ impl RangeState for NodeSm {
         }
     }
 
+    fn txn_mark(&self) -> u64 {
+        match self {
+            NodeSm::Range(sm) => sm.txn_mark(),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => 0,
+        }
+    }
+
     fn gc_threshold(&self) -> Hlc {
         match self {
             NodeSm::Range(sm) => sm.gc_threshold(),

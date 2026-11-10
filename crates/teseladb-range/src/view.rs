@@ -372,6 +372,8 @@ impl Either {
 #[derive(Clone)]
 pub struct RangeViews {
     cell: Arc<Published<BTreeMap<GroupId, Arc<RangeView>>>>,
+    /// The transaction record mark of each range of the core, led or not (008 FR-007, H-040).
+    marks: Arc<Published<BTreeMap<GroupId, u64>>>,
 }
 
 impl std::fmt::Debug for RangeViews {
@@ -382,7 +384,10 @@ impl std::fmt::Debug for RangeViews {
 
 impl Default for RangeViews {
     fn default() -> RangeViews {
-        RangeViews { cell: Arc::new(Published::new(Arc::new(BTreeMap::new()))) }
+        RangeViews {
+            cell: Arc::new(Published::new(Arc::new(BTreeMap::new()))),
+            marks: Arc::new(Published::new(Arc::new(BTreeMap::new()))),
+        }
     }
 }
 
@@ -394,5 +399,20 @@ impl RangeViews {
 
     pub(crate) fn publish(&self, views: BTreeMap<GroupId, Arc<RangeView>>) {
         self.cell.store(Arc::new(views));
+    }
+
+    /// The index of the last entry of range `g` that may have changed its transaction records,
+    /// as the core published it at its last poll; `None` if the core holds no such range.
+    pub fn txn_mark(&self, g: GroupId) -> Option<u64> {
+        self.marks.load().get(&g).copied()
+    }
+
+    /// The published marks, to compare before publishing again.
+    pub(crate) fn txn_marks(&self) -> Arc<BTreeMap<GroupId, u64>> {
+        self.marks.load()
+    }
+
+    pub(crate) fn publish_txn_marks(&self, marks: BTreeMap<GroupId, u64>) {
+        self.marks.store(Arc::new(marks));
     }
 }

@@ -169,6 +169,10 @@ fn a_state_without_closed_marks_has_none() {
         fn shared_counts(&self) -> Option<std::sync::Arc<teseladb_range::doc_count::Counts>> {
             None
         }
+
+        fn txn_mark(&self) -> u64 {
+            0
+        }
     }
     assert_eq!(NoRange.closed_mark(), None);
     assert!(NoRange.shared_counts().is_none());

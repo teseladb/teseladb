@@ -13,6 +13,7 @@ mod together;
 mod txn_reaper;
 
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
+pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
 
 use crate::authz_lease::{AuthGate, DEADLINE_SKEW};

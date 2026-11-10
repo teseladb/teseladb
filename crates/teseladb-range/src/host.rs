@@ -1178,7 +1178,25 @@ impl RangeHost {
             moved |= self.step(core, id, now);
         }
         self.publish_views(core, now);
+        self.publish_txn_marks(core);
         moved
+    }
+
+    /// Publishes the transaction record mark of each range of the host when one moved (008
+    /// FR-007, H-040): the node's reaper reads no range whose mark it saw empty.
+    fn publish_txn_marks<S: StateMachine + RangeState>(&self, core: &MultiRaftCore<S>) {
+        let published = self.views.txn_marks();
+        let mark = |g: &GroupId| core.state_machine(*g).map(RangeState::txn_mark);
+        let mut held = 0;
+        let mut same = true;
+        for (g, m) in self.ranges.keys().filter_map(|g| Some((g, mark(g)?))) {
+            held += 1;
+            same &= published.get(g) == Some(&m);
+        }
+        if !same || held != published.len() {
+            let marks = self.ranges.keys().filter_map(|g| Some((*g, mark(g)?))).collect();
+            self.views.publish_txn_marks(marks);
+        }
     }
 
     /// Publishes the views of the ranges this host leads in `views`, which the node's handle
