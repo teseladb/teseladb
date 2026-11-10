@@ -13,6 +13,13 @@
 //! the transactions, and the next plain write takes the keys and is evaluated on the pending
 //! value. A retry of the same statement still waits: the idempotence record of a pipelined write
 //! stays exclusive for the writes too.
+//!
+//! For the point reads served outside the core (005 FR-028) a write also counts each key it
+//! latches in [`KeySlots`], a counting filter shared with the range's view, and uncounts it when
+//! it releases them. Every key a write puts or deletes is latched by its evaluation before its
+//! mark is compared with the bound of those reads, so a read that finds the slot of its key at
+//! zero after raising the bound either sees the write or makes it take a mark above
+//! (`spec/tla/HlcKeyLatches.tla`, which fails when a write counts a key after its mark).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -29,6 +36,48 @@ pub enum WaitFor {
     /// a merge, which copies what the range holds with the idempotence records of the writes in
     /// flight.
     Every,
+}
+
+/// How many slots [`KeySlots`] has: with a few dozen writes in flight in a range, a read finds the
+/// slot of its key taken by another key about one time in a hundred, and then goes to the core.
+pub const KEY_SLOTS: usize = 4096;
+
+/// A counting filter of the keys latched in a range (Fan et al., «Summary Cache», 2000): each
+/// key counts in one slot, chosen by its hash, so a slot at zero means no write holds that key.
+/// Two keys may share a slot: a read of one then sees the other's write and goes to the core.
+#[derive(Debug)]
+pub struct KeySlots {
+    slots: Box<[AtomicU32]>,
+}
+
+impl Default for KeySlots {
+    fn default() -> KeySlots {
+        KeySlots { slots: (0..KEY_SLOTS).map(|_| AtomicU32::new(0)).collect() }
+    }
+}
+
+impl KeySlots {
+    /// The slot of `key` (FNV-1a over its bytes).
+    pub fn slot(key: &[u8]) -> usize {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0100_0000_01b3;
+        let h = key.iter().fold(OFFSET, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME));
+        // The slot count is a power of two: the low bits after folding in the high ones.
+        usize::try_from((h ^ (h >> 32)) & (KEY_SLOTS as u64 - 1)).unwrap_or(0)
+    }
+
+    /// Whether a write may hold `key`: its slot is not at zero.
+    pub fn maybe_held(&self, key: &[u8]) -> bool {
+        self.slots[Self::slot(key)].load(Ordering::SeqCst) != 0
+    }
+
+    fn count(&self, slot: usize) {
+        self.slots[slot].fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn uncount(&self, slot: usize) {
+        self.slots[slot].fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// A held set of latches.
@@ -76,6 +125,10 @@ pub struct Latches {
     /// read outside the core that sees any goes to the core.
     holders: BTreeSet<LatchId>,
     held: Arc<AtomicU32>,
+    /// The keys latched, counted for the point reads outside the core, and the slots each write
+    /// counted, which its release uncounts.
+    keys: Arc<KeySlots>,
+    counted: BTreeMap<LatchId, Vec<usize>>,
 }
 
 impl Latches {
@@ -140,6 +193,8 @@ impl Latches {
             self.pipelined.entry(k).or_default().push(Pipelined { ts, id, record, value });
         }
         for (k, value) in written {
+            // A key written and not latched (only a faulty variant leaves one) counts now.
+            self.count_key(id, &k);
             let p = Pipelined { ts, id, record: false, value: Some(value) };
             self.pipelined.entry(k).or_default().push(p);
         }
@@ -168,7 +223,12 @@ impl Latches {
         }
         let ts = self.by_key.values().find(|(_, h)| *h == id).and_then(|(t, _)| *t);
         for k in keys {
-            self.by_key.insert(k.clone(), (ts, id));
+            // Counted here, before the write's mark: the simulator runs a core step whole, so
+            // only `spec/tla/HlcKeyLatches.tla` (its CountBeforeMark mutant) reaches a read
+            // between the count and the mark.
+            if self.by_key.insert(k.clone(), (ts, id)).is_none() {
+                self.count_key(id, k);
+            }
         }
         if !keys.is_empty() && self.holders.insert(id) {
             self.held
@@ -203,6 +263,9 @@ impl Latches {
         });
         self.answered.remove(&id);
         self.goes_on.remove(&id);
+        for slot in self.counted.remove(&id).unwrap_or_default() {
+            self.keys.uncount(slot);
+        }
         if self.holders.remove(&id) {
             self.held
                 .store(u32::try_from(self.holders.len()).unwrap_or(u32::MAX), Ordering::SeqCst);
@@ -212,6 +275,18 @@ impl Latches {
     /// How many writes hold latches, for the reads outside the core (005 FR-028).
     pub fn held(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.held)
+    }
+
+    /// The keys latched, for the point reads outside the core (005 FR-028).
+    pub fn keys(&self) -> Arc<KeySlots> {
+        Arc::clone(&self.keys)
+    }
+
+    /// Counts `key`, latched by `id`, in its slot.
+    fn count_key(&mut self, id: LatchId, key: &[u8]) {
+        let slot = KeySlots::slot(key);
+        self.keys.count(slot);
+        self.counted.entry(id).or_default().push(slot);
     }
 
     /// Whether `key` is held.

@@ -561,6 +561,38 @@ fn a_read_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     ));
 }
 
+/// A point read outside the core looks only at the writes of its own key (H-010 of the native
+/// tests, `spec/tla/HlcKeyLatches.tla`): a write in flight on another key does not send it to the
+/// core, and the next write of the key it read goes above its mark. A scan still looks at every
+/// write.
+#[test]
+fn a_point_read_outside_the_core_waits_only_for_the_writes_of_its_key() {
+    use teseladb_range::latch::KeySlots;
+    let (written, other) = (b"\x01count".as_slice(), b"\x01other".as_slice());
+    assert_ne!(KeySlots::slot(written), KeySlots::slot(other));
+    let mut n = Node::new();
+    n.mutate(written, Box::new(Inc), MAJORITY);
+    n.settle();
+    let w = n.mutate(written, Box::new(Inc), MAJORITY);
+    let FastRead::Found { ts: read, value } =
+        read_outside(&n, other, ReadConcern::Local, Nanos::ZERO)
+    else {
+        panic!("a write of another key does not send the read to the core")
+    };
+    assert_eq!(value, None);
+    assert!(matches!(read_outside(&n, written, ReadConcern::Local, Nanos::ZERO), FastRead::Core));
+    assert!(scan_outside(&n, (b"\x01", b"\x02"), 10, ReadConcern::Local).is_none());
+    n.settle();
+    assert!(n.reply(w).is_some());
+    // The key it read is written above its mark.
+    let later = n.mutate(other, Box::new(Inc), MAJORITY);
+    n.settle();
+    match n.reply(later) {
+        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > read, "{ts:?} above {read:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A scan from a connection's thread (005 FR-028), as [`read_outside`]; no block is read.
 fn scan_outside(
     n: &Node,

@@ -1224,6 +1224,7 @@ impl RangeHost {
                 valid_until: until,
                 gc_floor: handed.unwrap_or(ZERO),
                 held: l.latches.held(),
+                keys: l.latches.keys(),
                 outside: l.cache.outside(),
                 counts: core.state_machine(*g).and_then(RangeState::shared_counts),
             };

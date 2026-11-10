@@ -171,3 +171,31 @@ fn a_pipelined_write_lets_the_next_plain_write_go_on_it_and_holds_the_rest() {
     assert!(latches.is_empty());
     assert_eq!(latches.held().load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// The keys a write latches count in their slots for the point reads outside the core (005
+/// FR-028, `spec/tla/HlcKeyLatches.tla`) from the moment it takes them, before its mark, through
+/// its pipelined state, until it releases them; another key's slot stays at zero.
+#[test]
+fn the_keys_a_write_latches_count_in_their_slots_until_it_releases_them() {
+    use teseladb_range::latch::KeySlots;
+    let (doc, index, other) = (b"doc".to_vec(), b"idx/a".to_vec(), b"other".to_vec());
+    assert_ne!(KeySlots::slot(&doc), KeySlots::slot(&other));
+    assert_ne!(KeySlots::slot(&index), KeySlots::slot(&other));
+    let mut latches = Latches::default();
+    let keys = latches.keys();
+    let w = latches.acquire_pipelined(std::slice::from_ref(&doc)).unwrap();
+    assert!(keys.maybe_held(&doc), "counted before it has a mark");
+    assert!(!keys.maybe_held(&other));
+    latches.extend(w, &[doc.clone(), index.clone()]).unwrap();
+    latches.set_mark(w, ts(10));
+    latches.pipeline(w, ts(10), &[], Default::default());
+    assert!(keys.maybe_held(&doc) && keys.maybe_held(&index), "still held once pipelined");
+    // The next write of the key goes on the pipelined one and counts it too.
+    let next = latches.acquire_pipelined(std::slice::from_ref(&doc)).unwrap();
+    latches.release(w);
+    assert!(keys.maybe_held(&doc), "held by the next write");
+    assert!(!keys.maybe_held(&index));
+    latches.release(next);
+    latches.release(next);
+    assert!(!keys.maybe_held(&doc), "released once, uncounted once");
+}

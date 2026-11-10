@@ -129,12 +129,12 @@ variants!(
     // `relocate` at seed 3 is the first (measured 04-11-2026 on main f55d8d7, before the
     // `authz-fence` workload, and again with it).
     ("no_timer_after_lost_vote", "liveness", Heavy, 1000),
-    // A coordinator that combines one range's partial group twice (010 T026): the `queries`
-    // workload's next group differs from the reference evaluator's.
     // A read outside the core that does not look at the writes holding latches (005 T049): a
     // write in flight then takes a mark below it, and `outside-reads` sees a read miss a write
     // the majority acknowledged below its mark (`mvcc`, seed 3, measured 09-11-2026).
     ("outside_ignores_latches", "mvcc", Default, 1000),
+    // A coordinator that combines one range's partial group twice (010 T026): the `queries`
+    // workload's next group differs from the reference evaluator's.
     ("partial_double_count", "queries-oracle", Default, 1000),
     // A proposal the leader refuses leaves its value pending (005 T054): the next write of the key
     // goes on a value that never was in the log, and `range-docs` finds a write acknowledged with
