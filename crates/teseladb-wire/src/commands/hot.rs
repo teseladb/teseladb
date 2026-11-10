@@ -108,7 +108,8 @@ impl CommandStats {
 }
 
 /// What the node of `shared` keeps outside its lock, without that lock after the first command
-/// of a thread.
+/// of a thread. The first call of a thread takes the node's lock: with that lock already held,
+/// use the guard's `hot` instead, or the thread waits on itself.
 pub fn of(shared: &super::Shared) -> Arc<Hot> {
     let key = std::ptr::from_ref(shared) as usize;
     let held = HELD
