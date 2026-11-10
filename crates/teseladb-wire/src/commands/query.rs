@@ -52,8 +52,12 @@ pub const DEFAULT_FIRST_BATCH: usize = 101;
 pub const MAX_BATCH_BYTES: usize = MAX_BSON_OBJECT_SIZE as usize;
 /// Most memory a sort uses without `allowDiskUse`.
 pub const SORT_MEMORY_LIMIT: usize = 100 * 1024 * 1024;
-/// Documents read from the range at a time.
+/// Documents read from the range at a time, at most.
 pub const SCAN_CHUNK: usize = 1000;
+/// Documents a collection scan reads first: each refill doubles it up to [`SCAN_CHUNK`], as an
+/// adaptive readahead grows, so that a read that wants few documents does not read a thousand
+/// (H-012 of the native tests).
+pub const SCAN_FIRST: usize = 16;
 /// The sort field of the collection's own order.
 const NATURAL: &str = "$natural";
 
@@ -76,6 +80,8 @@ pub enum Source {
         concern: ReadConcern,
         /// The command's `let` variables, for its `getMore`s too.
         vars: Option<Document>,
+        /// Documents the next refill reads ([`SCAN_FIRST`], doubling up to [`SCAN_CHUNK`]).
+        chunk: usize,
     },
     /// The entries of `local.oplog.rs` above mark `from`, filtered and projected (018 FR-009).
     Oplog {
@@ -568,17 +574,28 @@ impl QueryCursor {
             }
             return Ok(());
         }
-        let (next, end, filter, projection, collation, concern, vars) = match &mut self.source {
-            Source::Scan { next, end, filter, projection, collation, concern, vars } => {
-                (next, end, filter, projection, collation, concern, vars)
+        let (next, end, filter, projection, collation, concern, vars, size) = match &mut self.source
+        {
+            Source::Scan { next, end, filter, projection, collation, concern, vars, chunk } => {
+                let size = *chunk;
+                *chunk = chunk.saturating_mul(2).min(SCAN_CHUNK);
+                (next, end, filter, projection, collation, concern, vars, size)
             }
             Source::Done | Source::Spilled { .. } | Source::Oplog { .. } => return Ok(()),
         };
         let plan =
             Plan::new(filter, projection.as_ref(), collation.as_ref())?.with_vars(vars.as_ref());
-        let rows = backend.scan(next, end, SCAN_CHUNK, *concern)?;
-        let short = rows.len() < SCAN_CHUNK;
-        for (key, bytes) in rows {
+        let rows = backend.scan(next, end, size, *concern)?;
+        let mut short = rows.len() < size;
+        let read = rows.len();
+        for (seen, (key, bytes)) in rows.into_iter().enumerate() {
+            // The limit is reached: the rest of the read is left for no one, as a `COLLSCAN`
+            // stops at its limit, and its `docsExamined` stops there too.
+            if self.left.is_some_and(|l| self.buffered.len() as u64 >= l) {
+                backend.not_examined(u64::try_from(read - seen).unwrap_or(u64::MAX));
+                short = false;
+                break;
+            }
             *next = after(&key);
             // A stored document always parses: one that does not is a fault, not a miss.
             let doc = RawDoc::from_bytes(&bytes)?;
@@ -1169,6 +1186,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 collation: collation.clone(),
                 concern: a.concern,
                 vars: a.vars.clone(),
+                chunk: SCAN_FIRST,
             },
             buffered: VecDeque::new(),
             skip: a.skip,

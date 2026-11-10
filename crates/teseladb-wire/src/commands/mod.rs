@@ -384,6 +384,10 @@ pub trait Backend {
     /// What the running operation has examined so far, for `$queryStats` (010 FR-023). Every
     /// backend says what it does, so that a wrapper cannot drop the call.
     fn op_reads(&mut self) -> crate::ops::OpReads;
+    /// `docs` documents a scan read and did not look at (it stopped at its limit): they leave
+    /// the documents the operation examined (`docsExamined`, H-012). It has no default, so that a
+    /// wrapper cannot drop it.
+    fn not_examined(&mut self, docs: u64);
     /// The client metadata of the running operation's connection, for `$queryStats`.
     fn op_client(&mut self) -> Option<Document>;
     /// The plan the running operation noted ([`Backend::note_plan`]), for `$queryStats`.

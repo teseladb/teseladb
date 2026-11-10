@@ -641,3 +641,21 @@ fn a_filter_is_unset_by_name() {
     assert_eq!(field(&r, "code"), &Value::Int32(2), "{r:?}");
     assert_eq!(field(&r, "errmsg"), &Value::from("Expected an object, or the string 'unset'."));
 }
+
+/// A collection scan stops at its limit (H-012 of the native tests): a `find` with `limit: 1`
+/// over 200 documents that all match examines one, as a `COLLSCAN` stops at its limit, instead of
+/// reading a thousand documents to give one.
+#[test]
+fn a_collection_scan_stops_at_its_limit() {
+    let mut m = node();
+    let docs: Vec<String> = (0..200).map(|i| format!(r#"{{"_id":{i},"a":5}}"#)).collect();
+    run(&mut m, DB, json(&format!(r#"{{"insert":"c","documents":[{}]}}"#, docs.join(","))));
+    run(&mut m, DB, json(r#"{"profile":2}"#));
+    let r = run(&mut m, DB, json(r#"{"find":"c","filter":{"a":5},"limit":1}"#));
+    run(&mut m, DB, json(r#"{"profile":0}"#));
+    let Value::Array(found) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(found.len(), 1);
+    let profiled = profiled(&mut m);
+    let examined = profiled[0].get("docsExamined").cloned();
+    assert_eq!(examined, Some(Value::Int64(1)), "{profiled:?}");
+}

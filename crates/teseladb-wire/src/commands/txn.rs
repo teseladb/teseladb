@@ -1571,6 +1571,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.note_plan_lazy(plan);
     }
 
+    fn not_examined(&mut self, docs: u64) {
+        self.inner.not_examined(docs);
+    }
+
     fn op_reads(&mut self) -> crate::ops::OpReads {
         self.inner.op_reads()
     }

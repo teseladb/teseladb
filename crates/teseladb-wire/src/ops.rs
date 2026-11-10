@@ -943,6 +943,11 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(found)
     }
 
+    fn not_examined(&mut self, docs: u64) {
+        self.report.docs = self.report.docs.saturating_sub(docs);
+        self.inner.not_examined(docs);
+    }
+
     fn op_reads(&mut self) -> OpReads {
         OpReads { keys: self.report.keys, docs: self.report.docs }
     }
