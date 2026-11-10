@@ -203,6 +203,11 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     outbox: Vec<(NodeId, PeerMsg)>,
     events: Vec<Event>,
     fired: Vec<NodeId>,
+    /// Whether the last turn took any work (a message, a disk result or a socket event): only
+    /// then does the next one spin before sleeping.
+    worked: bool,
+    /// Turns that spun, for the tests.
+    spins: u64,
 }
 
 fn wall_ms() -> u64 {
@@ -260,6 +265,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             outbox: Vec::new(),
             events: Vec::new(),
             fired: Vec::new(),
+            worked: false,
+            spins: 0,
         };
         Ok((rt, sender))
     }
@@ -334,6 +341,11 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
     }
 
+    /// How many turns spun before sleeping.
+    pub fn spins(&self) -> u64 {
+        self.spins
+    }
+
     /// One iteration of the loop.
     pub fn turn(&mut self) -> io::Result<()> {
         let now = self.now();
@@ -352,9 +364,13 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         // A message or a socket event that arrives within a short spin is taken without
         // sleeping: a wake-up costs several microseconds on every request that crosses threads
         // (H-013). The spin looks at the mailbox and, without waiting, at the poller; the events
-        // it takes are not asked for again.
+        // it takes are not asked for again. Only a core that just worked spins: one that woke
+        // for its tick alone sleeps again at once, as AnotherProduct polls only for a while after its
+        // last work (H-037: every core spun after each tick, 3 % of a core with the node idle).
         let mut failed = None;
-        let spun = !timeout.is_zero()
+        let spin = self.worked && !timeout.is_zero();
+        self.spins += u64::from(spin);
+        let spun = spin
             && crate::spin::spin_until(crate::spin::SPIN_BEFORE_SLEEP, || {
                 if !self.mailbox.is_empty() {
                     return true;
@@ -378,14 +394,17 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.events.extend_from_slice(self.poller.poll(Some(wait))?);
         }
         let events = std::mem::take(&mut self.events);
+        let mut worked = false;
         for e in &events {
             if is_socket(e.token) {
+                worked = true;
                 self.on_socket(e);
             }
         }
-        self.reap_ring()?;
+        worked |= self.reap_ring()?;
         self.events = events;
         self.mailbox.drain_into(&mut self.inputs);
+        self.worked = worked || !self.inputs.is_empty();
         for input in std::mem::take(&mut self.inputs) {
             self.on_input(input)?;
         }
@@ -413,17 +432,19 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     }
 
     /// Feeds the logic with the ring's completions. A ring that fails is a disk that cannot make
-    /// anything durable any more: the loop ends with the error.
-    fn reap_ring(&mut self) -> io::Result<()> {
+    /// anything durable any more: the loop ends with the error. Returns whether it took any.
+    fn reap_ring(&mut self) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         if let Exec::InLoop(d) = &mut self.disk {
             ring(d).reap(&mut self.reaped)?;
             let now = self.now();
+            let took = !self.reaped.is_empty();
             for done in std::mem::take(&mut self.reaped) {
                 self.logic.on_io_done(done, now);
             }
+            return Ok(took);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Hands the logic's disk operations and frames to their executors.

@@ -52,6 +52,7 @@ use crate::rollback::ref_layout;
 use crate::routes::SharedRoutes;
 use crate::sessions_ops::{AnswersSender, KillSender, NodeQueries, SessionOps};
 use teseladb_meta::drain::DrainError;
+use teseladb_meta::liveness::NODE_HEARTBEAT;
 
 use crate::client_listener::NodePresence;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
@@ -272,6 +273,8 @@ pub struct NodeLogic {
     sessions: Option<Arc<Shared>>,
     /// This core's index and where it publishes its load for core 0's heartbeat (007 FR-010).
     loads: Option<(usize, Arc<SharedLoads>)>,
+    /// When this core next publishes its load in `loads`.
+    load_next: Nanos,
     /// Where core 0 tells the clients' port the node's state in Group 0 (007 FR-015).
     presence: Option<Arc<NodePresence>>,
     /// Where core 0 hands the HTTP requests other nodes forward to the node's HTTP port.
@@ -343,6 +346,7 @@ impl NodeLogic {
             op_lists: NodeQueries::default(),
             sessions: None,
             loads: None,
+            load_next: Nanos::ZERO,
             presence: None,
             http_forwards: None,
         }
@@ -396,13 +400,24 @@ impl NodeLogic {
 
     /// The node's load for the heartbeat, after publishing this core's: the operations of its
     /// data ranges' leaders count.
-    fn node_load(&self) -> teseladb_meta::liveness::NodeLoad {
+    /// Publishes this core's load once per [`NODE_HEARTBEAT`] and, when core 0's heartbeat is due
+    /// (`due`), returns the node's: the sum of the cores and the space of the disk. Each tick
+    /// used to do both on every core, a `statvfs` and a walk of every group per tick and core
+    /// (measured on 10-11-2026: 7 % of a core with the node idle), for a load read every 500 ms.
+    fn node_load(&mut self, now: Nanos, due: bool) -> teseladb_meta::liveness::NodeLoad {
+        let publish = self.loads.is_some() && now >= self.load_next;
+        if !publish && !due {
+            return teseladb_meta::liveness::NodeLoad::default();
+        }
         let ops = self.data.as_ref().map_or(0, |d| d.ops(&self.core));
         let mine = core_load(&self.core, ops);
         match &self.loads {
             Some((core, loads)) => {
-                loads.publish(*core, mine);
-                loads.node()
+                if publish {
+                    self.load_next = now + NODE_HEARTBEAT;
+                    loads.publish(*core, mine);
+                }
+                if due { loads.node() } else { teseladb_meta::liveness::NodeLoad::default() }
             }
             None => mine,
         }
@@ -1663,7 +1678,8 @@ impl CoreLogic for NodeLogic {
         self.now = now;
         self.wall_ms = wall_ms;
         self.core.on_tick(now, wall_ms);
-        let load = self.node_load();
+        let due = self.me.is_some() && self.liveness.due(now);
+        let load = self.node_load(now, due);
         self.publish_presence();
         if let Some((me, _)) = &self.me {
             let out = self.liveness.tick_with(&mut self.core, (*me, load), now, wall_ms);

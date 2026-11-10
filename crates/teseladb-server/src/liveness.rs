@@ -4,8 +4,9 @@
 //! Group 0's voters (`ClockReport`). A node out of margin hands over its leaderships and takes
 //! none until a report brings it back.
 //!
-//! The load a heartbeat carries is the node's (007 FR-010): every core publishes its own at each
-//! tick in [`SharedLoads`], and core 0 adds them up with the space of the data directory's disk.
+//! The load a heartbeat carries is the node's (007 FR-010): every core publishes its own in
+//! [`SharedLoads`] once per [`NODE_HEARTBEAT`], and core 0 adds them up with the space of the data
+//! directory's disk when its heartbeat is due, not at every tick.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,7 +109,15 @@ impl LivenessDriver {
         self.tick_with(core, (me, load), now, wall_ms)
     }
 
-    /// [`LivenessDriver::tick`] with the node's load `load`, from [`SharedLoads::node`].
+    /// Whether a tick at `now` sends the heartbeat (or the round of reports): only then does
+    /// core 0 need the node's load, which reads every core's slot and asks the file system for
+    /// its space.
+    pub fn due(&self, now: Nanos) -> bool {
+        now >= self.next
+    }
+
+    /// [`LivenessDriver::tick`] with the node's load `load`, from [`SharedLoads::node`]; a tick
+    /// that is not [`due`](LivenessDriver::due) does not read it.
     pub fn tick_with<S: StateMachine + Group0Holder>(
         &mut self,
         core: &mut MultiRaftCore<S>,
@@ -360,6 +369,31 @@ mod tests {
         assert!(n.core.status(GROUP0).is_some_and(|s| s.role != Role::Leader));
         c.steps(10);
         assert_eq!(c.leader(), Some(l), "its own clock rule did not take it");
+    }
+
+    #[test]
+    fn a_follower_is_due_exactly_when_it_sends_its_heartbeat() {
+        let mut c = Cluster::new();
+        c.steps(300);
+        let l = c.leader().expect("Group 0 elects a leader");
+        let mut beats = 0;
+        for _ in 0..50 {
+            let next = c.now + TICK;
+            let due: BTreeMap<NodeId, bool> =
+                c.nodes.iter().map(|(&id, n)| (id, n.driver.due(next))).collect();
+            c.sent.clear();
+            c.step();
+            for (&id, &was_due) in due.iter().filter(|(id, _)| **id != l) {
+                let sent = c
+                    .sent
+                    .iter()
+                    .any(|(from, _, m)| *from == id && matches!(m, PeerMsg::NodeHeartbeat { .. }));
+                assert_eq!(sent, was_due, "node {id:?} at {next:?}");
+                beats += usize::from(sent);
+            }
+        }
+        // 50 ticks of 10 ms are 500 ms: one heartbeat per follower.
+        assert_eq!(beats, 2);
     }
 
     #[test]

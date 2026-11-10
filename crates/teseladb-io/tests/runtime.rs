@@ -601,3 +601,27 @@ fn two_nodes_speak_the_highest_version_both_have() {
     assert_eq!((got.version, got.hello.versions), (4, Versions { min: 4, max: 4 }));
     assert_eq!(server.join().unwrap(), 4);
 }
+
+#[test]
+fn an_idle_core_sleeps_without_spinning_and_spins_only_after_work() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let cfg = RuntimeConfig { tick: Duration::from_millis(1), seed: 50, tls: None, origin: None };
+    let (mut rt, tx) =
+        CoreRuntime::new(Toy::default(), MemDisk::new(), hello(50, &addr), cfg).unwrap();
+    // Ticks alone: every turn wakes up for its tick and sleeps again without spinning.
+    for _ in 0..20 {
+        rt.turn().unwrap();
+    }
+    assert_eq!(rt.spins(), 0, "an idle core does not spin");
+    // A message is work: the turn after the one that took it spins before sleeping.
+    tx.send(CoreInput::App(Cmd::Addr(NodeId(51), "x".into()))).ok().unwrap();
+    rt.turn().unwrap();
+    rt.turn().unwrap();
+    assert_eq!(rt.spins(), 1, "the turn after some work spins");
+    // And with nothing more, the core goes back to sleeping without spinning.
+    for _ in 0..5 {
+        rt.turn().unwrap();
+    }
+    assert_eq!(rt.spins(), 1);
+}
