@@ -1419,6 +1419,10 @@ impl Backend for Mem {
         ));
     }
 
+    fn host_port(&mut self) -> String {
+        format!("{}:{}", self.facts.host.hostname, self.facts.port)
+    }
+
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {
         self.facts.clone()
     }

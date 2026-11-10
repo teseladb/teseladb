@@ -141,7 +141,9 @@ impl Writer {
             }
             (None, _) => None,
         };
-        let redact = lock(ctx.shared).params.redact_client_log_data;
+        let redact = super::hot::of(ctx.shared)
+            .redact_client_log_data
+            .load(std::sync::atomic::Ordering::Relaxed);
         let uid = owner.uid;
         let (retried, prev) = (Vec::new(), None);
         Ok(Writer { wc, retry, wc_error, args: wc_args, retried, redact, relayed, uid, prev })

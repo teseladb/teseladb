@@ -1934,6 +1934,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.authenticated_roles()
     }
 
+    fn host_port(&mut self) -> String {
+        self.inner.host_port()
+    }
+
     fn process(&mut self) -> crate::commands::diagnostics::ProcessFacts {
         self.inner.process()
     }

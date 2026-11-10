@@ -66,6 +66,8 @@ pub struct Diag {
     open: Arc<AtomicUsize>,
     max_connections: usize,
     port: u16,
+    /// `host:port`, read once at the start (RefDb caches its host name the same way).
+    host_port: String,
     start_ms: u64,
     process: ProcessConfig,
     certificates: Option<Arc<crate::certs::Certificates>>,
@@ -99,6 +101,7 @@ impl Diag {
             open,
             max_connections,
             port,
+            host_port: format!("{}:{port}", teseladb_sys::host::hostname().unwrap_or_default()),
             start_ms: wall_ms(),
             process,
             certificates: None,
@@ -223,6 +226,11 @@ impl Diag {
             threads: int(m.threads),
             pageins: m.pageins,
         }
+    }
+
+    /// The node's `host:port`, as it was at the start.
+    pub fn host_port(&self) -> &str {
+        &self.host_port
     }
 
     /// Everything the diagnostic commands report, read now.

@@ -660,6 +660,8 @@ impl DataCore {
             // A collection's live documents, from the leader's counts (007 FR-039): only the
             // leader has applied every write it acknowledged.
             RemoteReq::DocCount { tenant, collection } => {
+                // The next counts read the view, which a quiescent group does not publish.
+                self.host.note_reads(core, g, now);
                 let st = core.status(g);
                 let leads =
                     st.as_ref().is_some_and(|s| s.role == Role::Leader) && core.leader_ready(g);

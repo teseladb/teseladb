@@ -88,3 +88,34 @@ fn a_confirm_round_wakes_a_quiet_leader_and_needs_a_majority() {
     c.ticks(50);
     assert!(c.nodes[&l].core.quorum_heard_at(G).is_some_and(|h| h < cut));
 }
+
+/// A quiet leader holds no lease, so the reads served on other threads with it (005 FR-028)
+/// would go back to the core: `wake_leader` wakes it and, alone in its group, it reads with its
+/// lease again at once; a follower or an awake leader is left as it is.
+#[test]
+fn a_quiet_single_leader_wakes_and_reads_with_its_lease_again() {
+    let mut c = Cluster::new(1);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(400);
+    let now = c.now;
+    assert!(c.nodes[&l].core.is_quiesced(G));
+    assert!(!c.nodes[&l].core.lease_readable(G, now), "no lease while quiet");
+    assert!(c.nodes.get_mut(&l).unwrap().core.wake_leader(G));
+    assert!(!c.nodes[&l].core.is_quiesced(G));
+    assert!(c.nodes[&l].core.lease_readable(G, now), "its lease again");
+    assert!(!c.nodes.get_mut(&l).unwrap().core.wake_leader(G), "already awake");
+    assert!(!c.nodes.get_mut(&l).unwrap().core.wake_leader(GroupId(999)), "no such group");
+}
+
+/// Three replicas: a follower is not woken by it.
+#[test]
+fn wake_leader_leaves_a_quiet_follower_alone() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.propose(l, b"a").unwrap();
+    c.ticks(400);
+    let f = c.others(l)[0];
+    assert!(!c.nodes.get_mut(&f).unwrap().core.wake_leader(G));
+    assert!(c.nodes[&f].core.is_quiesced(G));
+}

@@ -2267,6 +2267,20 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.clock_rule.offset(now)
     }
 
+    /// Wakes group `g` from quiescence when this replica leads it: a quiescent leader holds no
+    /// lease, so the reads served on other threads with it (005 FR-028) would go back to the core.
+    /// `true` if it was quiescent.
+    pub fn wake_leader(&mut self, g: GroupId) -> bool {
+        let Some(grp) = self.groups.get_mut(&g) else { return false };
+        let view = GroupStore::new(&self.store, g);
+        if !grp.raw.is_quiesced() || grp.raw.status(&view).role != Role::Leader {
+            return false;
+        }
+        grp.raw.wake(&view);
+        self.drive(g);
+        true
+    }
+
     /// Whether group `g` is quiescent: idle, its leader sends no heartbeats.
     pub fn is_quiesced(&self, g: GroupId) -> bool {
         self.groups.get(&g).is_some_and(|grp| grp.raw.is_quiesced())

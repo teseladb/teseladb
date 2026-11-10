@@ -242,8 +242,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let indexes = super::plan_exec::plan_indexes(&mut **backend, &coll)?;
         let catalog = super::plan_cache::catalog_signature(&coll, &indexes);
         super::lock(shared).plan_cache.forget_other(&ns_text, &catalog);
-        let facts = backend.process();
-        let host = format!("{}:{}", facts.host.hostname, facts.port);
+        let host = backend.host_port();
         let shard = super::shard_name(backend.node());
         Ok(super::lock(shared).plan_cache.stats(&ns_text, (&host, &shard)))
     }
@@ -270,8 +269,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
             }
             None => specs.extend(listed),
         }
-        let facts = backend.process();
-        let host = format!("{}:{}", facts.host.hostname, facts.port);
+        let host = backend.host_port();
         let shard = super::shard_name(backend.node());
         let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
         let ns_text = names::full(ns);

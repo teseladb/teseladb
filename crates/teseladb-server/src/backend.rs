@@ -487,6 +487,31 @@ impl ServerBackend {
 
     /// The deadline a write whose wait ends at `until` carries (009 FR-006): the node's clock
     /// then, in the milliseconds of its marks, plus [`DEADLINE_SKEW`].
+    /// The document under `key` read by its leader's core as a point read, which skips the files
+    /// whose filters rule the key out (H-013); none for a key without one.
+    fn point_on_leader(
+        &mut self,
+        key: &[u8],
+        concern: ReadConcern,
+    ) -> Result<Option<Vec<u8>>, CommandError> {
+        let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
+            key: key.to_vec(),
+            scan: None,
+            backward: false,
+            at: None,
+            concern,
+            view: TxnView::default(),
+            uncertain_to: None,
+        };
+        match self.data(key, true, build)? {
+            // A version that only serves the history is no document, as in a scan.
+            (_, RemoteReply::Value { value, .. }) => {
+                Ok(value.filter(|(t, _)| *t != teseladb_range::HISTORY_VALUE).map(|(_, v)| v))
+            }
+            _ => Err(CommandError::new(INTERNAL_ERROR, "a read answered with no value")),
+        }
+    }
+
     fn deadline_of(&self, until: Instant) -> u64 {
         let left = (until.saturating_duration_since(Instant::now()) + DEADLINE_SKEW).as_millis();
         let now = self.h.clock.0.peek().physical.max(crate::clock::wall_ms());
@@ -870,11 +895,13 @@ impl Backend for ServerBackend {
         // FR-028): a find by `_id` asks for one.
         let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         let one_key = end.len() == start.len() + 1 && end.starts_with(start) && end.ends_with(&[0]);
-        if primary
-            && one_key
-            && limit > 0
-            && let Some(value) = self.read_outside(start, concern)
-        {
+        // Its core reads it as a point read too: a key the filters of a file rule out costs no
+        // block there, where a scan reads one from each file (H-010 of the native tests).
+        if primary && one_key && limit > 0 {
+            let value = match self.read_outside(start, concern) {
+                Some(value) => value,
+                None => self.point_on_leader(start, concern)?,
+            };
             return Ok(value.map(|v| (start.to_vec(), v)).into_iter().collect());
         }
         // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
@@ -908,28 +935,11 @@ impl Backend for ServerBackend {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // On this thread when the key's range published a view that serves it (005 FR-028).
-            if let Some(value) = self.read_outside(key, concern) {
-                out.push(value);
-                continue;
-            }
-            let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
-                key: key.clone(),
-                scan: None,
-                backward: false,
-                at: None,
-                concern,
-                view: TxnView::default(),
-                uncertain_to: None,
+            let value = match self.read_outside(key, concern) {
+                Some(value) => value,
+                None => self.point_on_leader(key, concern)?,
             };
-            match self.data(key, true, build)? {
-                (_, RemoteReply::Value { value, .. }) => out.push(
-                    // A version that only serves the history is no document, as in a scan.
-                    value.filter(|(t, _)| *t != teseladb_range::HISTORY_VALUE).map(|(_, v)| v),
-                ),
-                _ => {
-                    return Err(CommandError::new(INTERNAL_ERROR, "a read answered with no value"));
-                }
-            }
+            out.push(value);
         }
         Ok(out)
     }
@@ -1829,6 +1839,10 @@ impl Backend for ServerBackend {
         // operation reports `cpuNanos`, and none pays the system calls that read a thread's CPU
         // time (four per operation, H-013 of the native tests on macOS).
         if cfg!(target_os = "linux") { teseladb_sys::host::thread_cpu_nanos().ok() } else { None }
+    }
+
+    fn host_port(&mut self) -> String {
+        self.diag.as_ref().map_or_else(|| ":0".to_owned(), |d| d.host_port().to_owned())
     }
 
     fn process(&mut self) -> teseladb_wire::commands::diagnostics::ProcessFacts {

@@ -155,8 +155,6 @@ pub struct ServerParams {
     pub cursor_timeout_ms: i64,
     /// Period of the reaping, in milliseconds (`clientCursorMonitorFrequencySecs` × 1000).
     pub monitor_ms: i64,
-    /// `redactClientLogData`: the documents of the log lines go redacted.
-    pub redact_client_log_data: bool,
     /// `transactionLifetimeLimitSeconds`.
     pub transaction_lifetime_secs: i64,
     /// `maxConcurrentMultiDocumentTransactions`.
@@ -203,7 +201,6 @@ impl Default for ServerParams {
             cursor_timeout_ms: i64::try_from(teseladb_session::cursor::CURSOR_TIMEOUT_MS)
                 .unwrap_or(i64::MAX),
             monitor_ms: i64::try_from(super::REAP_INTERVAL_MS).unwrap_or(i64::MAX),
-            redact_client_log_data: false,
             transaction_lifetime_secs: TRANSACTION_LIFETIME_DEFAULT_SECS,
             max_concurrent_transactions: MAX_CONCURRENT_TRANSACTIONS_DEFAULT,
             audit_authorization_success: false,
@@ -283,7 +280,9 @@ fn value_of(name: &str, s: &NodeSessions) -> Value {
         TLS_OCSP_VERIFY_TIMEOUT_SECS => {
             Value::Int32(clamp_i32(s.params.tls_ocsp_verify_timeout_secs))
         }
-        REDACT_CLIENT_LOG_DATA => Value::Boolean(s.params.redact_client_log_data),
+        REDACT_CLIENT_LOG_DATA => {
+            Value::Boolean(s.hot.redact_client_log_data.load(std::sync::atomic::Ordering::Relaxed))
+        }
         USE_INTERNAL_AUTHZ_FOR_X509 => Value::Boolean(s.params.use_internal_authz_for_x509),
         HASH_INTERSECTION => {
             Value::Boolean(s.hot.hash_intersection.load(std::sync::atomic::Ordering::Relaxed))
@@ -578,7 +577,9 @@ fn apply(g: &mut NodeSessions, name: &str, change: Change) {
             g.params.cursor_timeout_ms = n;
             g.cursors.set_timeout_ms(u64::try_from(n).unwrap_or(0));
         }
-        REDACT_CLIENT_LOG_DATA => g.params.redact_client_log_data = n != 0,
+        REDACT_CLIENT_LOG_DATA => {
+            g.hot.redact_client_log_data.store(n != 0, std::sync::atomic::Ordering::Relaxed);
+        }
         USE_INTERNAL_AUTHZ_FOR_X509 => g.params.use_internal_authz_for_x509 = n != 0,
         HASH_INTERSECTION => {
             g.hot.hash_intersection.store(n != 0, std::sync::atomic::Ordering::Relaxed)

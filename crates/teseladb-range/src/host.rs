@@ -54,6 +54,10 @@ pub use txn::{CONTINUES, FIND_BATCH, TxnOp, TxnReq, continues, last_activity};
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
 /// The newest mark: a write reads the current versions at it.
 const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+/// How long after the last tally of reads served outside the core a range's group is kept awake
+/// (005 FR-028): one second, as the tallies come every 64 reads or 10 ms.
+pub const READS_KEEP_AWAKE: Nanos = Nanos::from_millis(1_000);
+
 /// How long a published view serves reads on other threads before the core checks the lease and
 /// the clock rule again (005 FR-028): a core polls far more often. It stays under the 250 ms
 /// a new leader's read cache starts above the clock (`LEASE_MARGIN_MS`).
@@ -278,6 +282,8 @@ pub(crate) struct Leader {
     pub(crate) fencing: Vec<crate::fence::Span>,
     /// Its recount of the live documents of each collection (007 FR-039).
     recount: recount::RecountJob,
+    /// When the reads served outside the core last reported a tally of this range (005 FR-028).
+    read_outside_at: Option<Nanos>,
 }
 
 impl Leader {
@@ -1165,6 +1171,7 @@ impl RangeHost {
             moved |= self.round_step(core, g, Periodic::Checksum, now);
             moved |= self.close_step(core, g, now);
             moved |= self.recount_step(core, g, now);
+            moved |= self.keep_awake(core, g, now);
         }
         let ids: Vec<ReqId> = self.reqs.keys().copied().collect();
         for id in ids {
@@ -1185,7 +1192,39 @@ impl RangeHost {
     pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
         if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
             l.load.record_sampled(keys, ops, now);
+            l.read_outside_at = Some(now);
         }
+    }
+
+    /// Reads of range `g` are coming that its view would serve if it were published (a count the
+    /// view could not give went to the core): its group is kept awake as for reads served outside
+    /// the core.
+    pub fn note_reads<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        g: GroupId,
+        now: Nanos,
+    ) {
+        if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
+            l.read_outside_at = Some(now);
+        }
+        self.keep_awake(core, g, now);
+    }
+
+    /// Wakes the group of range `g` if it went quiescent while reads were served outside the core
+    /// within [`READS_KEEP_AWAKE`]: a quiescent leader has no lease, so its view would not be
+    /// published and those reads would go to the core (H-004 of the native tests). `true` if it
+    /// woke it.
+    fn keep_awake<S: StateMachine>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        g: GroupId,
+        now: Nanos,
+    ) -> bool {
+        let read =
+            self.ranges.get(&g).and_then(|r| r.leader.as_ref()).and_then(|l| l.read_outside_at);
+        let recent = read.is_some_and(|at| now.0.saturating_sub(at.0) < READS_KEEP_AWAKE.0);
+        recent && core.is_quiesced(g) && core.wake_leader(g)
     }
 
     /// The views of the ranges this host leads, for reads on other threads (005 FR-028).
@@ -1285,6 +1324,7 @@ impl RangeHost {
             last_closed: (ZERO, 0),
             fencing: Vec::new(),
             recount: recount::RecountJob::default(),
+            read_outside_at: None,
         });
         let lost: Vec<ReqId> = self
             .reqs

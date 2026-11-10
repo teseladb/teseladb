@@ -1216,6 +1216,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
             .with(id, |t| t.get(id).and_then(|o| o.roles.clone()))
     }
 
+    fn host_port(&mut self) -> String {
+        self.inner.host_port()
+    }
+
     fn process(&mut self) -> crate::commands::diagnostics::ProcessFacts {
         self.inner.process()
     }

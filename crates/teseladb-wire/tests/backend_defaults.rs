@@ -226,6 +226,9 @@ impl Backend for Bare {
     fn log_warning(&mut self, _id: i32, _msg: &str, _attr: &Document) {}
 
     fn log_slow_query(&mut self, _attr: &Document) {}
+    fn host_port(&mut self) -> String {
+        ":0".to_owned()
+    }
     fn rotate_certificates(&mut self, _message: Option<&str>) -> Result<(), CommandError> {
         Ok(())
     }

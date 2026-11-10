@@ -34,6 +34,9 @@ pub struct Hot {
     pub txn_resolving: AtomicBool,
     /// `internalQueryPlannerEnableHashIntersection`.
     pub hash_intersection: AtomicBool,
+    /// `redactClientLogData`: the documents of the log lines go redacted (013 FR-027). Each
+    /// write reads it, so it lives here and not under the node's lock.
+    pub redact_client_log_data: AtomicBool,
     /// `internalQueryMaxSingleExpressionMemoryUsageBytes`.
     pub expression_memory: AtomicI64,
     /// Whether server-side JavaScript runs: `false` with `--noscripting` or
@@ -59,6 +62,7 @@ impl Default for Hot {
             fail_command: AtomicBool::new(false),
             txn_resolving: AtomicBool::new(false),
             hash_intersection: AtomicBool::new(false),
+            redact_client_log_data: AtomicBool::new(false),
             expression_memory: AtomicI64::new(i64::try_from(expression).unwrap_or(i64::MAX)),
             javascript_enabled: AtomicBool::new(true),
             profiler_quiet_ms: AtomicI64::new(super::profile::Profiler::default().quiet_ms()),

@@ -66,8 +66,8 @@ pub fn unchanged_outside() -> u64 {
 /// Reads a range's view sent back to its core since the process started.
 static DECLINED: AtomicU64 = AtomicU64::new(0);
 
-/// Reads a range's published view sent back to its core: a write in flight on the range, an
-/// intent, a view past its time, a block that could not be read.
+/// Reads and scans a range's published view sent back to its core: a write in flight on what
+/// they read, an intent, a view past its time, a block that could not be read.
 pub fn declined_outside() -> u64 {
     DECLINED.load(Ordering::Relaxed)
 }
@@ -284,7 +284,11 @@ impl ServerBackend {
         let clocks = (crate::clock::wall_ms(), now);
         let span = (lo.as_slice(), hi.as_slice());
         let way = (limit, backward);
-        let (_, rows) = view.scan(&mut caches[core], span, way, clocks, concern, supply)?;
+        let Some((_, rows)) = view.scan(&mut caches[core], span, way, clocks, concern, supply)
+        else {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         self.tally(core, g, &lo, asked.get().unwrap_or_else(Instant::now));
         let boundary = if backward { lo } else { hi };
         Some((boundary, rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
@@ -300,19 +304,32 @@ impl ServerBackend {
         (start, end): (&[u8], &[u8]),
     ) -> Option<u64> {
         let origin = self.h.origin;
+        // The monotonic time each view asks for once its mark is taken, which its tally counts
+        // too; one wall clock reading for all the marks, as the HLC never goes below its own.
+        let asked = std::cell::Cell::new(None);
         let now = || {
-            let since = Instant::now().saturating_duration_since(origin);
-            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+            let at = Instant::now();
+            asked.set(Some(at));
+            Nanos(
+                u64::try_from(at.saturating_duration_since(origin).as_nanos()).unwrap_or(u64::MAX),
+            )
         };
+        let wall = crate::clock::wall_ms();
         let mut total = 0u64;
         let mut from = start.to_vec();
         loop {
             let (g, core, range_end) = self.h.routes.span_of(&mut self.outside.routes, &from)?;
             let range_end = range_end.to_vec();
-            let view = self.h.views.get(usize::from(core))?.get(g)?;
-            let clocks = (crate::clock::wall_ms(), now);
-            total = total.saturating_add(view.count(coll, clocks, ReadConcern::Local)?);
-            self.tally(usize::from(core), g, &from, Instant::now());
+            let Some(view) = self.h.views.get(usize::from(core)).and_then(|v| v.get(g)) else {
+                DECLINED.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            let Some(n) = view.count(coll, (wall, &now), ReadConcern::Local) else {
+                DECLINED.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            total = total.saturating_add(n);
+            self.tally(usize::from(core), g, &from, asked.get().unwrap_or_else(Instant::now));
             if range_end.is_empty() || range_end.as_slice() >= end {
                 return Some(total);
             }

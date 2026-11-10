@@ -479,15 +479,15 @@ fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, flush_micros: u64) {
 
 /// The reads the connections' threads served without the cores (005 FR-028), and those whose
 /// range's view sent them back to its core (a write in flight, an intent, a view past its time).
-fn outside_metrics(out: &mut String, (served, declined, unchanged): (u64, u64, u64)) {
+fn outside_metrics(out: &mut String, (served, declined, unchanged, blocks): (u64, u64, u64, u64)) {
     let name = "teseladb_reads_outside_total";
     let _ = writeln!(out, "# HELP {name} Reads served on a connection's thread without a core.");
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {served}");
     let name = "teseladb_reads_outside_declined_total";
     let _ = writeln!(
         out,
-        "# HELP {name} Reads a range's view sent back to its core: a write in flight on the range, \
-         an intent or a view past its time."
+        "# HELP {name} Reads and scans a range's view sent back to its core: a write in flight \
+         on what they read, an intent or a view past its time."
     );
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {declined}");
     let name = "teseladb_writes_unchanged_outside_total";
@@ -496,6 +496,12 @@ fn outside_metrics(out: &mut String, (served, declined, unchanged): (u64, u64, u
         "# HELP {name} Writes that changed nothing answered on a connection's thread without a core."
     );
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {unchanged}");
+    let name = "teseladb_reads_outside_blocks_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Blocks a connection's thread read from their files for a read outside a core."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {blocks}");
 }
 
 /// The transactions' metrics (008 FR-019).
@@ -622,6 +628,7 @@ impl AdminBackend for NodeAdmin {
             crate::backend::served_outside(),
             crate::backend::declined_outside(),
             crate::backend::unchanged_outside(),
+            crate::backend::blocks_read_outside(),
         );
         outside_metrics(&mut out, outside);
         let lags = crate::backend::range_lags(crate::clock::wall_ms());
@@ -1457,7 +1464,8 @@ mod tests {
     #[test]
     fn the_read_metrics_give_the_reads_served_outside_the_cores_and_those_sent_back() {
         let mut out = String::new();
-        outside_metrics(&mut out, (40, 2, 5));
+        outside_metrics(&mut out, (40, 2, 5, 3));
+        assert!(out.lines().any(|l| l == "teseladb_reads_outside_blocks_total 3"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_writes_unchanged_outside_total 5"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_reads_outside_total 40"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_reads_outside_declined_total 2"), "{out}");

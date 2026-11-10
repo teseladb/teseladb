@@ -780,6 +780,10 @@ pub trait Backend {
     /// without TLS has nothing to load. Every backend says what it does, so that a wrapper cannot
     /// drop the call.
     fn rotate_certificates(&mut self, message: Option<&str>) -> Result<(), CommandError>;
+    /// The node's `host:port`, as the replies and the errors name it. It is read on every write,
+    /// so a node keeps it from its start, as RefDb caches its host name; it has no default, so
+    /// that a wrapper cannot answer it with [`Backend::process`], which reads everything again.
+    fn host_port(&mut self) -> String;
     /// What the diagnostic commands report of the process and its host; nothing by default (a
     /// node in tests).
     fn process(&mut self) -> diagnostics::ProcessFacts {
@@ -836,15 +840,13 @@ pub fn shard_name(node: u64) -> String {
 /// The name a `refrouter` gives a shard's part of a reply (`raw`), here the node's:
 /// `node<N>/host:port` (D-102).
 pub fn raw_name<B: Backend + ?Sized>(backend: &mut B) -> String {
-    let facts = backend.process();
-    format!("{}/{}:{}", shard_name(backend.node()), facts.host.hostname, facts.port)
+    format!("{}/{}", shard_name(backend.node()), backend.host_port())
 }
 
 /// The host and port of the node, as a `refrouter` names the shard whose writes it could not
 /// relay.
 pub fn host_port<B: Backend + ?Sized>(backend: &mut B) -> String {
-    let facts = backend.process();
-    format!("{}:{}", facts.host.hostname, facts.port)
+    backend.host_port()
 }
 
 /// Error `e` of node `node` as a `refrouter` relays a shard's: «failed on: node<N> :: caused by ::»

@@ -94,6 +94,8 @@ fn the_facts_come_from_the_host_and_the_port() {
     assert_eq!((f.connections.total_created, f.network.requests), (3, 4));
     assert!(!f.host.hostname.is_empty() && f.host.num_cores >= 1 && f.host.mem_size_mb > 0);
     assert!(f.host_name().ends_with(":27311"));
+    // What every write names the node with, kept from the start: the same host and port.
+    assert_eq!(d.host_port(), format!("{}:{}", f.host.hostname, f.port));
     assert!(f.fs_total >= f.fs_used && f.fs_total > 0);
     assert!(f.resources.resident_bytes > 0 && f.resources.threads >= 1);
     assert!(f.now_ms >= f.start_ms);

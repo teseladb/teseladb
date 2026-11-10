@@ -119,7 +119,7 @@ impl ClientConfig {
         let mut s = NodeSessions::new(self.timeouts);
         s.audit = self.audit.as_ref().map(crate::audit_log::AuditLog::for_node);
         s.params.monitor_ms = i64::try_from(self.reap_every.as_millis()).unwrap_or(i64::MAX);
-        s.params.redact_client_log_data = self.redact_client_log_data;
+        s.hot.redact_client_log_data.store(self.redact_client_log_data, Ordering::Relaxed);
         s.hot
             .javascript_enabled
             .store(self.javascript_enabled, std::sync::atomic::Ordering::Relaxed);

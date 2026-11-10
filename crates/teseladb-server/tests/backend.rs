@@ -1143,6 +1143,11 @@ fn reads_of_several_keys_go_together_and_each_gets_its_answer() {
 fn reads_of_several_spans_go_together_and_each_gets_its_rows() {
     use teseladb_wire::commands::Span;
     let rows = |r: Vec<(Vec<u8>, Vec<u8>)>| Ok(DataReply::Remote(RemoteReply::Rows(r)));
+    // A span of one key read on its own goes as a point read, which the files' filters serve.
+    let point = |v: &[u8]| {
+        let ts = Hlc { physical: 1, logical: 0 };
+        Ok(DataReply::Remote(RemoteReply::Value { ts, value: Some((1, v.to_vec())) }))
+    };
     let span = |start: &[u8], end: &[u8]| Span {
         start: start.to_vec(),
         end: end.to_vec(),
@@ -1165,7 +1170,7 @@ fn reads_of_several_spans_go_together_and_each_gets_its_rows() {
             rows(two.clone()),
             rows(three.clone()),
             // The first again on its own, then the span of both ranges, range by range.
-            rows(one.clone()),
+            point(&[7]),
             rows(vec![]),
             rows(vec![(vec![2, 0], vec![4])]),
         ],
@@ -1173,8 +1178,8 @@ fn reads_of_several_spans_go_together_and_each_gets_its_rows() {
     );
     let found = b.scan_spans(&spans, ReadConcern::Local).unwrap();
     assert_eq!(found, vec![one.clone(), two, three, vec![(vec![2, 0], vec![4])]]);
-    // One span alone is a scan.
-    let mut b = backend(vec![rows(one.clone())], vec![]);
+    // One span of one key alone is a point read.
+    let mut b = backend(vec![point(&[7])], vec![]);
     assert_eq!(b.scan_spans(&spans[..1], ReadConcern::Local).unwrap(), vec![one]);
 }
 
