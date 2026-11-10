@@ -90,7 +90,7 @@ fi
 check "an existing release" 0 "gh release upload v0.2.0 --repo teseladb/teseladb --clobber" GH_RELEASE_EXISTS=yes
 check "the notes of an existing release" 0 "gh release edit v0.2.0 --repo teseladb/teseladb --title TeselaDB 0.2.0" GH_RELEASE_EXISTS=yes
 check "the login of GHCR" 0 "token gh-token"
-check "the image to GHCR" 0 "docker buildx imagetools create -t ghcr.io/teseladb/teseladb:0.2.0 -t ghcr.io/teseladb/teseladb:latest teseladb/teseladb:0.2.0"
+check "the image to GHCR" 0 "docker buildx imagetools create --annotation index:org.opencontainers.image.source=https://github.com/teseladb/teseladb -t ghcr.io/teseladb/teseladb:0.2.0 -t ghcr.io/teseladb/teseladb:latest teseladb/teseladb:0.2.0"
 check "an image with one architecture" 1 "ghcr.io/teseladb/teseladb:0.2.0 has amd64, not amd64 and arm64" IMAGE_ARCHES=amd64
 
 echo "github_release_test: $passed passed, $failed failed"

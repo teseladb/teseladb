@@ -37,24 +37,26 @@ done
 [[ -z $CHANGES || -r $CHANGES ]] || fail "the changes file $CHANGES cannot be read"
 
 notes() {
-  echo "TeselaDB $VERSION."
+  echo "TeselaDB $VERSION has binaries for Linux on x86_64 and aarch64 and for macOS on Apple Silicon. Its Docker image"
+  echo "is on Docker Hub and on GitHub."
   echo
   if [[ -n $CHANGES ]]; then cat "$CHANGES" && echo; fi
   cat <<EOF
 ## Install
 
+The install script picks the binary of your system, checks its SHA-256 and copies it to \`/usr/local/bin\`, and it
+asks for your password through \`sudo\` when your user cannot write to that folder. With Docker, you pull the image of
+this version from Docker Hub or from GitHub, whichever you prefer.
+
 \`\`\`sh
 curl -fsSL https://downloads.teseladb.com/install.sh | sh
-\`\`\`
-
-or with Docker:
-
-\`\`\`sh
+# or, with Docker
 docker pull $IMAGE:$VERSION
 docker pull $GHCR:$VERSION
 \`\`\`
 
-Then follow the [quick start](https://github.com/$REPO/blob/main/docs/quickstart.md).
+The [quick start](https://github.com/$REPO/blob/main/docs/quickstart.md) takes you from here to a running node with a
+\`refshell\` session on it in about five minutes.
 
 ## Files
 
@@ -64,11 +66,11 @@ Then follow the [quick start](https://github.com/$REPO/blob/main/docs/quickstart
 | \`teseladb-$VERSION-linux-aarch64.tar.gz\` | Linux aarch64 |
 | \`teseladb-$VERSION-macos-aarch64.tar.gz\` | macOS on Apple Silicon |
 
-Each file has its \`.sha256\`. Check it with \`shasum -a 256 -c <file>.sha256\`.
-
-TeselaDB is distributed under the [TeselaDB License](https://github.com/$REPO/blob/main/LICENSE).
+Each file has its \`.sha256\`. To check a download, run \`shasum -a 256 -c <file>.sha256\` in the folder where you
+saved both files. TeselaDB is distributed under the [TeselaDB License](https://github.com/$REPO/blob/main/LICENSE).
 EOF
 }
+
 notes >"$WORK/notes.md"
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -93,7 +95,9 @@ for plugins in "$HOME/.docker/cli-plugins" /usr/local/lib/docker/cli-plugins; do
   if [[ -d $plugins ]]; then ln -s "$plugins" "$DOCKER_CONFIG/cli-plugins" && break; fi
 done
 gh auth token | docker login "${GHCR%%/*}" --username "$(gh api user -q .login)" --password-stdin >/dev/null
-docker buildx imagetools create -t "$GHCR:$VERSION" -t "$GHCR:latest" "$IMAGE:$VERSION"
+# The source annotation links the package of GHCR to the repository, which shows it on the page of the repository.
+docker buildx imagetools create --annotation "index:org.opencontainers.image.source=https://github.com/$REPO" \
+  -t "$GHCR:$VERSION" -t "$GHCR:latest" "$IMAGE:$VERSION"
 arches=$(docker buildx imagetools inspect "$GHCR:$VERSION" --format '{{range .Manifest.Manifests}}{{.Platform.Architecture}} {{end}}' |
   tr ' ' '\n' | grep -vx -e unknown -e '' | sort | xargs)
 docker logout "${GHCR%%/*}" >/dev/null

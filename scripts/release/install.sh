@@ -20,6 +20,20 @@ case "$(uname -s)-$(uname -m)" in
   *) fail "there is no binary for $(uname -s) $(uname -m); run it with Docker: docker run teseladb/teseladb:latest" ;;
 esac
 
+# The Linux binaries are built for glibc 2.28 or later: a system without glibc (musl, as in Alpine) or with an older one
+# cannot run them, so it gets the same answer as an unknown platform before anything is downloaded.
+if [ "$(uname -s)" = Linux ]; then
+  GLIBC="$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p')" || GLIBC=""
+  [ -n "$GLIBC" ] ||
+    fail "there is no binary for Linux $(uname -m) without glibc; run it with Docker: docker run teseladb/teseladb:latest"
+  GLIBC_MAJOR="${GLIBC%%.*}"
+  GLIBC_MINOR="${GLIBC#*.}"
+  GLIBC_MINOR="${GLIBC_MINOR%%.*}"
+  if [ "$GLIBC_MAJOR" -lt 2 ] || { [ "$GLIBC_MAJOR" -eq 2 ] && [ "$GLIBC_MINOR" -lt 28 ]; }; then
+    fail "there is no binary for Linux $(uname -m) with glibc $GLIBC, it needs 2.28 or later; run it with Docker: docker run teseladb/teseladb:latest"
+  fi
+fi
+
 command -v curl >/dev/null 2>&1 || fail "curl is needed to download the binary"
 VERSION="${TESELADB_VERSION:-$(curl -fsSL "$DOWNLOADS_URL/latest.txt")}" || fail "could not read the newest version"
 VERSION="${VERSION#v}"
