@@ -476,7 +476,7 @@ fn command<B: Backend + ?Sized>(
     }
     if let (Some(s), true) = (shared, is_hello(name) || name == PING || name == WHATS_MY_URI) {
         // The commands that answer without the node count here; the others in `run_op`.
-        lock(s).counters.count(name, &req.command, false);
+        crate::commands::hot::of(s).counters.count(name, &req.command, false);
     }
     // The tenant's `maxTimeMS` (007 FR-036): no command of its users that takes one runs longer,
     // and one without it gets it; `getMore` and the end of a transaction wait as they do.
@@ -815,14 +815,12 @@ fn run_op<B: Backend + ?Sized>(
         report
     });
     report.absorb(own_report);
-    let report = {
-        let mut g = lock(shared);
-        g.counters.count(name, &req.command, matches!(result, Some(Err(_))));
-        for name in &report.used {
-            g.index_usage.used(&ns, name, now);
-        }
-        report
-    };
+    // Its counters and the indexes it used, without the node's lock (H-013).
+    let hot = crate::commands::hot::of(shared);
+    hot.counters.count(name, &req.command, matches!(result, Some(Err(_))));
+    for name in &report.used {
+        hot.index_usage.used(&ns, name, now);
+    }
     audit::record(shared, conn, backend, events, 0);
     let ended = profile::Ended {
         db: &req.db,

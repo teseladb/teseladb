@@ -275,7 +275,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let shard = super::shard_name(backend.node());
         let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
         let ns_text = names::full(ns);
-        let mut g = super::lock(shared);
+        let usage = &super::hot::of(shared).index_usage;
         let names: Vec<String> = specs
             .iter()
             .filter_map(|s| match s.get("name") {
@@ -283,12 +283,12 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
                 _ => None,
             })
             .collect();
-        g.index_usage.keep_only(&ns_text, &names);
+        usage.keep_only(&ns_text, &names);
         Ok(specs
             .into_iter()
             .zip(names)
             .map(|(spec, name)| {
-                let (ops, since) = g.index_usage.of(&ns_text, &name, now);
+                let (ops, since) = usage.of(&ns_text, &name, now);
                 let accesses =
                     Document::new().with("ops", ops).with("since", Value::DateTime(since));
                 Document::new()

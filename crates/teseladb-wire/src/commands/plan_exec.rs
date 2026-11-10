@@ -1842,11 +1842,9 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         .with(SORT_SERVED, super::explain::sorted(&chosen.winner));
     backend.note_plan(report(Some(plan), chosen.planning_micros));
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
-    {
-        let mut g = super::lock(note.shared);
-        for name in scanned(&indexes, &chosen.winner.access) {
-            g.index_usage.used(&ns, &name, now);
-        }
+    let usage = &super::hot::of(note.shared).index_usage;
+    for name in scanned(&indexes, &chosen.winner.access) {
+        usage.used(&ns, &name, now);
     }
     // A replanned read leaves no entry (measured).
     if replanned.is_none()

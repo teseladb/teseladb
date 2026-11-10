@@ -157,8 +157,9 @@ pub fn kill_local(shared: &Shared, scope: &KillScope) {
             g.sessions.end_all();
             g.cursors.kill_all_sessions();
         }
+        // With the node's lock held: `hot::of` could take it again.
         KillScope::Op { op, .. } => {
-            super::hot::of(shared).ops.kill(*op);
+            g.hot.ops.kill(*op);
         }
     }
 }

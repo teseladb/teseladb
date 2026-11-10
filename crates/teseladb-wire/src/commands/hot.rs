@@ -44,6 +44,11 @@ pub struct Hot {
     pub profiler_quiet_ms: AtomicI64,
     /// The commands in progress, in stripes of their own locks (H-013).
     pub ops: crate::ops::Ops,
+    /// What the node counted of its commands (`serverStatus`), in atomics (H-013).
+    pub counters: super::diagnostics::AtomicOpCounters,
+    /// How often each index served a query plan, and since when (`$indexStats`, 010 FR-018), in
+    /// stripes of their own locks.
+    pub index_usage: super::index_usage::IndexUses,
 }
 
 impl Default for Hot {
@@ -58,6 +63,8 @@ impl Default for Hot {
             javascript_enabled: AtomicBool::new(true),
             profiler_quiet_ms: AtomicI64::new(super::profile::Profiler::default().quiet_ms()),
             ops: crate::ops::Ops::default(),
+            counters: super::diagnostics::AtomicOpCounters::default(),
+            index_usage: super::index_usage::IndexUses::default(),
         }
     }
 }

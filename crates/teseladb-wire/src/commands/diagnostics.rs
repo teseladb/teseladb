@@ -250,6 +250,59 @@ pub struct OpCounters {
     pub user_asserts: i64,
 }
 
+/// [`OpCounters`] that every thread adds to without a lock (H-013 of the native tests), as
+/// RefDb keeps its `opcounters` in atomics.
+#[derive(Debug, Default)]
+pub struct AtomicOpCounters {
+    insert: std::sync::atomic::AtomicI64,
+    query: std::sync::atomic::AtomicI64,
+    update: std::sync::atomic::AtomicI64,
+    delete: std::sync::atomic::AtomicI64,
+    getmore: std::sync::atomic::AtomicI64,
+    command: std::sync::atomic::AtomicI64,
+    aggregate: std::sync::atomic::AtomicI64,
+    user_asserts: std::sync::atomic::AtomicI64,
+}
+
+impl AtomicOpCounters {
+    /// [`OpCounters::count`].
+    pub fn count(&self, name: &str, cmd: &Document, failed: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let statements = |field: &str| match cmd.get(field) {
+            Some(Value::Array(a)) => i64::try_from(a.len()).unwrap_or(i64::MAX),
+            _ => 0,
+        };
+        let (counter, n) = match name {
+            "insert" => (&self.insert, statements("documents")),
+            "update" => (&self.update, statements("updates")),
+            "delete" => (&self.delete, statements("deletes")),
+            "find" => (&self.query, 1),
+            "getMore" => (&self.getmore, 1),
+            "aggregate" => (&self.aggregate, 1),
+            _ => (&self.command, 1),
+        };
+        counter.fetch_add(n, Relaxed);
+        if failed {
+            self.user_asserts.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// The counters now.
+    pub fn snapshot(&self) -> OpCounters {
+        use std::sync::atomic::Ordering::Relaxed;
+        OpCounters {
+            insert: self.insert.load(Relaxed),
+            query: self.query.load(Relaxed),
+            update: self.update.load(Relaxed),
+            delete: self.delete.load(Relaxed),
+            getmore: self.getmore.load(Relaxed),
+            command: self.command.load(Relaxed),
+            aggregate: self.aggregate.load(Relaxed),
+            user_asserts: self.user_asserts.load(Relaxed),
+        }
+    }
+}
+
 impl OpCounters {
     /// Counts `cmd`, named `name`, as RefDb's `opcounters` do, and whether it failed.
     pub fn count(&mut self, name: &str, cmd: &Document, failed: bool) {
@@ -350,10 +403,12 @@ fn shown(cmd: &Document, section: &str) -> bool {
 /// `serverStatus`.
 pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let facts = ctx.backend.process();
-    let (counters, status, sessions, cursors, ingress) = {
+    // Before the node's lock: `hot::of` may take it to find the counters.
+    let counters = super::hot::of(ctx.shared).counters.snapshot();
+    let (status, sessions, cursors, ingress) = {
         let g = lock(ctx.shared);
         let ingress = g.ingress.counts();
-        (g.counters, super::txn_stats::status(&g), g.sessions.len(), g.cursors.len(), ingress)
+        (super::txn_stats::status(&g), g.sessions.len(), g.cursors.len(), ingress)
     };
     let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
     let started = i64::try_from(facts.start_ms).unwrap_or(i64::MAX);
@@ -1163,4 +1218,34 @@ pub fn listed_names() -> impl Iterator<Item = &'static str> {
     names.extend(api_version::TEST_COMMANDS.iter().map(|t| t.name));
     names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     names.into_iter()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod op_counter_tests {
+    use super::{AtomicOpCounters, OpCounters};
+    use teseladb_bson::{Document, Value};
+
+    #[test]
+    fn the_counters_add_up_the_commands_of_every_thread() {
+        let c = std::sync::Arc::new(AtomicOpCounters::default());
+        let insert = Document::new().with("documents", Value::Array(vec![Value::Int32(1); 3]));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let (c, insert) = (c.clone(), insert.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        c.count("find", &Document::new(), false);
+                        c.count("insert", &insert, true);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        let want =
+            OpCounters { query: 800, insert: 2_400, user_asserts: 800, ..OpCounters::default() };
+        assert_eq!(c.snapshot(), want);
+    }
 }

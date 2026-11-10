@@ -861,8 +861,6 @@ pub struct NodeSessions {
     pub failpoint: Option<FailPoint>,
     /// The node's server parameters (`setParameter`).
     pub params: server_params::ServerParams,
-    /// What the node counted of its commands (`serverStatus`).
-    pub counters: diagnostics::OpCounters,
     /// The rest of what `serverStatus` reports (006 T046).
     pub status: status::StatusCounters,
     /// What the commands read and write without this lock ([`hot`]): its command counters
@@ -890,8 +888,6 @@ pub struct NodeSessions {
     pub object_ids: ObjectIds,
     /// The plans the node's reads chose, by shape (010 FR-002).
     pub plan_cache: plan_cache::PlanCache,
-    /// How often each index served a query plan, and since when (`$indexStats`, 010 FR-018).
-    pub index_usage: index_usage::IndexUsage,
     /// What the node counted of each query shape (`$queryStats`, 010 FR-023).
     pub query_stats: query_stats::QueryStats,
     /// The queries this node sampled for the query analyzer (018 FR-017).
@@ -952,7 +948,6 @@ impl NodeSessions {
             search: search_ops::SearchIndexes::default(),
             spill: Spill::default(),
             ingress: crate::ingress::Limiter::default(),
-            counters: diagnostics::OpCounters::default(),
             status: status::StatusCounters::default(),
             hot: std::sync::Arc::default(),
             audit: None,
@@ -960,7 +955,6 @@ impl NodeSessions {
             rw_defaults: cluster_admin::Defaults::default(),
             object_ids: ObjectIds::default(),
             plan_cache: plan_cache::PlanCache::default(),
-            index_usage: index_usage::IndexUsage::default(),
             pushes: teseladb_txn::push_cache::PushCache::new(),
             push_settled: std::sync::Arc::default(),
             txn_scratch: std::collections::BTreeSet::new(),
