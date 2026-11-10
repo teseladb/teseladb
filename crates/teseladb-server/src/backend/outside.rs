@@ -52,6 +52,15 @@ pub fn served_outside() -> u64 {
     SERVED.load(Ordering::Relaxed)
 }
 
+/// Reads a range's view sent back to its core since the process started.
+static DECLINED: AtomicU64 = AtomicU64::new(0);
+
+/// Reads a range's published view sent back to its core: a write in flight on the range, an
+/// intent, a view past its time, a block that could not be read.
+pub fn declined_outside() -> u64 {
+    DECLINED.load(Ordering::Relaxed)
+}
+
 /// Blocks the client workers read from their files for reads outside the cores.
 pub fn blocks_read_outside() -> u64 {
     BLOCKS.load(Ordering::Relaxed)
@@ -108,7 +117,10 @@ impl ServerBackend {
         let (g, core) = self.h.routes.route_of(&mut self.outside.routes, key)?;
         let core = usize::from(core);
         let view = self.h.views.get(core)?.get(g)?;
-        let (value, at) = self.serve(core, &view, key, concern)?;
+        let Some((value, at)) = self.serve(core, &view, key, concern) else {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         self.tally(core, g, key, at);
         Some(value)
     }

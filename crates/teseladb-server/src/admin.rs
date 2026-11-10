@@ -477,6 +477,21 @@ fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, flush_micros: u64) {
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {flush_micros}");
 }
 
+/// The reads the connections' threads served without the cores (005 FR-028), and those whose
+/// range's view sent them back to its core (a write in flight, an intent, a view past its time).
+fn outside_metrics(out: &mut String, served: u64, declined: u64) {
+    let name = "teseladb_reads_outside_total";
+    let _ = writeln!(out, "# HELP {name} Reads served on a connection's thread without a core.");
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {served}");
+    let name = "teseladb_reads_outside_declined_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Reads a range's view sent back to its core: a write in flight on the range, \
+         an intent or a view past its time."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {declined}");
+}
+
 /// The transactions' metrics (008 FR-019).
 fn txn_metrics(out: &mut String, t: &teseladb_wire::commands::status::TxnCounts) {
     let counters = [
@@ -596,6 +611,11 @@ impl AdminBackend for NodeAdmin {
             teseladb_io::counters::syncs(),
             teseladb_io::counters::device_flushes(),
             teseladb_io::counters::device_flush_micros(),
+        );
+        outside_metrics(
+            &mut out,
+            crate::backend::served_outside(),
+            crate::backend::declined_outside(),
         );
         let lags = crate::backend::range_lags(crate::clock::wall_ms());
         stream_metrics(&mut out, teseladb_wire::commands::change_stream::stream_metrics(), &lags);
@@ -1425,6 +1445,15 @@ mod tests {
         ] {
             assert!(out.lines().any(|l| l == line), "{line} in {out}");
         }
+    }
+
+    #[test]
+    fn the_read_metrics_give_the_reads_served_outside_the_cores_and_those_sent_back() {
+        let mut out = String::new();
+        outside_metrics(&mut out, 40, 2);
+        assert!(out.lines().any(|l| l == "teseladb_reads_outside_total 40"), "{out}");
+        assert!(out.lines().any(|l| l == "teseladb_reads_outside_declined_total 2"), "{out}");
+        assert!(out.lines().any(|l| l == "# TYPE teseladb_reads_outside_total counter"), "{out}");
     }
 
     #[test]
