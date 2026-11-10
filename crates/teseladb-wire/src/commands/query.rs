@@ -1029,13 +1029,15 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     // Its errors come before the statement joins a transaction (008, measured on 03-11-2026).
-    Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())
-        .map_err(CommandError::query_parse)?
-        .check_metadata(a.sort.as_ref())?;
+    // The filter is parsed once, here, for the checks and the planner, as RefDb builds one
+    // canonical query from the command.
+    let first = Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())
+        .map_err(CommandError::query_parse)?;
+    first.check_metadata(a.sort.as_ref())?;
     if a.tailable.is_some() {
         check_tailable(&ns, &coll, &a)?;
     }
-    check_filter(&a.filter, collation.as_ref(), a.vars.as_ref())?;
+    let optimized = check_planned_filter(&first, &a.filter, a.vars.as_ref())?;
     if let Some(p) = &a.projection {
         check_projection(p, a.vars.as_ref())?;
     }
@@ -1089,7 +1091,10 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         && a.tailable.is_none()
         && range == documents_of(&coll);
     let planned = if plannable {
-        let parsed = super::plan_exec::parsed_filter(&a.filter, a.vars.as_ref())?;
+        let parsed = match &optimized {
+            None => first.filter.parsed_query(),
+            Some(o) => super::plan_exec::parsed_of_optimized(o)?,
+        };
         let sort = match ctx.cmd.get("sort") {
             Some(Value::Document(s)) => sort_directions(s),
             _ => Vec::new(),
@@ -1666,10 +1671,35 @@ pub(crate) fn check_filter(
     collation: Option<&Document>,
     vars: Option<&Document>,
 ) -> Result<(), CommandError> {
-    check_filter_syntax(filter, collation, vars)?;
+    check_planned_filter(&Plan::new(filter, None, collation)?, filter, vars).map(drop)
+}
+
+/// [`check_filter`] with the filter already parsed in `plan`; the filter with its `$expr`s
+/// optimised, or `None` when it has none and stays as it is.
+fn check_planned_filter(
+    plan: &Plan,
+    filter: &Document,
+    vars: Option<&Document>,
+) -> Result<Option<Document>, CommandError> {
+    check_planned_syntax(plan, filter, vars)?;
+    if !has_expr(filter) {
+        return Ok(None);
+    }
     // A constant of an `$expr` that fails fails the command before any document is read.
-    teseladb_exec::expr::optimize::optimize_filter(filter, vars).map_err(from_mql)?;
-    Ok(())
+    teseladb_exec::expr::optimize::optimize_filter(filter, vars).map(Some).map_err(from_mql)
+}
+
+/// Whether `$expr` appears anywhere in `d`: only then is there an expression to check or to
+/// optimise.
+fn has_expr(d: &Document) -> bool {
+    fn in_value(v: &Value) -> bool {
+        match v {
+            Value::Document(d) => has_expr(d),
+            Value::Array(items) => items.iter().any(in_value),
+            _ => false,
+        }
+    }
+    d.iter().any(|(k, v)| k == "$expr" || in_value(v))
 }
 
 /// Checks the filter of a read as RefDb parses it, before it optimises its `$expr`s.
@@ -1678,9 +1708,20 @@ pub(crate) fn check_filter_syntax(
     collation: Option<&Document>,
     vars: Option<&Document>,
 ) -> Result<(), CommandError> {
-    let plan = Plan::new(filter, None, collation)?;
+    check_planned_syntax(&Plan::new(filter, None, collation)?, filter, vars)
+}
+
+/// [`check_filter_syntax`] with the filter already parsed in `plan`.
+fn check_planned_syntax(
+    plan: &Plan,
+    filter: &Document,
+    vars: Option<&Document>,
+) -> Result<(), CommandError> {
     super::engines::check_geo(&plan.filter).map_err(from_mql)?;
     super::js::check_where(&plan.filter).map_err(from_mql)?;
+    if !has_expr(filter) {
+        return Ok(());
+    }
     let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
     let bytes = raw_bytes(filter)?;
     teseladb_exec::pipeline::check_exprs(

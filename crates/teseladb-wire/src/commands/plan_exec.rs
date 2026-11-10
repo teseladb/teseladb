@@ -202,89 +202,158 @@ pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     stored_indexes(backend, coll)
 }
 
+/// The parts of an index that its catalog entries alone decide, with those entries: the
+/// collection's and the index's (RefDb keeps an `IndexCatalog` per collection, built when an
+/// index is created or dropped, instead of parsing the definitions on every query).
+#[derive(Clone)]
+struct BuiltIndex {
+    coll: CollectionEntry,
+    /// The catalog's entry; `None` for the index of `_id`, which the collection's entry decides.
+    entry: Option<IndexEntry>,
+    index: PlanIndex,
+    /// Plannable as far as its definition goes; the query settings decide the rest.
+    plannable: bool,
+    /// The index of `_id`, unique without saying so and without paths through arrays.
+    of_id: bool,
+}
+
+/// The most indexes a thread keeps built.
+const MAX_BUILT: usize = 4_096;
+
+thread_local! {
+    /// The indexes this thread built, by collection and index: a query builds one again only
+    /// when its collection's or its own catalog entry changed.
+    static BUILT: std::cell::RefCell<std::collections::HashMap<(u32, Option<u32>), BuiltIndex>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// The indexes of `coll` as they are stored, whatever its kind: those of a time series index
 /// its buckets (015 FR-008).
 pub(crate) fn stored_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
 ) -> Result<Vec<PlanIndex>, CommandError> {
+    let mut built: Vec<BuiltIndex> = built_index(coll, None)?.into_iter().collect();
+    for entry in backend.indexes(coll.id)? {
+        if entry.state != EntryState::Ready {
+            continue;
+        }
+        built.extend(built_index(coll, Some(entry))?);
+    }
+    let mut out = Vec::with_capacity(built.len());
+    for b in built {
+        let mut index = b.index;
+        index.meta.plannable =
+            b.plannable && allowed_by_settings(coll.id, &index.entry.name, &index.pattern);
+        if !b.of_id {
+            let found =
+                multikey_paths(backend, (coll.tenant, coll.id), &index.entry, &index.pattern)?;
+            index.meta.multikey = found.iter().any(|(_, p)| !p.is_empty());
+            index.multikey_paths = found;
+        }
+        out.push(index);
+    }
+    Ok(out)
+}
+
+/// The index of `entry` of `coll` (`None`: its index of `_id`) as its catalog entries decide
+/// it, from this thread's memory when they did not change; `None` for one the planner does not
+/// read (its definition is not one of a catalog index).
+fn built_index(
+    coll: &CollectionEntry,
+    entry: Option<IndexEntry>,
+) -> Result<Option<BuiltIndex>, CommandError> {
+    let key = (coll.id, entry.as_ref().map(|e| e.id));
+    let kept = BUILT
+        .with(|b| b.borrow().get(&key).filter(|k| k.coll == *coll && k.entry == entry).cloned());
+    if let Some(k) = kept {
+        return Ok(Some(k));
+    }
+    let Some(b) = build_index(coll, entry)? else { return Ok(None) };
+    BUILT.with(|m| {
+        let mut m = m.borrow_mut();
+        // Dropped collections never come back (their ids are not reused): the memory is emptied
+        // rather than let grow with them.
+        if m.len() >= MAX_BUILT {
+            m.clear();
+        }
+        m.insert(key, b.clone());
+    });
+    Ok(Some(b))
+}
+
+/// [`built_index`] built from the catalog entries.
+fn build_index(
+    coll: &CollectionEntry,
+    entry: Option<IndexEntry>,
+) -> Result<Option<BuiltIndex>, CommandError> {
     // A collection with a shard key keeps `_id` in an index of its own (018 FR-001).
     let sharded = super::sharding::is_sharded(coll);
     let in_order = in_id_order(coll)?;
     let is_clustered = matches!(super::kinds::kind_of(coll)?, CollectionKind::Clustered { .. });
-    let id_entry = IndexEntry {
-        id: if sharded { teseladb_range::capped::ID_INDEX } else { DOCUMENTS },
-        collection: coll.id,
-        name: ID_INDEX.to_owned(),
-        spec: super::catalog::id_index(coll)?.to_bytes()?,
-        buckets: 0,
-        state: EntryState::Ready,
+    let kept_entry = entry.clone();
+    let entry = match entry {
+        Some(e) => e,
+        None => IndexEntry {
+            id: if sharded { teseladb_range::capped::ID_INDEX } else { DOCUMENTS },
+            collection: coll.id,
+            name: ID_INDEX.to_owned(),
+            spec: super::catalog::id_index(coll)?.to_bytes()?,
+            buckets: 0,
+            state: EntryState::Ready,
+        },
     };
-    let mut out = Vec::new();
-    for entry in std::iter::once(id_entry).chain(backend.indexes(coll.id)?) {
-        if entry.state != EntryState::Ready {
-            continue;
-        }
-        let id_index = entry.id == DOCUMENTS;
-        let spec = RawDoc::from_bytes(&entry.spec)?;
-        let ready = IndexState::Ready(Hlc { physical: 0, logical: 0 });
-        let catalog = catalog_index(spec, entry.id, entry.buckets, ready)
-            .map_err(|e| CommandError::new(INTERNAL_ERROR, e.reason))?;
-        let Some(mut catalog) = catalog else { continue };
-        // The index of `_id` is unique without saying so in its definition.
-        let of_id = id_index || (sharded && entry.id == teseladb_range::capped::ID_INDEX);
-        catalog.unique |= of_id;
-        let pattern = Document::from(RawDoc::from_bytes(&catalog.key_pattern)?);
-        // An ordered field, or a hashed one, which an equality scans by its hash (010 T048).
-        let ordered = pattern.iter().all(|(_, v)| {
-            matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
-                || is_hashed(v)
-        });
-        let plannable = ordered
-            && entry.buckets == 0
-            && !catalog.hidden
-            && !catalog.partial
-            && !catalog.sparse
-            && spec.get("collation").is_none()
-            && pattern.iter().all(|(k, _)| !k.contains('$'))
-            && allowed_by_settings(coll.id, &entry.name, &pattern);
-        let multikey_paths = if of_id {
-            pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect()
-        } else {
-            multikey_paths(backend, (coll.tenant, coll.id), &entry, &pattern)?
-        };
-        let key = pattern
-            .iter()
-            .map(|(k, v)| {
-                let dir = match v {
-                    _ if is_hashed(v) => teseladb_plan::rules::HASHED,
-                    _ if query_number(v) < 0.0 => -1,
-                    _ => 1,
-                };
-                (k.to_owned(), dir)
-            })
-            .collect();
-        let meta = IndexMeta {
-            name: entry.name.clone(),
-            key,
-            multikey: multikey_paths.iter().any(|(_, p)| !p.is_empty()),
-            plannable,
-        };
-        let dirs = catalog.def.key_spec().fields.iter().map(|f| f.direction).collect();
-        let (ordered, clustered) = (in_order && id_index, is_clustered && id_index);
-        out.push(PlanIndex {
-            entry,
-            pattern,
-            multikey_paths,
-            meta,
-            catalog,
-            dirs,
-            id_index,
-            ordered,
-            clustered,
-        });
-    }
-    Ok(out)
+    let id_index = entry.id == DOCUMENTS;
+    let spec = RawDoc::from_bytes(&entry.spec)?;
+    let ready = IndexState::Ready(Hlc { physical: 0, logical: 0 });
+    let catalog = catalog_index(spec, entry.id, entry.buckets, ready)
+        .map_err(|e| CommandError::new(INTERNAL_ERROR, e.reason))?;
+    let Some(mut catalog) = catalog else { return Ok(None) };
+    // The index of `_id` is unique without saying so in its definition.
+    let of_id = id_index || (sharded && entry.id == teseladb_range::capped::ID_INDEX);
+    catalog.unique |= of_id;
+    let pattern = Document::from(RawDoc::from_bytes(&catalog.key_pattern)?);
+    // An ordered field, or a hashed one, which an equality scans by its hash (010 T048).
+    let ordered = pattern.iter().all(|(_, v)| {
+        matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_))
+            || is_hashed(v)
+    });
+    let plannable = ordered
+        && entry.buckets == 0
+        && !catalog.hidden
+        && !catalog.partial
+        && !catalog.sparse
+        && spec.get("collation").is_none()
+        && pattern.iter().all(|(k, _)| !k.contains('$'));
+    // The index of `_id` has no paths through arrays; another's are read on every query.
+    let multikey_paths: Vec<(String, Vec<String>)> =
+        pattern.iter().map(|(k, _)| (k.to_owned(), Vec::new())).collect();
+    let key = pattern
+        .iter()
+        .map(|(k, v)| {
+            let dir = match v {
+                _ if is_hashed(v) => teseladb_plan::rules::HASHED,
+                _ if query_number(v) < 0.0 => -1,
+                _ => 1,
+            };
+            (k.to_owned(), dir)
+        })
+        .collect();
+    let meta = IndexMeta { name: entry.name.clone(), key, multikey: false, plannable };
+    let dirs = catalog.def.key_spec().fields.iter().map(|f| f.direction).collect();
+    let (ordered, clustered) = (in_order && id_index, is_clustered && id_index);
+    let index = PlanIndex {
+        entry,
+        pattern,
+        multikey_paths,
+        meta,
+        catalog,
+        dirs,
+        id_index,
+        ordered,
+        clustered,
+    };
+    Ok(Some(BuiltIndex { coll: coll.clone(), entry: kept_entry, index, plannable, of_id }))
 }
 
 /// Whether an index of key `pattern` keeps the paths through arrays of its fields: btree and
@@ -1738,7 +1807,12 @@ pub(crate) fn parsed_filter(
     vars: Option<&Document>,
 ) -> Result<Document, CommandError> {
     let filter = teseladb_exec::expr::optimize::optimize_filter(filter, vars).map_err(from_mql)?;
-    let bytes = super::query::raw_bytes(&filter)?;
+    parsed_of_optimized(&filter)
+}
+
+/// [`parsed_filter`] of a filter whose `$expr`s are already optimised.
+pub(crate) fn parsed_of_optimized(filter: &Document) -> Result<Document, CommandError> {
+    let bytes = super::query::raw_bytes(filter)?;
     let raw = RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?;
     let f = teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)?;
     Ok(f.parsed_query())

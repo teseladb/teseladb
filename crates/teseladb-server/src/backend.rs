@@ -694,10 +694,12 @@ fn committed_mark(reply: &teseladb_range::host::Reply) -> Option<Hlc> {
 /// Prefix of the Group 0 settings that hold the cluster parameters (`setClusterParameter`).
 pub const PARAMETER_PREFIX: &[u8] = b"clusterParameter.";
 
-/// The cluster parameters among Group 0's settings, by name.
+/// The cluster parameters among Group 0's settings, by name: the settings under
+/// [`PARAMETER_PREFIX`], which the ordered map keeps together.
 pub fn parameters_of(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
     settings
-        .iter()
+        .range(PARAMETER_PREFIX.to_vec()..)
+        .take_while(|(k, _)| k.starts_with(PARAMETER_PREFIX))
         .filter_map(|(k, v)| {
             let name = k.strip_prefix(PARAMETER_PREFIX)?;
             Some((String::from_utf8(name.to_vec()).ok()?, v.clone()))
@@ -1540,6 +1542,11 @@ impl Backend for ServerBackend {
     }
 
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
+        // Core 0 publishes its copy before it answers any change of it (H-017): every
+        // `aggregate` reads the presentation from here, without a message to core 0.
+        if let Some(all) = self.h.routes.settings() {
+            return Ok(parameters_of(&all));
+        }
         let until = self.until();
         loop {
             if let Some(CatalogAnswer::Settings(all)) =
