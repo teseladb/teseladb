@@ -1353,35 +1353,13 @@ impl Worker {
                 .awaits
                 .first_key_value()
                 .map(|(&(d, _), _)| d.saturating_duration_since(Instant::now()));
-            // The next request of a client that answers quickly arrives within a short spin and
-            // is taken without sleeping (H-013): the spin looks at the socket without waiting, and
-            // the events it takes are not asked for again.
-            let mut failed = false;
-            let mut seen = false;
-            let spun =
-                teseladb_io::spin::spin_until(teseladb_io::spin::SPIN_BEFORE_SLEEP, || match self
-                    .poller
-                    .poll(Some(Duration::ZERO))
-                {
-                    Ok(ev) => {
-                        seen |= ev.iter().any(|e| e.token != WAKE_TOKEN);
-                        events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied());
-                        seen || ev.iter().any(|e| e.token == WAKE_TOKEN)
-                    }
-                    Err(_) => {
-                        failed = true;
-                        true
-                    }
-                });
-            if failed {
-                break;
-            }
-            if !seen {
-                let timeout = if spun { Some(Duration::ZERO) } else { timeout };
-                match self.poller.poll(timeout) {
-                    Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
-                    Err(_) => break,
-                }
+            // No spin before sleeping: polling the socket in a loop for the next request burned
+            // the CPU the clients need and made a lone connection slower (measured on
+            // 10-11-2026, H-013 of the native tests: YCSB-C with one connection went from 35 746
+            // to 39 070 op/s without it).
+            match self.poller.poll(timeout) {
+                Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
+                Err(_) => break,
             }
             let info = self.state.info();
             if info.topology.counter != self.seen {
