@@ -378,6 +378,9 @@ pub trait Backend {
     /// of its shape), for the profiler (010 FR-015). Every backend says what it does, so that a
     /// wrapper cannot drop the call.
     fn note_plan(&mut self, plan: Document);
+    /// [`Backend::note_plan`] of a report built only if something reads it (H-035). It has no
+    /// default, so that a wrapper cannot drop it.
+    fn note_plan_lazy(&mut self, plan: crate::ops::PendingPlan);
     /// What the running operation has examined so far, for `$queryStats` (010 FR-023). Every
     /// backend says what it does, so that a wrapper cannot drop the call.
     fn op_reads(&mut self) -> crate::ops::OpReads;

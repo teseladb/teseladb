@@ -200,6 +200,37 @@ pub struct Op {
     pub metrics: Option<Document>,
 }
 
+/// A plan's report built only when something reads it: the profiler, the slow query log, a
+/// sampled query's statistics or a cursor that stays open. RefDb builds a plan's summary from
+/// its executor when it profiles or logs the operation, not for every read (H-035 of the native
+/// tests).
+#[derive(Clone)]
+pub struct PendingPlan(std::sync::Arc<dyn Fn() -> Document + Send + Sync>);
+
+impl PendingPlan {
+    /// The report `make` builds.
+    pub fn new(make: impl Fn() -> Document + Send + Sync + 'static) -> PendingPlan {
+        PendingPlan(std::sync::Arc::new(make))
+    }
+
+    /// Builds the report.
+    pub fn render(&self) -> Document {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for PendingPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingPlan")
+    }
+}
+
+impl PartialEq for PendingPlan {
+    fn eq(&self, other: &PendingPlan) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 /// What an operation read and how it planned its read, for the profiler (010 FR-015).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpReport {
@@ -215,6 +246,8 @@ pub struct OpReport {
     /// The indexes of its collection the winning plans of its writes scanned (`$indexStats`;
     /// a read counts its own uses).
     pub used: Vec<String>,
+    /// The plan's report still to build, in place of [`OpReport::plan`].
+    pub pending: Option<PendingPlan>,
 }
 
 impl OpReport {
@@ -226,8 +259,16 @@ impl OpReport {
         self.keys_written.0 += o.keys_written.0;
         self.keys_written.1 += o.keys_written.1;
         self.used.extend(o.used);
-        if o.plan.is_some() {
+        if o.plan.is_some() || o.pending.is_some() {
             self.plan = o.plan;
+            self.pending = o.pending;
+        }
+    }
+
+    /// Builds the plan's report if it is still pending.
+    pub fn resolve_plan(&mut self) {
+        if let Some(p) = self.pending.take() {
+            self.plan = Some(p.render());
         }
     }
 }
@@ -914,6 +955,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn op_plan(&mut self) -> Option<Document> {
+        self.report.resolve_plan();
         self.report.plan.clone()
     }
 
@@ -932,7 +974,13 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         // A note of the indexes alone leaves the plan as it was.
         if plan.iter().next().is_some() {
             report.plan = Some(plan);
+            report.pending = None;
         }
+    }
+
+    fn note_plan_lazy(&mut self, plan: PendingPlan) {
+        self.report.plan = None;
+        self.report.pending = Some(plan);
     }
 
     fn audit_event(&mut self, atype: teseladb_auth::audit::AuditType, param: Document) {

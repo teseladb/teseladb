@@ -608,6 +608,25 @@ fn cursor_id(e: &Ended<'_>) -> Option<i64> {
 
 /// Keeps with the cursor `e` left open the command and its plan, which the profile of each
 /// `getMore` of it shows (measured on a `refnode` 9.0.4, 01-11-2026).
+/// Whether what runs after a command that took `micros` and answered `reply` reads its plan:
+/// the profiler and the slow query log past the quiet threshold, and a cursor that stays open,
+/// which keeps it for its `getMore`s ([`after_command`]).
+pub fn reads_plan(
+    shared: &super::Shared,
+    micros: u64,
+    reply: Option<&Result<Document, CommandError>>,
+) -> bool {
+    let quiet = super::hot::of(shared).profiler_quiet_ms.load(std::sync::atomic::Ordering::Relaxed);
+    if i64::try_from(micros / 1000).unwrap_or(i64::MAX) > quiet {
+        return true;
+    }
+    let Some(Ok(reply)) = reply else { return false };
+    matches!(
+        reply.get("cursor"),
+        Some(Value::Document(c)) if matches!(c.get("id"), Some(Value::Int64(id)) if *id != 0)
+    )
+}
+
 fn keep_origin(shared: &super::Shared, e: &Ended<'_>) {
     if e.op == "getmore" {
         return;

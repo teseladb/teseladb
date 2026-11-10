@@ -86,6 +86,8 @@ impl Backend for Bare {
     }
     fn note_plan(&mut self, _: teseladb_bson::Document) {}
 
+    fn note_plan_lazy(&mut self, _: teseladb_wire::ops::PendingPlan) {}
+
     fn op_reads(&mut self) -> teseladb_wire::ops::OpReads {
         teseladb_wire::ops::OpReads::default()
     }

@@ -822,13 +822,19 @@ fn run_op<B: Backend + ?Sized>(
         hot.index_usage.used(&ns, name, now);
     }
     audit::record(shared, conn, backend, events, 0);
+    let micros = backend.now_micros().saturating_sub(started_micros);
+    // The plan's report is built only when the profiler, the slow query log or an open cursor
+    // will read it (H-035).
+    if report.pending.is_some() && profile::reads_plan(shared, micros, result.as_ref()) {
+        report.resolve_plan();
+    }
     let ended = profile::Ended {
         db: &req.db,
         command: &req.command,
         op: op_type(name),
         ns: &ns,
         reply: result.as_ref(),
-        micros: backend.now_micros().saturating_sub(started_micros),
+        micros,
         cpu_nanos: started_cpu
             .zip(backend.thread_cpu_nanos())
             .map(|(start, end)| end.saturating_sub(start)),

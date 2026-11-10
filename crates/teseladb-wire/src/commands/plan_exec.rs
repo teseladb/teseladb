@@ -217,6 +217,10 @@ struct BuiltIndex {
     of_id: bool,
 }
 
+/// A built index as a query takes it: the index, whether its definition lets it be planned, and
+/// whether it is the index of `_id`.
+type Kept = (PlanIndex, bool, bool);
+
 /// The most indexes a thread keeps built.
 const MAX_BUILT: usize = 4_096;
 
@@ -233,7 +237,7 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
 ) -> Result<Vec<PlanIndex>, CommandError> {
-    let mut built: Vec<BuiltIndex> = built_index(coll, None)?.into_iter().collect();
+    let mut built: Vec<Kept> = built_index(coll, None)?.into_iter().collect();
     for entry in backend.indexes(coll.id)? {
         if entry.state != EntryState::Ready {
             continue;
@@ -241,11 +245,10 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
         built.extend(built_index(coll, Some(entry))?);
     }
     let mut out = Vec::with_capacity(built.len());
-    for b in built {
-        let mut index = b.index;
+    for (mut index, plannable, of_id) in built {
         index.meta.plannable =
-            b.plannable && allowed_by_settings(coll.id, &index.entry.name, &index.pattern);
-        if !b.of_id {
+            plannable && allowed_by_settings(coll.id, &index.entry.name, &index.pattern);
+        if !of_id {
             let found =
                 multikey_paths(backend, (coll.tenant, coll.id), &index.entry, &index.pattern)?;
             index.meta.multikey = found.iter().any(|(_, p)| !p.is_empty());
@@ -262,10 +265,15 @@ pub(crate) fn stored_indexes<B: Backend + ?Sized>(
 fn built_index(
     coll: &CollectionEntry,
     entry: Option<IndexEntry>,
-) -> Result<Option<BuiltIndex>, CommandError> {
+) -> Result<Option<Kept>, CommandError> {
     let key = (coll.id, entry.as_ref().map(|e| e.id));
-    let kept = BUILT
-        .with(|b| b.borrow().get(&key).filter(|k| k.coll == *coll && k.entry == entry).cloned());
+    // Only what a query takes is copied out: the entries it is checked against stay.
+    let kept = BUILT.with(|b| {
+        b.borrow()
+            .get(&key)
+            .filter(|k| k.coll == *coll && k.entry == entry)
+            .map(|k| (k.index.clone(), k.plannable, k.of_id))
+    });
     if let Some(k) = kept {
         return Ok(Some(k));
     }
@@ -279,7 +287,7 @@ fn built_index(
         }
         m.insert(key, b.clone());
     });
-    Ok(Some(b))
+    Ok(Some((b.index, b.plannable, b.of_id)))
 }
 
 /// [`built_index`] built from the catalog entries.
@@ -1077,6 +1085,9 @@ fn entries<B: Backend + ?Sized>(
     if let Some(read) = point_entries(backend, (tenant, collection), index, points, concern)? {
         return Ok(read);
     }
+    if let Some(read) = ordered_points(backend, (tenant, collection), index, points, concern)? {
+        return Ok(read);
+    }
     let (first, past) = index_span((tenant, collection), index);
     // With `most`, a scan of one interval stops reading at that many entries: those after them
     // are past what the caller takes (a trial's budget), and reading them made each trial of a
@@ -1365,6 +1376,63 @@ fn gap_spans(tenant: u32, collection: u32, (from, to): (&[u8], &[u8])) -> Vec<Sp
             Span { start, end, limit: 1, backward: false }
         })
         .collect()
+}
+
+/// The entries of a scan of the index of `_id` of a collection in `_id` order whose intervals
+/// are all single values (H-011 of the native tests): for each value, in the scan's order, one
+/// read of at most two keys over the value and the stretch up to the next one gives its document
+/// and whether that stretch holds a key, as a B-tree cursor positions once and steps. The keys
+/// examined are those [`entries`] counts reading the value and its stretch apart, in two reads.
+fn ordered_points<B: Backend + ?Sized>(
+    backend: &mut B,
+    (tenant, collection): (u32, u32),
+    index: &PlanIndex,
+    (ranges, backward): (&[KeyRange], bool),
+    concern: ReadConcern,
+) -> Result<Option<Scanned>, CommandError> {
+    if !index.id_index || !index.ordered || ranges.len() < 2 {
+        return Ok(None);
+    }
+    let docs = KeyBuilder::index_prefix(tenant, collection, DOCUMENTS);
+    let (first, past) = index_span((tenant, collection), index);
+    let end_of = |r: &KeyRange| r.end.clone().unwrap_or_else(|| past.clone());
+    if ranges.iter().any(|r| point_pk(docs.as_bytes(), (&r.start, &end_of(r))).is_none()) {
+        return Ok(None);
+    }
+    let order: Vec<usize> = match backward {
+        true => (0..ranges.len()).rev().collect(),
+        false => (0..ranges.len()).collect(),
+    };
+    let head = docs.as_bytes().len();
+    let mut out = Vec::new();
+    for (step, &i) in order.iter().enumerate() {
+        let (r, end) = (&ranges[i], end_of(&ranges[i]));
+        let next = order.get(step + 1).copied();
+        // The value first, then the nearest key of the stretch past it in the scan's order.
+        let rows = match backward {
+            true => {
+                let from = next.map_or_else(|| first.clone(), |n| end_of(&ranges[n]));
+                backend.scan_back(&from, &end, 2, concern)?
+            }
+            false => {
+                let to = next.map_or_else(|| past.clone(), |n| ranges[n].start.clone());
+                backend.scan(&r.start, &to, 2, concern)?
+            }
+        };
+        let mut held = false;
+        for (key, value) in rows {
+            if r.start.as_slice() <= key.as_slice() && key.as_slice() < end.as_slice() {
+                let pk = key.get(head..).unwrap_or_default().to_vec();
+                out.push(Some(Entry { pk, key: None, values: None, doc: Some((key, value)) }));
+            } else {
+                held = true;
+            }
+        }
+        if held {
+            out.push(None);
+        }
+    }
+    Ok(Some(Scanned { entries: out, seeks: 1, more: false }))
 }
 
 /// The pk of the one document of the index of `_id` in `[from, to)`, when that range is one
@@ -1852,28 +1920,12 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     note: CacheNote<'_>,
 ) -> Result<Option<Planned>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
-    // The hashes of the read's shape, as `$planCacheStats` shows them, for the profiler.
-    let hash = super::plan_hash::shape_hash(&note.shape);
     let ns = super::names::full(note.ns);
-    let digits = super::plan_hash::indexability(read.parsed, &key_indexes(&indexes), None);
-    let cache_key = super::plan_hash::cache_key_hash(&note.shape, &digits);
-    let hashes = Document::new()
-        .with("planCacheShapeHash", hash.clone())
-        .with("queryHash", hash)
-        .with("planCacheKey", cache_key.clone());
-    let report = |plan: Option<Document>, planning: u64| {
-        let mut d = hashes.clone();
-        d.push("filter", read.parsed.clone());
-        for (k, v) in plan.unwrap_or_default().iter() {
-            d.push(k, v.clone());
-        }
-        d.push(PLANNING_TIME, i64::try_from(planning).unwrap_or(i64::MAX));
-        d
-    };
     let started = backend.now_micros();
     if indexes.is_empty() {
         let planning = backend.now_micros().saturating_sub(started);
-        backend.note_plan(report(None, planning));
+        let shown = Shown { ns: note.ns.clone(), shape: note.shape, parsed: read.parsed.clone() };
+        backend.note_plan_lazy(shown.pending(Vec::new(), None, planning));
         return Ok(None);
     }
     // A hinted read plans nothing and never takes the cached plan (measured).
@@ -1904,22 +1956,18 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         }
         None => (choose(backend, coll, &indexes, read)?, false, None),
     };
-    let Some(chosen) = chosen else {
+    let Some(mut chosen) = chosen else {
         let planning = backend.now_micros().saturating_sub(started);
-        backend.note_plan(report(None, planning));
+        let shown = Shown { ns: note.ns.clone(), shape: note.shape, parsed: read.parsed.clone() };
+        backend.note_plan_lazy(shown.pending(indexes, None, planning));
         return Ok(None);
     };
-    let plan = super::explain::plan_report(note.ns, read.parsed, &indexes, &chosen.winner)
-        .with(MULTI_PLANNED, !chosen.others.is_empty())
-        .with(FROM_CACHE, from_cache)
-        .with(REPLANNED, replanned.clone().map_or(Value::Null, Value::from))
-        .with(SORT_SERVED, super::explain::sorted(&chosen.winner));
-    backend.note_plan(report(Some(plan), chosen.planning_micros));
     let now = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
     let usage = &super::hot::of(note.shared).index_usage;
     for name in scanned(&indexes, &chosen.winner.access) {
         usage.used(&ns, &name, now);
     }
+    let shape = note.shape.clone();
     // A replanned read leaves no entry (measured).
     if replanned.is_none()
         && let Some(mut learned) = super::explain::learned(
@@ -1931,12 +1979,66 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         )
     {
         learned.catalog = catalog;
-        learned.key = cache_key;
+        let digits = super::plan_hash::indexability(read.parsed, &key_indexes(&indexes), None);
+        learned.key = super::plan_hash::cache_key_hash(&shape, &digits);
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
         super::lock(note.shared).plan_cache.learn(&ns, learned, now);
     }
-    let keys = chosen.winner.index_keys;
-    Ok(Some((chosen.winner.found.into_iter().map(|(_, d)| d).collect(), keys)))
+    // The documents go to the caller; the report keeps how many there were.
+    let found = std::mem::take(&mut chosen.winner.found);
+    chosen.winner.found = vec![(Vec::new(), Vec::new()); found.len()];
+    let keys = std::mem::take(&mut chosen.winner.index_keys);
+    let ran = Box::new((chosen, from_cache, replanned));
+    let shown = Shown { ns: note.ns.clone(), shape, parsed: read.parsed.clone() };
+    let planning = ran.0.planning_micros;
+    backend.note_plan_lazy(shown.pending(indexes, Some(ran), planning));
+    Ok(Some((found.into_iter().map(|(_, d)| d).collect(), keys)))
+}
+
+/// What a read's plan report shows, kept to build it when something reads it ([`Shown::pending`]).
+struct Shown {
+    ns: teseladb_meta::catalog::Namespace,
+    /// The read's shape, which its hashes come from.
+    shape: String,
+    /// The read's filter as RefDb writes it back after parsing it.
+    parsed: Document,
+}
+
+impl Shown {
+    /// The report of a read planned with `indexes` in `planning` microseconds, whose plan `ran`
+    /// won (with whether it came from the cache and why it was planned again), or none (a
+    /// collection scan), built when something reads it: its shape's hashes, its filter, the
+    /// plan and the planning time.
+    fn pending(
+        self,
+        indexes: Vec<PlanIndex>,
+        ran: Option<Box<(Chosen, bool, Option<String>)>>,
+        planning: u64,
+    ) -> crate::ops::PendingPlan {
+        crate::ops::PendingPlan::new(move || {
+            let hash = super::plan_hash::shape_hash(&self.shape);
+            let digits = super::plan_hash::indexability(&self.parsed, &key_indexes(&indexes), None);
+            let mut d = Document::new()
+                .with("planCacheShapeHash", hash.clone())
+                .with("queryHash", hash)
+                .with("planCacheKey", super::plan_hash::cache_key_hash(&self.shape, &digits))
+                .with("filter", self.parsed.clone());
+            if let Some(ran) = &ran {
+                let (chosen, from_cache, replanned) = &**ran;
+                let plan =
+                    super::explain::plan_report(&self.ns, &self.parsed, &indexes, &chosen.winner)
+                        .with(MULTI_PLANNED, !chosen.others.is_empty())
+                        .with(FROM_CACHE, *from_cache)
+                        .with(REPLANNED, replanned.clone().map_or(Value::Null, Value::from))
+                        .with(SORT_SERVED, super::explain::sorted(&chosen.winner));
+                for (k, v) in plan.iter() {
+                    d.push(k, v.clone());
+                }
+            }
+            d.push(PLANNING_TIME, i64::try_from(planning).unwrap_or(i64::MAX));
+            d
+        })
+    }
 }
 
 /// The plan of `read` with the shape of `cached`: the candidate of this read that scans the same

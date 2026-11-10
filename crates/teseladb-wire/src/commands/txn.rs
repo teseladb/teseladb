@@ -1567,6 +1567,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.note_plan(plan);
     }
 
+    fn note_plan_lazy(&mut self, plan: crate::ops::PendingPlan) {
+        self.inner.note_plan_lazy(plan);
+    }
+
     fn op_reads(&mut self) -> crate::ops::OpReads {
         self.inner.op_reads()
     }
