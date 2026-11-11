@@ -60,6 +60,8 @@ shellcheck_all() {
 gate "0. viuzi-* crates of Cargo.lock from the registry" cargo fetch --locked
 gate "1. format" cargo fmt --all -- --check
 gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
+# The comparison of the native measures and the reading of YCSB's output (002 FR-028, FR-030).
+gate "1. tests of the native measuring tools" python3 -m unittest discover -s tests/compat/native -p 'test_*.py'
 gate "2. dependencies" scripts/check-deps.sh
 gate "2. origin register" scripts/check-origin.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256
@@ -79,8 +81,6 @@ gate "3. tests" cargo test --workspace --offline -q
 gate "1. lints for x86_64 Linux" cargo clippy --workspace --all-targets --offline \
   --target x86_64-unknown-linux-musl -- -D warnings
 gate "1. shell scripts" shellcheck_all
-# The comparison of the native measures and the reading of YCSB's output (002 FR-028, FR-030).
-gate "1. tests of the native measuring tools" python3 -m unittest discover -s tests/compat/native -p 'test_*.py'
 # The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
 gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable::

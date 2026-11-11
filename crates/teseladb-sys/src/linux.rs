@@ -10,6 +10,21 @@ pub(crate) const ENOSPC: i32 = 28;
 
 unsafe extern "C" {
     fn posix_fallocate(fd: i32, offset: i64, len: i64) -> i32;
+    fn sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) -> i32;
+}
+
+/// `SYNC_FILE_RANGE_WRITE`: start the write of the dirty pages, without waiting for it.
+const SYNC_FILE_RANGE_WRITE: u32 = 2;
+
+/// Starts writing the file's dirty pages to the device without waiting (`sync_file_range` with
+/// `SYNC_FILE_RANGE_WRITE` over the whole file).
+pub(crate) fn write_behind(file: &File) -> io::Result<()> {
+    // SAFETY: valid descriptor during the call; no pointers.
+    let rc = unsafe { sync_file_range(file.as_raw_fd(), 0, 0, SYNC_FILE_RANGE_WRITE) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub(crate) fn preallocate(file: &File, len: u64) -> io::Result<()> {

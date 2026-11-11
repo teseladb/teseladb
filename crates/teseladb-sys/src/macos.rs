@@ -72,6 +72,12 @@ pub(crate) fn push_to_drive(file: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// Sends what the file has written to the drive without asking it to flush its cache: on macOS,
+/// [`push_to_drive`].
+pub(crate) fn write_behind(file: &File) -> io::Result<()> {
+    push_to_drive(file)
+}
+
 /// [`push_to_drive`] by descriptor: `fd` is open in another thread that waits for this push.
 pub(crate) fn push_descriptor(fd: RawFd) -> io::Result<()> {
     // SAFETY: `fsync` takes a descriptor and touches no memory of the caller; a descriptor that

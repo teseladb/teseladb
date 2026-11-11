@@ -91,7 +91,15 @@ impl DetachedSync {
 struct DiskFile {
     file: File,
     direct: Option<File>,
+    /// Bytes written outside a log's batches since they were last sent towards the device.
+    behind: u64,
 }
+
+/// Every how many bytes a file written outside a log's batches (the LSM's tables, snapshots) is
+/// sent towards the device as it grows ([`teseladb_sys::write_behind`]): a table of tens of
+/// megabytes synced at once held the drive's flush, and every log's sync behind it, for about
+/// 100 ms (H-049 of the native tests).
+const WRITE_BEHIND_BYTES: u64 = 1 << 20;
 
 /// Real disk rooted at a directory.
 #[derive(Debug)]
@@ -307,7 +315,7 @@ impl FileDisk {
                 };
                 let direct = made.and_then(|()| self.direct(&full));
                 match direct {
-                    Ok(direct) => self.files.insert(*file, DiskFile { file: f, direct }),
+                    Ok(direct) => self.files.insert(*file, DiskFile { file: f, direct, behind: 0 }),
                     Err(err) => {
                         // Do not leave a half-made file behind if there is no space.
                         let _ = fs::remove_file(&full);
@@ -320,11 +328,23 @@ impl FileDisk {
                 let full = self.full(path);
                 let f = Self::options().open(&full).map_err(io_errno)?;
                 let direct = self.direct(&full).map_err(io_errno)?;
-                self.files.insert(*file, DiskFile { file: f, direct });
+                self.files.insert(*file, DiskFile { file: f, direct, behind: 0 });
                 Ok(None)
             }
-            IoOp::WriteAt { file, offset, data, .. } => {
+            IoOp::WriteAt { file, offset, data, batch } => {
                 self.write(*file, *offset, data)?;
+                // A log's batch is synced at once; anything else goes towards the device as it
+                // grows. A failure here shows again in the sync that ends the file.
+                if *batch == 0
+                    && let Some(f) = self.files.get_mut(file)
+                {
+                    f.behind += data.len() as u64;
+                    if f.behind >= WRITE_BEHIND_BYTES {
+                        f.behind = 0;
+                        crate::counters::record_write_behind();
+                        let _ = teseladb_sys::write_behind(&f.file);
+                    }
+                }
                 Ok(None)
             }
             IoOp::ReadAt { file, offset, len, .. } => {
@@ -403,6 +423,40 @@ mod tests {
         p.push(format!("teseladb-io-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         p
+    }
+
+    #[test]
+    fn a_file_written_outside_a_log_is_sent_towards_the_device_as_it_grows() {
+        // H-049: an LSM table goes to the drive every `WRITE_BEHIND_BYTES`, a log's batch never.
+        let root = temp_root("behind");
+        let mut d = FileDisk::open(&root).unwrap();
+        let (table, wal) = (FileId(1), FileId(2));
+        ok(&mut d, IoOp::Create { file: table, path: PathBuf::from("t"), prealloc: 0 });
+        ok(&mut d, IoOp::Create { file: wal, path: PathBuf::from("w"), prealloc: 0 });
+        let chunk = Bytes::from_vec(vec![7; (WRITE_BEHIND_BYTES / 2) as usize]);
+        let write = |file, i: u64, batch| IoOp::WriteAt {
+            file,
+            offset: i * chunk.len() as u64,
+            data: chunk.clone(),
+            batch,
+        };
+        // Counted across the process: other tests only add to it.
+        let before = crate::counters::write_behinds();
+        for i in 0..4 {
+            ok(&mut d, write(wal, i, i + 1));
+        }
+        for i in 0..5 {
+            ok(&mut d, write(table, i, 0));
+        }
+        let sent = crate::counters::write_behinds() - before;
+        assert!(sent >= 2, "{sent} for 2.5 MiB of a table");
+        assert_eq!(
+            d.files[&table].behind,
+            WRITE_BEHIND_BYTES / 2,
+            "the rest waits for the next MiB"
+        );
+        assert_eq!(d.files[&wal].behind, 0, "a log's batches are synced at once");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

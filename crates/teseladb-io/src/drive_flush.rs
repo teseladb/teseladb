@@ -15,20 +15,26 @@
 //! drive: every later sync on it fails, as the log stops after any failed sync (fail-stop).
 
 use std::io;
+#[cfg(any(target_os = "macos", test))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
 
+#[cfg(any(target_os = "macos", test))]
 /// How long a disk thread parks between two looks at a flush in progress (a flush of the drive
 /// takes milliseconds).
 const PARK: Duration = Duration::from_micros(20);
 
+#[cfg(any(target_os = "macos", test))]
 /// How many syncs of one drive can wait for a group at once; one more pushes its own file.
 const WAITERS: usize = 64;
 
+#[cfg(any(target_os = "macos", test))]
 /// The mark of a waiter's slot whose file waits for a group; without it the slot holds the
 /// number of the group that took the file, and 0 when it is free.
 const PENDING: u64 = 1 << 63;
 
+#[cfg(any(target_os = "macos", test))]
 /// The flushes of one drive.
 #[derive(Debug)]
 pub(crate) struct Flusher {
@@ -42,6 +48,7 @@ pub(crate) struct Flusher {
     waiters: [AtomicU64; WAITERS],
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl Flusher {
     pub(crate) const fn new() -> Flusher {
         Flusher {
@@ -208,18 +215,22 @@ impl Flusher {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 /// Drives a node has flushers for; a sync on another one flushes by itself.
 const DRIVES: usize = 8;
 
+#[cfg(any(target_os = "macos", test))]
 struct Slot {
     /// The device plus one; 0 while free.
     device: AtomicU64,
     flusher: Flusher,
 }
 
+#[cfg(any(target_os = "macos", test))]
 static SLOTS: [Slot; DRIVES] =
     [const { Slot { device: AtomicU64::new(0), flusher: Flusher::new() } }; DRIVES];
 
+#[cfg(any(target_os = "macos", test))]
 /// The flusher of `device`, taking a free one the first time; `None` when every one is taken.
 pub(crate) fn flusher_for(device: u64) -> Option<&'static Flusher> {
     let key = device.wrapping_add(1).max(1);

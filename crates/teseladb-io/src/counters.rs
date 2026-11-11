@@ -7,6 +7,7 @@ static DEVICE_FLUSHES: AtomicU64 = AtomicU64::new(0);
 static DEVICE_FLUSH_MICROS: AtomicU64 = AtomicU64::new(0);
 static DEVICE_PUSHES: AtomicU64 = AtomicU64::new(0);
 static DEVICE_PUSH_MICROS: AtomicU64 = AtomicU64::new(0);
+static WRITE_BEHINDS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts a sync of a file or a folder to the disk.
 pub(crate) fn record_sync() {
@@ -42,6 +43,7 @@ pub fn device_flush_micros() -> u64 {
 
 /// Counts the files the leader of a flush group sent to the drive before its flush, and the time
 /// it took to send them all.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn record_device_pushes(files: u64, micros: u64) {
     DEVICE_PUSHES.fetch_add(files, Ordering::Relaxed);
     DEVICE_PUSH_MICROS.fetch_add(micros, Ordering::Relaxed);
@@ -56,4 +58,14 @@ pub fn device_pushes() -> u64 {
 /// each flush: added to the flushes', the length of the groups a confirmed write waits for.
 pub fn device_push_micros() -> u64 {
     DEVICE_PUSH_MICROS.load(Ordering::Relaxed)
+}
+
+/// Counts a file sent towards the device as it grows (`teseladb_sys::write_behind`).
+pub(crate) fn record_write_behind() {
+    WRITE_BEHINDS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The times files were sent towards the device as they grew since the process started.
+pub fn write_behinds() -> u64 {
+    WRITE_BEHINDS.load(Ordering::Relaxed)
 }
