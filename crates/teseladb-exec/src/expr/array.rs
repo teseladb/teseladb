@@ -351,6 +351,12 @@ fn slice(vals: &[Eval]) -> Result<Eval, MqlError> {
     Ok(Some(Value::Array(items.iter().skip(start).take(n).cloned().collect())))
 }
 
+/// The bytes `$range` may build (RefDb's limit, measured).
+const RANGE_MEMORY_LIMIT: u64 = 104_857_600;
+/// What RefDb counts per element of a `$range` and for the array itself.
+const RANGE_BYTES_PER_ITEM: u64 = 16;
+const RANGE_BYTES_BASE: u64 = 40;
+
 fn range(vals: &[Eval]) -> Result<Eval, MqlError> {
     let int = |v: &Eval,
                which: &str,
@@ -386,7 +392,21 @@ fn range(vals: &[Eval]) -> Result<Eval, MqlError> {
     if step == 0 {
         return Err(error(RANGE_STEP_ZERO, "$range requires a non-zero step value"));
     }
-    let mut out = Vec::new();
+    // The array is refused before it is built when it would pass the limit, counted as RefDb
+    // counts it (measured on a `refrouter` 9.0.4: 16 bytes per step of `(end - start) / step` and
+    // 40 more; `[0, 6553597]` fits and `[0, 6553598]` needs 104857608 bytes).
+    let steps = u64::try_from((end - start) / step).unwrap_or(0);
+    let needed = steps * RANGE_BYTES_PER_ITEM + RANGE_BYTES_BASE;
+    if steps > 0 && needed > RANGE_MEMORY_LIMIT {
+        return Err(error(
+            crate::expr::optimize::EXCEEDED_MEMORY_LIMIT,
+            format!(
+                "$range would use too much memory ({needed} bytes) and cannot spill to disk. \
+                 Memory limit: {RANGE_MEMORY_LIMIT} bytes"
+            ),
+        ));
+    }
+    let mut out = Vec::with_capacity(usize::try_from(steps).unwrap_or(0));
     let mut i = start;
     while (step > 0 && i < end) || (step < 0 && i > end) {
         out.push(Value::Int32(i32::try_from(i).unwrap_or(i32::MAX)));

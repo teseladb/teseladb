@@ -322,3 +322,41 @@ fn geo_near_needs_a_collection_and_its_geospatial_index() {
     let r = run(&mut m, "r", &format!(r#"{{"aggregate":"c","pipeline":{near},"cursor":{{}}}}"#));
     assert_eq!(batch(&r).len(), 3, "{r:?}");
 }
+
+/// An `$expr` comparison compares across types with or without an index, and a multikey index
+/// does not answer it, since the expression compares a whole array (measured on a `refrouter`
+/// 9.0.4 on 11-11-2026).
+#[test]
+fn expr_comparisons_cross_types_through_an_index() {
+    let ids = |r: &Document| {
+        let mut v: Vec<i32> = batch(r)
+            .iter()
+            .map(|d| match d.get("_id") {
+                Some(Value::Int32(n)) => *n,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let docs = r#"[{"_id":0,"v":1},{"_id":1,"v":2},{"_id":2,"v":"a"},{"_id":3,"v":"b"},
+        {"_id":4,"v":null},{"_id":5,"v":{"x":1}},{"_id":6,"v":true},{"_id":99}]"#;
+    for multikey in [false, true] {
+        let mut m = Mem::new();
+        run(&mut m, "r", &format!(r#"{{"insert":"c","documents":{docs}}}"#));
+        if multikey {
+            run(&mut m, "r", r#"{"insert":"c","documents":[{"_id":50,"v":[0]}]}"#);
+        }
+        run(&mut m, "r", r#"{"createIndexes":"c","indexes":[{"key":{"v":1},"name":"v_1"}]}"#);
+        let cases: [(&str, &[i32]); 4] = [
+            (r#"{"$gt":["$v",1]}"#, if multikey { &[1, 2, 3, 5, 6, 50] } else { &[1, 2, 3, 5, 6] }),
+            (r#"{"$lt":["$v","a"]}"#, &[0, 1, 4, 99]),
+            (r#"{"$lte":["$v",2]}"#, &[0, 1, 4, 99]),
+            (r#"{"$eq":["$v",null]}"#, &[4]),
+        ];
+        for (expr, want) in cases {
+            let r = run(&mut m, "r", &format!(r#"{{"find":"c","filter":{{"$expr":{expr}}}}}"#));
+            assert_eq!(ids(&r), want, "{expr} multikey {multikey}");
+        }
+    }
+}

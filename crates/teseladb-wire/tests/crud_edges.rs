@@ -957,6 +957,49 @@ fn a_sort_without_index_orders_as_a_refrouter() {
     }
 }
 
+#[test]
+fn a_sort_on_a_path_through_arrays_orders_as_a_refrouter() {
+    // Measured on a `refrouter` 9.0.4 (002 FR-031): an empty array reached through an array sorts
+    // as `undefined`, an element where the path ends (a document without the field, a scalar, a
+    // nested array) gives `null`, in `find` and in `$sort` alike.
+    let mut m = Mem::new();
+    let a = |v: Value| d(&[("a", v)]);
+    let rows = [
+        (1, Value::Array(vec![a(Value::Array(vec![])), a(1.into())])),
+        (2, Value::Array(vec![d(&[]), a(1.into())])),
+        (3, a(Value::Null)),
+        (4, Value::Array(vec![5.into(), a(2.into())])),
+        (5, Value::Array(vec![Value::Array(vec![a(0.into())]), a(3.into())])),
+        (6, Value::Array(vec![a(Value::Array(vec![Value::Array(vec![]), 0.into()]))])),
+        (8, a(Value::Array(vec![]))),
+        (9, Value::Array(vec![a((-5).into())])),
+    ];
+    let mut docs: Vec<Value> =
+        rows.iter().map(|(i, v)| d(&[("_id", (*i).into()), ("v", v.clone())])).collect();
+    docs.push(d(&[("_id", 7.into())]));
+    m.run("db", doc(&[("insert", s("p")), ("documents", Value::Array(docs))]));
+    let ids_of = |r: &Document, at: &str| {
+        let Value::Array(batch) = field(r, at).clone() else { panic!("{r:?}") };
+        batch
+            .iter()
+            .map(|x| match x {
+                Value::Document(x) => x.get("_id").cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            })
+            .collect::<Vec<_>>()
+    };
+    let ids = |v: &[i32]| v.iter().map(|&i| Value::Int32(i)).collect::<Vec<_>>();
+    for (dir, want) in [(1, [1, 8, 2, 3, 4, 5, 7, 9, 6]), (-1, [6, 5, 4, 1, 2, 9, 3, 7, 8])] {
+        let sort = d(&[("v.a", dir.into()), ("_id", 1.into())]);
+        let r = m.run("db", doc(&[("find", s("p")), ("sort", sort.clone())]));
+        assert_eq!(ids_of(&r, "cursor.firstBatch"), ids(&want), "find {dir}");
+        let pipeline = Value::Array(vec![d(&[("$sort", sort)])]);
+        let r =
+            m.run("db", doc(&[("aggregate", s("p")), ("pipeline", pipeline), ("cursor", d(&[]))]));
+        assert_eq!(ids_of(&r, "cursor.firstBatch"), ids(&want), "$sort {dir}");
+    }
+}
+
 /// A mutation or result past the limits of a range entry is an error with its code, never an
 /// empty encoding; a result that cannot be kept writes nothing and answers with that error.
 #[test]

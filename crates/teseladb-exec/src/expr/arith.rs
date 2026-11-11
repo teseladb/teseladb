@@ -343,7 +343,7 @@ fn numbers(
 
 fn is_zero(n: Num) -> bool {
     match n {
-        Num::Decimal(d) => decimal_to_f64(d) == 0.0,
+        Num::Decimal(d) => teseladb_mql::decimal_is_zero(d),
         other => other.f64() == 0.0,
     }
 }

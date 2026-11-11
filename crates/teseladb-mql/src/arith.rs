@@ -318,6 +318,11 @@ pub fn to_decimal128(v: &Value) -> Option<Decimal128> {
     to_decimal(v).map(encode)
 }
 
+/// Whether `d` is a zero of either sign: a decimal too small for a double (`1E-6143`) is not.
+pub fn decimal_is_zero(d: Decimal128) -> bool {
+    matches!(d.classify(), teseladb_bson::Decimal::Finite { coefficient: 0, .. })
+}
+
 /// The double nearest to decimal `d`.
 pub fn decimal_to_f64(d: Decimal128) -> f64 {
     d.to_string().parse().unwrap_or(f64::NAN)

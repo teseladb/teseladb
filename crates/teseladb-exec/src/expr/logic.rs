@@ -93,7 +93,7 @@ pub fn truthy(v: &Eval) -> bool {
         Some(Value::Int32(n)) => *n != 0,
         Some(Value::Int64(n)) => *n != 0,
         Some(Value::Double(n)) => *n != 0.0,
-        Some(Value::Decimal128(d)) => teseladb_mql::decimal_to_f64(*d) != 0.0,
+        Some(Value::Decimal128(d)) => !teseladb_mql::decimal_is_zero(*d),
         Some(_) => true,
     }
 }

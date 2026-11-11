@@ -66,6 +66,7 @@ pub fn shown_value(v: &Value) -> String {
         Value::MinKey => "MinKey".to_owned(),
         Value::MaxKey => "MaxKey".to_owned(),
         Value::Double(x) if x.is_infinite() => if *x > 0.0 { "inf" } else { "-inf" }.to_owned(),
+        Value::Double(x) if x.is_nan() => "nan".to_owned(),
         Value::Double(x) => format!("{x}"),
         Value::Int32(n) => n.to_string(),
         Value::Int64(n) => n.to_string(),
@@ -139,6 +140,10 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             let exact = !items.iter().any(|i| matches!(i, Value::Null));
             Some((items.iter().cloned().map(Bound::point).collect(), exact))
         }
+        // NaN is only equal to NaN and below every other number: `$gte` and `$lte` find the
+        // NaNs of either type, `$gt` and `$lt` nothing (measured on a `refrouter` 9.0.4).
+        "$gt" | "$lt" if is_nan(arg) => Some((Vec::new(), true)),
+        "$gte" | "$lte" if is_nan(arg) => Some((vec![Bound::point(Value::Double(f64::NAN))], true)),
         "$gt" | "$gte" | "$lt" | "$lte" => {
             let (low, high) = bracket(arg)?;
             let inclusive = op.ends_with('e');
@@ -151,11 +156,27 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             };
             Some((vec![b], true))
         }
-        // A time series' bucket filter compares `control.min` and `control.max` with these:
-        // the plain comparison's interval, which the buckets decide (015 FR-008).
-        "$_internalExprGt" | "$_internalExprGte" | "$_internalExprLt" | "$_internalExprLte" => {
-            let plain = op.replace("_internalExpr", "").to_lowercase();
-            intervals(&plain, arg).map(|(b, _)| (b, false))
+        // What an `$expr` comparison implies compares across types, as the expression does:
+        // the interval runs to the end of the whole index, the expression deciding (measured
+        // on a `refrouter` 9.0.4: `{$expr: {$gt: ["$v", 1]}}` scans `(1, MaxKey]`).
+        "$_internalExprEq" => Some((vec![Bound::point(arg.clone())], false)),
+        "$_internalExprGt" | "$_internalExprGte" => {
+            let b = Bound {
+                low: arg.clone(),
+                low_inclusive: op.ends_with('e'),
+                high: Value::MaxKey,
+                high_inclusive: true,
+            };
+            Some((vec![b], false))
+        }
+        "$_internalExprLt" | "$_internalExprLte" => {
+            let b = Bound {
+                low: Value::MinKey,
+                low_inclusive: true,
+                high: arg.clone(),
+                high_inclusive: op.ends_with('e'),
+            };
+            Some((vec![b], false))
         }
         "$regex" => prefix_regex(arg),
         // A non-sparse index holds every document: `$exists` scans all of it and `$not:
@@ -168,6 +189,15 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Whether `v` is a double or decimal NaN.
+fn is_nan(v: &Value) -> bool {
+    match v {
+        Value::Double(n) => n.is_nan(),
+        Value::Decimal128(d) => matches!(d.classify(), teseladb_bson::Decimal::NaN),
+        _ => false,
     }
 }
 

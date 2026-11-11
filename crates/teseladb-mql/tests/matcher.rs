@@ -380,6 +380,33 @@ fn bit_operators() {
         (r#"{"a": {"$bitsAllSet": []}}"#, r#"{"a": 0}"#, true),
         (r#"{"a": {"$bitsAnySet": []}}"#, r#"{"a": 1}"#, false),
         (r#"{"a": {"$bitsAnySet": 1}}"#, r#"{"a": [2, 3]}"#, true),
+        // Subtype 2 keeps its inner length in front of its bytes, and both the value and the
+        // mask are tested with it (measured on a `refrouter` 9.0.4).
+        (
+            r#"{"a": {"$bitsAllSet": [0, 1, 32]}}"#,
+            r#"{"a": {"$binary": {"base64": "YWJj", "subType": "02"}}}"#,
+            true,
+        ),
+        (
+            r#"{"a": {"$bitsAnySet": [2, 33]}}"#,
+            r#"{"a": {"$binary": {"base64": "YWJj", "subType": "02"}}}"#,
+            false,
+        ),
+        (
+            r#"{"a": {"$bitsAllSet": {"$binary": {"base64": "AQ==", "subType": "02"}}}}"#,
+            r#"{"a": {"$binary": {"base64": "AwAAAGE=", "subType": "00"}}}"#,
+            true,
+        ),
+        (
+            r#"{"a": {"$bitsAllSet": {"$binary": {"base64": "AQ==", "subType": "02"}}}}"#,
+            r#"{"a": 1}"#,
+            false,
+        ),
+        (
+            r#"{"a": {"$bitsAnySet": {"$binary": {"base64": "", "subType": "02"}}}}"#,
+            r#"{"a": -1}"#,
+            false,
+        ),
     ]);
 }
 

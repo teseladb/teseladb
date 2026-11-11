@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 
+use teseladb_bson::types::BINARY_OLD;
 use teseladb_bson::{Collator, RawDoc, RawValue, type_class};
 
 use crate::error::Result;
@@ -453,11 +454,28 @@ fn regex_matches(re: &Regex, v: Option<RawValue<'_>>) -> Result<bool> {
     })
 }
 
+/// The length of binary data as BSON stores it: subtype 2 keeps its 4-byte inner length in front
+/// of the bytes, and the bit operators test those bytes too (measured on a `refrouter` 9.0.4).
+pub(crate) fn stored_len(subtype: u8, bytes: &[u8]) -> usize {
+    bytes.len() + if subtype == BINARY_OLD { 4 } else { 0 }
+}
+
+/// Byte `i` of binary data as BSON stores it (see [`stored_len`]).
+pub(crate) fn stored_byte(subtype: u8, bytes: &[u8], i: usize) -> Option<u8> {
+    if subtype != BINARY_OLD {
+        return bytes.get(i).copied();
+    }
+    match i.checked_sub(4) {
+        Some(j) => bytes.get(j).copied(),
+        None => u32::try_from(bytes.len()).ok().map(|n| n.to_le_bytes()[i]),
+    }
+}
+
 /// The bit operators on an integral number (two's complement, sign-extended) or binary data.
 fn bits(op: BitsOp, positions: &[u32], v: RawValue<'_>) -> bool {
     let bit: Box<dyn Fn(u32) -> bool> = match v {
-        RawValue::Binary { bytes, .. } => Box::new(move |p| {
-            let byte = usize::try_from(p / 8).ok().and_then(|i| bytes.get(i));
+        RawValue::Binary { subtype, bytes } => Box::new(move |p| {
+            let byte = usize::try_from(p / 8).ok().and_then(|i| stored_byte(subtype, bytes, i));
             byte.is_some_and(|b| b >> (p % 8) & 1 == 1)
         }),
         v if is_number(&v) && !is_nan(&v) => {

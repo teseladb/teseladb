@@ -265,7 +265,9 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         let hashed = index.key[pos].1 == HASHED;
         let on_field = clauses.iter().enumerate().filter_map(|(i, c)| {
             let (path, op, arg) = on_path(c)?;
-            if path != field {
+            // An `$expr` compares a whole array, which a multikey index keys by element: it
+            // does not use one (measured on a `refrouter` 9.0.4).
+            if path != field || (index.multikey && op.starts_with("$_internalExpr")) {
                 return None;
             }
             let (b, exact) = if hashed { hashed_intervals(op, arg)? } else { intervals(op, arg)? };

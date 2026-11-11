@@ -56,12 +56,22 @@ shellcheck_all() {
   docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -x "${files[@]}"
 }
 
+diff_suite_tests() {
+  local python
+  python=$(tests/compat/native/tools/venv.sh)
+  "$python" -m unittest discover -s tests/compat/native/diff -p 'test_*.py' &&
+    "$python" -m unittest discover -s tests/compat/native/soak -p 'test_*.py'
+}
+
 # The viuzi-* crates come from the private registry at the versions of Cargo.lock; every later step runs offline.
 gate "0. viuzi-* crates of Cargo.lock from the registry" cargo fetch --locked
 gate "1. format" cargo fmt --all -- --check
 gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
 # The comparison of the native measures and the reading of YCSB's output (002 FR-028, FR-030).
 gate "1. tests of the native measuring tools" python3 -m unittest discover -s tests/compat/native -p 'test_*.py'
+# The pieces of the differential suite and the sustained load, without servers (002 FR-031,
+# FR-032); they need pyref.
+gate "1. tests of the differential suite and the sustained load" diff_suite_tests
 gate "2. dependencies" scripts/check-deps.sh
 gate "2. origin register" scripts/check-origin.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256

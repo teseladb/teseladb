@@ -308,13 +308,32 @@ fn intervals_follow_refdb() {
     assert!(!exact);
     assert_eq!(b, vec![Bound::point(Value::Null)]);
     assert_eq!(intervals("$gt", &Value::Boolean(true)), None);
-    // The comparisons a time series' bucket filter makes on `control.min` and `control.max`
-    // scan the intervals of their plain forms, the buckets deciding them (015 FR-008).
+    // NaN is below every other number and only equal to itself (measured on a `refrouter` 9.0.4).
+    for nan in [Value::Double(f64::NAN), Value::Decimal128(teseladb_bson::Decimal128::nan())] {
+        for op in ["$gt", "$lt"] {
+            assert_eq!(intervals(op, &nan), Some((Vec::new(), true)), "{op}");
+        }
+        for op in ["$gte", "$lte"] {
+            let (b, exact) = intervals(op, &nan).expect("the NaNs");
+            assert_eq!((b.len(), exact), (1, true), "{op}");
+            assert_eq!(b[0].shown(), "[nan, nan]", "{op}");
+        }
+    }
+    // The comparisons an `$expr` implies, and those a time series' bucket filter makes on
+    // `control.min` and `control.max` (015 FR-008), compare across types: they scan to the end
+    // of the index, the expression or the buckets deciding (measured on a `refrouter` 9.0.4:
+    // `[new Date(…), MaxKey]` and `[MinKey, new Date(…))`).
     let at = Value::DateTime(5);
-    let (plain, _) = intervals("$gte", &at).expect("a $gte");
-    assert_eq!(intervals("$_internalExprGte", &at), Some((plain, false)));
-    let (plain, _) = intervals("$lt", &at).expect("a $lt");
-    assert_eq!(intervals("$_internalExprLt", &at), Some((plain, false)));
+    let (b, exact) = intervals("$_internalExprGte", &at).expect("a $gte");
+    assert_eq!((b[0].shown(), exact), ("[new Date(5), MaxKey]".to_owned(), false));
+    let (b, _) = intervals("$_internalExprGt", &at).expect("a $gt");
+    assert_eq!(b[0].shown(), "(new Date(5), MaxKey]");
+    let (b, _) = intervals("$_internalExprLt", &at).expect("a $lt");
+    assert_eq!(b[0].shown(), "[MinKey, new Date(5))");
+    let (b, _) = intervals("$_internalExprLte", &at).expect("a $lte");
+    assert_eq!(b[0].shown(), "[MinKey, new Date(5)]");
+    let (b, exact) = intervals("$_internalExprEq", &Value::Int32(1)).expect("an $eq");
+    assert_eq!((b[0].shown(), exact), ("[1, 1]".to_owned(), false));
     assert_eq!(shown_value(&Value::DateTime(i64::MIN)), "new Date(-9223372036854775808)");
     let (b, exact) = intervals("$gte", &at).expect("a $gte");
     let to = Bound {
@@ -324,8 +343,6 @@ fn intervals_follow_refdb() {
         high_inclusive: true,
     };
     assert_eq!((b, exact), (vec![to], true));
-    assert!(intervals("$_internalExprGt", &at).is_some());
-    assert!(intervals("$_internalExprLte", &at).is_some());
     let (b, _) = intervals("$lte", &Value::String("m".to_owned())).expect("a bound");
     assert_eq!(b[0].shown(), r#"["", "m"]"#);
     let (b, _) = intervals("$gte", &Value::String("m".to_owned())).expect("a bound");

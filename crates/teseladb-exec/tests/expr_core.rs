@@ -108,6 +108,19 @@ fn booleans_and_conditionals_follow_truthiness() {
     assert_eq!(eval(r#"{"$and":[]}"#), boolean(true));
     assert_eq!(eval(r#"{"$or":[0,null,"$zz"]}"#), boolean(false));
     assert_eq!(eval(r#"{"$or":[0,{"$numberDecimal":"1"}]}"#), boolean(true));
+    // A decimal too small for a double is not zero (measured on a `refrouter` 9.0.4).
+    let tiny = r#"{"$numberDecimal":"1E-6143"}"#;
+    assert_eq!(eval(&format!(r#"{{"$and":[{tiny}]}}"#)), boolean(true));
+    assert_eq!(eval(&format!(r#"{{"$not":[{tiny}]}}"#)), boolean(false));
+    assert_eq!(eval(r#"{"$and":[{"$numberDecimal":"-0E-6176"}]}"#), boolean(false));
+    assert_eq!(
+        eval(&format!(r#"{{"$divide":[1,{tiny}]}}"#)),
+        Some(Value::Decimal128("1.00000000000000000000000000000000E+6143".parse().unwrap()))
+    );
+    assert_eq!(
+        eval(&format!(r#"{{"$mod":[1,{tiny}]}}"#)),
+        Some(Value::Decimal128("0E-6143".parse().unwrap()))
+    );
     assert_eq!(eval(r#"{"$not":[[]]}"#), boolean(false));
     assert_eq!(eval(r#"{"$cond":[{"$gt":["$i",0]},"y","n"]}"#), Some(Value::from("y")));
     assert_eq!(eval(r#"{"$cond":{"if":false,"then":1,"else":2}}"#), int(2));
@@ -254,4 +267,27 @@ fn sorting_values_that_do_not_compare_gives_the_error() {
     let mut values = vec![deep.clone(), Some(Value::Int32(1))];
     let e = try_sort_by(&mut values, |a, b| order(a, b, None)).expect_err("too deep");
     assert_eq!(e.code.code, 2);
+}
+
+#[test]
+fn range_refuses_an_array_past_its_memory_limit_before_building_it() {
+    // Measured on a `refrouter` 9.0.4 on 11-11-2026: 16 bytes per step and 40 more, against
+    // 104857600 bytes; the largest range of 32-bit integers is refused at once.
+    let size = |args: &str| eval(&format!(r#"{{"$size":{{"$range":{args}}}}}"#));
+    assert_eq!(size("[0, 6553597]"), int(6_553_597));
+    assert_eq!(size("[0, 13107195, 2]"), int(6_553_598));
+    assert_eq!(size("[10, 0, -1]"), int(10));
+    assert_eq!(size("[5, 5]"), int(0));
+    let too_much = |args: &str, bytes: u64| {
+        let msg = format!(
+            "$range would use too much memory ({bytes} bytes) and cannot spill to disk. Memory \
+             limit: 104857600 bytes"
+        );
+        assert_eq!(error(&format!(r#"{{"$range":{args}}}"#)), (146, msg), "{args}");
+    };
+    too_much("[0, 6553598]", 104_857_608);
+    too_much("[0, 13107196, 2]", 104_857_608);
+    too_much("[0, -6553599, -1]", 104_857_624);
+    too_much("[0, 2147483647]", 34_359_738_392);
+    too_much("[-2147483648, 2147483647]", 68_719_476_760);
 }

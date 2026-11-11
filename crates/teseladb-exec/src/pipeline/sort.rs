@@ -251,20 +251,11 @@ fn key_of(
         let array = matches!(v, Value::Array(_));
         return Ok((v, array));
     }
-    let mut candidates: Vec<Value> = Vec::new();
-    let mut empty_array = false;
     let found = values_at(doc, path);
     let through_array =
         crosses_array(doc, path) || found.iter().any(|v| matches!(v, RawValue::Array(_)));
-    for v in found {
-        match v {
-            RawValue::Array(a) if a.iter().next().is_none() => empty_array = true,
-            RawValue::Array(a) => candidates.extend(a.iter().map(Value::from)),
-            other => candidates.push(Value::from(other)),
-        }
-    }
     let mut best: Option<Value> = None;
-    for c in candidates {
+    for c in candidates_of(found).into_iter().map(Value::from) {
         let better = match &best {
             None => true,
             Some(b) => {
@@ -276,12 +267,30 @@ fn key_of(
             best = Some(c);
         }
     }
-    let v = match best {
-        Some(v) => v,
-        None if empty_array => Value::Undefined,
-        None => Value::Null,
-    };
-    Ok((v, through_array))
+    Ok((best.unwrap_or(Value::Null), through_array))
+}
+
+/// The values one sort field of `doc` chooses its key from: each value `path` reaches, an
+/// array giving its elements and an empty array `undefined`, and `null` when it reaches none
+/// (measured on a `refrouter` 9.0.4: `{v: [{a: []}, {a: 1}]}` sorts by `v.a` ascending as
+/// `undefined`, before `null`).
+pub fn sort_candidates<'a>(doc: RawDoc<'a>, path: &str) -> Vec<RawValue<'a>> {
+    candidates_of(values_at(doc, path))
+}
+
+fn candidates_of(found: Vec<RawValue<'_>>) -> Vec<RawValue<'_>> {
+    let mut out = Vec::with_capacity(found.len());
+    for v in found {
+        match v {
+            RawValue::Array(a) if a.iter().next().is_none() => out.push(RawValue::Undefined),
+            RawValue::Array(a) => out.extend(a.iter()),
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() {
+        out.push(RawValue::Null);
+    }
+    out
 }
 
 /// The stages that change each document without adding or removing any, which RefDb moves a

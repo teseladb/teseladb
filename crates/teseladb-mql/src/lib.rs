@@ -30,7 +30,7 @@ pub mod validation;
 mod value;
 pub mod vars;
 
-pub use arith::{DecOp, dec_binary, decimal_to_f64, to_decimal128};
+pub use arith::{DecOp, dec_binary, decimal_is_zero, decimal_to_f64, to_decimal128};
 pub use debug::debug_tree;
 pub use error::{ErrorCode, MqlError, Result, codes};
 pub use ext::{Extensions, NoExtensions};

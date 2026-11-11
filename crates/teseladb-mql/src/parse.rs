@@ -727,8 +727,12 @@ fn bit_positions(path: &str, key: &str, value: RawValue<'_>) -> Result<Vec<u32>>
             }
             Ok(out)
         }
-        RawValue::Binary { bytes, .. } => Ok((0..bytes.len() * 8)
-            .filter(|i| bytes[i / 8] >> (i % 8) & 1 == 1)
+        RawValue::Binary { subtype, bytes } => Ok((0..crate::matcher::stored_len(subtype, bytes)
+            * 8)
+            .filter(|i| {
+                crate::matcher::stored_byte(subtype, bytes, i / 8)
+                    .is_some_and(|b| b >> (i % 8) & 1 == 1)
+            })
             .filter_map(|i| u32::try_from(i).ok())
             .collect()),
         v if is_number(&v) => {

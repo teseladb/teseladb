@@ -22,3 +22,4 @@ __pycache__/
 # Synth output of the downloads CDK (cdk/)
 /cdk/cdk.out/
 /cdk/cdk.context.json
+/tests/compat/native/diff/out/

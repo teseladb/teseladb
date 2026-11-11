@@ -222,16 +222,7 @@ fn walk<'a>(v: RawValue<'a>, segs: &[&str], out: &mut Vec<RawValue<'a>>) {
 }
 
 fn key(doc: RawDoc<'_>, path: &str, asc: bool, collation: Option<&dyn Collator>) -> SortKey {
-    let found = values_at(doc, path);
-    let mut candidates: Vec<RawValue<'_>> = Vec::new();
-    let mut empty_array = false;
-    for v in found {
-        match v {
-            RawValue::Array(a) if a.iter().next().is_none() => empty_array = true,
-            RawValue::Array(a) => candidates.extend(a.iter()),
-            other => candidates.push(other),
-        }
-    }
+    let candidates = teseladb_exec::pipeline::sort::sort_candidates(doc, path);
     // The element is chosen in the order of queries; the key then sorts in the order of a sort
     // (they differ for DBPointers, measured on a `refrouter` 9.0.4).
     let best = candidates.into_iter().reduce(|x, y| {
@@ -241,9 +232,5 @@ fn key(doc: RawDoc<'_>, path: &str, asc: bool, collation: Option<&dyn Collator>)
             _ => x,
         }
     });
-    match best {
-        Some(v) => SortKey(Value::from(v)),
-        None if empty_array => SortKey(Value::Undefined),
-        None => SortKey(Value::Null),
-    }
+    SortKey(best.map_or(Value::Null, Value::from))
 }
