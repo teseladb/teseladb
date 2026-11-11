@@ -158,8 +158,9 @@ pub fn check(cmd: &Document, name: &str, node: &NodeInfo) -> Result<(), CommandE
 
 /// Takes the `$clusterTime` of command `name`, already checked, into the node's clock (008
 /// FR-013), as a `refrouter` 9.0.4 advances its clock with it: a write that follows lands above what
-/// the client saw, even on another node. One more than [`MAX_RECEIVED_AHEAD_MS`] ahead of the node's wall
-/// clock fails with 205 and the node's clock is left alone (DV-101): a `refrouter` allows 365 days,
+/// the client saw, even on another node. One past the node's clock and more than
+/// [`MAX_RECEIVED_AHEAD_MS`] ahead of its wall clock fails with 205 and the node's clock is left
+/// alone (DV-101): a `refrouter` allows 365 days,
 /// but the HLC's bound on disk would then keep the node from starting again until its wall clock
 /// passed it.
 pub fn take<B: Backend + ?Sized>(
@@ -169,6 +170,12 @@ pub fn take<B: Backend + ?Sized>(
 ) -> Result<(), CommandError> {
     let Some(given) = parse(cmd, name)? else { return Ok(()) };
     let mark = teseladb_hlc::from_timestamp((given.time.secs, given.time.inc));
+    // A time the node's clock already reached is one it gave out or heard: taking it moves
+    // nothing, whatever the wall clock says (the clock may run ahead of it after a burst of
+    // elections, 005 FR-005).
+    if mark <= backend.cluster_mark() {
+        return Ok(());
+    }
     let wall = backend.wall_ms();
     if mark.physical > wall.saturating_add(MAX_RECEIVED_AHEAD_MS) {
         let msg = format!(

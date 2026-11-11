@@ -1177,7 +1177,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant `hlc_regress_restart`: the clock takes no mark it receives.
         #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
         if let Some(h) = hlc {
-            self.cfg.clock.0.update(h);
+            self.cfg.clock.0.hear(h);
         }
         #[cfg(teseladb_bug = "hlc_regress_restart")]
         let _ = hlc;
@@ -1190,7 +1190,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant `hlc_regress_restart`: the clock takes no mark it receives, from an
         // entry or from a frame.
         #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
-        self.cfg.clock.0.update(hlc);
+        self.cfg.clock.0.hear(hlc);
         #[cfg(teseladb_bug = "hlc_regress_restart")]
         let _ = hlc;
         if self.groups.values().any(|g| g.raw.conf().voters.contains(&from)) {
@@ -1582,18 +1582,22 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// previous leader read until its lease ended, at most a lease after the last round its voters
     /// acknowledged, and at a mark no higher than its wall clock then plus that lease: each round
     /// carried its clock, at least its wall clock (`keep_lease_clock`), and the voters handed it
-    /// on. So the minimum is the millisecond after a lease above the clock this node heard
-    /// (`read_cache_minimum`), and at least the margin above its own wall clock. It does not run
-    /// away: a new term comes only after the previous lease ended, so the wall clocks advance at
-    /// least a lease between two elections, and the cluster time stays within the margin plus a
-    /// lease and a millisecond of the wall time (seed 4086 of `splits`; seed 730 of `range-docs`
-    /// for the reads at the wall clock late in a term).
+    /// on. So the minimum is the millisecond after a lease above the clock this node heard from
+    /// other nodes, the millisecond after its own clock (a previous leader on this node, or the
+    /// range a split cut this one from, read at marks it gave out), and at least the margin above
+    /// its own wall clock (`read_cache_minimum`). It does not run away: a new term comes only after
+    /// the previous lease ended, so the wall clocks advance at least a lease between two elections,
+    /// and the cluster time stays within the margin plus a lease and a millisecond of the wall time
+    /// (seed 4086 of `splits`; seed 730 of `range-docs` for the reads at the wall clock late in a
+    /// term). The node's own raises get no lease on top: the halves of several splits elected
+    /// together stacked one each (H-013 of the native tests).
     fn raise_to_read_cache(&mut self, g: GroupId) {
         let grp = self.groups.get_mut(&g).expect("group");
         let Some(margin) = grp.sm.read_cache_margin_ms() else { return };
         let clock = &self.cfg.clock.0;
         let lease_ms = self.cfg.raft.lease_dur.0.div_ceil(1_000_000);
-        let minimum = read_cache_minimum(clock.peek(), self.wall_ms, lease_ms, margin);
+        let minimum =
+            read_cache_minimum(clock.heard_ms(), clock.peek(), self.wall_ms, (lease_ms, margin));
         // The read cache starts at the lease mark plus the margin: at the minimum.
         let lease = Hlc { physical: minimum.physical - margin, logical: 0 };
         // Faulty variant (005 T017): the clock stays where it was; with the write's read floor
@@ -1972,8 +1976,12 @@ impl<S: StateMachine> MultiRaftCore<S> {
             .map_err(|err| format!("entry {} could not be decoded: {err:?}", e.index))
             .and_then(|env| {
                 grp.last_mark = grp.last_mark.max(env.ts);
+                // An entry another node proposed carries that node's clock.
                 #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
-                clock.update(env.ts);
+                match teseladb_hlc::node_of(env.ts) == clock.node() {
+                    true => clock.update(env.ts),
+                    false => clock.hear(env.ts),
+                }
                 let ctx = ApplyCtx { group: g, index: e.index, term: e.term, ts: env.ts };
                 grp.sm.apply(env.payload, &ctx).map_err(|err| err.to_string())
             });
@@ -2125,7 +2133,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 // every mark of the entries it covers.
                 let bound = Hlc { physical: ms, logical: (1 << LOGICAL_BITS) - 1 };
                 grp.last_mark = grp.last_mark.max(bound);
-                self.cfg.clock.0.update(bound);
+                self.cfg.clock.0.hear(bound);
                 true
             }
             // A snapshot this version cannot restore: the group stops instead of guessing.

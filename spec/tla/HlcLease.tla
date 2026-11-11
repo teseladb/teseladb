@@ -103,8 +103,11 @@ Tick ==
     /\ UNCHANGED <<off, aside, hlc, holder, leaseEnd, floor, carried, last, versions, reads, writes, lost, jumps>>
 
 \* A node takes the lease once the previous one ended. Its read cache starts at the lowest mark of the
-\* tick after the one a lease above the clock it heard (its own, the group's last entry and what its
-\* voters carried from the previous holder), and at least 2 ticks above its wall clock (FR-005,
+\* tick after the one a lease above the clock it heard from other nodes (what its voters carried from
+\* the previous holder, and the group's last entry when another node wrote it), at the tick after its
+\* own clock (every read and write it served is at or below it), and at least 2 ticks above its wall
+\* clock (FR-005; a lease above its own clock stacked one per election when many groups of a node won
+\* together, H-013 of the native tests;
 \* research R12; <<t, 0>> is below every mark a node gives in tick t). The previous holder read until
 \* its lease ended, a lease after the last round its voters acknowledged (Renew), at its clock then:
 \* in the tick a lease above the clock that round carried at the latest, at any mark of that tick (in
@@ -114,8 +117,9 @@ Tick ==
 Acquire(n) ==
     /\ InMargin(n)
     /\ holder = 0 \/ leaseEnd < now
-    /\ LET h == Max2(Max2(hlc[n], last), carried)
-           f == Max2(<<h[1] + LeaseTicks + 1, 0>>, <<Phys(n) + 2, 0>>)
+    /\ LET heard == Max2(IF last[2] = n THEN <<0, 0>> ELSE last, carried)
+           f == Max2(Max2(<<heard[1] + LeaseTicks + 1, 0>>, <<hlc[n][1] + 1, 0>>),
+                     <<Phys(n) + 2, 0>>)
        IN /\ hlc' = [hlc EXCEPT ![n] = f]
           /\ floor' = f
           /\ carried' = f
@@ -155,14 +159,16 @@ Write ==
     /\ UNCHANGED <<now, off, aside, peak, holder, leaseEnd, floor, carried, reads, jumps>>
 
 \* A read with the lease, served at the holder's clock (its HLC, or its wall clock if ahead), at
-\* the highest mark of that tick; the cache rises to it.
+\* the highest mark of that tick; the cache and the holder's clock rise to it (the code takes the
+\* read's mark from the clock).
 Read ==
     /\ holder /= 0 /\ now <= leaseEnd /\ InMargin(holder)
     /\ Cardinality(reads) < MaxReads
     /\ LET t == Max2(<<hlc[holder][1], N>>, <<Phys(holder), N>>)
        IN /\ reads' = reads \cup {<<t, Seen(t)>>}
           /\ floor' = Max2(floor, t)
-    /\ UNCHANGED <<now, off, aside, peak, hlc, holder, leaseEnd, carried, last, versions, writes, lost, jumps>>
+          /\ hlc' = [hlc EXCEPT ![holder] = t]
+    /\ UNCHANGED <<now, off, aside, peak, holder, leaseEnd, carried, last, versions, writes, lost, jumps>>
 
 \* A node's wall clock jumps 3 ticks (400 ms) while every other clock is in time.
 Jump(n) ==

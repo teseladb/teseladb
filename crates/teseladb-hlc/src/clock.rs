@@ -80,6 +80,12 @@ pub struct HlcClock {
     bound: AtomicU64,
     /// The highest millisecond of a mark refused at the bound: the next bound covers it.
     wanted: AtomicU64,
+    /// Marks refused at the bound since the clock started.
+    refused: AtomicU64,
+    /// The highest millisecond heard from another node: in its frames, its forwarded requests and
+    /// answers, the entries it proposed and its snapshots ([`HlcClock::hear`]). The node's own
+    /// raises do not count.
+    heard: AtomicU64,
 }
 
 fn pack(physical: u64, seq: u32, node: u32) -> u64 {
@@ -105,7 +111,20 @@ impl HlcClock {
             return Err(BadNode(node));
         }
         let word = AtomicU64::new(pack(0, 0, node));
-        Ok(HlcClock { word, node, bound: AtomicU64::new(bound), wanted: AtomicU64::new(0) })
+        Ok(HlcClock {
+            word,
+            node,
+            bound: AtomicU64::new(bound),
+            wanted: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            heard: AtomicU64::new(0),
+        })
+    }
+
+    /// How many marks [`HlcClock::now`] refused at the bound since the clock started: each
+    /// one a read or a write that waited for the next bound to be written.
+    pub fn refused_at_bound(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
     }
 
     /// The bound in force (`None` without one).
@@ -173,6 +192,7 @@ impl HlcClock {
             };
             if nms >= self.bound.load(Ordering::Acquire) {
                 self.wanted.fetch_max(nms, Ordering::AcqRel);
+                self.refused.fetch_add(1, Ordering::Relaxed);
                 return Next::AboveBound;
             }
             let new = pack(nms, nseq, self.node);
@@ -181,12 +201,30 @@ impl HlcClock {
                 // either saw this mark or is seen here.
                 Ok(_) if nms >= self.bound.load(Ordering::SeqCst) => {
                     self.wanted.fetch_max(nms, Ordering::AcqRel);
+                    self.refused.fetch_add(1, Ordering::Relaxed);
                     return Next::AboveBound;
                 }
                 Ok(_) => return Next::Mark(mark(nms, nseq, self.node)),
                 Err(seen) => cur = seen,
             }
         }
+    }
+
+    /// Takes a mark heard from another node, as [`HlcClock::update`] does, and remembers its
+    /// millisecond in [`HlcClock::heard_ms`].
+    pub fn hear(&self, received: Hlc) {
+        self.update(received);
+        self.heard.fetch_max(received.physical.min(MAX_PHYSICAL), Ordering::AcqRel);
+    }
+
+    /// The highest millisecond of a mark heard from another node ([`HlcClock::hear`]).
+    pub fn heard_ms(&self) -> u64 {
+        self.heard.load(Ordering::Acquire)
+    }
+
+    /// The node number its marks carry.
+    pub fn node(&self) -> u32 {
+        self.node
     }
 
     /// Takes a received mark: the next mark this node issues is above it.

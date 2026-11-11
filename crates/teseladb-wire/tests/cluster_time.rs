@@ -12,6 +12,7 @@ use common::{Mem, doc, field};
 use teseladb_auth::clustertime::{HmacKey, KEY_LEN, KeyRing, Time, sign};
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::users::{RoleName, User, UserName};
+use teseladb_hlc::Hlc;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::cluster_time::{GivenTime, parse};
 use teseladb_wire::commands::auth::Authenticated;
@@ -490,6 +491,23 @@ fn a_clients_cluster_time_moves_the_nodes_clock() {
     // One behind the node's clock passes and leaves it alone.
     let r = ping_on(&mut m, ts(secs - 3600, 1));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+}
+
+/// A `$clusterTime` the node gave out passes even when its clock ran more than 1 s ahead of its
+/// wall clock (elections of the halves of several splits in a row): it is no further than the
+/// node's own clock, and taking it moves nothing (DV-101).
+#[test]
+fn a_cluster_time_the_node_gave_passes_when_its_clock_runs_ahead_of_the_wall() {
+    let mut m = Mem::new();
+    m.mark_ahead = 1_500;
+    let given = teseladb_hlc::to_timestamp(Hlc { physical: m.now + 1_400, logical: 0 });
+    let r = ping_on(&mut m, ts(given.0, given.1));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    assert!(m.observed.is_empty(), "nothing to take");
+    // Past the node's own clock, the bound on the wall clock holds.
+    let past = teseladb_hlc::to_timestamp(Hlc { physical: m.now + 1_600, logical: 0 });
+    let r = ping_on(&mut m, ts(past.0, past.1));
+    assert_eq!(code(&r).0, 205, "{r:?}");
 }
 
 /// One more than 1 s ahead of the node's wall clock fails with 205 and the message of a `refrouter`

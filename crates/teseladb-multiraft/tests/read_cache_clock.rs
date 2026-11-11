@@ -8,6 +8,7 @@ mod common;
 use common::*;
 use teseladb_hlc::Hlc;
 use teseladb_multiraft::{CoreConfig, GroupDesc, NodeClock};
+use teseladb_types::GroupId;
 
 const MARGIN: u64 = 250;
 /// The lease of the test configuration (`RaftConfig::default`), in milliseconds.
@@ -106,6 +107,40 @@ fn elections_one_after_another_keep_the_clock_within_the_margin_of_the_wall_time
         "the clock is {} ms ahead of the wall time after {ELECTIONS} elections",
         ahead - wall
     );
+}
+
+/// Many groups of one node winning their first terms within a few ticks (the halves of several
+/// splits by load in a row) leave the clock within the margin plus a lease of the wall time: each
+/// cache starts a lease above what the node heard from other nodes, and only above its own clock
+/// by a millisecond, as every mark this node gave out is below it. A lease above its own clock,
+/// which already held the previous raise, added 111 ms per election: twelve took it 1,5 s ahead,
+/// and a reader whose mark ran past the wall clock of a transaction record's leader waited for
+/// that clock to pass it (H-013 of the native tests, 11-11-2026).
+#[test]
+fn many_groups_of_one_node_elected_together_keep_its_clock_near_the_wall_time() {
+    const GROUPS: u64 = 12;
+    let clock = NodeClock::for_node(id(1));
+    let mut c = Cluster::with(0, cfg);
+    let mine = clock.clone();
+    c.add_node(1, |i| CoreConfig { clock: mine.clone(), ..cfg(i) });
+    for g in 0..GROUPS {
+        let desc = GroupDesc { group: GroupId(100 + g), voters: vec![id(1)], learners: vec![] };
+        let sm = Appender { cache_margin: Some(MARGIN), ..Appender::default() };
+        c.nodes.get_mut(&id(1)).unwrap().core.create_group(desc, sm).unwrap();
+    }
+    c.settle();
+    c.ticks(5);
+    let marks: Vec<u64> = (0..GROUPS)
+        .map(|g| c.nodes[&id(1)].core.lease_mark(GroupId(100 + g)).expect("it leads").physical)
+        .collect();
+    let (first, last) = (marks.iter().min().unwrap(), marks.iter().max().unwrap());
+    assert!(
+        last - first < LEASE_MS,
+        "the elections stacked {} ms on one another: {marks:?}",
+        last - first
+    );
+    let ahead = clock.0.peek().physical;
+    assert!(ahead <= last + MARGIN + 1, "the clock went to {ahead}, past the last cache");
 }
 
 /// While it leads, the leader keeps its clock at least at its wall clock, and its frames carry it:
