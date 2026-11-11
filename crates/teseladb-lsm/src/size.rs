@@ -24,6 +24,23 @@ fn logical(ikey: &[u8]) -> &[u8] {
 }
 
 impl Lsm {
+    /// A bound, never below [`Lsm::interval_size`]'s bytes, of what `[start, end)` takes: every
+    /// memtable whole and every block of the files that overlap the interval, without walking a
+    /// memtable nor gathering keys. A range checks its size against it every second and walks its
+    /// keys only when it could be past a limit: with a full memtable the walk took about 45 ms of
+    /// the core's thread, and every write of the core waited for it (H-049 of the native tests).
+    #[must_use]
+    pub fn interval_size_bound(&self, start: &[u8], end: &[u8]) -> u64 {
+        let memtables: u64 = self.version.memtables.iter().map(|m| m.bytes()).sum();
+        let files: u64 = self
+            .version
+            .tables()
+            .filter(|t| t.props.hi.as_slice() >= start && t.props.lo.as_slice() < end)
+            .map(|t| t.index_entries().map(|(_, len)| len).sum::<u64>())
+            .sum();
+        memtables + files
+    }
+
     /// The size of `[start, end)` and the key that halves it.
     pub fn interval_size(&self, start: &[u8], end: &[u8]) -> IntervalSize {
         let inside = |k: &[u8]| start <= k && k < end;

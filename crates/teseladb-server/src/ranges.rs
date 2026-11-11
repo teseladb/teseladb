@@ -586,14 +586,20 @@ impl Replicas {
             out.push(Group0Command::SplitRange { group: g, at });
             return;
         }
-        let size = lsm.interval_size(start, end);
         let split_bytes = split_size(start, &self.chunks, self.split_bytes);
         let disk_limit = split_bytes.saturating_mul(SPLIT_DISK_FACTOR);
         // By size (FR-005) at the files' middle key, or else by load (FR-006) at the median of the
-        // keys the leader served.
-        let by_size = l.live >= split_bytes || size.bytes >= disk_limit;
+        // keys the leader served. The keys are walked only when the range could be past the disk
+        // limit by its bound, or splits by its live bytes and needs the middle key: the walk of
+        // a full memtable held the core's thread for tens of milliseconds every second (H-049).
+        let could = l.live >= split_bytes || lsm.interval_size_bound(start, end) >= disk_limit;
+        let size = could.then(|| lsm.interval_size(start, end));
+        let by_size = l.live >= split_bytes || size.as_ref().is_some_and(|s| s.bytes >= disk_limit);
         let by_load = !by_size;
-        let at = if by_size { size.cut } else { host.load_cut(g, now) };
+        let at = match size {
+            Some(s) if by_size => s.cut,
+            _ => host.load_cut(g, now),
+        };
         // A cut at a change meta (014) goes before its document, which it belongs with.
         let at = at.map(|k| {
             let word =

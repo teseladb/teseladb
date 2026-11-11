@@ -54,3 +54,36 @@ fn an_interval_is_measured_in_memory_and_in_files_and_cut_near_its_middle() {
     assert!(half.bytes * 3 > files.bytes && half.bytes * 3 < files.bytes * 2);
     assert_eq!(lsm.interval_size(&[0x02], &[0x03]), IntervalSize::default());
 }
+
+#[test]
+fn the_bound_is_never_below_the_measured_size() {
+    // H-049: a range checks its size against this bound every second and walks its keys only
+    // when the bound could reach a limit.
+    let cfg = LsmConfig { block_bytes: 4 << 10, ..LsmConfig::default() };
+    let mut disk = MemDisk::new();
+    let mut lsm = Lsm::recover(&cfg, &mut disk).unwrap().0;
+    let mut index = 0;
+    let intervals = [
+        (vec![0x01], vec![0x02]),
+        (key(500), key(1_500)),
+        (key(1_990), vec![0x02]),
+        (vec![0x02], vec![0x03]),
+    ];
+    let check = |lsm: &Lsm| {
+        for (start, end) in &intervals {
+            let (bound, size) =
+                (lsm.interval_size_bound(start, end), lsm.interval_size(start, end));
+            assert!(bound >= size.bytes, "{bound} below {} for {start:?}..{end:?}", size.bytes);
+        }
+    };
+    check(&lsm);
+    fill(&mut lsm, 0, 1_000, &mut index);
+    check(&lsm);
+    // Part in the files, part still in the memtable.
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    fill(&mut lsm, 1_000, 2_000, &mut index);
+    check(&lsm);
+    // Nothing of a file outside the interval counts.
+    assert!(lsm.interval_size_bound(&[0x02], &[0x03]) < lsm.interval_size_bound(&[0x01], &[0x02]));
+}
