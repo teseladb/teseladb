@@ -12,7 +12,7 @@ Cada modelo explica en su cabecera qué comprueba; `scripts/ci.sh` vuelve a gene
 | `ClosedTimestamp` | `ClosedTimestamp.streams.cfg` | 503.370.352 | 51.869.224 | 32 | 535 s |
 | `CoreRelocate` | `CoreRelocate.cfg` | 154.193 | 44.316 | 31 | 2 s |
 | `HlcLatches` | `HlcLatches.cfg` | 235.682 | 57.254 | 19 | 1 s |
-| `HlcKeyLatches` | `HlcKeyLatches.cfg` | 11.514.252 | 3.053.293 | 19 | 4 s |
+| `HlcKeyLatches` | `HlcKeyLatches.cfg` | 883.003.129 | 198.186.722 | 21 | 5 min 38 s |
 | `PipelinedWrites` | `PipelinedWrites.cfg` | 2.353 | 846 | 20 | 1 s |
 | `CatalogPins` | `CatalogPins.cfg` | 517.500 | 125.226 | 28 | 3 s |
 | `HlcLease` | `HlcLease.cfg` | 101.694.096 | 47.323.569 | 15 | 336 s |

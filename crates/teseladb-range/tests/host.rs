@@ -661,6 +661,11 @@ fn a_scan_outside_the_core_waits_only_for_the_writes_of_its_span() {
     let (read, rows) = scan_outside(&n, (b"\x01a", b"\x01k"), 10, ReadConcern::Local)
         .expect("a write past its span does not send the scan to the core");
     assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![1]))]);
+    // Its span reaches the insert, but with its limit it reads only up to `a` (a find with a
+    // limit asks for the rest of the collection, H-049).
+    let (_, first) = scan_outside(&n, (b"\x01a", b"\x01y"), 1, ReadConcern::Local)
+        .expect("an insert past the keys it read does not send the scan to the core");
+    assert_eq!(first, vec![(b"\x01a".to_vec(), (1, vec![1]))]);
     assert!(scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).is_none());
     assert!(scan_outside(&n, (b"\x01m", b"\x01m\x00"), 10, ReadConcern::Local).is_none());
     assert!(scan_outside_way(&n, (b"\x01k", b"\x01y"), (1, true), ReadConcern::Local).is_none());

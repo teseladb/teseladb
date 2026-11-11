@@ -8,8 +8,9 @@
 //! reads only if no write holds a latch it covers: either it sees the write, or the write sees its
 //! bound and takes a mark above it (`spec/tla/HlcLatches.tla`, which fails without either step).
 //! A point read looks at the writes of its own key, in the slots the latches count
-//! (`spec/tla/HlcKeyLatches.tla`); a scan at the writes of the keys of its span, absent ones
-//! included, in the latched keys in order; a count at every write of the range. Any condition it
+//! (`spec/tla/HlcKeyLatches.tla`); a scan, after it reads, at the writes of the keys it read,
+//! absent ones included, in the latched keys in order, and at whether any write was released
+//! while it read; a count at every write of the range. Any condition it
 //! cannot check goes back to the core, which serves the read as before.
 //!
 //! The time the view holds until is checked after the mark is taken: a thread stopped between
@@ -56,6 +57,7 @@ pub struct RangeView {
     held: Arc<AtomicU32>,
     keys: Arc<KeySlots>,
     spans: Arc<SpanKeys>,
+    released: Arc<AtomicU64>,
     outside: Arc<AtomicU64>,
     /// The live documents of each collection when the core published the view, if exact (007
     /// FR-039).
@@ -75,8 +77,8 @@ impl std::fmt::Debug for RangeView {
 enum Watch<'a> {
     /// Those of these keys.
     Keys(&'a [&'a [u8]]),
-    /// Those of any key of `[start, end)`.
-    Span(&'a [u8], &'a [u8]),
+    /// None before the read: the caller checks after it.
+    Later,
     /// Every write of the range.
     Range,
 }
@@ -108,6 +110,7 @@ pub(crate) struct ViewParts {
     pub(crate) held: Arc<AtomicU32>,
     pub(crate) keys: Arc<KeySlots>,
     pub(crate) spans: Arc<SpanKeys>,
+    pub(crate) released: Arc<AtomicU64>,
     pub(crate) outside: Arc<AtomicU64>,
     pub(crate) counts: Option<Arc<Counts>>,
 }
@@ -124,6 +127,7 @@ impl RangeView {
             held: p.held,
             keys: p.keys,
             spans: p.spans,
+            released: p.released,
             outside: p.outside,
             counts: p.counts,
             lsm,
@@ -152,14 +156,15 @@ impl RangeView {
         #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
         let writing = match watch {
             Watch::Keys(keys) => keys.iter().any(|k| self.keys.maybe_held(k)),
-            Watch::Span(start, end) => self.spans.any_in(start, end),
+            // A scan looks once it has read (`RangeView::scan`).
+            Watch::Later => false,
             Watch::Range => self.held.load(Ordering::SeqCst) != 0,
         };
         #[cfg(teseladb_bug = "outside_ignores_latches")]
         let writing = {
             let watched = match watch {
                 Watch::Keys(keys) => keys.len(),
-                Watch::Span(start, end) => start.len() + end.len(),
+                Watch::Later => 0,
                 Watch::Range => 0,
             };
             let _ignored = (&self.held, &self.keys, &self.spans, watched);
@@ -224,7 +229,9 @@ impl RangeView {
         if !servable {
             return None;
         }
-        let ts = self.mark(Watch::Span(start, end), wall_ms, now)?;
+        let ts = self.mark(Watch::Later, wall_ms, now)?;
+        // After the bound: a write released before this reads applied before the scan reads.
+        let released = self.released.load(Ordering::SeqCst);
         let view = self.lsm.view_cached(cache);
         let mut scan = match backward {
             false => Either::Forward(view.scan(start, end, ts)),
@@ -246,7 +253,29 @@ impl RangeView {
                 SharedStep::Need(_) | SharedStep::Failed(_) => return None,
             }
         }
-        Some((ts, rows))
+        // The keys it read: up to the last row when the limit stopped it, the span otherwise.
+        let last = (rows.len() == limit).then(|| rows.last()).flatten().map(|(k, _)| k);
+        let read = match (last, backward) {
+            (Some(k), false) => (start.to_vec(), [k.as_slice(), &[0]].concat()),
+            (Some(k), true) => (k.clone(), end.to_vec()),
+            (None, _) => (start.to_vec(), end.to_vec()),
+        };
+        (!self.written_while_read(&read, released)).then_some((ts, rows))
+    }
+
+    /// Whether a write holds a key of `read` or a write was released since the count was
+    /// `released`: then the scan goes to the core.
+    fn written_while_read(&self, (start, end): &(Vec<u8>, Vec<u8>), released: u64) -> bool {
+        // Faulty variant (005 T049): a read outside the core that does not look at the writes.
+        #[cfg(teseladb_bug = "outside_ignores_latches")]
+        {
+            let _ignored = (start, end, released);
+            false
+        }
+        #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
+        {
+            self.spans.any_in(start, end) || self.released.load(Ordering::SeqCst) != released
+        }
     }
 }
 

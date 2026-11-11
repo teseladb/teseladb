@@ -21,13 +21,15 @@
 //! zero after raising the bound either sees the write or makes it take a mark above
 //! (`spec/tla/HlcKeyLatches.tla`, which fails when a write counts a key after its mark).
 //!
-//! The same keys go, in order, to [`SpanKeys`] for the scans served outside the core: a scan
-//! that finds no key of its span there after raising the bound reads, as a point read does, each
-//! key of the span, the absent ones included (H-049 of the native tests).
+//! The same keys go, in order, to [`SpanKeys`] for the scans served outside the core. A scan
+//! knows which keys it read only once it has read them, so it checks after: it raises the bound,
+//! notes how many writes the range has released, reads, and keeps what it read only if no key of
+//! it is latched and no write was released meanwhile; a write released between its read and its
+//! check would hide from both (H-049 of the native tests, `spec/tla/HlcKeyLatches.tla`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use teseladb_lsm::Published;
 
@@ -175,6 +177,9 @@ pub struct Latches {
     /// The keys latched, in order, for the scans outside the core, and how many writes hold each.
     spans: Arc<SpanKeys>,
     span_counts: BTreeMap<Vec<u8>, u32>,
+    /// How many writes with counted keys were released, raised before their keys leave
+    /// [`SpanKeys`].
+    released: Arc<AtomicU64>,
     /// The keys each write counted, which its release uncounts.
     counted: BTreeMap<LatchId, Vec<Vec<u8>>>,
 }
@@ -320,6 +325,9 @@ impl Latches {
         self.answered.remove(&id);
         self.goes_on.remove(&id);
         let counted = self.counted.remove(&id).unwrap_or_default();
+        if !counted.is_empty() {
+            self.released.fetch_add(1, Ordering::SeqCst);
+        }
         let mut gone = false;
         for k in &counted {
             self.keys.uncount(KeySlots::slot(k));
@@ -353,6 +361,11 @@ impl Latches {
     /// The keys latched in order, for the scans outside the core (005 FR-028).
     pub fn spans(&self) -> Arc<SpanKeys> {
         Arc::clone(&self.spans)
+    }
+
+    /// How many writes with counted keys were released, for the scans outside the core.
+    pub fn released(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.released)
     }
 
     /// Counts `key`, latched by `id`, in its slot and among the keys in order; whether the keys
