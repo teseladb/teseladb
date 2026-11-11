@@ -267,6 +267,12 @@ impl FileDisk {
         Some(DetachedSync { file, op: op.without_data() })
     }
 
+    /// A maintenance operation of a log, as a job for the core's chores thread
+    /// ([`crate::log_chore`]).
+    pub(crate) fn detach_chore(&self, op: &IoOp) -> Option<crate::log_chore::DetachedChore> {
+        crate::log_chore::DetachedChore::of(&self.root, op)
+    }
+
     fn file(&self, id: FileId) -> Result<&DiskFile, IoErrno> {
         self.files.get(&id).ok_or(IoErrno::BadFile)
     }

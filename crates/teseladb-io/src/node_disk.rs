@@ -197,6 +197,17 @@ impl NodeDisk {
     }
 }
 
+impl NodeDisk {
+    /// A maintenance operation of a log, as a job for the core's chores thread.
+    pub(crate) fn detach_chore(&self, op: &IoOp) -> Option<crate::log_chore::DetachedChore> {
+        match self {
+            NodeDisk::Threads(d) => d.detach_chore(op),
+            #[cfg(target_os = "linux")]
+            NodeDisk::Uring(_) => None,
+        }
+    }
+}
+
 impl Disk for NodeDisk {
     fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
         self.disk().list(dir)

@@ -12,6 +12,7 @@ mod file_disk;
 pub mod handshake;
 #[cfg(target_os = "linux")]
 pub mod io_uring_disk;
+mod log_chore;
 pub mod mailbox;
 pub mod node_disk;
 pub mod peer;
@@ -25,4 +26,5 @@ pub mod timer;
 pub use file_disk::{FileDisk, direct_io_supported, read_up_to, sync_dir, write_whole};
 #[cfg(target_os = "linux")]
 pub use io_uring_disk::IoUringDisk;
+pub use log_chore::{answered_apart, log_chore};
 pub use node_disk::NodeDisk;

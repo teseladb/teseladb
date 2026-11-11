@@ -91,7 +91,25 @@ fn run<D: Disk + 'static, M: Send + 'static>(
     sync_name: &str,
 ) -> D {
     let mut syncs: Option<Syncs> = None;
+    let mut chores: Option<Chores> = None;
     for op in ops {
+        if let Some(job) = detach_chore(&disk, &op) {
+            let helper = match &mut chores {
+                Some(h) => h,
+                None => match Chores::spawn(&format!("{sync_name}-chores"), done.clone(), wrap) {
+                    Ok(h) => chores.insert(h),
+                    // Without a third thread the chore runs here, in order.
+                    Err(_) => {
+                        if done.send_waiting(wrap(job.run())).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                },
+            };
+            helper.jobs.send(job).ok();
+            continue;
+        }
         let detached = detach(&disk, &op);
         if let Some(job) = detached {
             let helper = match &mut syncs {
@@ -115,9 +133,13 @@ fn run<D: Disk + 'static, M: Send + 'static>(
             break;
         }
     }
-    // The syncs handed over finish before the disk goes back.
+    // The syncs and chores handed over finish before the disk goes back.
     if let Some(h) = syncs {
         h.join();
+    }
+    if let Some(h) = chores {
+        drop(h.jobs);
+        let _ = h.handle.join();
     }
     disk
 }
@@ -130,6 +152,40 @@ fn detach<D: 'static>(disk: &D, op: &IoOp) -> Option<DetachedSync> {
         return d.detach_sync(op);
     }
     any.downcast_ref::<FileDisk>().and_then(|d| d.detach_sync(op))
+}
+
+/// A maintenance operation of a log as a job for the chores thread, when `disk` is a real one.
+fn detach_chore<D: 'static>(disk: &D, op: &IoOp) -> Option<crate::log_chore::DetachedChore> {
+    let any = disk as &dyn Any;
+    if let Some(d) = any.downcast_ref::<NodeDisk>() {
+        return d.detach_chore(op);
+    }
+    any.downcast_ref::<FileDisk>().and_then(|d| d.detach_chore(op))
+}
+
+/// The thread that runs the maintenance of a core's log, in order and away from its disk thread
+/// ([`crate::log_chore`], H-049 of the native tests).
+struct Chores {
+    jobs: Sender<crate::log_chore::DetachedChore>,
+    handle: JoinHandle<()>,
+}
+
+impl Chores {
+    fn spawn<M: Send + 'static>(
+        name: &str,
+        done: MailboxSender<M>,
+        wrap: fn(IoDone) -> M,
+    ) -> io::Result<Chores> {
+        let (jobs, rx) = mpsc::channel::<crate::log_chore::DetachedChore>();
+        let handle = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            for job in rx {
+                if done.send_waiting(wrap(job.run())).is_err() {
+                    return;
+                }
+            }
+        })?;
+        Ok(Chores { jobs, handle })
+    }
 }
 
 /// The thread that runs the syncs of a core's batches away from its disk thread. Each turn it

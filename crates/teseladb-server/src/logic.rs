@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
+use teseladb_io::answered_apart;
 use teseladb_io::handshake::JoinRequest;
 use teseladb_io::mailbox::SendError;
 use teseladb_io::peer::{JoinAccepted, PeerMsg};
@@ -1746,11 +1747,11 @@ impl CoreLogic for NodeLogic {
             self.core.rollback_durable();
         }
         if let Some(op) = self.core.poll_io(now) {
-            self.io.push_back((IoSlot::Log, batch_sync(&op).then(|| op.without_data())));
+            self.io.push_back((IoSlot::Log, apart(&op)));
             return Some(op);
         }
         if let Some(op) = self.rollback.poll_io() {
-            self.io.push_back((IoSlot::Rollback, None));
+            self.io.push_back((IoSlot::Rollback, apart(&op)));
             return Some(op);
         }
         let data = self.data.as_mut()?;
@@ -1758,7 +1759,7 @@ impl CoreLogic for NodeLogic {
         // Completions that came with it (an export, an ingestion) may have moved the core.
         self.pump();
         let (op, owner) = next?;
-        self.io.push_back((IoSlot::Data(owner), None));
+        self.io.push_back((IoSlot::Data(owner), apart(&op)));
         Some(op)
     }
 
@@ -1916,21 +1917,22 @@ impl CoreLogic for NodeLogic {
 }
 
 /// Who issued the operation `done` answers: a log batch's sync ends when the drive's flush covering
-/// it ends, maybe after later operations, so it takes its own slot; anything else takes the oldest
-/// other one, as the disk thread answers it in order.
+/// it ends, and a log's maintenance runs on a thread of its own, maybe after later operations, so
+/// each takes its own slot; anything else takes the oldest other one, as the disk thread answers it
+/// in order.
 fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone) -> IoSlot {
     let synced = match done {
-        IoDone::Ok(op) | IoDone::Err { op, .. } if batch_sync(op) => Some(op.clone()),
+        IoDone::Ok(op) | IoDone::Err { op, .. } if answered_apart(op) => Some(op.clone()),
         _ => None,
     };
     let at = io.iter().position(|(_, s)| *s == synced).expect("a disk operation in flight");
     io.remove(at).expect("found above").0
 }
 
-/// Whether `op` is the sync of a log batch (`batch > 0`), which the disk thread runs away from
-/// its other operations (012 FR-014, D-159).
-fn batch_sync(op: &IoOp) -> bool {
-    matches!(op, IoOp::Sync { batch, .. } if *batch > 0)
+/// The operation a slot keeps to be matched by, when its answer may come apart from the order
+/// the disk thread runs in ([`answered_apart`]).
+fn apart(op: &IoOp) -> Option<IoOp> {
+    answered_apart(op).then(|| op.without_data())
 }
 
 #[cfg(test)]
@@ -3473,6 +3475,26 @@ mod tests {
             IoSlot::Log,
             "a sync outside a batch keeps its place"
         );
+        assert!(io.is_empty());
+    }
+
+    #[test]
+    fn a_log_chore_takes_its_own_slot_whoever_asked_for_it() {
+        // H-049: a log's maintenance runs on the chores thread and may answer after later
+        // operations of the disk thread.
+        use teseladb_raftlog::FileId;
+        let sync_dir = IoOp::SyncDir { path: "core-02/wal".into() };
+        let close = IoOp::Close { file: FileId(1) };
+        assert_eq!(apart(&sync_dir), Some(sync_dir.clone()));
+        assert_eq!(apart(&close), None);
+        let mut io = VecDeque::from([
+            (IoSlot::Log, apart(&sync_dir)),
+            (IoSlot::Rollback, apart(&close)),
+            (IoSlot::Log, None),
+        ]);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(close)), IoSlot::Rollback);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(IoOp::Close { file: FileId(2) })), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync_dir)), IoSlot::Log);
         assert!(io.is_empty());
     }
 }
