@@ -121,3 +121,44 @@ fn reads_served_outside_the_core_count_by_their_batches_and_their_samples() {
     load.record_sampled(&[key(1)], 1, Nanos(1_000_000_000));
     assert_eq!(load.ops_per_second(), 0);
 }
+
+/// Feeds operations as [`feed`] does, each on the keys from the first to the last `pick` gives.
+fn feed_spans(
+    load: &mut Load,
+    start: Nanos,
+    (seconds, per_second): (u64, u64),
+    mut pick: impl FnMut(u64) -> (Vec<u8>, Vec<u8>),
+) -> Nanos {
+    let step = 1_000_000_000 / per_second;
+    let mut now = start;
+    for i in 0..seconds * per_second {
+        let (lo, hi) = pick(i);
+        load.record_span(&lo, &hi, now);
+        now = now + Nanos(step);
+    }
+    now
+}
+
+/// A cut does not fall inside the operations it sampled: a write of a document and its index
+/// entry, the two far apart in the range, would become a transaction across two ranges after
+/// such a cut, each costing more than before (H-051 of the native tests). With every write on
+/// both there is no cut; with the writes of two collections, the cut falls between them.
+#[test]
+fn a_cut_does_not_split_the_operations_it_sampled() {
+    let mut load = Load::new(100, 7);
+    let span = |i: u64| (key((i % 1000) as u32), key(10_000 + (i % 1000) as u32));
+    let now = feed_spans(&mut load, Nanos::ZERO, (LOAD_SECONDS + 1, 400), span);
+    assert_eq!(load.cut(now, &key(0)), None, "every cut would split the writes");
+    let mut load = Load::new(100, 7);
+    let two = |i: u64| {
+        let base = if i.is_multiple_of(2) { 0 } else { 50_000 };
+        let j = ((i / 2) % 1000) as u32;
+        (key(base + j), key(base + 10_000 + j))
+    };
+    let now = feed_spans(&mut load, Nanos::ZERO, (LOAD_SECONDS + 1, 400), two);
+    let cut = load.cut(now, &key(0)).expect("a cut between the collections");
+    let at = u32::from_be_bytes(cut[1..].try_into().unwrap());
+    // Past every key of the first collection, at the lowest key of the second one the reservoir
+    // kept, which cuts through none of its writes it sampled.
+    assert!((11_000..51_000).contains(&at), "{at}");
+}

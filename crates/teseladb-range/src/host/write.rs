@@ -420,6 +420,12 @@ impl RangeHost {
                         .map(|k| dedup_key(m.g, k.lsid, k.txn_number, k.stmt_id))
                         .into_iter()
                         .collect();
+                    // Its load, on every key it read or writes: a split by load does not cut
+                    // through a document and its index entries (007 FR-006).
+                    let keys = m.keys.iter().chain(written.keys());
+                    if let (Some(first), Some(last)) = (keys.clone().min(), keys.max()) {
+                        l.load.record_span(first, last, now);
+                    }
                     l.latches.pipeline(latch, ts, &records, std::mem::take(&mut written));
                     break Ok((op, ts, change, result));
                 }

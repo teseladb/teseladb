@@ -134,11 +134,13 @@ impl ServerBackend {
         };
         cv.notify_all();
         let rec = rec?;
-        // A finished owner's intent goes now; a failure leaves it to the next reader.
+        // A finished owner's intent goes, without waiting for it: the read goes again knowing the
+        // outcome, and the resolution is a write that would hold it for a sync of the disk. A
+        // failure leaves it to the next reader or to the resolvers.
         if let Some(op) = lazy_resolve(&rec, vec![owner.key.clone()])
             && let Some(e) = self.h.routes.lookup(&owner.key)
         {
-            let _ = self.ask_range(e.group, op);
+            self.tell_range(e.group, op);
         }
         Some(learn(&rec))
     }

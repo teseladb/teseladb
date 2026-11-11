@@ -590,6 +590,7 @@ impl ServerBackend {
         let mut pinned: Option<(Hlc, TxnView)> = None;
         loop {
             let mut sent = true;
+            let mut answered = true;
             let mut plain_write = false;
             let e = match self.h.routes.lookup(key) {
                 Some(entry) => {
@@ -618,6 +619,7 @@ impl ServerBackend {
                             if writes {
                                 self.note_unsettled(until);
                             }
+                            answered = false;
                             RangeError::Timeout
                         }
                     }
@@ -663,6 +665,9 @@ impl ServerBackend {
                 }
                 _ => false,
             };
+            if again {
+                count_retry(&e, paused, answered);
+            }
             // Past the deadline while it waited for an intent's owner, it timed out.
             let e = match e {
                 RangeError::IntentConflict(_) if plain_write => RangeError::Timeout,
@@ -692,6 +697,46 @@ impl ServerBackend {
             }
         }
     }
+}
+
+/// Why requests to a range went again, by [`RETRY_REASONS`], since the process started.
+static RETRIES: [std::sync::atomic::AtomicU64; RETRY_REASONS.len()] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; RETRY_REASONS.len()];
+
+/// The labels of [`retry_counts`].
+pub const RETRY_REASONS: [&str; 9] = [
+    "not_leader",
+    "overloaded",
+    "out_of_range",
+    "timeout",
+    "intent_wait",
+    "read_intent",
+    "other",
+    "unavailable",
+    "no_answer",
+];
+
+/// Counts a request that goes to its range again after `e` (`paused`: it already waited for an
+/// intent's owner; `answered`: its range answered `e`, which is otherwise a request that got no
+/// answer before its wait ended).
+fn count_retry(e: &RangeError, paused: bool, answered: bool) {
+    let i = match e {
+        _ if !answered => 8,
+        RangeError::NotLeader { .. } => 0,
+        RangeError::Overloaded => 1,
+        RangeError::OutOfRange => 2,
+        RangeError::Timeout => 3,
+        RangeError::Unavailable => 7,
+        RangeError::IntentConflict(_) if paused => 4,
+        RangeError::ReadIntent { .. } => 5,
+        _ => 6,
+    };
+    RETRIES[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many requests went to their range again for each reason of [`RETRY_REASONS`].
+pub fn retry_counts() -> [u64; RETRY_REASONS.len()] {
+    std::array::from_fn(|i| RETRIES[i].load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Logs a request that tried range `group` again until its deadline: the range and the last

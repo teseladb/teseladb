@@ -745,20 +745,24 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
 }
 
 #[test]
-fn the_views_go_where_the_node_reads_them_and_reads_outside_count_as_load() {
+fn the_views_go_where_the_node_reads_them_and_reads_outside_count_as_load_when_asked() {
     let mut n = Node::new();
     let shared = teseladb_range::view::RangeViews::default();
     n.host.set_views(shared.clone());
     n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
     n.settle();
     assert!(shared.get(G).is_some(), "published where the node reads it");
-    // 300 reads in one second, then one more a second later closes it.
+    // Reads that do not count for the load (a range on one node) leave it alone.
     let keys = vec![b"\x01a".to_vec(), b"\x01b".to_vec()];
-    n.host.count_outside(G, 300, &keys, n.now);
-    n.host.count_outside(G, 1, &keys, n.now + Nanos::from_secs(1));
+    n.host.count_outside(G, (300, &keys), false, n.now);
+    n.host.count_outside(G, (1, &keys), false, n.now + Nanos::from_secs(1));
+    assert_eq!(n.host.load(G), 0, "no load from reads that use no core");
+    // 300 reads in one second, then one more a second later closes it.
+    n.host.count_outside(G, (300, &keys), true, n.now + Nanos::from_secs(2));
+    n.host.count_outside(G, (1, &keys), true, n.now + Nanos::from_secs(3));
     assert!(n.host.load(G) >= 300, "{}", n.host.load(G));
     // A range this node does not lead counts nothing.
-    n.host.count_outside(GroupId(99), 300, &keys, n.now);
+    n.host.count_outside(GroupId(99), (300, &keys), true, n.now);
 }
 
 #[test]

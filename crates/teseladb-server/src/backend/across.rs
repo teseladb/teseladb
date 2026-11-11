@@ -87,6 +87,19 @@ fn ended(o: Outcome) -> Result<Hlc, CommandError> {
 impl ServerBackend {
     /// Asks range `g` for `op`, again while it has no leader or is overloaded, until the
     /// deadline, which the request carries (009 FR-006).
+    /// Sends `op` to range `g`'s core without waiting for its answer, which nobody reads: for
+    /// work whose outcome the sender does not need, such as resolving a finished transaction's
+    /// intent a read met. A range that moved meanwhile drops it.
+    pub(super) fn tell_range(&mut self, g: GroupId, op: TxnOp) {
+        let Some(entry) = self.h.routes.entry(g) else { return };
+        let req = RemoteReq::Txn { op, deadline: Some(self.deadline_of(self.until())) };
+        let (tx, _answer) = std::sync::mpsc::channel();
+        if let Some(core) = self.cores.get(usize::from(entry.core)) {
+            let msg = NodeMsg::Data(DataReq::Remote(g, req), tx);
+            let _ = core.send(teseladb_io::runtime::CoreInput::App(msg));
+        }
+    }
+
     pub(super) fn ask_range(&mut self, g: GroupId, op: TxnOp) -> Result<RemoteReply, RangeError> {
         let until = self.until();
         let req = RemoteReq::Txn { op, deadline: Some(self.deadline_of(until)) };

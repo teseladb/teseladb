@@ -501,6 +501,13 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             reason.label()
         );
     }
+    let name = "teseladb_range_retries_total";
+    let _ = writeln!(out, "# HELP {name} Requests sent to their range again, by the reason.");
+    let _ = writeln!(out, "# TYPE {name} counter");
+    let retries = crate::backend::retry_counts();
+    for (reason, n) in crate::backend::RETRY_REASONS.iter().zip(retries) {
+        let _ = writeln!(out, "{name}{{reason=\"{reason}\"}} {n}");
+    }
     let (gets, probes) = teseladb_lsm::outside_probes();
     let rows = [
         ("teseladb_lsm_outside_gets_total", "Point reads served on connections' threads.", gets),

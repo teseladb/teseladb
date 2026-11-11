@@ -703,10 +703,11 @@ impl RangeHost {
         self.gc_ttl_ms = ttl_ms;
     }
 
-    /// Counts an operation of range `g` on `key` if this host leads it.
-    fn count_load(&mut self, g: GroupId, key: &[u8], now: Nanos) {
+    /// Counts an operation of range `g` on `keys` (at least one) if this host leads it.
+    fn count_load(&mut self, g: GroupId, keys: &[Vec<u8>], now: Nanos) {
+        let (Some(first), Some(last)) = (keys.iter().min(), keys.iter().max()) else { return };
         if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
-            l.load.record(key, now);
+            l.load.record_span(first, last, now);
         }
     }
 
@@ -920,7 +921,10 @@ impl RangeHost {
             self.reply(id, crossing(&keys, |k| self.covers(g, k), &work));
             return id;
         }
-        self.count_load(g, &keys[0], now);
+        // A mutation counts once proposed, with the keys it writes (`RangeHost::propose`).
+        if matches!(work, Work::Txn(_)) {
+            self.count_load(g, &keys, now);
+        }
         let replicas = core.conf(g).map_or(1, |c| c.voters.len() + c.learners.len());
         let Ok(ack) = ack_when(wc, replicas) else {
             self.reply(id, Err(RangeError::Unsatisfiable));
@@ -1091,7 +1095,7 @@ impl RangeHost {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;
         }
-        self.count_load(req.g, &req.key, now);
+        self.count_load(req.g, std::slice::from_ref(&req.key), now);
         // Faulty variant (005 T017): a node that believes it leads serves the read at once, without
         // a lease or ReadIndex, also after a partition took its leadership.
         #[cfg(teseladb_bug = "stale_lease_read")]
@@ -1253,11 +1257,21 @@ impl RangeHost {
         self.views = views;
     }
 
-    /// Counts for range `g`'s split by load (007 FR-006) `ops` reads served on other threads, of
-    /// which `keys` are a sample (005 FR-028).
-    pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
+    /// Notes `ops` reads of range `g` served on other threads, of which `keys` are a sample (005
+    /// FR-028), and counts them for its split by load (007 FR-006) when `for_load`: a split moves
+    /// work between cores and nodes, and these reads use neither the core nor, without other
+    /// nodes, anything a split could spread.
+    pub fn count_outside(
+        &mut self,
+        g: GroupId,
+        (ops, keys): (u64, &[Vec<u8>]),
+        for_load: bool,
+        now: Nanos,
+    ) {
         if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
-            l.load.record_sampled(keys, ops, now);
+            if for_load {
+                l.load.record_sampled(keys, ops, now);
+            }
             l.read_outside_at = Some(now);
         }
     }

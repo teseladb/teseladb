@@ -336,9 +336,13 @@ impl DataCore {
     }
 
     /// Reads a client worker served of range `g` without this core: `ops` of them, sampled by
-    /// `keys`, for the range's split by load (005 FR-028, 007 FR-006).
+    /// `keys` (005 FR-028). They count for the range's split by load (007 FR-006) only when it has
+    /// replicas on other nodes, whose leaders a split can spread: on one node they would split
+    /// the range and move its half to another core (FR-040) for reads that use no core, and
+    /// each move leaves its keys unserved for a moment (H-051 of the native tests).
     pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
-        self.host.count_outside(g, ops, keys, now);
+        let spread = self.replicas.nodes(g).len() > 1;
+        self.host.count_outside(g, (ops, keys), spread, now);
     }
 
     /// Backups and restores with their files under `dir`; `nonce` tells this life's file names
