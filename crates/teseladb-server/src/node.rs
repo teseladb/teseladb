@@ -619,6 +619,8 @@ fn run_core<D: Disk + Send + 'static>(
     mut disk: D,
     ready: mpsc::Sender<Result<CoreSender<NodeMsg>, NodeError>>,
 ) -> io::Result<Option<D>> {
+    // Every request of its ranges goes through this thread: on the fast cores.
+    let _ = teseladb_sys::favor_current_thread();
     // Pinned before it allocates anything, so that its memory is on its CPU's node.
     if let Some(cpu) = spec.cpu
         && let Err(e) = crate::affinity::place_current(cpu)

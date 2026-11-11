@@ -78,6 +78,22 @@ pub(crate) fn write_behind(file: &File) -> io::Result<()> {
     push_to_drive(file)
 }
 
+/// `QOS_CLASS_USER_INTERACTIVE` of `<sys/qos.h>`.
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+unsafe extern "C" {
+    fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+}
+
+pub(crate) fn favor_current_thread() -> io::Result<()> {
+    // SAFETY: it changes the calling thread's class and touches no memory of the caller.
+    let rc = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+    if rc != 0 {
+        return Err(io::Error::from_raw_os_error(rc));
+    }
+    Ok(())
+}
+
 /// [`push_to_drive`] by descriptor: `fd` is open in another thread that waits for this push.
 pub(crate) fn push_descriptor(fd: RawFd) -> io::Result<()> {
     // SAFETY: `fsync` takes a descriptor and touches no memory of the caller; a descriptor that
@@ -308,6 +324,32 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> std::io::Result<bool> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    unsafe extern "C" {
+        fn pthread_self() -> usize;
+        fn pthread_get_qos_class_np(thread: usize, class: *mut u32, relative: *mut i32) -> i32;
+    }
+
+    /// The favored thread runs in the highest class; another thread keeps its own.
+    #[test]
+    fn a_favored_thread_runs_in_the_highest_class() {
+        let class_of_self = || {
+            let (mut class, mut relative) = (0u32, 0i32);
+            // SAFETY: both pointers are to locals that live through the call.
+            let rc = unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut relative) };
+            assert_eq!(rc, 0);
+            class
+        };
+        let other = std::thread::spawn(class_of_self).join().unwrap();
+        assert_ne!(other, QOS_CLASS_USER_INTERACTIVE);
+        let favored = std::thread::spawn(move || {
+            favor_current_thread().unwrap();
+            class_of_self()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(favored, QOS_CLASS_USER_INTERACTIVE);
+    }
 
     /// macOS counts the task's page-ins apart, and `extra_info` shows them (RefDb's
     /// `processinfo_osx.cpp`).

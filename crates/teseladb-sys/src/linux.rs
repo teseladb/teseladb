@@ -18,6 +18,11 @@ const SYNC_FILE_RANGE_WRITE: u32 = 2;
 
 /// Starts writing the file's dirty pages to the device without waiting (`sync_file_range` with
 /// `SYNC_FILE_RANGE_WRITE` over the whole file).
+/// Linux places threads by load, not by a class: nothing to ask.
+pub(crate) fn favor_current_thread() -> io::Result<()> {
+    Ok(())
+}
+
 pub(crate) fn write_behind(file: &File) -> io::Result<()> {
     // SAFETY: valid descriptor during the call; no pointers.
     let rc = unsafe { sync_file_range(file.as_raw_fd(), 0, 0, SYNC_FILE_RANGE_WRITE) };
@@ -218,6 +223,12 @@ pub(crate) fn pin_to_cpu(cpu: usize) -> std::io::Result<bool> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    /// Linux has nothing to ask, and says so without an error.
+    #[test]
+    fn favoring_a_thread_asks_nothing() {
+        assert!(favor_current_thread().is_ok());
+    }
 
     /// Linux has no page-ins apart from `getrusage(2)`.
     #[test]

@@ -82,6 +82,18 @@ pub fn write_behind(file: &std::fs::File) -> io::Result<()> {
     os::write_behind(file)
 }
 
+/// Asks the system to run the calling thread on its fastest cores. On macOS, whose scheduler
+/// places a thread by its quality-of-service class, the thread takes the highest class
+/// (`QOS_CLASS_USER_INTERACTIVE`), so that it is not left on an efficiency core while the
+/// others are busy; elsewhere it does nothing.
+///
+/// # Errors
+///
+/// The error of the system call.
+pub fn favor_current_thread() -> io::Result<()> {
+    os::favor_current_thread()
+}
+
 /// `flock(2)` operations.
 const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;

@@ -429,6 +429,12 @@ impl Default for Hooks {
 
 /// A named thread that is not joined.
 fn spawn_thread(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+    let run: Box<dyn FnOnce() + Send> = Box::new(move || {
+        // A connection's commands run on this thread: on the fast cores, not left on an
+        // efficiency core while the node's other threads are busy (H-049 of the native tests).
+        let _ = teseladb_sys::favor_current_thread();
+        run();
+    });
     command_thread(name).spawn(with_command_stack(run)).map(drop)
 }
 
