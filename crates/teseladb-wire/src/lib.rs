@@ -15,7 +15,6 @@
 use std::fmt;
 
 pub mod api_version;
-mod bson_len;
 pub mod cluster_time;
 pub mod commands;
 pub mod compressed;

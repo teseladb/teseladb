@@ -243,6 +243,40 @@ impl Plan {
         }
     }
 
+    /// [`Plan::apply`] on a row read from the node's own storage, taken whole: only the
+    /// document's frame is checked, since it was validated when it came in and comes back under
+    /// the LSM's checksums, and without a projection the reply keeps its bytes (003 FR-002, H-009
+    /// of the native tests). A frame that does not hold is a fault, not a miss.
+    fn apply_row(
+        &self,
+        bytes: Vec<u8>,
+        index_key: Option<&Document>,
+    ) -> Result<Option<Document>, CommandError> {
+        let doc = RawDoc::from_stored(&bytes)?;
+        let ctx = self.ctx();
+        let Some(position) = self.filter.match_position(doc, &ctx).map_err(from_mql)? else {
+            return Ok(None);
+        };
+        match &self.projection {
+            None => Ok(Some(Document::from_stored(bytes)?)),
+            Some(p) => {
+                let pctx = ProjectionContext { matcher: ctx, position, sort_key: None, index_key };
+                p.apply(doc, &pctx).map(Some).map_err(from_mql)
+            }
+        }
+    }
+
+    /// [`Plan::apply_row`] on a row this plan's filter already matched.
+    fn matched_row(
+        &self,
+        bytes: Vec<u8>,
+        index_key: Option<&Document>,
+    ) -> Result<Document, CommandError> {
+        self.apply_row(bytes, index_key)?.ok_or_else(|| {
+            CommandError::new(crate::error::INTERNAL_ERROR, "a matched document matches no more")
+        })
+    }
+
     /// Document `doc`, which this plan's filter already matched, projected.
     fn matched(
         &self,
@@ -527,7 +561,7 @@ impl QueryCursor {
             }
             match self.buffered.pop_front() {
                 Some(d) => {
-                    let n = crate::bson_len::encoded_len(&d);
+                    let n = d.encoded_len();
                     if bytes + n > MAX_BATCH_BYTES && !out.is_empty() {
                         self.buffered.push_front(d);
                         return Ok(self.finish(out, false));
@@ -599,10 +633,8 @@ impl QueryCursor {
                 break;
             }
             *next = after(&key);
-            // A stored document always parses: one that does not is a fault, not a miss.
-            let doc = RawDoc::from_bytes(&bytes)?;
             let mut buffered = false;
-            if let Some(d) = plan.apply(doc, None)? {
+            if let Some(d) = plan.apply_row(bytes, None)? {
                 if self.skip > 0 {
                     self.skip -= 1;
                 } else {
@@ -1480,9 +1512,10 @@ fn planned_cursor(
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
-    for (i, bytes) in rows.iter().enumerate().skip(skip).take(take) {
+    // The rows come from the node's own storage (003 FR-002).
+    for (i, bytes) in rows.into_iter().enumerate().skip(skip).take(take) {
         let key = keys.get(i).and_then(Option::as_ref);
-        docs.push(plan.matched(RawDoc::from_bytes(bytes)?, None, key)?);
+        docs.push(plan.matched_row(bytes, key)?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;
@@ -1514,8 +1547,8 @@ fn backward<B: Backend + ?Sized>(
     let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
     let take = a.limit.map_or(usize::MAX, |l| usize::try_from(l).unwrap_or(usize::MAX));
     let mut docs = Vec::new();
-    for bytes in rows.iter().rev().skip(skip).take(take) {
-        docs.push(plan.matched(RawDoc::from_bytes(bytes)?, None, None)?);
+    for bytes in rows.into_iter().rev().skip(skip).take(take) {
+        docs.push(plan.matched_row(bytes, None)?);
     }
     let mut c = QueryCursor::buffered(docs);
     c.left = a.limit;

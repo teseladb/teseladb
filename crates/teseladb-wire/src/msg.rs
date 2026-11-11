@@ -302,6 +302,38 @@ impl OpMsg {
         Ok(Ok(end))
     }
 
+    /// [`OpMsg::encode`] with the body written from `doc` within `limits`, in the same buffer
+    /// as the header: the document is not written apart and copied again (H-009 of the native
+    /// tests, a reply of a scan carries tens of kilobytes).
+    ///
+    /// # Errors
+    ///
+    /// The [`BsonError`](teseladb_bson::BsonError) of a document that does not encode.
+    pub fn encode_document(
+        request_id: i32,
+        response_to: i32,
+        flag_bits: u32,
+        doc: &teseladb_bson::Document,
+        limits: Limits,
+    ) -> Result<Vec<u8>, teseladb_bson::BsonError> {
+        let checksum = flag_bits & flags::CHECKSUM_PRESENT != 0;
+        let tail = if checksum { 4 } else { 0 };
+        let mut out = Vec::with_capacity(HEADER_LEN + 5 + doc.encoded_len() + tail);
+        let op_code = opcode::OP_MSG;
+        // The length goes in once the body is written.
+        Header { length: 0, request_id, response_to, op_code }.write(&mut out);
+        out.extend_from_slice(&flag_bits.to_le_bytes());
+        out.push(KIND_BODY);
+        doc.append_to(&mut out, limits)?;
+        let length = i32::try_from(out.len() + tail).unwrap_or(i32::MAX);
+        out[..4].copy_from_slice(&length.to_le_bytes());
+        if checksum {
+            let crc = crc32c(&out);
+            out.extend_from_slice(&crc.to_le_bytes());
+        }
+        Ok(out)
+    }
+
     /// Encodes a message with one body: header, flags, body and, with
     /// [`flags::CHECKSUM_PRESENT`], its CRC-32C.
     pub fn encode(request_id: i32, response_to: i32, flag_bits: u32, body: &[u8]) -> Vec<u8> {

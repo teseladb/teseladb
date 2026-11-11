@@ -523,3 +523,26 @@ fn bson_columns_are_answered_as_a_refrouter_answers_them() {
         r#"Invalid BSON column in element with field name 'a.1' in object with _id: \"n1\""#
     );
 }
+
+#[test]
+fn a_body_written_behind_the_header_is_the_message_written_apart() {
+    // H-009 of the native tests: the reply's document is written in the message's buffer.
+    let doc = teseladb_bson::Document::new().with("ok", 1.0).with(
+        "cursor",
+        teseladb_bson::Document::new()
+            .with("id", 0i64)
+            .with("firstBatch", Vec::<teseladb_bson::Value>::new()),
+    );
+    let limits = teseladb_bson::Limits::default();
+    for bits in
+        [0, teseladb_wire::msg::flags::CHECKSUM_PRESENT, teseladb_wire::msg::flags::MORE_TO_COME]
+    {
+        let apart = teseladb_wire::msg::OpMsg::encode(7, 3, bits, &doc.to_bytes().unwrap());
+        let together =
+            teseladb_wire::msg::OpMsg::encode_document(7, 3, bits, &doc, limits).unwrap();
+        assert_eq!(together, apart, "flags {bits}");
+    }
+    // A document past the limits is the error of that fault.
+    let tight = teseladb_bson::Limits { max_size: 10, max_depth: 10 };
+    assert!(teseladb_wire::msg::OpMsg::encode_document(7, 3, 0, &doc, tight).is_err());
+}

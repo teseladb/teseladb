@@ -204,22 +204,27 @@ impl Connection {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         // A reply the server built that does not encode (a name with a zero byte, or past the
         // limits) is answered with the error of that BSON fault.
-        let body = doc.to_bytes_with(reply_limits()).unwrap_or_else(|e| {
+        let fallback = |e: teseladb_bson::BsonError| {
             let (code, name) = e.code();
             let err = crate::error::Code { code, name };
             let fallback = CommandError::new(err, "reply document is invalid or too large");
             fallback.to_document().to_bytes().unwrap_or_default()
-        });
+        };
+        let body = || doc.to_bytes_with(reply_limits()).unwrap_or_else(fallback);
         let bytes = match req.kind {
             Kind::Msg => {
                 let mut bits = req.flags & flags::CHECKSUM_PRESENT;
                 if more_to_come {
                     bits |= flags::MORE_TO_COME;
                 }
-                crate::msg::OpMsg::encode(id, response_to, bits, &body)
+                // The body is written behind the header, in one buffer.
+                crate::msg::OpMsg::encode_document(id, response_to, bits, doc, reply_limits())
+                    .unwrap_or_else(|e| {
+                        crate::msg::OpMsg::encode(id, response_to, bits, &fallback(e))
+                    })
             }
-            Kind::Query => encode_reply(id, response_to, AWAIT_CAPABLE, &body),
-            Kind::LegacyQuery => encode_reply(id, response_to, QUERY_FAILURE, &body),
+            Kind::Query => encode_reply(id, response_to, AWAIT_CAPABLE, &body()),
+            Kind::LegacyQuery => encode_reply(id, response_to, QUERY_FAILURE, &body()),
         };
         match req.compressor {
             Some(c) => (compressed::compress(&bytes, c), id),

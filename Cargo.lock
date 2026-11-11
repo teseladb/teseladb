@@ -401,9 +401,9 @@ dependencies = [
 
 [[package]]
 name = "teseladb-bson"
-version = "0.1.2"
+version = "0.1.5"
 source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "5e2ddd59d33bfff639ac79e120b112d2c52e64f6e5e2ff517104b984c18e8821"
+checksum = "6a313054c2ce39c476b1455db24c4d10bd473d9b74ff7c2a8322484eb00ca4a9"
 dependencies = [
  "teseladb-json",
 ]
