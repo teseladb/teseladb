@@ -157,8 +157,11 @@ variants!(
     // an intent and leaves an entry missing (`index_consistency`, seed 2). Seed 1 of `txn-bank`
     // finds it first: a committed read of every account adds up to less than the total
     // (`bank-total`; measured 04-11-2026 with the fixes of seeds 883 of `indexes` and 790 and 548
-    // of `search`; on main 842d14f `indexes` found it first, at seed 1).
-    ("reader_ignores_intent", "bank-total", Default, 1000),
+    // of `search`; on main 842d14f `indexes` found it first, at seed 1). Since then seed 1 of
+    // `indexes` decides again: `index_consistency` (measured 11-11-2026 on 96a2dd48, where seed 1
+    // of `txn-append` found it with `snapshot-isolation`, and with the pipelined intents of 008
+    // FR-021, where `indexes` finds it first).
+    ("reader_ignores_intent", "index_consistency", Default, 1000),
     // A reader that ignores what its push found (008 T029): it reads below the intent of a
     // transaction that committed at or below its mark. Seed 1 fails in two workloads: `indexes`,
     // whose index maintenance reads the old document and leaves entries no document needs, and
@@ -186,8 +189,10 @@ variants!(
     // one account while its commit is lost, and `txn-bank`'s read of every account finds a total
     // other than the starting one (`bank-total`, seed 9). On main f3f92e6 seed 1 of `txn-append`
     // found it first (`snapshot-isolation`); on main 78568c9, before the changes of 04-11 to the
-    // clock rule and the coordinator, it no longer did (measured 04-11-2026).
-    ("resolve_before_durable_commit", "bank-total", Default, 1000),
+    // clock rule and the coordinator, it no longer did (measured 04-11-2026). With the pipelined
+    // intents of 008 FR-021 seed 7 of `changestream` finds it first: a change delivered for a
+    // write whose commit never became durable (`changestream_delivery`, measured 11-11-2026).
+    ("resolve_before_durable_commit", "changestream_delivery", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
     // A search that answers before its segments reach its mark (011 T018): the `search` workload

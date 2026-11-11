@@ -432,11 +432,17 @@ pub fn end_txn_above(
             // and ignores the reads of it, so a version appears below a read that pushed it by
             // reading the record.
             #[cfg(teseladb_bug = "commit_below_record_reads")]
-            let commit_ts = ts.max(r.min_commit_ts);
+            let commit_ts = {
+                let _ignored = above(read_floor);
+                ts.max(r.min_commit_ts)
+            };
             // Faulty variant (008 T024): the commit takes the coordinator's mark and ignores the
             // pushes, so a version appears below a read that was served without it.
             #[cfg(teseladb_bug = "commit_below_push")]
-            let commit_ts = ts;
+            let commit_ts = {
+                let _ignored = above(read_floor);
+                ts
+            };
             Ok(TxnRecord { status: TxnStatus::Committed, commit_ts, spans, ..r })
         }
         (Some(r), RecordOp::Abort { lsid, txn_number, spans }) => {

@@ -29,9 +29,15 @@
 (* is, and EndTxn(Committed) goes above that cache too. Pushing an abandoned transaction still      *)
 (* writes the record. The reads are lease reads at or below the leader's clock (HlcLease covers     *)
 (* them), so one clock is enough here. Mutant "commit_below_record_reads" ignores recRead.         *)
+(* With Pipelined (008 FR-021, D-160) a statement is answered once its intent is in the leader's   *)
+(* log: the intent is not applied yet (readers, writers and resolution wait for it under its       *)
+(* latch) and a change of leader may lose it while the coordinator counts it as written. The       *)
+(* commit first checks that every intent of the transaction is applied (WaitApplied); otherwise    *)
+(* the coordinator aborts. Mutant "commit_without_wait" commits without the check, and            *)
+(* CommittedWritesKept fails.                                                                     *)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant, PushByRead
+CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant, PushByRead, Pipelined
 
 NoTxn == 0
 None == "none"
@@ -53,7 +59,7 @@ VARIABLES
     rec,       \* the record: [st, minC, cts]
     alive,     \* heartbeat of each transaction's coordinator
     wrote,     \* keys with an intent of the transaction
-    intent,    \* intent on each key: [t, ts]
+    intent,    \* intent on each key: [t, ts, ap] (ap: applied, not only in the leader's log)
     ver,       \* committed versions of each key: set of [t, ts]
     maxRead,   \* the highest timestamp a read was served at, per key (the read cache)
     recRead,   \* the read cache of each transaction's record key: the highest push by a read
@@ -64,7 +70,11 @@ VARIABLES
 vars == <<now, coord, readTs, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 Max(a, b) == IF a > b THEN a ELSE b
-NoIntent == [t |-> NoTxn, ts |-> 0]
+NoIntent == [t |-> NoTxn, ts |-> 0, ap |-> TRUE]
+
+\* No intent of another transaction waits to be applied on k: its latch holds readers, writers and
+\* the resolution until then.
+Unlatched(k) == intent[k].t = NoTxn \/ intent[k].ap
 
 TypeOK ==
     /\ now \in 1..MaxTs
@@ -73,7 +83,7 @@ TypeOK ==
     /\ rec \in [Txns -> [st : {None, Pending, Committed, Aborted}, minC : 0..MaxTs + 1, cts : 0..MaxTs + 1]]
     /\ alive \in [Txns -> BOOLEAN]
     /\ wrote \in [Txns -> SUBSET Keys]
-    /\ intent \in [Keys -> [t : Txns \cup {NoTxn}, ts : 0..MaxTs + 1]]
+    /\ intent \in [Keys -> [t : Txns \cup {NoTxn}, ts : 0..MaxTs + 1, ap : BOOLEAN]]
     /\ maxRead \in [Keys -> 0..MaxTs]
     /\ recRead \in [Txns -> 0..MaxTs]
     /\ broken \in BOOLEAN
@@ -124,7 +134,7 @@ CreateRecord(t) ==
 
 \* PutIntents on key k: a conflict ends the transaction (the driver retries it).
 PutIntent(t, k) ==
-    /\ coord[t] = Writing /\ alive[t] /\ k \notin wrote[t]
+    /\ coord[t] = Writing /\ alive[t] /\ k \notin wrote[t] /\ Unlatched(k)
     /\ LET other == intent[k].t
            conflict == (other # NoTxn /\ other # t)
                        \/ \E v \in ver[k] : v.ts > readTs[t]
@@ -132,14 +142,29 @@ PutIntent(t, k) ==
              THEN /\ coord' = [coord EXCEPT ![t] = Done]
                   /\ rec' = [rec EXCEPT ![t].st = IF @ = Pending \/ @ = None THEN Aborted ELSE @]
                   /\ UNCHANGED <<wrote, intent>>
-             ELSE /\ intent' = [intent EXCEPT ![k] = [t |-> t, ts |-> Max(now, maxRead[k] + 1)]]
+             ELSE /\ intent' = [intent EXCEPT ![k] =
+                                     [t |-> t, ts |-> Max(now, maxRead[k] + 1), ap |-> ~Pipelined]]
                   /\ wrote' = [wrote EXCEPT ![t] = @ \cup {k}]
                   /\ UNCHANGED <<coord, rec>>
     /\ UNCHANGED <<now, readTs, alive, ver, maxRead, recRead, reads, abortedFor, broken>>
 
-\* EndTxn(Committed) in the record's range.
+\* A pipelined intent is applied: its entry committed and the leader applied it.
+ApplyIntent(k) ==
+    /\ intent[k].t # NoTxn /\ ~intent[k].ap
+    /\ intent' = [intent EXCEPT ![k].ap = TRUE]
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, ver, maxRead, recRead, reads, abortedFor, broken>>
+
+\* A change of leader loses a pipelined intent that was only in the old leader's log; its
+\* coordinator still counts the key as written.
+LoseIntent(k) ==
+    /\ intent[k].t # NoTxn /\ ~intent[k].ap
+    /\ intent' = [intent EXCEPT ![k] = NoIntent]
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, ver, maxRead, recRead, reads, abortedFor, broken>>
+
+\* EndTxn(Committed) in the record's range, once every intent it wrote is applied (WaitApplied).
 Commit(t) ==
     /\ coord[t] = Writing /\ alive[t] /\ wrote[t] # {} /\ rec[t].st = Pending
+    /\ Mutant # "commit_without_wait" => \A k \in wrote[t] : intent[k].t = t /\ intent[k].ap
     /\ LET intentMax == Max(IF \E k \in Keys : intent[k].t = t
                                THEN CHOOSE m \in 0..MaxTs + 1 :
                                         /\ \E k \in Keys : intent[k].t = t /\ intent[k].ts = m
@@ -187,7 +212,7 @@ Reap(t) ==
 \* ResolveIntents of a finished record (in the background or by a reader): the mutant turns an
 \* intent into a version before the record is committed.
 Resolve(t, k) ==
-    /\ intent[k].t = t
+    /\ intent[k].t = t /\ intent[k].ap
     /\ \/ /\ rec[t].st = Committed
           /\ ver' = [ver EXCEPT ![k] = @ \cup {[t |-> t, ts |-> rec[t].cts]}]
        \/ /\ rec[t].st = Aborted
@@ -208,7 +233,7 @@ Pushed(t, rts) ==
 
 \* A read of key k at the current time.
 Read(k) ==
-    /\ Cardinality(reads) < MaxReads
+    /\ Cardinality(reads) < MaxReads /\ Unlatched(k)
     /\ LET rts == now
            owner == intent[k].t
            mustPush == owner # NoTxn /\ intent[k].ts <= rts
@@ -235,7 +260,7 @@ Next ==
     \/ \E t \in Txns : Begin(t) \/ CreateRecord(t) \/ Commit(t) \/ Abort(t) \/ Stall(t) \/ Resume(t)
           \/ Reap(t)
     \/ \E t \in Txns, k \in Keys : PutIntent(t, k) \/ Resolve(t, k)
-    \/ \E k \in Keys : Read(k)
+    \/ \E k \in Keys : Read(k) \/ ApplyIntent(k) \/ LoseIntent(k)
 
 Spec == Init /\ [][Next]_vars
 
@@ -246,6 +271,12 @@ ReadsAreStable == ~broken
 \* Only committed transactions leave versions, all at their commit timestamp.
 VersionsAreCommitted ==
     \A k \in Keys : \A v \in ver[k] : rec[v.t].st = Committed /\ v.ts = rec[v.t].cts
+
+\* A committed transaction lost none of its writes: each key it wrote holds its intent or its
+\* version.
+CommittedWritesKept ==
+    \A t \in Txns : rec[t].st = Committed =>
+        \A k \in wrote[t] : intent[k].t = t \/ \E v \in ver[k] : v.t = t
 
 \* First committer wins: two committed transactions that wrote the same key do not overlap.
 FirstCommitterWins ==

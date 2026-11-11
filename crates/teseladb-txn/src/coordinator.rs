@@ -6,6 +6,12 @@
 //! raises it to its `min_commit_ts`); once it is answered the coordinator resolves the intents
 //! range by range, as it does after an abort.
 //!
+//! A range answers `PutIntents` once the intents are in its leader's log, not yet durable (FR-021,
+//! D-160): before `EndTxn(Commit)` the coordinator asks each range it wrote in with
+//! `CheckIntents` whether they were applied. One that a change of leader lost fails the commit
+//! with `NoSuchTransaction` and the coordinator aborts; one without an answer leaves the commit
+//! unknown, and the driver asks again.
+//!
 //! A commit whose mark is above the coordinator's wall clock answers once the clock reaches it
 //! (commit wait, FR-008): a new leader's writes go up to 250 ms above every clock (its read cache
 //! starts there, 005 FR-005) and a reader's push lifts a commit to that reader's clock. Answering
@@ -161,6 +167,19 @@ enum Pending {
     OnePhase(Vec<(Vec<u8>, IntentOp)>, Hlc),
     Abort,
     Resolve(GroupId),
+    /// `CheckIntents` of the keys written in this range, before the commit.
+    Check,
+}
+
+/// Where the check of the intents before the commit is (FR-021).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Checks {
+    /// Not asked.
+    NotSent,
+    /// Asked; this many ranges have not answered.
+    Waiting(usize),
+    /// Every range answered that its intents are applied.
+    Done,
 }
 
 /// The intents of one statement in one range.
@@ -195,6 +214,8 @@ pub struct Coordinator {
     written: BTreeMap<GroupId, BTreeSet<Vec<u8>>>,
     spans: Spans,
     intent_max: Hlc,
+    /// The check of the intents before the commit (FR-021).
+    checks: Checks,
     heartbeat: Heartbeat,
     /// Requests in flight, with their range.
     pending: BTreeMap<ReqNo, (GroupId, Pending)>,
@@ -270,6 +291,7 @@ impl Coordinator {
             written: BTreeMap::new(),
             spans: Spans::default(),
             intent_max: Hlc { physical: 0, logical: 0 },
+            checks: Checks::NotSent,
             heartbeat: Heartbeat::new(now),
             pending: BTreeMap::new(),
             stalled: Vec::new(),
@@ -392,7 +414,8 @@ impl Coordinator {
             | Pending::Push(..)
             | Pending::ResolveOther(_)
             | Pending::OnePhase(..)
-            | Pending::Resolve(_) => unreachable!("not an operation on the record"),
+            | Pending::Resolve(_)
+            | Pending::Check => unreachable!("not an operation on the record"),
         };
         self.send(self.record_range(), TxnOp::EndTxn { txn: self.txn, op }, p);
     }
@@ -537,6 +560,26 @@ impl Coordinator {
         });
         if self.record != RecordState::Created || writing {
             return;
+        }
+        // Every intent applied first: their answers came once they were in the leaders' logs.
+        match self.checks {
+            Checks::Done => {}
+            Checks::Waiting(_) => return,
+            Checks::NotSent => {
+                let ranges: Vec<(GroupId, Vec<Vec<u8>>)> = self
+                    .written
+                    .iter()
+                    .map(|(g, keys)| (*g, keys.iter().cloned().collect()))
+                    .collect();
+                self.checks = Checks::Waiting(ranges.len());
+                for (g, keys) in ranges {
+                    self.send(g, TxnOp::CheckIntents { txn: self.txn, keys }, Pending::Check);
+                }
+                if !matches!(self.checks, Checks::Waiting(0)) {
+                    return;
+                }
+                self.checks = Checks::Done;
+            }
         }
         // Every intent's mark is known now.
         let ts = ts.max(self.intent_max);
@@ -703,6 +746,7 @@ impl Coordinator {
             Pending::OnePhase(..) => self.one_phase_done(r),
             Pending::Abort => self.abort_done(r),
             Pending::Resolve(g) => self.resolve_done(route, g, r),
+            Pending::Check => self.check_done(r),
         }
         self.try_commit();
     }
@@ -721,6 +765,9 @@ impl Coordinator {
             }
             Pending::Push(_, owner) => vec![&owner.record_key],
             Pending::OnePhase(writes, _) => writes.iter().map(|(k, _)| k.as_slice()).collect(),
+            Pending::Check => {
+                return self.recheck(route, from, again);
+            }
             Pending::Resolve(_) => unreachable!("a resolution is routed by resolve_in"),
         };
         let ranges: Option<BTreeSet<GroupId>> = keys.iter().map(|k| route.range_of(k)).collect();
@@ -755,6 +802,7 @@ impl Coordinator {
                 self.write_and_commit(route, writes, clock);
             }
             Pending::Resolve(_) => unreachable!("a resolution is routed by resolve_in"),
+            Pending::Check => unreachable!("rerouted by recheck"),
         }
     }
 
@@ -777,6 +825,37 @@ impl Coordinator {
         s.0 += by_range.len() - 1;
         for (g, writes) in by_range {
             self.send_write(Write { stmt: w.stmt, g, writes, rounds: w.rounds });
+        }
+    }
+
+    /// Sends again the check range `from` refused with `OutOfRange` (a split or a merge moved its
+    /// keys), cut by the ranges `route` gives those keys now; the keys move to those ranges for the
+    /// resolution. While the route still puts them all in `from` the check waits for the next
+    /// tick, as any refused request does; without a range for one of them the commit is unknown,
+    /// and asked again.
+    fn recheck(&mut self, route: &dyn Route, from: GroupId, again: Again) {
+        let Checks::Waiting(left) = self.checks else { return };
+        let keys: Vec<Vec<u8>> =
+            self.written.get(&from).map(|k| k.iter().cloned().collect()).unwrap_or_default();
+        let mut by_range: BTreeMap<GroupId, Vec<Vec<u8>>> = BTreeMap::new();
+        for k in keys {
+            let Some(g) = route.range_of(&k) else {
+                self.checks = Checks::NotSent;
+                return self.ended(Outcome::Unknown(RangeError::OutOfRange));
+            };
+            by_range.entry(g).or_default().push(k);
+        }
+        let unmoved = by_range.len() == 1 && by_range.contains_key(&from);
+        if unmoved && again != Again::SameRange {
+            return self.stalled.push((from, Pending::Check));
+        }
+        self.written.remove(&from);
+        for (g, keys) in &by_range {
+            self.written.entry(*g).or_default().extend(keys.iter().cloned());
+        }
+        self.checks = Checks::Waiting(left - 1 + by_range.len());
+        for (g, keys) in by_range {
+            self.send(g, TxnOp::CheckIntents { txn: self.txn, keys }, Pending::Check);
         }
     }
 
@@ -847,6 +926,31 @@ impl Coordinator {
         };
         let g = w.g;
         self.send(g, op, Pending::ResolveOther(w));
+    }
+
+    /// A range's answer to `CheckIntents` (FR-021).
+    fn check_done(&mut self, r: Result<Reply, RangeError>) {
+        let Checks::Waiting(left) = self.checks else { return };
+        if !matches!(self.phase, Phase::CommitWaiting(_)) {
+            return;
+        }
+        match r {
+            Ok(Reply::Intents { ts }) => {
+                self.intent_max = self.intent_max.max(ts);
+                self.checks = if left <= 1 { Checks::Done } else { Checks::Waiting(left - 1) };
+            }
+            // A change of leader lost an intent: the transaction cannot commit what it wrote.
+            Ok(_) | Err(RangeError::NoSuchTransaction) => {
+                self.checks = Checks::NotSent;
+                self.start_abort();
+                self.events.push(Event::Ended(Outcome::Failed(TxnError::NoSuchTransaction)));
+            }
+            // Nothing committed yet: the driver asks again, and the commit checks again.
+            Err(e) => {
+                self.checks = Checks::NotSent;
+                self.ended(Outcome::Unknown(e));
+            }
+        }
     }
 
     fn commit_done(&mut self, r: Result<Reply, RangeError>) {
@@ -1037,9 +1141,10 @@ mod tests {
                 Ok(Reply::Record(TxnRecord { status: TxnStatus::Aborted, ..record.clone() }))
             }
             TxnOp::EndTxn { .. } | TxnOp::PushTxn { .. } => Ok(Reply::Record(record.clone())),
-            TxnOp::PutIntents { .. } | TxnOp::ResolveIntents { .. } | TxnOp::OnePhase { .. } => {
-                Ok(Reply::Intents { ts: ts(5) })
-            }
+            TxnOp::PutIntents { .. }
+            | TxnOp::ResolveIntents { .. }
+            | TxnOp::OnePhase { .. }
+            | TxnOp::CheckIntents { .. } => Ok(Reply::Intents { ts: ts(5) }),
             TxnOp::FindIntents { .. }
             | TxnOp::ForgetRecord { .. }
             | TxnOp::ReadRecord { .. }
@@ -1361,6 +1466,74 @@ mod tests {
         reqs.iter().map(|r| r.g).collect()
     }
 
+    /// A range answers a statement once its intents are in the leader's log (FR-021, D-160): the
+    /// commit first asks each range written in whether they were applied.
+    #[test]
+    fn the_commit_checks_the_intents_were_applied_before_it_commits() {
+        let record = rec(TxnStatus::Pending, 0);
+        let written = |c: &mut Coordinator| {
+            c.write(&Two, vec![(b"a1".to_vec(), put()), (b"b1".to_vec(), put())]).unwrap();
+            answer_all(c, |r| ok_for(r, &record));
+            c.take_events();
+        };
+        let only = |reqs: &[Request], check: bool| {
+            reqs.iter().all(|r| matches!(r.op, TxnOp::CheckIntents { .. }) == check)
+        };
+        // Applied in both ranges: then the commit, at no less than their marks.
+        let mut c = coord();
+        written(&mut c);
+        c.commit(ts(3));
+        let checks = c.take_requests();
+        assert_eq!(ranges(&checks), BTreeSet::from([G1, G2]));
+        assert!(only(&checks, true), "{checks:?}");
+        for r in checks {
+            c.on_reply(&Two, r.id, Ok(Reply::Intents { ts: ts(7) }));
+        }
+        let commit = c.take_requests();
+        assert!(only(&commit, false) && commit.len() == 1, "{commit:?}");
+        let TxnOp::EndTxn { op: RecordOp::Commit { ts: at, .. }, .. } = commit[0].op else {
+            panic!("{commit:?}")
+        };
+        assert_eq!(at, ts(7));
+        // A change of leader lost one: the transaction aborts and the commit fails.
+        let mut c = coord();
+        written(&mut c);
+        c.commit(ts(3));
+        for r in c.take_requests() {
+            let a = match r.g {
+                G1 => Err(RangeError::NoSuchTransaction),
+                _ => Ok(Reply::Intents { ts: ts(5) }),
+            };
+            c.on_reply(&Two, r.id, a);
+        }
+        let failed = Event::Ended(Outcome::Failed(TxnError::NoSuchTransaction));
+        assert!(c.take_events().contains(&failed));
+        let abort = c.take_requests();
+        assert!(
+            abort.iter().any(|r| matches!(r.op, TxnOp::EndTxn { op: RecordOp::Abort { .. }, .. }))
+        );
+        // No answer: the commit is unknown, and the driver's next commit checks again.
+        let mut c = coord();
+        written(&mut c);
+        c.commit(ts(3));
+        answer_all(&mut c, |_| Err(RangeError::Timeout));
+        assert!(c.take_events().contains(&Event::Ended(Outcome::Unknown(RangeError::Timeout))));
+        c.commit(ts(3));
+        assert!(only(&c.take_requests(), true), "it checks again");
+        // Refused with `OutOfRange` while the route still names the range: the check waits for
+        // the next tick instead of going back at once, and then goes again.
+        let mut c = coord();
+        written(&mut c);
+        c.commit(ts(3));
+        let checks = c.take_requests();
+        let g1 = checks.iter().find(|r| r.g == G1).expect("a check in G1").id;
+        c.on_reply(&Two, g1, Err(RangeError::OutOfRange));
+        assert!(c.take_requests().is_empty(), "no request while the route did not move");
+        c.tick(&Two, Nanos::ZERO, WALL);
+        let again = c.take_requests();
+        assert!(again.len() == 1 && again[0].g == G1 && only(&again, true), "{again:?}");
+    }
+
     #[test]
     fn requests_refused_by_a_split_wait_for_the_route_and_go_to_the_new_ranges() {
         let record = rec(TxnStatus::Pending, 0);
@@ -1382,6 +1555,14 @@ mod tests {
             c.on_reply(&Cut, r.id, a);
         }
         assert!(c.take_events().contains(&Event::Written { stmt: s, result: Ok(()) }));
+        // Before the commit, each range written in says its intents are applied (FR-021).
+        let checks = c.take_requests();
+        assert_eq!(ranges(&checks), BTreeSet::from([G1, G3]));
+        assert!(checks.iter().all(|r| matches!(r.op, TxnOp::CheckIntents { .. })));
+        for r in checks {
+            let a = ok_for(&r, &record);
+            c.on_reply(&Cut, r.id, a);
+        }
         // The commit went to G4; refused there, the route of `Two` sends it back to G2.
         let commit = c.take_requests();
         assert_eq!(ranges(&commit), BTreeSet::from([G4]));

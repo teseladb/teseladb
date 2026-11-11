@@ -2,7 +2,9 @@
 //! request takes the latches of its keys like a write, reads the newest versions of each one
 //! (deletions and intents included), and is evaluated inside the proposal at its own mark with the
 //! rules of [`crate::intents`]. `PutIntents` and `ResolveIntents` answer with the entry's mark,
-//! `EndTxn` and `PushTxn` with the record they leave. A conflict goes out only once the core
+//! `EndTxn` and `PushTxn` with the record they leave. `PutIntents` answers once the entry is in the
+//! leader's log (FR-021, D-160), and `CheckIntents` tells the coordinator, before its commit,
+//! whether those intents were applied. A conflict goes out only once the core
 //! confirms the leadership, as a refused mutation does.
 
 use super::*;
@@ -51,6 +53,16 @@ pub enum TxnOp {
         read_ts: Hlc,
         /// The keys and what each writes, without repeated keys.
         writes: Vec<(Vec<u8>, IntentOp)>,
+    },
+    /// Whether every key of `keys` holds an applied intent of `txn` (FR-021): it waits for their
+    /// latches, so for the intents in the leader's log to be applied or dropped, and answers
+    /// [`Reply::Intents`] with the highest mark among them, or [`RangeError::NoSuchTransaction`]
+    /// when a change of leader lost one. It writes nothing.
+    CheckIntents {
+        /// The transaction.
+        txn: TxnId,
+        /// The keys it wrote in this range.
+        keys: Vec<Vec<u8>>,
     },
     /// Resolves the intents of a finished `txn` on `keys` (FR-005); a key without its intent is
     /// left as it is.
@@ -134,7 +146,7 @@ impl TxnOp {
             | TxnOp::ForgetRecord { txn, .. }
             | TxnOp::ReadRecord { txn }
             | TxnOp::PushByRead { txn, .. } => vec![record_key(*txn)],
-            TxnOp::ResolveIntents { keys, .. } => keys.clone(),
+            TxnOp::ResolveIntents { keys, .. } | TxnOp::CheckIntents { keys, .. } => keys.clone(),
             TxnOp::FindIntents { start, .. } => vec![start.clone()],
         }
     }
@@ -174,6 +186,22 @@ fn newest_versions(lsm: &RefCell<Lsm>, key: &[u8], n: usize) -> Option<Result<Ve
 }
 
 /// A version as the conflict rules read it; a deletion has no value.
+/// What [`TxnOp::CheckIntents`] answers from the newest version of each key: the highest mark
+/// of the intents of `txn`, if each key holds one.
+fn held_intents(txn: TxnId, versions: &[Vec<Item>]) -> Result<Reply, RangeError> {
+    let mut ts = Hlc { physical: 0, logical: 0 };
+    for v in versions {
+        let held = v.first().filter(|i| i.kind == Kind::Intent).is_some_and(|i| {
+            crate::intents::Intent::decode(&i.value).is_ok_and(|intent| intent.txn == txn)
+        });
+        if !held {
+            return Err(RangeError::NoSuchTransaction);
+        }
+        ts = ts.max(v[0].ts);
+    }
+    Ok(Reply::Intents { ts })
+}
+
 fn latest_of(i: &Item) -> Latest {
     let value = if i.kind == Kind::Delete { Vec::new() } else { i.value.to_vec() };
     Latest { ts: i.ts, intent: i.kind == Kind::Intent, value }
@@ -309,7 +337,10 @@ fn evaluate_txn(
                 false => Err(RangeError::WriteConflict),
             }
         }
-        TxnOp::FindIntents { .. } | TxnOp::ReadRecord { .. } | TxnOp::PushByRead { .. } => {
+        TxnOp::FindIntents { .. }
+        | TxnOp::ReadRecord { .. }
+        | TxnOp::PushByRead { .. }
+        | TxnOp::CheckIntents { .. } => {
             unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
@@ -398,6 +429,12 @@ impl RangeHost {
                 Some(Ok(rec)) => Ok(Reply::Record(rec)),
                 Some(Err(_)) => Err(RangeError::Unavailable),
             };
+            self.release(m.g, m.term, latch);
+            self.reply(id, answer);
+            return true;
+        }
+        if let TxnOp::CheckIntents { txn, .. } = **op {
+            let answer = held_intents(txn, &versions);
             self.release(m.g, m.term, latch);
             self.reply(id, answer);
             return true;

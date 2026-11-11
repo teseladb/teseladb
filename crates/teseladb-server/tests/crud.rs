@@ -948,6 +948,11 @@ fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
     let r =
         node.data(DataReq::Remote(DATA_RANGE, RemoteReq::Txn { op: put, deadline: None }), READY);
     assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Intents { .. }))), "{r:?}");
+    // The intent answered once in the leader's log (008 FR-021): applied once its check answers.
+    let check = TxnOp::CheckIntents { txn, keys: vec![rows[0].0.clone()] };
+    let r =
+        node.data(DataReq::Remote(DATA_RANGE, RemoteReq::Txn { op: check, deadline: None }), READY);
+    assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Intents { .. }))), "{r:?}");
     let applied = || node.data_status(READY).map(|s| s.applied).unwrap_or_default();
     let before = applied();
     for _ in 0..16 {

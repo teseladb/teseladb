@@ -32,8 +32,8 @@ Cada modelo explica en su cabecera qué comprueba; `scripts/ci.sh` vuelve a gene
 | `Smoke` | `Smoke.cfg` | 5 | 4 | 4 | 8 s |
 | `SnapshotAwait` | `SnapshotAwait.cfg` | 38.943 | 7.088 | 19 | 5 s |
 | `SplitCompletion` | `SplitCompletion.cfg` | 1.043 | 559 | 24 | 6 s |
-| `TxnCommit` | `TxnCommit.cfg` | 60.303.931 | 12.502.328 | 23 | 201 s |
-| `TxnCommit` | `TxnCommit.pushread.cfg` | 64.061.211 | 13.222.728 | 23 | 199 s |
+| `TxnCommit` | `TxnCommit.cfg` | 209.508.137 | 34.903.906 | 27 | 119 s |
+| `TxnCommit` | `TxnCommit.pushread.cfg` | 221.934.989 | 37.016.258 | 26 | 120 s |
 | `WriteConcernW1` | `WriteConcernW1.cfg` | 16.564.351 | 2.349.474 | 21 | 51 s |
 
 Ninguno encuentra errores.

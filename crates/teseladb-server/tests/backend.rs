@@ -596,6 +596,9 @@ fn a_transaction_over_two_ranges_commits_and_resolves_its_intents() {
         record(TxnStatus::Pending, ts(0)),
         intents(),
         intents(),
+        // Each range says its intents are applied before the commit (008 FR-021).
+        intents(),
+        intents(),
         record(TxnStatus::Committed, ts(7)),
         intents(),
         intents(),

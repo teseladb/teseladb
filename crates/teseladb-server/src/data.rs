@@ -637,9 +637,16 @@ impl DataCore {
                 let spec = ReadSpec { g, key, scan, backward, at, concern, view, uncertain_to };
                 self.host.read_with(core, spec, now, wall_ms)
             }
-            // Every request of a transaction waits for the range's majority (008).
+            // Every request of a transaction waits for the range's majority (008), but its intents,
+            // which answer once in the leader's log: the coordinator checks they were applied
+            // before it commits (FR-021, D-160).
             RemoteReq::Txn { op, deadline } => {
-                let wc = WriteConcern { w: W::Majority, j: true };
+                let wc = match op {
+                    teseladb_range::host::TxnOp::PutIntents { .. } => {
+                        WriteConcern { w: W::Nodes(1), j: false }
+                    }
+                    _ => WriteConcern { w: W::Majority, j: true },
+                };
                 let req = TxnReq { g, op, wc };
                 match deadline {
                     Some(d) => self.host.txn_until(core, req, d, (now, wall_ms)),

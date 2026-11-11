@@ -691,6 +691,15 @@ impl Backend for Mem {
                 }
                 Ok(Reply::Intents { ts })
             }
+            // Before the commit (008 FR-021): every key holds an intent of the transaction.
+            TxnOp::CheckIntents { txn, keys } => {
+                let mine = self.intents.get(&txn.0);
+                let held = keys.iter().all(|k| mine.is_some_and(|m| m.iter().any(|(w, _)| w == k)));
+                match held {
+                    true => Ok(Reply::Intents { ts }),
+                    false => Err(teseladb_range::host::RangeError::NoSuchTransaction),
+                }
+            }
             TxnOp::EndTxn { txn, op: RecordOp::Commit { ts: at, .. } } => {
                 if !self.commit_errors.is_empty() {
                     return Err(self.commit_errors.remove(0));

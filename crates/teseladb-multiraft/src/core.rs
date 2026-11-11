@@ -1862,6 +1862,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant (005 T033): the entries another leader's log replaces leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_overwritten(g, &entries);
+        #[cfg(teseladb_bug = "rollback_unrecorded")]
+        let _unrecorded = (Self::note_overwritten, Self::note_rolled);
         // Raft keeps the commit index as volatile state: a hard state that only moves it stays in
         // the store's memory and goes to disk with the next batch that is synced, never with a
         // sync of its own (H-008 of the native tests: the next write waited for that sync, and
@@ -2154,6 +2156,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // Faulty variant (005 T033): the entries the snapshot contradicts leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_superseded(g, d.index);
+        #[cfg(teseladb_bug = "rollback_unrecorded")]
+        let _unrecorded = Self::note_superseded;
         self.drop_proposals_under_snapshot(g, snap.meta.index, snap.meta.term);
         let meta = SnapshotMeta {
             index: snap.meta.index,

@@ -36,6 +36,27 @@ fn put_intents_conflict_with_newer_versions_and_other_transactions() {
     assert!(again > at);
 }
 
+/// Before its commit a coordinator asks each range whether its intents were applied (FR-021,
+/// D-160): the keys holding them answer with their highest mark; a key without one of the
+/// transaction's intents (a change of leader lost it, or another transaction's is there) answers
+/// `NoSuchTransaction`, and the commit fails. It writes nothing.
+#[test]
+fn check_intents_says_whether_every_intent_of_the_transaction_is_applied() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    let at = intents_mark(n.txn(intents(T1, base, &[(A, put(b"x")), (B, IntentOp::Delete)])));
+    let check = |txn, keys: &[&[u8]]| TxnOp::CheckIntents {
+        txn,
+        keys: keys.iter().map(|k| k.to_vec()).collect(),
+    };
+    assert_eq!(n.txn(check(T1, &[A, B])), Ok(Reply::Intents { ts: at }));
+    // A key it did not write, or another transaction asking: something is missing.
+    assert_eq!(n.txn(check(T1, &[A, b"\x01zz"])), Err(RangeError::NoSuchTransaction));
+    assert_eq!(n.txn(check(T2, &[A])), Err(RangeError::NoSuchTransaction));
+    // Nothing was written: the intents are still there.
+    assert_eq!(n.txn(check(T1, &[A, B])), Ok(Reply::Intents { ts: at }));
+}
+
 #[test]
 fn the_record_moves_through_begin_push_and_commit() {
     let mut n = Node::new();

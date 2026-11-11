@@ -310,10 +310,16 @@ fn a_node_that_cannot_reach_the_cluster_to_join_does_not_start() {
 }
 
 #[test]
-fn an_insecure_node_issues_no_token_and_a_status_not_answered_in_time_is_none() {
+fn an_insecure_node_issues_no_token_and_a_status_asked_without_time_is_not_waited_for() {
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
     let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
     assert!(node.create_enroll_token(Duration::from_secs(60)).unwrap_err().contains("PKI"));
-    assert!(node.data_status(Duration::ZERO).is_none());
+    // Without time it does not wait: `None`, or the status when the core answered within the
+    // microseconds between the request and the look at its channel (asserting `None` made the
+    // test depend on the machine's speed).
+    let asked = std::time::Instant::now();
+    let _either = node.data_status(Duration::ZERO);
+    assert!(asked.elapsed() < Duration::from_millis(200), "{:?}", asked.elapsed());
+    assert!(node.data_status(Duration::from_secs(5)).is_some());
     node.stop();
 }
