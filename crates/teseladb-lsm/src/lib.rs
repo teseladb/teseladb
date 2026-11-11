@@ -70,7 +70,8 @@ mod time_iter;
 mod version;
 
 pub use concurrent::{
-    BlockNeed, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep, SharedView, ViewCache,
+    BlockNeed, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep, SharedView,
+    ViewCache, outside_probes,
 };
 pub use config::{Codec, Encryption, LsmConfig};
 pub use shared::Published;

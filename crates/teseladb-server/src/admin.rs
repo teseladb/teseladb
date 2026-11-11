@@ -501,6 +501,18 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             reason.label()
         );
     }
+    let (gets, probes) = teseladb_lsm::outside_probes();
+    let rows = [
+        ("teseladb_lsm_outside_gets_total", "Point reads served on connections' threads.", gets),
+        (
+            "teseladb_lsm_outside_probes_total",
+            "Files those point reads searched past their filters.",
+            probes,
+        ),
+    ];
+    for (name, help, n) in rows {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");
+    }
     let _ = writeln!(out, "# HELP teseladb_lsm_live_bytes Live bytes of each core's ranges.");
     let _ = writeln!(out, "# TYPE teseladb_lsm_live_bytes gauge");
     for (core, s) in cores {

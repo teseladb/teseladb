@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
@@ -205,6 +206,16 @@ impl Inner {
     }
 }
 
+/// Point reads from other threads that ended, and the files they searched.
+static OUTSIDE_GETS: AtomicU64 = AtomicU64::new(0);
+static OUTSIDE_PROBES: AtomicU64 = AtomicU64::new(0);
+
+/// The point reads served from other threads since the process started and the files they
+/// searched (a file whose filter rules the key out is not searched).
+pub fn outside_probes() -> (u64, u64) {
+    (OUTSIDE_GETS.load(Ordering::Relaxed), OUTSIDE_PROBES.load(Ordering::Relaxed))
+}
+
 /// The blocks of a read from another thread: the shared cache, or the one block it needs.
 struct Source<'a> {
     inner: &'a Inner,
@@ -232,6 +243,11 @@ impl Blocks for Source<'_> {
 
     fn failure(&self) -> Option<&LsmError> {
         None
+    }
+
+    fn counted(&mut self, probes: u64) {
+        OUTSIDE_GETS.fetch_add(1, Ordering::Relaxed);
+        OUTSIDE_PROBES.fetch_add(probes, Ordering::Relaxed);
     }
 }
 

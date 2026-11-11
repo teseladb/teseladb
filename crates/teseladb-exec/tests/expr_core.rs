@@ -291,3 +291,29 @@ fn range_refuses_an_array_past_its_memory_limit_before_building_it() {
     too_much("[0, 2147483647]", 34_359_738_392);
     too_much("[-2147483648, 2147483647]", 68_719_476_760);
 }
+
+/// A document kept as the bytes it was stored as gives each field path what the same document
+/// read into fields gives: its first field of a repeated name, a nested path, a path through an
+/// array, and nothing for a field it lacks (H-051 of the native tests: a `$group` reads only its
+/// fields from the stored bytes).
+#[test]
+fn a_stored_document_gives_each_field_path_what_its_fields_give() {
+    let mut fields = doc();
+    fields.push("s", "second");
+    let stored = Document::from_stored(fields.to_bytes().expect("small")).expect("stored");
+    assert!(stored.canonical_bytes().is_some(), "kept as its bytes");
+    for path in ["$s", "$i", "$l", "$a.b", "$a.c", "$dt", "$n", "$missing", "$a.b.x", "$_id"] {
+        let holder = json(&format!(r#"{{"e":"{path}"}}"#)).to_bytes().expect("small");
+        let raw = teseladb_bson::RawDoc::from_bytes(&holder).expect("a document");
+        let expr = Expr::parse(raw.get("e").expect("e")).expect("a path");
+        let read = expr.eval(&fields, &Scope::new(fields.clone(), None)).expect("evaluates");
+        let kept = expr.eval(&stored, &Scope::new(stored.clone(), None)).expect("evaluates");
+        assert_eq!(kept, read, "{path}");
+    }
+    let first = Expr::parse(teseladb_bson::RawValue::String("$s")).expect("a path");
+    assert_eq!(
+        first.eval(&stored, &Scope::new(stored.clone(), None)).expect("evaluates"),
+        Some(Value::from("abc")),
+        "the first of two fields named s"
+    );
+}

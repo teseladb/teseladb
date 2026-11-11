@@ -3,7 +3,7 @@
 //! elements that give nothing); `"$$name.b"` reads a variable.
 
 use teseladb_mql::MqlError;
-use teseladb_bson::{Document, Value};
+use teseladb_bson::{Document, RawDoc, Value};
 
 use super::{Ctx, Eval, Expr, Scope, codes, error};
 
@@ -32,16 +32,25 @@ pub fn field_path(v: &Value, path: &str) -> Eval {
     }
 }
 
-/// The value of dotted path `path` in document `doc`.
+/// The value of dotted path `path` in document `doc`. A document that keeps the bytes it was
+/// stored as gives its first field from them, without reading the others: a `$group` by one field
+/// of documents read through an index reads only that field of each.
 pub(super) fn field_of(doc: &Document, path: &str) -> Eval {
     let (head, rest) = match path.split_once('.') {
         Some((h, r)) => (h, Some(r)),
         None => (path, None),
     };
-    let x = doc.get(head)?;
+    let kept = doc.canonical_bytes().and_then(|b| RawDoc::from_stored(b).ok());
+    let x = match kept {
+        Some(raw) => {
+            let (_, v) = raw.iter().find(|(k, _)| *k == head)?;
+            Value::from(v)
+        }
+        None => doc.get(head)?.clone(),
+    };
     match rest {
-        Some(r) => field_path(x, r),
-        None => Some(x.clone()),
+        Some(r) => field_path(&x, r),
+        None => Some(x),
     }
 }
 

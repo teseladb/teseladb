@@ -1312,14 +1312,16 @@ fn planned_read<B: Backend + ?Sized>(
     else {
         return Ok(None);
     };
+    // Taken whole, as `find` takes the rows it reads from the node's storage: their fields are
+    // read when a stage asks for them.
+    let count = found.len();
     let docs = found
-        .iter()
-        .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
+        .into_iter()
+        .map(|b| Ok(Document::from_stored(b)?))
         .collect::<Result<_, CommandError>>()?;
     let metas = index_keys.then(|| {
         let mut keys = keys.into_iter();
-        found
-            .iter()
+        (0..count)
             .map(|_| {
                 let mut m = Meta::new();
                 if let Some(Some(k)) = keys.next() {
