@@ -832,6 +832,7 @@ fn run_reading<B: Backend + ?Sized>(
     let blocking = !read.sort.is_empty() && !scans.iter().all(|s| s.sorts);
     let batch = if blocking { None } else { budget.map(|_| TRIAL_RESULTS) };
     let limit = if blocking { None } else { read.limit };
+    let unbucketed = unbucketed(coll)?;
     let mut seen: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
     let mut ended = true;
     let mut cut = false;
@@ -879,7 +880,8 @@ fn run_reading<B: Backend + ?Sized>(
                     continue;
                 }
             }
-            let Some((dk, bytes)) = fetched(backend, coll, (&pk, doc), read.concern)? else {
+            let Some((dk, bytes)) = fetched(backend, (coll, unbucketed), (&pk, doc), read.concern)?
+            else {
                 continue;
             };
             ran.docs += 1;
@@ -951,14 +953,10 @@ pub(crate) fn in_id_order(coll: &CollectionEntry) -> Result<bool, CommandError> 
 fn indexed_document<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
+    unbucketed: bool,
     pk: &[u8],
     concern: ReadConcern,
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>, CommandError> {
-    // The buckets of a time series are kept in `_id` order without hash bucket, as the
-    // documents of a collection with a shard key (015 FR-008).
-    let unbucketed = super::sharding::is_sharded(coll)
-        || in_id_order(coll)?
-        || matches!(super::kinds::kind_of(coll)?, CollectionKind::TimeSeries(_));
     let key = match unbucketed {
         true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
         false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),
@@ -967,16 +965,25 @@ fn indexed_document<B: Backend + ?Sized>(
     Ok(backend.scan(key.as_bytes(), &next, 1, concern)?.into_iter().next())
 }
 
+/// Whether the document keys of `coll` carry no hash bucket: the buckets of a time series are
+/// kept in `_id` order without one, as the documents of a collection with a shard key (015
+/// FR-008). Asked once per scan, not per document.
+fn unbucketed(coll: &CollectionEntry) -> Result<bool, CommandError> {
+    Ok(super::sharding::is_sharded(coll)
+        || in_id_order(coll)?
+        || matches!(super::kinds::kind_of(coll)?, CollectionKind::TimeSeries(_)))
+}
+
 /// The document of an entry: the one it was read with, or [`indexed_document`].
 fn fetched<B: Backend + ?Sized>(
     backend: &mut B,
-    coll: &CollectionEntry,
+    (coll, unbucketed): (&CollectionEntry, bool),
     (pk, doc): (&[u8], Option<(Vec<u8>, Vec<u8>)>),
     concern: ReadConcern,
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>, CommandError> {
     match doc {
         Some(read) => Ok(Some(read)),
-        None => indexed_document(backend, coll, pk, concern),
+        None => indexed_document(backend, coll, unbucketed, pk, concern),
     }
 }
 
@@ -1031,6 +1038,7 @@ fn intersected<B: Backend + ?Sized>(
         ran.child_past.push(past);
         sets.push(pks);
     }
+    let unbucketed = unbucketed(coll)?;
     let (mut last_keys, mut last_past) = (0, 0);
     let last_index = &indexes[last.index];
     let scanned =
@@ -1046,7 +1054,8 @@ fn intersected<B: Backend + ?Sized>(
         if !sets.iter().all(|set| set.contains(&pk)) {
             continue;
         }
-        let Some((dk, bytes)) = fetched(backend, coll, (&pk, doc), read.concern)? else {
+        let Some((dk, bytes)) = fetched(backend, (coll, unbucketed), (&pk, doc), read.concern)?
+        else {
             continue;
         };
         // A document both scans hold comes out of the intersection one unit of work later.

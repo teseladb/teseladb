@@ -8,10 +8,11 @@
 //! reads only if no write holds a latch it covers: either it sees the write, or the write sees its
 //! bound and takes a mark above it (`spec/tla/HlcLatches.tla`, which fails without either step).
 //! A point read looks at the writes of its own key, in the slots the latches count
-//! (`spec/tla/HlcKeyLatches.tla`); a scan, after it reads, at the writes of the keys it read,
-//! absent ones included, in the latched keys in order, and at whether any write was released
-//! while it read; a count at every write of the range. Any condition it
-//! cannot check goes back to the core, which serves the read as before.
+//! (`spec/tla/HlcKeyLatches.tla`); when a write counts its slot, which other keys share, it reads
+//! and then looks as a scan of that one key does. A scan, after it reads, looks at the writes of
+//! the keys it read, absent ones included, in the latched keys in order, and at whether any write
+//! was released while it read; a count at every write of the range. Any condition it cannot check
+//! goes back to the core, which serves the read as before.
 //!
 //! The time the view holds until is checked after the mark is taken: a thread stopped between
 //! the two would otherwise read at a mark from after the lease, where another leader, or the
@@ -144,8 +145,12 @@ impl RangeView {
     /// `wall_ms`; `now` gives the monotonic time once it is taken. `None` when the read goes to
     /// the core.
     fn mark(&self, watch: Watch<'_>, wall_ms: u64, now: impl FnOnce() -> Nanos) -> Option<Hlc> {
-        let Next::Mark(ts) = self.clock.0.now(wall_ms) else { return None };
+        let Next::Mark(ts) = self.clock.0.now(wall_ms) else {
+            Decline::Expired.count();
+            return None;
+        };
         if ts < self.gc_floor {
+            Decline::Other.count();
             return None;
         }
         // The bound first, then the latches: a write counted after this check takes a mark
@@ -170,7 +175,15 @@ impl RangeView {
             let _ignored = (&self.held, &self.keys, &self.spans, watched);
             false
         };
-        (!writing && now() < self.valid_until).then_some(ts)
+        if writing {
+            Decline::Writing.count();
+            return None;
+        }
+        if now() >= self.valid_until {
+            Decline::Expired.count();
+            return None;
+        }
+        Some(ts)
     }
 
     /// Reads `key` at a mark of the node's clock, with the wall clock at `wall_ms`, if this
@@ -187,20 +200,98 @@ impl RangeView {
             && self.start.as_slice() <= key
             && key < self.end.as_slice();
         if !servable {
+            Decline::Other.count();
             return FastRead::Core;
         }
-        let Some(ts) = self.mark(Watch::Keys(&[key]), wall_ms, now) else { return FastRead::Core };
+        let Some(ts) = self.mark(Watch::Later, wall_ms, now) else { return FastRead::Core };
+        // After the bound, as a scan of the one key: when a write counts the key's slot, which
+        // other keys share, the read goes on and looks after it at the latched keys themselves.
+        let released = self.released.load(Ordering::SeqCst);
+        let shared_slot = self.slot_counted(key);
         let view = self.lsm.view_cached(cache);
-        match view.get(&self.lsm, key, ts) {
-            SharedRead::Hit(f) if f.kind == Kind::Intent => FastRead::Core,
-            SharedRead::Hit(f) => {
-                FastRead::Found { ts, value: split_value(&f.value).map(|(t, v)| (t, v.to_vec())) }
+        let found = match view.get(&self.lsm, key, ts) {
+            SharedRead::Hit(f) if f.kind == Kind::Intent => {
+                Decline::Intent.count();
+                return FastRead::Core;
             }
-            SharedRead::NotFound => FastRead::Found { ts, value: None },
-            SharedRead::Need(need) => FastRead::Need(need),
-            SharedRead::Failed(_) => FastRead::Core,
+            SharedRead::Hit(f) => split_value(&f.value).map(|(t, v)| (t, v.to_vec())),
+            SharedRead::NotFound => None,
+            SharedRead::Need(need) => return FastRead::Need(need),
+            SharedRead::Failed(_) => {
+                Decline::Other.count();
+                return FastRead::Core;
+            }
+        };
+        if shared_slot && self.written_while_read(&(key.to_vec(), [key, &[0]].concat()), released) {
+            Decline::Writing.count();
+            return FastRead::Core;
+        }
+        FastRead::Found { ts, value: found }
+    }
+
+    /// Whether a write counts the slot of `key`.
+    fn slot_counted(&self, key: &[u8]) -> bool {
+        // Faulty variant (005 T049): a read outside the core that does not look at the writes.
+        #[cfg(teseladb_bug = "outside_ignores_latches")]
+        {
+            let _ignored = key;
+            false
+        }
+        #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
+        {
+            self.keys.maybe_held(key)
         }
     }
+}
+
+/// Why reads outside the core went back to it, since the process started, by [`Decline`].
+static DECLINES: [AtomicU64; DECLINE_REASONS] = [const { AtomicU64::new(0) }; DECLINE_REASONS];
+const DECLINE_REASONS: usize = 5;
+
+/// Why a read outside the core went back to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decline {
+    /// A write in flight holds a key a point read reads, or was released while it read.
+    Writing,
+    /// A write held a key of a scan, or one was released while the scan read.
+    WrittenWhileScanned,
+    /// The view's time ran out, or the clock gives no mark yet.
+    Expired,
+    /// It met an intent.
+    Intent,
+    /// Anything else: a span past the range, a mark below the GC threshold, a failed read.
+    Other,
+}
+
+impl Decline {
+    /// Every reason, in the order of [`decline_counts`].
+    pub const ALL: [Decline; DECLINE_REASONS] = [
+        Decline::Writing,
+        Decline::WrittenWhileScanned,
+        Decline::Expired,
+        Decline::Intent,
+        Decline::Other,
+    ];
+
+    /// Its label in the metrics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Decline::Writing => "writing",
+            Decline::WrittenWhileScanned => "written_while_scanned",
+            Decline::Expired => "expired",
+            Decline::Intent => "intent",
+            Decline::Other => "other",
+        }
+    }
+
+    fn count(self) {
+        DECLINES[self as usize].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How many reads outside the core went back to it for each reason of [`Decline::ALL`].
+pub fn decline_counts() -> [u64; DECLINE_REASONS] {
+    std::array::from_fn(|i| DECLINES[i].load(Ordering::Relaxed))
 }
 
 impl RangeView {
@@ -227,6 +318,7 @@ impl RangeView {
             && start <= end
             && end <= self.end.as_slice();
         if !servable {
+            Decline::Other.count();
             return None;
         }
         let ts = self.mark(Watch::Later, wall_ms, now)?;
@@ -240,7 +332,10 @@ impl RangeView {
         let mut rows = Vec::new();
         while rows.len() < limit {
             match scan.next(&self.lsm) {
-                SharedStep::Item(i) if i.kind == Kind::Intent => return None,
+                SharedStep::Item(i) if i.kind == Kind::Intent => {
+                    Decline::Intent.count();
+                    return None;
+                }
                 SharedStep::Item(i) => {
                     if let Some((t, v)) = split_value(&i.value)
                         && t != crate::HISTORY_VALUE
@@ -250,7 +345,10 @@ impl RangeView {
                 }
                 SharedStep::Done => break,
                 SharedStep::Need(need) if supply(&need) => {}
-                SharedStep::Need(_) | SharedStep::Failed(_) => return None,
+                SharedStep::Need(_) | SharedStep::Failed(_) => {
+                    Decline::Other.count();
+                    return None;
+                }
             }
         }
         // The keys it read: up to the last row when the limit stopped it, the span otherwise.
@@ -260,7 +358,11 @@ impl RangeView {
             (Some(k), true) => (k.clone(), end.to_vec()),
             (None, _) => (start.to_vec(), end.to_vec()),
         };
-        (!self.written_while_read(&read, released)).then_some((ts, rows))
+        if self.written_while_read(&read, released) {
+            Decline::WrittenWhileScanned.count();
+            return None;
+        }
+        Some((ts, rows))
     }
 
     /// Whether a write holds a key of `read` or a write was released since the count was

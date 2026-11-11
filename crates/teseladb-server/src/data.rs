@@ -123,6 +123,8 @@ pub struct LsmSizes {
     pub live_bytes: u64,
     /// Bytes of its files after its last compaction of everything that their space asked for.
     pub full_after: u64,
+    /// Reads and writes of the core's ranges that waited for another write's latch.
+    pub latch_waits: u64,
 }
 
 /// What this node's replica of a range looks like.
@@ -473,6 +475,12 @@ impl DataCore {
                 return;
             }
             DataReq::Lsm => {
+                let latch_waits = self
+                    .replicas
+                    .open_ranges()
+                    .filter_map(|g| self.host.metrics(core, g, now))
+                    .map(|m| m.latch_waits)
+                    .sum();
                 let m = self.lsm.borrow().metrics();
                 let sizes = LsmSizes {
                     level_bytes: m.level_bytes,
@@ -482,6 +490,7 @@ impl DataCore {
                     compactions: m.compactions_total,
                     live_bytes: m.live_bytes,
                     full_after: m.full_after,
+                    latch_waits,
                 };
                 let _ = reply.send(Ok(DataReply::Lsm(sizes)));
                 return;

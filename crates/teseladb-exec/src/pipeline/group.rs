@@ -320,17 +320,11 @@ fn encode(v: &Value, col: Option<&dyn teseladb_bson::Collator>, out: &mut Vec<u8
     };
     match v {
         Value::Null | Value::Undefined => out.push(b'0'),
-        Value::Int32(n) => number(
-            teseladb_bson::Decimal128::from_parts(*n < 0, u128::from(n.unsigned_abs()), 0)
-                .unwrap_or_else(teseladb_bson::Decimal128::nan),
-            out,
-        ),
-        Value::Int64(n) => number(
-            teseladb_bson::Decimal128::from_parts(*n < 0, u128::from(n.unsigned_abs()), 0)
-                .unwrap_or_else(teseladb_bson::Decimal128::nan),
-            out,
-        ),
+        Value::Int32(n) => integer(i64::from(*n), out),
+        Value::Int64(n) => integer(*n, out),
         Value::Double(x) if x.is_nan() => out.extend_from_slice(b"nNaN\0"),
+        // An integer a double holds exactly: the text of that integer.
+        Value::Double(x) if x.fract() == 0.0 && x.abs() < EXACT_INTEGERS => integer(*x as i64, out),
         Value::Double(x) => number(from_f64_exact(*x), out),
         Value::Decimal128(d) => number(*d, out),
         // In a collation, strings that compare equal share their sort key.
@@ -372,6 +366,29 @@ fn encode(v: &Value, col: Option<&dyn teseladb_bson::Collator>, out: &mut Vec<u8
 }
 
 /// A decimal's text with the exponent and trailing zeros normalized (`1.50E+1` and `15` agree).
+/// The doubles below it in magnitude hold each integer exactly (2^53).
+const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
+
+/// The key of integer `n`: the text [`normal_number`] gives its decimal, written without one.
+fn integer(n: i64, out: &mut Vec<u8>) {
+    use std::io::Write;
+    out.push(b'n');
+    if n == 0 {
+        out.extend_from_slice(b"0\0");
+        return;
+    }
+    let mut core = n.unsigned_abs();
+    let mut zeros = 0u32;
+    while core.is_multiple_of(10) {
+        core /= 10;
+        zeros += 1;
+    }
+    let sign = if n < 0 { "-" } else { "" };
+    // Writing to a vector does not fail.
+    let _ = write!(out, "{sign}{core}e{zeros}");
+    out.push(0);
+}
+
 fn normal_number(text: &str) -> String {
     match text {
         "NaN" | "Infinity" | "-Infinity" => return text.to_owned(),
@@ -875,4 +892,58 @@ pub fn run_sort_by_count(
     };
     out.sort_by_key(|d| std::cmp::Reverse(count(d)));
     Ok(out)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The key the decimal of a number gives, as every number had it before the integers' own.
+    fn through_decimal(d: teseladb_bson::Decimal128) -> Vec<u8> {
+        let mut out = vec![b'n'];
+        out.extend_from_slice(normal_number(&d.to_string()).as_bytes());
+        out.push(0);
+        out
+    }
+
+    fn key(v: &Value) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode(v, None, &mut out);
+        out
+    }
+
+    #[test]
+    fn integers_and_whole_doubles_keep_the_key_of_their_decimal() {
+        use teseladb_mql::decimal_math::from_f64_exact;
+        let ints = [
+            0i64,
+            1,
+            -1,
+            7,
+            10,
+            -10,
+            100,
+            120,
+            1_000_000,
+            -4_500,
+            i64::from(i32::MAX),
+            i64::from(i32::MIN),
+            i64::MAX,
+            i64::MIN,
+            1 << 53,
+        ];
+        for n in ints {
+            let d = teseladb_bson::Decimal128::from_parts(n < 0, u128::from(n.unsigned_abs()), 0)
+                .expect("an integer");
+            assert_eq!(key(&Value::Int64(n)), through_decimal(d), "{n}");
+            if let Ok(small) = i32::try_from(n) {
+                assert_eq!(key(&Value::Int32(small)), through_decimal(d), "{n}");
+            }
+        }
+        for x in [0.0, -0.0, 1.0, -3.0, 250.0, 1e15, -9_007_199_254_740_991.0, 0.5, 1e300] {
+            assert_eq!(key(&Value::Double(x)), through_decimal(from_f64_exact(x)), "{x}");
+        }
+        assert_eq!(key(&Value::Int32(5)), key(&Value::Double(5.0)));
+    }
 }

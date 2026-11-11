@@ -479,6 +479,28 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             }
         }
     }
+    let _ = writeln!(
+        out,
+        "# HELP teseladb_range_latch_waits_total Reads and writes of each core's ranges that waited for a latch."
+    );
+    let _ = writeln!(out, "# TYPE teseladb_range_latch_waits_total counter");
+    for (core, s) in cores {
+        let _ =
+            writeln!(out, "teseladb_range_latch_waits_total{{core=\"{core}\"}} {}", s.latch_waits);
+    }
+    let _ = writeln!(
+        out,
+        "# HELP teseladb_reads_outside_declined_by_reason_total Reads outside the cores sent back to them, by reason."
+    );
+    let _ = writeln!(out, "# TYPE teseladb_reads_outside_declined_by_reason_total counter");
+    let counts = teseladb_range::view::decline_counts();
+    for (reason, n) in teseladb_range::view::Decline::ALL.iter().zip(counts) {
+        let _ = writeln!(
+            out,
+            "teseladb_reads_outside_declined_by_reason_total{{reason=\"{}\"}} {n}",
+            reason.label()
+        );
+    }
     let _ = writeln!(out, "# HELP teseladb_lsm_live_bytes Live bytes of each core's ranges.");
     let _ = writeln!(out, "# TYPE teseladb_lsm_live_bytes gauge");
     for (core, s) in cores {
@@ -655,6 +677,38 @@ fn search_metrics(out: &mut String, m: &teseladb_wire::commands::search_ops::Sea
     }
 }
 
+/// Writes the node's clock against its wall clock and its bound on disk (005 FR-003): how far
+/// ahead of the wall clock it runs, how far its bound is ahead of it, and the marks it refused at
+/// the bound, which waited for the next one to be written.
+fn clock_metrics(out: &mut String, clock: &teseladb_multiraft::NodeClock) {
+    let wall = i128::from(crate::clock::wall_ms());
+    let mark = i128::from(clock.0.peek().physical);
+    let bound = clock.0.bound().map_or(mark, i128::from);
+    let rows = [
+        (
+            "teseladb_hlc_ahead_of_wall_ms",
+            "Milliseconds the node's clock runs ahead of its wall clock.",
+            "gauge",
+            mark - wall,
+        ),
+        (
+            "teseladb_hlc_bound_ahead_ms",
+            "Milliseconds the bound on disk is ahead of the node's clock.",
+            "gauge",
+            bound - mark,
+        ),
+        (
+            "teseladb_hlc_refused_at_bound_total",
+            "Marks refused at the bound on disk, each waiting for the next one.",
+            "counter",
+            i128::from(clock.0.refused_at_bound()),
+        ),
+    ];
+    for (name, help, kind, n) in rows {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {n}");
+    }
+}
+
 impl AdminBackend for NodeAdmin {
     fn healthy(&self) -> bool {
         self.ask(0, NodeMsg::View).is_some_and(|v| v.ready())
@@ -664,6 +718,7 @@ impl AdminBackend for NodeAdmin {
         let mut out = String::new();
         let up = u8::from(self.healthy());
         let entries = self.handle.routes.entries();
+        clock_metrics(&mut out, &self.handle.clock);
         let _ = writeln!(out, "# HELP teseladb_up Whether the node serves (1) or not (0).");
         let _ = writeln!(out, "# TYPE teseladb_up gauge\nteseladb_up {up}");
         let _ = writeln!(out, "# HELP teseladb_ranges Ranges in the node's routing table.");

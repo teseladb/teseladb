@@ -475,12 +475,35 @@ impl Pipeline {
     /// ([`meta`]); the documents and their metadata at the end.
     pub fn run_with_meta(
         &self,
-        mut docs: Vec<Document>,
-        mut metas: Option<Vec<meta::Meta>>,
+        docs: Vec<Document>,
+        metas: Option<Vec<meta::Meta>>,
         env: &dyn Env,
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
+        self.run_after_matches(0, (docs, metas), env, sbe)
+    }
+
+    /// How many `$match` stages the pipeline starts with.
+    pub fn leading_matches(&self) -> usize {
+        self.stages.iter().take_while(|s| matches!(s, Stage::Match(_))).count()
+    }
+
+    /// [`Pipeline::run_with_meta`] on documents that already passed its first `applied` stages,
+    /// `$match`es whose filter the read that gave them applied (an index plan): those stages
+    /// only carry on whether the slot-based engine runs the rest. More than
+    /// [`Pipeline::leading_matches`] counts as none.
+    pub fn run_after_matches(
+        &self,
+        applied: usize,
+        (mut docs, mut metas): (Vec<Document>, Option<Vec<meta::Meta>>),
+        env: &dyn Env,
+        sbe: bool,
+    ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
+        let applied = if applied <= self.leading_matches() { applied } else { 0 };
         let mut sbe = sbe && !self.starts_with_documents();
+        for (st, spec) in self.stages.iter().zip(&self.sbe_specs).take(applied) {
+            sbe = sbe && *spec && sbe_capable(st);
+        }
         // The scores search stages gave: a document without them is an error until a stage
         // makes new documents, after which they read as nothing (measured on 9.0.4).
         let mut required: Vec<String> = Vec::new();
@@ -489,7 +512,7 @@ impl Pipeline {
         // The scores the stages so far gave every document (`$text`, `$score`): those that a
         // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
         let mut given: Vec<String> = Vec::new();
-        for (st, spec) in self.stages.iter().zip(&self.sbe_specs) {
+        for (st, spec) in self.stages.iter().zip(&self.sbe_specs).skip(applied) {
             env.interrupted()?;
             sbe = sbe && *spec && sbe_capable(st);
             // A grouping stage reads a score a document lacks as nothing (measured on 9.0.4,

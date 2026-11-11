@@ -154,8 +154,14 @@ pub(crate) struct BlockBuilder {
     interval: usize,
 }
 
+/// Bytes of entries after which the next entry starts a restart point, whatever the interval: a
+/// seek walks from the restart point below its key, and with documents of a few hundred bytes an
+/// interval of entries alone would have it decode several kilobytes of headers per read.
+pub(crate) const RESTART_BYTES: usize = 1024;
+
 impl BlockBuilder {
-    /// A builder with a restart point every `interval` entries.
+    /// A builder with a restart point every `interval` entries, or sooner after
+    /// [`RESTART_BYTES`].
     pub(crate) fn new(interval: usize) -> BlockBuilder {
         BlockBuilder {
             buf: Vec::new(),
@@ -183,7 +189,11 @@ impl BlockBuilder {
 
     /// Adds an entry; keys come in order.
     pub(crate) fn add(&mut self, key: &[u8], kind: Kind, value: &[u8]) {
-        let shared = if self.since_restart == self.interval || self.restarts.is_empty() {
+        let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
+        let restart = self.since_restart == self.interval
+            || self.restarts.is_empty()
+            || self.buf.len() - restart_at >= RESTART_BYTES;
+        let shared = if restart {
             self.restarts.push(self.buf.len() as u32);
             self.since_restart = 0;
             0
@@ -232,7 +242,8 @@ struct Raw {
 }
 
 impl Block {
-    /// Reads the restart array of a payload.
+    /// Reads the restart array of a payload. Each read of a cached block parses it, so a
+    /// restart point is checked when a cursor goes to it, not here.
     pub(crate) fn parse(data: Bytes) -> Result<Block, Bad> {
         let n = data.len().checked_sub(4).ok_or(Bad)?;
         let count = u32::from_le_bytes(data[n..].try_into().map_err(|_| Bad)?) as usize;
@@ -240,18 +251,18 @@ impl Block {
         if (count == 0) != (restarts == 0) {
             return Err(Bad);
         }
-        let block = Block { data, restarts, count };
-        for i in 0..count {
-            if block.restart(i) >= restarts {
-                return Err(Bad);
-            }
-        }
-        Ok(block)
+        Ok(Block { data, restarts, count })
     }
 
-    fn restart(&self, i: usize) -> usize {
+    /// Restart point `i`, an offset among the entries.
+    fn restart(&self, i: usize) -> Result<usize, Bad> {
         let at = self.restarts + 4 * i;
-        u32::from_le_bytes(self.data[at..at + 4].try_into().expect("4 bytes")) as usize
+        let offset = u32::from_le_bytes(self.data[at..at + 4].try_into().map_err(|_| Bad)?);
+        let offset = offset as usize;
+        if offset >= self.restarts {
+            return Err(Bad);
+        }
+        Ok(offset)
     }
 
     fn raw(&self, at: usize) -> Result<(Raw, usize), Bad> {
@@ -273,7 +284,7 @@ impl Block {
 
     /// Key of the entry at restart point `i`, stored whole.
     fn restart_key(&self, i: usize) -> Result<&[u8], Bad> {
-        let (raw, _) = self.raw(self.restart(i))?;
+        let (raw, _) = self.raw(self.restart(i)?)?;
         if raw.shared != 0 {
             return Err(Bad);
         }
@@ -325,7 +336,7 @@ impl BlockCursor {
         if c.block.count == 0 {
             return Ok(c);
         }
-        c.next = c.block.restart(start);
+        c.next = c.block.restart(start)?;
         c.advance()?;
         while c.valid && cmp(&c.key, target).is_lt() {
             c.advance()?;
@@ -423,6 +434,27 @@ mod tests {
             assert_eq!(c.key(), &keys[0][..]);
             assert!(!BlockCursor::seek(block, b"z", <[u8]>::cmp).unwrap().valid());
         }
+    }
+
+    /// Entries of documents a few hundred bytes long get a restart point every
+    /// [`RESTART_BYTES`], not every interval of entries, and a seek still finds each.
+    #[test]
+    fn large_entries_restart_every_kilobyte() {
+        let mut b = BlockBuilder::new(16);
+        let keys: Vec<Vec<u8>> = (0..24).map(|i| format!("doc{i:03}").into_bytes()).collect();
+        for k in &keys {
+            b.add(k, Kind::Put, &[7; 600]);
+        }
+        let block = Block::parse(Bytes::from_vec(b.finish())).unwrap();
+        assert_eq!(block.count, 12, "two entries of about 610 bytes between restart points");
+        for k in &keys {
+            let c = BlockCursor::seek(block.clone(), k, <[u8]>::cmp).unwrap();
+            assert_eq!(c.key(), &k[..]);
+            assert_eq!(c.value_slice(), &[7; 600]);
+        }
+        // Small entries keep the interval.
+        let (small, _) = build(100, 16);
+        assert_eq!(small.count, 7);
     }
 
     #[test]
@@ -532,7 +564,9 @@ mod tests {
         let mut past = vec![0xaa, 0xbb];
         past.extend_from_slice(&5u32.to_le_bytes());
         past.extend_from_slice(&1u32.to_le_bytes());
-        assert!(Block::parse(Bytes::from_vec(past)).is_err(), "a restart point past the entries");
+        // A restart point past the entries: a seek that goes to it fails.
+        let past = Block::parse(Bytes::from_vec(past)).unwrap();
+        assert!(BlockCursor::seek(past, b"\xff", <[u8]>::cmp).is_err());
         let mut b = vec![1, 0, 0, 0, 0, 0, 0, 0, 0];
         b.extend_from_slice(&0u32.to_le_bytes());
         assert!(Block::parse(Bytes::from_vec(b)).is_err(), "entries without restarts");

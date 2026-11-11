@@ -492,7 +492,7 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         let mut ctx = Ctx { backend: &mut **backend, shared, db: self.db, cmd: &cmd };
         let stages = [RawValue::Document(raw)];
         match planned_read(&mut ctx, &ns, (&stages, None), self.concern, false).map_err(to_mql)? {
-            Some((docs, _)) => Ok(docs),
+            Some((docs, _, _)) => Ok(docs),
             None => read(&mut **backend, Some(shared), &ns, self.concern).map_err(to_mql),
         }
     }
@@ -1032,13 +1032,13 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         .map_err(|e| executor_on(&ns_text, e))?,
         false => None,
     };
-    let (docs, metas, sbe) = match planned {
-        Some((docs, metas)) => (docs, metas, true),
+    let (docs, metas, sbe, applied) = match planned {
+        Some((docs, metas, applied)) => (docs, metas, true, applied),
         None if on_collection && pipeline.reads_collection() => {
             let (docs, sbe) = read_engine(&mut *ctx.backend, Some(ctx.shared), &ns, a.concern)?;
-            (docs, None, sbe)
+            (docs, None, sbe, 0)
         }
-        None => (Vec::new(), None, true),
+        None => (Vec::new(), None, true, 0),
     };
     let env = WireEnv {
         backend: RefCell::new(&mut *ctx.backend),
@@ -1059,8 +1059,9 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         err
     };
     pipeline.check_plan(&env).map_err(from_mql)?;
-    let (mut results, _) =
-        pipeline.run_with_meta(docs, metas, &env, sbe).map_err(|e| executor(from_mql(e)))?;
+    let (mut results, _) = pipeline
+        .run_after_matches(applied, (docs, metas), &env, sbe)
+        .map_err(|e| executor(from_mql(e)))?;
     let vars = env.vars.clone();
     drop(env);
     // A classic stage at the end writes each document it gives as BSON, which may not pass
@@ -1277,7 +1278,7 @@ fn planned_read<B: Backend + ?Sized>(
             .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
             .collect::<Result<Vec<_>, CommandError>>()?;
         let metas = index_keys.then(|| docs.iter().map(|_| Meta::new()).collect());
-        return Ok(Some((docs, metas)));
+        return Ok(Some((docs, metas, 0)));
     }
     let parsed = super::plan_exec::parsed_filter(&filter, vars)?;
     let read = super::plan_exec::ReadPlan {
@@ -1328,16 +1329,33 @@ fn planned_read<B: Backend + ?Sized>(
             })
             .collect()
     });
-    Ok(Some((docs, metas)))
+    Ok(Some((docs, metas, filter_of_leading_matches(&stages, &filter))))
+}
+
+/// How many of `stages`, from the first, are `$match`es whose filters, one after the other, are
+/// `filter`: the documents an index plan read with `filter` passed them. Any other order the
+/// planner took them in counts as none.
+fn filter_of_leading_matches(stages: &[Document], filter: &Document) -> usize {
+    let mut merged = Document::new();
+    let mut n = 0;
+    for st in stages {
+        let Some(Value::Document(m)) = st.get("$match").filter(|_| st.len() == 1) else { break };
+        for (k, v) in m.iter() {
+            merged.push(k, v.clone());
+        }
+        n += 1;
+    }
+    if n > 0 && &merged == filter { n } else { 0 }
 }
 
 /// RefDb's code for a `$shardedDataDistribution` outside `admin`.
 const SHARDED_DATA_DISTRIBUTION_NOT_ADMIN: crate::error::Code =
     crate::error::Code { code: 6_789_102, name: "Location6789102" };
 
-/// The documents an index plan read and, when the pipeline reads `{$meta: "indexKey"}`, the
-/// metadata of each with its index key.
-type PlannedRead = (Vec<Document>, Option<Vec<Meta>>);
+/// The documents an index plan read, when the pipeline reads `{$meta: "indexKey"}` the metadata
+/// of each with its index key, and how many of the pipeline's first `$match`es its filter is
+/// (the documents already passed them).
+type PlannedRead = (Vec<Document>, Option<Vec<Meta>>, usize);
 
 /// Refuses a stage the node answers itself on a namespace it does not run on (measured on a
 /// `refrouter` 9.0.4): `$listLocalSessions` only with `aggregate: 1`, `$listSessions` only on

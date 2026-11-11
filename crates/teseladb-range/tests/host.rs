@@ -593,6 +593,38 @@ fn a_point_read_outside_the_core_waits_only_for_the_writes_of_its_key() {
     }
 }
 
+/// A point read whose key only shares its slot with a key a write holds is still served outside
+/// the core: it looks at the latched keys themselves after it reads (H-013 of the native tests,
+/// writes slowing the reads of other documents), and the next write of its key goes above it.
+#[test]
+fn a_point_read_outside_the_core_is_served_when_its_key_only_shares_a_slot() {
+    use teseladb_range::latch::KeySlots;
+    let written = b"\x01count".as_slice();
+    let sharing = (0u32..)
+        .map(|i| [b"\x01k".as_slice(), &i.to_be_bytes()].concat())
+        .find(|k| KeySlots::slot(k) == KeySlots::slot(written))
+        .expect("a key in the same slot");
+    let mut n = Node::new();
+    n.mutate(&sharing, Box::new(SetKey(sharing.clone(), Some(7))), MAJORITY);
+    n.settle();
+    let w = n.mutate(written, Box::new(Inc), MAJORITY);
+    let FastRead::Found { ts: read, value } =
+        read_outside(&n, &sharing, ReadConcern::Local, Nanos::ZERO)
+    else {
+        panic!("a write of another key in the same slot does not send the read to the core")
+    };
+    assert_eq!(value, Some((1, vec![7])));
+    assert!(matches!(read_outside(&n, written, ReadConcern::Local, Nanos::ZERO), FastRead::Core));
+    n.settle();
+    assert!(n.reply(w).is_some());
+    let later = n.mutate(&sharing, Box::new(SetKey(sharing.clone(), Some(8))), MAJORITY);
+    n.settle();
+    match n.reply(later) {
+        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > read, "{ts:?} above {read:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A scan from a connection's thread (005 FR-028), as [`read_outside`]; no block is read.
 fn scan_outside(
     n: &Node,

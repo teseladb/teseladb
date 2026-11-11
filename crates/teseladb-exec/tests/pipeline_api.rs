@@ -135,3 +135,23 @@ fn a_facet_refuses_stages_that_are_not_documents() {
     assert!(parse(r#"[{"$facet":{"a":[5]}}]"#, true).is_err());
     assert!(parse(r#"[{"$facet":{"a":[{}]}}]"#, true).is_err());
 }
+
+/// Documents an index plan read with the filter of the pipeline's first `$match`es skip those
+/// stages and run from the next; a count past them runs the whole pipeline.
+#[test]
+fn documents_that_passed_the_leading_matches_run_from_the_next_stage() {
+    let p = parse(
+        r#"[{"$match":{"a":1}},{"$match":{"b":2}},{"$group":{"_id":"$a","n":{"$sum":1}}}]"#,
+        true,
+    )
+    .expect("valid");
+    assert_eq!(p.leading_matches(), 2);
+    let doc = |a: i32| extjson::parse(&format!(r#"{{"a":{a},"b":2}}"#)).expect("JSON");
+    let docs = vec![doc(1), doc(5)];
+    let (all, _) = p.run_with_meta(docs.clone(), None, &Plain, true).expect("runs");
+    assert_eq!(all.len(), 1, "the matches drop the document with a: 5");
+    let (skipped, _) = p.run_after_matches(2, (docs.clone(), None), &Plain, true).expect("runs");
+    assert_eq!(skipped.len(), 2, "both groups: the source already filtered");
+    let (whole, _) = p.run_after_matches(3, (docs, None), &Plain, true).expect("runs");
+    assert_eq!(whole, all, "more than the leading matches counts as none");
+}
