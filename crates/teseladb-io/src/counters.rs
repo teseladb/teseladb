@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SYNCS: AtomicU64 = AtomicU64::new(0);
 static DEVICE_FLUSHES: AtomicU64 = AtomicU64::new(0);
 static DEVICE_FLUSH_MICROS: AtomicU64 = AtomicU64::new(0);
+static DEVICE_PUSHES: AtomicU64 = AtomicU64::new(0);
+static DEVICE_PUSH_MICROS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts a sync of a file or a folder to the disk.
 pub(crate) fn record_sync() {
@@ -36,4 +38,22 @@ pub(crate) fn record_device_flush_micros(micros: u64) {
 /// waiting in a drive's cache makes them longer (H-008 of the native tests).
 pub fn device_flush_micros() -> u64 {
     DEVICE_FLUSH_MICROS.load(Ordering::Relaxed)
+}
+
+/// Counts the files the leader of a flush group sent to the drive before its flush, and the time
+/// it took to send them all.
+pub(crate) fn record_device_pushes(files: u64, micros: u64) {
+    DEVICE_PUSHES.fetch_add(files, Ordering::Relaxed);
+    DEVICE_PUSH_MICROS.fetch_add(micros, Ordering::Relaxed);
+}
+
+/// The files the leaders of flush groups sent to the drive since the process started.
+pub fn device_pushes() -> u64 {
+    DEVICE_PUSHES.load(Ordering::Relaxed)
+}
+
+/// The microseconds the leaders of flush groups spent sending their files to the drive before
+/// each flush: added to the flushes', the length of the groups a confirmed write waits for.
+pub fn device_push_micros() -> u64 {
+    DEVICE_PUSH_MICROS.load(Ordering::Relaxed)
 }

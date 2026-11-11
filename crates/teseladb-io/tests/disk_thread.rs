@@ -42,7 +42,8 @@ fn ops(file: FileId) -> Vec<IoOp> {
     for i in 0..100u64 {
         v.push(IoOp::WriteAt { file, offset: i, data: Bytes::from_vec(vec![i as u8]), batch: i });
     }
-    v.push(IoOp::Sync { file, batch: 99 });
+    // A sync outside a store's batches keeps its place (a batch's runs on a sync thread).
+    v.push(IoOp::Sync { file, batch: 0 });
     v.push(IoOp::ReadAt { file, offset: 0, len: 100, token: 7 });
     v
 }
@@ -101,6 +102,71 @@ fn operations_run_in_order_over_real_files() {
         other => panic!("unexpected {other:?}"),
     }
     drop(t);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_batch_sync_on_a_real_disk_answers_on_its_own_and_other_syncs_stay_in_order() {
+    // 012 FR-014: the sync of a store's batch (`batch > 0`) runs on a sync thread, so its result
+    // may come after that of a later write; a sync with `batch: 0` keeps its place.
+    let dir =
+        std::env::temp_dir().join(format!("teseladb-disk-thread-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, mut rx) = channel(Arc::new(Counter::default()));
+    let t =
+        DiskThread::spawn("disk-3".into(), FileDisk::open(&dir).unwrap(), tx, Msg::Disk).unwrap();
+    let file = FileId(1);
+    let write = |offset: u64| IoOp::WriteAt {
+        file,
+        offset,
+        data: Bytes::from_vec(vec![1; 4]),
+        batch: offset + 1,
+    };
+    let sent = [
+        IoOp::Create { file, path: PathBuf::from("f"), prealloc: 0 },
+        write(0),
+        IoOp::Sync { file, batch: 1 },
+        write(4),
+        IoOp::Sync { file, batch: 2 },
+        write(8),
+        IoOp::Sync { file, batch: 0 },
+        IoOp::Close { file },
+    ];
+    for op in sent.iter().cloned() {
+        t.submit(op).unwrap();
+    }
+    let got = wait_for(&mut rx, sent.len());
+    // Every operation answered once, all well.
+    let mut answered: Vec<IoOp> = got
+        .iter()
+        .map(|d| match d {
+            IoDone::Ok(op) => op.clone(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    let mut want: Vec<IoOp> = sent.iter().map(IoOp::without_data).collect();
+    let key = |op: &IoOp| format!("{op:?}");
+    answered.sort_by_key(key);
+    want.sort_by_key(key);
+    assert_eq!(answered, want);
+    // The operations that stay in order: everything but the two batch syncs.
+    let in_order: Vec<IoOp> = got
+        .iter()
+        .filter_map(|d| match d {
+            IoDone::Ok(op) if !matches!(op, IoOp::Sync { batch, .. } if *batch > 0) => {
+                Some(op.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let want_order: Vec<IoOp> = sent
+        .iter()
+        .filter(|op| !matches!(op, IoOp::Sync { batch, .. } if *batch > 0))
+        .map(IoOp::without_data)
+        .collect();
+    assert_eq!(in_order, want_order);
+    let mut disk = t.shutdown().unwrap();
+    assert_eq!(disk.read_all(&PathBuf::from("f")).unwrap().len(), 12);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

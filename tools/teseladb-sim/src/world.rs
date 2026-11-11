@@ -499,6 +499,7 @@ pub fn sim_storage_config() -> StorageConfig {
     StorageConfig {
         wal_segment_size: 1 << 20,
         max_batch_bytes: 64 << 10,
+        max_inflight_batches: teseladb_multiraft::INFLIGHT_BATCHES,
         ..StorageConfig::default()
     }
 }

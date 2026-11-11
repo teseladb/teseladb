@@ -215,7 +215,9 @@ pub struct NodeLogic {
     /// The data ranges of this core.
     data: Option<DataCore>,
     /// Whose each disk operation in flight is.
-    io: VecDeque<IoSlot>,
+    /// Who issued each disk operation in flight, in order; a sync of a log batch keeps its
+    /// operation, since it may end after later operations (012 FR-014).
+    io: VecDeque<(IoSlot, Option<IoOp>)>,
     /// Rollback files being written.
     rollback: RollbackWriter,
     /// The node's cores (empty until [`NodeMsg::Cores`]).
@@ -1744,11 +1746,11 @@ impl CoreLogic for NodeLogic {
             self.core.rollback_durable();
         }
         if let Some(op) = self.core.poll_io(now) {
-            self.io.push_back(IoSlot::Log);
+            self.io.push_back((IoSlot::Log, batch_sync(&op).then(|| op.without_data())));
             return Some(op);
         }
         if let Some(op) = self.rollback.poll_io() {
-            self.io.push_back(IoSlot::Rollback);
+            self.io.push_back((IoSlot::Rollback, None));
             return Some(op);
         }
         let data = self.data.as_mut()?;
@@ -1756,13 +1758,13 @@ impl CoreLogic for NodeLogic {
         // Completions that came with it (an export, an ingestion) may have moved the core.
         self.pump();
         let (op, owner) = next?;
-        self.io.push_back(IoSlot::Data(owner));
+        self.io.push_back((IoSlot::Data(owner), None));
         Some(op)
     }
 
     fn on_io_done(&mut self, done: IoDone, now: Nanos) {
         self.now = now;
-        match self.io.pop_front().expect("a disk operation in flight") {
+        match take_slot(&mut self.io, &done) {
             IoSlot::Log => self.core.on_io_done(done, now),
             IoSlot::Rollback => self.rollback.on_io_done(&done, now),
             IoSlot::Data(owner) => {
@@ -1911,6 +1913,24 @@ impl CoreLogic for NodeLogic {
     fn peer_unreachable(&mut self, node: NodeId) {
         self.core.report_unreachable(node);
     }
+}
+
+/// Who issued the operation `done` answers: a log batch's sync ends when the drive's flush covering
+/// it ends, maybe after later operations, so it takes its own slot; anything else takes the oldest
+/// other one, as the disk thread answers it in order.
+fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone) -> IoSlot {
+    let synced = match done {
+        IoDone::Ok(op) | IoDone::Err { op, .. } if batch_sync(op) => Some(op.clone()),
+        _ => None,
+    };
+    let at = io.iter().position(|(_, s)| *s == synced).expect("a disk operation in flight");
+    io.remove(at).expect("found above").0
+}
+
+/// Whether `op` is the sync of a log batch (`batch > 0`), which the disk thread runs away from
+/// its other operations (012 FR-014, D-159).
+fn batch_sync(op: &IoOp) -> bool {
+    matches!(op, IoOp::Sync { batch, .. } if *batch > 0)
 }
 
 #[cfg(test)]
@@ -3426,5 +3446,33 @@ mod tests {
         let v = c.logic(8).view();
         assert!(!v.addrs_current);
         assert_eq!(c.logic(8).addr_update, None);
+    }
+
+    #[test]
+    fn a_batch_sync_takes_its_own_slot_and_the_rest_the_oldest_other() {
+        // 012 FR-014: a log batch's sync may answer after later operations of the disk thread.
+        use teseladb_raftlog::FileId;
+        let (file, data) = (FileId(1), teseladb_types::Bytes::new());
+        let write = |offset| IoOp::WriteAt { file, offset, data: data.clone(), batch: 1 };
+        let sync = IoOp::Sync { file, batch: 1 };
+        let mut io = VecDeque::from([
+            (IoSlot::Log, None),
+            (IoSlot::Log, Some(sync.clone())),
+            (IoSlot::Rollback, None),
+            (IoSlot::Log, None),
+        ]);
+        // The write after the sync answers first; then the rollback's, then the sync.
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(0))), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(4))), IoSlot::Rollback);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync.clone())), IoSlot::Log);
+        assert_eq!(io.len(), 1);
+        let failed =
+            IoDone::Err { op: IoOp::Sync { file, batch: 0 }, errno: teseladb_raftlog::IoErrno::Io };
+        assert_eq!(
+            take_slot(&mut io, &failed),
+            IoSlot::Log,
+            "a sync outside a batch keeps its place"
+        );
+        assert!(io.is_empty());
     }
 }

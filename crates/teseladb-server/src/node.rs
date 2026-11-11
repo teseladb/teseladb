@@ -295,7 +295,11 @@ impl Default for NodeConfig {
             native_addr: String::new(),
             join: Vec::new(),
             join_deadline: JOIN_DEADLINE,
-            storage: StorageConfig::default(),
+            // A batch is written while the ones before wait for their syncs (D-159, H-048).
+            storage: StorageConfig {
+                max_inflight_batches: teseladb_multiraft::INFLIGHT_BATCHES,
+                ..StorageConfig::default()
+            },
             tick: Duration::from_millis(10),
             seed: None,
             lsm: LsmConfig::default(),

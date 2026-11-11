@@ -3,12 +3,21 @@
 //! system takes it) and prints every acknowledgement; the parent kills it with `SIGKILL` at an arbitrary point, recovers the
 //! directory and checks that every acknowledged entry is there and correct.
 //!
+//! In the `pipelined` mode (012 FR-014, D-159) the child writes through a real disk thread with
+//! several batches in flight, whose syncs run on its second thread and end out of order with the
+//! writes of the next batches.
+//!
 //! Without the test harness: the same binary is the parent and, with `TESELADB_CHILD_DIR`, the
 //! child. `TESELADB_KILL_ROUNDS` (10 by default) sets the number of kills.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use teseladb_io::disk_thread::DiskThread;
+use teseladb_io::mailbox::{Notify, channel};
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{CoreStore, LogEntry, LogGap, SnapshotMeta, StorageConfig};
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, Rng};
@@ -16,6 +25,13 @@ use teseladb_types::{Bytes, Durability, GroupId, Nanos, Rng};
 const G: GroupId = GroupId(1);
 /// A snapshot every this many entries, so that WAL segments are released while writing.
 const SNAPSHOT_EVERY: u64 = 100;
+/// Variable that tells the child to write through the disk thread with batches in flight.
+const MODE_VAR: &str = "TESELADB_CHILD_MODE";
+const PIPELINED: &str = "pipelined";
+/// Batches in flight in the `pipelined` mode, as the server has them.
+const INFLIGHT: usize = 4;
+/// Entries the `pipelined` child keeps waiting for their acknowledgement.
+const OUTSTANDING: usize = 8;
 
 fn cfg() -> StorageConfig {
     StorageConfig {
@@ -61,24 +77,80 @@ fn child(dir: &str) {
     }
 }
 
+/// Nobody waits on the mailbox: the child looks at it in a loop.
+struct Polled;
+
+impl Notify for Polled {
+    fn notify(&self) {}
+}
+
+/// Child process of the `pipelined` mode: appends through a disk thread, several entries and
+/// batches at once, and prints "ok <index>" as each is acknowledged.
+fn child_pipelined(dir: &str) {
+    let cfg = StorageConfig { max_inflight_batches: INFLIGHT, ..cfg() };
+    let mut disk = disks::open(dir, teseladb_io::node_disk::IoExecutor::Threads);
+    let mut s = CoreStore::recover(&cfg, 0, &mut disk).unwrap().0;
+    if s.group(G).is_none() {
+        s.create_group(G, Bytes::new(), Durability::Strict).unwrap();
+        s.run_io(&mut disk, Nanos::ZERO);
+    }
+    let (tx, mut rx) = channel(Arc::new(Polled));
+    let thread = DiskThread::spawn("disk-crash".into(), disk, tx, |d| d).unwrap();
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    let mut index = s.group(G).unwrap().last_index() + 1;
+    let mut waiting = VecDeque::new();
+    let mut done = Vec::new();
+    // Until the parent kills it.
+    loop {
+        while waiting.len() < OUTSTANDING {
+            let t = s.append_raft(G, &[entry(index)], None, Durability::Strict).unwrap();
+            waiting.push_back((t, index));
+            index += 1;
+        }
+        while let Some(op) = s.poll_io(Nanos::ZERO) {
+            thread.submit(op).unwrap();
+        }
+        rx.drain_into(&mut done);
+        for d in done.drain(..) {
+            for (t, r) in s.on_io_done(d, Nanos::ZERO).tickets {
+                r.unwrap();
+                // Tickets end in the order they were taken.
+                let (first, i) = waiting.pop_front().unwrap();
+                assert_eq!(first, t);
+                writeln!(out, "ok {i}").unwrap();
+            }
+        }
+        out.flush().unwrap();
+    }
+}
+
 #[path = "common/disks.rs"]
 mod disks;
 
 fn main() {
     match std::env::var("TESELADB_CHILD_DIR") {
+        Ok(dir) if std::env::var(MODE_VAR).as_deref() == Ok(PIPELINED) => child_pipelined(&dir),
         Ok(dir) => child(&dir),
         Err(_) => {
             for (name, exec) in disks::executors() {
-                sigkill_never_loses_confirmed_entries(name, exec);
+                sigkill_never_loses_confirmed_entries(name, exec, None);
             }
+            let threads = teseladb_io::node_disk::IoExecutor::Threads;
+            sigkill_never_loses_confirmed_entries("threads", threads, Some(PIPELINED));
             println!("crash_real: ok");
         }
     }
 }
 
-fn sigkill_never_loses_confirmed_entries(name: &str, exec: teseladb_io::node_disk::IoExecutor) {
-    let dir =
-        std::env::temp_dir().join(format!("teseladb-crash-real-{name}-{}", std::process::id()));
+fn sigkill_never_loses_confirmed_entries(
+    name: &str,
+    exec: teseladb_io::node_disk::IoExecutor,
+    mode: Option<&str>,
+) {
+    let tag = mode.unwrap_or("run-io");
+    let dir = std::env::temp_dir()
+        .join(format!("teseladb-crash-real-{name}-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut confirmed: Vec<u64> = Vec::new();
     let mut rng = Rng::new(42);
@@ -88,6 +160,7 @@ fn sigkill_never_loses_confirmed_entries(name: &str, exec: teseladb_io::node_dis
         let mut c = Command::new(std::env::current_exe().unwrap())
             .env("TESELADB_CHILD_DIR", &dir)
             .env(disks::EXECUTOR_VAR, name)
+            .env(MODE_VAR, tag)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -109,7 +182,7 @@ fn sigkill_never_loses_confirmed_entries(name: &str, exec: teseladb_io::node_dis
         c.wait().unwrap();
         let mut disk = disks::open(&dir, exec);
         let s = CoreStore::recover(&cfg(), 0, &mut disk)
-            .unwrap_or_else(|e| panic!("{name}, round {round}: {e:?}"))
+            .unwrap_or_else(|e| panic!("{name} {tag}, round {round}: {e:?}"))
             .0;
         for &i in &confirmed {
             match s.entries(G, i, i + 1, u64::MAX) {
@@ -118,7 +191,7 @@ fn sigkill_never_loses_confirmed_entries(name: &str, exec: teseladb_io::node_dis
                 got => assert_eq!(
                     got.ok().and_then(|v| v.first().cloned()),
                     Some(entry(i)),
-                    "round {round}, entry {i}"
+                    "{tag}, round {round}, entry {i}"
                 ),
             }
         }

@@ -133,6 +133,7 @@ impl Flusher {
     ) -> io::Result<u64> {
         let n = self.started.fetch_add(1, Ordering::SeqCst) + 1;
         let mut done = Ok(());
+        let (start, mut pushed) = (std::time::Instant::now(), 0u64);
         for w in &self.waiters {
             let v = w.load(Ordering::Acquire);
             if v & PENDING == 0 {
@@ -141,10 +142,13 @@ impl Flusher {
             if done.is_ok() {
                 // The low bits are the file a waiter wrote there.
                 done = push(u32::try_from(v & !PENDING).unwrap_or(u32::MAX));
+                pushed += 1;
             }
             // Its owner waits while the mark is there, so only this group changes it.
             let _ = w.compare_exchange(v, n, Ordering::AcqRel, Ordering::Acquire);
         }
+        let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        crate::counters::record_device_pushes(pushed, micros);
         if done.is_ok() {
             done = flush();
         }

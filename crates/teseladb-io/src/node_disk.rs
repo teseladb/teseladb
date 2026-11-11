@@ -185,6 +185,18 @@ impl NodeDisk {
     }
 }
 
+impl NodeDisk {
+    /// The sync of a store's batch as a job for another thread, on the disk thread's `FileDisk`
+    /// ([`FileDisk::detach_sync`]); io_uring runs its syncs in the core's loop.
+    pub(crate) fn detach_sync(&self, op: &IoOp) -> Option<crate::file_disk::SyncJob> {
+        match self {
+            NodeDisk::Threads(d) => d.detach_sync(op),
+            #[cfg(target_os = "linux")]
+            NodeDisk::Uring(_) => None,
+        }
+    }
+}
+
 impl Disk for NodeDisk {
     fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
         self.disk().list(dir)

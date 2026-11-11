@@ -31,3 +31,8 @@ pub use crate::frame::{
     expand_heartbeats, route_stray,
 };
 pub use crate::state_machine::{ApplyCtx, ApplyError, RestoreError, StateMachine};
+
+/// Batches of a core's Raft log in flight at once (001 FR-004, D-159), for the stores of the server
+/// and of the simulator: a write that reaches a core whose batch waits for its sync goes in the
+/// drive's next flush instead of the one after (H-048 of the native tests).
+pub const INFLIGHT_BATCHES: usize = 4;

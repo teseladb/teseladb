@@ -458,7 +458,12 @@ fn node_value(n: NodeId) -> Value {
 
 /// The disk's metrics: its syncs, which bound what a confirmed write costs (H-008 of the native
 /// tests against RefDb).
-fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, flush_micros: u64) {
+fn disk_metrics(
+    out: &mut String,
+    syncs: u64,
+    flushes: u64,
+    (flush_micros, pushes, push_micros): (u64, u64, u64),
+) {
     let name = "teseladb_disk_syncs_total";
     let _ = writeln!(out, "# HELP {name} Syncs of files and folders to the disk.");
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {syncs}");
@@ -475,6 +480,19 @@ fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, flush_micros: u64) {
          mean, which grows with what the drive has waiting in its cache."
     );
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {flush_micros}");
+    let name = "teseladb_disk_device_pushes_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Files the leader of a flush group sent to the drive before its flush."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {pushes}");
+    let name = "teseladb_disk_device_push_micros_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Microseconds the leaders of flush groups spent sending their files to the \
+         drive before each flush."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {push_micros}");
 }
 
 /// The reads the connections' threads served without the cores (005 FR-028), and those whose
@@ -622,7 +640,11 @@ impl AdminBackend for NodeAdmin {
             &mut out,
             teseladb_io::counters::syncs(),
             teseladb_io::counters::device_flushes(),
-            teseladb_io::counters::device_flush_micros(),
+            (
+                teseladb_io::counters::device_flush_micros(),
+                teseladb_io::counters::device_pushes(),
+                teseladb_io::counters::device_push_micros(),
+            ),
         );
         let outside = (
             crate::backend::served_outside(),
@@ -1475,10 +1497,12 @@ mod tests {
     #[test]
     fn the_disk_metrics_give_the_syncs() {
         let mut out = String::new();
-        disk_metrics(&mut out, 7, 3, 9_000);
+        disk_metrics(&mut out, 7, 3, (9_000, 5, 400));
         assert!(out.lines().any(|l| l == "teseladb_disk_syncs_total 7"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_disk_device_flush_micros_total 9000"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_disk_device_flushes_total 3"), "{out}");
+        assert!(out.lines().any(|l| l == "teseladb_disk_device_pushes_total 5"), "{out}");
+        assert!(out.lines().any(|l| l == "teseladb_disk_device_push_micros_total 400"), "{out}");
         assert!(out.lines().any(|l| l == "# TYPE teseladb_disk_syncs_total counter"), "{out}");
     }
 

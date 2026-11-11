@@ -1,14 +1,22 @@
 //! Per-core disk thread: it executes the core's [`IoOp`]s one after another, in the
 //! order they were submitted, and hands every [`IoDone`] back through the core's mailbox. The
-//! core thread never blocks on disk.
+//! core thread never blocks on disk. The sync of a store's batch on a real disk (`IoOp::Sync` with
+//! `batch > 0`) goes to one of the core's sync threads, which waits for the drive's flush and
+//! hands its result back on its own: the disk thread writes the next batch meanwhile, and the
+//! sync of that batch waits for the drive's next flush while the one before is still in the
+//! current flush, each on its own thread (012 FR-014, D-159). Its result may come after those of
+//! later operations; the store makes its batches durable in order.
 
+use std::any::Any;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use teseladb_raftlog::{Disk, IoDone, IoOp};
 
+use crate::file_disk::{FileDisk, SyncJob};
 use crate::mailbox::MailboxSender;
+use crate::node_disk::NodeDisk;
 
 /// Handle of a running disk thread.
 #[derive(Debug)]
@@ -28,7 +36,10 @@ impl<D: Disk + Send + 'static> DiskThread<D> {
         wrap: fn(IoDone) -> M,
     ) -> io::Result<DiskThread<D>> {
         let (tx, rx) = mpsc::channel();
-        let handle = thread::Builder::new().name(name).spawn(move || run(disk, rx, done, wrap))?;
+        let sync_name = format!("{name}-sync");
+        let handle = thread::Builder::new()
+            .name(name)
+            .spawn(move || run(disk, rx, (done, wrap), &sync_name))?;
         Ok(DiskThread { ops: tx, handle: Some(handle) })
     }
 
@@ -71,16 +82,98 @@ impl<D> Drop for DiskThread<D> {
     }
 }
 
-fn run<D: Disk, M: Send>(
+fn run<D: Disk + 'static, M: Send + 'static>(
     mut disk: D,
     ops: Receiver<IoOp>,
-    done: MailboxSender<M>,
-    wrap: fn(IoDone) -> M,
+    (done, wrap): (MailboxSender<M>, fn(IoDone) -> M),
+    sync_name: &str,
 ) -> D {
+    let mut syncs: Option<Syncs> = None;
     for op in ops {
+        let detached = detach(&disk, &op);
+        if let Some(job) = detached {
+            let helper = match &mut syncs {
+                Some(h) => h,
+                None => match Syncs::spawn(sync_name, done.clone(), wrap) {
+                    Ok(h) => syncs.insert(h),
+                    // Without a second thread the sync runs here, in order.
+                    Err(_) => {
+                        if done.send_waiting(wrap(job())).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                },
+            };
+            helper.submit(job);
+            continue;
+        }
         if done.send_waiting(wrap(disk.execute(op))).is_err() {
             break;
         }
     }
+    // The syncs handed over finish before the disk goes back.
+    if let Some(h) = syncs {
+        h.join();
+    }
     disk
+}
+
+/// The sync of a store's batch as a job for the second thread, when `disk` is a real one: the
+/// node's disk or a bare `FileDisk`. Any other disk (in memory, simulated) runs it in order.
+fn detach<D: 'static>(disk: &D, op: &IoOp) -> Option<SyncJob> {
+    let any = disk as &dyn Any;
+    if let Some(d) = any.downcast_ref::<NodeDisk>() {
+        return d.detach_sync(op);
+    }
+    any.downcast_ref::<FileDisk>().and_then(|d| d.detach_sync(op))
+}
+
+/// Threads that run the syncs of a core's batches away from its disk thread, one per batch the
+/// server keeps in flight (`teseladb_multiraft::INFLIGHT_BATCHES`): each sync waits for its flush
+/// on a thread of its own, so a later one joins the drive's next group while an earlier one is
+/// still in the current group. Jobs go to them in turn, each through its own channel (no lock,
+/// 012 FR-008).
+const SYNC_THREADS: usize = 4;
+
+struct Syncs {
+    workers: Vec<(Sender<SyncJob>, JoinHandle<()>)>,
+    next: usize,
+}
+
+impl Syncs {
+    fn spawn<M: Send + 'static>(
+        name: &str,
+        done: MailboxSender<M>,
+        wrap: fn(IoDone) -> M,
+    ) -> io::Result<Syncs> {
+        let mut workers = Vec::with_capacity(SYNC_THREADS);
+        for i in 0..SYNC_THREADS {
+            let (jobs, rx) = mpsc::channel::<SyncJob>();
+            let done = done.clone();
+            let handle = thread::Builder::new().name(format!("{name}-{i}")).spawn(move || {
+                for job in rx {
+                    if done.send_waiting(wrap(job())).is_err() {
+                        break;
+                    }
+                }
+            })?;
+            workers.push((jobs, handle));
+        }
+        Ok(Syncs { workers, next: 0 })
+    }
+
+    /// Queues `job` on the next thread in turn; a thread that stopped (its core is gone) has
+    /// nobody to answer.
+    fn submit(&mut self, job: SyncJob) {
+        let _ = self.workers[self.next].0.send(job);
+        self.next = (self.next + 1) % self.workers.len();
+    }
+
+    fn join(self) {
+        for (jobs, handle) in self.workers {
+            drop(jobs);
+            let _ = handle.join();
+        }
+    }
 }

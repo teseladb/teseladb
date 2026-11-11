@@ -35,6 +35,9 @@ const DIRECT_FLAG: i32 = O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const DIRECT_FLAG: i32 = 0;
 
+/// A sync that runs away from the disk thread, and the result it gives (012 FR-014).
+pub(crate) type SyncJob = Box<dyn FnOnce() -> IoDone + Send>;
+
 /// An open file: its buffered descriptor and, with `O_DIRECT`, the direct one.
 #[derive(Debug)]
 struct DiskFile {
@@ -193,6 +196,26 @@ impl FileDisk {
         }
         use std::os::unix::fs::OpenOptionsExt;
         Self::options().custom_flags(DIRECT_FLAG).open(full).map(Some)
+    }
+
+    /// For the sync of a store's batch (`IoOp::Sync` with `batch > 0`, 012 FR-014, D-159): a job
+    /// that makes the file durable on another thread, with a descriptor of its own, so that the
+    /// disk thread writes the next batch meanwhile. `None` for any other operation, which runs in
+    /// order: the syncs of the LSM, of atomic writes and of folders come before what follows them.
+    pub(crate) fn detach_sync(&self, op: &IoOp) -> Option<SyncJob> {
+        let IoOp::Sync { file, batch } = op else { return None };
+        if *batch == 0 {
+            return None;
+        }
+        let f = self.files.get(file)?.file.try_clone().ok()?;
+        let op = op.without_data();
+        Some(Box::new(move || {
+            crate::counters::record_sync();
+            match crate::drive_flush::make_durable(&f) {
+                Ok(()) => IoDone::Ok(op),
+                Err(e) => IoDone::Err { op, errno: io_errno(e) },
+            }
+        }))
     }
 
     fn file(&self, id: FileId) -> Result<&DiskFile, IoErrno> {
