@@ -9,6 +9,9 @@
 (* without having latched it before): CountBeforeMark = FALSE is that mutant.                      *)
 (* ConnChecks, MarkAboveBound and CountBeforeMark turn each defence off: without any of them,      *)
 (* ReadsAreStable fails.                                                                            *)
+(* An outside read covers a set of keys, checked together: one key is a point read, the keys of a  *)
+(* span (those with no version included) a scan, which looks at the latched keys in order under a  *)
+(* mutex (H-049 of the native tests).                                                              *)
 (* Invariant: a read of key k served at t keeps seeing the same version of k.                      *)
 EXTENDS Naturals, FiniteSets
 
@@ -22,7 +25,7 @@ VARIABLES
     inflight,   \* <<mark, key>> of the writes whose latch is held (proposed, not applied)
     versions,   \* <<mark, key>> of the applied versions
     reads,      \* served reads: <<key, mark, mark of the version seen (0 for none)>>
-    conn,       \* an outside read between its two steps: <<key, mark>>, or <<"none", 0>>
+    conn,       \* an outside read between its two steps: <<keys, mark>>, or <<{}, 0>>
     writes      \* writes begun
 
 vars == <<floor, bound, pend, marking, inflight, versions, reads, conn, writes>>
@@ -40,7 +43,7 @@ Init ==
     /\ inflight = {}
     /\ versions = {}
     /\ reads = {}
-    /\ conn = <<None, 0>>
+    /\ conn = <<{}, 0>>
     /\ writes = 0
 
 \* A write of key k begins (one marking at a time, at most one in flight per key); with
@@ -95,24 +98,24 @@ Read ==
         /\ floor' = [floor EXCEPT ![k] = IF t > @ THEN t ELSE @]
     /\ UNCHANGED <<bound, pend, marking, inflight, versions, conn, writes>>
 
-\* A read of key k outside the core raises the bound to its mark...
+\* A read of the keys S outside the core raises the bound to its mark...
 ConnStart ==
-    /\ conn[1] = None
+    /\ conn[1] = {}
     /\ Cardinality(reads) < MaxReads
-    /\ \E k \in Keys, t \in Marks :
-        /\ conn' = <<k, t>>
+    /\ \E S \in SUBSET Keys \ {{}}, t \in Marks :
+        /\ conn' = <<S, t>>
         /\ bound' = IF t > bound THEN t ELSE bound
     /\ UNCHANGED <<floor, pend, marking, inflight, versions, reads, writes>>
 
-\* ...then reads if no write of its key is in flight; otherwise it goes to the core.
+\* ...then reads them if no write of any of them is in flight; otherwise it goes to the core.
 ConnFinish ==
-    /\ conn[1] /= None
-    /\ LET k == conn[1]
+    /\ conn[1] /= {}
+    /\ LET S == conn[1]
            t == conn[2]
-       IN reads' = IF pend[k] = 0 \/ ~ConnChecks
-                      THEN reads \cup {<<k, t, Seen(k, t)>>}
+       IN reads' = IF (\A k \in S : pend[k] = 0) \/ ~ConnChecks
+                      THEN reads \cup {<<k, t, Seen(k, t)>> : k \in S}
                       ELSE reads
-    /\ conn' = <<None, 0>>
+    /\ conn' = <<{}, 0>>
     /\ UNCHANGED <<floor, bound, pend, marking, inflight, versions, writes>>
 
 Next == Count \/ Propose \/ CountLate \/ Apply \/ Read \/ ConnStart \/ ConnFinish

@@ -563,8 +563,8 @@ fn a_read_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
 
 /// A point read outside the core looks only at the writes of its own key (H-010 of the native
 /// tests, `spec/tla/HlcKeyLatches.tla`): a write in flight on another key does not send it to the
-/// core, and the next write of the key it read goes above its mark. A scan still looks at every
-/// write.
+/// core, and the next write of the key it read goes above its mark. A scan over both keys still
+/// sees the write in flight.
 #[test]
 fn a_point_read_outside_the_core_waits_only_for_the_writes_of_its_key() {
     use teseladb_range::latch::KeySlots;
@@ -644,6 +644,36 @@ fn a_scan_outside_the_core_gives_the_documents_of_the_span_and_a_later_write_goe
     n.settle();
     match n.reply(w) {
         Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > mark, "{ts:?} above {mark:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A scan outside the core looks only at the writes of its span (H-049 of the native tests): a
+/// write in flight elsewhere in the range does not send it to the core; one of a key in its span
+/// does, also of a key with no version yet; and the next write of its span goes above its mark.
+#[test]
+fn a_scan_outside_the_core_waits_only_for_the_writes_of_its_span() {
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    // An insert in flight of a key that has no version yet.
+    let w = n.mutate(b"\x01m", Box::new(SetKey(b"\x01m".to_vec(), Some(2))), MAJORITY);
+    let (read, rows) = scan_outside(&n, (b"\x01a", b"\x01k"), 10, ReadConcern::Local)
+        .expect("a write past its span does not send the scan to the core");
+    assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![1]))]);
+    assert!(scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).is_none());
+    assert!(scan_outside(&n, (b"\x01m", b"\x01m\x00"), 10, ReadConcern::Local).is_none());
+    assert!(scan_outside_way(&n, (b"\x01k", b"\x01y"), (1, true), ReadConcern::Local).is_none());
+    n.settle();
+    assert!(n.reply(w).is_some());
+    let (_, all) =
+        scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).expect("served outside");
+    assert_eq!(all.len(), 2);
+    // A key of the span it read is written above its mark.
+    let later = n.mutate(b"\x01b", Box::new(SetKey(b"\x01b".to_vec(), Some(3))), MAJORITY);
+    n.settle();
+    match n.reply(later) {
+        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > read, "{ts:?} above {read:?}"),
         other => panic!("{other:?}"),
     }
 }

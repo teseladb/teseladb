@@ -8,8 +8,9 @@
 //! reads only if no write holds a latch it covers: either it sees the write, or the write sees its
 //! bound and takes a mark above it (`spec/tla/HlcLatches.tla`, which fails without either step).
 //! A point read looks at the writes of its own key, in the slots the latches count
-//! (`spec/tla/HlcKeyLatches.tla`); a scan at every write of the range. Any condition it cannot
-//! check goes back to the core, which serves the read as before.
+//! (`spec/tla/HlcKeyLatches.tla`); a scan at the writes of the keys of its span, absent ones
+//! included, in the latched keys in order; a count at every write of the range. Any condition it
+//! cannot check goes back to the core, which serves the read as before.
 //!
 //! The time the view holds until is checked after the mark is taken: a thread stopped between
 //! the two would otherwise read at a mark from after the lease, where another leader, or the
@@ -35,7 +36,7 @@ use crate::ack::{WriteConcern, met_without_entry};
 use crate::command::DedupKey;
 use crate::doc_count::{Coll, Counts};
 use crate::host::Mutation;
-use crate::latch::KeySlots;
+use crate::latch::{KeySlots, SpanKeys};
 use crate::read::ReadConcern;
 use crate::sm::{dedup_key, split_value};
 use crate::tscache::word;
@@ -54,6 +55,7 @@ pub struct RangeView {
     gc_floor: Hlc,
     held: Arc<AtomicU32>,
     keys: Arc<KeySlots>,
+    spans: Arc<SpanKeys>,
     outside: Arc<AtomicU64>,
     /// The live documents of each collection when the core published the view, if exact (007
     /// FR-039).
@@ -66,6 +68,17 @@ impl std::fmt::Debug for RangeView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RangeView").field("g", &self.g).field("term", &self.term).finish()
     }
+}
+
+/// The writes a read outside the core looks at before it reads.
+#[derive(Clone, Copy, Debug)]
+enum Watch<'a> {
+    /// Those of these keys.
+    Keys(&'a [&'a [u8]]),
+    /// Those of any key of `[start, end)`.
+    Span(&'a [u8], &'a [u8]),
+    /// Every write of the range.
+    Range,
 }
 
 /// What a read outside the core gives.
@@ -94,6 +107,7 @@ pub(crate) struct ViewParts {
     pub(crate) gc_floor: Hlc,
     pub(crate) held: Arc<AtomicU32>,
     pub(crate) keys: Arc<KeySlots>,
+    pub(crate) spans: Arc<SpanKeys>,
     pub(crate) outside: Arc<AtomicU64>,
     pub(crate) counts: Option<Arc<Counts>>,
 }
@@ -109,6 +123,7 @@ impl RangeView {
             gc_floor: p.gc_floor,
             held: p.held,
             keys: p.keys,
+            spans: p.spans,
             outside: p.outside,
             counts: p.counts,
             lsm,
@@ -121,15 +136,10 @@ impl RangeView {
         &self.lsm
     }
 
-    /// The mark of a read outside the core of `keys`, or of the whole range with `None`, with the
-    /// wall clock at `wall_ms`; `now` gives the monotonic time once it is taken. `None` when the
-    /// read goes to the core.
-    fn mark(
-        &self,
-        keys: Option<&[&[u8]]>,
-        wall_ms: u64,
-        now: impl FnOnce() -> Nanos,
-    ) -> Option<Hlc> {
+    /// The mark of a read outside the core of what `watch` names, with the wall clock at
+    /// `wall_ms`; `now` gives the monotonic time once it is taken. `None` when the read goes to
+    /// the core.
+    fn mark(&self, watch: Watch<'_>, wall_ms: u64, now: impl FnOnce() -> Nanos) -> Option<Hlc> {
         let Next::Mark(ts) = self.clock.0.now(wall_ms) else { return None };
         if ts < self.gc_floor {
             return None;
@@ -140,13 +150,19 @@ impl RangeView {
         // Faulty variant (005 T049): a read outside the core that does not look at the writes
         // holding latches, which may then take a mark below it.
         #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
-        let writing = match keys {
-            Some(keys) => keys.iter().any(|k| self.keys.maybe_held(k)),
-            None => self.held.load(Ordering::SeqCst) != 0,
+        let writing = match watch {
+            Watch::Keys(keys) => keys.iter().any(|k| self.keys.maybe_held(k)),
+            Watch::Span(start, end) => self.spans.any_in(start, end),
+            Watch::Range => self.held.load(Ordering::SeqCst) != 0,
         };
         #[cfg(teseladb_bug = "outside_ignores_latches")]
         let writing = {
-            let _ignored = (&self.held, &self.keys, keys);
+            let watched = match watch {
+                Watch::Keys(keys) => keys.len(),
+                Watch::Span(start, end) => start.len() + end.len(),
+                Watch::Range => 0,
+            };
+            let _ignored = (&self.held, &self.keys, &self.spans, watched);
             false
         };
         (!writing && now() < self.valid_until).then_some(ts)
@@ -168,7 +184,7 @@ impl RangeView {
         if !servable {
             return FastRead::Core;
         }
-        let Some(ts) = self.mark(Some(&[key]), wall_ms, now) else { return FastRead::Core };
+        let Some(ts) = self.mark(Watch::Keys(&[key]), wall_ms, now) else { return FastRead::Core };
         let view = self.lsm.view_cached(cache);
         match view.get(&self.lsm, key, ts) {
             SharedRead::Hit(f) if f.kind == Kind::Intent => FastRead::Core,
@@ -208,7 +224,7 @@ impl RangeView {
         if !servable {
             return None;
         }
-        let ts = self.mark(None, wall_ms, now)?;
+        let ts = self.mark(Watch::Span(start, end), wall_ms, now)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = match backward {
             false => Either::Forward(view.scan(start, end, ts)),
@@ -291,7 +307,9 @@ impl RangeView {
         let record = w.dedup.map(|k| dedup_key(self.g, k.lsid, k.txn_number, k.stmt_id));
         let watched: Vec<&[u8]> =
             w.keys.iter().map(Vec::as_slice).chain(record.as_deref()).collect();
-        let Some(ts) = self.mark(Some(&watched), wall_ms, now) else { return FastWrite::Core };
+        let Some(ts) = self.mark(Watch::Keys(&watched), wall_ms, now) else {
+            return FastWrite::Core;
+        };
         if w.deadline.is_some_and(|d| ts.physical > d) {
             return FastWrite::Core;
         }
@@ -354,7 +372,7 @@ impl RangeView {
         if !matches!(concern, ReadConcern::Local | ReadConcern::Majority) {
             return None;
         }
-        self.mark(None, wall_ms, now)?;
+        self.mark(Watch::Range, wall_ms, now)?;
         Some(counts.docs.get(&coll).copied().unwrap_or(0))
     }
 }

@@ -20,10 +20,16 @@
 //! mark is compared with the bound of those reads, so a read that finds the slot of its key at
 //! zero after raising the bound either sees the write or makes it take a mark above
 //! (`spec/tla/HlcKeyLatches.tla`, which fails when a write counts a key after its mark).
+//!
+//! The same keys go, in order, to [`SpanKeys`] for the scans served outside the core: a scan
+//! that finds no key of its span there after raising the bound reads, as a point read does, each
+//! key of the span, the absent ones included (H-049 of the native tests).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use teseladb_lsm::Published;
 
 use teseladb_hlc::Hlc;
 
@@ -80,6 +86,44 @@ impl KeySlots {
     }
 }
 
+/// The keys latched in a range, in order, for the scans outside the core (005 FR-028): the core
+/// publishes them whenever the set changes, before the write that added a key compares its mark
+/// with the bound of those reads, and a scan raises the bound before it loads them. Both steps
+/// are sequentially consistent, so either the scan loads a set with the key or the write sees its
+/// bound (`spec/tla/HlcKeyLatches.tla`).
+pub struct SpanKeys {
+    published: Published<Vec<Vec<u8>>>,
+}
+
+impl Default for SpanKeys {
+    fn default() -> SpanKeys {
+        SpanKeys { published: Published::new(Arc::new(Vec::new())) }
+    }
+}
+
+impl std::fmt::Debug for SpanKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpanKeys").field("keys", &self.published.load().len()).finish()
+    }
+}
+
+impl SpanKeys {
+    /// Whether a write holds a key of `[start, end)`.
+    pub fn any_in(&self, start: &[u8], end: &[u8]) -> bool {
+        if start >= end {
+            return false;
+        }
+        let keys = self.published.load();
+        let first = keys.partition_point(|k| k.as_slice() < start);
+        keys.get(first).is_some_and(|k| k.as_slice() < end)
+    }
+
+    /// Publishes the keys of `held`, in order.
+    fn publish(&self, held: &BTreeMap<Vec<u8>, u32>) {
+        self.published.store(Arc::new(held.keys().cloned().collect()));
+    }
+}
+
 /// A held set of latches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LatchId(pub u64);
@@ -128,7 +172,11 @@ pub struct Latches {
     /// The keys latched, counted for the point reads outside the core, and the slots each write
     /// counted, which its release uncounts.
     keys: Arc<KeySlots>,
-    counted: BTreeMap<LatchId, Vec<usize>>,
+    /// The keys latched, in order, for the scans outside the core, and how many writes hold each.
+    spans: Arc<SpanKeys>,
+    span_counts: BTreeMap<Vec<u8>, u32>,
+    /// The keys each write counted, which its release uncounts.
+    counted: BTreeMap<LatchId, Vec<Vec<u8>>>,
 }
 
 impl Latches {
@@ -192,11 +240,15 @@ impl Latches {
             let record = records.contains(&k);
             self.pipelined.entry(k).or_default().push(Pipelined { ts, id, record, value });
         }
+        let mut added = false;
         for (k, value) in written {
             // A key written and not latched (only a faulty variant leaves one) counts now.
-            self.count_key(id, &k);
+            added |= self.count_key(id, &k);
             let p = Pipelined { ts, id, record: false, value: Some(value) };
             self.pipelined.entry(k).or_default().push(p);
+        }
+        if added {
+            self.spans.publish(&self.span_counts);
         }
         if self.holders.insert(id) {
             self.held
@@ -222,13 +274,17 @@ impl Latches {
             return Err(*holder);
         }
         let ts = self.by_key.values().find(|(_, h)| *h == id).and_then(|(t, _)| *t);
+        let mut added = false;
         for k in keys {
             // Counted here, before the write's mark: the simulator runs a core step whole, so
             // only `spec/tla/HlcKeyLatches.tla` (its CountBeforeMark mutant) reaches a read
             // between the count and the mark.
             if self.by_key.insert(k.clone(), (ts, id)).is_none() {
-                self.count_key(id, k);
+                added |= self.count_key(id, k);
             }
+        }
+        if added {
+            self.spans.publish(&self.span_counts);
         }
         if !keys.is_empty() && self.holders.insert(id) {
             self.held
@@ -263,8 +319,20 @@ impl Latches {
         });
         self.answered.remove(&id);
         self.goes_on.remove(&id);
-        for slot in self.counted.remove(&id).unwrap_or_default() {
-            self.keys.uncount(slot);
+        let counted = self.counted.remove(&id).unwrap_or_default();
+        let mut gone = false;
+        for k in &counted {
+            self.keys.uncount(KeySlots::slot(k));
+            if let Some(n) = self.span_counts.get_mut(k) {
+                *n -= 1;
+                if *n == 0 {
+                    self.span_counts.remove(k);
+                    gone = true;
+                }
+            }
+        }
+        if gone {
+            self.spans.publish(&self.span_counts);
         }
         if self.holders.remove(&id) {
             self.held
@@ -282,11 +350,19 @@ impl Latches {
         Arc::clone(&self.keys)
     }
 
-    /// Counts `key`, latched by `id`, in its slot.
-    fn count_key(&mut self, id: LatchId, key: &[u8]) {
-        let slot = KeySlots::slot(key);
-        self.keys.count(slot);
-        self.counted.entry(id).or_default().push(slot);
+    /// The keys latched in order, for the scans outside the core (005 FR-028).
+    pub fn spans(&self) -> Arc<SpanKeys> {
+        Arc::clone(&self.spans)
+    }
+
+    /// Counts `key`, latched by `id`, in its slot and among the keys in order; whether the keys
+    /// in order gained it, and have to be published before the write's mark.
+    fn count_key(&mut self, id: LatchId, key: &[u8]) -> bool {
+        self.keys.count(KeySlots::slot(key));
+        self.counted.entry(id).or_default().push(key.to_vec());
+        let n = self.span_counts.entry(key.to_vec()).or_insert(0);
+        *n += 1;
+        *n == 1
     }
 
     /// Whether `key` is held.
