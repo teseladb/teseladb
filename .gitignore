@@ -9,6 +9,7 @@ target/
 /tests/compat/out/
 /tests/compat/native/out/
 /tests/compat/native/out-ycsb/
+/tests/compat/native/out-tpcc/
 /tests/compat/.venv/
 /tests/compat/runners/*/node_modules/
 

@@ -1374,6 +1374,7 @@ fn end(
         true => {
             g.txn_resolving.push(run.coord);
             g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
+            g.hot.wake_resolvers();
             None
         }
         false => Some(run),
@@ -1416,7 +1417,8 @@ fn end(
 const RESOLVE_ROUNDS: u32 = 4;
 
 /// Resolves the intents of the transactions that answered their commit or abort (FR-005): the
-/// worker that answered runs it after the answer went out, and the keeper for those it left.
+/// worker that answered runs it after the answer went out when the node has no resolver threads,
+/// and the keeper for those it left.
 pub fn resolve_queued(backend: &mut dyn Backend, shared: &Shared) {
     // Every command ends here: only a queue with coordinators takes the node's lock (H-013).
     let flag = &super::hot::of(shared).txn_resolving;
@@ -1428,29 +1430,56 @@ pub fn resolve_queued(backend: &mut dyn Backend, shared: &Shared) {
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
         std::mem::take(&mut g.txn_resolving)
     };
-    for mut coord in queued {
-        let mut done = false;
-        for _ in 0..RESOLVE_ROUNDS {
-            let mut requests = coord.take_requests();
-            if requests.is_empty() {
-                coord.tick(&Via(&*backend), nanos(backend), backend.wall_ms());
-                requests = coord.take_requests();
-            }
-            for r in requests {
-                let answer = backend.txn_send(r.g, r.op);
-                coord.on_reply(&Via(&*backend), r.id, answer);
-            }
-            if coord.take_events().contains(&Event::Resolved) {
-                done = true;
-                break;
-            }
+    for coord in queued {
+        resolve_coordinator(backend, shared, coord);
+    }
+}
+
+/// Resolves one transaction that answered its commit or abort, if one waits (FR-005): what each
+/// of the node's resolver threads runs, so that the next command of the connection that ended it
+/// does not wait for its resolution (H-050 of the native tests). `false` when none waited.
+pub fn resolve_one(backend: &mut dyn Backend, shared: &Shared) -> bool {
+    let flag = &super::hot::of(shared).txn_resolving;
+    if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let coord = {
+        let mut g = lock(shared);
+        let coord = g.txn_resolving.pop();
+        if g.txn_resolving.is_empty() {
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
         }
-        if !done {
-            let mut g = lock(shared);
-            g.txn_resolving.push(coord);
-            g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
+        coord
+    };
+    let Some(coord) = coord else { return false };
+    resolve_coordinator(backend, shared, coord);
+    true
+}
+
+/// A few rounds of resolution of `coord`; one that is not done goes back to the queue, for the
+/// keeper or a resolver.
+fn resolve_coordinator(
+    backend: &mut dyn Backend,
+    shared: &Shared,
+    mut coord: teseladb_txn::coordinator::Coordinator,
+) {
+    for _ in 0..RESOLVE_ROUNDS {
+        let mut requests = coord.take_requests();
+        if requests.is_empty() {
+            coord.tick(&Via(&*backend), nanos(backend), backend.wall_ms());
+            requests = coord.take_requests();
+        }
+        for r in requests {
+            let answer = backend.txn_send(r.g, r.op);
+            coord.on_reply(&Via(&*backend), r.id, answer);
+        }
+        if coord.take_events().contains(&Event::Resolved) {
+            return;
         }
     }
+    let mut g = lock(shared);
+    g.txn_resolving.push(coord);
+    g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Ticks the transactions no command has, so that their heartbeats go (008 FR-007), and aborts

@@ -689,6 +689,53 @@ fn a_commit_answers_before_its_intents_are_resolved() {
     assert_eq!(found(&run(&mut m, DB, find())), 1);
 }
 
+/// The node's resolver threads take the finished transactions one at a time, woken when one is
+/// queued, so that the next command of the connection that committed does not wait for the
+/// resolution (008 FR-005, H-050 of the native tests).
+#[test]
+fn a_resolver_thread_is_woken_and_resolves_one_transaction_at_a_time() {
+    let mut m = node();
+    let shared = std::mem::take(&mut m.shared);
+    let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = woken.clone();
+    let wake = move || {
+        w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    };
+    teseladb_wire::commands::hot::of(&shared).set_resolvers(Box::new(wake));
+    m.shared = shared;
+    for (txn, id) in [(31, 1), (32, 2)] {
+        assert!(ok(&run_unresolved(&mut m, DB, stmt(insert(id), txn, 1, true))));
+        let commit = end("commitTransaction", txn, 1);
+        assert!(ok(&run_unresolved(&mut m, "admin", commit)));
+    }
+    assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 2, "each one queued wakes them");
+    let shared = std::mem::take(&mut m.shared);
+    assert_eq!(lock(&shared).txn_resolving.len(), 2);
+    assert!(teseladb_wire::commands::txn::resolve_one(&mut m, &shared));
+    assert_eq!(lock(&shared).txn_resolving.len(), 1, "one at a time");
+    assert!(teseladb_wire::commands::txn::resolve_one(&mut m, &shared));
+    assert!(!teseladb_wire::commands::txn::resolve_one(&mut m, &shared), "none left");
+    m.shared = shared;
+    assert!(m.intents.is_empty());
+    assert_eq!(found(&run(&mut m, DB, find())), 2);
+}
+
+/// [`run`] without resolving afterwards, as a connection's thread does when the node has
+/// resolver threads.
+fn run_unresolved(m: &mut Mem, db: &str, cmd: Document) -> Document {
+    let bytes = OpMsg::encode(1, 0, 0, &cmd.with("$db", db).to_bytes().unwrap());
+    let mut conn = Connection::new(9);
+    conn.receive(&bytes);
+    let req: Request = conn.next_request().unwrap().unwrap();
+    let shared = std::mem::take(&mut m.shared);
+    let r = dispatch_with(&mut conn, &req, &info(), Some((&mut *m, &shared)));
+    m.shared = shared;
+    match r {
+        Action::Reply(d) => d,
+        other => panic!("{other:?}"),
+    }
+}
+
 /// A command a transaction cannot run answers its own argument errors first, as a `refrouter` 9.0.4
 /// does (measured: `{drop: 1}` gives 73 and `{createUser: …}` without roles 40414), and does
 /// nothing when its arguments are right.

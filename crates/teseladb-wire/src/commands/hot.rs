@@ -32,6 +32,9 @@ pub struct Hot {
     pub fail_command: AtomicBool,
     /// Coordinators may wait in `txn_resolving`.
     pub txn_resolving: AtomicBool,
+    /// What wakes the node's resolvers, which resolve the finished transactions apart from the
+    /// connections (008 FR-005); without them a connection's thread resolves after answering.
+    pub resolvers: Resolvers,
     /// `internalQueryPlannerEnableHashIntersection`.
     pub hash_intersection: AtomicBool,
     /// `redactClientLogData`: the documents of the log lines go redacted (013 FR-027). Each
@@ -61,6 +64,7 @@ impl Default for Hot {
             stats: CommandStats::default(),
             fail_command: AtomicBool::new(false),
             txn_resolving: AtomicBool::new(false),
+            resolvers: Resolvers::default(),
             hash_intersection: AtomicBool::new(false),
             redact_client_log_data: AtomicBool::new(false),
             expression_memory: AtomicI64::new(i64::try_from(expression).unwrap_or(i64::MAX)),
@@ -107,6 +111,38 @@ impl CommandStats {
     pub fn add_to(&self, status: &mut StatusCounters) {
         for s in &self.stripes {
             status.absorb(&s.lock().unwrap_or_else(PoisonError::into_inner));
+        }
+    }
+}
+
+/// What wakes the node's resolvers: the node gives it when it starts them.
+pub type Waker = Box<dyn Fn() + Send + Sync>;
+
+/// The waker of the node's resolvers, set once.
+#[derive(Default)]
+pub struct Resolvers(std::sync::OnceLock<Waker>);
+
+impl std::fmt::Debug for Resolvers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Resolvers").field(&self.0.get().is_some()).finish()
+    }
+}
+
+impl Hot {
+    /// What wakes the node's resolvers; set once, when the node starts them.
+    pub fn set_resolvers(&self, wake: Waker) {
+        let _ = self.resolvers.0.set(wake);
+    }
+
+    /// Whether the node has resolvers.
+    pub fn has_resolvers(&self) -> bool {
+        self.resolvers.0.get().is_some()
+    }
+
+    /// Wakes the resolvers: a finished transaction waits to be resolved.
+    pub fn wake_resolvers(&self) {
+        if let Some(wake) = self.resolvers.0.get() {
+            wake();
         }
     }
 }

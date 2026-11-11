@@ -476,6 +476,9 @@ pub struct ClientListener {
     builder: Option<JoinHandle<()>>,
     /// The thread that reads the data each tenant uses (007 FR-031), with a node behind the port.
     usage: Option<JoinHandle<()>>,
+    /// The threads that resolve the intents of the finished transactions (008 FR-005), with a
+    /// node behind the port.
+    resolvers: Vec<JoinHandle<()>>,
     open: Arc<AtomicUsize>,
 }
 
@@ -567,6 +570,7 @@ impl ClientListener {
             }
             None => None,
         };
+        let resolvers = spawn_resolvers(state.as_ref(), &shared, &stop)?;
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
@@ -582,7 +586,16 @@ impl ClientListener {
             }
             None => None,
         };
-        Ok(ClientListener { addrs, stop, acceptor: (waker, t), keeper, builder, usage, open })
+        Ok(ClientListener {
+            addrs,
+            stop,
+            acceptor: (waker, t),
+            keeper,
+            builder,
+            usage,
+            resolvers,
+            open,
+        })
     }
 
     /// The addresses it listens on (with the ports the system chose for port 0).
@@ -604,11 +617,49 @@ impl ClientListener {
         // A thread that already ended needs no wake-up, and its end is all `join` waits for.
         let _ = waker.wake();
         let _ = t.join();
-        for k in self.keeper.into_iter().chain(self.builder).chain(self.usage) {
+        let threads = self.keeper.into_iter().chain(self.builder).chain(self.usage);
+        for k in threads.chain(self.resolvers) {
             k.thread().unpark();
             let _ = k.join();
         }
     }
+}
+
+/// How many threads resolve the intents of the finished transactions: a resolution waits for a
+/// write of the log, so a few run side by side.
+const RESOLVERS: usize = 4;
+/// How long an idle resolver sleeps before it looks at the queue again; a transaction that ends
+/// wakes it at once.
+const RESOLVER_IDLE: Duration = Duration::from_millis(100);
+
+/// Starts the threads that resolve the intents of the finished transactions apart from the
+/// connections (008 FR-005): run after the answer on the connection's own thread, a resolution
+/// held that client's next command for a write of the log, about 20 ms (H-050 of the native
+/// tests). None without a node behind the port.
+fn spawn_resolvers(
+    state: &dyn NodeState,
+    shared: &Arc<Shared>,
+    stop: &Arc<AtomicBool>,
+) -> io::Result<Vec<JoinHandle<()>>> {
+    let mut threads = Vec::with_capacity(RESOLVERS);
+    for i in 0..RESOLVERS {
+        let Some(h) = state.handle() else { return Ok(Vec::new()) };
+        let mut backend = ServerBackend::new(h, seed(u64::MAX - 3 - i as u64));
+        let (shared, stop) = (shared.clone(), stop.clone());
+        let t = thread::Builder::new().name(format!("txn-resolver-{i}")).spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                while teseladb_wire::commands::txn::resolve_one(&mut backend, &shared) {
+                    backend.end_operation();
+                }
+                thread::park_timeout(RESOLVER_IDLE);
+            }
+        })?;
+        threads.push(t);
+    }
+    let parked: Vec<thread::Thread> = threads.iter().map(|t| t.thread().clone()).collect();
+    let wake = move || parked.iter().for_each(thread::Thread::unpark);
+    teseladb_wire::commands::hot::of(shared).set_resolvers(Box::new(wake));
+    Ok(threads)
 }
 
 /// Reaps the node's expired cursors and sessions, writes the sessions it used to
@@ -1381,7 +1432,11 @@ impl Worker {
             self.close_suspended();
             // With the answers on their way, the intents of a transaction a command ended (008
             // FR-005).
-            if ran && let Some(backend) = self.inline.as_mut() {
+            let resolved_apart = teseladb_wire::commands::hot::of(&self.shared).has_resolvers();
+            if ran
+                && !resolved_apart
+                && let Some(backend) = self.inline.as_mut()
+            {
                 teseladb_wire::commands::txn::resolve_queued(backend, &self.shared);
             }
         }
