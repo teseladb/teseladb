@@ -219,6 +219,21 @@ impl Transport {
         }
     }
 
+    /// [`Transport::outgoing`] of a reply the caller no longer needs: without TLS and with
+    /// nothing waiting in `out`, the reply becomes `out` as it is, without copying it (a find's
+    /// reply of a hundred documents is about 100 KB, H-049 of the native tests).
+    pub fn outgoing_owned(&mut self, data: Vec<u8>, out: &mut Vec<u8>) -> bool {
+        match self {
+            Transport::Plain | Transport::Undecided(_) if out.is_empty() => {
+                *out = data;
+                true
+            }
+            Transport::Tls(_) | Transport::Plain | Transport::Undecided(_) => {
+                self.outgoing(&data, out)
+            }
+        }
+    }
+
     /// Whether the connection is TLS and its handshake has finished.
     pub fn tls_established(&self) -> bool {
         matches!(self, Transport::Tls(c) if !c.is_handshaking())
@@ -463,5 +478,24 @@ mod tests {
         assert_eq!(out, b"x");
         let tls = Transport::new(&TlsPort::new(TlsMode::RequireTls, Some(config(1)))).unwrap();
         assert!(tls.peer_certificates().is_empty());
+    }
+
+    #[test]
+    fn a_reply_without_tls_becomes_the_output_without_a_copy_when_nothing_waits() {
+        let mut plain = Transport::new(&TlsPort::default()).unwrap();
+        let reply = b"reply".to_vec();
+        let at = reply.as_ptr();
+        let mut out = Vec::new();
+        assert!(plain.outgoing_owned(reply, &mut out));
+        assert_eq!(out, b"reply");
+        assert_eq!(out.as_ptr(), at, "the reply's own buffer");
+        // Behind bytes still waiting, it goes after them.
+        assert!(plain.outgoing_owned(b" next".to_vec(), &mut out));
+        assert_eq!(out, b"reply next");
+        // Over TLS it goes through the session, as with `outgoing`.
+        let mut tls = Transport::new(&TlsPort::new(TlsMode::RequireTls, Some(config(1)))).unwrap();
+        let mut sealed = Vec::new();
+        let _ = tls.outgoing_owned(b"x".to_vec(), &mut sealed);
+        assert_ne!(sealed, b"x");
     }
 }

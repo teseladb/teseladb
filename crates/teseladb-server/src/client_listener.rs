@@ -1057,7 +1057,7 @@ impl Client {
             Action::Reply(doc) => {
                 let bytes = conn.reply(&req, &doc, false);
                 PortStats::add(&self.diag.stats.bytes_out, bytes.len());
-                self.transport.outgoing(&bytes, &mut self.out)
+                self.transport.outgoing_owned(bytes, &mut self.out)
             }
             Action::Await { max_await_ms, exhaust, hello } => {
                 let every = Duration::from_millis(max_await_ms);
@@ -1121,14 +1121,14 @@ impl Client {
         if let Some(e) = p.held.take() {
             let doc = teseladb_wire::hello::with_cluster_time(e, info);
             let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
-            let _ = self.transport.outgoing(&bytes, &mut self.out);
+            let _ = self.transport.outgoing_owned(bytes, &mut self.out);
             self.waiting = false;
             return (None, true);
         }
         let doc = hello_after_wait(conn, &p.hello, info);
         let (bytes, id) = conn.reply_to(p.response_to, &p.req, &doc, p.exhaust);
         // A TLS failure here shows on the next read, which closes the connection.
-        let _ = self.transport.outgoing(&bytes, &mut self.out);
+        let _ = self.transport.outgoing_owned(bytes, &mut self.out);
         self.waiting = p.exhaust;
         p.response_to = id;
         p.deadline += p.every;
