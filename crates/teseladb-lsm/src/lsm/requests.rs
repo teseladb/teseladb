@@ -50,6 +50,17 @@ impl Lsm {
         self.gc = self.gc_handed.with_intervals(&self.clearing, CLEARED);
     }
 
+    /// The bytes of the live versions of the data this LSM holds, which the embedder counts: once
+    /// the files take more than [`SPACE_AMP`](crate::lsm::SPACE_AMP) times that, or times what
+    /// they took after the last compaction of everything, plus
+    /// [`SPACE_FLOOR`](crate::lsm::SPACE_FLOOR), every file is compacted into the last level.
+    /// Leveled compaction alone leaves a level within its budget, and the last level, as they
+    /// are: the versions below the GC threshold and the keys a clearing removed stay on disk and
+    /// in the caches (found by the sustained load of 002 on 11-11-2026).
+    pub fn set_live_bytes(&mut self, bytes: u64) {
+        self.live_bytes = Some(bytes);
+    }
+
     /// Asks for one compaction of every file into the last level (before an export, or to apply
     /// a new GC threshold everywhere).
     pub fn compact_all(&mut self) {

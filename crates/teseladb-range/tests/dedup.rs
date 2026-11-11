@@ -176,7 +176,55 @@ fn a_purge_keeps_newer_records_and_a_later_round_skips_the_deleted_ones() {
     let again = inc(&mut c, l, Some(NEWER));
     c.ticks(2);
     assert_eq!(mutated(c.reply(l, again)).1, vec![1], "the newer record stays");
+    // The older one went, and its session has a newer `txnNumber` here: too old, as RefDb
+    // answers it.
     let late = inc(&mut c, l, Some(K));
     c.ticks(2);
-    assert_eq!(mutated(c.reply(l, late)).1, vec![2], "the older one went");
+    assert_too_old(c.reply(l, late), 7, 8);
+    assert_eq!(read(&mut c, l), Some(2));
+}
+
+fn assert_too_old(r: Option<Result<Reply, RangeError>>, txn: i64, newest: i64) {
+    match r {
+        Some(Err(RangeError::Mutation(e))) => assert_eq!(
+            e.0,
+            format!(
+                "225\u{0}Retryable write with txnNumber {txn} is prohibited on session because a \
+                 newer retryable write with txnNumber {newest} has already started on this session."
+            )
+        ),
+        other => panic!("not too old: {other:?}"),
+    }
+}
+
+#[test]
+fn a_session_keeps_the_records_of_its_newest_txn_number_only() {
+    // As a shard of RefDb keeps one record per session (`config.transactions`): a purge round
+    // drops the records a newer `txnNumber` of their session replaced, long before 30 minutes.
+    const NEWER: DedupKey = DedupKey { lsid: 0xabcd, txn_number: 8, stmt_id: 0 };
+    const OTHER: DedupKey = DedupKey { lsid: 0x1234, txn_number: 3, stmt_id: 0 };
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    for k in [K, OTHER, NEWER] {
+        let w = inc(&mut c, l, Some(k));
+        c.ticks(2);
+        mutated(c.reply(l, w));
+    }
+    // Before a purge the older record still answers its retry.
+    let retry = inc(&mut c, l, Some(K));
+    c.ticks(2);
+    assert_eq!(mutated(c.reply(l, retry)).1, vec![0]);
+    // One purge round later.
+    c.wall_ahead = 2 * PURGE_EVERY_MS;
+    c.ticks(200);
+    let l = c.leader().expect("a leader");
+    let old = inc(&mut c, l, Some(K));
+    c.ticks(2);
+    assert_too_old(c.reply(l, old), 7, 8);
+    for (k, result) in [(NEWER, 2), (OTHER, 1)] {
+        let again = inc(&mut c, l, Some(k));
+        c.ticks(2);
+        assert_eq!(mutated(c.reply(l, again)).1, vec![result], "{k:?} keeps its record");
+    }
+    assert_eq!(read(&mut c, l), Some(3), "no retry wrote again");
 }

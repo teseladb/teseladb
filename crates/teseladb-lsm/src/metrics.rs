@@ -44,6 +44,10 @@ pub struct LsmMetrics {
     /// `lsm_ingest_compaction_bytes_total`: bytes those compactions read and wrote, out of their
     /// own budget.
     pub ingest_compaction_bytes_total: u64,
+    /// The live bytes the embedder last told ([`Lsm::set_live_bytes`]; 0: never told).
+    pub live_bytes: u64,
+    /// Bytes of the files after the last compaction of everything that their space asked for.
+    pub full_after: u64,
 }
 
 fn ratio(num: u64, den: u64) -> f64 {
@@ -75,6 +79,8 @@ impl Lsm {
             dictionaries: self.state.dictionaries.len(),
             ingest_compactions_total: c.ingest_compactions,
             ingest_compaction_bytes_total: c.ingest_compaction_bytes,
+            live_bytes: self.live_bytes.unwrap_or(0),
+            full_after: self.full_after,
         }
     }
 

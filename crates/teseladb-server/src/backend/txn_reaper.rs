@@ -110,13 +110,23 @@ impl ServerBackend {
         }
     }
 
-    /// One pass of the reapers of this node's cores; the transactions they aborted.
-    pub fn reap_transactions(&mut self, reapers: &mut Reapers) -> u64 {
+    /// One pass of the reapers of this node's cores; the transactions they aborted. It ends
+    /// between two requests once `stop` is set: a node that stops does not wait for a pass whose
+    /// requests may each take their whole deadline.
+    pub fn reap_transactions(
+        &mut self,
+        reapers: &mut Reapers,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> u64 {
+        let stopping = || stop.load(std::sync::atomic::Ordering::Acquire);
         let routes = self.h.routes.clone();
         let route = Routes(&routes);
         let now = Hlc { physical: self.h.clock.0.peek().physical, logical: 0 };
         let before: u64 = reapers.cores.values().map(Reaper::reaped).sum();
         for e in routes.entries() {
+            if stopping() {
+                break;
+            }
             let Some(span) = records_of(&e) else { continue };
             // Read before the records: an entry applied after it moves it again.
             let mark = self.h.views.get(usize::from(e.core)).and_then(|v| v.txn_mark(e.group));
@@ -136,6 +146,9 @@ impl ServerBackend {
             loop {
                 let requests = reaper.take_requests();
                 if requests.is_empty() {
+                    break;
+                }
+                if stopping() {
                     break;
                 }
                 for r in requests {

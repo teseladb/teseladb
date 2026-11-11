@@ -56,6 +56,10 @@ pub const DOCUMENT: u8 = 1;
 /// memtable holds the range's log back (`StateMachine::release_floor`), so an idle range would
 /// keep its whole log and never take a snapshot.
 pub const IDLE_FLUSH: Nanos = Nanos::from_secs(1);
+/// A request that waits this long in its range is written to the log, once.
+const LONG_WAIT: Nanos = Nanos::from_secs(10);
+/// How often the LSM learns the live bytes of the core's ranges, which bound its files' space.
+const LIVE_EVERY: Nanos = Nanos::from_secs(5);
 /// Longest a memtable holds back a range's log before it is flushed, however busy its core:
 /// RefEngine's checkpoint period (`syncPeriodSecs`), after which RefDb removes old journal files.
 pub const CHECKPOINT_EVERY: Nanos = Nanos::from_secs(60);
@@ -98,6 +102,27 @@ pub enum DataReq {
     /// A request for the replica of a range on node `.0` (a restore's, 007 FR-021): run here if
     /// it is this node, or forwarded to it.
     At(NodeId, GroupId, RemoteReq),
+    /// The sizes of this core's LSM, for the metrics (004 FR-019).
+    Lsm,
+}
+
+/// The sizes of a core's LSM: its files by level and what it holds in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LsmSizes {
+    /// Bytes of the files of each level, level 0 first.
+    pub level_bytes: Vec<u64>,
+    /// Files of each level, level 0 first.
+    pub level_files: Vec<usize>,
+    /// Bytes in its memtables, frozen ones included.
+    pub memtable_bytes: u64,
+    /// Bytes in its block cache.
+    pub cache_bytes: u64,
+    /// Compactions it ran since it opened.
+    pub compactions: u64,
+    /// The live bytes of the core's ranges it was last told.
+    pub live_bytes: u64,
+    /// Bytes of its files after its last compaction of everything that their space asked for.
+    pub full_after: u64,
 }
 
 /// What this node's replica of a range looks like.
@@ -144,6 +169,8 @@ pub enum DataReply {
     Cut(Option<Vec<u8>>),
     /// The answer to a [`DataReq::Remote`].
     Remote(RemoteReply),
+    /// The answer to a [`DataReq::Lsm`].
+    Lsm(LsmSizes),
 }
 
 /// Why a request of the node's handle failed.
@@ -239,6 +266,10 @@ pub struct DataCore {
     backup_clients: BTreeMap<u64, Client>,
     /// The identifier of the next request of `backups`.
     backup_next: u64,
+    /// The failure of the core's LSM was written to the log.
+    failure_told: bool,
+    /// When the LSM learns the live bytes of the core's ranges next.
+    live_at: Nanos,
 }
 
 impl DataCore {
@@ -275,6 +306,8 @@ impl DataCore {
             backups: Backups::new(PathBuf::from("backup"), 0),
             backup_clients: BTreeMap::new(),
             backup_next: 0,
+            failure_told: false,
+            live_at: Nanos::ZERO,
         }
     }
 
@@ -437,6 +470,20 @@ impl DataCore {
             }
             DataReq::Status(g) => {
                 let _ = reply.send(Ok(DataReply::Status(self.status(core, g))));
+                return;
+            }
+            DataReq::Lsm => {
+                let m = self.lsm.borrow().metrics();
+                let sizes = LsmSizes {
+                    level_bytes: m.level_bytes,
+                    level_files: m.level_files,
+                    memtable_bytes: m.memtable_bytes,
+                    cache_bytes: m.cache_bytes,
+                    compactions: m.compactions_total,
+                    live_bytes: m.live_bytes,
+                    full_after: m.full_after,
+                };
+                let _ = reply.send(Ok(DataReply::Lsm(sizes)));
                 return;
             }
             DataReq::Put { key, value, wc } => {
@@ -824,6 +871,33 @@ impl DataCore {
         // handed to the LSM.
         self.host.follow_state(core);
         self.host.poll(core, now, wall_ms);
+        for (g, why) in core.take_stops() {
+            crate::log::defer_at(
+                crate::log::Level::Error,
+                crate::log::Pending {
+                    id: 0,
+                    msg: "a range stopped: it applies, reads and writes nothing more".to_owned(),
+                    attr: format!("{{\"range\":{},\"why\":{why:?}}}", g.0),
+                },
+            );
+        }
+        if now >= self.live_at {
+            self.live_at = Nanos(now.0.saturating_add(LIVE_EVERY.0));
+            let live: u64 = self
+                .replicas
+                .open_ranges()
+                .filter_map(|g| core.state_machine(g).and_then(CoreSm::range))
+                .map(teseladb_range::sm::RangeSm::live_bytes)
+                .sum();
+            self.lsm.borrow_mut().set_live_bytes(live);
+        }
+        for what in self.host.long_waits(now, LONG_WAIT) {
+            crate::log::defer(crate::log::Pending {
+                id: 0,
+                msg: "a request waited in its range longer than 10 s".to_owned(),
+                attr: format!("{{\"core\":{},\"request\":{what:?}}}", self.replicas.core()),
+            });
+        }
         self.checksums.route(core, &mut self.host, now);
         let lsm = self.lsm.clone();
         self.checksums.step(core, &mut self.host, &mut self.replicas, &mut lsm.borrow_mut());
@@ -1061,6 +1135,7 @@ impl DataCore {
             (op, lsm.take_completions())
         };
         self.lsm_done(core, done, now);
+        self.tell_failure();
         if let Some(op) = op {
             return Some((op, IoOwner::Lsm));
         }
@@ -1085,6 +1160,7 @@ impl DataCore {
             IoOwner::Lsm => {
                 let c = self.lsm.borrow_mut().on_io_done(done, now);
                 self.lsm_done(core, c, now);
+                self.tell_failure();
             }
             IoOwner::Transfer => {
                 let lsm = self.lsm.clone();
@@ -1100,6 +1176,28 @@ impl DataCore {
                 self.answer(core, now);
             }
         }
+    }
+
+    /// Writes the failure of the core's LSM to the log the first time it appears: from then on
+    /// the core reads and flushes nothing, and its ranges answer that they are unavailable.
+    fn tell_failure(&mut self) {
+        if self.failure_told {
+            return;
+        }
+        let Some(e) = self.lsm.borrow().failure().cloned() else { return };
+        self.failure_told = true;
+        crate::log::defer_at(
+            crate::log::Level::Error,
+            crate::log::Pending {
+                id: 0,
+                msg: "the storage of a core failed: it reads and flushes nothing more".to_owned(),
+                attr: format!(
+                    "{{\"core\":{},\"error\":{:?}}}",
+                    self.replicas.core(),
+                    e.to_string()
+                ),
+            },
+        );
     }
 
     fn lsm_done(&mut self, core: &mut MultiRaftCore<CoreSm>, c: Completions, now: Nanos) {

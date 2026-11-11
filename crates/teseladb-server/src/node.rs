@@ -1439,6 +1439,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             DataReq::Status(g) | DataReq::Cut(g) | DataReq::Remote(g, _) | DataReq::At(_, g, _) => {
                 Some(*g)
             }
+            DataReq::Lsm => None,
         };
         let (tx, rx) = mpsc::channel();
         let core = usize::from(self.core_of(g.unwrap_or(DATA_RANGE)));

@@ -330,6 +330,11 @@ impl Replicas {
         self.open.contains(&g)
     }
 
+    /// The replicas created and opened on this core.
+    pub fn open_ranges(&self) -> impl Iterator<Item = GroupId> + '_ {
+        self.open.iter().copied()
+    }
+
     /// Replica `g` was closed for a rebuild: it is not open, and is not opened again until
     /// [`Replicas::release`].
     pub fn hold(&mut self, g: GroupId) {

@@ -171,6 +171,13 @@ enum Request {
     },
 }
 
+/// How many times the live data the files may take before every file is compacted
+/// ([`Lsm::set_live_bytes`]).
+pub const SPACE_AMP: u64 = 2;
+/// Bytes the files may take above that, so that a small LSM does not compact everything for a
+/// few megabytes.
+pub const SPACE_FLOOR: u64 = 4 << 20;
+
 /// The LSM of a core.
 #[derive(Debug)]
 pub struct Lsm {
@@ -196,6 +203,17 @@ pub struct Lsm {
     ingesting: BTreeMap<u64, Vec<(Vec<u8>, Vec<u8>)>>,
     pointers: Vec<Vec<u8>>,
     compact_all: bool,
+    /// Bytes of the live versions of the data this LSM holds, as the embedder last counted them
+    /// (`None`: never told): the space of the files is bounded by it ([`Lsm::set_live_bytes`]).
+    pub(crate) live_bytes: Option<u64>,
+    /// Bytes of the files after the last compaction of everything.
+    pub(crate) full_after: u64,
+    /// A compaction of everything that the space of the files asked for runs.
+    full_running: bool,
+    /// The newest version in the files when the last such compaction started: what it could not
+    /// collect then was above the GC threshold, so the next one waits for the threshold to pass
+    /// it.
+    full_ts: Option<teseladb_keys::Hlc>,
     /// Clearings whose tombstones wait for their flush.
     clears: Vec<u64>,
     /// Clearings whose compaction is running.
@@ -264,6 +282,10 @@ impl Lsm {
             ingesting: BTreeMap::new(),
             pointers: vec![Vec::new(); cfg.levels + 1],
             compact_all: false,
+            live_bytes: None,
+            full_after: 0,
+            full_running: false,
+            full_ts: None,
             clears: Vec::new(),
             clears_compacting: Vec::new(),
             budget: i64::try_from(cfg.compaction_bytes_per_sec).unwrap_or(i64::MAX),
@@ -278,6 +300,13 @@ impl Lsm {
             shared,
         };
         Ok((lsm, flushed))
+    }
+
+    /// The failure that stopped this LSM's reads, flushes and compactions, if any: the embedder
+    /// reports it, since nothing it holds is read or written to disk any more.
+    #[must_use]
+    pub fn failure(&self) -> Option<&LsmError> {
+        self.reader.failure.as_ref()
     }
 
     fn writable(&self) -> Result<(), LsmError> {

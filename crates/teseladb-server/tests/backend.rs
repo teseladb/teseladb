@@ -603,12 +603,21 @@ fn a_transaction_over_two_ranges_commits_and_resolves_its_intents() {
         intents(),
         intents(),
     ];
-    let mut b = backend(answers, vec![]);
+    let data: DataScript = Arc::new(Mutex::new(answers.into()));
+    let h = cores(
+        data.clone(),
+        Arc::new(Mutex::new(Vec::new().into())),
+        Arc::new(Mutex::new(vec![true, false].into())),
+    );
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300));
     let writes = vec![
         (vec![1, 1], IntentOp::Put { value_type: 1, value: vec![5] }),
         (vec![2, 1], IntentOp::Delete),
     ];
     assert_eq!(b.transact(ts(1), writes, Some(TxnId(1))), Ok(ts(7)));
+    // The answer comes once the record is committed: the resolution of the two intents is the
+    // resolvers' (008 FR-005), and its two answers are still to be asked.
+    assert_eq!(data.lock().unwrap().len(), 2);
     // Without answers the transaction gives up at the deadline.
     let mut b = backend(vec![], vec![]);
     let writes = vec![(vec![1, 1], IntentOp::Delete), (vec![2, 1], IntentOp::Delete)];
@@ -1098,9 +1107,15 @@ fn the_reaper_reads_every_page_of_the_records_it_leads() {
     // pass finds its leader's answer next, so the first read both pages.
     let pass = |b: &mut ServerBackend| {
         let mut reapers = teseladb_server::backend::Reapers::default();
-        assert_eq!(b.reap_transactions(&mut reapers), 0);
+        let running = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(b.reap_transactions(&mut reapers, &running), 0);
         reapers.cores()
     };
+    // A node that stops reads nothing: the answers stay for the passes below.
+    let mut reapers = teseladb_server::backend::Reapers::default();
+    let stopped = std::sync::atomic::AtomicBool::new(true);
+    assert_eq!(b.reap_transactions(&mut reapers, &stopped), 0);
+    assert_eq!(reapers.cores(), 0);
     assert_eq!(pass(&mut b), 1);
     assert_eq!(pass(&mut b), 1);
     // A follower, then a leader whose scan gets no answer: neither is read.

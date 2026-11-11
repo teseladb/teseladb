@@ -739,7 +739,7 @@ impl Keeper {
                 next_ttl = now + ttl_every;
             }
             if now >= next_txn {
-                self.backend.reap_transactions(&mut self.reapers);
+                self.backend.reap_transactions(&mut self.reapers, &self.stop);
                 // The heartbeats of the client transactions between their statements.
                 teseladb_wire::commands::txn::tick_idle(&mut self.backend, &self.shared);
                 self.backend.end_operation();

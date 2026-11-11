@@ -83,7 +83,9 @@ pub use entry::{Kind, RangeTombstone};
 pub use error::LsmError;
 pub use gc::GcTable;
 pub use ingest::FileRef;
-pub use lsm::{Commit, Completions, EntryWrite, Lsm, Pressure, VersionWrite};
+pub use lsm::{
+    Commit, Completions, EntryWrite, Lsm, Pressure, SPACE_AMP, SPACE_FLOOR, VersionWrite,
+};
 pub use metrics::LsmMetrics;
 pub use read::{Found, Item, Lookup, ReadToken, Scan, Step};
 pub use read_back::BackScan;

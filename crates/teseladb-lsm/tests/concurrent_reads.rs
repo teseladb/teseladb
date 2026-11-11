@@ -315,3 +315,45 @@ fn may_exist_answers_without_reading_a_block() {
     assert!(view.may_exist(b"k"), "in a file, its filter says so");
     assert!(!view.may_exist(b"absent"), "the file's filter rules it out");
 }
+
+#[test]
+fn the_shared_cache_forgets_the_blocks_of_a_deleted_file() {
+    // Found by the sustained load of 002 (11-11-2026): the blocks that reads outside the core
+    // gave the shared cache stayed after their files went, holding its memory.
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let g = GroupId(1);
+    for i in 0..400u32 {
+        let key = format!("k{i:05}");
+        lsm.put(g, u64::from(i) + 1, key.as_bytes(), ts(1, 0), &[9u8; 200]).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.publish();
+    let shared = lsm.shared();
+    let view = shared.view();
+    let mut s = view.scan(b"k", b"l", ts(2, 0));
+    let mut seen = 0;
+    loop {
+        match s.next(&shared) {
+            SharedStep::Item(_) => seen += 1,
+            SharedStep::Done => break,
+            SharedStep::Need(need) => {
+                let bytes = read_block(&mut disk, &need);
+                shared.supply(&need, &bytes).expect("a good block");
+            }
+            SharedStep::Failed(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(seen, 400);
+    drop(s);
+    drop(view);
+    assert!(shared.cache_bytes() > 0, "the reads filled the shared cache");
+    // A compaction of everything rewrites the files; once the core publishes the new version
+    // nothing holds the old ones, which go.
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::from_secs(10));
+    lsm.publish();
+    lsm.run_io(&mut disk, Nanos::from_secs(20));
+    assert_eq!(shared.cache_bytes(), 0, "the deleted files' blocks are gone");
+}

@@ -445,6 +445,61 @@ impl NodeAdmin {
 }
 
 /// `bytes` in hexadecimal.
+/// The sizes of each core's LSM (004 FR-019): its files by level and what it holds in memory.
+fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
+    let series: [(&str, &str); 4] = [
+        ("teseladb_lsm_level_bytes", "Bytes of the files of each level of each core's LSM."),
+        ("teseladb_lsm_level_files", "Files of each level of each core's LSM."),
+        ("teseladb_lsm_memtable_bytes", "Bytes in each core's memtables, frozen ones included."),
+        ("teseladb_lsm_cache_bytes", "Bytes in each core's block cache."),
+    ];
+    for (i, (name, help)) in series.iter().enumerate() {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        for (core, s) in cores {
+            match i {
+                0 => {
+                    for (level, bytes) in s.level_bytes.iter().enumerate() {
+                        let _ =
+                            writeln!(out, "{name}{{core=\"{core}\",level=\"{level}\"}} {bytes}");
+                    }
+                }
+                1 => {
+                    for (level, files) in s.level_files.iter().enumerate() {
+                        let _ =
+                            writeln!(out, "{name}{{core=\"{core}\",level=\"{level}\"}} {files}");
+                    }
+                }
+                2 => {
+                    let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", s.memtable_bytes);
+                }
+                _ => {
+                    let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", s.cache_bytes);
+                }
+            }
+        }
+    }
+    let _ = writeln!(out, "# HELP teseladb_lsm_live_bytes Live bytes of each core's ranges.");
+    let _ = writeln!(out, "# TYPE teseladb_lsm_live_bytes gauge");
+    for (core, s) in cores {
+        let _ = writeln!(out, "teseladb_lsm_live_bytes{{core=\"{core}\"}} {}", s.live_bytes);
+    }
+    let _ = writeln!(
+        out,
+        "# HELP teseladb_lsm_full_after_bytes Bytes of each core's files after its last full compaction."
+    );
+    let _ = writeln!(out, "# TYPE teseladb_lsm_full_after_bytes gauge");
+    for (core, s) in cores {
+        let _ = writeln!(out, "teseladb_lsm_full_after_bytes{{core=\"{core}\"}} {}", s.full_after);
+    }
+    let _ = writeln!(out, "# HELP teseladb_lsm_compactions_total Compactions each core's LSM ran.");
+    let _ = writeln!(out, "# TYPE teseladb_lsm_compactions_total counter");
+    for (core, s) in cores {
+        let _ =
+            writeln!(out, "teseladb_lsm_compactions_total{{core=\"{core}\"}} {}", s.compactions);
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
         let _ = write!(s, "{b:02x}");
@@ -662,6 +717,13 @@ impl AdminBackend for NodeAdmin {
         if let Some(m) = &self.memory {
             m.metrics(&mut out);
         }
+        let lsm: Vec<(usize, crate::data::LsmSizes)> = (0..self.handle.senders.len())
+            .filter_map(|core| match self.ask(core, |tx| NodeMsg::Data(DataReq::Lsm, tx))? {
+                Ok(DataReply::Lsm(sizes)) => Some((core, sizes)),
+                _ => None,
+            })
+            .collect();
+        lsm_metrics(&mut out, &lsm);
         crate::tenant_limits::metrics(&self.handle.routes, &mut out);
         machine_metrics(&mut out, self.data_dir.as_deref());
         if let Some(h) = &self.http_metrics {

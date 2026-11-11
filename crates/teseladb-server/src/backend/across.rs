@@ -182,6 +182,13 @@ impl ServerBackend {
                     Event::Written { .. } => {}
                 }
             }
+            // Committed or aborted, its record says so: the resolvers resolve its intents while
+            // the client has its answer, as a client transaction's are (008 FR-005). A reader
+            // that meets one of them learns from the record (008 FR-003).
+            if let Some(o) = outcome.take_if(|o| !matches!(o, Outcome::Unknown(_))) {
+                teseladb_wire::commands::txn::hand_to_resolvers(&self.h.sessions, c);
+                return ended(o);
+            }
             let requests = c.take_requests();
             if requests.is_empty() {
                 // Ended without intents to resolve (one phase, or an abort before any).

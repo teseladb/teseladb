@@ -1372,9 +1372,7 @@ fn end(
     }
     let run = match !resolved && !matches!(answer, CommitAnswer::Unknown(_)) {
         true => {
-            g.txn_resolving.push(run.coord);
-            g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
-            g.hot.wake_resolvers();
+            queue_resolution(&mut g, run.coord);
             None
         }
         false => Some(run),
@@ -1433,6 +1431,18 @@ pub fn resolve_queued(backend: &mut dyn Backend, shared: &Shared) {
     for coord in queued {
         resolve_coordinator(backend, shared, coord);
     }
+}
+
+/// Hands coordinator `coord` of a transaction that ended to the threads that resolve the intents
+/// (008 FR-005): the caller answers its client without waiting for the resolution.
+pub fn hand_to_resolvers(shared: &Shared, coord: teseladb_txn::coordinator::Coordinator) {
+    queue_resolution(&mut lock(shared), coord);
+}
+
+fn queue_resolution(g: &mut super::NodeSessions, coord: teseladb_txn::coordinator::Coordinator) {
+    g.txn_resolving.push(coord);
+    g.hot.txn_resolving.store(true, std::sync::atomic::Ordering::SeqCst);
+    g.hot.wake_resolvers();
 }
 
 /// Resolves one transaction that answered its commit or abort, if one waits (FR-005): what each

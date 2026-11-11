@@ -213,6 +213,16 @@ impl Latches {
         Ok(id)
     }
 
+    /// The write that holds one of `keys`, pipelined or not, if any: what a write of them waits
+    /// for, as an operator reads it.
+    pub fn holder_of(&self, keys: &[Vec<u8>]) -> Option<(LatchId, bool)> {
+        let pipelined = keys.iter().find_map(|k| self.pipelined_holder(k, false));
+        if let Some(id) = pipelined {
+            return Some((id, true));
+        }
+        keys.iter().find_map(|k| self.by_key.get(k)).map(|(_, h)| (*h, false))
+    }
+
     /// The newest pipelined write of `key` a write has to wait for: any, or with `records_only`
     /// the one whose idempotence record `key` is.
     fn pipelined_holder(&self, key: &[u8], records_only: bool) -> Option<LatchId> {

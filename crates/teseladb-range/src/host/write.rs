@@ -25,6 +25,15 @@ impl From<MutationError> for Eval {
     }
 }
 
+/// The refusal of a retryable statement whose session has a newer `txnNumber` in the range, as
+/// RefDb words it (`TransactionTooOld`, 225).
+fn too_old(txn_number: i64, newest: i64) -> MutationError {
+    MutationError(format!(
+        "225\u{0}Retryable write with txnNumber {txn_number} is prohibited on session because a \
+         newer retryable write with txnNumber {newest} has already started on this session."
+    ))
+}
+
 impl RangeHost {
     pub(super) fn mutation_done<S: StateMachine>(
         &mut self,
@@ -167,7 +176,28 @@ impl RangeHost {
                         self.reply(id, Ok(Reply::Mutated { ts, change: Vec::new(), result }));
                         return true;
                     }
-                    Some(Ok(None)) => {}
+                    // Without its record, a statement of an older `txnNumber` than the session's
+                    // newest in this range is too old: its record may have been purged.
+                    Some(Ok(None)) => match dedup::superseded(&self.lsm, m.g, key) {
+                        None => {
+                            self.reqs.insert(id, Req::Mut(m));
+                            return moved;
+                        }
+                        Some(Err(())) => {
+                            self.release(m.g, m.term, latch);
+                            self.reply(id, Err(RangeError::Unavailable));
+                            return true;
+                        }
+                        Some(Ok(Some(newest))) => {
+                            self.release(m.g, m.term, latch);
+                            self.reply(
+                                id,
+                                Err(RangeError::Mutation(too_old(key.txn_number, newest))),
+                            );
+                            return true;
+                        }
+                        Some(Ok(None)) => {}
+                    },
                 }
             }
             let mut current = Vec::with_capacity(m.keys.len());
@@ -297,9 +327,18 @@ impl RangeHost {
         }
         let current: Vec<Option<(u8, &[u8])>> =
             current.iter().map(|c| c.as_ref().map(|(t, v)| (*t, v.as_slice()))).collect();
-        let interval = self.ranges.get(&m.g).map(|r| (r.start.clone(), r.end.clone()));
         // A mutation writes only keys of its range: an index entry of another range needs a
-        // transaction across ranges (008).
+        // transaction across ranges (008). While a split runs the range ends at its cut: an
+        // entry past it could go into the log after the cut, which the range could not apply
+        // (found by the sustained load of 002 on 11-11-2026).
+        let interval = self.ranges.get(&m.g).map(|r| {
+            let cut = r.leader.as_ref().and_then(|l| l.split.gate());
+            let end = match cut {
+                Some(at) if at < r.end.as_slice() => at.to_vec(),
+                _ => r.end.clone(),
+            };
+            (r.start.clone(), end)
+        });
         let inside = |k: &[u8]| {
             interval.as_ref().is_some_and(|(s, e)| s.as_slice() <= k && k < e.as_slice())
         };

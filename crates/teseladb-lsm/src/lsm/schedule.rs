@@ -23,6 +23,7 @@ impl Lsm {
             let numbers: Vec<u64> = free.iter().map(|t| t.number).collect();
             for t in &free {
                 self.reader.cache.forget(t.number, t.blocks());
+                self.shared.forget(t.number, t.blocks());
             }
             return Some(Job::Delete(Script::delete(&self.cfg, &numbers)));
         }
@@ -34,10 +35,16 @@ impl Lsm {
             self.compact_all = true;
             self.clears_compacting.append(&mut self.clears);
         }
+        if !self.compact_all && !self.full_running && self.space_amplified() {
+            self.compact_all = true;
+            self.full_running = true;
+            self.full_ts = self.version.levels.iter().flatten().map(|t| t.props.max_ts).max();
+        }
         let all = std::mem::take(&mut self.compact_all);
         if let Some(plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all) {
             return Some(Job::Compact(Box::new(self.compaction(plan))));
         }
+        self.full_running = false;
         // Nothing to compact: the clearings are done.
         self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
         // Background jobs start only when no flush runs (`poll_flush` came back empty).
@@ -53,6 +60,26 @@ impl Lsm {
             )));
         }
         None
+    }
+
+    /// Bytes of every file of the current version.
+    pub(super) fn files_bytes(&self) -> u64 {
+        self.version.levels.iter().flatten().map(|t| t.size).sum()
+    }
+
+    /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
+    /// and a compaction of everything could collect more than the last one did: the GC threshold
+    /// passed the newest version the files held when it started.
+    fn space_amplified(&self) -> bool {
+        let Some(live) = self.live_bytes else { return false };
+        let limit = live.saturating_mul(super::SPACE_AMP).saturating_add(super::SPACE_FLOOR);
+        if self.files_bytes() <= limit {
+            return false;
+        }
+        match self.full_ts {
+            None => true,
+            Some(ts) => self.gc.lowest().is_some_and(|t| t >= ts),
+        }
     }
 
     /// The compaction of `plan`, which trains the collections' dictionaries with
@@ -122,6 +149,10 @@ impl Lsm {
                 }
                 self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
                 self.counters.compactions += 1;
+                if self.full_running && !ingest {
+                    self.full_running = false;
+                    self.full_after = self.files_bytes();
+                }
             }
         }
     }

@@ -520,6 +520,51 @@ pub(crate) enum Req {
     Fence(fence::FenceReq),
 }
 
+impl Req {
+    /// What the request is and where it waits, for an operator: its kind, range, state and
+    /// first key in hexadecimal.
+    fn describe(&self) -> String {
+        let hex = |k: &[u8]| k.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        match self {
+            Req::Mut(m) => {
+                let state = match &m.state {
+                    MutState::Latch => "waiting for latches",
+                    MutState::Read(_) => "reading its keys",
+                    MutState::Proposed(_) => "proposed",
+                    MutState::Confirm(_) => "confirming a refusal",
+                    MutState::Answer(_) => "confirming an answer",
+                };
+                let work = match &m.work {
+                    Work::Txn(op) => {
+                        let shown = format!("{op:?}");
+                        let name =
+                            shown.split([' ', '{', '(']).next().unwrap_or_default().to_owned();
+                        format!("transaction {name}")
+                    }
+                    Work::Mutation(_) => "write".to_owned(),
+                };
+                let key = m.keys.first().map_or_else(String::new, |k| hex(k));
+                format!("{work} of range {} {state}, key {key}, {} keys", m.g.0, m.keys.len())
+            }
+            Req::Get(r) => {
+                let state = match &r.state {
+                    GetState::Clock => "waiting for the clock",
+                    GetState::Core => "confirming the leadership",
+                    GetState::Admit(_) => "waiting for latches",
+                    GetState::Read(_) => "reading",
+                    GetState::Scanning(_) => "scanning",
+                    _ => "in another state",
+                };
+                format!("read of range {} {state}, key {}", r.g.0, hex(&r.key))
+            }
+            Req::Changes(_) => "change stream read".to_owned(),
+            Req::Purge(_) => "purge".to_owned(),
+            Req::Round(_) => "leadership round".to_owned(),
+            Req::Fence(_) => "write fence".to_owned(),
+        }
+    }
+}
+
 /// The ranges of a core.
 pub struct RangeHost {
     pub(crate) lsm: Rc<RefCell<Lsm>>,
@@ -531,6 +576,8 @@ pub struct RangeHost {
     views_until: BTreeMap<GroupId, Nanos>,
     pub(crate) ranges: BTreeMap<GroupId, Range>,
     pub(crate) reqs: BTreeMap<ReqId, Req>,
+    /// When each request was first seen waiting, and whether it was reported ([`Self::long_waits`]).
+    seen: BTreeMap<ReqId, (Nanos, bool)>,
     pub(crate) ops: BTreeMap<OpId, ReqId>,
     replies: Vec<(ReqId, Result<Reply, RangeError>)>,
     /// Splits its leaders saw applied, for the embedder (007).
@@ -626,6 +673,7 @@ impl RangeHost {
             views_until: BTreeMap::new(),
             ranges: BTreeMap::new(),
             reqs: BTreeMap::new(),
+            seen: BTreeMap::new(),
             ops: BTreeMap::new(),
             replies: Vec::new(),
             splits: Vec::new(),
@@ -1255,6 +1303,54 @@ impl RangeHost {
     /// holding now and at the end of the span, and no split or merge in progress (the keys may
     /// change range). The embedder takes the replies after `poll`, so a write is answered after
     /// the view that shows it.
+    /// The requests that have waited longer than `limit` at `now` and were not reported yet,
+    /// each described once: a request that never ends holds its latches and its client.
+    pub fn long_waits(&mut self, now: Nanos, limit: Nanos) -> Vec<String> {
+        let reqs = &self.reqs;
+        self.seen.retain(|id, _| reqs.contains_key(id));
+        let mut out = Vec::new();
+        for (id, req) in &self.reqs {
+            let (since, told) = self.seen.entry(*id).or_insert((now, false));
+            if !*told && now.0.saturating_sub(since.0) >= limit.0 {
+                *told = true;
+                out.push(format!("{}{}", req.describe(), self.blocker(req)));
+            }
+        }
+        out
+    }
+
+    /// For a write waiting for latches: the write that holds them, and whether a request of
+    /// this host still owns it (a latch no request owns is never released).
+    fn blocker(&self, req: &Req) -> String {
+        let Req::Mut(m) = req else { return String::new() };
+        if !matches!(m.state, MutState::Latch) {
+            return String::new();
+        }
+        let l = self.ranges.get(&m.g).and_then(|r| r.leader.as_ref());
+        let Some((latch, pipelined)) = l.and_then(|l| l.latches.holder_of(&m.keys)) else {
+            return "; no write holds its keys".to_owned();
+        };
+        let owner = self.reqs.values().find_map(|r| match r {
+            Req::Mut(o) => match &o.state {
+                MutState::Read(id) if *id == latch => Some(r.describe()),
+                MutState::Proposed(p) if p.latch == latch => Some(r.describe()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let uncertain = self.uncertain.iter().find(|(_, _, id, _)| *id == latch).map_or_else(
+            || "no".to_owned(),
+            |(_, term, _, index)| format!("term {term} index {index}"),
+        );
+        let leader_term = l.map_or(0, |l| l.term);
+        format!(
+            "; held by latch {} (pipelined {pipelined}, uncertain: {uncertain}, leader term \
+             {leader_term}) of {}",
+            latch.0,
+            owner.unwrap_or_else(|| "no request of this host".to_owned())
+        )
+    }
+
     /// Whether no request waits in the host (H-037).
     pub fn idle(&self) -> bool {
         self.reqs.is_empty()

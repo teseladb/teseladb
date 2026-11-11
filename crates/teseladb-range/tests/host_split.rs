@@ -229,3 +229,46 @@ fn a_stream_read_that_waits_across_a_split_is_refused() {
     }
     assert_eq!(c.reply(l, read), Some(Err(RangeError::OutOfRange)));
 }
+
+/// Writes its document and, as an index entry does, another key its evaluation finds.
+struct WithEntry(Vec<u8>, Vec<u8>);
+
+impl Mutation for WithEntry {
+    fn eval(&self, _: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
+        let put = |key: &[u8]| Put { key: key.to_vec(), value_type: 1, value: vec![1] };
+        Ok(Outcome {
+            puts: vec![put(&self.0), put(&self.1)],
+            deletes: vec![],
+            change: vec![],
+            result: vec![],
+        })
+    }
+}
+
+#[test]
+fn a_write_whose_entry_falls_past_a_cut_in_progress_needs_a_transaction_across_ranges() {
+    // Found by the sustained load of 002 (11-11-2026): a document left of the cut, admitted
+    // while the split ran, wrote an index entry right of it; the entry went into the log after
+    // the cut and the range stopped applying, its keys unreachable until the node restarted.
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    c.follow();
+    assert!(c.nodes.get_mut(&l).unwrap().host.split(G, AT, NEW));
+    let (now, wall) = (c.now, c.wall_of(l));
+    let node = c.nodes.get_mut(&l).unwrap();
+    let m = Box::new(WithEntry(b"\x01b".to_vec(), b"\x01q".to_vec()));
+    let w = WriteReq { g: G, keys: vec![b"\x01b".to_vec()], m, dedup: None, wc: MAJORITY };
+    let across = node.host.mutate(&mut node.core, w, now, wall);
+    c.follow();
+    match c.reply(l, across) {
+        Some(Err(RangeError::Mutation(e))) => {
+            assert!(e.0.starts_with(teseladb_range::host::CROSSES_RANGES), "{e:?}");
+        }
+        other => panic!("not refused as crossing ranges: {other:?}"),
+    }
+    assert_eq!(c.nodes[&l].core.state_machine(G).and_then(RangeState::end), Some(AT));
+    // The range goes on applying: a write of its own keys after the cut.
+    let after = write_on(&mut c, l, G, b"\x01c", 4, 4);
+    c.follow();
+    mutated_ts(c.reply(l, after));
+}

@@ -426,6 +426,8 @@ pub struct MultiRaftCore<S: StateMachine> {
     /// Transfers this core is sending, per group and destination, with their start and size (0
     /// until the snapshot is loaded).
     sending: BTreeMap<GroupId, BTreeMap<NodeId, (Nanos, u64)>>,
+    /// The groups that stopped since the embedder last asked, with why ([`Self::take_stops`]).
+    stops: Vec<(GroupId, String)>,
     /// Groups whose snapshot was asked for now ([`MultiRaftCore::snapshot_now`]): while it waits
     /// for the release floor, a flush is owed ([`MultiRaftCore::snapshot_awaits_flush`]).
     floor_waits: BTreeSet<GroupId>,
@@ -491,6 +493,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             snapshot_reqs: BTreeMap::new(),
             installing_from: BTreeMap::new(),
             sending: BTreeMap::new(),
+            stops: Vec::new(),
             floor_waits: BTreeSet::new(),
             floor_wait_mark: 0,
             unreachable: BTreeSet::new(),
@@ -1484,7 +1487,9 @@ impl<S: StateMachine> MultiRaftCore<S> {
                         ready.insert(group);
                     }
                 }
-                (Some(Load::Restore { group }), Err(_)) => self.stop(group),
+                (Some(Load::Restore { group }), Err(e)) => {
+                    self.stop(group, format!("its snapshot could not be read: {e:?}"));
+                }
                 // Read before the state machine's floor passed it: it does not go (see
                 // `start_snapshot_send`).
                 (Some(Load::Send { group, to }), Ok((meta, _)))
@@ -1891,7 +1896,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             let Ok(t) = self.store.append_raft(g, &entries, hs, Durability::Strict) else {
                 // Disk full or store stopped: nothing is persisted or answered, and the group
                 // stops before an answer that depends on these entries can leave.
-                self.stop(g);
+                self.stop(g, "its log refused entries".to_owned());
                 return false;
             };
             let grp = self.groups.get_mut(&g).expect("group");
@@ -1963,13 +1968,15 @@ impl<S: StateMachine> MultiRaftCore<S> {
             grp.sm.skip(e.index);
             return true;
         }
-        let applied = envelope::decode(&e.data).map_err(|_| ()).and_then(|env| {
-            grp.last_mark = grp.last_mark.max(env.ts);
-            #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
-            clock.update(env.ts);
-            let ctx = ApplyCtx { group: g, index: e.index, term: e.term, ts: env.ts };
-            grp.sm.apply(env.payload, &ctx).map_err(|_| ())
-        });
+        let applied = envelope::decode(&e.data)
+            .map_err(|err| format!("entry {} could not be decoded: {err:?}", e.index))
+            .and_then(|env| {
+                grp.last_mark = grp.last_mark.max(env.ts);
+                #[cfg(not(teseladb_bug = "hlc_regress_restart"))]
+                clock.update(env.ts);
+                let ctx = ApplyCtx { group: g, index: e.index, term: e.term, ts: env.ts };
+                grp.sm.apply(env.payload, &ctx).map_err(|err| err.to_string())
+            });
         match applied {
             Ok(out) => {
                 if let Some(op) = op {
@@ -1978,17 +1985,24 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 true
             }
             // An entry this version cannot apply: the group stops instead of guessing.
-            Err(()) => {
-                self.stop(g);
+            Err(why) => {
+                self.stop(g, why);
                 false
             }
         }
     }
 
-    /// Stops a group: no ticks, messages, proposals or reads until the node restarts.
-    fn stop(&mut self, g: GroupId) {
+    /// Stops a group: no ticks, messages, proposals or reads until the node restarts. Why goes
+    /// to [`Self::take_stops`], for the embedder's log.
+    fn stop(&mut self, g: GroupId, why: String) {
         self.groups.get_mut(&g).expect("a group of this core").stopped = true;
+        self.stops.push((g, why));
         self.fail_group(g, OpError::Unavailable);
+    }
+
+    /// The groups that stopped since the last call, with why each one did.
+    pub fn take_stops(&mut self) -> Vec<(GroupId, String)> {
+        std::mem::take(&mut self.stops)
     }
 
     fn end_sending(&mut self, g: GroupId, to: NodeId) {
@@ -2097,8 +2111,10 @@ impl<S: StateMachine> MultiRaftCore<S> {
     fn restore(&mut self, g: GroupId, data: &[u8]) -> bool {
         let grp = self.groups.get_mut(&g).expect("a group of this core");
         let restored = unwrap_snapshot(data)
-            .map_err(|_| ())
-            .and_then(|(ms, terms, sm)| grp.sm.restore(sm).map(|()| (ms, terms)).map_err(|_| ()));
+            .map_err(|e| format!("its snapshot could not be unwrapped: {e:?}"))
+            .and_then(|(ms, terms, sm)| {
+                grp.sm.restore(sm).map(|()| (ms, terms)).map_err(|e| format!("{e:?}"))
+            });
         match restored {
             Ok((ms, terms)) => {
                 grp.terms = terms;
@@ -2113,8 +2129,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 true
             }
             // A snapshot this version cannot restore: the group stops instead of guessing.
-            Err(()) => {
-                self.stop(g);
+            Err(why) => {
+                self.stop(g, why);
                 false
             }
         }
@@ -2175,7 +2191,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             self.store.set_release_floor(g, ReleaseProvider::Lsm, floor);
         }
         let Ok(t) = self.store.save_snapshot(g, meta, snap.data) else {
-            self.stop(g);
+            self.stop(g, "its snapshot could not be saved".to_owned());
             return false;
         };
         let grp = self.groups.get_mut(&g).expect("group");

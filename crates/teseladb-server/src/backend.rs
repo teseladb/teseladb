@@ -681,6 +681,9 @@ impl ServerBackend {
             }
             if !again || Instant::now() >= until {
                 let max_time_expired = self.max_until.is_some_and(|m| Instant::now() >= m);
+                if again && !max_time_expired {
+                    log_gave_up(group, &e, key);
+                }
                 let ctx = RangeContext { retryable_write: retryable, max_time_expired };
                 return Err(from_range(&e, ctx));
             }
@@ -689,6 +692,25 @@ impl ServerBackend {
             }
         }
     }
+}
+
+/// Logs a request that tried range `group` again until its deadline: the range and the last
+/// refusal tell an operator which range stopped answering and why.
+fn log_gave_up(group: Option<teseladb_types::GroupId>, e: &RangeError, key: &[u8]) {
+    crate::log::defer(crate::log::Pending {
+        id: 0,
+        msg: "a request gave up on its range at the deadline".to_owned(),
+        attr: format!(
+            "{{\"range\":{},\"lastError\":{:?},\"key\":{:?}}}",
+            group.map_or(0, |g| g.0),
+            format!("{e:?}"),
+            hex(key)
+        ),
+    });
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The mark of a commit a transaction's request answered: a committed record's, or a one-phase

@@ -152,6 +152,34 @@ impl SharedLsm {
         self.inner.current.store(version);
     }
 
+    /// Bytes the shared cache holds.
+    pub fn cache_bytes(&self) -> u64 {
+        let mut total = 0;
+        for shard in self.inner.cache.iter() {
+            loop {
+                if let Some(used) = shard.try_with(|c| c.used()) {
+                    total += used;
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        total
+    }
+
+    /// Drops the blocks of file `file` (of `blocks` data blocks) from the shared cache: the file
+    /// is gone, and its blocks would hold the cache's memory until other blocks evict them.
+    pub(crate) fn forget(&self, file: u64, blocks: usize) {
+        for shard in self.inner.cache.iter() {
+            loop {
+                if shard.try_with(|c| c.forget(file, blocks)).is_some() {
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+    }
+
     /// Gives the cache the block `need` names, read from its file as `bytes`.
     pub fn supply(&self, need: &BlockNeed, bytes: &[u8]) -> Result<(), LsmError> {
         let raw = Bytes::copy_from_slice(bytes);
