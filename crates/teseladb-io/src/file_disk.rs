@@ -35,8 +35,56 @@ const DIRECT_FLAG: i32 = O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const DIRECT_FLAG: i32 = 0;
 
-/// A sync that runs away from the disk thread, and the result it gives (012 FR-014).
-pub(crate) type SyncJob = Box<dyn FnOnce() -> IoDone + Send>;
+/// The identity of a file (its device and inode), `None` when it cannot be read.
+type FileIdentity = Option<(u64, u64)>;
+
+/// A sync of a store's batch handed to the core's sync thread (012 FR-014): the file, with a
+/// descriptor of its own, and the operation it answers.
+pub(crate) struct DetachedSync {
+    file: File,
+    op: IoOp,
+}
+
+impl DetachedSync {
+    /// Makes the files of `syncs` durable, one sync per file, and gives the answer of each in
+    /// their order: the batches of a log go one after another to the same file, and one sync
+    /// covers everything written to it before it starts, so the batches that waited while the
+    /// drive flushed go together in its next flush, as a database with one log does.
+    pub(crate) fn run_all(syncs: Vec<DetachedSync>) -> Vec<IoDone> {
+        DetachedSync::run_all_with(syncs, |f| {
+            crate::counters::record_sync();
+            crate::drive_flush::make_durable(f)
+        })
+    }
+
+    /// [`DetachedSync::run_all`] with `sync` making a file durable.
+    fn run_all_with(
+        syncs: Vec<DetachedSync>,
+        mut sync: impl FnMut(&File) -> io::Result<()>,
+    ) -> Vec<IoDone> {
+        use std::os::unix::fs::MetadataExt;
+        let key = |f: &File| f.metadata().ok().map(|m| (m.dev(), m.ino()));
+        let keys: Vec<FileIdentity> = syncs.iter().map(|s| key(&s.file)).collect();
+        let mut done: Vec<(FileIdentity, Result<(), IoErrno>)> = Vec::new();
+        let mut answers = Vec::with_capacity(syncs.len());
+        for (s, k) in syncs.into_iter().zip(keys) {
+            // A file whose identity is unknown gets a sync of its own.
+            let r = match done.iter().find(|(d, _)| k.is_some() && *d == k) {
+                Some((_, r)) => *r,
+                None => {
+                    let r = sync(&s.file).map_err(io_errno);
+                    done.push((k, r));
+                    r
+                }
+            };
+            answers.push(match r {
+                Ok(()) => IoDone::Ok(s.op),
+                Err(errno) => IoDone::Err { op: s.op, errno },
+            });
+        }
+        answers
+    }
+}
 
 /// An open file: its buffered descriptor and, with `O_DIRECT`, the direct one.
 #[derive(Debug)]
@@ -198,24 +246,17 @@ impl FileDisk {
         Self::options().custom_flags(DIRECT_FLAG).open(full).map(Some)
     }
 
-    /// For the sync of a store's batch (`IoOp::Sync` with `batch > 0`, 012 FR-014, D-159): a job
-    /// that makes the file durable on another thread, with a descriptor of its own, so that the
-    /// disk thread writes the next batch meanwhile. `None` for any other operation, which runs in
+    /// For the sync of a store's batch (`IoOp::Sync` with `batch > 0`, 012 FR-014, D-159): the
+    /// sync for the core's sync thread, with a descriptor of its own, so that the disk thread
+    /// writes the next batch meanwhile. `None` for any other operation, which runs in
     /// order: the syncs of the LSM, of atomic writes and of folders come before what follows them.
-    pub(crate) fn detach_sync(&self, op: &IoOp) -> Option<SyncJob> {
+    pub(crate) fn detach_sync(&self, op: &IoOp) -> Option<DetachedSync> {
         let IoOp::Sync { file, batch } = op else { return None };
         if *batch == 0 {
             return None;
         }
-        let f = self.files.get(file)?.file.try_clone().ok()?;
-        let op = op.without_data();
-        Some(Box::new(move || {
-            crate::counters::record_sync();
-            match crate::drive_flush::make_durable(&f) {
-                Ok(()) => IoDone::Ok(op),
-                Err(e) => IoDone::Err { op, errno: io_errno(e) },
-            }
-        }))
+        let file = self.files.get(file)?.file.try_clone().ok()?;
+        Some(DetachedSync { file, op: op.without_data() })
     }
 
     fn file(&self, id: FileId) -> Result<&DiskFile, IoErrno> {
@@ -362,6 +403,37 @@ mod tests {
         p.push(format!("teseladb-io-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         p
+    }
+
+    #[test]
+    fn the_syncs_of_one_file_go_in_one_sync_and_each_is_answered() {
+        // 012 FR-014: the batches that waited for the drive go together, one sync per file.
+        let root = temp_root("detached");
+        fs::create_dir_all(&root).unwrap();
+        let open = |name: &str| {
+            fs::OpenOptions::new().create(true).write(true).truncate(true).open(root.join(name))
+        };
+        let (a, b) = (open("a").unwrap(), open("b").unwrap());
+        let job = |f: &File, batch| DetachedSync {
+            file: f.try_clone().unwrap(),
+            op: IoOp::Sync { file: FileId(1), batch },
+        };
+        let jobs = vec![job(&a, 1), job(&b, 2), job(&a, 3), job(&a, 4)];
+        let mut made = 0;
+        let answers = DetachedSync::run_all_with(jobs, |f| {
+            made += 1;
+            f.sync_all()
+        });
+        let batches: Vec<u64> = answers
+            .iter()
+            .map(|d| match d {
+                IoDone::Ok(IoOp::Sync { batch, .. }) => *batch,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(batches, [1, 2, 3, 4], "every sync answered, in order");
+        assert_eq!(made, 2, "one sync per file");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn ok(d: &mut FileDisk, op: IoOp) {
