@@ -39,8 +39,8 @@ const STOP_SETTLE_POLL: Duration = Duration::from_millis(10);
 /// How long a core goes without work, with its logic at rest, before it ticks every
 /// [`REST_TICK`].
 pub const REST_AFTER: Nanos = Nanos::from_secs(1);
-/// The tick of a core at rest. Linux stops the tick of an idle CPU the same way (`NO_HZ_IDLE`),
-/// and AnotherProduct ticks only the replicas that are not quiescent; the first work ends the rest
+/// The tick of a core at rest. Linux stops the tick of an idle CPU the same way
+/// (`NO_HZ_IDLE`); the first work ends the rest
 /// with a tick, so a mark still comes from a wall clock read in the same tick that checked it for
 /// jumps (005 FR-007).
 pub const REST_TICK: Duration = Duration::from_millis(100);
@@ -392,8 +392,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         // sleeping: a wake-up costs several microseconds on every request that crosses threads
         // (H-013). The spin looks at the mailbox and, without waiting, at the poller; the events
         // it takes are not asked for again. Only a core that just worked spins: one that woke
-        // for its tick alone sleeps again at once, as AnotherProduct polls only for a while after its
-        // last work (H-037: every core spun after each tick, 3 % of a core with the node idle).
+        // for its tick alone sleeps again at once (H-037: every core spun after each tick,
+        // 3 % of a core with the node idle).
         let mut failed = None;
         let spin = self.worked && !timeout.is_zero();
         self.spins += u64::from(spin);

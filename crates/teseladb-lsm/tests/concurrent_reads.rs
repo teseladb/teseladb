@@ -293,7 +293,7 @@ fn a_cached_view_belongs_to_its_lsm() {
 
 #[test]
 fn may_exist_answers_without_reading_a_block() {
-    // H-042, as AnotherProduct's `KeyMayExist`: a key with a version in a memtable or in a file whose
+    // H-042: a key with a version in a memtable or in a file whose
     // filter does not rule it out may exist; an absent key is ruled out without any block.
     let cfg = small();
     let mut disk = MemDisk::new();

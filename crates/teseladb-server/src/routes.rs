@@ -110,8 +110,7 @@ impl SharedRoutes {
 
     /// The range that holds `key` and the core of this node that holds it, from the table and
     /// cores `cache` keeps for one worker: it reads them again only when the table or the cores
-    /// changed, so a read touches no lock and no counter other workers write (H-013, as a
-    /// thread keeps AnotherProduct's `SuperVersion`).
+    /// changed, so a read touches no lock and no counter other workers write (H-013).
     pub fn route_of(&self, cache: &mut RouteCache, key: &[u8]) -> Option<(GroupId, u16)> {
         self.span_of(cache, key).map(|(g, core, _)| (g, core))
     }

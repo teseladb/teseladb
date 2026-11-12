@@ -345,8 +345,8 @@ fn get_in_table<B: Blocks>(
     Ok(None)
 }
 
-/// Whether `key` may have a version in `v`, without reading a block (H-042, as AnotherProduct's
-/// `KeyMayExist`): a memtable holds an entry of it, or a file covering it whose filter does not
+/// Whether `key` may have a version in `v`, without reading a block (H-042): a memtable
+/// holds an entry of it, or a file covering it whose filter does not
 /// rule it out. `false` is certain; `true` may be a false positive of a filter, or a version that
 /// deletes the key.
 pub(crate) fn may_exist(v: &Version, key: &[u8]) -> bool {

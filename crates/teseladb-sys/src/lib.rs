@@ -72,8 +72,7 @@ pub mod drive {
 /// drive (`sync_file_range` with `SYNC_FILE_RANGE_WRITE` on Linux, `fsync` on macOS, which leaves
 /// the data in the drive's cache). A large file written this way as it grows leaves little for
 /// the sync that ends it, so that sync no longer holds the drive's flush, and every sync of the
-/// other logs behind it, for the time of the whole file (H-049 of the native tests; the
-/// `bytes_per_sync` of AnotherProduct).
+/// other logs behind it, for the time of the whole file (H-049 of the native tests).
 ///
 /// # Errors
 ///

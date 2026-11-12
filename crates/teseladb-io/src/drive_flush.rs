@@ -71,8 +71,8 @@ impl Flusher {
     /// with `push` and then runs one `flush`. A file is pushed by the leader of its group and
     /// never while a flush of the drive runs: a push waits behind a flush in progress, and the
     /// pushes that ended with it would start the next flush one by one and miss it (the leader
-    /// writes for its followers, as AnotherProductQL's `XLogFlush` and AnotherProduct's write group leader
-    /// do). Returns the group's number, or the error of a push or flush of this drive that
+    /// writes for its followers). Returns the group's number, or the error of a push or flush
+    /// of this drive that
     /// failed now or before. With every slot taken the file is pushed here and waits for a flush
     /// as [`Flusher::after_push`] does.
     pub(crate) fn sync(

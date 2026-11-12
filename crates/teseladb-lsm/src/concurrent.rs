@@ -146,8 +146,8 @@ impl SharedLsm {
     }
 
     /// The version the core published last, kept in `cache` between reads of one thread: it is
-    /// taken again only when the core published another one since (AnotherProduct's thread-local
-    /// `SuperVersion`), so a read touches no counter that other readers write. A version published
+    /// taken again only when the core published another one since, so a read touches no
+    /// counter that other readers write. A version published
     /// before the core answered a write is seen by any read that starts after that answer.
     pub fn view_cached<'a>(&self, cache: &'a mut ViewCache) -> &'a SharedView {
         let now = self.inner.current.version();

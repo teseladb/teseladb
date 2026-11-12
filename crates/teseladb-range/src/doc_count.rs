@@ -1,6 +1,6 @@
 //! The live documents of each collection a range holds (007 FR-039, D-149, H-004): what `count`
 //! without a filter, `estimatedDocumentCount` and `collStats` add up instead of reading every
-//! document, as AnotherProduct keeps `live_count` in its `MVCCStats` next to `live_bytes`.
+//! document.
 //!
 //! A live document is a version of a key of the documents of a collection (index
 //! [`DOCUMENTS`](teseladb_keys::space::DOCUMENTS) of the data space) whose value is a document

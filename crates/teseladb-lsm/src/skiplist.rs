@@ -1,5 +1,5 @@
 //! A sorted map of byte keys with one writer at a time and readers on any thread without a lock
-//! (004 FR-026, H-013): AnotherProduct's skiplist (`db/skiplist.h`). A writer links a node only after it
+//! (004 FR-026, H-013): a skiplist. A writer links a node only after it
 //! is complete, storing each level's pointer with `Release`; a reader loads them with `Acquire`,
 //! so it sees a node whole or not at all. Nodes and replaced values are freed only when the list
 //! is dropped, so a reader holding the list (through the `Arc` of its memtable) never meets a
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 /// Most levels of a node.
 const MAX_HEIGHT: usize = 12;
 
-/// One level up in four, as in AnotherProduct.
+/// One level up in four.
 const BRANCHING: u64 = 4;
 
 struct Node<V> {

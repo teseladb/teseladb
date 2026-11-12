@@ -2,7 +2,7 @@
 //! leads are estimated, the leader counts the documents of each collection at the entry it has
 //! applied and proposes `AdjustCounts`, at most once every [`RECOUNT_EVERY`]. Each replica adds
 //! the counted writes that followed and takes the counts as exact only if nothing after that
-//! entry left them estimated, as AnotherProduct's `RecomputeStats` corrects `MVCCStats`.
+//! entry left them estimated.
 
 use super::*;
 use crate::doc_count::{DocScan, Recount};

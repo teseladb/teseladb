@@ -30,7 +30,7 @@ pub struct Published<T> {
     readers: [AtomicUsize; 2],
     storing: AtomicBool,
     /// How many values were published: a reader that keeps the value it took compares this and
-    /// loads again only when it moved (AnotherProduct keeps its `SuperVersion` per thread the same way).
+    /// loads again only when it moved.
     version: AtomicU64,
 }
 

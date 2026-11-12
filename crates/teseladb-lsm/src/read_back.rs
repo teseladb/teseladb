@@ -1,8 +1,8 @@
 //! Backward range reads (H-003): the keys of `[start, end)` from the last one down, one visible
 //! version per key, as a forward [`Scan`](crate::Scan) gives them reversed.
 //!
-//! Each step finds the largest logical key below the current bound in every source (AnotherProduct's
-//! `SeekForPrev`: a memtable answers from its ordered keys; a file from its block index, which
+//! Each step finds the largest logical key below the current bound in every source (a
+//! memtable answers from its ordered keys; a file from its block index, which
 //! holds each block's last key, reading at most the one block the bound falls in) and then reads
 //! that key as a point read does, which decides its versions, retractions, intents and range
 //! tombstones. A read of the last `n` keys costs `n` such steps, not a read of the whole range.
@@ -30,8 +30,7 @@ pub struct BackScan {
     finished: bool,
     /// For each file of the version, in its order, the keys of the block the bound last fell in:
     /// the bound only goes down, so each block is read once per scan and then searched by
-    /// bisection (H-003 of the native tests; AnotherProduct's `BlockIter::Prev` keeps the entries it
-    /// decoded for the same reason).
+    /// bisection (H-003 of the native tests).
     blocks: Vec<Option<Decoded>>,
     /// The largest logical key a step found so far, kept between steps so that each step
     /// copies into it instead of allocating one per source.

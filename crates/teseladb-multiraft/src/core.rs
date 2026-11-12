@@ -2058,7 +2058,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
     }
 
     /// A group whose latest snapshot is older than `snapshot_age` takes one if it applied entries
-    /// since (001 FR-005), as AnotherProduct compacts each region's log on a periodic tick: otherwise a group
+    /// since (001 FR-005): otherwise a group
     /// with little traffic holds the core's shared WAL from its oldest segment on. Without forcing
     /// a flush: a snapshot past the LSM's floor waits for it as any other does.
     fn snapshot_by_age(&mut self, g: GroupId, now: Nanos) {
@@ -2388,8 +2388,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
     pub fn send_confirm_round(&mut self, g: GroupId, now: Nanos) {
         self.now = now;
         // Alone in its group the leader is the majority: the round is answered as it leaves,
-        // and the quiet group is not woken for it (013 FR-012, H-039; anotherproduct answers a
-        // `ReadIndex` of a single-node cluster the same way).
+        // and the quiet group is not woken for it (013 FR-012, H-039).
         if let Some(grp) = self.groups.get(&g).filter(|grp| !grp.stopped && !grp.installing) {
             let term = grp.raw.status(&GroupStore::new(&self.store, g)).hard_state.term;
             if self.leads_alone(g, grp, term) {
