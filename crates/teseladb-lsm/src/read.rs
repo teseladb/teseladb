@@ -359,9 +359,7 @@ pub(crate) fn may_exist(v: &Version, key: &[u8]) -> bool {
         return true;
     }
     let hashes = filter::hashes(key);
-    v.tables().any(|t| {
-        t.props.lo.as_slice() <= key && key <= t.props.hi.as_slice() && t.may_contain(hashes)
-    })
+    v.tables_for(key).any(|t| t.may_contain(hashes))
 }
 
 pub(crate) fn get<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc) -> Lookup {
@@ -391,10 +389,7 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
     let hashes = filter::hashes(key);
     let mut waiting = None;
     let mut probes = 0;
-    for t in v.tables() {
-        if key < t.props.lo.as_slice() || key > t.props.hi.as_slice() {
-            continue;
-        }
+    for t in v.tables_for(key) {
         note_tombstones(&mut hidden, &t.props.tombstones, key, read);
         let newer = best.as_ref().is_none_or(|b| t.props.max_ts > b.ts);
         if !newer || t.props.min_ts > read || !t.may_contain(hashes) {

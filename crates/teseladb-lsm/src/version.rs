@@ -38,6 +38,23 @@ impl Version {
         self.levels.iter().flatten()
     }
 
+    /// The files that may hold versions of `key`, in order of precedence: every file of level 0
+    /// whose keys cover it, then in each deeper level the file whose keys cover it, found by a
+    /// binary search (a compaction cuts files only between keys; were a key's versions in two,
+    /// both would come). A point read
+    /// looking at every file of a large LSM spent its time comparing keys (H-051 of the native
+    /// tests).
+    pub(crate) fn tables_for<'a>(&'a self, key: &'a [u8]) -> impl Iterator<Item = &'a Arc<Table>> {
+        let covers =
+            move |t: &&Arc<Table>| t.props.lo.as_slice() <= key && key <= t.props.hi.as_slice();
+        let level0 = self.levels.first().into_iter().flatten().filter(covers);
+        let deeper = self.levels.iter().skip(1).flat_map(move |level| {
+            let first = level.partition_point(|t| t.props.hi.as_slice() < key);
+            level[first..].iter().take_while(move |t| t.props.lo.as_slice() <= key)
+        });
+        level0.chain(deeper)
+    }
+
     /// Files of `level` that touch `[lo, hi]`.
     pub(crate) fn overlapping(&self, level: usize, lo: &[u8], hi: &[u8]) -> Vec<Arc<Table>> {
         self.levels[level]

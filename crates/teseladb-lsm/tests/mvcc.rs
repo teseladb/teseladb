@@ -7,7 +7,7 @@ mod common;
 use common::model::Model;
 use common::{get, history, open, scan, small, ts};
 use teseladb_lsm::Step;
-use teseladb_lsm::{Commit, EntryWrite, Kind, LsmConfig, VersionWrite};
+use teseladb_lsm::{Commit, EntryWrite, Kind, Lsm, LsmConfig, VersionWrite};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
@@ -354,4 +354,48 @@ fn a_backward_scan_reads_its_last_keys_without_reading_the_rest() {
     assert_eq!(keys, [b"k01999".to_vec(), b"k01998".to_vec(), b"k01997".to_vec()]);
     assert!(blocks >= 20, "the data spans {blocks} blocks");
     assert!(reads <= 2, "{reads} block reads for the last three keys");
+}
+
+/// A key with many versions, among the files of other keys in a level of several files, reads
+/// each version at its mark: a point read finds a key's file of each level by a binary search
+/// (H-051 of the native tests: looking at every file of a large LSM, point reads spent their time
+/// comparing keys).
+#[test]
+fn a_key_with_many_versions_among_many_files_reads_each_version() {
+    const VERSIONS: u64 = 120;
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let mut index = 0;
+    let mut put = |lsm: &mut Lsm, key: &[u8], at: u64, value: &[u8]| {
+        index += 1;
+        lsm.put(G, index, key, ts(at, 0), value).unwrap();
+    };
+    for i in 0..400u32 {
+        put(&mut lsm, format!("a{i:04}").as_bytes(), 1, &[1; 300]);
+    }
+    // Each version of `m` 1 KiB: 120 KiB, more than one file of 64 KiB.
+    for v in 1..=VERSIONS {
+        put(&mut lsm, b"m", 10 + v, &[u8::try_from(v).unwrap(); 1024]);
+    }
+    for i in 0..400u32 {
+        put(&mut lsm, format!("z{i:04}").as_bytes(), 2, &[2; 300]);
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.compact_all();
+    // Rounds of I/O until the compaction of everything ran.
+    for _ in 0..1000 {
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    let m = lsm.metrics();
+    assert_eq!(m.level_bytes[0], 0, "everything below level 0: {m:?}");
+    assert!(m.level_files.iter().skip(1).any(|n| *n > 4), "several files in a level: {m:?}");
+    let view = lsm.view();
+    for v in 1..=VERSIONS {
+        let row = get(&mut lsm, &mut disk, &view, b"m", ts(10 + v, 0)).expect("a version");
+        assert_eq!(row.3, vec![u8::try_from(v).unwrap(); 1024], "version {v}");
+    }
+    assert_eq!(get(&mut lsm, &mut disk, &view, b"m", ts(5, 0)), None, "none before the first");
+    assert!(get(&mut lsm, &mut disk, &view, b"a0399", ts(3, 0)).is_some());
+    assert!(get(&mut lsm, &mut disk, &view, b"z0000", ts(3, 0)).is_some());
 }
