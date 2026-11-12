@@ -55,17 +55,32 @@ pub enum Stage {
     TxnResolve,
     /// A commit's wait for the clock to reach its mark.
     TxnClockWait,
+    /// A statement of a transaction, from its arrival to its answer.
+    TxnStatement,
     /// A transaction from its first request to its outcome.
     TxnTotal,
     /// A scan served on a connection's thread.
     ScanOutside,
     /// A scan the core served.
     ScanCore,
+    /// A read's wait in its range for the node's wall clock to reach the mark it was given.
+    ReadClockWait,
+    /// A read's wait in its range for the core to confirm the leadership.
+    ReadConfirm,
+    /// A read's wait in its range for the writes in flight at or below its mark.
+    ReadLatchWait,
+    /// A disk operation's wait in the queue of its core's disk thread.
+    DiskQueueWait,
+    /// A message's wait in the mailbox of its core: a request, a disk result, another core's.
+    MailboxWait,
+    /// Entries of a Raft log from their append to the core's log until the core learns they are
+    /// durable.
+    LogAppendToDurable,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 16] = [
+    pub const ALL: [Stage; 23] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -79,9 +94,16 @@ impl Stage {
         Stage::TxnOnePhase,
         Stage::TxnResolve,
         Stage::TxnClockWait,
+        Stage::TxnStatement,
         Stage::TxnTotal,
         Stage::ScanOutside,
         Stage::ScanCore,
+        Stage::ReadClockWait,
+        Stage::ReadConfirm,
+        Stage::ReadLatchWait,
+        Stage::DiskQueueWait,
+        Stage::MailboxWait,
+        Stage::LogAppendToDurable,
     ];
 
     /// Its label in the metrics.
@@ -100,9 +122,16 @@ impl Stage {
             Stage::TxnOnePhase => "txn_one_phase",
             Stage::TxnResolve => "txn_resolve",
             Stage::TxnClockWait => "txn_clock_wait",
+            Stage::TxnStatement => "txn_statement",
             Stage::TxnTotal => "txn_total",
             Stage::ScanOutside => "scan_outside",
             Stage::ScanCore => "scan_core",
+            Stage::ReadClockWait => "read_clock_wait",
+            Stage::ReadConfirm => "read_confirm",
+            Stage::ReadLatchWait => "read_latch_wait",
+            Stage::DiskQueueWait => "disk_queue_wait",
+            Stage::MailboxWait => "mailbox_wait",
+            Stage::LogAppendToDurable => "log_append_to_durable",
         }
     }
 }

@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 teseladb-hlc = { path = "../teseladb-hlc" }
+teseladb-stages = { path = "../teseladb-stages" }
 teseladb-types = { workspace = true }
 teseladb-raft = { workspace = true }
 teseladb-raftlog = { workspace = true }

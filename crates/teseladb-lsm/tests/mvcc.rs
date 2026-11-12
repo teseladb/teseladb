@@ -399,3 +399,108 @@ fn a_key_with_many_versions_among_many_files_reads_each_version() {
     assert!(get(&mut lsm, &mut disk, &view, b"a0399", ts(3, 0)).is_some());
     assert!(get(&mut lsm, &mut disk, &view, b"z0000", ts(3, 0)).is_some());
 }
+
+#[test]
+fn a_scan_over_many_files_gives_each_key_once_in_order_at_any_timestamp() {
+    // FR-029: forty files in level 0 with their keys interleaved, and a memtable on top. The
+    // scan orders their cursors once and moves only the one it reads from.
+    let cfg = LsmConfig { l0_trigger: 1_000, l0_slow: 2_000, l0_reject: 3_000, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    let key = |i: u64| format!("k{i:05}").into_bytes();
+    let mut index = 0;
+    // Round `r` writes the keys `r, r + 7, r + 14…` at `r`; a key is written in several rounds.
+    for round in 1..=40u64 {
+        for i in (round..400).step_by(7) {
+            index += 1;
+            lsm.put(G, index, &key(i), ts(round, 0), format!("{round}").as_bytes()).unwrap();
+        }
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    assert!(lsm.metrics().level_files[0] >= 40, "{:?}", lsm.metrics().level_files);
+    for i in (0..400).step_by(50) {
+        index += 1;
+        lsm.put(G, index, &key(i), ts(41, 0), b"mem").unwrap();
+    }
+    // The value of key `i` as of round `at`: the last round up to it that wrote the key.
+    let wanted = |at: u64| -> Vec<(Vec<u8>, Vec<u8>)> {
+        (0..400u64)
+            .filter_map(|i| {
+                if at >= 41 && i % 50 == 0 {
+                    return Some((key(i), b"mem".to_vec()));
+                }
+                let round = (1..=at.min(40)).rev().find(|r| i >= *r && (i - r) % 7 == 0)?;
+                Some((key(i), format!("{round}").into_bytes()))
+            })
+            .collect()
+    };
+    let v = lsm.view();
+    for at in [41, 40, 23, 7, 1] {
+        let rows = scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(at, 0));
+        let got: Vec<(Vec<u8>, Vec<u8>)> = rows.into_iter().map(|r| (r.0, r.3)).collect();
+        assert_eq!(got, wanted(at), "at {at}");
+    }
+    // A part of the span, from the middle of it.
+    let rows = scan(&mut lsm, &mut disk, &v, &key(100), &key(120), ts(41, 0));
+    let got: Vec<Vec<u8>> = rows.into_iter().map(|r| r.0).collect();
+    assert_eq!(got, (100..120).map(key).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_scan_passes_the_old_versions_of_a_key_however_many_a_file_has() {
+    // FR-029: fifty versions of each key in one file, more than the scan steps over one by
+    // one, and across several blocks; some keys deleted at the end.
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let key = |i: u64| format!("k{i:03}").into_bytes();
+    let mut index = 0;
+    for version in 1..=50u64 {
+        for i in 0..20 {
+            index += 1;
+            lsm.put(G, index, &key(i), ts(version, 0), &[version as u8; 300]).unwrap();
+        }
+    }
+    for i in [3, 4, 19] {
+        index += 1;
+        lsm.delete(G, index, &key(i), ts(51, 0)).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let v = lsm.view();
+    // The blocks are read as the scan needs them: it waits for some of them on its way.
+    let mut misses = 0;
+    let mut s = v.scan(b"k", b"l", ts(60, 0));
+    let mut latest = Vec::new();
+    loop {
+        match s.next(&mut lsm) {
+            Step::Item(i) => latest.push((i.key, i.ts, i.value.to_vec())),
+            Step::Miss(_) => {
+                misses += 1;
+                lsm.run_io(&mut disk, Nanos::ZERO);
+            }
+            Step::Done => break,
+            Step::Failed(e) => panic!("{e}"),
+        }
+    }
+    // Twenty keys of some four blocks each: it reads the block of each newest version and the
+    // file's index takes it past the blocks that hold only older ones.
+    assert!(misses > 1 && misses < 45, "{misses} waits for a block");
+    let alive: Vec<u64> = (0..20).filter(|i| ![3, 4, 19].contains(i)).collect();
+    assert_eq!(latest.len(), alive.len());
+    for ((k, at, value), i) in latest.iter().zip(&alive) {
+        assert_eq!((k, *at, value.as_slice()), (&key(*i), ts(50, 0), &[50u8; 300][..]));
+    }
+    // At an old timestamp, every key shows the version of that moment.
+    for at in [50u64, 26, 9, 1] {
+        let rows = scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(at, 0));
+        assert_eq!(rows.len(), 20, "at {at}");
+        for (n, r) in rows.iter().enumerate() {
+            assert_eq!(
+                (&r.0, r.1, r.3.as_slice()),
+                (&key(n as u64), ts(at, 0), &[at as u8; 300][..])
+            );
+        }
+    }
+}

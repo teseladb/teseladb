@@ -196,6 +196,7 @@ name = "teseladb-multiraft"
 version = "0.1.0"
 dependencies = [
  "teseladb-hlc",
+ "teseladb-stages",
  "teseladb-hash",
  "teseladb-raft",
  "teseladb-raftlog",

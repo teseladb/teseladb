@@ -21,7 +21,7 @@ use teseladb_range::mutate::Outcome;
 use teseladb_range::push::Row;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_range::view::FastRead;
+use teseladb_range::view::{Decline, FastRead, Part};
 use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -69,25 +69,33 @@ impl Node {
             self.now = self.now + Nanos::from_millis(1);
             let (now, wall) = (self.now, self.wall());
             self.core.on_tick(now, wall);
-            while let Some(op) = self.core.poll_io(now) {
-                let done = teseladb_raftlog::Disk::execute(&mut self.disk, op);
-                self.core.on_io_done(done, now);
-                moved = true;
-            }
-            let c = self.host.lsm().borrow_mut().run_io(&mut self.disk, now);
-            moved |= !c.flushed.is_empty();
-            for (op, r) in self.core.drain_actions().done {
-                moved |= self.host.on_done(&mut self.core, op, r);
-            }
-            moved |= self.host.poll(&mut self.core, now, wall);
-            let replies = self.host.take_replies();
-            moved |= !replies.is_empty();
-            self.replies.extend(replies);
+            moved |= self.turn(now, wall);
             if !moved {
                 return;
             }
         }
         panic!("the node never settled");
+    }
+
+    /// One turn of the core's loop at `now` without a tick: the core's wall clock stays at
+    /// `wall`, the one of its last tick. `true` if something moved.
+    fn turn(&mut self, now: Nanos, wall: u64) -> bool {
+        let mut moved = false;
+        while let Some(op) = self.core.poll_io(now) {
+            let done = teseladb_raftlog::Disk::execute(&mut self.disk, op);
+            self.core.on_io_done(done, now);
+            moved = true;
+        }
+        let c = self.host.lsm().borrow_mut().run_io(&mut self.disk, now);
+        moved |= !c.flushed.is_empty();
+        for (op, r) in self.core.drain_actions().done {
+            moved |= self.host.on_done(&mut self.core, op, r);
+        }
+        moved |= self.host.poll(&mut self.core, now, wall);
+        let replies = self.host.take_replies();
+        moved |= !replies.is_empty();
+        self.replies.extend(replies);
+        moved
     }
 
     fn reply(&self, id: ReqId) -> Option<&Result<Reply, RangeError>> {
@@ -351,6 +359,16 @@ fn a_write_without_documents_or_on_a_range_the_core_lacks_fails() {
     assert_eq!(n.reply(lost), Some(&Err(RangeError::NotLeader { hint: NodeId(0) })));
 }
 
+/// Writes a value of `.1` bytes at `key`, each of them `.2`.
+struct SetLarge(Vec<u8>, usize, u8);
+
+impl Mutation for SetLarge {
+    fn eval(&self, _: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
+        let put = Put { key: self.0.clone(), value_type: 1, value: vec![self.2; self.1] };
+        Ok(Outcome { puts: vec![put], deletes: vec![], change: vec![], result: vec![] })
+    }
+}
+
 /// Writes `value` at `key` (`None`: deletes it).
 struct SetKey(Vec<u8>, Option<u8>);
 
@@ -452,6 +470,31 @@ fn a_read_at_a_mark_sees_that_moment_and_later_writes_stay_above_it() {
         other => panic!("{other:?}"),
     }
     assert_eq!(count(&n, r), Some(2), "the read at that mark still sees 2");
+}
+
+#[test]
+fn a_read_at_a_mark_is_served_in_the_turn_whose_wall_clock_reaches_it() {
+    // 005 FR-032: a transaction's mark comes from the node's HLC, which a connection's thread
+    // moved with the wall clock it read a moment ago. The core reads the wall clock at the start
+    // of each turn with work and the host compares the mark with that reading, not with the one
+    // of the core's last tick, up to a tick old.
+    let mut n = Node::new();
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    let (now, at_tick) = (n.now, n.wall());
+    let mark = Hlc { physical: at_tick + 5, logical: 0 };
+    let r = n.host.get_at(&mut n.core, G, b"\x01count", mark, now, at_tick);
+    while n.turn(now, at_tick) {}
+    assert!(n.reply(r).is_none(), "the wall clock of the last tick is below the mark");
+    // The next turn, before the core's next tick: its wall clock reads the mark's millisecond.
+    n.core.on_clock(now, at_tick + 5);
+    while n.turn(now, at_tick + 5) {}
+    assert_eq!(count(&n, r), Some(1));
+    // Half a second ahead of the wall clock is still refused (D-081).
+    let far = Hlc { physical: at_tick + 5 + 501, logical: 0 };
+    let r = n.host.get_at(&mut n.core, G, b"\x01count", far, now, at_tick + 5);
+    while n.turn(now, at_tick + 5) {}
+    assert!(matches!(n.reply(r), Some(Err(RangeError::Timeout))), "{:?}", n.reply(r));
 }
 
 #[test]
@@ -644,7 +687,8 @@ fn scan_outside_way(
 ) -> Option<(Hlc, Vec<Row>)> {
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let mut cache = ViewCache::default();
-    view.scan(&mut cache, span, (limit, backward), || n.now, concern, |_| false)
+    let part = Part { docs: limit, backward, blocks: 64 };
+    view.scan(&mut cache, span, part, || n.now, concern, |_| false).map(|s| (s.ts, s.rows))
 }
 
 #[test]
@@ -738,7 +782,8 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
     let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
     let odd = |v: &[u8]| v[0] % 2 == 1;
     let mut scan = |span, examine| {
-        view.scan_matching(&mut cache, span, examine, || n.now, ReadConcern::Local, |_| false, odd)
+        let most = (examine, 64);
+        view.scan_matching(&mut cache, span, most, || n.now, ReadConcern::Local, |_| false, odd)
             .expect("served outside")
     };
     let all = scan(span, 10);
@@ -753,6 +798,169 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
     let rest = scan((&from, span.1), 10);
     assert_eq!((rest.rows.len(), rest.examined, &rest.next), (2, 3, &None));
     assert!(rest.ts == all.ts);
+}
+
+/// A node whose range holds `docs` documents of 8 KiB (`\x01k000`, `\x01k001`…) in a file of the
+/// LSM, of which the first `deleted` were deleted afterwards: about two documents a block, none
+/// of them in the cache of the reads outside the core.
+fn node_with_a_file(docs: u32, deleted: u32) -> Node {
+    let key = |i: u32| format!("\x01k{i:03}").into_bytes();
+    let mut n = Node::new();
+    for i in 0..docs {
+        n.mutate(&key(i), Box::new(SetLarge(key(i), 8 << 10, i as u8)), MAJORITY);
+        n.settle();
+    }
+    for i in 0..deleted {
+        n.mutate(&key(i), Box::new(SetKey(key(i), None)), MAJORITY);
+        n.settle();
+    }
+    n.host.lsm().borrow_mut().flush();
+    n.settle();
+    // A write after the flush: the view the range publishes next has the file.
+    n.mutate(b"\x01z", Box::new(SetKey(b"\x01z".to_vec(), Some(9))), MAJORITY);
+    n.settle();
+    n
+}
+
+/// Reads the block `need` names from `disk` into the cache of the reads outside the core, as a
+/// connection's thread does, and counts it in `read`.
+fn supply_block(
+    disk: &mut MemDisk,
+    view: &teseladb_range::view::RangeView,
+    need: &teseladb_lsm::BlockNeed,
+    read: &mut usize,
+) -> bool {
+    use teseladb_raftlog::Disk;
+    *read += 1;
+    let Ok(file) = disk.read_all(std::path::Path::new(&need.path)) else { return false };
+    let (from, len) = (need.offset as usize, need.len as usize);
+    file.get(from..from + len).is_some_and(|b| view.lsm().supply(need, b).is_ok())
+}
+
+#[test]
+fn a_scan_outside_the_core_stops_at_its_blocks_with_what_it_has_and_goes_on_from_there() {
+    // 005 FR-033: forty documents in some twenty blocks, read four blocks at a time.
+    let span: (&[u8], &[u8]) = (b"\x01k", b"\x01l");
+    for backward in [false, true] {
+        // A node for each direction: the blocks one scan read stay in the cache.
+        let mut n = node_with_a_file(40, 0);
+        let now = n.now;
+        let view = n.host.views().get(G).expect("the view of a range this node leads");
+        let mut cache = ViewCache::default();
+        let (mut from, mut to) = (span.0.to_vec(), span.1.to_vec());
+        let (mut keys, mut parts) = (Vec::new(), 0);
+        loop {
+            let mut read = 0;
+            let part = Part { docs: 100, backward, blocks: 4 };
+            let got = view
+                .scan(
+                    &mut cache,
+                    (&from, &to),
+                    part,
+                    || now,
+                    ReadConcern::Local,
+                    |need| supply_block(&mut n.disk, &view, need, &mut read),
+                )
+                .expect("served outside");
+            assert!(read <= 4, "{read} blocks in one part");
+            assert!(!got.rows.is_empty(), "a part comes back with documents");
+            keys.extend(got.rows.into_iter().map(|(k, _)| k));
+            parts += 1;
+            match (got.next, backward) {
+                (Some(next), false) => from = next,
+                (Some(next), true) => to = next,
+                (None, _) => break,
+            }
+        }
+        let mut wanted: Vec<Vec<u8>> =
+            (0..40u32).map(|i| format!("\x01k{i:03}").into_bytes()).collect();
+        if backward {
+            wanted.reverse();
+        }
+        assert_eq!(keys, wanted, "every document once, in order");
+        assert!(parts >= 4, "{parts} parts for some twenty blocks");
+        // The blocks stay in the cache: the next scan reads none and gives everything at once.
+        let mut cache = ViewCache::default();
+        let part = Part { docs: 100, backward, blocks: 4 };
+        let all = view
+            .scan(&mut cache, span, part, || now, ReadConcern::Local, |_| false)
+            .expect("served outside");
+        assert_eq!((all.rows.len(), all.next), (40, None));
+    }
+}
+
+#[test]
+fn a_matching_scan_outside_the_core_stops_at_its_blocks_and_goes_on_from_there() {
+    // 005 FR-033 with a filter (010 FR-027): the documents with an even first byte.
+    let mut n = node_with_a_file(40, 0);
+    let now = n.now;
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = ViewCache::default();
+    let end: &[u8] = b"\x01l";
+    let mut from = b"\x01k".to_vec();
+    let (mut kept, mut examined, mut parts) = (Vec::new(), 0, 0);
+    loop {
+        let mut read = 0;
+        let got = view
+            .scan_matching(
+                &mut cache,
+                (&from, end),
+                (1_000, 4),
+                || now,
+                ReadConcern::Local,
+                |need| supply_block(&mut n.disk, &view, need, &mut read),
+                |v| v[0] % 2 == 0,
+            )
+            .expect("served outside");
+        assert!(read <= 4 && got.examined > 0, "{read} blocks, {} examined", got.examined);
+        examined += got.examined;
+        kept.extend(got.rows.into_iter().map(|(k, _)| k));
+        parts += 1;
+        match got.next {
+            Some(next) => from = next,
+            None => break,
+        }
+    }
+    let wanted: Vec<Vec<u8>> =
+        (0..40u32).step_by(2).map(|i| format!("\x01k{i:03}").into_bytes()).collect();
+    assert_eq!((kept, examined), (wanted, 40));
+    assert!(parts >= 4, "{parts} parts");
+}
+
+#[test]
+fn a_part_without_a_document_reads_on_and_too_many_blocks_send_the_scan_to_the_core() {
+    // Forty documents deleted and one left after them: the deleted versions fill some twenty
+    // blocks the scan has to pass.
+    let mut n = node_with_a_file(41, 40);
+    let now = n.now;
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let span: (&[u8], &[u8]) = (b"\x01k", b"\x01l");
+    let scan = |n: &mut Node, blocks: usize, read: &mut usize| {
+        let mut cache = ViewCache::default();
+        let part = Part { docs: 10, backward: false, blocks };
+        view.scan(
+            &mut cache,
+            span,
+            part,
+            || now,
+            ReadConcern::Local,
+            |need| supply_block(&mut n.disk, &view, need, read),
+        )
+    };
+    // A block that cannot be read sends the scan to the core.
+    let mut cache = ViewCache::default();
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    assert!(view.scan(&mut cache, span, part, || now, ReadConcern::Local, |_| false).is_none());
+    // One block a part: sixteen without a document, and the scan goes to the core.
+    let mut read = 0;
+    assert!(scan(&mut n, 1, &mut read).is_none());
+    assert_eq!(read, 16);
+    // Two a part: it reads on past its two blocks, since it has no document, and finds the one.
+    let mut read = 0;
+    let got = scan(&mut n, 2, &mut read).expect("served outside");
+    assert_eq!(got.rows.len(), 1);
+    assert_eq!(got.rows[0].0, b"\x01k040");
+    assert!(read > 2, "{read} blocks");
 }
 
 #[test]
@@ -772,7 +980,10 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
         answered.iter().any(|(id, r)| *id == w && r.is_ok()),
         "answered once it is in the leader's log: {answered:?}"
     );
+    let early = || teseladb_range::view::decline_counts()[Decline::Early as usize];
+    let before = early();
     assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
+    assert!(early() > before, "counted with its own reason");
     n.settle();
     // A span past the range, a linearizable read and no limit go to the core.
     assert!(scan_outside(&n, (b"\x01a", b"\x02"), 10, ReadConcern::Local).is_none());
@@ -782,7 +993,8 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     let view = n.host.views().get(G).expect("the view");
     let late = n.now + Nanos::from_secs(60);
     let mut cache = ViewCache::default();
-    let r = view.scan(&mut cache, span, (10, false), || late, ReadConcern::Local, |_| false);
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let r = view.scan(&mut cache, span, part, || late, ReadConcern::Local, |_| false);
     assert!(r.is_none());
     // Back to normal once the write is applied.
     let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");

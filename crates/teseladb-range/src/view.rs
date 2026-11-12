@@ -255,7 +255,7 @@ impl RangeView {
 
 /// Why reads outside the core went back to it, since the process started, by [`Decline`].
 static DECLINES: [AtomicU64; DECLINE_REASONS] = [const { AtomicU64::new(0) }; DECLINE_REASONS];
-const DECLINE_REASONS: usize = 4;
+const DECLINE_REASONS: usize = 7;
 
 /// Why a read outside the core went back to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,12 +268,27 @@ pub enum Decline {
     Intent,
     /// Anything else: a span past the range, a mark below the GC threshold, a failed read.
     Other,
+    /// A scan while a write of the range was answered to its client before it was applied
+    /// (`w: 1`, DV-010): the view does not hold it yet.
+    Early,
+    /// The node publishes no view of the key's range: this node does not lead it, or its core
+    /// has not published one yet.
+    NoView,
+    /// The node's routing table has no range for the key.
+    Unrouted,
 }
 
 impl Decline {
     /// Every reason, in the order of [`decline_counts`].
-    pub const ALL: [Decline; DECLINE_REASONS] =
-        [Decline::Writing, Decline::Expired, Decline::Intent, Decline::Other];
+    pub const ALL: [Decline; DECLINE_REASONS] = [
+        Decline::Writing,
+        Decline::Expired,
+        Decline::Intent,
+        Decline::Other,
+        Decline::Early,
+        Decline::NoView,
+        Decline::Unrouted,
+    ];
 
     /// Its label in the metrics.
     pub fn label(self) -> &'static str {
@@ -282,10 +297,14 @@ impl Decline {
             Decline::Expired => "expired",
             Decline::Intent => "intent",
             Decline::Other => "other",
+            Decline::Early => "early",
+            Decline::NoView => "no_view",
+            Decline::Unrouted => "unrouted",
         }
     }
 
-    fn count(self) {
+    /// Counts a read that went back to the core for this reason.
+    pub fn count(self) {
         DECLINES[self as usize].fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -293,6 +312,59 @@ impl Decline {
 /// How many reads outside the core went back to it for each reason of [`Decline::ALL`].
 pub fn decline_counts() -> [u64; DECLINE_REASONS] {
     std::array::from_fn(|i| DECLINES[i].load(Ordering::Relaxed))
+}
+
+/// How much one part of a scan outside the core reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Part {
+    /// The most documents it gives; with a filter, the most it examines. More than none.
+    pub docs: usize,
+    /// From the span's last key down (H-003).
+    pub backward: bool,
+    /// Blocks it reads from their files before it stops at the documents it has (FR-033): its
+    /// caller goes on from there with another part. Without a document yet it reads up to
+    /// [`BLOCKS_WITHOUT_A_DOCUMENT`] times as many.
+    pub blocks: usize,
+}
+
+/// How many times its number of blocks a part reads while it has no document (a long stretch
+/// of deleted versions) before the scan goes to the core.
+pub const BLOCKS_WITHOUT_A_DOCUMENT: usize = 16;
+
+/// What [`RangeView::scan`] read.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Scanned {
+    /// The mark it read at.
+    pub ts: Hlc,
+    /// Its documents with their value types: in key order, or from the last key down.
+    pub rows: Vec<crate::push::Row>,
+    /// Where the scan goes on when the part stopped at its blocks: the key to start from, or
+    /// backward the key to end before. `None` when it gave its number of documents or reached
+    /// the span's end.
+    pub next: Option<Vec<u8>>,
+}
+
+/// Counts the blocks a part reads from their files and says when it has read its share.
+struct Blocks {
+    most: usize,
+    read: usize,
+}
+
+impl Blocks {
+    fn new(most: usize) -> Blocks {
+        Blocks { most, read: 0 }
+    }
+
+    /// Whether the part stops before reading another block: it read its share and already has a
+    /// document, so it comes back with progress.
+    fn spent(&self, has_document: bool) -> bool {
+        has_document && self.read >= self.most
+    }
+
+    /// Whether the scan gives up: so many blocks without a single document.
+    fn exhausted(&self) -> bool {
+        self.read >= self.most.saturating_mul(BLOCKS_WITHOUT_A_DOCUMENT)
+    }
 }
 
 /// What [`RangeView::scan_matching`] read.
@@ -306,41 +378,45 @@ pub struct Matched {
     pub seen: Vec<usize>,
     /// Documents examined.
     pub examined: usize,
-    /// Where the scan goes on when it stopped at its number of documents; `None` at the span's
-    /// end.
+    /// Where the scan goes on when it stopped at its number of documents or of blocks; `None`
+    /// at the span's end.
     pub next: Option<Vec<u8>>,
 }
 
 impl RangeView {
-    /// The documents of `[start, end)` with their value types, at most `limit` (more than none),
-    /// in key order (from the last key down when `backward`, H-003), with the mark they are read
+    /// The documents of `[start, end)` with their value types, at most `part.docs`, in key order
+    /// (from the last key down when `part.backward`), with the mark they are read
     /// at: the mark of the last entry the range had applied when the view was published (FR-031).
     /// Every write of the range takes a mark above the entries before it and they are applied in
     /// the log's order, so no write in flight is at or below that mark: the scan looks at no
     /// latch and no write sends it to the core. `now` gives the monotonic time, for the view's
     /// validity. A block the shared cache lacks goes to `supply`, which reads it, gives it to
     /// [`SharedLsm::supply`](teseladb_lsm::SharedLsm) and says whether it could; then the scan
-    /// goes on. `None` when the scan goes to the core: a span past the range, an expired view, a
-    /// write answered to its client before it is applied (DV-010), a mark below the GC
-    /// threshold, an intent, a block that could not be read or a failed read. Versions that only
-    /// serve the history are no documents, as in the core's scans.
+    /// goes on. A part that read its blocks stops at the documents it has and says where the
+    /// scan goes on (FR-033). `None` when the scan goes to the core: a span past the range, an
+    /// expired view, a write answered to its client before it is applied (DV-010), a mark below
+    /// the GC threshold, an intent, a block that could not be read, a failed read or too many
+    /// blocks without a document. Versions that only serve the history are no documents, as in
+    /// the core's scans.
     pub fn scan(
         &self,
         cache: &mut ViewCache,
         (start, end): (&[u8], &[u8]),
-        (limit, backward): (usize, bool),
+        part: Part,
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
-    ) -> Option<(Hlc, Vec<crate::push::Row>)> {
-        let ts = self.applied_for((start, end), limit, now, concern)?;
+    ) -> Option<Scanned> {
+        let ts = self.applied_for((start, end), part.docs, now, concern)?;
         let view = self.lsm.view_cached(cache);
-        let mut scan = match backward {
+        let mut scan = match part.backward {
             false => Either::Forward(view.scan(start, end, ts)),
             true => Either::Backward(view.scan_back(start, end, ts)),
         };
-        let mut rows = Vec::new();
-        while rows.len() < limit {
+        let mut rows: Vec<crate::push::Row> = Vec::new();
+        let mut blocks = Blocks::new(part.blocks);
+        let mut next = None;
+        while rows.len() < part.docs {
             match scan.next(&self.lsm) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
                     Decline::Intent.count();
@@ -354,14 +430,22 @@ impl RangeView {
                     }
                 }
                 SharedStep::Done => break,
-                SharedStep::Need(need) if supply(&need) => {}
+                SharedStep::Need(_) if blocks.spent(!rows.is_empty()) => {
+                    // The scan goes on after its last document: backward, below it.
+                    next = rows.last().map(|(k, _)| match part.backward {
+                        true => k.clone(),
+                        false => [k.as_slice(), &[0]].concat(),
+                    });
+                    break;
+                }
+                SharedStep::Need(need) if !blocks.exhausted() && supply(&need) => blocks.read += 1,
                 SharedStep::Need(_) | SharedStep::Failed(_) => {
                     Decline::Other.count();
                     return None;
                 }
             }
         }
-        Some((ts, rows))
+        Some(Scanned { ts, rows, next })
     }
 
     /// The mark a scan of `[start, end)` reads at (FR-031), or `None` when it goes to the core:
@@ -385,7 +469,7 @@ impl RangeView {
         }
         // A write its client already has an answer for is not in the view yet.
         if self.early.load(Ordering::SeqCst) != 0 {
-            Decline::Writing.count();
+            Decline::Early.count();
             return None;
         }
         let ts = self.applied;
@@ -402,12 +486,13 @@ impl RangeView {
 
     /// As [`RangeView::scan`] in key order, over at most `examine` documents of which it copies
     /// only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates it on
-    /// the stored bytes and leaves the rest where they are.
+    /// the stored bytes and leaves the rest where they are. It reads at most `blocks` blocks
+    /// from their files once it has examined a document, as a [`Part`] does.
     pub fn scan_matching(
         &self,
         cache: &mut ViewCache,
         (start, end): (&[u8], &[u8]),
-        examine: usize,
+        (examine, blocks): (usize, usize),
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
@@ -417,6 +502,9 @@ impl RangeView {
         let view = self.lsm.view_cached(cache);
         let mut scan = view.scan(start, end, ts);
         let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
+        let mut blocks = Blocks::new(blocks);
+        // The key of the last document examined, when the filter left it out.
+        let mut left_out: Option<Vec<u8>> = None;
         while out.examined < examine {
             match scan.next(&self.lsm) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
@@ -436,10 +524,19 @@ impl RangeView {
                     if kept {
                         out.seen.push(out.examined);
                         out.rows.push((i.key, (t, v.to_vec())));
+                        left_out = None;
+                    } else {
+                        left_out = Some(i.key);
                     }
                 }
                 SharedStep::Done => break,
-                SharedStep::Need(need) if supply(&need) => {}
+                SharedStep::Need(_) if blocks.spent(out.examined > 0) => {
+                    // The scan goes on after the last document it examined.
+                    let last = left_out.as_ref().or(out.rows.last().map(|(k, _)| k));
+                    out.next = last.map(|k| [k.as_slice(), &[0]].concat());
+                    break;
+                }
+                SharedStep::Need(need) if !blocks.exhausted() && supply(&need) => blocks.read += 1,
                 SharedStep::Need(_) | SharedStep::Failed(_) => {
                     Decline::Other.count();
                     return None;

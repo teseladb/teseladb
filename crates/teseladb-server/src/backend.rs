@@ -317,6 +317,7 @@ impl ServerBackend {
             match self.data(&from, true, build)? {
                 (e, RemoteReply::Rows(more)) => {
                     stage_since(Stage::ScanCore, began);
+                    log_slow_core_scan(began, (&from, end), more.len(), outside);
                     // A full part may stop before the range's end: the next one starts after it.
                     from = next_from(stop(&e), &more, part);
                     rows.extend(more);
@@ -748,6 +749,30 @@ impl ServerBackend {
             }
         }
     }
+}
+
+/// How long a part of a scan may take in its range's core before the node's log names it.
+const SLOW_CORE_SCAN: Duration = Duration::from_millis(10);
+
+/// Writes a part of a scan that its range's core served slowly to the node's log, with the start
+/// of its span: the core serves nothing else meanwhile, so which scans go there matters (012
+/// FR-015).
+fn log_slow_core_scan(began: Instant, (from, end): (&[u8], &[u8]), rows: usize, outside: bool) {
+    let took = began.elapsed();
+    if took < SLOW_CORE_SCAN {
+        return;
+    }
+    let hex = |k: &[u8]| k.iter().take(12).map(|b| format!("{b:02x}")).collect::<String>();
+    crate::log::defer(crate::log::Pending {
+        id: 0,
+        msg: "a part of a scan was slow in its range's core".to_owned(),
+        attr: format!(
+            "{{\"millis\":{},\"from\":\"{}\",\"end\":\"{}\",\"rows\":{rows},\"triedOutside\":{outside}}}",
+            took.as_millis(),
+            hex(from),
+            hex(end)
+        ),
+    });
 }
 
 /// Where a scan goes on after a part that gave `rows`, with at most `want` asked for, of a range

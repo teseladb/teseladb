@@ -80,6 +80,7 @@ impl RangeHost {
             concern,
             state,
             waited: false,
+            since: now,
             view,
             uncertain_to: None,
         };

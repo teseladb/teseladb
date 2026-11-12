@@ -428,10 +428,43 @@ impl View {
             end: end.to_vec(),
             read: ts,
             cursors: None,
+            heap: None,
+            moved: false,
             tombstones: Vec::new(),
             current: None,
             finished: false,
         }
+    }
+}
+
+/// Older versions of a decided key a scan steps over in a file one by one before it seeks past
+/// them: a key has a few versions in each file, and a seek builds a key and searches the block.
+const VERSIONS_STEPPED: usize = 8;
+
+/// Whether cursor `a` goes before cursor `b`: the smaller internal key, and with the same one
+/// the source that comes first (the newer one).
+fn goes_before(cursors: &[Cursor], a: usize, b: usize) -> bool {
+    let key = |i: usize| cursors[i].key().expect("a cursor in the heap is at an entry");
+    entry::compare(key(a), key(b)).then(a.cmp(&b)).is_lt()
+}
+
+/// Puts the cursor at `at` of `heap` in its place below.
+fn sift_down(heap: &mut [usize], cursors: &[Cursor], mut at: usize) {
+    loop {
+        let left = 2 * at + 1;
+        if left >= heap.len() {
+            return;
+        }
+        let right = left + 1;
+        let first = match right < heap.len() && goes_before(cursors, heap[right], heap[left]) {
+            true => right,
+            false => left,
+        };
+        if !goes_before(cursors, heap[first], heap[at]) {
+            return;
+        }
+        heap.swap(first, at);
+        at = first;
     }
 }
 
@@ -449,6 +482,14 @@ pub struct Scan {
     end: Vec<u8>,
     read: Hlc,
     cursors: Option<Vec<Cursor>>,
+    /// The cursors at an entry, as a heap by [`goes_before`]: the next entry of the scan is the
+    /// one of its first cursor. `None` until every cursor is at its first entry. A scan of a
+    /// collection reads a cursor per file it overlaps, tens of them, and looking at each one
+    /// for every entry cost more than reading the entries.
+    heap: Option<Vec<usize>>,
+    /// The first cursor of the heap moved: it is made ready and put in its place before the
+    /// scan looks at the heap again.
+    moved: bool,
     tombstones: Vec<RangeTombstone>,
     current: Option<KeyState>,
     finished: bool,
@@ -528,7 +569,8 @@ impl Scan {
             let c = self.open();
             self.cursors = Some(c);
         }
-        loop {
+        if self.heap.is_none() {
+            // Every cursor at its first entry; then they are ordered once.
             let cursors = self.cursors.as_mut().expect("opened");
             let mut waiting = None;
             for c in cursors.iter_mut() {
@@ -543,21 +585,39 @@ impl Scan {
             if let Some(t) = waiting {
                 return Step::Miss(t);
             }
-            let mut min: Option<usize> = None;
-            for (i, c) in cursors.iter().enumerate() {
-                if let Some(k) = c.key()
-                    && min.is_none_or(|m| {
-                        entry::compare(k, cursors[m].key().expect("has a key")).is_lt()
-                    })
-                {
-                    min = Some(i);
-                }
+            let mut heap: Vec<usize> =
+                (0..cursors.len()).filter(|i| cursors[*i].key().is_some()).collect();
+            for at in (0..heap.len() / 2).rev() {
+                sift_down(&mut heap, cursors, at);
             }
-            let at = min.and_then(|i| {
-                let (logical, ts) = entry::split(cursors[i].key().expect("has a key"));
-                (logical < self.end.as_slice()).then(|| (i, logical.to_vec(), ts))
+            self.heap = Some(heap);
+        }
+        loop {
+            if self.moved {
+                // Only the first cursor moves: ready again, it goes to its place or leaves.
+                let cursors = self.cursors.as_mut().expect("opened");
+                let heap = self.heap.as_mut().expect("ordered");
+                let top = heap[0];
+                match cursors[top].ready(r) {
+                    Err(e) => return Step::Failed(e),
+                    Ok(Some(t)) => return Step::Miss(t),
+                    Ok(None) => {}
+                }
+                self.moved = false;
+                if cursors[top].key().is_none() {
+                    heap.swap_remove(0);
+                }
+                sift_down(heap, cursors, 0);
+            }
+            // The first cursor's entry: its number, its mark and whether it is of the key being
+            // decided (`None`: no key is).
+            let head = self.heap.as_ref().expect("ordered").first().and_then(|&i| {
+                let key = self.cursors.as_ref().expect("opened")[i].key().expect("in the heap");
+                let (logical, ts) = entry::split(key);
+                let same = self.current.as_ref().map(|s| s.key.as_slice() == logical);
+                (logical < self.end.as_slice()).then_some((i, ts, same))
             });
-            let Some((i, logical, ts)) = at else {
+            let Some((i, ts, same)) = head else {
                 self.finished = true;
                 let st = self.current.take();
                 return match st.and_then(|s| self.emit(s)) {
@@ -565,7 +625,7 @@ impl Scan {
                     None => Step::Done,
                 };
             };
-            if self.current.as_ref().is_some_and(|s| s.key != logical) {
+            if same == Some(false) {
                 let st = self.current.take().expect("checked");
                 if let Some(item) = self.emit(st) {
                     return Step::Item(item);
@@ -573,18 +633,22 @@ impl Scan {
                 continue;
             }
             let read = self.read;
+            let cursors = self.cursors.as_mut().expect("opened");
+            // The key is copied once, when the scan starts to decide it.
             let st = self.current.get_or_insert_with(|| KeyState {
-                key: logical.clone(),
+                key: entry::split(cursors[i].key().expect("in the heap")).0.to_vec(),
                 retracted: Vec::new(),
                 found: None,
             });
-            let cursors = self.cursors.as_mut().expect("opened");
+            self.moved = true;
             if ts > read {
-                cursors[i].seek(entry::internal_key(&logical, read));
+                cursors[i].seek(entry::internal_key(&st.key, read));
                 continue;
             }
             if st.found.is_some() {
-                cursors[i].seek(entry::after_all_versions(&logical));
+                if let Err(e) = cursors[i].skip_versions(&st.key, VERSIONS_STEPPED) {
+                    return Step::Failed(e);
+                }
                 continue;
             }
             let c = &cursors[i];

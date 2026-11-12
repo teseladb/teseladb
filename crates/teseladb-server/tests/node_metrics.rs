@@ -58,7 +58,14 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     assert!(sample(&text, "teseladb_command_duration_seconds_sum").unwrap() >= 0.0);
     // Each stage of an operation (012 FR-015): the insert above went through its range.
     assert!(text.contains("# TYPE teseladb_stage_seconds histogram"), "{text}");
-    for stage in ["write_latch_wait", "write_range", "drive_flush_wait", "core_step", "txn_total"] {
+    for stage in [
+        "write_latch_wait",
+        "write_range",
+        "drive_flush_wait",
+        "core_step",
+        "txn_statement",
+        "txn_total",
+    ] {
         let count = format!("teseladb_stage_seconds_count{{stage=\"{stage}\"}}");
         assert!(text.contains(&count), "{count} in {text}");
     }

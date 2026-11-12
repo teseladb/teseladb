@@ -206,6 +206,20 @@ impl Relocations {
         std::mem::take(&mut self.group0)
     }
 
+    /// A step of a core change in the node's log, with the other core: the range serves nothing
+    /// between its export and its start on the target core, and the log says how long each step
+    /// took.
+    fn told(&self, msg: &str, g: GroupId, other: u16) {
+        crate::log::defer_at(
+            crate::log::Level::Info,
+            crate::log::Pending {
+                id: 0,
+                msg: msg.to_owned(),
+                attr: format!("{{\"range\":{},\"core\":{},\"other\":{other}}}", g.0, self.core),
+            },
+        );
+    }
+
     fn file_id(&mut self) -> FileId {
         let id = FileId(FILE_BASE + self.next_file % FILE_SPAN);
         self.next_file = self.next_file.wrapping_add(1);
@@ -256,6 +270,7 @@ impl Relocations {
                 .map(|(start, end)| lsm.borrow_mut().export(start, end, NEWEST, dir.clone()))
                 .collect();
             self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at });
+            self.told("a range leaves this core: exporting it", g, target);
         }
         self.send_read(core, host, replicas);
         self.retire(core, replicas);
@@ -294,6 +309,7 @@ impl Relocations {
         match d {
             Durable::Imported(g) => {
                 if let Some(In::Importing { from }) = self.inbound.remove(&g) {
+                    self.told("a range arrived on this core: imported", g, from);
                     self.hosting.add(g, self.core);
                     self.msgs.push((from, RelocateMsg::Imported { group: g }));
                 }
@@ -362,6 +378,7 @@ impl Relocations {
             let Some(Out::Read { target, files, .. }) = self.out.insert(g, sent) else {
                 continue;
             };
+            self.told("a range leaves this core: handed over", g, target);
             let h = Handover { group: g, from: self.core, imp, intervals, files };
             self.msgs.push((target, RelocateMsg::Handover(Box::new(h))));
         }
@@ -460,6 +477,7 @@ impl Relocations {
     /// Writes the files of a hand-over.
     fn take(&mut self, lsm: &RefCell<Lsm>, h: Box<Handover>) {
         let g = h.group;
+        self.told("a range arrives on this core: writing its files", g, h.from);
         let dir = self.name("in", g);
         let first = self.file_id();
         for _ in 1..h.files.len() {

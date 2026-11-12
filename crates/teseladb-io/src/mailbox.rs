@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use teseladb_sys::handoff::Handoff;
 use teseladb_sys::ring::{Consumer, Producer, ring};
@@ -36,9 +37,13 @@ impl Notify for Waker {
 /// Messages each sender can have queued before it gets them back (`SendError::Full`).
 pub const CAPACITY: usize = 256;
 
+/// A message with the instant it was queued: the receiver counts how long it waited (012
+/// FR-015).
+type Timed<T> = (Instant, T);
+
 struct Shared<T> {
     /// Rings of the senders made since the receiver last looked.
-    new_rings: Handoff<Consumer<T>>,
+    new_rings: Handoff<Consumer<Timed<T>>>,
     capacity: usize,
     /// Set by the sender that notified; cleared by the receiver before draining.
     notified: AtomicBool,
@@ -57,7 +62,7 @@ impl<T: Send> Shared<T> {
 
 /// Sending half, owned by one thread; [`Clone`] gives another sender with a ring of its own.
 pub struct MailboxSender<T> {
-    tx: RefCell<Producer<T>>,
+    tx: RefCell<Producer<Timed<T>>>,
     shared: Arc<Shared<T>>,
 }
 
@@ -68,7 +73,7 @@ pub struct MailboxSenders<T> {
 
 /// Receiving half, owned by the core's thread.
 pub struct Mailbox<T> {
-    rings: RefCell<Vec<Consumer<T>>>,
+    rings: RefCell<Vec<Consumer<Timed<T>>>>,
     shared: Arc<Shared<T>>,
 }
 
@@ -100,7 +105,8 @@ impl<T: Send> MailboxSender<T> {
         if self.shared.closed.load(Ordering::Acquire) {
             return Err(SendError::Closed(msg));
         }
-        self.tx.borrow_mut().push(msg).map_err(SendError::Full)?;
+        let timed = (Instant::now(), msg);
+        self.tx.borrow_mut().push(timed).map_err(|(_, back)| SendError::Full(back))?;
         // After the push: a receiver that cleared the flag before it either drains this message
         // or is woken by this swap; one that clears it later synchronizes with it and sees it.
         if !self.shared.notified.swap(true, Ordering::AcqRel) {
@@ -174,10 +180,14 @@ impl<T: Send> Mailbox<T> {
         // send pushed its ring before that send's swap, so this drain sees the ring.
         self.shared.notified.swap(false, Ordering::AcqRel);
         self.take_new_rings();
+        let now = Instant::now();
         self.rings.get_mut().retain_mut(|rx| {
             // Checked before draining: a sender gone now pushes nothing after this drain.
             let gone = rx.is_abandoned();
-            while let Some(m) = rx.pop() {
+            while let Some((queued, m)) = rx.pop() {
+                let waited = now.saturating_duration_since(queued).as_nanos();
+                let waited = u64::try_from(waited).unwrap_or(u64::MAX);
+                teseladb_stages::record(teseladb_stages::Stage::MailboxWait, waited);
                 out.push(m);
             }
             !gone

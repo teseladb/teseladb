@@ -1793,6 +1793,12 @@ impl CoreLogic for NodeLogic {
         self.core.on_wake(now, wall_ms);
     }
 
+    fn clock(&mut self, now: Nanos, wall_ms: u64) {
+        self.now = now;
+        self.wall_ms = wall_ms;
+        self.core.on_clock(now, wall_ms);
+    }
+
     fn resting(&self) -> bool {
         // Every group at rest, nothing in the host and nothing on its way to the disk: the
         // node's own periodic duties are timed in `Nanos` and tolerate the longer tick (H-037).

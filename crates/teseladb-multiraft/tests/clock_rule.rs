@@ -262,3 +262,23 @@ fn a_core_waking_from_rest_reads_and_checks_the_clock_before_any_mark() {
     core.on_wake(later, wall - 400);
     assert_eq!(core.read_mark(later), None, "a jump back is caught on waking");
 }
+
+#[test]
+fn the_clock_of_a_turn_gives_its_marks_and_a_jump_is_seen_before_the_tick() {
+    // 005 FR-032: a turn with work reads the wall clock when it starts.
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    c.ticks(5);
+    let now = c.now;
+    let at_tick = WALL0 + now.as_millis();
+    let core = &mut c.nodes.get_mut(&l).unwrap().core;
+    // 7 ms after the tick, within the same monotonic instant for the rule: the marks follow.
+    core.on_clock(now, at_tick + 7);
+    let mark = core.read_mark(now).expect("a mark in margin");
+    assert!(mark.physical >= at_tick + 7, "{mark:?} below the wall clock of the turn");
+    // The wall clock jumped 400 ms against the monotonic one: no mark from this turn on, and
+    // the group hands its leadership over without waiting for the tick.
+    core.on_clock(now, at_tick + 407);
+    assert_eq!(core.read_mark(now), None);
+    assert_eq!(c.propose(l, b"x"), Err(OpError::Overloaded));
+}

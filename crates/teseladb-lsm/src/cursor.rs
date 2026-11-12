@@ -101,6 +101,32 @@ impl Cursor {
         Ok(())
     }
 
+    /// Moves past the versions of `logical` from the current entry on, which is one of them. A
+    /// file's cursor steps over up to `stepped` of them while they are in its block; past that,
+    /// or at the block's end, it seeks, and the file's index takes it to the block of the next
+    /// key without reading the blocks that hold only older versions (a document updated often
+    /// fills blocks with them). A memtable's cursor seeks at once, since each of its steps
+    /// copies a key.
+    pub(crate) fn skip_versions(&mut self, logical: &[u8], stepped: usize) -> Result<(), LsmError> {
+        if matches!(self, Cursor::Table { .. }) {
+            for _ in 0..stepped {
+                self.advance()?;
+                match self {
+                    Cursor::Table { pos: Pos::Ready(_, c), .. }
+                        if entry::split(c.key()).0 != logical =>
+                    {
+                        return Ok(());
+                    }
+                    Cursor::Table { pos: Pos::Ready(..), .. } => {}
+                    // Out of its block.
+                    Cursor::Table { .. } | Cursor::Mem(_) => break,
+                }
+            }
+        }
+        self.seek(entry::after_all_versions(logical));
+        Ok(())
+    }
+
     /// Loads what the cursor needs; `Some(token)` if it waits for a read.
     pub(crate) fn ready<B: Blocks>(&mut self, r: &mut B) -> Result<Option<ReadToken>, LsmError> {
         let Cursor::Table { table, pos } = self else {

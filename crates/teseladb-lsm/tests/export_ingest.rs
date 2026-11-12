@@ -70,7 +70,7 @@ fn an_exported_interval_reads_the_same_after_ingestion() {
         target_file_bytes: 8 << 20,
         l1_bytes: 32 << 20,
         cache_bytes: 16 << 20,
-        // The export waits for a running compaction; here time stands still, so no throttle.
+        // Time stands still here, so the compactions get no throttle and end at once.
         compaction_bytes_per_sec: 1 << 40,
         ..small()
     };
@@ -586,4 +586,51 @@ fn the_compaction_for_an_ingestion_spends_its_own_budget() {
         "{moved} {seconds}"
     );
     reads_everything(&mut lsm, &mut disk);
+}
+
+#[test]
+fn an_export_goes_ahead_of_a_compaction_in_progress() {
+    // FR-028: a compaction of 60 KiB with 4 KiB a second of budget takes seconds; the export of
+    // a range that changes core does not wait for it.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 4096, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    for round in 0..3u64 {
+        for i in 0..200 {
+            lsm.put(G, round * 200 + i + 1, &key(i), ts(10 + round, 0), &[round as u8; 100])
+                .unwrap();
+        }
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    lsm.compact_all();
+    // It spends its second of budget and stops halfway: time stands still.
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    assert_eq!(lsm.metrics().compactions_total, 0, "the compaction is in progress");
+    let id = lsm.export(&key(0), &key(200), ts(20, 0), "export".into());
+    let done = lsm.run_io(&mut disk, Nanos::ZERO);
+    let (got, files) = done.exported.into_iter().next().expect("the export did not wait");
+    assert_eq!(got, id);
+    assert_eq!(lsm.metrics().compactions_total, 0, "the compaction still waits for its budget");
+    // The compaction goes on where it stopped, and the data reads the same after both.
+    let mut now = Nanos::ZERO;
+    while lsm.metrics().compactions_total == 0 {
+        now = now + Nanos::from_secs(1);
+        lsm.run_io(&mut disk, now);
+    }
+    let v = lsm.view();
+    for i in [0, 77, 199] {
+        assert_eq!(get(&mut lsm, &mut disk, &v, &key(i), ts(20, 0)).unwrap().3, [2; 100]);
+        assert_eq!(get(&mut lsm, &mut disk, &v, &key(i), ts(10, 0)).unwrap().3, [0; 100]);
+    }
+    // The exported files hold every version, as the files had them when it ran.
+    let mut other = MemDisk::new();
+    let mut b = open(&cfg, &mut other);
+    let sent = send(&files, &mut disk, &mut other);
+    ingest(&mut b, &mut other, sent, &key(0), &key(200)).unwrap();
+    let v = b.view();
+    for i in [0, 77, 199] {
+        assert_eq!(get(&mut b, &mut other, &v, &key(i), ts(20, 0)).unwrap().3, [2; 100]);
+        assert_eq!(get(&mut b, &mut other, &v, &key(i), ts(11, 0)).unwrap().3, [1; 100]);
+    }
 }

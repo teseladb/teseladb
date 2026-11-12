@@ -55,6 +55,10 @@ pub trait CoreLogic {
     /// the work stamps comes from a wall clock read now (005 FR-007); the rest of the tick comes
     /// at its time (H-044).
     fn wake(&mut self, now: Nanos, wall_ms: u64);
+    /// A turn with work starts, on a core that is not at rest: `wall_ms` is the node's wall
+    /// clock read now, for what the turn stamps and compares (005 FR-032). Between two ticks
+    /// the logic had the reading of the last one, up to a tick old.
+    fn clock(&mut self, now: Nanos, wall_ms: u64);
     /// Next disk operation, if any.
     fn poll_io(&mut self, now: Nanos) -> Option<IoOp>;
     /// Result of a disk operation, in submission order.
@@ -439,6 +443,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 self.resting = false;
                 self.logic.wake(now, wall_ms());
                 self.next_tick = Nanos(now.0 + step.0);
+            } else {
+                self.logic.clock(now, wall_ms());
             }
         }
         for input in std::mem::take(&mut self.inputs) {

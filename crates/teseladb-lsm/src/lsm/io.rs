@@ -5,7 +5,7 @@
 use teseladb_raftlog::{DISK_FULL_RETRY, Disk, IoDone, IoErrno, IoOp};
 use teseladb_types::Nanos;
 
-use super::{Completions, Job, Lsm, Slot};
+use super::{Completions, Job, Lsm, Request, Slot};
 use crate::compaction::{CompactJob, JOB_TOKEN};
 use crate::error::LsmError;
 use crate::jobs::{FlushJob, Next};
@@ -32,10 +32,31 @@ impl Lsm {
         }
     }
 
+    /// Whether an export is the next request and may start: every frozen memtable is in a file.
+    fn export_waits(&self) -> bool {
+        matches!(self.requests.front(), Some(Request::Export(_)))
+            && self.version.memtables.len() == 1
+    }
+
     fn poll_background(&mut self) -> Option<IoOp> {
         loop {
+            // An export does not wait for the compaction in progress (FR-028): whoever asked
+            // for it serves nothing meanwhile (a range that changes core), and a compaction
+            // takes seconds at its pace. No operation of the compaction is in flight here, so
+            // it is set aside as it is. The export reads the current version, which still has
+            // the compaction's inputs, and writes files of its own.
+            let compacting = matches!(&self.bg_job, Some(Job::Compact(c)) if !c.is_export());
+            if compacting && self.parked.is_none() && self.export_waits() {
+                self.parked = self.bg_job.take();
+            }
             if self.bg_job.is_none() {
-                self.bg_job = Some(self.schedule()?);
+                self.bg_job = Some(match self.parked.is_some() {
+                    // Only exports run ahead of it: another compaction, an ingestion or a
+                    // clearing would change the files it reads or the levels it writes to.
+                    true if self.export_waits() => self.take_request()?,
+                    true => self.parked.take()?,
+                    false => self.schedule()?,
+                });
             }
             let next = match self.bg_job.as_mut().expect("scheduled") {
                 Job::Delete(s) | Job::Rotate(s) | Job::Reset(s) => s.next(),

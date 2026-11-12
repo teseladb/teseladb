@@ -2,15 +2,16 @@
 //! order they were submitted, and hands every [`IoDone`] back through the core's mailbox. The
 //! core thread never blocks on disk. The sync of a store's batch on a real disk (`IoOp::Sync` with
 //! `batch > 0`) goes to the core's sync thread, which waits for the drive's flush and hands its
-//! result back on its own: the disk thread writes the next batches meanwhile, and the sync
-//! thread makes all the batches that waited durable with one sync of their file in the drive's
-//! next flush (012 FR-014, D-159). Its result may come after those of later operations; the store
-//! makes its batches durable in order.
+//! result back on its own: the disk thread writes the next batches meanwhile, and each of them
+//! goes in the first flush of the drive that starts after its write (012 FR-014, FR-020, D-159).
+//! Its result may come after those of later operations; the store makes its batches durable in
+//! order.
 
 use std::any::Any;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use teseladb_raftlog::{Disk, IoDone, IoOp};
 
@@ -21,7 +22,8 @@ use crate::node_disk::NodeDisk;
 /// Handle of a running disk thread.
 #[derive(Debug)]
 pub struct DiskThread<D> {
-    ops: Sender<IoOp>,
+    /// Each operation with the instant it was queued.
+    ops: Sender<(Instant, IoOp)>,
     handle: Option<JoinHandle<D>>,
 }
 
@@ -47,7 +49,7 @@ impl<D: Disk + Send + 'static> DiskThread<D> {
 
     /// Queues `op` behind the ones already submitted. Returns it if the thread has stopped.
     pub fn submit(&self, op: IoOp) -> Result<(), IoOp> {
-        self.ops.send(op).map_err(|e| e.0)
+        self.ops.send((Instant::now(), op)).map_err(|e| e.0.1)
     }
 
     /// Whether the thread still runs: a thread that panicked will complete nothing more.
@@ -86,13 +88,17 @@ impl<D> Drop for DiskThread<D> {
 
 fn run<D: Disk + 'static, M: Send + 'static>(
     mut disk: D,
-    ops: Receiver<IoOp>,
+    ops: Receiver<(Instant, IoOp)>,
     (done, wrap): (MailboxSender<M>, fn(IoDone) -> M),
     sync_name: &str,
 ) -> D {
     let mut syncs: Option<Syncs> = None;
     let mut chores: Option<Chores> = None;
-    for op in ops {
+    for (queued, op) in ops {
+        // How long it waited behind the operations before it (012 FR-015): a batch of the log
+        // waits here while the thread syncs a file of the LSM.
+        let waited = u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
         if let Some(job) = detach_chore(&disk, &op) {
             let helper = match &mut chores {
                 Some(h) => h,
@@ -189,8 +195,9 @@ impl Chores {
 }
 
 /// The thread that runs the syncs of a core's batches away from its disk thread. Each turn it
-/// takes every sync waiting and makes their files durable with one sync per file: the batches
-/// that arrived while the drive flushed go together in its next flush (012 FR-014, D-159).
+/// takes every sync waiting, waits for the flush of the drive that took each batch (or, for the
+/// batches without a place in one, makes their files durable with one sync per file) and answers
+/// each as it becomes durable (012 FR-014, FR-020, D-159).
 struct Syncs {
     jobs: Sender<DetachedSync>,
     handle: JoinHandle<()>,
@@ -209,10 +216,15 @@ impl Syncs {
             while let Ok(first) = rx.recv() {
                 let mut turn = vec![first];
                 turn.extend(rx.try_iter());
-                for d in DetachedSync::run_all(turn) {
-                    if done.send_waiting(wrap(d)).is_err() {
-                        return;
-                    }
+                // Each answer leaves when its batch is durable: the ones after it in the turn
+                // may be in a later flush of the drive (012 FR-020).
+                let mut listened = true;
+                DetachedSync::run_each(turn, |d| {
+                    listened = done.send_waiting(wrap(d)).is_ok();
+                    listened
+                });
+                if !listened {
+                    return;
                 }
             }
         })?;

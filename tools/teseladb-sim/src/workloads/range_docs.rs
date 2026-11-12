@@ -827,10 +827,11 @@ impl RangeDocsWorkload {
                 blocks <= OUTSIDE_BLOCKS
                     && bytes.is_some_and(|b| view.lsm().supply(need, b).is_ok())
             };
-            let (ts, rows) =
-                view.scan(cache, (&key, &end), (1, backward), || now, concern, supply)?;
-            let value = rows.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
-            return Some((ts, value));
+            // The closure counts the blocks, so the part reads as many as it lets it.
+            let part = teseladb_range::view::Part { docs: 1, backward, blocks: usize::MAX };
+            let read = view.scan(cache, (&key, &end), part, || now, concern, supply)?;
+            let value = read.rows.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+            return Some((read.ts, value));
         }
         for _ in 0..=OUTSIDE_BLOCKS {
             let (now, wall) = Self::times(w, node);

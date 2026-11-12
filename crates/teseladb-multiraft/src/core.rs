@@ -296,6 +296,9 @@ enum Wait {
         number: u64,
         last: u64,
         last_term: u64,
+        /// When the entries went to the store, for the time they take to be durable (012
+        /// FR-015).
+        since: Nanos,
     },
     Install {
         group: GroupId,
@@ -1441,7 +1444,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 continue;
             }
             match w {
-                Wait::Persist { group, number, last, last_term } => {
+                Wait::Persist { group, number, last, last_term, since } => {
+                    teseladb_stages::record(
+                        teseladb_stages::Stage::LogAppendToDurable,
+                        self.now.0.saturating_sub(since.0),
+                    );
                     let grp = self.groups.get_mut(&group).expect("its waits go with it");
                     // The store completes a group's tickets in order.
                     let (_, after) = grp.persisting.pop_front().expect("the ticket in flight");
@@ -1908,7 +1915,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
             let last = log.last_index();
             let last_term = log.term(last).unwrap_or(0);
             grp.persisting.push_back((t, after));
-            self.waits.insert(t, Wait::Persist { group: g, number, last, last_term });
+            let since = self.now;
+            self.waits.insert(t, Wait::Persist { group: g, number, last, last_term, since });
         } else {
             self.nothing_to_persist(g, number, after);
         }
@@ -2536,6 +2544,24 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.cfg.clock.0.update(Hlc { physical: self.clock_rule.peak_ms(), logical: 0 });
         self.apply_clock_rule(now);
         self.keep_lease_clock();
+    }
+
+    /// The wall clock read at the start of a turn with work (005 FR-032): what the turn stamps,
+    /// and what it compares the marks of its reads with, comes from this reading and not from
+    /// the last tick's, up to a tick old. The marks of a node come from an HLC that its other
+    /// threads move with the wall clock they read; a read at one of them waited here for the
+    /// core's next tick. The rule checks the reading as a tick does, so a jump is seen at once
+    /// (FR-007); the groups follow a verdict that changed, and the rest of their duties and the
+    /// lease's clock wait for the tick.
+    pub fn on_clock(&mut self, now: Nanos, wall_ms: u64) {
+        self.now = now;
+        let was = self.clock_rule.in_margin(now);
+        self.wall_ms = wall_ms;
+        self.clock_rule.tick(now, wall_ms);
+        self.cfg.clock.0.update(Hlc { physical: self.clock_rule.peak_ms(), logical: 0 });
+        if self.clock_rule.in_margin(now) != was {
+            self.apply_clock_rule(now);
+        }
     }
 
     /// Whether every group of the core is quiescent or stopped: nothing moves until something

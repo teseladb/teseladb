@@ -211,6 +211,9 @@ pub struct Lsm {
     pub(crate) next_file: u64,
     flush_job: Option<FlushJob>,
     bg_job: Option<Job>,
+    /// The compaction set aside, between two of its disk operations, while an export runs
+    /// (FR-028); it goes on when no export waits.
+    parked: Option<Job>,
     inflight: Option<(Slot, IoOp)>,
     retry: Option<(Slot, IoOp)>,
     full_until: Option<Nanos>,
@@ -300,6 +303,7 @@ impl Lsm {
             },
             flush_job: None,
             bg_job: None,
+            parked: None,
             inflight: None,
             retry: None,
             full_until: None,

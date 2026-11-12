@@ -26,13 +26,19 @@ use std::time::Duration;
 const PARK: Duration = Duration::from_micros(20);
 
 #[cfg(any(target_os = "macos", test))]
-/// How many syncs of one drive can wait for a group at once; one more pushes its own file.
-const WAITERS: usize = 64;
+/// How many files of one drive can wait for a group at once; one more pushes its own. Every
+/// batch of a log in flight has a place (012 FR-020): up to 16 on each core.
+const WAITERS: usize = 256;
 
 #[cfg(any(target_os = "macos", test))]
 /// The mark of a waiter's slot whose file waits for a group; without it the slot holds the
 /// number of the group that took the file, and 0 when it is free.
 const PENDING: u64 = 1 << 63;
+
+#[cfg(any(target_os = "macos", test))]
+/// The mark of a slot whose file the leader of a group is pushing: the slot is not given up,
+/// nor its file closed, until the group has put its number there.
+const TAKING: u64 = 1 << 62;
 
 #[cfg(any(target_os = "macos", test))]
 /// The flushes of one drive.
@@ -78,18 +84,52 @@ impl Flusher {
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::other("an earlier flush of this drive failed"));
         }
-        let mark = PENDING | u64::from(file);
-        let Some(slot) = self
-            .waiters
-            .iter()
-            .find(|w| w.compare_exchange(0, mark, Ordering::AcqRel, Ordering::Acquire).is_ok())
-        else {
+        let Some(place) = self.reserve(file) else {
             push(file)?;
             return self.after_push(flush);
         };
+        self.wait(place, push, flush)
+    }
+
+    /// Takes a place for `file`, already written, among the files that wait for a group: the
+    /// leader of the next group that looks at the places pushes it, whoever waits for it and
+    /// whenever ([`Flusher::wait`]). The thread that wrote the file takes the place at once (012
+    /// FR-020): taken by the thread that waits, a file written while that thread waited for an
+    /// earlier flush missed the flush that came next. `None` with every place taken.
+    pub(crate) fn reserve(&self, file: u32) -> Option<usize> {
+        let mark = PENDING | u64::from(file);
+        self.waiters
+            .iter()
+            .position(|w| w.compare_exchange(0, mark, Ordering::AcqRel, Ordering::Acquire).is_ok())
+    }
+
+    /// Waits until a group that took the file of `place` ended, leading one with `push` and
+    /// `flush` when no flush runs, and frees the place. The group's number, or the error of a
+    /// push or flush of this drive that failed now or before.
+    pub(crate) fn wait(
+        &self,
+        place: usize,
+        push: impl Fn(u32) -> io::Result<()>,
+        flush: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<u64> {
+        let slot = &self.waiters[place];
         let done = self.wait_in_group(slot, &push, flush);
         slot.store(0, Ordering::Release);
         done
+    }
+
+    /// Gives `place` back without waiting for its group (its owner stops). It returns once no
+    /// leader is pushing the file, which the owner may close then.
+    pub(crate) fn give_up(&self, place: usize) {
+        let slot = &self.waiters[place];
+        loop {
+            let v = slot.load(Ordering::Acquire);
+            if v & TAKING != 0 {
+                std::thread::park_timeout(PARK);
+            } else if slot.compare_exchange(v, 0, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return;
+            }
+        }
     }
 
     /// The wait of a file in `slot` until a group that took it ended, leading one when no flush
@@ -146,13 +186,19 @@ impl Flusher {
             if v & PENDING == 0 {
                 continue;
             }
+            // The low bits are the file its owner wrote there. Claimed before the push: a place
+            // given up meanwhile is not pushed, and one being pushed is not given up, so the
+            // file is open while the push runs.
+            let file = v & !PENDING;
+            if w.compare_exchange(v, file | TAKING, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                continue;
+            }
             if done.is_ok() {
-                // The low bits are the file a waiter wrote there.
-                done = push(u32::try_from(v & !PENDING).unwrap_or(u32::MAX));
+                done = push(u32::try_from(file).unwrap_or(u32::MAX));
                 pushed += 1;
             }
-            // Its owner waits while the mark is there, so only this group changes it.
-            let _ = w.compare_exchange(v, n, Ordering::AcqRel, Ordering::Acquire);
+            // Its owner waits while the claim is there, so only this group changes it.
+            w.store(n, Ordering::Release);
         }
         let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         crate::counters::record_device_pushes(pushed, micros);
@@ -252,6 +298,75 @@ pub(crate) fn make_durable(file: &std::fs::File) -> io::Result<()> {
     let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
     teseladb_stages::record(teseladb_stages::Stage::DriveFlushWait, nanos);
     out
+}
+
+/// The place of a file, just written, in the next flush of its drive (012 FR-020).
+#[cfg(target_os = "macos")]
+pub(crate) struct Reserved {
+    flusher: &'static Flusher,
+    place: usize,
+    since: std::time::Instant,
+    waited: bool,
+}
+
+/// The place of a file in the next flush of its drive: only macOS shares the flush, so nothing
+/// builds one elsewhere.
+#[cfg(not(target_os = "macos"))]
+pub(crate) struct Reserved(std::convert::Infallible);
+
+#[cfg(target_os = "macos")]
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        if !self.waited {
+            self.flusher.give_up(self.place);
+        }
+    }
+}
+
+/// Takes the place of `file`, just written by this thread, in the next flush of its drive:
+/// [`make_durable_reserved`] waits for it later, on any thread, and `file` stays open until
+/// then or until the place is dropped. `None` where the drive's flush is not shared (anything
+/// but macOS), on a drive without a flusher or with every place taken: the file is made
+/// durable with [`make_durable`].
+pub(crate) fn reserve(file: &std::fs::File) -> Option<Reserved> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let flusher = flusher_for(teseladb_sys::drive::device_of(file).ok()?)?;
+        let place = flusher.reserve(u32::try_from(file.as_raw_fd()).ok()?)?;
+        Some(Reserved { flusher, place, since: std::time::Instant::now(), waited: false })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// Makes `file` durable through the place `reserved` took for it when it was written: it
+/// returns once the flush of the drive that took the file ended.
+pub(crate) fn make_durable_reserved(file: &std::fs::File, reserved: Reserved) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use teseladb_sys::drive;
+        let mut reserved = reserved;
+        reserved.waited = true;
+        let flush = || {
+            crate::counters::record_device_flush();
+            timed(|| drive::flush_drive(file))
+        };
+        let push = |fd: u32| drive::push_descriptor(i32::try_from(fd).unwrap_or(-1));
+        let out = reserved.flusher.wait(reserved.place, push, flush).map(drop);
+        // From its write: the whole wait of the batch for the drive.
+        let nanos = u64::try_from(reserved.since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        teseladb_stages::record(teseladb_stages::Stage::DriveFlushWait, nanos);
+        out
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = file;
+        match reserved.0 {}
+    }
 }
 
 /// [`make_durable`] without timing it.
@@ -480,6 +595,111 @@ mod tests {
         let flushes = drive.flushes.load(Ordering::SeqCst);
         let syncs = usize::try_from(THREADS).unwrap() * SYNCS;
         assert!(flushes < syncs / 2, "{flushes} flushes for {syncs} syncs");
+    }
+
+    #[test]
+    fn a_file_written_during_a_flush_goes_in_the_next_one_before_anyone_waits_for_it() {
+        // 012 FR-020: the thread that wrote the file takes its place at once; the thread that
+        // waits for it is still waiting for the flush before.
+        let flusher = Arc::new(Flusher::new());
+        let (drive, pushes) = GatedDrive::new(8);
+        let drive = Arc::new(drive);
+        drive.release.store(false, Ordering::SeqCst);
+        let sync = |file: u32| {
+            let (flusher, drive) = (Arc::clone(&flusher), Arc::clone(&drive));
+            std::thread::spawn(move || flusher.sync(file, |f| drive.push(f), || drive.flush()))
+        };
+        let first = sync(0);
+        while drive.flushes.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        // Written while the first flush runs: its place, and another file with its waiter.
+        let written = drive.now();
+        let place = flusher.reserve(5).expect("a free place");
+        let other = sync(1);
+        while flusher.waiting() < 2 {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        drive.release.store(true, Ordering::SeqCst);
+        assert_eq!(first.join().unwrap().unwrap(), 1);
+        assert_eq!(other.join().unwrap().unwrap(), 2);
+        // The second flush took it with the other file: whoever waits now finds it durable.
+        let mut flushed_again = false;
+        let n = flusher
+            .wait(
+                place,
+                |f| drive.push(f),
+                || {
+                    flushed_again = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        assert!(!flushed_again, "no flush of its own");
+        assert_eq!(drive.flushes.load(Ordering::SeqCst), 2);
+        let second = drive.starts[2].load(Ordering::SeqCst);
+        let pushed: Vec<(u32, u64, bool)> = pushes.try_iter().collect();
+        let at = pushed.iter().find(|p| p.0 == 5).expect("file 5 was pushed").1;
+        assert!(written < at && at < second, "pushed at {at}, between {written} and {second}");
+        assert_eq!(flusher.waiting(), 0);
+    }
+
+    #[test]
+    fn a_place_given_up_is_not_pushed_and_one_being_pushed_is_given_up_after_the_push() {
+        // A core that stops drops the syncs it never waited for and closes their files.
+        let flusher = Arc::new(Flusher::new());
+        let gone = flusher.reserve(7).expect("a free place");
+        flusher.give_up(gone);
+        let (tx, pushed) = std::sync::mpsc::channel();
+        let push = |f: u32| {
+            tx.send(f).unwrap();
+            Ok(())
+        };
+        flusher.sync(8, push, || Ok(())).unwrap();
+        assert_eq!(pushed.try_iter().collect::<Vec<u32>>(), [8], "the one given up was not pushed");
+        // A leader is pushing file 9 when its owner gives the place up.
+        let place = flusher.reserve(9).expect("a free place");
+        let pushing = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let pushed_at = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(AtomicU64::new(1));
+        let leader = {
+            let (flusher, pushing, release) =
+                (Arc::clone(&flusher), Arc::clone(&pushing), Arc::clone(&release));
+            let (pushed_at, clock) = (Arc::clone(&pushed_at), Arc::clone(&clock));
+            std::thread::spawn(move || {
+                let push = |f: u32| {
+                    if f == 9 {
+                        pushing.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_micros(50));
+                        }
+                        pushed_at.store(clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                    }
+                    Ok(())
+                };
+                flusher.sync(10, push, || Ok(()))
+            })
+        };
+        while !pushing.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        let owner = {
+            let (flusher, clock) = (Arc::clone(&flusher), Arc::clone(&clock));
+            std::thread::spawn(move || {
+                flusher.give_up(place);
+                clock.fetch_add(1, Ordering::SeqCst)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(!owner.is_finished(), "the place is not given up while its file is pushed");
+        release.store(true, Ordering::SeqCst);
+        let given_up_at = owner.join().unwrap();
+        assert!(leader.join().unwrap().is_ok());
+        assert!(given_up_at > pushed_at.load(Ordering::SeqCst));
+        assert_eq!(flusher.waiting(), 0);
+        assert!(flusher.reserve(11).is_some(), "the place is free again");
     }
 
     #[test]

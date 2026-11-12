@@ -24,7 +24,7 @@ use teseladb_range::command::DedupKey;
 use teseladb_range::host::{Mutation, MutationError};
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
-use teseladb_range::view::{FastRead, FastWrite, NoChange, RangeView};
+use teseladb_range::view::{Decline, FastRead, FastWrite, NoChange, Part, RangeView};
 use teseladb_wire::commands::mutation::Bound;
 use teseladb_wire::commands::{Backend, Rows, WriteOp};
 use teseladb_types::{GroupId, Nanos};
@@ -80,8 +80,8 @@ impl Mutation for LazyBound<'_> {
 
 /// Blocks one read may read from their files before it goes to the core instead.
 const MAX_BLOCKS: usize = 8;
-/// Blocks one scan may read from their files before it goes to the core instead: a scan of a
-/// YCSB-E length (up to 100 documents) spans a few blocks of each table it reads.
+/// Blocks one part of a scan reads from their files before it stops at the documents it has
+/// and the scan goes on with another part (005 FR-033): a megabyte of blocks at a time.
 const MAX_SCAN_BLOCKS: usize = 64;
 /// Files a worker keeps open between reads.
 const MAX_FILES: usize = 64;
@@ -124,6 +124,24 @@ pub fn declined_outside() -> u64 {
 /// Blocks the client workers read from their files for reads outside the cores.
 pub fn blocks_read_outside() -> u64 {
     BLOCKS.load(Ordering::Relaxed)
+}
+
+/// `found`, counting a read that goes to the core because the routing table has no range for
+/// its key.
+fn unrouted<T>(found: Option<T>) -> Option<T> {
+    if found.is_none() {
+        Decline::Unrouted.count();
+    }
+    found
+}
+
+/// `view`, counting a read that goes to the core because the node publishes no view of its
+/// range.
+fn unviewed<T>(view: Option<T>) -> Option<T> {
+    if view.is_none() {
+        Decline::NoView.count();
+    }
+    view
 }
 
 /// What a worker keeps for its reads outside the cores.
@@ -182,9 +200,9 @@ impl ServerBackend {
         key: &[u8],
         concern: ReadConcern,
     ) -> Option<Option<Vec<u8>>> {
-        let (g, core) = self.h.routes.route_of(&mut self.outside.routes, key)?;
+        let (g, core) = unrouted(self.h.routes.route_of(&mut self.outside.routes, key))?;
         let core = usize::from(core);
-        let view = self.h.views.get(core)?.get(g)?;
+        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
         let Some((value, at)) = self.serve(core, &view, key, concern) else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -198,9 +216,9 @@ impl ServerBackend {
     /// `None` when it goes to its range's core.
     pub(super) fn write_outside(&mut self, op: &WriteOp) -> Option<Vec<u8>> {
         let first = op.keys.first()?;
-        let (g, core) = self.h.routes.route_of(&mut self.outside.routes, first)?;
+        let (g, core) = unrouted(self.h.routes.route_of(&mut self.outside.routes, first))?;
         let core = usize::from(core);
-        let view = self.h.views.get(core)?.get(g)?;
+        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
         // The mutation as it was sent: its result carries that send's number (`attempt`).
         let bound = LazyBound::new(&op.mutation);
         let dedup = op.dedup.map(|k| DedupKey {
@@ -302,7 +320,7 @@ impl ServerBackend {
         let (g, core, (lo, hi)) = match backward {
             false => {
                 let (g, core, range_end) =
-                    self.h.routes.span_of(&mut self.outside.routes, start)?;
+                    unrouted(self.h.routes.span_of(&mut self.outside.routes, start))?;
                 let hi = match range_end.is_empty() || end <= range_end {
                     true => end.to_vec(),
                     false => range_end.to_vec(),
@@ -311,12 +329,12 @@ impl ServerBackend {
             }
             true => {
                 let (g, core, range_start) =
-                    self.h.routes.span_below(&mut self.outside.routes, end)?;
+                    unrouted(self.h.routes.span_below(&mut self.outside.routes, end))?;
                 (g, core, (range_start.max(start).to_vec(), end.to_vec()))
             }
         };
         let core = usize::from(core);
-        let view = self.h.views.get(core)?.get(g)?;
+        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
         if self.outside.caches.len() <= core {
             self.outside.caches.resize_with(core + 1, ViewCache::default);
         }
@@ -330,23 +348,21 @@ impl ServerBackend {
         };
         let dir = self.h.data_dir.clone();
         let Outside { caches, files, .. } = &mut self.outside;
-        let mut blocks = 0;
         let supply = |need: &BlockNeed| {
-            blocks += 1;
-            let Some(dir) = dir.as_deref().filter(|_| blocks <= MAX_SCAN_BLOCKS) else {
-                return false;
-            };
+            let Some(dir) = dir.as_deref() else { return false };
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
         let span = (lo.as_slice(), hi.as_slice());
-        let way = (limit, backward);
-        let Some((_, rows)) = view.scan(&mut caches[core], span, way, now, concern, supply) else {
+        let part = Part { docs: limit, backward, blocks: MAX_SCAN_BLOCKS };
+        let Some(read) = view.scan(&mut caches[core], span, part, now, concern, supply) else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         self.tally(core, g, &lo, asked.get().unwrap_or_else(Instant::now));
-        let boundary = if backward { lo } else { hi };
-        Some((boundary, rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
+        // A part that stopped at its blocks goes on from there (005 FR-033); any other ends at
+        // the range's end, or at its number of documents.
+        let boundary = read.next.unwrap_or(if backward { lo } else { hi });
+        Some((boundary, read.rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
     }
 
     /// As [`ServerBackend::scan_outside`] in key order, over at most `examine` documents of the
@@ -359,13 +375,14 @@ impl ServerBackend {
         concern: ReadConcern,
         keep: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Option<teseladb_wire::commands::Matching> {
-        let (g, core, range_end) = self.h.routes.span_of(&mut self.outside.routes, start)?;
+        let (g, core, range_end) =
+            unrouted(self.h.routes.span_of(&mut self.outside.routes, start))?;
         let hi = match range_end.is_empty() || end <= range_end {
             true => end.to_vec(),
             false => range_end.to_vec(),
         };
         let core = usize::from(core);
-        let view = self.h.views.get(core)?.get(g)?;
+        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
         if self.outside.caches.len() <= core {
             self.outside.caches.resize_with(core + 1, ViewCache::default);
         }
@@ -379,17 +396,13 @@ impl ServerBackend {
         };
         let dir = self.h.data_dir.clone();
         let Outside { caches, files, .. } = &mut self.outside;
-        let mut blocks = 0;
         let supply = |need: &BlockNeed| {
-            blocks += 1;
-            let Some(dir) = dir.as_deref().filter(|_| blocks <= MAX_SCAN_BLOCKS) else {
-                return false;
-            };
+            let Some(dir) = dir.as_deref() else { return false };
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
         let span = (start, hi.as_slice());
-        let Some(m) =
-            view.scan_matching(&mut caches[core], span, examine, now, concern, supply, keep)
+        let most = (examine, MAX_SCAN_BLOCKS);
+        let Some(m) = view.scan_matching(&mut caches[core], span, most, now, concern, supply, keep)
         else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;

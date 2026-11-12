@@ -782,7 +782,12 @@ pub fn run_in_txn(
     f: TxnFields,
     statement: impl FnMut(&mut TxnBackend<'_>) -> Option<Result<Document, CommandError>>,
 ) -> Option<Result<Document, CommandError>> {
+    let arrived_us = backend.now_micros();
     let result = run_command(backend, shared, command, f, statement);
+    if !ends(command.0) {
+        let took = backend.now_micros().saturating_sub(arrived_us).saturating_mul(1_000);
+        teseladb_stages::record(teseladb_stages::Stage::TxnStatement, took);
+    }
     let result = with_token(backend, shared, command.0, f, result);
     let uid = user_uid(backend.authenticated_user().as_ref());
     let result = result.map(|r| r.map_err(|e| name_the_user(e, &uid)));

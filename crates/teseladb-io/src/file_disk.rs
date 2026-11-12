@@ -41,48 +41,76 @@ type FileIdentity = Option<(u64, u64)>;
 /// A sync of a store's batch handed to the core's sync thread (012 FR-014): the file, with a
 /// descriptor of its own, and the operation it answers.
 pub(crate) struct DetachedSync {
+    /// Its place in the next flush of the drive, taken when its batch was written (012 FR-020).
+    /// Dropped before the file, which stays open while a group pushes it.
+    reserved: Option<crate::drive_flush::Reserved>,
     file: File,
     op: IoOp,
 }
 
 impl DetachedSync {
-    /// Makes the files of `syncs` durable, one sync per file, and gives the answer of each in
-    /// their order: the batches of a log go one after another to the same file, and one sync
-    /// covers everything written to it before it starts, so the batches that waited while the
-    /// drive flushed go together in its next flush, as a database with one log does.
+    /// Makes the files of `syncs` durable and gives the answer of each in their order. A batch
+    /// with a place in the drive's flush waits for the flush that took it, which started after
+    /// its write whatever this thread was waiting for then (012 FR-020). The others get one sync
+    /// per file: the batches of a log go one after another to the same file, and one sync covers
+    /// everything written to it before it starts, so the batches that waited while the drive
+    /// flushed go together in its next flush, as a database with one log does.
     pub(crate) fn run_all(syncs: Vec<DetachedSync>) -> Vec<IoDone> {
-        DetachedSync::run_all_with(syncs, |f| {
-            crate::counters::record_sync();
-            crate::drive_flush::make_durable(f)
-        })
+        let mut answers = Vec::with_capacity(syncs.len());
+        DetachedSync::run_each(syncs, |d| {
+            answers.push(d);
+            true
+        });
+        answers
     }
 
-    /// [`DetachedSync::run_all`] with `sync` making a file durable.
-    fn run_all_with(
+    /// As [`DetachedSync::run_all`], handing each answer to `answer` as soon as its batch is
+    /// durable: the batches of one turn may go in different flushes of the drive, and a batch
+    /// that is durable does not wait for the flush of the ones after it. It stops when `answer`
+    /// says nobody listens.
+    pub(crate) fn run_each(syncs: Vec<DetachedSync>, answer: impl FnMut(IoDone) -> bool) {
+        DetachedSync::run_each_with(syncs, answer, |f| {
+            crate::counters::record_sync();
+            crate::drive_flush::make_durable(f)
+        });
+    }
+
+    /// [`DetachedSync::run_each`] with `sync` making durable a file without a place.
+    fn run_each_with(
         syncs: Vec<DetachedSync>,
+        mut answer: impl FnMut(IoDone) -> bool,
         mut sync: impl FnMut(&File) -> io::Result<()>,
-    ) -> Vec<IoDone> {
+    ) {
         use std::os::unix::fs::MetadataExt;
         let key = |f: &File| f.metadata().ok().map(|m| (m.dev(), m.ino()));
-        let keys: Vec<FileIdentity> = syncs.iter().map(|s| key(&s.file)).collect();
         let mut done: Vec<(FileIdentity, Result<(), IoErrno>)> = Vec::new();
-        let mut answers = Vec::with_capacity(syncs.len());
-        for (s, k) in syncs.into_iter().zip(keys) {
-            // A file whose identity is unknown gets a sync of its own.
-            let r = match done.iter().find(|(d, _)| k.is_some() && *d == k) {
-                Some((_, r)) => *r,
+        for mut s in syncs {
+            let r = match s.reserved.take() {
+                Some(reserved) => {
+                    crate::counters::record_sync();
+                    crate::drive_flush::make_durable_reserved(&s.file, reserved).map_err(io_errno)
+                }
                 None => {
-                    let r = sync(&s.file).map_err(io_errno);
-                    done.push((k, r));
-                    r
+                    let k = key(&s.file);
+                    // A file whose identity is unknown gets a sync of its own.
+                    match done.iter().find(|(d, _)| k.is_some() && *d == k) {
+                        Some((_, r)) => *r,
+                        None => {
+                            let r = sync(&s.file).map_err(io_errno);
+                            done.push((k, r));
+                            r
+                        }
+                    }
                 }
             };
-            answers.push(match r {
+            let listened = answer(match r {
                 Ok(()) => IoDone::Ok(s.op),
                 Err(errno) => IoDone::Err { op: s.op, errno },
             });
+            if !listened {
+                return;
+            }
         }
-        answers
     }
 }
 
@@ -264,7 +292,10 @@ impl FileDisk {
             return None;
         }
         let file = self.files.get(file)?.file.try_clone().ok()?;
-        Some(DetachedSync { file, op: op.without_data() })
+        // Its batch is written: its place in the drive's next flush is taken here, on the
+        // thread that wrote it, before the sync thread gets to it.
+        let reserved = crate::drive_flush::reserve(&file);
+        Some(DetachedSync { reserved, file, op: op.without_data() })
     }
 
     /// A maintenance operation of a log, as a job for the core's chores thread
@@ -475,24 +506,42 @@ mod tests {
         };
         let (a, b) = (open("a").unwrap(), open("b").unwrap());
         let job = |f: &File, batch| DetachedSync {
+            reserved: None,
             file: f.try_clone().unwrap(),
             op: IoOp::Sync { file: FileId(1), batch },
         };
         let jobs = vec![job(&a, 1), job(&b, 2), job(&a, 3), job(&a, 4)];
-        let mut made = 0;
-        let answers = DetachedSync::run_all_with(jobs, |f| {
-            made += 1;
-            f.sync_all()
-        });
-        let batches: Vec<u64> = answers
-            .iter()
-            .map(|d| match d {
-                IoDone::Ok(IoOp::Sync { batch, .. }) => *batch,
-                other => panic!("unexpected {other:?}"),
-            })
-            .collect();
-        assert_eq!(batches, [1, 2, 3, 4], "every sync answered, in order");
-        assert_eq!(made, 2, "one sync per file");
+        let made = std::cell::Cell::new(0);
+        // The batch of each answer and the syncs made when it left.
+        let mut answers = Vec::new();
+        DetachedSync::run_each_with(
+            jobs,
+            |d| {
+                match d {
+                    IoDone::Ok(IoOp::Sync { batch, .. }) => answers.push((batch, made.get())),
+                    other => panic!("unexpected {other:?}"),
+                }
+                true
+            },
+            |f| {
+                made.set(made.get() + 1);
+                f.sync_all()
+            },
+        );
+        // Every sync answered, in order, with one sync per file; and each answer left when its
+        // own file was durable, before the sync of the next file (012 FR-020).
+        assert_eq!(answers, [(1, 1), (2, 2), (3, 2), (4, 2)]);
+        // With nobody to answer, the rest is not synced.
+        let mut asked = 0;
+        DetachedSync::run_each_with(
+            vec![job(&a, 5), job(&b, 6)],
+            |_| false,
+            |f| {
+                asked += 1;
+                f.sync_all()
+            },
+        );
+        assert_eq!(asked, 1);
         fs::remove_dir_all(&root).unwrap();
     }
 

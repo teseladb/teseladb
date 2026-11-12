@@ -72,6 +72,8 @@ struct Toy {
     rests: bool,
     /// Wakes from rest ([`CoreLogic::wake`]).
     wakes: u64,
+    /// Turns with work that read the wall clock ([`CoreLogic::clock`]).
+    clocks: u64,
 }
 
 fn ack(req: u64) -> PeerMsg {
@@ -90,6 +92,11 @@ impl CoreLogic for Toy {
     fn wake(&mut self, _now: Nanos, wall_ms: u64) {
         assert!(wall_ms > 0);
         self.wakes += 1;
+    }
+
+    fn clock(&mut self, _now: Nanos, wall_ms: u64) {
+        assert!(wall_ms > 0);
+        self.clocks += 1;
     }
 
     fn poll_io(&mut self, _now: Nanos) -> Option<IoOp> {
@@ -225,6 +232,9 @@ fn two_nodes_play_ping_pong_and_tick() {
     // A stops answering at its limit, so the last request B saw is the limit.
     assert!(tb.last_seen >= 1_000, "B saw {}", tb.last_seen);
     assert!(ta.ticks > 10 && tb.ticks > 10, "ticks {} {}", ta.ticks, tb.ticks);
+    // Every turn that brought a frame read the wall clock first, many times between two ticks
+    // (005 FR-032).
+    assert!(ta.clocks > ta.ticks && tb.clocks > tb.ticks, "clocks {} {}", ta.clocks, tb.clocks);
 }
 
 #[test]

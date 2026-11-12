@@ -14,6 +14,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use teseladb_stages::Stage;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Kind, Lsm, Pressure, Step};
@@ -489,6 +490,8 @@ pub(crate) struct GetReq {
     state: GetState,
     /// It already waited for a latch (counted once, FR-022).
     waited: bool,
+    /// When it entered the state it is in, for the time each wait takes (012 FR-015).
+    since: Nanos,
     /// What the reader knows about the transactions whose intents it may meet (008).
     view: TxnView,
     /// The end of its uncertainty window, for a mark from another node's clock (008 FR-008).
@@ -1034,6 +1037,7 @@ impl RangeHost {
             concern,
             state: GetState::Core,
             waited: false,
+            since: now,
             view: TxnView::default(),
             uncertain_to: None,
         };
@@ -1065,6 +1069,7 @@ impl RangeHost {
             concern,
             state: GetState::Core,
             waited: false,
+            since: now,
             view: TxnView::default(),
             uncertain_to: None,
         };
@@ -1101,6 +1106,7 @@ impl RangeHost {
             concern,
             state: GetState::Core,
             waited: false,
+            since: now,
             view,
             uncertain_to,
         };
@@ -1131,6 +1137,7 @@ impl RangeHost {
             concern,
             state: GetState::Core,
             waited: false,
+            since: now,
             view: TxnView::default(),
             uncertain_to: None,
         };
@@ -1171,7 +1178,8 @@ impl RangeHost {
         id
     }
 
-    /// Where this node's wall clock is against the mark the client gave read `q`, if any.
+    /// Where this node's wall clock is against the mark the client gave read `q`, if any: the
+    /// wall clock the core read at the start of this turn (005 FR-032).
     fn clock_at(&self, q: &GetReq) -> ClockAt {
         match q.at {
             Some(at) if at.physical > self.wall_ms + FUTURE_READ_MS => ClockAt::TooFar,
@@ -1231,6 +1239,8 @@ impl RangeHost {
                 Ok(_) => match q.at.or_else(|| core.read_mark(self.now)) {
                     Some(ts) => {
                         self.refresh(core, q.g);
+                        record_wait(Stage::ReadConfirm, self.now, q.since);
+                        q.since = self.now;
                         q.state = GetState::Admit(ts);
                         self.reqs.insert(id, Req::Get(q));
                         self.step(core, id, Nanos::ZERO);
@@ -1579,6 +1589,8 @@ impl RangeHost {
             match self.clock_at(&q) {
                 ClockAt::Reached => {
                     let now = self.now;
+                    record_wait(Stage::ReadClockWait, now, q.since);
+                    q.since = now;
                     self.confirm(core, id, q, now);
                 }
                 ClockAt::Behind => {
@@ -1642,6 +1654,7 @@ impl RangeHost {
                 self.reqs.insert(id, Req::Get(q));
                 return false;
             }
+            record_wait(Stage::ReadLatchWait, self.now, q.since);
             q.state = match window_of(&q).filter(|limit| *limit > ts) {
                 Some(limit) => {
                     let w = Window::new(&self.lsm, (&q.key, &end), (ts, limit), q.view.own);
@@ -1715,4 +1728,9 @@ fn crossing(
         }
         _ => Err(RangeError::OutOfRange),
     }
+}
+
+/// Records how long a read waited in a state it entered at `since` (012 FR-015).
+fn record_wait(stage: Stage, now: Nanos, since: Nanos) {
+    teseladb_stages::record(stage, now.0.saturating_sub(since.0));
 }
