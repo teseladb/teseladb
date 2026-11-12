@@ -78,14 +78,19 @@ pub enum Periodic {
 /// The least period of the threshold's rounds.
 pub const GC_LEAST_EVERY_MS: u64 = 1_000;
 
+/// Threshold rounds in one history window: the threshold lags «now − gc_ttl» by up to one round,
+/// so the history kept is the window and a thirtieth more (H-054: with a tenth, the last writes
+/// of the sustained load of 002 stayed on disk 30 s past their window).
+pub const GC_ROUNDS_PER_TTL: u64 = 30;
+
 impl Periodic {
-    /// Its period in cluster time with `gc_ttl_ms` of history: the threshold goes up every tenth
+    /// Its period in cluster time with `gc_ttl_ms` of history: the threshold goes up every thirtieth
     /// of the history, at most [`GC_EVERY_MS`] (with 5 minutes of history, a minute between rounds
-    /// left the versions of the last one on disk a fifth longer than asked, H-051 of the native
+    /// left the versions of the last one on disk a fifth longer than asked, H-052 of the native
     /// tests).
     pub fn every_ms(self, gc_ttl_ms: u64) -> u64 {
         match self {
-            Periodic::Gc => (gc_ttl_ms / 10).clamp(GC_LEAST_EVERY_MS, GC_EVERY_MS),
+            Periodic::Gc => (gc_ttl_ms / GC_ROUNDS_PER_TTL).clamp(GC_LEAST_EVERY_MS, GC_EVERY_MS),
             Periodic::Checksum => crate::checksum::CHECKSUM_EVERY_MS,
         }
     }

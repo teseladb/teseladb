@@ -1679,6 +1679,31 @@ impl Backend for ServerBackend {
         Ok(())
     }
 
+    /// Every core of the node compacts its LSM at once; the bytes they freed, added up, once all
+    /// answered (DV-017, H-054).
+    fn compact(&mut self) -> Result<u64, CommandError> {
+        let until = self.until();
+        let waits: Vec<Receiver<u64>> = self
+            .cores
+            .iter()
+            .filter_map(|core| {
+                let (tx, rx) = mpsc::channel();
+                core.send(CoreInput::App(NodeMsg::Compact(tx))).ok().map(|()| rx)
+            })
+            .collect();
+        let mut freed = 0u64;
+        for rx in waits {
+            match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(bytes) => freed = freed.saturating_add(bytes),
+                Err(_) => {
+                    let msg = "a core of the node did not end its compaction in time";
+                    return Err(CommandError::new(NETWORK_TIMEOUT, msg));
+                }
+            }
+        }
+        Ok(freed)
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         // Core 0 publishes its copy before it answers any change of it (H-017): every
         // `aggregate` reads the presentation from here, without a message to core 0.

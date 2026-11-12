@@ -164,6 +164,8 @@ pub enum NodeMsg {
     HttpAnswer(NodeId, u64, Vec<u8>),
     /// A core change between two cores of the node (007 FR-011).
     Relocate(RelocateMsg),
+    /// `compact` (DV-017): the core compacts its LSM and answers the bytes of files it freed.
+    Compact(Sender<u64>),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
     /// range moved between cores), with the node that sent it.
     Stray(NodeId, PeerFrame),
@@ -1853,6 +1855,12 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Peers(peers) => self.peers = peers,
             NodeMsg::Catalog(req, reply) => self.catalog_request(req, reply),
             NodeMsg::KillSessions(scope, reply) => self.kill_sessions(scope, reply),
+            NodeMsg::Compact(reply) => match &mut self.data {
+                Some(data) => data.compact(reply),
+                None => {
+                    let _ = reply.send(0);
+                }
+            },
             NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
             NodeMsg::CurrentOps(reply) => self.current_ops(reply),
             NodeMsg::ForwardHttp(to, body, reply) => {

@@ -93,6 +93,8 @@ pub struct Completions {
     pub ingested: Vec<(u64, Result<(), LsmError>)>,
     /// Ranges cleared by [`Lsm::clear_range`]: their identifier.
     pub cleared: Vec<u64>,
+    /// Compactions of everything asked by [`Lsm::compact_now`] that ended: their identifier.
+    pub compacted: Vec<u64>,
 }
 
 impl Completions {
@@ -101,6 +103,7 @@ impl Completions {
         self.exported.extend(other.exported);
         self.ingested.extend(other.ingested);
         self.cleared.extend(other.cleared);
+        self.compacted.extend(other.compacted);
     }
 }
 
@@ -229,14 +232,18 @@ pub struct Lsm {
     pub(crate) full_after: u64,
     /// A compaction of everything that the space of the files asked for runs.
     full_running: bool,
-    /// The newest version in the files when the last such compaction started: what it could not
-    /// collect then was above the GC threshold, so the next one waits for the threshold to pass
-    /// it.
-    full_ts: Option<teseladb_keys::Hlc>,
+    /// The highest GC threshold handed and the newest version in the files when the last such
+    /// compaction started: what it could not collect then lay between the two, so the next one
+    /// waits for the threshold to pass half of that span (see `space_amplified`).
+    full_ts: Option<(Option<teseladb_keys::Hlc>, teseladb_keys::Hlc)>,
     /// Clearings whose tombstones wait for their flush.
     clears: Vec<u64>,
     /// Clearings whose compaction is running.
     clears_compacting: Vec<u64>,
+    /// Compactions asked by [`Lsm::compact_now`] whose memtables wait for their flush.
+    manual: Vec<u64>,
+    /// Compactions asked by [`Lsm::compact_now`] that run.
+    manual_compacting: Vec<u64>,
     budget: i64,
     /// The budget of the compactions that make room for an ingestion (FR-024).
     ingest_budget: i64,
@@ -308,6 +315,8 @@ impl Lsm {
             full_ts: None,
             clears: Vec::new(),
             clears_compacting: Vec::new(),
+            manual: Vec::new(),
+            manual_compacting: Vec::new(),
             budget: i64::try_from(cfg.compaction_bytes_per_sec).unwrap_or(i64::MAX),
             ingest_budget: i64::try_from(cfg.ingest_compaction_bytes_per_sec).unwrap_or(i64::MAX),
             budget_at: None,

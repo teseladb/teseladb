@@ -715,9 +715,20 @@ impl RangeHost {
     }
 
     /// History each range this host leads keeps (`teselaHistoryRetention`, 007 FR-019): its next
-    /// GC threshold is «now − ttl»; a threshold already raised never goes down.
+    /// GC threshold is «now − ttl»; a threshold already raised never goes down. A new value
+    /// brings the next round of each leader forward to now: it was due one period of the old
+    /// value away, a minute after the window went from an hour to a second (H-054).
     pub fn set_gc_ttl_ms(&mut self, ttl_ms: u64) {
+        if ttl_ms == self.gc_ttl_ms {
+            return;
+        }
         self.gc_ttl_ms = ttl_ms;
+        for l in self.ranges.values_mut().filter_map(|r| r.leader.as_mut()) {
+            let round = l.round(Periodic::Gc);
+            if matches!(round, Round::Idle(_)) {
+                *round = Round::Idle(0);
+            }
+        }
     }
 
     /// Counts an operation of range `g` on `keys` (at least one) if this host leads it.

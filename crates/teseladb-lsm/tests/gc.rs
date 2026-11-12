@@ -217,7 +217,7 @@ fn get_value(lsm: &mut Lsm, disk: &mut MemDisk, key: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[test]
-fn a_full_compaction_waits_for_the_threshold_to_pass_what_the_last_one_could_not_collect() {
+fn a_full_compaction_waits_for_the_threshold_to_pass_half_of_what_the_last_one_kept() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);
     let value = vec![3u8; 1024];
@@ -239,8 +239,8 @@ fn a_full_compaction_waits_for_the_threshold_to_pass_what_the_last_one_could_not
     let kept = files_bytes(&lsm);
     assert!(kept > live * teseladb_lsm::SPACE_AMP + teseladb_lsm::SPACE_FLOOR, "{kept}");
     let compactions = lsm.metrics().compactions_total;
-    // The threshold moved, but not past the newest version the files held: nothing new to do.
-    lsm.set_gc_thresholds(GcTable::new(vec![(b"k".to_vec(), b"l".to_vec(), ts(90, 0))]));
+    // The threshold moved, but not past half of what the last one kept (H-054): nothing new.
+    lsm.set_gc_thresholds(GcTable::new(vec![(b"k".to_vec(), b"l".to_vec(), ts(75, 0))]));
     lsm.run_io(&mut disk, Nanos::from_secs(20));
     assert_eq!(lsm.metrics().compactions_total, compactions);
     // Past it, the next compaction of everything collects what the history no longer needs.
@@ -296,6 +296,93 @@ fn an_idle_range_with_a_low_threshold_does_not_hold_back_the_others_collection()
     lsm.run_io(&mut disk, Nanos::from_secs(30));
     let after = files_bytes(&lsm);
     assert!(after < 4 * live, "{after} bytes of files for {live} live");
+    for k in &keys {
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+    }
+}
+
+#[test]
+fn a_compaction_of_everything_follows_once_the_threshold_passed_half_of_what_the_last_kept() {
+    // H-054: the next compaction of everything waited for the threshold to pass the newest
+    // version the last one saw, a whole history window, so the history kept by a compaction near
+    // the end of the writes stayed on disk for a window after they stopped.
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let value = vec![6u8; 1024];
+    let keys: Vec<Vec<u8>> = (0..200u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let mut index = 0;
+    for round in 1..=100u64 {
+        for k in &keys {
+            index += 1;
+            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+        }
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    lsm.flush();
+    let live = (keys.len() * (5 + 1 + value.len())) as u64;
+    lsm.set_live_bytes(live);
+    let table = |t: u64| GcTable::new(vec![(b"k".to_vec(), b"l".to_vec(), ts(t, 0))]);
+    // The first compaction keeps the versions above 50: half of them.
+    lsm.set_gc_thresholds(table(50));
+    lsm.run_io(&mut disk, Nanos::from_secs(10));
+    let first = files_bytes(&lsm);
+    assert!(first > live * teseladb_lsm::SPACE_AMP + teseladb_lsm::SPACE_FLOOR);
+    // Halfway to the newest version it saw (100), nothing more goes.
+    lsm.set_gc_thresholds(table(75));
+    lsm.run_io(&mut disk, Nanos::from_secs(20));
+    assert_eq!(files_bytes(&lsm), first, "a quarter of the kept versions is not worth it yet");
+    // A clearing elsewhere, whose threshold is above every version, does not open the gate: its
+    // own compaction runs, and then no other until the thresholds handed move.
+    lsm.clear_range(GroupId(9), vec![(b"x".to_vec(), b"y".to_vec())]);
+    lsm.run_io(&mut disk, Nanos::from_secs(21));
+    let compactions = lsm.metrics().compactions_total;
+    for s in 22..30 {
+        lsm.run_io(&mut disk, Nanos::from_secs(s));
+    }
+    assert_eq!(lsm.metrics().compactions_total, compactions, "no compaction after the clearing");
+    // Past halfway, the next one runs and collects what aged out.
+    lsm.set_gc_thresholds(table(76));
+    lsm.run_io(&mut disk, Nanos::from_secs(40));
+    let second = files_bytes(&lsm);
+    assert!(second * 10 < first * 6, "{second} bytes of files after {first}");
+    for k in &keys {
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+    }
+}
+
+#[test]
+fn a_compaction_asked_for_flushes_and_collects_everything_the_thresholds_allow() {
+    // H-054, DV-017: `compact` freed nothing, so the history its threshold no longer needed stayed
+    // on disk until the space of the files asked for a compaction of everything.
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let value = vec![6u8; 1024];
+    let keys: Vec<Vec<u8>> = (0..200u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let mut index = 0;
+    for round in 1..=20u64 {
+        for k in &keys {
+            index += 1;
+            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+        }
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    // No live bytes handed: the space of the files never asks for a compaction by itself.
+    lsm.set_gc_thresholds(GcTable::new(vec![(b"k".to_vec(), b"l".to_vec(), ts(20, 0))]));
+    lsm.run_io(&mut disk, Nanos::from_secs(1));
+    let before = files_bytes(&lsm);
+    let id = lsm.compact_now();
+    let mut done = Vec::new();
+    for s in 2..40 {
+        done.extend(lsm.run_io(&mut disk, Nanos::from_secs(s)).compacted);
+        if !done.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(done, vec![id], "its end is reported once");
+    let live = (keys.len() * (5 + 1 + value.len())) as u64;
+    let after = files_bytes(&lsm);
+    assert!(after < 2 * live, "{after} bytes of files after {before}, for {live} live");
+    assert_eq!(lsm.metrics().memtable_bytes, 0, "the memtable went to a file first");
     for k in &keys {
         assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
     }

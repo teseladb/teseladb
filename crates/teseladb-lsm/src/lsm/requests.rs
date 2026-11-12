@@ -67,6 +67,19 @@ impl Lsm {
         self.compact_all = true;
     }
 
+    /// Flushes the memtable and then compacts every file into the last level with the GC
+    /// thresholds handed, as `compact` asks (DV-017): what the history no longer needs and what
+    /// clearings removed leaves the disk now rather than when the space of the files asks for it
+    /// (H-054). Its end comes in [`Completions::compacted`](super::Completions::compacted) with
+    /// the returned identifier.
+    pub fn compact_now(&mut self) -> u64 {
+        self.freeze();
+        let id = self.next_request;
+        self.next_request += 1;
+        self.manual.push(id);
+        id
+    }
+
     /// Exports every version of `[start, end)` up to `ts` as SST files in `dir` (FR-009). The
     /// memtable is flushed first; the files come in
     /// [`Completions::exported`](super::Completions::exported) with the returned identifier. Writes up to `ts` must all be applied before.

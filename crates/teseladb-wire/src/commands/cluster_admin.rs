@@ -375,8 +375,9 @@ pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
 
 /// `compact` (DV-017): a `refrouter` refuses it and a `refnode` runs it on itself; TeselaDB takes
 /// it on any node with the fields and checks of a `refnode` 9.0.4 (measured: without `force`
-/// the node refuses, as a primary does). The node's LSM already compacts as it writes, so
-/// nothing is left to free.
+/// the node refuses, as a primary does). The node compacts the files of all its cores, as a
+/// `refnode` rewrites the collection, and answers the bytes freed: what the history no longer
+/// needs stayed on disk until the space of the files asked for a compaction (H-054).
 pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let mut force = false;
     for (k, v) in ctx.cmd.iter().skip(1) {
@@ -401,7 +402,10 @@ pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         let msg = format!("collection does not exist: {}.{}", ns.db, ns.coll);
         return Err(CommandError::new(crate::error::NAMESPACE_NOT_FOUND, msg));
     }
-    Ok(Document::new().with("bytesFreed", 0).with("ok", 1.0))
+    // As `appendNumber` writes it: a 32-bit integer when the count fits in one.
+    let freed = i64::try_from(ctx.backend.compact()?).unwrap_or(i64::MAX);
+    let freed = i32::try_from(freed).map_or(Value::Int64(freed), Value::Int32);
+    Ok(Document::new().with("bytesFreed", freed).with("ok", 1.0))
 }
 
 /// `autoCompact` (DV-017): the node's LSM always compacts in the background; the switch is

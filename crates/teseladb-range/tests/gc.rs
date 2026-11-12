@@ -7,7 +7,9 @@ mod common;
 
 use common::*;
 use teseladb_lsm::Step;
-use teseladb_range::gc::{GC_EVERY_MS, GC_TTL_MS, Round, table, threshold, threshold_with};
+use teseladb_range::gc::{
+    GC_EVERY_MS, GC_LEAST_EVERY_MS, GC_TTL_MS, Round, table, threshold, threshold_with,
+};
 use teseladb_range::snapshot::local_interval;
 
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
@@ -260,6 +262,30 @@ fn a_shorter_retention_raises_the_threshold_sooner() {
     assert!(raised.physical <= c.wall() - ttl);
 }
 
+/// H-054: a new `teselaHistoryRetention` took effect only when the round due with the old one
+/// came, a minute after the window went from an hour to a second.
+#[test]
+fn a_new_retention_raises_the_threshold_at_once() {
+    let mut c = cluster();
+    let l = c.elect();
+    c.wall_ahead = 10 * GC_EVERY_MS;
+    c.ticks_following(JUMP_TICKS);
+    let first = gc_threshold(&c, l);
+    assert!(first.physical > 0, "a new leader proposes the threshold at once");
+    let ttl = 5_000;
+    for n in c.nodes.values_mut() {
+        n.host.set_gc_ttl_ms(ttl);
+    }
+    c.wall_ahead += 2 * GC_LEAST_EVERY_MS;
+    c.ticks_following(JUMP_TICKS);
+    let raised = gc_threshold(&c, l);
+    assert!(
+        raised.physical + ttl + 2 * GC_LEAST_EVERY_MS >= c.wall(),
+        "the threshold {raised:?} follows the new window at {}",
+        c.wall()
+    );
+}
+
 /// The load a leader measures (007 FR-006) is the leader's own: a follower serves none, and a
 /// few writes in less than ten seconds give no cut.
 #[test]
@@ -284,13 +310,13 @@ fn only_the_leader_measures_the_load_of_its_range() {
     assert_eq!(c.nodes.get_mut(&l).unwrap().host.load_cut(GroupId(99), now), None);
 }
 
-/// The threshold goes up every tenth of the history the cluster keeps, at most every minute and
+/// The threshold goes up every thirtieth of the history the cluster keeps, at most every minute and
 /// at least every second (`teselaHistoryRetention`, 007 FR-019): with 5 minutes of history a
 /// minute between rounds kept the last one's versions a fifth longer than asked.
 #[test]
 fn the_threshold_rounds_follow_the_history_kept() {
     use teseladb_range::gc::{GC_EVERY_MS, GC_LEAST_EVERY_MS, Periodic};
-    assert_eq!(Periodic::Gc.every_ms(300_000), 30_000);
+    assert_eq!(Periodic::Gc.every_ms(300_000), 10_000);
     assert_eq!(Periodic::Gc.every_ms(teseladb_range::gc::GC_TTL_MS), GC_EVERY_MS);
     assert_eq!(Periodic::Gc.every_ms(5_000), GC_LEAST_EVERY_MS);
     assert_eq!(Periodic::Gc.every_ms(0), GC_LEAST_EVERY_MS);

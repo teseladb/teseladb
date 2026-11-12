@@ -9,7 +9,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
+use teseladb_lsm::LsmConfig;
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
 
@@ -338,4 +339,76 @@ fn every_node_gives_the_events_of_cs_split_large() {
         assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "node {k}: {gone:?}");
     }
     nodes.into_iter().for_each(|n| drop(n.stop()));
+}
+
+// `compact` frees the files the history no longer needs (DV-017, H-054): before, it answered
+// `bytesFreed: 0` and left them on disk until their space asked for a compaction.
+
+/// The window of 1 s and a round of the threshold, which rises every second.
+const HISTORY_SETTLE: Duration = Duration::from_secs(3);
+/// Most time the compactions may take to collect the versions.
+const HISTORY_WAIT: Duration = Duration::from_secs(20);
+
+#[test]
+fn compact_frees_the_versions_the_history_no_longer_keeps() {
+    // Small memtables, so that the versions reach files; less than the space floor, so that no
+    // compaction of everything runs by itself.
+    let lsm = LsmConfig { memtable_bytes: 64 << 10, ..LsmConfig::default() };
+    let node =
+        Node::start(NodeConfig { lsm, ..config(Vec::new()) }, || Ok(MemDisk::new()), None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let mut retain = |seconds: i32| {
+        let window = Document::new().with("seconds", seconds);
+        let set = Document::new().with("teselaHistoryRetention", window);
+        assert!(ok(&c.run("admin", Document::new().with("setClusterParameter", set))));
+    };
+    retain(3600);
+    let pad = "x".repeat(1000);
+    let docs: Vec<Value> = (0..200)
+        .map(|i| {
+            Value::Document(Document::new().with("_id", i).with("v", 0).with("p", pad.as_str()))
+        })
+        .collect();
+    let r = c.run("app", Document::new().with("insert", "c").with("documents", docs));
+    assert_eq!(r.get("n"), Some(&Value::Int32(200)), "{r:?}");
+    for v in 1..=10 {
+        let upd = Document::new()
+            .with("q", Document::new())
+            .with("u", Document::new().with("$set", Document::new().with("v", v)))
+            .with("multi", true);
+        let r = c.run(
+            "app",
+            Document::new().with("update", "c").with("updates", vec![Value::Document(upd)]),
+        );
+        assert_eq!(r.get("nModified"), Some(&Value::Int32(200)), "{r:?}");
+    }
+    // Within the window every version stays: a first `compact` puts them all in the last
+    // level, which no compaction touches again by itself without new writes.
+    let r = c.run("app", Document::new().with("compact", "c").with("force", true));
+    assert!(ok(&r), "{r:?}");
+    // The window shrinks and passes; then `compact` takes away the versions under the threshold.
+    // The threshold rises every second at most, so a few compactions add up to all of them.
+    let window = Document::new().with("seconds", 1);
+    let set = Document::new().with("teselaHistoryRetention", window);
+    assert!(ok(&c.run("admin", Document::new().with("setClusterParameter", set))));
+    std::thread::sleep(HISTORY_SETTLE);
+    let start = Instant::now();
+    let mut freed = 0i64;
+    while freed <= 1 << 20 && start.elapsed() < HISTORY_WAIT {
+        let r = c.run("app", Document::new().with("compact", "c").with("force", true));
+        assert!(ok(&r), "{r:?}");
+        freed += match r.get("bytesFreed") {
+            Some(Value::Int32(n)) => i64::from(*n),
+            Some(Value::Int64(n)) => *n,
+            other => panic!("{other:?}"),
+        };
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert!(freed > 1 << 20, "ten versions of 200 documents of 1 KB went: {freed} bytes");
+    let r = c.run(
+        "app",
+        Document::new().with("count", "c").with("query", Document::new().with("v", 10)),
+    );
+    assert_eq!(r.get("n"), Some(&Value::Int32(200)), "{r:?}");
 }

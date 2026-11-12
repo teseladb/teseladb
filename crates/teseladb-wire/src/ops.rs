@@ -1168,6 +1168,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.request_shutdown())
     }
 
+    fn compact(&mut self) -> Result<u64, CommandError> {
+        self.call(|b| b.compact())
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         self.call(|b| b.cluster_parameters())
     }

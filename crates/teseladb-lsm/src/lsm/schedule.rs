@@ -35,18 +35,25 @@ impl Lsm {
             self.compact_all = true;
             self.clears_compacting.append(&mut self.clears);
         }
+        // So do the compactions asked for once the memtables frozen for them are in files.
+        if !self.manual.is_empty() && self.version.memtables.len() == 1 {
+            self.compact_all = true;
+            self.manual_compacting.append(&mut self.manual);
+        }
         if !self.compact_all && !self.full_running && self.space_amplified() {
             self.compact_all = true;
             self.full_running = true;
-            self.full_ts = self.version.levels.iter().flatten().map(|t| t.props.max_ts).max();
+            let newest = self.version.levels.iter().flatten().map(|t| t.props.max_ts).max();
+            self.full_ts = newest.map(|ts| (self.gc_handed.highest(), ts));
         }
         let all = std::mem::take(&mut self.compact_all);
         if let Some(plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all) {
             return Some(Job::Compact(Box::new(self.compaction(plan))));
         }
         self.full_running = false;
-        // Nothing to compact: the clearings are done.
+        // Nothing to compact: the clearings and the compactions asked for are done.
         self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
+        self.done.compacted.extend(std::mem::take(&mut self.manual_compacting));
         // Background jobs start only when no flush runs (`poll_flush` came back empty).
         if self.manifest.tail > self.cfg.manifest_rotate_bytes {
             let number = self.alloc_file();
@@ -68,19 +75,29 @@ impl Lsm {
     }
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
-    /// and a compaction of everything could collect more than the last one did: the GC threshold
-    /// of some range passed the newest version the files held when it started. Waiting for every
-    /// range's let an idle range, whose threshold no longer rises, keep the others' garbage.
+    /// and a compaction of everything could collect more than the last one did: the highest GC
+    /// threshold handed passed half the span between the one handed when it started and the
+    /// newest version the files held then, so that at least half of what it kept can go.
+    /// Waiting for every range's let an idle range, whose threshold no longer rises, keep the
+    /// others' garbage; waiting for the whole span left the history of the last compaction on
+    /// disk for a whole window after the writes stopped (H-054). The thresholds of clearings are
+    /// not counted: they are above every version, and their own compaction collects them.
     fn space_amplified(&self) -> bool {
         let Some(live) = self.live_bytes else { return false };
         let limit = live.saturating_mul(super::SPACE_AMP).saturating_add(super::SPACE_FLOOR);
         if self.files_bytes() <= limit {
             return false;
         }
-        match self.full_ts {
-            None => true,
-            Some(ts) => self.gc.highest().is_some_and(|t| t >= ts),
-        }
+        let Some((from, newest)) = self.full_ts else { return true };
+        let Some(now) = self.gc_handed.highest() else { return false };
+        let wanted = match from {
+            Some(from) if from < newest => {
+                let half = (newest.physical - from.physical) / 2;
+                teseladb_keys::Hlc { physical: from.physical + half, logical: 0 }.max(from)
+            }
+            _ => newest,
+        };
+        now > wanted
     }
 
     /// The compaction of `plan`, which trains the collections' dictionaries with

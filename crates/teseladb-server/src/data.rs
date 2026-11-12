@@ -272,6 +272,9 @@ pub struct DataCore {
     failure_told: bool,
     /// When the LSM learns the live bytes of the core's ranges next.
     live_at: Nanos,
+    /// The compactions `compact` asked for (DV-017): the bytes of the files when each was asked,
+    /// and who waits for the bytes it freed.
+    compactions: BTreeMap<u64, (u64, std::sync::mpsc::Sender<u64>)>,
 }
 
 impl DataCore {
@@ -310,7 +313,17 @@ impl DataCore {
             backup_next: 0,
             failure_told: false,
             live_at: Nanos::ZERO,
+            compactions: BTreeMap::new(),
         }
+    }
+
+    /// Compacts the core's LSM for `compact` (DV-017, H-054): `reply` gets the bytes of files it
+    /// freed once the memtable is in files and every file was compacted.
+    pub fn compact(&mut self, reply: std::sync::mpsc::Sender<u64>) {
+        let mut lsm = self.lsm.borrow_mut();
+        let before = lsm.metrics().level_bytes.iter().sum::<u64>();
+        let id = lsm.compact_now();
+        self.compactions.insert(id, (before, reply));
     }
 
     /// Core changes with their files under `dir` and the node's table of which cores hold each
@@ -1253,6 +1266,12 @@ impl DataCore {
                 }
                 Some(g) => core.snapshot_data_ready(g, now),
                 None => {}
+            }
+        }
+        for id in c.compacted {
+            if let Some((before, reply)) = self.compactions.remove(&id) {
+                let after = lsm.borrow().metrics().level_bytes.iter().sum::<u64>();
+                let _ = reply.send(before.saturating_sub(after));
             }
         }
         for id in c.cleared {

@@ -569,6 +569,11 @@ pub trait Backend {
             "this node keeps no cluster settings",
         ))
     }
+    /// Compacts the node's storage for `compact` (DV-017) and gives the bytes of files it freed;
+    /// a backend that keeps no files frees none.
+    fn compact(&mut self) -> Result<u64, CommandError> {
+        Ok(0)
+    }
     /// Asks the node to stop (`shutdown`, 007 FR-018); a backend that cannot stop refuses.
     fn request_shutdown(&mut self) -> Result<(), CommandError> {
         Err(CommandError::new(crate::error::ILLEGAL_OPERATION, "this node cannot be shut down"))

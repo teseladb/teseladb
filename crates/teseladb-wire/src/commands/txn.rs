@@ -1897,6 +1897,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.request_shutdown()
     }
 
+    fn compact(&mut self) -> Result<u64, CommandError> {
+        self.inner.compact()
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         self.inner.cluster_parameters()
     }
