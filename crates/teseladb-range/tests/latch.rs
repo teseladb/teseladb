@@ -199,3 +199,38 @@ fn the_keys_a_write_latches_count_in_their_slots_until_it_releases_them() {
     latches.release(next);
     assert!(!keys.maybe_held(&doc), "released once, uncounted once");
 }
+
+/// Each write released with counted keys leaves its first and last key under its number in the
+/// count of releases, before that count goes up: a scan outside the core that saw the count move
+/// while it read goes to the core only if one of those writes had a key in what it read, and
+/// whenever the core no longer keeps every write released since (H-051 of the native tests).
+#[test]
+fn released_writes_are_kept_with_their_keys_for_the_scans_outside_the_core() {
+    use teseladb_range::latch::RECENT_RELEASES;
+    let mut latches = Latches::default();
+    let (spans, released) = (latches.spans(), latches.released());
+    let before = released.load(std::sync::atomic::Ordering::SeqCst);
+    let release = |l: &mut Latches, keys: &[&[u8]]| {
+        let keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let w = l.acquire_pipelined(&keys).unwrap();
+        l.release(w);
+    };
+    release(&mut latches, &[b"b", b"d"]);
+    release(&mut latches, &[b"x"]);
+    let now = released.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(now, before + 2);
+    let recent = spans.released();
+    assert_eq!(recent.any_in((before, now), (b"a", b"c")), Some(true), "b in [a, c)");
+    assert_eq!(recent.any_in((before, now), (b"c", b"d")), Some(true), "between b and d");
+    assert_eq!(recent.any_in((before, now), (b"e", b"w")), Some(false), "nothing in [e, w)");
+    assert_eq!(recent.any_in((before + 1, now), (b"a", b"c")), Some(false), "only the second");
+    assert_eq!(recent.any_in((now, now), (b"a", b"z")), Some(false), "none since");
+    // Past what it keeps, it cannot say.
+    for i in 0..RECENT_RELEASES {
+        let key = format!("k{i:04}").into_bytes();
+        release(&mut latches, &[key.as_slice()]);
+    }
+    let later = released.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(spans.released().any_in((before, later), (b"e", b"f")), None);
+    assert_eq!(spans.released().any_in((later - 1, later), (b"e", b"f")), Some(false));
+}

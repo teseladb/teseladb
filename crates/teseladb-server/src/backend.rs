@@ -65,6 +65,14 @@ pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 pub const SELECTION_LIMIT: Duration = Duration::from_secs(15);
 /// Pause before trying a request again.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
+/// Most documents a scan asks a core for at once.
+const CORE_SCAN_PART: usize = 1024;
+/// Tries of a scan on a connection's thread before a part of it goes to the core.
+const OUTSIDE_SCAN_TRIES: usize = 3;
+/// How much smaller each try of a scan on a connection's thread is than the one before.
+const OUTSIDE_SCAN_SHRINK: usize = 8;
+/// The smallest part a scan on a connection's thread tries.
+const OUTSIDE_SCAN_LEAST_PART: usize = 64;
 
 /// Sleeps until the wall clock reaches `until_ms`, or until `deadline` if that comes first: whether
 /// the clock got there, for a commit that answers once the clock is at its mark (008 FR-008).
@@ -243,6 +251,30 @@ impl ServerBackend {
         }
     }
 
+    /// [`ServerBackend::scan_outside`] of `[from, end)` for at most `limit` documents, again
+    /// with smaller parts while writes keep sending it to the core: a long scan of a written
+    /// collection rarely reads all of it with no write in between, and its parts are read at
+    /// marks of their own, as a scan reads each range at its own (RefDb's scans yield too).
+    fn scan_outside_in_parts(
+        &mut self,
+        from: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Option<(Vec<u8>, teseladb_wire::commands::Rows)> {
+        let mut want = limit;
+        for _ in 0..OUTSIDE_SCAN_TRIES {
+            if let Some((boundary, rows)) = self.scan_outside((from, end), (want, false), concern) {
+                return Some((next_from(boundary, &rows, want), rows));
+            }
+            if want <= OUTSIDE_SCAN_LEAST_PART {
+                return None;
+            }
+            want = (want / OUTSIDE_SCAN_SHRINK).max(OUTSIDE_SCAN_LEAST_PART);
+        }
+        None
+    }
+
     fn scan_ranges(
         &mut self,
         start: &[u8],
@@ -261,13 +293,16 @@ impl ServerBackend {
         while from.as_slice() < end && rows.len() < limit {
             if outside
                 && let Some((stop, more)) =
-                    self.scan_outside((&from, end), (limit - rows.len(), false), concern)
+                    self.scan_outside_in_parts(&from, end, limit - rows.len(), concern)
             {
                 rows.extend(more);
                 from = stop;
                 continue;
             }
-            let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
+            // The core reads a bounded part at a time: a scan of a whole collection there would
+            // hold its writes behind it (H-051 of the native tests).
+            let part = (limit - rows.len()).min(CORE_SCAN_PART);
+            let left = u32::try_from(part).unwrap_or(u32::MAX);
             let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
                 true => end.to_vec(),
                 false => e.end.clone(),
@@ -277,8 +312,9 @@ impl ServerBackend {
             };
             match self.data(&from, true, build)? {
                 (e, RemoteReply::Rows(more)) => {
+                    // A full part may stop before the range's end: the next one starts after it.
+                    from = next_from(stop(&e), &more, part);
                     rows.extend(more);
-                    from = stop(&e);
                 }
                 (
                     _,
@@ -696,6 +732,16 @@ impl ServerBackend {
                 thread::sleep(RETRY_PAUSE);
             }
         }
+    }
+}
+
+/// Where a scan goes on after a part that gave `rows`, with at most `want` asked for, of a range
+/// that ends at `boundary`: past its last key when the part is full (the range may hold more), at
+/// the range's end otherwise.
+fn next_from(boundary: Vec<u8>, rows: &[(Vec<u8>, Vec<u8>)], want: usize) -> Vec<u8> {
+    match (rows.len() >= want, rows.last()) {
+        (true, Some((k, _))) => [k.as_slice(), &[0]].concat(),
+        _ => boundary,
     }
 }
 
@@ -2004,4 +2050,25 @@ pub(crate) fn scan_req(
     let nodes = candidates(pref, &replicas).into_iter().map(|n| (n, leader_ok)).collect();
     let max_stale_ms = pref.max_staleness_ms;
     RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod part_tests {
+    use super::next_from;
+
+    fn rows(keys: &[&[u8]]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        keys.iter().map(|k| (k.to_vec(), Vec::new())).collect()
+    }
+
+    /// A full part of a scan goes on past its last key, not at the range's end: a part smaller
+    /// than the whole scan that took the range's end as where it stopped skipped the rest of the
+    /// range (H-051 of the native tests: 27,190 documents read as lost in the sustained load).
+    #[test]
+    fn a_full_part_goes_on_past_its_last_key_and_a_short_one_at_the_end() {
+        let end = b"\x02".to_vec();
+        assert_eq!(next_from(end.clone(), &rows(&[b"\x01a", b"\x01b"]), 2), b"\x01b\x00".to_vec());
+        assert_eq!(next_from(end.clone(), &rows(&[b"\x01a"]), 2), end);
+        assert_eq!(next_from(end.clone(), &[], 2), end);
+    }
 }

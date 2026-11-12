@@ -365,8 +365,10 @@ impl RangeView {
         Some((ts, rows))
     }
 
-    /// Whether a write holds a key of `read` or a write was released since the count was
-    /// `released`: then the scan goes to the core.
+    /// Whether a write holds a key of `read` or a write with a key of it was released since the
+    /// count was `released` (any write, when the core no longer keeps all of those released
+    /// since): then the scan goes to the core. Looking at every release of the range sent a scan
+    /// of a written collection to the core almost always (H-051 of the native tests).
     fn written_while_read(&self, (start, end): &(Vec<u8>, Vec<u8>), released: u64) -> bool {
         // Faulty variant (005 T049): a read outside the core that does not look at the writes.
         #[cfg(teseladb_bug = "outside_ignores_latches")]
@@ -376,7 +378,12 @@ impl RangeView {
         }
         #[cfg(not(teseladb_bug = "outside_ignores_latches"))]
         {
-            self.spans.any_in(start, end) || self.released.load(Ordering::SeqCst) != released
+            if self.spans.any_in(start, end) {
+                return true;
+            }
+            let now = self.released.load(Ordering::SeqCst);
+            now != released
+                && self.spans.released().any_in((released, now), (start, end)).unwrap_or(true)
         }
     }
 }

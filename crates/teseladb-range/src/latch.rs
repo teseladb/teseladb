@@ -27,7 +27,7 @@
 //! it is latched and no write was released meanwhile; a write released between its read and its
 //! check would hide from both (H-049 of the native tests, `spec/tla/HlcKeyLatches.tla`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -95,11 +95,41 @@ impl KeySlots {
 /// bound (`spec/tla/HlcKeyLatches.tla`).
 pub struct SpanKeys {
     published: Published<Vec<Vec<u8>>>,
+    /// The keys, first and last, of the last writes released, each with its number in the count
+    /// of releases: published before the count goes up, so a scan that sees a release counted
+    /// finds it here, and goes to the core only if one of them was in what it read.
+    recent: Published<Released>,
+}
+
+/// The last [`RECENT_RELEASES`] writes released with counted keys: number, first and last key.
+#[derive(Debug, Default)]
+pub struct Released {
+    writes: VecDeque<(u64, Arc<[u8]>, Arc<[u8]>)>,
+}
+
+/// Writes released that [`SpanKeys`] keeps for the scans outside the core.
+pub const RECENT_RELEASES: usize = 256;
+
+impl Released {
+    /// Whether a write numbered in `(after, upto]` had a key in `[start, end)`; `None` when it
+    /// does not keep all of them.
+    pub fn any_in(&self, (after, upto): (u64, u64), (start, end): (&[u8], &[u8])) -> Option<bool> {
+        let oldest = self.writes.front().map_or(u64::MAX, |(n, _, _)| *n);
+        if after < upto && oldest > after + 1 {
+            return None;
+        }
+        Some(self.writes.iter().any(|(n, first, last)| {
+            *n > after && *n <= upto && &first[..] < end && start <= &last[..]
+        }))
+    }
 }
 
 impl Default for SpanKeys {
     fn default() -> SpanKeys {
-        SpanKeys { published: Published::new(Arc::new(Vec::new())) }
+        SpanKeys {
+            published: Published::new(Arc::new(Vec::new())),
+            recent: Published::new(Arc::new(Released::default())),
+        }
     }
 }
 
@@ -123,6 +153,22 @@ impl SpanKeys {
     /// Publishes the keys of `held`, in order.
     fn publish(&self, held: &BTreeMap<Vec<u8>, u32>) {
         self.published.store(Arc::new(held.keys().cloned().collect()));
+    }
+
+    /// The writes released last, for a scan that saw the count of releases go up.
+    pub fn released(&self) -> Arc<Released> {
+        self.recent.load()
+    }
+
+    /// Records write number `n` released, with its keys from `first` to `last`.
+    fn record_release(&self, n: u64, first: &[u8], last: &[u8]) {
+        let now = self.recent.load();
+        let mut writes = now.writes.clone();
+        writes.push_back((n, Arc::from(first), Arc::from(last)));
+        while writes.len() > RECENT_RELEASES {
+            writes.pop_front();
+        }
+        self.recent.store(Arc::new(Released { writes }));
     }
 }
 
@@ -335,7 +381,10 @@ impl Latches {
         self.answered.remove(&id);
         self.goes_on.remove(&id);
         let counted = self.counted.remove(&id).unwrap_or_default();
-        if !counted.is_empty() {
+        if let (Some(first), Some(last)) = (counted.iter().min(), counted.iter().max()) {
+            // Its keys before its number: a scan that sees the number finds them.
+            let n = self.released.load(Ordering::SeqCst) + 1;
+            self.spans.record_release(n, first, last);
             self.released.fetch_add(1, Ordering::SeqCst);
         }
         let mut gone = false;
