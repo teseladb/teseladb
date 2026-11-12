@@ -225,7 +225,13 @@ impl ServerBackend {
                 continue;
             }
             for r in requests {
+                let stage = teseladb_txn::stages::stage_of(&r.op);
+                let began = Instant::now();
                 let answer = self.ask_range(r.g, r.op).and_then(reply_of);
+                if let Some(stage) = stage {
+                    let nanos = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    teseladb_stages::record(stage, nanos);
+                }
                 c.on_reply(&route, r.id, answer);
             }
         }

@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_stages::Stage;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::runtime::{CoreInput, CoreSender, CoreSenders};
@@ -291,14 +292,17 @@ impl ServerBackend {
         let outside = self.read_mark.is_none()
             && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         while from.as_slice() < end && rows.len() < limit {
+            let began = Instant::now();
             if outside
                 && let Some((stop, more)) =
                     self.scan_outside_in_parts(&from, end, limit - rows.len(), concern)
             {
+                stage_since(Stage::ScanOutside, began);
                 rows.extend(more);
                 from = stop;
                 continue;
             }
+            let began = Instant::now();
             // The core reads a bounded part at a time: a scan of a whole collection there would
             // hold its writes behind it (H-051 of the native tests).
             let part = (limit - rows.len()).min(CORE_SCAN_PART);
@@ -312,6 +316,7 @@ impl ServerBackend {
             };
             match self.data(&from, true, build)? {
                 (e, RemoteReply::Rows(more)) => {
+                    stage_since(Stage::ScanCore, began);
                     // A full part may stop before the range's end: the next one starts after it.
                     from = next_from(stop(&e), &more, part);
                     rows.extend(more);
@@ -684,6 +689,14 @@ impl ServerBackend {
                     paused = true;
                     true
                 }
+                // A write outside a transaction waits for the lock of a transaction that holds
+                // its writes until its commit (008 FR-022); the lock goes with its commit or
+                // abort, or when it stays idle.
+                RangeError::KeyLocked if plain_write => {
+                    thread::sleep(RETRY_PAUSE);
+                    paused = true;
+                    true
+                }
                 // A read pushes the owner above its mark and reads again knowing it (008 FR-003).
                 RangeError::ReadIntent { owner, at } => {
                     let (owner, at) = (owner.clone(), *at);
@@ -706,7 +719,9 @@ impl ServerBackend {
             }
             // Past the deadline while it waited for an intent's owner, it timed out.
             let e = match e {
-                RangeError::IntentConflict(_) if plain_write => RangeError::Timeout,
+                RangeError::IntentConflict(_) | RangeError::KeyLocked if plain_write => {
+                    RangeError::Timeout
+                }
                 e => e,
             };
             // Past the selection limit no candidate served it: refused, or no answer in time.
@@ -773,7 +788,7 @@ fn count_retry(e: &RangeError, paused: bool, answered: bool) {
         RangeError::OutOfRange => 2,
         RangeError::Timeout => 3,
         RangeError::Unavailable => 7,
-        RangeError::IntentConflict(_) if paused => 4,
+        RangeError::IntentConflict(_) | RangeError::KeyLocked if paused => 4,
         RangeError::ReadIntent { .. } => 5,
         _ => 6,
     };
@@ -2076,6 +2091,12 @@ pub(crate) fn scan_req(
     let nodes = candidates(pref, &replicas).into_iter().map(|n| (n, leader_ok)).collect();
     let max_stale_ms = pref.max_staleness_ms;
     RemoteReq::FollowerScan { start, end, limit, max_stale_ms, nodes, backward }
+}
+
+/// Counts in `stage` the time since `began` (012 FR-015).
+fn stage_since(stage: Stage, began: Instant) {
+    let nanos = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    teseladb_stages::record(stage, nanos);
 }
 
 #[cfg(test)]

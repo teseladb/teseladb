@@ -155,6 +155,10 @@ pub enum RangeError {
     /// A write fence holds a key of the write (018 FR-002): a resharding is in its critical
     /// section, and nothing was written. The caller reads the catalog again and retries.
     Fenced,
+    /// A write outside a transaction found a key that a transaction holding its writes until the
+    /// commit has locked (008 FR-022): nothing was written, and it waits for the lock, as it
+    /// waits for an intent's owner.
+    KeyLocked,
 }
 
 /// A write: its range, the documents it changes, the mutation, its idempotence record and its
@@ -255,6 +259,8 @@ pub(crate) struct Leader {
     /// reaches the clock only when it is applied.
     ready: u64,
     latches: Latches,
+    /// The locks of the transactions that hold their writes until the commit (008 FR-022).
+    pub(crate) locks: crate::locks::LockTable,
     cache: TsCache,
     /// The round of purging idempotence records (FR-011).
     purge: Purge,
@@ -422,6 +428,8 @@ pub(crate) struct MutReq {
     deadline: Option<u64>,
     /// What it read of its keys under the latch it holds, while blocks of the others are read.
     read: Partial,
+    /// When it reached the core (012 FR-015).
+    arrived: Nanos,
 }
 
 /// What a request read of its keys under one latch, key by key (`None`: not yet): the latch
@@ -984,6 +992,7 @@ impl RangeHost {
             settled: false,
             deadline,
             read: Partial::Nothing,
+            arrived: now,
         };
         self.reqs.insert(id, Req::Mut(req));
         self.step(core, id, now);
@@ -1490,6 +1499,7 @@ impl RangeHost {
             term,
             ready,
             latches: Latches::default(),
+            locks: crate::locks::LockTable::default(),
             cache: TsCache::for_lease(lease, CACHE_INTERVALS),
             purge: Purge::Idle(0),
             gc: Round::Idle(0),

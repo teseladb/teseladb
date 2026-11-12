@@ -54,6 +54,27 @@ pub enum TxnOp {
         /// The keys and what each writes, without repeated keys.
         writes: Vec<(Vec<u8>, IntentOp)>,
     },
+    /// Locks `keys` for `txn`, which reads at `read_ts` and holds its writes until the commit, in
+    /// the leader's memory and without an entry (FR-022): refused as [`TxnOp::PutIntents`] is when
+    /// a version newer than `read_ts` or another transaction's intent is on a key, and with
+    /// [`RangeError::WriteConflict`] when another live transaction holds one. It answers
+    /// [`Reply::Intents`] with `read_ts`. Sent again with the same keys, it keeps `txn` active.
+    LockKeys {
+        /// The transaction.
+        txn: TxnId,
+        /// Its read mark.
+        read_ts: Hlc,
+        /// The keys its statement writes in this range.
+        keys: Vec<Vec<u8>>,
+    },
+    /// Lets go of every lock of `txn` in this range (FR-022): it aborted, or its writes are
+    /// intents now. It answers [`Reply::Intents`] and writes nothing.
+    UnlockKeys {
+        /// The transaction.
+        txn: TxnId,
+        /// The keys it locked in this range, which route and latch the request.
+        keys: Vec<Vec<u8>>,
+    },
     /// Whether every key of `keys` holds an applied intent of `txn` (FR-021): it waits for their
     /// latches, so for the intents in the leader's log to be applied or dropped, and answers
     /// [`Reply::Intents`] with the highest mark among them, or [`RangeError::NoSuchTransaction`]
@@ -146,7 +167,10 @@ impl TxnOp {
             | TxnOp::ForgetRecord { txn, .. }
             | TxnOp::ReadRecord { txn }
             | TxnOp::PushByRead { txn, .. } => vec![record_key(*txn)],
-            TxnOp::ResolveIntents { keys, .. } | TxnOp::CheckIntents { keys, .. } => keys.clone(),
+            TxnOp::ResolveIntents { keys, .. }
+            | TxnOp::CheckIntents { keys, .. }
+            | TxnOp::LockKeys { keys, .. }
+            | TxnOp::UnlockKeys { keys, .. } => keys.clone(),
             TxnOp::FindIntents { start, .. } => vec![start.clone()],
         }
     }
@@ -368,7 +392,9 @@ fn evaluate_txn(
         TxnOp::FindIntents { .. }
         | TxnOp::ReadRecord { .. }
         | TxnOp::PushByRead { .. }
-        | TxnOp::CheckIntents { .. } => {
+        | TxnOp::CheckIntents { .. }
+        | TxnOp::LockKeys { .. }
+        | TxnOp::UnlockKeys { .. } => {
             unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
@@ -482,6 +508,20 @@ impl RangeHost {
             self.reply(id, answer);
             return true;
         }
+        if let TxnOp::LockKeys { txn, read_ts, keys } = &**op {
+            let answer = self.lock_keys(m.g, (*txn, *read_ts), keys, &versions);
+            self.release(m.g, m.term, latch);
+            self.reply(id, answer);
+            return true;
+        }
+        if let TxnOp::UnlockKeys { txn, .. } = **op {
+            if let Some(l) = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()) {
+                l.locks.release(txn);
+            }
+            self.release(m.g, m.term, latch);
+            self.reply(id, Ok(Reply::Intents { ts: Hlc { physical: 0, logical: 0 } }));
+            return true;
+        }
         if let TxnOp::PushByRead { txn, at } = **op {
             let stored = versions.first().and_then(|v| stored_record(v)).map(<[u8]>::to_vec);
             return self.push_by_read(core, id, m, latch, (txn, at, stored), now);
@@ -513,6 +553,40 @@ impl RangeHost {
         self.propose_txn(core, id, m, latch, &versions, now)
     }
 
+    /// [`TxnOp::LockKeys`] on the leader of range `g`, whose newest versions of `keys` are
+    /// `versions` (FR-022).
+    fn lock_keys(
+        &mut self,
+        g: GroupId,
+        (txn, read_ts): (TxnId, Hlc),
+        keys: &[Vec<u8>],
+        versions: &[Vec<Item>],
+    ) -> Result<Reply, RangeError> {
+        for (key, v) in keys.iter().zip(versions) {
+            let latest = v.first().map(latest_of);
+            check_put(key, latest.as_ref(), txn, read_ts).map_err(conflict_error)?;
+        }
+        let now_ms = self.cluster_ms();
+        let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) else {
+            return Err(RangeError::Unavailable);
+        };
+        if l.locks.holder(keys, Some(txn), now_ms).is_some() {
+            return Err(RangeError::WriteConflict);
+        }
+        l.locks.lock(txn, keys, now_ms);
+        Ok(Reply::Intents { ts: read_ts })
+    }
+
+    /// Whether another live transaction holds a lock on one of `keys` of range `g` (FR-022):
+    /// `txn` is the transaction that asks, `None` for a write outside one.
+    pub(super) fn locked_by_other(&self, g: GroupId, keys: &[Vec<u8>], txn: Option<TxnId>) -> bool {
+        let now_ms = self.cluster_ms();
+        self.ranges
+            .get(&g)
+            .and_then(|r| r.leader.as_ref())
+            .is_some_and(|l| l.locks.holder(keys, txn, now_ms).is_some())
+    }
+
     fn propose_txn<S: StateMachine>(
         &mut self,
         core: &mut MultiRaftCore<S>,
@@ -526,6 +600,22 @@ impl RangeHost {
             return true;
         }
         let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };
+        // A key another live transaction locked is a conflict for a transaction's writes, as its
+        // intent would be; the writes of a transaction replace its own locks (008 FR-022).
+        let writer = match &**op {
+            TxnOp::PutIntents { txn, .. } | TxnOp::OnePhase { txn, .. } => Some(*txn),
+            _ => None,
+        };
+        if let Some(txn) = writer {
+            if self.locked_by_other(m.g, &m.keys, Some(txn)) {
+                self.release(m.g, m.term, latch);
+                self.reply(id, Err(RangeError::WriteConflict));
+                return true;
+            }
+            if let Some(l) = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()) {
+                l.locks.release(txn);
+            }
+        }
         let counted_resolutions = self.counted_resolutions;
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);

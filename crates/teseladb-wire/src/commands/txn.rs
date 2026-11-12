@@ -79,6 +79,8 @@ struct Running {
     txn_number: i64,
     /// Cluster time at its start, in milliseconds.
     started_ms: u64,
+    /// The node's monotonic time at its start, in microseconds (012 FR-015).
+    started_us: u64,
     coord: Coordinator,
     view: TxnView,
     /// Statements run so far, which names the next one in RefDb's messages.
@@ -431,6 +433,23 @@ impl Route for Via<'_> {
     }
 }
 
+/// Sends request `op` of a coordinator to range `g` and counts how long it took in its stage
+/// (012 FR-015).
+fn send(
+    b: &mut dyn Backend,
+    g: GroupId,
+    op: teseladb_range::host::TxnOp,
+) -> Result<teseladb_range::host::Reply, RangeError> {
+    let stage = teseladb_txn::stages::stage_of(&op);
+    let start = b.now_micros();
+    let answer = b.txn_send(g, op);
+    if let Some(stage) = stage {
+        let took = b.now_micros().saturating_sub(start).saturating_mul(1_000);
+        teseladb_stages::record(stage, took);
+    }
+    answer
+}
+
 fn nanos(b: &dyn Backend) -> Nanos {
     Nanos(b.now_micros().saturating_mul(1000))
 }
@@ -455,7 +474,13 @@ fn drive(
         if requests.is_empty() {
             // A commit above the clock answers once the clock is there (FR-008).
             let waited = match coord.clock_wait() {
-                Some(ms) => b.txn_wait_clock(ms),
+                Some(ms) => {
+                    let start = b.now_micros();
+                    let waited = b.txn_wait_clock(ms);
+                    let took = b.now_micros().saturating_sub(start).saturating_mul(1_000);
+                    teseladb_stages::record(teseladb_stages::Stage::TxnClockWait, took);
+                    waited
+                }
                 None => b.txn_pause(),
             };
             if !waited {
@@ -466,7 +491,7 @@ fn drive(
             continue;
         }
         for r in requests {
-            let answer = b.txn_send(r.g, r.op);
+            let answer = send(b, r.g, r.op);
             coord.on_reply(&Via(&*b), r.id, answer);
         }
     }
@@ -801,6 +826,7 @@ fn run_command(
             let run = Running {
                 txn_number: f.txn_number,
                 started_ms,
+                started_us: backend.now_micros(),
                 coord,
                 view,
                 statements: 0,
@@ -1067,7 +1093,7 @@ fn recover(backend: &mut dyn Backend, lsid: u128, txn_number: i64) -> Option<Dec
     loop {
         r.tick(&Via(&*backend));
         for req in r.take_requests() {
-            let answer = backend.txn_send(req.g, req.op);
+            let answer = send(backend, req.g, req.op);
             r.on_reply(req.id, answer);
         }
         if let Some(d) = r.decision() {
@@ -1097,7 +1123,7 @@ fn check_shard(backend: &mut dyn Backend, shard: &str) -> Result<(), CommandErro
 fn end_abandoned(backend: &mut dyn Backend, shared: &Shared, mut run: Running) {
     run.coord.abort();
     for r in run.coord.take_requests() {
-        let answer = backend.txn_send(r.g, r.op);
+        let answer = send(backend, r.g, r.op);
         run.coord.on_reply(&Via(&*backend), r.id, answer);
     }
     if run.published {
@@ -1338,6 +1364,10 @@ fn end(
         Ok(None) => CommitAnswer::Unknown(RangeError::Unavailable),
         Err(e) => CommitAnswer::Unknown(e),
     };
+    if commit {
+        let took = backend.now_micros().saturating_sub(run.started_us).saturating_mul(1_000);
+        teseladb_stages::record(teseladb_stages::Stage::TxnTotal, took);
+    }
     match &answer {
         CommitAnswer::Committed(_) => txn_ddl::forget(shared, &run.created),
         CommitAnswer::NoSuchTransaction | CommitAnswer::WriteConflict => {
@@ -1480,7 +1510,7 @@ fn resolve_coordinator(
             requests = coord.take_requests();
         }
         for r in requests {
-            let answer = backend.txn_send(r.g, r.op);
+            let answer = send(backend, r.g, r.op);
             coord.on_reply(&Via(&*backend), r.id, answer);
         }
         if coord.take_events().contains(&Event::Resolved) {
@@ -1526,7 +1556,7 @@ pub fn tick_idle(backend: &mut dyn Backend, shared: &Shared) {
         let (now, wall) = (nanos(backend), backend.wall_ms());
         run.coord.tick(&Via(&*backend), now, wall);
         for r in run.coord.take_requests() {
-            let answer = backend.txn_send(r.g, r.op);
+            let answer = send(backend, r.g, r.op);
             run.coord.on_reply(&Via(&*backend), r.id, answer);
         }
         store(shared, lsid, run);

@@ -730,6 +730,7 @@ fn read_through_on<B: Backend + ?Sized>(
         None,
         concern,
         |_, bytes| {
+            super::agg_memory::hold(bytes.len() as u64);
             docs.push(Document::from(RawDoc::from_bytes(bytes)?));
             Ok(true)
         },
@@ -956,6 +957,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     find: bool,
 ) -> Result<Document, CommandError> {
+    let _held = super::agg_memory::Scope::open();
     let first = ctx.first().clone();
     let (ns, on_collection) = match &first {
         Value::String(_) => (target(ctx)?, true),
@@ -1315,6 +1317,7 @@ fn planned_read<B: Backend + ?Sized>(
     // Taken whole, as `find` takes the rows it reads from the node's storage: their fields are
     // read when a stage asks for them.
     let count = found.len();
+    super::agg_memory::hold(found.iter().map(|b| b.len() as u64).sum());
     let docs = found
         .into_iter()
         .map(|b| Ok(Document::from_stored(b)?))

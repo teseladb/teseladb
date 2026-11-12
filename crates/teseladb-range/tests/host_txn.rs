@@ -353,3 +353,68 @@ fn a_write_reads_each_key_once_while_its_blocks_come_back_one_by_one() {
     let read = gets(&n) - before;
     assert!(read <= 2 * KEYS as u64, "{read} point reads for {KEYS} keys");
 }
+
+fn lock(txn: TxnId, read_ts: Hlc, keys: &[&[u8]]) -> TxnOp {
+    TxnOp::LockKeys { txn, read_ts, keys: keys.iter().map(|k| k.to_vec()).collect() }
+}
+
+/// A plain write of `key`, with whatever the range answers.
+fn try_write(n: &mut Node, key: &[u8]) -> Result<Reply, RangeError> {
+    let (now, wall) = (n.now, n.wall());
+    let m = Box::new(Set(key.to_vec(), b"plain".to_vec()));
+    let w = WriteReq { g: G, keys: vec![key.to_vec()], m, dedup: None, wc: MAJORITY };
+    let id = n.host.mutate(&mut n.core, w, now, wall);
+    n.answer(id)
+}
+
+/// A transaction that holds its writes until the commit locks its keys on the leader (008
+/// FR-022): the lock is refused as an intent is, another transaction's writes and locks conflict
+/// with it, a write outside a transaction is told to wait, and nothing reaches the log.
+#[test]
+fn a_lock_stops_other_writers_until_its_transaction_commits_in_one_phase() {
+    let mut n = Node::new();
+    let written = n.write(A, b"v1");
+    let applied = n.core.status(G).unwrap().last_index;
+    // A version newer than the read mark refuses the lock, as it refuses an intent.
+    let before = Hlc { physical: written.physical - 1, logical: 0 };
+    assert_eq!(n.txn(lock(T1, before, &[A])), Err(RangeError::WriteConflict));
+    assert_eq!(n.txn(lock(T1, written, &[A, B])), Ok(Reply::Intents { ts: written }));
+    // Asked again by its owner it is granted again.
+    assert_eq!(n.txn(lock(T1, written, &[A])), Ok(Reply::Intents { ts: written }));
+    // Another transaction can neither lock the keys nor write them, in intents or in one phase.
+    assert_eq!(n.txn(lock(T2, far(), &[B])), Err(RangeError::WriteConflict));
+    assert_eq!(n.txn(intents(T2, far(), &[(B, put(b"y"))])), Err(RangeError::WriteConflict));
+    let one = |txn, read_ts, v: &[u8]| TxnOp::OnePhase {
+        txn,
+        read_ts,
+        writes: vec![(A.to_vec(), put(v)), (B.to_vec(), put(v))],
+    };
+    assert_eq!(n.txn(one(T2, far(), b"theirs")), Err(RangeError::WriteConflict));
+    // A write outside a transaction waits for the lock.
+    assert_eq!(try_write(&mut n, A), Err(RangeError::KeyLocked));
+    // None of this wrote an entry.
+    assert_eq!(n.core.status(G).unwrap().last_index, applied);
+    // The owner commits in one phase, and its locks go with the commit.
+    intents_mark(n.txn(one(T1, written, b"mine")));
+    assert_eq!(n.get(A), Some(b"mine".to_vec()));
+    assert!(matches!(try_write(&mut n, A), Ok(Reply::Mutated { .. })));
+    // What the other transaction read is older than the commit now.
+    assert_eq!(n.txn(lock(T2, written, &[B])), Err(RangeError::WriteConflict));
+}
+
+/// The locks of a transaction go when it asks (an abort) and when it stays idle for as long as
+/// a transaction without a heartbeat counts as abandoned.
+#[test]
+fn locks_go_with_an_unlock_and_after_five_idle_seconds() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    assert_eq!(n.txn(lock(T1, base, &[A])), Ok(Reply::Intents { ts: base }));
+    let unlock = TxnOp::UnlockKeys { txn: T1, keys: vec![A.to_vec()] };
+    assert!(n.txn(unlock).is_ok());
+    assert_eq!(n.txn(lock(T2, far(), &[A])), Ok(Reply::Intents { ts: far() }));
+    // T2 stays idle: its lock stops counting, and T1 takes the key.
+    n.now = n.now + teseladb_types::Nanos::from_millis(teseladb_range::intents::ABANDONED_AFTER_MS);
+    n.settle();
+    assert_eq!(n.txn(lock(T1, far(), &[A])), Ok(Reply::Intents { ts: far() }));
+    assert_eq!(n.txn(lock(T2, far(), &[A])), Err(RangeError::WriteConflict));
+}

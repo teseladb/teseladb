@@ -63,6 +63,24 @@ impl std::fmt::Debug for Memtable {
     }
 }
 
+/// Bytes of the frozen memtables still alive in the process (012 FR-016): those of the cores'
+/// versions and those that only a reader's view keeps after their flush.
+static FROZEN_ALIVE: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes of the frozen memtables alive in the process: a memtable counts from its freeze until
+/// the last version or view that holds it lets it go.
+pub fn frozen_alive_bytes() -> u64 {
+    FROZEN_ALIVE.load(Ordering::Relaxed)
+}
+
+impl Drop for Memtable {
+    fn drop(&mut self) {
+        if self.frozen.load(Ordering::Acquire) {
+            FROZEN_ALIVE.fetch_sub(self.bytes(), Ordering::Relaxed);
+        }
+    }
+}
+
 impl Default for Memtable {
     fn default() -> Memtable {
         Memtable {
@@ -174,7 +192,9 @@ impl Memtable {
 
     /// No more writes come.
     pub(crate) fn freeze(&self) {
-        self.frozen.store(true, Ordering::Release);
+        if !self.frozen.swap(true, Ordering::AcqRel) {
+            FROZEN_ALIVE.fetch_add(self.bytes(), Ordering::Relaxed);
+        }
     }
 
     /// Its range tombstones, in order of arrival.
@@ -238,6 +258,25 @@ mod tests {
             at = m.next_after(pos, &key);
         }
         out
+    }
+
+    #[test]
+    fn a_frozen_memtable_counts_as_alive_until_it_is_dropped() {
+        let m = Memtable::default();
+        m.insert(GroupId(1), 1, b"k", ts(1), Kind::Put, &[7; 1000]);
+        let bytes = m.bytes();
+        assert!(bytes >= 1000);
+        // Other tests freeze memtables at the same time: the counter only moves by at least ours.
+        let before = frozen_alive_bytes();
+        m.freeze();
+        m.freeze();
+        let frozen = frozen_alive_bytes();
+        assert!(frozen >= before + bytes || frozen >= bytes, "{before} then {frozen}");
+        let held = std::sync::Arc::new(m);
+        let view = held.clone();
+        drop(held);
+        assert!(frozen_alive_bytes() >= bytes, "a view still holds it");
+        drop(view);
     }
 
     #[test]

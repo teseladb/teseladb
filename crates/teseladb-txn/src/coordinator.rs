@@ -1144,6 +1144,8 @@ mod tests {
             TxnOp::PutIntents { .. }
             | TxnOp::ResolveIntents { .. }
             | TxnOp::OnePhase { .. }
+            | TxnOp::LockKeys { .. }
+            | TxnOp::UnlockKeys { .. }
             | TxnOp::CheckIntents { .. } => Ok(Reply::Intents { ts: ts(5) }),
             TxnOp::FindIntents { .. }
             | TxnOp::ForgetRecord { .. }

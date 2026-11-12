@@ -5,6 +5,7 @@
 use super::*;
 use crate::ack::AckWhen;
 use teseladb_multiraft::ReadMode;
+use teseladb_stages::Stage;
 
 /// Why the evaluation inside a proposal stopped.
 enum Eval {
@@ -49,6 +50,7 @@ impl RangeHost {
         {
             let took = self.now.0.saturating_sub(p.proposed_at.0);
             range.counters.propose_latency.record(took);
+            teseladb_stages::record(Stage::WriteProposeToApplied, took);
         }
         match &r {
             // Another leader's entry took its index: it will never be applied.
@@ -77,6 +79,7 @@ impl RangeHost {
         let p = m.state.proposal();
         if reached {
             let r = p.answer();
+            teseladb_stages::record(Stage::WriteRange, self.now.0.saturating_sub(m.arrived.0));
             self.reply(id, Ok(r));
             return;
         }
@@ -142,6 +145,10 @@ impl RangeHost {
             };
             match taken {
                 Ok(latch) => {
+                    teseladb_stages::record(
+                        Stage::WriteLatchWait,
+                        now.0.saturating_sub(m.arrived.0),
+                    );
                     m.state = MutState::Read(latch);
                     m.term = l.term;
                     moved = true;
@@ -251,6 +258,13 @@ impl RangeHost {
                 self.reply(id, Err(RangeError::OutOfRange));
                 return true;
             }
+            // A transaction that holds its writes until the commit locked one of the keys (008
+            // FR-022): the layer above waits for the lock and writes again.
+            if self.locked_by_other(m.g, &m.keys, None) {
+                self.release(m.g, m.term, latch);
+                self.reply(id, Err(RangeError::KeyLocked));
+                return true;
+            }
             return self.propose(core, id, m, latch, &current, now);
         }
         // A refused write waits for the core to confirm the leadership.
@@ -268,6 +282,7 @@ impl RangeHost {
         {
             p.replied = true;
             let r = p.answer();
+            teseladb_stages::record(Stage::WriteRange, now.0.saturating_sub(m.arrived.0));
             let applied = p.applied;
             let latch = p.latch;
             // From now on a `local` read waits for it: it saw the write answered (DV-010).

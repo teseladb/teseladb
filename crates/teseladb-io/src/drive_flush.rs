@@ -247,6 +247,15 @@ pub(crate) fn flusher_for(device: u64) -> Option<&'static Flusher> {
 /// Makes `file` durable: on macOS its data goes to the drive and one shared flush of the drive
 /// covers it; elsewhere `fsync` with the drive's flush, as the system does it.
 pub(crate) fn make_durable(file: &std::fs::File) -> io::Result<()> {
+    let start = std::time::Instant::now();
+    let out = make_durable_now(file);
+    let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    teseladb_stages::record(teseladb_stages::Stage::DriveFlushWait, nanos);
+    out
+}
+
+/// [`make_durable`] without timing it.
+fn make_durable_now(file: &std::fs::File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;

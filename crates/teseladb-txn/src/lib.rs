@@ -13,4 +13,5 @@ pub mod reaper;
 pub mod record;
 pub mod recovery;
 pub mod session_txn;
+pub mod stages;
 pub mod uncertainty;

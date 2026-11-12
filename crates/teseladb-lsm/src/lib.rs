@@ -88,6 +88,7 @@ pub use lsm::{
     Commit, Completions, EntryWrite, Lsm, MIN_CORE_CACHE, Pressure, SHARED_CACHE_PERCENT,
     SPACE_AMP, SPACE_FLOOR, VersionWrite, cache_split,
 };
+pub use memtable::frozen_alive_bytes;
 pub use metrics::LsmMetrics;
 pub use read::{Found, Item, Lookup, ReadToken, Scan, Step};
 pub use read_back::BackScan;

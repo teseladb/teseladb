@@ -33,6 +33,7 @@ teseladb-router = { path = "../teseladb-router" }
 teseladb-session = { path = "../teseladb-session" }
 teseladb-topology = { path = "../teseladb-topology" }
 teseladb-txn = { path = "../teseladb-txn" }
+teseladb-stages = { path = "../teseladb-stages" }
 teseladb-types = { workspace = true }
 teseladb-x509 = { workspace = true }
 

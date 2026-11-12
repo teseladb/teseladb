@@ -117,6 +117,7 @@ version = "0.1.0"
 dependencies = [
  "teseladb-keys",
  "teseladb-lsm",
+ "teseladb-stages",
  "teseladb-sys",
  "teseladb-crypto",
  "teseladb-deflate",
@@ -218,6 +219,7 @@ dependencies = [
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-multiraft",
+ "teseladb-stages",
  "teseladb-hash",
  "teseladb-raft",
  "teseladb-raftlog",
@@ -278,6 +280,7 @@ dependencies = [
  "teseladb-rest",
  "teseladb-router",
  "teseladb-session",
+ "teseladb-stages",
  "teseladb-sys",
  "teseladb-topology",
  "teseladb-txn",
@@ -327,6 +330,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-stages"
+version = "0.1.0"
+
+[[package]]
 name = "teseladb-sys"
 version = "0.1.0"
 
@@ -353,9 +360,11 @@ name = "teseladb-txn"
 version = "0.1.0"
 dependencies = [
  "teseladb-hlc",
+ "teseladb-keys",
  "teseladb-lsm",
  "teseladb-multiraft",
  "teseladb-range",
+ "teseladb-stages",
  "teseladb-hash",
  "teseladb-raftlog",
  "teseladb-types",
@@ -388,6 +397,7 @@ dependencies = [
  "teseladb-router",
  "teseladb-search",
  "teseladb-session",
+ "teseladb-stages",
  "teseladb-topology",
  "teseladb-txn",
  "teseladb-bson",

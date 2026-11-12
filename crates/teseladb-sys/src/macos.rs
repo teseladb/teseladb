@@ -549,6 +549,29 @@ pub(crate) fn memory() -> io::Result<crate::host::Memory> {
     })
 }
 
+/// `malloc_statistics_t` of `<malloc/malloc.h>`.
+#[repr(C)]
+#[derive(Default)]
+struct MallocStatistics {
+    blocks_in_use: u32,
+    size_in_use: usize,
+    max_size_in_use: usize,
+    size_allocated: usize,
+}
+
+unsafe extern "C" {
+    fn malloc_zone_statistics(zone: *mut std::ffi::c_void, stats: *mut MallocStatistics);
+}
+
+/// Bytes in use in every malloc zone of the process.
+pub(crate) fn allocated() -> Option<u64> {
+    let mut s = MallocStatistics::default();
+    // SAFETY: a null zone asks for every zone together; `s` is a `malloc_statistics_t` valid for
+    // writes during the call.
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut s) };
+    u64::try_from(s.size_in_use).ok()
+}
+
 /// RefDb's names of macOS in `hostInfo`: `Mac OS X` and the kernel release.
 pub(crate) fn distribution() -> (String, String) {
     let release = crate::host::kernel().map(|k| k.release).unwrap_or_default();

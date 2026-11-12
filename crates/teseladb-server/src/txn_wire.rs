@@ -22,6 +22,8 @@ const READ_RECORD: u8 = 7;
 const PUSH_BY_READ: u8 = 8;
 /// Tag of `TxnOp::CheckIntents` (008 FR-021).
 const CHECK_INTENTS: u8 = 9;
+const LOCK_KEYS: u8 = 10;
+const UNLOCK_KEYS: u8 = 11;
 
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -200,6 +202,15 @@ pub fn put_op(e: &mut Encoder, op: &TxnOp) {
             e.u8(CHECK_INTENTS).u128(txn.0);
             put_keys(e, keys);
         }
+        TxnOp::LockKeys { txn, read_ts, keys } => {
+            e.u8(LOCK_KEYS).u128(txn.0);
+            put_hlc(e, *read_ts);
+            put_keys(e, keys);
+        }
+        TxnOp::UnlockKeys { txn, keys } => {
+            e.u8(UNLOCK_KEYS).u128(txn.0);
+            put_keys(e, keys);
+        }
     }
 }
 
@@ -235,6 +246,8 @@ pub fn get_op(d: &mut Decoder<'_>) -> Result<TxnOp, DecodeError> {
         READ_RECORD => TxnOp::ReadRecord { txn },
         PUSH_BY_READ => TxnOp::PushByRead { txn, at: get_hlc(d)? },
         CHECK_INTENTS => TxnOp::CheckIntents { txn, keys: get_keys(d)? },
+        LOCK_KEYS => TxnOp::LockKeys { txn, read_ts: get_hlc(d)?, keys: get_keys(d)? },
+        UNLOCK_KEYS => TxnOp::UnlockKeys { txn, keys: get_keys(d)? },
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -278,6 +291,8 @@ mod tests {
             TxnOp::ReadRecord { txn },
             TxnOp::PushByRead { txn, at: ts },
             TxnOp::CheckIntents { txn, keys: vec![vec![1], vec![2, 3]] },
+            TxnOp::LockKeys { txn, read_ts: ts, keys: vec![vec![1], vec![2, 3]] },
+            TxnOp::UnlockKeys { txn, keys: vec![vec![4]] },
             TxnOp::ResolveIntents {
                 txn,
                 status: TxnStatus::Committed,
@@ -294,7 +309,7 @@ mod tests {
     fn bad_tags_and_counts_are_refused() {
         let bad = |bytes: &[u8]| get_op(&mut Decoder::new(bytes)).is_err();
         let mut e = Encoder::new();
-        e.u8(9).u128(1);
+        e.u8(99).u128(1);
         assert!(bad(&e.finish()), "unknown request");
         let mut e = Encoder::new();
         e.u8(PUSH_TXN).u128(1).u8(9);

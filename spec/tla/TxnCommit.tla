@@ -35,9 +35,23 @@
 (* commit first checks that every intent of the transaction is applied (WaitApplied); otherwise    *)
 (* the coordinator aborts. Mutant "commit_without_wait" commits without the check, and            *)
 (* CommittedWritesKept fails.                                                                     *)
+(* With Buffered (008 FR-022) a statement holds its writes in the coordinator and only takes a     *)
+(* lock on each key in its leader's memory (Lock): the lock is refused, and the transaction ends   *)
+(* with WriteConflict, when another live transaction holds the key or a version newer than the    *)
+(* read timestamp exists. Locks are not replicated: a change of leader or their expiry loses them  *)
+(* (LoseLocks). The commit of a transaction whose keys are all in one range is one write (OnePhase): *)
+(* it checks again that no other transaction's intent and no version newer than the read          *)
+(* timestamp is on its keys, and writes the versions above the read cache of every key. Mutants    *)
+(* "onephase_ignores_newer" (no check of newer versions: FirstCommitterWins fails) and            *)
+(* "onephase_below_reads" (the commit ignores the read cache: ReadsAreStable fails).              *)
+(* A one-phase commit leaves no record, so the recovery of a client transaction's decision from    *)
+(* another node (RecoverOnePhase) asks the range itself: the commit left there a mark of the        *)
+(* transaction, and a range without it writes a mark that refuses the commit from then on (fenced), *)
+(* in the same log as the commit. Mutant "onephase_ignores_fence" commits over that mark, and a     *)
+(* transaction answered as aborted commits (ReadsAreStable fails).                                 *)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant, PushByRead, Pipelined
+CONSTANTS Txns, Keys, MaxTs, MaxReads, Mutant, PushByRead, Pipelined, Buffered
 
 NoTxn == 0
 None == "none"
@@ -58,7 +72,9 @@ VARIABLES
     readTs,    \* read timestamp of each transaction
     rec,       \* the record: [st, minC, cts]
     alive,     \* heartbeat of each transaction's coordinator
-    wrote,     \* keys with an intent of the transaction
+    wrote,     \* keys with an intent of the transaction, or held in its coordinator (Buffered)
+    locked,    \* keys each buffered transaction holds a lock on in their leader's memory
+    fenced,    \* transactions whose one-phase commit a recovery refused in the range
     intent,    \* intent on each key: [t, ts, ap] (ap: applied, not only in the leader's log)
     ver,       \* committed versions of each key: set of [t, ts]
     maxRead,   \* the highest timestamp a read was served at, per key (the read cache)
@@ -67,7 +83,7 @@ VARIABLES
     abortedFor, \* ghost: transactions a reader saw aborted
     broken     \* ghost: a read missed a commit at or below its timestamp
 
-vars == <<now, coord, readTs, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+vars == <<now, coord, readTs, rec, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 Max(a, b) == IF a > b THEN a ELSE b
 NoIntent == [t |-> NoTxn, ts |-> 0, ap |-> TRUE]
@@ -83,6 +99,8 @@ TypeOK ==
     /\ rec \in [Txns -> [st : {None, Pending, Committed, Aborted}, minC : 0..MaxTs + 1, cts : 0..MaxTs + 1]]
     /\ alive \in [Txns -> BOOLEAN]
     /\ wrote \in [Txns -> SUBSET Keys]
+    /\ locked \in [Txns -> SUBSET Keys]
+    /\ fenced \in SUBSET Txns
     /\ intent \in [Keys -> [t : Txns \cup {NoTxn}, ts : 0..MaxTs + 1, ap : BOOLEAN]]
     /\ maxRead \in [Keys -> 0..MaxTs]
     /\ recRead \in [Txns -> 0..MaxTs]
@@ -95,6 +113,8 @@ Init ==
     /\ rec = [t \in Txns |-> [st |-> None, minC |-> 0, cts |-> 0]]
     /\ alive = [t \in Txns |-> TRUE]
     /\ wrote = [t \in Txns |-> {}]
+    /\ locked = [t \in Txns |-> {}]
+    /\ fenced = {}
     /\ intent = [k \in Keys |-> NoIntent]
     /\ ver = [k \in Keys |-> {}]
     /\ maxRead = [k \in Keys |-> 0]
@@ -106,13 +126,13 @@ Init ==
 Tick ==
     /\ now < MaxTs
     /\ now' = now + 1
-    /\ UNCHANGED <<coord, readTs, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<coord, readTs, rec, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 Begin(t) ==
     /\ coord[t] = Idle
     /\ coord' = [coord EXCEPT ![t] = Writing]
     /\ readTs' = [readTs EXCEPT ![t] = now]
-    /\ UNCHANGED <<now, rec, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, rec, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The coordinator creates its record: Pending, or it adopts the one a push created; over an
 \* Aborted record it fails with NoSuchTransaction (the mutant overwrites it).
@@ -130,14 +150,15 @@ CreateRecord(t) ==
        \/ /\ rec[t].st = Pending /\ rec[t].minC > 0 /\ Mutant = "begin_ignores_push"
           /\ rec' = [rec EXCEPT ![t].minC = 0]
           /\ UNCHANGED coord
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* PutIntents on key k: a conflict ends the transaction (the driver retries it).
 PutIntent(t, k) ==
-    /\ coord[t] = Writing /\ alive[t] /\ k \notin wrote[t] /\ Unlatched(k)
+    /\ ~Buffered /\ coord[t] = Writing /\ alive[t] /\ k \notin wrote[t] /\ Unlatched(k)
     /\ LET other == intent[k].t
            conflict == (other # NoTxn /\ other # t)
                        \/ \E v \in ver[k] : v.ts > readTs[t]
+                       \/ \E o \in Txns : o # t /\ k \in locked[o]
        IN IF conflict
              THEN /\ coord' = [coord EXCEPT ![t] = Done]
                   /\ rec' = [rec EXCEPT ![t].st = IF @ = Pending \/ @ = None THEN Aborted ELSE @]
@@ -146,20 +167,77 @@ PutIntent(t, k) ==
                                      [t |-> t, ts |-> Max(now, maxRead[k] + 1), ap |-> ~Pipelined]]
                   /\ wrote' = [wrote EXCEPT ![t] = @ \cup {k}]
                   /\ UNCHANGED <<coord, rec>>
-    /\ UNCHANGED <<now, readTs, alive, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, locked, fenced, ver, maxRead, recRead, reads, abortedFor, broken>>
+
+\* A buffered statement locks key k in its leader's memory and holds its write in the coordinator
+\* (008 FR-022). The lock is refused as PutIntents is, and the transaction ends.
+Lock(t, k) ==
+    /\ Buffered /\ coord[t] = Writing /\ alive[t] /\ k \notin wrote[t] /\ Unlatched(k)
+    /\ LET conflict == (intent[k].t # NoTxn /\ intent[k].t # t)
+                       \/ \E v \in ver[k] : v.ts > readTs[t]
+                       \/ \E o \in Txns : o # t /\ k \in locked[o]
+       IN IF conflict
+             THEN /\ coord' = [coord EXCEPT ![t] = Done]
+                  /\ locked' = [locked EXCEPT ![t] = {}]
+                  /\ UNCHANGED wrote
+             ELSE /\ locked' = [locked EXCEPT ![t] = @ \cup {k}]
+                  /\ wrote' = [wrote EXCEPT ![t] = @ \cup {k}]
+                  /\ UNCHANGED coord
+    /\ UNCHANGED <<now, readTs, rec, alive, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+
+\* A change of leader, or their expiry, loses a transaction's locks; its writes stay buffered.
+LoseLocks(t) ==
+    /\ locked[t] # {}
+    /\ locked' = [locked EXCEPT ![t] = {}]
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+
+\* The commit of a buffered transaction whose keys are in one range: one write that checks its
+\* keys again and leaves its versions above every read served on them (008 FR-006, FR-022).
+OnePhase(t) ==
+    /\ Buffered /\ coord[t] = Writing /\ alive[t] /\ wrote[t] # {} /\ rec[t].st = None
+    /\ Mutant # "onephase_ignores_fence" => t \notin fenced
+    /\ \A k \in wrote[t] : intent[k].t = NoTxn /\ Unlatched(k)
+    /\ LET newer == \E k \in wrote[t] : \E v \in ver[k] : v.ts > readTs[t]
+           readMax == CHOOSE m \in 0..MaxTs :
+                          /\ \A k \in wrote[t] : maxRead[k] <= m
+                          /\ \/ m = 0
+                             \/ \E k \in wrote[t] : maxRead[k] = m
+           cts == IF Mutant = "onephase_below_reads" THEN now ELSE Max(now, readMax + 1)
+       IN IF newer /\ Mutant # "onephase_ignores_newer"
+             THEN /\ coord' = [coord EXCEPT ![t] = Done]
+                  /\ UNCHANGED <<rec, ver, broken>>
+             ELSE /\ cts <= MaxTs + 1
+                  /\ rec' = [rec EXCEPT ![t] = [st |-> Committed, minC |-> 0, cts |-> cts]]
+                  /\ ver' = [k \in Keys |-> IF k \in wrote[t] THEN ver[k] \cup {[t |-> t, ts |-> cts]}
+                                                              ELSE ver[k]]
+                  /\ coord' = [coord EXCEPT ![t] = Done]
+                  /\ broken' = (\/ broken
+                                 \/ (\E r \in reads : r.k \in wrote[t] /\ r.rts >= cts /\ t \notin r.seen)
+                                 \/ t \in abortedFor)
+    /\ locked' = [locked EXCEPT ![t] = {}]
+    /\ UNCHANGED <<now, readTs, alive, wrote, fenced, intent, maxRead, recRead, reads, abortedFor>>
+
+\* The recovery of the decision of a transaction without a record, from another node: the range
+\* that would hold its one-phase commit has no mark of it, so it writes the mark that refuses that
+\* commit, and the recovery answers that the transaction aborted.
+RecoverOnePhase(t) ==
+    /\ Buffered /\ rec[t].st = None /\ t \notin fenced
+    /\ fenced' = fenced \cup {t}
+    /\ abortedFor' = abortedFor \cup {t}
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, locked, intent, ver, maxRead, recRead, reads, broken>>
 
 \* A pipelined intent is applied: its entry committed and the leader applied it.
 ApplyIntent(k) ==
     /\ intent[k].t # NoTxn /\ ~intent[k].ap
     /\ intent' = [intent EXCEPT ![k].ap = TRUE]
-    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, locked, fenced, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* A change of leader loses a pipelined intent that was only in the old leader's log; its
 \* coordinator still counts the key as written.
 LoseIntent(k) ==
     /\ intent[k].t # NoTxn /\ ~intent[k].ap
     /\ intent' = [intent EXCEPT ![k] = NoIntent]
-    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, locked, fenced, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* EndTxn(Committed) in the record's range, once every intent it wrote is applied (WaitApplied).
 Commit(t) ==
@@ -181,33 +259,33 @@ Commit(t) ==
           /\ broken' = (\/ broken
                          \/ (\E r \in reads : r.k \in wrote[t] /\ r.rts >= cts /\ t \notin r.seen)
                          \/ t \in abortedFor)
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor>>
 
 \* EndTxn(Aborted) by the coordinator.
 Abort(t) ==
     /\ coord[t] = Writing /\ alive[t]
     /\ rec' = [rec EXCEPT ![t].st = IF @ = Pending \/ @ = None THEN Aborted ELSE @]
     /\ coord' = [coord EXCEPT ![t] = Done]
-    /\ UNCHANGED <<now, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, readTs, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The coordinator stops sending heartbeats: it died, or it is only late and may come back.
 Stall(t) ==
     /\ coord[t] \in {Idle, Writing} /\ alive[t]
     /\ alive' = [alive EXCEPT ![t] = FALSE]
-    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* A late coordinator comes back; a dead one never does.
 Resume(t) ==
     /\ ~alive[t] /\ coord[t] \in {Idle, Writing}
     /\ alive' = [alive EXCEPT ![t] = TRUE]
-    /\ UNCHANGED <<now, coord, readTs, rec, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* The reaper (or a writer's push) aborts a transaction without heartbeat; a missing record is
 \* created Aborted.
 Reap(t) ==
     /\ ~alive[t] /\ rec[t].st \in {None, Pending}
     /\ rec' = [rec EXCEPT ![t].st = Aborted]
-    /\ UNCHANGED <<now, coord, readTs, alive, wrote, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, alive, wrote, locked, fenced, intent, ver, maxRead, recRead, reads, abortedFor, broken>>
 
 \* ResolveIntents of a finished record (in the background or by a reader): the mutant turns an
 \* intent into a version before the record is committed.
@@ -220,7 +298,7 @@ Resolve(t, k) ==
        \/ /\ Mutant = "resolve_before_commit" /\ rec[t].st = Pending
           /\ ver' = [ver EXCEPT ![k] = @ \cup {[t |-> t, ts |-> intent[k].ts]}]
     /\ intent' = [intent EXCEPT ![k] = NoIntent]
-    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, maxRead, recRead, reads, abortedFor, broken>>
+    /\ UNCHANGED <<now, coord, readTs, rec, alive, wrote, locked, fenced, maxRead, recRead, reads, abortedFor, broken>>
 
 \* What a push does to the record of t for a reader at rts: the record after it. Pushed by a read, a
 \* live transaction's record stays as it is.
@@ -253,13 +331,13 @@ Read(k) ==
                            THEN [recRead EXCEPT ![owner] = Max(@, rts)] ELSE recRead
           \* A version written at or below the read after it was served breaks it too.
           /\ broken' = broken
-    /\ UNCHANGED <<now, coord, readTs, alive, wrote, intent, ver>>
+    /\ UNCHANGED <<now, coord, readTs, alive, wrote, locked, fenced, intent, ver>>
 
 Next ==
     \/ Tick
     \/ \E t \in Txns : Begin(t) \/ CreateRecord(t) \/ Commit(t) \/ Abort(t) \/ Stall(t) \/ Resume(t)
-          \/ Reap(t)
-    \/ \E t \in Txns, k \in Keys : PutIntent(t, k) \/ Resolve(t, k)
+          \/ Reap(t) \/ OnePhase(t) \/ LoseLocks(t) \/ RecoverOnePhase(t)
+    \/ \E t \in Txns, k \in Keys : PutIntent(t, k) \/ Resolve(t, k) \/ Lock(t, k)
     \/ \E k \in Keys : Read(k) \/ ApplyIntent(k) \/ LoseIntent(k)
 
 Spec == Init /\ [][Next]_vars

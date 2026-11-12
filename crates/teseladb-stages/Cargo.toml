@@ -1,0 +1,11 @@
+[package]
+name = "teseladb-stages"
+version = "0.1.0"
+description = "TeselaDB's per-stage latency histograms: lock-free counters shared by the whole process and their Prometheus text."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

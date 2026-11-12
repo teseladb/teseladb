@@ -206,6 +206,12 @@ pub fn memory() -> io::Result<Memory> {
     os::memory()
 }
 
+/// Bytes the process's allocator holds for live allocations (012 FR-016): what `malloc` handed
+/// out and nobody freed yet. `None` where the system does not say (glibc before 2.33).
+pub fn allocated() -> Option<u64> {
+    os::allocated()
+}
+
 /// Bytes used and total of the file system that holds `path`.
 pub fn fs_usage(path: &Path) -> io::Result<(u64, u64)> {
     let mut c = path.as_os_str().as_bytes().to_vec();
@@ -286,5 +292,14 @@ mod tests {
         assert_eq!(fs_usage(Path::new(bad)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(text(b"abc"), "abc");
         assert_eq!(text(b"ab\0c"), "ab");
+    }
+
+    #[test]
+    fn the_allocator_counts_what_is_held() {
+        let Some(before) = allocated() else { return };
+        let held: Vec<u8> = vec![1; 64 << 20];
+        let after = allocated().expect("the allocator answered once");
+        assert!(after >= before + (32 << 20), "{before} then {after}");
+        drop(held);
     }
 }

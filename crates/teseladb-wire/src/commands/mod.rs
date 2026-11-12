@@ -12,6 +12,7 @@
 //! - [`registry`]: the cluster's record of sessions, `config.system.sessions`.
 
 pub mod admin;
+pub mod agg_memory;
 pub mod aggregate;
 pub mod api_keys;
 pub mod apply_ops;

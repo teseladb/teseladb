@@ -721,7 +721,7 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
         ),
         RangeError::Mutation(m) => (CommandError::from_mutation(m), false),
         // Another transaction's intent, or a newer version: the driver repeats the transaction.
-        RangeError::WriteConflict | RangeError::IntentConflict(_) => (
+        RangeError::WriteConflict | RangeError::IntentConflict(_) | RangeError::KeyLocked => (
             CommandError::new(WRITE_CONFLICT, WRITE_CONFLICT_MESSAGE)
                 .with_label(TRANSIENT_TRANSACTION_ERROR),
             false,

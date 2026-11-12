@@ -782,6 +782,9 @@ impl Backend for Mem {
                 }
                 Ok(Reply::Intents { ts })
             }
+            // One range and no other transaction: a lock is always granted (008 FR-022).
+            TxnOp::LockKeys { read_ts, .. } => Ok(Reply::Intents { ts: read_ts }),
+            TxnOp::UnlockKeys { .. } => Ok(Reply::Intents { ts }),
             // Only the reaper sends these, and this node has none.
             TxnOp::FindIntents { .. } => Ok(Reply::Batch(Vec::new())),
             TxnOp::ForgetRecord { .. } => Err(teseladb_range::host::RangeError::WriteConflict),

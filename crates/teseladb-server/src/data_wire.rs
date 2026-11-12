@@ -580,6 +580,7 @@ fn put_error(e: &mut Encoder, err: &RangeError) {
         RangeError::ReadIntent { .. } => (12, 0, ""),
         RangeError::ReadUncertain { .. } => (13, 0, ""),
         RangeError::Fenced => (14, 0, ""),
+        RangeError::KeyLocked => (15, 0, ""),
     };
     e.u8(tag).u64(hint).str(text);
     let put_owner = |e: &mut Encoder, o: &IntentOwner| {
@@ -629,6 +630,7 @@ fn get_error(d: &mut Decoder<'_>) -> Result<RangeError, DecodeError> {
         },
         13 => RangeError::ReadUncertain { ts: Hlc { physical: d.u64()?, logical: d.u32()? } },
         14 => RangeError::Fenced,
+        15 => RangeError::KeyLocked,
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }

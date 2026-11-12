@@ -394,6 +394,46 @@ pub(crate) fn memory() -> io::Result<crate::host::Memory> {
     })
 }
 
+/// `struct mallinfo2` of glibc 2.33 and later.
+#[repr(C)]
+#[derive(Default)]
+struct MallInfo2 {
+    arena: usize,
+    ordblks: usize,
+    smblks: usize,
+    hblks: usize,
+    hblkhd: usize,
+    usmblks: usize,
+    fsmblks: usize,
+    uordblks: usize,
+    fordblks: usize,
+    keepcost: usize,
+}
+
+unsafe extern "C" {
+    fn dlsym(
+        handle: *mut std::ffi::c_void,
+        symbol: *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_void;
+}
+
+/// Bytes in use of glibc's allocator (`mallinfo2`: the arenas' allocated chunks and the mapped
+/// ones), looked up at run time because the binaries are built against glibc 2.28, which lacks
+/// it; `None` without it.
+pub(crate) fn allocated() -> Option<u64> {
+    // `RTLD_DEFAULT`: every object the process loaded.
+    let sym = c"mallinfo2";
+    // SAFETY: a null handle is `RTLD_DEFAULT` on glibc; the name is a terminated string.
+    let f = unsafe { dlsym(std::ptr::null_mut(), sym.as_ptr()) };
+    if f.is_null() {
+        return None;
+    }
+    // SAFETY: glibc exports `mallinfo2` with this signature, returning the struct by value.
+    let mallinfo2: extern "C" fn() -> MallInfo2 = unsafe { std::mem::transmute(f) };
+    let m = mallinfo2();
+    u64::try_from(m.uordblks.saturating_add(m.hblkhd)).ok()
+}
+
 /// `NAME` and `VERSION_ID` of `/etc/os-release`, as RefDb shows them in `hostInfo`.
 pub(crate) fn distribution() -> (String, String) {
     let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();

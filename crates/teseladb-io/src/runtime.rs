@@ -416,6 +416,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             let wait = if spun { Duration::ZERO } else { timeout };
             self.events.extend_from_slice(self.poller.poll(Some(wait))?);
         }
+        let woke = self.now();
         let events = std::mem::take(&mut self.events);
         let mut worked = false;
         for e in &events {
@@ -456,6 +457,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.on_backoff_done(node);
         }
         self.pump(now);
+        if self.worked {
+            let busy = self.now().0.saturating_sub(woke.0);
+            teseladb_stages::record(teseladb_stages::Stage::CoreStep, busy);
+        }
         Ok(())
     }
 

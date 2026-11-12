@@ -1180,7 +1180,8 @@ pub(crate) fn record_answer(
             | RangeError::ReadIntent { .. }
             | RangeError::ReadUncertain { .. }
             | RangeError::NoSuchTransaction
-            | RangeError::Fenced,
+            | RangeError::Fenced
+            | RangeError::KeyLocked,
         ) => unreachable!("the workload runs no transactions, change streams nor fences"),
         // Refused before anything was proposed: it imposes nothing.
         Err(RangeError::NotLeader { hint }) => {

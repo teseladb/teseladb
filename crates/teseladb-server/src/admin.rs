@@ -347,6 +347,26 @@ fn machine_metrics(out: &mut String, data_dir: Option<&std::path::Path>) {
         let _ = writeln!(out, "# HELP {name} Resident bytes of the node's process.");
         let _ = writeln!(out, "# TYPE {name} gauge\n{name} {}", m.resident);
     }
+    // The node's memory by component (012 FR-016), next to each core's memtables and caches.
+    let mut parts = vec![
+        (
+            "teseladb_memory_frozen_memtables_bytes",
+            "Bytes of the frozen memtables alive in the process, those only a reader's view holds included.",
+            teseladb_lsm::frozen_alive_bytes(),
+        ),
+        (
+            "teseladb_memory_aggregations_bytes",
+            "Bytes of the documents the running aggregations read into memory.",
+            teseladb_wire::commands::agg_memory::held(),
+        ),
+    ];
+    if let Some(bytes) = teseladb_sys::host::allocated() {
+        let help = "Bytes the process's allocator holds for live allocations.";
+        parts.push(("teseladb_memory_allocated_bytes", help, bytes));
+    }
+    for (name, help, n) in parts {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {n}");
+    }
     teseladb_wire::commands::durations::render(out);
 }
 
@@ -493,6 +513,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         "# HELP teseladb_reads_outside_declined_by_reason_total Reads outside the cores sent back to them, by reason."
     );
     let _ = writeln!(out, "# TYPE teseladb_reads_outside_declined_by_reason_total counter");
+    teseladb_stages::render(out);
     let counts = teseladb_range::view::decline_counts();
     for (reason, n) in teseladb_range::view::Decline::ALL.iter().zip(counts) {
         let _ = writeln!(

@@ -1,6 +1,7 @@
 //! The state of the machine in `/metrics` (007 FR-038), which TeselaDB Cloud watches on a
 //! dedicated cluster (021 FR-048): the disk of the data directory, the process's resident memory
-//! and the histogram of how long the clients' commands took on the node.
+//! the histogram of how long the clients' commands took on the node, and how long each stage of
+//! an operation took (012 FR-015).
 
 mod common;
 
@@ -55,6 +56,20 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     let count = sample(&text, "teseladb_command_duration_seconds_count").unwrap();
     assert!((inf - count).abs() < f64::EPSILON, "every command falls in +Inf");
     assert!(sample(&text, "teseladb_command_duration_seconds_sum").unwrap() >= 0.0);
+    // Each stage of an operation (012 FR-015): the insert above went through its range.
+    assert!(text.contains("# TYPE teseladb_stage_seconds histogram"), "{text}");
+    for stage in ["write_latch_wait", "write_range", "drive_flush_wait", "core_step", "txn_total"] {
+        let count = format!("teseladb_stage_seconds_count{{stage=\"{stage}\"}}");
+        assert!(text.contains(&count), "{count} in {text}");
+    }
+    // The memory by component (012 FR-016).
+    for name in ["teseladb_memory_frozen_memtables_bytes", "teseladb_memory_aggregations_bytes"] {
+        assert!(sample(&text, name).is_some(), "{name} in {text}");
+    }
+    #[cfg(target_os = "macos")]
+    assert!(sample(&text, "teseladb_memory_allocated_bytes").expect("allocated") > 0.0);
+    let writes = "teseladb_stage_seconds_count{stage=\"write_range\"}";
+    assert!(sample(&text, writes).expect("write_range") >= 1.0, "{text}");
     n.stop();
     let _ = std::fs::remove_dir_all(dir);
 }
