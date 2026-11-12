@@ -605,7 +605,10 @@ impl Replicas {
         let by_size = l.live >= split_bytes || size.as_ref().is_some_and(|s| s.bytes >= disk_limit);
         let by_load = !by_size;
         let at = match size {
-            Some(s) if by_size => s.cut,
+            Some(s) if by_size => s.cut.map(|cut| {
+                let below = |k: &[u8]| lsm.interval_size(start, k).bytes;
+                size_cut((start, end), cut, below, s.bytes)
+            }),
             _ => host.load_cut(g, now),
         };
         // A cut at a change meta (014) goes before its document, which it belongs with.
@@ -707,6 +710,37 @@ fn split_size(
     own.or(chunks.1).unwrap_or(default)
 }
 
+/// Where a split by size cuts `[start, end)` (FR-005), given `cut`, the key that leaves half of
+/// its `total` bytes on each side: at the edge of `cut`'s collection that leaves the bytes most
+/// even, as told by `below` (the bytes from `start` up to a key). A cut inside a collection puts
+/// its documents and their index entries in two ranges, and every write that touches both pays a
+/// transaction across them (H-053), so a range cuts inside a collection only when it holds no
+/// edge of one.
+fn size_cut(
+    (start, end): (&[u8], &[u8]),
+    cut: Vec<u8>,
+    below: impl Fn(&[u8]) -> u64,
+    total: u64,
+) -> Vec<u8> {
+    use teseladb_keys::KeyBuilder;
+    use teseladb_keys::space::DATA;
+    let word = |i: usize| cut.get(i..i + 4).and_then(|w| w.try_into().ok()).map(u32::from_be_bytes);
+    let (Some(&DATA), Some(tenant), Some(collection)) = (cut.first(), word(1), word(5)) else {
+        return cut;
+    };
+    let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
+    let edges = [
+        KeyBuilder::collection_start(tenant, collection),
+        KeyBuilder::collection_end(tenant, collection),
+    ];
+    edges
+        .iter()
+        .map(|k| k.as_bytes().to_vec())
+        .filter(|k| inside(k))
+        .min_by_key(|k| below(k).saturating_mul(2).abs_diff(total))
+        .unwrap_or(cut)
+}
+
 /// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
 /// `end`: no end), where the range is cut so that the collection has a range of its own
 /// (007 FR-009).
@@ -731,6 +765,45 @@ mod tests {
 
     const ME: NodeId = NodeId(1);
     const G: GroupId = GroupId(1);
+
+    /// A document key of collection `c` of tenant 0.
+    fn doc(c: u32, id: &[u8]) -> Vec<u8> {
+        let mut k = teseladb_keys::KeyBuilder::collection_start(0, c).as_bytes().to_vec();
+        k.extend_from_slice(id);
+        k
+    }
+
+    #[test]
+    fn a_split_by_size_cuts_at_the_edge_of_a_collection_when_the_range_has_one() {
+        // H-053: the middle key fell inside a collection, between its documents and their index
+        // entries, and every write to the lower part became a transaction across two ranges.
+        use teseladb_keys::KeyBuilder;
+        let (start, end) = ([1u8], [2u8]);
+        let edge = |c: u32| KeyBuilder::collection_start(0, c).as_bytes().to_vec();
+        // Collections 1, 2 and 3 of 30, 50 and 20 bytes: the middle falls in collection 2.
+        let below = |k: &[u8]| match k {
+            k if k <= edge(1).as_slice() => 0,
+            k if k <= edge(2).as_slice() => 30,
+            k if k <= edge(3).as_slice() => 80,
+            _ => 100,
+        };
+        let cut = size_cut((&start, &end), doc(2, b"m"), below, 100);
+        assert_eq!(cut, edge(2), "30 below and 70 above beat 80 and 20");
+        // Collections of 10, 60 and 30 bytes: 70 and 30 beat 10 and 90.
+        let other = |k: &[u8]| [0, 10, 70, 100][usize::try_from(below(k) / 30).unwrap_or(3).min(3)];
+        let cut = size_cut((&start, &end), doc(2, b"m"), other, 100);
+        assert_eq!(cut, edge(3), "the more even edge wins");
+        // A range inside one collection cuts at the middle key.
+        let one = (edge(2), edge(3));
+        let cut = size_cut((&one.0, &one.1), doc(2, b"m"), below, 100);
+        assert_eq!(cut, doc(2, b"m"));
+        // A range open at its end still takes the collection's upper edge.
+        let open: (&[u8], &[u8]) = (&start, &[]);
+        assert_eq!(size_cut(open, doc(2, b"m"), other, 100), edge(3));
+        // A key of another space is cut where it falls.
+        let txn = vec![teseladb_keys::space::TXN, 7];
+        assert_eq!(size_cut((&[2u8], &[3u8]), txn.clone(), below, 100), txn);
+    }
 
     struct One {
         core: MultiRaftCore<CoreSm>,
