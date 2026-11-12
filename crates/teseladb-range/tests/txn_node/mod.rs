@@ -43,12 +43,16 @@ pub struct Node {
 
 impl Node {
     pub fn new() -> Node {
+        Node::with_lsm(LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() })
+    }
+
+    /// A node whose LSM runs with `lcfg`.
+    pub fn with_lsm(lcfg: LsmConfig) -> Node {
         let mut disk = MemDisk::new();
         let clock = NodeClock::for_node(NodeId(1));
         let store = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap().0;
         let cfg = CoreConfig { clock: clock.clone(), ..CoreConfig::new(NodeId(1), 0) };
         let mut core = MultiRaftCore::new(cfg, store, 1);
-        let lcfg = LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() };
         let lsm = Rc::new(RefCell::new(Lsm::recover(&lcfg, &mut disk).unwrap().0));
         let sm = RangeSm::open(G, START.to_vec(), END.to_vec(), lsm.clone(), &mut disk).unwrap();
         let desc = GroupDesc { group: G, voters: vec![NodeId(1)], learners: vec![] };

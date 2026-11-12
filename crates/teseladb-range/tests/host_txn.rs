@@ -231,3 +231,81 @@ fn the_record_mark_moves_only_with_entries_that_touch_the_records() {
     assert_eq!(views.txn_mark(G), Some(moved));
     assert_eq!(views.txn_mark(GroupId(999)), None, "not a range of the core");
 }
+
+/// The leader's commit of a transaction says how it changes each collection's documents, from
+/// the version below each intent (007 FR-039): a replaced document adds none, a new one adds one
+/// and a deleted one takes one away, and the counts stay exact with no recount (H-051 of the
+/// native tests).
+#[test]
+fn a_commit_counts_the_documents_it_replaces_adds_and_deletes() {
+    const COLL: (u32, u32) = (0x6100_0000, 4);
+    let doc = |pk: &[u8]| {
+        teseladb_keys::space::KeyBuilder::document_of_pk(COLL.0, COLL.1, pk).as_bytes().to_vec()
+    };
+    let (a, b, c) = (doc(b"a"), doc(b"b"), doc(b"c"));
+    let mut n = Node::new();
+    n.host.set_counted_writes(true);
+    n.host.set_counted_resolutions(true);
+    n.write(&a, b"a1");
+    let first = n.write(&c, b"c1");
+    let counts = |n: &Node| n.core.state_machine(G).unwrap().doc_counts().cloned();
+    assert_eq!(counts(&n), Some([(COLL, 2)].into()));
+    let writes =
+        [(a.as_slice(), put(b"a2")), (b.as_slice(), put(b"b1")), (c.as_slice(), IntentOp::Delete)];
+    intents_mark(n.txn(intents(T1, first, &writes)));
+    record(n.txn(TxnOp::EndTxn { txn: T1, op: begin(first) }));
+    let commit = RecordOp::Commit { ts: n.host_mark(), spans: vec![] };
+    let done = record(n.txn(TxnOp::EndTxn { txn: T1, op: commit }));
+    let keys = vec![a.clone(), b.clone(), c.clone()];
+    let resolve = TxnOp::ResolveIntents {
+        txn: T1,
+        status: TxnStatus::Committed,
+        commit_ts: done.commit_ts,
+        keys,
+    };
+    intents_mark(n.txn(resolve));
+    assert_eq!(n.get(&b), Some(b"b1".to_vec()));
+    assert_eq!(counts(&n), Some([(COLL, 2)].into()), "a replaced, b added, c deleted");
+}
+
+/// A request reads all its keys in one pass: with none of their blocks in the cache it asks for
+/// every one of them at once, and waits once (H-051 of the native tests: one block at a time,
+/// a transaction of 600 keys waited more than 10 s behind the disk's other work).
+#[test]
+fn a_request_asks_for_every_block_its_keys_miss_at_once() {
+    const KEYS: usize = 32;
+    let lcfg = teseladb_lsm::LsmConfig {
+        dir: "core-00/lsm".into(),
+        cache_bytes: 4 << 10,
+        block_bytes: 4 << 10,
+        ..teseladb_lsm::LsmConfig::default()
+    };
+    let mut n = Node::with_lsm(lcfg);
+    let keys: Vec<Vec<u8>> = (0..KEYS).map(|i| format!("\x01k{i:03}").into_bytes()).collect();
+    let mut last = Hlc { physical: 0, logical: 0 };
+    for k in &keys {
+        // A block of its own for each document.
+        last = n.write(k, &[7; 3000]);
+    }
+    n.host.lsm().borrow_mut().flush();
+    n.settle();
+    let writes: Vec<(&[u8], IntentOp)> = keys.iter().map(|k| (k.as_slice(), put(b"x"))).collect();
+    let (now, wall) = (n.now, n.wall());
+    let op = intents(T1, last, &writes);
+    let req = teseladb_range::host::TxnReq { g: G, op, wc: MAJORITY };
+    let id = n.host.txn(&mut n.core, req, now, wall);
+    // The first batch of reads of the LSM, before any of them is done.
+    let mut reads = 0;
+    let mut done = Vec::new();
+    while let Some(op) = n.host.lsm().borrow_mut().poll_io(now) {
+        if matches!(op, teseladb_raftlog::IoOp::ReadAt { .. }) {
+            reads += 1;
+        }
+        done.push(teseladb_raftlog::Disk::execute(&mut n.disk, op));
+    }
+    for d in done {
+        n.host.lsm().borrow_mut().on_io_done(d, now);
+    }
+    assert!(reads >= KEYS, "{reads} blocks asked for at once, {KEYS} keys");
+    assert!(matches!(n.answer(id), Ok(Reply::Intents { .. })));
+}

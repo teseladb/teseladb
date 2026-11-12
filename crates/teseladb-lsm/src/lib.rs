@@ -85,7 +85,8 @@ pub use error::LsmError;
 pub use gc::GcTable;
 pub use ingest::FileRef;
 pub use lsm::{
-    Commit, Completions, EntryWrite, Lsm, Pressure, SPACE_AMP, SPACE_FLOOR, VersionWrite,
+    Commit, Completions, EntryWrite, Lsm, MIN_CORE_CACHE, Pressure, SHARED_CACHE_PERCENT,
+    SPACE_AMP, SPACE_FLOOR, VersionWrite, cache_split,
 };
 pub use metrics::LsmMetrics;
 pub use read::{Found, Item, Lookup, ReadToken, Scan, Step};

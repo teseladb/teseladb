@@ -816,6 +816,25 @@ impl RangeSm {
         Ok(())
     }
 
+    /// Entry `index` changed each collection's live documents by `delta`, which the leader
+    /// computed (a counted commit): the counts move by it, exact or estimated as they were, and
+    /// the change is remembered for a recount. The local key goes with the entry's other writes.
+    fn counts_change_write(
+        &mut self,
+        index: u64,
+        delta: &[(Coll, i64)],
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let mut counts = Counts::clone(&self.counts);
+        counts.apply(delta);
+        if !delta.is_empty() {
+            self.remember(index, delta.to_vec());
+        }
+        (counts != *self.counts).then(|| {
+            self.counts = Arc::new(counts);
+            (local_key(self.range, COUNTS), self.counts.encode())
+        })
+    }
+
     /// Entry `index` changed the range's documents in a way that does not say by how many (a
     /// transaction's writes, a split, a merge or a snapshot): the counts are estimated from it
     /// until a recount (007 FR-039). The local key goes with the entry's other writes.
@@ -1193,8 +1212,16 @@ impl StateMachine for RangeSm {
                 self.apply_forget(txn, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
-            Command::ResolveIntents { txn: _, status, commit_ts, resolutions, live_delta } => {
-                self.apply_resolve((status, commit_ts), &resolutions, live_delta, ctx)?;
+            Command::ResolveIntents {
+                txn: _,
+                status,
+                commit_ts,
+                resolutions,
+                live_delta,
+                docs,
+            } => {
+                let deltas = (live_delta, docs.as_deref());
+                self.apply_resolve((status, commit_ts), &resolutions, deltas, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
             Command::Relocate { core, intent } => {

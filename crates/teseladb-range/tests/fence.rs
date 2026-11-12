@@ -128,6 +128,7 @@ fn a_fence_refuses_the_writes_and_intents_of_its_span_from_its_entry_on() {
             commit: Some(IntentOp::Put { value_type: 1, value: b"t".to_vec() }),
         }],
         live_delta: 0,
+        docs: None,
     };
     assert_eq!(apply(&mut sm, G, 7, ts(16), &resolve), applied(16));
     assert_eq!(core.get(b"\x01e"), Some(b"t".to_vec()));

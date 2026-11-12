@@ -593,6 +593,7 @@ pub struct RangeHost {
     /// Every node reads the writes that carry their change of documents (007 FR-039): the
     /// leaders write them.
     counted_writes: bool,
+    counted_resolutions: bool,
     wall_ms: u64,
     /// Monotonic time of the last call.
     now: Nanos,
@@ -681,6 +682,7 @@ impl RangeHost {
             uncertain: Vec::new(),
             moving: BTreeSet::new(),
             counted_writes: false,
+            counted_resolutions: false,
             wall_ms: 0,
             now: Nanos::ZERO,
             gc_handed: None,
@@ -797,6 +799,12 @@ impl RangeHost {
     /// collection's documents (007 FR-039): from then on this core's leaders write them.
     pub fn set_counted_writes(&mut self, on: bool) {
         self.counted_writes = on;
+    }
+
+    /// Whether a transaction's commit says how it changes each collection's live documents
+    /// ([`crate::command::KIND_RESOLVE_INTENTS_COUNTED`]): only once every node reads that format.
+    pub fn set_counted_resolutions(&mut self, on: bool) {
+        self.counted_resolutions = on;
     }
 
     /// Whether range `g` is on its way to another core.

@@ -235,19 +235,33 @@ fn stored_size(key: &[u8], version: Option<&Item>) -> i64 {
         .map_or(0, |(t, value)| live_size_of(key, *t, value))
 }
 
-/// The resolutions of `txn`'s intents among `versions` and the change of live bytes they make.
+/// The collection whose live document `version` is, if it is one.
+fn live_document_of(key: &[u8], version: Option<&Item>) -> Option<crate::doc_count::Coll> {
+    let v = version.filter(|v| v.kind == Kind::Put)?;
+    let (t, _) = v.value.split_first()?;
+    crate::doc_count::live_document(key, *t)
+}
+
+/// What resolving a transaction's intents changes: the resolutions, the change of live bytes and
+/// the change of each collection's live documents (007 FR-039).
+type Resolved = (Vec<Resolution>, i64, Vec<(crate::doc_count::Coll, i64)>);
+
+/// The resolutions of `txn`'s intents among `versions` and the changes of live bytes and of live
+/// documents they make: a committed intent replaces the version below it, which the leader read
+/// with it.
 fn resolutions(
     txn: TxnId,
     status: TxnStatus,
     keys: &[Vec<u8>],
     versions: &[Vec<Item>],
-) -> Result<(Vec<Resolution>, i64), RangeError> {
+) -> Result<Resolved, RangeError> {
     if status == TxnStatus::Pending {
         let e = "a pending transaction's intents are not resolved";
         return Err(RangeError::Mutation(MutationError(e.into())));
     }
     let mut out = Vec::new();
     let mut delta = 0;
+    let mut docs: BTreeMap<crate::doc_count::Coll, i64> = BTreeMap::new();
     for (key, v) in keys.iter().zip(versions) {
         let Some(newest) = v.first().filter(|i| i.kind == Kind::Intent) else { continue };
         let intent = Intent::decode(&newest.value).map_err(|_| RangeError::Unavailable)?;
@@ -261,10 +275,23 @@ fn resolutions(
                 IntentOp::Delete => 0,
             };
             delta += new - stored_size(key, v.get(1));
+            let now = match op {
+                IntentOp::Put { value_type, .. } => {
+                    crate::doc_count::live_document(key, *value_type)
+                }
+                IntentOp::Delete => None,
+            };
+            let before = live_document_of(key, v.get(1));
+            for (coll, n) in [(now, 1), (before, -1)] {
+                if let Some(c) = coll {
+                    *docs.entry(c).or_default() += n;
+                }
+            }
         }
         out.push(Resolution { key: key.clone(), intent_ts: newest.ts, commit });
     }
-    Ok((out, delta))
+    let docs = docs.into_iter().filter(|(_, n)| *n != 0).collect();
+    Ok((out, delta, docs))
 }
 
 /// The command a transaction's request proposes at mark `ts`, with the record it leaves.
@@ -273,6 +300,7 @@ fn evaluate_txn(
     keys: &[Vec<u8>],
     versions: &[Vec<Item>],
     (ts, read_floor): (Hlc, Hlc),
+    counted: bool,
 ) -> Result<(Command, Option<TxnRecord>), RangeError> {
     match op {
         TxnOp::PutIntents { txn, read_ts, writes } => {
@@ -344,13 +372,14 @@ fn evaluate_txn(
             unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
-            let (resolutions, live_delta) = resolutions(*txn, *status, keys, versions)?;
+            let (resolutions, live_delta, docs) = resolutions(*txn, *status, keys, versions)?;
             let command = Command::ResolveIntents {
                 txn: *txn,
                 status: *status,
                 commit_ts: *commit_ts,
                 resolutions,
                 live_delta,
+                docs: counted.then_some(docs),
             };
             Ok((command, None))
         }
@@ -401,6 +430,10 @@ impl RangeHost {
             Work::Txn(_) | Work::Mutation(_) => 1,
         };
         let mut versions = Vec::with_capacity(m.keys.len());
+        // Every key is read in one pass: the blocks missing from the cache are all asked for
+        // together, and the request waits once for them (H-051 of the native tests: one block at
+        // a time, 600 keys waited more than 10 s behind the disk's other work).
+        let mut missing = false;
         for k in &m.keys {
             match newest_versions(&self.lsm, k, depth) {
                 Some(Ok(v)) => versions.push(v),
@@ -409,11 +442,12 @@ impl RangeHost {
                     self.reply(id, Err(RangeError::Unavailable));
                     return true;
                 }
-                None => {
-                    self.reqs.insert(id, Req::Mut(m));
-                    return moved;
-                }
+                None => missing = true,
             }
+        }
+        if missing {
+            self.reqs.insert(id, Req::Mut(m));
+            return moved;
         }
         // A split cut the range while the request read its keys (007): the caller retries there.
         if !m.keys.iter().all(|k| self.covers(m.g, k)) {
@@ -483,6 +517,7 @@ impl RangeHost {
             return true;
         }
         let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };
+        let counted_resolutions = self.counted_resolutions;
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);
         // The reads of the keys, the record's for an `EndTxn`: its commit goes above them (008 T043).
@@ -499,7 +534,8 @@ impl RangeHost {
             if deadline.is_some_and(|d| ts.physical > d) {
                 return Err(RangeError::Timeout);
             }
-            let (command, after) = evaluate_txn(op, keys, versions, (ts, read_floor))?;
+            let (command, after) =
+                evaluate_txn(op, keys, versions, (ts, read_floor), counted_resolutions)?;
             record = after;
             Ok(command.encode())
         };

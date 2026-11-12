@@ -64,6 +64,17 @@ pub fn counted_writes(sm: &Group0Sm) -> bool {
         .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_COUNTED)
 }
 
+/// Whether every node that is not removed reads the commits of transactions that carry their
+/// change of each collection's documents (007 FR-039). A node that recorded nothing yet runs this
+/// binary.
+pub fn counted_resolutions(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_RESOLVE_COUNTED)
+}
+
 /// Whether every node that is not removed keeps the documents of a new collection in `_id`
 /// order (D-153): a node of the version before would key them by the hash bucket of their `_id`.
 /// A node that recorded nothing yet runs this binary.
@@ -153,6 +164,17 @@ mod tests {
         assert!(!counted_writes(&sm));
         sm.settings.insert(key(NodeId(2)), ours());
         assert!(counted_writes(&sm));
+        assert!(counted_resolutions(&sm));
+        // A node of the format before reads counted writes and not counted commits.
+        let format_1 = Document::new()
+            .with(FCV, "9.0")
+            .with(RANGE, i64::from(teseladb_range::command::FORMAT_COUNTED))
+            .to_bytes()
+            .unwrap();
+        sm.settings.insert(key(NodeId(2)), format_1);
+        assert!(counted_writes(&sm));
+        assert!(!counted_resolutions(&sm));
+        sm.settings.insert(key(NodeId(2)), ours());
         assert!(ordered_ids(&sm));
         sm.settings.insert(key(NodeId(2)), Document::new().with(FCV, "9.0").to_bytes().unwrap());
         assert!(!ordered_ids(&sm), "a node of the version before keys documents by hash");

@@ -335,6 +335,7 @@ fn transaction_commands_round_trip() {
                 Resolution { key: b"\x01b".to_vec(), intent_ts: ts(5), commit: None },
             ],
             live_delta: -12,
+            docs: None,
         },
     ];
     for (c, kind) in commands.iter().zip([8, 9, 12, 10]) {
@@ -455,6 +456,7 @@ fn a_replica_applies_intents_records_and_resolutions_and_keeps_them_across_a_res
             },
         ],
         live_delta: 2,
+        docs: None,
     };
     r.apply(6, 55, &resolve).unwrap();
     let mut r = r.restart();
@@ -474,6 +476,7 @@ fn a_replica_applies_intents_records_and_resolutions_and_keeps_them_across_a_res
         commit_ts: ts(0),
         resolutions: vec![Resolution { key: b"\x01c".to_vec(), intent_ts: ts(60), commit: None }],
         live_delta: 0,
+        docs: None,
     };
     r.apply(9, 62, &abort).unwrap();
     let same = Command::ResolveIntents {
@@ -486,6 +489,7 @@ fn a_replica_applies_intents_records_and_resolutions_and_keeps_them_across_a_res
             commit: Some(put(b"d")),
         }],
         live_delta: 4,
+        docs: None,
     };
     r.apply(10, 63, &same).unwrap();
     let mut r = r.restart();
@@ -533,6 +537,7 @@ fn a_restart_from_an_older_snapshot_does_not_write_again_what_the_lsm_holds() {
             commit: Some(IntentOp::Delete),
         }],
         live_delta: -6,
+        docs: None,
     };
     r.apply(2, 20, &intent).unwrap();
     r.apply(3, 21, &resolve).unwrap();
@@ -567,6 +572,7 @@ fn entries_that_break_the_rules_stop_the_group() {
         commit_ts: ts(1),
         resolutions: vec![],
         live_delta: 0,
+        docs: None,
     };
     assert!(r.apply(1, 10, &pending).unwrap_err().contains("do not match"));
     let aborted_with_commit = Command::ResolveIntents {
@@ -579,6 +585,7 @@ fn entries_that_break_the_rules_stop_the_group() {
             commit: Some(put(b"v")),
         }],
         live_delta: 0,
+        docs: None,
     };
     assert!(r.apply(1, 10, &aborted_with_commit).unwrap_err().contains("do not match"));
     // A frozen range writes nothing.
@@ -617,4 +624,65 @@ fn a_commit_goes_above_the_reads_of_its_record() {
         end_txn_above(Some(&pending), T1, beat.clone(), ts(510), ts(500)),
         end_txn(Some(&pending), T1, beat, ts(510))
     );
+}
+
+/// A document key of collection `coll` inside the test range.
+fn doc_key(coll: (u32, u32), pk: &[u8]) -> Vec<u8> {
+    teseladb_keys::space::KeyBuilder::document_of_pk(coll.0, coll.1, pk).as_bytes().to_vec()
+}
+
+/// A transaction's commit that says how it changes each collection's documents keeps the counts
+/// exact; one that does not leaves them estimated until a recount (007 FR-039). Without it, every
+/// transaction of documents left its range counting all its documents again each second, on its
+/// core (H-051 of the native tests).
+#[test]
+fn a_counted_commit_keeps_the_document_counts_exact() {
+    const COLL: (u32, u32) = (0x6100_0000, 4);
+    let (a, b) = (doc_key(COLL, b"a"), doc_key(COLL, b"b"));
+    assert!(START <= a.as_slice() && b.as_slice() < END, "keys of the test range");
+    let committed = |r: &mut Replica, base: u64, docs: Option<Vec<((u32, u32), i64)>>| {
+        let first = Command::Write {
+            puts: vec![teseladb_range::command::Put {
+                key: a.clone(),
+                value_type: DOC,
+                value: b"old".to_vec(),
+            }],
+            deletes: vec![],
+            dedup: None,
+            live_delta: 0,
+            docs: Some(vec![(COLL, 1)]),
+        };
+        r.apply(base + 1, base + 10, &first).unwrap();
+        assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 1)].into()), "a counted write");
+        // `a` replaced and `b` inserted by one transaction.
+        let intents =
+            intents_of(T1, &[(a.as_slice(), put(b"new"), None), (b.as_slice(), put(b"b"), None)]);
+        r.apply(base + 2, base + 20, &intents).unwrap();
+        let resolve = Command::ResolveIntents {
+            txn: T1,
+            status: TxnStatus::Committed,
+            commit_ts: ts(base + 30),
+            resolutions: vec![
+                Resolution { key: a.clone(), intent_ts: ts(base + 20), commit: Some(put(b"new")) },
+                Resolution { key: b.clone(), intent_ts: ts(base + 20), commit: Some(put(b"b")) },
+            ],
+            live_delta: 0,
+            docs,
+        };
+        assert_eq!(
+            resolve.kind(),
+            if matches!(resolve, Command::ResolveIntents { docs: Some(_), .. }) { 19 } else { 10 }
+        );
+        let bytes = resolve.encode();
+        assert_eq!(Command::decode(&bytes).unwrap(), resolve, "round trip");
+        r.apply(base + 3, base + 30, &resolve).unwrap();
+    };
+    let mut r = Replica::new();
+    committed(&mut r, 0, Some(vec![(COLL, 1)]));
+    assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 2)].into()), "one more document");
+    let r = r.restart();
+    assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 2)].into()), "kept across a restart");
+    let mut r = Replica::new();
+    committed(&mut r, 0, None);
+    assert_eq!(r.sm.doc_counts(), None, "a commit that does not say leaves them estimated");
 }

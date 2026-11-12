@@ -178,6 +178,25 @@ pub const SPACE_AMP: u64 = 2;
 /// few megabytes.
 pub const SPACE_FLOOR: u64 = 4 << 20;
 
+/// The share of [`LsmConfig::cache_bytes`], in percent, of the cache of the readers on other
+/// threads, which serve most reads (005 FR-028); the core's own cache, with every open file's
+/// index and filter blocks, has the rest. The two caches share the core's budget (012 FR-013):
+/// each with the whole of it, a core used twice its share of the node's memory.
+pub const SHARED_CACHE_PERCENT: u64 = 75;
+
+/// The least the core's own cache keeps of a small budget, up to all of it: it holds every open
+/// file's index and filter blocks with the data blocks of one read, and below that its reads stop
+/// making progress (the simulator's caches of 64 KiB, of which a quarter is one data block).
+pub const MIN_CORE_CACHE: u64 = 256 << 10;
+
+/// The budgets of the core's cache and of the shared one for a block cache of `total` bytes:
+/// together never more than `total`.
+pub fn cache_split(total: u64) -> (u64, u64) {
+    let shared = total / 100 * SHARED_CACHE_PERCENT + total % 100 * SHARED_CACHE_PERCENT / 100;
+    let core = (total - shared).max(MIN_CORE_CACHE.min(total));
+    (core, total - core)
+}
+
 /// The LSM of a core.
 #[derive(Debug)]
 pub struct Lsm {
@@ -246,7 +265,8 @@ impl Lsm {
         );
         let r = recovery::recover(cfg, disk)?;
         let mut v = Version::empty(cfg.levels);
-        let mut reader = Reader::new(cfg.cache_bytes);
+        let (core_cache, shared_cache) = cache_split(cfg.cache_bytes);
+        let mut reader = Reader::new(core_cache);
         for (level, t) in r.tables {
             reader.cache.pin_meta(t.number, t.meta.clone());
             let level = usize::from(level).min(cfg.levels);
@@ -259,7 +279,7 @@ impl Lsm {
         let flushed = r.state.flushed.clone();
         let version = Arc::new(v);
         let shared =
-            crate::concurrent::SharedLsm::new(version.clone(), cfg.cache_bytes, cfg.dir.clone());
+            crate::concurrent::SharedLsm::new(version.clone(), shared_cache, cfg.dir.clone());
         let lsm = Lsm {
             cfg: cfg.clone(),
             version,

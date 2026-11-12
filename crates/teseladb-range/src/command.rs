@@ -44,9 +44,10 @@ pub const KIND_FORGET_RECORD: u16 = 15;
 /// `kind` of [`Command::Fence`] (018).
 pub const KIND_FENCE: u16 = 16;
 /// The format of the range commands this binary reads and writes: 1 adds
-/// [`KIND_WRITE_COUNTED`] (007 FR-039). A node records it in Group 0 (FR-027), and a leader writes
-/// a command of a format only once every node that is not removed records it.
-pub const FORMAT: u8 = 1;
+/// [`KIND_WRITE_COUNTED`] (007 FR-039), 2 [`KIND_RESOLVE_INTENTS_COUNTED`]. A node records it in
+/// Group 0 (FR-027), and a leader writes a command of a format only once every node that is not
+/// removed records it.
+pub const FORMAT: u8 = 2;
 /// The format that brings [`KIND_WRITE_COUNTED`].
 pub const FORMAT_COUNTED: u8 = 1;
 /// `kind` of a [`Command::Write`] that carries the change of each collection's live documents
@@ -56,6 +57,12 @@ pub const KIND_WRITE_COUNTED: u16 = 17;
 /// `kind` of [`Command::AdjustCounts`] (007 FR-039), of the same format as
 /// [`KIND_WRITE_COUNTED`].
 pub const KIND_ADJUST_COUNTS: u16 = 18;
+/// The format that brings [`KIND_RESOLVE_INTENTS_COUNTED`].
+pub const FORMAT_RESOLVE_COUNTED: u8 = 2;
+/// `kind` of a [`Command::ResolveIntents`] that carries the change of each collection's live
+/// documents (007 FR-039), as [`KIND_WRITE_COUNTED`] does for a write: without it a transaction's
+/// commit leaves the counts estimated, and its range counts all its documents again.
+pub const KIND_RESOLVE_INTENTS_COUNTED: u16 = 19;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -260,6 +267,9 @@ pub enum Command {
         resolutions: Vec<Resolution>,
         /// Change of the range's live bytes, which the leader read under latches (D-068).
         live_delta: i64,
+        /// Change of each collection's live documents (007 FR-039), computed as `live_delta`;
+        /// `None`: not counted, and a commit of documents without it leaves the counts estimated.
+        docs: Option<Vec<(crate::doc_count::Coll, i64)>>,
     },
     /// Writes the record a push left (008 FR-002, FR-003).
     PushTxn {
@@ -310,6 +320,25 @@ fn get_record(d: &mut Decoder<'_>) -> Result<DedupRecord, DecodeError> {
     })
 }
 
+/// Writes the change of each collection's live documents of a counted command.
+fn put_docs(e: &mut Encoder, docs: &[(crate::doc_count::Coll, i64)]) {
+    e.var(docs.len() as u64);
+    for ((tenant, collection), n) in docs {
+        e.u32(*tenant).u32(*collection).var(zigzag(*n));
+    }
+}
+
+/// Reads what [`put_docs`] wrote.
+fn get_docs(d: &mut Decoder<'_>) -> Result<Vec<(crate::doc_count::Coll, i64)>, DecodeError> {
+    let n = d.var()?;
+    let mut docs = Vec::new();
+    for _ in 0..n {
+        let coll = (d.u32()?, d.u32()?);
+        docs.push((coll, unzigzag(d.var()?)));
+    }
+    Ok(docs)
+}
+
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
 }
@@ -357,7 +386,8 @@ impl Command {
             Command::Merge { .. } => KIND_MERGE,
             Command::PutIntents { .. } => KIND_PUT_INTENTS,
             Command::EndTxn { .. } => KIND_END_TXN,
-            Command::ResolveIntents { .. } => KIND_RESOLVE_INTENTS,
+            Command::ResolveIntents { docs: Some(_), .. } => KIND_RESOLVE_INTENTS_COUNTED,
+            Command::ResolveIntents { docs: None, .. } => KIND_RESOLVE_INTENTS,
             Command::PushTxn { .. } => KIND_PUSH_TXN,
             Command::Fence { .. } => KIND_FENCE,
             Command::AdjustCounts { .. } => KIND_ADJUST_COUNTS,
@@ -385,10 +415,7 @@ impl Command {
                 }
                 e.var(zigzag(*live_delta));
                 if let Some(docs) = docs {
-                    e.var(docs.len() as u64);
-                    for ((tenant, collection), n) in docs {
-                        e.u32(*tenant).u32(*collection).var(zigzag(*n));
-                    }
+                    put_docs(&mut e, docs);
                 }
             }
             Command::SetGcThreshold { ts } => put_hlc(&mut e, *ts),
@@ -449,7 +476,7 @@ impl Command {
                 }
             }
             Command::EndTxn { record } | Command::PushTxn { record } => record.encode_into(&mut e),
-            Command::ResolveIntents { txn, status, commit_ts, resolutions, live_delta } => {
+            Command::ResolveIntents { txn, status, commit_ts, resolutions, live_delta, docs } => {
                 e.u128(txn.0).u8(status.code());
                 put_hlc(&mut e, *commit_ts);
                 e.var(resolutions.len() as u64);
@@ -462,6 +489,9 @@ impl Command {
                     }
                 }
                 e.var(zigzag(*live_delta));
+                if let Some(docs) = docs {
+                    put_docs(&mut e, docs);
+                }
             }
         }
         e.finish()
@@ -492,15 +522,7 @@ impl Command {
                 let dedup = if d.bool()? { Some(get_record(&mut d)?) } else { None };
                 let live_delta = unzigzag(d.var()?);
                 let docs = match kind == KIND_WRITE_COUNTED {
-                    true => {
-                        let n = d.var()?;
-                        let mut docs = Vec::new();
-                        for _ in 0..n {
-                            let coll = (d.u32()?, d.u32()?);
-                            docs.push((coll, unzigzag(d.var()?)));
-                        }
-                        Some(docs)
-                    }
+                    true => Some(get_docs(&mut d)?),
                     false => None,
                 };
                 Command::Write { puts, deletes, dedup, live_delta, docs }
@@ -568,7 +590,7 @@ impl Command {
             }
             KIND_END_TXN => Command::EndTxn { record: TxnRecord::decode_from(&mut d)? },
             KIND_PUSH_TXN => Command::PushTxn { record: TxnRecord::decode_from(&mut d)? },
-            KIND_RESOLVE_INTENTS => {
+            KIND_RESOLVE_INTENTS | KIND_RESOLVE_INTENTS_COUNTED => {
                 let txn = TxnId(d.u128()?);
                 let offset = d.position();
                 let status =
@@ -582,7 +604,11 @@ impl Command {
                     resolutions.push(Resolution { key, intent_ts, commit });
                 }
                 let live_delta = unzigzag(d.var()?);
-                Command::ResolveIntents { txn, status, commit_ts, resolutions, live_delta }
+                let docs = match kind == KIND_RESOLVE_INTENTS_COUNTED {
+                    true => Some(get_docs(&mut d)?),
+                    false => None,
+                };
+                Command::ResolveIntents { txn, status, commit_ts, resolutions, live_delta, docs }
             }
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };

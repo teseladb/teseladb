@@ -357,3 +357,23 @@ fn the_shared_cache_forgets_the_blocks_of_a_deleted_file() {
     lsm.run_io(&mut disk, Nanos::from_secs(20));
     assert_eq!(shared.cache_bytes(), 0, "the deleted files' blocks are gone");
 }
+
+/// The core's cache and the shared one split the block cache budget between them, never more
+/// than it (012 FR-013): each had the whole budget, twice the core's share of the node's memory.
+#[test]
+fn the_two_block_caches_share_one_budget() {
+    for total in [0, 1, 99, 100, 4096, 256 << 20, u64::MAX / 2] {
+        let (core, shared) = teseladb_lsm::cache_split(total);
+        assert_eq!(core + shared, total, "{total}");
+        if total >= 4 * teseladb_lsm::MIN_CORE_CACHE {
+            assert!(shared >= core, "the readers on other threads get the larger part");
+        }
+        assert!(core >= teseladb_lsm::MIN_CORE_CACHE.min(total), "the core's least, {total}");
+    }
+    let (core, shared) = teseladb_lsm::cache_split(256 << 20);
+    assert_eq!(shared, (256u64 << 20) * teseladb_lsm::SHARED_CACHE_PERCENT / 100);
+    assert!(core > 0);
+    // A small budget leaves the core its least and the rest to the shared cache.
+    assert_eq!(teseladb_lsm::cache_split(64 << 10), (64 << 10, 0));
+    assert_eq!(teseladb_lsm::cache_split(512 << 10), (256 << 10, 256 << 10));
+}

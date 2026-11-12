@@ -97,6 +97,8 @@ pub struct Ranges {
     pub chunk_size: Option<u64>,
     /// Every node reads the writes that carry their change of documents (007 FR-039).
     pub counted_writes: bool,
+    /// Every node reads the transactions' commits that carry their change of documents.
+    pub counted_resolutions: bool,
 }
 
 /// The stored value of cluster parameter `name` in a copy of Group 0.
@@ -162,6 +164,7 @@ impl Ranges {
                 .collect(),
             chunk_size: teseladb_meta::config_settings::chunk_size_bytes(&sm.settings),
             counted_writes: crate::node_versions::counted_writes(sm),
+            counted_resolutions: crate::node_versions::counted_resolutions(sm),
         }
     }
 }

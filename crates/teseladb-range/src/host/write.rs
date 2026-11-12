@@ -203,6 +203,9 @@ impl RangeHost {
             let mut current = Vec::with_capacity(m.keys.len());
             let view = TxnView::default();
             let leader = self.ranges.get(&m.g).and_then(|r| r.leader.as_ref());
+            // Every key is read in one pass, the missing blocks asked for together (as a
+            // transaction's keys are, `RangeHost::step_txn`).
+            let mut missing = false;
             for k in &m.keys {
                 // The value a pending write of the key leaves, which this one goes on (FR-029).
                 if let Some(v) = leader.and_then(|l| l.latches.pending_value(k)) {
@@ -226,11 +229,12 @@ impl RangeHost {
                         self.reply(id, Err(e));
                         return true;
                     }
-                    None => {
-                        self.reqs.insert(id, Req::Mut(m));
-                        return moved;
-                    }
+                    None => missing = true,
                 }
+            }
+            if missing {
+                self.reqs.insert(id, Req::Mut(m));
+                return moved;
             }
             // A split cut the range while the write read its documents (007): they are the new
             // range's, and the caller retries there.

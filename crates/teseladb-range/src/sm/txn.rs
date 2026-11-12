@@ -32,24 +32,28 @@ impl RangeSm {
         }
     }
 
-    /// Writes `versions` and the range's last mark as entry `ctx.index`.
+    /// Writes `versions` and the range's last mark as entry `ctx.index`, with the change of each
+    /// collection's live documents the leader computed, if it did.
     fn write_txn_entry(
         &mut self,
         versions: Vec<VersionWrite<'_>>,
-        live: Option<u64>,
+        (live, docs): (Option<u64>, Option<&[(crate::doc_count::Coll, i64)]>),
         ctx: &ApplyCtx,
     ) -> Result<(), ApplyError> {
         let (mark_key, mark) = (last_mark_key(self.range), encode_hlc(ctx.ts));
         let (live_key, live_value) =
             (live_key(self.range), live.unwrap_or(self.live).to_be_bytes());
         let mut versions: Vec<VersionWrite<'_>> = versions.into_iter().collect();
-        // A commit of documents does not say by how many each collection changes: the counts
-        // are estimated from this entry (007 FR-039, T073 step 6).
+        // A commit of documents that does not say by how many each collection changes leaves the
+        // counts estimated from this entry (007 FR-039, T073 step 6).
         let documents = versions.iter().any(|v| {
             matches!(v.kind, Kind::Put | Kind::Delete)
                 && crate::doc_count::document_of(v.key).is_some()
         });
-        let counts = documents.then(|| self.counts_dirty_write(ctx.index)).flatten();
+        let counts = match docs {
+            Some(delta) => self.counts_change_write(ctx.index, delta),
+            None => documents.then(|| self.counts_dirty_write(ctx.index)).flatten(),
+        };
         if let Some((key, value)) = &counts {
             versions.push(VersionWrite { key, ts: ctx.ts, kind: Kind::Put, value });
         }
@@ -104,7 +108,7 @@ impl RangeSm {
                 value: payload,
             });
         }
-        self.write_txn_entry(versions, None, ctx)
+        self.write_txn_entry(versions, (None, None), ctx)
     }
 
     pub(super) fn apply_record(
@@ -116,7 +120,7 @@ impl RangeSm {
         self.check_txn_keys([key.as_slice()], ctx)?;
         let value = record.encode();
         let versions = vec![VersionWrite { key: &key, ts: ctx.ts, kind: Kind::Put, value: &value }];
-        self.write_txn_entry(versions, None, ctx)
+        self.write_txn_entry(versions, (None, None), ctx)
     }
 
     /// Deletes the record of `txn` at the entry's mark (008 record GC).
@@ -124,14 +128,14 @@ impl RangeSm {
         let key = record_key(txn);
         self.check_txn_keys([key.as_slice()], ctx)?;
         let versions = vec![VersionWrite { key: &key, ts: ctx.ts, kind: Kind::Delete, value: &[] }];
-        self.write_txn_entry(versions, None, ctx)
+        self.write_txn_entry(versions, (None, None), ctx)
     }
 
     pub(super) fn apply_resolve(
         &mut self,
         (status, commit_ts): (TxnStatus, teseladb_hlc::Hlc),
         resolutions: &[Resolution],
-        live_delta: i64,
+        (live_delta, docs): (i64, Option<&[(crate::doc_count::Coll, i64)]>),
         ctx: &ApplyCtx,
     ) -> Result<(), ApplyError> {
         self.check_txn_keys(resolutions.iter().map(|r| r.key.as_slice()), ctx)?;
@@ -173,6 +177,6 @@ impl RangeSm {
         }
         // The counter never goes below zero: a delta the leader got wrong cannot wrap it.
         let live = self.live.saturating_add_signed(live_delta);
-        self.write_txn_entry(versions, Some(live), ctx)
+        self.write_txn_entry(versions, (Some(live), docs), ctx)
     }
 }

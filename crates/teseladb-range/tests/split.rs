@@ -537,6 +537,7 @@ fn a_split_keeps_versions_and_intents_on_their_side_and_loses_nothing() {
             commit: Some(IntentOp::Put { value_type: 1, value: vec![key[1]] }),
         }],
         live_delta: 0,
+        docs: None,
     };
     let (left, right) =
         if b"\x01c".as_slice() < at.as_slice() { (&mut g, &mut n) } else { (&mut n, &mut g) };

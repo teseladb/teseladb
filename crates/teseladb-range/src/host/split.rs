@@ -231,6 +231,7 @@ fn drop_intents<S: StateMachine>(
             commit_ts: zero,
             resolutions,
             live_delta: 0,
+            docs: None,
         };
         let payload = cmd.encode();
         let _ = core.propose_at(g, zero, now, |_| Ok::<_, std::convert::Infallible>(payload));
