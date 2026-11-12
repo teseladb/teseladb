@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "teseladb-server"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "teseladb-auth",
  "teseladb-changestream",
