@@ -69,7 +69,8 @@ impl Lsm {
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
     /// and a compaction of everything could collect more than the last one did: the GC threshold
-    /// passed the newest version the files held when it started.
+    /// of some range passed the newest version the files held when it started. Waiting for every
+    /// range's let an idle range, whose threshold no longer rises, keep the others' garbage.
     fn space_amplified(&self) -> bool {
         let Some(live) = self.live_bytes else { return false };
         let limit = live.saturating_mul(super::SPACE_AMP).saturating_add(super::SPACE_FLOOR);
@@ -78,7 +79,7 @@ impl Lsm {
         }
         match self.full_ts {
             None => true,
-            Some(ts) => self.gc.lowest().is_some_and(|t| t >= ts),
+            Some(ts) => self.gc.highest().is_some_and(|t| t >= ts),
         }
     }
 

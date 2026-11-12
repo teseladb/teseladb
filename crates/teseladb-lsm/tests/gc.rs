@@ -259,3 +259,44 @@ fn a_full_compaction_waits_for_the_threshold_to_pass_what_the_last_one_could_not
         assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
     }
 }
+
+/// A range whose threshold stays low (an idle range, whose leader no longer raises it) does not
+/// hold back the compaction of everything that the threshold of another range lets collect: the
+/// next one only needs some range's threshold past what the last one could not collect (H-051 of
+/// the native tests: one idle range kept a core's files at 1 GiB for 50 MiB of live data).
+#[test]
+fn an_idle_range_with_a_low_threshold_does_not_hold_back_the_others_collection() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    // Not 5, which marks a version that only serves the history.
+    let value = vec![6u8; 1024];
+    let keys: Vec<Vec<u8>> = (0..200u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let mut index = 0;
+    // An idle range of one key, written once.
+    index += 1;
+    lsm.put(G, index, b"a", ts(1, 0), b"idle").unwrap();
+    for round in 1..=100u64 {
+        for k in &keys {
+            index += 1;
+            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+        }
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    lsm.flush();
+    let live = (keys.len() * (5 + 1 + value.len())) as u64;
+    lsm.set_live_bytes(live);
+    let idle = (b"a".to_vec(), b"b".to_vec(), ts(1, 0));
+    let table = |t: u64| GcTable::new(vec![idle.clone(), (b"k".to_vec(), b"l".to_vec(), ts(t, 0))]);
+    // A first compaction of everything, with the history of the written range still kept.
+    lsm.set_gc_thresholds(table(50));
+    lsm.run_io(&mut disk, Nanos::from_secs(10));
+    assert!(files_bytes(&lsm) > live * teseladb_lsm::SPACE_AMP + teseladb_lsm::SPACE_FLOOR);
+    // The written range's threshold passes everything; the idle one's stays where it was.
+    lsm.set_gc_thresholds(table(100));
+    lsm.run_io(&mut disk, Nanos::from_secs(30));
+    let after = files_bytes(&lsm);
+    assert!(after < 4 * live, "{after} bytes of files for {live} live");
+    for k in &keys {
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+    }
+}

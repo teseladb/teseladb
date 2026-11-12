@@ -283,3 +283,17 @@ fn only_the_leader_measures_the_load_of_its_range() {
     }
     assert_eq!(c.nodes.get_mut(&l).unwrap().host.load_cut(GroupId(99), now), None);
 }
+
+/// The threshold goes up every tenth of the history the cluster keeps, at most every minute and
+/// at least every second (`teselaHistoryRetention`, 007 FR-019): with 5 minutes of history a
+/// minute between rounds kept the last one's versions a fifth longer than asked.
+#[test]
+fn the_threshold_rounds_follow_the_history_kept() {
+    use teseladb_range::gc::{GC_EVERY_MS, GC_LEAST_EVERY_MS, Periodic};
+    assert_eq!(Periodic::Gc.every_ms(300_000), 30_000);
+    assert_eq!(Periodic::Gc.every_ms(teseladb_range::gc::GC_TTL_MS), GC_EVERY_MS);
+    assert_eq!(Periodic::Gc.every_ms(5_000), GC_LEAST_EVERY_MS);
+    assert_eq!(Periodic::Gc.every_ms(0), GC_LEAST_EVERY_MS);
+    let checksum = teseladb_range::checksum::CHECKSUM_EVERY_MS;
+    assert_eq!(Periodic::Checksum.every_ms(300_000), checksum, "the checksum keeps its own");
+}

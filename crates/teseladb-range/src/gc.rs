@@ -75,11 +75,17 @@ pub enum Periodic {
     Checksum,
 }
 
+/// The least period of the threshold's rounds.
+pub const GC_LEAST_EVERY_MS: u64 = 1_000;
+
 impl Periodic {
-    /// Its period in cluster time.
-    pub fn every_ms(self) -> u64 {
+    /// Its period in cluster time with `gc_ttl_ms` of history: the threshold goes up every tenth
+    /// of the history, at most [`GC_EVERY_MS`] (with 5 minutes of history, a minute between rounds
+    /// left the versions of the last one on disk a fifth longer than asked, H-051 of the native
+    /// tests).
+    pub fn every_ms(self, gc_ttl_ms: u64) -> u64 {
         match self {
-            Periodic::Gc => GC_EVERY_MS,
+            Periodic::Gc => (gc_ttl_ms / 10).clamp(GC_LEAST_EVERY_MS, GC_EVERY_MS),
             Periodic::Checksum => crate::checksum::CHECKSUM_EVERY_MS,
         }
     }
@@ -152,17 +158,17 @@ impl RangeHost {
                 self.ops.insert(op, id);
             }
             Err(ProposeAt::Op(OpError::Overloaded)) => return false,
-            Err(_) => *l.round(kind) = Round::Idle(now_ms + kind.every_ms()),
+            Err(_) => *l.round(kind) = Round::Idle(now_ms + kind.every_ms(self.gc_ttl_ms)),
         }
         true
     }
 
     /// The core's answer to a periodic proposal: the round is due again a period later.
     pub(crate) fn round_done(&mut self, r: RoundReq) {
-        let now_ms = self.cluster_ms();
+        let (now_ms, ttl) = (self.cluster_ms(), self.gc_ttl_ms);
         let leader = self.ranges.get_mut(&r.g).and_then(|range| range.leader.as_mut());
         if let Some(l) = leader.filter(|l| l.term == r.term) {
-            *l.round(r.kind) = Round::Idle(now_ms + r.kind.every_ms());
+            *l.round(r.kind) = Round::Idle(now_ms + r.kind.every_ms(ttl));
         }
     }
 }

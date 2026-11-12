@@ -54,6 +54,11 @@ impl GcTable {
         self.ranges.iter().map(|(_, _, t)| *t).min()
     }
 
+    /// The highest threshold of the table, if it has any.
+    pub fn highest(&self) -> Option<Hlc> {
+        self.ranges.iter().map(|(_, _, t)| *t).max()
+    }
+
     /// The threshold of `key`, if its range has one.
     pub fn threshold(&self, key: &[u8]) -> Option<Hlc> {
         let i = self.ranges.partition_point(|(start, _, _)| start.as_slice() <= key);
