@@ -100,7 +100,13 @@ fn a_range_splits_while_it_takes_writes_and_its_halves_get_replicas() {
         (ranges.len() >= 4 && applied).then_some(ranges)
     });
     assert!(contiguous(&ranges), "{ranges:?}");
-    assert!(ranges.iter().all(|r| r.generation >= 1 && r.core == ranges[0].core));
+    assert!(ranges.iter().all(|r| r.generation >= 1));
+    // D-161: the new half of a split by size moves to the least loaded core too.
+    let cores: std::collections::BTreeSet<u16> = until("halves on other cores", || {
+        let cores: std::collections::BTreeSet<u16> = n1.ranges().iter().map(|r| r.core).collect();
+        (cores.len() > 1).then_some(cores)
+    });
+    assert!(cores.len() > 1, "{cores:?}");
     for i in 0..DOCS {
         assert_eq!(get(&[&n1], i), Some(value(i)), "document {i}");
     }
