@@ -86,11 +86,17 @@ pub(crate) enum Outcome {
     Reset { id: u64, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>, edit: Edit },
 }
 
+/// Bytes of entries a background job takes in one go before it lets its core serve something
+/// else (FR-030): merging a megabyte kept the core for several milliseconds.
+pub(crate) const STEP_BYTES: usize = 64 << 10;
+
 /// The next thing a job wants.
 #[derive(Debug)]
 pub(crate) enum Next {
     Op(IoOp),
     Done(Box<Outcome>),
+    /// No operation to hand out yet and more to do: the job goes on when asked again (FR-030).
+    More,
 }
 
 /// A flush of the oldest frozen memtable.
@@ -163,16 +169,23 @@ impl FlushJob {
         let resume = self.last.take();
         let mut entries = mem.from(resume.as_deref()).peekable();
         let mut last = None;
+        let mut taken = 0;
         while w.pending() < self.chunk
+            && taken < STEP_BYTES
             && let Some((k, s)) = entries.next()
         {
             w.add(k, s.kind, &s.value);
+            taken += k.len() + s.value.len();
             last = Some(k);
         }
         let more = entries.peek().is_some();
         let next = last.map(<[u8]>::to_vec);
         drop(entries);
         self.last = next.or(resume);
+        // Its step is over before the chunk is full: it goes on when asked again (FR-030).
+        if more && w.pending() < self.chunk {
+            return;
+        }
         if more {
             let (at, chunk) = w.take().expect("a full chunk");
             self.queued.push_back(IoOp::WriteAt {
@@ -206,7 +219,12 @@ impl FlushJob {
                 return Next::Op(op);
             }
             match self.stage {
-                FlushStage::Fill => self.fill(),
+                FlushStage::Fill => {
+                    self.fill();
+                    if self.queued.is_empty() && self.stage == FlushStage::Fill {
+                        return Next::More;
+                    }
+                }
                 FlushStage::Edit => {
                     self.queued.extend(manifest.append(&self.edit));
                     self.stage = FlushStage::Done;

@@ -7,6 +7,8 @@
 
 mod io;
 mod requests;
+
+pub use io::Polled;
 mod schedule;
 mod write;
 

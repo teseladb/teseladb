@@ -26,7 +26,7 @@ use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::gc::{self, Candidate, GcTable};
 use crate::ingest::FileRef;
-use crate::jobs::{ManifestFile, Next, Outcome, file_meta};
+use crate::jobs::{ManifestFile, Next, Outcome, STEP_BYTES, file_meta};
 use crate::manifest::Edit;
 use crate::range_tombstone;
 use crate::read::corrupt;
@@ -501,7 +501,12 @@ impl CompactJob {
     }
 
     fn merge(&mut self, next_file: &mut u64) -> Result<(), LsmError> {
+        // The bytes of the entries taken in this call: past a step, the job yields (FR-030).
+        let mut taken = 0;
         loop {
+            if taken >= STEP_BYTES {
+                return Ok(());
+            }
             if let Some(i) = self.lanes.iter().position(Lane::needs_read) {
                 let (op, upto) = self.lanes[i].read_op(self.chunk);
                 self.reading = Some((i, upto));
@@ -548,6 +553,7 @@ impl CompactJob {
                     continue;
                 }
                 if logical < spec.start.as_slice() || ts > spec.ts {
+                    taken += c.key().len() + c.value().len();
                     self.lanes[i].advance()?;
                     continue;
                 }
@@ -555,6 +561,7 @@ impl CompactJob {
             let c = self.lanes[i].cur.as_ref().expect("has an entry");
             let (logical, ts) = entry::split(c.key());
             let (kind, value) = (c.kind(), c.value());
+            taken += c.key().len() + value.len();
             if self.key.as_deref() != Some(logical) {
                 let logical = logical.to_vec();
                 self.finish_key(next_file);
@@ -587,7 +594,12 @@ impl CompactJob {
                 return Ok(Next::Op(op));
             }
             match self.stage {
-                Stage::Merge => self.merge(next_file)?,
+                Stage::Merge => {
+                    self.merge(next_file)?;
+                    if self.queued.is_empty() && matches!(self.stage, Stage::Merge) {
+                        return Ok(Next::More);
+                    }
+                }
                 Stage::Edit if self.export.is_some() => {
                     for t in &self.finished {
                         self.queued.push_back(IoOp::Close { file: file_id(t.number) });

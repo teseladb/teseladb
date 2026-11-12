@@ -85,7 +85,7 @@ pub use error::LsmError;
 pub use gc::GcTable;
 pub use ingest::FileRef;
 pub use lsm::{
-    Commit, Completions, EntryWrite, Lsm, MIN_CORE_CACHE, Pressure, SHARED_CACHE_PERCENT,
+    Commit, Completions, EntryWrite, Lsm, MIN_CORE_CACHE, Polled, Pressure, SHARED_CACHE_PERCENT,
     SPACE_AMP, SPACE_FLOOR, VersionWrite, cache_split,
 };
 pub use memtable::frozen_alive_bytes;

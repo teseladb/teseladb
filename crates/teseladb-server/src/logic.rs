@@ -1779,6 +1779,11 @@ impl CoreLogic for NodeLogic {
     }
 
     fn next_deadline(&self) -> Option<Nanos> {
+        // Background work of the LSM that waits for no disk operation goes on in the next
+        // turn, without sleeping (004 FR-030).
+        if self.data.as_ref().is_some_and(DataCore::has_more) {
+            return Some(self.now);
+        }
         self.core.next_deadline()
     }
 

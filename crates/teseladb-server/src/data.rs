@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use teseladb_hlc::Hlc;
-use teseladb_lsm::{Completions, Lsm};
+use teseladb_lsm::{Completions, Lsm, Polled};
 use teseladb_meta::command::Group0Command;
 use teseladb_multiraft::{Done, MultiRaftCore, NodeClock, OpError, OpId, StateMachine};
 use teseladb_range::ack::{W, WriteConcern};
@@ -293,6 +293,8 @@ pub struct DataCore {
     /// Its part in what the node's cores hold together (012 FR-018, FR-019), and when it counts
     /// it next.
     pressure: Option<(CorePressure, Nanos)>,
+    /// The LSM left background work that waits for no disk operation (004 FR-030).
+    lsm_more: bool,
 }
 
 impl DataCore {
@@ -333,7 +335,15 @@ impl DataCore {
             live_at: Nanos::ZERO,
             compactions: BTreeMap::new(),
             pressure: None,
+            lsm_more: false,
         }
+    }
+
+    /// Whether the LSM has background work that waits for no disk operation (004 FR-030): the
+    /// core's loop comes back to [`DataCore::poll_io`] without sleeping, and serves what
+    /// arrived meanwhile between two steps of that work.
+    pub fn has_more(&self) -> bool {
+        self.lsm_more
     }
 
     /// The core counts its memtables and its log with the node's other cores, and flushes for
@@ -1208,15 +1218,17 @@ impl DataCore {
         core: &mut MultiRaftCore<CoreSm>,
         now: Nanos,
     ) -> Option<(IoOp, IoOwner)> {
-        let (op, done) = {
+        let (polled, done) = {
             let mut lsm = self.lsm.borrow_mut();
-            let op = lsm.poll_io(now);
-            // A job that ended inside `poll_io` (an export) is only told here.
-            (op, lsm.take_completions())
+            // One step of its background work a turn (004 FR-030).
+            let polled = lsm.poll_io_step(now);
+            // A job that ended inside `poll_io_step` (an export) is only told here.
+            (polled, lsm.take_completions())
         };
         self.lsm_done(core, done, now);
         self.tell_failure();
-        if let Some(op) = op {
+        self.lsm_more = matches!(polled, Polled::More);
+        if let Polled::Op(op) = polled {
             return Some((op, IoOwner::Lsm));
         }
         if let Some(op) = self.transfers.poll_io() {
@@ -1460,13 +1472,53 @@ mod tests {
         panic!("the replica never applied an entry")
     }
 
-    /// Runs the disk operations of the core's LSM and transfers until none is left.
+    /// Runs the disk operations of the core's LSM and transfers until none is left, and the
+    /// LSM's background work until it waits for a disk operation.
     fn run_io(core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, disk: &mut MemDisk, now: Nanos) {
         use teseladb_raftlog::Disk;
-        while let Some((op, owner)) = d.poll_io(core, now) {
-            let done = disk.execute(op);
-            d.on_io_done(core, owner, done, now);
+        loop {
+            match d.poll_io(core, now) {
+                Some((op, owner)) => {
+                    let done = disk.execute(op);
+                    d.on_io_done(core, owner, done, now);
+                }
+                None if d.has_more() => {}
+                None => return,
+            }
         }
+    }
+
+    #[test]
+    fn the_lsm_does_a_step_of_background_work_a_turn_and_the_core_is_asked_again() {
+        // 004 FR-030: a flush of 300 KiB yields after each 64 KiB. The core gets no operation
+        // for its disk then, and is told that there is more to do without one.
+        use teseladb_raftlog::Disk;
+        let (mut core, mut d, mut disk) = setup_disk(&[1]);
+        {
+            let mut lsm = d.lsm.borrow_mut();
+            for i in 1..=300u64 {
+                let at = teseladb_hlc::Hlc { physical: i, logical: 0 };
+                lsm.put(GroupId(900), i, format!("k{i:04}").as_bytes(), at, &[7; 1024]).unwrap();
+            }
+            lsm.flush();
+        }
+        let now = Nanos::from_secs(1);
+        let (mut yields, mut ops) = (0, 0);
+        loop {
+            match d.poll_io(&mut core, now) {
+                Some((op, owner)) => {
+                    assert!(!d.has_more(), "an operation for the disk comes first");
+                    ops += 1;
+                    let done = disk.execute(op);
+                    d.on_io_done(&mut core, owner, done, now);
+                }
+                None if d.has_more() => yields += 1,
+                None => break,
+            }
+        }
+        assert!(yields >= 3, "{yields} yields");
+        assert!(ops >= 3, "{ops} operations: the file, its bytes and its sync");
+        assert!(!d.has_more());
     }
 
     #[test]
