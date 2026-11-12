@@ -63,6 +63,12 @@ pub const PART_BYTES: usize = 32 << 20;
 pub trait Route {
     /// The range of `key`, if the coordinator's node knows one.
     fn range_of(&self, key: &[u8]) -> Option<GroupId>;
+
+    /// Every range the node knows, each with a key it holds (008 FR-022: the recovery of a
+    /// one-phase commit's decision asks them all). None for a route that only places keys.
+    fn ranges(&self) -> Vec<(GroupId, Vec<u8>)> {
+        Vec::new()
+    }
 }
 
 /// Identifies a request of the coordinator.
@@ -151,6 +157,9 @@ enum RecordState {
     Created,
 }
 
+/// A one-phase commit to send again: its range, its writes and the clock it commits at.
+type OnePhaseAgain = (GroupId, Vec<(Vec<u8>, IntentOp)>, Hlc);
+
 /// What a request in flight was.
 #[derive(Clone, Debug)]
 enum Pending {
@@ -165,6 +174,8 @@ enum Pending {
     Commit(Hlc),
     /// The one `Write` of a one-phase commit, with its keys and the clock it commits at.
     OnePhase(Vec<(Vec<u8>, IntentOp)>, Hlc),
+    /// `DecideOnePhase` in a range that holds keys of a one-phase commit whose answer was lost.
+    Decide,
     Abort,
     Resolve(GroupId),
     /// `CheckIntents` of the keys written in this range, before the commit.
@@ -238,6 +249,13 @@ pub struct Coordinator {
     retry_abort: bool,
     /// Why the answer of a one-phase commit was lost.
     one_phase_lost: Option<RangeError>,
+    /// The one-phase commit of a client transaction whose answer was lost, which a commit asked
+    /// again sends again: its idempotence record answers it if it was applied (FR-022).
+    one_phase_again: Option<OnePhaseAgain>,
+    /// A one-phase commit got no answer, so it may be applied where its keys were.
+    one_phase_tried: bool,
+    /// Ranges asked with `DecideOnePhase` that have not answered.
+    deciding: usize,
     out: Vec<Request>,
     events: Vec<Event>,
     next_req: ReqNo,
@@ -303,6 +321,9 @@ impl Coordinator {
             abort_attempts: 0,
             retry_abort: false,
             one_phase_lost: None,
+            one_phase_again: None,
+            one_phase_tried: false,
+            deciding: 0,
             out: Vec::new(),
             events: Vec::new(),
             next_req: 1,
@@ -414,6 +435,7 @@ impl Coordinator {
             | Pending::Push(..)
             | Pending::ResolveOther(_)
             | Pending::OnePhase(..)
+            | Pending::Decide
             | Pending::Resolve(_)
             | Pending::Check => unreachable!("not an operation on the record"),
         };
@@ -513,8 +535,16 @@ impl Coordinator {
             return self.commit_at(clock);
         };
         let writes = parts.into_iter().flatten().collect::<Vec<_>>();
+        self.send_one_phase(g, writes, clock);
+    }
+
+    /// Sends the one `Write` of a one-phase commit of `writes` to range `g`.
+    fn send_one_phase(&mut self, g: GroupId, writes: Vec<(Vec<u8>, IntentOp)>, clock: Hlc) {
         self.phase = Phase::Committing;
-        let op = TxnOp::OnePhase { txn: self.txn, read_ts: self.read_ts, writes: writes.clone() };
+        // A client transaction's commit leaves its decision with its session (FR-022).
+        let session = (self.lsid != 0).then_some((self.lsid, self.txn_number));
+        let (txn, read_ts) = (self.txn, self.read_ts);
+        let op = TxnOp::OnePhase { txn, read_ts, writes: writes.clone(), session };
         self.send(g, op, Pending::OnePhase(writes, clock));
     }
 
@@ -537,7 +567,11 @@ impl Coordinator {
                     .push(Event::Ended(Outcome::Failed(TxnError::NoSuchTransaction)));
             }
             Phase::CommitWaiting(_) | Phase::Committing | Phase::ClockWait(_) => return,
-            Phase::OnePhaseUnknown => return self.repeat_lost(),
+            // A client transaction's commit goes again: the record it left answers it (FR-022).
+            Phase::OnePhaseUnknown => match self.one_phase_again.take() {
+                Some((g, writes, clock)) => return self.send_one_phase(g, writes, clock),
+                None => return self.repeat_lost(),
+            },
         }
         if let Some(e) = self.doomed.clone() {
             self.start_abort();
@@ -725,7 +759,9 @@ impl Coordinator {
     /// The answer to request `id`.
     pub fn on_reply(&mut self, route: &dyn Route, id: ReqNo, r: Result<Reply, RangeError>) {
         let Some((g, p)) = self.pending.remove(&id) else { return };
-        if matches!(r, Err(RangeError::OutOfRange)) && !matches!(p, Pending::Resolve(_)) {
+        if matches!(r, Err(RangeError::OutOfRange))
+            && !matches!(p, Pending::Resolve(_) | Pending::Decide)
+        {
             self.reroute(route, g, p, Again::OtherRange);
             return self.try_commit();
         }
@@ -743,7 +779,8 @@ impl Coordinator {
                 Err(e) => self.write_done(w.stmt, Some(TxnError::Range(e))),
             },
             Pending::Commit(_) => self.commit_done(r),
-            Pending::OnePhase(..) => self.one_phase_done(r),
+            Pending::OnePhase(writes, clock) => self.one_phase_done((g, writes, clock), r),
+            Pending::Decide => self.decide_done(r),
             Pending::Abort => self.abort_done(r),
             Pending::Resolve(g) => self.resolve_done(route, g, r),
             Pending::Check => self.check_done(r),
@@ -769,6 +806,7 @@ impl Coordinator {
                 return self.recheck(route, from, again);
             }
             Pending::Resolve(_) => unreachable!("a resolution is routed by resolve_in"),
+            Pending::Decide => unreachable!("a decision is not routed again"),
         };
         let ranges: Option<BTreeSet<GroupId>> = keys.iter().map(|k| route.range_of(k)).collect();
         let ended = !matches!(self.phase, Phase::Open | Phase::CommitWaiting(_));
@@ -796,6 +834,29 @@ impl Coordinator {
                 let push = Push::AbortIfAbandoned { intent_ts: owner.ts };
                 self.send(g, TxnOp::PushTxn { txn: owner.txn, push }, Pending::Push(w, owner));
             }
+            // An earlier try of a client transaction may be applied where its keys were, and a
+            // split copied its record to both halves (FR-022): in one range the commit goes
+            // again and that record answers it; in several, each says whether it committed
+            // there and refuses it otherwise, so that it never commits twice.
+            Pending::OnePhase(writes, clock) if self.one_phase_tried => {
+                let places: Vec<(GroupId, Vec<u8>)> = ranges
+                    .iter()
+                    .filter_map(|g| {
+                        let at = writes.iter().find(|(k, _)| route.range_of(k) == Some(*g));
+                        at.map(|(k, _)| (*g, k.clone()))
+                    })
+                    .collect();
+                if let [(g, _)] = places[..] {
+                    return self.send_one_phase(g, writes, clock);
+                }
+                self.phase = Phase::Committing;
+                self.deciding = places.len();
+                self.one_phase_again = Some((from, writes, clock));
+                let (lsid, txn_number) = (self.lsid, self.txn_number);
+                for (g, at) in places {
+                    self.send(g, TxnOp::DecideOnePhase { lsid, txn_number, at }, Pending::Decide);
+                }
+            }
             Pending::OnePhase(writes, clock) => {
                 // Not applied: it starts again, in two phases if its keys are now in two ranges.
                 self.phase = Phase::Open;
@@ -803,6 +864,7 @@ impl Coordinator {
             }
             Pending::Resolve(_) => unreachable!("a resolution is routed by resolve_in"),
             Pending::Check => unreachable!("rerouted by recheck"),
+            Pending::Decide => unreachable!("a decision is not routed again"),
         }
     }
 
@@ -966,13 +1028,57 @@ impl Coordinator {
         }
     }
 
-    fn one_phase_done(&mut self, r: Result<Reply, RangeError>) {
+    fn one_phase_done(
+        &mut self,
+        (g, writes, clock): (GroupId, Vec<(Vec<u8>, IntentOp)>, Hlc),
+        r: Result<Reply, RangeError>,
+    ) {
         match r {
             Ok(Reply::Intents { ts }) => self.ended(Outcome::Committed(ts)),
             Ok(_) | Err(RangeError::IntentConflict(_) | RangeError::WriteConflict) => {
                 self.ended(Outcome::Failed(TxnError::WriteConflict));
             }
+            // A recovery from another node refused the commit before it came (FR-022).
+            Err(RangeError::NoSuchTransaction) => {
+                self.ended(Outcome::Failed(TxnError::NoSuchTransaction));
+            }
             Err(e) => {
+                self.phase = Phase::OnePhaseUnknown;
+                self.one_phase_lost = Some(e.clone());
+                if self.lsid != 0 {
+                    self.one_phase_tried = true;
+                    self.one_phase_again = Some((g, writes, clock));
+                }
+                self.events.push(Event::Ended(Outcome::Unknown(e)));
+            }
+        }
+    }
+
+    /// A range's answer to `DecideOnePhase`, asked after a one-phase commit whose answer was
+    /// lost and whose keys are in several ranges now (FR-022).
+    fn decide_done(&mut self, r: Result<Reply, RangeError>) {
+        if self.phase != Phase::Committing || self.deciding == 0 {
+            return;
+        }
+        match r {
+            // It committed there.
+            Ok(Reply::Intents { ts }) => {
+                self.deciding = 0;
+                self.one_phase_again = None;
+                self.ended(Outcome::Committed(ts));
+            }
+            // Refused there: once every range refused it, it never committed.
+            Ok(Reply::Batch(_)) | Err(RangeError::NoSuchTransaction) => {
+                self.deciding -= 1;
+                if self.deciding == 0 {
+                    self.one_phase_again = None;
+                    self.ended(Outcome::Failed(TxnError::NoSuchTransaction));
+                }
+            }
+            // Still unknown: a commit asked again asks the ranges again.
+            Ok(_) | Err(_) => {
+                self.deciding = 0;
+                let e = r.err().unwrap_or(RangeError::Unavailable);
                 self.phase = Phase::OnePhaseUnknown;
                 self.one_phase_lost = Some(e.clone());
                 self.events.push(Event::Ended(Outcome::Unknown(e)));
@@ -1146,6 +1252,7 @@ mod tests {
             | TxnOp::OnePhase { .. }
             | TxnOp::LockKeys { .. }
             | TxnOp::UnlockKeys { .. }
+            | TxnOp::DecideOnePhase { .. }
             | TxnOp::CheckIntents { .. } => Ok(Reply::Intents { ts: ts(5) }),
             TxnOp::FindIntents { .. }
             | TxnOp::ForgetRecord { .. }
@@ -1426,9 +1533,33 @@ mod tests {
         answer_all(&mut c, |_| Err(RangeError::Timeout));
         let lost = Event::Ended(Outcome::Unknown(RangeError::Timeout));
         assert!(c.take_events().contains(&lost));
-        c.commit(ts(9));
+        // An abort cannot undo what may be committed: it gets the same answer.
         c.abort();
-        assert_eq!(c.take_events(), [lost.clone(), lost]);
+        assert_eq!(c.take_events(), std::slice::from_ref(&lost));
+        // A client transaction's commit asked again goes again with its session, and the record
+        // the first one may have left answers it (FR-022).
+        c.commit(ts(9));
+        let again = c.take_requests();
+        let [Request { id, op: TxnOp::OnePhase { session: Some((7, 1)), .. }, .. }] = &again[..]
+        else {
+            panic!("{again:?}")
+        };
+        c.on_reply(&Two, *id, Ok(Reply::Intents { ts: ts(12) }));
+        assert_eq!(c.take_events(), [Event::Ended(Outcome::Committed(ts(12))), Event::Resolved]);
+        // A recovery from another node refused it first: the transaction never committed.
+        let mut c = coord();
+        c.write_and_commit(&Two, vec![(b"a".to_vec(), put())], ts(9));
+        answer_all(&mut c, |_| Err(RangeError::NoSuchTransaction));
+        let refused = Event::Ended(Outcome::Failed(TxnError::NoSuchTransaction));
+        assert!(c.take_events().contains(&refused));
+        // A transaction of the node itself has no session: its lost commit stays unknown.
+        let mut c = Coordinator::new(TxnId(1), (0, 0), ts(1), Nanos::ZERO);
+        c.write_and_commit(&Two, vec![(b"a".to_vec(), put())], ts(9));
+        answer_all(&mut c, |_| Err(RangeError::Timeout));
+        c.take_events();
+        c.commit(ts(9));
+        assert!(c.take_requests().is_empty());
+        assert_eq!(c.take_events(), std::slice::from_ref(&lost));
         let mut c = coord();
         c.write_and_commit(&Two, vec![(b"a".to_vec(), put())], ts(9));
         answer_all(&mut c, |_| Ok(Reply::Record(rec(TxnStatus::Pending, 0))));

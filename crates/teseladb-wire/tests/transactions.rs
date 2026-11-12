@@ -124,6 +124,46 @@ fn statements_read_their_writes_which_show_once_committed() {
     assert!(ok(&run(&mut m, "admin", end("commitTransaction", 1, 2))));
 }
 
+/// A transaction holds its writes until the commit (008 FR-022): each statement locks its keys
+/// without writing, a statement that writes a key again reads what it holds and asks for no
+/// lock, and the commit is one write. An abort lets go of the locks, and nothing was written.
+#[test]
+fn a_transaction_holds_its_writes_and_commits_them_in_one_write() {
+    let mut m = node();
+    let set = |id: i32, v: i32| {
+        let q = doc(&[("_id", Value::Int32(id))]);
+        let u = doc(&[("$inc", Value::Document(doc(&[("v", Value::Int32(v))])))]);
+        let one = doc(&[("q", Value::Document(q)), ("u", Value::Document(u))]);
+        Document::new().with("update", "c").with("updates", vec![Value::Document(one)])
+    };
+    assert!(ok(&run(&mut m, DB, stmt(insert(1), 40, 1, true))));
+    let locked = m.locks;
+    assert!(locked > 0);
+    // The same document again: it reads the held insert, and its key is already locked.
+    assert!(ok(&run(&mut m, DB, stmt(set(1, 5), 40, 1, false))));
+    assert!(ok(&run(&mut m, DB, stmt(set(1, 2), 40, 1, false))));
+    assert_eq!((m.intent_puts, m.one_phase, m.intents.len()), (0, 0, 0));
+    let held = run(&mut m, DB, stmt(find(), 40, 1, false));
+    let Value::Array(batch) = field(&held, "cursor.firstBatch") else { panic!("{held:?}") };
+    let Some(Value::Document(first)) = batch.first() else { panic!("{held:?}") };
+    assert_eq!(first.get("v"), Some(&Value::Int32(7)));
+    assert_eq!(found(&run(&mut m, DB, find())), 0, "invisible outside");
+    assert!(ok(&run(&mut m, "admin", end("commitTransaction", 40, 1))));
+    assert_eq!((m.intent_puts, m.one_phase, m.unlocks), (0, 1, 0));
+    assert_eq!(found(&run(&mut m, DB, find())), 1);
+    // An abort writes nothing and lets go of the locks.
+    assert!(ok(&run(&mut m, DB, stmt(insert(2), 40, 2, true))));
+    assert!(ok(&run(&mut m, "admin", end("abortTransaction", 40, 2))));
+    assert_eq!((m.intent_puts, m.one_phase, m.unlocks), (0, 1, 1));
+    assert_eq!(found(&run(&mut m, DB, find())), 1);
+    // A lock another transaction holds is the statement's conflict, and the transaction ends.
+    m.intent_errors = vec![RangeError::WriteConflict];
+    let r = run(&mut m, DB, stmt(insert(3), 40, 3, true));
+    assert_eq!(code(&r), Some(&Value::Int32(112)), "{r:?}");
+    assert!(has_label(&r, "TransientTransactionError"));
+    assert_eq!(found(&run(&mut m, DB, find())), 1);
+}
+
 #[test]
 fn the_session_rules_answer_as_refdb_does() {
     let mut m = node();
@@ -671,6 +711,8 @@ fn the_keeper_drops_what_ended_transactions_left() {
 #[test]
 fn a_commit_answers_before_its_intents_are_resolved() {
     let mut m = node();
+    // Its statements put intents, as when a key's range moves under a lock (008 FR-022).
+    m.lock_moved = true;
     assert!(ok(&run(&mut m, DB, stmt(insert(1), 30, 1, true))));
     let cmd = end("commitTransaction", 30, 1).with("$db", "admin");
     let bytes = OpMsg::encode(1, 0, 0, &cmd.to_bytes().unwrap());
@@ -695,6 +737,8 @@ fn a_commit_answers_before_its_intents_are_resolved() {
 #[test]
 fn a_resolver_thread_is_woken_and_resolves_one_transaction_at_a_time() {
     let mut m = node();
+    // Its statements put intents, as when a key's range moves under a lock (008 FR-022).
+    m.lock_moved = true;
     let shared = std::mem::take(&mut m.shared);
     let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let w = woken.clone();
@@ -1118,9 +1162,12 @@ fn session_fields_and_unknown_commits_answer_as_on_a_refrouter() {
 /// A commit of a transaction the node has no record of, with its `recoveryToken`, recovers the
 /// decision from the transaction's record, as a second `refrouter` 9.0.4 recovers it from the shard
 /// (measured on 01-11-2026 through two routers of one cluster): any node finds the record from the
-/// session and the number. Committed answers `ok`; aborted, and a running one, which the recovery
-/// aborts, answer `NoSuchTransaction`; so does a number the session never began, whose record the
-/// recovery leaves aborted. Each answer has an empty `recoveryToken`. A node `config.shards` does
+/// session and the number. Committed answers `ok`: a transaction that held its writes and
+/// committed them in one phase left its decision in its range, where the recovery finds it (008
+/// FR-022). Aborted, and a running one, which the recovery aborts, answer `NoSuchTransaction`; so
+/// does a number the session never began, whose record the recovery leaves aborted. A transaction
+/// that held its writes left nothing before its commit, so its recovery reads as one never begun
+/// (DV-018). Each answer has an empty `recoveryToken`. A node `config.shards` does
 /// not list is not found, and a record that does not answer fails as a shard that cannot be
 /// reached.
 #[test]
@@ -1148,25 +1195,34 @@ fn a_commit_recovers_its_decision_from_the_transactions_record() {
     assert!(ok(&run(&mut m, DB, stmt(insert(2), 101, 1, true))));
     assert!(ok(&run(&mut m, "admin", end("abortTransaction", 101, 1))));
     elsewhere(&mut m, 101);
-    let found = "Recovering the transaction's outcome found the transaction aborted";
+    let never = |s: u8| {
+        format!(
+            "Given transaction number 1 on session {} using txnRetryCounter 0 does not match any \
+             in-progress transactions. The active transaction number is -1",
+            session(s)
+        )
+    };
     let r = run(&mut m, "admin", commit(101, token(2)));
-    fails(&r, found);
+    fails(&r, &never(101));
     assert_eq!(r.get("recoveryToken").cloned(), empty);
+    // One whose statements put intents has its record: the recovery finds it aborted.
+    m.lock_moved = true;
+    assert!(ok(&run(&mut m, DB, stmt(insert(2), 107, 1, true))));
+    assert!(ok(&run(&mut m, "admin", end("abortTransaction", 107, 1))));
+    m.lock_moved = false;
+    elsewhere(&mut m, 107);
+    let found = "Recovering the transaction's outcome found the transaction aborted";
+    fails(&run(&mut m, "admin", commit(107, token(2))), found);
     // Running on its node: the recovery aborts it, and its own commit there fails after.
     assert!(ok(&run(&mut m, DB, stmt(insert(3), 102, 1, true))));
     let running = elsewhere(&mut m, 102).expect("its session");
-    fails(&run(&mut m, "admin", commit(102, token(1))), found);
+    fails(&run(&mut m, "admin", commit(102, token(1))), &never(102));
     lock(&m.shared).txns.insert(key(102), running);
     let r = run(&mut m, "admin", end("commitTransaction", 102, 1));
     fails(&r, "Transaction with { txnNumber: 1 } has been aborted.");
     // Never begun: its record now says aborted, for a coordinator that would come later.
     let r = run(&mut m, "admin", commit(103, token(1)));
-    let msg = format!(
-        "Given transaction number 1 on session {} using txnRetryCounter 0 does not match any \
-         in-progress transactions. The active transaction number is -1",
-        session(103)
-    );
-    fails(&r, &msg);
+    fails(&r, &never(103));
     assert_eq!(r.get("recoveryToken").cloned(), empty);
     let t = teseladb_txn::recovery::client_txn_id(key(103), 1);
     assert_eq!(m.records.get(&t.0).map(|r| r.1), Some(teseladb_range::intents::TxnStatus::Aborted));
@@ -1375,6 +1431,8 @@ fn reads_without_a_route_and_two_uncertain_versions() {
 #[test]
 fn a_resolution_the_range_refuses_is_kept_for_later() {
     let mut m = node();
+    // Its statements put intents, as when a key's range moves under a lock (008 FR-022).
+    m.lock_moved = true;
     assert!(ok(&run(&mut m, DB, stmt(insert(83), 194, 1, true))));
     m.resolve_errors = vec![RangeError::Unavailable; 8];
     assert!(ok(&run(&mut m, "admin", end("commitTransaction", 194, 1))));

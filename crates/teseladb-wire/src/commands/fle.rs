@@ -525,13 +525,9 @@ fn one_txn(
     let mut round = 0;
     loop {
         let lsid = u128::from_be_bytes(super::new_uuid(backend));
+        // Its writes go with the commit, in one phase when one range holds them (017 SC-002,
+        // 008 FR-022).
         let start = super::txn::TxnFields::internal(lsid, INTERNAL_TXN_NUMBER, true);
-        // An insert reads the ESC before it writes and never what it wrote: its writes go with
-        // the commit, in one phase when one range holds them (017 SC-002).
-        let start = match name {
-            super::crud::INSERT => start.deferring(),
-            _ => start,
-        };
         let then = super::txn::TxnFields::internal(lsid, INTERNAL_TXN_NUMBER, false);
         let result = super::txn::run_in_txn(backend, shared, (name, db, &begin), start, |b| {
             statement(b, cmd)

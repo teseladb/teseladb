@@ -200,8 +200,12 @@ fn a_plain_write_that_finds_an_intent_stops_with_its_owner() {
 fn a_transaction_request_past_its_deadline_is_not_evaluated() {
     let mut n = Node::new();
     let req = |op| teseladb_range::host::TxnReq { g: G, op, wc: MAJORITY };
-    let one_phase =
-        TxnOp::OnePhase { txn: T1, read_ts: far(), writes: vec![(A.to_vec(), put(b"v"))] };
+    let one_phase = TxnOp::OnePhase {
+        txn: T1,
+        read_ts: far(),
+        writes: vec![(A.to_vec(), put(b"v"))],
+        session: None,
+    };
     let (now, wall) = (n.now, n.wall());
     let late = n.host.txn_until(&mut n.core, req(one_phase.clone()), wall - 1, (now, wall));
     assert_eq!(n.answer(late), Err(RangeError::Timeout));
@@ -388,6 +392,7 @@ fn a_lock_stops_other_writers_until_its_transaction_commits_in_one_phase() {
         txn,
         read_ts,
         writes: vec![(A.to_vec(), put(v)), (B.to_vec(), put(v))],
+        session: None,
     };
     assert_eq!(n.txn(one(T2, far(), b"theirs")), Err(RangeError::WriteConflict));
     // A write outside a transaction waits for the lock.
@@ -417,4 +422,55 @@ fn locks_go_with_an_unlock_and_after_five_idle_seconds() {
     n.settle();
     assert_eq!(n.txn(lock(T1, far(), &[A])), Ok(Reply::Intents { ts: far() }));
     assert_eq!(n.txn(lock(T2, far(), &[A])), Err(RangeError::WriteConflict));
+}
+
+/// The one-phase commit of a client transaction leaves its decision in its range (008 FR-022):
+/// sent again it answers the commit's mark without writing twice, and a recovery finds it.
+#[test]
+fn a_client_one_phase_commit_is_answered_again_from_its_record() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    let one = |v: &[u8]| TxnOp::OnePhase {
+        txn: T1,
+        read_ts: base,
+        writes: vec![(A.to_vec(), put(v))],
+        session: Some((7, 3)),
+    };
+    let at = intents_mark(n.txn(one(b"mine")));
+    assert_eq!(n.get(A), Some(b"mine".to_vec()));
+    let applied = n.core.status(G).unwrap().last_index;
+    // The same commit again, even with other bytes: its record answers, and nothing is written.
+    assert_eq!(n.txn(one(b"again")), Ok(Reply::Intents { ts: at }));
+    assert_eq!(n.get(A), Some(b"mine".to_vec()));
+    assert_eq!(n.core.status(G).unwrap().last_index, applied);
+    // A recovery from another node reads the decision there.
+    let decide = |number| TxnOp::DecideOnePhase { lsid: 7, txn_number: number, at: A.to_vec() };
+    assert_eq!(n.txn(decide(3)), Ok(Reply::Intents { ts: at }));
+    assert_eq!(n.core.status(G).unwrap().last_index, applied);
+}
+
+/// A recovery that finds no commit of a transaction in a range refuses it from then on: the
+/// commit that comes later writes nothing, and the session's older transactions cannot commit
+/// once a newer one left its record.
+#[test]
+fn a_decision_asked_first_refuses_the_one_phase_commit_that_comes_later() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    let decide = |number| TxnOp::DecideOnePhase { lsid: 7, txn_number: number, at: A.to_vec() };
+    let one = |number| TxnOp::OnePhase {
+        txn: T1,
+        read_ts: far(),
+        writes: vec![(A.to_vec(), put(b"late"))],
+        session: Some((7, number)),
+    };
+    assert_eq!(n.txn(decide(3)), Ok(Reply::Batch(Vec::new())));
+    assert_eq!(n.txn(decide(3)), Err(RangeError::NoSuchTransaction));
+    assert_eq!(n.txn(one(3)), Err(RangeError::NoSuchTransaction));
+    assert_eq!(n.get(A), Some(b"v1".to_vec()));
+    // The session's next transaction commits, and an older number is then too old to.
+    intents_mark(n.txn(one(4)));
+    assert_eq!(n.get(A), Some(b"late".to_vec()));
+    assert_eq!(n.txn(one(2)), Err(RangeError::NoSuchTransaction));
+    assert_eq!(n.txn(decide(2)), Err(RangeError::NoSuchTransaction));
+    assert!(base < far());
 }

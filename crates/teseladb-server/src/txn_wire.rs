@@ -24,6 +24,10 @@ const PUSH_BY_READ: u8 = 8;
 const CHECK_INTENTS: u8 = 9;
 const LOCK_KEYS: u8 = 10;
 const UNLOCK_KEYS: u8 = 11;
+/// A one-phase commit with its session, apart from `ONE_PHASE` so that a node of an earlier
+/// version still reads the commits without one.
+const ONE_PHASE_SESSION: u8 = 12;
+const DECIDE_ONE_PHASE: u8 = 13;
 
 const OP_PUT: u8 = 0;
 const OP_DELETE: u8 = 1;
@@ -153,11 +157,22 @@ fn get_record_op(d: &mut Decoder<'_>) -> Result<RecordOp, DecodeError> {
 /// Writes `op`.
 pub fn put_op(e: &mut Encoder, op: &TxnOp) {
     match op {
-        TxnOp::PutIntents { txn, read_ts, writes } | TxnOp::OnePhase { txn, read_ts, writes } => {
+        TxnOp::PutIntents { txn, read_ts, writes }
+        | TxnOp::OnePhase { txn, read_ts, writes, session: None } => {
             let tag = if matches!(op, TxnOp::PutIntents { .. }) { PUT_INTENTS } else { ONE_PHASE };
             e.u8(tag).u128(txn.0);
             put_hlc(e, *read_ts);
             put_writes(e, writes);
+        }
+        TxnOp::OnePhase { txn, read_ts, writes, session: Some((lsid, txn_number)) } => {
+            e.u8(ONE_PHASE_SESSION).u128(txn.0);
+            put_hlc(e, *read_ts);
+            put_writes(e, writes);
+            e.u128(*lsid).i64(*txn_number);
+        }
+        // Its place has no transaction identifier: the session's goes there.
+        TxnOp::DecideOnePhase { lsid, txn_number, at } => {
+            e.u8(DECIDE_ONE_PHASE).u128(*lsid).i64(*txn_number).bytes(at);
         }
         TxnOp::EndTxn { txn, op } => {
             e.u8(END_TXN).u128(txn.0);
@@ -221,7 +236,17 @@ pub fn get_op(d: &mut Decoder<'_>) -> Result<TxnOp, DecodeError> {
     let txn = TxnId(d.u128()?);
     Ok(match tag {
         PUT_INTENTS => TxnOp::PutIntents { txn, read_ts: get_hlc(d)?, writes: get_writes(d)? },
-        ONE_PHASE => TxnOp::OnePhase { txn, read_ts: get_hlc(d)?, writes: get_writes(d)? },
+        ONE_PHASE => {
+            TxnOp::OnePhase { txn, read_ts: get_hlc(d)?, writes: get_writes(d)?, session: None }
+        }
+        ONE_PHASE_SESSION => {
+            let (read_ts, writes) = (get_hlc(d)?, get_writes(d)?);
+            let session = Some((d.u128()?, d.i64()?));
+            TxnOp::OnePhase { txn, read_ts, writes, session }
+        }
+        DECIDE_ONE_PHASE => {
+            TxnOp::DecideOnePhase { lsid: txn.0, txn_number: d.i64()?, at: d.bytes()?.to_vec() }
+        }
         END_TXN => TxnOp::EndTxn { txn, op: get_record_op(d)? },
         PUSH_TXN => {
             let at = d.position();
@@ -277,7 +302,9 @@ mod tests {
         let spans = vec![(vec![1], vec![9])];
         let ops = [
             TxnOp::PutIntents { txn, read_ts: ts, writes: writes.clone() },
-            TxnOp::OnePhase { txn, read_ts: ts, writes },
+            TxnOp::OnePhase { txn, read_ts: ts, writes: writes.clone(), session: None },
+            TxnOp::OnePhase { txn, read_ts: ts, writes, session: Some((9, -4)) },
+            TxnOp::DecideOnePhase { lsid: 9, txn_number: -4, at: vec![1, 2] },
             TxnOp::EndTxn { txn, op: RecordOp::Begin { lsid: 3, txn_number: -1, read_ts: ts } },
             TxnOp::EndTxn { txn, op: RecordOp::Heartbeat { spans: spans.clone() } },
             TxnOp::EndTxn { txn, op: RecordOp::Commit { ts, spans: spans.clone() } },

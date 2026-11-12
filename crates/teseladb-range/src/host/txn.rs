@@ -11,7 +11,7 @@ use super::*;
 use teseladb_lsm::Item;
 use teseladb_multiraft::ReadMode;
 
-use crate::command::{IntentPut, Resolution};
+use crate::command::{DedupRecord, IntentPut, Resolution};
 use crate::intents::{
     Conflict, Intent, IntentOp, Latest, Push, RecordError, RecordOp, TxnId, TxnRecord, TxnStatus,
     check_put, end_txn_above, push_txn, pushed_by_read, record_key,
@@ -53,6 +53,24 @@ pub enum TxnOp {
         read_ts: Hlc,
         /// The keys and what each writes, without repeated keys.
         writes: Vec<(Vec<u8>, IntentOp)>,
+        /// The session and `txnNumber` of a client transaction (FR-022): the commit leaves their
+        /// idempotence record in the same entry, so that the same request sent again answers
+        /// with the commit's mark and a recovery from another node finds the decision. A commit
+        /// a recovery refused first answers [`RangeError::NoSuchTransaction`].
+        session: Option<(u128, i64)>,
+    },
+    /// The decision on the one-phase commit of client transaction `txn_number` of session `lsid`
+    /// in this range (FR-022), for a recovery that found no record of it: [`Reply::Intents`] with
+    /// the commit's mark if it committed here; otherwise the range writes the record that refuses
+    /// the commit from then on and answers an empty [`Reply::Batch`], or
+    /// [`RangeError::NoSuchTransaction`] when it was refused before.
+    DecideOnePhase {
+        /// The session.
+        lsid: u128,
+        /// Its transaction.
+        txn_number: i64,
+        /// A key of the range, which routes the request.
+        at: Vec<u8>,
     },
     /// Locks `keys` for `txn`, which reads at `read_ts` and holds its writes until the commit, in
     /// the leader's memory and without an entry (FR-022): refused as [`TxnOp::PutIntents`] is when
@@ -172,6 +190,21 @@ impl TxnOp {
             | TxnOp::LockKeys { keys, .. }
             | TxnOp::UnlockKeys { keys, .. } => keys.clone(),
             TxnOp::FindIntents { start, .. } => vec![start.clone()],
+            TxnOp::DecideOnePhase { at, .. } => vec![at.clone()],
+        }
+    }
+
+    /// The idempotence record it reads and leaves (FR-022): a client transaction's one-phase
+    /// commit and the decision on it.
+    fn dedup(&self) -> Option<DedupKey> {
+        match self {
+            TxnOp::OnePhase { session: Some((lsid, txn_number)), .. }
+            | TxnOp::DecideOnePhase { lsid, txn_number, .. } => Some(DedupKey {
+                lsid: *lsid,
+                txn_number: *txn_number,
+                stmt_id: crate::onepc::COMMIT_STMT,
+            }),
+            _ => None,
         }
     }
 }
@@ -318,6 +351,13 @@ fn resolutions(
     Ok((out, delta, docs))
 }
 
+/// The idempotence record of the one-phase commit of a client transaction, with `result`
+/// ([`crate::onepc::COMMITTED`] or [`crate::onepc::REFUSED`]).
+fn decision(lsid: u128, txn_number: i64, result: &[u8]) -> DedupRecord {
+    let stmt_id = crate::onepc::COMMIT_STMT;
+    DedupRecord { lsid, txn_number, stmt_id, result: result.to_vec() }
+}
+
 /// The command a transaction's request proposes at mark `ts`, with the record it leaves.
 fn evaluate_txn(
     op: &TxnOp,
@@ -346,11 +386,30 @@ fn evaluate_txn(
             let command = Command::PutIntents { txn: *txn, record_key: record_key(*txn), intents };
             Ok((command, None))
         }
-        TxnOp::OnePhase { txn, read_ts, writes } => {
+        TxnOp::OnePhase { txn, read_ts, writes, session } => {
             let newest: Vec<Option<Latest>> =
                 versions.iter().map(|v| v.first().map(latest_of)).collect();
             let command =
                 crate::onepc::one_phase(*txn, *read_ts, writes, &newest).map_err(conflict_error)?;
+            // A client transaction's commit leaves its decision in the same entry (FR-022).
+            let command = match (command, session) {
+                (Command::Write { puts, deletes, live_delta, docs, .. }, Some((lsid, number))) => {
+                    let dedup = Some(decision(*lsid, *number, crate::onepc::COMMITTED));
+                    Command::Write { puts, deletes, dedup, live_delta, docs }
+                }
+                (command, _) => command,
+            };
+            Ok((command, None))
+        }
+        // No commit of the transaction is in the range: none comes after this entry.
+        TxnOp::DecideOnePhase { lsid, txn_number, .. } => {
+            let command = Command::Write {
+                puts: Vec::new(),
+                deletes: Vec::new(),
+                dedup: Some(decision(*lsid, *txn_number, crate::onepc::REFUSED)),
+                live_delta: 0,
+                docs: None,
+            };
             Ok((command, None))
         }
         TxnOp::EndTxn { txn, op } => {
@@ -422,8 +481,8 @@ impl RangeHost {
         wall_ms: u64,
     ) -> ReqId {
         let TxnReq { g, op, wc } = req;
-        let keys = op.keys();
-        self.submit(core, (g, keys, Work::Txn(Box::new(op)), None, wc), None, (now, wall_ms))
+        let (keys, dedup) = (op.keys(), op.dedup());
+        self.submit(core, (g, keys, Work::Txn(Box::new(op)), dedup, wc), None, (now, wall_ms))
     }
 
     /// A transaction's request that the leader evaluates only at a mark whose physical part is
@@ -437,8 +496,8 @@ impl RangeHost {
         (now, wall_ms): (Nanos, u64),
     ) -> ReqId {
         let TxnReq { g, op, wc } = req;
-        let keys = op.keys();
-        let work = (g, keys, Work::Txn(Box::new(op)), None, wc);
+        let (keys, dedup) = (op.keys(), op.dedup());
+        let work = (g, keys, Work::Txn(Box::new(op)), dedup, wc);
         self.submit(core, work, Some(deadline), (now, wall_ms))
     }
 
@@ -451,6 +510,39 @@ impl RangeHost {
         (latch, moved): (LatchId, bool),
         now: Nanos,
     ) -> bool {
+        // The decision a one-phase commit of a client transaction left, or the refusal a recovery
+        // left before it (FR-022): answered as it is, without a new entry. A session that has a
+        // newer `txnNumber` in the range no longer commits this one.
+        if let Some(key) = m.dedup {
+            let decided = match dedup::lookup(&self.lsm, m.g, key) {
+                None => None,
+                Some(Err(())) => Some(Err(RangeError::Unavailable)),
+                Some(Ok(Some((ts, result)))) => Some(match result == crate::onepc::COMMITTED {
+                    true => Ok(Reply::Intents { ts }),
+                    false => Err(RangeError::NoSuchTransaction),
+                }),
+                Some(Ok(None)) => match dedup::superseded(&self.lsm, m.g, key) {
+                    None => None,
+                    Some(Err(())) => Some(Err(RangeError::Unavailable)),
+                    Some(Ok(Some(_))) => Some(Err(RangeError::NoSuchTransaction)),
+                    Some(Ok(None)) => Some(Ok(Reply::Batch(Vec::new()))),
+                },
+            };
+            match decided {
+                // A block is being read: the request waits for it.
+                None => {
+                    self.reqs.insert(id, Req::Mut(m));
+                    return moved;
+                }
+                // Nothing decided yet: the request goes on and leaves its record.
+                Some(Ok(Reply::Batch(_))) => {}
+                Some(answer) => {
+                    self.release(m.g, m.term, latch);
+                    self.reply(id, answer);
+                    return true;
+                }
+            }
+        }
         let depth = match &m.work {
             Work::Txn(op) if matches!(**op, TxnOp::ResolveIntents { .. }) => RESOLVE_DEPTH,
             Work::Txn(_) | Work::Mutation(_) => 1,
@@ -616,6 +708,7 @@ impl RangeHost {
                 l.locks.release(txn);
             }
         }
+        let deciding = matches!(**op, TxnOp::DecideOnePhase { .. });
         let counted_resolutions = self.counted_resolutions;
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);
@@ -656,7 +749,12 @@ impl RangeHost {
         match outcome {
             Ok((op_id, ts)) => {
                 let index = core.status(m.g).map_or(0, |st| st.last_index);
-                let reply = Some(Box::new(record.map_or(Reply::Intents { ts }, Reply::Record)));
+                let reply = match deciding {
+                    // The commit is refused from this entry on.
+                    true => Reply::Batch(Vec::new()),
+                    false => record.map_or(Reply::Intents { ts }, Reply::Record),
+                };
+                let reply = Some(Box::new(reply));
                 let p = Proposal {
                     latch,
                     ts,

@@ -169,6 +169,16 @@ pub struct Mem {
     /// How many `PutIntents` and one-phase commits the ranges took.
     pub intent_puts: usize,
     pub one_phase: usize,
+    /// The one-phase commits of client transactions, by session and number, with their marks
+    /// (008 FR-022), and those a recovery refused.
+    pub decided: BTreeMap<(u128, i64), Hlc>,
+    pub refused: std::collections::BTreeSet<(u128, i64)>,
+    /// Lock requests of transactions that hold their writes.
+    pub locks: usize,
+    /// Requests to let go of a transaction's locks.
+    pub unlocks: usize,
+    /// The range refuses the locks as if the keys had moved: the statements put intents.
+    pub lock_moved: bool,
     /// Every version written, at its mark: what a change stream reads (014).
     pub history: Vec<teseladb_range::changes::Versioned>,
     /// Runs before each read of the range with its first key and the data: another node's
@@ -635,6 +645,13 @@ impl Backend for Mem {
         (!self.no_route).then_some(teseladb_types::GroupId(1))
     }
 
+    fn txn_ranges(&self) -> Vec<(teseladb_types::GroupId, Vec<u8>)> {
+        match self.no_route {
+            true => Vec::new(),
+            false => vec![(teseladb_types::GroupId(1), Vec::new())],
+        }
+    }
+
     fn cluster_mark(&self) -> Hlc {
         Hlc { physical: self.now + self.mark_ahead, logical: 0 }
     }
@@ -761,7 +778,14 @@ impl Backend for Mem {
                 }
                 Ok(Reply::Intents { ts })
             }
-            TxnOp::OnePhase { writes, .. } => {
+            TxnOp::OnePhase { writes, session, .. } => {
+                // Sent again, or refused by a recovery: answered from its record (008 FR-022).
+                if let Some(at) = session.and_then(|s| self.decided.get(&s)) {
+                    return Ok(Reply::Intents { ts: *at });
+                }
+                if session.is_some_and(|s| self.refused.contains(&s)) {
+                    return Err(teseladb_range::host::RangeError::NoSuchTransaction);
+                }
                 self.one_phase += 1;
                 // It is the write and the commit: their failures are its own.
                 if !self.commit_errors.is_empty() {
@@ -780,15 +804,44 @@ impl Backend for Mem {
                 for (k, w) in writes {
                     self.apply_committed(k, w, ts);
                 }
+                if let Some(s) = session {
+                    self.decided.insert(s, ts);
+                }
                 Ok(Reply::Intents { ts })
             }
-            // One range and no other transaction: a lock is always granted (008 FR-022).
-            TxnOp::LockKeys { read_ts, .. } => Ok(Reply::Intents { ts: read_ts }),
-            TxnOp::UnlockKeys { .. } => Ok(Reply::Intents { ts }),
+            TxnOp::DecideOnePhase { lsid, txn_number, .. } => {
+                match self.decided.get(&(lsid, txn_number)) {
+                    Some(at) => Ok(Reply::Intents { ts: *at }),
+                    None if self.refused.insert((lsid, txn_number)) => Ok(Reply::Batch(Vec::new())),
+                    None => Err(teseladb_range::host::RangeError::NoSuchTransaction),
+                }
+            }
+            // One range and no other transaction: a lock is granted, unless the test injects
+            // the failure of the statement's write (008 FR-022).
+            TxnOp::LockKeys { read_ts, .. } => {
+                if self.lock_moved {
+                    return Err(teseladb_range::host::RangeError::OutOfRange);
+                }
+                self.locks += 1;
+                if !self.intent_errors.is_empty() {
+                    if self.intents_before_error == 0 {
+                        return Err(self.intent_errors.remove(0));
+                    }
+                    self.intents_before_error -= 1;
+                }
+                Ok(Reply::Intents { ts: read_ts })
+            }
+            TxnOp::UnlockKeys { .. } => {
+                self.unlocks += 1;
+                Ok(Reply::Intents { ts })
+            }
             // Only the reaper sends these, and this node has none.
             TxnOp::FindIntents { .. } => Ok(Reply::Batch(Vec::new())),
             TxnOp::ForgetRecord { .. } => Err(teseladb_range::host::RangeError::WriteConflict),
-            TxnOp::ReadRecord { .. } => Err(teseladb_range::host::RangeError::NoSuchTransaction),
+            TxnOp::ReadRecord { txn } => match self.records.get(&txn.0) {
+                Some((_, status, at)) => Ok(Reply::Record(record(txn, *status, *at))),
+                None => Err(teseladb_range::host::RangeError::NoSuchTransaction),
+            },
         }
     }
 

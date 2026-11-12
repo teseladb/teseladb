@@ -10,7 +10,7 @@ use txn_node::*;
 
 fn one_phase(txn: TxnId, read_ts: Hlc, writes: &[(&[u8], IntentOp)]) -> TxnOp {
     let writes = writes.iter().map(|(k, op)| (k.to_vec(), op.clone())).collect();
-    TxnOp::OnePhase { txn, read_ts, writes }
+    TxnOp::OnePhase { txn, read_ts, writes, session: None }
 }
 
 fn committed(r: Result<Reply, RangeError>) -> Hlc {

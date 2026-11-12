@@ -19,8 +19,8 @@ use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
-use teseladb_range::host::RangeError;
-use teseladb_range::intents::IntentOp;
+use teseladb_range::host::{RangeError, TxnOp};
+use teseladb_range::intents::{IntentOp, TxnId};
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_txn::commit_retry::{CommitAnswer, commit_answer};
@@ -34,6 +34,7 @@ use teseladb_types::{GroupId, Nanos};
 use super::cross_range;
 use super::mutation::Bound;
 use super::session::KillScope;
+use super::txn_buffer::Buffer;
 use super::txn_concern::{Begin, begin_mark, now_mark, snapshot_error};
 use super::txn_ddl::{self, Created};
 use super::txn_stats;
@@ -103,8 +104,12 @@ struct Running {
     /// Documents its statements wrote: the position of the next one in its events (014).
     ops: u32,
     /// The writes held until the commit, which sends them with it (in one phase when one range
-    /// has every key): `None` when each statement puts its intents.
-    deferred: Option<Vec<(Vec<u8>, IntentOp)>>,
+    /// has every key), and the keys locked for them (FR-022): `None` once each statement puts
+    /// its intents.
+    buffer: Option<Buffer>,
+    /// Cluster time of its last lock, in milliseconds: an idle transaction locks again before
+    /// its locks stop counting.
+    locked_ms: u64,
 }
 
 impl Running {
@@ -162,22 +167,13 @@ pub struct TxnFields {
     txn_number: i64,
     autocommit: Option<bool>,
     start: bool,
-    /// Its writes wait for the commit (a transaction of the node whose statements never read
-    /// what they wrote).
-    deferred: bool,
 }
 
 impl TxnFields {
     /// The fields of a transaction of the node itself (017: the writes with encrypted fields),
     /// on session `lsid`.
     pub(crate) fn internal(lsid: u128, txn_number: i64, start: bool) -> TxnFields {
-        TxnFields { lsid, txn_number, autocommit: Some(false), start, deferred: false }
-    }
-
-    /// As [`TxnFields::internal`], for a transaction whose statements never read what they wrote
-    /// (017: an encrypted insert): its writes go with the commit.
-    pub(crate) fn deferring(self) -> TxnFields {
-        TxnFields { deferred: true, ..self }
+        TxnFields { lsid, txn_number, autocommit: Some(false), start }
     }
 }
 
@@ -220,7 +216,7 @@ pub fn fields(name: &str, cmd: &Document) -> Result<Option<TxnFields>, CommandEr
         return Ok(None);
     }
     let start = start.unwrap_or(false);
-    Ok(Some(TxnFields { lsid, txn_number, autocommit, start, deferred: false }))
+    Ok(Some(TxnFields { lsid, txn_number, autocommit, start }))
 }
 
 /// Whether command `name` ends a transaction: `commitTransaction` or `abortTransaction`.
@@ -431,6 +427,47 @@ impl Route for Via<'_> {
     fn range_of(&self, key: &[u8]) -> Option<GroupId> {
         self.0.txn_route(key)
     }
+
+    fn ranges(&self) -> Vec<(GroupId, Vec<u8>)> {
+        self.0.txn_ranges()
+    }
+}
+
+/// How long an idle transaction keeps its locks before it asks for them again: well under the
+/// time after which a range stops counting them (FR-022).
+const LOCK_KEEP_MS: u64 = 2_000;
+
+/// Lets go of `locks`, the keys transaction `txn` locked in each range (FR-022): it aborted, or
+/// its commit failed. A lock that is not let go stops counting once the transaction is idle.
+fn unlock(backend: &mut dyn Backend, txn: TxnId, locks: Vec<(GroupId, Vec<Vec<u8>>)>) {
+    for (g, keys) in locks {
+        let _ = send(backend, g, TxnOp::UnlockKeys { txn, keys });
+    }
+}
+
+/// Lets go of the locks of the writes `run` holds.
+fn release_locks(backend: &mut dyn Backend, run: &mut Running) {
+    let txn = run.coord.txn();
+    if let Some(buffer) = run.buffer.as_mut() {
+        unlock(backend, txn, buffer.take_locks());
+    }
+}
+
+/// Asks again for the locks of the writes `run` holds when it has been idle for
+/// [`LOCK_KEEP_MS`], so that they keep counting in their ranges. A lock another transaction took
+/// meanwhile is not an error here: the commit finds the conflict.
+fn keep_locks(backend: &mut dyn Backend, run: &mut Running) {
+    let now = backend.now_ms();
+    let Some(buffer) = run.buffer.as_ref() else { return };
+    let locks = buffer.locks();
+    if locks.is_empty() || now.saturating_sub(run.locked_ms) < LOCK_KEEP_MS {
+        return;
+    }
+    run.locked_ms = now;
+    let (txn, read_ts) = (run.coord.txn(), run.read_ts());
+    for (g, keys) in locks {
+        let _ = send(backend, g, TxnOp::LockKeys { txn, read_ts, keys });
+    }
 }
 
 /// Sends request `op` of a coordinator to range `g` and counts how long it took in its stage
@@ -519,6 +556,40 @@ pub struct TxnBackend<'a> {
 }
 
 impl TxnBackend<'_> {
+    /// `values`, what the ranges hold at `keys`, with the writes the transaction holds over them
+    /// (FR-022).
+    fn over_values(
+        &self,
+        keys: &[Vec<u8>],
+        values: Vec<Option<(u8, Vec<u8>)>>,
+    ) -> Vec<Option<(u8, Vec<u8>)>> {
+        match &self.run.buffer {
+            Some(buffer) => buffer.over_values(keys, values),
+            None => values,
+        }
+    }
+
+    /// At most `limit` documents of `[start, end)` read at `at` with `view`, in key order or
+    /// from the last one down (`back`), with the writes the transaction holds over them (FR-022).
+    fn scan_over(
+        &mut self,
+        (start, end): (&[u8], &[u8]),
+        limit: usize,
+        (at, view, window): (Hlc, &TxnView, Option<Hlc>),
+        back: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        let inner = &mut *self.inner;
+        let mut read = |from: &[u8], to: &[u8], n: usize| match back {
+            false => inner.txn_scan(from, to, n, at, view, window),
+            true => inner.txn_scan_back(from, to, n, at, view, window),
+        };
+        match (&self.run.buffer, back) {
+            (Some(buffer), false) => super::txn_buffer::scan(buffer, (start, end), limit, read),
+            (Some(buffer), true) => super::txn_buffer::scan_back(buffer, (start, end), limit, read),
+            (None, _) => read(start, end, limit),
+        }
+    }
+
     /// Notes a read request to the range of `key` (FR-019).
     fn contact(&mut self, key: &[u8]) {
         self.run.requests += 1;
@@ -597,13 +668,77 @@ impl TxnBackend<'_> {
         Ok(out)
     }
 
+    /// Locks the keys of `writes` in their ranges for the transaction (FR-022): `true` once they
+    /// are all locked, `false` when the statement has to put intents instead (an intent of
+    /// another transaction is on a key, which the coordinator pushes; a key whose range moved; or
+    /// the writes held pass the transaction's memory budget, which the coordinator refuses).
+    /// Another transaction's lock or a newer version is the statement's `WriteConflict`.
+    fn lock(&mut self, writes: &[(Vec<u8>, IntentOp)]) -> Result<bool, CommandError> {
+        let (txn, read_ts, number) =
+            (self.run.coord.txn(), self.run.read_ts(), self.run.txn_number);
+        let budget = self.inner.txn_memory_budget();
+        let Some(buffer) = self.run.buffer.as_mut() else { return Ok(false) };
+        let added: usize = writes.iter().map(|(k, _)| 2 * k.len()).sum();
+        if buffer.bytes().saturating_add(added) > budget {
+            return Ok(false);
+        }
+        let mut by_range: BTreeMap<GroupId, Vec<Vec<u8>>> = BTreeMap::new();
+        for (key, _) in writes {
+            let Some(g) = self.inner.txn_route(key) else { return Ok(false) };
+            if !buffer.holds_lock(g, key) {
+                by_range.entry(g).or_default().push(key.clone());
+            }
+        }
+        self.run.locked_ms = self.inner.now_ms();
+        for (g, keys) in by_range {
+            self.run.requests += 1;
+            let op = TxnOp::LockKeys { txn, read_ts, keys: keys.clone() };
+            match send(&mut *self.inner, g, op) {
+                Ok(_) => buffer.locked_in(g, keys),
+                Err(RangeError::IntentConflict(_) | RangeError::OutOfRange) => return Ok(false),
+                Err(RangeError::WriteConflict) => {
+                    return Err(txn_error(TxnError::WriteConflict, number));
+                }
+                Err(e) => return Err(range_error(&e)),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Stops holding the transaction's writes: those held so far become intents, and each
+    /// statement puts its own from now on. The ranges let go of the transaction's locks as its
+    /// intents reach them.
+    fn unbuffer(&mut self) -> Result<(), CommandError> {
+        let Some(mut buffer) = self.run.buffer.take() else { return Ok(()) };
+        let held = buffer.take_writes();
+        if held.is_empty() {
+            unlock(&mut *self.inner, self.run.coord.txn(), buffer.take_locks());
+            return Ok(());
+        }
+        self.put_intents(held)
+    }
+
     /// Writes `writes` as one statement of the transaction.
     fn statement(&mut self, writes: Vec<(Vec<u8>, IntentOp)>) -> Result<(), CommandError> {
         let writes = self.with_history(writes)?;
-        if let Some(held) = &mut self.run.deferred {
-            held.extend(writes);
-            return Ok(());
+        // A transaction that created a collection puts its intents, as its catalog writes do.
+        if !self.run.created.is_empty() {
+            self.unbuffer()?;
         }
+        if self.run.buffer.is_some() {
+            if self.lock(&writes)? {
+                if let Some(buffer) = self.run.buffer.as_mut() {
+                    buffer.hold(writes);
+                }
+                return Ok(());
+            }
+            self.unbuffer()?;
+        }
+        self.put_intents(writes)
+    }
+
+    /// Puts the intents of `writes` as one statement of the transaction.
+    fn put_intents(&mut self, writes: Vec<(Vec<u8>, IntentOp)>) -> Result<(), CommandError> {
         let number = self.run.txn_number;
         let stmt =
             self.run.coord.write(&Via(&*self.inner), writes).map_err(|e| txn_error(e, number))?;
@@ -838,7 +973,8 @@ fn run_command(
                 contacted: BTreeSet::new(),
                 requests: 0,
                 ops: 0,
-                deferred: f.deferred.then(Vec::new),
+                buffer: Some(Buffer::default()),
+                locked_ms: 0,
             };
             txn_stats::started(&mut lock(shared));
             store(shared, f.lsid, run);
@@ -1092,14 +1228,19 @@ fn recover(backend: &mut dyn Backend, lsid: u128, txn_number: i64) -> Option<Dec
     let mut r = Recovery::new(lsid, txn_number);
     loop {
         r.tick(&Via(&*backend));
-        for req in r.take_requests() {
+        let requests = r.take_requests();
+        // It pauses only when a step made no progress: nothing to send yet, or a range that
+        // did not answer. Each step that got its answer is followed by the next at once.
+        let mut stuck = requests.is_empty();
+        for req in requests {
             let answer = send(backend, req.g, req.op);
+            stuck |= matches!(&answer, Err(e) if *e != RangeError::NoSuchTransaction);
             r.on_reply(req.id, answer);
         }
         if let Some(d) = r.decision() {
             return Some(d);
         }
-        if !backend.txn_pause() {
+        if stuck && !backend.txn_pause() {
             return None;
         }
     }
@@ -1121,6 +1262,7 @@ fn check_shard(backend: &mut dyn Backend, shard: &str) -> Result<(), CommandErro
 /// number replaced it): its intents resolved as far as one round goes, the reaper and the readers
 /// resolve the rest, and the collections it created are dropped.
 fn end_abandoned(backend: &mut dyn Backend, shared: &Shared, mut run: Running) {
+    release_locks(backend, &mut run);
     run.coord.abort();
     for r in run.coord.take_requests() {
         let answer = send(backend, r.g, r.op);
@@ -1258,16 +1400,14 @@ fn with_running(
         // A read met a version in its uncertainty window (FR-008).
         let Some(ts) = run.uncertain.take() else { break result };
         txn_stats::uncertainty_restart(&mut lock(shared));
-        match on_uncertain(number, run.coord.written(), restarts, ts) {
+        let wrote = run.coord.written() || run.buffer.as_ref().is_some_and(|b| !b.is_empty());
+        match on_uncertain(number, wrote, restarts, ts) {
             OnUncertain::Restart(at) => {
                 restarts += 1;
                 let (txn, now) = (run.coord.txn(), nanos(&*backend));
                 run.coord = Coordinator::new(txn, (f.lsid, f.txn_number), at, now)
                     .with_budget(backend.txn_memory_budget());
                 run.ops = 0;
-                if let Some(held) = &mut run.deferred {
-                    held.clear();
-                }
             }
             OnUncertain::Fail => break result,
         }
@@ -1302,6 +1442,7 @@ fn with_running(
         run.coord.abort();
         // The abort's answer only resolves the intents: the statement's error is the answer.
         let _ = drive(backend, &mut run.coord, finished);
+        release_locks(backend, &mut run);
         txn_ddl::discard(backend, shared, &std::mem::take(&mut run.created));
         let mut g = lock(shared);
         txn_stats::aborted(&mut g, &cause);
@@ -1327,6 +1468,7 @@ fn end(
         if let Err(e) = txn_ddl::publish(backend, &run.created) {
             run.coord.abort();
             let _ = drive(backend, &mut run.coord, finished);
+            release_locks(backend, &mut run);
             txn_ddl::discard(backend, shared, &run.created);
             let mut g = lock(shared);
             txn_stats::aborted(&mut g, e.code.name);
@@ -1338,7 +1480,8 @@ fn end(
         }
         run.published = true;
     }
-    let held = run.deferred.take().unwrap_or_default();
+    let mut buffer = run.buffer.take().unwrap_or_default();
+    let (held, locks) = (buffer.take_writes(), buffer.take_locks());
     let mut written = run.coord.written_ranges();
     written.extend(held.iter().filter_map(|(k, _)| backend.txn_route(k)));
     let kind = txn_stats::commit_kind(&run.contacted, &written);
@@ -1367,6 +1510,11 @@ fn end(
     if commit {
         let took = backend.now_micros().saturating_sub(run.started_us).saturating_mul(1_000);
         teseladb_stages::record(teseladb_stages::Stage::TxnTotal, took);
+    }
+    // A commit lets go of the locks in its ranges as its writes reach them; an abort, or a
+    // commit that did not get there, lets go of them here (FR-022).
+    if !matches!(answer, CommitAnswer::Committed(_)) {
+        unlock(backend, run.coord.txn(), locks);
     }
     match &answer {
         CommitAnswer::Committed(_) => txn_ddl::forget(shared, &run.created),
@@ -1554,6 +1702,7 @@ pub fn tick_idle(backend: &mut dyn Backend, shared: &Shared) {
             continue;
         }
         let (now, wall) = (nanos(backend), backend.wall_ms());
+        keep_locks(backend, &mut run);
         run.coord.tick(&Via(&*backend), now, wall);
         for r in run.coord.take_requests() {
             let answer = send(backend, r.g, r.op);
@@ -1618,7 +1767,7 @@ impl Backend for TxnBackend<'_> {
         }
         let values =
             self.inner.txn_gets(keys, at, &view, window).map_err(|e| self.run.note_uncertain(e))?;
-        Ok((at, values))
+        Ok((at, self.over_values(keys, values)))
     }
 
     fn transact(
@@ -1695,6 +1844,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.txn_route(key)
     }
 
+    fn txn_ranges(&self) -> Vec<(teseladb_types::GroupId, Vec<u8>)> {
+        self.inner.txn_ranges()
+    }
+
     fn set_read_preference(&mut self, pref: Option<teseladb_router::read_pref::ReadPreference>) {
         self.inner.set_read_preference(pref);
     }
@@ -1740,7 +1893,8 @@ impl Backend for TxnBackend<'_> {
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
         self.contact(key);
-        self.inner.txn_get(key, at, view, uncertain_to)
+        let value = self.inner.txn_get(key, at, view, uncertain_to)?;
+        Ok(self.over_values(&[key.to_vec()], vec![value]).pop().flatten())
     }
 
     fn txn_scan(
@@ -1753,7 +1907,7 @@ impl Backend for TxnBackend<'_> {
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         self.contact(start);
-        self.inner.txn_scan(start, end, limit, at, view, uncertain_to)
+        self.scan_over((start, end), limit, (at, view, uncertain_to), false)
     }
 
     fn txn_scan_back(
@@ -1766,7 +1920,7 @@ impl Backend for TxnBackend<'_> {
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         self.contact(start);
-        self.inner.txn_scan_back(start, end, limit, at, view, uncertain_to)
+        self.scan_over((start, end), limit, (at, view, uncertain_to), true)
     }
 
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
@@ -1836,11 +1990,10 @@ impl Backend for TxnBackend<'_> {
         limit: usize,
         _concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        // Inside the transaction: at its read mark, with its own intents.
+        // Inside the transaction: at its read mark, with its own intents and held writes.
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
-        self.inner
-            .txn_scan(start, end, limit, at, &view, window)
+        self.scan_over((start, end), limit, (at, &view, window), false)
             .map_err(|e| self.run.note_uncertain(e))
     }
 
@@ -1854,8 +2007,7 @@ impl Backend for TxnBackend<'_> {
         // As `scan`, from the last key down (H-003).
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
-        self.inner
-            .txn_scan_back(start, end, limit, at, &view, window)
+        self.scan_over((start, end), limit, (at, &view, window), true)
             .map_err(|e| self.run.note_uncertain(e))
     }
 
@@ -1869,7 +2021,14 @@ impl Backend for TxnBackend<'_> {
             self.contact(k);
         }
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
-        self.inner.txn_points(keys, at, &view, window).map_err(|e| self.run.note_uncertain(e))
+        let docs = self
+            .inner
+            .txn_points(keys, at, &view, window)
+            .map_err(|e| self.run.note_uncertain(e))?;
+        Ok(match &self.run.buffer {
+            Some(buffer) => buffer.over_points(keys, docs),
+            None => docs,
+        })
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

@@ -105,6 +105,7 @@ pub mod timeseries_filter;
 pub mod timeseries_range;
 pub mod ttl;
 pub mod txn;
+mod txn_buffer;
 pub mod txn_concern;
 pub mod txn_ddl;
 pub mod txn_stats;
@@ -260,6 +261,11 @@ pub trait Backend {
     /// The range that holds `key`, for the coordinator of a client transaction (008), if the
     /// node knows one.
     fn txn_route(&self, key: &[u8]) -> Option<teseladb_types::GroupId>;
+    /// Every range the node knows, each with a key it holds, for the recovery of the decision
+    /// of a transaction that committed in one phase (008 FR-022); none by default.
+    fn txn_ranges(&self) -> Vec<(teseladb_types::GroupId, Vec<u8>)> {
+        Vec::new()
+    }
     /// What the state of a client transaction may take in its coordinator's memory before it
     /// fails with `TransactionTooLarge` (008 FR-010).
     fn txn_memory_budget(&self) -> usize;

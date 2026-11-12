@@ -18,6 +18,7 @@ pub fn stage_of(op: &TxnOp) -> Option<Stage> {
             Some(Stage::TxnEnd)
         }
         TxnOp::EndTxn { op: RecordOp::Heartbeat { .. } | RecordOp::Resolved, .. }
+        | TxnOp::DecideOnePhase { .. }
         | TxnOp::PushTxn { .. }
         | TxnOp::FindIntents { .. }
         | TxnOp::PushByRead { .. }

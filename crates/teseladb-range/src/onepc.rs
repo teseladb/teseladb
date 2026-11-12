@@ -8,6 +8,15 @@ use crate::command::{Command, Put};
 use crate::intents::{Conflict, IntentOp, Latest, TxnId, check_put};
 use crate::mutate::live_size_of;
 
+/// The statement of the idempotence record a client transaction's one-phase commit leaves with
+/// its session and `txnNumber` (008 FR-022): no statement of a retryable write has it.
+pub const COMMIT_STMT: u32 = u32::MAX;
+/// The result of that record when the transaction committed in this range.
+pub const COMMITTED: &[u8] = &[1];
+/// The result of that record when a recovery refused the commit before it came
+/// (`TxnOp::DecideOnePhase`).
+pub const REFUSED: &[u8] = &[0];
+
 /// The newest version of a key as the leader read it, with its value stored as `type · value`.
 pub type Newest = Option<Latest>;
 

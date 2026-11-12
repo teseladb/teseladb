@@ -315,7 +315,8 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
 /// A commit asked of another node, with the transaction's `recoveryToken`, recovers its decision
 /// from the transaction's record, which Raft keeps in its range, as a second `refrouter` 9.0.4
 /// recovers it from the shard (008, measured on 01-11-2026 through two routers): a committed one
-/// answers `ok`, an open one is aborted and its own commit on its node fails after, and a record
+/// answers `ok`, also when it committed in one phase and its decision is in its range (FR-022);
+/// an open one is aborted and its own commit on its node fails after, and a record
 /// whose range cannot answer fails at the command's `maxTimeMS`.
 #[test]
 fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
@@ -338,10 +339,11 @@ fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
     assert!(ok(&a.run(DB, stmt(insert(2), 61, 1, true))));
     let r = b.run("admin", with(end("commitTransaction", 61, 1), &token));
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
-    assert_eq!(
-        r.get("errmsg"),
-        Some(&Value::from("Recovering the transaction's outcome found the transaction aborted"))
-    );
+    // It held its writes, so nothing of it was in any range: it reads as one never begun
+    // (DV-018), and the ranges refuse its commit from then on (008 FR-022).
+    let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
+    assert!(msg.starts_with("Given transaction number 1 on session "), "{r:?}");
+    assert!(msg.ends_with("The active transaction number is -1"), "{r:?}");
     let r = a.run("admin", end("commitTransaction", 61, 1));
     assert_eq!(
         r.get("errmsg"),

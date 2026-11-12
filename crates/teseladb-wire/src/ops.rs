@@ -837,6 +837,10 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.inner.txn_route(key)
     }
 
+    fn txn_ranges(&self) -> Vec<(teseladb_types::GroupId, Vec<u8>)> {
+        self.inner.txn_ranges()
+    }
+
     fn txn_memory_budget(&self) -> usize {
         self.inner.txn_memory_budget()
     }

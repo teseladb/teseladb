@@ -1324,6 +1324,10 @@ impl Backend for ServerBackend {
         self.h.routes.lookup(key).map(|e| e.group)
     }
 
+    fn txn_ranges(&self) -> Vec<(teseladb_types::GroupId, Vec<u8>)> {
+        self.h.routes.entries().into_iter().map(|e| (e.group, e.start)).collect()
+    }
+
     fn txn_memory_budget(&self) -> usize {
         teseladb_txn::coordinator::MEMORY_BUDGET
     }
