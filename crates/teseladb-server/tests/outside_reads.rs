@@ -173,6 +173,37 @@ fn scans_by_id_are_served_without_the_core_also_from_the_files() {
     }
 }
 
+/// A scan that begins after a `w: 1` write was answered sees it, also while its entry is not
+/// applied yet (005 FR-031, DV-010): the worker waits for the view that holds it (FR-034).
+#[test]
+fn a_scan_right_after_a_write_answered_from_the_log_sees_it() {
+    let dir = Dir::new("after-w1");
+    let cfg = NodeConfig { data_dir: Some(dir.0.clone()), ..config(Vec::new()) };
+    let path = dir.0.clone();
+    let lock = lock_dir(&dir.0).expect("locks the directory");
+    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let served = served_outside();
+    for id in 0..200 {
+        let doc = Document::new().with("_id", id).with("v", id * 10);
+        let insert = Document::new()
+            .with("insert", "w1")
+            .with("documents", vec![doc.into()])
+            .with("writeConcern", Document::new().with("w", 1));
+        let r = c.run(DB, insert);
+        assert!(ok(&r), "{r:?}");
+        let gte = Document::new().with("_id", Document::new().with("$gte", id));
+        let find = Document::new().with("find", "w1").with("filter", gte).with("limit", 10);
+        let r = c.run(DB, find);
+        assert!(ok(&r), "{r:?}");
+        let got: Vec<Option<Value>> =
+            batch(&r, "firstBatch").iter().map(|d| field(d, "_id")).collect();
+        assert_eq!(got, vec![Some(Value::Int32(id))], "the write answered before the scan");
+    }
+    assert!(served_outside() - served >= 64, "scans outside: {}", served_outside() - served);
+}
+
 /// `$in` of `_id`s examines, as RefDb, each value's key and the key after it that ends its
 /// interval (`totalKeysExamined`, measured on a `refnode` 9.0.4): the reads of the stretches
 /// between the values find those keys also when they are served outside the core.

@@ -58,8 +58,11 @@ pub struct RangeView {
     /// The mark of the last entry the range had applied when the core published the view, which
     /// the LSM's version published just before holds (FR-031).
     applied: Hlc,
-    /// Writes answered to their client and not applied yet, which a scan has to see (FR-031).
-    early: Arc<AtomicU32>,
+    /// The last entry the range had applied when the core published the view (FR-031).
+    applied_index: u64,
+    /// The highest entry of the range's log whose write was answered to its client, as its
+    /// leader notes it before the answer leaves (FR-031).
+    answered: Arc<AtomicU64>,
     held: Arc<AtomicU32>,
     keys: Arc<KeySlots>,
     spans: Arc<SpanKeys>,
@@ -120,7 +123,8 @@ pub(crate) struct ViewParts {
     pub(crate) outside: Arc<AtomicU64>,
     pub(crate) counts: Option<Arc<Counts>>,
     pub(crate) applied: Hlc,
-    pub(crate) early: Arc<AtomicU32>,
+    pub(crate) applied_index: u64,
+    pub(crate) answered: Arc<AtomicU64>,
 }
 
 impl RangeView {
@@ -133,7 +137,8 @@ impl RangeView {
             valid_until: p.valid_until,
             gc_floor: p.gc_floor,
             applied: p.applied,
-            early: p.early,
+            applied_index: p.applied_index,
+            answered: p.answered,
             held: p.held,
             keys: p.keys,
             spans: p.spans,
@@ -268,8 +273,8 @@ pub enum Decline {
     Intent,
     /// Anything else: a span past the range, a mark below the GC threshold, a failed read.
     Other,
-    /// A scan while a write of the range was answered to its client before it was applied
-    /// (`w: 1`, DV-010): the view does not hold it yet.
+    /// A scan of a view that lacks a write the range answered to its client before the scan
+    /// began (DV-010): a later view holds it.
     Early,
     /// The node publishes no view of the key's range: this node does not lead it, or its core
     /// has not published one yet.
@@ -331,6 +336,14 @@ pub struct Part {
 /// of deleted versions) before the scan goes to the core.
 pub const BLOCKS_WITHOUT_A_DOCUMENT: usize = 16;
 
+/// A scan outside the core that has begun: the entry of its range's log it has to see, the
+/// highest whose write the range had answered to its client by then (FR-031, DV-010).
+#[derive(Clone, Debug)]
+pub struct Begun {
+    answered: Arc<AtomicU64>,
+    entry: u64,
+}
+
 /// What [`RangeView::scan`] read.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Scanned {
@@ -384,9 +397,41 @@ pub struct Matched {
 }
 
 impl RangeView {
+    /// A scan begins: what it has to see. It reads this view if the view
+    /// [`holds`](RangeView::holds) that, or a later view of the range that does (FR-034).
+    pub fn begin(&self) -> Begun {
+        Begun { answered: Arc::clone(&self.answered), entry: self.answered.load(Ordering::SeqCst) }
+    }
+
+    /// Whether a scan that began as `begun` may read this view: the view applied the entry the
+    /// scan has to see. The writes answered after it began do not count: under a steady flow of
+    /// `w: 1` writes every view lacks the newest. A view of another term of the range's leader
+    /// takes what that leader has answered by now.
+    pub fn holds(&self, begun: &Begun) -> bool {
+        let entry = match Arc::ptr_eq(&begun.answered, &self.answered) {
+            true => begun.entry,
+            false => self.answered.load(Ordering::SeqCst),
+        };
+        self.applied_index >= entry
+    }
+
+    /// [`RangeView::scan_begun`] for a scan that begins now on this view.
+    pub fn scan(
+        &self,
+        cache: &mut ViewCache,
+        span: (&[u8], &[u8]),
+        part: Part,
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+        supply: impl FnMut(&BlockNeed) -> bool,
+    ) -> Option<Scanned> {
+        self.scan_begun(cache, span, (part, &self.begin()), now, concern, supply)
+    }
+
     /// The documents of `[start, end)` with their value types, at most `part.docs`, in key order
-    /// (from the last key down when `part.backward`), with the mark they are read
-    /// at: the mark of the last entry the range had applied when the view was published (FR-031).
+    /// (from the last key down when `part.backward`), for a scan that began as `begun`, with the
+    /// mark they are read at: that of the last entry the range had applied when the view was
+    /// published (FR-031).
     /// Every write of the range takes a mark above the entries before it and they are applied in
     /// the log's order, so no write in flight is at or below that mark: the scan looks at no
     /// latch and no write sends it to the core. `now` gives the monotonic time, for the view's
@@ -394,20 +439,20 @@ impl RangeView {
     /// [`SharedLsm::supply`](teseladb_lsm::SharedLsm) and says whether it could; then the scan
     /// goes on. A part that read its blocks stops at the documents it has and says where the
     /// scan goes on (FR-033). `None` when the scan goes to the core: a span past the range, an
-    /// expired view, a write answered to its client before it is applied (DV-010), a mark below
-    /// the GC threshold, an intent, a block that could not be read, a failed read or too many
-    /// blocks without a document. Versions that only serve the history are no documents, as in
-    /// the core's scans.
-    pub fn scan(
+    /// expired view, a view that lacks a write answered to its client before the scan began
+    /// (DV-010), a mark below the GC threshold, an intent, a block that could not be read, a
+    /// failed read or too many blocks without a document. Versions that only serve the history
+    /// are no documents, as in the core's scans.
+    pub fn scan_begun(
         &self,
         cache: &mut ViewCache,
         (start, end): (&[u8], &[u8]),
-        part: Part,
+        (part, begun): (Part, &Begun),
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
     ) -> Option<Scanned> {
-        let ts = self.applied_for((start, end), part.docs, now, concern)?;
+        let ts = self.applied_for((start, end), (part.docs, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = match part.backward {
             false => Either::Forward(view.scan(start, end, ts)),
@@ -448,13 +493,14 @@ impl RangeView {
         Some(Scanned { ts, rows, next })
     }
 
-    /// The mark a scan of `[start, end)` reads at (FR-031), or `None` when it goes to the core:
-    /// a span past the range, no limit, a concern the view does not serve, a write answered
-    /// before it is applied, a mark below the GC threshold or an expired view.
+    /// The mark a scan of `[start, end)` that began as `begun` reads at (FR-031), or `None` when
+    /// it goes to the core: a span past the range, no limit, a concern the view does not serve,
+    /// a view that lacks a write answered before the scan began, a mark below the GC threshold
+    /// or an expired view.
     fn applied_for(
         &self,
         (start, end): (&[u8], &[u8]),
-        limit: usize,
+        (limit, begun): (usize, &Begun),
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
     ) -> Option<Hlc> {
@@ -467,8 +513,8 @@ impl RangeView {
             Decline::Other.count();
             return None;
         }
-        // A write its client already has an answer for is not in the view yet.
-        if self.early.load(Ordering::SeqCst) != 0 {
+        // A write its client had the answer of before the scan began, which the view lacks.
+        if !self.holds(begun) {
             Decline::Early.count();
             return None;
         }
@@ -484,21 +530,36 @@ impl RangeView {
         Some(ts)
     }
 
-    /// As [`RangeView::scan`] in key order, over at most `examine` documents of which it copies
-    /// only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates it on
-    /// the stored bytes and leaves the rest where they are. It reads at most `blocks` blocks
-    /// from their files once it has examined a document, as a [`Part`] does.
+    /// [`RangeView::scan_matching_begun`] for a scan that begins now on this view.
     pub fn scan_matching(
         &self,
         cache: &mut ViewCache,
-        (start, end): (&[u8], &[u8]),
+        span: (&[u8], &[u8]),
         (examine, blocks): (usize, usize),
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+        supply: impl FnMut(&BlockNeed) -> bool,
+        keep: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Matched> {
+        let most = (examine, blocks, &self.begin());
+        self.scan_matching_begun(cache, span, most, now, concern, supply, keep)
+    }
+
+    /// As [`RangeView::scan_begun`] in key order, over at most `examine` documents of which it
+    /// copies only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates
+    /// it on the stored bytes and leaves the rest where they are. It reads at most `blocks`
+    /// blocks from their files once it has examined a document, as a [`Part`] does.
+    pub fn scan_matching_begun(
+        &self,
+        cache: &mut ViewCache,
+        (start, end): (&[u8], &[u8]),
+        (examine, blocks, begun): (usize, usize, &Begun),
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
         mut keep: impl FnMut(&[u8]) -> bool,
     ) -> Option<Matched> {
-        let ts = self.applied_for((start, end), examine, now, concern)?;
+        let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = view.scan(start, end, ts);
         let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };

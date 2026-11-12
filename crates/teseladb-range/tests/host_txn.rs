@@ -6,11 +6,15 @@
 mod txn_node;
 
 use teseladb_hlc::Hlc;
+use teseladb_lsm::ViewCache;
+use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::host::Reply;
-use teseladb_range::host::{RangeError, TxnOp, WriteReq};
+use teseladb_range::host::{RangeError, TxnOp, TxnReq, WriteReq};
 use teseladb_range::intents::{
     IntentOp, IntentOwner, Push, RecordOp, TxnId, TxnRecord, TxnStatus, record_key,
 };
+use teseladb_range::read::ReadConcern;
+use teseladb_range::view::Part;
 use txn_node::*;
 use teseladb_types::GroupId;
 
@@ -34,6 +38,35 @@ fn put_intents_conflict_with_newer_versions_and_other_transactions() {
     // The transaction writes its own key again.
     let again = intents_mark(n.txn(intents(T1, deleted, &[(A, put(b"x2"))])));
     assert!(again > at);
+}
+
+/// Intents answered once they are in the leader's log (FR-021, D-160) are no versions a read
+/// sees, and their transaction commits after it checked that they are applied: a scan outside
+/// the core does not wait for them (005 FR-031). Once applied, the intent itself sends the scan
+/// of its key to the core.
+#[test]
+fn intents_answered_in_the_log_do_not_hold_back_a_scan_outside_the_core() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    let w1 = WriteConcern { w: W::Nodes(1), j: false };
+    let (now, wall) = (n.now, n.wall());
+    let op = intents(T1, base, &[(B, put(b"x"))]);
+    let id = n.host.txn(&mut n.core, TxnReq { g: G, op, wc: w1 }, now, wall);
+    n.host.poll(&mut n.core, now, wall);
+    let answered = n.host.take_replies();
+    assert!(answered.iter().any(|(r, a)| *r == id && a.is_ok()), "in the log: {answered:?}");
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    assert!(view.holds(&view.begin()), "no scan has to see an intent");
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let read = view
+        .scan(&mut cache, (A, END), part, || n.now, ReadConcern::Local, |_| false)
+        .expect("served outside");
+    assert_eq!(read.rows, vec![(A.to_vec(), (DOC, b"v1".to_vec()))]);
+    n.settle();
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let read = view.scan(&mut cache, (A, END), part, || n.now, ReadConcern::Local, |_| false);
+    assert!(read.is_none(), "{read:?}");
 }
 
 /// Before its commit a coordinator asks each range whether its intents were applied (FR-021,

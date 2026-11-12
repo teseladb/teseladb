@@ -68,12 +68,6 @@ pub const SELECTION_LIMIT: Duration = Duration::from_secs(15);
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
 /// Most documents a scan asks a core for at once.
 const CORE_SCAN_PART: usize = 1024;
-/// Tries of a scan on a connection's thread before a part of it goes to the core.
-const OUTSIDE_SCAN_TRIES: usize = 3;
-/// How much smaller each try of a scan on a connection's thread is than the one before.
-const OUTSIDE_SCAN_SHRINK: usize = 8;
-/// The smallest part a scan on a connection's thread tries.
-const OUTSIDE_SCAN_LEAST_PART: usize = 64;
 
 /// Sleeps until the wall clock reaches `until_ms`, or until `deadline` if that comes first: whether
 /// the clock got there, for a commit that answers once the clock is at its mark (008 FR-008).
@@ -252,30 +246,6 @@ impl ServerBackend {
         }
     }
 
-    /// [`ServerBackend::scan_outside`] of `[from, end)` for at most `limit` documents, again
-    /// with smaller parts while writes keep sending it to the core: a long scan of a written
-    /// collection rarely reads all of it with no write in between, and its parts are read at
-    /// marks of their own, as a scan reads each range at its own (RefDb's scans yield too).
-    fn scan_outside_in_parts(
-        &mut self,
-        from: &[u8],
-        end: &[u8],
-        limit: usize,
-        concern: ReadConcern,
-    ) -> Option<(Vec<u8>, teseladb_wire::commands::Rows)> {
-        let mut want = limit;
-        for _ in 0..OUTSIDE_SCAN_TRIES {
-            if let Some((boundary, rows)) = self.scan_outside((from, end), (want, false), concern) {
-                return Some((next_from(boundary, &rows, want), rows));
-            }
-            if want <= OUTSIDE_SCAN_LEAST_PART {
-                return None;
-            }
-            want = (want / OUTSIDE_SCAN_SHRINK).max(OUTSIDE_SCAN_LEAST_PART);
-        }
-        None
-    }
-
     fn scan_ranges(
         &mut self,
         start: &[u8],
@@ -293,13 +263,14 @@ impl ServerBackend {
             && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         while from.as_slice() < end && rows.len() < limit {
             let began = Instant::now();
+            let want = limit - rows.len();
             if outside
-                && let Some((stop, more)) =
-                    self.scan_outside_in_parts(&from, end, limit - rows.len(), concern)
+                && let Some((boundary, more)) =
+                    self.scan_outside((&from, end), (want, false), concern)
             {
                 stage_since(Stage::ScanOutside, began);
+                from = next_from(boundary, &more, want);
                 rows.extend(more);
-                from = stop;
                 continue;
             }
             let began = Instant::now();

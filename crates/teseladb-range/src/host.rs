@@ -14,6 +14,8 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use teseladb_stages::Stage;
 
 use teseladb_hlc::Hlc;
@@ -291,6 +293,10 @@ pub(crate) struct Leader {
     recount: recount::RecountJob,
     /// When the reads served outside the core last reported a tally of this range (005 FR-028).
     read_outside_at: Option<Nanos>,
+    /// The highest entry of its log whose write it answered to its client, noted before the
+    /// answer leaves (005 FR-031): a scan outside the core that begins afterwards reads a view
+    /// that applied it.
+    pub(crate) answered: Arc<AtomicU64>,
 }
 
 impl Leader {
@@ -1465,12 +1471,13 @@ impl RangeHost {
                 released: l.latches.released(),
                 outside: l.cache.outside(),
                 counts: core.state_machine(*g).and_then(RangeState::shared_counts),
-                // After the LSM's version above: that version holds every entry up to it.
+                // After the LSM's version above: that version holds every entry up to them.
                 applied: core.state_machine(*g).map_or(ZERO, RangeState::applied_mark),
-                early: l.latches.early(),
+                applied_index: core.state_machine(*g).map_or(0, StateMachine::applied_index),
+                answered: Arc::clone(&l.answered),
             };
             let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());
-            views.insert(*g, std::sync::Arc::new(view));
+            views.insert(*g, Arc::new(view));
             self.views_until.insert(*g, until);
         }
         self.views.publish(views);
@@ -1528,6 +1535,7 @@ impl RangeHost {
             fencing: Vec::new(),
             recount: recount::RecountJob::default(),
             read_outside_at: None,
+            answered: Arc::default(),
         });
         let lost: Vec<ReqId> = self
             .reqs

@@ -65,6 +65,7 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         "core_step",
         "txn_statement",
         "txn_total",
+        "view_wait",
     ] {
         let count = format!("teseladb_stage_seconds_count{{stage=\"{stage}\"}}");
         assert!(text.contains(&count), "{count} in {text}");

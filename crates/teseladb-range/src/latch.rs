@@ -209,11 +209,8 @@ pub struct Latches {
     /// The holders that took their latches with [`Latches::acquire_pipelined`]: only they go on
     /// pipelined writes when they add keys.
     goes_on: BTreeSet<LatchId>,
-    /// The writes already answered to their client while their latches are held, and how many
-    /// they are for the scans outside the core, which go to the core while there is one (005
-    /// FR-031).
+    /// The writes already answered to their client while their latches are held.
     answered: BTreeSet<LatchId>,
-    early: Arc<AtomicU32>,
     next: u64,
     /// The writes holding latches, and how many they are for the reads outside the core (005
     /// FR-028): a write is counted when it takes its first latch, before it gets a mark, and a
@@ -369,9 +366,8 @@ impl Latches {
     /// The write `id` was answered to its client before it was applied.
     pub fn mark_answered(&mut self, id: LatchId) {
         let pipelined = || self.pipelined.values().flatten().any(|p| p.id == id);
-        if (self.by_key.values().any(|(_, h)| *h == id) || pipelined()) && self.answered.insert(id)
-        {
-            self.early.fetch_add(1, Ordering::SeqCst);
+        if self.by_key.values().any(|(_, h)| *h == id) || pipelined() {
+            self.answered.insert(id);
         }
     }
 
@@ -382,9 +378,7 @@ impl Latches {
             held.retain(|p| p.id != id);
             !held.is_empty()
         });
-        if self.answered.remove(&id) {
-            self.early.fetch_sub(1, Ordering::SeqCst);
-        }
+        self.answered.remove(&id);
         self.goes_on.remove(&id);
         let counted = self.counted.remove(&id).unwrap_or_default();
         if let (Some(first), Some(last)) = (counted.iter().min(), counted.iter().max()) {
@@ -416,11 +410,6 @@ impl Latches {
     /// How many writes hold latches, for the reads outside the core (005 FR-028).
     pub fn held(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.held)
-    }
-
-    /// How many writes were answered to their client and are not applied yet (005 FR-031).
-    pub fn early(&self) -> Arc<AtomicU32> {
-        Arc::clone(&self.early)
     }
 
     /// The keys latched, for the point reads outside the core (005 FR-028).

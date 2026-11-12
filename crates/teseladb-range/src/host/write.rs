@@ -80,6 +80,7 @@ impl RangeHost {
         if reached {
             let r = p.answer();
             teseladb_stages::record(Stage::WriteRange, self.now.0.saturating_sub(m.arrived.0));
+            self.note_answered(m.g, m.term, index);
             self.reply(id, Ok(r));
             return;
         }
@@ -284,11 +285,18 @@ impl RangeHost {
             let r = p.answer();
             teseladb_stages::record(Stage::WriteRange, now.0.saturating_sub(m.arrived.0));
             let applied = p.applied;
-            let latch = p.latch;
+            let (latch, index) = (p.latch, p.index);
             // From now on a `local` read waits for it: it saw the write answered (DV-010).
             let leader = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut());
             if let Some(l) = leader.filter(|l| l.term == m.term) {
                 l.latches.mark_answered(latch);
+            }
+            // An intent is no version a read sees, and its transaction commits once it checked
+            // that its intents are applied (008 FR-021): no scan has to see it.
+            let intents =
+                matches!(&m.work, Work::Txn(op) if matches!(**op, TxnOp::PutIntents { .. }));
+            if !intents {
+                self.note_answered(m.g, m.term, index);
             }
             self.reply(id, Ok(r));
             if applied {
@@ -329,6 +337,16 @@ impl RangeHost {
         self.release(m.g, m.term, latch);
         self.reply(id, Err(RangeError::NotLeader { hint: NodeId(0) }));
         true
+    }
+
+    /// Notes that the write of entry `index`, which the leader of range `g` in `term` proposed,
+    /// is answered to its client (005 FR-031), before the answer leaves: a scan outside the core
+    /// that begins from now on reads a view that applied the entry.
+    fn note_answered(&self, g: GroupId, term: u64, index: u64) {
+        let leader = self.ranges.get(&g).and_then(|r| r.leader.as_ref());
+        if let Some(l) = leader.filter(|l| l.term == term) {
+            l.answered.fetch_max(index, Ordering::SeqCst);
+        }
     }
 
     pub(super) fn release(&mut self, g: GroupId, term: u64, latch: LatchId) {

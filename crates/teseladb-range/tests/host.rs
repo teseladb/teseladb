@@ -963,6 +963,20 @@ fn a_part_without_a_document_reads_on_and_too_many_blocks_send_the_scan_to_the_c
     assert!(read > 2, "{read} blocks");
 }
 
+/// Writes `value` under `key` with `w: 1` and lets the leader answer it from its log, without
+/// running its disk: the write is answered and not applied.
+fn answer_early(n: &mut Node, key: &[u8], value: u8) {
+    let w1 = WriteConcern { w: W::Nodes(1), j: false };
+    let w = n.mutate(key, Box::new(SetKey(key.to_vec(), Some(value))), w1);
+    let (now, wall) = (n.now, n.wall());
+    n.host.poll(&mut n.core, now, wall);
+    let answered = n.host.take_replies();
+    assert!(
+        answered.iter().any(|(id, r)| *id == w && r.is_ok()),
+        "answered once it is in the leader's log: {answered:?}"
+    );
+}
+
 #[test]
 fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     let mut n = Node::new();
@@ -971,15 +985,7 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
     // A write its client already has the answer of, before it is applied (`w: 1`, DV-010): a
     // read that comes after that answer has to see it, and the view does not hold it yet.
-    let w1 = WriteConcern { w: W::Nodes(1), j: false };
-    let w = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(2))), w1);
-    let (now, wall) = (n.now, n.wall());
-    n.host.poll(&mut n.core, now, wall);
-    let answered = n.host.take_replies();
-    assert!(
-        answered.iter().any(|(id, r)| *id == w && r.is_ok()),
-        "answered once it is in the leader's log: {answered:?}"
-    );
+    answer_early(&mut n, b"\x01a", 2);
     let early = || teseladb_range::view::decline_counts()[Decline::Early as usize];
     let before = early();
     assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
@@ -999,6 +1005,122 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     // Back to normal once the write is applied.
     let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");
     assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![2]))]);
+}
+
+#[test]
+fn a_view_from_before_an_answered_write_was_applied_does_not_serve_a_scan_that_began_after_it() {
+    // 005 FR-031: the write is answered, the scan begins and the core applies the write before
+    // the scan reads. Counting the writes answered and not applied let that scan read the view
+    // of before the write: the count was back at zero and the view lacked the write.
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    let old = n.host.views().get(G).expect("the view");
+    let then = n.now;
+    answer_early(&mut n, b"\x01a", 2);
+    let begun = old.begin();
+    n.settle();
+    assert!(!old.holds(&begun), "the view of before the write lacks it");
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let early = || teseladb_range::view::decline_counts()[Decline::Early as usize];
+    let before = early();
+    let read =
+        old.scan_begun(&mut cache, span, (part, &begun), || then, ReadConcern::Local, |_| false);
+    assert!(read.is_none() && early() > before, "{read:?}");
+    // The view the core published once it applied the write serves that scan.
+    let new = n.host.views().get(G).expect("the view");
+    assert!(new.holds(&begun));
+    let read = new
+        .scan_begun(&mut cache, span, (part, &begun), || n.now, ReadConcern::Local, |_| false)
+        .expect("served outside");
+    assert_eq!(read.rows, vec![(b"\x01a".to_vec(), (1, vec![2]))]);
+}
+
+#[test]
+fn a_scan_outside_the_core_reads_the_view_that_holds_what_was_answered_when_it_began() {
+    // 005 FR-031: the writes answered after a scan began do not hold it back. Under a steady
+    // flow of `w: 1` writes every view lacks the newest of them.
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    answer_early(&mut n, b"\x01a", 2);
+    let begun = n.host.views().get(G).expect("the view").begin();
+    n.settle();
+    // Another write answered and not applied: the view holds the first and lacks this one.
+    answer_early(&mut n, b"\x01b", 3);
+    let view = n.host.views().get(G).expect("the view");
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let read = view
+        .scan_begun(&mut cache, span, (part, &begun), || n.now, ReadConcern::Local, |_| false)
+        .expect("served outside");
+    assert_eq!(read.rows, vec![(b"\x01a".to_vec(), (1, vec![2]))]);
+    // A scan that begins now has to see the second write too.
+    assert!(!view.holds(&view.begin()));
+    assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
+    n.settle();
+    let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");
+    let both = vec![(b"\x01a".to_vec(), (1, vec![2])), (b"\x01b".to_vec(), (1, vec![3]))];
+    assert_eq!(rows, both);
+}
+
+#[test]
+fn a_write_answered_once_applied_is_noted_before_the_view_that_holds_it_is_published() {
+    // 005 FR-031: whoever drives the host may hand out the answer of an applied write before
+    // the host's next poll publishes the view with it. A scan that begins then does not read
+    // the view of before the write.
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    let w = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(2))), MAJORITY);
+    let (now, wall) = (n.now, n.wall());
+    n.host.poll(&mut n.core, now, wall);
+    // The core's disk and what it applied reach the host, which does not poll.
+    let mut answered = Vec::new();
+    for _ in 0..100 {
+        while let Some(op) = n.core.poll_io(now) {
+            let done = teseladb_raftlog::Disk::execute(&mut n.disk, op);
+            n.core.on_io_done(done, now);
+        }
+        for (op, r) in n.core.drain_actions().done {
+            n.host.on_done(&mut n.core, op, r);
+        }
+        answered.extend(n.host.take_replies());
+        if !answered.is_empty() {
+            break;
+        }
+    }
+    assert!(answered.iter().any(|(id, r)| *id == w && r.is_ok()), "once applied: {answered:?}");
+    let old = n.host.views().get(G).expect("the view");
+    assert!(!old.holds(&old.begin()), "published before the write was applied");
+    assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
+    n.host.poll(&mut n.core, now, wall);
+    let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");
+    assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![2]))]);
+}
+
+#[test]
+fn a_view_of_another_leader_of_the_range_takes_what_that_leader_has_answered() {
+    // 005 FR-031: a scan that began on one leader's view and reads another leader's (a new
+    // term) has to see what the new one answered by now; the entry it took belongs to a log
+    // the new leader applied before it published a view.
+    let mut first = Node::new();
+    first.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    first.settle();
+    answer_early(&mut first, b"\x01a", 2);
+    let begun = first.host.views().get(G).expect("the view").begin();
+    let mut second = Node::new();
+    let view = second.host.views().get(G).expect("the view");
+    assert!(view.holds(&begun), "nothing answered there that its view lacks");
+    answer_early(&mut second, b"\x01b", 3);
+    let view = second.host.views().get(G).expect("the view");
+    assert!(!view.holds(&begun), "a write answered there, not applied yet");
+    second.settle();
+    assert!(second.host.views().get(G).expect("the view").holds(&begun));
 }
 
 #[test]

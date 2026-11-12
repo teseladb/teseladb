@@ -4,7 +4,8 @@
 //! key or the span there; a block the shared cache lacks it reads from its file itself and hands
 //! to the cache. Whatever the view cannot serve goes to the core as before: a write holding a
 //! latch, an intent, a lease not checked for this moment, a file that cannot be read (the core
-//! reads it again and reports its error).
+//! reads it again and reports its error). A scan whose view lacks a write answered before the
+//! scan began waits here for the view that holds it (005 FR-034).
 //!
 //! The reads served here still count for their range's split by load (007 FR-006): the worker
 //! tallies them per range and reports each tally to the core in one message, with a sample of
@@ -13,7 +14,9 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_hlc::Hlc;
@@ -24,12 +27,13 @@ use teseladb_range::command::DedupKey;
 use teseladb_range::host::{Mutation, MutationError};
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
-use teseladb_range::view::{Decline, FastRead, FastWrite, NoChange, Part, RangeView};
+use teseladb_range::view::{Begun, Decline, FastRead, FastWrite, NoChange, Part, RangeView};
+use teseladb_stages::Stage;
 use teseladb_wire::commands::mutation::Bound;
 use teseladb_wire::commands::{Backend, Rows, WriteOp};
 use teseladb_types::{GroupId, Nanos};
 
-use super::ServerBackend;
+use super::{ServerBackend, stage_since};
 use crate::logic::NodeMsg;
 
 /// A write's mutation decoded the first time the view evaluates it (H-042): most updates reach a
@@ -85,6 +89,12 @@ const MAX_BLOCKS: usize = 8;
 const MAX_SCAN_BLOCKS: usize = 64;
 /// Files a worker keeps open between reads.
 const MAX_FILES: usize = 64;
+/// The longest a scan waits on its thread for a view that holds the writes answered before it
+/// began (005 FR-034); past it the scan goes to the core, and the worker does not wait for that
+/// range again for as long.
+const VIEW_WAIT: Duration = Duration::from_millis(50);
+/// How long the thread sleeps between two looks at the published view while it waits.
+const VIEW_LOOK: Duration = Duration::from_micros(200);
 /// Reads of a range a worker tallies before it reports them to the core.
 pub(super) const REPORT_OPS: u64 = 64;
 /// Longest a tally waits before it is reported.
@@ -144,6 +154,29 @@ fn unviewed<T>(view: Option<T>) -> Option<T> {
     view
 }
 
+/// What `look` gives once `serves` accepts it, looking again every `every` for at most `most`,
+/// and whether it had to look again; past `most`, what `look` gave last. `None` as soon as
+/// `look` gives nothing.
+fn look_until<T>(
+    mut look: impl FnMut() -> Option<T>,
+    serves: impl Fn(&T) -> bool,
+    (most, every): (Duration, Duration),
+) -> Option<(T, bool)> {
+    let mut seen = look()?;
+    if serves(&seen) {
+        return Some((seen, false));
+    }
+    let began = Instant::now();
+    while began.elapsed() < most {
+        thread::sleep(every);
+        seen = look()?;
+        if serves(&seen) {
+            break;
+        }
+    }
+    Some((seen, true))
+}
+
 /// What a worker keeps for its reads outside the cores.
 #[derive(Debug, Default)]
 pub(super) struct Outside {
@@ -155,6 +188,9 @@ pub(super) struct Outside {
     tallies: BTreeMap<(usize, GroupId), Tally>,
     /// The routing table as this worker last read it.
     routes: crate::routes::RouteCache,
+    /// The range whose view this worker waited for in vain, and until when it does not wait for
+    /// it again (005 FR-034).
+    gave_up: Option<(GroupId, Instant)>,
 }
 
 impl Outside {
@@ -193,6 +229,31 @@ fn block(files: &mut BTreeMap<String, File>, dir: &Path, need: &BlockNeed) -> Op
 }
 
 impl ServerBackend {
+    /// The view of range `g` its core `core` published and what a scan that begins now has to
+    /// see (005 FR-031). While the view lacks a write answered before the scan began, the thread
+    /// waits for one that holds it (FR-034); past [`VIEW_WAIT`] it gives the view as it is,
+    /// which sends the scan to the core, and for as long again it does not wait for that range:
+    /// the next parts of the scan go straight to the core. `None` when the node publishes no
+    /// view of the range.
+    fn view_for_scan(&mut self, core: usize, g: GroupId) -> Option<(Arc<RangeView>, Begun)> {
+        let views = &self.h.views;
+        let look = || unviewed(views.get(core).and_then(|v| v.get(g)));
+        let mut first = Some(look()?);
+        let begun = first.as_ref()?.begin();
+        let began = Instant::now();
+        let patient = self.outside.gave_up.is_none_or(|(r, until)| r != g || began >= until);
+        let most = if patient { VIEW_WAIT } else { Duration::ZERO };
+        let (view, waited) =
+            look_until(|| first.take().or_else(look), |v| v.holds(&begun), (most, VIEW_LOOK))?;
+        if waited && patient {
+            stage_since(Stage::ViewWait, began);
+        }
+        if waited && !view.holds(&begun) {
+            self.outside.gave_up = Some((g, Instant::now() + VIEW_WAIT));
+        }
+        Some((view, begun))
+    }
+
     /// The document under `key` read on this thread (`Some(None)`: none), or `None` when the read
     /// goes to the key's core.
     pub(super) fn read_outside(
@@ -334,7 +395,7 @@ impl ServerBackend {
             }
         };
         let core = usize::from(core);
-        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
+        let (view, begun) = self.view_for_scan(core, g)?;
         if self.outside.caches.len() <= core {
             self.outside.caches.resize_with(core + 1, ViewCache::default);
         }
@@ -353,8 +414,9 @@ impl ServerBackend {
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
         let span = (lo.as_slice(), hi.as_slice());
-        let part = Part { docs: limit, backward, blocks: MAX_SCAN_BLOCKS };
-        let Some(read) = view.scan(&mut caches[core], span, part, now, concern, supply) else {
+        let part = (Part { docs: limit, backward, blocks: MAX_SCAN_BLOCKS }, &begun);
+        let Some(read) = view.scan_begun(&mut caches[core], span, part, now, concern, supply)
+        else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
@@ -382,7 +444,7 @@ impl ServerBackend {
             false => range_end.to_vec(),
         };
         let core = usize::from(core);
-        let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
+        let (view, begun) = self.view_for_scan(core, g)?;
         if self.outside.caches.len() <= core {
             self.outside.caches.resize_with(core + 1, ViewCache::default);
         }
@@ -401,8 +463,9 @@ impl ServerBackend {
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
         let span = (start, hi.as_slice());
-        let most = (examine, MAX_SCAN_BLOCKS);
-        let Some(m) = view.scan_matching(&mut caches[core], span, most, now, concern, supply, keep)
+        let most = (examine, MAX_SCAN_BLOCKS, &begun);
+        let cache = &mut caches[core];
+        let Some(m) = view.scan_matching_begun(cache, span, most, now, concern, supply, keep)
         else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -533,6 +596,71 @@ mod release_tests {
         outside.release();
         assert!(outside.caches.iter().all(|c| !c.holds()), "no version held");
         assert!(outside.files.is_empty(), "no file open");
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod wait_tests {
+    use super::*;
+
+    const EVERY: Duration = Duration::from_micros(100);
+    const LONG: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn what_serves_at_once_is_given_without_another_look() {
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            Some(7)
+        };
+        let got = look_until(look, |v| *v == 7, (LONG, EVERY));
+        assert_eq!((got, looks), (Some((7, false)), 1));
+    }
+
+    #[test]
+    fn it_looks_again_until_what_it_sees_serves() {
+        // 005 FR-034: the third view the core publishes holds what the scan has to see.
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            Some(looks)
+        };
+        assert_eq!(look_until(look, |v| *v >= 3, (LONG, EVERY)), Some((3, true)));
+    }
+
+    #[test]
+    fn past_its_time_it_gives_what_it_saw_last_and_with_no_time_it_does_not_wait() {
+        let (began, most) = (Instant::now(), Duration::from_millis(5));
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            Some(looks)
+        };
+        let got = look_until(look, |_| false, (most, EVERY));
+        assert!(began.elapsed() >= most);
+        assert!(looks >= 2, "{looks} looks");
+        assert_eq!(got, Some((looks, true)));
+        // A worker that gave up on a range a moment ago takes its view as it is.
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            Some(looks)
+        };
+        let got = look_until(look, |_| false, (Duration::ZERO, EVERY));
+        assert_eq!((got, looks), (Some((1, true)), 1));
+    }
+
+    #[test]
+    fn a_range_whose_view_goes_ends_the_wait() {
+        let mut looks = 0;
+        let look = || {
+            looks += 1;
+            (looks < 2).then_some(looks)
+        };
+        let got = look_until(look, |_| false, (LONG, EVERY));
+        assert_eq!((got, looks), (None, 2));
+        assert_eq!(look_until(|| None::<u8>, |_| true, (LONG, EVERY)), None);
     }
 }
 

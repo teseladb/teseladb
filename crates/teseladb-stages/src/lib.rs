@@ -63,6 +63,9 @@ pub enum Stage {
     ScanOutside,
     /// A scan the core served.
     ScanCore,
+    /// A scan's wait on its connection's thread for a view that holds the writes answered
+    /// before it began.
+    ViewWait,
     /// A read's wait in its range for the node's wall clock to reach the mark it was given.
     ReadClockWait,
     /// A read's wait in its range for the core to confirm the leadership.
@@ -80,7 +83,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 23] = [
+    pub const ALL: [Stage; 24] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -98,6 +101,7 @@ impl Stage {
         Stage::TxnTotal,
         Stage::ScanOutside,
         Stage::ScanCore,
+        Stage::ViewWait,
         Stage::ReadClockWait,
         Stage::ReadConfirm,
         Stage::ReadLatchWait,
@@ -126,6 +130,7 @@ impl Stage {
             Stage::TxnTotal => "txn_total",
             Stage::ScanOutside => "scan_outside",
             Stage::ScanCore => "scan_core",
+            Stage::ViewWait => "view_wait",
             Stage::ReadClockWait => "read_clock_wait",
             Stage::ReadConfirm => "read_confirm",
             Stage::ReadLatchWait => "read_latch_wait",
