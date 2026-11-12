@@ -1057,6 +1057,28 @@ impl Backend for ServerBackend {
         rows
     }
 
+    fn scan_matching(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        examine: usize,
+        concern: ReadConcern,
+        keep: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<teseladb_wire::commands::Matching, CommandError> {
+        // On this thread when the range's view serves it, for a read at the latest mark on the
+        // leaders (005 FR-028, FR-031): the filter runs on the stored bytes (010 FR-027).
+        let outside = self.read_mark.is_none()
+            && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        if outside && start < end {
+            let began = Instant::now();
+            if let Some(found) = self.scan_matching_outside((start, end), examine, concern, keep) {
+                stage_since(Stage::ScanOutside, began);
+                return Ok(found);
+            }
+        }
+        teseladb_wire::commands::matching_by_scan(self, (start, end), examine, concern, keep)
+    }
+
     fn points(
         &mut self,
         keys: &[Vec<u8>],

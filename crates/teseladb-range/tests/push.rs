@@ -723,20 +723,17 @@ fn a_read_outside_the_core_that_meets_an_intent_goes_to_the_core() {
     }));
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let mut cache = teseladb_lsm::ViewCache::default();
-    let clocks = (n.wall(), || n.now);
     let span: (&[u8], &[u8]) = (A, D);
-    assert!(
-        view.scan(&mut cache, span, (10, false), clocks, ReadConcern::Local, |_| false).is_none()
-    );
-    let clocks = (n.wall(), || n.now);
-    assert!(
-        view.scan(&mut cache, span, (10, true), clocks, ReadConcern::Local, |_| false).is_none()
-    );
+    let scan = |cache: &mut teseladb_lsm::ViewCache, back: bool| {
+        view.scan(cache, span, (10, back), || n.now, ReadConcern::Local, |_| false)
+    };
+    assert!(scan(&mut cache, false).is_none());
+    assert!(scan(&mut cache, true).is_none());
     let read = view.read(&mut cache, A, n.wall(), || n.now, ReadConcern::Local);
     assert!(matches!(read, teseladb_range::view::FastRead::Core));
     // A span past the intent is served.
     let (_, rows) = view
-        .scan(&mut cache, (C, D), (10, false), (n.wall(), || n.now), ReadConcern::Local, |_| false)
+        .scan(&mut cache, (C, D), (10, false), || n.now, ReadConcern::Local, |_| false)
         .expect("served outside");
     assert_eq!(rows.len(), 1);
 }

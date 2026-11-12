@@ -1455,6 +1455,9 @@ impl RangeHost {
                 released: l.latches.released(),
                 outside: l.cache.outside(),
                 counts: core.state_machine(*g).and_then(RangeState::shared_counts),
+                // After the LSM's version above: that version holds every entry up to it.
+                applied: core.state_machine(*g).map_or(ZERO, RangeState::applied_mark),
+                early: l.latches.early(),
             };
             let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());
             views.insert(*g, std::sync::Arc::new(view));

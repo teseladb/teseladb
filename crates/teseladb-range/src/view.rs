@@ -55,6 +55,11 @@ pub struct RangeView {
     valid_until: Nanos,
     /// Reads below it may miss versions the compaction dropped (FR-013).
     gc_floor: Hlc,
+    /// The mark of the last entry the range had applied when the core published the view, which
+    /// the LSM's version published just before holds (FR-031).
+    applied: Hlc,
+    /// Writes answered to their client and not applied yet, which a scan has to see (FR-031).
+    early: Arc<AtomicU32>,
     held: Arc<AtomicU32>,
     keys: Arc<KeySlots>,
     spans: Arc<SpanKeys>,
@@ -114,6 +119,8 @@ pub(crate) struct ViewParts {
     pub(crate) released: Arc<AtomicU64>,
     pub(crate) outside: Arc<AtomicU64>,
     pub(crate) counts: Option<Arc<Counts>>,
+    pub(crate) applied: Hlc,
+    pub(crate) early: Arc<AtomicU32>,
 }
 
 impl RangeView {
@@ -125,6 +132,8 @@ impl RangeView {
             end: p.range.1,
             valid_until: p.valid_until,
             gc_floor: p.gc_floor,
+            applied: p.applied,
+            early: p.early,
             held: p.held,
             keys: p.keys,
             spans: p.spans,
@@ -246,15 +255,13 @@ impl RangeView {
 
 /// Why reads outside the core went back to it, since the process started, by [`Decline`].
 static DECLINES: [AtomicU64; DECLINE_REASONS] = [const { AtomicU64::new(0) }; DECLINE_REASONS];
-const DECLINE_REASONS: usize = 5;
+const DECLINE_REASONS: usize = 4;
 
 /// Why a read outside the core went back to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decline {
     /// A write in flight holds a key a point read reads, or was released while it read.
     Writing,
-    /// A write held a key of a scan, or one was released while the scan read.
-    WrittenWhileScanned,
     /// The view's time ran out, or the clock gives no mark yet.
     Expired,
     /// It met an intent.
@@ -265,19 +272,13 @@ pub enum Decline {
 
 impl Decline {
     /// Every reason, in the order of [`decline_counts`].
-    pub const ALL: [Decline; DECLINE_REASONS] = [
-        Decline::Writing,
-        Decline::WrittenWhileScanned,
-        Decline::Expired,
-        Decline::Intent,
-        Decline::Other,
-    ];
+    pub const ALL: [Decline; DECLINE_REASONS] =
+        [Decline::Writing, Decline::Expired, Decline::Intent, Decline::Other];
 
     /// Its label in the metrics.
     pub fn label(self) -> &'static str {
         match self {
             Decline::Writing => "writing",
-            Decline::WrittenWhileScanned => "written_while_scanned",
             Decline::Expired => "expired",
             Decline::Intent => "intent",
             Decline::Other => "other",
@@ -294,36 +295,45 @@ pub fn decline_counts() -> [u64; DECLINE_REASONS] {
     std::array::from_fn(|i| DECLINES[i].load(Ordering::Relaxed))
 }
 
+/// What [`RangeView::scan_matching`] read.
+#[derive(Debug)]
+pub struct Matched {
+    /// The mark it read at.
+    pub ts: Hlc,
+    /// The documents its filter accepted, in key order.
+    pub rows: Vec<crate::push::Row>,
+    /// For each of them, how many documents the scan had examined when it took it.
+    pub seen: Vec<usize>,
+    /// Documents examined.
+    pub examined: usize,
+    /// Where the scan goes on when it stopped at its number of documents; `None` at the span's
+    /// end.
+    pub next: Option<Vec<u8>>,
+}
+
 impl RangeView {
     /// The documents of `[start, end)` with their value types, at most `limit` (more than none),
-    /// in key order (from the last key down when `backward`, H-003), read at one mark of the node's clock as [`RangeView::read`] reads a key,
-    /// with the wall clock and the monotonic time of `clocks`; with the mark. A block the shared cache lacks goes to
-    /// `supply`, which reads it, gives it to [`SharedLsm::supply`](teseladb_lsm::SharedLsm) and
-    /// says whether it could; then the scan goes on. `None` when the scan goes to the core: a
-    /// span past the range, an intent, a block that could not be read, a failed read, and
-    /// whatever [`RangeView::read`] sends there. Versions that only serve the history are no
-    /// documents, as in the core's scans.
+    /// in key order (from the last key down when `backward`, H-003), with the mark they are read
+    /// at: the mark of the last entry the range had applied when the view was published (FR-031).
+    /// Every write of the range takes a mark above the entries before it and they are applied in
+    /// the log's order, so no write in flight is at or below that mark: the scan looks at no
+    /// latch and no write sends it to the core. `now` gives the monotonic time, for the view's
+    /// validity. A block the shared cache lacks goes to `supply`, which reads it, gives it to
+    /// [`SharedLsm::supply`](teseladb_lsm::SharedLsm) and says whether it could; then the scan
+    /// goes on. `None` when the scan goes to the core: a span past the range, an expired view, a
+    /// write answered to its client before it is applied (DV-010), a mark below the GC
+    /// threshold, an intent, a block that could not be read or a failed read. Versions that only
+    /// serve the history are no documents, as in the core's scans.
     pub fn scan(
         &self,
         cache: &mut ViewCache,
         (start, end): (&[u8], &[u8]),
         (limit, backward): (usize, bool),
-        (wall_ms, now): (u64, impl FnOnce() -> Nanos),
+        now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
     ) -> Option<(Hlc, Vec<crate::push::Row>)> {
-        let servable = matches!(concern, ReadConcern::Local | ReadConcern::Majority)
-            && limit > 0
-            && self.start.as_slice() <= start
-            && start <= end
-            && end <= self.end.as_slice();
-        if !servable {
-            Decline::Other.count();
-            return None;
-        }
-        let ts = self.mark(Watch::Later, wall_ms, now)?;
-        // After the bound: a write released before this reads applied before the scan reads.
-        let released = self.released.load(Ordering::SeqCst);
+        let ts = self.applied_for((start, end), limit, now, concern)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = match backward {
             false => Either::Forward(view.scan(start, end, ts)),
@@ -351,18 +361,92 @@ impl RangeView {
                 }
             }
         }
-        // The keys it read: up to the last row when the limit stopped it, the span otherwise.
-        let last = (rows.len() == limit).then(|| rows.last()).flatten().map(|(k, _)| k);
-        let read = match (last, backward) {
-            (Some(k), false) => (start.to_vec(), [k.as_slice(), &[0]].concat()),
-            (Some(k), true) => (k.clone(), end.to_vec()),
-            (None, _) => (start.to_vec(), end.to_vec()),
-        };
-        if self.written_while_read(&read, released) {
-            Decline::WrittenWhileScanned.count();
+        Some((ts, rows))
+    }
+
+    /// The mark a scan of `[start, end)` reads at (FR-031), or `None` when it goes to the core:
+    /// a span past the range, no limit, a concern the view does not serve, a write answered
+    /// before it is applied, a mark below the GC threshold or an expired view.
+    fn applied_for(
+        &self,
+        (start, end): (&[u8], &[u8]),
+        limit: usize,
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+    ) -> Option<Hlc> {
+        let servable = matches!(concern, ReadConcern::Local | ReadConcern::Majority)
+            && limit > 0
+            && self.start.as_slice() <= start
+            && start <= end
+            && end <= self.end.as_slice();
+        if !servable {
+            Decline::Other.count();
             return None;
         }
-        Some((ts, rows))
+        // A write its client already has an answer for is not in the view yet.
+        if self.early.load(Ordering::SeqCst) != 0 {
+            Decline::Writing.count();
+            return None;
+        }
+        let ts = self.applied;
+        if ts < self.gc_floor {
+            Decline::Other.count();
+            return None;
+        }
+        if now() >= self.valid_until {
+            Decline::Expired.count();
+            return None;
+        }
+        Some(ts)
+    }
+
+    /// As [`RangeView::scan`] in key order, over at most `examine` documents of which it copies
+    /// only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates it on
+    /// the stored bytes and leaves the rest where they are.
+    pub fn scan_matching(
+        &self,
+        cache: &mut ViewCache,
+        (start, end): (&[u8], &[u8]),
+        examine: usize,
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+        mut supply: impl FnMut(&BlockNeed) -> bool,
+        mut keep: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Matched> {
+        let ts = self.applied_for((start, end), examine, now, concern)?;
+        let view = self.lsm.view_cached(cache);
+        let mut scan = view.scan(start, end, ts);
+        let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
+        while out.examined < examine {
+            match scan.next(&self.lsm) {
+                SharedStep::Item(i) if i.kind == Kind::Intent => {
+                    Decline::Intent.count();
+                    return None;
+                }
+                SharedStep::Item(i) => {
+                    let Some((t, v)) = split_value(&i.value) else { continue };
+                    if t == crate::HISTORY_VALUE {
+                        continue;
+                    }
+                    out.examined += 1;
+                    let kept = keep(v);
+                    if out.examined == examine {
+                        out.next = Some([i.key.as_slice(), &[0]].concat());
+                    }
+                    if kept {
+                        out.seen.push(out.examined);
+                        out.rows.push((i.key, (t, v.to_vec())));
+                    }
+                }
+                SharedStep::Done => break,
+                SharedStep::Need(need) if supply(&need) => {}
+                SharedStep::Need(_) | SharedStep::Failed(_) => {
+                    Decline::Other.count();
+                    return None;
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Whether a write holds a key of `read` or a write with a key of it was released since the

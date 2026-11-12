@@ -338,17 +338,72 @@ impl ServerBackend {
             };
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
-        let clocks = (crate::clock::wall_ms(), now);
         let span = (lo.as_slice(), hi.as_slice());
         let way = (limit, backward);
-        let Some((_, rows)) = view.scan(&mut caches[core], span, way, clocks, concern, supply)
-        else {
+        let Some((_, rows)) = view.scan(&mut caches[core], span, way, now, concern, supply) else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         self.tally(core, g, &lo, asked.get().unwrap_or_else(Instant::now));
         let boundary = if backward { lo } else { hi };
         Some((boundary, rows.into_iter().map(|(k, (_, v))| (k, v)).collect()))
+    }
+
+    /// As [`ServerBackend::scan_outside`] in key order, over at most `examine` documents of the
+    /// part of the span in the range of `start`, of which only those `keep` accepts are copied
+    /// (010 FR-027); with where the scan goes on. `None` when the read goes to the core.
+    pub(super) fn scan_matching_outside(
+        &mut self,
+        (start, end): (&[u8], &[u8]),
+        examine: usize,
+        concern: ReadConcern,
+        keep: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Option<teseladb_wire::commands::Matching> {
+        let (g, core, range_end) = self.h.routes.span_of(&mut self.outside.routes, start)?;
+        let hi = match range_end.is_empty() || end <= range_end {
+            true => end.to_vec(),
+            false => range_end.to_vec(),
+        };
+        let core = usize::from(core);
+        let view = self.h.views.get(core)?.get(g)?;
+        if self.outside.caches.len() <= core {
+            self.outside.caches.resize_with(core + 1, ViewCache::default);
+        }
+        let origin = self.h.origin;
+        let asked = std::cell::Cell::new(None);
+        let now = || {
+            let at = Instant::now();
+            asked.set(Some(at));
+            let since = at.saturating_duration_since(origin);
+            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+        };
+        let dir = self.h.data_dir.clone();
+        let Outside { caches, files, .. } = &mut self.outside;
+        let mut blocks = 0;
+        let supply = |need: &BlockNeed| {
+            blocks += 1;
+            let Some(dir) = dir.as_deref().filter(|_| blocks <= MAX_SCAN_BLOCKS) else {
+                return false;
+            };
+            block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
+        };
+        let span = (start, hi.as_slice());
+        let Some(m) =
+            view.scan_matching(&mut caches[core], span, examine, now, concern, supply, keep)
+        else {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        self.tally(core, g, start, asked.get().unwrap_or_else(Instant::now));
+        // It stopped at its number of documents, or at the end of this range's part: the span
+        // goes on in the next range unless that was its end.
+        let next = m.next.or_else(|| (hi.as_slice() < end).then_some(hi));
+        Some(teseladb_wire::commands::Matching {
+            rows: m.rows.into_iter().map(|(k, (_, v))| (k, v)).collect(),
+            seen: m.seen,
+            examined: m.examined,
+            next,
+        })
     }
 
     /// The live documents of collection `coll` in `[start, end)`, its documents' keys, added up

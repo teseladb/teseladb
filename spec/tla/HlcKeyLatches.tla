@@ -19,11 +19,17 @@
 (* number in the count, so a release of other keys lets the scan go on (H-051 of the native tests: *)
 (* any release sent a scan of a written collection to the core). GenCheck = FALSE drops the second *)
 (* condition: then ReadsAreStable fails.                                                            *)
+(* A scan may also read without a mark of the clock (005 FR-031): it takes the version the range  *)
+(* published and reads at the mark of the last entry applied in it (ScanApplied). Every write of  *)
+(* the range takes a mark above every entry applied or proposed before it, so no write in flight  *)
+(* is at or below that mark: the scan looks at no latch, raises no bound and never goes back to   *)
+(* the core for a write in flight. MarkAboveLast = FALSE drops that rule of the marks: then        *)
+(* ReadsAreStable fails.                                                                            *)
 (* Invariant: a read of key k served at t keeps seeing the same version of k.                      *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Keys, MaxMark, MaxWrites, MaxReads, ConnChecks, MarkAboveBound, CountBeforeMark,
-          GenCheck
+          GenCheck, MarkAboveLast
 
 VARIABLES
     floor,      \* the read cache of each key: the highest mark read in the core
@@ -81,6 +87,7 @@ Propose ==
         \E m \in Marks :
             /\ m > floor[k]
             /\ MarkAboveBound => m > bound
+            /\ MarkAboveLast => m > Max({x[1] : x \in versions \cup inflight})
             /\ <<m, k>> \notin versions
             /\ inflight' = inflight \cup {<<m, k>>}
     /\ marking' = None
@@ -96,6 +103,8 @@ CountLate ==
 \* Its entry is applied: the version is visible and the write is no longer in flight.
 Apply ==
     /\ \E x \in inflight :
+        \* Entries are applied in the order of the log: with marks that follow it, lowest first.
+        /\ \A y \in inflight : x[1] <= y[1]
         /\ pend[x[2]] = 1
         /\ versions' = versions \cup {x}
         /\ inflight' = inflight \ {x}
@@ -161,8 +170,18 @@ ScanFinish ==
     /\ scan' = NoScan
     /\ UNCHANGED <<floor, bound, pend, marking, inflight, versions, conn, writes, released, relog>>
 
+\* A scan of the keys S reads the published version at the mark of its last applied entry,
+\* whatever is in flight.
+ScanApplied ==
+    /\ Cardinality(reads) < MaxReads
+    /\ versions /= {}
+    /\ LET t == Max({x[1] : x \in versions})
+       IN \E S \in SUBSET Keys \ {{}} :
+            reads' = reads \cup {<<k, t, Seen(k, t)>> : k \in S}
+    /\ UNCHANGED <<floor, bound, pend, marking, inflight, versions, conn, writes, released, relog, scan>>
+
 Next == Count \/ Propose \/ CountLate \/ Apply \/ Read \/ ConnStart \/ ConnFinish
-        \/ ScanStart \/ ScanRead \/ ScanFinish
+        \/ ScanStart \/ ScanRead \/ ScanFinish \/ ScanApplied
 
 Spec == Init /\ [][Next]_vars
 

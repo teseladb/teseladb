@@ -187,6 +187,10 @@ pub enum RangeOutput {
 pub trait RangeState {
     /// GC threshold of the range, which the host hands to the LSM (FR-013).
     fn gc_threshold(&self) -> Hlc;
+    /// The mark of the last entry the range applied that wrote anything: every version it holds
+    /// is at or below it and every later entry is above it (005 FR-031). Without a default, so a
+    /// wrapping state machine hands it on.
+    fn applied_mark(&self) -> Hlc;
     /// The last checksum the log asked for: its entry and mark (FR-014).
     fn checksum_request(&self) -> Option<(u64, Hlc)>;
     /// The range's end as applied, which a split moves (007); `None` for a machine that is no
@@ -1057,6 +1061,10 @@ impl RangeSm {
 impl RangeState for RangeSm {
     fn gc_threshold(&self) -> Hlc {
         self.gc_threshold
+    }
+
+    fn applied_mark(&self) -> Hlc {
+        self.last_mark
     }
 
     fn counts_dirty(&self) -> bool {

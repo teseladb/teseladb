@@ -814,7 +814,7 @@ impl RangeDocsWorkload {
             let backward = w.rng.chance(0.5);
             let key = doc(k);
             let end = [key.as_slice(), &[0]].concat();
-            let (now, wall) = Self::times(w, node);
+            let (now, _) = Self::times(w, node);
             let core = self.core as usize;
             let mut blocks = 0;
             let supply = |need: &teseladb_lsm::BlockNeed| {
@@ -828,7 +828,7 @@ impl RangeDocsWorkload {
                     && bytes.is_some_and(|b| view.lsm().supply(need, b).is_ok())
             };
             let (ts, rows) =
-                view.scan(cache, (&key, &end), (1, backward), (wall, || now), concern, supply)?;
+                view.scan(cache, (&key, &end), (1, backward), || now, concern, supply)?;
             let value = rows.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
             return Some((ts, value));
         }

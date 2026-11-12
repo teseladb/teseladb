@@ -157,6 +157,9 @@ fn a_state_without_closed_marks_has_none() {
         fn gc_threshold(&self) -> Hlc {
             Hlc { physical: 0, logical: 0 }
         }
+        fn applied_mark(&self) -> Hlc {
+            Hlc { physical: 0, logical: 0 }
+        }
         fn checksum_request(&self) -> Option<(u64, Hlc)> {
             None
         }

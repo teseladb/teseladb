@@ -138,6 +138,41 @@ use crate::failpoint::FailPoint;
 /// What a read of a span gives: `(key, document)` in key order.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
+/// What [`Backend::scan_matching`] read.
+#[derive(Debug, Default)]
+pub struct Matching {
+    /// The documents the filter accepted, in key order.
+    pub rows: Rows,
+    /// For each of them, how many documents the scan had examined when it took it.
+    pub seen: Vec<usize>,
+    /// Documents examined.
+    pub examined: usize,
+    /// Where the scan goes on when it stopped at its number of documents; `None` at the end.
+    pub next: Option<Vec<u8>>,
+}
+
+/// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered.
+pub fn matching_by_scan<B: Backend + ?Sized>(
+    backend: &mut B,
+    (start, end): (&[u8], &[u8]),
+    examine: usize,
+    concern: ReadConcern,
+    keep: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<Matching, CommandError> {
+    let read = backend.scan(start, end, examine, concern)?;
+    let mut out = Matching { examined: read.len(), ..Matching::default() };
+    if read.len() >= examine {
+        out.next = read.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
+    }
+    for (i, (key, doc)) in read.into_iter().enumerate() {
+        if keep(&doc) {
+            out.seen.push(i + 1);
+            out.rows.push((key, doc));
+        }
+    }
+    Ok(out)
+}
+
 /// A span of keys `[start, end)` a read takes at most `limit` documents of.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
@@ -469,6 +504,19 @@ pub trait Backend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
+    /// Examines at most `examine` documents of `[start, end)` in key order and gives those
+    /// `keep` accepts (010 FR-027). A backend that can evaluates `keep` on the stored bytes and
+    /// copies only what it accepts; by default it reads them all and filters.
+    fn scan_matching(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        examine: usize,
+        concern: ReadConcern,
+        keep: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<Matching, CommandError> {
+        matching_by_scan(self, (start, end), examine, concern, keep)
+    }
     /// The live documents of collection `collection` of tenant `tenant`, added up from the counts
     /// its ranges keep (007 FR-039), when every one of them is exact; `None` when one is
     /// estimated or the backend keeps none, and the caller counts by reading.

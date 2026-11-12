@@ -370,19 +370,35 @@ pub(crate) fn for_each_match_counted<B: Backend + ?Sized>(
     let mut next = start;
     let mut examined = 0u64;
     loop {
-        let rows = backend.scan(&next, &end, SCAN_CHUNK, concern)?;
-        let short = rows.len() < SCAN_CHUNK;
-        for (key, bytes) in rows {
-            next = after(&key);
-            examined += 1;
-            // A stored document always parses: one that does not is a fault, not a miss.
-            let doc = RawDoc::from_bytes(&bytes)?;
-            if plan.filter.matches(doc, &ctx).map_err(from_mql)? && !each(key, &bytes)? {
-                return Ok(examined);
+        // The filter runs where the documents are read, and only those it accepts are copied
+        // (010 FR-027). A stored document always parses: one that does not is a fault, not a
+        // miss, and it stops the scan.
+        let mut fault: Option<CommandError> = None;
+        let mut keep = |bytes: &[u8]| {
+            if fault.is_some() {
+                return false;
+            }
+            let matched = RawDoc::from_bytes(bytes)
+                .map_err(CommandError::from)
+                .and_then(|doc| plan.filter.matches(doc, &ctx).map_err(from_mql));
+            matched.unwrap_or_else(|e| {
+                fault = Some(e);
+                false
+            })
+        };
+        let found = backend.scan_matching(&next, &end, SCAN_CHUNK, concern, &mut keep)?;
+        if let Some(e) = fault {
+            return Err(e);
+        }
+        for ((key, bytes), seen) in found.rows.into_iter().zip(found.seen) {
+            if !each(key, &bytes)? {
+                return Ok(examined + seen as u64);
             }
         }
-        if short {
-            return Ok(examined);
+        examined += found.examined as u64;
+        match found.next {
+            Some(from) => next = from,
+            None => return Ok(examined),
         }
     }
 }

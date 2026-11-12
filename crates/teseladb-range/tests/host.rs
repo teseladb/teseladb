@@ -644,7 +644,7 @@ fn scan_outside_way(
 ) -> Option<(Hlc, Vec<Row>)> {
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let mut cache = ViewCache::default();
-    view.scan(&mut cache, span, (limit, backward), (n.wall(), || n.now), concern, |_| false)
+    view.scan(&mut cache, span, (limit, backward), || n.now, concern, |_| false)
 }
 
 #[test]
@@ -680,39 +680,79 @@ fn a_scan_outside_the_core_gives_the_documents_of_the_span_and_a_later_write_goe
     }
 }
 
-/// A scan outside the core looks only at the writes of its span (H-049 of the native tests): a
-/// write in flight elsewhere in the range does not send it to the core; one of a key in its span
-/// does, also of a key with no version yet; and the next write of its span goes above its mark.
+/// A scan outside the core reads at the mark of the last entry its range applied (005 FR-031):
+/// a write in flight, of a key of its span or not, does not send it to the core, because that
+/// write's mark is above the scan's; the scan gives what was applied, and the write once it is.
 #[test]
-fn a_scan_outside_the_core_waits_only_for_the_writes_of_its_span() {
+fn a_scan_outside_the_core_reads_what_was_applied_whatever_is_in_flight() {
     let mut n = Node::new();
-    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    let first = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
     n.settle();
-    // An insert in flight of a key that has no version yet.
-    let w = n.mutate(b"\x01m", Box::new(SetKey(b"\x01m".to_vec(), Some(2))), MAJORITY);
-    let (read, rows) = scan_outside(&n, (b"\x01a", b"\x01k"), 10, ReadConcern::Local)
-        .expect("a write past its span does not send the scan to the core");
-    assert_eq!(rows, vec![(b"\x01a".to_vec(), (1, vec![1]))]);
-    // Its span reaches the insert, but with its limit it reads only up to `a` (a find with a
-    // limit asks for the rest of the collection, H-049).
-    let (_, first) = scan_outside(&n, (b"\x01a", b"\x01y"), 1, ReadConcern::Local)
-        .expect("an insert past the keys it read does not send the scan to the core");
-    assert_eq!(first, vec![(b"\x01a".to_vec(), (1, vec![1]))]);
-    assert!(scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).is_none());
-    assert!(scan_outside(&n, (b"\x01m", b"\x01m\x00"), 10, ReadConcern::Local).is_none());
-    assert!(scan_outside_way(&n, (b"\x01k", b"\x01y"), (1, true), ReadConcern::Local).is_none());
-    n.settle();
-    assert!(n.reply(w).is_some());
-    let (_, all) =
-        scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).expect("served outside");
-    assert_eq!(all.len(), 2);
-    // A key of the span it read is written above its mark.
-    let later = n.mutate(b"\x01b", Box::new(SetKey(b"\x01b".to_vec(), Some(3))), MAJORITY);
-    n.settle();
-    match n.reply(later) {
-        Some(Ok(Reply::Mutated { ts, .. })) => assert!(*ts > read, "{ts:?} above {read:?}"),
-        other => panic!("{other:?}"),
+    let Some(Ok(Reply::Mutated { ts: applied, .. })) = n.reply(first).cloned() else {
+        panic!("the first write")
+    };
+    // In flight: an insert of a key that has no version yet, and a second write of `a`.
+    let insert = n.mutate(b"\x01m", Box::new(SetKey(b"\x01m".to_vec(), Some(2))), MAJORITY);
+    let again = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(9))), MAJORITY);
+    let before = vec![(b"\x01a".to_vec(), (1, vec![1]))];
+    for (span, way) in [
+        ((&b"\x01a"[..], &b"\x01y"[..]), (10, false)),
+        ((b"\x01a", b"\x01k"), (10, false)),
+        ((b"\x01a", b"\x01y"), (1, true)),
+    ] {
+        let (mark, rows) = scan_outside_way(&n, span, way, ReadConcern::Local)
+            .expect("a write in flight does not send the scan to the core");
+        assert_eq!((mark, rows), (applied, before.clone()), "{span:?} {way:?}");
     }
+    let (_, none) =
+        scan_outside(&n, (b"\x01m", b"\x01m\x00"), 10, ReadConcern::Local).expect("served outside");
+    assert!(none.is_empty(), "the insert in flight is not applied yet");
+    n.settle();
+    // Both writes took marks above the scan's, and a scan now reads them.
+    for w in [insert, again] {
+        match n.reply(w) {
+            Some(Ok(Reply::Mutated { ts, .. })) => {
+                assert!(*ts > applied, "{ts:?} above {applied:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let (mark, all) =
+        scan_outside(&n, (b"\x01a", b"\x01y"), 10, ReadConcern::Local).expect("served outside");
+    assert!(mark > applied);
+    assert_eq!(all, vec![(b"\x01a".to_vec(), (1, vec![9])), (b"\x01m".to_vec(), (1, vec![2]))]);
+}
+
+/// A scan with a filter runs it on the stored bytes and copies only what it accepts (010
+/// FR-027): it says how many documents it examined, how many it had examined at each one it
+/// took, and where it goes on when it stops at its number of documents.
+#[test]
+fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
+    let mut n = Node::new();
+    for (k, v) in [(b"\x01a", 1), (b"\x01b", 2), (b"\x01c", 3), (b"\x01d", 4), (b"\x01e", 5)] {
+        n.mutate(k, Box::new(SetKey(k.to_vec(), Some(v))), MAJORITY);
+        n.settle();
+    }
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = ViewCache::default();
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    let odd = |v: &[u8]| v[0] % 2 == 1;
+    let mut scan = |span, examine| {
+        view.scan_matching(&mut cache, span, examine, || n.now, ReadConcern::Local, |_| false, odd)
+            .expect("served outside")
+    };
+    let all = scan(span, 10);
+    let keys: Vec<&[u8]> = all.rows.iter().map(|(k, _)| k.as_slice()).collect();
+    assert_eq!(keys, [&b"\x01a"[..], b"\x01c", b"\x01e"]);
+    assert_eq!((all.examined, all.seen.as_slice(), &all.next), (5, &[1, 3, 5][..], &None));
+    // It stops at its number of documents and says where the rest starts.
+    let first = scan(span, 2);
+    assert_eq!((first.rows.len(), first.examined, first.seen.as_slice()), (1, 2, &[1][..]));
+    let from = first.next.expect("more to examine");
+    assert_eq!(from, b"\x01b\x00");
+    let rest = scan((&from, span.1), 10);
+    assert_eq!((rest.rows.len(), rest.examined, &rest.next), (2, 3, &None));
+    assert!(rest.ts == all.ts);
 }
 
 #[test]
@@ -721,23 +761,28 @@ fn a_scan_outside_the_core_goes_to_it_when_it_cannot_be_served_there() {
     n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
     n.settle();
     let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
-    // A write in flight on the range.
-    let w = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(2))), MAJORITY);
+    // A write its client already has the answer of, before it is applied (`w: 1`, DV-010): a
+    // read that comes after that answer has to see it, and the view does not hold it yet.
+    let w1 = WriteConcern { w: W::Nodes(1), j: false };
+    let w = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(2))), w1);
+    let (now, wall) = (n.now, n.wall());
+    n.host.poll(&mut n.core, now, wall);
+    let answered = n.host.take_replies();
+    assert!(
+        answered.iter().any(|(id, r)| *id == w && r.is_ok()),
+        "answered once it is in the leader's log: {answered:?}"
+    );
     assert!(scan_outside(&n, span, 10, ReadConcern::Local).is_none());
     n.settle();
-    assert!(n.reply(w).is_some());
     // A span past the range, a linearizable read and no limit go to the core.
     assert!(scan_outside(&n, (b"\x01a", b"\x02"), 10, ReadConcern::Local).is_none());
     assert!(scan_outside(&n, span, 10, ReadConcern::Linearizable).is_none());
     assert!(scan_outside(&n, span, 0, ReadConcern::Local).is_none());
-    // Far past what the core published as valid when the mark is taken.
+    // Far past what the core published as valid.
     let view = n.host.views().get(G).expect("the view");
     let late = n.now + Nanos::from_secs(60);
     let mut cache = ViewCache::default();
-    let r =
-        view.scan(&mut cache, span, (10, false), (n.wall(), || late), ReadConcern::Local, |_| {
-            false
-        });
+    let r = view.scan(&mut cache, span, (10, false), || late, ReadConcern::Local, |_| false);
     assert!(r.is_none());
     // Back to normal once the write is applied.
     let (_, rows) = scan_outside(&n, span, 10, ReadConcern::Local).expect("served outside");
