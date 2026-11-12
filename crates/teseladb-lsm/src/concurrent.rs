@@ -102,6 +102,19 @@ pub struct ViewCache {
     held: Option<(Arc<Inner>, u64, SharedView)>,
 }
 
+impl ViewCache {
+    /// Lets go of the version this cache holds: a reader that stops reading would otherwise keep
+    /// every file of it, and the core deletes a file only once nothing holds it.
+    pub fn release(&mut self) {
+        self.held = None;
+    }
+
+    /// Whether the cache holds a version.
+    pub fn holds(&self) -> bool {
+        self.held.is_some()
+    }
+}
+
 impl std::fmt::Debug for ViewCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ViewCache").field("version", &self.held.as_ref().map(|h| h.1)).finish()

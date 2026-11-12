@@ -358,6 +358,64 @@ fn the_shared_cache_forgets_the_blocks_of_a_deleted_file() {
     assert_eq!(shared.cache_bytes(), 0, "the deleted files' blocks are gone");
 }
 
+/// The `.sst` files the LSM of `small` keeps on `disk`.
+fn tables_on(disk: &mut MemDisk) -> usize {
+    let dir = std::path::Path::new("core-00/lsm");
+    let files = disk.list(dir).expect("list");
+    files.iter().filter(|p| p.extension().is_some_and(|e| e == "sst")).count()
+}
+
+#[test]
+fn a_released_cache_lets_the_files_of_its_version_go() {
+    // H-052, found by the sustained load of 002 (12-11-2026): every connection kept the version
+    // it read last in its cache, so a connection waiting in a client's pool held the files
+    // compactions had replaced: 181 files and 3.9 GB on disk for 27 files and 447 MB in the
+    // version. The connection lets its cache go when the operation ends.
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let g = GroupId(1);
+    for i in 0..400u32 {
+        let key = format!("k{i:05}");
+        lsm.put(g, u64::from(i) + 1, key.as_bytes(), ts(1, 0), &[9u8; 200]).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.publish();
+    let before = tables_on(&mut disk);
+    assert!(before > 1, "the memtable went to several files");
+    let shared = lsm.shared();
+    let mut cache = ViewCache::default();
+    shared.view_cached(&mut cache);
+    assert!(cache.holds());
+    for i in 0..400u32 {
+        let key = format!("k{i:05}");
+        lsm.put(g, u64::from(i) + 401, key.as_bytes(), ts(2, 0), &[7u8; 200]).unwrap();
+    }
+    lsm.flush();
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::from_secs(10));
+    lsm.publish();
+    lsm.run_io(&mut disk, Nanos::from_secs(20));
+    let held = tables_on(&mut disk);
+    assert!(held > before, "the cached version keeps its files: {held} after {before}");
+    cache.release();
+    assert!(!cache.holds());
+    lsm.run_io(&mut disk, Nanos::from_secs(30));
+    let after = tables_on(&mut disk);
+    assert!(after < held, "the replaced files went once released: {after} of {held}");
+    let mut fresh = ViewCache::default();
+    let view = shared.view_cached(&mut fresh).clone();
+    let (ask, asks) = mpsc::channel::<Ask>();
+    let reader = thread::spawn(move || {
+        let row = get(&shared, &view, &ask, b"k00000", ts(3, 0));
+        row.map(|r| r.3)
+    });
+    while !reader.is_finished() {
+        serve(&mut disk, &asks);
+    }
+    assert_eq!(reader.join().expect("reader"), Some(vec![7u8; 200]));
+}
+
 /// The core's cache and the shared one split the block cache budget between them, never more
 /// than it (012 FR-013): each had the whole budget, twice the core's share of the node's memory.
 #[test]

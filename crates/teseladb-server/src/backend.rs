@@ -1176,6 +1176,7 @@ impl Backend for ServerBackend {
 
     fn end_operation(&mut self) {
         self.release_pins();
+        self.release_outside();
     }
 
     fn changes(

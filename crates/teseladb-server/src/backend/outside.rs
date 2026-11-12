@@ -139,6 +139,14 @@ pub(super) struct Outside {
     routes: crate::routes::RouteCache,
 }
 
+impl Outside {
+    /// Drops the LSM versions and the open files this worker kept (see `release_outside`).
+    fn release(&mut self) {
+        self.caches.iter_mut().for_each(ViewCache::release);
+        self.files.clear();
+    }
+}
+
 /// Reads of one range not reported yet.
 #[derive(Debug)]
 struct Tally {
@@ -406,6 +414,14 @@ impl ServerBackend {
         }
     }
 
+    /// Lets go of what the worker kept for its reads outside the cores once an operation ends:
+    /// the LSM versions and the open files. A connection that waits in a client's pool would
+    /// otherwise keep files that compactions replaced, and the disk space of a deleted file
+    /// that is still open (H-052).
+    pub(super) fn release_outside(&mut self) {
+        self.outside.release();
+    }
+
     /// Reports every tally not reported yet (when the worker ends).
     pub(super) fn report_outside(&mut self) {
         for ((core, g), t) in std::mem::take(&mut self.outside.tallies) {
@@ -420,6 +436,35 @@ impl ServerBackend {
         if let Some(tx) = self.cores.get(core) {
             let _ = tx.send(CoreInput::App(NodeMsg::OutsideLoad(g, t.ops, t.keys)));
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod release_tests {
+    use super::*;
+    use teseladb_lsm::{Lsm, LsmConfig};
+    use teseladb_raftlog::MemDisk;
+
+    #[test]
+    fn a_worker_lets_go_of_its_versions_and_files() {
+        // H-052: a connection waiting in a client's pool kept the version of each core it read
+        // last and the files it had open, so replaced files stayed on disk.
+        let cfg = LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() };
+        let mut disk = MemDisk::new();
+        let (lsm, _) = Lsm::recover(&cfg, &mut disk).expect("recovery");
+        lsm.publish();
+        let shared = lsm.shared();
+        let mut outside = Outside::default();
+        outside.caches.resize_with(2, ViewCache::default);
+        shared.view_cached(&mut outside.caches[1]);
+        let file = std::env::current_exe().expect("this test's file");
+        let open = File::open(&file).expect("open");
+        outside.files.insert(file.display().to_string(), open);
+        assert!(outside.caches[1].holds());
+        outside.release();
+        assert!(outside.caches.iter().all(|c| !c.holds()), "no version held");
+        assert!(outside.files.is_empty(), "no file open");
     }
 }
 
