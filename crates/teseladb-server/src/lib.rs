@@ -60,6 +60,7 @@ pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
 pub mod pki;
+pub mod pressure;
 pub mod ranges;
 pub mod relocations;
 pub mod replica_port;

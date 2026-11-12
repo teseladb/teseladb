@@ -499,6 +499,41 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             }
         }
     }
+    // The Raft log of each core, on disk and in memory, and what its LSM writes (012 FR-016).
+    type Gauge = (&'static str, &'static str, fn(&crate::data::LsmSizes) -> f64);
+    let per_core: [Gauge; 5] = [
+        (
+            "teseladb_raft_log_disk_bytes",
+            "Bytes the segments of each core's Raft log take on disk.",
+            |s| s.log_disk_bytes as f64,
+        ),
+        (
+            "teseladb_raft_log_memory_bytes",
+            "Bytes of the Raft entries each core holds in memory.",
+            |s| s.log_memory_bytes as f64,
+        ),
+        (
+            "teseladb_lsm_write_amplification",
+            "Bytes each core's LSM wrote to files per byte its callers wrote.",
+            |s| s.write_amp_milli as f64 / 1000.0,
+        ),
+        (
+            "teseladb_lsm_stalls_total",
+            "Writes that came while each core's LSM asked to slow down.",
+            |s| s.stalls as f64,
+        ),
+        (
+            "teseladb_lsm_rejects_total",
+            "Writes that came while each core's LSM rejected proposals.",
+            |s| s.rejects as f64,
+        ),
+    ];
+    for (name, help, value) in per_core {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge");
+        for (core, s) in cores {
+            let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", value(s));
+        }
+    }
     let _ = writeln!(
         out,
         "# HELP teseladb_range_latch_waits_total Reads and writes of each core's ranges that waited for a latch."

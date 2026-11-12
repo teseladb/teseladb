@@ -357,6 +357,12 @@ impl Lsm {
         self.version = Arc::new(v);
     }
 
+    /// Bytes in the memtables, frozen ones included, and those of the active one alone.
+    pub fn memtables_bytes(&self) -> (u64, u64) {
+        let all = self.version.memtables.iter().map(|m| m.bytes()).sum();
+        (all, self.version.memtables[0].bytes())
+    }
+
     /// Freezes the active memtable now (before a shutdown, an export or a test).
     pub fn flush(&mut self) {
         self.freeze();

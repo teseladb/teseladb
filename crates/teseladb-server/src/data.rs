@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use teseladb_hlc::Hlc;
@@ -44,6 +45,7 @@ use crate::forward::{Fetch, Request};
 use crate::hosting::Hosting;
 use crate::leaders::Leaders;
 use crate::merges::{MERGE_BYTES, MERGE_COLD, Merges};
+use crate::pressure::{CorePressure, NodePressure};
 use crate::ranges::{Ranges, Replicas};
 use crate::relocations::{RelocateMsg, Relocations};
 use crate::transfer::Transfers;
@@ -60,6 +62,8 @@ pub const IDLE_FLUSH: Nanos = Nanos::from_secs(1);
 const LONG_WAIT: Nanos = Nanos::from_secs(10);
 /// How often the LSM learns the live bytes of the core's ranges, which bound its files' space.
 const LIVE_EVERY: Nanos = Nanos::from_secs(5);
+/// How often a core counts its memtables and its log with the node's.
+const PRESSURE_EVERY: Nanos = Nanos::from_millis(100);
 /// Longest a memtable holds back a range's log before it is flushed, however busy its core:
 /// RefEngine's checkpoint period (`syncPeriodSecs`), after which RefDb removes old journal files.
 pub const CHECKPOINT_EVERY: Nanos = Nanos::from_secs(60);
@@ -125,6 +129,17 @@ pub struct LsmSizes {
     pub full_after: u64,
     /// Reads and writes of the core's ranges that waited for another write's latch.
     pub latch_waits: u64,
+    /// Bytes the core's Raft log takes on disk, and those of the entries it holds in memory
+    /// (012 FR-016, FR-018).
+    pub log_disk_bytes: u64,
+    /// Bytes of the Raft entries the core's groups hold in memory.
+    pub log_memory_bytes: u64,
+    /// Bytes its LSM wrote to files per thousand bytes its callers wrote.
+    pub write_amp_milli: u64,
+    /// Writes that came while the LSM asked to slow down, and while it rejected them.
+    pub stalls: u64,
+    /// Writes that came while the LSM rejected proposals.
+    pub rejects: u64,
 }
 
 /// What this node's replica of a range looks like.
@@ -275,6 +290,9 @@ pub struct DataCore {
     /// The compactions `compact` asked for (DV-017): the bytes of the files when each was asked,
     /// and who waits for the bytes it freed.
     compactions: BTreeMap<u64, (u64, std::sync::mpsc::Sender<u64>)>,
+    /// Its part in what the node's cores hold together (012 FR-018, FR-019), and when it counts
+    /// it next.
+    pressure: Option<(CorePressure, Nanos)>,
 }
 
 impl DataCore {
@@ -314,7 +332,15 @@ impl DataCore {
             failure_told: false,
             live_at: Nanos::ZERO,
             compactions: BTreeMap::new(),
+            pressure: None,
         }
+    }
+
+    /// The core counts its memtables and its log with the node's other cores, and flushes for
+    /// the node when `node` asks (012 FR-018, FR-019).
+    pub fn with_pressure(mut self, node: Arc<NodePressure>) -> DataCore {
+        self.pressure = Some((CorePressure::new(node), Nanos::ZERO));
+        self
     }
 
     /// Compacts the core's LSM for `compact` (DV-017, H-054): `reply` gets the bytes of files it
@@ -509,6 +535,11 @@ impl DataCore {
                     live_bytes: m.live_bytes,
                     full_after: m.full_after,
                     latch_waits,
+                    log_disk_bytes: core.store().wal_disk_bytes(),
+                    log_memory_bytes: core.store().entries_bytes(),
+                    write_amp_milli: (m.write_amp * 1000.0) as u64,
+                    stalls: m.stalls_total,
+                    rejects: m.rejects_total,
                 };
                 let _ = reply.send(Ok(DataReply::Lsm(sizes)));
                 return;
@@ -938,6 +969,7 @@ impl DataCore {
         self.relocations.step(core, &mut self.host, &mut self.replicas, &lsm, now);
         self.group0.extend(self.relocations.take_group0());
         self.flush_idle(core, now);
+        self.relieve(core, now);
         let nodes = self.transfers.sink_group().map(|g| self.replicas.nodes(g)).unwrap_or_default();
         self.transfers.forget_unawaited(core);
         // A replica frozen for a merge keeps its data: the left range of the node takes it over, and
@@ -1017,6 +1049,27 @@ impl DataCore {
         self.idle = idle;
         if flush {
             self.lsm.borrow_mut().flush();
+        }
+    }
+
+    /// Counts the core's memtables and its log with the node's, and does what the node asks of
+    /// it: its memtable flushed, and the snapshots of the groups that hold its log's oldest
+    /// segment (a snapshot the release floor holds back gets its flush from `flush_idle`).
+    fn relieve(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
+        let Some((pressure, at)) = self.pressure.as_mut() else { return };
+        if now < *at {
+            return;
+        }
+        *at = Nanos(now.0.saturating_add(PRESSURE_EVERY.0));
+        let memtables = self.lsm.borrow().memtables_bytes();
+        let relief = pressure.step(memtables, core.store().wal_disk_bytes(), now);
+        if relief.flush {
+            self.lsm.borrow_mut().flush();
+        }
+        if relief.snapshots {
+            for holder in core.store().wal_holders() {
+                core.snapshot_now(holder.group);
+            }
         }
     }
 
@@ -1779,5 +1832,35 @@ mod tests {
         d.requeue_relocate(1, RelocateMsg::Imported { group: G });
         let msgs = d.take_relocate_msgs();
         assert!(matches!(msgs[..], [(1, RelocateMsg::Imported { group: G })]));
+    }
+
+    #[test]
+    fn a_core_flushes_its_memtable_when_the_node_asks() {
+        let (mut core, d, mut disk) = setup_disk(&[1]);
+        let put = |d: &DataCore, k: u8| {
+            let at = Hlc { physical: 1, logical: 0 };
+            d.lsm.borrow_mut().put(G, 1, &[1, k], at, &[k; 64]).unwrap();
+        };
+        // Alone, a core keeps what its memtable holds.
+        let mut d = d;
+        let now = lead_alone(&mut core, &mut d, &mut disk);
+        put(&d, 1);
+        d.poll(&mut core, (now, 0));
+        assert!(d.lsm.borrow().memtables_bytes().1 > 0);
+        // A node with a byte for its memtables is over it: the core, above its share, flushes.
+        let node = Arc::new(NodePressure::new(1, 8 << 20, 1));
+        let mut d = d.with_pressure(node.clone());
+        d.poll(&mut core, (now, 0));
+        assert_eq!(d.lsm.borrow().memtables_bytes().1, 0, "the active memtable was frozen");
+        assert!(node.memtables() > 0, "the frozen one counts until it is in a file");
+        run_io(&mut core, &mut d, &mut disk, now);
+        // A log past its cap flushes too, with the node well under its memory: a segment of
+        // this core's log is larger than the cap of a node of many cores without segments kept.
+        let node = Arc::new(NodePressure::new(u16::MAX, 0, u64::MAX));
+        assert!(core.store().wal_disk_bytes() > node.log_cap());
+        let mut d = d.with_pressure(node);
+        put(&d, 2);
+        d.poll(&mut core, (now + Nanos::from_secs(2), 0));
+        assert_eq!(d.lsm.borrow().memtables_bytes().1, 0);
     }
 }

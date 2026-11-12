@@ -63,6 +63,7 @@ use crate::enroll::{Enroller, SECRET_LEN, Token};
 use crate::hosting::Hosting;
 use crate::liveness::{DataPlace, Group0Place, NodeRoles, SharedLoads};
 use crate::logic::{Group0View, NodeLogic, NodeMsg};
+use crate::pressure::NodePressure;
 use crate::ranges::SPLIT_BYTES;
 use crate::routes::SharedRoutes;
 use crate::transfer::{Transfers, transfer_dir};
@@ -97,6 +98,9 @@ const FIRST_DATA_FORMAT: u32 = 1;
 
 /// Longest a new node keeps trying to join before giving up.
 pub const JOIN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The size of a segment of a core's log (012 FR-017).
+pub const WAL_SEGMENT_BYTES: u64 = 8 << 20;
 
 /// Pause between two rounds of join attempts.
 const JOIN_RETRY: Duration = Duration::from_millis(200);
@@ -296,7 +300,10 @@ impl Default for NodeConfig {
             join: Vec::new(),
             join_deadline: JOIN_DEADLINE,
             // A batch is written while the ones before wait for their syncs (D-159, H-048).
+            // Segments of 8 MiB (012 FR-017): a core keeps a few whole segments of its log, and
+            // with larger ones the logs of a node with many cores took gigabytes at rest.
             storage: StorageConfig {
+                wal_segment_size: WAL_SEGMENT_BYTES,
                 max_inflight_batches: teseladb_multiraft::INFLIGHT_BATCHES,
                 ..StorageConfig::default()
             },
@@ -493,6 +500,8 @@ struct CoreSpec {
     clock: NodeClock,
     storage: StorageConfig,
     lsm: LsmConfig,
+    /// What the node's cores hold together (012 FR-018, FR-019).
+    pressure: Arc<NodePressure>,
     snapshot_entries: u64,
     seed: u64,
     /// Core 0's part.
@@ -547,7 +556,7 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes)
         .with_cores(spec.node_cores);
     let data = data.with_backups(dir.join("backup"), random_u64());
-    let data = data.with_views(spec.views.clone());
+    let data = data.with_views(spec.views.clone()).with_pressure(spec.pressure.clone());
     Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone()))
 }
 
@@ -942,6 +951,11 @@ impl<D: Disk + Send + 'static> Node<D> {
             .or_else(teseladb_sys::memory_limit::host_default)
             .map(|total| crate::memory::MemoryBudget::new(total, cores));
         let lsm = memory.map_or_else(|| cfg.lsm.clone(), |m| m.lsm(&cfg.lsm));
+        // The memtables and the logs of every core, counted together (012 FR-018, FR-019).
+        let memtables = memory.map_or(u64::MAX, |m| {
+            m.part(crate::memory::Component::Memtables).saturating_mul(u64::from(cores))
+        });
+        let pressure = Arc::new(NodePressure::new(cores, cfg.storage.wal_segment_size, memtables));
         // Where each core runs (012 FR-006).
         let allowed = teseladb_sys::numa::allowed_cpus()?;
         let cpus = crate::affinity::core_cpus(&cfg.affinity, cores, &allowed)
@@ -1059,6 +1073,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 clock: clock.clone(),
                 storage: cfg.storage.clone(),
                 lsm: lsm.clone(),
+                pressure: pressure.clone(),
                 snapshot_entries: cfg.snapshot_entries,
                 seed: seed.wrapping_add(u64::from(k)),
                 group0,
@@ -1728,5 +1743,46 @@ mod tests {
         drop(mailbox);
         let cmd = Group0Command::ClusterTick { cluster_time_ms: 1 };
         assert_eq!(group0_change(&tx, cmd), Err("the node is stopping".to_owned()));
+    }
+
+    #[test]
+    fn an_entry_larger_than_a_segment_of_the_log_is_kept() {
+        use teseladb_raftlog::format::wal::EntryKind;
+        use teseladb_raftlog::{Disk, LogEntry, MemDisk};
+        use teseladb_types::{Bytes, Durability, Nanos};
+        let cfg = NodeConfig::default().storage;
+        assert_eq!(cfg.wal_segment_size, WAL_SEGMENT_BYTES);
+        cfg.validate().unwrap();
+        let big = usize::try_from(WAL_SEGMENT_BYTES).unwrap() * 3 / 2;
+        let entry = |index: u64, len: usize| LogEntry {
+            index,
+            term: 1,
+            kind: EntryKind::Normal,
+            data: Bytes::from_vec(vec![7; len]),
+        };
+        let mut disk = MemDisk::new();
+        let g = GroupId(9);
+        let mut store = CoreStore::recover(&cfg, 0, &mut disk).unwrap().0;
+        store.create_group(g, Bytes::from("conf"), Durability::Strict).unwrap();
+        // One and a half segments in one entry, with an entry on each side of it.
+        for (index, len) in [(1, 100), (2, big), (3, 100)] {
+            store.append_raft(g, &[entry(index, len)], None, Durability::Strict).unwrap();
+            let mut now = Nanos::ZERO;
+            for _ in 0..1_000 {
+                store.run_io(&mut disk, now);
+                match store.next_deadline() {
+                    Some(d) if d > now => now = d,
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        }
+        // It is on disk whole: a store that recovers has the three.
+        let dyn_disk: &mut dyn Disk = &mut disk;
+        let again = CoreStore::recover(&cfg, 0, dyn_disk).unwrap().0;
+        let log = again.group(g).unwrap();
+        assert_eq!(log.last_index(), 3);
+        let kept = log.entries(1, 4, u64::MAX).unwrap();
+        assert_eq!(kept.iter().map(|e| e.data.len()).collect::<Vec<_>>(), [100, big, 100]);
     }
 }

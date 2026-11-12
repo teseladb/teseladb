@@ -66,6 +66,16 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     for name in ["teseladb_memory_frozen_memtables_bytes", "teseladb_memory_aggregations_bytes"] {
         assert!(sample(&text, name).is_some(), "{name} in {text}");
     }
+    // The Raft log of a core that wrote: a segment on disk, and its entries in memory.
+    let of_cores = |name: &str| -> f64 {
+        text.lines()
+            .filter(|l| l.starts_with(&format!("{name}{{core=")))
+            .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+            .sum()
+    };
+    assert!(of_cores("teseladb_raft_log_disk_bytes") > 0.0, "{text}");
+    assert!(of_cores("teseladb_raft_log_memory_bytes") > 0.0, "{text}");
+    assert!(text.contains("teseladb_lsm_write_amplification{core="), "{text}");
     #[cfg(target_os = "macos")]
     assert!(sample(&text, "teseladb_memory_allocated_bytes").expect("allocated") > 0.0);
     let writes = "teseladb_stage_seconds_count{stage=\"write_range\"}";
