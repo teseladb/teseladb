@@ -200,22 +200,28 @@ impl RangeHost {
                     },
                 }
             }
-            let mut current = Vec::with_capacity(m.keys.len());
             let view = TxnView::default();
             let leader = self.ranges.get(&m.g).and_then(|r| r.leader.as_ref());
             // Every key is read in one pass, the missing blocks asked for together (as a
-            // transaction's keys are, `RangeHost::step_txn`).
+            // transaction's keys are, `RangeHost::step_txn`); what was read stays read.
+            let mut read = match std::mem::take(&mut m.read) {
+                Partial::Visible(l, read) if l == latch && read.len() == m.keys.len() => read,
+                _ => vec![None; m.keys.len()],
+            };
             let mut missing = false;
-            for k in &m.keys {
+            for (k, slot) in m.keys.iter().zip(read.iter_mut()) {
+                if slot.is_some() {
+                    continue;
+                }
                 // The value a pending write of the key leaves, which this one goes on (FR-029).
                 if let Some(v) = leader.and_then(|l| l.latches.pending_value(k)) {
-                    current.push(v.clone());
+                    *slot = Some(v.clone());
                     continue;
                 }
                 // An intent of a transaction stops the write with its owner (008 FR-002): the
                 // layer above waits for it, or pushes it if it is abandoned, and writes again.
                 match read_visible(&self.lsm, k, (NEWEST, None), &view) {
-                    Some(Ok(v)) => current.push(v),
+                    Some(Ok(v)) => *slot = Some(v),
                     Some(Err(e)) => {
                         self.release(m.g, m.term, latch);
                         let e = read_error(e);
@@ -233,9 +239,11 @@ impl RangeHost {
                 }
             }
             if missing {
+                m.read = Partial::Visible(latch, read);
                 self.reqs.insert(id, Req::Mut(m));
                 return moved;
             }
+            let current: Vec<crate::push::Visible> = read.into_iter().flatten().collect();
             // A split cut the range while the write read its documents (007): they are the new
             // range's, and the caller retries there.
             if !m.keys.iter().all(|k| self.covers(m.g, k)) {

@@ -420,6 +420,21 @@ pub(crate) struct MutReq {
     /// The mark's physical part past which the leader no longer evaluates it (009 FR-006): the
     /// operation that sent it may have ended and released what it read of the catalog.
     deadline: Option<u64>,
+    /// What it read of its keys under the latch it holds, while blocks of the others are read.
+    read: Partial,
+}
+
+/// What a request read of its keys under one latch, key by key (`None`: not yet): the latch
+/// keeps them as they are, so a step after a block came reads only the keys still missing.
+#[derive(Default)]
+pub(crate) enum Partial {
+    /// Nothing read yet.
+    #[default]
+    Nothing,
+    /// A write's visible versions.
+    Visible(LatchId, Vec<Option<crate::push::Visible>>),
+    /// A transaction's newest versions.
+    Versions(LatchId, Vec<Option<Vec<teseladb_lsm::Item>>>),
 }
 
 enum GetState {
@@ -946,8 +961,19 @@ impl RangeHost {
         }
         self.refresh(core, g);
         let (state, waited) = (MutState::Latch, false);
-        let req =
-            MutReq { g, term: 0, keys, work, dedup, ack, state, waited, settled: false, deadline };
+        let req = MutReq {
+            g,
+            term: 0,
+            keys,
+            work,
+            dedup,
+            ack,
+            state,
+            waited,
+            settled: false,
+            deadline,
+            read: Partial::Nothing,
+        };
         self.reqs.insert(id, Req::Mut(req));
         self.step(core, id, now);
         id

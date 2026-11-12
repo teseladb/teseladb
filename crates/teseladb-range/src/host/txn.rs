@@ -421,7 +421,7 @@ impl RangeHost {
         &mut self,
         core: &mut MultiRaftCore<S>,
         id: ReqId,
-        m: MutReq,
+        mut m: MutReq,
         (latch, moved): (LatchId, bool),
         now: Nanos,
     ) -> bool {
@@ -429,14 +429,21 @@ impl RangeHost {
             Work::Txn(op) if matches!(**op, TxnOp::ResolveIntents { .. }) => RESOLVE_DEPTH,
             Work::Txn(_) | Work::Mutation(_) => 1,
         };
-        let mut versions = Vec::with_capacity(m.keys.len());
         // Every key is read in one pass: the blocks missing from the cache are all asked for
         // together, and the request waits once for them (H-051 of the native tests: one block at
-        // a time, 600 keys waited more than 10 s behind the disk's other work).
+        // a time, 600 keys waited more than 10 s behind the disk's other work). What was read
+        // stays read: the latch keeps it so.
+        let mut read = match std::mem::take(&mut m.read) {
+            Partial::Versions(l, read) if l == latch && read.len() == m.keys.len() => read,
+            _ => vec![None; m.keys.len()],
+        };
         let mut missing = false;
-        for k in &m.keys {
+        for (k, slot) in m.keys.iter().zip(read.iter_mut()) {
+            if slot.is_some() {
+                continue;
+            }
             match newest_versions(&self.lsm, k, depth) {
-                Some(Ok(v)) => versions.push(v),
+                Some(Ok(v)) => *slot = Some(v),
                 Some(Err(())) => {
                     self.release(m.g, m.term, latch);
                     self.reply(id, Err(RangeError::Unavailable));
@@ -446,9 +453,11 @@ impl RangeHost {
             }
         }
         if missing {
+            m.read = Partial::Versions(latch, read);
             self.reqs.insert(id, Req::Mut(m));
             return moved;
         }
+        let versions: Vec<Vec<Item>> = read.into_iter().flatten().collect();
         // A split cut the range while the request read its keys (007): the caller retries there.
         if !m.keys.iter().all(|k| self.covers(m.g, k)) {
             self.release(m.g, m.term, latch);

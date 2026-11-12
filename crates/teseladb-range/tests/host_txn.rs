@@ -309,3 +309,47 @@ fn a_request_asks_for_every_block_its_keys_miss_at_once() {
     assert!(reads >= KEYS, "{reads} blocks asked for at once, {KEYS} keys");
     assert!(matches!(n.answer(id), Ok(Reply::Intents { .. })));
 }
+
+/// A write reads each of its keys once while the blocks they miss come back one by one: what it
+/// read stays read under its latch, and each step reads only the keys still missing (H-051 of the
+/// native tests: re-reading every key at each block made the writes of many keys take half of a
+/// busy core).
+#[test]
+fn a_write_reads_each_key_once_while_its_blocks_come_back_one_by_one() {
+    const KEYS: usize = 32;
+    let lcfg = teseladb_lsm::LsmConfig {
+        dir: "core-00/lsm".into(),
+        cache_bytes: 4 << 10,
+        block_bytes: 4 << 10,
+        ..teseladb_lsm::LsmConfig::default()
+    };
+    let mut n = Node::with_lsm(lcfg);
+    let keys: Vec<Vec<u8>> = (0..KEYS).map(|i| format!("\x01k{i:03}").into_bytes()).collect();
+    for k in &keys {
+        n.write(k, &[7; 3000]);
+    }
+    n.host.lsm().borrow_mut().flush();
+    n.settle();
+    let gets = |n: &Node| n.host.lsm().borrow().metrics().gets_total;
+    let before = gets(&n);
+    // One write that reads every key and writes the first.
+    let m = Box::new(Set(keys[0].clone(), b"x".to_vec()));
+    let w = WriteReq { g: G, keys: keys.clone(), m, dedup: None, wc: MAJORITY };
+    let (now, wall) = (n.now, n.wall());
+    let id = n.host.mutate(&mut n.core, w, now, wall);
+    // The blocks come back one at a time, and the host steps after each. Reading every key again
+    // at each step, with a cache this small, asked for blocks without end.
+    let mut reads = 0;
+    loop {
+        let op = n.host.lsm().borrow_mut().poll_io(now);
+        let Some(op) = op else { break };
+        reads += 1;
+        assert!(reads <= 10 * KEYS, "{reads} reads of the disk for {KEYS} keys");
+        let done = teseladb_raftlog::Disk::execute(&mut n.disk, op);
+        n.host.lsm().borrow_mut().on_io_done(done, now);
+        n.host.poll(&mut n.core, now, wall);
+    }
+    assert!(matches!(n.answer(id), Ok(Reply::Mutated { .. })));
+    let read = gets(&n) - before;
+    assert!(read <= 2 * KEYS as u64, "{read} point reads for {KEYS} keys");
+}
