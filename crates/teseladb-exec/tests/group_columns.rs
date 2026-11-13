@@ -105,3 +105,70 @@ fn groups_on_columns_equal_groups_by_expressions() {
         }
     }
 }
+
+/// A number of one kind per batch, or a mix, for the groups that go into their accumulators a
+/// batch at a time (010 FR-030).
+fn number(rng: &mut Rng, kind: usize) -> Option<Value> {
+    Some(match kind {
+        0 => Value::Int32(rng.below(41) as i32 - 20),
+        1 => Value::Int64(rng.below(41) as i64 - 20),
+        2 => [Value::Double(0.0), Value::Double(-0.0), Value::Double(rng.below(9) as f64 / 4.0)]
+            [rng.below(3)]
+        .clone(),
+        3 => Value::Int64((1 << 52) + rng.below(5) as i64),
+        _ => match rng.below(7) {
+            0 => return None,
+            1 => Value::Null,
+            2 => Value::Double(f64::NAN),
+            3 => Value::Decimal128(Decimal128::from_parts(true, 3, 0).expect("d")),
+            4 => Value::String("x".into()),
+            5 => Value::Int32(i32::MIN),
+            _ => Value::Double(-0.0),
+        },
+    })
+}
+
+#[test]
+fn groups_of_numbers_a_batch_at_a_time_equal_groups_by_expressions() {
+    let mut rng = Rng(0x0BA7_C4ED);
+    let mut docs = Vec::new();
+    for batch in 0..40 {
+        // Each batch keeps to one kind of number, a few with a stray value of another.
+        let kind = batch % 5;
+        for i in 0..64 {
+            let mut x = d().with("_id", (batch * 64 + i) as i32).with("k", (rng.below(3)) as i32);
+            let kind = if rng.below(16) == 0 { rng.below(5) } else { kind };
+            if let Some(v) = number(&mut rng, kind) {
+                x.insert("v", v);
+            }
+            if rng.below(10) != 0 {
+                x.insert("w", Value::Int32(rng.below(7) as i32));
+            }
+            docs.push(x);
+        }
+    }
+    let stored: Vec<Document> = docs
+        .iter()
+        .map(|x| Document::from_stored(x.to_bytes().expect("small")).expect("canonical"))
+        .collect();
+    let built: Vec<Document> = docs
+        .iter()
+        .map(|x| {
+            let mut copy = x.clone();
+            copy.insert("_touched", true);
+            copy.remove("_touched");
+            copy
+        })
+        .collect();
+    assert!(built.iter().all(|x| x.canonical_bytes().is_none()));
+    let on_columns = Reference::new(1).with_collection("c", stored);
+    let by_expressions = Reference::new(1).with_collection("c", built);
+    for key in ["$k", "x"] {
+        for input in ["$v", "$w"] {
+            let stages = [group(key, input), d().with("$sort", d().with("_id", 1))];
+            let a = on_columns.evaluate("c", &stages).expect("groups");
+            let b = by_expressions.evaluate("c", &stages).expect("groups");
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{key} {input}");
+        }
+    }
+}

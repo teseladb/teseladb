@@ -153,6 +153,38 @@ impl Group {
             // The batch's columns, when the group runs on them and the documents are stored.
             let raws = plan.as_ref().and_then(|_| super::group_columns::stored(chunk));
             let columns = plan.as_ref().zip(raws.as_deref()).map(|(p, r)| (p, p.load(r)));
+            if let Some((p, c)) = columns.as_ref().filter(|(p, c)| p.whole(c)) {
+                // Every key and input from the columns: the lanes of each group of the batch
+                // go into its accumulators together.
+                let mut lanes_of: Vec<(usize, u64)> = Vec::new();
+                for lane in 0..chunk.len() {
+                    let key = p.key(c, lane).expect("a whole batch's keys come from its columns");
+                    let before = groups.list.len();
+                    let size = super::errors::value_size(&key);
+                    let g = groups.index_of(key, &self.outputs, col);
+                    if groups.list.len() > before {
+                        held += size;
+                    }
+                    match lanes_of.iter_mut().find(|(x, _)| *x == g) {
+                        Some((_, mask)) => *mask |= 1 << lane,
+                        None => lanes_of.push((g, 1 << lane)),
+                    }
+                    if store.is_some() && held > limit {
+                        spill = true;
+                        break 'batches;
+                    }
+                }
+                // The accumulators on columns collect no values, so they hold no more bytes.
+                for (g, mask) in lanes_of {
+                    let states = &mut groups.list[g].1;
+                    for (k, ((_, acc), st)) in
+                        self.outputs.iter().zip(states.iter_mut()).enumerate()
+                    {
+                        p.accumulate(c, k, acc, st, mask, (col, sbe))?;
+                    }
+                }
+                continue;
+            }
             for (lane, doc) in chunk.iter().enumerate() {
                 let mut scope: Option<Scope> = None;
                 let key = match columns.as_ref().and_then(|(p, c)| p.key(c, lane)) {
@@ -285,16 +317,26 @@ impl Groups {
         outputs: &Outputs,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<&mut Vec<State>, MqlError> {
+        let i = self.index_of(key, outputs, col);
+        Ok(&mut self.list[i].1)
+    }
+
+    /// The position of the group of `key` in the list, which it joins when new.
+    fn index_of(
+        &mut self,
+        key: Value,
+        outputs: &Outputs,
+        col: Option<&dyn teseladb_bson::Collator>,
+    ) -> usize {
         let canon = canonical(&key, col);
-        let i = match self.index.get(&canon) {
+        match self.index.get(&canon) {
             Some(i) => *i,
             None => {
                 self.list.push((key, outputs.iter().map(|(_, a)| a.start()).collect()));
                 self.index.insert(canon, self.list.len() - 1);
                 self.list.len() - 1
             }
-        };
-        Ok(&mut self.list[i].1)
+        }
     }
 
     fn finish(
