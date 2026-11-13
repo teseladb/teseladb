@@ -42,6 +42,8 @@ pub struct Mem {
     pub rnd: u64,
     /// Writes the range ran (not counting answers from the idempotence records).
     pub writes: usize,
+    /// Documents the filtered scans handed out (`Backend::scan_matching`).
+    pub matched: usize,
     /// Replicas: a `w` above it is unsatisfiable.
     pub replicas: u32,
     /// The next write fails with this error.
@@ -1109,6 +1111,20 @@ impl Backend for Mem {
         _: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         self.scan_dir(start, end, limit, true)
+    }
+
+    fn scan_matching(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        examine: usize,
+        concern: ReadConcern,
+        keep: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<teseladb_wire::commands::Matching, CommandError> {
+        let range = (start, end);
+        let out = teseladb_wire::commands::matching_by_scan(self, range, examine, concern, keep)?;
+        self.matched += out.rows.len();
+        Ok(out)
     }
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {

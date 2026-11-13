@@ -12,7 +12,7 @@ use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::Ctx as ExprCtx;
 use teseladb_exec::pipeline::meta::{INDEX_KEY, Meta};
 use teseladb_exec::pipeline::{Env, Pipeline};
-use teseladb_meta::catalog::Namespace;
+use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_mql::{Extensions, MqlError};
 use teseladb_range::read::ReadConcern;
@@ -721,20 +721,7 @@ fn read_through_on<B: Backend + ?Sized>(
         None => ns.clone(),
     };
     let Some(coll) = backend.collection(&base)? else { return Ok(Ok((Vec::new(), true))) };
-    let mut docs = Vec::new();
-    for_each_match_with(
-        backend,
-        documents_of(&coll),
-        &Document::new(),
-        None,
-        None,
-        concern,
-        |_, bytes| {
-            super::agg_memory::hold(bytes.len() as u64);
-            docs.push(Document::from(RawDoc::from_bytes(bytes)?));
-            Ok(true)
-        },
-    )?;
+    let docs = scanned(backend, &coll, &Document::new(), concern)?;
     let mut stages: Vec<Vec<u8>> = view.map(|v| v.pipeline).unwrap_or_default();
     for d in extra {
         stages.push(super::query::raw_bytes(d)?);
@@ -1276,8 +1263,8 @@ fn planned_read<B: Backend + ?Sized>(
         express.filter(|_| super::timeseries::spec_of(&coll).is_ok_and(|t| t.is_none()))
     {
         let docs = super::query::read_by_id(ctx.backend, &coll, &id, concern)?
-            .iter()
-            .map(|b| Ok(Document::from(RawDoc::from_bytes(b)?)))
+            .into_iter()
+            .map(|b| Ok(Document::from_stored(b)?))
             .collect::<Result<Vec<_>, CommandError>>()?;
         let metas = index_keys.then(|| docs.iter().map(|_| Meta::new()).collect());
         return Ok(Some((docs, metas, 0)));
@@ -1312,7 +1299,16 @@ fn planned_read<B: Backend + ?Sized>(
     };
     let Some((found, keys, _)) = super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note)?
     else {
-        return Ok(None);
+        // No index plan: the scan of the collection takes the filter of the `$match`es the
+        // pipeline starts with when it decides with the document alone (010 FR-027). With
+        // `$expr`, `$where`, `$text`, `$sampleRate` or a geographic operator the stages run
+        // it themselves, with their variables and engines, on the whole collection.
+        let applied = filter_of_leading_matches(&stages, &filter);
+        if applied == 0 || !super::query::decides_alone(&filter)? {
+            return Ok(None);
+        }
+        let docs = scanned(ctx.backend, &coll, &filter, concern)?;
+        return Ok(Some((docs, None, applied)));
     };
     // Taken whole, as `find` takes the rows it reads from the node's storage: their fields are
     // read when a stage asks for them.
@@ -1335,6 +1331,25 @@ fn planned_read<B: Backend + ?Sized>(
             .collect()
     });
     Ok(Some((docs, metas, filter_of_leading_matches(&stages, &filter))))
+}
+
+/// The documents of `coll` that `filter` accepts, read by a scan of the collection that runs the
+/// filter where it reads and copies only those (010 FR-027). They are taken whole, as the rows
+/// of an index plan: their fields are read when a stage asks for them.
+fn scanned<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    filter: &Document,
+    concern: ReadConcern,
+) -> Result<Vec<Document>, CommandError> {
+    let mut docs = Vec::new();
+    let range = documents_of(coll);
+    super::query::for_each_match_taken(backend, range, filter, None, None, concern, |_, bytes| {
+        super::agg_memory::hold(bytes.len() as u64);
+        docs.push(Document::from_stored(bytes)?);
+        Ok(true)
+    })?;
+    Ok(docs)
 }
 
 /// How many of `stages`, from the first, are `$match`es whose filters, one after the other, are

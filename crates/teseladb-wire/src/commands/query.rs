@@ -365,20 +365,41 @@ pub(crate) fn for_each_match_counted<B: Backend + ?Sized>(
     concern: ReadConcern,
     mut each: impl FnMut(Vec<u8>, &[u8]) -> Result<bool, CommandError>,
 ) -> Result<u64, CommandError> {
+    let each = |key, bytes: Vec<u8>| each(key, &bytes);
+    for_each_match_taken(backend, (start, end), filter, collation, vars, concern, each)
+}
+
+/// Whether `filter` decides each document from the document alone
+/// ([`Filter::reads_document_alone`]).
+pub(crate) fn decides_alone(filter: &Document) -> Result<bool, CommandError> {
+    Ok(Plan::new(filter, None, None)?.filter.reads_document_alone())
+}
+
+/// [`for_each_match_counted`] giving `each` the bytes of the document, to keep them.
+pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
+    backend: &mut B,
+    (start, end): (Vec<u8>, Vec<u8>),
+    filter: &Document,
+    collation: Option<&Document>,
+    vars: Option<&Document>,
+    concern: ReadConcern,
+    mut each: impl FnMut(Vec<u8>, Vec<u8>) -> Result<bool, CommandError>,
+) -> Result<u64, CommandError> {
     let plan = Plan::new(filter, None, collation)?.with_vars(vars);
     let ctx = plan.ctx();
     let mut next = start;
     let mut examined = 0u64;
     loop {
         // The filter runs where the documents are read, and only those it accepts are copied
-        // (010 FR-027). A stored document always parses: one that does not is a fault, not a
-        // miss, and it stops the scan.
+        // (010 FR-027). Only the frame of a stored document is checked, as in
+        // [`Plan::apply_row`]: one whose frame does not hold is a fault, not a miss, and it
+        // stops the scan.
         let mut fault: Option<CommandError> = None;
         let mut keep = |bytes: &[u8]| {
             if fault.is_some() {
                 return false;
             }
-            let matched = RawDoc::from_bytes(bytes)
+            let matched = RawDoc::from_stored(bytes)
                 .map_err(CommandError::from)
                 .and_then(|doc| plan.filter.matches(doc, &ctx).map_err(from_mql));
             matched.unwrap_or_else(|e| {
@@ -391,7 +412,7 @@ pub(crate) fn for_each_match_counted<B: Backend + ?Sized>(
             return Err(e);
         }
         for ((key, bytes), seen) in found.rows.into_iter().zip(found.seen) {
-            if !each(key, &bytes)? {
+            if !each(key, bytes)? {
                 return Ok(examined + seen as u64);
             }
         }

@@ -887,7 +887,7 @@ fn run_reading<B: Backend + ?Sized>(
             ran.docs += 1;
             ran.docs_at.push(ran.keys);
             let keep = match &residual {
-                Some(f) => f.matches(RawDoc::from_bytes(&bytes)?, &ctx).map_err(from_mql)?,
+                Some(f) => f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?,
                 None => true,
             };
             if keep && residual.is_some() {
@@ -1062,7 +1062,7 @@ fn intersected<B: Backend + ?Sized>(
         ran.docs += 1;
         ran.docs_at.push(ran.keys + 1);
         let keep = match &filter {
-            Some(f) => f.matches(RawDoc::from_bytes(&bytes)?, &ctx).map_err(from_mql)?,
+            Some(f) => f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?,
             None => true,
         };
         if keep {

@@ -126,6 +126,41 @@ impl Filter {
         }
         walk(&self.expr)
     }
+
+    /// Whether the filter decides a document from the document alone: it has no `$expr`,
+    /// `$where`, `$text`, `$sampleRate` nor geographic operator, which ask the reader's
+    /// [`crate::Extensions`] and its variables. Under one collation such a filter matches the
+    /// same documents whoever evaluates it, so a reader may run it for another (010 FR-027).
+    pub fn reads_document_alone(&self) -> bool {
+        fn pred(p: &Pred) -> bool {
+            match p {
+                Pred::Geo(_) => false,
+                Pred::And(preds) => preds.iter().all(pred),
+                Pred::Not(p) | Pred::ElemMatchValue(p) => pred(p),
+                Pred::ElemMatchDoc(e) => walk(e),
+                Pred::Eq(_)
+                | Pred::Cmp(..)
+                | Pred::ExprCmp(..)
+                | Pred::ExprEq(_)
+                | Pred::In(_)
+                | Pred::Regex(_)
+                | Pred::Exists
+                | Pred::Type(_)
+                | Pred::Mod { .. }
+                | Pred::Size(_)
+                | Pred::Bits(..) => true,
+            }
+        }
+        fn walk(e: &Expr) -> bool {
+            match e {
+                Expr::And(items) | Expr::Or(items) | Expr::Nor(items) => items.iter().all(walk),
+                Expr::Field { pred: p, .. } => pred(p),
+                Expr::Expr(_) | Expr::Where(_) | Expr::Text(_) | Expr::SampleRate(_) => false,
+                Expr::JsonSchema(_) | Expr::True | Expr::False => true,
+            }
+        }
+        walk(&self.expr)
+    }
 }
 
 /// The value of the first field named `name`.

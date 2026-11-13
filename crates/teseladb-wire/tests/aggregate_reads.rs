@@ -360,3 +360,91 @@ fn expr_comparisons_cross_types_through_an_index() {
         }
     }
 }
+
+/// Sixty documents in four groups, with no index but that of `_id`.
+fn grouped() -> Mem {
+    let mut m = Mem::new();
+    let docs: Vec<String> =
+        (0..60).map(|n| format!(r#"{{"_id":{n},"g":{},"c":{},"v":{n}}}"#, n % 4, n % 3)).collect();
+    run(&mut m, "r", &format!(r#"{{"insert":"c","documents":[{}]}}"#, docs.join(",")));
+    m
+}
+
+const GROUP_BY_C: &str =
+    r#"{"$group":{"_id":"$c","n":{"$sum":1},"v":{"$sum":"$v"}}},{"$sort":{"_id":1}}"#;
+
+/// 010 FR-027: without an index, the scan of the collection takes the filter of the `$match`es
+/// the pipeline starts with and hands the pipeline the documents that pass it alone; the answer
+/// is that of the same pipeline through an index.
+#[test]
+fn a_leading_match_without_an_index_is_run_by_the_scan() {
+    let mut m = grouped();
+    let cmd = format!(
+        r#"{{"aggregate":"c","pipeline":[{{"$match":{{"g":1}}}},{{"$match":{{"v":{{"$gte":20}}}}}},{GROUP_BY_C}],"cursor":{{}}}}"#
+    );
+    let before = m.matched;
+    let scanned = batch(&run(&mut m, "r", &cmd));
+    assert_eq!(m.matched - before, 10, "the scan hands out what both `$match`es accept");
+    assert_eq!(
+        scanned,
+        vec![
+            json(r#"{"_id":0,"n":4,"v":156}"#),
+            json(r#"{"_id":1,"n":3,"v":111}"#),
+            json(r#"{"_id":2,"n":3,"v":123}"#),
+        ]
+    );
+    run(&mut m, "r", r#"{"createIndexes":"c","indexes":[{"key":{"g":1},"name":"g_1"}]}"#);
+    assert_eq!(batch(&run(&mut m, "r", &cmd)), scanned);
+}
+
+/// A `$match` that matches nothing, one after another stage and a pipeline without one read
+/// what they read before.
+#[test]
+fn a_scan_takes_only_the_matches_the_pipeline_starts_with() {
+    let mut m = grouped();
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$match":{"g":9}},{"$count":"n"}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), Vec::<Document>::new(), "{r:?}");
+    let before = m.matched;
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$addFields":{"w":{"$add":["$v",1]}}},{"$match":{"w":{"$gt":58}}},{"$project":{"w":1}},{"$sort":{"_id":1}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), vec![json(r#"{"_id":58,"w":59}"#), json(r#"{"_id":59,"w":60}"#)]);
+    assert_eq!(m.matched - before, 60, "a `$match` after another stage reads the collection");
+    let r = run(
+        &mut m,
+        "r",
+        r#"{"aggregate":"c","pipeline":[{"$group":{"_id":null,"n":{"$sum":1}}}],"cursor":{}}"#,
+    );
+    assert_eq!(batch(&r), vec![json(r#"{"_id":null,"n":60}"#)]);
+}
+
+/// A leading `$match` that asks the stage's variables or engines stays in the pipeline: the scan
+/// hands it the whole collection, and the answer is the same.
+#[test]
+fn a_leading_match_with_an_expression_stays_in_the_pipeline() {
+    let mut m = grouped();
+    for (pipeline, want) in [
+        (r#"[{"$match":{"g":1,"$expr":{"$gt":["$v","$$floor"]}}},{"$count":"n"}]"#, r#"{"n":5}"#),
+        (
+            r#"[{"$match":{"$expr":{"$and":[{"$eq":["$g",2]},{"$lt":["$v","$$floor"]}]}}},{"$count":"n"}]"#,
+            r#"{"n":10}"#,
+        ),
+    ] {
+        let before = m.matched;
+        let r = run(
+            &mut m,
+            "r",
+            &format!(
+                r#"{{"aggregate":"c","pipeline":{pipeline},"cursor":{{}},"let":{{"floor":40}}}}"#
+            ),
+        );
+        assert_eq!(batch(&r), vec![json(want)], "{pipeline}");
+        assert_eq!(m.matched - before, 60, "{pipeline}");
+    }
+}

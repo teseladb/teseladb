@@ -833,3 +833,45 @@ fn matches_and_match_position_agree_on_type() {
         assert_eq!(whole, doc == r#"{"a": 1}"#, "{doc}");
     }
 }
+
+/// 010 FR-027: a filter that asks an engine or the variables of its reader says so, wherever
+/// the operator is.
+#[test]
+fn a_filter_says_whether_it_decides_with_the_document_alone() {
+    let alone = |filter: &str| {
+        let f = bytes(filter);
+        Filter::parse(raw(&f), FilterUse::Query)
+            .unwrap_or_else(|e| panic!("{filter}: {e}"))
+            .reads_document_alone()
+    };
+    for filter in [
+        r#"{}"#,
+        r#"{"g": 3}"#,
+        r#"{"a": {"$gt": 1, "$lte": 9}, "b": {"$in": [1, "x", null]}}"#,
+        r#"{"$or": [{"a": {"$exists": true}}, {"b": {"$type": "string"}}]}"#,
+        r#"{"$nor": [{"a": {"$mod": [3, 1]}}, {"b": {"$size": 2}}]}"#,
+        r#"{"a": {"$not": {"$regex": "^x"}}, "b": {"$bitsAllSet": [1, 5]}}"#,
+        r#"{"a": {"$elemMatch": {"b": 1, "c": {"$gt": 2}}}}"#,
+        r#"{"a": {"$elemMatch": {"$gt": 1, "$lt": 5}}}"#,
+        r#"{"a": {"$all": [1, 2]}}"#,
+        r#"{"$jsonSchema": {"required": ["a"]}}"#,
+        r#"{"$alwaysTrue": 1}"#,
+    ] {
+        assert!(alone(filter), "{filter}");
+    }
+    for filter in [
+        r#"{"$expr": {"$gt": ["$a", "$b"]}}"#,
+        r#"{"a": 1, "$expr": {"$eq": ["$a", 1]}}"#,
+        r#"{"$where": "true"}"#,
+        r#"{"$text": {"$search": "coffee"}}"#,
+        r#"{"$sampleRate": 0.5}"#,
+        r#"{"p": {"$geoWithin": {"$box": [[0, 0], [1, 1]]}}}"#,
+        r#"{"p": {"$not": {"$geoWithin": {"$box": [[0, 0], [1, 1]]}}}}"#,
+        r#"{"p": {"$exists": true, "$not": {"$geoWithin": {"$box": [[0, 0], [1, 1]]}}}}"#,
+        r#"{"$and": [{"a": 1}, {"$or": [{"b": 2}, {"$expr": {"$eq": ["$c", 3]}}]}]}"#,
+        r#"{"$nor": [{"a": 1}, {"$sampleRate": 0.1}]}"#,
+        r#"{"a": {"$elemMatch": {"b": 1, "p": {"$geoWithin": {"$box": [[0, 0], [1, 1]]}}}}}"#,
+    ] {
+        assert!(!alone(filter), "{filter}");
+    }
+}

@@ -1776,8 +1776,9 @@ fn modify(
     let candidates = if upsert.is_some() { &keys[..keys.len().saturating_sub(1)] } else { keys };
     for key in candidates {
         let Some((_, bytes)) = lookup(key) else { continue };
-        // A stored document always parses: one that does not is a fault, not a miss.
-        let doc = RawDoc::from_bytes(bytes)?;
+        // Only the frame of a stored document is checked: one whose frame does not hold is a
+        // fault, not a miss.
+        let doc = RawDoc::from_stored(bytes)?;
         let position = parsed.match_position(doc, &ctx).map_err(from_mql);
         let position = match (&update, position) {
             (Some(_), Err(e)) => return Err(executor_error(executor_of(image))(e)),
