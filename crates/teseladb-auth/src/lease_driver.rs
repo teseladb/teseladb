@@ -81,6 +81,8 @@ pub enum FenceMsg {
 pub struct LeaseDriver {
     ask_every_ns: u64,
     next_ns: u64,
+    /// The index of its copy the node acknowledged with its last request.
+    acknowledged: u64,
     lease: AuthLease,
     /// While it leads: its table and the term it leads.
     table: Option<(FenceTable, u64)>,
@@ -151,10 +153,18 @@ impl LeaseDriver {
             self.fenced = self.fenced.max(table.fenced(v.commit, now));
         }
         let mut out = Vec::new();
-        if now_ns >= self.next_ns {
+        let applied = acked(v.applied);
+        // Its copy moved past what its last request acknowledged: it asks now, ahead of the
+        // period (FR-012). A change that waits for the fence answers once every node
+        // acknowledged its index, and at one request a period each change of the indexes
+        // waited up to 500 ms (H-061 of the native tests). Not with a request still unanswered:
+        // the leader holds one request of each node, and a second one would replace it before
+        // its round came back.
+        let ahead = applied > self.acknowledged && !self.lease.awaits_answer(now);
+        if now_ns >= self.next_ns || ahead {
             self.next_ns = now_ns.saturating_add(self.ask_every_ns);
             let seq = self.lease.ask(now);
-            let applied = acked(v.applied);
+            self.acknowledged = applied;
             if self.table.is_some() {
                 self.held.hold(HeldAsk { node: me, seq, applied, at_ns: now_ns });
             } else if v.leader != 0 && v.leader != me {

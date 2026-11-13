@@ -672,6 +672,35 @@ mod tests {
         assert!(x.driver.on_peer(&x.core, other, now).is_err());
     }
 
+    /// A change passes the fence a few ticks after it commits, whenever it comes within the
+    /// period of the requests (013 FR-012, H-061 of the native tests): a node whose copy of
+    /// Group 0 moved asks again at once and acknowledges it. With one request every 500 ms each
+    /// change of the indexes waited up to that long, and `createIndexes`, which makes three,
+    /// took 1,5 s.
+    #[test]
+    fn a_change_passes_the_fence_without_waiting_for_the_period_of_the_requests() {
+        /// Ticks of 10 ms a change may take to pass: its commit, its application on every
+        /// node, their requests, the leader's round and its answers.
+        const FEW: u32 = 12;
+        let mut c = Cluster::new();
+        c.steps(300);
+        let l = c.leader();
+        for round in 0..5 {
+            // At a different moment of the period each time.
+            c.steps(7 + round);
+            let index = c.commit() + 1;
+            c.change();
+            let mut took = 0;
+            while c.nodes[&l].driver.fenced() < index {
+                c.step();
+                took += 1;
+                assert!(took <= FEW, "change {round} waited more than {FEW} ticks for the fence");
+            }
+        }
+        let now = c.now;
+        assert!(c.nodes.values().all(|n| n.driver.holds(now)), "every node keeps its lease");
+    }
+
     #[test]
     fn a_node_cut_off_loses_its_lease_before_the_fence_passes() {
         let mut c = Cluster::new();

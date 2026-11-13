@@ -167,6 +167,12 @@ impl AuthLease {
         }
     }
 
+    /// Whether a request is still in flight at `now_ms`: one the leader has not answered and
+    /// whose answer could still give a lease.
+    pub fn awaits_answer(&self, now_ms: u64) -> bool {
+        self.asked.iter().flatten().any(|(_, at)| lease_end(*at) > now_ms)
+    }
+
     /// When the lease ends (0 without one).
     pub fn until_ms(&self) -> u64 {
         self.until_ms

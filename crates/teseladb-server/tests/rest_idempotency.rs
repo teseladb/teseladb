@@ -164,8 +164,8 @@ fn replicated(node: &Node<MemDisk>) -> bool {
     false
 }
 
-/// `teseladb admin` on `node`'s administration port: its output.
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
+/// `teseladb admin` on `node`'s administration port: its exit code, its output and its errors.
+fn admin_run(node: &Node<MemDisk>, args: &[&str]) -> (i32, String, String) {
     let none = std::env::temp_dir().join("teseladb-idempotency-no-pki");
     let mut all = vec!["--node".to_owned(), node.admin_addr().unwrap().to_string()];
     all.extend(["--dbpath".to_owned(), none.to_str().unwrap().to_owned()]);
@@ -173,8 +173,29 @@ fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
     let o = teseladb_server::admin::parse(&all).unwrap();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = teseladb_server::admin::run(&o, &mut out, &mut err);
-    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-    String::from_utf8(out).unwrap()
+    (code, String::from_utf8(out).unwrap(), String::from_utf8_lossy(&err).into_owned())
+}
+
+/// `teseladb admin` on `node`'s administration port: its output.
+fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
+    let (code, out, err) = admin_run(node, args);
+    assert_eq!(code, 0, "{err}");
+    out
+}
+
+/// [`admin`] for a change of a range, asked again while Group 0 answers that the range is busy
+/// with another change (a replica it is still adding, say), for at most [`READY`].
+fn admin_once_free(node: &Node<MemDisk>, args: &[&str]) -> String {
+    let busy = format!("{:?}", teseladb_meta::group0::Group0Error::RangeBusy);
+    let end = Instant::now() + READY;
+    loop {
+        let (code, out, err) = admin_run(node, args);
+        if code == 0 || !err.contains(&busy) || Instant::now() >= end {
+            assert_eq!(code, 0, "{err}");
+            return out;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Moves each range of collection `ns` to the other core of its node (007 FR-011): its Raft
@@ -194,6 +215,6 @@ fn relocate(node: &Node<MemDisk>, ns: &str) {
             Some(Value::Int32(c)) => 1 - c,
             other => panic!("{other:?}"),
         };
-        admin(node, &["range", "relocate", &id, "--core", &core.to_string()]);
+        admin_once_free(node, &["range", "relocate", &id, "--core", &core.to_string()]);
     }
 }

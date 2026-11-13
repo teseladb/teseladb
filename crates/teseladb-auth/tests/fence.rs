@@ -328,6 +328,35 @@ fn a_follower_asks_its_leader() {
     assert_eq!(d.fenced(), 0);
 }
 
+/// A node whose copy moved past what its last request acknowledged asks again ahead of the
+/// period, once that request is answered (013 FR-012, H-061 of the native tests). A change that
+/// waits for the fence answers when every node acknowledged its index: with one request a period
+/// each change of the indexes waited up to 500 ms.
+#[test]
+fn a_node_whose_copy_moved_asks_again_once_its_request_is_answered() {
+    let mut d = LeaseDriver::new(ASK_EVERY);
+    let at =
+        |applied| Some(Group0View { term: 1, leads: false, leader: 1, commit: applied, applied });
+    let mut host = FakeHost { view: at(4), ..FakeHost::default() };
+    let out = d.tick(&mut host, 2, ASK_EVERY, &same);
+    let [FenceMsg::Ask { seq: first, applied: 4, .. }] = out[..] else { panic!("{out:?}") };
+    // Its copy moves while that request is unanswered: the leader holds one request of each
+    // node, and a second one would replace it before its round came back.
+    host.view = at(5);
+    assert!(d.tick(&mut host, 2, ASK_EVERY + MS, &same).is_empty());
+    d.on_grant(first, 4, 4, 5);
+    // Answered: it acknowledges the new index now, well inside the period.
+    let out = d.tick(&mut host, 2, ASK_EVERY + 2 * MS, &same);
+    let [FenceMsg::Ask { seq: second, applied: 5, .. }] = out[..] else { panic!("{out:?}") };
+    assert!(second > first);
+    // With nothing new to acknowledge it waits for the period.
+    d.on_grant(second, 5, 5, 5);
+    assert!(d.tick(&mut host, 2, ASK_EVERY + 3 * MS, &same).is_empty());
+    // Nor does it ask for what its running operations hold back.
+    host.view = at(6);
+    assert!(d.tick(&mut host, 2, ASK_EVERY + 4 * MS, &|_| 5).is_empty());
+}
+
 /// The leader grants nothing, to itself or to others, until a majority acknowledges a round sent
 /// after each request, and it takes over only once its copy holds every committed entry (D-073).
 #[test]
