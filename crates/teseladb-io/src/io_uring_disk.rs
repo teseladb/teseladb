@@ -5,9 +5,11 @@
 //!
 //! The results are the same as [`crate::FileDisk`]'s, in submission order. io_uring does not order
 //! operations, so an operation only starts when it cannot depend on one still running: reads and
-//! writes run together while their ranges do not overlap a write's on the same file, and every
-//! other operation (a `Sync` among them) waits for all earlier ones to finish and runs alone. A
-//! `Sync` therefore covers every write submitted before it on its file.
+//! writes run together while their ranges do not overlap a write's on the same file. A `Sync`
+//! starts once no write of its file runs, so it covers every write submitted before it there, and
+//! the reads and writes of the other files go on meanwhile: the log's flush of a core does not wait
+//! for a compaction's writes to another file, nor they for it (012 FR-021). Every other operation
+//! waits for all earlier ones to finish and runs alone.
 //!
 //! With `O_DIRECT` each file has a second descriptor opened with it: writes and reads of whole
 //! 4 KiB blocks use it, and the rest (the engine's few unaligned accesses) the buffered one. Both
@@ -64,9 +66,12 @@ fn support_of(ring: io::Result<Ring>) -> Result<(), String> {
     missing_ops(&probe)
 }
 
-// Data jobs hold a buffer each and every other job runs alone, so the jobs in flight never pass
-// the buffers, which never pass the ring's slots.
-const _: () = assert!((BUFFERS_PER_CORE as u32) < RING_ENTRIES);
+/// `Sync`s that run at once on a core (012 FR-021).
+const MAX_SYNCS: usize = 16;
+
+// Data jobs hold a buffer each, at most [`MAX_SYNCS`] `Sync`s run next to them with one ring
+// operation each, and every other job runs alone: the jobs in flight never pass the ring's slots.
+const _: () = assert!((BUFFERS_PER_CORE as u32) + (MAX_SYNCS as u32) < RING_ENTRIES);
 
 fn missing_ops(probe: &Probe) -> Result<(), String> {
     let missing: Vec<&str> =
@@ -91,6 +96,9 @@ impl Handle {
 struct OpenFile {
     buffered: Handle,
     direct: Option<Handle>,
+    /// The file's device and inode: two identifiers opened on one path are one file, whose
+    /// accesses must be ordered as one's.
+    inode: (u64, u64),
 }
 
 impl OpenFile {
@@ -179,8 +187,72 @@ fn data_range(op: &IoOp) -> Option<(FileId, u64, u64, bool)> {
     }
 }
 
+/// The device and inode of an open descriptor.
+fn inode_of(fd: &OwnedFd) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = File::from(fd.try_clone()?).metadata()?;
+    Ok((m.dev(), m.ino()))
+}
+
+/// [`conflicts_in`] with each identifier naming its own file.
+#[cfg(test)]
 fn conflicts(a: (FileId, u64, u64, bool), b: (FileId, u64, u64, bool)) -> bool {
-    a.0 == b.0 && (a.3 || b.3) && a.1 < b.2 && b.1 < a.2
+    conflicts_in(a, b, &|x, y| x == y)
+}
+
+/// Whether two reads or writes of one file, as `same` tells, must not run together: two writes
+/// whose ranges overlap, and a read and a write that ends past the read's start, since a write
+/// past the end of the file lengthens it and a read near the end would see the new length (found
+/// by the batch battery once a `Sync` no longer kept them apart, 012 FR-021).
+fn conflicts_in(
+    a: (FileId, u64, u64, bool),
+    b: (FileId, u64, u64, bool),
+    same: &dyn Fn(FileId, FileId) -> bool,
+) -> bool {
+    if !same(a.0, b.0) || !(a.3 || b.3) {
+        return false;
+    }
+    match (a.3, b.3) {
+        (true, true) => a.1 < b.2 && b.1 < a.2,
+        (true, false) => a.2 > b.1,
+        _ => b.2 > a.1,
+    }
+}
+
+/// [`may_start_in`] with each identifier naming its own file.
+#[cfg(test)]
+fn may_start<'a>(running: impl Iterator<Item = &'a IoOp>, op: &IoOp) -> bool {
+    may_start_in(running, op, &|a, b| a == b)
+}
+
+/// Whether `op` may start while `running` run, with `same` telling whether two identifiers name
+/// one file (012 FR-021): a read or a write next to the reads, the writes it does not conflict
+/// with and the `Sync`s; a `Sync` once no write of its file runs, next to the rest of the reads,
+/// writes and `Sync`s, at most [`MAX_SYNCS`]; anything else alone.
+fn may_start_in<'a>(
+    mut running: impl Iterator<Item = &'a IoOp>,
+    op: &IoOp,
+    same: &dyn Fn(FileId, FileId) -> bool,
+) -> bool {
+    match (op, data_range(op)) {
+        (_, Some(new)) => running.all(|r| match (r, data_range(r)) {
+            (IoOp::Sync { .. }, _) => true,
+            (_, Some(old)) => !conflicts_in(old, new, same),
+            (_, None) => false,
+        }),
+        (IoOp::Sync { file, .. }, None) => {
+            let mut syncs = 0;
+            running.all(|r| match (r, data_range(r)) {
+                (IoOp::Sync { .. }, _) => {
+                    syncs += 1;
+                    syncs < MAX_SYNCS
+                }
+                (_, Some((f, _, _, write))) => !same(f, *file) || !write,
+                (_, None) => false,
+            })
+        }
+        (_, None) => running.next().is_none(),
+    }
 }
 
 impl IoUringDisk {
@@ -313,11 +385,14 @@ impl IoUringDisk {
 
     /// Whether the operation at the head of the queue may start now.
     fn can_start(&self, op: &IoOp) -> bool {
-        let Some(new) = data_range(op) else { return self.running.is_empty() };
-        if self.pool.available() == 0 {
+        if data_range(op).is_some() && self.pool.available() == 0 {
             return false;
         }
-        self.running.iter().all(|j| data_range(&j.op).is_some_and(|r| !conflicts(r, new)))
+        let same = |a: FileId, b: FileId| {
+            a == b
+                || matches!((self.files.get(&a), self.files.get(&b)), (Some(x), Some(y)) if x.inode == y.inode)
+        };
+        may_start_in(self.running.iter().map(|j| &j.op), op, &same)
     }
 
     fn start_ready(&mut self) {
@@ -548,7 +623,8 @@ impl IoUringDisk {
                 let buffered = fds.next().map(|fd| self.handle(fd));
                 let direct = fds.next().map(|fd| self.handle(fd));
                 let buffered = buffered.expect("a finished open has its descriptor");
-                if let Some(old) = self.files.insert(file, OpenFile { buffered, direct }) {
+                let inode = inode_of(&buffered.fd).unwrap_or((u64::MAX, u64::from(file.0)));
+                if let Some(old) = self.files.insert(file, OpenFile { buffered, direct, inode }) {
                     self.release(old);
                 }
                 IoDone::Ok(op)
@@ -661,6 +737,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sync_waits_only_for_the_writes_of_its_file_and_lets_the_rest_go_on() {
+        let write = |f| IoOp::WriteAt {
+            file: FileId(f),
+            offset: 0,
+            data: Bytes::from_vec(vec![1; 8]),
+            batch: 0,
+        };
+        let read = |f| IoOp::ReadAt { file: FileId(f), offset: 0, len: 8, token: 0 };
+        let sync = |f| IoOp::Sync { file: FileId(f), batch: 0 };
+        let create = |f| IoOp::Create { file: FileId(f), path: "x".into(), prealloc: 0 };
+        // A log's flush next to a compaction's write and read of another file.
+        assert!(may_start([write(2), read(3)].iter(), &sync(1)));
+        // Not while a write of its own file runs: it would not cover it.
+        assert!(!may_start([write(2), write(1)].iter(), &sync(1)));
+        assert!(may_start([read(1)].iter(), &sync(1)));
+        // The reads and writes of other files, and a later write of its own, go on meanwhile.
+        assert!(may_start([sync(1)].iter(), &write(2)));
+        assert!(may_start([sync(1)].iter(), &read(1)));
+        assert!(may_start([sync(1), sync(2)].iter(), &sync(3)));
+        // At most MAX_SYNCS at once.
+        let many: Vec<IoOp> = (10..10 + MAX_SYNCS as u32).map(sync).collect();
+        assert!(!may_start(many.iter(), &sync(1)));
+        assert!(may_start(many[1..].iter(), &sync(1)));
+        // Overlapping data still waits, and every other operation runs alone.
+        assert!(!may_start([write(1)].iter(), &read(1)));
+        assert!(!may_start([sync(1)].iter(), &create(4)));
+        assert!(!may_start([create(4)].iter(), &sync(1)));
+        assert!(!may_start([create(4)].iter(), &write(2)));
+        assert!(may_start(std::iter::empty(), &create(4)));
+    }
+
+    #[test]
     fn ranges_conflict_only_with_a_write_on_the_same_file() {
         let w = |f, a, b| (FileId(f), a, b, true);
         let r = |f, a, b| (FileId(f), a, b, false);
@@ -668,6 +776,10 @@ mod tests {
         assert!(conflicts(r(1, 5, 15), w(1, 0, 10)));
         assert!(!conflicts(r(1, 0, 10), r(1, 0, 10)));
         assert!(!conflicts(w(1, 0, 10), w(2, 0, 10)));
+        // A write past a read's end on the same file may lengthen the file under it.
+        assert!(conflicts(r(1, 0, 10), w(1, 20, 30)));
+        assert!(conflicts(w(1, 20, 30), r(1, 0, 10)));
+        assert!(!conflicts(r(1, 20, 30), w(1, 0, 10)));
         assert!(!conflicts(w(1, 0, 10), w(1, 10, 20)));
     }
 
