@@ -1891,6 +1891,8 @@ impl CoreLogic for NodeLogic {
     fn service_class(&self, msg: &NodeMsg) -> ServiceClass {
         match msg {
             NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _) => remote_class(req),
+            // An aggregation's part reads a whole range's part: behind the document operations.
+            NodeMsg::Data(DataReq::Partial(..), _) => ServiceClass::Background,
             _ => ServiceClass::Foreground,
         }
     }
@@ -1900,7 +1902,11 @@ impl CoreLogic for NodeLogic {
         // the node's own status, cut and size questions still run.
         match msg {
             NodeMsg::Data(
-                DataReq::Put { .. } | DataReq::Get { .. } | DataReq::Remote(..) | DataReq::At(..),
+                DataReq::Put { .. }
+                | DataReq::Get { .. }
+                | DataReq::Remote(..)
+                | DataReq::At(..)
+                | DataReq::Partial(..),
                 reply,
             ) => {
                 let _ = reply.send(Err(RangeError::Overloaded));

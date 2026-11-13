@@ -151,6 +151,17 @@ pub struct Matching {
     pub next: Option<Vec<u8>>,
 }
 
+/// What the cores that own the ranges of a span gave for a [`Backend::scatter_groups`] (010
+/// FR-034): the partial groups of each part of the span, in key order, and the documents they
+/// examined.
+#[derive(Debug, Default)]
+pub struct Scattered {
+    /// The partial groups of each part, in key order.
+    pub parts: Vec<teseladb_exec::pipeline::PartialGroups>,
+    /// Documents examined.
+    pub examined: usize,
+}
+
 /// The most documents a scan hands its filter at once: a batch of the register machine
 /// (010 FR-028).
 pub const SCAN_BATCH: usize = teseladb_mql::vm::BATCH;
@@ -537,6 +548,19 @@ pub trait Backend {
         keep: &mut Keep<'_>,
     ) -> Result<Matching, CommandError> {
         matching_by_scan(self, (start, end), examine, concern, keep)
+    }
+    /// Runs `program` (the `$match`es and the partial `$group` of an aggregation) over the
+    /// documents of `[start, end)` on the cores that own its ranges, all at once, each giving
+    /// back only its partial groups (010 FR-034). `None` when the span is not held by several
+    /// ranges this node leads, a core declined or a range moved: the caller then reads the
+    /// documents and runs the pipeline itself. By default it never does.
+    fn scatter_groups(
+        &mut self,
+        _span: (&[u8], &[u8]),
+        _program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
+        _concern: ReadConcern,
+    ) -> Result<Option<Scattered>, CommandError> {
+        Ok(None)
     }
     /// The live documents of collection `collection` of tenant `tenant`, added up from the counts
     /// its ranges keep (007 FR-039), when every one of them is exact; `None` when one is

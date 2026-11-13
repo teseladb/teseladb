@@ -33,7 +33,7 @@ enum Answer {
 impl ServerBackend {
     /// Whether the reads of this command go to the leaders at the latest mark, which a read of
     /// several spans sends together.
-    fn plain_reads(&self) -> bool {
+    pub(super) fn plain_reads(&self) -> bool {
         self.read_mark.is_none() && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary)
     }
 

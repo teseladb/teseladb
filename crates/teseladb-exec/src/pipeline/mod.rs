@@ -18,6 +18,7 @@ pub mod optimize;
 pub mod out_merge;
 pub mod radix;
 mod sbe;
+mod scatter;
 mod scoped;
 pub mod search;
 mod shape;
@@ -27,6 +28,8 @@ mod stages;
 mod system;
 pub use system::{LIST_SAMPLED_QUERIES, SHARDED_DATA_DISTRIBUTION};
 
+pub use group::PartialGroups;
+pub use scatter::{Program, Scatter};
 pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};
@@ -500,7 +503,7 @@ impl Pipeline {
     pub fn run_after_matches(
         &self,
         applied: usize,
-        (mut docs, mut metas): (Vec<Document>, Option<Vec<meta::Meta>>),
+        (docs, metas): (Vec<Document>, Option<Vec<meta::Meta>>),
         env: &dyn Env,
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
@@ -509,6 +512,18 @@ impl Pipeline {
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs).take(applied) {
             sbe = sbe && *spec && sbe_capable(st);
         }
+        self.run_from(applied, (docs, metas), env, sbe)
+    }
+
+    /// Runs the stages from the one at `at` over `docs`, the output of those before it, with
+    /// `sbe` as those before it leave it.
+    fn run_from(
+        &self,
+        at: usize,
+        (mut docs, mut metas): (Vec<Document>, Option<Vec<meta::Meta>>),
+        env: &dyn Env,
+        mut sbe: bool,
+    ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
         // The scores search stages gave: a document without them is an error until a stage
         // makes new documents, after which they read as nothing (measured on 9.0.4).
         let mut required: Vec<String> = Vec::new();
@@ -517,7 +532,7 @@ impl Pipeline {
         // The scores the stages so far gave every document (`$text`, `$score`): those that a
         // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
         let mut given: Vec<String> = Vec::new();
-        let mut at = applied;
+        let mut at = at;
         while let (Some(st), Some(spec)) = (self.stages.get(at), self.sbe_specs.get(at)) {
             at += 1;
             env.interrupted()?;

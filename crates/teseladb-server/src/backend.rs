@@ -7,12 +7,14 @@
 mod across;
 mod intent_wait;
 mod outside;
+mod scatter;
 mod span;
 mod spans;
 mod together;
 mod txn_reaper;
 
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
+pub use scatter::scattered_groups;
 pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
 
@@ -1104,6 +1106,15 @@ impl Backend for ServerBackend {
             }
         }
         teseladb_wire::commands::matching_by_scan(self, (start, end), examine, concern, keep)
+    }
+
+    fn scatter_groups(
+        &mut self,
+        span: (&[u8], &[u8]),
+        program: &Arc<teseladb_exec::pipeline::Program>,
+        concern: ReadConcern,
+    ) -> Result<Option<teseladb_wire::commands::Scattered>, CommandError> {
+        Ok(self.scatter_together(span, program, concern))
     }
 
     fn points(
