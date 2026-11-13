@@ -1221,7 +1221,8 @@ pub fn parse_with(
     }
 }
 
-/// The codec of `--refengineCollectionBlockCompressor` (004 FR-023): `none`, `zlib` or `zstd`;
+/// The codec of `--refengineCollectionBlockCompressor` (004 FR-023, FR-037): `none`, `zlib`,
+/// `zstd` or `lz4`;
 /// RefDb's `snappy` is a codec the node does not have.
 fn block_codec(v: Option<&str>) -> Result<Option<teseladb_lsm::Codec>, CliError> {
     use teseladb_lsm::Codec;
@@ -1230,8 +1231,9 @@ fn block_codec(v: Option<&str>) -> Result<Option<teseladb_lsm::Codec>, CliError>
         Some("none") => Ok(Some(Codec::None)),
         Some("zlib") => Ok(Some(Codec::Zlib)),
         Some("zstd") => Ok(Some(Codec::Zstd)),
+        Some("lz4") => Ok(Some(Codec::Lz4)),
         Some(other) => {
-            Err(CliError(format!("--{BLOCK_COMPRESSOR}: {other:?} is not none, zlib or zstd")))
+            Err(CliError(format!("--{BLOCK_COMPRESSOR}: {other:?} is not none, zlib, zstd or lz4")))
         }
     }
 }
@@ -1242,7 +1244,7 @@ usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
                  [--io-uring-sqpoll]
-                 [--refengineCollectionBlockCompressor none|zlib|zstd]
+                 [--refengineCollectionBlockCompressor none|zlib|zstd|lz4]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]
                  [--join <ip:port>,...]

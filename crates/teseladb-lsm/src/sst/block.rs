@@ -22,8 +22,8 @@ use teseladb_deflate::zlib;
 use teseladb_hash::crc32c;
 use teseladb_types::Bytes;
 
-use super::{Bad, get_varint, put_varint};
-use crate::entry::Kind;
+use super::{Bad, delta, get_varint, lz4, put_varint};
+use crate::entry::{Kind, logical};
 
 /// Bytes after the payload of a framed block.
 pub(crate) const TRAILER: usize = 1 + ENCRYPTION + 4;
@@ -33,6 +33,7 @@ pub(crate) const COMPRESSION_NONE: u8 = 0;
 pub(crate) const COMPRESSION_ZLIB: u8 = 1;
 pub(crate) const COMPRESSION_ZSTD: u8 = 2;
 pub(crate) const COMPRESSION_ZSTD_DICT: u8 = 3;
+pub(crate) const COMPRESSION_LZ4: u8 = 4;
 const ZLIB_LEVEL: u8 = 6;
 /// Largest payload a block decompresses to: a version larger than a block takes one of its own,
 /// and a document is at most 16 MiB.
@@ -46,6 +47,8 @@ pub(crate) enum Method<'a> {
     Zstd,
     /// zstd with this raw content dictionary, the file's.
     Dict(&'a [u8]),
+    /// LZ4 (FR-037).
+    Lz4,
 }
 
 /// Frames a payload, compressed with `method` when that makes it smaller.
@@ -62,6 +65,7 @@ pub(crate) fn compressed(payload: &[u8], method: Method<'_>) -> (Vec<u8>, u8) {
         Method::Zlib => Some((zlib::compress(payload, ZLIB_LEVEL), COMPRESSION_ZLIB)),
         Method::Zstd => Some((zstd::compress(payload), COMPRESSION_ZSTD)),
         Method::Dict(d) => Some((zstd::compress_with_dict(payload, d), COMPRESSION_ZSTD_DICT)),
+        Method::Lz4 => Some((lz4::compress(payload), COMPRESSION_LZ4)),
     };
     match packed {
         Some((z, code)) if z.len() < payload.len() => (z, code),
@@ -134,6 +138,7 @@ pub(crate) fn unframe_with(
         COMPRESSION_ZSTD => {
             zstd::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec).map_err(|_| Bad)
         }
+        COMPRESSION_LZ4 => lz4::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec),
         COMPRESSION_ZSTD_DICT => {
             let dict = dict.ok_or(Bad)?;
             zstd::decompress_with_dict(&body, MAX_PAYLOAD, dict)
@@ -152,7 +157,16 @@ pub(crate) struct BlockBuilder {
     last: Vec<u8>,
     since_restart: usize,
     interval: usize,
+    /// The block keeps an old version as a delta against the entry before it (FR-035).
+    deltas: bool,
+    /// The kind and whole value of the last entry, with `deltas`.
+    last_value: Option<(Kind, Vec<u8>)>,
 }
+
+/// The bit of an entry's kind byte that marks its value as a delta against the value of the
+/// entry before it, the next newer version of its key (FR-035). Files written before have no
+/// entry with it.
+const PATCH: u8 = 0x80;
 
 /// Bytes of entries after which the next entry starts a restart point, whatever the interval: a
 /// seek walks from the restart point below its key, and with documents of a few hundred bytes an
@@ -169,7 +183,16 @@ impl BlockBuilder {
             last: Vec::new(),
             since_restart: 0,
             interval,
+            deltas: false,
+            last_value: None,
         }
+    }
+
+    /// A builder whose old versions go as deltas against the next newer version of their key,
+    /// the entry before them, when the delta is smaller (FR-035). An entry at a restart point
+    /// stays whole: a seek starts reading there.
+    pub(crate) fn with_deltas(self) -> BlockBuilder {
+        BlockBuilder { deltas: true, ..self }
     }
 
     /// Whether it has no entry.
@@ -200,12 +223,27 @@ impl BlockBuilder {
         } else {
             self.last.iter().zip(key).take_while(|(a, b)| a == b).count()
         };
+        let patch = match &self.last_value {
+            Some((Kind::Put, newer))
+                if !restart && kind == Kind::Put && logical(&self.last) == logical(key) =>
+            {
+                delta::encode(newer, value)
+            }
+            _ => None,
+        };
+        if self.deltas {
+            self.last_value = Some((kind, value.to_vec()));
+        }
+        let (flag, stored) = match &patch {
+            Some(d) => (PATCH, d.as_slice()),
+            None => (0, value),
+        };
         put_varint(&mut self.buf, shared as u64);
         put_varint(&mut self.buf, (key.len() - shared) as u64);
-        put_varint(&mut self.buf, value.len() as u64);
+        put_varint(&mut self.buf, stored.len() as u64);
         self.buf.extend_from_slice(&key[shared..]);
-        self.buf.push(kind as u8);
-        self.buf.extend_from_slice(value);
+        self.buf.push(kind as u8 | flag);
+        self.buf.extend_from_slice(stored);
         self.last.clear();
         self.last.extend_from_slice(key);
         self.since_restart += 1;
@@ -220,6 +258,7 @@ impl BlockBuilder {
         out.extend_from_slice(&(self.restarts.len() as u32).to_le_bytes());
         self.restarts.clear();
         self.last.clear();
+        self.last_value = None;
         self.since_restart = 0;
         out
     }
@@ -238,6 +277,8 @@ struct Raw {
     shared: usize,
     delta: Range<usize>,
     kind: Kind,
+    /// The value is a delta against the value of the entry before (FR-035).
+    patch: bool,
     value: Range<usize>,
 }
 
@@ -273,13 +314,14 @@ impl Block {
         let vlen = usize::try_from(get_varint(d, &mut p)?).map_err(|_| Bad)?;
         let delta = p..p.checked_add(unshared).ok_or(Bad)?;
         let kind_at = delta.end;
-        let kind = Kind::from_u8(*d.get(kind_at).ok_or(Bad)?).ok_or(Bad)?;
+        let byte = *d.get(kind_at).ok_or(Bad)?;
+        let kind = Kind::from_u8(byte & !PATCH).ok_or(Bad)?;
         let value = kind_at + 1..(kind_at + 1).checked_add(vlen).ok_or(Bad)?;
         if value.end > d.len() {
             return Err(Bad);
         }
         let next = value.end;
-        Ok((Raw { shared, delta, kind, value }, next))
+        Ok((Raw { shared, delta, kind, patch: byte & PATCH != 0, value }, next))
     }
 
     /// Key of the entry at restart point `i`, stored whole.
@@ -302,6 +344,8 @@ pub(crate) struct BlockCursor {
     shared: usize,
     kind: Kind,
     value: Range<usize>,
+    /// The entry's value rebuilt from its delta (FR-035).
+    patched: Option<Bytes>,
     valid: bool,
 }
 
@@ -314,6 +358,7 @@ impl BlockCursor {
             shared: 0,
             kind: Kind::Put,
             value: 0..0,
+            patched: None,
             valid: false,
         }
     }
@@ -384,9 +429,11 @@ impl BlockCursor {
             }
         }
         if lo > after {
-            // A restart point stores its key whole: one that shares bytes is refused.
+            // A restart point stores its key and value whole: one that shares bytes or holds
+            // a delta is refused.
             self.next = self.block.restart(lo - 1)?;
             self.key.clear();
+            self.valid = false;
             self.advance()?;
         }
         while self.valid && cmp(&self.key, target).is_lt() {
@@ -405,6 +452,15 @@ impl BlockCursor {
         if raw.shared > self.key.len() {
             return Err(Bad);
         }
+        self.patched = match raw.patch {
+            // The entry before is the next newer version of the key.
+            true if self.valid => {
+                let stored = &self.block.data[raw.value.clone()];
+                Some(Bytes::from_vec(delta::apply(self.value_slice(), stored)?))
+            }
+            true => return Err(Bad),
+            false => None,
+        };
         self.key.truncate(raw.shared);
         self.key.extend_from_slice(&self.block.data[raw.delta]);
         self.shared = raw.shared;
@@ -437,12 +493,18 @@ impl BlockCursor {
 
     /// Value of the entry, sharing the block's bytes.
     pub(crate) fn value(&self) -> Bytes {
-        self.block.data.slice(self.value.clone())
+        match &self.patched {
+            Some(v) => v.clone(),
+            None => self.block.data.slice(self.value.clone()),
+        }
     }
 
     /// Value of the entry as a slice.
     pub(crate) fn value_slice(&self) -> &[u8] {
-        &self.block.data[self.value.clone()]
+        match &self.patched {
+            Some(v) => v,
+            None => &self.block.data[self.value.clone()],
+        }
     }
 }
 
@@ -740,5 +802,73 @@ mod tests {
             Err(Bad),
             "a clear block is not sealed"
         );
+    }
+
+    /// Versions of a few keys, newest first, each a small edit of the next newer one.
+    fn versions() -> Vec<(Vec<u8>, Kind, Vec<u8>)> {
+        use crate::entry::internal_key;
+        let mut out = Vec::new();
+        for k in 0..4u8 {
+            let mut doc: Vec<u8> = (0..300u32).map(|i| (i % 200) as u8 + k).collect();
+            for v in (1..=40u64).rev() {
+                doc[17] = v as u8;
+                doc[150] = (v * 3) as u8;
+                let ts = teseladb_keys::Hlc { physical: v, logical: 0 };
+                let kind = if v == 20 { Kind::Delete } else { Kind::Put };
+                out.push((internal_key(&[b'k', k], ts), kind, doc.clone()));
+            }
+        }
+        out
+    }
+
+    /// FR-035: in a block with deltas an old version takes a few bytes, every way of reading it
+    /// gives it whole, and a restart point keeps it whole.
+    #[test]
+    fn old_versions_go_as_deltas_and_read_whole() {
+        let all = versions();
+        let build = |deltas: bool| {
+            let b = BlockBuilder::new(16);
+            let mut b = if deltas { b.with_deltas() } else { b };
+            for (k, kind, v) in &all {
+                b.add(k, *kind, v);
+            }
+            Block::parse(Bytes::from_vec(b.finish())).unwrap()
+        };
+        let (whole, patched) = (build(false), build(true));
+        assert!(patched.data.len() * 4 < whole.data.len(), "{}", patched.data.len());
+        // In order.
+        let mut c = BlockCursor::first(patched.clone()).unwrap();
+        for (k, kind, v) in &all {
+            assert!(c.valid());
+            assert_eq!((c.key(), c.kind(), c.value_slice()), (&k[..], *kind, &v[..]));
+            assert_eq!(&c.value()[..], &v[..]);
+            c.advance().unwrap();
+        }
+        assert!(!c.valid());
+        // From a seek, and from a seek forward over restart points.
+        for (i, (k, _, v)) in all.iter().enumerate() {
+            let c = BlockCursor::seek(patched.clone(), k, crate::entry::compare).unwrap();
+            assert_eq!((c.key(), c.value_slice()), (&k[..], &v[..]), "seek {i}");
+            let mut c = BlockCursor::first(patched.clone()).unwrap();
+            c.seek_forward(k, crate::entry::compare).unwrap();
+            assert_eq!((c.key(), c.value_slice()), (&k[..], &v[..]), "forward {i}");
+        }
+        // A block written whole, as before FR-035, reads the same.
+        let mut c = BlockCursor::first(whole).unwrap();
+        for (k, _, v) in &all {
+            assert_eq!((c.key(), c.value_slice()), (&k[..], &v[..]));
+            c.advance().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_delta_with_no_entry_before_it_is_refused() {
+        let mut b = BlockBuilder::new(16);
+        b.add(b"k1", Kind::Put, b"x");
+        let mut payload = b.finish();
+        // The first entry's kind byte, after three varints of one byte and the key.
+        payload[5] |= PATCH;
+        let block = Block::parse(Bytes::from_vec(payload)).unwrap();
+        assert_eq!(BlockCursor::first(block).err(), Some(Bad));
     }
 }

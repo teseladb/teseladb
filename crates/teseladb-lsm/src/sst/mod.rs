@@ -13,9 +13,14 @@
 //! and padded with `0x5a` up to the next 4 KiB, so that every read and write is aligned.
 
 pub(crate) mod block;
+pub(crate) mod delta;
+pub(crate) mod elias_fano;
 pub(crate) mod filter;
+pub(crate) mod lz4;
 pub(crate) mod meta;
+pub(crate) mod pgm;
 pub(crate) mod reader;
+pub(crate) mod ribbon;
 pub(crate) mod writer;
 
 use teseladb_raftlog::FileId;

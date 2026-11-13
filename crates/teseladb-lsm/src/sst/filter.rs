@@ -1,15 +1,19 @@
-//! Bloom filter of the logical keys of a file (FR-003, research R4): 10 bits per key and 7 probes
-//! (about 1 % false positives), chosen by double hashing over two CRC32C values with different
-//! seeds. Payload: `bits · probes(u8)`.
+//! Filter of the logical keys of a file (FR-003, FR-042). A file written now has a Ribbon filter
+//! ([`super::ribbon`]): about 0.4 % false positives in about 8.8 bits per key. Files written
+//! before have a Bloom filter (research R4), read as before: 10 bits per key and 7 probes (about
+//! 1 % false positives), chosen by double hashing over two CRC32C values with different seeds.
+//! Payload of a Bloom filter: `bits · probes(u8)`, with 1 to 30 probes.
 
 use teseladb_hash::{crc32c, crc32c_append};
 use teseladb_types::Bytes;
 
-use super::Bad;
+use super::{Bad, ribbon};
 
 /// Bits per key.
+#[cfg(test)]
 const BITS_PER_KEY: usize = 10;
 /// Probes per key.
+#[cfg(test)]
 const PROBES: u8 = 7;
 /// Seed of the second hash.
 const SEED: u32 = 0x9e37_79b9;
@@ -19,8 +23,14 @@ pub(crate) fn hashes(key: &[u8]) -> (u32, u32) {
     (crc32c(key), crc32c_append(SEED, key) | 1)
 }
 
-/// Builds the payload of the filter of `keys` (their [`hashes`]).
+/// Builds the payload of the filter of `keys` (their [`hashes`]): a Ribbon filter (FR-042).
 pub(crate) fn build(keys: &[(u32, u32)]) -> Vec<u8> {
+    ribbon::build(keys)
+}
+
+/// Builds the payload of the Bloom filter of `keys`, as files written before FR-042 have.
+#[cfg(test)]
+pub(crate) fn build_bloom(keys: &[(u32, u32)]) -> Vec<u8> {
     let bits = (keys.len() * BITS_PER_KEY).max(64).next_multiple_of(8);
     let mut out = vec![0u8; bits / 8];
     for &(h1, h2) in keys {
@@ -37,28 +47,38 @@ pub(crate) fn build(keys: &[(u32, u32)]) -> Vec<u8> {
 
 /// A filter read from its payload.
 #[derive(Clone, Debug)]
-pub(crate) struct Filter {
-    bits: Bytes,
-    probes: u8,
+pub(crate) enum Filter {
+    /// A Ribbon filter: one byte per row, and its seed (FR-042).
+    Ribbon { rows: Bytes, seed: u32 },
+    /// The Bloom filter of a file written before.
+    Bloom { bits: Bytes, probes: u8 },
 }
 
 impl Filter {
     /// Reads a payload; the filter keeps pointing into its bytes.
     pub(crate) fn parse(payload: &Bytes) -> Result<Filter, Bad> {
+        if payload.last() == Some(&ribbon::RIBBON) {
+            let (rows, seed) = ribbon::parse(payload)?;
+            return Ok(Filter::Ribbon { rows: payload.slice(..rows), seed });
+        }
         let (&probes, bits) = payload.split_last().ok_or(Bad)?;
         if bits.is_empty() || probes == 0 || probes > 30 {
             return Err(Bad);
         }
-        Ok(Filter { bits: payload.slice(..bits.len()), probes })
+        Ok(Filter::Bloom { bits: payload.slice(..bits.len()), probes })
     }
 
     /// Whether the key may be in the file (`false` means it is not).
     pub(crate) fn may_contain(&self, (h1, h2): (u32, u32)) -> bool {
-        let bits = self.bits.len() * 8;
+        let (bits, probes) = match self {
+            Filter::Ribbon { rows, seed } => return ribbon::may_contain(rows, *seed, (h1, h2)),
+            Filter::Bloom { bits, probes } => (bits, *probes),
+        };
+        let len = bits.len() * 8;
         let mut h = h1;
-        for _ in 0..self.probes {
-            let bit = h as usize % bits;
-            if self.bits[bit / 8] & (1 << (bit % 8)) == 0 {
+        for _ in 0..probes {
+            let bit = h as usize % len;
+            if bits[bit / 8] & (1 << (bit % 8)) == 0 {
                 return false;
             }
             h = h.wrapping_add(h2);
@@ -76,17 +96,29 @@ mod tests {
     fn no_false_negatives_and_about_one_percent_false_positives() {
         let keys: Vec<Vec<u8>> = (0..10_000).map(|i| format!("user:{i}").into_bytes()).collect();
         let hashed: Vec<(u32, u32)> = keys.iter().map(|k| hashes(k)).collect();
-        let f = Filter::parse(&Bytes::from_vec(build(&hashed))).unwrap();
-        assert_eq!(f.bits.len(), 12_500);
+        let false_positives = |f: &Filter| {
+            (0..10_000).filter(|i| f.may_contain(hashes(format!("other:{i}").as_bytes()))).count()
+        };
+        // A Bloom filter of a file written before FR-042 reads as it did.
+        let bloom = build_bloom(&hashed);
+        let f = Filter::parse(&Bytes::from_vec(bloom.clone())).unwrap();
+        assert!(matches!(&f, Filter::Bloom { bits, .. } if bits.len() == 12_500));
         assert!(hashed.iter().all(|h| f.may_contain(*h)));
-        let false_positives =
-            (0..10_000).filter(|i| f.may_contain(hashes(format!("other:{i}").as_bytes()))).count();
-        assert!(false_positives < 200, "{false_positives} in 10 000");
+        let bloom_fp = false_positives(&f);
+        assert!(bloom_fp < 200, "{bloom_fp} in 10 000");
+        // The Ribbon filter: no more false positives in less memory (FR-042).
+        let ribbon = build(&hashed);
+        let f = Filter::parse(&Bytes::from_vec(ribbon.clone())).unwrap();
+        assert!(matches!(f, Filter::Ribbon { .. }));
+        assert!(hashed.iter().all(|h| f.may_contain(*h)));
+        let ribbon_fp = false_positives(&f);
+        assert!(ribbon_fp <= bloom_fp, "{ribbon_fp} against {bloom_fp}");
+        assert!(ribbon.len() * 8 < bloom.len() * 8 * 9 / 10, "{} bytes", ribbon.len());
     }
 
     #[test]
     fn an_empty_filter_says_no_and_garbage_is_refused() {
-        let f = Filter::parse(&Bytes::from_vec(build(&[]))).unwrap();
+        let f = Filter::parse(&Bytes::from_vec(build_bloom(&[]))).unwrap();
         assert!(!f.may_contain(hashes(b"x")));
         assert_eq!(Filter::parse(&Bytes::copy_from_slice(&[])).err(), Some(Bad));
         assert_eq!(Filter::parse(&Bytes::copy_from_slice(&[7])).err(), Some(Bad));

@@ -50,7 +50,17 @@ impl Lsm {
             self.full_ts = newest.map(|ts| (self.gc_handed.highest(), ts));
         }
         let all = std::mem::take(&mut self.compact_all);
-        if let Some(plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all) {
+        if let Some(mut plan) = compaction::pick(&self.version, &self.cfg, &mut self.pointers, all)
+        {
+            if plan.output_level == 0 {
+                // A tier of level 0 goes above every file older than its inputs and below every
+                // newer one (FR-036): a flush in flight took its number already, and its file,
+                // newer than the tier, would end below it. The tier waits for it.
+                if self.flush_job.is_some() {
+                    return None;
+                }
+                plan.reserved = Some(self.alloc_file());
+            }
             return Some(Job::Compact(Box::new(self.compaction(plan))));
         }
         self.full_running = false;
@@ -112,7 +122,7 @@ impl Lsm {
                 let written = self.dict_written.clone();
                 job.with_training(Training::new(&self.cfg, &self.state, &self.version, written))
             }
-            Codec::None | Codec::Zlib | Codec::Zstd => job,
+            Codec::None | Codec::Zlib | Codec::Zstd | Codec::Lz4 => job,
         }
     }
 

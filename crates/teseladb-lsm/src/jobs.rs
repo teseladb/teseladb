@@ -224,7 +224,7 @@ impl FlushJob {
                 path: self.dir.join(file_name(self.history_number)),
                 prealloc: 0,
             });
-            self.history = Some(new_writer(&self.format));
+            self.history = Some(new_writer(&self.format).for_history());
         }
         self.history.as_mut().expect("started above").add(ikey, kind, value);
     }

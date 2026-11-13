@@ -121,6 +121,12 @@ impl TableWriter {
         TableWriter { key, ..self }
     }
 
+    /// The writer of a history file: an old version goes as a delta against the next newer
+    /// version of its key when that takes fewer bytes (FR-035).
+    pub(crate) fn for_history(self) -> TableWriter {
+        TableWriter { data: self.data.with_deltas(), ..self }
+    }
+
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
     pub(crate) fn with_dicts(self, dicts: Arc<CurrentDictionaries>) -> TableWriter {
         TableWriter { dicts: Some(dicts), ..self }
@@ -163,11 +169,12 @@ impl TableWriter {
         let first = self.block_first.take().unwrap_or_default();
         let dict = match self.codec {
             Codec::ZstdDict => self.block_dict(&first),
-            Codec::None | Codec::Zlib | Codec::Zstd => None,
+            Codec::None | Codec::Zlib | Codec::Zstd | Codec::Lz4 => None,
         };
         let method = match (self.codec, &dict) {
             (Codec::None, _) => Method::None,
             (Codec::Zlib, _) => Method::Zlib,
+            (Codec::Lz4, _) => Method::Lz4,
             (Codec::ZstdDict, Some(d)) => Method::Dict(d),
             (Codec::Zstd | Codec::ZstdDict, _) => Method::Zstd,
         };

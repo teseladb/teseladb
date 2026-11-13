@@ -118,7 +118,7 @@ pub(crate) struct Counters {
     pub(crate) stalls: u64,
     pub(crate) rejects: u64,
     /// Data blocks written by compression code.
-    pub(crate) blocks: [u64; 4],
+    pub(crate) blocks: [u64; 5],
     /// Bytes of data blocks written, before and after compression.
     pub(crate) block_bytes: [u64; 2],
     /// Compactions that made room for an ingestion, and the bytes they read and wrote (FR-024).

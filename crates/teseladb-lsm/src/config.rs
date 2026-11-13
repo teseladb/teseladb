@@ -18,6 +18,8 @@ pub enum Codec {
     /// Code 3: zstd with the dictionary of the block's collection, code 2 while the collection has
     /// none (a compaction trains it).
     ZstdDict,
+    /// Code 4: the LZ4 block format (FR-037), with the decompressed length before it.
+    Lz4,
 }
 
 /// Configuration.

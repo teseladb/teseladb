@@ -34,8 +34,12 @@ const CUSTOMERS: u32 = 1;
 const ORDERS: u32 = 2;
 const EVENTS: u32 = 3;
 /// The codecs compared, with the name of their metrics.
-const CODECS: [(Codec, &str); 3] =
-    [(Codec::Zlib, "zlib"), (Codec::Zstd, "zstd"), (Codec::ZstdDict, "zstd_dict")];
+const CODECS: [(Codec, &str); 4] = [
+    (Codec::Zlib, "zlib"),
+    (Codec::Zstd, "zstd"),
+    (Codec::ZstdDict, "zstd_dict"),
+    (Codec::Lz4, "lz4"),
+];
 const CITIES: [&str; 8] =
     ["Madrid", "Sevilla", "Bilbao", "Valencia", "Zaragoza", "Málaga", "Murcia", "Vigo"];
 const PRODUCTS: [&str; 6] = ["keyboard", "monitor", "mouse", "laptop", "headset", "webcam"];

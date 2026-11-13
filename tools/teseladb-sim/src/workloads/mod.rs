@@ -7,6 +7,7 @@
 //! tenants' quotas and suspension, 007).
 
 pub mod authz_fence;
+mod carry;
 pub mod changestream;
 pub mod data_ship;
 pub mod indexes;

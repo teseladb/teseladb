@@ -44,7 +44,7 @@ fn core_of_range_1(at: &str) -> Option<u16> {
 /// Every document of `db.c`, once a find answers.
 fn all(c: &mut Client) -> usize {
     until("a find", || {
-        let r = c.run("db", Document::new().with("find", "c").with("batchSize", 1000));
+        let r = c.run("db", Document::new().with("find", "c").with("batchSize", 10_000));
         ok(&r).then(|| batch(&r, "firstBatch").len())
     })
 }
@@ -98,40 +98,103 @@ impl Drop for Dir {
     }
 }
 
+/// What tells a hard link from a copy: inode, size and modification time.
+type FileId = (u64, u64, std::time::SystemTime);
+
+/// The SST files under `dir`, each with its [`FileId`].
+fn sst_files(dir: &std::path::Path) -> Vec<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            let Ok(m) = fs::metadata(&path) else { continue };
+            if m.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "sst") {
+                out.push((m.ino(), m.size(), m.modified().unwrap()));
+            }
+        }
+    }
+    out
+}
+
+/// Documents of about 1 KiB, enough to fill several small files.
+fn big_docs(range: std::ops::Range<i32>) -> teseladb_bson::Value {
+    let pad = "x".repeat(1000);
+    teseladb_bson::Value::Array(
+        range.map(|i| Document::new().with("_id", i).with("pad", pad.as_str()).into()).collect(),
+    )
+}
+
 /// The cores of a node over real files share them: the moved range's whole files go to its new
-/// core as hard links (004 FR-033).
+/// core as hard links (004 FR-033). Small memtables and files leave most of the range in files
+/// that hold nothing else, and at least one of them reaches the new core as the same inode,
+/// unread and unwritten.
 #[test]
 fn a_moved_range_survives_a_restart_on_its_new_core() {
+    const DOCS: i32 = 1500;
     let dir = Dir(std::env::temp_dir().join(format!("teseladb-relocate-{}", std::process::id())));
     let _ = fs::remove_dir_all(&dir.0);
+    let lsm = teseladb_lsm::LsmConfig {
+        memtable_bytes: 64 << 10,
+        target_file_bytes: 32 << 10,
+        block_bytes: 4 << 10,
+        l1_bytes: 128 << 10,
+        ..teseladb_lsm::LsmConfig::default()
+    };
     let start = || {
         let path = dir.0.clone();
-        let cfg = NodeConfig { shared_files: true, ..with_admin() };
+        let cfg = NodeConfig { shared_files: true, lsm: lsm.clone(), ..with_admin() };
         Node::start(cfg, move || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap())).unwrap()
     };
     let n = start();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
-    assert!(ok(&c.run("db", Document::new().with("insert", "c").with("documents", docs(0..40)))));
+    for k in (0..DOCS).step_by(100) {
+        let more = Document::new().with("insert", "c").with("documents", big_docs(k..k + 100));
+        assert!(ok(&c.run("db", more)));
+    }
     let from = until("range 1", || core_of_range_1(&at));
-    let (code, _, err) = admin(&at, &["range", "relocate", "1", "--core", &(1 - from).to_string()]);
+    let to = 1 - from;
+    let from_dir = dir.0.join(teseladb_raftlog::paths::core_dir(from));
+    let to_dir = dir.0.join(teseladb_raftlog::paths::core_dir(to));
+    // The flushes and compactions of the inserts settle: the same files for a second.
+    let mut last = Vec::new();
+    let before = until("the files of the range settled on its core", || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let mut files = sst_files(&from_dir);
+        files.sort();
+        let settled = files.len() >= 4 && files == last;
+        last = files.clone();
+        settled.then_some(files)
+    });
+    let (code, _, err) = admin(&at, &["range", "relocate", "1", "--core", &to.to_string()]);
     assert_eq!(code, 0, "{err}");
-    until("the range on its new core", || (core_of_range_1(&at) == Some(1 - from)).then_some(()));
-    assert_eq!(all(&mut c), 40);
+    until("the range on its new core", || (core_of_range_1(&at) == Some(to)).then_some(()));
+    let linked = sst_files(&to_dir).iter().filter(|id| before.contains(id)).count();
+    assert!(
+        linked > 0,
+        "no file of the range reached core {to} as a link: {before:?} {:?}",
+        sst_files(&to_dir)
+    );
+    assert_eq!(all(&mut c), DOCS as usize);
     drop(c);
     n.stop();
     let n = start();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
-    assert_eq!(until("range 1", || core_of_range_1(&at)), 1 - from);
+    assert_eq!(until("range 1", || core_of_range_1(&at)), to);
     let mut c = Client::new(&n);
-    assert_eq!(all(&mut c), 40);
+    assert_eq!(all(&mut c), DOCS as usize);
     // And back, with what the first move linked now in the files of the new core.
     let (code, _, err) = admin(&at, &["range", "relocate", "1", "--core", &from.to_string()]);
     assert_eq!(code, 0, "{err}");
     until("the range back", || (core_of_range_1(&at) == Some(from)).then_some(()));
-    assert_eq!(all(&mut c), 40);
+    assert_eq!(all(&mut c), DOCS as usize);
     n.stop();
 }
 
