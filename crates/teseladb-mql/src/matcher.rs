@@ -35,6 +35,8 @@ pub struct Filter {
     /// The tree a query evaluates, in RefDb's order, when it leaves out `$_internalExpr…`
     /// comparisons ([`crate::implied`]).
     run: Option<Expr>,
+    /// The tree a query evaluates, compiled for the register machine (010 FR-031).
+    program: Box<crate::vm::Program>,
 }
 
 impl Filter {
@@ -54,12 +56,40 @@ impl Filter {
         } else {
             None
         };
-        Ok(Filter { expr, ordered, run })
+        let program = Box::new(crate::vm::Program::compile(
+            run.as_ref().unwrap_or(&expr),
+            &crate::vm::DefaultSelectivity,
+        ));
+        Ok(Filter { expr, ordered, run, program })
     }
 
-    /// Whether `doc` matches.
+    /// The filter with the conditions of its `$and`s and `$or`s ordered by `sel`, the range's
+    /// estimate of what each lets through (010 FR-029, FR-031).
+    pub fn with_selectivity(mut self, sel: &dyn crate::vm::Selectivity) -> Filter {
+        self.program = Box::new(crate::vm::Program::compile(self.run_tree(), sel));
+        self
+    }
+
+    /// The compiled program of the filter.
+    pub fn program(&self) -> &crate::vm::Program {
+        &self.program
+    }
+
+    /// Whether `doc` matches, run by the register machine (010 FR-031).
     pub fn matches(&self, doc: RawDoc<'_>, ctx: &MatchContext<'_>) -> Result<bool> {
-        Eval::new(ctx, false).expr(self.run.as_ref().unwrap_or(&self.expr), doc)
+        self.program.run(self.run_tree(), doc, ctx)
+    }
+
+    /// The documents of `docs` (at most 64) that match, as the bits of a mask: bit `i` for
+    /// `docs[i]` (010 FR-028, FR-031). An error is the first one the documents give in order.
+    pub fn matches_batch(&self, docs: &[RawDoc<'_>], ctx: &MatchContext<'_>) -> Result<u64> {
+        self.program.run_batch(self.run_tree(), docs, ctx)
+    }
+
+    /// Whether `doc` matches, by the tree evaluator: what the register machine is checked
+    /// against.
+    pub fn matches_by_tree(&self, doc: RawDoc<'_>, ctx: &MatchContext<'_>) -> Result<bool> {
+        Eval::new(ctx, false).expr(self.run_tree(), doc)
     }
 
     /// Whether `doc` matches and, if it does, the position in the first array the match went
@@ -72,6 +102,11 @@ impl Filter {
         let eval = Eval::new(ctx, true);
         let expr = self.run.as_ref().or(self.ordered.as_ref()).unwrap_or(&self.expr);
         Ok(eval.expr(expr, doc)?.then(|| eval.pos.get()))
+    }
+
+    /// The tree a query evaluates ([`Filter::matches`]).
+    pub fn run_tree(&self) -> &Expr {
+        self.run.as_ref().unwrap_or(&self.expr)
     }
 
     /// The parsed tree.
@@ -265,7 +300,7 @@ impl<'c, 'a> Eval<'c, 'a> {
     }
 
     /// `pred` on the values of `path` in `doc`.
-    fn path(&self, pred: &Pred, doc: RawDoc<'_>, path: &str) -> Result<bool> {
+    pub(crate) fn path(&self, pred: &Pred, doc: RawDoc<'_>, path: &str) -> Result<bool> {
         self.scoped(|| match pred {
             Pred::And(preds) => {
                 for p in preds {
@@ -449,7 +484,7 @@ pub(crate) fn eq(v: Option<RawValue<'_>>, t: RawValue<'_>, coll: Option<&dyn Col
 
 /// An ordering within the target's type class (MinKey and MaxKey compare with every type); NaN
 /// is only equal to NaN.
-fn compare(
+pub(crate) fn compare(
     op: CmpOp,
     v: Option<RawValue<'_>>,
     t: RawValue<'_>,

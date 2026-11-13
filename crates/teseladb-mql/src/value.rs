@@ -46,6 +46,11 @@ impl OwnedValue {
         RawDoc::from_bytes_with(&self.bytes, VALUE_LIMITS).unwrap_or_else(|_| empty_doc())
     }
 
+    /// The BSON of `{"": value}`, as `Document::to_bytes` wrote it.
+    pub(crate) fn holder_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// The value as an owned [`Value`].
     pub fn to_value(&self) -> Value {
         Value::from(self.get())
