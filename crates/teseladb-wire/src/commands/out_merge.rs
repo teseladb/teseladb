@@ -32,7 +32,7 @@ pub(super) fn write<B: Backend + ?Sized>(
     vars: Document,
     executor: impl Fn(CommandError) -> CommandError,
 ) -> Result<(), CommandError> {
-    let env = super::engines::VarsEnv(vars);
+    let env = super::engines::VarsEnv::new(vars);
     match w {
         Write::Out(out) => {
             out.check(ctx.db).map_err(from_mql)?;

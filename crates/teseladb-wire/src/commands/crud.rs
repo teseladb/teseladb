@@ -947,12 +947,13 @@ fn raw(d: &Document) -> Result<Vec<u8>, CommandError> {
 
 /// The document an upsert of statement `m` with update `update` inserts: the one it supplies
 /// (`upsertSupplied`, with an `_id` first when it has none), or its filter's equalities updated,
-/// the update reading the statement's variables.
+/// the update reading the statement's variables and comparing strings with `collation` (the
+/// statement's, or else the collection's default).
 pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
     op: &str,
-    m: &Modify,
+    (m, collation): (&Modify, Option<&Document>),
     update: &Value,
 ) -> Result<Document, CommandError> {
     let (filter, array_filters) = (&m.filter, m.array_filters.as_deref());
@@ -984,10 +985,12 @@ pub(crate) fn upsert_doc<B: Backend + ?Sized>(
     };
     let u = Update::parse(h.get("u").ok_or(CommandError::new(BAD_VALUE, "bad update"))?, af)
         .map_err(from_mql)?;
+    let collator = super::mutation::collator_of(collation)?;
+    let ext = super::engines::CollatedExtensions::new(collator);
     let ctx = UpdateContext {
         matcher: MatchContext {
-            collation: None,
-            ext: &super::engines::NodeExtensions,
+            collation: collator.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
+            ext: &ext,
             vars: m.vars.as_ref(),
         },
         position: None,
@@ -1122,7 +1125,7 @@ fn modify_once<B: Backend + ?Sized>(
     let upsert_doc = match (&m.update, m.upsert) {
         (Some(u), true) => {
             let op = executor_of(m.image);
-            Some(upsert_doc(ctx.backend, ctx.shared, op, m, u)?)
+            Some(upsert_doc(ctx.backend, ctx.shared, op, (m, rules.collation.as_ref()), u)?)
         }
         _ => None,
     };
