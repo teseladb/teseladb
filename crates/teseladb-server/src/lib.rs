@@ -198,8 +198,9 @@ fn log_output(o: &StartOpts) -> io::Result<Box<dyn Write + Send>> {
 }
 
 /// The codec of the new blocks of a node started without `--refengineCollectionBlockCompressor`
-/// (004 FR-023, T037).
-pub const DEFAULT_BLOCK_CODEC: teseladb_lsm::Codec = teseladb_lsm::Codec::None;
+/// (004 FR-023, T037, D-164): zlib, which in the sustained load of 002 left the disk at a quarter
+/// and gave more operations a second than no compression and than zstd.
+pub const DEFAULT_BLOCK_CODEC: teseladb_lsm::Codec = teseladb_lsm::Codec::Zlib;
 
 /// Node configuration of `teseladb start`.
 pub fn node_config(o: &StartOpts) -> NodeConfig {

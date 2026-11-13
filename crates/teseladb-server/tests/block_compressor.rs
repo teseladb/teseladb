@@ -21,7 +21,9 @@ fn the_option_chooses_the_codec_of_the_new_blocks() {
     assert_eq!(start(&["--refengineCollectionBlockCompressor", "zstd"]), Ok(Codec::Zstd));
     assert_eq!(start(&["--refengineCollectionBlockCompressor", "zlib"]), Ok(Codec::Zlib));
     assert_eq!(start(&["--refengineCollectionBlockCompressor=none"]), Ok(Codec::None));
-    assert_eq!(start(&[]), Ok(teseladb_server::DEFAULT_BLOCK_CODEC));
+    // Without the option, zlib (D-164).
+    assert_eq!(start(&[]), Ok(Codec::Zlib));
+    assert_eq!(teseladb_server::DEFAULT_BLOCK_CODEC, Codec::Zlib);
     let snappy = start(&["--refengineCollectionBlockCompressor", "snappy"]).unwrap_err();
     assert!(snappy.contains("none, zlib or zstd"), "{snappy}");
 }
