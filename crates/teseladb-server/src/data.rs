@@ -108,7 +108,47 @@ pub enum DataReq {
     At(NodeId, GroupId, RemoteReq),
     /// The sizes of this core's LSM, for the metrics (004 FR-019).
     Lsm,
+    /// A scan of a range this replica leads (`.1`, a [`RemoteReq::Scan`]) whose documents go
+    /// through `.2`, the `$match`es and partial `$group` of an aggregation, on this core (010
+    /// FR-034): the answer is the partial groups, not the documents.
+    Partial(GroupId, RemoteReq, Fold),
 }
+
+/// The program of an aggregation that a core runs over the documents of its range (010 FR-034).
+/// Two are equal when they are the same program.
+#[derive(Clone, Debug)]
+pub struct Fold(pub Arc<teseladb_exec::pipeline::Program>);
+
+impl PartialEq for Fold {
+    fn eq(&self, other: &Fold) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Fold {}
+
+/// The answer to a [`DataReq::Partial`].
+#[derive(Clone, Debug)]
+pub struct Folded {
+    /// The partial groups of the documents read; `None` when the core declined them.
+    pub groups: Option<Arc<teseladb_exec::pipeline::PartialGroups>>,
+    /// Documents read.
+    pub examined: usize,
+    /// Where the scan of the range goes on, when it stopped at its number of documents.
+    pub next: Option<Vec<u8>>,
+}
+
+impl PartialEq for Folded {
+    fn eq(&self, other: &Folded) -> bool {
+        let same = match (&self.groups, &other.groups) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        same && self.examined == other.examined && self.next == other.next
+    }
+}
+
+impl Eq for Folded {}
 
 /// The sizes of a core's LSM: its files by level and what it holds in memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -190,6 +230,8 @@ pub enum DataReply {
     Remote(RemoteReply),
     /// The answer to a [`DataReq::Lsm`].
     Lsm(LsmSizes),
+    /// The answer to a [`DataReq::Partial`].
+    Partial(Folded),
 }
 
 /// Why a request of the node's handle failed.
@@ -212,6 +254,29 @@ enum Client {
     Local(DataSender, Option<(GroupId, RemoteReq)>),
     /// Another node's forwarded request.
     Remote(NodeId, u64),
+    /// The handle's scan for an aggregation's program (010 FR-034), of at most `.2` documents.
+    Partial(DataSender, Fold, usize),
+}
+
+/// The answer to a [`DataReq::Partial`] from the answer `r` of its scan of at most `limit`
+/// documents: the program run over the rows, on this core. A leader that moved, or an answer
+/// without rows, goes back as an error and the caller reads the range itself.
+fn folded(
+    r: Result<RemoteReply, RangeError>,
+    fold: &Fold,
+    limit: usize,
+) -> Result<DataReply, RangeError> {
+    match r? {
+        RemoteReply::Rows(rows) => {
+            let next = match (rows.len() >= limit, rows.last()) {
+                (true, Some((k, _))) => Some([k.as_slice(), &[0]].concat()),
+                _ => None,
+            };
+            let groups = fold.0.run(&rows).map(Arc::new);
+            Ok(DataReply::Partial(Folded { groups, examined: rows.len(), next }))
+        }
+        _ => Err(RangeError::Unavailable),
+    }
 }
 
 /// The mutation of a put: the new value, whatever was there.
@@ -586,6 +651,20 @@ impl DataCore {
                 self.send_to(core, (g, r), reply, node, now);
                 return;
             }
+            DataReq::Partial(g, r, fold) => {
+                // Only where this replica holds the range: the program does not go to another
+                // node, and the caller reads the range itself instead.
+                let limit = match &r {
+                    RemoteReq::Scan { limit, .. } => usize::try_from(*limit).unwrap_or(usize::MAX),
+                    _ => 0,
+                };
+                if !self.host_has(g) || limit == 0 {
+                    let _ = reply.send(Err(RangeError::NotLeader { hint: NodeId(0) }));
+                    return;
+                }
+                self.run(core, (g, r), Client::Partial(reply, fold, limit), (now, wall_ms));
+                return;
+            }
             DataReq::At(_, g, r) | DataReq::Remote(g, r) => {
                 if !self.host_has(g) {
                     // No replica here (or not open yet): straight to the leader the router knows.
@@ -923,6 +1002,7 @@ impl DataCore {
                 r => drop(to.send(r.map(DataReply::Remote))),
             },
             Client::Local(to, None) => drop(to.send(r.map(DataReply::Remote))),
+            Client::Partial(to, fold, limit) => drop(to.send(folded(r, &fold, limit))),
             Client::Remote(node, req) => {
                 let body = encode_reply(&r);
                 core.answer_forward(node, req, Bytes::from_vec(body));

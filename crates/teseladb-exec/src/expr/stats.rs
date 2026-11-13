@@ -102,6 +102,11 @@ pub(crate) struct Total {
     plain: f64,
     decimals: Option<Decimal128>,
     count: u64,
+    /// A number came that is not an integer (a fraction, an infinity, a NaN, a decimal).
+    inexact: bool,
+    /// The sum of the magnitudes of the numbers (or a bound of it): while it stays within 2^53
+    /// with only integers, every running total above was exact in any order.
+    magnitude: f64,
 }
 
 impl Total {
@@ -133,12 +138,40 @@ impl Total {
             }
             _ => return,
         }
-        self.plain += super::values::f64_of(v).unwrap_or(0.0);
+        let x = super::values::f64_of(v).unwrap_or(0.0);
+        let integral = !matches!(v, Value::Decimal128(_)) && x.is_finite() && x.fract() == 0.0;
+        self.inexact |= !integral;
+        self.magnitude += x.abs();
+        self.plain += x;
         self.count += 1;
     }
 
+    /// Takes in `later`, the total of the numbers that came after this one's, when the result is
+    /// the one adding them all one at a time gives (010 FR-034): both only integers (doubles
+    /// included) whose magnitudes add up to at most 2^53, so that every double either total kept
+    /// was exact and so is every running total of the whole. Returns whether it took it; the
+    /// caller does not merge otherwise.
+    pub(crate) fn merge_exact(&mut self, later: &Total) -> bool {
+        // 2^53: the integers up to it are doubles, and so are their sums while they stay there.
+        const EXACT: f64 = (1u64 << 53) as f64;
+        // The most the high half of a value (`add_long`) can stand above the value, twice.
+        const HALVES: f64 = (1u64 << 33) as f64;
+        let exact = |t: &Total| !t.inexact && t.decimals.is_none() && t.doubles.lo == 0.0;
+        if !exact(self) || !exact(later) || self.magnitude + later.magnitude + HALVES > EXACT {
+            return false;
+        }
+        self.ints += later.ints;
+        self.has_long |= later.has_long;
+        self.doubles.hi += later.doubles.hi;
+        self.has_double |= later.has_double;
+        self.plain += later.plain;
+        self.count += later.count;
+        self.magnitude += later.magnitude;
+        true
+    }
+
     /// Adds `count` integers whose exact sum is `sum` and whose magnitudes are at most
-    /// `max_abs` (`long` when one of them is a `long`), when adding them one at a time with
+    /// `max_abs` and add up to `abs_sum` (`long` when one of them is a `long`), when adding them one at a time with
     /// [`Total::add`] would be exact in every double it keeps (010 FR-030): no decimal yet,
     /// integral running doubles, and every partial sum, the high half of each value included,
     /// within 2^53. Then the totals are those of the adds one at a time, with no double rounded.
@@ -147,7 +180,7 @@ impl Total {
         &mut self,
         sum: i128,
         count: u64,
-        max_abs: u64,
+        (max_abs, abs_sum): (u64, u128),
         long: bool,
     ) -> bool {
         // 2^53: the integers up to it are doubles, and so are their sums while they stay there.
@@ -160,7 +193,12 @@ impl Total {
         }
         let reach = i128::from(count) * i128::from(max_abs);
         let (hi, plain) = (self.doubles.hi as i128, self.plain as i128);
-        if hi.abs() + reach + HALF > EXACT || plain.abs() + reach > EXACT {
+        // The magnitude too, so that it stays the exact sum the adds one at a time give.
+        let magnitude = self.magnitude + abs_sum as f64;
+        if hi.abs() + reach + HALF > EXACT
+            || plain.abs() + reach > EXACT
+            || magnitude > EXACT as f64
+        {
             return false;
         }
         self.ints += sum;
@@ -169,6 +207,7 @@ impl Total {
         self.plain += sum as f64;
         self.has_long |= long;
         self.count += count;
+        self.magnitude = magnitude;
         true
     }
 
@@ -246,6 +285,21 @@ impl Extreme {
 
     pub(crate) fn value(&self) -> Value {
         self.best.clone().unwrap_or(Value::Null)
+    }
+
+    /// Takes in `later`, the extreme of the values that came after this one's: its value, as
+    /// [`Extreme::add`] takes one, gives what taking them all one at a time gives (the first of
+    /// equal values, or the last with `keep_last`), since the order is a total preorder.
+    pub(crate) fn merge(
+        &mut self,
+        later: &Extreme,
+        col: Option<&dyn teseladb_bson::Collator>,
+        keep_last: bool,
+    ) -> Result<(), MqlError> {
+        match &later.best {
+            Some(v) => self.add(v, col, keep_last),
+            None => Ok(()),
+        }
     }
 }
 
@@ -387,7 +441,8 @@ mod tests {
             let sum = ints.iter().map(|&n| i128::from(n)).sum();
             let max_abs = ints.iter().map(|n| n.unsigned_abs()).max().unwrap_or(0);
             let long = values.iter().any(|v| matches!(v, Value::Int64(_)));
-            if at_once.add_exact_ints(sum, values.len() as u64, max_abs, long) {
+            let abs_sum = ints.iter().map(|n| u128::from(n.unsigned_abs())).sum();
+            if at_once.add_exact_ints(sum, values.len() as u64, (max_abs, abs_sum), long) {
                 taken += 1;
                 assert_eq!(format!("{at_once:?}"), format!("{one_by_one:?}"));
                 assert_eq!(format!("{:?}", at_once.sum()), format!("{:?}", one_by_one.sum()));
@@ -397,9 +452,9 @@ mod tests {
         assert!(taken > 1000, "the batches within 2^53 are taken: {taken}");
         let mut big = Total::default();
         big.add(&Value::Int64(1 << 53));
-        assert!(!big.add_exact_ints(1, 1, 1, false));
+        assert!(!big.add_exact_ints(1, 1, (1, 1), false));
         let mut fraction = Total::default();
         fraction.add(&Value::Double(0.5));
-        assert!(!fraction.add_exact_ints(1, 1, 1, false));
+        assert!(!fraction.add_exact_ints(1, 1, (1, 1), false));
     }
 }

@@ -17,7 +17,7 @@ use super::errors::{
     UNKNOWN_FIELD, error,
 };
 use super::granularity::Granularity;
-use crate::accum::{Accumulator, State};
+use crate::accum::{Accumulator, Part, State};
 use crate::expr::arith::type_name_of;
 use crate::expr::values::display;
 use crate::expr::{Ctx, Expr, Scope, order};
@@ -195,6 +195,111 @@ impl Group {
             d.push(name.clone(), acc.finish(st, col, sbe)?);
         }
         Ok(d)
+    }
+}
+
+/// The groups of a `$group` over one part of its input, before their values are finished (010
+/// FR-034): in the order they appeared, each with its canonical key, its key and its
+/// accumulators' states. The groups of consecutive parts merge into those of the whole
+/// ([`Group::merge_parts`]).
+#[derive(Clone, Debug, Default)]
+pub struct PartialGroups {
+    list: Vec<(Vec<u8>, Value, Vec<Part>)>,
+}
+
+impl PartialGroups {
+    /// How many groups.
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+}
+
+impl Group {
+    /// Whether the states of every accumulator merge, so that the groups of parts of the input
+    /// give those of the whole ([`Accumulator::merges`]).
+    pub fn merges(&self) -> bool {
+        self.outputs.iter().all(|(_, a)| a.merges())
+    }
+
+    /// The groups of `docs`, one part of the input, as [`Group::run`] would build them before
+    /// finishing them; `None` when their keys pass `limit` bytes (the whole would then go through
+    /// the store, in the order of the keys, or fail) or an accumulator does not merge.
+    pub fn partial(
+        &self,
+        docs: Vec<Document>,
+        env: &dyn Env,
+        sbe: bool,
+        limit: usize,
+    ) -> Result<Option<PartialGroups>, MqlError> {
+        if !self.merges() {
+            return Ok(None);
+        }
+        let mut grouping = self.start(env, sbe);
+        grouping.absorb_groups(&docs, (limit, true))?;
+        if grouping.spill {
+            return Ok(None);
+        }
+        let collation = env.collation();
+        let col = collation.get();
+        let mut list = Vec::with_capacity(grouping.groups.list.len());
+        for (key, states) in grouping.groups.list {
+            let parts: Option<Vec<Part>> = states.into_iter().map(Part::of).collect();
+            let Some(parts) = parts else { return Ok(None) };
+            list.push((canonical(&key, col), key, parts));
+        }
+        Ok(Some(PartialGroups { list }))
+    }
+
+    /// The documents of the groups of the whole input from those of its consecutive parts
+    /// `parts`, in their order: each group in the order it first appeared, with the key of its
+    /// first document, as [`Group::run`] gives them over the parts one after the other, the
+    /// memory limit included. `None` when a merge would not give the same states
+    /// ([`Accumulator::merge`]) or the groups pass the limit with a store to write to (the run
+    /// would then sort them by key through it), and the caller runs the stage over the whole.
+    pub fn merge_parts(
+        &self,
+        parts: Vec<PartialGroups>,
+        env: &dyn Env,
+        sbe: bool,
+    ) -> Result<Option<Vec<Document>>, MqlError> {
+        let collation = env.collation();
+        let col = collation.get();
+        let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut list: Vec<(Value, Vec<Part>)> = Vec::new();
+        let mut held = 0usize;
+        for part in parts {
+            for (canon, key, states) in part.list {
+                let Some(&i) = index.get(&canon) else {
+                    held += super::errors::value_size(&key);
+                    index.insert(canon, list.len());
+                    list.push((key, states));
+                    continue;
+                };
+                for ((_, acc), (into, later)) in
+                    self.outputs.iter().zip(list[i].1.iter_mut().zip(&states))
+                {
+                    if !acc.merge(into, later, (col, sbe))? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let (limit, store) = limits(env);
+        if store.is_some() && held > limit {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(list.len());
+        for (key, parts) in list {
+            let states = parts.into_iter().map(Part::into_state).collect();
+            out.push(self.finished(key, states, col, sbe)?);
+        }
+        check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
+        Ok(Some(out))
     }
 }
 
