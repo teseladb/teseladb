@@ -135,6 +135,15 @@ impl RangeHost {
                 self.reqs.insert(id, Req::Mut(m));
                 return false;
             }
+            // New writes go in at the rate the LSM's debt allows (FR-038), in order of arrival;
+            // a decided transaction's resolution frees what others wait for and always goes in.
+            if fenced_work && !m.admitted {
+                if !self.throttle.admit(now) {
+                    self.reqs.insert(id, Req::Mut(m));
+                    return false;
+                }
+                m.admitted = true;
+            }
             // A retry of the same statement waits for the original (FR-011).
             let record = m.dedup.map(|k| dedup_key(m.g, k.lsid, k.txn_number, k.stmt_id));
             let keys: Vec<Vec<u8>> = m.keys.iter().cloned().chain(record).collect();

@@ -430,6 +430,12 @@ impl Lsm {
         }
     }
 
+    /// The debt the leader's write rate follows (005 FR-038): files in level 0 plus frozen
+    /// memtables.
+    pub fn write_debt(&self) -> u64 {
+        (self.version.levels[0].len() + self.version.memtables.len() - 1) as u64
+    }
+
     /// What a read that just missed blocks waits for: [`Lsm::block_reads_back`] tells when the
     /// block reads asked so far, its own among them, came back.
     pub fn block_reads_asked(&self) -> u64 {

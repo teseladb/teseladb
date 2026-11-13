@@ -31,6 +31,7 @@ pub mod relocate;
 pub mod rollback;
 pub mod sm;
 pub mod snapshot;
+pub mod throttle;
 pub mod tscache;
 pub mod view;
 

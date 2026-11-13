@@ -23,6 +23,7 @@ fn level_0_files_slow_down_then_reject_and_compaction_brings_it_back() {
         lsm.flush();
         lsm.run_io(&mut disk, Nanos::ZERO);
         seen.push((lsm.metrics().level_bytes.len(), lsm.pressure()));
+        assert_eq!(lsm.write_debt(), i, "one file in level 0 per flush (005 FR-038)");
     }
     let at = |n: usize| seen[n - 1].1;
     assert_eq!(at(19), Pressure::Normal);
@@ -55,6 +56,7 @@ fn many_frozen_memtables_ask_to_slow_down_too() {
             Pressure::Normal
         };
         assert_eq!(lsm.pressure(), expected, "{frozen} frozen");
+        assert_eq!(lsm.write_debt(), i, "frozen memtables are debt too");
     }
     lsm.run_io(&mut disk, Nanos::ZERO);
     assert_eq!(lsm.pressure(), Pressure::Normal);

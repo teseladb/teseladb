@@ -443,6 +443,8 @@ pub(crate) struct MutReq {
     read_due: u64,
     /// When it reached the core (012 FR-015).
     arrived: Nanos,
+    /// The write rate let it in (FR-038).
+    admitted: bool,
 }
 
 /// What a request read of its keys under one latch, key by key (`None`: not yet): the latch
@@ -649,6 +651,8 @@ pub struct RangeHost {
     load_split_ops: u64,
     /// History each range keeps, in cluster time (007 FR-019).
     pub(crate) gc_ttl_ms: u64,
+    /// The rate at which new writes are admitted while the LSM asks to slow down (FR-038).
+    throttle: crate::throttle::WriteThrottle,
 }
 
 fn op_error(e: OpError) -> RangeError {
@@ -712,6 +716,7 @@ impl RangeHost {
         RangeHost {
             lsm,
             clock,
+            throttle: crate::throttle::WriteThrottle::default(),
             views: crate::view::RangeViews::default(),
             views_until: BTreeMap::new(),
             ranges: BTreeMap::new(),
@@ -1022,6 +1027,7 @@ impl RangeHost {
             read: Partial::Nothing,
             read_due: 0,
             arrived: now,
+            admitted: false,
         };
         self.reqs.insert(id, Req::Mut(req));
         self.step(core, id, now);
@@ -1300,6 +1306,10 @@ impl RangeHost {
             moved |= self.merge_step(core, g, now);
         }
         moved |= self.settle_uncertain(core);
+        {
+            let lsm = self.lsm.borrow();
+            self.throttle.observe(now, lsm.pressure(), lsm.write_debt());
+        }
         // A frozen range runs no round: its state waits for the merge as it is.
         let led: Vec<GroupId> = self
             .ranges

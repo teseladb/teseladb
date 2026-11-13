@@ -268,6 +268,59 @@ fn a_full_level_0_answers_overloaded_until_compaction_empties_it() {
     assert!(matches!(c.reply(l, w), Some(Ok(Reply::Mutated { .. }))));
 }
 
+#[test]
+fn a_level_0_that_asks_to_slow_down_spreads_new_writes_out_instead_of_refusing_them() {
+    // 005 FR-038: with `Slow` the leader admits new writes at a rate, in order, and none of them
+    // is refused.
+    let lsm = LsmConfig {
+        dir: "core-00/lsm".into(),
+        l0_trigger: 1000,
+        l0_slow: 1,
+        l0_reject: 100,
+        ..LsmConfig::default()
+    };
+    let mut c = Cluster::new(lsm, 1024);
+    let l = c.elect();
+    let w = c.mutate_key(l, b"\x01a0", 0, MAJORITY);
+    c.settle();
+    assert!(matches!(c.reply(l, w), Some(Ok(Reply::Mutated { .. }))));
+    let now = c.now;
+    let node = c.nodes.get_mut(&l).unwrap();
+    let lsm = node.host.lsm().clone();
+    lsm.borrow_mut().flush();
+    lsm.borrow_mut().run_io(&mut node.disk, now);
+    c.ticks(1);
+    let keys: Vec<Vec<u8>> = (0..40u8).map(|i| vec![1, b'b', i]).collect();
+    let ids: Vec<_> =
+        keys.iter().enumerate().map(|(i, k)| c.mutate_key(l, k, i as u8, MAJORITY)).collect();
+    c.settle();
+    let mut done = vec![false; ids.len()];
+    let mut first_round = 0;
+    for (i, id) in ids.iter().enumerate() {
+        if let Some(r) = c.reply(l, *id) {
+            assert!(matches!(r, Ok(Reply::Mutated { .. })), "{r:?}");
+            done[i] = true;
+            first_round += 1;
+        }
+    }
+    assert!(first_round < ids.len() / 2, "{first_round} of {} went in at once", ids.len());
+    for _ in 0..400 {
+        c.ticks(1);
+        for (i, id) in ids.iter().enumerate() {
+            if !done[i]
+                && let Some(r) = c.reply(l, *id)
+            {
+                assert!(matches!(r, Ok(Reply::Mutated { .. })), "{r:?}");
+                done[i] = true;
+            }
+        }
+        if done.iter().all(|d| *d) {
+            return;
+        }
+    }
+    panic!("{} of {} writes still wait", done.iter().filter(|d| !**d).count(), ids.len());
+}
+
 /// The clocks of a majority jump back together (005 FR-005, FR-006, D-044): within margin of
 /// each other, the jumped nodes still stay aside until their wall clocks pass the highest time
 /// they read before the jump, and then the new leader writes above the reads the old leader
