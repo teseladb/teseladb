@@ -630,7 +630,12 @@ pub fn start(
     }
     let data = o.dbpath.clone();
     // The disk executor and O_DIRECT (012 FR-003, FR-007), decided once and logged.
-    let choice = match teseladb_io::node_disk::choose(o.io_executor, o.direct_io, &data) {
+    let choice = match teseladb_io::node_disk::choose(
+        o.io_executor,
+        o.direct_io,
+        o.io_uring_sqpoll,
+        &data,
+    ) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");

@@ -93,6 +93,8 @@ pub struct StartOpts {
     pub io_executor: teseladb_io::node_disk::IoExecutor,
     /// `O_DIRECT` (`--direct-io`, 012 FR-003).
     pub direct_io: teseladb_io::node_disk::DirectIo,
+    /// A kernel thread polls each core's ring (`--io-uring-sqpoll`, 012 FR-025).
+    pub io_uring_sqpoll: bool,
     /// The codec of the new blocks of every core (`--refengineCollectionBlockCompressor`,
     /// 004 FR-023); `None`: the default one.
     pub block_codec: Option<teseladb_lsm::Codec>,
@@ -352,6 +354,8 @@ pub struct DevOpts {
 /// One option of a subcommand: its name and whether it is a flag (it takes no value).
 type Spec = (&'static str, bool);
 
+/// `--io-uring-sqpoll` (012 FR-025).
+const IO_URING_SQPOLL: &str = "io-uring-sqpoll";
 const VALUE: bool = false;
 const FLAG: bool = true;
 
@@ -361,6 +365,7 @@ const START: &[Spec] = &[
     ("memory-limit", VALUE),
     ("io-executor", VALUE),
     ("direct-io", VALUE),
+    (IO_URING_SQPOLL, FLAG),
     (BLOCK_COMPRESSOR, VALUE),
     ("cpu-list", VALUE),
     ("bind_ip", VALUE),
@@ -1120,6 +1125,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             Some(v) => teseladb_io::node_disk::DirectIo::parse(v)
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
+        io_uring_sqpoll: o.flag(IO_URING_SQPOLL)?,
         block_codec: block_codec(o.get(BLOCK_COMPRESSOR))?,
         cpu_list: cpu_list(o.get("cpu-list"), cores)?,
         enroll_token: o.get(ENROLL_TOKEN).map(Password::from),
@@ -1235,6 +1241,7 @@ pub const USAGE: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
+                 [--io-uring-sqpoll]
                  [--refengineCollectionBlockCompressor none|zlib|zstd]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]

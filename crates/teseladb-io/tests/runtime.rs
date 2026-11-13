@@ -16,6 +16,7 @@ use teseladb_io::handshake::{self, Acceptor, HandshakeError};
 use teseladb_io::mailbox::MailboxSender;
 use teseladb_io::peer::{Hello, PeerMsg, Versions, encode_frame};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreRuntime, RuntimeConfig};
+use teseladb_io::service::ServiceClass;
 use teseladb_raftlog::{Disk, FileId, IoDone, IoOp, MemDisk};
 use teseladb_types::{Bytes, Nanos, NodeId};
 
@@ -46,6 +47,12 @@ enum Cmd {
     /// Create a file and write to it, one operation at a time: the write is handed out only
     /// once the creation is done, the way the log's next batch waits for the one in flight.
     OneByOne,
+    /// Keeps the core busy for this long (a request that costs it CPU).
+    Stall(Duration),
+    /// A new request, refused when the core is overloaded.
+    Request(u64),
+    /// A long scan, in the background class (012 FR-030).
+    Scan(u64),
 }
 
 #[derive(Default)]
@@ -75,6 +82,9 @@ struct Toy {
     wakes: u64,
     /// Turns with work that read the wall clock ([`CoreLogic::clock`]).
     clocks: u64,
+    /// Requests served and refused as overloaded (012 FR-029).
+    served: Vec<u64>,
+    refused: Vec<u64>,
 }
 
 fn ack(req: u64) -> PeerMsg {
@@ -155,6 +165,25 @@ impl CoreLogic for Toy {
                 let data = Bytes::from_vec(b"abc".to_vec());
                 self.io.push(IoOp::WriteAt { file, offset: 0, data, batch: 1 });
             }
+            Cmd::Stall(d) => thread::sleep(d),
+            Cmd::Request(id) | Cmd::Scan(id) => self.served.push(id),
+        }
+    }
+
+    fn service_class(&self, msg: &Cmd) -> ServiceClass {
+        match msg {
+            Cmd::Scan(_) => ServiceClass::Background,
+            _ => ServiceClass::Foreground,
+        }
+    }
+
+    fn refuse_overloaded(&mut self, msg: Cmd) -> Option<Cmd> {
+        match msg {
+            Cmd::Request(id) => {
+                self.refused.push(id);
+                None
+            }
+            other => Some(other),
         }
     }
 
@@ -692,4 +721,72 @@ fn a_core_whose_logic_is_busy_never_rests() {
     }
     // Every 10 ms all along: about 150.
     assert!(rt.logic().ticks >= 120, "{} ticks", rt.logic().ticks);
+}
+
+#[test]
+fn an_overloaded_core_refuses_new_requests_until_its_queue_drains() {
+    // 012 FR-029: twenty stalls of 10 ms queued at once keep each message waiting more than 5 ms
+    // for well over 100 ms; the requests behind them are refused, and once the queue is empty a
+    // new request is served.
+    let a = start(20, Toy::default());
+    for _ in 0..20 {
+        a.tx.send(CoreInput::App(Cmd::Stall(Duration::from_millis(10)))).ok().unwrap();
+    }
+    for id in 1..=5 {
+        a.tx.send(CoreInput::App(Cmd::Request(id))).ok().unwrap();
+    }
+    // A stall alone waits for nothing: once it has run, the core admits again.
+    thread::sleep(Duration::from_millis(400));
+    a.tx.send(CoreInput::App(Cmd::Stall(Duration::ZERO))).ok().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    a.tx.send(CoreInput::App(Cmd::Request(6))).ok().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let t = stop(a);
+    assert_eq!(t.refused, vec![1, 2, 3, 4, 5]);
+    assert_eq!(t.served, vec![6]);
+}
+
+#[test]
+fn a_core_that_keeps_up_refuses_nothing() {
+    let a = start(21, Toy::default());
+    for id in 0..200 {
+        a.tx.send(CoreInput::App(Cmd::Request(id))).ok().unwrap();
+        if id % 20 == 0 {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    thread::sleep(Duration::from_millis(100));
+    let t = stop(a);
+    assert!(t.refused.is_empty(), "{:?}", t.refused);
+    assert_eq!(t.served.len(), 200);
+}
+
+#[test]
+fn document_operations_go_ahead_of_long_scans() {
+    // 012 FR-030: scans and requests queued behind a busy stretch come out with the requests
+    // first; the scans run once nothing else waits, and all of them are answered.
+    let a = start(22, Toy::default());
+    a.tx.send(CoreInput::App(Cmd::Stall(Duration::from_millis(30)))).ok().unwrap();
+    thread::sleep(Duration::from_millis(5));
+    for id in [101, 102] {
+        a.tx.send(CoreInput::App(Cmd::Scan(id))).ok().unwrap();
+    }
+    for id in [1, 2] {
+        a.tx.send(CoreInput::App(Cmd::Request(id))).ok().unwrap();
+    }
+    thread::sleep(Duration::from_millis(100));
+    // Alone, a scan runs at once.
+    a.tx.send(CoreInput::App(Cmd::Scan(103))).ok().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let t = stop(a);
+    assert_eq!(t.served, vec![1, 2, 101, 102, 103]);
+}
+
+#[test]
+fn background_requests_still_waiting_at_a_stop_are_answered() {
+    let a = start(23, Toy::default());
+    a.tx.send(CoreInput::App(Cmd::Stall(Duration::from_millis(20)))).ok().unwrap();
+    a.tx.send(CoreInput::App(Cmd::Scan(7))).ok().unwrap();
+    let t = stop(a);
+    assert_eq!(t.served, vec![7]);
 }

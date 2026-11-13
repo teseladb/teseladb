@@ -483,3 +483,48 @@ pub(crate) fn distribution() -> (String, String) {
 pub(crate) fn usec(v: Suseconds) -> i64 {
     v
 }
+
+unsafe extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+const HUGE_PROT: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
+const MAP_PRIVATE: i32 = 0x02;
+const MAP_ANONYMOUS: i32 = 0x20;
+const MAP_HUGETLB: i32 = 0x40000;
+const MAP_FAILED: usize = usize::MAX;
+
+/// `len` zeroed bytes on 2 MiB pages (`MAP_HUGETLB`, 012 FR-032); `None` when the system has not
+/// enough huge pages reserved (`ENOMEM`) or refuses them.
+pub(crate) fn map_huge(len: usize) -> Option<std::ptr::NonNull<u8>> {
+    // SAFETY: an anonymous private mapping at an address the kernel picks; no memory of the
+    // process is touched.
+    let p = unsafe {
+        mmap(std::ptr::null_mut(), len, HUGE_PROT, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0)
+    };
+    if p as usize == MAP_FAILED {
+        return None;
+    }
+    std::ptr::NonNull::new(p)
+}
+
+/// Unmaps a mapping [`map_huge`] made.
+pub(crate) fn unmap(ptr: std::ptr::NonNull<u8>, len: usize) {
+    // SAFETY: `ptr` and `len` are those of a mapping `map_huge` returned, unmapped once by its
+    // owner when nothing points into it any more. A failure leaves the mapping in place, which
+    // only keeps its memory.
+    unsafe { munmap(ptr.as_ptr(), len) };
+}
+
+/// The free huge pages the system has reserved (`HugePages_Free` of `/proc/meminfo`).
+pub(crate) fn huge_pages_free() -> usize {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| {
+            m.lines()
+                .find_map(|l| l.strip_prefix("HugePages_Free:"))
+                .and_then(|n| n.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}

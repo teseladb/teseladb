@@ -15,12 +15,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_raftlog::{Disk, IoDone, IoOp};
 use teseladb_types::{Nanos, NodeId, Rng};
 
+use crate::admission::Admission;
 use crate::disk_thread::DiskThread;
 use crate::handshake::{self, Inbound, Outbound};
 use crate::mailbox::{self, Mailbox, MailboxSender};
 use crate::peer::{Hello, PeerMsg, decode_frame, encode_frame_for};
 use crate::poller::{Event, Interest, Poller, WAKE_TOKEN};
 use crate::secure::{Channel, PeerTls};
+use crate::service::ServiceClass;
 use crate::timer::TimerWheel;
 
 /// Frames queued for a node that is not connected yet beyond this are dropped (Raft resends).
@@ -69,6 +71,17 @@ pub trait CoreLogic {
     fn on_peer(&mut self, from: NodeId, msg: PeerMsg, now: Nanos);
     /// Message from another thread.
     fn on_message(&mut self, msg: Self::Msg, now: Nanos);
+    /// The core is overloaded (012 FR-029): answers `msg` with `Overloaded` if it is a new
+    /// request and returns `None`, or gives it back to run as usual (the default, for messages
+    /// that are not requests).
+    fn refuse_overloaded(&mut self, msg: Self::Msg) -> Option<Self::Msg> {
+        Some(msg)
+    }
+    /// The service class of `msg` (012 FR-030): a background one runs only when the core has
+    /// nothing else to do. Everything is in the foreground by default.
+    fn service_class(&self, _msg: &Self::Msg) -> ServiceClass {
+        ServiceClass::Foreground
+    }
     /// Moves the frames to send to `out`.
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>);
     /// Inter-node address of `node`, if known.
@@ -223,7 +236,12 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     stopped: bool,
     /// The disk can take no more operations: a stop does not wait for it.
     disk_gone: bool,
-    inputs: Vec<CoreInput<L::Msg>>,
+    /// The messages drained from the mailbox, with the instant each was queued.
+    inputs: Vec<(Instant, CoreInput<L::Msg>)>,
+    /// Refuses new requests while the queue wait stays high (012 FR-029).
+    admission: Admission,
+    /// Background requests waiting for a turn with nothing else to do (012 FR-030).
+    background: VecDeque<L::Msg>,
     outbox: Vec<(NodeId, PeerMsg)>,
     events: Vec<Event>,
     fired: Vec<NodeId>,
@@ -291,6 +309,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             stopped: false,
             disk_gone: false,
             inputs: Vec::new(),
+            admission: Admission::new(),
+            background: VecDeque::new(),
             outbox: Vec::new(),
             events: Vec::new(),
             fired: Vec::new(),
@@ -316,6 +336,11 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     pub fn run(mut self) -> io::Result<(L, Option<D>)> {
         while !self.stopped {
             self.turn()?;
+        }
+        // The background requests still waiting are answered before the core goes.
+        while let Some(m) = self.background.pop_front() {
+            let now = self.now();
+            self.logic.on_message(m, now);
         }
         self.settle()?;
         let CoreRuntime { logic, disk, .. } = self;
@@ -352,8 +377,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             let timeout = if self.ring_ready() { Duration::ZERO } else { timeout };
             self.poller.poll(Some(timeout))?;
             self.reap_ring()?;
-            self.mailbox.drain_into(&mut self.inputs);
-            for input in std::mem::take(&mut self.inputs) {
+            self.mailbox.drain_timed_into(&mut self.inputs);
+            for (_, input) in std::mem::take(&mut self.inputs) {
                 if let CoreInput::Disk(done) = input {
                     let class = self.thread_class(&done);
                     self.logic.on_io_done(done, class, self.now());
@@ -373,6 +398,16 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
     }
 
+    /// Runs one background request if nothing new waits in the mailbox (012 FR-030).
+    fn run_background(&mut self) {
+        if self.background.is_empty() || !self.mailbox.is_empty() {
+            return;
+        }
+        let m = self.background.pop_front().expect("a background request");
+        let now = self.now();
+        self.logic.on_message(m, now);
+    }
+
     /// How many turns spun before sleeping.
     pub fn spins(&self) -> u64 {
         self.spins
@@ -389,6 +424,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             deadline = deadline.min(Nanos::from_millis(ms));
         }
         let timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
+        // A background request waits for nothing but the core's other work.
+        let timeout = if self.background.is_empty() { timeout } else { Duration::ZERO };
         // Results of the ring that no completion will signal are taken at once.
         #[cfg(target_os = "linux")]
         let timeout = if self.ring_ready() { Duration::ZERO } else { timeout };
@@ -436,8 +473,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
         worked |= self.reap_ring()?;
         self.events = events;
-        self.mailbox.drain_into(&mut self.inputs);
-        self.worked = worked || !self.inputs.is_empty();
+        self.mailbox.drain_timed_into(&mut self.inputs);
+        self.worked = worked || !self.inputs.is_empty() || !self.background.is_empty();
         let step = Nanos(self.cfg.tick.as_nanos() as u64);
         if self.worked {
             let now = self.now();
@@ -452,9 +489,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 self.logic.clock(now, wall_ms());
             }
         }
-        for input in std::mem::take(&mut self.inputs) {
-            self.on_input(input)?;
+        for (queued, input) in std::mem::take(&mut self.inputs) {
+            self.on_input(queued, input)?;
         }
+        self.run_background();
         let now = self.now();
         if now >= self.next_tick {
             self.logic.tick(now, wall_ms());
@@ -570,14 +608,26 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             .expect("a result for each operation handed to the disk thread")
     }
 
-    fn on_input(&mut self, input: CoreInput<L::Msg>) -> io::Result<()> {
+    fn on_input(&mut self, queued: Instant, input: CoreInput<L::Msg>) -> io::Result<()> {
+        let started = Instant::now();
+        let overloaded = self.admission.observe(started.saturating_duration_since(queued), started);
         let now = self.now();
         match input {
             CoreInput::Disk(done) => {
                 let class = self.thread_class(&done);
                 self.logic.on_io_done(done, class, now);
             }
-            CoreInput::App(m) => self.logic.on_message(m, now),
+            CoreInput::App(m) if overloaded => {
+                // 012 FR-029: a new request is refused before the core spends CPU on it.
+                match self.logic.refuse_overloaded(m) {
+                    Some(m) => self.logic.on_message(m, now),
+                    None => self.admission.count_refusal(),
+                }
+            }
+            CoreInput::App(m) => match self.logic.service_class(&m) {
+                ServiceClass::Foreground => self.logic.on_message(m, now),
+                ServiceClass::Background => self.background.push_back(m),
+            },
             CoreInput::Stop => self.stopped = true,
             CoreInput::Inbound(Inbound { stream, channel, got }) => {
                 self.learned.insert(got.hello.node_id, got.hello.peer_addr.clone());

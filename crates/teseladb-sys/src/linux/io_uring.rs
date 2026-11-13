@@ -12,7 +12,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering, fence};
 
 use crate::aligned::AlignedBuf;
 
@@ -24,6 +24,12 @@ const IORING_OFF_SQ_RING: i64 = 0;
 const IORING_OFF_SQES: i64 = 0x1000_0000;
 const IORING_FEAT_SINGLE_MMAP: u32 = 1;
 const IORING_ENTER_GETEVENTS: u32 = 1;
+const IORING_ENTER_SQ_WAKEUP: u32 = 2;
+const IORING_SETUP_SQPOLL: u32 = 2;
+const IORING_SQ_NEED_WAKEUP: u32 = 1;
+/// How long the kernel's polling thread of a ring spins without work before it sleeps
+/// (012 FR-025): the next submission after that wakes it with one `io_uring_enter`.
+pub const SQPOLL_IDLE_MS: u32 = 1000;
 
 const IORING_REGISTER_BUFFERS: u32 = 0;
 const IORING_REGISTER_FILES: u32 = 2;
@@ -360,6 +366,10 @@ impl Drop for Map {
 pub struct Ring {
     sq_head: *const AtomicU32,
     sq_tail: *const AtomicU32,
+    /// The kernel's flags of the submission queue: whether its polling thread sleeps.
+    sq_flags: *const AtomicU32,
+    /// Whether a kernel thread polls the submission queue (`IORING_SETUP_SQPOLL`, 012 FR-025).
+    sqpoll: bool,
     sq_mask: u32,
     sq_entries: u32,
     sqes: *mut Sqe,
@@ -391,7 +401,18 @@ impl Ring {
     /// A ring with at least `entries` submission slots (rounded up to a power of two by the
     /// kernel) and twice as many completion slots.
     pub fn new(entries: u32) -> io::Result<Ring> {
+        Ring::with_sqpoll(entries, false)
+    }
+
+    /// [`Ring::new`], with `sqpoll` a kernel thread that takes the submissions from the queue
+    /// without system calls (`IORING_SETUP_SQPOLL`, 012 FR-025); it sleeps after
+    /// [`SQPOLL_IDLE_MS`] without work and the next [`Ring::submit`] wakes it.
+    pub fn with_sqpoll(entries: u32, sqpoll: bool) -> io::Result<Ring> {
         let mut p = Params::default();
+        if sqpoll {
+            p.flags |= IORING_SETUP_SQPOLL;
+            p.sq_thread_idle = SQPOLL_IDLE_MS;
+        }
         // SAFETY: `p` is a valid `io_uring_params` that lives during the call.
         let fd = cvt(unsafe { syscall(SYS_IO_URING_SETUP, entries, &mut p as *mut Params) })?;
         // SAFETY: the call has just created the descriptor and nobody else owns it.
@@ -418,6 +439,8 @@ impl Ring {
         Ok(Ring {
             sq_head: sq_map.at(p.sq_off.head),
             sq_tail: sq_map.at(p.sq_off.tail),
+            sq_flags: sq_map.at(p.sq_off.flags),
+            sqpoll,
             sq_mask,
             sq_entries: p.sq_entries,
             sqes: sqe_map.ptr.as_ptr().cast(),
@@ -681,14 +704,42 @@ impl Ring {
     /// Hands the queued operations to the kernel in one `io_uring_enter` and, with `wait > 0`,
     /// waits until at least `wait` completions are ready. Returns the operations submitted.
     pub fn submit(&mut self, wait: u32) -> io::Result<u32> {
-        let flags = if wait > 0 { IORING_ENTER_GETEVENTS } else { 0 };
+        let mut flags = if wait > 0 { IORING_ENTER_GETEVENTS } else { 0 };
+        if self.sqpoll {
+            // The kernel's thread takes what the tail published. Only a sleeping thread needs a
+            // wake-up, and only a wait needs the call at all. The fence orders the tail's store
+            // before the load of the flags, as the kernel orders its side (012 FR-025).
+            fence(Ordering::SeqCst);
+            // SAFETY: the flags are a `u32` of the mapped queue the ring owns.
+            let sq_flags = unsafe { (*self.sq_flags).load(Ordering::Relaxed) };
+            if sq_flags & IORING_SQ_NEED_WAKEUP != 0 && self.unsubmitted > 0 {
+                flags |= IORING_ENTER_SQ_WAKEUP;
+            }
+            let handed = self.unsubmitted;
+            self.unsubmitted = 0;
+            if flags == 0 {
+                return Ok(handed);
+            }
+            self.enter(0, wait, flags)?;
+            return Ok(handed);
+        }
+        self.enter(self.unsubmitted, wait, flags)
+    }
+
+    /// Whether a kernel thread polls this ring's submissions (`--io-uring-sqpoll`).
+    pub fn sqpoll(&self) -> bool {
+        self.sqpoll
+    }
+
+    /// `io_uring_enter` with `to_submit` entries of the queue, waiting for `wait` completions.
+    fn enter(&mut self, to_submit: u32, wait: u32, flags: u32) -> io::Result<u32> {
         loop {
             // SAFETY: no pointers (the signal mask is null with size 0).
             let rc = unsafe {
                 syscall(
                     SYS_IO_URING_ENTER,
                     self.fd.as_raw_fd(),
-                    self.unsubmitted,
+                    to_submit,
                     wait,
                     flags,
                     ptr::null::<u8>(),
@@ -841,6 +892,34 @@ mod tests {
         assert_eq!(enter_failure(&e(EAGAIN), 1), EnterFailure::Fatal);
         assert_eq!(enter_failure(&e(9), 0), EnterFailure::Fatal);
         assert!(interrupted(&e(EINTR)) && !interrupted(&e(9)));
+    }
+
+    #[test]
+    fn a_polled_ring_takes_submissions_without_a_call_and_wakes_its_thread_after_idling() {
+        // 012 FR-025: the kernel's thread takes the operations; after SQPOLL_IDLE_MS without
+        // work it sleeps, and the next submission wakes it.
+        let mut r = Ring::with_sqpoll(8, true).unwrap();
+        assert!(r.sqpoll() && !Ring::new(2).unwrap().sqpoll());
+        for round in 0..2 {
+            let id = r.push(Op::Nop).unwrap();
+            assert_eq!(r.submit(0).unwrap(), 1);
+            assert_eq!(r.unsubmitted, 0);
+            let c = loop {
+                if let Some(c) = r.complete() {
+                    break c;
+                }
+                r.submit(1).unwrap();
+            };
+            assert_eq!((c.id, c.result.unwrap()), (id, 0), "round {round}");
+            if round == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    u64::from(SQPOLL_IDLE_MS) + 300,
+                ));
+                // SAFETY: the flags are a `u32` of the mapped queue the ring owns.
+                let slept = unsafe { (*r.sq_flags).load(Ordering::Acquire) };
+                assert_ne!(slept & IORING_SQ_NEED_WAKEUP, 0, "the thread sleeps after idling");
+            }
+        }
     }
 
     #[test]

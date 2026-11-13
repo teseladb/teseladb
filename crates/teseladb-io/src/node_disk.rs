@@ -70,13 +70,20 @@ pub struct DiskChoice {
     pub uring: bool,
     /// Whether whole-block accesses use `O_DIRECT`.
     pub direct: bool,
+    /// Whether each ring has a kernel thread that polls its submissions (`--io-uring-sqpoll`,
+    /// 012 FR-025).
+    pub sqpoll: bool,
     /// The lines the node logs about it.
     pub notes: Vec<String>,
 }
 
 impl fmt::Display for DiskChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let exec = if self.uring { "io_uring" } else { "disk threads" };
+        let exec = match (self.uring, self.sqpoll) {
+            (true, true) => "io_uring with a polling kernel thread per core",
+            (true, false) => "io_uring",
+            (false, _) => "disk threads",
+        };
         let direct = if self.direct { "O_DIRECT" } else { "buffered I/O with fdatasync" };
         write!(f, "disk: {exec}, {direct}")?;
         for n in &self.notes {
@@ -131,16 +138,29 @@ pub fn decide(
             false
         }
     };
-    Ok(DiskChoice { uring, direct, notes })
+    Ok(DiskChoice { uring, direct, sqpoll: false, notes })
+}
+
+/// `choice` with `--io-uring-sqpoll` (012 FR-025): only the io_uring executor has rings to poll.
+pub fn with_sqpoll(choice: DiskChoice, sqpoll: bool) -> Result<DiskChoice, String> {
+    if sqpoll && !choice.uring {
+        return Err("--io-uring-sqpoll: the cores do not use io_uring (see --io-executor)".into());
+    }
+    Ok(DiskChoice { sqpoll, ..choice })
 }
 
 /// [`decide`] with what this host has, for data directory `dir`.
-pub fn choose(exec: IoExecutor, direct: DirectIo, dir: &Path) -> Result<DiskChoice, String> {
+pub fn choose(
+    exec: IoExecutor,
+    direct: DirectIo,
+    sqpoll: bool,
+    dir: &Path,
+) -> Result<DiskChoice, String> {
     #[cfg(target_os = "linux")]
     let support = crate::io_uring_disk::check_support();
     #[cfg(not(target_os = "linux"))]
     let support = Err("io_uring is Linux only".to_string());
-    decide(URING_BY_DEFAULT, exec, direct, support, direct_io_supported(dir))
+    with_sqpoll(decide(URING_BY_DEFAULT, exec, direct, support, direct_io_supported(dir))?, sqpoll)
 }
 
 /// A core's disk.
@@ -159,7 +179,7 @@ impl NodeDisk {
         let root = root.into();
         #[cfg(target_os = "linux")]
         if choice.uring {
-            return crate::IoUringDisk::open(root, choice.direct)
+            return crate::IoUringDisk::open_polled(root, choice.direct, choice.sqpoll)
                 .map(|u| NodeDisk::Uring(Box::new(u)));
         }
         let mut d = FileDisk::open(root)?;
@@ -228,6 +248,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn polling_needs_the_io_uring_executor() {
+        // 012 FR-025.
+        let uring = DiskChoice { uring: true, direct: false, sqpoll: false, notes: Vec::new() };
+        let polled = with_sqpoll(uring.clone(), true).unwrap();
+        assert!(polled.sqpoll);
+        assert!(polled.to_string().contains("polling kernel thread"));
+        assert!(!with_sqpoll(uring.clone(), false).unwrap().sqpoll);
+        let threads = DiskChoice { uring: false, ..uring };
+        assert!(with_sqpoll(threads.clone(), true).unwrap_err().contains("--io-uring-sqpoll"));
+        assert_eq!(with_sqpoll(threads.clone(), false), Ok(threads));
+    }
+
+    #[test]
     fn options_parse() {
         assert_eq!(IoExecutor::parse("auto"), Some(IoExecutor::Auto));
         assert_eq!(IoExecutor::parse("uring"), Some(IoExecutor::Uring));
@@ -271,7 +304,8 @@ mod tests {
     #[test]
     fn a_threads_disk_opens_and_executes() {
         let root = std::env::temp_dir().join(format!("teseladb-nd-{}", std::process::id()));
-        let choice = choose(IoExecutor::Threads, DirectIo::Off, &std::env::temp_dir()).unwrap();
+        let choice =
+            choose(IoExecutor::Threads, DirectIo::Off, false, &std::env::temp_dir()).unwrap();
         let mut d = NodeDisk::open(&root, &choice).unwrap();
         let op = IoOp::SyncDir { path: ".".into() };
         assert!(matches!(d.execute(op), IoDone::Ok(_)));

@@ -5,6 +5,7 @@
 # one image per architecture and installs the release from the public host to check it. Only production, a release of
 # main, pushes the images to Docker Hub, joined under the version and :latest; development builds and runs them locally.
 #   scripts/release/publish.sh <version> <stage dev|prd>
+# PGO_SECONDS (default 120) sets how long each workload of the profiles runs.
 # Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER, AWS_ACCOUNT_ID and CARGO_REGISTRIES_VIUZI_TOKEN (the JWT of the run that
 # reads the viuzi-* crates of the private registry) from the workflow, and DOCKERHUB_TOKEN in production,
 # which the workflow reads from Vault (scripts/ci/release-tokens.sh).
@@ -35,17 +36,15 @@ trap 'docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true' EXIT
 tar -cf - --exclude=./target --exclude=./.git . | docker run --rm -i -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" sh -c 'mkdir -p /work/repo/src && tar -xf - -C /work/repo/src'
 # Cargo downloads the viuzi-* crates of Cargo.lock from the private registry with the JWT of the run.
 # The binary carries the release's full version (0.1.0-dev.N in development), which test-install.sh checks.
+# Every binary is built with PGO from the load of 002 and the benches, and the x86_64 Linux one is
+# laid out with BOLT from a perf profile (012 FR-034, scripts/release/pgo-bolt.sh): perf samples
+# the node from the container, which needs CAP_PERFMON (and CAP_SYS_ADMIN on kernels before 5.8).
 docker run --rm -v "$VOLUME:/work" -w /work/repo/src -e CARGO_TARGET_DIR=/work/target -e CARGO_PROFILE_DIST_STRIP=debuginfo \
-  -e CARGO_REGISTRIES_VIUZI_TOKEN -e TESELADB_RELEASE_VERSION="$VERSION" "$ZIGBUILD_IMAGE" sh -c '
+  -e CARGO_REGISTRIES_VIUZI_TOKEN -e TESELADB_RELEASE_VERSION="$VERSION" -e PGO_SECONDS \
+  --cap-add PERFMON --cap-add SYS_ADMIN "$ZIGBUILD_IMAGE" sh -c '
   set -e
   rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
-  # glibc 2.28 (Debian 10, RHEL 8 and later) for the Linux binaries.
-  for target in x86_64-unknown-linux-gnu.2.28 aarch64-unknown-linux-gnu.2.28 aarch64-apple-darwin; do
-    cargo zigbuild --locked --profile dist -p teseladb-server --bin teseladb --target "$target"
-  done
-  for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
-    mkdir -p "/work/out/$triple/dist" && cp "/work/target/$triple/dist/teseladb" "/work/out/$triple/dist/teseladb"
-  done'
+  scripts/release/pgo-bolt.sh'
 mkdir -p target-release
 docker run --rm -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" tar -cf - -C /work/out . | tar -xf - -C target-release
 for triple in "${TRIPLES[@]}"; do [[ -x target-release/$triple/dist/teseladb ]] || { echo "publish: $triple is missing" >&2; exit 1; }; done

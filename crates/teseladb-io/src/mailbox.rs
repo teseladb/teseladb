@@ -41,6 +41,8 @@ pub const CAPACITY: usize = 256;
 /// FR-015).
 type Timed<T> = (Instant, T);
 
+/// On cache lines of its own (012 FR-031): every sender and the receiver touch its flags.
+#[repr(align(64))]
 struct Shared<T> {
     /// Rings of the senders made since the receiver last looked.
     new_rings: Handoff<Consumer<Timed<T>>>,
@@ -175,6 +177,16 @@ impl<T: Send> Mailbox<T> {
     /// After it starts, the next send wakes the receiver again. A ring whose sender is gone goes
     /// once it is empty.
     pub fn drain_into(&mut self, out: &mut Vec<T>) {
+        self.drain_with(|_, m| out.push(m));
+    }
+
+    /// [`Mailbox::drain_into`] with the instant each message was queued, for the core to tell
+    /// how long it waited until it starts (012 FR-029).
+    pub fn drain_timed_into(&mut self, out: &mut Vec<(Instant, T)>) {
+        self.drain_with(|queued, m| out.push((queued, m)));
+    }
+
+    fn drain_with(&mut self, mut put: impl FnMut(Instant, T)) {
         // Cleared before looking at the rings: a message queued after this point either lands in
         // this drain or notifies again, so none is left asleep; a sender made before its first
         // send pushed its ring before that send's swap, so this drain sees the ring.
@@ -188,7 +200,7 @@ impl<T: Send> Mailbox<T> {
                 let waited = now.saturating_duration_since(queued).as_nanos();
                 let waited = u64::try_from(waited).unwrap_or(u64::MAX);
                 teseladb_stages::record(teseladb_stages::Stage::MailboxWait, waited);
-                out.push(m);
+                put(queued, m);
             }
             !gone
         });
@@ -239,5 +251,14 @@ impl<T> fmt::Debug for MailboxSenders<T> {
 impl<T: Send> fmt::Debug for Mailbox<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Mailbox").field("len", &self.len()).finish()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod alignment_tests {
+    #[test]
+    fn the_shared_flags_start_a_cache_line() {
+        assert_eq!(std::mem::align_of::<super::Shared<u8>>(), 64);
     }
 }
