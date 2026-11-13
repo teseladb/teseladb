@@ -4,6 +4,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
+pub mod bandwidth;
 pub mod buffers;
 pub mod counters;
 pub mod disk_thread;

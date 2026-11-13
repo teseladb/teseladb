@@ -28,6 +28,7 @@ use teseladb_sys::uring::{Op, Probe, Ring, Target, opcode};
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
 use teseladb_types::Bytes;
 
+use crate::bandwidth::{BandwidthSplit, cost_of};
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
 use crate::file_disk::{O_DIRECT, errno, io_errno};
 use crate::io_class::IoClass;
@@ -151,6 +152,8 @@ struct Job {
     seq: u64,
     op: IoOp,
     class: IoClass,
+    /// When it was submitted (012 FR-028).
+    queued: Instant,
     /// When it started (012 FR-015).
     started: Instant,
     work: Work,
@@ -181,6 +184,8 @@ pub struct IoUringDisk {
     /// Whether the buffers are registered: on the first read or write, from the core's thread,
     /// so that their memory is on the NUMA node of the core's CPU (012 FR-006).
     buffers_ready: bool,
+    /// The tokens that cap the data's bandwidth while the log waits (012 FR-028).
+    split: BandwidthSplit,
 }
 
 fn cpath(p: &Path) -> CString {
@@ -307,6 +312,7 @@ impl IoUringDisk {
             next_seq: 0,
             wake,
             buffers_ready: false,
+            split: BandwidthSplit::new(),
         })
     }
 
@@ -404,6 +410,9 @@ impl IoUringDisk {
             }
             self.advance(i, Some(c.result));
             let j = &self.running[i];
+            if j.result.is_some() && j.class == IoClass::Log {
+                self.split.log_completed(j.queued.elapsed());
+            }
             if j.result.is_some() && matches!(j.op, IoOp::Sync { .. }) {
                 let took = u64::try_from(j.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 teseladb_stages::record(teseladb_stages::Stage::DiskSync, took);
@@ -446,12 +455,23 @@ impl IoUringDisk {
         may_start_in(mine, op, &same)
     }
 
-    /// Starts what can start, the log's class first (012 FR-023).
+    /// Starts what can start, the log's class first (012 FR-023), the data's within the share of
+    /// the disk the log leaves it (012 FR-028).
     fn start_ready(&mut self) {
-        for class in [IoClass::Log, IoClass::Data] {
-            self.start_class(class);
-        }
+        self.note_log_state();
+        self.start_class(IoClass::Log);
+        // What the log started no longer waits in its queue.
+        self.note_log_state();
+        self.start_class(IoClass::Data);
         self.collect();
+    }
+
+    /// Tells the split whether the log has work and how long its oldest queued operation waits.
+    fn note_log_state(&mut self) {
+        let log = IoClass::Log.index();
+        let busy = !self.queues[log].is_empty()
+            || self.running.iter().any(|j| j.class == IoClass::Log && j.result.is_none());
+        self.split.set_log_state(busy, self.queues[log].front().map(|(_, _, t)| *t));
     }
 
     fn start_class(&mut self, class: IoClass) {
@@ -460,10 +480,19 @@ impl IoUringDisk {
             if !self.can_start(op, class) {
                 return;
             }
+            let started = Instant::now();
+            let cost = cost_of(data_range(op).map_or(0, |(_, a, b, _)| b - a));
+            match class {
+                IoClass::Log => self.split.log_started(cost, started),
+                IoClass::Data => {
+                    if !self.split.try_start_data(cost, started) {
+                        return;
+                    }
+                }
+            }
             let (seq, op, queued) = self.queues[q].pop_front().expect("front op");
             // How long it waited behind the operations before it (012 FR-015): a batch of the
             // log waits here behind the reads and writes of a compaction.
-            let started = Instant::now();
             let waited =
                 u64::try_from(started.duration_since(queued).as_nanos()).unwrap_or(u64::MAX);
             teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
@@ -478,6 +507,7 @@ impl IoUringDisk {
                             seq,
                             op,
                             class,
+                            queued,
                             started,
                             work,
                             waiting: None,
@@ -504,6 +534,7 @@ impl IoUringDisk {
                             seq,
                             op,
                             class,
+                            queued,
                             started,
                             work,
                             waiting: None,
@@ -517,6 +548,7 @@ impl IoUringDisk {
                 seq,
                 op,
                 class,
+                queued,
                 started,
                 work,
                 waiting: None,
@@ -1002,6 +1034,50 @@ mod tests {
         assert!(!d.can_start(&write(0), IoClass::Data));
         assert!(d.can_start(&write(0), IoClass::Log));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_waiting_log_caps_the_data_writes_that_start() {
+        // 012 FR-028: with the log waiting past its limit, the data starts only what the log's
+        // started bytes earn it; with the log quick, it starts all it can.
+        for pressed in [false, true] {
+            let root = temp(if pressed { "split-pressed" } else { "split-free" });
+            let mut d = IoUringDisk::open(&root, false).unwrap();
+            ok(&mut d, IoOp::Create { file: FileId(1), path: "log".into(), prealloc: 0 });
+            ok(&mut d, IoOp::Create { file: FileId(2), path: "data".into(), prealloc: 0 });
+            if pressed {
+                d.split.log_completed(std::time::Duration::from_millis(5));
+            }
+            let entry = Bytes::from_vec(vec![9; 4096]);
+            d.submit_in(
+                IoOp::WriteAt { file: FileId(1), offset: 0, data: entry, batch: 1 },
+                IoClass::Log,
+            );
+            for i in 0..16u64 {
+                let data = Bytes::from_vec(vec![i as u8; 4096]);
+                d.submit_in(
+                    IoOp::WriteAt { file: FileId(2), offset: i * 4096, data, batch: 0 },
+                    IoClass::Data,
+                );
+            }
+            d.flush().unwrap();
+            let data_started = d.running.iter().filter(|j| j.class == IoClass::Data).count();
+            if pressed {
+                assert_eq!(data_started, 1, "one 4 KiB write on the log's 4 KiB tokens");
+            } else {
+                assert_eq!(data_started, 16);
+            }
+            // Every write still lands once the log is done.
+            let mut got = Vec::new();
+            while got.len() < 17 {
+                if d.running.iter().any(|j| j.waiting.is_some()) {
+                    d.ring.submit(1).unwrap();
+                }
+                d.reap(&mut got).unwrap();
+            }
+            assert_eq!(fs::metadata(root.join("data")).unwrap().len(), 16 * 4096);
+            fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]
