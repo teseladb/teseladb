@@ -11,6 +11,7 @@ use teseladb_types::Bytes;
 use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::reader::{BlockStats, Table};
+use super::value::ValueRef;
 use super::{ALIGN, PAD, filter, pad, put_varint};
 use crate::config::Codec;
 use crate::entry::{self, Kind, RangeTombstone};
@@ -82,6 +83,9 @@ pub(crate) struct TableWriter {
     versions: u64,
     /// The file's data key and its wrapped form, when the files are encrypted.
     key: Option<(Arc<FileKey>, [u8; WRAPPED_KEY_LEN])>,
+    /// The value files its references point to, by slot: their numbers and the bytes the
+    /// references keep alive (FR-034).
+    slots: Vec<(u64, u64)>,
 }
 
 impl TableWriter {
@@ -105,6 +109,7 @@ impl TableWriter {
             max_ts: None,
             versions: 0,
             key: None,
+            slots: Vec::new(),
         }
     }
 
@@ -162,7 +167,7 @@ impl TableWriter {
         self.taken + self.out.len() as u64 + self.data.framed_size() as u64
     }
 
-    fn flush_block(&mut self) {
+    fn flush_block(&mut self) -> Handle {
         let last = self.data.last_key().to_vec();
         let payload = self.data.finish();
         let offset = self.taken + self.out.len() as u64;
@@ -185,23 +190,71 @@ impl TableWriter {
         let mut handle = Vec::new();
         put_varint(&mut handle, offset);
         put_varint(&mut handle, framed.len() as u64);
+        let written = Handle { offset, len: framed.len() as u64 };
         self.out.extend_from_slice(&framed);
         pad(&mut self.out);
         self.index.add(&last, Kind::Put, &handle);
+        written
     }
 
     /// Adds a version; internal keys come in order.
     pub(crate) fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
+        self.open_block(ikey, value.len());
+        self.data.add(ikey, kind, value);
+        self.note(ikey);
+    }
+
+    /// Adds a version whose value is in value file `file` at `r` (FR-034); the reference's slot
+    /// is the file's place among those this file refers to.
+    pub(crate) fn add_ref(&mut self, ikey: &[u8], kind: Kind, file: u64, r: &ValueRef) {
+        let slot = match self.slots.iter().position(|(n, _)| *n == file) {
+            Some(s) => s,
+            None => {
+                self.slots.push((file, 0));
+                self.slots.len() - 1
+            }
+        };
+        self.slots[slot].1 += r.bytes();
+        let encoded = ValueRef { slot: slot as u32, ..*r }.encode();
+        self.open_block(ikey, encoded.len());
+        self.data.add_ref(ikey, kind, &encoded);
+        self.note(ikey);
+    }
+
+    /// Adds a version to a value file in a block of its own, and returns the reference to it
+    /// (slot 0, which the file of its key sets) (FR-034).
+    pub(crate) fn add_alone(&mut self, ikey: &[u8], value: &[u8]) -> ValueRef {
+        if !self.data.is_empty() {
+            self.flush_block();
+        }
+        self.block_first = Some(entry::logical(ikey).to_vec());
+        self.data.add(ikey, Kind::Put, value);
+        self.note(ikey);
+        let h = self.flush_block();
+        ValueRef { slot: 0, offset: h.offset, len: h.len, crc: teseladb_hash::crc32c(value) }
+    }
+
+    /// The numbers of the value files its references point to, by slot (FR-034).
+    pub(crate) fn value_numbers(&self) -> Vec<u64> {
+        self.slots.iter().map(|(n, _)| *n).collect()
+    }
+
+    /// Ends the open data block when an entry of `value_len` bytes and key `ikey` does not fit,
+    /// and notes the first key of a new one.
+    fn open_block(&mut self, ikey: &[u8], value_len: usize) {
         if !self.data.is_empty()
-            && self.data.framed_size() + ikey.len() + value.len() + ENTRY_HEADER > self.block_bytes
+            && self.data.framed_size() + ikey.len() + value_len + ENTRY_HEADER > self.block_bytes
         {
             self.flush_block();
         }
-        let (logical, ts) = entry::split(ikey);
         if self.data.is_empty() {
-            self.block_first = Some(logical.to_vec());
+            self.block_first = Some(entry::logical(ikey).to_vec());
         }
-        self.data.add(ikey, kind, value);
+    }
+
+    /// Counts a version just added: its key in the filter and the bounds.
+    fn note(&mut self, ikey: &[u8]) {
+        let (logical, ts) = entry::split(ikey);
         if self.last_logical.as_deref() != Some(logical) {
             self.hashes.push(filter::hashes(logical));
             self.last_logical = Some(logical.to_vec());
@@ -272,6 +325,7 @@ impl TableWriter {
             versions: self.versions,
             tombstones,
             dictionary: self.file_dict.as_ref().map_or(0, |(v, _)| *v),
+            values: self.slots.iter().map(|(_, b)| *b).collect(),
         };
         let props_handle = self.meta_block(&props.encode());
         let index_payload = self.index.finish();

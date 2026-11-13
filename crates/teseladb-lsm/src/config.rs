@@ -68,10 +68,15 @@ pub struct LsmConfig {
     pub manifest_rotate_bytes: u64,
     /// Encryption of the files (013 FR-015); `None` writes them in clear.
     pub encryption: Option<Encryption>,
+    /// A value longer than this goes to a value file, and the file of its key keeps a reference
+    /// (FR-034).
+    pub value_separation_bytes: usize,
 }
 
 /// Default size of a dictionary: zstd's own default for trained dictionaries.
 const DICT_BYTES: usize = 110 << 10;
+/// Default size above which a value goes to a value file (FR-034).
+const VALUE_SEPARATION_BYTES: usize = 4 << 10;
 /// Default bytes written with a dictionary before it is renewed.
 const DICT_RENEW_BYTES: u64 = 1 << 30;
 
@@ -98,6 +103,7 @@ impl Default for LsmConfig {
             io_chunk_bytes: 1 << 20,
             manifest_rotate_bytes: 64 << 20,
             encryption: None,
+            value_separation_bytes: VALUE_SEPARATION_BYTES,
         }
     }
 }

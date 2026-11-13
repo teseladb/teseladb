@@ -213,10 +213,11 @@ impl Cursor {
         }
     }
 
-    pub(crate) fn value(&self) -> Bytes {
+    /// The entry's value, or where it is in its value file (FR-034).
+    pub(crate) fn stored(&self) -> Result<(Bytes, Option<Box<crate::read::Deferred>>), LsmError> {
         match self {
-            Cursor::Mem(m) => m.value.clone(),
-            Cursor::Table { pos: Pos::Ready(_, c), .. } => c.value(),
+            Cursor::Mem(m) => Ok((m.value.clone(), None)),
+            Cursor::Table { table, pos: Pos::Ready(i, c) } => crate::read::stored(table, *i, c),
             Cursor::Table { .. } => unreachable!("a cursor without an entry has no value"),
         }
     }

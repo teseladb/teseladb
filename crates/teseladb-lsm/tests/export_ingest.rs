@@ -707,3 +707,35 @@ fn clearing_a_range_also_removes_its_whole_files_before_compacting() {
     assert_eq!(scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(99, 0)).len(), 0);
     assert_eq!(scan(&mut lsm, &mut disk, &v, b"a", b"b", ts(99, 0)).len(), 200);
 }
+
+/// Large documents in value files (FR-034): an export to another node writes each value with its
+/// key, so its files travel alone; the receiving LSM puts them in value files of its own when it
+/// compacts them.
+#[test]
+fn an_export_writes_the_values_of_value_files_with_their_keys() {
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
+    let mut disk = MemDisk::new();
+    let mut a = open(&cfg, &mut disk);
+    let doc = |i: u64| vec![(i % 251) as u8; 6_000 + i as usize * 100];
+    for i in 0..40 {
+        a.put(G, i + 1, &key(i), ts(10, 0), &doc(i)).unwrap();
+    }
+    a.flush();
+    a.run_io(&mut disk, Nanos::ZERO);
+    assert!(a.metrics().value_files > 0);
+    let files = export(&mut a, &mut disk, &key(0), &key(40), ts(20, 0));
+    assert!(files.iter().all(|f| f.values.is_empty() && f.group == 0));
+    let mut other = MemDisk::new();
+    let sent = send(&files, &mut disk, &mut other);
+    let mut b = open(&cfg, &mut other);
+    ingest(&mut b, &mut other, sent, &key(0), &key(40)).unwrap();
+    assert_eq!(b.metrics().value_files, 0);
+    let id = b.compact_now();
+    assert_eq!(b.run_io(&mut other, Nanos::ZERO).compacted, vec![id]);
+    assert!(b.metrics().value_files > 0);
+    let v = b.view();
+    for i in 0..40 {
+        let got = get(&mut b, &mut other, &v, &key(i), ts(20, 0)).expect("the document");
+        assert!(got.3 == doc(i), "document {i}");
+    }
+}

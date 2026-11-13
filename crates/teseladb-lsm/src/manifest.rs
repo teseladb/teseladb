@@ -35,6 +35,8 @@ const DICTIONARY: u8 = 8;
 const DROP_DICTIONARY: u8 = 9;
 /// The history file of a file (004 FR-031).
 const ADD_HISTORY: u8 = 10;
+/// The value files a file's references point to, by slot (004 FR-034).
+const VALUES: u8 = 11;
 
 /// Name of manifest `number`.
 pub(crate) fn manifest_name(number: u64) -> String {
@@ -69,6 +71,9 @@ pub(crate) struct FileMeta {
     /// of a level. A history file has the level of its file and is removed with it, each with
     /// its own record.
     pub(crate) history_of: Option<u64>,
+    /// The value files its references point to, by slot: number and size of each (004 FR-034).
+    /// A value file is part of the LSM while a file lists it.
+    pub(crate) values: Vec<(u64, u64)>,
 }
 
 /// A dictionary as the manifest keeps it: its version, the prefix of the collection whose blocks
@@ -174,6 +179,16 @@ impl Edit {
             b.extend_from_slice(&f.max_ts.to_be_bytes());
             let kind = if f.history_of.is_some() { ADD_HISTORY } else { ADD_FILE };
             record(&mut out, kind, &b);
+            if !f.values.is_empty() {
+                let mut b = Vec::new();
+                put_varint(&mut b, f.number);
+                put_varint(&mut b, f.values.len() as u64);
+                for (number, size) in &f.values {
+                    put_varint(&mut b, *number);
+                    put_varint(&mut b, *size);
+                }
+                record(&mut out, VALUES, &b);
+            }
         }
         for (level, number) in &self.removes {
             let mut b = vec![*level];
@@ -229,8 +244,23 @@ impl Edit {
                     min_ts: get_ts(body, &mut at)?,
                     max_ts: get_ts(body, &mut at)?,
                     history_of,
+                    values: Vec::new(),
                 };
                 self.adds.push(f);
+            }
+            // After the record of the file it is of, in the same edit.
+            VALUES => {
+                let number = get_varint(body, &mut at)?;
+                let n = get_varint(body, &mut at)?;
+                let mut values = Vec::new();
+                for _ in 0..n {
+                    values.push((get_varint(body, &mut at)?, get_varint(body, &mut at)?));
+                }
+                let f = self.adds.iter_mut().rfind(|f| f.number == number).ok_or(Bad)?;
+                if !f.values.is_empty() || values.is_empty() {
+                    return Err(Bad);
+                }
+                f.values = values;
             }
             REMOVE_FILE => {
                 let level = *body.first().ok_or(Bad)?;
@@ -451,6 +481,7 @@ mod tests {
             min_ts: Hlc { physical: 1, logical: 0 },
             max_ts: Hlc { physical: 9, logical: 2 },
             history_of: None,
+            values: Vec::new(),
         }
     }
 
@@ -485,6 +516,29 @@ mod tests {
         // Each is removed by its own record.
         s.apply(&Edit { removes: vec![(1, 7), (1, 8)], next_file: 9, ..Edit::default() });
         assert!(s.files.is_empty());
+    }
+
+    /// The value files of a file and of its history file go after each one's record (004
+    /// FR-034); a list for a file the edit does not add is corruption.
+    #[test]
+    fn the_value_files_of_a_file_round_trip_after_it() {
+        let key = FileMeta { values: vec![(20, 8192), (21, 4096)], ..file(7) };
+        let history = FileMeta {
+            number: 8,
+            size: 4096,
+            history_of: Some(7),
+            values: vec![(21, 4096)],
+            ..file(7)
+        };
+        let e = Edit { adds: vec![key.clone(), history.clone()], next_file: 22, ..Edit::default() };
+        let (edits, _) = read(&e.encode(), None).unwrap();
+        assert_eq!(edits[0].adds, vec![key, history]);
+        let mut out = Vec::new();
+        record(&mut out, BEGIN, &[]);
+        record(&mut out, VALUES, &[9, 1, 20, 1]);
+        record(&mut out, END, &[]);
+        pad(&mut out);
+        assert!(read_edit(&out, 0).is_err());
     }
 
     #[test]

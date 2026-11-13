@@ -53,6 +53,15 @@ pub struct LsmMetrics {
     pub live_bytes: u64,
     /// Bytes of the files after the last compaction of everything that their space asked for.
     pub full_after: u64,
+    /// `lsm_value_files`: value files the files point to (FR-034).
+    pub value_files: usize,
+    /// `lsm_value_bytes`: bytes of the value files.
+    pub value_bytes: u64,
+    /// `lsm_value_live_bytes`: bytes of the value files that references keep alive.
+    pub value_live_bytes: u64,
+    /// `lsm_value_files_sparse`: value files whose live bytes are under half of their values,
+    /// which compactions collect.
+    pub value_files_sparse: usize,
 }
 
 fn ratio(num: u64, den: u64) -> f64 {
@@ -65,6 +74,9 @@ impl Lsm {
         let v = &self.version;
         let r = &self.reader;
         let c = &self.counters;
+        let values = v.value_files();
+        let live = v.live_values();
+        let sparse = v.sparse_values().len();
         LsmMetrics {
             level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.bytes()).sum()).collect(),
             level_files: v.levels.iter().map(Vec::len).collect(),
@@ -88,6 +100,10 @@ impl Lsm {
             ingest_compaction_bytes_total: c.ingest_compaction_bytes,
             live_bytes: self.live_bytes.unwrap_or(0),
             full_after: self.full_after,
+            value_files: values.len(),
+            value_bytes: values.values().map(|f| f.size).sum(),
+            value_live_bytes: live.values().sum(),
+            value_files_sparse: sparse,
         }
     }
 

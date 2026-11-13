@@ -41,12 +41,16 @@ struct Node {
 
 impl Node {
     fn new() -> Node {
+        Node::with_lsm(LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() })
+    }
+
+    /// A node whose LSM has `lcfg`.
+    fn with_lsm(lcfg: LsmConfig) -> Node {
         let mut disk = MemDisk::new();
         let clock = NodeClock::for_node(NodeId(1));
         let store = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).unwrap().0;
         let cfg = CoreConfig { clock: clock.clone(), ..CoreConfig::new(NodeId(1), 0) };
         let mut core = MultiRaftCore::new(cfg, store, 1);
-        let lcfg = LsmConfig { dir: "core-00/lsm".into(), ..LsmConfig::default() };
         let lsm = Rc::new(RefCell::new(Lsm::recover(&lcfg, &mut disk).unwrap().0));
         let sm = RangeSm::open(G, START.to_vec(), END.to_vec(), lsm.clone(), &mut disk).unwrap();
         let desc = GroupDesc { group: G, voters: vec![NodeId(1)], learners: vec![] };
@@ -81,6 +85,9 @@ impl Node {
     /// `wall`, the one of its last tick. `true` if something moved.
     fn turn(&mut self, now: Nanos, wall: u64) -> bool {
         let mut moved = false;
+        // A read that asked for another block moved too: a document in a value file needs the
+        // block of its key first and then the one of its value (004 FR-034).
+        let asked = self.host.lsm().borrow().block_reads_asked();
         while let Some(op) = self.core.poll_io(now) {
             let done = teseladb_raftlog::Disk::execute(&mut self.disk, op);
             self.core.on_io_done(done, now);
@@ -95,7 +102,7 @@ impl Node {
         let replies = self.host.take_replies();
         moved |= !replies.is_empty();
         self.replies.extend(replies);
-        moved
+        moved || self.host.lsm().borrow().block_reads_asked() != asked
     }
 
     fn reply(&self, id: ReqId) -> Option<&Result<Reply, RangeError>> {
@@ -806,8 +813,23 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
 /// in a file of their own so that the documents they delete stay in the blocks a scan passes:
 /// in one file the flush would set them apart as history (004 FR-031).
 fn node_with_a_file(docs: u32, deleted: u32) -> Node {
+    fill_a_file(Node::new(), docs, deleted)
+}
+
+/// [`node_with_a_file`] with each document in the file of its key, a block of its own: values of
+/// 8 KiB go to value files by default (004 FR-034), and a key file of references holds a hundred
+/// versions a block.
+fn node_with_a_file_of_documents(docs: u32, deleted: u32) -> Node {
+    let lcfg = LsmConfig {
+        dir: "core-00/lsm".into(),
+        value_separation_bytes: 16 << 10,
+        ..LsmConfig::default()
+    };
+    fill_a_file(Node::with_lsm(lcfg), docs, deleted)
+}
+
+fn fill_a_file(mut n: Node, docs: u32, deleted: u32) -> Node {
     let key = |i: u32| format!("\x01k{i:03}").into_bytes();
-    let mut n = Node::new();
     for i in 0..docs {
         n.mutate(&key(i), Box::new(SetLarge(key(i), 8 << 10, i as u8)), MAJORITY);
         n.settle();
@@ -986,7 +1008,7 @@ fn a_matching_scan_outside_the_core_stops_at_its_blocks_and_goes_on_from_there()
 fn a_part_without_a_document_reads_on_and_too_many_blocks_send_the_scan_to_the_core() {
     // Forty documents deleted and one left after them: the deleted versions fill some twenty
     // blocks the scan has to pass.
-    let mut n = node_with_a_file(41, 40);
+    let mut n = node_with_a_file_of_documents(41, 40);
     let now = n.now;
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let span: (&[u8], &[u8]) = (b"\x01k", b"\x01l");

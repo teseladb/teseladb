@@ -45,21 +45,47 @@ pub struct FileRef {
     /// linked, from the newest. The ingestion places a group above every higher group whose keys
     /// it touches, so a copy of a version never ends below an older one.
     pub group: u32,
+    /// The value files its references point to, by slot, with their sizes (FR-034): a file an
+    /// export linked whole names them; one it wrote holds its values with their keys.
+    pub values: Vec<(PathBuf, u64)>,
+    /// The same for its history file.
+    pub history_values: Vec<(PathBuf, u64)>,
 }
 
 impl FileRef {
-    /// A file the export wrote: no history file, group 0.
+    /// A file the export wrote: no history file, group 0, no value files.
     pub fn new(path: PathBuf, size: u64) -> FileRef {
-        FileRef { path, size, history: None, group: 0 }
+        FileRef {
+            path,
+            size,
+            history: None,
+            group: 0,
+            values: Vec::new(),
+            history_values: Vec::new(),
+        }
+    }
+
+    /// Every name it stands for: the file, its history file and their value files, each once.
+    /// Value files a hand-over shares between files appear in each.
+    pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        let history = self.history.iter().map(|(p, _)| p);
+        let mut values: Vec<&PathBuf> =
+            self.values.iter().chain(&self.history_values).map(|(p, _)| p).collect();
+        values.sort();
+        values.dedup();
+        std::iter::once(&self.path).chain(history).chain(values)
     }
 }
 
-/// One file the ingestion opens: a file or a history file.
+/// One file the ingestion opens: a file, a history file or a value file.
 #[derive(Clone, Debug)]
 struct Part {
     path: PathBuf,
     size: u64,
     number: u64,
+    /// A value file (FR-034): it holds values of keys anywhere, and only the references of the
+    /// files it comes with are read.
+    values: bool,
 }
 
 /// What the read in flight is for.
@@ -191,8 +217,18 @@ impl IngestJob {
         for f in &files {
             let history = f.history.iter().map(|(path, size)| (path.clone(), *size));
             for (path, size) in std::iter::once((f.path.clone(), f.size)).chain(history) {
-                parts.push(Part { path, size, number: *next_file });
+                parts.push(Part { path, size, number: *next_file, values: false });
                 *next_file += 1;
+            }
+        }
+        // The value files after every file, each once however many files point to it.
+        for f in &files {
+            for (path, size) in f.values.iter().chain(&f.history_values) {
+                if !parts.iter().any(|p| p.values && p.path == *path) {
+                    let (path, size) = (path.clone(), *size);
+                    parts.push(Part { path, size, number: *next_file, values: true });
+                    *next_file += 1;
+                }
             }
         }
         IngestJob {
@@ -261,6 +297,7 @@ impl IngestJob {
                 // Exports never use dictionaries: a file that names one is refused.
                 let none = crate::sst::reader::Dictionaries::new();
                 match Table::from_meta(n, size, start, &data, (ring, &none)) {
+                    Ok(t) if self.parts[i].values => self.opened.push(t),
                     Ok(t)
                         if self
                             .intervals
@@ -286,14 +323,35 @@ impl IngestJob {
         self.failed = Some(e);
     }
 
-    /// The files opened, each with its history file attached, and their groups.
+    /// The files opened, each with its history file and its value files attached, and their
+    /// groups.
     fn assemble(&mut self) -> Vec<(u32, Table)> {
-        let mut opened = std::mem::take(&mut self.opened).into_iter();
+        let opened = std::mem::take(&mut self.opened);
+        let keys = self.parts.iter().filter(|p| !p.values).count();
+        let mut opened = opened.into_iter();
+        let mut files: Vec<Table> = opened.by_ref().take(keys).collect();
+        let values: Vec<(&PathBuf, Arc<Table>)> = self
+            .parts
+            .iter()
+            .filter(|p| p.values)
+            .map(|p| &p.path)
+            .zip(opened.map(Arc::new))
+            .collect();
+        let find = |list: &[(PathBuf, u64)]| -> Vec<Arc<Table>> {
+            let of = |path: &PathBuf| values.iter().find(|(p, _)| *p == path).map(|(_, t)| t);
+            list.iter()
+                .map(|(path, _)| of(path).expect("every value file is a part").clone())
+                .collect()
+        };
+        let mut files = files.drain(..);
         let mut out = Vec::new();
         for f in &self.files {
-            let mut t = opened.next().expect("every part is opened");
+            let mut t = files.next().expect("every part is opened");
+            t.values = find(&f.values);
             if f.history.is_some() {
-                t.history = Some(Arc::new(opened.next().expect("every part is opened")));
+                let mut h = files.next().expect("every part is opened");
+                h.values = find(&f.history_values);
+                t.history = Some(Arc::new(h));
             }
             out.push((f.group, t));
         }
@@ -355,6 +413,17 @@ impl IngestJob {
                 self.pending = Some(Pending::Footer(i));
                 continue;
             }
+            let tables = self.assemble();
+            // A file whose value files are not those its references count is unreadable.
+            let unmatched = tables
+                .iter()
+                .flat_map(|(_, t)| std::iter::once(t).chain(t.history.as_deref()))
+                .find(|t| t.values.len() != t.props.values.len());
+            if let Some(t) = unmatched {
+                let n = t.number;
+                self.fail(LsmError::Corrupt { file: n, offset: 0 });
+                continue;
+            }
             self.placed = true;
             for p in &self.parts {
                 self.queued.push_back(IoOp::Rename {
@@ -363,7 +432,6 @@ impl IngestJob {
                 });
             }
             self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
-            let tables = self.assemble();
             let levels = place(v, &tables.iter().map(|(g, t)| (*g, t)).collect::<Vec<_>>());
             let edit = Edit {
                 adds: tables

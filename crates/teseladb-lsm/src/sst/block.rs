@@ -168,6 +168,11 @@ pub(crate) struct BlockBuilder {
 /// entry with it.
 const PATCH: u8 = 0x80;
 
+/// The bit of an entry's kind byte that marks its value as a reference to a value file (FR-034):
+/// the value is in a block of that file, and the entry holds where. Files written before have no
+/// entry with it.
+const REF: u8 = 0x40;
+
 /// Bytes of entries after which the next entry starts a restart point, whatever the interval: a
 /// seek walks from the restart point below its key, and with documents of a few hundred bytes an
 /// interval of entries alone would have it decode several kilobytes of headers per read.
@@ -212,6 +217,16 @@ impl BlockBuilder {
 
     /// Adds an entry; keys come in order.
     pub(crate) fn add(&mut self, key: &[u8], kind: Kind, value: &[u8]) {
+        self.add_entry(key, kind, value, false);
+    }
+
+    /// Adds an entry whose value is a reference to a value file (FR-034); it is never a delta,
+    /// and the entry after it is never a delta against it.
+    pub(crate) fn add_ref(&mut self, key: &[u8], kind: Kind, encoded: &[u8]) {
+        self.add_entry(key, kind, encoded, true);
+    }
+
+    fn add_entry(&mut self, key: &[u8], kind: Kind, value: &[u8], is_ref: bool) {
         let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
         let restart = self.since_restart == self.interval
             || self.restarts.is_empty()
@@ -225,17 +240,21 @@ impl BlockBuilder {
         };
         let patch = match &self.last_value {
             Some((Kind::Put, newer))
-                if !restart && kind == Kind::Put && logical(&self.last) == logical(key) =>
+                if !restart
+                    && !is_ref
+                    && kind == Kind::Put
+                    && logical(&self.last) == logical(key) =>
             {
                 delta::encode(newer, value)
             }
             _ => None,
         };
         if self.deltas {
-            self.last_value = Some((kind, value.to_vec()));
+            self.last_value = (!is_ref).then(|| (kind, value.to_vec()));
         }
         let (flag, stored) = match &patch {
             Some(d) => (PATCH, d.as_slice()),
+            None if is_ref => (REF, value),
             None => (0, value),
         };
         put_varint(&mut self.buf, shared as u64);
@@ -279,6 +298,8 @@ struct Raw {
     kind: Kind,
     /// The value is a delta against the value of the entry before (FR-035).
     patch: bool,
+    /// The value is a reference to a value file (FR-034).
+    is_ref: bool,
     value: Range<usize>,
 }
 
@@ -315,13 +336,14 @@ impl Block {
         let delta = p..p.checked_add(unshared).ok_or(Bad)?;
         let kind_at = delta.end;
         let byte = *d.get(kind_at).ok_or(Bad)?;
-        let kind = Kind::from_u8(byte & !PATCH).ok_or(Bad)?;
+        let kind = Kind::from_u8(byte & !(PATCH | REF)).ok_or(Bad)?;
+        let (patch, is_ref) = (byte & PATCH != 0, byte & REF != 0);
         let value = kind_at + 1..(kind_at + 1).checked_add(vlen).ok_or(Bad)?;
-        if value.end > d.len() {
+        if value.end > d.len() || (patch && is_ref) {
             return Err(Bad);
         }
         let next = value.end;
-        Ok((Raw { shared, delta, kind, patch: byte & PATCH != 0, value }, next))
+        Ok((Raw { shared, delta, kind, patch, is_ref, value }, next))
     }
 
     /// Key of the entry at restart point `i`, stored whole.
@@ -346,6 +368,8 @@ pub(crate) struct BlockCursor {
     value: Range<usize>,
     /// The entry's value rebuilt from its delta (FR-035).
     patched: Option<Bytes>,
+    /// The entry's value is a reference to a value file (FR-034).
+    is_ref: bool,
     valid: bool,
 }
 
@@ -359,6 +383,7 @@ impl BlockCursor {
             kind: Kind::Put,
             value: 0..0,
             patched: None,
+            is_ref: false,
             valid: false,
         }
     }
@@ -453,8 +478,8 @@ impl BlockCursor {
             return Err(Bad);
         }
         self.patched = match raw.patch {
-            // The entry before is the next newer version of the key.
-            true if self.valid => {
+            // The entry before is the next newer version of the key, and holds its value.
+            true if self.valid && !self.is_ref => {
                 let stored = &self.block.data[raw.value.clone()];
                 Some(Bytes::from_vec(delta::apply(self.value_slice(), stored)?))
             }
@@ -465,6 +490,7 @@ impl BlockCursor {
         self.key.extend_from_slice(&self.block.data[raw.delta]);
         self.shared = raw.shared;
         self.kind = raw.kind;
+        self.is_ref = raw.is_ref;
         self.value = raw.value;
         self.next = next;
         self.valid = true;
@@ -489,6 +515,11 @@ impl BlockCursor {
     /// Kind of the entry.
     pub(crate) fn kind(&self) -> Kind {
         self.kind
+    }
+
+    /// Whether the entry's value is a reference to a value file (FR-034).
+    pub(crate) fn is_ref(&self) -> bool {
+        self.is_ref
     }
 
     /// Value of the entry, sharing the block's bytes.
@@ -859,6 +890,33 @@ mod tests {
             assert_eq!((c.key(), c.value_slice()), (&k[..], &v[..]));
             c.advance().unwrap();
         }
+    }
+
+    /// FR-034: a reference reads back as one, is never a delta nor the base of one, and a kind
+    /// byte with both marks is refused.
+    #[test]
+    fn references_stay_whole_and_marked() {
+        use crate::entry::internal_key;
+        let ts = |p| teseladb_keys::Hlc { physical: p, logical: 0 };
+        let doc = vec![7u8; 300];
+        let mut b = BlockBuilder::new(16).with_deltas();
+        b.add(&internal_key(b"k", ts(9)), Kind::Put, &doc);
+        b.add_ref(&internal_key(b"k", ts(8)), Kind::Put, b"ref-8");
+        b.add(&internal_key(b"k", ts(7)), Kind::Put, &doc);
+        let block = Block::parse(Bytes::from_vec(b.finish())).unwrap();
+        let mut c = BlockCursor::first(block.clone()).unwrap();
+        let mut seen = Vec::new();
+        while c.valid() {
+            seen.push((c.is_ref(), c.value_slice().to_vec()));
+            c.advance().unwrap();
+        }
+        assert_eq!(seen, vec![(false, doc.clone()), (true, b"ref-8".to_vec()), (false, doc)]);
+        let mut raw = block.data.to_vec();
+        let kind_at = raw.iter().position(|x| *x == (Kind::Put as u8 | REF)).unwrap();
+        raw[kind_at] |= PATCH;
+        let broken = Block::parse(Bytes::from_vec(raw)).unwrap();
+        let mut c = BlockCursor::first(broken).unwrap();
+        assert!(c.advance().is_err());
     }
 
     #[test]
