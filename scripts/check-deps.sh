@@ -37,7 +37,8 @@ HOT_VIUZI=(teseladb-raft teseladb-raftlog teseladb-crypto)
 UNSAFE_CRATES=(teseladb-sys)
 # Modules that D-151 admits with unsafe code for a measured performance gain: their crate denies
 # it and only these files allow it; Miri runs their tests in the gates (scripts/ci.sh).
-UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs)
+UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs
+  crates/teseladb-mql/src/simd.rs)
 # Built in two halves so that this script does not contain the word itself.
 ORIGIN_WORD="raf""tree"
 

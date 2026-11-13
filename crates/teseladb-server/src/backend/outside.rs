@@ -467,7 +467,7 @@ impl ServerBackend {
         (start, end): (&[u8], &[u8]),
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut teseladb_wire::commands::Keep<'_>,
     ) -> Option<teseladb_wire::commands::Matching> {
         let (g, core, range_end) =
             unrouted(self.h.routes.span_of(&mut self.outside.routes, start))?;

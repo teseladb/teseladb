@@ -94,6 +94,15 @@ gate "1. shell scripts" shellcheck_all
 # The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
 gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable::
+# The vector kernels of the query engine (010 FR-030): NEON on the host, and the x86_64 ones
+# interpreted, SSE2 by default and AVX2 with the feature on.
+gate "1. Miri on the vector kernels (host)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-mql --lib -- simd::
+gate "1. Miri on the vector kernels (x86_64, SSE2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-mql --lib --target x86_64-unknown-linux-gnu -- simd::
+gate "1. Miri on the vector kernels (x86_64, AVX2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  RUSTFLAGS="-C target-feature=+avx2" \
+  cargo +nightly miri test -q -p teseladb-mql --lib --target x86_64-unknown-linux-gnu -- simd::
 # The pool that carves blocks out of one mapping of huge pages (012 FR-032), on normal pages.
 gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-sys --lib -- huge_pool::

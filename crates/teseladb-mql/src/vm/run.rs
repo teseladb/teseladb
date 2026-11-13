@@ -12,6 +12,7 @@ use super::{Address, BATCH, Fast, Insn, Leaf, Literal, NO_EXPAND, Op, Program, R
 use crate::error::Result;
 use crate::matcher::{Eval, MatchContext, array_index, compare, eq};
 use crate::parse::{CmpOp, Expr, Pred};
+use crate::simd::{self, Cmp};
 use crate::value::{bson_error, cmp};
 
 /// What the instructions read besides their registers.
@@ -612,7 +613,9 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                     continue;
                 }
                 _ => {
-                    for l in lanes(m) {
+                    // The lanes a vector kernel answers, then the others one by one.
+                    let rest = self.vector_cmp(env, i, m);
+                    for l in lanes(rest) {
                         let v = self.regs[i.src1()][l];
                         let answer = env.leaf(pc, i, v, self.docs[l])?;
                         self.regs[i.dst()][l] = ValueRef::boolean(answer);
@@ -636,6 +639,66 @@ impl<'d, 'b> VectorVm<'d, 'b> {
         }
         Ok(matched)
     }
+}
+
+impl VectorVm<'_, '_> {
+    /// Comparison `i` on the lanes of `m` whose register holds a number of the literal's kind
+    /// (an integer against an integer literal, a double that is not NaN against a double), with
+    /// a vector kernel (010 FR-030): what [`Env::single`] gives on those values, which are no
+    /// arrays to expand. The lanes of `m` it leaves for the comparison one lane at a time.
+    fn vector_cmp(&mut self, env: &Env<'_, '_, '_>, i: Insn, m: u64) -> u64 {
+        let p = env.program;
+        let ordered = |code: u8| match cmp_of(code) {
+            CmpOp::Gt => Cmp::Gt,
+            CmpOp::Gte => Cmp::Gte,
+            CmpOp::Lt => Cmp::Lt,
+            CmpOp::Lte => Cmp::Lte,
+        };
+        // The pool's literal (the immediate of an `Imm` instruction is the literal itself); an
+        // instruction whose literal has another kind compares generically, as `single` does.
+        let pooled = matches!(i.op(), Op::CmpEqI64 | Op::CmpEqF64 | Op::CmpI64 | Op::CmpF64);
+        let literal = if pooled { &p.pool[i.index()].fast } else { &Fast::None };
+        let (cmp, kernel) = match (i.op(), literal) {
+            (Op::CmpEqI64Imm, _) => (Cmp::Eq, Kernel::I64(i64::from(i.imm()))),
+            (Op::CmpI64Imm, _) => (ordered(i.src2()), Kernel::I64(i64::from(i.imm()))),
+            (Op::CmpEqI64, Fast::I64(k)) => (Cmp::Eq, Kernel::I64(*k)),
+            (Op::CmpEqF64, Fast::F64(k)) => (Cmp::Eq, Kernel::F64(*k)),
+            (Op::CmpI64, Fast::I64(k)) => (ordered(i.src2()), Kernel::I64(*k)),
+            (Op::CmpF64, Fast::F64(k)) => (ordered(i.src2()), Kernel::F64(*k)),
+            _ => return m,
+        };
+        let regs = &self.regs[i.src1()];
+        let (hits, mine) = match kernel {
+            Kernel::I64(k) => {
+                let mine = lanes(m)
+                    .filter(|&l| matches!(regs[l].tag, Tag::I32 | Tag::I64))
+                    .fold(0u64, |a, l| a | (1 << l));
+                let col: simd::Column<i64> = std::array::from_fn(|l| regs[l].payload as i64);
+                (simd::cmp_i64(cmp, &col, k), mine)
+            }
+            Kernel::F64(k) => {
+                let mine = lanes(m)
+                    .filter(|&l| {
+                        regs[l].tag == Tag::F64 && !f64::from_bits(regs[l].payload).is_nan()
+                    })
+                    .fold(0u64, |a, l| a | (1 << l));
+                let col: simd::Column<f64> =
+                    std::array::from_fn(|l| f64::from_bits(regs[l].payload));
+                (simd::cmp_f64(cmp, &col, k), mine)
+            }
+        };
+        for l in lanes(mine) {
+            self.regs[i.dst()][l] = ValueRef::boolean((hits >> l) & 1 == 1);
+        }
+        m & !mine
+    }
+}
+
+/// The literal a vector comparison takes.
+#[derive(Clone, Copy)]
+enum Kernel {
+    I64(i64),
+    F64(f64),
 }
 
 /// The lanes of mask `m`, in order.

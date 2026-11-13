@@ -137,6 +137,41 @@ impl Total {
         self.count += 1;
     }
 
+    /// Adds `count` integers whose exact sum is `sum` and whose magnitudes are at most
+    /// `max_abs` (`long` when one of them is a `long`), when adding them one at a time with
+    /// [`Total::add`] would be exact in every double it keeps (010 FR-030): no decimal yet,
+    /// integral running doubles, and every partial sum, the high half of each value included,
+    /// within 2^53. Then the totals are those of the adds one at a time, with no double rounded.
+    /// Returns whether it added them; otherwise the caller adds them one at a time.
+    pub(crate) fn add_exact_ints(
+        &mut self,
+        sum: i128,
+        count: u64,
+        max_abs: u64,
+        long: bool,
+    ) -> bool {
+        // 2^53: the integers up to it are doubles, and so are their sums while they stay there.
+        const EXACT: i128 = 1 << 53;
+        // The most the high half of a value (`add_long`) can stand above the value.
+        const HALF: i128 = 1 << 32;
+        let integral = |x: f64| x.is_finite() && x.fract() == 0.0 && x.abs() <= EXACT as f64;
+        if self.decimals.is_some() || !integral(self.doubles.hi) || !integral(self.plain) {
+            return false;
+        }
+        let reach = i128::from(count) * i128::from(max_abs);
+        let (hi, plain) = (self.doubles.hi as i128, self.plain as i128);
+        if hi.abs() + reach + HALF > EXACT || plain.abs() + reach > EXACT {
+            return false;
+        }
+        self.ints += sum;
+        // Exact: `sum` and the new totals are integers within 2^53.
+        self.doubles.hi += sum as f64;
+        self.plain += sum as f64;
+        self.has_long |= long;
+        self.count += count;
+        true
+    }
+
     /// The doubles and integers seen so far as a decimal (the start of a decimal total).
     fn non_decimal_as_decimal(&self) -> Decimal128 {
         if self.has_double { self.doubles.decimal() } else { long_decimal(self.ints) }
@@ -291,5 +326,80 @@ impl Stat {
                 Ok(d.value(self == Stat::StdDevSamp))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use teseladb_bson::Value;
+
+    use super::Total;
+
+    /// xorshift64*.
+    fn draws(mut state: u64) -> impl FnMut() -> u64 {
+        move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// A batch of integers added at once gives the totals of the adds one at a time, field by
+    /// field, whenever it is taken; near 2^53 and after fractions it is refused.
+    #[test]
+    fn integers_added_at_once_equal_the_adds_one_at_a_time() {
+        let mut next = draws(0x5EED);
+        let mut taken = 0;
+        for round in 0..4000 {
+            let mut before = Total::default();
+            for _ in 0..next() % 4 {
+                before.add(&match next() % 4 {
+                    0 => Value::Double((next() % 9) as f64 / 2.0),
+                    1 => Value::Int64((next() >> 12) as i64 - (1 << 51)),
+                    2 => Value::Double(1e300),
+                    _ => Value::Int32(next() as i32),
+                });
+            }
+            let scale = [1 << 8, 1 << 31, 1 << 46, 1 << 62][round % 4];
+            let values: Vec<Value> = (0..1 + next() % 64)
+                .map(|_| {
+                    let n = (next() % (2 * scale)) as i64 - scale as i64;
+                    match i32::try_from(n) {
+                        Ok(small) if next().is_multiple_of(2) => Value::Int32(small),
+                        _ => Value::Int64(n),
+                    }
+                })
+                .collect();
+            let ints: Vec<i64> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Int32(n) => i64::from(*n),
+                    Value::Int64(n) => *n,
+                    _ => unreachable!("integers"),
+                })
+                .collect();
+            let mut one_by_one = before.clone();
+            for v in &values {
+                one_by_one.add(v);
+            }
+            let mut at_once = before;
+            let sum = ints.iter().map(|&n| i128::from(n)).sum();
+            let max_abs = ints.iter().map(|n| n.unsigned_abs()).max().unwrap_or(0);
+            let long = values.iter().any(|v| matches!(v, Value::Int64(_)));
+            if at_once.add_exact_ints(sum, values.len() as u64, max_abs, long) {
+                taken += 1;
+                assert_eq!(format!("{at_once:?}"), format!("{one_by_one:?}"));
+                assert_eq!(format!("{:?}", at_once.sum()), format!("{:?}", one_by_one.sum()));
+                assert_eq!(format!("{:?}", at_once.avg()), format!("{:?}", one_by_one.avg()));
+            }
+        }
+        assert!(taken > 1000, "the batches within 2^53 are taken: {taken}");
+        let mut big = Total::default();
+        big.add(&Value::Int64(1 << 53));
+        assert!(!big.add_exact_ints(1, 1, 1, false));
+        let mut fraction = Total::default();
+        fraction.add(&Value::Double(0.5));
+        assert!(!fraction.add_exact_ints(1, 1, 1, false));
     }
 }
