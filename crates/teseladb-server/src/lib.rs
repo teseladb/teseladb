@@ -19,6 +19,7 @@ pub mod audit_log;
 pub mod authz_lease;
 pub mod backend;
 pub mod backup;
+pub mod block_memory;
 pub mod catalog_ops;
 pub mod certs;
 pub mod checksums;

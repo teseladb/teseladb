@@ -94,6 +94,9 @@ gate "1. shell scripts" shellcheck_all
 # The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
 gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable::
+# The pool that carves blocks out of one mapping of huge pages (012 FR-032), on normal pages.
+gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-sys --lib -- huge_pool::
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh

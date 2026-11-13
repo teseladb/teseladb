@@ -91,6 +91,14 @@ impl Default for HelloState {
     }
 }
 
+/// Where a connection keeps the buffer of each request it reads, which the request's documents
+/// share (012 FR-027): the server places it on pages of 2 MiB when the system has them (012
+/// FR-032).
+pub trait RequestArena: Send + Sync + std::fmt::Debug {
+    /// `message` copied into this memory, or `None` when it has no room for it.
+    fn hold(&self, message: &[u8]) -> Option<Bytes>;
+}
+
 /// A client connection.
 #[derive(Debug)]
 pub struct Connection {
@@ -110,6 +118,8 @@ pub struct Connection {
     pub auth: AuthState,
     /// The tenant the request being run works in (007 FR-025).
     pub tenant: u32,
+    /// Where the buffers of its requests go; the heap without one.
+    pub arena: Option<std::sync::Arc<dyn RequestArena>>,
 }
 
 /// The longest message a connection takes before it authenticates, with authentication on: a
@@ -136,6 +146,7 @@ impl Connection {
             bypass_default_max_time: true,
             auth: AuthState::default(),
             tenant: 0,
+            arena: None,
         }
     }
 
@@ -172,7 +183,12 @@ impl Connection {
         }
         // The request's buffer: every canonical document of the message keeps a view of it, and
         // it goes with the last of them once the reply is written (012 FR-027).
-        let whole = Bytes::from_owner(self.buf.drain(..size).collect::<Vec<u8>>());
+        let whole = self
+            .arena
+            .as_ref()
+            .and_then(|a| a.hold(&self.buf[..size]))
+            .unwrap_or_else(|| Bytes::from_owner(self.buf[..size].to_vec()));
+        self.buf.drain(..size);
         let header = Header::parse(&whole);
         match header.op_code {
             opcode::OP_MSG => msg_request(&whole, None).map(Some),

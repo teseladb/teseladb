@@ -140,6 +140,16 @@ impl SharedLsm {
         SharedLsm { inner: Arc::new(Inner { current: Published::new(version), cache, dir }) }
     }
 
+    /// Keeps the blocks of every shard in `memory` (012 FR-032). The core calls it once it opened
+    /// the LSM; a shard busy at that moment is waited for, as a block read waits for it.
+    pub(crate) fn place_blocks(&self, memory: &Arc<dyn crate::BlockMemory>) {
+        for shard in &self.inner.cache {
+            while shard.try_with(|c| c.set_memory(Arc::clone(memory))).is_none() {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
     /// The version the core published last.
     pub fn view(&self) -> SharedView {
         SharedView { version: self.inner.current.load() }
