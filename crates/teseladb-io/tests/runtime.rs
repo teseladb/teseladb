@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use teseladb_io::IoClass;
 use teseladb_io::handshake::{self, Acceptor, HandshakeError};
 use teseladb_io::mailbox::MailboxSender;
 use teseladb_io::peer::{Hello, PeerMsg, Versions, encode_frame};
@@ -99,15 +100,16 @@ impl CoreLogic for Toy {
         self.clocks += 1;
     }
 
-    fn poll_io(&mut self, _now: Nanos) -> Option<IoOp> {
+    fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
         if self.io.is_empty() || (self.one_by_one && self.in_flight > 0) {
             return None;
         }
         self.in_flight += 1;
-        Some(self.io.remove(0))
+        Some((self.io.remove(0), IoClass::Data))
     }
 
-    fn on_io_done(&mut self, done: IoDone, _now: Nanos) {
+    fn on_io_done(&mut self, done: IoDone, class: IoClass, _now: Nanos) {
+        assert_eq!(class, IoClass::Data, "each result with the class of its operation");
         self.in_flight -= 1;
         self.done.push(done);
     }

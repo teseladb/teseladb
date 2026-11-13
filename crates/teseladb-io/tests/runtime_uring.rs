@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::NodeDisk;
 use teseladb_io::node_disk::{DirectIo, IoExecutor, choose};
 use teseladb_io::peer::{Hello, PeerMsg, Versions};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreRuntime, RuntimeConfig};
+use teseladb_io::{IoClass, NodeDisk};
 use teseladb_raftlog::{FileId, IoDone, IoErrno, IoOp};
 use teseladb_types::{Bytes, Nanos, NodeId};
 
@@ -27,10 +27,11 @@ struct Writer {
 impl CoreLogic for Writer {
     type Msg = IoOp;
     fn tick(&mut self, _now: Nanos, _wall_ms: u64) {}
-    fn poll_io(&mut self, _now: Nanos) -> Option<IoOp> {
-        if self.io.is_empty() { None } else { Some(self.io.remove(0)) }
+    fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
+        if self.io.is_empty() { None } else { Some((self.io.remove(0), IoClass::Data)) }
     }
-    fn on_io_done(&mut self, done: IoDone, _now: Nanos) {
+    fn on_io_done(&mut self, done: IoDone, class: IoClass, _now: Nanos) {
+        assert_eq!(class, IoClass::Data, "each result with the class of its operation");
         self.done.push(done);
         self.seen.fetch_add(1, Ordering::Relaxed);
     }

@@ -235,7 +235,7 @@ fn the_reference_gives_what_the_scripted_sequence_expects() {
 #[cfg(target_os = "linux")]
 mod batches {
     use super::*;
-    use teseladb_io::IoUringDisk;
+    use teseladb_io::{IoClass, IoUringDisk};
 
     /// Submits every operation at once and collects as the ring completes them: the results come
     /// back in submission order and equal one-at-a-time execution.
@@ -257,7 +257,8 @@ mod batches {
             }
         }
         assert_eq!(u.pending(), 0);
-        for (i, (a, b)) in expected.iter().zip(&got).enumerate() {
+        for (i, (a, (b, class))) in expected.iter().zip(&got).enumerate() {
+            assert_eq!(*class, IoClass::Data, "{tag}: operation {i} in the class it was sent with");
             assert_eq!(a, b, "{tag}: batch differs at operation {i}: {:?}", ops[i]);
         }
         assert!(snapshot(&one.0) == snapshot(&all.0), "{tag}: batch leaves other files");

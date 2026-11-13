@@ -30,9 +30,14 @@ use teseladb_types::Bytes;
 
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
 use crate::file_disk::{O_DIRECT, errno, io_errno};
+use crate::io_class::IoClass;
 
 /// Submission slots of a core's ring.
-pub const RING_ENTRIES: u32 = 64;
+pub const RING_ENTRIES: u32 = 128;
+
+/// Registered buffers only the log's operations may take (012 FR-023): a compaction that holds
+/// the rest leaves the log's writes something to start with.
+const LOG_BUFFERS: usize = 8;
 /// Slots of the registered file table; files beyond it use their plain descriptor.
 pub const FILE_SLOTS: u32 = 1024;
 /// Operations the executor cannot do without (FR-007): with fewer, the node uses the disk threads.
@@ -70,9 +75,10 @@ fn support_of(ring: io::Result<Ring>) -> Result<(), String> {
 /// `Sync`s that run at once on a core (012 FR-021).
 const MAX_SYNCS: usize = 16;
 
-// Data jobs hold a buffer each, at most [`MAX_SYNCS`] `Sync`s run next to them with one ring
-// operation each, and every other job runs alone: the jobs in flight never pass the ring's slots.
-const _: () = assert!((BUFFERS_PER_CORE as u32) + (MAX_SYNCS as u32) < RING_ENTRIES);
+// Data jobs hold a buffer each; in each of the two classes at most [`MAX_SYNCS`] `Sync`s run next
+// to them and one job alone, each with one ring operation: the jobs in flight never pass the ring's
+// slots.
+const _: () = assert!((BUFFERS_PER_CORE as u32) + 2 * (MAX_SYNCS as u32) + 2 < RING_ENTRIES);
 
 fn missing_ops(probe: &Probe) -> Result<(), String> {
     let missing: Vec<&str> =
@@ -144,6 +150,7 @@ enum Work {
 struct Job {
     seq: u64,
     op: IoOp,
+    class: IoClass,
     /// When it started (012 FR-015).
     started: Instant,
     work: Work,
@@ -164,10 +171,11 @@ pub struct IoUringDisk {
     linkat: bool,
     files: HashMap<FileId, OpenFile>,
     free_slots: Vec<u32>,
-    queue: VecDeque<(u64, IoOp, Instant)>,
+    /// The operations not started, one queue per class (012 FR-023).
+    queues: [VecDeque<(u64, IoOp, Instant)>; 2],
     running: VecDeque<Job>,
     by_ring: HashMap<u64, u64>,
-    done: VecDeque<(u64, IoDone)>,
+    done: VecDeque<(u64, IoDone, IoClass)>,
     next_seq: u64,
     wake: File,
     /// Whether the buffers are registered: on the first read or write, from the core's thread,
@@ -292,7 +300,7 @@ impl IoUringDisk {
             linkat: probe.supports(opcode::LINKAT),
             files: HashMap::new(),
             free_slots: (0..file_slots).rev().collect(),
-            queue: VecDeque::new(),
+            queues: [VecDeque::new(), VecDeque::new()],
             running: VecDeque::new(),
             by_ring: HashMap::new(),
             done: VecDeque::new(),
@@ -319,7 +327,7 @@ impl IoUringDisk {
 
     /// Operations submitted whose result has not been collected.
     pub fn pending(&self) -> usize {
-        self.queue.len() + self.running.len() + self.done.len()
+        self.queues.iter().map(VecDeque::len).sum::<usize>() + self.running.len() + self.done.len()
     }
 
     /// Uses `IORING_OP_FTRUNCATE` (`on`) or truncates from the core's thread, as on kernels
@@ -342,7 +350,7 @@ impl IoUringDisk {
 
     /// Waits for every submitted operation and drops the results (when the core stops).
     pub fn drain(&mut self) {
-        while !self.queue.is_empty() || !self.running.is_empty() {
+        while self.queues.iter().any(|q| !q.is_empty()) || !self.running.is_empty() {
             self.start_ready();
             let wait = u32::from(self.running.iter().any(|j| j.waiting.is_some()));
             if self.ring.submit(wait).is_err() {
@@ -353,11 +361,17 @@ impl IoUringDisk {
         self.done.clear();
     }
 
-    /// Queues `op` behind the ones already submitted; it starts on the next [`IoUringDisk::flush`].
+    /// Queues `op` behind the ones already submitted in the data class; it starts on the next
+    /// [`IoUringDisk::flush`].
     pub fn submit(&mut self, op: IoOp) {
+        self.submit_in(op, IoClass::Data);
+    }
+
+    /// Queues `op` behind the ones of `class` already submitted (012 FR-023).
+    pub fn submit_in(&mut self, op: IoOp, class: IoClass) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.queue.push_back((seq, op, Instant::now()));
+        self.queues[class.index()].push_back((seq, op, Instant::now()));
     }
 
     /// Starts what can start and hands it to the kernel in one `io_uring_enter`.
@@ -368,14 +382,14 @@ impl IoUringDisk {
     }
 
     /// Collects the completions that arrived, moves the operations on, and appends to `out` the
-    /// results of the finished ones, in submission order.
-    pub fn reap(&mut self, out: &mut Vec<IoDone>) -> io::Result<()> {
+    /// results of the finished ones with their class, in submission order within each class.
+    pub fn reap(&mut self, out: &mut Vec<(IoDone, IoClass)>) -> io::Result<()> {
         let mut counter = [0u8; 8];
         // Resets the eventfd; nothing to read means no completion was signalled since.
         let _ = (&self.wake).read(&mut counter);
         self.collect();
         self.flush()?;
-        out.extend(self.done.drain(..).map(|(_, d)| d));
+        out.extend(self.done.drain(..).map(|(_, d, class)| (d, class)));
         Ok(())
     }
 
@@ -395,30 +409,58 @@ impl IoUringDisk {
                 teseladb_stages::record(teseladb_stages::Stage::DiskSync, took);
             }
         }
-        while self.running.front().is_some_and(|j| j.result.is_some()) {
-            let j = self.running.pop_front().expect("front job");
-            self.done.push_back((j.seq, j.result.expect("finished job")));
+        // A finished job goes once every earlier job of its class has gone (012 FR-023).
+        let mut blocked = [false; 2];
+        let mut kept = VecDeque::with_capacity(self.running.len());
+        for j in self.running.drain(..) {
+            let c = j.class.index();
+            match j.result {
+                Some(_) if !blocked[c] => {
+                    let result = j.result.expect("finished job");
+                    self.done.push_back((j.seq, result, j.class));
+                }
+                _ => {
+                    blocked[c] = true;
+                    kept.push_back(j);
+                }
+            }
         }
+        self.running = kept;
     }
 
-    /// Whether the operation at the head of the queue may start now.
-    fn can_start(&self, op: &IoOp) -> bool {
-        if data_range(op).is_some() && self.pool.available() == 0 {
+    /// Whether the operation at the head of the queue of `class` may start now: the classes do
+    /// not wait for each other, but the data class leaves [`LOG_BUFFERS`] buffers to the log.
+    fn can_start(&self, op: &IoOp, class: IoClass) -> bool {
+        let reserved = match class {
+            IoClass::Log => 0,
+            IoClass::Data => LOG_BUFFERS,
+        };
+        if data_range(op).is_some() && self.pool.available() <= reserved {
             return false;
         }
         let same = |a: FileId, b: FileId| {
             a == b
                 || matches!((self.files.get(&a), self.files.get(&b)), (Some(x), Some(y)) if x.inode == y.inode)
         };
-        may_start_in(self.running.iter().map(|j| &j.op), op, &same)
+        let mine = self.running.iter().filter(|j| j.class == class).map(|j| &j.op);
+        may_start_in(mine, op, &same)
     }
 
+    /// Starts what can start, the log's class first (012 FR-023).
     fn start_ready(&mut self) {
-        while let Some((_, op, _)) = self.queue.front() {
-            if !self.can_start(op) {
+        for class in [IoClass::Log, IoClass::Data] {
+            self.start_class(class);
+        }
+        self.collect();
+    }
+
+    fn start_class(&mut self, class: IoClass) {
+        let q = class.index();
+        while let Some((_, op, _)) = self.queues[q].front() {
+            if !self.can_start(op, class) {
                 return;
             }
-            let (seq, op, queued) = self.queue.pop_front().expect("front op");
+            let (seq, op, queued) = self.queues[q].pop_front().expect("front op");
             // How long it waited behind the operations before it (012 FR-015): a batch of the
             // log waits here behind the reads and writes of a compaction.
             let started = Instant::now();
@@ -435,6 +477,7 @@ impl IoUringDisk {
                         self.running.push_back(Job {
                             seq,
                             op,
+                            class,
                             started,
                             work,
                             waiting: None,
@@ -460,6 +503,7 @@ impl IoUringDisk {
                         self.running.push_back(Job {
                             seq,
                             op,
+                            class,
                             started,
                             work,
                             waiting: None,
@@ -469,10 +513,17 @@ impl IoUringDisk {
                     }
                 },
             };
-            self.running.push_back(Job { seq, op, started, work, waiting: None, result: None });
+            self.running.push_back(Job {
+                seq,
+                op,
+                class,
+                started,
+                work,
+                waiting: None,
+                result: None,
+            });
             self.advance(self.running.len() - 1, None);
         }
-        self.collect();
     }
 
     /// The steps of an operation that is not a read or a write. Those done without the ring
@@ -762,7 +813,7 @@ impl Disk for IoUringDisk {
         let fallback = op.without_data();
         self.submit(op);
         loop {
-            if let Some(i) = self.done.iter().position(|(s, _)| *s == seq) {
+            if let Some(i) = self.done.iter().position(|(s, _, _)| *s == seq) {
                 return self.done.remove(i).expect("found result").1;
             }
             self.start_ready();
@@ -877,6 +928,79 @@ mod tests {
         ok(&mut d, IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 8192 });
         ok(&mut d, IoOp::Truncate { file: FileId(1), len: 100 });
         assert_eq!(fs::metadata(root.join("f")).unwrap().len(), 100);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_log_does_not_wait_behind_the_data_and_each_class_answers_in_its_order() {
+        // 012 FR-023: a data operation that runs alone (a create) and the writes queued behind it
+        // hold no write of the log, and the results of each class come in its own order.
+        let root = temp("classes");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "log".into(), prealloc: 0 });
+        d.submit_in(
+            IoOp::Create { file: FileId(2), path: "data".into(), prealloc: 1 << 20 },
+            IoClass::Data,
+        );
+        for i in 0..8u64 {
+            let data = Bytes::from_vec(vec![i as u8; 4096]);
+            d.submit_in(
+                IoOp::WriteAt { file: FileId(2), offset: i * 4096, data, batch: 0 },
+                IoClass::Data,
+            );
+        }
+        let entry = Bytes::from_vec(vec![9; 512]);
+        d.submit_in(
+            IoOp::WriteAt { file: FileId(1), offset: 0, data: entry, batch: 1 },
+            IoClass::Log,
+        );
+        d.submit_in(IoOp::Sync { file: FileId(1), batch: 1 }, IoClass::Log);
+        d.flush().unwrap();
+        // The log's two operations started with the data's create, not after its writes.
+        let started: Vec<IoClass> = d.running.iter().map(|j| j.class).collect();
+        assert!(started.iter().filter(|c| **c == IoClass::Log).count() >= 1, "{started:?}");
+        let mut got = Vec::new();
+        while got.len() < 11 {
+            d.ring.submit(1).unwrap();
+            d.reap(&mut got).unwrap();
+        }
+        let log: Vec<&IoDone> =
+            got.iter().filter(|(_, c)| *c == IoClass::Log).map(|(r, _)| r).collect();
+        assert!(
+            matches!(log[..], [IoDone::Ok(IoOp::WriteAt { .. }), IoDone::Ok(IoOp::Sync { .. })]),
+            "{log:?}"
+        );
+        let data: Vec<&IoDone> =
+            got.iter().filter(|(_, c)| *c == IoClass::Data).map(|(r, _)| r).collect();
+        assert!(matches!(data[0], IoDone::Ok(IoOp::Create { .. })), "{data:?}");
+        let offsets: Vec<u64> = data[1..]
+            .iter()
+            .map(|r| match r {
+                IoDone::Ok(IoOp::WriteAt { offset, .. }) => *offset,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(offsets, (0..8).map(|i| i * 4096).collect::<Vec<_>>(), "in its order");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_data_leaves_buffers_to_the_log() {
+        let root = temp("reserve");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 0 });
+        let write = |o: u64| IoOp::WriteAt {
+            file: FileId(1),
+            offset: o,
+            data: Bytes::from_vec(vec![1; 8]),
+            batch: 0,
+        };
+        // With no more free buffers than the log's, a data write waits and a log write starts.
+        for _ in 0..(BUFFERS_PER_CORE as usize - LOG_BUFFERS) {
+            let _ = d.pool.take();
+        }
+        assert!(!d.can_start(&write(0), IoClass::Data));
+        assert!(d.can_start(&write(0), IoClass::Log));
         fs::remove_dir_all(&root).unwrap();
     }
 

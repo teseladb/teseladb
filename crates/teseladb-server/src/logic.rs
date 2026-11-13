@@ -18,11 +18,11 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use teseladb_io::answered_apart;
 use teseladb_io::handshake::JoinRequest;
 use teseladb_io::mailbox::SendError;
 use teseladb_io::peer::{JoinAccepted, PeerMsg};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreSender};
+use teseladb_io::{IoClass, answered_apart};
 use teseladb_meta::balancer::{BALANCE_EVERY, Decision, View, plan};
 use teseladb_meta::bootstrap::{create_data_range, data_range, needs_data_range};
 use teseladb_meta::command::{Group0Command, NodeAddrs, NodeState};
@@ -74,6 +74,17 @@ enum IoSlot {
     Rollback,
     /// The data range's (its LSM or its transfers).
     Data(IoOwner),
+}
+
+impl IoSlot {
+    /// The class of the executor's queue its operations go to (012 FR-023): the log's and the
+    /// rollback's, which a write waits for, apart from the data's.
+    fn class(&self) -> IoClass {
+        match self {
+            IoSlot::Log | IoSlot::Rollback => IoClass::Log,
+            IoSlot::Data(_) => IoClass::Data,
+        }
+    }
 }
 
 /// Group 0 voters at most; the other nodes stay learners.
@@ -1753,7 +1764,7 @@ impl CoreLogic for NodeLogic {
         took(Stage::CoreTick, began);
     }
 
-    fn poll_io(&mut self, now: Nanos) -> Option<IoOp> {
+    fn poll_io(&mut self, now: Nanos) -> Option<(IoOp, IoClass)> {
         self.now = now;
         // The log drops the entries of a rollback only once their files are durable (005
         // FR-010): until then the core issues no disk operation.
@@ -1762,11 +1773,11 @@ impl CoreLogic for NodeLogic {
         }
         if let Some(op) = self.core.poll_io(now) {
             self.io.push_back((IoSlot::Log, apart(&op)));
-            return Some(op);
+            return Some((op, IoClass::Log));
         }
         if let Some(op) = self.rollback.poll_io() {
             self.io.push_back((IoSlot::Rollback, apart(&op)));
-            return Some(op);
+            return Some((op, IoClass::Log));
         }
         let data = self.data.as_mut()?;
         let began = Instant::now();
@@ -1776,13 +1787,13 @@ impl CoreLogic for NodeLogic {
         self.pump();
         let (op, owner) = next?;
         self.io.push_back((IoSlot::Data(owner), apart(&op)));
-        Some(op)
+        Some((op, IoClass::Data))
     }
 
-    fn on_io_done(&mut self, done: IoDone, now: Nanos) {
+    fn on_io_done(&mut self, done: IoDone, class: IoClass, now: Nanos) {
         self.now = now;
         let began = Instant::now();
-        match take_slot(&mut self.io, &done) {
+        match take_slot(&mut self.io, &done, class) {
             IoSlot::Log => {
                 self.core.on_io_done(done, now);
                 took(Stage::CoreLogDone, began);
@@ -1962,12 +1973,17 @@ impl CoreLogic for NodeLogic {
 /// it ends, and a log's maintenance runs on a thread of its own, maybe after later operations, so
 /// each takes its own slot; anything else takes the oldest other one, as the disk thread answers it
 /// in order.
-fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone) -> IoSlot {
+fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone, class: IoClass) -> IoSlot {
     let synced = match done {
         IoDone::Ok(op) | IoDone::Err { op, .. } if answered_apart(op) => Some(op.clone()),
         _ => None,
     };
-    let at = io.iter().position(|(_, s)| *s == synced).expect("a disk operation in flight");
+    // An operation answered apart is matched by its value; the rest by order within its class,
+    // which the executor keeps (012 FR-023).
+    let at = io
+        .iter()
+        .position(|(slot, s)| *s == synced && (synced.is_some() || slot.class() == class))
+        .expect("a disk operation in flight");
     io.remove(at).expect("found above").0
 }
 
@@ -2147,9 +2163,9 @@ mod tests {
             let mut sent = Vec::new();
             for (id, l, disk) in &mut self.nodes {
                 l.tick(now, now.0 / 1_000_000);
-                while let Some(op) = l.poll_io(now) {
+                while let Some((op, class)) = l.poll_io(now) {
                     let done = disk.execute(op);
-                    l.on_io_done(done, now);
+                    l.on_io_done(done, class, now);
                 }
                 let mut out = Vec::new();
                 l.take_outbound(&mut out);
@@ -3506,17 +3522,33 @@ mod tests {
             (IoSlot::Log, None),
         ]);
         // The write after the sync answers first; then the rollback's, then the sync.
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(0))), IoSlot::Log);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(4))), IoSlot::Rollback);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync.clone())), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(0)), IoClass::Log), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(4)), IoClass::Log), IoSlot::Rollback);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync.clone()), IoClass::Log), IoSlot::Log);
         assert_eq!(io.len(), 1);
         let failed =
             IoDone::Err { op: IoOp::Sync { file, batch: 0 }, errno: teseladb_raftlog::IoErrno::Io };
         assert_eq!(
-            take_slot(&mut io, &failed),
+            take_slot(&mut io, &failed, IoClass::Log),
             IoSlot::Log,
             "a sync outside a batch keeps its place"
         );
+        assert!(io.is_empty());
+    }
+
+    #[test]
+    fn a_result_takes_the_oldest_slot_of_its_class() {
+        // 012 FR-023: the executor answers each class in its order, not across classes, so a data
+        // result that comes before an older log result goes to the data's slot.
+        use teseladb_raftlog::FileId;
+        let data = teseladb_types::Bytes::new();
+        let write =
+            |f, offset| IoOp::WriteAt { file: FileId(f), offset, data: data.clone(), batch: 0 };
+        let owner = IoSlot::Data(IoOwner::Lsm);
+        let mut io = VecDeque::from([(IoSlot::Log, None), (owner, None), (IoSlot::Rollback, None)]);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(9, 0)), IoClass::Data), owner);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(1, 0)), IoClass::Log), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(2, 0)), IoClass::Log), IoSlot::Rollback);
         assert!(io.is_empty());
     }
 
@@ -3534,9 +3566,12 @@ mod tests {
             (IoSlot::Rollback, apart(&close)),
             (IoSlot::Log, None),
         ]);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(close)), IoSlot::Rollback);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(IoOp::Close { file: FileId(2) })), IoSlot::Log);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync_dir)), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(close), IoClass::Log), IoSlot::Rollback);
+        assert_eq!(
+            take_slot(&mut io, &IoDone::Ok(IoOp::Close { file: FileId(2) }), IoClass::Log),
+            IoSlot::Log
+        );
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync_dir), IoClass::Log), IoSlot::Log);
         assert!(io.is_empty());
     }
 }

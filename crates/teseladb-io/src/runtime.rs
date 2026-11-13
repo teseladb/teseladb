@@ -6,7 +6,7 @@
 //! kernel in one call; frames for other nodes go to one outbound connection per node (dialed in the background,
 //! redialed with a 10 ms–1 s backoff with jitter after a failure).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -59,10 +59,10 @@ pub trait CoreLogic {
     /// clock read now, for what the turn stamps and compares (005 FR-032). Between two ticks
     /// the logic had the reading of the last one, up to a tick old.
     fn clock(&mut self, now: Nanos, wall_ms: u64);
-    /// Next disk operation, if any.
-    fn poll_io(&mut self, now: Nanos) -> Option<IoOp>;
-    /// Result of a disk operation, in submission order.
-    fn on_io_done(&mut self, done: IoDone, now: Nanos);
+    /// Next disk operation, if any, with its class (012 FR-023).
+    fn poll_io(&mut self, now: Nanos) -> Option<(IoOp, crate::IoClass)>;
+    /// Result of a disk operation of `class`, in submission order within its class.
+    fn on_io_done(&mut self, done: IoDone, class: crate::IoClass, now: Nanos);
     /// Earliest instant at which `poll_io` may have something new without any input.
     fn next_deadline(&self) -> Option<Nanos>;
     /// Frame received from `from`.
@@ -206,7 +206,10 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     disk: Exec<D>,
     /// Completions taken from the ring this turn.
     #[cfg(target_os = "linux")]
-    reaped: Vec<IoDone>,
+    reaped: Vec<(IoDone, crate::IoClass)>,
+    /// The classes of the operations handed to the disk thread, in order, but those it answers
+    /// apart, which are all the log's ([`crate::answered_apart`]).
+    thread_classes: VecDeque<crate::IoClass>,
     conns: BTreeMap<u64, Conn>,
     links: BTreeMap<NodeId, Link>,
     /// Inter-node addresses announced in the `Hello` of incoming connections: used when the logic
@@ -278,6 +281,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             disk,
             #[cfg(target_os = "linux")]
             reaped: Vec::new(),
+            thread_classes: VecDeque::new(),
             conns: BTreeMap::new(),
             links: BTreeMap::new(),
             learned: BTreeMap::new(),
@@ -351,7 +355,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.mailbox.drain_into(&mut self.inputs);
             for input in std::mem::take(&mut self.inputs) {
                 if let CoreInput::Disk(done) = input {
-                    self.logic.on_io_done(done, self.now());
+                    let class = self.thread_class(&done);
+                    self.logic.on_io_done(done, class, self.now());
                 }
             }
             self.submit_io(self.now());
@@ -487,8 +492,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             ring(d).reap(&mut self.reaped)?;
             let now = self.now();
             let took = !self.reaped.is_empty();
-            for done in std::mem::take(&mut self.reaped) {
-                self.logic.on_io_done(done, now);
+            for (done, class) in std::mem::take(&mut self.reaped) {
+                self.logic.on_io_done(done, class, now);
             }
             return Ok(took);
         }
@@ -518,13 +523,18 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     /// is gone.
     fn submit_io(&mut self, now: Nanos) -> (usize, bool) {
         let mut handed = 0;
-        while let Some(op) = self.logic.poll_io(now) {
+        while let Some((op, class)) = self.logic.poll_io(now) {
             handed += 1;
             let gone = match &mut self.disk {
-                Exec::Thread(t) => t.submit(op).is_err(),
+                Exec::Thread(t) => {
+                    if !crate::answered_apart(&op) {
+                        self.thread_classes.push_back(class);
+                    }
+                    t.submit(op).is_err()
+                }
                 #[cfg(target_os = "linux")]
                 Exec::InLoop(d) => {
-                    ring(d).submit(op);
+                    ring(d).submit_in(op, class);
                     false
                 }
             };
@@ -545,10 +555,28 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         (handed, true)
     }
 
+    /// The class of a result of the disk thread: the log's for one answered apart, else the class
+    /// of the oldest operation handed to it, since it answers the rest in order.
+    fn thread_class(&mut self, done: &IoDone) -> crate::IoClass {
+        let apart = match done {
+            IoDone::Ok(op) | IoDone::Err { op, .. } => crate::answered_apart(op),
+            IoDone::Read { .. } => false,
+        };
+        if apart {
+            return crate::IoClass::Log;
+        }
+        self.thread_classes
+            .pop_front()
+            .expect("a result for each operation handed to the disk thread")
+    }
+
     fn on_input(&mut self, input: CoreInput<L::Msg>) -> io::Result<()> {
         let now = self.now();
         match input {
-            CoreInput::Disk(done) => self.logic.on_io_done(done, now),
+            CoreInput::Disk(done) => {
+                let class = self.thread_class(&done);
+                self.logic.on_io_done(done, class, now);
+            }
             CoreInput::App(m) => self.logic.on_message(m, now),
             CoreInput::Stop => self.stopped = true,
             CoreInput::Inbound(Inbound { stream, channel, got }) => {
