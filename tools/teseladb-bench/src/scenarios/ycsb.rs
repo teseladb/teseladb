@@ -7,7 +7,7 @@ use teseladb_bson::{Document, Value};
 
 use super::ycsb_gen::{AckedCounter, FIELDS, KeyChooser, MAX_SCAN, Op, Rng, Workload, field, key};
 use crate::cli::Args;
-use crate::client::{Client, Target, doc};
+use crate::client::{Client, Target, doc, durable};
 use crate::load::{Load, drive};
 use crate::report::Report;
 
@@ -39,7 +39,10 @@ fn insert(c: &mut Client, docs: Vec<Value>) -> Result<(), String> {
 
 /// The insert of `docs` into the YCSB collection.
 fn insert_command(docs: Vec<Value>) -> Document {
-    doc(vec![("insert", Value::String(COLLECTION.into())), ("documents", Value::Array(docs))])
+    durable(doc(vec![
+        ("insert", Value::String(COLLECTION.into())),
+        ("documents", Value::Array(docs)),
+    ]))
 }
 
 /// Inserts `docs` into the YCSB collection of a node that may still be electing its leaders.
@@ -65,10 +68,10 @@ fn update(c: &mut Client, k: String, rng: &mut Rng) -> Result<(), String> {
     let one = doc(vec![("q", by_id(k)), ("u", Value::Document(u))]);
     c.command(
         DB,
-        doc(vec![
+        durable(doc(vec![
             ("update", Value::String(COLLECTION.into())),
             ("updates", Value::Array(vec![Value::Document(one)])),
-        ]),
+        ])),
     )
     .map(drop)
 }

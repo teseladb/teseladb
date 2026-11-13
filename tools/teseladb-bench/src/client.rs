@@ -263,6 +263,14 @@ pub fn debug(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
 }
 
+/// `command` asking the durability every comparison uses (002 FR-038): written on a majority and
+/// flushed to its journal or log, `{w: "majority", j: true}`.
+pub fn durable(mut command: Document) -> Document {
+    let wc = doc(vec![("w", Value::String("majority".into())), ("j", Value::Boolean(true))]);
+    command.insert("writeConcern", Value::Document(wc));
+    command
+}
+
 /// A document from pairs.
 pub fn doc(pairs: Vec<(&str, Value)>) -> Document {
     let mut d = Document::new();

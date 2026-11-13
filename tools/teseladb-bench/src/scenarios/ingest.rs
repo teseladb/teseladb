@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use teseladb_bson::{Document, Value};
 
 use crate::cli::Args;
-use crate::client::{Client, Target, doc};
+use crate::client::{Client, Target, doc, durable};
 use crate::load::{Load, drive};
 use crate::report::Report;
 
@@ -35,14 +35,31 @@ fn telemetry(i: u64) -> Value {
 /// The unordered insert of documents `from .. from + BATCH`.
 fn batch(from: u64) -> Document {
     let docs = (from..from + BATCH).map(telemetry).collect();
-    doc(vec![
+    durable(doc(vec![
         ("insert", Value::String(COLLECTION.into())),
         ("documents", Value::Array(docs)),
         ("ordered", Value::Boolean(false)),
-    ])
+    ]))
 }
 
 pub fn run(args: &Args) -> Result<Report, String> {
+    run_with(args, false)
+}
+
+/// Profile C of 002 FR-037: half of the operations insert one document and half a batch.
+pub fn run_mixed(args: &Args) -> Result<Report, String> {
+    run_with(args, true)
+}
+
+/// The insert of document `i` alone.
+fn single(i: u64) -> Document {
+    durable(doc(vec![
+        ("insert", Value::String(COLLECTION.into())),
+        ("documents", Value::Array(vec![telemetry(i)])),
+    ]))
+}
+
+fn run_with(args: &Args, mixed: bool) -> Result<Report, String> {
     let target = Target::open(args.target.as_deref())?;
     let addr = target.addr()?;
     let mut setup = Client::connect(addr)?;
@@ -50,6 +67,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
     setup.until_ready(DB, doc(vec![("create", Value::String(COLLECTION.into()))]))?;
     let next = AtomicU64::new(0);
+    let singles = AtomicU64::new(0);
     let load = Load {
         warmup: args.warmup,
         duration: args.duration,
@@ -61,15 +79,25 @@ pub fn run(args: &Args) -> Result<Report, String> {
         |_| Client::connect(addr),
         |c| {
             let from = next.fetch_add(BATCH, Ordering::Relaxed);
+            // In the mixed profile, one operation in two takes one document of its range.
+            if mixed && (from / BATCH).is_multiple_of(2) {
+                singles.fetch_add(1, Ordering::Relaxed);
+                c.command(DB, single(from))?;
+                return Ok("single");
+            }
             c.command(DB, batch(from))?;
             Ok("batch")
         },
     )?;
-    let mut report = Report::new("ingest");
+    let ops = out.ops;
+    let ones = singles.load(Ordering::Relaxed).min(ops);
+    let mut report = Report::new(if mixed { "profile-c" } else { "ingest" });
     for (kind, h) in &out.latencies {
         report.latency(kind, h, None, None);
     }
-    report.push("documents", "doc/s", out.throughput() * BATCH as f64, None);
+    // Documents of the timed operations: a batch carries BATCH of them, a single insert one.
+    let per_op = if ops == 0 { 0.0 } else { ((ops - ones) * BATCH + ones) as f64 / ops as f64 };
+    report.push("documents", "doc/s", out.throughput() * per_op, None);
     report.push("errors", "op", out.errors as f64, None);
     if let Some(e) = &out.first_error {
         report.notes.push(format!("first error: {e}"));
