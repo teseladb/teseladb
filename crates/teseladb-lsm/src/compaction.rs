@@ -1,8 +1,13 @@
-//! Leveled compaction (FR-007, FR-008, FR-012; research R3).
+//! Compaction, size-tiered above level 2 and leveled below (FR-007, FR-008, FR-012, FR-036;
+//! research R3).
 //!
 //! What gets compacted:
-//! - with `l0_trigger` files in level 0, all of level 0 and the files of level 1 they touch go to
-//!   level 1 (level 0 moves whole, so a newer copy never ends below an older one);
+//! - with `l0_trigger` files in level 0 and level 0 lighter than level 1, the newest files of
+//!   level 0 of a similar size, `l0_trigger` or more, join in one file of level 0 (a tier): a
+//!   burst of flushes does not rewrite level 1 each time;
+//! - with `l0_trigger` files in level 0 as heavy as level 1, or half of `l0_slow`, all of level
+//!   0 and the files of level 1 they touch go to level 1 (level 0 moves whole, so a newer copy
+//!   never ends below an older one);
 //! - otherwise the first level over its size gives one file, in turn by key, with the files of
 //!   the next level it touches;
 //! - [`Lsm::compact_all`](crate::Lsm::compact_all) sends every file to the last level.
@@ -50,6 +55,9 @@ pub(crate) struct Plan {
     /// Logical keys, in order, where an output file ends before the first key at or past each
     /// one (an ingestion's intervals, FR-024).
     pub(crate) cuts: Vec<Vec<u8>>,
+    /// The number of the one output of a tier of level 0 (FR-036), taken when the compaction
+    /// starts: every flush after it gets a higher number and stays above it.
+    pub(crate) reserved: Option<u64>,
 }
 
 fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
@@ -62,7 +70,23 @@ fn plan(v: &Version, inputs: Vec<(u8, Arc<Table>)>, output_level: usize) -> Plan
     let (lo, hi) = span(&inputs);
     let bottommost =
         (output_level + 1..v.levels.len()).all(|l| v.overlapping(l, &lo, &hi).is_empty());
-    Plan { inputs, output_level, bottommost, cuts: Vec::new() }
+    Plan { inputs, output_level, bottommost, cuts: Vec::new(), reserved: None }
+}
+
+/// Largest ratio between the sizes of the files a tier joins (FR-036).
+const TIER_RATIO: u64 = 2;
+
+/// How many of the newest files of level 0 have a similar size: none more than [`TIER_RATIO`]
+/// times another (FR-036).
+fn similar_newest(l0: &[Arc<Table>]) -> usize {
+    let (mut lo, mut hi) = (u64::MAX, 0);
+    l0.iter()
+        .take_while(|t| {
+            let b = t.bytes().max(1);
+            (lo, hi) = (lo.min(b), hi.max(b));
+            hi <= lo.saturating_mul(TIER_RATIO)
+        })
+        .count()
 }
 
 /// The size each level may reach before it gives a file to the next one (research R3). The
@@ -106,7 +130,16 @@ pub(crate) fn pick(
         return (!inputs.is_empty()).then(|| plan(v, inputs, cfg.levels));
     }
     let l0 = &v.levels[0];
-    if l0.len() >= cfg.l0_trigger {
+    let level_bytes = |l: usize| -> u64 { v.levels[l].iter().map(|t| t.bytes()).sum() };
+    // A burst of flushes against a heavier level 1 joins in tiers of level 0 (FR-036).
+    let down =
+        level_bytes(0) >= level_bytes(1) || l0.len() >= (cfg.l0_slow / 2).max(cfg.l0_trigger);
+    let tier = similar_newest(l0);
+    if l0.len() >= cfg.l0_trigger && !down && tier >= cfg.l0_trigger {
+        let inputs = l0[..tier].iter().map(|t| (0, t.clone())).collect();
+        return Some(plan(v, inputs, 0));
+    }
+    if l0.len() >= cfg.l0_trigger && down {
         let mut inputs: Vec<(u8, Arc<Table>)> = l0.iter().map(|t| (0, t.clone())).collect();
         let (lo, hi) = span(&inputs);
         inputs.extend(v.overlapping(1, &lo, &hi).into_iter().map(|t| (1, t)));
@@ -377,6 +410,7 @@ impl CompactJob {
             .cloned()
             .collect();
         // Each input with its history file after it (FR-031), in order of precedence.
+        let plan_reserved = plan.reserved.is_some();
         let lanes = plan
             .inputs
             .iter()
@@ -409,7 +443,11 @@ impl CompactJob {
             training: None,
             dict_written: None,
             encryption: cfg.encryption.clone(),
-            target: cfg.target_file_bytes,
+            // A tier of level 0 is one file, whose number was taken when it started.
+            target: match plan_reserved {
+                true => u64::MAX,
+                false => cfg.target_file_bytes,
+            },
             passed_cuts: 0,
             for_ingest: false,
         }
@@ -456,7 +494,8 @@ impl CompactJob {
             .cloned()
             .collect();
         let surviving = range_tombstone::pieces(&tombstones, Some(&spec.start), Some(&spec.end));
-        let plan = Plan { inputs, output_level: 0, bottommost: false, cuts: Vec::new() };
+        let plan =
+            Plan { inputs, output_level: 0, bottommost: false, cuts: Vec::new(), reserved: None };
         let mut job = CompactJob::new(cfg, plan, GcTable::default());
         for lane in &mut job.lanes {
             lane.next_block = lane.table.find_block(&first).unwrap_or(lane.table.blocks());
@@ -502,8 +541,10 @@ impl CompactJob {
     }
 
     fn start_output(&mut self, first: &[u8], next_file: &mut u64) {
-        let number = *next_file;
-        *next_file += 1;
+        let number = self.plan.reserved.take().unwrap_or_else(|| {
+            *next_file += 1;
+            *next_file - 1
+        });
         let lo = self.started.then(|| first.to_vec());
         self.started = true;
         self.queued.push_back(IoOp::Create {
