@@ -14,8 +14,7 @@ use teseladb_keys::space::{DOCUMENTS, KeyParts};
 
 use crate::command::Put;
 
-/// Value type of a document (a change stream's `DOCUMENT_VALUE`, 014).
-pub const DOCUMENT_VALUE: u8 = 1;
+pub use teseladb_lsm::DOCUMENT_VALUE;
 
 /// A collection: tenant and collection number.
 pub type Coll = (u32, u32);

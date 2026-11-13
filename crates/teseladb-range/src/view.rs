@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use teseladb_hlc::{Hlc, Next};
+use teseladb_keys::zone::Zones;
 use teseladb_lsm::{
     BlockNeed, Kind, Published, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep,
     ViewCache,
@@ -583,7 +584,7 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         supply: impl FnMut(&BlockNeed) -> bool,
-        keep: impl FnMut(&[u8]) -> bool,
+        keep: (impl FnMut(&[u8]) -> bool, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let most = (examine, blocks, &self.begin());
         self.scan_matching_begun(cache, span, most, now, concern, supply, keep)
@@ -592,7 +593,10 @@ impl RangeView {
     /// As [`RangeView::scan_begun`] in key order, over at most `examine` documents of which it
     /// copies only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates
     /// it on the stored bytes and leaves the rest where they are. It reads at most `blocks`
-    /// blocks from their files once it has examined a document, as a [`Part`] does.
+    /// blocks from their files once it has examined a document, as a [`Part`] does. `block`
+    /// says whether a data block may hold a document `keep` accepts, from its zone map: the
+    /// blocks it rules out are passed over unread and their documents are not examined (004
+    /// FR-039).
     pub fn scan_matching_begun(
         &self,
         cache: &mut ViewCache,
@@ -601,7 +605,7 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
-        mut keep: impl FnMut(&[u8]) -> bool,
+        (mut keep, block): (impl FnMut(&[u8]) -> bool, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
@@ -611,7 +615,7 @@ impl RangeView {
         // The key of the last document examined, when the filter left it out.
         let mut left_out: Option<Vec<u8>> = None;
         while out.examined < examine {
-            match scan.next(&self.lsm) {
+            match scan.next_pruned(&self.lsm, block) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
                     Decline::Intent.count();
                     return None;

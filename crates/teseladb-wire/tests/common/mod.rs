@@ -1120,6 +1120,7 @@ impl Backend for Mem {
         examine: usize,
         concern: ReadConcern,
         keep: &mut dyn FnMut(&[u8]) -> bool,
+        _block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
     ) -> Result<teseladb_wire::commands::Matching, CommandError> {
         let range = (start, end);
         let out = teseladb_wire::commands::matching_by_scan(self, range, examine, concern, keep)?;

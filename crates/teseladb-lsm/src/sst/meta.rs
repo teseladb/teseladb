@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! props  := lo · hi (length-prefixed) · min_ts(12 BE) · max_ts(12 BE) · versions(varint)
-//!           · tombstones(varint) · (start · end · ts(12 BE))*
+//!           · tombstones(varint) · (start · end · ts(12 BE))* · dictionary(varint)
+//!           · [values(varint) · bytes(varint)*] · [zone_off(varint) · zone_len(varint)]
 //! footer := filter_off · filter_len · props_off · props_len · index_off · index_len (u64 LE)
 //!           · encryption(32 bytes) · version(u32 LE = 1) · magic "TSLSST01"
 //!           · padding(32 bytes) · crc32c(u32 LE), 128 bytes
@@ -51,6 +52,9 @@ pub struct Props {
     /// Bytes of each value file its references point to, by slot (FR-034): what the file keeps
     /// alive of each. A file written before value files ends its properties without them.
     pub values: Vec<u64>,
+    /// Offset and framed length of its zone block (FR-039), when it has one. A file without
+    /// value files that has one writes a count of value files of zero before it.
+    pub zones: Option<(u64, u64)>,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -79,11 +83,15 @@ impl Props {
             put_ts(&mut out, t.ts);
         }
         put_varint(&mut out, self.dictionary);
-        if !self.values.is_empty() {
+        if !self.values.is_empty() || self.zones.is_some() {
             put_varint(&mut out, self.values.len() as u64);
             for bytes in &self.values {
                 put_varint(&mut out, *bytes);
             }
+        }
+        if let Some((offset, len)) = self.zones {
+            put_varint(&mut out, offset);
+            put_varint(&mut out, len);
         }
         out
     }
@@ -108,17 +116,22 @@ impl Props {
         let mut values = Vec::new();
         if at < b.len() {
             let n = get_varint(b, &mut at)?;
-            if n == 0 {
-                return Err(Bad);
-            }
             for _ in 0..n {
                 values.push(get_varint(b, &mut at)?);
             }
+            // A count of zero only comes before a zone block.
+            if n == 0 && at == b.len() {
+                return Err(Bad);
+            }
         }
+        let zones = match at < b.len() {
+            true => Some((get_varint(b, &mut at)?, get_varint(b, &mut at)?)),
+            false => None,
+        };
         if at != b.len() || lo > hi || min_ts > max_ts {
             return Err(Bad);
         }
-        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary, values })
+        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary, values, zones })
     }
 }
 
@@ -217,6 +230,7 @@ mod tests {
             }],
             dictionary: 7,
             values: Vec::new(),
+            zones: None,
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
@@ -232,6 +246,16 @@ mod tests {
         let v = with_values.encode();
         assert_eq!(Props::decode(&v), Ok(with_values));
         assert_eq!(Props::decode(&v[..v.len() - 1]), Err(Bad));
+        // With a zone block (FR-039), with and without value files.
+        for values in [Vec::new(), vec![4096]] {
+            let zoned = Props { values, zones: Some((12_288, 300)), ..p.clone() };
+            let z = zoned.encode();
+            assert_eq!(Props::decode(&z), Ok(zoned));
+            assert_eq!(Props::decode(&z[..z.len() - 1]), Err(Bad));
+        }
+        let mut no_zone = p.encode();
+        no_zone.push(0);
+        assert_eq!(Props::decode(&no_zone), Err(Bad), "a count of zero and nothing after");
         let upside_down = Props { lo: b"z".to_vec(), ..p.clone() };
         assert_eq!(Props::decode(&upside_down.encode()), Err(Bad));
         let backwards = Props { min_ts: ts(10), ..p };

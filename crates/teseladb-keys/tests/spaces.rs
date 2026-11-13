@@ -261,3 +261,17 @@ fn a_meta_is_told_from_a_document_that_ends_in_zero() {
     let meta_of_ends = [&ends[..], &[0, 0, 0, 0, 7][..]].concat();
     assert_eq!(space::meta_document(&meta_of_ends, false), Some(&ends[..]));
 }
+
+/// 004 FR-039: the zone maps summarise the documents of a collection, and only those.
+#[test]
+fn in_documents_tells_documents_from_indexes_and_other_spaces() {
+    use teseladb_keys::KeyBuilder;
+    let doc = KeyBuilder::document(1, 7, RawValue::Int32(3));
+    assert!(space::in_documents(doc.as_bytes()));
+    assert!(!space::in_documents(KeyBuilder::collection_start(1, 7).as_bytes()), "no index part");
+    let index = KeyBuilder::index_prefix(1, 7, 2);
+    assert!(!space::in_documents(index.as_bytes()));
+    assert!(!space::in_documents(KeyBuilder::system(1, 2, b"x").as_bytes()));
+    assert!(!space::in_documents(&[space::DATA, 0, 0]));
+    assert!(!space::in_documents(&[]));
+}

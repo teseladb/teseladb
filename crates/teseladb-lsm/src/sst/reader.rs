@@ -14,6 +14,7 @@ use super::elias_fano::EliasFano;
 use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::pgm::{self, Pgm};
+use super::zone::ZoneMap;
 use super::{ALIGN, Bad, get_varint};
 use crate::entry;
 
@@ -47,6 +48,8 @@ pub struct Table {
     pub(crate) history: Option<Arc<Table>>,
     /// The value files its references point to, by slot (FR-034).
     pub(crate) values: Vec<Arc<Table>>,
+    /// Its zone map (FR-039), when it has one.
+    pub(crate) zones: Option<ZoneMap>,
 }
 
 /// Data blocks written: how many with each compression code, and their bytes before and after
@@ -152,7 +155,14 @@ impl Table {
             bounds.extend([h.offset, end]);
             cursor.advance()?;
         }
+        let zones = match props.zones {
+            None => None,
+            Some((offset, len)) => {
+                Some(ZoneMap::decode(&block(Handle { offset, len })?, last_keys.len())?)
+            }
+        };
         Ok(Table {
+            zones,
             number,
             size,
             props,
@@ -223,6 +233,31 @@ impl Table {
     /// The last internal key of data block `i`.
     pub(crate) fn last_key(&self, i: usize) -> &[u8] {
         &self.last_keys[i]
+    }
+
+    /// The logical keys data block `i` may hold, both included: from the logical key of the
+    /// last version of the block before it (the file's lowest key for the first) to that of its
+    /// own last version.
+    pub(crate) fn block_span(&self, i: usize) -> (&[u8], &[u8]) {
+        let from = match i {
+            0 => self.props.lo.as_slice(),
+            _ => entry::logical(&self.last_keys[i - 1]),
+        };
+        (from, entry::logical(&self.last_keys[i]))
+    }
+
+    /// Whether the file may hold a version of a logical key in `[lo, hi]`, from its index alone:
+    /// `false` is certain.
+    pub(crate) fn may_hold(&self, lo: &[u8], hi: &[u8]) -> bool {
+        if self.props.hi.as_slice() < lo || hi < self.props.lo.as_slice() {
+            return false;
+        }
+        // The first block whose last version is at or after `lo`: the blocks before it end
+        // below `lo`, and its versions and those of the blocks after it are at or above `from`.
+        match self.find_block(&entry::first_version(lo)) {
+            None => false,
+            Some(k) => self.block_span(k).0 <= hi,
+        }
     }
 
     /// Where block `i` is.
@@ -464,6 +499,7 @@ mod tests {
             tombstones: Vec::new(),
             dictionary: 0,
             values: Vec::new(),
+            zones: None,
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);

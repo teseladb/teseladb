@@ -76,6 +76,7 @@ version = "0.1.0"
 dependencies = [
  "teseladb-collation",
  "teseladb-index",
+ "teseladb-keys",
  "teseladb-mql",
  "teseladb-plan",
  "teseladb-bson",
@@ -151,6 +152,7 @@ name = "teseladb-lsm"
 version = "0.1.0"
 dependencies = [
  "teseladb-keys",
+ "teseladb-bson",
  "teseladb-compress",
  "teseladb-crypto",
  "teseladb-deflate",

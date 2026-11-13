@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use teseladb_hlc::Hlc;
+use teseladb_keys::zone::Zones;
 use teseladb_lsm::ViewCache;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
@@ -790,8 +791,16 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
     let odd = |v: &[u8]| v[0] % 2 == 1;
     let mut scan = |span, examine| {
         let most = (examine, 64);
-        view.scan_matching(&mut cache, span, most, || n.now, ReadConcern::Local, |_| false, odd)
-            .expect("served outside")
+        view.scan_matching(
+            &mut cache,
+            span,
+            most,
+            || n.now,
+            ReadConcern::Local,
+            |_| false,
+            (odd, &|_: &dyn Zones| true),
+        )
+        .expect("served outside")
     };
     let all = scan(span, 10);
     let keys: Vec<&[u8]> = all.rows.iter().map(|(k, _)| k.as_slice()).collect();
@@ -986,7 +995,7 @@ fn a_matching_scan_outside_the_core_stops_at_its_blocks_and_goes_on_from_there()
                 || now,
                 ReadConcern::Local,
                 |need| supply_block(&mut n.disk, &view, need, &mut read),
-                |v| v[0] % 2 == 0,
+                (|v: &[u8]| v[0].is_multiple_of(2), &|_: &dyn Zones| true),
             )
             .expect("served outside");
         assert!(read <= 4 && got.examined > 0, "{read} blocks, {} examined", got.examined);

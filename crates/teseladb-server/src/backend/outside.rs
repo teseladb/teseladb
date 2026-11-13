@@ -461,13 +461,14 @@ impl ServerBackend {
 
     /// As [`ServerBackend::scan_outside`] in key order, over at most `examine` documents of the
     /// part of the span in the range of `start`, of which only those `keep` accepts are copied
-    /// (010 FR-027); with where the scan goes on. `None` when the read goes to the core.
+    /// (010 FR-027), passing over the blocks `prune` rules out (004 FR-039); with where the scan
+    /// goes on. `None` when the read goes to the core.
     pub(super) fn scan_matching_outside(
         &mut self,
         (start, end): (&[u8], &[u8]),
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        (keep, prune): (&mut dyn FnMut(&[u8]) -> bool, Prune<'_>),
     ) -> Option<teseladb_wire::commands::Matching> {
         let (g, core, range_end) =
             unrouted(self.h.routes.span_of(&mut self.outside.routes, start))?;
@@ -497,7 +498,8 @@ impl ServerBackend {
         let span = (start, hi.as_slice());
         let most = (examine, MAX_SCAN_BLOCKS, &begun);
         let cache = &mut caches[core];
-        let Some(m) = view.scan_matching_begun(cache, span, most, now, concern, supply, keep)
+        let Some(m) =
+            view.scan_matching_begun(cache, span, most, now, concern, supply, (keep, prune))
         else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -714,3 +716,7 @@ mod lazy_tests {
         assert!(lazy.eval_with(&[], &[], ts).is_err());
     }
 }
+
+/// Whether a data block may hold a document a scan's filter accepts, from its zone map (004
+/// FR-039).
+type Prune<'a> = &'a dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool;

@@ -331,8 +331,32 @@ pub struct SharedScan {
 impl SharedScan {
     /// The next key's visible version.
     pub fn next(&mut self, shared: &SharedLsm) -> SharedStep {
+        self.step(shared, None)
+    }
+
+    /// [`SharedScan::next`] for a scan with a filter, passing over the data blocks whose zones
+    /// `prune` rules out without reading them (FR-039): `prune` says whether a block may hold a
+    /// document the filter accepts.
+    pub fn next_pruned(
+        &mut self,
+        shared: &SharedLsm,
+        prune: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
+    ) -> SharedStep {
+        self.step(shared, Some(prune))
+    }
+
+    /// Data blocks the scan passed over by their zone maps so far (FR-039).
+    pub fn skipped_blocks(&self) -> u64 {
+        self.scan.skipped_blocks()
+    }
+
+    fn step(
+        &mut self,
+        shared: &SharedLsm,
+        prune: Option<&dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool>,
+    ) -> SharedStep {
         let mut s = Source { inner: &shared.inner, need: None };
-        match self.scan.next_with(&mut s) {
+        match self.scan.next_pruned_with(&mut s, prune) {
             Step::Item(i) => SharedStep::Item(i),
             Step::Done => SharedStep::Done,
             Step::Miss(_) => SharedStep::Need(s.need.expect("a miss names its block")),

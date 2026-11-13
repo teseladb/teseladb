@@ -15,6 +15,7 @@ teseladb-bson = { workspace = true }
 teseladb-compress = { workspace = true }
 teseladb-hash = { workspace = true }
 teseladb-index = { path = "../teseladb-index" }
+teseladb-keys = { path = "../teseladb-keys" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-plan = { path = "../teseladb-plan" }
 teseladb-tz = { workspace = true }
