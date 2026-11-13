@@ -504,3 +504,48 @@ fn a_scan_passes_the_old_versions_of_a_key_however_many_a_file_has() {
         }
     }
 }
+
+/// FR-029: keys with one to thirty versions, so that the old versions of some end with their
+/// block, those of others fill the next blocks and those of others leave the next key in the
+/// same block past the eight a scan steps over. Each key shows its version of the moment at
+/// every mark, with its versions in one file and spread over three.
+#[test]
+fn a_scan_passes_old_versions_wherever_they_end_in_their_blocks() {
+    const KEYS: u64 = 200;
+    let key = |i: u64| format!("k{i:04}").into_bytes();
+    let versions = |i: u64| 1 + (i * 7) % 30;
+    for flushes in [1u64, 3] {
+        let mut disk = MemDisk::new();
+        let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+        let mut lsm = open(&cfg, &mut disk);
+        let mut index = 0;
+        for part in 0..flushes {
+            // The versions of each part in the order of their marks.
+            for version in (1..=30u64).filter(|v| v % flushes == part) {
+                for i in (0..KEYS).filter(|i| version <= versions(*i)) {
+                    index += 1;
+                    lsm.put(G, index, &key(i), ts(version, 0), &[version as u8; 300]).unwrap();
+                }
+            }
+            lsm.flush();
+            lsm.run_io(&mut disk, Nanos::ZERO);
+        }
+        let v = lsm.view();
+        for at in [30u64, 29, 17, 9, 8, 2, 1] {
+            let rows = scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(at, 0));
+            assert_eq!(rows.len() as u64, KEYS, "at {at} with {flushes} files");
+            for (i, r) in rows.iter().enumerate() {
+                let shown = at.min(versions(i as u64));
+                assert_eq!(
+                    (&r.0, r.1, r.3.as_slice()),
+                    (&key(i as u64), ts(shown, 0), &[shown as u8; 300][..]),
+                    "at {at} with {flushes} files"
+                );
+            }
+        }
+        // A part of the span that starts and ends between keys.
+        let rows = scan(&mut lsm, &mut disk, &v, &key(57), &key(143), ts(30, 0));
+        let got: Vec<Vec<u8>> = rows.into_iter().map(|r| r.0).collect();
+        assert_eq!(got, (57..143).map(key).collect::<Vec<_>>());
+    }
+}

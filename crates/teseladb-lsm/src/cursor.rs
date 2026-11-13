@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use teseladb_keys::VERSION_LEN;
 use teseladb_types::Bytes;
 
 use crate::entry::{self, Kind};
@@ -61,6 +62,15 @@ impl MemCursor {
     }
 }
 
+/// Whether the entry `c` moved to is another version of `logical`, a version of which the entry
+/// before it was. With the whole logical key among the bytes it shares with that entry the keys
+/// are not compared: an internal key is its logical key and a version of a fixed length.
+fn another_version(c: &BlockCursor, logical: &[u8]) -> bool {
+    let key = c.key();
+    key.len() == logical.len() + VERSION_LEN
+        && (c.shared() >= logical.len() || entry::logical(key) == logical)
+}
+
 /// A cursor over one source.
 pub(crate) enum Cursor {
     Mem(MemCursor),
@@ -102,28 +112,49 @@ impl Cursor {
     }
 
     /// Moves past the versions of `logical` from the current entry on, which is one of them. A
-    /// file's cursor steps over up to `stepped` of them while they are in its block; past that,
-    /// or at the block's end, it seeks, and the file's index takes it to the block of the next
-    /// key without reading the blocks that hold only older versions (a document updated often
-    /// fills blocks with them). A memtable's cursor seeks at once, since each of its steps
-    /// copies a key.
+    /// file's cursor steps over up to `stepped` of them while they are in its block. At the
+    /// block's end it goes on to the next block, unless the file's index says that block holds
+    /// this key alone: then the index takes it to the block of the next key without reading
+    /// the blocks that hold only older versions (a document updated often fills blocks with
+    /// them). Past the versions it steps over, it searches its own block when the index says
+    /// the next key is there, and the index otherwise. A memtable's cursor seeks at once, since
+    /// each of its steps copies a key.
     pub(crate) fn skip_versions(&mut self, logical: &[u8], stepped: usize) -> Result<(), LsmError> {
-        if matches!(self, Cursor::Table { .. }) {
-            for _ in 0..stepped {
-                self.advance()?;
-                match self {
-                    Cursor::Table { pos: Pos::Ready(_, c), .. }
-                        if entry::split(c.key()).0 != logical =>
-                    {
-                        return Ok(());
-                    }
-                    Cursor::Table { pos: Pos::Ready(..), .. } => {}
-                    // Out of its block.
-                    Cursor::Table { .. } | Cursor::Mem(_) => break,
-                }
+        let Cursor::Table { table, pos } = self else {
+            self.seek(entry::after_all_versions(logical));
+            return Ok(());
+        };
+        let Pos::Ready(i, c) = pos else {
+            unreachable!("only a cursor at an entry passes versions")
+        };
+        let i = *i;
+        for _ in 0..stepped {
+            c.advance().map_err(|_| corrupt(table, i))?;
+            if !c.valid() {
+                let next = i + 1;
+                let alone =
+                    next < table.blocks() && entry::logical(table.last_key(next)) == logical;
+                *pos = match alone {
+                    true => Pos::Seek(entry::after_all_versions(logical)),
+                    false => Pos::Block(next),
+                };
+                return Ok(());
+            }
+            if !another_version(c, logical) {
+                return Ok(());
             }
         }
-        self.seek(entry::after_all_versions(logical));
+        let target = entry::after_all_versions(logical);
+        if entry::compare(table.last_key(i), &target).is_lt() {
+            // What is left of the block is this key's.
+            *pos = Pos::Seek(target);
+            return Ok(());
+        }
+        c.seek_forward(&target, entry::compare).map_err(|_| corrupt(table, i))?;
+        if !c.valid() {
+            // The index named a last key the block does not hold: the next block has it.
+            *pos = Pos::Block(i + 1);
+        }
         Ok(())
     }
 

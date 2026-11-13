@@ -298,6 +298,8 @@ pub(crate) struct BlockCursor {
     block: Block,
     next: usize,
     key: Vec<u8>,
+    /// Bytes the entry's key shares with that of the entry before it.
+    shared: usize,
     kind: Kind,
     value: Range<usize>,
     valid: bool,
@@ -305,7 +307,15 @@ pub(crate) struct BlockCursor {
 
 impl BlockCursor {
     fn empty(block: Block) -> BlockCursor {
-        BlockCursor { block, next: 0, key: Vec::new(), kind: Kind::Put, value: 0..0, valid: false }
+        BlockCursor {
+            block,
+            next: 0,
+            key: Vec::new(),
+            shared: 0,
+            kind: Kind::Put,
+            value: 0..0,
+            valid: false,
+        }
     }
 
     /// At the first entry.
@@ -344,6 +354,47 @@ impl BlockCursor {
         Ok(c)
     }
 
+    /// Moves forward to the first entry whose key is not below `target` under `cmp` (invalid if
+    /// the block has none), from an entry whose key is below it: it searches the restart points
+    /// after the entry and walks from the last one below the target, or from the entry itself.
+    pub(crate) fn seek_forward(
+        &mut self,
+        target: &[u8],
+        cmp: fn(&[u8], &[u8]) -> Ordering,
+    ) -> Result<(), Bad> {
+        // The first restart point after the entry.
+        let (mut lo, mut hi) = (0, self.block.count);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.block.restart(mid)? < self.next {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let after = lo;
+        // The last one from there whose key is below the target.
+        let mut hi = self.block.count;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if cmp(self.block.restart_key(mid)?, target).is_lt() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo > after {
+            // A restart point stores its key whole: one that shares bytes is refused.
+            self.next = self.block.restart(lo - 1)?;
+            self.key.clear();
+            self.advance()?;
+        }
+        while self.valid && cmp(&self.key, target).is_lt() {
+            self.advance()?;
+        }
+        Ok(())
+    }
+
     /// Moves to the next entry (invalid past the last one).
     pub(crate) fn advance(&mut self) -> Result<(), Bad> {
         if self.next >= self.block.restarts {
@@ -356,6 +407,7 @@ impl BlockCursor {
         }
         self.key.truncate(raw.shared);
         self.key.extend_from_slice(&self.block.data[raw.delta]);
+        self.shared = raw.shared;
         self.kind = raw.kind;
         self.value = raw.value;
         self.next = next;
@@ -371,6 +423,11 @@ impl BlockCursor {
     /// Key of the entry.
     pub(crate) fn key(&self) -> &[u8] {
         &self.key
+    }
+
+    /// Bytes the entry's key shares with the key of the entry before it in the block.
+    pub(crate) fn shared(&self) -> usize {
+        self.shared
     }
 
     /// Kind of the entry.
@@ -433,6 +490,65 @@ mod tests {
             let c = BlockCursor::seek(block.clone(), b"a", <[u8]>::cmp).unwrap();
             assert_eq!(c.key(), &keys[0][..]);
             assert!(!BlockCursor::seek(block, b"z", <[u8]>::cmp).unwrap().valid());
+        }
+    }
+
+    /// From every entry, a forward seek to every key after it, to the gap after each key and past
+    /// the last one stands where a seek of the whole block stands (004 FR-029).
+    #[test]
+    fn a_forward_seek_stands_where_a_seek_of_the_block_stands() {
+        let large = {
+            let mut b = BlockBuilder::new(16);
+            let keys: Vec<Vec<u8>> = (0..24).map(|i| format!("doc{i:03}").into_bytes()).collect();
+            for k in &keys {
+                b.add(k, Kind::Put, &[7; 600]);
+            }
+            (Block::parse(Bytes::from_vec(b.finish())).unwrap(), keys)
+        };
+        for (block, keys) in [build(100, 1), build(100, 4), build(100, 16), large] {
+            let mut from = BlockCursor::first(block.clone()).unwrap();
+            for start in 0..keys.len() {
+                for k in &keys[start + 1..] {
+                    let mut between = k.clone();
+                    between.push(0);
+                    for target in [k, &between] {
+                        let whole = BlockCursor::seek(block.clone(), target, <[u8]>::cmp).unwrap();
+                        let mut c = from.clone();
+                        c.seek_forward(target, <[u8]>::cmp).unwrap();
+                        assert_eq!(c.valid(), whole.valid(), "from {start}");
+                        if whole.valid() {
+                            assert_eq!(c.key(), whole.key(), "from {start}");
+                            assert_eq!(c.value_slice(), whole.value_slice());
+                            assert_eq!(c.kind(), whole.kind());
+                        }
+                    }
+                }
+                let mut c = from.clone();
+                c.seek_forward(b"z", <[u8]>::cmp).unwrap();
+                assert!(!c.valid(), "past the last key from {start}");
+                from.advance().unwrap();
+            }
+            // Past its last entry it stays there.
+            assert!(!from.valid());
+            from.seek_forward(b"z", <[u8]>::cmp).unwrap();
+            assert!(!from.valid());
+        }
+    }
+
+    /// An entry tells how much of its key it shares with the one before it: nothing at a restart
+    /// point.
+    #[test]
+    fn an_entry_tells_the_bytes_it_shares_with_the_one_before() {
+        let (block, _) = build(40, 16);
+        let mut c = BlockCursor::first(block).unwrap();
+        for i in 0..40 {
+            let want = match i {
+                _ if i % 16 == 0 => 0,
+                _ if i % 10 == 0 => 6,
+                _ => 7,
+            };
+            assert_eq!(c.shared(), want, "entry {i}");
+            c.advance().unwrap();
         }
     }
 
