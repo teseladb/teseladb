@@ -909,6 +909,20 @@ struct Checker {
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
 }
 
+/// The collator of the collation `spec` of a write (the command's, or else the collection's
+/// default): `None` for the binary order.
+pub(crate) fn collator_of(
+    spec: Option<&Document>,
+) -> Result<Option<teseladb_collation::Collation>, CommandError> {
+    let Some(c) = spec else { return Ok(None) };
+    let bytes = c.to_bytes()?;
+    let raw = RawDoc::from_bytes(&bytes)?;
+    Ok(match parse_collation(raw)? {
+        ParsedCollation::Simple => None,
+        ParsedCollation::Collation(c, _) => Some(c),
+    })
+}
+
 impl Checker {
     /// The checker of a write with rules `r`; `enforce` is false in an index build's backfill,
     /// which takes the duplicates of an index with `prepareUnique`.
@@ -923,17 +937,7 @@ impl Checker {
             }
             None => None,
         };
-        let collation = match &r.collation {
-            Some(c) => {
-                let bytes = c.to_bytes()?;
-                let raw = RawDoc::from_bytes(&bytes)?;
-                match parse_collation(raw)? {
-                    ParsedCollation::Simple => None,
-                    ParsedCollation::Collation(c, _) => Some(c),
-                }
-            }
-            None => None,
-        };
+        let collation = collator_of(r.collation.as_ref())?;
         let constraint = matches!(&r.validator, Some((_, level, _)) if level == CONSTRAINT_LEVEL);
         Ok(Checker {
             validator,
