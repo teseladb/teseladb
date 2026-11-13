@@ -83,7 +83,7 @@ impl Default for Args {
 pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recover|deflate|bson|js|keys|lsm|\
                          lsm-sustained|lsm-compression|write|read|failover|follower-read|group0-limits|noisy-tenant|\
                          split|add-node|rebalance|reference|wire|crud|rest|index-write|index-read|\
-                         index-build-load|aggregate|sort|group-large|ingest|profile-a..profile-e|fle-query|txn|txn-readers|contention|\
+                         index-build-load|aggregate|sort|group-large|ingest|open-read|open-insert|profile-a..profile-e|fle-query|txn|txn-readers|contention|\
                          tls-handshake|scram|timeseries|changestream-lag|reshard|search-term|search-multi|\
                          search-phrase|search-fuzzy|search-visibility|vector-search|vector|cores-curve|disk-usage|\
                          ycsb-a..ycsb-f [--data dir] [--json file] \

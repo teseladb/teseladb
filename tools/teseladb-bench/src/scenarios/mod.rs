@@ -23,6 +23,7 @@ pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
 pub mod noisy_tenant;
+pub mod open;
 pub mod profiles;
 pub mod query;
 pub mod raftlog;
@@ -196,6 +197,8 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
         "ingest" => ingest::run(args),
+        "open-read" => open::read(args),
+        "open-insert" => open::insert(args),
         "profile-a" => profiles::a(args),
         "profile-b" => profiles::b(args),
         "profile-c" => profiles::c(args),
