@@ -561,6 +561,18 @@ struct MallocStatistics {
 
 unsafe extern "C" {
     fn malloc_zone_statistics(zone: *mut std::ffi::c_void, stats: *mut MallocStatistics);
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+/// The malloc of macOS has no arenas to cap.
+pub(crate) fn limit_arenas(_arenas: usize) -> Option<bool> {
+    None
+}
+
+/// `malloc_zone_pressure_relief` over every zone, with no goal: the free pages go back.
+pub(crate) fn release_free_memory() -> Option<bool> {
+    // SAFETY: a null zone asks every zone; no pointers are passed.
+    Some(unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) } > 0)
 }
 
 /// Bytes in use in every malloc zone of the process.

@@ -434,6 +434,39 @@ pub(crate) fn allocated() -> Option<u64> {
     u64::try_from(m.uordblks.saturating_add(m.hblkhd)).ok()
 }
 
+/// `M_ARENA_MAX` of glibc's `mallopt`.
+const M_ARENA_MAX: i32 = -8;
+
+/// A function of the C library looked up by name; null where it does not have it (musl, a
+/// static binary).
+fn libc_symbol(name: &std::ffi::CStr) -> *mut std::ffi::c_void {
+    // SAFETY: a null handle is `RTLD_DEFAULT` on glibc; the name is a terminated string.
+    unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) }
+}
+
+/// `mallopt(M_ARENA_MAX, arenas)` of glibc, looked up at run time like `mallinfo2`.
+pub(crate) fn limit_arenas(arenas: usize) -> Option<bool> {
+    let f = libc_symbol(c"mallopt");
+    if f.is_null() {
+        return None;
+    }
+    // SAFETY: glibc exports `int mallopt(int param, int value)`; the pointer is that function.
+    let mallopt: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(f) };
+    let value = i32::try_from(arenas).unwrap_or(i32::MAX);
+    Some(value > 0 && mallopt(M_ARENA_MAX, value) == 1)
+}
+
+/// `malloc_trim(0)` of glibc: the free memory of every arena goes back to the system.
+pub(crate) fn release_free_memory() -> Option<bool> {
+    let f = libc_symbol(c"malloc_trim");
+    if f.is_null() {
+        return None;
+    }
+    // SAFETY: glibc exports `int malloc_trim(size_t pad)`; the pointer is that function.
+    let malloc_trim: extern "C" fn(usize) -> i32 = unsafe { std::mem::transmute(f) };
+    Some(malloc_trim(0) == 1)
+}
+
 /// `NAME` and `VERSION_ID` of `/etc/os-release`, as RefDb shows them in `hostInfo`.
 pub(crate) fn distribution() -> (String, String) {
     let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();

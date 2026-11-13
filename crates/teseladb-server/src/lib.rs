@@ -13,6 +13,7 @@ pub mod admin_http;
 pub mod admin_tenant_state;
 pub mod admin_tenants;
 pub mod affinity;
+pub mod allocator;
 pub mod at_rest;
 pub mod audit_log;
 pub mod authz_lease;

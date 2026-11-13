@@ -1050,6 +1050,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         let mut senders = Vec::new();
         let mut threads = Vec::new();
         log.step("starting the cores", &[("node_id", &node_id.0), ("cores", &cores)]);
+        // Before the cores' threads allocate (012 FR-022).
+        let arenas = crate::allocator::bound(cores);
+        log.step("allocator", &[("arenas", &arenas)]);
         for k in 0..cores {
             let began = Instant::now();
             let disk = match open_disk() {

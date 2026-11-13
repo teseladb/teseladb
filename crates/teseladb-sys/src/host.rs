@@ -212,6 +212,20 @@ pub fn allocated() -> Option<u64> {
     os::allocated()
 }
 
+/// Caps the arenas of glibc's allocator at `arenas` (`mallopt(M_ARENA_MAX)`, 012 FR-022), to be
+/// called before the threads that allocate start: by default glibc makes up to eight per CPU.
+/// `None` where the C library has no such setting (musl, macOS), else whether it took the value.
+pub fn limit_allocator_arenas(arenas: usize) -> Option<bool> {
+    os::limit_arenas(arenas)
+}
+
+/// Hands back to the system the free memory the allocator keeps (`malloc_trim(0)` with glibc,
+/// `malloc_zone_pressure_relief` on macOS; 012 FR-022). `None` where the C library cannot, else
+/// whether any memory went back.
+pub fn release_free_memory() -> Option<bool> {
+    os::release_free_memory()
+}
+
 /// Bytes used and total of the file system that holds `path`.
 pub fn fs_usage(path: &Path) -> io::Result<(u64, u64)> {
     let mut c = path.as_os_str().as_bytes().to_vec();
@@ -292,6 +306,19 @@ mod tests {
         assert_eq!(fs_usage(Path::new(bad)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(text(b"abc"), "abc");
         assert_eq!(text(b"ab\0c"), "ab");
+    }
+
+    #[test]
+    fn the_allocator_takes_an_arena_cap_and_gives_back_free_memory_where_its_library_can() {
+        let glibc = cfg!(all(target_os = "linux", target_env = "gnu"));
+        assert_eq!(limit_allocator_arenas(4), glibc.then_some(true));
+        assert_eq!(limit_allocator_arenas(0), glibc.then_some(false), "glibc refuses no arena");
+        // Memory freed by another thread stays in its arena until it is handed back.
+        let freed =
+            std::thread::spawn(|| drop((0..64).map(|_| vec![7u8; 1 << 20]).collect::<Vec<_>>()));
+        freed.join().unwrap();
+        let back = release_free_memory();
+        assert_eq!(back.is_some(), glibc || cfg!(target_os = "macos"), "{back:?}");
     }
 
     #[test]
