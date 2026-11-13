@@ -15,6 +15,7 @@ mod joined;
 pub mod meta;
 pub mod optimize;
 pub mod out_merge;
+pub mod radix;
 mod sbe;
 mod scoped;
 pub mod search;
