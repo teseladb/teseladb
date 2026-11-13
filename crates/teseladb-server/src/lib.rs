@@ -197,6 +197,10 @@ fn log_output(o: &StartOpts) -> io::Result<Box<dyn Write + Send>> {
     Ok(Box::new(file))
 }
 
+/// The codec of the new blocks of a node started without `--refengineCollectionBlockCompressor`
+/// (004 FR-023, T037).
+pub const DEFAULT_BLOCK_CODEC: teseladb_lsm::Codec = teseladb_lsm::Codec::None;
+
 /// Node configuration of `teseladb start`.
 pub fn node_config(o: &StartOpts) -> NodeConfig {
     NodeConfig {
@@ -217,9 +221,11 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
             Some(l) => affinity::Affinity::List(l.clone()),
             None => affinity::Affinity::Allowed,
         },
-        // The block cache takes its whole part of the node's memory (012 FR-013).
+        // The block cache takes its whole part of the node's memory (012 FR-013), and the new
+        // blocks go with the codec asked for or the default one (004 FR-023).
         lsm: teseladb_lsm::LsmConfig {
             cache_bytes: u64::MAX,
+            codec: o.block_codec.unwrap_or(DEFAULT_BLOCK_CODEC),
             ..teseladb_lsm::LsmConfig::default()
         },
         ..NodeConfig::default()
@@ -404,6 +410,9 @@ pub fn parsed_options(o: &StartOpts) -> Document {
             cli::AUDIT_SCHEMA => vec![(vec!["auditLog", "schema"], text())],
             cli::AUDIT_LOCAL_KEY_FILE => vec![(vec!["auditLog", "localAuditKeyFile"], text())],
             cli::AUDIT_COMPRESSION_MODE => vec![(vec!["auditLog", "compressionMode"], text())],
+            cli::BLOCK_COMPRESSOR => {
+                vec![(vec!["storage", "refengine", "collectionConfig", "blockCompressor"], text())]
+            }
             cli::AUDIT_ENCRYPTION_KEY_UID => {
                 vec![(vec!["auditLog", "auditEncryptionKeyIdentifier"], text())]
             }

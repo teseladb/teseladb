@@ -35,6 +35,10 @@ const KEYS: &[(&str, Kind)] = &[
     ("teseladb.memoryLimit", Kind::Option("memory-limit")),
     ("teseladb.ioExecutor", Kind::Option("io-executor")),
     ("teseladb.directIo", Kind::Option("direct-io")),
+    (
+        "storage.refengine.collectionConfig.blockCompressor",
+        Kind::Option(crate::cli::BLOCK_COMPRESSOR),
+    ),
     ("teseladb.cpuList", Kind::Option("cpu-list")),
     ("teseladb.peerListen", Kind::Option("peer-listen")),
     ("teseladb.advertise", Kind::Option("advertise")),

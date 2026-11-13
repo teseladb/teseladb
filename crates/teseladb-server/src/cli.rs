@@ -93,6 +93,9 @@ pub struct StartOpts {
     pub io_executor: teseladb_io::node_disk::IoExecutor,
     /// `O_DIRECT` (`--direct-io`, 012 FR-003).
     pub direct_io: teseladb_io::node_disk::DirectIo,
+    /// The codec of the new blocks of every core (`--refengineCollectionBlockCompressor`,
+    /// 004 FR-023); `None`: the default one.
+    pub block_codec: Option<teseladb_lsm::Codec>,
     /// The cores' CPUs (`--cpu-list`, 012 FR-006); `None`: the CPUs the process may use.
     pub cpu_list: Option<Vec<usize>>,
     /// The enrollment token of a node that joins without a PKI yet (013 FR-005).
@@ -160,6 +163,9 @@ pub struct StartOpts {
 pub const TLS_MODE: &str = "tlsMode";
 /// `--http-port`.
 pub const HTTP_PORT: &str = "http-port";
+/// `--refengineCollectionBlockCompressor` (004 FR-023): the codec of the new blocks, with
+/// RefDb's name.
+pub const BLOCK_COMPRESSOR: &str = "refengineCollectionBlockCompressor";
 /// `--http-bind`.
 pub const HTTP_BIND: &str = "http-bind";
 /// `--tlsCertificateKeyFile`.
@@ -355,6 +361,7 @@ const START: &[Spec] = &[
     ("memory-limit", VALUE),
     ("io-executor", VALUE),
     ("direct-io", VALUE),
+    (BLOCK_COMPRESSOR, VALUE),
     ("cpu-list", VALUE),
     ("bind_ip", VALUE),
     ("port", VALUE),
@@ -1113,6 +1120,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             Some(v) => teseladb_io::node_disk::DirectIo::parse(v)
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
+        block_codec: block_codec(o.get(BLOCK_COMPRESSOR))?,
         cpu_list: cpu_list(o.get("cpu-list"), cores)?,
         enroll_token: o.get(ENROLL_TOKEN).map(Password::from),
         bootstrap_dir: o.path(BOOTSTRAP_DIR),
@@ -1207,11 +1215,27 @@ pub fn parse_with(
     }
 }
 
+/// The codec of `--refengineCollectionBlockCompressor` (004 FR-023): `none`, `zlib` or `zstd`;
+/// RefDb's `snappy` is a codec the node does not have.
+fn block_codec(v: Option<&str>) -> Result<Option<teseladb_lsm::Codec>, CliError> {
+    use teseladb_lsm::Codec;
+    match v {
+        None => Ok(None),
+        Some("none") => Ok(Some(Codec::None)),
+        Some("zlib") => Ok(Some(Codec::Zlib)),
+        Some("zstd") => Ok(Some(Codec::Zstd)),
+        Some(other) => {
+            Err(CliError(format!("--{BLOCK_COMPRESSOR}: {other:?} is not none, zlib or zstd")))
+        }
+    }
+}
+
 /// Usage text.
 pub const USAGE: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
+                 [--refengineCollectionBlockCompressor none|zlib|zstd]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]
                  [--join <ip:port>,...]
