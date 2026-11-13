@@ -21,11 +21,25 @@ impl Lsm {
     /// compacted, which removes the data and the tombstones. The identifier comes back in
     /// [`Completions::cleared`](super::Completions::cleared) once that compaction ends, and then
     /// [`Lsm::ingest_range`] finds the intervals empty. Nothing may be written to the range meanwhile.
+    /// The files whose keys all fall inside the intervals leave in the edit that lowers the
+    /// index, unread (FR-032).
     pub fn clear_range(&mut self, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>) -> u64 {
+        self.clear(range, intervals, true)
+    }
+
+    /// Lets go of `intervals` of `range`, which left this core (004 FR-032, D-166): as
+    /// [`Lsm::clear_range`], but its identifier comes back in
+    /// [`Completions::cleared`](super::Completions::cleared) once the edit is written, and what
+    /// the removed files did not take, the tombstones hide until ordinary compactions collect it.
+    pub fn drop_range(&mut self, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>) -> u64 {
+        self.clear(range, intervals, false)
+    }
+
+    fn clear(&mut self, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>, compact: bool) -> u64 {
         self.freeze();
         let id = self.next_request;
         self.next_request += 1;
-        self.requests.push_back(Request::Clear { id, range, intervals });
+        self.requests.push_back(Request::Clear { id, range, intervals, compact });
         id
     }
 
@@ -178,10 +192,36 @@ impl Lsm {
                 );
                 Some(Job::Ingest(Box::new(job)))
             }
-            Request::Clear { id, range, intervals } => {
+            Request::Clear { id, range, intervals, compact } => {
                 let next = self.next_file;
-                Some(Job::Reset(Script::reset(&mut self.manifest, id, range, intervals, next)))
+                let inside = self.files_inside(&intervals);
+                let script = Script::reset(
+                    &mut self.manifest,
+                    (id, range, intervals),
+                    inside,
+                    next,
+                    compact,
+                );
+                Some(Job::Reset(script))
             }
         }
+    }
+
+    /// The files (level and number) whose keys all fall inside one of `intervals`, each with
+    /// its history file (FR-031, FR-032).
+    fn files_inside(&self, intervals: &[(Vec<u8>, Vec<u8>)]) -> Vec<(u8, u64)> {
+        let inside = |t: &&Arc<Table>| {
+            intervals.iter().any(|(start, end)| {
+                start.as_slice() <= t.props.lo.as_slice() && t.props.hi.as_slice() < end.as_slice()
+            })
+        };
+        let mut out = Vec::new();
+        for (l, files) in self.version.levels.iter().enumerate() {
+            for t in files.iter().filter(inside) {
+                let both = std::iter::once(t).chain(t.history.as_ref());
+                out.extend(both.map(|f| (l as u8, f.number)));
+            }
+        }
+        out
     }
 }

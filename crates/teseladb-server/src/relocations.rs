@@ -449,7 +449,9 @@ impl Relocations {
                 self.hosting.remove(g, self.core);
                 match self.out.remove(&g) {
                     Some(Out::Retiring { intervals }) => {
-                        lsm.borrow_mut().clear_range(g, intervals);
+                        // Nothing here waits for the intervals to be empty: the whole files go,
+                        // the rest is collected as compactions reach it (004 FR-032).
+                        lsm.borrow_mut().drop_range(g, intervals);
                         replicas.release(g);
                     }
                     Some(other) => {

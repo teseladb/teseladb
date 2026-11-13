@@ -6,7 +6,7 @@ mod common;
 
 use common::{get, open, scan, small, ts};
 use teseladb_keys::Hlc;
-use teseladb_lsm::{Commit, FileRef, GcTable, Kind, Lsm, LsmConfig, LsmError};
+use teseladb_lsm::{Codec, Commit, FileRef, GcTable, Kind, Lsm, LsmConfig, LsmError};
 use teseladb_raftlog::{Disk, FileId, IoOp, MemDisk};
 use teseladb_types::{Bytes, GroupId, Nanos};
 
@@ -633,4 +633,77 @@ fn an_export_goes_ahead_of_a_compaction_in_progress() {
         assert_eq!(get(&mut b, &mut other, &v, &key(i), ts(20, 0)).unwrap().3, [2; 100]);
         assert_eq!(get(&mut b, &mut other, &v, &key(i), ts(11, 0)).unwrap().3, [1; 100]);
     }
+}
+
+/// Two ranges side by side in the files of one core: `G` in `[k, l)` with versions and
+/// history, `other` around it in `a…` and `m…`, all compacted below level 0.
+fn two_ranges(cfg: &LsmConfig, disk: &mut MemDisk) -> Lsm {
+    let other = GroupId(2);
+    let mut lsm = open(cfg, disk);
+    let mut index = 0;
+    for t in [10u64, 20, 30] {
+        for i in 0..2000u64 {
+            index += 1;
+            lsm.put(G, index, &key(i), ts(t, 0), &[b'v'; 200]).unwrap();
+        }
+    }
+    for i in 0..200u64 {
+        lsm.put(other, i + 1, format!("a{i:04}").as_bytes(), ts(5, 0), &[b'a'; 200]).unwrap();
+        lsm.put(other, i + 1, format!("m{i:04}").as_bytes(), ts(5, 0), &[b'm'; 200]).unwrap();
+    }
+    lsm.compact_all();
+    lsm.run_io(disk, Nanos::ZERO);
+    lsm
+}
+
+#[test]
+fn dropping_a_range_that_left_removes_its_whole_files_without_a_compaction() {
+    // 004 FR-032 (D-166): the files whose keys all fall inside the range leave the version in
+    // the manifest record that lowers its flushed index, with their history files, and the
+    // core's other files are not rewritten.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, codec: Codec::None, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = two_ranges(&cfg, &mut disk);
+    let before = lsm.metrics();
+    assert!(before.files >= 4, "{} files", before.files);
+    let intervals = vec![(b"k".to_vec(), b"l".to_vec())];
+    let id = lsm.drop_range(G, intervals.clone());
+    let done = lsm.run_io(&mut disk, Nanos::ZERO);
+    assert_eq!(done.cleared, vec![id]);
+    let after = lsm.metrics();
+    assert_eq!(after.compactions_total, before.compactions_total, "nothing compacted");
+    assert!(
+        after.files + 3 < before.files,
+        "{} files of {}: {before:?}",
+        after.files,
+        before.files
+    );
+    assert!(after.history_files < before.history_files || before.history_files == 0);
+    assert_eq!(lsm.flushed_index(G), 0);
+    // A restart reads the same version from the manifest.
+    let files = lsm.metrics().files;
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    assert_eq!((lsm.metrics().files, lsm.flushed_index(G)), (files, 0));
+    // What the files left of the range, an ordinary compaction collects.
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let v = lsm.view();
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(99, 0)).len(), 0);
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"a", b"b", ts(99, 0)).len(), 200);
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"m", b"n", ts(99, 0)).len(), 200);
+}
+
+#[test]
+fn clearing_a_range_also_removes_its_whole_files_before_compacting() {
+    // 004 FR-032: a clearing for an ingest drops the whole files first and still leaves the
+    // intervals empty when it ends.
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, codec: Codec::None, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = two_ranges(&cfg, &mut disk);
+    let id = lsm.clear_range(G, vec![(b"k".to_vec(), b"l".to_vec())]);
+    assert_eq!(lsm.run_io(&mut disk, Nanos::ZERO).cleared, vec![id]);
+    let v = lsm.view();
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"k", b"l", ts(99, 0)).len(), 0);
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"a", b"b", ts(99, 0)).len(), 200);
 }

@@ -173,6 +173,8 @@ enum Request {
         id: u64,
         range: GroupId,
         intervals: Vec<(Vec<u8>, Vec<u8>)>,
+        /// Whether the intervals must be empty when it ends (an ingest follows).
+        compact: bool,
     },
 }
 
@@ -292,10 +294,21 @@ impl Lsm {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
         let flushed = r.state.flushed.clone();
+        // The clearings under way when the node stopped, from their tombstones (004 FR-032): a
+        // range dropped from this core has no one to clear it again, and what its removed files
+        // did not take is collected under their threshold as before the restart.
+        let clearing: Vec<(Vec<u8>, Vec<u8>)> = v
+            .levels
+            .iter()
+            .flatten()
+            .flat_map(|t| t.props.tombstones.iter())
+            .filter(|t| t.ts == CLEARED)
+            .map(|t| (t.start.clone(), t.end.clone()))
+            .collect();
         let version = Arc::new(v);
         let shared =
             crate::concurrent::SharedLsm::new(version.clone(), shared_cache, cfg.dir.clone());
-        let lsm = Lsm {
+        let mut lsm = Lsm {
             cfg: cfg.clone(),
             version,
             reader,
@@ -314,7 +327,7 @@ impl Lsm {
             full_until: None,
             gc: GcTable::default(),
             gc_handed: GcTable::default(),
-            clearing: Vec::new(),
+            clearing,
             ingesting: BTreeMap::new(),
             pointers: vec![Vec::new(); cfg.levels + 1],
             compact_all: false,
@@ -337,6 +350,7 @@ impl Lsm {
             dict_written: crate::dict::Written::new(),
             shared,
         };
+        lsm.refresh_gc();
         Ok((lsm, flushed))
     }
 

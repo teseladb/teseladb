@@ -149,16 +149,20 @@ impl Lsm {
             }
             // The index is down on disk: now the data goes, with tombstones that a GC threshold
             // above them lets the compaction remove together with what they cover.
-            Outcome::Reset { id, range, intervals, edit } => {
-                self.state.apply(&edit);
+            Outcome::Reset { id, range, intervals, edit, removed, compact } => {
+                self.apply_files(Vec::new(), &removed, &edit);
                 for (start, end) in &intervals {
                     self.insert_tombstone(range, start, end);
                 }
                 self.clearing.extend(intervals);
                 self.refresh_gc();
                 self.freeze();
-                // The compaction waits until the tombstones are in a file.
-                self.clears.push(id);
+                if compact {
+                    // The compaction waits until the tombstones are in a file.
+                    self.clears.push(id);
+                } else {
+                    self.done.cleared.push(id);
+                }
             }
             Outcome::Changed { added, removed, edit, dict_written, ingest } => {
                 self.counters.ingest_compactions += u64::from(ingest);

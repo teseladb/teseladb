@@ -106,7 +106,16 @@ pub(crate) enum Outcome {
     /// Ingestion `id` added these files with this edit, or failed and changed nothing.
     Ingested { id: u64, result: Result<(Vec<(u8, Table)>, Edit), crate::error::LsmError> },
     /// Clearing `id` of `range` over `intervals`: its flushed index went back to 0 (`edit`).
-    Reset { id: u64, range: GroupId, intervals: Vec<(Vec<u8>, Vec<u8>)>, edit: Edit },
+    Reset {
+        id: u64,
+        range: GroupId,
+        intervals: Vec<(Vec<u8>, Vec<u8>)>,
+        edit: Edit,
+        /// Files whose keys all fall inside the intervals, removed by the edit (FR-032).
+        removed: Vec<u64>,
+        /// Whether a compaction must leave the intervals empty before the clearing ends.
+        compact: bool,
+    },
 }
 
 /// Bytes of entries a background job takes in one go before it lets its core serve something
@@ -327,16 +336,20 @@ impl Script {
     }
 
     /// The edit that takes the flushed index of `range` back to 0, then [`Outcome::Reset`].
+    /// The edit also removes `inside`, the files (level and number) whose keys all fall inside
+    /// the intervals (FR-032).
     pub(crate) fn reset(
         manifest: &mut ManifestFile,
-        id: u64,
-        range: GroupId,
-        intervals: Vec<(Vec<u8>, Vec<u8>)>,
+        (id, range, intervals): (u64, GroupId, Vec<(Vec<u8>, Vec<u8>)>),
+        inside: Vec<(u8, u64)>,
         next_file: u64,
+        compact: bool,
     ) -> Script {
-        let edit = Edit { resets: vec![range], next_file, ..Edit::default() };
+        let removed = inside.iter().map(|(_, n)| *n).collect();
+        let edit = Edit { resets: vec![range], removes: inside, next_file, ..Edit::default() };
         let ops = manifest.append(&edit).into_iter().collect();
-        Script { ops, outcome: Some(Outcome::Reset { id, range, intervals, edit }) }
+        let outcome = Outcome::Reset { id, range, intervals, edit, removed, compact };
+        Script { ops, outcome: Some(outcome) }
     }
 
     /// Closing and removing files no version holds any more.
