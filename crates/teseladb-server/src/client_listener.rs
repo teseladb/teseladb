@@ -90,6 +90,10 @@ pub struct ClientConfig {
     pub process: ProcessConfig,
     /// TLS on the port (`--tlsMode` and the certificate options, 013).
     pub tls: TlsPort,
+    /// With the io_uring executor, the rings of the port, one per core (012 FR-024): each accepts,
+    /// reads and writes its connections, and a pool runs their commands. `None`, a port with TLS
+    /// or a kernel without multishot `recv`: a thread per connection.
+    pub rings: Option<usize>,
     /// Clients authenticate before running commands (a node started without `--insecure`, 013).
     pub auth: bool,
     /// What `rotateCertificates` loads again (013 FR-006); `None` on a node without a PKI.
@@ -161,6 +165,7 @@ impl ClientConfig {
                 teseladb_wire::commands::server_params::MAX_CONCURRENT_TRANSACTIONS_DEFAULT,
             process: ProcessConfig::default(),
             tls: TlsPort::default(),
+            rings: None,
             auth: false,
             certificates: None,
             audit: None,
@@ -453,14 +458,14 @@ pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() ->
 }
 
 /// What a connection's commands run with: its backend when a node is behind the port.
-struct Cmds<'a> {
-    inline: Option<&'a mut ServerBackend>,
-    shared: &'a Shared,
-    state: &'a dyn NodeState,
+pub(crate) struct Cmds<'a> {
+    pub(crate) inline: Option<&'a mut ServerBackend>,
+    pub(crate) shared: &'a Shared,
+    pub(crate) state: &'a dyn NodeState,
 }
 
 /// The seed of the random numbers of backend `k`: the clock and the number.
-fn seed(k: u64) -> u64 {
+pub(crate) fn seed(k: u64) -> u64 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     nanos ^ (k << 40) ^ 0x9e37_79b9_7f4a_7c15
 }
@@ -469,7 +474,8 @@ fn seed(k: u64) -> u64 {
 pub struct ClientListener {
     addrs: Vec<SocketAddr>,
     stop: Arc<AtomicBool>,
-    acceptor: (Arc<Waker>, JoinHandle<()>),
+    /// The acceptor of the connections that get a thread each, or the port's rings.
+    acceptor: Accepting,
     /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
     keeper: Option<JoinHandle<()>>,
     /// The thread that builds the node's search indexes, with a node behind the port.
@@ -482,6 +488,24 @@ pub struct ClientListener {
     open: Arc<AtomicUsize>,
 }
 
+/// How the port takes its connections.
+enum Accepting {
+    /// An acceptor thread gives each connection a thread.
+    Threads(Arc<Waker>, JoinHandle<()>),
+    /// Rings of io_uring (012 FR-024).
+    #[cfg(target_os = "linux")]
+    Rings(crate::client_ring::RingPort),
+}
+
+/// The rings the port runs on, if it does (012 FR-024): with the io_uring executor, without TLS
+/// and with a kernel that has multishot `recv`.
+#[cfg(target_os = "linux")]
+fn ring_count(cfg: &ClientConfig) -> Option<usize> {
+    let n = cfg.rings?;
+    let plain = cfg.tls.mode == crate::tls_port::TlsMode::Disabled;
+    (plain && teseladb_io::net_ring::check_support().is_ok()).then_some(n)
+}
+
 impl std::fmt::Debug for ClientListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientListener").field("addrs", &self.addrs).finish()
@@ -489,7 +513,7 @@ impl std::fmt::Debug for ClientListener {
 }
 
 impl ClientListener {
-    /// Listens on `cfg.addrs`, with a thread for each connection.
+    /// Listens on `cfg.addrs`, with a thread for each connection or on rings (`cfg.rings`).
     pub fn spawn(cfg: &ClientConfig, state: Arc<dyn NodeState>) -> io::Result<ClientListener> {
         ClientListener::spawn_with(cfg, state, Hooks::default())
     }
@@ -528,35 +552,62 @@ impl ClientListener {
             state: state.clone(),
             shared: shared.clone(),
             diag: diag.clone(),
-            compressors: cfg.compressors.clone(),
-            tls: cfg.tls.clone(),
-            auth: cfg.auth,
-            mechanisms: cfg.mechanisms.clone(),
+            kit: ClientKit {
+                compressors: cfg.compressors.clone(),
+                tls: cfg.tls.clone(),
+                auth: cfg.auth,
+                mechanisms: cfg.mechanisms.clone(),
+                arena: crate::block_memory::HugeRequests::for_port(),
+                diag: diag.clone(),
+            },
             open: open.clone(),
             stop: stop.clone(),
             spawn: hooks.spawn_connection,
-            arena: crate::block_memory::HugeRequests::for_port(),
         };
-        let poller = Poller::new()?;
-        for (i, l) in listeners.iter().enumerate() {
-            l.set_nonblocking(true)?;
-            poller.register(l, i as u64, Interest::READ)?;
-        }
-        let waker = Arc::new(poller.waker());
-        let acceptor = Acceptor {
-            poller,
-            listeners,
-            parts,
-            live: Vec::new(),
-            max: cfg.max_connections,
-            open: open.clone(),
-            stop: stop.clone(),
-            next_id: 1,
-            diag: diag.clone(),
-            state: state.clone(),
+        #[cfg(target_os = "linux")]
+        let rings = ring_count(cfg);
+        #[cfg(not(target_os = "linux"))]
+        let rings: Option<usize> = None;
+        let acceptor = match rings {
+            #[cfg(target_os = "linux")]
+            Some(n) => {
+                let ring_parts = crate::client_ring::RingParts {
+                    state: state.clone(),
+                    shared: shared.clone(),
+                    kit: parts.kit.clone(),
+                    diag: diag.clone(),
+                    open: open.clone(),
+                    stop: stop.clone(),
+                    max: cfg.max_connections,
+                    next_id: std::sync::atomic::AtomicI32::new(1),
+                };
+                Accepting::Rings(crate::client_ring::spawn(ring_parts, &listeners, n)?)
+            }
+            _ => {
+                let poller = Poller::new()?;
+                for (i, l) in listeners.iter().enumerate() {
+                    l.set_nonblocking(true)?;
+                    poller.register(l, i as u64, Interest::READ)?;
+                }
+                let waker = Arc::new(poller.waker());
+                let acceptor = Acceptor {
+                    poller,
+                    listeners,
+                    parts,
+                    live: Vec::new(),
+                    max: cfg.max_connections,
+                    open: open.clone(),
+                    stop: stop.clone(),
+                    next_id: 1,
+                    diag: diag.clone(),
+                    state: state.clone(),
+                };
+                let t = thread::Builder::new()
+                    .name("client-accept".into())
+                    .spawn(move || acceptor.run())?;
+                Accepting::Threads(waker, t)
+            }
         };
-        let t =
-            thread::Builder::new().name("client-accept".into()).spawn(move || acceptor.run())?;
         let builder = match state.handle() {
             Some(h) => {
                 let backend = ServerBackend::new(h, seed(u64::MAX - 1)).with_diag(diag.clone());
@@ -587,16 +638,12 @@ impl ClientListener {
             }
             None => None,
         };
-        Ok(ClientListener {
-            addrs,
-            stop,
-            acceptor: (waker, t),
-            keeper,
-            builder,
-            usage,
-            resolvers,
-            open,
-        })
+        Ok(ClientListener { addrs, stop, acceptor, keeper, builder, usage, resolvers, open })
+    }
+
+    /// Whether the port runs on io_uring rings (012 FR-024) rather than a thread per connection.
+    pub fn on_rings(&self) -> bool {
+        !matches!(self.acceptor, Accepting::Threads(..))
     }
 
     /// The addresses it listens on (with the ports the system chose for port 0).
@@ -614,10 +661,16 @@ impl ClientListener {
     /// unwaited.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
-        let (waker, t) = self.acceptor;
-        // A thread that already ended needs no wake-up, and its end is all `join` waits for.
-        let _ = waker.wake();
-        let _ = t.join();
+        match self.acceptor {
+            Accepting::Threads(waker, t) => {
+                // A thread that already ended needs no wake-up, and its end is all `join` waits
+                // for.
+                let _ = waker.wake();
+                let _ = t.join();
+            }
+            #[cfg(target_os = "linux")]
+            Accepting::Rings(rings) => rings.stop(),
+        }
         let threads = self.keeper.into_iter().chain(self.builder).chain(self.usage);
         for k in threads.chain(self.resolvers) {
             k.thread().unpark();
@@ -820,15 +873,63 @@ struct PortParts {
     state: Arc<dyn NodeState>,
     shared: Arc<Shared>,
     diag: Arc<Diag>,
-    compressors: Vec<Compressor>,
-    tls: TlsPort,
-    auth: bool,
-    mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    kit: ClientKit,
     open: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     spawn: SpawnFn,
+}
+
+/// What a new connection of the port starts with.
+#[derive(Clone)]
+pub(crate) struct ClientKit {
+    pub(crate) compressors: Vec<Compressor>,
+    pub(crate) tls: TlsPort,
+    /// Clients authenticate before running commands.
+    pub(crate) auth: bool,
+    /// `authenticationMechanisms`.
+    pub(crate) mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
     /// Where its connections keep the buffers of their requests (012 FR-032).
-    arena: Option<Arc<dyn RequestArena>>,
+    pub(crate) arena: Option<Arc<dyn RequestArena>>,
+    /// The port's counters.
+    pub(crate) diag: Arc<Diag>,
+}
+
+impl ClientKit {
+    /// Client `id` on `stream` (`None`: a socket a ring owns, 012 FR-024) from `peer` to `local`;
+    /// `None` if the randomness for TLS is not available.
+    pub(crate) fn client(
+        &self,
+        id: i32,
+        stream: Option<TcpStream>,
+        peer: Option<SocketAddr>,
+        local: Option<SocketAddr>,
+    ) -> Option<Client> {
+        let transport = Transport::new(&self.tls)?;
+        let mut conn = Connection::with_compressors(id, &self.compressors);
+        conn.arena.clone_from(&self.arena);
+        conn.peer = peer.map(|a| a.to_string());
+        conn.auth.required = self.auth;
+        conn.auth.mechanisms.clone_from(&self.mechanisms);
+        conn.auth.client_addr = conn.peer.clone();
+        conn.auth.server_addr = local.map(|a| a.to_string());
+        Some(Client {
+            stream,
+            transport,
+            conn: Some(conn),
+            backlog: Vec::new(),
+            handshake_from: Some(Instant::now()),
+            out: Vec::new(),
+            pos: 0,
+            watching_write: false,
+            waiting: false,
+            new_wait: None,
+            diag: self.diag.clone(),
+            member_subject: crate::cluster_auth::member_subject(&self.tls),
+            peer_ip: peer.map(|a| a.ip()),
+            admitted: false,
+            counted: None,
+        })
+    }
 }
 
 impl PortParts {
@@ -855,13 +956,8 @@ impl PortParts {
                 .handle()
                 .map(|h| ServerBackend::new(h, seed(id as u64)).with_diag(self.diag.clone())),
             shared: self.shared.clone(),
-            compressors: self.compressors.clone(),
-            arena: self.arena.clone(),
-            tls: self.tls.clone(),
-            auth: self.auth,
-            mechanisms: self.mechanisms.clone(),
+            kit: self.kit.clone(),
             open: self.open.clone(),
-            diag: self.diag.clone(),
             stop: self.stop.clone(),
             tenants_seen: None,
         };
@@ -872,7 +968,7 @@ impl PortParts {
 }
 
 /// What waits in a worker until its deadline.
-enum Pending {
+pub(crate) enum Pending {
     /// An awaitable `hello` waiting for its answer.
     Hello(HelloWait),
     /// A request the failpoint holds (`blockConnection`), dispatched again at the deadline with
@@ -884,7 +980,7 @@ enum Pending {
 }
 
 impl Pending {
-    fn deadline(&self) -> Instant {
+    pub(crate) fn deadline(&self) -> Instant {
         match self {
             Pending::Hello(h) => h.deadline,
             Pending::Held { deadline, .. } | Pending::Queued { deadline, .. } => *deadline,
@@ -893,7 +989,7 @@ impl Pending {
 }
 
 /// An awaitable `hello` waiting for its answer.
-struct HelloWait {
+pub(crate) struct HelloWait {
     req: Request,
     hello: HelloRequest,
     deadline: Instant,
@@ -907,8 +1003,10 @@ struct HelloWait {
 
 /// One client connection of a worker. Its socket is non-blocking: reads and writes end with
 /// `WouldBlock`, never with `Interrupted`.
-struct Client {
-    stream: TcpStream,
+pub(crate) struct Client {
+    /// The socket its worker polls; `None` when a ring owns it (012 FR-024), which takes `out`
+    /// to send it.
+    stream: Option<TcpStream>,
     /// Plain or TLS between the socket and `conn`.
     transport: Transport,
     /// The connection; `None` while the failpoint holds one of its requests.
@@ -939,6 +1037,32 @@ struct Client {
     counted: Option<u32>,
 }
 
+/// What the rings of the port (012 FR-024) ask of a client whose socket they own.
+#[cfg(target_os = "linux")]
+impl Client {
+    /// Bytes that arrived and wait for their command.
+    pub(crate) fn pending_in(&self) -> usize {
+        self.conn.as_ref().map_or(0, Connection::buffered) + self.backlog.len()
+    }
+
+    /// Whether an awaitable `hello`, a held request or the limiter's queue holds its requests.
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// The bytes waiting to go out, for the ring that owns its socket (012 FR-024).
+    pub(crate) fn take_out(&mut self) -> Vec<u8> {
+        let out = std::mem::take(&mut self.out);
+        let pos = std::mem::take(&mut self.pos);
+        if pos == 0 { out } else { out[pos..].to_vec() }
+    }
+
+    /// The awaitable `hello`, held request or queued request it just met.
+    pub(crate) fn take_wait(&mut self) -> Option<Pending> {
+        self.new_wait.take()
+    }
+}
+
 /// Microseconds since the first connection's first request: the limiter's clock.
 fn limiter_now_us() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -951,22 +1075,15 @@ impl Client {
     fn read(&mut self) -> bool {
         let mut chunk = [0u8; READ_CHUNK];
         loop {
-            match self.stream.read(&mut chunk) {
+            let Some(stream) = self.stream.as_mut() else { return true };
+            match stream.read(&mut chunk) {
                 Ok(0) => return false,
                 Ok(n) => {
-                    PortStats::add(&self.diag.stats.physical_in, n);
-                    let mut plain = Vec::new();
-                    if !self.transport.incoming(&chunk[..n], &mut plain, &mut self.out) {
+                    if !self.take_in(&chunk[..n]) {
                         // The TLS alert goes out before the connection closes.
                         let _ = self.write();
                         return false;
                     }
-                    match self.conn.as_mut() {
-                        Some(conn) => conn.receive(&plain),
-                        None => self.backlog.extend_from_slice(&plain),
-                    }
-                    self.note_handshake();
-                    self.note_certificate();
                     // A read that did not fill the chunk took what was there: the poller is
                     // level-triggered and reports the socket again if more came, so a second
                     // read that would only find it empty is not made (H-013).
@@ -977,6 +1094,36 @@ impl Client {
                 Err(e) => return e.kind() == ErrorKind::WouldBlock,
             }
         }
+    }
+
+    /// Takes `bytes` that came from the socket; `false` if the connection must close.
+    pub(crate) fn take_in(&mut self, bytes: &[u8]) -> bool {
+        PortStats::add(&self.diag.stats.physical_in, bytes.len());
+        let mut plain = Vec::new();
+        if !self.transport.incoming(bytes, &mut plain, &mut self.out) {
+            return false;
+        }
+        match self.conn.as_mut() {
+            Some(conn) => conn.receive(&plain),
+            None => self.backlog.extend_from_slice(&plain),
+        }
+        self.note_handshake();
+        self.note_certificate();
+        true
+    }
+
+    /// Whether its connection belongs to a tenant that `states` has suspended.
+    pub(crate) fn is_suspended(&self, states: &crate::routes::TenantStates) -> bool {
+        self.conn.as_ref().is_some_and(|conn| suspended(conn, states))
+    }
+
+    /// Ends the connection: its tenant's count drops, and its `Connection`, if it has it, comes
+    /// back for the audit of the close.
+    pub(crate) fn end(self, state: &dyn NodeState) -> Option<Connection> {
+        if let (Some(tenant), Some(routes)) = (self.counted, state.routes()) {
+            routes.limiter().disconnect(tenant);
+        }
+        self.conn
     }
 
     /// Counts the TLS handshake once it has finished (`transportSecurity`).
@@ -1043,7 +1190,7 @@ impl Client {
     /// Runs what arrived and writes the replies; the replies of the requests before a fault still
     /// go out before the connection closes, as `refnode` answers each message before reading the
     /// next. `false` if the connection must close.
-    fn flush_after(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
+    pub(crate) fn flush_after(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
         let served = self.serve(info, cmds);
         self.write() && served
     }
@@ -1222,9 +1369,16 @@ impl Client {
     /// stored documents go from their own buffers, and only what the socket does not take now is
     /// copied to wait (006 FR-040). `false` if the socket failed.
     fn send_pieces(&mut self, pieces: &[&[u8]]) -> bool {
+        let Some(stream) = self.stream.as_mut() else {
+            // A ring sends `out` (012 FR-024).
+            for p in pieces {
+                self.out.extend_from_slice(p);
+            }
+            return true;
+        };
         let waiting = &self.out[self.pos..];
         let all: Vec<&[u8]> = std::iter::once(waiting).chain(pieces.iter().copied()).collect();
-        match crate::vectored::write_pieces(&mut self.stream, &all) {
+        match crate::vectored::write_pieces(stream, &all) {
             Ok((n, rest)) => {
                 PortStats::add(&self.diag.stats.physical_out, n);
                 self.out = rest;
@@ -1237,8 +1391,10 @@ impl Client {
 
     /// Writes what it can; `false` if the socket failed.
     fn write(&mut self) -> bool {
+        // A ring sends `out` (012 FR-024).
+        let Some(stream) = self.stream.as_mut() else { return true };
         while self.pos < self.out.len() {
-            match self.stream.write(&self.out[self.pos..]) {
+            match stream.write(&self.out[self.pos..]) {
                 Ok(n) => {
                     PortStats::add(&self.diag.stats.physical_out, n);
                     self.pos += n;
@@ -1260,7 +1416,7 @@ impl Client {
         }
         self.watching_write = want;
         let interest = if want { Interest::BOTH } else { Interest::READ };
-        poller.reregister(&self.stream, token, interest).is_ok()
+        self.stream.as_ref().is_none_or(|s| poller.reregister(s, token, interest).is_ok())
     }
 }
 
@@ -1272,16 +1428,93 @@ impl Drop for Worker {
             self.close(t);
         }
         for p in std::mem::take(&mut self.awaits).into_values() {
-            match p {
-                Pending::Held { conn, .. } => self.gone(*conn),
-                // It leaves the limiter's queue as interrupted (006 FR-036).
-                Pending::Queued { conn, .. } => {
-                    lock(&self.shared).ingress.abandon();
-                    self.gone(*conn);
-                }
-                Pending::Hello(_) => {}
+            if let Some(conn) = abandon(p, &self.shared) {
+                self.gone(conn);
             }
         }
+    }
+}
+
+/// The connection of a wait whose client closed: a held one's close is recorded by the caller, and
+/// one in the limiter's queue leaves it as interrupted (006 FR-036).
+pub(crate) fn abandon(p: Pending, shared: &Shared) -> Option<Connection> {
+    match p {
+        Pending::Held { conn, .. } => Some(*conn),
+        Pending::Queued { conn, .. } => {
+            lock(shared).ingress.abandon();
+            Some(*conn)
+        }
+        Pending::Hello(_) => None,
+    }
+}
+
+/// Runs wait `p` of client `c`, due now: answers its awaitable `hello` (and schedules the next of
+/// an exhaust stream in `c`), or runs the request the failpoint or the limiter held. `false` if
+/// the connection must close.
+pub(crate) fn run_pending(
+    c: &mut Client,
+    p: Pending,
+    info: &NodeInfo,
+    cmds: &mut Cmds<'_>,
+) -> bool {
+    match p {
+        Pending::Hello(p) => {
+            let (next, open) = c.fire(p, info, cmds.shared);
+            c.new_wait = next;
+            open
+        }
+        // The held request runs now, with what the failpoint does next.
+        Pending::Held { conn, req, .. } => c.resume(*conn, req, info, cmds),
+        // Its turn in the limiter's queue came.
+        Pending::Queued { conn, req, .. } => {
+            lock(cmds.shared).ingress.dequeue();
+            c.resume(*conn, req, info, cmds)
+        }
+    }
+}
+
+/// Stops counting the connections of `clients` whose user is now its tenant's service user (007
+/// FR-032): a connection counts when it signs in, by this core's view of the tenants, which can
+/// name the service user later than Group 0 does, and a service user's connection counts for
+/// nothing.
+pub(crate) fn uncount_service_users<'a>(
+    clients: impl Iterator<Item = &'a mut Client>,
+    routes: &crate::routes::SharedRoutes,
+    states: &crate::routes::TenantStates,
+) {
+    for c in clients {
+        let Some(tenant) = c.counted else { continue };
+        let service = c.conn.as_ref().and_then(|conn| conn.auth.user.as_ref()).is_some_and(|u| {
+            states
+                .get(&tenant)
+                .is_some_and(|s| crate::tenant_limits::is_service_user(&s.limits, &u.name))
+        });
+        if service {
+            routes.limiter().disconnect(tenant);
+            c.counted = None;
+        }
+    }
+}
+
+/// Kills the cursors and change streams of the tenants `states` suspends and `seen` (the states
+/// the caller last looked at) did not; each worker does it, and a second time kills nothing.
+pub(crate) fn kill_suspended_cursors(
+    shared: &Shared,
+    seen: Option<&crate::routes::TenantStates>,
+    states: &crate::routes::TenantStates,
+) {
+    let before = |id: &u32| seen.and_then(|seen| seen.get(id)).is_some_and(|s| !s.admits_users());
+    let held: Vec<u32> = states
+        .iter()
+        .filter(|(id, s)| !s.admits_users() && !before(id))
+        .map(|(id, _)| *id)
+        .collect();
+    if !held.is_empty() {
+        let tenant_of = |ns: &str| {
+            let db = ns.split_once('.').map_or(ns, |(db, _)| db);
+            teseladb_meta::tenants::split_db(db).0
+        };
+        lock(shared).cursors.kill_namespaces(|ns| held.contains(&tenant_of(ns)));
     }
 }
 
@@ -1315,17 +1548,9 @@ struct Worker {
     inline: Option<ServerBackend>,
     /// The node's cursors and sessions, shared by its workers.
     shared: Arc<Shared>,
-    compressors: Vec<Compressor>,
-    /// Where its connection keeps the buffers of its requests (012 FR-032).
-    arena: Option<Arc<dyn RequestArena>>,
-    tls: TlsPort,
-    /// Clients authenticate before running commands.
-    auth: bool,
-    /// `authenticationMechanisms`.
-    mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
+    /// What its connection starts with.
+    kit: ClientKit,
     open: Arc<AtomicUsize>,
-    /// The port's counters.
-    diag: Arc<Diag>,
     stop: Arc<AtomicBool>,
     /// The tenants' states the worker last closed connections for (007 FR-034).
     tenants_seen: Option<Arc<crate::routes::TenantStates>>,
@@ -1368,29 +1593,6 @@ fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
 }
 
 impl Worker {
-    /// Stops counting the connections of a user that is now its tenant's service user (007 FR-032): a connection
-    /// counts when it signs in, by this core's view of the tenants, which can name the service user later than
-    /// Group 0 does, and a service user's connection counts for nothing.
-    fn uncount_service_users(
-        &mut self,
-        routes: &crate::routes::SharedRoutes,
-        states: &crate::routes::TenantStates,
-    ) {
-        for c in self.conns.values_mut() {
-            let Some(tenant) = c.counted else { continue };
-            let service =
-                c.conn.as_ref().and_then(|conn| conn.auth.user.as_ref()).is_some_and(|u| {
-                    states
-                        .get(&tenant)
-                        .is_some_and(|s| crate::tenant_limits::is_service_user(&s.limits, &u.name))
-                });
-            if service {
-                routes.limiter().disconnect(tenant);
-                c.counted = None;
-            }
-        }
-    }
-
     /// Closes the connections of the tenants suspended since the last look.
     fn close_suspended(&mut self) {
         let Some(routes) = self.state.routes() else { return };
@@ -1400,36 +1602,13 @@ impl Worker {
         }
         // The tenants changed (rare): the closes below borrow the worker.
         let routes = routes.clone();
-        let gone: Vec<u64> = self
-            .conns
-            .iter()
-            .filter(|(_, c)| c.conn.as_ref().is_some_and(|conn| suspended(conn, &states)))
-            .map(|(t, _)| *t)
-            .collect();
+        let gone: Vec<u64> =
+            self.conns.iter().filter(|(_, c)| c.is_suspended(&states)).map(|(t, _)| *t).collect();
         for t in gone {
             self.close(t);
         }
-        self.uncount_service_users(&routes, &states);
-        // The cursors and change streams of the tenants suspended since the last look go too;
-        // each worker does it, and a second time kills nothing.
-        let before = |id: &u32| {
-            self.tenants_seen
-                .as_ref()
-                .and_then(|seen| seen.get(id))
-                .is_some_and(|s| !s.admits_users())
-        };
-        let held: Vec<u32> = states
-            .iter()
-            .filter(|(id, s)| !s.admits_users() && !before(id))
-            .map(|(id, _)| *id)
-            .collect();
-        if !held.is_empty() {
-            let tenant_of = |ns: &str| {
-                let db = ns.split_once('.').map_or(ns, |(db, _)| db);
-                teseladb_meta::tenants::split_db(db).0
-            };
-            lock(&self.shared).cursors.kill_namespaces(|ns| held.contains(&tenant_of(ns)));
-        }
+        uncount_service_users(self.conns.values_mut(), &routes, &states);
+        kill_suspended_cursors(&self.shared, self.tenants_seen.as_deref(), &states);
         self.tenants_seen = Some(states);
     }
 
@@ -1480,45 +1659,21 @@ impl Worker {
     fn add(&mut self, stream: TcpStream, id: i32) {
         let token = self.next_token;
         self.next_token += 1;
-        let transport = Transport::new(&self.tls);
         let ready = stream
             .set_nonblocking(true)
             .and_then(|()| stream.set_nodelay(true))
             .and_then(|()| self.poller.register(&stream, token, Interest::READ));
-        match (ready, transport) {
-            (Ok(()), Some(transport)) => {
-                let mut conn = Connection::with_compressors(id, &self.compressors);
-                conn.arena.clone_from(&self.arena);
-                conn.peer = stream.peer_addr().ok().map(|a| a.to_string());
-                conn.auth.required = self.auth;
-                conn.auth.mechanisms.clone_from(&self.mechanisms);
-                conn.auth.client_addr = conn.peer.clone();
-                conn.auth.server_addr = stream.local_addr().ok().map(|a| a.to_string());
-                let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
-                let c = Client {
-                    stream,
-                    transport,
-                    conn: Some(conn),
-                    backlog: Vec::new(),
-                    handshake_from: Some(Instant::now()),
-                    out: Vec::new(),
-                    pos: 0,
-                    watching_write: false,
-                    waiting: false,
-                    new_wait: None,
-                    diag: self.diag.clone(),
-                    member_subject: crate::cluster_auth::member_subject(&self.tls),
-                    peer_ip,
-                    admitted: false,
-                    counted: None,
-                };
+        if ready.is_err() {
+            self.open.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        let (peer, local) = (stream.peer_addr().ok(), stream.local_addr().ok());
+        // Without a client the socket closes here, which also takes it out of the poller.
+        match self.kit.client(id, Some(stream), peer, local) {
+            Some(c) => {
                 self.conns.insert(token, c);
             }
-            (Ok(()), None) => {
-                let _ = self.poller.deregister(&stream);
-                self.open.fetch_sub(1, Ordering::AcqRel);
-            }
-            (Err(_), _) => {
+            None => {
                 self.open.fetch_sub(1, Ordering::AcqRel);
             }
         }
@@ -1527,14 +1682,13 @@ impl Worker {
     /// Closes connection `token`; one held by the failpoint records its
     /// close when its connection comes back ([`Worker::gone`]).
     fn close(&mut self, token: u64) {
-        if let Some(c) = self.conns.remove(&token) {
-            if let (Some(tenant), Some(routes)) = (c.counted, self.state.routes()) {
-                routes.limiter().disconnect(tenant);
+        if let Some(mut c) = self.conns.remove(&token) {
+            if let Some(stream) = c.stream.take() {
+                let _ = self.poller.deregister(&stream);
             }
-            if let Some(conn) = c.conn {
+            if let Some(conn) = c.end(&*self.state) {
                 self.gone(conn);
             }
-            let _ = self.poller.deregister(&c.stream);
             self.open.fetch_sub(1, Ordering::AcqRel);
         }
     }
@@ -1602,32 +1756,14 @@ impl Worker {
             let Some(c) = self.conns.get_mut(&token) else {
                 // Closed while it waited: a held connection's close is recorded now, and one in
                 // the limiter's queue leaves it as interrupted.
-                match p {
-                    Pending::Held { conn, .. } => self.gone(*conn),
-                    Pending::Queued { conn, .. } => {
-                        lock(&self.shared).ingress.abandon();
-                        self.gone(*conn);
-                    }
-                    Pending::Hello(_) => {}
+                if let Some(conn) = abandon(p, &self.shared) {
+                    self.gone(conn);
                 }
                 continue;
             };
             let mut cmds =
                 Cmds { inline: self.inline.as_mut(), shared: &self.shared, state: &*self.state };
-            let resumed = match p {
-                Pending::Hello(p) => {
-                    let (next, open) = c.fire(p, info, &self.shared);
-                    c.new_wait = next;
-                    open
-                }
-                // The held request runs now, with what the failpoint does next.
-                Pending::Held { conn, req, .. } => c.resume(*conn, req, info, &mut cmds),
-                // Its turn in the limiter's queue came.
-                Pending::Queued { conn, req, .. } => {
-                    lock(&self.shared).ingress.dequeue();
-                    c.resume(*conn, req, info, &mut cmds)
-                }
-            };
+            let resumed = run_pending(c, p, info, &mut cmds);
             let alive = c.flush_after(info, &mut cmds) && resumed && c.watch(poller, token);
             self.settle(token, alive);
         }

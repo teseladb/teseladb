@@ -229,3 +229,25 @@ fn a_send_to_a_closed_connection_is_an_error_and_no_signal() {
     }
     assert!(failed, "EPIPE or ECONNRESET, without SIGPIPE killing the process");
 }
+
+#[test]
+fn a_poll_completes_when_its_descriptor_is_readable_and_a_wait_times_out_without_error() {
+    let poller = crate::poll::Poller::new().unwrap();
+    let waker = poller.waker();
+    let mut r = Ring::new(4).unwrap();
+    let id = r.push(Op::PollIn { fd: poller.as_raw_fd() }).unwrap();
+    let from = std::time::Instant::now();
+    assert_eq!(r.submit_and_wait_for(std::time::Duration::from_millis(30)).unwrap(), 1);
+    assert!(r.complete().is_none(), "nothing to read yet");
+    assert!(from.elapsed() >= std::time::Duration::from_millis(25));
+    waker.wake().unwrap();
+    r.submit_and_wait_for(std::time::Duration::from_secs(5)).unwrap();
+    let got = r.complete().unwrap();
+    assert_eq!(got.id, id);
+    assert_eq!(got.result.unwrap() & 1, 1, "POLLIN");
+    // A poll still waiting when the ring goes is cancelled, not waited for.
+    let quiet = crate::poll::Poller::new().unwrap();
+    r.push(Op::PollIn { fd: quiet.as_raw_fd() }).unwrap();
+    r.submit(0).unwrap();
+    drop(r);
+}

@@ -35,6 +35,10 @@ const IORING_OFF_SQ_RING: i64 = 0;
 const IORING_OFF_SQES: i64 = 0x1000_0000;
 const IORING_FEAT_SINGLE_MMAP: u32 = 1;
 const IORING_ENTER_GETEVENTS: u32 = 1;
+/// `io_uring_enter` takes a `struct io_uring_getevents_arg` with a timeout (Linux 5.11).
+const IORING_ENTER_EXT_ARG: u32 = 1 << 3;
+const ETIME: i32 = 62;
+const POLLIN: u32 = 1;
 const IORING_ENTER_SQ_WAKEUP: u32 = 2;
 const IORING_SETUP_SQPOLL: u32 = 2;
 const IORING_SQ_NEED_WAKEUP: u32 = 1;
@@ -88,6 +92,8 @@ pub mod opcode {
     pub const NOP: u8 = 0;
     /// `IORING_OP_FSYNC`.
     pub const FSYNC: u8 = 3;
+    /// `IORING_OP_POLL_ADD`.
+    pub const POLL_ADD: u8 = 6;
     /// `IORING_OP_SENDMSG`.
     pub const SENDMSG: u8 = 9;
     /// `IORING_OP_ACCEPT`.
@@ -352,6 +358,12 @@ pub enum Op {
         /// Bytes.
         data: SendData,
     },
+    /// One-shot `IORING_OP_POLL_ADD` for `POLLIN` on `fd` (an `epoll` descriptor, say): completes
+    /// when it can be read.
+    PollIn {
+        /// Descriptor, kept open by the caller until the completion.
+        fd: RawFd,
+    },
     /// `IORING_OP_ASYNC_CANCEL` of operation `id`: it ends with `ECANCELED`.
     Cancel {
         /// Identifier [`Ring::push`] returned.
@@ -406,12 +418,15 @@ enum Keep {
     },
     /// An operation to cancel: done when its own completion comes.
     Cancel,
+    /// A poll, which waits for its descriptor.
+    Poll,
 }
 
 impl Keep {
-    /// An operation that only ends when cancelled or when its socket does.
-    fn multishot(&self) -> bool {
-        matches!(self, Keep::Accept | Keep::Recv { .. })
+    /// An operation that only ends when cancelled or when something outside the process acts:
+    /// a multishot one, or a poll.
+    fn waits(&self) -> bool {
+        matches!(self, Keep::Accept | Keep::Recv { .. } | Keep::Poll)
     }
 }
 
@@ -876,6 +891,12 @@ impl Ring {
                     }
                 }
             }
+            Op::PollIn { fd } => {
+                sqe.opcode = opcode::POLL_ADD;
+                sqe.fd = fd;
+                sqe.op_flags = POLLIN;
+                Keep::Poll
+            }
             Op::Cancel { id } => {
                 sqe.opcode = opcode::ASYNC_CANCEL;
                 sqe.fd = -1;
@@ -918,6 +939,40 @@ impl Ring {
             return Ok(handed);
         }
         self.enter(self.unsubmitted, wait, flags)
+    }
+
+    /// Hands the queued operations to the kernel and waits up to `timeout` for one completion;
+    /// returns the operations submitted. A timeout that passes is no error.
+    pub fn submit_and_wait_for(&mut self, timeout: std::time::Duration) -> io::Result<u32> {
+        if self.sqpoll {
+            // The polling thread takes the queue; the call below only waits.
+            self.submit(0)?;
+        }
+        let ts = [timeout.as_secs() as i64, i64::from(timeout.subsec_nanos())];
+        // `struct io_uring_getevents_arg`: signal mask, its size, padding, and the timeout.
+        let arg: [u64; 3] = [0, 0, ts.as_ptr() as u64];
+        let to_submit = if self.sqpoll { 0 } else { self.unsubmitted };
+        // SAFETY: `arg` and the `timespec` it points to live during the call; the kernel reads
+        // `size_of_val(&arg)` bytes of `arg`.
+        let rc = unsafe {
+            syscall(
+                SYS_IO_URING_ENTER,
+                self.fd.as_raw_fd(),
+                to_submit,
+                1u32,
+                IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG,
+                arg.as_ptr(),
+                size_of_val(&arg),
+            )
+        };
+        let n = match cvt(rc) {
+            Ok(n) => n,
+            // Only a call that submitted nothing reports the wait's end: a timeout or a signal.
+            Err(e) if e.raw_os_error() == Some(ETIME) || interrupted(&e) => 0,
+            Err(e) => return Err(e),
+        };
+        self.unsubmitted -= n.min(self.unsubmitted);
+        Ok(n)
     }
 
     /// Whether a kernel thread polls this ring's submissions (`--io-uring-sqpoll`).
@@ -1032,10 +1087,11 @@ impl Ring {
         self.buf_rings.get(&group).map_or(0, BufRing::held_count)
     }
 
-    /// Cancels every multishot operation in flight, which would otherwise never end.
-    fn cancel_multishot(&mut self) -> io::Result<()> {
+    /// Cancels every operation in flight that waits for the world (multishot ones, polls), which
+    /// might otherwise never end.
+    fn cancel_waiting(&mut self) -> io::Result<()> {
         let ids: Vec<u64> =
-            self.in_flight.iter().filter(|(_, k)| k.multishot()).map(|(id, _)| *id).collect();
+            self.in_flight.iter().filter(|(_, k)| k.waits()).map(|(id, _)| *id).collect();
         for id in ids {
             while self.space() == 0 {
                 self.submit(0)?;
@@ -1051,8 +1107,8 @@ impl Drop for Ring {
     fn drop(&mut self) {
         // The kernel may still read paths and use buffers of operations in flight: wait for them
         // before the memory goes. A ring that cannot wait any more (an error) stops waiting.
-        // Multishot operations only end when cancelled.
-        if self.cancel_multishot().is_err() {
+        // Multishot operations and polls only end when cancelled.
+        if self.cancel_waiting().is_err() {
             return;
         }
         while !self.in_flight.is_empty() {

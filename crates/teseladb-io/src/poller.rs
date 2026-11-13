@@ -68,3 +68,10 @@ impl Poller {
         self.sys.waker()
     }
 }
+
+impl AsRawFd for Poller {
+    /// The selector's descriptor, readable while it has events.
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.sys.as_raw_fd()
+    }
+}
