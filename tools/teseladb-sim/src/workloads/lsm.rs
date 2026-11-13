@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use teseladb_keys::Hlc;
-use teseladb_lsm::{Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone};
+use teseladb_lsm::{Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone, Step};
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{
     Completions, LogEntry, LogGap, ReleaseProvider, SimDisk, SnapshotMeta, Ticket,
@@ -203,6 +203,35 @@ fn read(
                 lsm.run_io(disk, now);
             }
             Lookup::Failed(e) => return Err(e),
+        }
+    }
+}
+
+/// A version as a read shows it: its mark, its kind and its value.
+type Shown = (Hlc, Kind, Vec<u8>);
+
+/// Scans the keys of group `g` at `ts`, running the LSM's I/O on the core's disk until the scan
+/// ends: the visible version of each key, in key order (004 FR-031: with history files, a scan
+/// at an old mark reads them and one at the newest does not).
+fn scan(
+    lsm: &mut Lsm,
+    disk: &mut SimDisk,
+    g: GroupId,
+    ts: Hlc,
+    now: Nanos,
+) -> Result<Vec<(Vec<u8>, Shown)>, LsmError> {
+    let (start, end) = (key(g, 0), key(g, KEYS));
+    let view = lsm.view();
+    let mut s = view.scan(&start, &end, ts);
+    let mut rows = Vec::new();
+    loop {
+        match s.next(lsm) {
+            Step::Item(i) => rows.push((i.key, (i.ts, i.kind, i.value.to_vec()))),
+            Step::Miss(_) => {
+                lsm.run_io(disk, now);
+            }
+            Step::Done => return Ok(rows),
+            Step::Failed(e) => return Err(e),
         }
     }
 }
@@ -519,6 +548,25 @@ impl Workload for LsmWorkload {
                 }
             }
             'check: for g in Self::groups(client) {
+                // The keys of the group as a scan gives them, at the same marks.
+                for ts in [at(cl.clock / 2), at(cl.clock), at(u64::MAX)] {
+                    let got = match scan(&mut lsm, &mut c.disk, g, ts, local) {
+                        Ok(got) => got,
+                        Err(LsmError::Stopped(_)) => break 'check,
+                        Err(e) => return Err(Violation::safety("lsm", e.to_string())),
+                    };
+                    let expected: Vec<_> = (0..KEYS)
+                        .map(|n| key(g, n))
+                        .filter_map(|k| model.get(&k, ts).map(|v| (k, v)))
+                        .collect();
+                    if got != expected {
+                        let detail = format!(
+                            "n{node} c{core}: the scan of {g:?} at {ts:?} gives {got:?}, the \
+                             model {expected:?}"
+                        );
+                        return Err(Violation::safety("lsm", detail));
+                    }
+                }
                 for n in 0..KEYS {
                     let k = key(g, n);
                     for ts in [at(cl.clock / 2), at(cl.clock), at(u64::MAX)] {

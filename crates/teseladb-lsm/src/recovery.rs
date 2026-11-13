@@ -187,8 +187,21 @@ pub(crate) fn recover(cfg: &LsmConfig, disk: &mut dyn Disk) -> Result<Recovered,
     )?;
     let mut tables = Vec::new();
     let dicts = state.dictionary_contents();
+    // Each history file goes with the file it is of (FR-031); one whose file the manifest does
+    // not list is as broken as a file it cannot read.
+    let mut histories = std::collections::BTreeMap::new();
     for f in state.files.values() {
-        tables.push((f.level, open_table(disk, cfg, f, &dicts)?));
+        if let Some(of) = f.history_of {
+            if !state.files.get(&of).is_some_and(|t| t.history_of.is_none()) {
+                return Err(LsmError::Corrupt { file: f.number, offset: 0 });
+            }
+            histories.insert(of, open_table(disk, cfg, f, &dicts)?);
+        }
+    }
+    for f in state.files.values().filter(|f| f.history_of.is_none()) {
+        let mut t = open_table(disk, cfg, f, &dicts)?;
+        t.history = histories.remove(&f.number).map(std::sync::Arc::new);
+        tables.push((f.level, t));
     }
     remove_leftovers(disk, cfg, &names, &state, number)?;
     Ok(Recovered { state, manifest: number, manifest_tail: tail, tables })
@@ -212,6 +225,7 @@ mod tests {
                 hi: Vec::new(),
                 min_ts: teseladb_keys::Hlc { physical: 0, logical: 0 },
                 max_ts: teseladb_keys::Hlc { physical: 0, logical: 0 },
+                history_of: None,
             },
         );
         assert!(!is_leftover("000004.sst", &state, 2));

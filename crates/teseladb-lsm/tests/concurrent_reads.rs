@@ -14,7 +14,9 @@ use std::thread;
 use common::model::{Model, Row};
 use common::{Gen, Op, apply, open, small, ts};
 use teseladb_keys::Hlc;
-use teseladb_lsm::{BlockNeed, Lsm, SharedLsm, SharedRead, SharedStep, SharedView, ViewCache};
+use teseladb_lsm::{
+    BlockNeed, Lsm, LsmConfig, SharedLsm, SharedRead, SharedStep, SharedView, ViewCache,
+};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
@@ -113,7 +115,11 @@ type Round = Option<(SharedView, Arc<Model>, Hlc)>;
 /// Rounds of random writes; in each, the readers check the published view against the model
 /// while the core only flushes and compacts, which changes the files and not what is visible.
 fn rounds(seed: u64, readers: usize) {
-    let cfg = small();
+    // The readers' cache gets room for the blocks of one read. With the budget of `small` it
+    // has none, each of its shards holds one block, and a read that needs two blocks of one
+    // shard asks for them in turns without an end: the node's reads give up after a few
+    // blocks and go to the core, and these readers have no core to go to.
+    let cfg = LsmConfig { cache_bytes: 2 << 20, ..small() };
     let mut disk = MemDisk::new();
     let mut lsm: Lsm = open(&cfg, &mut disk);
     let shared = lsm.shared();

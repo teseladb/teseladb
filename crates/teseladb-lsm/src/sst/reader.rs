@@ -34,6 +34,9 @@ pub struct Table {
     dict: Option<Arc<[u8]>>,
     /// What its data blocks took, for a file this LSM just wrote.
     pub(crate) written: BlockStats,
+    /// Its history file (FR-031): the versions older than the value or the deletion that is the
+    /// newest version here of their key. A read at or above `props.max_ts` does not open it.
+    pub(crate) history: Option<Arc<Table>>,
 }
 
 /// Data blocks written: how many with each compression code, and their bytes before and after
@@ -147,7 +150,13 @@ impl Table {
             key,
             dict,
             written: BlockStats::default(),
+            history: None,
         })
+    }
+
+    /// Bytes of the file and of its history file.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.size + self.history.as_ref().map_or(0, |h| h.size)
     }
 
     /// Each data block's last internal key and its length.

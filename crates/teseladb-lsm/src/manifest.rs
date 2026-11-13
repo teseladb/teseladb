@@ -33,6 +33,8 @@ const RANGE_RESET: u8 = 7;
 const DICTIONARY: u8 = 8;
 /// A dictionary no file uses any more.
 const DROP_DICTIONARY: u8 = 9;
+/// The history file of a file (004 FR-031).
+const ADD_HISTORY: u8 = 10;
 
 /// Name of manifest `number`.
 pub(crate) fn manifest_name(number: u64) -> String {
@@ -63,6 +65,10 @@ pub(crate) struct FileMeta {
     pub(crate) hi: Vec<u8>,
     pub(crate) min_ts: Hlc,
     pub(crate) max_ts: Hlc,
+    /// The number of the file this one is the history file of (004 FR-031); `None` for a file
+    /// of a level. A history file has the level of its file and is removed with it, each with
+    /// its own record.
+    pub(crate) history_of: Option<u64>,
 }
 
 /// A dictionary as the manifest keeps it: its version, the prefix of the collection whose blocks
@@ -152,15 +158,22 @@ impl Edit {
     fn records(&self) -> Vec<u8> {
         let mut out = Vec::new();
         record(&mut out, BEGIN, &[]);
-        for f in &self.adds {
+        // A history file goes after the file it is of: the files of the levels first.
+        let (files, histories): (Vec<&FileMeta>, Vec<&FileMeta>) =
+            self.adds.iter().partition(|f| f.history_of.is_none());
+        for f in files.into_iter().chain(histories) {
             let mut b = vec![f.level];
+            if let Some(of) = f.history_of {
+                put_varint(&mut b, of);
+            }
             put_varint(&mut b, f.number);
             put_varint(&mut b, f.size);
             put_bytes(&mut b, &f.lo);
             put_bytes(&mut b, &f.hi);
             b.extend_from_slice(&f.min_ts.to_be_bytes());
             b.extend_from_slice(&f.max_ts.to_be_bytes());
-            record(&mut out, ADD_FILE, &b);
+            let kind = if f.history_of.is_some() { ADD_HISTORY } else { ADD_FILE };
+            record(&mut out, kind, &b);
         }
         for (level, number) in &self.removes {
             let mut b = vec![*level];
@@ -200,9 +213,13 @@ impl Edit {
     fn take(&mut self, kind: u8, body: &[u8]) -> Result<(), Bad> {
         let mut at = 0;
         match kind {
-            ADD_FILE => {
+            ADD_FILE | ADD_HISTORY => {
                 let level = *body.first().ok_or(Bad)?;
                 at = 1;
+                let history_of = match kind {
+                    ADD_HISTORY => Some(get_varint(body, &mut at)?),
+                    _ => None,
+                };
                 let f = FileMeta {
                     level,
                     number: get_varint(body, &mut at)?,
@@ -211,6 +228,7 @@ impl Edit {
                     hi: get_bytes(body, &mut at)?.to_vec(),
                     min_ts: get_ts(body, &mut at)?,
                     max_ts: get_ts(body, &mut at)?,
+                    history_of,
                 };
                 self.adds.push(f);
             }
@@ -432,6 +450,7 @@ mod tests {
             hi: b"m".to_vec(),
             min_ts: Hlc { physical: 1, logical: 0 },
             max_ts: Hlc { physical: 9, logical: 2 },
+            history_of: None,
         }
     }
 
@@ -449,6 +468,23 @@ mod tests {
             }],
             dropped: if n > 2 { vec![n - 1] } else { Vec::new() },
         }
+    }
+
+    /// A history file goes in its edit after the files of the levels, with the number of the
+    /// file it is of (004 FR-031).
+    #[test]
+    fn a_history_file_round_trips_with_the_file_it_is_of() {
+        let history = FileMeta { number: 8, size: 4096, history_of: Some(7), ..file(7) };
+        let e = Edit { adds: vec![history.clone(), file(7)], next_file: 9, ..Edit::default() };
+        let (edits, _) = read(&e.encode(), None).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].adds, vec![file(7), history]);
+        let mut s = State::default();
+        s.apply(&edits[0]);
+        assert_eq!(s.files[&8].history_of, Some(7));
+        // Each is removed by its own record.
+        s.apply(&Edit { removes: vec![(1, 7), (1, 8)], next_file: 9, ..Edit::default() });
+        assert!(s.files.is_empty());
     }
 
     #[test]

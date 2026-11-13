@@ -26,13 +26,13 @@ use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::gc::{self, Candidate, GcTable};
 use crate::ingest::FileRef;
-use crate::jobs::{ManifestFile, Next, Outcome, STEP_BYTES, file_meta};
+use crate::jobs::{ManifestFile, Next, Outcome, STEP_BYTES, file_metas, write_at};
 use crate::manifest::Edit;
 use crate::range_tombstone;
 use crate::read::corrupt;
 use crate::sst::block::{Block, BlockCursor};
 use crate::sst::reader::Table;
-use crate::sst::writer::TableWriter;
+use crate::sst::writer::{Split, TableWriter};
 use crate::sst::{align_up, file_id, file_name};
 use crate::version::Version;
 
@@ -81,7 +81,7 @@ pub(crate) fn level_budgets(v: &Version, cfg: &LsmConfig) -> Vec<u64> {
     if last < cfg.levels {
         budgets[last] = cfg.level_bytes(last);
     }
-    let mut budget: u64 = v.levels[last].iter().map(|t| t.size).sum();
+    let mut budget: u64 = v.levels[last].iter().map(|t| t.bytes()).sum();
     for level in (1..last).rev() {
         budget = (budget / cfg.level_ratio.max(1)).max(cfg.l1_bytes);
         budgets[level] = budget;
@@ -115,7 +115,7 @@ pub(crate) fn pick(
     let budgets = level_budgets(v, cfg);
     let below = v.levels.iter().zip(pointers.iter_mut()).enumerate().take(cfg.levels).skip(1);
     for (n, (files, pointer)) in below {
-        let size: u64 = files.iter().map(|t| t.size).sum();
+        let size: u64 = files.iter().map(|t| t.bytes()).sum();
         if size <= budgets[n] {
             continue;
         }
@@ -249,7 +249,16 @@ impl Lane {
 struct Output {
     number: u64,
     writer: TableWriter,
+    /// Its history file, from its first version on (FR-031).
+    history: Option<(u64, TableWriter)>,
     lo: Option<Vec<u8>>,
+}
+
+impl Output {
+    /// Bytes of the file and of its history file so far.
+    fn size(&self) -> u64 {
+        self.writer.size() + self.history.as_ref().map_or(0, |(_, h)| h.size())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -269,6 +278,8 @@ pub(crate) struct CompactJob {
     surviving: Vec<RangeTombstone>,
     key: Option<Vec<u8>>,
     versions: Vec<(Candidate, Bytes)>,
+    /// Which of an output and its history file each version goes to.
+    split: Split,
     out: Option<Output>,
     finished: Vec<Table>,
     started: bool,
@@ -303,15 +314,12 @@ impl CompactJob {
             .filter(|t| !gc::drop_tombstone(t, &gc, plan.bottommost))
             .cloned()
             .collect();
+        // Each input with its history file after it (FR-031), in order of precedence.
         let lanes = plan
             .inputs
             .iter()
-            .map(|(_, t)| Lane {
-                table: t.clone(),
-                next_block: 0,
-                blocks: VecDeque::new(),
-                cur: None,
-            })
+            .flat_map(|(_, t)| std::iter::once(t).chain(t.history.as_ref()))
+            .map(|t| Lane { table: t.clone(), next_block: 0, blocks: VecDeque::new(), cur: None })
             .collect();
         CompactJob {
             plan,
@@ -321,6 +329,7 @@ impl CompactJob {
             surviving,
             key: None,
             versions: Vec::new(),
+            split: Split::default(),
             out: None,
             finished: Vec::new(),
             started: false,
@@ -435,23 +444,37 @@ impl CompactJob {
             path: self.dir.join(file_name(number)),
             prealloc: 0,
         });
-        self.out = Some(Output { number, writer: self.writer(), lo });
+        self.out = Some(Output { number, writer: self.writer(), history: None, lo });
     }
 
     fn finish_output(&mut self, hi: Option<&[u8]>) {
         let Some(o) = self.out.take() else { return };
         let pieces = range_tombstone::pieces(&self.surviving, o.lo.as_deref(), hi);
-        let file = file_id(o.number);
-        let (at, chunk, table) =
+        let (at, chunk, mut table) =
             o.writer.finish(o.number, pieces).expect("an output has versions or tombstones");
-        self.queued.push_back(IoOp::WriteAt {
-            file,
-            offset: at,
-            data: Bytes::from_vec(chunk),
-            batch: 0,
-        });
-        self.queued.push_back(IoOp::Sync { file, batch: 0 });
+        self.queued.push_back(write_at(o.number, at, chunk));
+        self.queued.push_back(IoOp::Sync { file: file_id(o.number), batch: 0 });
+        if let Some((number, h)) = o.history {
+            let (at, chunk, history) =
+                h.finish(number, Vec::new()).expect("a history file has versions");
+            self.queued.push_back(write_at(number, at, chunk));
+            self.queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+            table.history = Some(Arc::new(history));
+        }
         self.finished.push(table);
+    }
+
+    /// Starts the history file of the output in hand (FR-031).
+    fn start_history(&mut self, next_file: &mut u64) {
+        let number = *next_file;
+        *next_file += 1;
+        self.queued.push_back(IoOp::Create {
+            file: file_id(number),
+            path: self.dir.join(file_name(number)),
+            prealloc: 0,
+        });
+        let writer = self.writer();
+        self.out.as_mut().expect("an output in hand").history = Some((number, writer));
     }
 
     /// Decides the versions of the key in hand and writes the ones that stay.
@@ -474,29 +497,38 @@ impl CompactJob {
             if first {
                 first = false;
                 let cut = self.passes_cut(&key);
-                if self.out.as_ref().is_some_and(|o| cut || o.writer.size() >= self.target) {
+                if self.out.as_ref().is_some_and(|o| cut || o.size() >= self.target) {
                     self.finish_output(Some(&key));
                 }
                 if self.out.is_none() {
                     self.start_output(&key, next_file);
                 }
             }
+            let ikey = entry::internal_key(&key, c.ts);
+            // An export writes every version to its files: they are ingested as they are.
+            let apart = self.export.is_none() && self.split.sets_apart(&ikey, c.kind);
+            if apart && self.out.as_ref().is_some_and(|o| o.history.is_none()) {
+                self.start_history(next_file);
+            }
             let o = self.out.as_mut().expect("started above");
-            o.writer.add(&entry::internal_key(&key, c.ts), c.kind, &value);
+            match &mut o.history {
+                Some((_, h)) if apart => h.add(&ikey, c.kind, &value),
+                _ => o.writer.add(&ikey, c.kind, &value),
+            }
             if let Some(t) = &mut self.training {
                 t.note(&key, &value);
             }
         }
-        if let Some(o) = &mut self.out
-            && o.writer.pending() >= self.chunk
-        {
+        let Some(o) = &mut self.out else { return };
+        if o.writer.pending() >= self.chunk {
             let (at, chunk) = o.writer.take().expect("pending bytes");
-            self.queued.push_back(IoOp::WriteAt {
-                file: file_id(o.number),
-                offset: at,
-                data: Bytes::from_vec(chunk),
-                batch: 0,
-            });
+            self.queued.push_back(write_at(o.number, at, chunk));
+        }
+        if let Some((number, h)) = &mut o.history
+            && h.pending() >= self.chunk
+        {
+            let (at, chunk) = h.take().expect("pending bytes");
+            self.queued.push_back(write_at(*number, at, chunk));
         }
     }
 
@@ -534,7 +566,8 @@ impl CompactJob {
                         path: self.dir.join(file_name(n)),
                         prealloc: 0,
                     });
-                    self.out = Some(Output { number: n, writer: self.writer(), lo: None });
+                    let writer = self.writer();
+                    self.out = Some(Output { number: n, writer, history: None, lo: None });
                 }
                 self.finish_output(None);
                 if !self.finished.is_empty() {
@@ -617,17 +650,35 @@ impl CompactJob {
                 }
                 Stage::Edit => {
                     let level = self.plan.output_level as u8;
+                    // Each file with its history file (FR-031).
+                    let both = |t: &Arc<Table>| std::iter::once(t.clone()).chain(t.history.clone());
                     let mut edit = Edit {
-                        adds: self.finished.iter().map(|t| file_meta(level, t)).collect(),
-                        removes: self.plan.inputs.iter().map(|(l, t)| (*l, t.number)).collect(),
+                        adds: self.finished.iter().flat_map(|t| file_metas(level, t)).collect(),
+                        removes: self
+                            .plan
+                            .inputs
+                            .iter()
+                            .flat_map(|(l, t)| both(t).map(move |f| (*l, f.number)))
+                            .collect(),
                         next_file: *next_file,
                         ..Edit::default()
                     };
                     if let Some(t) = &mut self.training {
-                        let removed: Vec<u64> =
-                            self.plan.inputs.iter().map(|(_, t)| t.props.dictionary).collect();
-                        let added: Vec<u64> =
-                            self.finished.iter().map(|t| t.props.dictionary).collect();
+                        let removed: Vec<u64> = self
+                            .plan
+                            .inputs
+                            .iter()
+                            .flat_map(|(_, t)| both(t))
+                            .map(|f| f.props.dictionary)
+                            .collect();
+                        let added: Vec<u64> = self
+                            .finished
+                            .iter()
+                            .flat_map(|t| {
+                                let history = t.history.as_ref().map(|h| h.props.dictionary);
+                                std::iter::once(t.props.dictionary).chain(history)
+                            })
+                            .collect();
                         let (trained, dropped, written) = t.finish(&removed, &added);
                         (edit.dictionaries, edit.dropped) = (trained, dropped);
                         self.dict_written = Some(written);

@@ -87,7 +87,7 @@ impl TimeScan {
             c.seek(first.clone());
             cursors.push(c);
         }
-        for t in v.tables() {
+        for t in v.files() {
             let p = &t.props;
             if !self.in_time(p.min_ts, p.max_ts)
                 || p.hi.as_slice() < self.start.as_slice()

@@ -801,13 +801,19 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
 }
 
 /// A node whose range holds `docs` documents of 8 KiB (`\x01k000`, `\x01k001`…) in a file of the
-/// LSM, of which the first `deleted` were deleted afterwards: about two documents a block, none
-/// of them in the cache of the reads outside the core.
+/// LSM, of which the first `deleted` were deleted afterwards, in a second file: about two
+/// documents a block, none of them in the cache of the reads outside the core. The deletions go
+/// in a file of their own so that the documents they delete stay in the blocks a scan passes:
+/// in one file the flush would set them apart as history (004 FR-031).
 fn node_with_a_file(docs: u32, deleted: u32) -> Node {
     let key = |i: u32| format!("\x01k{i:03}").into_bytes();
     let mut n = Node::new();
     for i in 0..docs {
         n.mutate(&key(i), Box::new(SetLarge(key(i), 8 << 10, i as u8)), MAJORITY);
+        n.settle();
+    }
+    if deleted > 0 {
+        n.host.lsm().borrow_mut().flush();
         n.settle();
     }
     for i in 0..deleted {

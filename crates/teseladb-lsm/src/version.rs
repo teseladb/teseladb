@@ -12,6 +12,8 @@
 
 use std::sync::Arc;
 
+use teseladb_keys::Hlc;
+
 use crate::memtable::Memtable;
 use crate::sst::reader::Table;
 
@@ -36,6 +38,20 @@ impl Version {
     /// Every file in order of precedence.
     pub(crate) fn tables(&self) -> impl Iterator<Item = &Arc<Table>> {
         self.levels.iter().flatten()
+    }
+
+    /// Every file with its history file right after it (FR-031), in order of precedence: what a
+    /// read of every version, a compaction or a count of bytes walks.
+    pub(crate) fn files(&self) -> impl Iterator<Item = &Arc<Table>> {
+        self.tables().flat_map(with_history)
+    }
+
+    /// The files a read at mark `read` looks at, in order of precedence: every file, and the
+    /// history file of those whose highest mark is above the read's (FR-031). At or above that
+    /// mark the read sees, of each key with versions in the history file, the value or the
+    /// deletion its file has of it, or something newer, and none of the older ones.
+    pub(crate) fn files_at(&self, read: Hlc) -> impl Iterator<Item = &Arc<Table>> {
+        self.tables().flat_map(move |t| with_history_at(t, read))
     }
 
     /// The files that may hold versions of `key`, in order of precedence: every file of level 0
@@ -68,6 +84,16 @@ impl Version {
     pub(crate) fn clone_shallow(&self) -> Version {
         Version { memtables: self.memtables.clone(), levels: self.levels.clone() }
     }
+}
+
+/// A file and its history file.
+fn with_history(t: &Arc<Table>) -> impl Iterator<Item = &Arc<Table>> {
+    std::iter::once(t).chain(t.history.as_ref())
+}
+
+/// A file and, for a read at `read` below its highest mark, its history file.
+fn with_history_at(t: &Arc<Table>, read: Hlc) -> impl Iterator<Item = &Arc<Table>> {
+    std::iter::once(t).chain(t.history.as_ref().filter(|_| read < t.props.max_ts))
 }
 
 /// A fixed view for reads: what was there when it was taken stays readable while it lives.

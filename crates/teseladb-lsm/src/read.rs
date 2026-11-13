@@ -313,6 +313,7 @@ fn get_in_table<B: Blocks>(
     target: &[u8],
     retracted: &mut Vec<Hlc>,
     best: &mut Option<Found>,
+    passed: &mut bool,
 ) -> Result<Option<ReadToken>, LsmError> {
     let Some(mut i) = t.find_block(target) else {
         return Ok(None);
@@ -338,6 +339,8 @@ fn get_in_table<B: Blocks>(
             if let Seen::Answer = see(ts, c.kind(), || c.value(), retracted, best) {
                 return Ok(None);
             }
+            // A version passed over: what the read wants is under it.
+            *passed = true;
             c.advance().map_err(|_| corrupt(t, i))?;
         }
         i += 1;
@@ -391,17 +394,28 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
     let mut probes = 0;
     for t in v.tables_for(key) {
         note_tombstones(&mut hidden, &t.props.tombstones, key, read);
-        let newer = best.as_ref().is_none_or(|b| t.props.max_ts > b.ts);
-        if !newer || t.props.min_ts > read || !t.may_contain(hashes) {
-            continue;
-        }
-        probes += 1;
-        match get_in_table(r, t, key, &target, &mut retracted, &mut best) {
-            Err(e) => return Lookup::Failed(e),
-            Ok(Some(token)) => {
-                waiting.get_or_insert(token);
+        let before = best.as_ref().map(|b| b.ts);
+        let mut passed = false;
+        // The file, then its history file (FR-031): what it holds of a key is older than the
+        // version its file has of it. It is read below the file's highest mark, where that
+        // version may be above the read, and when the read passed over the file's version (a
+        // `Retract` of its mark in a newer source); never when the file gave the key's version.
+        let history = t.history.as_ref().map(|h| (h, false));
+        for (f, of_level) in std::iter::once((t, true)).chain(history) {
+            let gave = best.as_ref().map(|b| b.ts) != before;
+            let wanted = of_level || (!gave && (read < t.props.max_ts || passed));
+            let newer = best.as_ref().is_none_or(|b| f.props.max_ts > b.ts);
+            if !wanted || !newer || f.props.min_ts > read || !f.may_contain(hashes) {
+                continue;
             }
-            Ok(None) => {}
+            probes += 1;
+            match get_in_table(r, f, key, &target, &mut retracted, &mut best, &mut passed) {
+                Err(e) => return Lookup::Failed(e),
+                Ok(Some(token)) => {
+                    waiting.get_or_insert(token);
+                }
+                Ok(None) => {}
+            }
         }
     }
     if let Some(token) = waiting {
@@ -430,6 +444,8 @@ impl View {
             cursors: None,
             heap: None,
             moved: false,
+            asleep: Vec::new(),
+            joining: None,
             tombstones: Vec::new(),
             current: None,
             finished: false,
@@ -490,6 +506,12 @@ pub struct Scan {
     /// The first cursor of the heap moved: it is made ready and put in its place before the
     /// scan looks at the heap again.
     moved: bool,
+    /// For each cursor of a file, the cursor of its history file when the scan left it closed
+    /// (FR-031): a read at or above the file's highest mark needs it only for a key whose
+    /// version in the file it passes over, and opens it then.
+    asleep: Vec<Option<usize>>,
+    /// A history file's cursor that a key woke: once at its entry it joins the heap.
+    joining: Option<usize>,
     tombstones: Vec<RangeTombstone>,
     current: Option<KeyState>,
     finished: bool,
@@ -516,19 +538,36 @@ impl Scan {
             c.seek(first.clone());
             cursors.push(c);
         }
+        let mut asleep = vec![None; cursors.len()];
         for t in v.tables() {
-            if t.props.hi.as_slice() < self.start.as_slice()
-                || t.props.lo.as_slice() >= self.end.as_slice()
-            {
-                continue;
+            // The file, then its history file (FR-031), right after it in the order of
+            // precedence. At or above the file's highest mark the history file stays closed.
+            let open = self.read < t.props.max_ts;
+            let history = t.history.as_ref().map(|h| (h, open));
+            let mut of_level = None;
+            for (f, open) in std::iter::once((t, true)).chain(history) {
+                if f.props.hi.as_slice() < self.start.as_slice()
+                    || f.props.lo.as_slice() >= self.end.as_slice()
+                {
+                    continue;
+                }
+                self.tombstones
+                    .extend(f.props.tombstones.iter().filter(|x| x.ts <= self.read).cloned());
+                if f.props.min_ts > self.read || f.props.versions == 0 {
+                    continue;
+                }
+                let pos = if open { Pos::Seek(first.clone()) } else { Pos::Done };
+                cursors.push(Cursor::Table { table: f.clone(), pos });
+                asleep.push(None);
+                let at = cursors.len() - 1;
+                if Arc::ptr_eq(f, t) {
+                    of_level = Some(at);
+                } else if let (false, Some(file)) = (open, of_level) {
+                    asleep[file] = Some(at);
+                }
             }
-            self.tombstones
-                .extend(t.props.tombstones.iter().filter(|x| x.ts <= self.read).cloned());
-            if t.props.min_ts > self.read || t.props.versions == 0 {
-                continue;
-            }
-            cursors.push(Cursor::Table { table: t.clone(), pos: Pos::Seek(first.clone()) });
         }
+        self.asleep = asleep;
         cursors
     }
 
@@ -609,6 +648,23 @@ impl Scan {
                 }
                 sift_down(heap, cursors, 0);
             }
+            if let Some(j) = self.joining {
+                // A history file a key woke: at its entry, it takes its place among the others.
+                let cursors = self.cursors.as_mut().expect("opened");
+                match cursors[j].ready(r) {
+                    Err(e) => return Step::Failed(e),
+                    Ok(Some(t)) => return Step::Miss(t),
+                    Ok(None) => {}
+                }
+                self.joining = None;
+                if cursors[j].key().is_some() {
+                    let heap = self.heap.as_mut().expect("ordered");
+                    heap.push(j);
+                    for at in (0..heap.len() / 2).rev() {
+                        sift_down(heap, cursors, at);
+                    }
+                }
+            }
             // The first cursor's entry: its number, its mark and whether it is of the key being
             // decided (`None`: no key is).
             let head = self.heap.as_ref().expect("ordered").first().and_then(|&i| {
@@ -652,7 +708,14 @@ impl Scan {
                 continue;
             }
             let c = &cursors[i];
-            let _ = see(ts, c.kind(), || c.value(), &mut st.retracted, &mut st.found);
+            let seen = see(ts, c.kind(), || c.value(), &mut st.retracted, &mut st.found);
+            // The scan passes over this version: the ones under it may be in the history file
+            // it left closed, which it opens at this key (FR-031).
+            if let (Seen::Next, Some(j)) = (seen, self.asleep[i]) {
+                self.asleep[i] = None;
+                cursors[j].seek(entry::internal_key(&st.key, read));
+                self.joining = Some(j);
+            }
             if let Err(e) = cursors[i].advance() {
                 return Step::Failed(e);
             }

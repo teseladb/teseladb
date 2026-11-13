@@ -50,7 +50,7 @@ impl Training {
     /// `before` bytes written per collection since its dictionary was trained.
     pub(crate) fn new(cfg: &LsmConfig, state: &State, version: &Version, before: Written) -> Self {
         let mut used = BTreeMap::new();
-        for t in version.tables().filter(|t| t.props.dictionary != 0) {
+        for t in version.files().filter(|t| t.props.dictionary != 0) {
             *used.entry(t.props.dictionary).or_insert(0) += 1;
         }
         let versions = state.dictionaries.iter().map(|(v, d)| (*v, d.prefix.clone())).collect();

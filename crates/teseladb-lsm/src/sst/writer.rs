@@ -23,6 +23,39 @@ const ENTRY_HEADER: usize = 3 * 10 + 1;
 /// The newest dictionary of each collection, by the collection's prefix (004 FR-022).
 pub(crate) type CurrentDictionaries = BTreeMap<Vec<u8>, (u64, Arc<[u8]>)>;
 
+/// Which of a file and its history file each version of an output goes to (FR-031): the newest
+/// version of a key goes to the file, and the older ones to the history file when that newest
+/// one is a value or a deletion. Under an intent or a `Retract` they stay in the file: a read
+/// that passes one of those needs what is below it.
+#[derive(Debug, Default)]
+pub(crate) struct Split {
+    /// The logical key of the last version taken.
+    key: Vec<u8>,
+    /// Whether the older versions of that key go to the history file.
+    apart: bool,
+    /// Whether a version was taken.
+    any: bool,
+}
+
+impl Split {
+    /// Whether the version of internal key `ikey` and kind `kind`, taken in the order of the
+    /// output, goes to the history file.
+    pub(crate) fn sets_apart(&mut self, ikey: &[u8], kind: Kind) -> bool {
+        let logical = entry::logical(ikey);
+        if self.any && self.key == logical {
+            return self.apart;
+        }
+        self.key.clear();
+        self.key.extend_from_slice(logical);
+        self.apart = match kind {
+            Kind::Put | Kind::Delete => true,
+            Kind::Intent | Kind::Retract => false,
+        };
+        self.any = true;
+        false
+    }
+}
+
 /// Writes one file.
 #[derive(Debug)]
 pub(crate) struct TableWriter {
@@ -256,6 +289,33 @@ impl TableWriter {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    /// FR-031: the versions under a value or a deletion go to the history file; those under an
+    /// intent or a `Retract` stay with it.
+    #[test]
+    fn the_versions_under_a_value_or_a_deletion_go_to_the_history_file() {
+        let ts = |n| Hlc { physical: n, logical: 0 };
+        let mut split = Split::default();
+        let mut goes =
+            |key: &[u8], at: u64, kind| split.sets_apart(&entry::internal_key(key, ts(at)), kind);
+        // A value, then its older versions of every kind.
+        assert!(!goes(b"a", 9, Kind::Put));
+        assert!(goes(b"a", 7, Kind::Put));
+        assert!(goes(b"a", 5, Kind::Retract));
+        assert!(goes(b"a", 3, Kind::Delete));
+        // A deletion leads its key as a value does.
+        assert!(!goes(b"b", 9, Kind::Delete));
+        assert!(goes(b"b", 2, Kind::Put));
+        // Under an intent, and under a `Retract`, every version stays.
+        assert!(!goes(b"c", 9, Kind::Intent));
+        assert!(!goes(b"c", 4, Kind::Put));
+        assert!(!goes(b"d", 9, Kind::Retract));
+        assert!(!goes(b"d", 9, Kind::Intent));
+        assert!(!goes(b"d", 4, Kind::Put));
+        // A key that is the start of another is another key.
+        assert!(!goes(b"da", 1, Kind::Put));
+        assert!(goes(b"da", 0, Kind::Put));
+    }
 
     #[test]
     fn an_empty_writer_writes_nothing() {

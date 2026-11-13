@@ -34,7 +34,7 @@ impl Lsm {
         let memtables: u64 = self.version.memtables.iter().map(|m| m.bytes()).sum();
         let files: u64 = self
             .version
-            .tables()
+            .files()
             .filter(|t| t.props.hi.as_slice() >= start && t.props.lo.as_slice() < end)
             .map(|t| t.index_entries().map(|(_, len)| len).sum::<u64>())
             .sum();
@@ -60,7 +60,7 @@ impl Lsm {
                 at = m.next_after(pos, key);
             }
         }
-        for t in self.version.tables() {
+        for t in self.version.files() {
             if t.props.hi.as_slice() < start || t.props.lo.as_slice() >= end {
                 continue;
             }

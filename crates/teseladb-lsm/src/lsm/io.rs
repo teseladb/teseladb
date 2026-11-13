@@ -32,8 +32,8 @@ impl Lsm {
                     return Polled::Idle;
                 }
                 let mem = self.version.memtables.last().expect("a frozen memtable").clone();
-                let number = self.alloc_file();
-                self.flush_job = Some(FlushJob::new(&self.cfg, mem, number, self.next_file));
+                let numbers = (self.alloc_file(), self.alloc_file());
+                self.flush_job = Some(FlushJob::new(&self.cfg, mem, numbers, self.next_file));
             }
             match self.flush_job.as_mut().expect("started").next(&mut self.manifest) {
                 Next::Op(op) => return Polled::Op(op),

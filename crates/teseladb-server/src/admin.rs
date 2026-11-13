@@ -501,7 +501,12 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     }
     // The Raft log of each core, on disk and in memory, and what its LSM writes (012 FR-016).
     type Gauge = (&'static str, &'static str, fn(&crate::data::LsmSizes) -> f64);
-    let per_core: [Gauge; 5] = [
+    let per_core: [Gauge; 6] = [
+        (
+            "teseladb_lsm_history_bytes",
+            "Bytes of each core's history files, which its levels count too.",
+            |s| s.history_bytes as f64,
+        ),
         (
             "teseladb_raft_log_disk_bytes",
             "Bytes the segments of each core's Raft log take on disk.",

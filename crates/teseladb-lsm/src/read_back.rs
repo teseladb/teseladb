@@ -180,11 +180,11 @@ impl BackScan {
             }
         }
         let mut waiting = None;
-        let tables = self.version.tables().count();
+        let tables = self.version.files_at(self.read).count();
         if self.blocks.len() < tables {
             self.blocks.resize_with(tables, || None);
         }
-        for (n, t) in self.version.tables().enumerate() {
+        for (n, t) in self.version.files_at(self.read).enumerate() {
             if t.props.lo.as_slice() >= self.bound.as_slice()
                 || t.props.hi.as_slice() < self.start.as_slice()
                 || t.props.min_ts > self.read

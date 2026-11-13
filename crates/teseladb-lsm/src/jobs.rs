@@ -15,11 +15,12 @@ use teseladb_raftlog::IoOp;
 use teseladb_types::{Bytes, GroupId};
 
 use crate::config::LsmConfig;
+use crate::entry::Kind;
 use crate::manifest::{self, Edit, FileMeta};
 use crate::memtable::Memtable;
 use crate::recovery::switch_current;
 use crate::sst::reader::Table;
-use crate::sst::writer::TableWriter;
+use crate::sst::writer::{Split, TableWriter};
 use crate::sst::{file_id, file_name};
 
 /// The manifest being appended to.
@@ -55,7 +56,29 @@ pub(crate) fn file_meta(level: u8, t: &Table) -> FileMeta {
         hi: t.props.hi.clone(),
         min_ts: t.props.min_ts,
         max_ts: t.props.max_ts,
+        history_of: None,
     }
+}
+
+/// The records of file `t` of `level` and of its history file, if it has one (FR-031).
+pub(crate) fn file_metas(level: u8, t: &Table) -> impl Iterator<Item = FileMeta> {
+    let history =
+        t.history.as_ref().map(|h| FileMeta { history_of: Some(t.number), ..file_meta(level, h) });
+    std::iter::once(file_meta(level, t)).chain(history)
+}
+
+/// A writer of a file with blocks of `format.0` bytes, codec `format.1` and the key ring of
+/// `format.2`.
+fn new_writer(
+    format: &(usize, crate::config::Codec, Option<crate::config::Encryption>),
+) -> TableWriter {
+    let ring = format.2.as_ref().map(|e| &*e.0);
+    TableWriter::new(format.0, format.1).sealed(ring)
+}
+
+/// The write of `chunk` at `offset` of file `number`.
+pub(crate) fn write_at(number: u64, offset: u64, chunk: Vec<u8>) -> IoOp {
+    IoOp::WriteAt { file: file_id(number), offset, data: Bytes::from_vec(chunk), batch: 0 }
 }
 
 /// What a finished job leaves to install.
@@ -104,9 +127,17 @@ pub(crate) enum Next {
 pub(crate) struct FlushJob {
     mem: Arc<Memtable>,
     number: u64,
+    /// The number of its history file, which exists once a key has a version under a value or a
+    /// deletion (FR-031).
+    history_number: u64,
     dir: PathBuf,
     chunk: usize,
+    /// How its files are written: block size, codec and key ring.
+    format: (usize, crate::config::Codec, Option<crate::config::Encryption>),
     writer: Option<TableWriter>,
+    /// The writer of the history file, from its first version on.
+    history: Option<TableWriter>,
+    split: Split,
     /// The last internal key written; the next chunk starts after it.
     last: Option<Vec<u8>>,
     table: Option<Table>,
@@ -123,11 +154,12 @@ enum FlushStage {
 }
 
 impl FlushJob {
-    /// A flush of `mem` into file `number`; `next_file` is the counter after it.
+    /// A flush of `mem` into file `number`, with `history_number` for its history file;
+    /// `next_file` is the counter after both.
     pub(crate) fn new(
         cfg: &LsmConfig,
         mem: Arc<Memtable>,
-        number: u64,
+        (number, history_number): (u64, u64),
         next_file: u64,
     ) -> FlushJob {
         let has_data = !mem.is_empty();
@@ -145,15 +177,17 @@ impl FlushJob {
                 prealloc: 0,
             });
         }
+        let format = (cfg.block_bytes, cfg.codec, cfg.encryption.clone());
         FlushJob {
             mem,
             number,
+            history_number,
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
-            writer: has_data.then(|| {
-                let ring = cfg.encryption.as_ref().map(|e| &*e.0);
-                TableWriter::new(cfg.block_bytes, cfg.codec).sealed(ring)
-            }),
+            writer: has_data.then(|| new_writer(&format)),
+            format,
+            history: None,
+            split: Split::default(),
             last: None,
             table: None,
             edit,
@@ -162,19 +196,51 @@ impl FlushJob {
         }
     }
 
+    /// The most bytes one of its two writers has ready to write.
+    fn pending(&self) -> usize {
+        let of = |w: &Option<TableWriter>| w.as_ref().map_or(0, TableWriter::pending);
+        of(&self.writer).max(of(&self.history))
+    }
+
+    /// Adds a version to the file or to its history file (FR-031), which starts with its first
+    /// one.
+    fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
+        if !self.split.sets_apart(ikey, kind) {
+            self.writer.as_mut().expect("a flush with data has a writer").add(ikey, kind, value);
+            return;
+        }
+        if self.history.is_none() {
+            self.queued.push_back(IoOp::Create {
+                file: file_id(self.history_number),
+                path: self.dir.join(file_name(self.history_number)),
+                prealloc: 0,
+            });
+            self.history = Some(new_writer(&self.format));
+        }
+        self.history.as_mut().expect("started above").add(ikey, kind, value);
+    }
+
+    /// Queues the write of what each writer has ready, when it fills a chunk.
+    fn write_full_chunks(&mut self) {
+        let writers = [(self.number, &mut self.writer), (self.history_number, &mut self.history)];
+        for (number, w) in writers {
+            let Some(w) = w.as_mut().filter(|w| w.pending() >= self.chunk) else { continue };
+            let (at, chunk) = w.take().expect("a full chunk");
+            self.queued.push_back(write_at(number, at, chunk));
+        }
+    }
+
     fn fill(&mut self) {
-        let file = file_id(self.number);
         let mem = Arc::clone(&self.mem);
-        let w = self.writer.as_mut().expect("a flush with data has a writer");
         let resume = self.last.take();
         let mut entries = mem.from(resume.as_deref()).peekable();
         let mut last = None;
         let mut taken = 0;
-        while w.pending() < self.chunk
+        while self.pending() < self.chunk
             && taken < STEP_BYTES
             && let Some((k, s)) = entries.next()
         {
-            w.add(k, s.kind, &s.value);
+            self.add(k, s.kind, &s.value);
             taken += k.len() + s.value.len();
             last = Some(k);
         }
@@ -183,32 +249,28 @@ impl FlushJob {
         drop(entries);
         self.last = next.or(resume);
         // Its step is over before the chunk is full: it goes on when asked again (FR-030).
-        if more && w.pending() < self.chunk {
+        if more && self.pending() < self.chunk {
             return;
         }
         if more {
-            let (at, chunk) = w.take().expect("a full chunk");
-            self.queued.push_back(IoOp::WriteAt {
-                file,
-                offset: at,
-                data: Bytes::from_vec(chunk),
-                batch: 0,
-            });
+            self.write_full_chunks();
             return;
         }
         let w = self.writer.take().expect("a flush with data has a writer");
-        let (at, chunk, table) = w
+        let (at, chunk, mut table) = w
             .finish(self.number, mem.tombstones().cloned().collect())
             .expect("a memtable with data writes a file");
-        self.queued.push_back(IoOp::WriteAt {
-            file,
-            offset: at,
-            data: Bytes::from_vec(chunk),
-            batch: 0,
-        });
-        self.queued.push_back(IoOp::Sync { file, batch: 0 });
+        self.queued.push_back(write_at(self.number, at, chunk));
+        self.queued.push_back(IoOp::Sync { file: file_id(self.number), batch: 0 });
+        if let Some(h) = self.history.take() {
+            let (at, chunk, history) =
+                h.finish(self.history_number, Vec::new()).expect("a history file has versions");
+            self.queued.push_back(write_at(self.history_number, at, chunk));
+            self.queued.push_back(IoOp::Sync { file: file_id(self.history_number), batch: 0 });
+            table.history = Some(Arc::new(history));
+        }
         self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
-        self.edit.adds.push(file_meta(0, &table));
+        self.edit.adds.extend(file_metas(0, &table));
         self.table = Some(table);
         self.stage = FlushStage::Edit;
     }

@@ -58,9 +58,13 @@ fn only_the_files_that_overlap_the_interval_are_opened() {
     let (rows, sources) = by_time(&mut lsm, &mut disk, &v, b"", b"z", ts(950, 0), ts(1000, 0));
     assert_eq!(rows.len(), 50);
     assert!(rows.iter().all(|r| r.1 > ts(950, 0) && r.1 <= ts(1000, 0)));
-    assert_eq!(sources, 1, "only the last file");
+    // Each flush left the newest version of its 37 keys in its file and the 63 older ones in
+    // the file's history file (FR-031).
+    assert_eq!(sources, 2, "only the last file and its history file");
     let (rows, sources) = by_time(&mut lsm, &mut disk, &v, b"", b"z", ts(150, 0), ts(250, 0));
-    assert_eq!((rows.len(), sources), (100, 2));
+    // The second file with its history file, and the history file of the third: the newest
+    // versions the third file holds are all past the interval.
+    assert_eq!((rows.len(), sources), (100, 3));
     let (rows, _) = by_time(&mut lsm, &mut disk, &v, b"k010", b"k020", ts(0, 0), ts(2000, 0));
     assert!(
         rows.iter()

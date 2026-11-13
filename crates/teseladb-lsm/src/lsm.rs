@@ -281,6 +281,9 @@ impl Lsm {
         let mut reader = Reader::new(core_cache);
         for (level, t) in r.tables {
             reader.cache.pin_meta(t.number, t.meta.clone());
+            if let Some(h) = &t.history {
+                reader.cache.pin_meta(h.number, h.meta.clone());
+            }
             let level = usize::from(level).min(cfg.levels);
             v.levels[level].push(Arc::new(t));
         }

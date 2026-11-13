@@ -115,6 +115,8 @@ pub enum DataReq {
 pub struct LsmSizes {
     /// Bytes of the files of each level, level 0 first.
     pub level_bytes: Vec<u64>,
+    /// Bytes of its history files (004 FR-031), which `level_bytes` counts too.
+    pub history_bytes: u64,
     /// Files of each level, level 0 first.
     pub level_files: Vec<usize>,
     /// Bytes in its memtables, frozen ones included.
@@ -538,6 +540,7 @@ impl DataCore {
                 let m = self.lsm.borrow().metrics();
                 let sizes = LsmSizes {
                     level_bytes: m.level_bytes,
+                    history_bytes: m.history_bytes,
                     level_files: m.level_files,
                     memtable_bytes: m.memtable_bytes,
                     cache_bytes: m.cache_bytes,

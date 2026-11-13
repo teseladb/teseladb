@@ -20,8 +20,11 @@ impl Lsm {
             std::mem::take(&mut self.obsolete).into_iter().partition(|t| Arc::strong_count(t) == 1);
         self.obsolete = held;
         if !free.is_empty() {
-            let numbers: Vec<u64> = free.iter().map(|t| t.number).collect();
-            for t in &free {
+            // Each file goes with its history file (FR-031), which only its file holds.
+            let gone: Vec<&Arc<Table>> =
+                free.iter().flat_map(|t| std::iter::once(t).chain(t.history.as_ref())).collect();
+            let numbers: Vec<u64> = gone.iter().map(|t| t.number).collect();
+            for t in gone {
                 self.reader.cache.forget(t.number, t.blocks());
                 self.shared.forget(t.number, t.blocks());
             }
@@ -71,7 +74,7 @@ impl Lsm {
 
     /// Bytes of every file of the current version.
     pub(super) fn files_bytes(&self) -> u64 {
-        self.version.levels.iter().flatten().map(|t| t.size).sum()
+        self.version.levels.iter().flatten().map(|t| t.bytes()).sum()
     }
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
@@ -120,9 +123,7 @@ impl Lsm {
                 let mut v = self.version.clone_shallow();
                 v.memtables.pop();
                 if let Some(t) = table {
-                    self.reader.cache.pin_meta(t.number, t.meta.clone());
-                    self.counters.written_bytes += t.size;
-                    self.counters.note_codes(&t);
+                    self.adopt(&t);
                     v.levels[0].insert(0, Arc::new(*t));
                 }
                 self.version = Arc::new(v);
@@ -175,6 +176,16 @@ impl Lsm {
         }
     }
 
+    /// Takes a file this LSM wrote or ingested, and its history file: their metadata stays in
+    /// the cache and their bytes count as written.
+    fn adopt(&mut self, t: &Table) {
+        for f in std::iter::once(t).chain(t.history.as_deref()) {
+            self.reader.cache.pin_meta(f.number, f.meta.clone());
+            self.counters.written_bytes += f.size;
+            self.counters.note_codes(f);
+        }
+    }
+
     /// Installs a change of files: `removed` leave the version (and the disk once no view holds
     /// them), `added` join their levels.
     fn apply_files(
@@ -192,9 +203,7 @@ impl Lsm {
             self.obsolete.extend(gone);
         }
         for (level, t) in added {
-            self.reader.cache.pin_meta(t.number, t.meta.clone());
-            self.counters.written_bytes += t.size;
-            self.counters.note_codes(&t);
+            self.adopt(&t);
             v.levels[usize::from(level)].push(Arc::new(t));
         }
         for level in &mut v.levels[1..] {

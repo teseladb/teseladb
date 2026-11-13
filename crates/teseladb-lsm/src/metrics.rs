@@ -32,6 +32,11 @@ pub struct LsmMetrics {
     pub memtable_bytes: u64,
     /// Files in every level.
     pub files: usize,
+    /// `lsm_history_files`: files of the levels with a history file at their side (FR-031).
+    pub history_files: usize,
+    /// `lsm_history_bytes`: bytes of the history files; `level_bytes` counts them in the level
+    /// of their file.
+    pub history_bytes: u64,
     /// Data blocks written since the LSM opened, by compression code (`sst-format.md`).
     pub blocks_written: [u64; 4],
     /// Bytes of the data blocks written since the LSM opened, before and after compression
@@ -61,7 +66,7 @@ impl Lsm {
         let r = &self.reader;
         let c = &self.counters;
         LsmMetrics {
-            level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.size).sum()).collect(),
+            level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.bytes()).sum()).collect(),
             level_files: v.levels.iter().map(Vec::len).collect(),
             write_amp: ratio(c.written_bytes, c.user_bytes),
             read_files_per_get: ratio(r.probes, r.gets),
@@ -74,6 +79,8 @@ impl Lsm {
             cache_bytes: r.cache.used(),
             memtable_bytes: v.memtables.iter().map(|m| m.bytes()).sum(),
             files: v.tables().count(),
+            history_files: v.tables().filter(|t| t.history.is_some()).count(),
+            history_bytes: v.tables().filter_map(|t| t.history.as_ref()).map(|h| h.size).sum(),
             blocks_written: c.blocks,
             block_bytes_written: c.block_bytes,
             dictionaries: self.state.dictionaries.len(),
