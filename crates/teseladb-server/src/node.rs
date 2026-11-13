@@ -548,7 +548,11 @@ struct CoreSpec {
 fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeError> {
     let dir = core_dir(spec.core);
     let cfg = LsmConfig { dir: dir.join("lsm"), ..spec.lsm.clone() };
-    let (lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
+    let (mut lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
+    // The core's blocks on 2 MiB pages when the system has them reserved (012 FR-032).
+    if let Some(memory) = crate::block_memory::HugeBlocks::for_cache(cfg.cache_bytes) {
+        lsm.place_blocks(memory);
+    }
     let lsm = Rc::new(RefCell::new(lsm));
     let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64())
         .with_segments(spec.search.clone());

@@ -29,7 +29,7 @@ use teseladb_wire::commands::{
     Backend, NodeSessions, REAP_INTERVAL_MS, Shared, Timeouts, lock, reap,
 };
 use teseladb_wire::compressed::Compressor;
-use teseladb_wire::connection::{Connection, ReplyPieces, Request};
+use teseladb_wire::connection::{Connection, ReplyPieces, Request, RequestArena};
 use teseladb_wire::dispatch::{
     Action, ClusterTime, NodeInfo, Topology, dispatch_with, hello_after_wait,
 };
@@ -535,6 +535,7 @@ impl ClientListener {
             open: open.clone(),
             stop: stop.clone(),
             spawn: hooks.spawn_connection,
+            arena: crate::block_memory::HugeRequests::for_port(),
         };
         let poller = Poller::new()?;
         for (i, l) in listeners.iter().enumerate() {
@@ -826,6 +827,8 @@ struct PortParts {
     open: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     spawn: SpawnFn,
+    /// Where its connections keep the buffers of their requests (012 FR-032).
+    arena: Option<Arc<dyn RequestArena>>,
 }
 
 impl PortParts {
@@ -853,6 +856,7 @@ impl PortParts {
                 .map(|h| ServerBackend::new(h, seed(id as u64)).with_diag(self.diag.clone())),
             shared: self.shared.clone(),
             compressors: self.compressors.clone(),
+            arena: self.arena.clone(),
             tls: self.tls.clone(),
             auth: self.auth,
             mechanisms: self.mechanisms.clone(),
@@ -1312,6 +1316,8 @@ struct Worker {
     /// The node's cursors and sessions, shared by its workers.
     shared: Arc<Shared>,
     compressors: Vec<Compressor>,
+    /// Where its connection keeps the buffers of its requests (012 FR-032).
+    arena: Option<Arc<dyn RequestArena>>,
     tls: TlsPort,
     /// Clients authenticate before running commands.
     auth: bool,
@@ -1482,6 +1488,7 @@ impl Worker {
         match (ready, transport) {
             (Ok(()), Some(transport)) => {
                 let mut conn = Connection::with_compressors(id, &self.compressors);
+                conn.arena.clone_from(&self.arena);
                 conn.peer = stream.peer_addr().ok().map(|a| a.to_string());
                 conn.auth.required = self.auth;
                 conn.auth.mechanisms.clone_from(&self.mechanisms);
