@@ -34,6 +34,12 @@ pub(crate) fn with_raw_doc<R>(
     f(RawDoc::from_bytes(&bytes).map_err(bad)?)
 }
 
+/// A view over the canonical bytes a document keeps, when they fit a stored document's limits
+/// (what [`with_raw_doc`] reads without a copy).
+pub(crate) fn stored_view(kept: &[u8]) -> Option<RawDoc<'_>> {
+    RawDoc::from_stored(kept).ok().filter(|raw| within_stored_limits(*raw))
+}
+
 /// The fewest bytes one more level of nesting takes: the element's type, an empty name and an
 /// empty document.
 const LEVEL_BYTES: usize = 7;

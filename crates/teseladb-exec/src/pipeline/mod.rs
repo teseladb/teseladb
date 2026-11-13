@@ -40,6 +40,9 @@ use shape::{AddFields, Projection, ReplaceRoot};
 use sort::SortSpec;
 use stages::{Facet, Lookup, Match, Sample, UnionWith, Unwind};
 
+/// The documents a stage handles in one batch (010 FR-028).
+pub const BATCH_DOCS: usize = 1024;
+
 /// What a pipeline reads besides its input.
 pub trait Env {
     /// The extensions of the matcher (`$expr`, geometry, text).

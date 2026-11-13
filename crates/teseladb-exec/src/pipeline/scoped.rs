@@ -68,6 +68,55 @@ pub(super) fn matches(filter: &Filter, doc: &Document, env: &dyn Env) -> Result<
     crate::raw::with_raw_doc(doc, |raw| matches_raw(filter, raw, env))
 }
 
+/// The documents of `docs` (at most 64) that match `filter` in `env`, as the bits of a mask
+/// (010 FR-028, FR-031): the register machine runs them as one batch. A document that keeps its
+/// stored bytes is read where it is; the others are written once for the batch. When one of them
+/// cannot be written as BSON, each is matched in turn so that the error is the first one in
+/// order.
+pub(super) fn matches_batch(
+    filter: &Filter,
+    docs: &[Document],
+    env: &dyn Env,
+) -> Result<u64, MqlError> {
+    let mut written: Vec<Option<Vec<u8>>> = Vec::with_capacity(docs.len());
+    for d in docs {
+        match d.canonical_bytes() {
+            Some(_) => written.push(None),
+            None => match crate::raw::bytes_of(d) {
+                Ok(b) => written.push(Some(b)),
+                Err(_) => return one_by_one(filter, docs, env),
+            },
+        }
+    }
+    let mut raws = Vec::with_capacity(docs.len());
+    for (d, w) in docs.iter().zip(&written) {
+        let raw = match (w, d.canonical_bytes()) {
+            (Some(b), _) => RawDoc::from_bytes(b).ok(),
+            (None, Some(b)) => crate::raw::stored_view(b),
+            (None, None) => None,
+        };
+        match raw {
+            Some(r) => raws.push(r),
+            None => return one_by_one(filter, docs, env),
+        }
+    }
+    let collation = env.collation();
+    let ext = ScopedExtensions { env };
+    let ctx = MatchContext { collation: collation.get(), ext: &ext, vars: env.vars() };
+    filter.matches_batch(&raws, &ctx)
+}
+
+/// [`matches_batch`] one document at a time.
+fn one_by_one(filter: &Filter, docs: &[Document], env: &dyn Env) -> Result<u64, MqlError> {
+    let mut mask = 0u64;
+    for (i, d) in docs.iter().enumerate() {
+        if matches(filter, d, env)? {
+            mask |= 1 << i;
+        }
+    }
+    Ok(mask)
+}
+
 /// [`matches`] over a document already in BSON.
 pub(super) fn matches_raw(
     filter: &Filter,
