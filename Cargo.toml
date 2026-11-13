@@ -18,7 +18,7 @@ teseladb-deflate = { version = "0.1.0", registry = "viuzi" }
 teseladb-http = { version = "0.1.0", registry = "viuzi" }
 teseladb-tz = { version = "0.1.0", registry = "viuzi" }
 teseladb-raft = { version = "0.1.1", registry = "viuzi" }
-teseladb-raftlog = { version = "0.3.1", registry = "viuzi" }
+teseladb-raftlog = { version = "0.4.0", registry = "viuzi" }
 
 [workspace.package]
 edition = "2024"

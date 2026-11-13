@@ -22,6 +22,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use teseladb_sys::uring::{Op, Probe, Ring, Target, opcode};
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
@@ -119,6 +120,7 @@ enum Step {
     Fsync { on: On },
     Truncate { on: On, len: u64 },
     Rename(CString, CString),
+    Link(CString, CString),
     Unlink(CString, bool),
 }
 
@@ -142,6 +144,8 @@ enum Work {
 struct Job {
     seq: u64,
     op: IoOp,
+    /// When it started (012 FR-015).
+    started: Instant,
     work: Work,
     /// The ring operation it waits for.
     waiting: Option<u64>,
@@ -156,9 +160,11 @@ pub struct IoUringDisk {
     pool: BufferPool,
     direct: bool,
     ftruncate: bool,
+    /// Whether the ring links files (`IORING_OP_LINKAT`, Linux 5.15); without it the core does.
+    linkat: bool,
     files: HashMap<FileId, OpenFile>,
     free_slots: Vec<u32>,
-    queue: VecDeque<(u64, IoOp)>,
+    queue: VecDeque<(u64, IoOp, Instant)>,
     running: VecDeque<Job>,
     by_ring: HashMap<u64, u64>,
     done: VecDeque<(u64, IoDone)>,
@@ -283,6 +289,7 @@ impl IoUringDisk {
             pool: BufferPool::new(BUFFERS_PER_CORE),
             direct: direct_io,
             ftruncate: probe.supports(opcode::FTRUNCATE),
+            linkat: probe.supports(opcode::LINKAT),
             files: HashMap::new(),
             free_slots: (0..file_slots).rev().collect(),
             queue: VecDeque::new(),
@@ -321,6 +328,12 @@ impl IoUringDisk {
         self.ftruncate = on;
     }
 
+    /// Links with `IORING_OP_LINKAT` (`on`) or from the core's thread, as on kernels before 5.15
+    /// that do not have it.
+    pub fn set_linkat(&mut self, on: bool) {
+        self.linkat = on;
+    }
+
     /// Whether results are waiting for [`IoUringDisk::reap`] without a completion to signal them
     /// (an operation that failed before reaching the ring).
     pub fn ready(&self) -> bool {
@@ -344,7 +357,7 @@ impl IoUringDisk {
     pub fn submit(&mut self, op: IoOp) {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.queue.push_back((seq, op));
+        self.queue.push_back((seq, op, Instant::now()));
     }
 
     /// Starts what can start and hands it to the kernel in one `io_uring_enter`.
@@ -376,6 +389,11 @@ impl IoUringDisk {
                 opened.push(fd);
             }
             self.advance(i, Some(c.result));
+            let j = &self.running[i];
+            if j.result.is_some() && matches!(j.op, IoOp::Sync { .. }) {
+                let took = u64::try_from(j.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                teseladb_stages::record(teseladb_stages::Stage::DiskSync, took);
+            }
         }
         while self.running.front().is_some_and(|j| j.result.is_some()) {
             let j = self.running.pop_front().expect("front job");
@@ -396,11 +414,17 @@ impl IoUringDisk {
     }
 
     fn start_ready(&mut self) {
-        while let Some((_, op)) = self.queue.front() {
+        while let Some((_, op, _)) = self.queue.front() {
             if !self.can_start(op) {
                 return;
             }
-            let (seq, op) = self.queue.pop_front().expect("front op");
+            let (seq, op, queued) = self.queue.pop_front().expect("front op");
+            // How long it waited behind the operations before it (012 FR-015): a batch of the
+            // log waits here behind the reads and writes of a compaction.
+            let started = Instant::now();
+            let waited =
+                u64::try_from(started.duration_since(queued).as_nanos()).unwrap_or(u64::MAX);
+            teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
             if data_range(&op).is_some() && !self.buffers_ready {
                 match self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE)) {
                     Ok(()) => self.buffers_ready = true,
@@ -408,7 +432,14 @@ impl IoUringDisk {
                         // Finished at once, behind the ones still running.
                         let result = Some(fail(&op, errno(&e)));
                         let work = Work::Steps { steps: VecDeque::new(), opened: Vec::new() };
-                        self.running.push_back(Job { seq, op, work, waiting: None, result });
+                        self.running.push_back(Job {
+                            seq,
+                            op,
+                            started,
+                            work,
+                            waiting: None,
+                            result,
+                        });
                         continue;
                     }
                 }
@@ -426,12 +457,19 @@ impl IoUringDisk {
                         // Finished at once, behind the ones still running.
                         let result = Some(fail(&op, e));
                         let work = Work::Steps { steps: VecDeque::new(), opened: Vec::new() };
-                        self.running.push_back(Job { seq, op, work, waiting: None, result });
+                        self.running.push_back(Job {
+                            seq,
+                            op,
+                            started,
+                            work,
+                            waiting: None,
+                            result,
+                        });
                         continue;
                     }
                 },
             };
-            self.running.push_back(Job { seq, op, work, waiting: None, result: None });
+            self.running.push_back(Job { seq, op, started, work, waiting: None, result: None });
             self.advance(self.running.len() - 1, None);
         }
         self.collect();
@@ -486,6 +524,15 @@ impl IoUringDisk {
             IoOp::Rename { from, to } => {
                 let (f, t) = (cpath(&self.root.join(from)), cpath(&self.root.join(to)));
                 steps.push_back(Step::Rename(f, t));
+            }
+            IoOp::Link { from, to } => {
+                let (from, to) = (self.root.join(from), self.root.join(to));
+                fs::create_dir_all(to.parent().unwrap_or(&self.root)).map_err(io_errno)?;
+                if !self.linkat {
+                    fs::hard_link(&from, &to).map_err(io_errno)?;
+                    return Ok(steps);
+                }
+                steps.push_back(Step::Link(cpath(&from), cpath(&to)));
             }
             IoOp::Remove { path } => {
                 steps.push_back(Step::Unlink(cpath(&self.root.join(path)), false))
@@ -588,6 +635,7 @@ impl IoUringDisk {
                 Op::Ftruncate { target: self.target_of(job, on).ok_or(IoErrno::BadFile)?, len }
             }
             Step::Rename(from, to) => Op::RenameAt { from, to },
+            Step::Link(from, to) => Op::LinkAt { from, to },
             Step::Unlink(path, dir) => Op::UnlinkAt { path, dir },
         }))
     }
@@ -830,6 +878,27 @@ mod tests {
         ok(&mut d, IoOp::Truncate { file: FileId(1), len: 100 });
         assert_eq!(fs::metadata(root.join("f")).unwrap().len(), 100);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_link_names_the_same_file_with_or_without_the_ring() {
+        for ring in [true, false] {
+            let root = temp(if ring { "link-ring" } else { "link-core" });
+            let mut d = IoUringDisk::open(&root, false).unwrap();
+            d.set_linkat(ring);
+            ok(&mut d, IoOp::Create { file: FileId(1), path: "a/f".into(), prealloc: 0 });
+            let data = Bytes::from_vec(b"hello".to_vec());
+            ok(&mut d, IoOp::WriteAt { file: FileId(1), offset: 0, data, batch: 0 });
+            ok(&mut d, IoOp::Close { file: FileId(1) });
+            ok(&mut d, IoOp::Link { from: "a/f".into(), to: "b/g".into() });
+            assert_eq!(fs::read(root.join("b/g")).unwrap(), b"hello");
+            let again = d.execute(IoOp::Link { from: "a/f".into(), to: "b/g".into() });
+            assert!(
+                matches!(again, IoDone::Err { errno: IoErrno::AlreadyExists, .. }),
+                "{again:?}"
+            );
+            fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     #[test]

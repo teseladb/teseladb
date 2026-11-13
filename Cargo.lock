@@ -472,9 +472,9 @@ dependencies = [
 
 [[package]]
 name = "teseladb-raftlog"
-version = "0.3.1"
+version = "0.4.0"
 source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "d14bbb93215afd0c982a1a5400e386efdef651751d93de3ec7a0dfd1c1d56040"
+checksum = "958ff5d4c7284ce76165c81bbcd2283d4ed8f45b1b81ba165babc07b9646925c"
 dependencies = [
  "teseladb-crypto",
  "teseladb-hash",

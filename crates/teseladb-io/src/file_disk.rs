@@ -414,6 +414,12 @@ impl FileDisk {
                 fs::rename(self.full(from), self.full(to)).map_err(io_errno)?;
                 Ok(None)
             }
+            IoOp::Link { from, to } => {
+                let to = self.full(to);
+                fs::create_dir_all(to.parent().unwrap_or(&self.root)).map_err(io_errno)?;
+                fs::hard_link(self.full(from), to).map_err(io_errno)?;
+                Ok(None)
+            }
             IoOp::Remove { path } => {
                 fs::remove_file(self.full(path)).map_err(io_errno)?;
                 Ok(None)

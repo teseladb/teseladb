@@ -68,6 +68,8 @@ pub mod opcode {
     pub const UNLINKAT: u8 = 36;
     /// `IORING_OP_MKDIRAT`.
     pub const MKDIRAT: u8 = 37;
+    /// `IORING_OP_LINKAT`.
+    pub const LINKAT: u8 = 39;
     /// `IORING_OP_FTRUNCATE`.
     pub const FTRUNCATE: u8 = 55;
 }
@@ -238,6 +240,13 @@ pub enum Op {
         /// Source.
         from: CString,
         /// Destination.
+        to: CString,
+    },
+    /// `linkat(AT_FDCWD, from, AT_FDCWD, to, 0)`: a hard link.
+    LinkAt {
+        /// Existing name.
+        from: CString,
+        /// New name.
         to: CString,
     },
     /// `unlinkat`, or `rmdir` with `dir`.
@@ -634,6 +643,14 @@ impl Ring {
                 sqe.off = to.as_ptr() as u64;
                 Keep::Paths { _alive: vec![from, to] }
             }
+            Op::LinkAt { from, to } => {
+                sqe.opcode = opcode::LINKAT;
+                sqe.fd = AT_FDCWD;
+                sqe.addr = from.as_ptr() as u64;
+                sqe.len = AT_FDCWD as u32;
+                sqe.off = to.as_ptr() as u64;
+                Keep::Paths { _alive: vec![from, to] }
+            }
             Op::UnlinkAt { path, dir } => {
                 sqe.opcode = opcode::UNLINKAT;
                 sqe.fd = AT_FDCWD;
@@ -913,6 +930,18 @@ mod tests {
         let mut got = String::new();
         std::fs::File::open(&g).unwrap().take(5).read_to_string(&mut got).unwrap();
         assert_eq!(got, "hello");
+        {
+            let h = dir.join("h");
+            let id = r.push(Op::LinkAt { from: cpath(&g), to: cpath(&h) }).unwrap();
+            wait_one(&mut r, id).unwrap();
+            let mut got = String::new();
+            std::fs::File::open(&h).unwrap().take(5).read_to_string(&mut got).unwrap();
+            assert_eq!(got, "hello", "a second name of the same file");
+            let id = r.push(Op::LinkAt { from: cpath(&g), to: cpath(&h) }).unwrap();
+            assert!(wait_one(&mut r, id).is_err(), "the new name must not exist");
+            let id = r.push(Op::UnlinkAt { path: cpath(&h), dir: false }).unwrap();
+            wait_one(&mut r, id).unwrap();
+        }
         let id = r.push(Op::UnlinkAt { path: cpath(&g), dir: false }).unwrap();
         wait_one(&mut r, id).unwrap();
         let id = r.push(Op::UnlinkAt { path: cpath(&dir), dir: true }).unwrap();

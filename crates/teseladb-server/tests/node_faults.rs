@@ -79,7 +79,7 @@ impl FaultyDisk {
             | IoOp::Remove { path }
             | IoOp::RemoveDir { path }
             | IoOp::SyncDir { path } => return Some(path.clone()),
-            IoOp::Rename { to, .. } => return Some(to.clone()),
+            IoOp::Rename { to, .. } | IoOp::Link { to, .. } => return Some(to.clone()),
             IoOp::WriteAt { file, .. }
             | IoOp::ReadAt { file, .. }
             | IoOp::Sync { file, .. }

@@ -84,8 +84,11 @@ pub enum Stage {
     ReadConfirm,
     /// A read's wait in its range for the writes in flight at or below its mark.
     ReadLatchWait,
-    /// A disk operation's wait in the queue of its core's disk thread.
+    /// A disk operation's wait in the queue of its core's disk thread, or of its core's
+    /// io_uring executor until it starts.
     DiskQueueWait,
+    /// A sync on the io_uring executor, from its start to its completion.
+    DiskSync,
     /// A message's wait in the mailbox of its core: a request, a disk result, another core's.
     MailboxWait,
     /// Entries of a Raft log from their append to the core's log until the core learns they are
@@ -95,7 +98,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 30] = [
+    pub const ALL: [Stage; 31] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -124,6 +127,7 @@ impl Stage {
         Stage::ReadConfirm,
         Stage::ReadLatchWait,
         Stage::DiskQueueWait,
+        Stage::DiskSync,
         Stage::MailboxWait,
         Stage::LogAppendToDurable,
     ];
@@ -159,6 +163,7 @@ impl Stage {
             Stage::ReadConfirm => "read_confirm",
             Stage::ReadLatchWait => "read_latch_wait",
             Stage::DiskQueueWait => "disk_queue_wait",
+            Stage::DiskSync => "disk_sync",
             Stage::MailboxWait => "mailbox_wait",
             Stage::LogAppendToDurable => "log_append_to_durable",
         }
