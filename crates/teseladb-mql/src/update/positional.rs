@@ -194,6 +194,7 @@ impl Slot<'_> {
     /// Sets the value, padding an array with nulls up to the position.
     pub(crate) fn set(&mut self, v: MVal) -> Result<()> {
         let name = self.key_text();
+        self.parent.unpack();
         match (&mut *self.parent, &self.key) {
             (MVal::Doc(d), _) => {
                 d.set(&name, v);
@@ -220,6 +221,7 @@ impl Slot<'_> {
     /// Removes a field, or sets an array position to null.
     pub(crate) fn unset(&mut self) {
         let name = self.key_text();
+        self.parent.unpack();
         match &mut *self.parent {
             MVal::Doc(d) => {
                 d.remove(&name);
@@ -229,7 +231,7 @@ impl Slot<'_> {
                     *slot = MVal::Scalar(Value::Null);
                 }
             }
-            MVal::Scalar(_) => {}
+            MVal::Scalar(_) | MVal::Packed(_) => {}
         }
     }
 
@@ -273,6 +275,7 @@ impl Walk<'_, '_> {
         f: &mut dyn FnMut(Slot<'_>) -> Result<()>,
     ) -> Result<()> {
         let Some((seg, rest)) = segs.split_first() else { return Ok(()) };
+        cur.unpack();
         let seg = match seg {
             Seg::Positional => match self.position {
                 Some(p) => Seg::Name(p.to_string()),
@@ -375,7 +378,7 @@ impl Walk<'_, '_> {
                 }
                 Ok(items.get_mut(i))
             }
-            MVal::Scalar(_) => {
+            MVal::Scalar(_) | MVal::Packed(_) => {
                 if self.create {
                     Err(not_viable(n, name, cur))
                 } else if needs_array {

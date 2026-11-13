@@ -5,6 +5,7 @@
 
 mod arith;
 mod canonical;
+mod canonical_bson;
 mod clause;
 mod debug;
 pub mod decimal_math;

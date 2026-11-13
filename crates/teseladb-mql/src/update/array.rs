@@ -229,7 +229,7 @@ pub(super) fn apply(
 ) -> Result<()> {
     let coll = ctx.matcher.collation;
     let name = slot.key_text();
-    let current = slot.get().cloned();
+    let current = slot.get().map(|v| v.expanded().into_owned());
     let items = match (&current, &e.action) {
         (Some(MVal::Arr(items)), _) => items.clone(),
         (None, Action::Push(_) | Action::AddToSet(_)) => Vec::new(),
