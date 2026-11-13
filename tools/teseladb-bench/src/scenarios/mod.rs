@@ -17,6 +17,7 @@ pub mod fle;
 pub mod follower_read;
 pub mod group0_limits;
 pub mod index;
+pub mod ingest;
 pub mod js;
 pub mod keys;
 pub mod lsm;
@@ -193,6 +194,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
+        "ingest" => ingest::run(args),
         "fle-query" => fle::run(args),
         "txn" => txn::run(args),
         "txn-readers" => txn::readers_run(args),
