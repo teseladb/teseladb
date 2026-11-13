@@ -174,6 +174,8 @@ struct Plan {
     filter: Filter,
     projection: Option<Projection>,
     collation: Option<Collation>,
+    /// The extensions under that collation.
+    ext: super::engines::CollatedExtensions,
     /// The command's `let` variables (FR-032).
     vars: Option<Document>,
 }
@@ -195,7 +197,9 @@ impl Plan {
             Filter::parse(RawDoc::from_bytes_with(&fb, command_limits())?, FilterUse::Query)
                 .map_err(from_mql)?;
         let projection = parse_projection(projection)?;
-        Ok(Plan { filter, projection, collation: collation_of(collation)?, vars: None })
+        let collation = collation_of(collation)?;
+        let ext = super::engines::CollatedExtensions::new(collation);
+        Ok(Plan { filter, projection, collation, ext, vars: None })
     }
 
     /// The plan with the command's `let` variables.
@@ -206,7 +210,7 @@ impl Plan {
     fn ctx(&self) -> MatchContext<'_> {
         MatchContext {
             collation: self.collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &self.ext,
             vars: self.vars.as_ref(),
         }
     }
