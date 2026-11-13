@@ -130,8 +130,7 @@ pub struct OpMsg {
 }
 
 fn cstring(b: &[u8], at: usize) -> Result<(&str, usize), WireError> {
-    let len =
-        b[at..].iter().position(|&c| c == 0).ok_or(WireError::Malformed("unterminated string"))?;
+    let len = teseladb_bson::find_nul(&b[at..]).ok_or(WireError::Malformed("unterminated string"))?;
     let s =
         std::str::from_utf8(&b[at..at + len]).map_err(|_| WireError::Malformed("invalid UTF-8"))?;
     Ok((s, at + len + 1))
