@@ -2087,11 +2087,11 @@ fn would_update<B: Backend + ?Sized>(
 ) -> Result<(u64, u64, u64), CommandError> {
     let collator = super::query::collation_of(read.collation)?;
     let col: Option<&dyn teseladb_bson::Collator> = collator.as_ref().map(|c| c as _);
+    let ext = super::engines::CollatedExtensions::new(collator);
     let now = crud::now_of(&*ctx.backend);
     let mut modified = 0u64;
     let (examined, matched) = scan(ctx, coll, read, (!multi).then_some(1), |bytes| {
-        let matcher =
-            MatchContext { collation: col, ext: &super::engines::NodeExtensions, vars: read.vars };
+        let matcher = MatchContext { collation: col, ext: &ext, vars: read.vars };
         let uctx = UpdateContext { matcher, position: None, now, insert: false };
         if update.apply(RawDoc::from_bytes(bytes)?, &uctx).map_err(from_mql)?.modified {
             modified += 1;

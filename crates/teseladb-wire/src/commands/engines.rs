@@ -146,6 +146,86 @@ impl Extensions for NodeExtensions {
     }
 }
 
+/// The node's extensions under the collation of the operation (the command's, or else the
+/// collection's default): the expressions of a filter (`$expr`) and of a `find` projection
+/// compare strings with it, as RefDb 9.0.4 evaluates them with the operation's collator.
+#[derive(Clone, Debug, Default)]
+pub struct CollatedExtensions(teseladb_exec::collation::Collation);
+
+impl CollatedExtensions {
+    /// The extensions comparing strings with `collation`, the binary order for `None`.
+    pub fn new(collation: Option<teseladb_collation::Collation>) -> CollatedExtensions {
+        CollatedExtensions(
+            collation
+                .map(|c| teseladb_exec::collation::Collation::new(std::rc::Rc::new(c)))
+                .unwrap_or_default(),
+        )
+    }
+
+    fn scope(&self, d: &Document, vars: Option<&Document>) -> Scope {
+        drawing_scope(d, vars).with_collation(self.0.clone())
+    }
+}
+
+impl Extensions for CollatedExtensions {
+    fn expr(&self, e: RawValue<'_>, doc: RawDoc<'_>, vars: Option<&Document>) -> Result<bool> {
+        let (expr, d) = (Expr::parse(e)?, Document::from(doc));
+        let v = expr.eval(&d, &self.scope(&d, vars))?;
+        Ok(teseladb_exec::expr::truthy(&v))
+    }
+
+    fn where_js(&self, code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool> {
+        NodeExtensions.where_js(code, doc)
+    }
+
+    fn text(&self, query: &TextQuery, doc: RawDoc<'_>) -> Result<bool> {
+        NodeExtensions.text(query, doc)
+    }
+
+    fn geo(&self, query: &GeoQuery, value: RawValue<'_>) -> Result<bool> {
+        NodeExtensions.geo(query, value)
+    }
+
+    fn random(&self) -> f64 {
+        NodeExtensions.random()
+    }
+
+    fn meta(&self, name: &str, doc: RawDoc<'_>) -> Result<Option<Value>> {
+        NodeExtensions.meta(name, doc)
+    }
+
+    fn eval(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        let (expr, d) = (Expr::parse(e)?, Document::from(doc));
+        expr.eval(&d, &self.scope(&d, vars))
+    }
+
+    fn eval_projection(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        let expr =
+            teseladb_exec::pipeline::projected_expr(e, &teseladb_exec::expr::Ctx::default())?;
+        let d = Document::from(doc);
+        expr.eval(&d, &self.scope(&d, vars))
+    }
+
+    fn update_pipeline(
+        &self,
+        pipeline: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Document> {
+        NodeExtensions.update_pipeline(pipeline, doc, vars)
+    }
+}
+
 /// The stages an update's pipeline takes (measured on 9.0.4).
 const UPDATE_STAGES: [&str; 6] =
     ["$addFields", "$set", "$project", "$unset", "$replaceRoot", "$replaceWith"];

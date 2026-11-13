@@ -517,8 +517,40 @@ impl Pipeline {
         // The scores the stages so far gave every document (`$text`, `$score`): those that a
         // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
         let mut given: Vec<String> = Vec::new();
-        for (st, spec) in self.stages.iter().zip(&self.sbe_specs).skip(applied) {
+        let mut at = applied;
+        while let (Some(st), Some(spec)) = (self.stages.get(at), self.sbe_specs.get(at)) {
+            at += 1;
             env.interrupted()?;
+            if metas.is_none() && required.is_empty() && search_vars.is_none() {
+                // Stages that change or filter each document on its own pass batches of
+                // [`BATCH_DOCS`] from one to the next (010 FR-028).
+                let end = self.streaming_end(at - 1);
+                if end > at - 1 {
+                    let run = &self.stages[at - 1..end];
+                    for (st, spec) in run.iter().zip(&self.sbe_specs[at - 1..end]) {
+                        sbe = sbe && *spec && sbe_capable(st);
+                    }
+                    docs = run_batched(run, docs, env, sbe)?;
+                    if run.iter().any(makes_new_documents) {
+                        given.clear();
+                    }
+                    at = end;
+                    continue;
+                }
+                // `$sort` followed by `$limit` keeps only the documents the limit takes (010
+                // FR-029); the `$limit` then takes them all.
+                if let (Stage::Sort(sort), Some(Stage::Limit(n))) = (st, self.stages.get(at)) {
+                    sbe = sbe && *spec && sbe_capable(st);
+                    let k = usize::try_from(*n).unwrap_or(usize::MAX);
+                    docs = sort.sort_top(docs, env.collation().get(), k)?;
+                    errors::check_sort_memory(
+                        &docs,
+                        env.allow_disk_use(),
+                        env.stage_memory_limit(),
+                    )?;
+                    continue;
+                }
+            }
             sbe = sbe && *spec && sbe_capable(st);
             // A grouping stage reads a score a document lacks as nothing (measured on 9.0.4,
             // after a `$unionWith`).
@@ -592,6 +624,12 @@ impl Pipeline {
             }
         }
         Ok((docs, metas))
+    }
+
+    /// The end of the stages from `from` that change or filter each document on its own
+    /// ([`streams`]): `from` when that stage does not.
+    fn streaming_end(&self, from: usize) -> usize {
+        from + self.stages[from..].iter().take_while(|st| streams(st)).count()
     }
 
     /// Runs the pipeline with `between` applied to the output of its first stage (the equality
@@ -940,6 +978,46 @@ fn makes_new_documents(st: &Stage) -> bool {
             | Stage::SortByCount(_)
             | Stage::Count(_)
     )
+}
+
+/// Whether a stage changes or filters each document on its own, so that it gives the same
+/// documents over its input in batches as over the whole of it.
+fn streams(st: &Stage) -> bool {
+    matches!(
+        st,
+        Stage::Match(_)
+            | Stage::Project(_)
+            | Stage::AddFields(_)
+            | Stage::ReplaceRoot(_)
+            | Stage::Unwind(_)
+    )
+}
+
+/// Runs `stages`, each of which [`streams`], over `docs` in batches of [`BATCH_DOCS`]: each batch
+/// goes through every stage before the next batch starts, as a document goes through them all
+/// before the next one does. The documents come out in their order.
+fn run_batched(
+    stages: &[Stage],
+    docs: Vec<Document>,
+    env: &dyn Env,
+    sbe: bool,
+) -> Result<Vec<Document>, MqlError> {
+    let mut out = Vec::with_capacity(docs.len());
+    let mut input = docs.into_iter();
+    loop {
+        let mut batch: Vec<Document> = input.by_ref().take(BATCH_DOCS).collect();
+        if batch.is_empty() {
+            return Ok(out);
+        }
+        for st in stages {
+            if batch.is_empty() {
+                break;
+            }
+            env.interrupted()?;
+            batch = run_stage(st, batch, env, sbe)?;
+        }
+        out.append(&mut batch);
+    }
 }
 
 fn run_stage(

@@ -831,9 +831,10 @@ impl Statement<'_> {
     fn delete(&self, b: &Read, bytes: &[u8]) -> Result<Change, CommandError> {
         let (f, _) = self.filter()?;
         let c = collation(self.rules)?;
+        let ext = super::engines::CollatedExtensions::new(c);
         let ctx = teseladb_mql::MatchContext {
             collation: c.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &ext,
             vars: self.m.vars.as_ref(),
         };
         let unpacked =
@@ -873,9 +874,10 @@ impl Statement<'_> {
         let doc = RawDoc::from_bytes(&mb)?;
         let (f, _) = self.filter()?;
         let c = collation(self.rules)?;
+        let ext = super::engines::CollatedExtensions::new(c);
         let ctx = teseladb_mql::MatchContext {
             collation: c.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &ext,
             vars: self.m.vars.as_ref(),
         };
         let Some(position) = f.match_position(doc, &ctx).map_err(mql)? else { return Ok(none) };

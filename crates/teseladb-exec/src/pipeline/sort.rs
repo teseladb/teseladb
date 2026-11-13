@@ -190,6 +190,46 @@ impl SortSpec {
     }
 }
 
+/// The most documents a top-k keeps in order by insertion; a larger `$limit` sorts every
+/// document and keeps the first ones.
+const TOP_K_INSERTION: usize = 4096;
+
+impl SortSpec {
+    /// The first `k` documents of `docs` in the order of [`SortSpec::sort`] (`$sort` followed by
+    /// `$limit`, 010 FR-029): every key is read in the documents' order, as the whole sort reads
+    /// them, and only the `k` least are kept, equal keys in their order.
+    pub fn sort_top(
+        &self,
+        docs: Vec<Document>,
+        col: Option<&dyn teseladb_bson::Collator>,
+        k: usize,
+    ) -> Result<Vec<Document>, MqlError> {
+        if k >= docs.len() || k > TOP_K_INSERTION {
+            let mut sorted = self.sort(docs, col)?;
+            sorted.truncate(k);
+            return Ok(sorted);
+        }
+        let mut kept: Vec<(Vec<Value>, Document)> = Vec::with_capacity(k + 1);
+        for d in docs {
+            let key = self.key(&d, col)?;
+            // After every kept key that is not greater: equal keys stay in their order.
+            let (mut low, mut high) = (0, kept.len());
+            while low < high {
+                let mid = low + (high - low) / 2;
+                match self.compare(&kept[mid].0, &key, col)? {
+                    Ordering::Greater => high = mid,
+                    Ordering::Less | Ordering::Equal => low = mid + 1,
+                }
+            }
+            if low < k {
+                kept.insert(low, (key, d));
+                kept.truncate(k);
+            }
+        }
+        Ok(kept.into_iter().map(|(_, d)| d).collect())
+    }
+}
+
 /// The values `path` reaches in `doc`, crossing arrays (a numeric segment also picks an
 /// element).
 fn values_at<'a>(doc: RawDoc<'a>, path: &str) -> Vec<RawValue<'a>> {

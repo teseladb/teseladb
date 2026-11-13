@@ -885,6 +885,8 @@ struct Checker {
     /// The collection's level is `constraint`, which does not let writes bypass validation.
     constraint: bool,
     collation: Option<teseladb_collation::Collation>,
+    /// The extensions under that collation.
+    ext: super::engines::CollatedExtensions,
     /// The collection's secondary indexes.
     indexes: Maintainer,
     /// The unique keys the write's statements have put or removed so far.
@@ -940,6 +942,7 @@ impl Checker {
             bypass: r.bypass,
             constraint,
             collation,
+            ext: super::engines::CollatedExtensions::new(collation),
             indexes: Maintainer::new(&r.ns, (r.tenant, r.collection), &r.indexes)?
                 .with_probes(r.probes.clone(), enforce),
             unique: std::cell::RefCell::default(),
@@ -956,7 +959,7 @@ impl Checker {
     fn ctx(&self) -> MatchContext<'_> {
         MatchContext {
             collation: self.collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &self.ext,
             vars: self.vars.as_ref(),
         }
     }
