@@ -2,11 +2,18 @@
 //! Group 0 records the intent (`RelocateRange`); then, on every node:
 //!
 //! 1. The range's leader proposes `Relocate` with the target core and the intent.
-//! 2. A replica that applies it on another core than the target stops applying
-//!    ([`RangeSm::halted`]). Its core exports the range's two intervals (local keys and data) as
-//!    SST files, reads them, stops the group and takes its Raft state, its state and the entries
-//!    of its log past it ([`MultiRaftCore::export_group`]), and hands all that to the target core
-//!    of the node ([`RelocateMsg::Handover`]).
+//! 2. A replica that applies it on another core than the target goes on applying there while
+//!    its core exports the range's two intervals (local keys and data) as SST files, from the
+//!    state of its last applied entry, which names the target core already
+//!    ([`MultiRaftCore::capture_export`]), and reads them. It stops at its cut
+//!    ([`RangeSm::halted`]): a repeat of `Relocate` that the leader proposes once it has its
+//!    files, a step after its host stopped proposing writes, or on its own if it does not lead.
+//!    Its core then stops the group and takes its Raft state, the state of the export and the
+//!    entries of its log past it ([`MultiRaftCore::export_group_from`]), and hands all that to
+//!    the target core of the node ([`RelocateMsg::Handover`]). A replica that stopped without
+//!    an export (opened with a state that names another core, a snapshot, a second `Relocate`
+//!    before its files) exports stopped, with its state as it is
+//!    ([`MultiRaftCore::export_group`]).
 //! 3. The target core writes the files, ingests them with the state's index as the range's
 //!    flushed index and writes the group whole to its log ([`MultiRaftCore::import_group`]). Once
 //!    that is durable it says so ([`RelocateMsg::Imported`]) and the node's [`Hosting`] lists it.
@@ -23,13 +30,13 @@
 //! over anew.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_meta::command::Group0Command;
-use teseladb_multiraft::{Durable, GroupImport, MultiRaftCore, OpError, StateMachine};
+use teseladb_multiraft::{Durable, ExportBase, GroupImport, MultiRaftCore, OpError, StateMachine};
 use teseladb_range::command::Command;
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
@@ -108,6 +115,13 @@ enum Out {
     Retiring { intervals: Intervals },
 }
 
+/// An export taken of a range while its replica went on applying (007 FR-011): the state it
+/// starts from and the intervals exported.
+struct Ahead {
+    base: ExportBase,
+    intervals: Intervals,
+}
+
 /// What the target core does with a range handed to it.
 enum In {
     /// An imported copy from before a restart is being removed first.
@@ -141,6 +155,12 @@ pub struct Relocations {
     /// Group 0's intents: the target core and the intent, by range.
     intents: BTreeMap<GroupId, (u16, u64)>,
     out: BTreeMap<GroupId, Out>,
+    /// The exports of `out` taken while their range still ran.
+    ahead: BTreeMap<GroupId, Ahead>,
+    /// Ranges whose export could not be taken ahead: they stop first and export then.
+    cold: BTreeSet<GroupId>,
+    /// Ranges whose leader here proposes `Relocate`, or is about to: it proposes no more writes.
+    closing: BTreeSet<GroupId>,
     inbound: BTreeMap<GroupId, In>,
     msgs: Vec<(u16, RelocateMsg)>,
     group0: Vec<Group0Command>,
@@ -157,6 +177,19 @@ fn range_sm(core: &MultiRaftCore<CoreSm>, g: GroupId) -> Option<&RangeSm> {
     core.state_machine(g).and_then(CoreSm::range)
 }
 
+/// Whether a replica applied the `Relocate` of `moved` (target core and intent) and goes on
+/// applying on its core until its cut (007 FR-011).
+fn goes_on(sm: &RangeSm, moved: (u16, u64)) -> bool {
+    sm.relocated() == Some(moved) && !sm.halted()
+}
+
+/// Whether the leader of `g` applied an entry of its own term: what the terms before left in
+/// its log is applied then, a `Relocate` among it.
+fn settled(core: &MultiRaftCore<CoreSm>, g: GroupId) -> bool {
+    let (Some(st), Some(log)) = (core.status(g), core.store().group(g)) else { return false };
+    log.term(st.applied) == Some(st.hard_state.term)
+}
+
 impl Relocations {
     /// The core changes of core `core`, with its files under `dir` and the node's `hosting`.
     pub fn new(core: u16, dir: PathBuf, hosting: Hosting) -> Relocations {
@@ -166,6 +199,9 @@ impl Relocations {
             hosting,
             intents: BTreeMap::new(),
             out: BTreeMap::new(),
+            ahead: BTreeMap::new(),
+            cold: BTreeSet::new(),
+            closing: BTreeSet::new(),
             inbound: BTreeMap::new(),
             msgs: Vec::new(),
             group0: Vec::new(),
@@ -180,13 +216,18 @@ impl Relocations {
     /// Group 0's core changes in progress.
     pub fn set_intents(&mut self, intents: &BTreeMap<GroupId, (u16, u64)>) {
         self.intents = intents.clone();
+        let leaves = |g: &GroupId| intents.get(g).is_some_and(|(target, _)| *target != self.core);
+        self.closing.retain(leaves);
+        self.cold.retain(leaves);
     }
 
-    /// The ranges that Group 0 moves to another core than this one: a range this core leads
-    /// proposes no more writes from the moment the intent arrives, before its `Relocate`, so that
-    /// no write goes into the log handed to the new core (H-025).
+    /// The ranges this core's leaders propose no more writes for: those whose cut they propose,
+    /// from the step before the proposal, so that every write proposed before it is applied on
+    /// this core and none goes into the log behind it (H-025). Until then a range that leaves
+    /// goes on taking writes while it is exported (H-059); a replica that stopped proposes none
+    /// either, whoever proposed its cut.
     pub fn leaving(&self) -> impl Iterator<Item = GroupId> + '_ {
-        self.intents.iter().filter(|(_, (target, _))| *target != self.core).map(|(g, _)| *g)
+        self.closing.iter().copied()
     }
 
     /// Messages for other cores of the node, with their core.
@@ -256,6 +297,16 @@ impl Relocations {
         for d in core.take_durable() {
             self.durable(replicas, lsm, d);
         }
+        // An export taken ahead that was given up, or left, lets go of the log it held.
+        let over = |o: Option<&Out>| {
+            !matches!(o, Some(Out::Exporting { .. } | Out::Reading { .. } | Out::Read { .. }))
+        };
+        let gone: Vec<GroupId> =
+            self.ahead.keys().filter(|g| over(self.out.get(g))).copied().collect();
+        for g in gone {
+            self.ahead.remove(&g);
+            core.release_export(g);
+        }
         let halted: Vec<(GroupId, u16, Intervals, u64)> = replicas
             .open_groups()
             .filter(|g| !self.out.contains_key(g))
@@ -276,9 +327,81 @@ impl Relocations {
             self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at });
             self.told("a range leaves this core: exporting it", g, target);
         }
+        self.export_ahead(core, replicas, lsm);
+        self.cut(core, replicas);
         self.send_read(core, host, replicas);
         self.retire(core, replicas);
         self.lead(core, replicas, now);
+    }
+
+    /// A replica that applied `Relocate` to another core and goes on applying exports the range
+    /// meanwhile (FR-011, H-059 of the native tests): the state at its last applied entry, which
+    /// names the new core already, the versions up to that entry's mark, and the log held from
+    /// there. It stops at its cut and hands the files over with the entries applied since, which
+    /// the new core applies. A range that stopped first was served by no one during its export
+    /// and its import where it has a single voter: 0,25 to 1,2 s in the sustained load.
+    fn export_ahead(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        replicas: &Replicas,
+        lsm: &RefCell<Lsm>,
+    ) {
+        let due: Vec<(GroupId, (u16, u64))> = self
+            .intents
+            .iter()
+            .filter(|(g, (target, _))| *target != self.core && !self.out.contains_key(g))
+            .filter(|(g, _)| !self.cold.contains(g) && replicas.is_open(**g))
+            .map(|(g, i)| (*g, *i))
+            .collect();
+        for (g, (target, intent)) in due {
+            let moved = (target, intent);
+            let Some(sm) = range_sm(core, g).filter(|sm| goes_on(sm, moved)) else { continue };
+            let intervals = sm.intervals();
+            let Ok(base) = core.capture_export(g) else {
+                self.cold.insert(g);
+                continue;
+            };
+            // Up to the mark of its last entry: what later entries write of the range's own
+            // state is above it, and the new core writes it as it applies them.
+            let (dir, mark) = (self.name("out", g), base.mark);
+            let jobs = intervals
+                .iter()
+                .map(|(start, end)| lsm.borrow_mut().export(start, end, mark, dir.clone()))
+                .collect();
+            self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at: base.index });
+            self.ahead.insert(g, Ahead { base, intervals });
+            self.told("a range leaves this core: exporting it while it runs", g, target);
+        }
+    }
+
+    /// Whether range `g`, which goes on applying after its `Relocate`, may stop: its files are
+    /// read, or it could not export while running and exports stopped.
+    fn exported(&self, g: GroupId) -> bool {
+        match self.out.get(&g) {
+            Some(Out::Read { .. }) => self.ahead.contains_key(&g),
+            Some(_) => false,
+            None => self.cold.contains(&g),
+        }
+    }
+
+    /// Whether a replica of `g` that goes on applying after its `Relocate` stops on its own
+    /// (FR-011): one that does not lead, once its files are read. A leader's cut goes through
+    /// the log, behind the writes it proposed ([`Relocations::lead`]).
+    fn stops_alone(&self, g: GroupId, leads: bool) -> bool {
+        !leads && self.exported(g)
+    }
+
+    /// The cut of the replicas that do not lead.
+    fn cut(&self, core: &MultiRaftCore<CoreSm>, replicas: &Replicas) {
+        for (g, moved) in &self.intents {
+            let leads = core.status(*g).is_some_and(|s| s.role == Role::Leader);
+            if !replicas.is_open(*g) || !self.stops_alone(*g, leads) {
+                continue;
+            }
+            if let Some(sm) = range_sm(core, *g).filter(|sm| goes_on(sm, *moved)) {
+                sm.cut();
+            }
+        }
     }
 
     /// The old core removes the groups the target core imported.
@@ -353,10 +476,36 @@ impl Relocations {
             .map(|(g, _)| *g)
             .collect();
         for g in ready {
-            let at = match self.out.get(&g) {
-                Some(Out::Read { at, .. }) => *at,
+            let (target, at) = match self.out.get(&g) {
+                Some(Out::Read { target, at, .. }) => (*target, *at),
                 _ => continue,
             };
+            if let Some(a) = self.ahead.get(&g) {
+                // Exported while it ran: it goes once it stopped at its cut, with the entries
+                // applied since. A range whose bounds or target moved meanwhile, or whose log
+                // no longer has those entries, is exported again as it is then.
+                let Some(sm) = range_sm(core, g) else { continue };
+                let moves = sm.relocated().is_some_and(|(to, _)| to == target);
+                if !moves || sm.intervals() != a.intervals {
+                    self.out.remove(&g);
+                    continue;
+                }
+                if !sm.halted() {
+                    continue;
+                }
+                let intervals = sm.intervals();
+                let imp = match core.export_group_from(g, a.base.clone()) {
+                    Ok(imp) => imp,
+                    // Something of the group is in flight with the disk: on the next turn.
+                    Err(OpError::Busy) => continue,
+                    Err(_) => {
+                        self.out.remove(&g);
+                        continue;
+                    }
+                };
+                self.hand(host, replicas, g, imp, intervals);
+                continue;
+            }
             let intervals = match range_sm(core, g) {
                 Some(sm) if sm.halted() && sm.applied_index() == at => sm.intervals(),
                 // A halted copy applies no entry, but it may install a snapshot of the range
@@ -376,16 +525,26 @@ impl Relocations {
             };
             // Something of the group is in flight with the disk: it goes on the next turn.
             let Ok(imp) = core.export_group(g) else { continue };
-            host.remove_range(g);
-            replicas.hold(g);
-            let sent = Out::Sent { intervals: intervals.clone() };
-            let Some(Out::Read { target, files, .. }) = self.out.insert(g, sent) else {
-                continue;
-            };
-            self.told("a range leaves this core: handed over", g, target);
-            let h = Handover { group: g, from: self.core, imp, intervals, files };
-            self.msgs.push((target, RelocateMsg::Handover(Box::new(h))));
+            self.hand(host, replicas, g, imp, intervals);
         }
+    }
+
+    /// Hands range `g`, whose group just closed as `imp`, with the files read of it.
+    fn hand(
+        &mut self,
+        host: &mut RangeHost,
+        replicas: &mut Replicas,
+        g: GroupId,
+        imp: GroupImport,
+        intervals: Intervals,
+    ) {
+        host.remove_range(g);
+        replicas.hold(g);
+        let sent = Out::Sent { intervals: intervals.clone() };
+        let Some(Out::Read { target, files, .. }) = self.out.insert(g, sent) else { return };
+        self.told("a range leaves this core: handed over", g, target);
+        let h = Handover { group: g, from: self.core, imp, intervals, files };
+        self.msgs.push((target, RelocateMsg::Handover(Box::new(h))));
     }
 
     /// The leaders of this core's ranges: `Relocate` for an intent their log has not applied,
@@ -409,19 +568,45 @@ impl Relocations {
         for (g, (target, intent)) in intents {
             let leads = core.status(g).is_some_and(|s| s.role == Role::Leader);
             let Some(sm) = range_sm(core, g).filter(|_| leads) else { continue };
-            if sm.relocated() == Some((target, intent)) {
-                if target == self.core && self.may(g, now) {
-                    self.group0.push(Group0Command::CompleteRelocate { group: g, core: target });
-                }
-                continue;
-            }
-            if sm.halted() || !self.may(g, now) {
+            if sm.halted() {
                 continue;
             }
             let payload = Command::Relocate { core: target, intent }.encode();
             let zero = Hlc { physical: 0, logical: 0 };
             let build = |_| Ok::<_, std::convert::Infallible>(payload);
-            let _ = core.propose_at(g, zero, now, build);
+            if sm.relocated() != Some((target, intent)) {
+                // The intent's `Relocate`: the range goes on taking writes behind it while it
+                // is exported. A leader that has applied nothing of its own term yet may have
+                // it in its log from an earlier one: proposed again, it would be the cut.
+                if settled(core, g) && self.may(g, now) {
+                    let _ = core.propose_at(g, zero, now, build);
+                }
+                continue;
+            }
+            if target == self.core {
+                if self.may(g, now) {
+                    self.group0.push(Group0Command::CompleteRelocate { group: g, core: target });
+                }
+                continue;
+            }
+            // It goes on applying after its `Relocate`. Its cut, a repeat of it, waits for the
+            // files; a range that could not export while running stops first and exports then.
+            if !self.exported(g) {
+                continue;
+            }
+            // The step before the cut is proposed the host learns that the range proposes no
+            // more writes (`Relocations::leaving`): those proposed before are applied here, and
+            // none goes into the log behind the cut (H-025). Only once the proposal may leave:
+            // until then the range goes on taking them.
+            if !self.closing.contains(&g) {
+                if self.resend_at.get(&g).is_none_or(|at| now >= *at) {
+                    self.closing.insert(g);
+                }
+                continue;
+            }
+            if self.may(g, now) {
+                let _ = core.propose_at(g, zero, now, build);
+            }
         }
     }
 
@@ -674,7 +859,7 @@ mod tests {
     use teseladb_meta::group0::{RangeDesc, ReplicaRole};
     use teseladb_multiraft::{CoreConfig, NodeClock};
     use teseladb_range::ack::{W, WriteConcern};
-    use teseladb_range::host::DeleteReq;
+    use teseladb_range::host::{DeleteReq, RangeError, Reply};
     use teseladb_range::tscache::LEASE_MARGIN_MS;
     use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
     use teseladb_types::NodeId;
@@ -800,20 +985,29 @@ mod tests {
                 };
                 self.rel.on_io_done(&self.lsm, done);
             }
-            let _ = self.core.drain_actions();
+            // What the core finished goes to the host, as the data core hands it on.
+            for (op, r) in self.core.drain_actions().done {
+                self.host.on_done(&mut self.core, op, r);
+            }
             self.r.open(&mut self.core, &mut self.host, &self.lsm);
             self.host.follow_state(&self.core);
             self.host.poll(&mut self.core, now, now.0 / 1_000_000);
             let lsm = self.lsm.clone();
             self.rel.step(&mut self.core, &mut self.host, &mut self.r, &lsm, now);
+            self.host.set_moving(self.rel.leaving());
             self.group0.extend(self.rel.take_group0());
         }
 
         /// Whether this core's LSM has a visible `KEY`.
         fn has_key(&mut self) -> bool {
+            self.holds(KEY)
+        }
+
+        /// Whether this core's LSM has a visible `key`.
+        fn holds(&mut self, key: &[u8]) -> bool {
             for _ in 0..100 {
                 let view = self.lsm.borrow().view();
-                let found = view.get(&mut self.lsm.borrow_mut(), KEY, NEWEST);
+                let found = view.get(&mut self.lsm.borrow_mut(), key, NEWEST);
                 match found {
                     Lookup::Hit(_) => return true,
                     Lookup::NotFound | Lookup::Failed(_) => return false,
@@ -833,6 +1027,8 @@ mod tests {
         now: Nanos,
         /// Messages from core 1 to core 0 are kept back while set.
         hold_back: bool,
+        /// The hand-overs each core sent.
+        handed: [u32; 2],
     }
 
     impl Node {
@@ -844,7 +1040,7 @@ mod tests {
         fn over(clock: Option<&NodeClock>) -> Node {
             let hosting = Hosting::default();
             let cores = [0, 1].map(|id| Core::start_with(id, MemDisk::new(), &hosting, clock));
-            let mut n = Node { cores, hosting, now: Nanos::ZERO, hold_back: false };
+            let mut n = Node { cores, hosting, now: Nanos::ZERO, hold_back: false, handed: [0; 2] };
             n.set(&BTreeMap::new());
             n.run_until(|n| n.leads(0), &mut [Fault::None; 2]);
             let value = [7u8; 64];
@@ -860,9 +1056,40 @@ mod tests {
             }
         }
 
+        /// The node stopped and started again with what its disks hold: nothing of what its
+        /// LSMs had not flushed.
+        fn restart(self) -> Node {
+            let [d0, d1] = self.cores.map(|c| c.disk);
+            let hosting = Hosting::default();
+            let cores = [Core::start(0, d0, &hosting), Core::start(1, d1, &hosting)];
+            Node { cores, hosting, now: Nanos::ZERO, hold_back: false, handed: [0; 2] }
+        }
+
         fn leads(&self, core: usize) -> bool {
             let c = &self.cores[core];
             c.r.is_open(G) && c.core.status(G).is_some_and(|s| s.role == Role::Leader)
+        }
+
+        /// Whether core `core` applied every entry of its log of `G`: those a hand-over brought
+        /// past its state among them.
+        fn caught_up(&self, core: usize) -> bool {
+            let c = &self.cores[core].core;
+            c.status(G).map(|s| s.applied) == c.store().group(G).map(|l| l.last_index())
+        }
+
+        /// Has `G` apply a `Relocate` to core 1 with `intent` and its cut, proposed by no one
+        /// this node's `Relocations` know of, and runs until its replica on core 0 stopped: a
+        /// copy that exports stopped.
+        fn stop(&mut self, intent: u64) {
+            let now = self.now;
+            let c = &mut self.cores[0];
+            for _ in 0..2 {
+                let payload = Command::Relocate { core: 1, intent }.encode();
+                let build = |_| Ok::<_, std::convert::Infallible>(payload);
+                c.core.propose_at(G, Hlc { physical: 0, logical: 0 }, now, build).unwrap();
+            }
+            let stopped = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
+            self.run_until(stopped, &mut [Fault::None; 2]);
         }
 
         fn turn(&mut self, faults: &mut [Fault; 2]) {
@@ -877,10 +1104,29 @@ mod tests {
                         self.cores[from].rel.requeue(u16::try_from(to).unwrap(), msg);
                         continue;
                     }
+                    self.handed[from] += u32::from(matches!(msg, RelocateMsg::Handover(_)));
                     let c = &mut self.cores[to];
                     c.rel.on_message(&mut c.core, &mut c.r, &c.lsm, msg);
                 }
             }
+        }
+
+        /// Deletes `key` on core `i` through its range's log: its answer, the node run until
+        /// it comes.
+        fn delete(&mut self, i: usize, key: &[u8]) -> Result<Reply, RangeError> {
+            let (now, wall) = (self.now, self.now.0 / 1_000_000);
+            let c = &mut self.cores[i];
+            let wc = WriteConcern { w: W::Majority, j: true };
+            let req = DeleteReq { g: G, key: key.to_vec(), dedup: None, wc };
+            let id = c.host.delete(&mut c.core, req, now, wall);
+            for _ in 0..500 {
+                let replies = self.cores[i].host.take_replies();
+                if let Some((_, r)) = replies.into_iter().find(|(r, _)| *r == id) {
+                    return r;
+                }
+                self.turn(&mut [Fault::None; 2]);
+            }
+            panic!("the write was never answered");
         }
 
         fn run_until(&mut self, done: impl Fn(&Node) -> bool, faults: &mut [Fault; 2]) {
@@ -1006,6 +1252,41 @@ mod tests {
         n.relocate(&mut [Fault::None; 2]);
     }
 
+    /// A range that already changed core changes again while it takes writes (007 FR-011,
+    /// H-059): the state its new core receives names that core, whatever core the range came
+    /// to before. A copy whose state named the core it had just left applied nothing on the
+    /// new one, and was exported back.
+    #[test]
+    fn a_range_that_moved_before_moves_again_while_it_takes_writes() {
+        const OTHER: &[u8] = &[2, b'o'];
+        let mut n = Node::new();
+        n.relocate(&mut [Fault::None; 2]);
+        let value = [9u8; 64];
+        let w = [EntryWrite { key: OTHER, kind: Kind::Put, value: &value }];
+        let ts = Hlc { physical: 2, logical: 0 };
+        n.cores[1].lsm.borrow_mut().write_entry(GroupId(90), 2, ts, &w).unwrap();
+        // The host of the new core follows its replica's term on its next turns.
+        for _ in 0..20 {
+            n.turn(&mut [Fault::None; 2]);
+        }
+        let first = n.delete(1, OTHER);
+        assert!(matches!(first, Ok(Reply::Mutated { .. })), "{first:?}");
+        n.set(&BTreeMap::from([(G, (0, 8))]));
+        n.run_until(|n| n.cores[1].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        assert!(n.leads(1), "it runs on while it is exported");
+        assert!(matches!(n.delete(1, KEY), Ok(Reply::Mutated { .. })), "it still takes writes");
+        let completes = Group0Command::CompleteRelocate { group: G, core: 0 };
+        n.run_until(
+            |n| n.leads(0) && n.cores[0].group0.contains(&completes) && n.caught_up(0),
+            &mut [Fault::None; 2],
+        );
+        assert!(n.cores[1].core.store().group(G).is_none(), "the old copy is gone");
+        assert!(n.hosting.single(G) == Some(0));
+        assert_eq!(n.handed, [1, 1], "each core handed the range over once");
+        assert!(!n.cores[0].holds(KEY), "the new core applied the deletion that followed");
+        assert!(!n.cores[0].holds(OTHER));
+    }
+
     #[test]
     fn a_copy_imported_before_a_restart_is_dropped_and_imported_again() {
         let mut n = Node::new();
@@ -1028,10 +1309,65 @@ mod tests {
         let cores = [Core::start(0, d0, &hosting), Core::start(1, d1, &hosting)];
         assert!(hosting.holds(G, 0) && hosting.holds(G, 1));
         assert!(cores.iter().all(|c| c.id < 2));
-        let mut n = Node { cores, hosting, now: Nanos::ZERO, hold_back: false };
+        let mut n = Node { cores, hosting, now: Nanos::ZERO, hold_back: false, handed: [0; 2] };
         // The old copy says the range moved and hands it over again; the target core drops the
         // copy it never started and takes the new one.
         n.relocate(&mut [Fault::None; 2]);
+    }
+
+    /// A node that stops with a range exported while it ran on both of its cores finds on the
+    /// old one a state that names the new one (007 FR-011, H-059): the export made it durable,
+    /// whatever the node had flushed since. The old copy hands the range over again with the
+    /// entries it had applied after the export, which only its log kept, and the new core drops
+    /// the copy it never started. With the state from before `Relocate` neither copy told
+    /// which one the imported was.
+    #[test]
+    fn a_range_exported_while_it_ran_is_found_moved_after_a_restart() {
+        let mut n = Node::new();
+        n.hold_back = true;
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[0].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        assert!(matches!(n.delete(0, KEY), Ok(Reply::Mutated { .. })));
+        // Core 1 imported the range; core 0 does not learn it before the node stops.
+        n.run_until(|n| n.hosting.holds(G, 1), &mut [Fault::None; 2]);
+        for _ in 0..20 {
+            n.turn(&mut [Fault::None; 2]);
+        }
+        assert!(n.cores[0].core.store().group(G).is_some());
+        let mut n = n.restart();
+        assert!(n.hosting.holds(G, 0) && n.hosting.holds(G, 1));
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        let completes = Group0Command::CompleteRelocate { group: G, core: 1 };
+        n.run_until(
+            |n| n.leads(1) && n.cores[1].group0.contains(&completes) && n.caught_up(1),
+            &mut [Fault::None; 2],
+        );
+        assert!(n.cores[0].core.store().group(G).is_none(), "the old copy is gone");
+        assert!(n.hosting.single(G) == Some(1));
+        assert_eq!(n.handed, [1, 0], "the old copy handed the range over again");
+        assert!(!n.cores[1].holds(KEY), "the deletion came with its log");
+    }
+
+    /// A node that stops after its range applied `Relocate` and before anything of it reached
+    /// its LSM's files finds `Relocate` in its log (007 FR-011): the replica applies it again,
+    /// goes on applying and is exported while it runs.
+    #[test]
+    fn a_range_that_restarts_after_relocate_goes_on_and_is_exported_again() {
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[0].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        let mut n = n.restart();
+        assert!(n.hosting.holds(G, 0) && !n.hosting.holds(G, 1));
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[0].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        assert!(n.leads(0), "it runs on while it is exported again");
+        let completes = Group0Command::CompleteRelocate { group: G, core: 1 };
+        n.run_until(
+            |n| n.leads(1) && n.cores[1].group0.contains(&completes) && n.caught_up(1),
+            &mut [Fault::None; 2],
+        );
+        assert!(n.cores[0].core.store().group(G).is_none(), "the old copy is gone");
+        assert_eq!(n.handed, [1, 0]);
     }
 
     #[test]
@@ -1101,13 +1437,101 @@ mod tests {
         assert_eq!(n.cores[1].rel.holder(GroupId(55)), None, "nobody");
     }
 
+    /// A range that leaves goes on taking writes after its `Relocate`, while it is exported, and
+    /// proposes no more from the step before its leader proposes its cut (007 FR-011, H-059):
+    /// the writes proposed before are applied on this core, and none goes into the log behind
+    /// the cut (H-025).
     #[test]
-    fn only_the_ranges_moving_to_another_core_are_leaving() {
+    fn a_range_that_leaves_takes_writes_after_relocate_and_none_as_its_cut_is_proposed() {
         let mut n = Node::new();
         let arriving = GroupId(56);
-        n.cores[0].rel.set_intents(&BTreeMap::from([(G, (1, 8)), (arriving, (0, 9))]));
-        assert_eq!(n.cores[0].rel.leaving().collect::<Vec<_>>(), vec![G]);
-        assert_eq!(n.cores[1].rel.leaving().count(), 0, "no intent known yet");
+        n.set(&BTreeMap::from([(G, (1, 8)), (arriving, (0, 9))]));
+        assert_eq!(n.cores[0].rel.leaving().count(), 0, "it still takes writes");
+        assert_eq!(n.cores[1].rel.leaving().count(), 0);
+        let went_on =
+            |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(|sm| goes_on(sm, (1, 8)));
+        let (mut open_after, mut closed_first) = (false, false);
+        for _ in 0..400 {
+            n.turn(&mut [Fault::None; 2]);
+            if n.handed[0] == 1 {
+                break;
+            }
+            let leaving: Vec<GroupId> = n.cores[0].rel.leaving().collect();
+            open_after |= went_on(&n) && leaving.is_empty();
+            closed_first |= went_on(&n) && leaving == [G];
+            assert!(leaving.is_empty() || leaving == [G], "{leaving:?}");
+        }
+        assert_eq!(n.handed, [1, 0], "it stopped at its cut and was handed over");
+        assert!(open_after, "it took writes after its `Relocate`");
+        assert!(closed_first, "it stopped proposing writes before its cut went into the log");
+    }
+
+    /// A replica that goes on applying and does not lead stops on its own once its files are
+    /// read, and one that leads waits for its cut in the log (007 FR-011).
+    #[test]
+    fn a_replica_that_does_not_lead_stops_on_its_own_once_its_files_are_read() {
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[0].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        let c = &n.cores[0];
+        assert!(matches!(c.rel.out.get(&G), Some(Out::Exporting { .. })));
+        assert!(!c.rel.stops_alone(G, false), "its files are not read yet");
+        let read = |n: &Node| matches!(n.cores[0].rel.out.get(&G), Some(Out::Read { .. }));
+        n.run_until(read, &mut [Fault::None; 2]);
+        let c = &n.cores[0];
+        assert!(c.rel.stops_alone(G, false));
+        assert!(!c.rel.stops_alone(G, true), "a leader's cut goes through its log");
+        // The leader this replica is goes on: its own cut is not due yet.
+        c.rel.cut(&c.core, &c.r);
+        let sm = range_sm(&c.core, G).expect("the range");
+        assert!(goes_on(sm, (1, 7)));
+        sm.cut();
+        assert!(sm.halted());
+    }
+
+    /// A replica that stopped proposes no writes, even if nothing told its host that the range
+    /// leaves (H-025): a leader of a later term does not know the proposals of an earlier one.
+    #[test]
+    fn a_replica_that_stopped_proposes_no_writes_whoever_proposed_its_cut() {
+        let mut n = Node::new();
+        n.stop(8);
+        let (now, wall) = (n.now, n.now.0 / 1_000_000);
+        let c = &mut n.cores[0];
+        assert_eq!(c.rel.leaving().count(), 0);
+        let wc = WriteConcern { w: W::Majority, j: true };
+        let req = DeleteReq { g: G, key: KEY.to_vec(), dedup: None, wc };
+        let id = c.host.delete(&mut c.core, req, now, wall);
+        let answer = c.host.take_replies().into_iter().find(|(r, _)| *r == id).map(|(_, a)| a);
+        assert_eq!(answer, Some(Err(RangeError::NotLeader { hint: NodeId(0) })));
+    }
+
+    /// A range takes writes while its files are exported, and its new core applies the entries
+    /// that followed (007 FR-011, H-059 of the native tests). A range that stopped for its whole
+    /// export was served by no one meanwhile where it has a single voter: the 16 clients of
+    /// the sustained load had a command of 0,25 to 1,2 s at once in each core change.
+    #[test]
+    fn a_range_takes_writes_while_it_is_exported_and_its_new_core_applies_them() {
+        const OTHER: &[u8] = &[2, b'o'];
+        let mut n = Node::new();
+        let value = [9u8; 64];
+        let w = [EntryWrite { key: OTHER, kind: Kind::Put, value: &value }];
+        let ts = Hlc { physical: 2, logical: 0 };
+        n.cores[0].lsm.borrow_mut().write_entry(GroupId(90), 2, ts, &w).unwrap();
+        // A write through the range's log: its last entry has a mark to export up to.
+        assert!(matches!(n.delete(0, OTHER), Ok(Reply::Mutated { .. })));
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[0].rel.ahead.contains_key(&G), &mut [Fault::None; 2]);
+        assert!(n.leads(0), "it runs on while it is exported");
+        // Written after the state the export starts from: only the hand-over's entries carry it.
+        assert!(matches!(n.delete(0, KEY), Ok(Reply::Mutated { .. })), "it still takes writes");
+        let completes = Group0Command::CompleteRelocate { group: G, core: 1 };
+        n.run_until(
+            |n| n.leads(1) && n.cores[1].group0.contains(&completes) && n.caught_up(1),
+            &mut [Fault::None; 2],
+        );
+        assert!(n.cores[0].core.store().group(G).is_none(), "the old copy is gone");
+        assert!(!n.cores[1].holds(KEY), "the new core applied the deletion that followed");
+        assert!(!n.cores[1].holds(OTHER));
     }
 
     #[test]
@@ -1230,9 +1654,7 @@ mod tests {
     #[test]
     fn a_read_export_waits_while_its_group_is_busy_with_the_disk() {
         let mut n = Node::new();
-        n.set(&BTreeMap::from([(G, (1, 7))]));
-        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
-        n.run_until(halted, &mut [Fault::None; 2]);
+        n.stop(7);
         let c = &mut n.cores[0];
         let at = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
         c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at });
@@ -1252,9 +1674,7 @@ mod tests {
         // H-046 of the native tests: a halted copy that installs a snapshot while its export runs
         // would hand over the files from before the snapshot with the state after it.
         let mut n = Node::new();
-        n.set(&BTreeMap::from([(G, (1, 7))]));
-        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
-        n.run_until(halted, &mut [Fault::None; 2]);
+        n.stop(7);
         let c = &mut n.cores[0];
         let applied = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
         c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: applied - 1 });
@@ -1272,9 +1692,7 @@ mod tests {
     #[test]
     fn a_leader_halted_for_an_earlier_intent_proposes_nothing_for_a_newer_one() {
         let mut n = Node::new();
-        n.set(&BTreeMap::from([(G, (1, 7))]));
-        let halted = |n: &Node| range_sm(&n.cores[0].core, G).is_some_and(RangeSm::halted);
-        n.run_until(halted, &mut [Fault::None; 2]);
+        n.stop(7);
         let c = &mut n.cores[0];
         assert!(c.core.status(G).is_some_and(|s| s.role == Role::Leader), "the only voter");
         let last = c.core.store().group(G).map(|l| l.last_index());

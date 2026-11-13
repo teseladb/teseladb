@@ -10,7 +10,7 @@
 //! Restoring one checks that the LSM has flushed that last write; a replica without the data
 //! receives it by ingest (FR-012).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -282,6 +282,11 @@ pub struct RangeSm {
     relocated: Option<(u16, u64)>,
     /// The core this replica runs on, as its embedder said (`None`: not told).
     core: Option<u16>,
+    /// The replica goes on applying on its core after a `Relocate` to another one, until its
+    /// cut (007 FR-011): its embedder exports the range meanwhile.
+    lingers: bool,
+    /// The intent whose cut the replica waits for while it goes on applying.
+    lingering: Cell<Option<u64>>,
     /// The range the last `Split` applied gave the upper part to: what tells a split Group 0
     /// recorded from an earlier cut at the same key that a merge undid (A007-3-1).
     cut: Option<GroupId>,
@@ -535,6 +540,8 @@ impl RangeSm {
             closed: None,
             relocated: s.relocated,
             core: None,
+            lingers: false,
+            lingering: Cell::new(None),
             cut: s.cut,
             // A range without counts that has applied nothing and was not cut from another is
             // new and empty: its counts are exact. Any other one has data that was not counted.
@@ -626,15 +633,38 @@ impl RangeSm {
         self.relocated
     }
 
+    /// Makes the replica go on applying on its core after a `Relocate` to another one, until its
+    /// cut (007 FR-011, H-059 of the native tests): a repeat of that `Relocate`, another one, a
+    /// restored snapshot or [`RangeSm::cut`]. Its embedder exports the range while it goes on,
+    /// from a state that names the new core already, and hands it over once it stopped. A
+    /// replica not told so stops at `Relocate`.
+    pub fn set_lingers(&mut self, on: bool) {
+        self.lingers = on;
+    }
+
+    /// Stops a replica that went on applying after its `Relocate` (007 FR-011): the cut of one
+    /// that does not lead, once it has its files.
+    pub fn cut(&self) {
+        self.lingering.set(None);
+    }
+
     /// The range moved to another core than the one this replica runs on: it applies nothing more
-    /// here and hands the range over (007 FR-011).
+    /// here and hands the range over (007 FR-011). A replica that goes on until its cut is not
+    /// halted before it.
     pub fn halted(&self) -> bool {
-        matches!((self.relocated, self.core), (Some((target, _)), Some(core)) if target != core)
+        match (self.relocated, self.core) {
+            (Some((target, intent)), Some(core)) => {
+                target != core && self.lingering.get() != Some(intent)
+            }
+            _ => false,
+        }
     }
 
     /// `Relocate` (007 FR-011): the range moves to `core`. A repeat of the last intent changes
-    /// nothing.
+    /// nothing of the state, and is the cut of a replica that went on applying after the first.
+    /// Another intent ends that wait too: the range moves again.
     fn apply_relocate(&mut self, core: u16, intent: u64, ctx: &ApplyCtx) -> Result<(), ApplyError> {
+        let waited = self.lingering.take();
         if self.relocated.is_some_and(|(_, last)| last == intent) {
             return Ok(());
         }
@@ -643,6 +673,9 @@ impl RangeSm {
         value.extend_from_slice(&intent.to_be_bytes());
         self.write(ctx.index, ctx.ts, &[EntryWrite { key: &key, kind: Kind::Put, value: &value }])?;
         self.relocated = Some((core, intent));
+        if self.lingers && waited.is_none() && self.core.is_some_and(|own| own != core) {
+            self.lingering.set(Some(intent));
+        }
         Ok(())
     }
 
@@ -1302,6 +1335,9 @@ impl StateMachine for RangeSm {
         (self.frozen, self.merged, self.abandoned) =
             (merges.frozen, merges.merged, merges.abandoned);
         self.relocated = relocated;
+        // The snapshot may come from past the cut this replica waited for, which it would never
+        // see then: it stops, and exports stopped.
+        self.lingering.set(None);
         self.cut = cut;
         self.fences = fences;
         // The snapshot does not carry the counts yet (007 T073, step 4): they are estimated from

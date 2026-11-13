@@ -978,6 +978,8 @@ impl DataCore {
         let cmds = self.leaders.step(core, self.me, now);
         self.group0.extend(cmds);
         self.relocations.step(core, &mut self.host, &mut self.replicas, &lsm, now);
+        // A range whose leader is about to propose `Relocate` proposes no more writes (H-025).
+        self.host.set_moving(self.relocations.leaving());
         self.group0.extend(self.relocations.take_group0());
         self.flush_idle(core, now);
         self.relieve(core, now);

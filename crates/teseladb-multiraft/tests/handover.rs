@@ -108,6 +108,83 @@ fn a_group_handed_to_another_core_goes_on_there_with_its_raft_state() {
     let _ = l;
 }
 
+/// A group is exported from a state taken while it ran, with the entries that followed (007
+/// FR-011, H-059 of the native tests): the core that takes it applies them as after a restart.
+/// A group that stopped for its whole export was served by no one meanwhile where it has a
+/// single voter.
+#[test]
+fn a_group_exported_from_a_state_taken_while_it_ran_goes_with_the_entries_that_followed() {
+    let (mut c, l, f) = cluster_with(2);
+    // The state is taken, and the group goes on applying.
+    let base = c.nodes.get_mut(&f).unwrap().core.capture_export(G).unwrap();
+    assert_eq!(base.index, c.sm(f).applied);
+    for i in 0..3u8 {
+        c.propose(l, &[b'x' + i]).unwrap();
+        c.ticks(1);
+    }
+    c.ticks(3);
+    assert_eq!(c.sm(f).applied, base.index + 3, "it applied what followed");
+    let old = c.nodes.get_mut(&f).unwrap();
+    let imp = old.core.export_group_from(G, base.clone()).unwrap();
+    assert!(old.core.status(G).is_none(), "closed");
+    assert_eq!((imp.index, imp.term, &imp.state), (base.index, base.term, &base.state));
+    let tail: Vec<u64> = imp.entries.iter().map(|e| e.index).collect();
+    assert_eq!(tail[..3], [base.index + 1, base.index + 2, base.index + 3]);
+    // The target core writes it, the old copy goes, and the target opens it over a state
+    // machine restored at the state taken: the entries that followed are applied there.
+    let mut disk = MemDisk::new();
+    let (store, _) = CoreStore::recover(&StorageConfig::default(), 1, &mut disk).unwrap();
+    let mut target = MultiRaftCore::new(CoreConfig { core: 1, ..cfg(f.0) }, store, 9);
+    target.import_group(G, imp).unwrap();
+    run_disk(&mut target, &mut disk, &c);
+    assert_eq!(target.take_durable(), vec![Durable::Imported(G)]);
+    let old = c.nodes.get_mut(&f).unwrap();
+    old.core.retire_group(G).unwrap();
+    for _ in 0..1_000 {
+        let Some(op) = old.core.poll_io(c.now) else { break };
+        let d = old.disk.execute(op);
+        old.core.on_io_done(d, c.now);
+    }
+    let recovered = GroupDesc { group: G, voters: vec![], learners: vec![] };
+    target.create_group(recovered, Appender::default()).unwrap();
+    let node = c.nodes.get_mut(&f).unwrap();
+    node.core = target;
+    node.disk = disk;
+    c.settle();
+    c.ticks(5);
+    let leader = c.leader().unwrap();
+    assert_eq!(c.sm(f).data, c.sm(leader).data, "it applied the entries that followed");
+}
+
+/// The log keeps the entries above a state taken for an export until the export leaves or is
+/// given up (007 FR-011); given up, a snapshot may pass it, and the export from that state is
+/// refused: the caller exports the group as it is then.
+#[test]
+fn the_log_keeps_the_entries_above_a_state_taken_for_an_export() {
+    let mut disk = MemDisk::new();
+    let mut now = Nanos::ZERO;
+    let mut core = single(&mut disk);
+    // A state whose last entry the log no longer has cannot be told from what follows it: its
+    // mark is gone with the entry.
+    fill(&mut core, &mut disk, 3, &mut now);
+    assert_eq!(core.store().group(G).unwrap().snapshot_index, core.status(G).unwrap().applied);
+    assert_eq!(core.capture_export(G), Err(OpError::Unavailable));
+    fill(&mut core, &mut disk, 1, &mut now);
+    let base = core.capture_export(G).unwrap();
+    assert!(base.mark.physical > 0, "the mark of its last entry");
+    // Snapshots every two entries would compact the log well past it.
+    fill(&mut core, &mut disk, 8, &mut now);
+    let log = core.store().group(G).unwrap();
+    assert!(log.snapshot_index <= base.index, "the log still has what followed {}", base.index);
+    assert!(log.last_index() >= base.index + 8);
+    // Given up: the log is let go, and the state taken is of no use any more.
+    core.release_export(G);
+    fill(&mut core, &mut disk, 8, &mut now);
+    assert!(core.store().group(G).unwrap().snapshot_index > base.index, "compacted past it");
+    assert_eq!(core.export_group_from(G, base), Err(OpError::Unavailable));
+    assert!(core.status(G).is_some(), "the group goes on running");
+}
+
 #[test]
 fn a_group_imported_and_not_started_can_be_retired() {
     let (mut c, _, f) = cluster_with(2);

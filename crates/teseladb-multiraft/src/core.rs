@@ -32,7 +32,7 @@ use crate::terms::TermRuns;
 
 mod handover;
 
-pub use handover::{Durable, GroupImport};
+pub use handover::{Durable, ExportBase, GroupImport};
 
 /// Identifier of an operation in progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -193,6 +193,9 @@ struct Group<S> {
     /// The term this replica leads and the cluster time it won it at, for a state machine with a
     /// read cache ([`StateMachine::read_cache_margin_ms`]).
     lease_mark: Option<(u64, Hlc)>,
+    /// The index an export taken while the group runs starts from (007 FR-011): the log keeps
+    /// the entries above it until the export leaves or is given up.
+    export_hold: Option<u64>,
     /// Own proposals: index → (term, operation).
     proposals: BTreeMap<u64, (u64, OpId)>,
     /// ReadIndex reads: context → operation.
@@ -618,6 +621,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             own_stale: false,
             last_mark: Hlc { physical: 0, logical: 0 },
             lease_mark: None,
+            export_hold: None,
             proposals: BTreeMap::new(),
             reads: BTreeMap::new(),
             persisting: VecDeque::new(),
@@ -2115,8 +2119,14 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// The log learns what a state machine that holds it still needs (004 FR-011): before a
     /// snapshot, so that one never covers entries it has not made durable.
     fn declare_floor(&mut self, g: GroupId) {
-        if S::HOLDS_LOG {
-            let floor = self.groups.get(&g).expect("group").sm.release_floor();
+        let grp = self.groups.get(&g).expect("group");
+        let held = if S::HOLDS_LOG { grp.sm.release_floor() } else { None };
+        // An export taken while the group runs needs the entries above its index (007 FR-011).
+        let floor = match (held, grp.export_hold) {
+            (Some(sm), Some(export)) => Some(sm.min(export)),
+            (sm, export) => sm.or(export),
+        };
+        if S::HOLDS_LOG || grp.export_hold.is_some() {
             self.store.set_release_floor(g, ReleaseProvider::Lsm, floor);
         }
     }

@@ -386,6 +386,9 @@ impl Replicas {
             let sm = RangeSm::try_open(d.group, d.start.clone(), d.end.clone(), lsm.clone());
             let Ok(Some(mut sm)) = sm else { break };
             sm.set_core(self.core);
+            // A replica whose range moves to another core goes on applying here while its files
+            // are exported, until its cut (007 FR-011, H-059 of the native tests).
+            sm.set_lingers(true);
             // A copy imported here starts once no other core holds the range.
             if others && sm.relocated().is_some_and(|(t, _)| t == self.core) {
                 continue;

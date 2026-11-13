@@ -140,6 +140,88 @@ fn a_later_intent_moves_the_range_back() {
     assert!(sm.halted());
 }
 
+/// A replica told to go on applies on its core after `Relocate` until its cut, the repeat of
+/// that `Relocate` (007 FR-011, H-059 of the native tests): its embedder exports the range
+/// meanwhile, from a state that names the new core already.
+#[test]
+fn a_replica_that_goes_on_after_relocate_applies_until_the_repeat() {
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    let relocate = Command::Relocate { core: NEW, intent: INTENT };
+    apply(&mut sm, 1, ts(10), &relocate).unwrap();
+    assert_eq!(sm.relocated(), Some((NEW, INTENT)));
+    assert!(!sm.halted(), "it goes on applying on its core");
+    apply(&mut sm, 2, ts(20), &write(b"\x01b")).unwrap();
+    assert!(!sm.halted());
+    apply(&mut sm, 3, ts(30), &relocate).unwrap();
+    assert!(sm.halted(), "the repeat is its cut");
+    assert_eq!(sm.relocated(), Some((NEW, INTENT)));
+}
+
+/// Another `Relocate` ends the wait too (007 FR-011): the range moves again, and a replica on
+/// the core it names runs there.
+#[test]
+fn another_relocate_stops_a_replica_that_went_on_or_leaves_it_on_its_core() {
+    let third = NEW + 1;
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    apply(&mut sm, 1, ts(10), &Command::Relocate { core: NEW, intent: INTENT }).unwrap();
+    apply(&mut sm, 2, ts(20), &Command::Relocate { core: third, intent: BACK }).unwrap();
+    assert_eq!(sm.relocated(), Some((third, BACK)));
+    assert!(sm.halted(), "it does not wait for a second cut");
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    apply(&mut sm, 1, ts(10), &Command::Relocate { core: NEW, intent: INTENT }).unwrap();
+    apply(&mut sm, 2, ts(20), &Command::Relocate { core: OLD, intent: BACK }).unwrap();
+    assert!(!sm.halted(), "the range is back on its core");
+    // Its next move finds it waiting for no cut: it goes on again.
+    apply(&mut sm, 3, ts(30), &Command::Relocate { core: NEW, intent: BACK + 1 }).unwrap();
+    assert!(!sm.halted());
+}
+
+/// A replica that went on stops on its own (the cut of one that does not lead), when a snapshot
+/// replaces its state and after a restart, whose state names the other core (007 FR-011).
+#[test]
+fn a_replica_that_went_on_stops_on_its_own_with_a_snapshot_and_after_a_restart() {
+    let relocate = Command::Relocate { core: NEW, intent: INTENT };
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    apply(&mut sm, 1, ts(10), &relocate).unwrap();
+    assert!(!sm.halted());
+    sm.cut();
+    assert!(sm.halted());
+    // A snapshot may come from past the cut, which this replica would never see.
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    apply(&mut sm, 1, ts(10), &relocate).unwrap();
+    let snap = sm.snapshot();
+    core.flush();
+    sm.restore(&snap).unwrap();
+    assert!(sm.halted());
+    drop(sm);
+    let mut core = core.restart();
+    let mut sm = core.open(OLD);
+    sm.set_lingers(true);
+    assert!(sm.halted(), "opened with a state that names the other core");
+}
+
+/// A replica not told to go on stops at `Relocate`, as one of a version without it does, and
+/// one that never moved stops at nothing.
+#[test]
+fn a_replica_not_told_to_go_on_stops_at_relocate() {
+    let mut core = Core::new();
+    let mut sm = core.open(OLD);
+    sm.cut();
+    assert!(!sm.halted());
+    apply(&mut sm, 1, ts(10), &Command::Relocate { core: NEW, intent: INTENT }).unwrap();
+    assert!(sm.halted());
+}
+
 #[test]
 fn a_replica_that_missed_the_entry_learns_the_target_from_a_snapshot() {
     let mut core = Core::new();

@@ -22,8 +22,8 @@ pub use crate::config::{
     SNAPSHOT_ENTRIES, SNAPSHOT_MIN_RATE, SNAPSHOT_TIMEOUT_BASE, snapshot_timeout,
 };
 pub use crate::core::{
-    Actions, Done, Durable, Forwarded, GroupImport, MultiRaftCore, Observation, OpId, ProposeAt,
-    first_request_id,
+    Actions, Done, Durable, ExportBase, Forwarded, GroupImport, MultiRaftCore, Observation, OpId,
+    ProposeAt, first_request_id,
 };
 pub use crate::error::OpError;
 pub use crate::frame::{

@@ -345,8 +345,16 @@ impl RangeHost {
 
     /// A write of a range on its way to another core is not proposed (H-025): it gives its latch
     /// back and is refused with `NotLeader` and no hint, which its client tries again.
-    pub(super) fn refuse_moving(&mut self, id: ReqId, m: &MutReq, latch: LatchId) -> bool {
-        if !self.is_moving(m.g) {
+    pub(super) fn refuse_moving(
+        &mut self,
+        id: ReqId,
+        m: &MutReq,
+        latch: LatchId,
+        stopped: bool,
+    ) -> bool {
+        // A replica that applied `Relocate` to another core proposes nothing either, whoever
+        // proposed it: its leader may not have known the proposal of an earlier term.
+        if !self.is_moving(m.g) && !stopped {
             return false;
         }
         self.release(m.g, m.term, latch);
@@ -382,7 +390,8 @@ impl RangeHost {
         current: &[Option<(u8, Vec<u8>)>],
         now: Nanos,
     ) -> bool {
-        if self.refuse_moving(id, &m, latch) {
+        let stopped = core.state_machine(m.g).is_some_and(StateMachine::halted);
+        if self.refuse_moving(id, &m, latch, stopped) {
             return true;
         }
         let current: Vec<Option<(u8, &[u8])>> =

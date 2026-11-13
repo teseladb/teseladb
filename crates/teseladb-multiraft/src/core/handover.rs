@@ -6,8 +6,10 @@
 //! once the import is durable, and the target core starts the group only once that removal is
 //! durable, so two copies never run.
 
+use teseladb_hlc::Hlc;
 use teseladb_raft::ConfState;
-use teseladb_raftlog::{HardState, LogEntry, SnapshotMeta};
+use teseladb_raftlog::format::wal::EntryKind;
+use teseladb_raftlog::{HardState, LogEntry, ReleaseProvider, SnapshotMeta};
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, NodeId};
 
 use super::{Led, MultiRaftCore, Wait, wrap_snapshot};
@@ -36,6 +38,24 @@ pub struct GroupImport {
     /// keys was then its node's, and the core that takes it on the same node may win its next
     /// term without the margin over its wall clock (005 FR-005).
     pub led: Option<u64>,
+}
+
+/// The state of a group at one of its entries, taken while it runs (007 FR-011): what an
+/// export that leaves later starts from ([`MultiRaftCore::export_group_from`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportBase {
+    /// The index whose state `state` is.
+    pub index: u64,
+    /// The term of the entry at `index`.
+    pub term: u64,
+    /// The snapshot at `index`, as the core stores its own.
+    pub state: Vec<u8>,
+    /// The group's configuration then: the export leaves only if it is still the same.
+    pub conf: ConfState,
+    /// The mark of the last entry applied then, for a state taken while the group runs
+    /// ([`MultiRaftCore::capture_export`]): every version the group holds at `index` is at or
+    /// below it, and every later entry is above it.
+    pub mark: Hlc,
 }
 
 /// A hand-over step that reached the disk.
@@ -69,6 +89,13 @@ impl<S: StateMachine> MultiRaftCore<S> {
         if self.close_refused(g, grp) {
             return Err(OpError::Busy);
         }
+        let base = self.export_base(g)?;
+        self.export_group_from(g, base)
+    }
+
+    /// The state of group `g` at the entry whose state its machine holds now.
+    fn export_base(&self, g: GroupId) -> Result<ExportBase, OpError> {
+        let grp = self.groups.get(&g).ok_or(OpError::GroupNotFound)?;
         let index = grp.sm.snapshot_state_index();
         let log = self.store.group(g).ok_or(OpError::GroupNotFound)?;
         if index < log.snapshot_index || index > log.last_index() {
@@ -78,14 +105,89 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // the core takes: the log has every entry above its snapshot.
         let mut terms = grp.terms.clone();
         terms.extend(index, |i| log.term(i).expect("an entry above the last snapshot"));
-        let conf = grp.raw.conf().clone();
         let state = wrap_snapshot(grp.last_mark.physical, &terms, &grp.sm.snapshot()).to_vec();
+        let term = log.term(index).ok_or(OpError::Unavailable)?;
+        let mark = Hlc { physical: 0, logical: 0 };
+        Ok(ExportBase { index, term, state, conf: grp.raw.conf().clone(), mark })
+    }
+
+    /// The mark of the last entry of group `g` at or below `index` that carries one, if its log
+    /// still has it.
+    fn mark_at(&self, g: GroupId, index: u64) -> Option<Hlc> {
+        let from = self.store.group(g)?.snapshot_index + 1;
+        if index < from {
+            return None;
+        }
+        let entries = self.store.entries(g, from, index + 1, u64::MAX).ok()?;
+        let marked = |e: &LogEntry| match e.kind {
+            EntryKind::Normal => crate::envelope::decode(&e.data).ok().map(|v| v.ts),
+            _ => None,
+        };
+        entries.iter().rev().find_map(marked)
+    }
+
+    /// Takes the state of group `g` at its last applied entry while it goes on running, and
+    /// holds its log from there (007 FR-011): [`MultiRaftCore::export_group_from`] hands that
+    /// state over later with the entries that followed, which the core that takes the group
+    /// applies as after a restart. A range that stopped for its whole export was served by no
+    /// one meanwhile where it has a single voter (H-059 of the native tests).
+    /// [`MultiRaftCore::release_export`] lets go of the log if the export is given up.
+    pub fn capture_export(&mut self, g: GroupId) -> Result<ExportBase, OpError> {
+        let grp = self.groups.get(&g).ok_or(OpError::GroupNotFound)?;
+        if grp.stopped || grp.loading || grp.installing {
+            return Err(OpError::Unavailable);
+        }
+        let base = self.export_base(g)?;
+        // Without the mark of its last entry there is no telling the versions of that state
+        // from the later ones: the caller stops the group first.
+        let mark = self.mark_at(g, base.index).ok_or(OpError::Unavailable)?;
+        self.groups.get_mut(&g).expect("checked").export_hold = Some(base.index);
+        self.declare_floor(g);
+        Ok(ExportBase { mark, ..base })
+    }
+
+    /// Lets go of the log [`MultiRaftCore::capture_export`] held for group `g`.
+    pub fn release_export(&mut self, g: GroupId) {
+        let held = self.groups.get_mut(&g).and_then(|grp| grp.export_hold.take());
+        if held.is_none() {
+            return;
+        }
+        match S::HOLDS_LOG {
+            true => self.declare_floor(g),
+            // Only the export held it: nothing does now.
+            false => self.store.set_release_floor(g, ReleaseProvider::Lsm, None),
+        }
+    }
+
+    /// [`MultiRaftCore::export_group`] with the state `base` holds and the entries of the log
+    /// past it. `Unavailable` if the log no longer has them, or holds another entry at
+    /// `base.index`, or the group's configuration changed since: the caller exports the group
+    /// as it is now.
+    pub fn export_group_from(
+        &mut self,
+        g: GroupId,
+        base: ExportBase,
+    ) -> Result<GroupImport, OpError> {
+        if self.hands_over(g) {
+            self.groups.get_mut(&g).ok_or(OpError::GroupNotFound)?.pending_snap = None;
+            self.received.remove(&g);
+            self.snapshot_reqs.remove(&g);
+        }
+        let grp = self.groups.get(&g).ok_or(OpError::GroupNotFound)?;
+        if self.close_refused(g, grp) {
+            return Err(OpError::Busy);
+        }
+        let ExportBase { index, term, state, conf, mark: _ } = base;
+        let log = self.store.group(g).ok_or(OpError::GroupNotFound)?;
+        let same_entry = log.term(index) == Some(term);
+        if index < log.snapshot_index || !same_entry || *grp.raw.conf() != conf {
+            return Err(OpError::Unavailable);
+        }
         self.close_group(g)?;
         // What this node served of its reads goes with the replica. One that never led keeps
         // nothing: its parent stays in this core.
         let led = self.led.remove(&g).filter(|l| l.parent.is_none()).map(|l| l.term);
         let log = self.store.group(g).ok_or(OpError::GroupNotFound)?;
-        let term = log.term(index).ok_or(OpError::Unavailable)?;
         let (hard, last) = (log.hard, log.last_index());
         let entries = match last > index {
             true => self

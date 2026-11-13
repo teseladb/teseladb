@@ -688,7 +688,8 @@ impl RangeHost {
         versions: &[Vec<Item>],
         now: Nanos,
     ) -> bool {
-        if self.refuse_moving(id, &m, latch) {
+        let stopped = core.state_machine(m.g).is_some_and(StateMachine::halted);
+        if self.refuse_moving(id, &m, latch, stopped) {
             return true;
         }
         let Work::Txn(op) = &m.work else { unreachable!("a transaction's request") };

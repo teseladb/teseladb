@@ -9,6 +9,11 @@
 //! - a replica that applied `Relocate` to another core stops applying; its core exports the
 //!   range's two intervals, reads the files, closes the group and takes its Raft state, its state
 //!   and the entries past it;
+//! - on two nodes of every three the replica goes on applying after `Relocate` while its core
+//!   exports the range from the state it had then, and stops at its cut: a repeat of `Relocate`
+//!   that the leader proposes once it has its files, or on its own if it does not lead. Its
+//!   group goes with the state of the export and the entries applied since. The other nodes
+//!   stop at `Relocate`, as a version without this does;
 //! - the target core writes the files, ingests them (clearing first what its LSM kept of the
 //!   range) and writes the group whole to its log; once that is durable the old core removes its
 //!   group, and once that removal is durable the target core opens its copy;
@@ -28,7 +33,9 @@ use std::rc::Rc;
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
-use teseladb_multiraft::{Done, Durable, GroupDesc, GroupImport, OpError, OpId, StateMachine};
+use teseladb_multiraft::{
+    Done, Durable, ExportBase, GroupDesc, GroupImport, OpError, OpId, StateMachine,
+};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Command;
 use teseladb_range::host::{RangeHost, ReqId, WriteReq};
@@ -99,12 +106,20 @@ pub struct RelocateWorkload {
     proposals: BTreeSet<(u32, u16, OpId)>,
     /// The hand-overs in progress, by node: the old core, the target core and the step.
     moves: BTreeMap<u32, (u16, u16, Move)>,
+    /// The state each node's export started from when its replica went on applying meanwhile.
+    ahead: BTreeMap<u32, ExportBase>,
+    /// Nodes whose replica went on applying and could not be exported so: it stops first.
+    cold: BTreeSet<u32>,
     /// What each core made durable and nobody took yet.
     durable: BTreeMap<(u32, u16), Vec<Durable>>,
     attempt: u64,
     shipper: Shipper,
     /// Core changes completed.
     pub done: u64,
+    /// Hand-overs of a replica exported while it went on applying.
+    pub ahead_done: u64,
+    /// Replicas that went on applying and stopped on their own, because they did not lead.
+    pub cut_alone: u64,
     /// The range was created on every node: a replica created later gets it as a snapshot.
     born: bool,
 }
@@ -132,10 +147,14 @@ impl RelocateWorkload {
             resend_at: Nanos::ZERO,
             proposals: BTreeSet::new(),
             moves: BTreeMap::new(),
+            ahead: BTreeMap::new(),
+            cold: BTreeSet::new(),
             durable: BTreeMap::new(),
             attempt: 0,
             shipper: Shipper::new(0),
             done: 0,
+            ahead_done: 0,
+            cut_alone: 0,
             born: false,
         }
     }
@@ -151,6 +170,30 @@ impl RelocateWorkload {
 
     fn voters(&self) -> Vec<NodeId> {
         (1..=u64::from(self.nodes)).map(NodeId).collect()
+    }
+
+    /// Whether the replica of `node` goes on applying after `Relocate` until its cut (007
+    /// FR-011): two nodes of every three, as during an upgrade.
+    fn lingers(node: u32) -> bool {
+        !node.is_multiple_of(3)
+    }
+
+    /// Whether the replica of `node`, on core `from`, applied a `Relocate` to another core and
+    /// goes on applying.
+    fn goes_on(sm: &RangeSm, from: u16) -> bool {
+        sm.relocated().is_some_and(|(to, _)| to != from) && !sm.halted()
+    }
+
+    /// Whether the replica of `node`, which goes on applying, may stop: its files are exported,
+    /// or it could not be exported while running.
+    fn exported(&self, node: u32) -> bool {
+        match self.moves.get(&node) {
+            Some((_, _, Move::Exporting { jobs, .. })) => {
+                jobs.is_empty() && self.ahead.contains_key(&node)
+            }
+            Some(_) => false,
+            None => self.cold.contains(&node),
+        }
     }
 
     /// The core whose group of the range runs on `node`.
@@ -198,6 +241,7 @@ impl RelocateWorkload {
                 return;
             };
             sm.set_core(*c);
+            sm.set_lingers(Self::lingers(node));
             // A copy imported here waits while another core holds the range.
             let imported = sm.relocated().is_some_and(|(t, _)| t == *c);
             if holders.len() == 1 || !imported {
@@ -215,6 +259,7 @@ impl RelocateWorkload {
                     return;
                 };
                 sm.set_core(c);
+                sm.set_lingers(Self::lingers(node));
                 if self.born {
                     sm.expect_snapshot();
                 }
@@ -369,16 +414,26 @@ impl RelocateWorkload {
         let x = w.cluster_core(node, core).expect("a leader's core");
         let sm = x.state_machine(G).and_then(as_range).expect("the range");
         let (relocated, halted) = (sm.relocated(), sm.halted());
+        // A leader that has applied nothing of its own term yet may have the intent's `Relocate`
+        // in its log from an earlier one: proposed again, it would be the cut.
+        let st = x.status(G).expect("the range");
+        let log = x.store().group(G);
+        let settled = log.is_some_and(|l| l.term(st.applied) == Some(st.hard_state.term));
         if relocated == Some((target, intent)) {
             if core == target {
                 self.core = target;
                 self.intent = None;
+                self.cold.clear();
                 self.done += 1;
                 self.next_move = now + Nanos::from_millis(w.rng.range(MOVE_EVERY.0, MOVE_EVERY.1));
+                return;
             }
-            return;
-        }
-        if halted || now < self.resend_at {
+            // It goes on applying after its `Relocate`: its cut, a repeat of it, waits for its
+            // files, and one that could not be exported while running stops first.
+            if halted || !self.exported(node) || now < self.resend_at {
+                return;
+            }
+        } else if halted || !settled || now < self.resend_at {
             return;
         }
         self.resend_at = now + RESEND_EVERY;
@@ -440,20 +495,55 @@ impl RelocateWorkload {
         let Some(x) = w.cluster_core(node, from) else { return };
         // `running` found the group there: it is the range.
         let sm = x.state_machine(G).and_then(as_range).expect("the range");
-        let (intervals, at) = (sm.intervals(), sm.applied_index());
+        let (intervals, applied) = (sm.intervals(), sm.applied_index());
+        let goes_on = Self::goes_on(sm, from);
         let to = match sm.relocated() {
-            Some((t, _)) if sm.halted() => t,
+            Some((t, _)) if sm.halted() || goes_on => t,
             _ => return,
+        };
+        // A replica that goes on applying is exported from the state of its last applied entry,
+        // up to that entry's mark: what it applies meanwhile goes with its log. One that cannot
+        // be exported so stops first.
+        let (upto, at) = match goes_on {
+            false => (NEWEST, applied),
+            true if self.cold.contains(&node) => return,
+            true => match x.capture_export(G) {
+                Ok(base) => {
+                    let from_here = (base.mark, base.index);
+                    self.ahead.insert(node, base);
+                    from_here
+                }
+                Err(_) => {
+                    self.cold.insert(node);
+                    return;
+                }
+            },
         };
         let Some(lsm) = Self::lsm(w, node, from) else { return };
         self.attempt += 1;
         let dir = format!("handover-n{node}-{}", self.attempt);
         let jobs = intervals
             .iter()
-            .map(|(s, e)| lsm.borrow_mut().export(s, e, NEWEST, dir.clone().into()))
+            .map(|(s, e)| lsm.borrow_mut().export(s, e, upto, dir.clone().into()))
             .collect();
         self.moves.insert(node, (from, to, Move::Exporting { jobs, files: vec![], dir, at }));
         w.pump(node, from);
+    }
+
+    /// The cut of a replica that goes on applying and does not lead: it stops on its own once
+    /// its files are exported. A leader's cut goes through the log.
+    fn cut(&mut self, w: &mut World, node: u32) {
+        if !self.exported(node) {
+            return;
+        }
+        let Some(from) = self.running(w, node) else { return };
+        let Some(x) = w.cluster_core(node, from) else { return };
+        let leads = x.status(G).is_some_and(|s| s.role == Role::Leader);
+        let sm = x.state_machine(G).and_then(as_range);
+        if let Some(sm) = sm.filter(|sm| !leads && Self::goes_on(sm, from)) {
+            sm.cut();
+            self.cut_alone += 1;
+        }
     }
 
     /// The target core could not take the hand-over: the old core opens its group again and
@@ -574,18 +664,43 @@ impl RelocateWorkload {
         (files, dir, at): (Vec<FileRef>, String, u64),
     ) -> Option<Move> {
         let c = w.cluster_core(node, from).expect("powered on and not frozen");
-        // Restored from its snapshot, its state does not move it: it runs on there. A halted copy
-        // that installed a snapshot while its export ran holds a newer state than its files: it
-        // is exported again, as the server does (H-046 of the native tests).
         let sm = c.state_machine(G).and_then(as_range);
-        if !sm.is_some_and(|sm| sm.halted() && sm.applied_index() == at) {
+        let halted = sm.is_some_and(RangeSm::halted);
+        let moves = sm.is_some_and(|sm| sm.relocated().is_some_and(|(t, _)| t == to));
+        let whole = sm.is_some_and(|sm| sm.applied_index() == at);
+        let imp = match self.ahead.get(&node).cloned() {
+            // Exported while it ran: it goes once it stopped at its cut, with the entries it
+            // applied since. A range whose target moved meanwhile, or whose log no longer has
+            // those entries, is exported again as it is then.
+            Some(_) if !moves => None,
+            Some(_) if !halted => return Some(Move::Exporting { jobs: vec![], files, dir, at }),
+            Some(base) => match c.export_group_from(G, base) {
+                Ok(imp) => {
+                    self.ahead_done += 1;
+                    Some(imp)
+                }
+                // Something of the group is in flight with the disk: it goes on the next turn.
+                Err(OpError::Busy) => {
+                    return Some(Move::Exporting { jobs: vec![], files, dir, at });
+                }
+                Err(_) => None,
+            },
+            // Restored from its snapshot, its state does not move it: it runs on there. A
+            // halted copy that installed a snapshot while its export ran holds a newer state
+            // than its files: it is exported again, as the server does (H-046 of the native
+            // tests).
+            None if !(halted && whole) => None,
+            None => match c.export_group(G) {
+                Ok(imp) => Some(imp),
+                Err(_) => return Some(Move::Exporting { jobs: vec![], files, dir, at }),
+            },
+        };
+        if self.ahead.remove(&node).is_some() {
+            c.release_export(G);
+        }
+        let Some(imp) = imp else {
             remove_tree(&mut w.nodes[node as usize].cores[from as usize].disk, &dir);
             return None;
-        }
-        let c = w.cluster_core(node, from).expect("powered on and not frozen");
-        // Something of the group is in flight with the disk: it goes on the next turn.
-        let Ok(imp) = c.export_group(G) else {
-            return Some(Move::Exporting { jobs: vec![], files, dir, at });
         };
         if let Some((_, host)) = self.hosts.get_mut(&node) {
             host.remove_range(G);
@@ -657,6 +772,7 @@ impl RelocateWorkload {
             self.step_down(w, node);
             self.move_step(w, node);
             self.start_move(w, node);
+            self.cut(w, node);
             self.open(w, node);
             self.pump(w, node);
         }
@@ -712,6 +828,8 @@ impl Workload for RelocateWorkload {
         self.on_completions(w, node, 0, Completions::default());
         self.lose(w, node);
         self.moves.remove(&node);
+        self.ahead.remove(&node);
+        self.cold.remove(&node);
         self.durable.retain(|(n, _), _| *n != node);
         self.proposals.retain(|(n, _, _)| *n != node);
         self.shipper.on_crash(node);
@@ -759,6 +877,18 @@ mod tests {
 
     fn freeze(w: &mut World, node: u32, core: u16) {
         w.nodes[node as usize].cores[core as usize].frozen_until = w.now() + Nanos::from_secs(1);
+    }
+
+    /// Without faults every core change completes, the replicas that go on applying after
+    /// `Relocate` are handed over with the export they took meanwhile, and those of them that
+    /// do not lead stop on their own (007 FR-011).
+    #[test]
+    fn replicas_that_go_on_are_exported_while_they_run_and_followers_stop_alone() {
+        let (mut w, mut wl) = world(2, 20);
+        assert!(wl.done >= 4, "{} core changes", wl.done);
+        assert!(wl.ahead_done >= wl.done, "{} of {}", wl.ahead_done, wl.done);
+        assert!(wl.cut_alone > 0, "a replica that does not lead stops on its own");
+        assert!(wl.finish(&mut w).is_ok());
     }
 
     #[test]
