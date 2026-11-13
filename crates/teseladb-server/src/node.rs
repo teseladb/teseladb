@@ -1466,9 +1466,11 @@ impl<D: Disk + Send + 'static> Node<D> {
             DataReq::Put { key, .. } | DataReq::Get { key } => {
                 self.routes.lookup(key).map(|e| e.group)
             }
-            DataReq::Status(g) | DataReq::Cut(g) | DataReq::Remote(g, _) | DataReq::At(_, g, _) => {
-                Some(*g)
-            }
+            DataReq::Status(g)
+            | DataReq::Cut(g)
+            | DataReq::Remote(g, _)
+            | DataReq::At(_, g, _)
+            | DataReq::Partial(g, ..) => Some(*g),
             DataReq::Lsm => None,
         };
         let (tx, rx) = mpsc::channel();

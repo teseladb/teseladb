@@ -203,7 +203,8 @@ fn sum_integers(column: &[Cell<'_>], mask: u64, t: &mut Total) -> bool {
     };
     let max_abs = least.unsigned_abs().max(greatest.unsigned_abs());
     let sum = simd::sum_i64(&ints, found);
-    t.add_exact_ints(sum, u64::from(found.count_ones()), max_abs, long)
+    let abs_sum = lanes(found).map(|l| u128::from(ints[l].unsigned_abs())).sum();
+    t.add_exact_ints(sum, u64::from(found.count_ones()), (max_abs, abs_sum), long)
 }
 
 /// The lane of `mask` in `column` whose value `$max` (`max`) or `$min` keeps when the lanes go
