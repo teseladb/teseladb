@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use teseladb_io::answered_apart;
 use teseladb_io::handshake::JoinRequest;
@@ -31,6 +32,7 @@ use teseladb_meta::meta2::Meta2Command;
 use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId, PeerFrame, route_stray};
 use teseladb_range::host::RangeError;
 use teseladb_range::rollback::rollback_files;
+use teseladb_stages::Stage;
 use teseladb_wire::commands::Shared;
 use teseladb_wire::commands::session::{KillScope, kill_local};
 use teseladb_raft::{ConfChange, ConfChangeKind, Role};
@@ -1054,6 +1056,7 @@ impl NodeLogic {
 
     /// Moves the data range and sends what it produced.
     fn data_step(&mut self) {
+        let began = Instant::now();
         if let Some(data) = &mut self.data {
             data.poll(&mut self.core, (self.now, self.wall_ms));
         }
@@ -1066,6 +1069,7 @@ impl NodeLogic {
         self.publish_catalog();
         self.publish_indexes();
         self.catalog.poll(applied, self.authz.fenced());
+        took(Stage::CoreDataStep, began);
     }
 
     /// Publishes this node's copies of the catalog and of the cluster settings for the workers
@@ -1705,10 +1709,17 @@ fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
     }
 }
 
+/// Counts as `stage` the time since `began` (012 FR-015): a part of a core's turn.
+fn took(stage: Stage, began: Instant) {
+    let nanos = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    teseladb_stages::record(stage, nanos);
+}
+
 impl CoreLogic for NodeLogic {
     type Msg = NodeMsg;
 
     fn tick(&mut self, now: Nanos, wall_ms: u64) {
+        let began = Instant::now();
         self.now = now;
         self.wall_ms = wall_ms;
         self.core.on_tick(now, wall_ms);
@@ -1739,6 +1750,7 @@ impl CoreLogic for NodeLogic {
         self.data_step();
         self.sync_desc();
         self.sync_peers();
+        took(Stage::CoreTick, began);
     }
 
     fn poll_io(&mut self, now: Nanos) -> Option<IoOp> {
@@ -1757,7 +1769,9 @@ impl CoreLogic for NodeLogic {
             return Some(op);
         }
         let data = self.data.as_mut()?;
+        let began = Instant::now();
         let next = data.poll_io(&mut self.core, now);
+        took(Stage::CoreLsmWork, began);
         // Completions that came with it (an export, an ingestion) may have moved the core.
         self.pump();
         let (op, owner) = next?;
@@ -1767,12 +1781,17 @@ impl CoreLogic for NodeLogic {
 
     fn on_io_done(&mut self, done: IoDone, now: Nanos) {
         self.now = now;
+        let began = Instant::now();
         match take_slot(&mut self.io, &done) {
-            IoSlot::Log => self.core.on_io_done(done, now),
+            IoSlot::Log => {
+                self.core.on_io_done(done, now);
+                took(Stage::CoreLogDone, began);
+            }
             IoSlot::Rollback => self.rollback.on_io_done(&done, now),
             IoSlot::Data(owner) => {
                 let data = self.data.as_mut().expect("the owner of a data operation");
                 data.on_io_done(&mut self.core, owner, done, now);
+                took(Stage::CoreDataDone, began);
             }
         }
         self.data_step();
@@ -1852,7 +1871,11 @@ impl CoreLogic for NodeLogic {
                 let _ = reply.send(cmd);
             }
             NodeMsg::Data(req, reply) => match &mut self.data {
-                Some(data) => data.request(&mut self.core, req, reply, (now, self.wall_ms)),
+                Some(data) => {
+                    let began = Instant::now();
+                    data.request(&mut self.core, req, reply, (now, self.wall_ms));
+                    took(Stage::CoreRequest, began);
+                }
                 None => {
                     let _ = reply.send(Err(RangeError::OutOfRange));
                 }

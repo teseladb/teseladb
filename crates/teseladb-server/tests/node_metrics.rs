@@ -63,6 +63,8 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         "write_range",
         "drive_flush_wait",
         "core_step",
+        "core_data_done",
+        "core_lsm_work",
         "txn_statement",
         "txn_total",
         "view_wait",
@@ -94,6 +96,12 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     assert!(sample(&text, "teseladb_memory_allocated_bytes").expect("allocated") > 0.0);
     let writes = "teseladb_stage_seconds_count{stage=\"write_range\"}";
     assert!(sample(&text, writes).expect("write_range") >= 1.0, "{text}");
+    // The parts of a core's turn (012 FR-015): the insert arrived as a request, its entry came
+    // back from the log, and the core ticked and stepped its data meanwhile.
+    for part in ["core_request", "core_log_done", "core_tick", "core_data_step"] {
+        let count = format!("teseladb_stage_seconds_count{{stage=\"{part}\"}}");
+        assert!(sample(&text, &count).expect(part) >= 1.0, "{part} in {text}");
+    }
     n.stop();
     let _ = std::fs::remove_dir_all(dir);
 }

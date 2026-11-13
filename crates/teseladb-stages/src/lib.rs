@@ -39,6 +39,18 @@ pub enum Stage {
     DriveFlushWait,
     /// The busy part of one turn of a core's loop.
     CoreStep,
+    /// A tick of a core: its periodic duties, with the step of its data that ends them.
+    CoreTick,
+    /// The result of a disk operation of a core's Raft log, with the entries it applies.
+    CoreLogDone,
+    /// The result of a disk operation of a core's data.
+    CoreDataDone,
+    /// A client's data request as its core takes it in.
+    CoreRequest,
+    /// A step of a core's data: its ranges' requests, duties and answers.
+    CoreDataStep,
+    /// A stretch of the background work of a core's LSM, until its next disk operation.
+    CoreLsmWork,
     /// A transaction's `EndTxn(Begin)`.
     TxnBegin,
     /// A transaction's `PutIntents`.
@@ -83,12 +95,18 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 24] = [
+    pub const ALL: [Stage; 30] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
         Stage::DriveFlushWait,
         Stage::CoreStep,
+        Stage::CoreTick,
+        Stage::CoreLogDone,
+        Stage::CoreDataDone,
+        Stage::CoreRequest,
+        Stage::CoreDataStep,
+        Stage::CoreLsmWork,
         Stage::TxnBegin,
         Stage::TxnIntents,
         Stage::TxnLock,
@@ -118,6 +136,12 @@ impl Stage {
             Stage::WriteRange => "write_range",
             Stage::DriveFlushWait => "drive_flush_wait",
             Stage::CoreStep => "core_step",
+            Stage::CoreTick => "core_tick",
+            Stage::CoreLogDone => "core_log_done",
+            Stage::CoreDataDone => "core_data_done",
+            Stage::CoreRequest => "core_request",
+            Stage::CoreDataStep => "core_data_step",
+            Stage::CoreLsmWork => "core_lsm_work",
             Stage::TxnBegin => "txn_begin",
             Stage::TxnIntents => "txn_intents",
             Stage::TxnLock => "txn_lock",
