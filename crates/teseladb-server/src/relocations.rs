@@ -161,6 +161,8 @@ pub struct Relocations {
     cold: BTreeSet<GroupId>,
     /// Ranges whose leader here proposes `Relocate`, or is about to: it proposes no more writes.
     closing: BTreeSet<GroupId>,
+    /// Ranges exported while they ran whose replica a step of this module already saw stopped.
+    stopped: BTreeSet<GroupId>,
     inbound: BTreeMap<GroupId, In>,
     msgs: Vec<(u16, RelocateMsg)>,
     group0: Vec<Group0Command>,
@@ -202,6 +204,7 @@ impl Relocations {
             ahead: BTreeMap::new(),
             cold: BTreeSet::new(),
             closing: BTreeSet::new(),
+            stopped: BTreeSet::new(),
             inbound: BTreeMap::new(),
             msgs: Vec::new(),
             group0: Vec::new(),
@@ -305,6 +308,7 @@ impl Relocations {
             self.ahead.keys().filter(|g| over(self.out.get(g))).copied().collect();
         for g in gone {
             self.ahead.remove(&g);
+            self.stopped.remove(&g);
             core.release_export(g);
         }
         let halted: Vec<(GroupId, u16, Intervals, u64)> = replicas
@@ -491,6 +495,13 @@ impl Relocations {
                     continue;
                 }
                 if !sm.halted() {
+                    continue;
+                }
+                // It goes the step after the one that saw it stopped. The node hands the host
+                // what the core finished after each step of this module: a write applied in the
+                // same turn as the cut is answered with its result first, and not with the
+                // `Unavailable` of a range taken from its host (H-025).
+                if self.stopped.insert(g) {
                     continue;
                 }
                 let intervals = sm.intervals();
@@ -890,6 +901,9 @@ mod tests {
         r: Replicas,
         rel: Relocations,
         group0: Vec<Group0Command>,
+        /// The disk of the Raft log answers nothing while set: what is proposed meanwhile
+        /// becomes durable together once it is cleared.
+        slow_log: bool,
     }
 
     fn desc() -> RangeDesc {
@@ -940,7 +954,7 @@ mod tests {
             r.set_hosting(hosting.clone());
             let dir = PathBuf::from(format!("core-{id:02}/relocate"));
             let rel = Relocations::new(id, dir, hosting.clone());
-            Core { id, core, host, lsm, disk, r, rel, group0: Vec::new() }
+            Core { id, core, host, lsm, disk, r, rel, group0: Vec::new(), slow_log: false }
         }
 
         fn set(&mut self, relocations: &BTreeMap<GroupId, (u16, u64)>) {
@@ -957,7 +971,9 @@ mod tests {
         /// One turn of 10 ms of the core, as the data core runs it; `fault` is spent once used.
         fn turn(&mut self, now: Nanos, fault: &mut Fault) {
             self.core.on_tick(now, now.0 / 1_000_000);
-            while let Some(op) = self.core.poll_io(now) {
+            while !self.slow_log
+                && let Some(op) = self.core.poll_io(now)
+            {
                 let done = self.disk.execute(op);
                 self.core.on_io_done(done, now);
             }
@@ -985,10 +1001,6 @@ mod tests {
                 };
                 self.rel.on_io_done(&self.lsm, done);
             }
-            // What the core finished goes to the host, as the data core hands it on.
-            for (op, r) in self.core.drain_actions().done {
-                self.host.on_done(&mut self.core, op, r);
-            }
             self.r.open(&mut self.core, &mut self.host, &self.lsm);
             self.host.follow_state(&self.core);
             self.host.poll(&mut self.core, now, now.0 / 1_000_000);
@@ -996,6 +1008,11 @@ mod tests {
             self.rel.step(&mut self.core, &mut self.host, &mut self.r, &lsm, now);
             self.host.set_moving(self.rel.leaving());
             self.group0.extend(self.rel.take_group0());
+            // What the core finished goes to the host after the step, as the node does it: its
+            // data core moves first and then takes what the core produced.
+            for (op, r) in self.core.drain_actions().done {
+                self.host.on_done(&mut self.core, op, r);
+            }
         }
 
         /// Whether this core's LSM has a visible `KEY`.
@@ -1487,6 +1504,37 @@ mod tests {
         assert!(goes_on(sm, (1, 7)));
         sm.cut();
         assert!(sm.halted());
+    }
+
+    /// A write that the cut of its range finds applied is answered with its result (H-025). The
+    /// node moves its data core and then hands the host what the core finished, so a range
+    /// handed over in the step that saw it stopped took with it the writes applied in that turn:
+    /// one made durable together with the cut got `Unavailable`, and its client could not tell
+    /// whether it was applied. The first run of the sustained load on Linux with io_uring ended
+    /// with four documents unlike the model (13-11-2026).
+    #[test]
+    fn a_write_applied_with_the_cut_is_answered_before_the_range_is_handed_over() {
+        let mut n = Node::new();
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        let read = |n: &Node| matches!(n.cores[0].rel.out.get(&G), Some(Out::Read { .. }));
+        n.run_until(read, &mut [Fault::None; 2]);
+        assert_eq!(n.cores[0].rel.leaving().count(), 0, "its cut is not due yet");
+        // The log's disk answers nothing from here: the write and the cut reach it together.
+        n.cores[0].slow_log = true;
+        let (now, wall) = (n.now, n.now.0 / 1_000_000);
+        let c = &mut n.cores[0];
+        let last = c.core.status(G).expect("the range").last_index;
+        let wc = WriteConcern { w: W::Majority, j: true };
+        let req = DeleteReq { g: G, key: KEY.to_vec(), dedup: None, wc };
+        let id = c.host.delete(&mut c.core, req, now, wall);
+        let both =
+            move |n: &Node| n.cores[0].core.status(G).is_some_and(|s| s.last_index == last + 2);
+        n.run_until(both, &mut [Fault::None; 2]);
+        n.cores[0].slow_log = false;
+        n.run_until(|n| n.handed[0] == 1, &mut [Fault::None; 2]);
+        let replies = n.cores[0].host.take_replies();
+        let answer = replies.into_iter().find(|(r, _)| *r == id).map(|(_, a)| a);
+        assert!(matches!(answer, Some(Ok(Reply::Mutated { .. }))), "{answer:?}");
     }
 
     /// A replica that stopped proposes no writes, even if nothing told its host that the range
