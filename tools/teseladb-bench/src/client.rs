@@ -138,7 +138,11 @@ impl Client {
             usize::try_from(Header::parse(&whole).length).map_err(|_| "negative length")?;
         whole.resize(length.max(HEADER_LEN), 0);
         self.stream.read_exact(&mut whole[HEADER_LEN..]).map_err(text)?;
-        Ok(OpMsg::parse(&whole).map_err(debug)?.body.ok_or("a reply without a body")?)
+        let body = OpMsg::parse(&whole).map_err(debug)?.body.ok_or("a reply without a body")?;
+        // A reply that read whole keeps its bytes; any other is written back without limits, as
+        // the node already kept it within its own.
+        let unlimited = teseladb_bson::Limits { max_size: usize::MAX, max_depth: usize::MAX };
+        body.to_bytes_with(unlimited).map_err(debug)
     }
 }
 

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_server::run;
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
-use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_bson::{Document, Value};
 
 const READY_WAIT: Duration = Duration::from_secs(60);
 /// A value of the clients' documents that the log must not hold.
@@ -101,8 +101,7 @@ fn command(port: u16, db: &str, cmd: &Document) -> Document {
         let len = usize::try_from(i32::from_le_bytes(reply[..4].try_into().unwrap())).unwrap();
         reply.resize(len, 0);
         sock.read_exact(&mut reply[HEADER_LEN..]).unwrap();
-        let body = OpMsg::parse(&reply).unwrap().body.unwrap();
-        let d = Document::from(RawDoc::from_bytes(&body).unwrap());
+        let d = OpMsg::parse(&reply).unwrap().body.unwrap();
         if d.get("ok") == Some(&Value::Double(1.0)) || Instant::now() >= until {
             return d;
         }
