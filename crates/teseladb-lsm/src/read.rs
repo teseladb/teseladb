@@ -172,6 +172,18 @@ impl Reader {
         }
     }
 
+    /// One past the last block read asked for so far: what a request that just missed a block
+    /// waits for ([`Reader::back`]).
+    pub(crate) fn asked(&self) -> u64 {
+        self.next_token
+    }
+
+    /// Whether the block reads asked before `due` ([`Reader::asked`] then) came back, as many as
+    /// that in the order they were asked, or one failed: every request hears of a failure.
+    pub(crate) fn back(&self, due: u64) -> bool {
+        self.failure.is_some() || self.next_token - self.waiting.len() as u64 >= due
+    }
+
     /// The next read to issue.
     pub(crate) fn pop_op(&mut self) -> Option<IoOp> {
         self.queue.pop_front()

@@ -572,7 +572,7 @@ impl RangeHost {
         }
         if missing {
             m.read = Partial::Versions(latch, read);
-            self.reqs.insert(id, Req::Mut(m));
+            self.wait_for_blocks(id, m);
             return moved;
         }
         let versions: Vec<Vec<Item>> = read.into_iter().flatten().collect();

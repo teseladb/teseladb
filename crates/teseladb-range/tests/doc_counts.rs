@@ -77,6 +77,26 @@ fn the_leader_recounts_estimated_counts_and_every_replica_takes_them() {
     }
 }
 
+/// A recount passes a bounded number of versions a step (007 FR-039, H-060 of the native
+/// tests): its leader takes one at each poll and serves its requests in between. Walking the
+/// range in one step held the core for up to 31 ms.
+#[test]
+fn a_recount_passes_its_range_a_step_at_a_time() {
+    use teseladb_range::doc_count::{DocScan, RECOUNT_STEP, Recount};
+    let mut c = Cluster::single();
+    let l = c.elect();
+    c.settle();
+    let docs = RECOUNT_STEP + RECOUNT_STEP / 2;
+    for i in 0..docs {
+        write(&mut c, l, &doc(format!("{i:05}").as_bytes()), 1);
+    }
+    let lsm = c.nodes[&l].host.lsm().clone();
+    let mut scan = DocScan::new(&lsm, START, END);
+    assert_eq!(scan.step(&lsm), None, "more versions than a step passes");
+    let counted = Recount::Counted(BTreeMap::from([(COLL, docs as u64)]));
+    assert_eq!(scan.step(&lsm), Some(counted), "the next step ends it");
+}
+
 fn counts_of(c: &Cluster, n: NodeId, g: GroupId) -> Option<BTreeMap<(u32, u32), u64>> {
     c.nodes[&n].core.state_machine(g).and_then(RangeSm::doc_counts).cloned()
 }

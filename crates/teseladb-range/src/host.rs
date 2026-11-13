@@ -438,6 +438,9 @@ pub(crate) struct MutReq {
     deadline: Option<u64>,
     /// What it read of its keys under the latch it holds, while blocks of the others are read.
     read: Partial,
+    /// The block reads it waits for since it last missed one (`Lsm::block_reads_asked` then, 0
+    /// if none): until they are back it reads nothing again (FR-037).
+    read_due: u64,
     /// When it reached the core (012 FR-015).
     arrived: Nanos,
 }
@@ -1004,6 +1007,7 @@ impl RangeHost {
             settled: false,
             deadline,
             read: Partial::Nothing,
+            read_due: 0,
             arrived: now,
         };
         self.reqs.insert(id, Req::Mut(req));

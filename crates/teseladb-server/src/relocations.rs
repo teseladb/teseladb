@@ -51,6 +51,10 @@ const FILE_BASE: u32 = 0x7fff_0000;
 const FILE_SPAN: u32 = 0x0000_ffff;
 /// The newest mark: an export carries every version.
 const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
+/// Disk operations of this module in the disk thread's queue at most (007 FR-011): what a core
+/// asks of its disk meanwhile, an append to its log or a block for a read, waits behind four
+/// of them and not behind every file of a hand-over.
+const MAX_IN_FLIGHT: usize = 4;
 
 /// A range's local keys and data intervals.
 type Intervals = Vec<(Vec<u8>, Vec<u8>)>;
@@ -601,8 +605,13 @@ impl Relocations {
         true
     }
 
-    /// The next disk operation of this module.
+    /// The next disk operation of this module, [`MAX_IN_FLIGHT`] at a time: the disk thread of
+    /// the core takes its operations in order, and the hundreds of a hand-over, queued at once,
+    /// held the log's and the reads' behind them for up to 0,26 s (007 FR-011).
     pub fn poll_io(&mut self) -> Option<IoOp> {
+        if self.inflight.len() >= MAX_IN_FLIGHT {
+            return None;
+        }
         let (op, tag) = self.ops.pop_front()?;
         self.inflight.push_back(tag);
         Some(op)
@@ -1118,6 +1127,29 @@ mod tests {
         c.rel.durable(&mut c.r, &lsm, Durable::Removed(gone));
         assert!(matches!(c.rel.out.get(&gone), Some(Out::Sent { .. })));
         assert!(!n.hosting.holds(gone, 0));
+    }
+
+    /// The files of a hand-over go to the disk a few operations at a time (007 FR-011, H-060
+    /// of the native tests): the disk thread takes a core's operations in order, and with every
+    /// file queued at once the appends to the log and the blocks of the reads waited behind
+    /// them, up to 0,26 s.
+    #[test]
+    fn the_operations_of_a_hand_over_go_to_the_disk_a_few_at_a_time() {
+        let mut n = Node::new();
+        let c = &mut n.cores[1];
+        let g = GroupId(58);
+        let files = vec![vec![7u8; 16]; 8];
+        c.rel.on_message(&mut c.core, &mut c.r, &c.lsm, RelocateMsg::Handover(handover(g, files)));
+        let queued = c.rel.ops.len();
+        assert!(queued > 2 * MAX_IN_FLIGHT, "{queued} operations for eight files");
+        let mut handed: VecDeque<IoOp> = std::iter::from_fn(|| c.rel.poll_io()).collect();
+        assert_eq!(handed.len(), MAX_IN_FLIGHT);
+        // Each one that comes back lets the next one go.
+        let done = c.disk.execute(handed.pop_front().unwrap());
+        c.rel.on_io_done(&c.lsm, done);
+        handed.extend(std::iter::from_fn(|| c.rel.poll_io()));
+        assert_eq!(handed.len(), MAX_IN_FLIGHT);
+        assert_eq!(c.rel.ops.len(), queued - MAX_IN_FLIGHT - 1);
     }
 
     #[test]

@@ -140,8 +140,14 @@ impl Counts {
     }
 }
 
+/// Versions a recount passes in one step (007 FR-039): its leader takes a step at each poll, and
+/// the requests of its core go on between two. A recount that walked its range in one step held
+/// the core for up to 31 ms (H-060 of the native tests).
+pub const RECOUNT_STEP: usize = 512;
+
 /// A recount of the live documents of each collection in `[start, end)` at the newest versions,
-/// a few blocks at a time, as the leader runs it for [`crate::command::Command::AdjustCounts`].
+/// [`RECOUNT_STEP`] versions at a time, as the leader runs it for
+/// [`crate::command::Command::AdjustCounts`].
 pub struct DocScan {
     cursor: teseladb_lsm::Scan,
     docs: BTreeMap<Coll, u64>,
@@ -166,10 +172,11 @@ impl DocScan {
         DocScan { cursor: lsm.borrow().view().scan(start, end, newest), docs: BTreeMap::new() }
     }
 
-    /// Moves the recount on: how it ended, or `None` while a block is being read. The stored
-    /// value of a version is its type followed by its value.
+    /// Moves the recount on by at most [`RECOUNT_STEP`] versions: how it ended, or `None` while
+    /// a block is being read or there are versions left for its next step. The stored value of
+    /// a version is its type followed by its value.
     pub fn step(&mut self, lsm: &std::cell::RefCell<teseladb_lsm::Lsm>) -> Option<Recount> {
-        loop {
+        for _ in 0..RECOUNT_STEP {
             match self.cursor.next(&mut lsm.borrow_mut()) {
                 teseladb_lsm::Step::Item(i) => {
                     let Some(coll) = document_of(&i.key) else { continue };
@@ -187,6 +194,7 @@ impl DocScan {
                 teseladb_lsm::Step::Failed(_) => return Some(Recount::Failed),
             }
         }
+        None
     }
 }
 

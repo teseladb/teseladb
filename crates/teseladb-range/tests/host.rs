@@ -828,6 +828,55 @@ fn node_with_a_file(docs: u32, deleted: u32) -> Node {
     n
 }
 
+/// A value for each of its keys.
+struct SetEach(Vec<Vec<u8>>, u8);
+
+impl Mutation for SetEach {
+    fn eval(&self, _: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
+        let put = |k: &Vec<u8>| Put { key: k.clone(), value_type: 1, value: vec![self.1] };
+        let puts = self.0.iter().map(put).collect();
+        Ok(Outcome { puts, deletes: vec![], change: vec![], result: vec![] })
+    }
+}
+
+/// A write that waits for blocks of its keys reads nothing again until the reads it asked for
+/// are back (005 FR-037, H-060 of the native tests). Every result of the disk polls the host,
+/// and at each poll the write read all its missing keys again, 0,7 ms for 191 of them: with the
+/// disk busy with the 250 file operations of a core change, its core spent 0,4 s in one turn.
+#[test]
+fn a_write_that_waits_for_blocks_reads_its_keys_again_once_they_are_back() {
+    const KEYS: u32 = 10;
+    let key = |i: u32| format!("\x01k{i:03}").into_bytes();
+    let mut n = node_with_a_file(KEYS, 0);
+    // A read of the first document brings its block and finds it there: from now on every block
+    // the cache is asked for and lacks lowers its share of hits.
+    for _ in 0..2 {
+        let read = n.get(&key(0), ReadConcern::Linearizable);
+        n.settle();
+        assert!(matches!(n.reply(read), Some(Ok(Reply::Value { .. }))), "{:?}", n.reply(read));
+    }
+    let lsm = n.host.lsm().clone();
+    let hits = |lsm: &RefCell<Lsm>| lsm.borrow().metrics().cache_hit_ratio;
+    assert!(hits(&lsm) > 0.0, "the second read found the block");
+    // The other documents are in other blocks of the file, two a block.
+    let keys: Vec<Vec<u8>> = (2..KEYS).map(key).collect();
+    let (now, wall) = (n.now, n.wall());
+    let m = Box::new(SetEach(keys.clone(), 7));
+    let w = WriteReq { g: G, keys, m, dedup: None, wc: MAJORITY };
+    let id = n.host.mutate(&mut n.core, w, now, wall);
+    let asked = lsm.borrow().block_reads_asked();
+    assert!(!lsm.borrow().block_reads_back(asked), "the blocks of its keys are being read");
+    let before = hits(&lsm);
+    for _ in 0..50 {
+        n.host.poll(&mut n.core, now, wall);
+    }
+    assert_eq!(hits(&lsm), before, "it read its keys again while their blocks were not back");
+    assert_eq!(n.reply(id), None);
+    // The reads come back and the write goes on.
+    n.settle();
+    assert!(matches!(n.reply(id), Some(Ok(Reply::Mutated { .. }))), "{:?}", n.reply(id));
+}
+
 /// Reads the block `need` names from `disk` into the cache of the reads outside the core, as a
 /// connection's thread does, and counts it in `read`.
 fn supply_block(

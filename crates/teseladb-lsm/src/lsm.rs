@@ -430,6 +430,19 @@ impl Lsm {
         }
     }
 
+    /// What a read that just missed blocks waits for: [`Lsm::block_reads_back`] tells when the
+    /// block reads asked so far, its own among them, came back.
+    pub fn block_reads_asked(&self) -> u64 {
+        self.reader.asked()
+    }
+
+    /// Whether the block reads asked up to `due` ([`Lsm::block_reads_asked`] then) came back, or
+    /// a read failed. A request that missed blocks reads again once this holds: before, it finds
+    /// the same blocks missing.
+    pub fn block_reads_back(&self, due: u64) -> bool {
+        self.reader.back(due)
+    }
+
     /// `Ok` while the core works; the error when it is read-only, corrupt or stopped.
     pub fn health(&self) -> Result<(), LsmError> {
         self.writable()?;

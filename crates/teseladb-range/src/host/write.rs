@@ -165,13 +165,21 @@ impl RangeHost {
             }
         }
         if let MutState::Read(latch) = m.state {
+            // The blocks it missed are not back: it would find them missing again (FR-037).
+            // Every result of the disk steps the requests of the core, and a write of 191 keys
+            // read them all again, 0,7 ms each time: behind the 250 file operations of a core
+            // change its core spent 0,4 s in one turn (H-060 of the native tests).
+            if !self.lsm.borrow().block_reads_back(m.read_due) {
+                self.reqs.insert(id, Req::Mut(m));
+                return moved;
+            }
             if matches!(m.work, Work::Txn(_)) {
                 return self.step_txn(core, id, m, (latch, moved), now);
             }
             if let Some(key) = m.dedup {
                 match dedup::lookup(&self.lsm, m.g, key) {
                     None => {
-                        self.reqs.insert(id, Req::Mut(m));
+                        self.wait_for_blocks(id, m);
                         return moved;
                     }
                     Some(Err(())) => {
@@ -188,7 +196,7 @@ impl RangeHost {
                     // newest in this range is too old: its record may have been purged.
                     Some(Ok(None)) => match dedup::superseded(&self.lsm, m.g, key) {
                         None => {
-                            self.reqs.insert(id, Req::Mut(m));
+                            self.wait_for_blocks(id, m);
                             return moved;
                         }
                         Some(Err(())) => {
@@ -248,7 +256,7 @@ impl RangeHost {
             }
             if missing {
                 m.read = Partial::Visible(latch, read);
-                self.reqs.insert(id, Req::Mut(m));
+                self.wait_for_blocks(id, m);
                 return moved;
             }
             let current: Vec<crate::push::Visible> = read.into_iter().flatten().collect();
@@ -307,6 +315,13 @@ impl RangeHost {
         }
         self.reqs.insert(id, Req::Mut(m));
         moved
+    }
+
+    /// Leaves write `m` waiting for the blocks its reads just missed: it reads again once the
+    /// block reads asked so far, its own among them, are back (FR-037).
+    pub(super) fn wait_for_blocks(&mut self, id: ReqId, mut m: MutReq) {
+        m.read_due = self.lsm.borrow().block_reads_asked();
+        self.reqs.insert(id, Req::Mut(m));
     }
 
     /// Frees the latches of uncertain writes whose entry was applied in their term or whose term
