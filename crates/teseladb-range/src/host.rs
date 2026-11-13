@@ -297,6 +297,9 @@ pub(crate) struct Leader {
     /// answer leaves (005 FR-031): a scan outside the core that begins afterwards reads a view
     /// that applied it.
     pub(crate) answered: Arc<AtomicU64>,
+    /// Whether the views it published still stand (005 FR-028): withdrawn when a cut takes keys
+    /// from the range and when this state goes.
+    pub(crate) standing: crate::view::Standing,
 }
 
 impl Leader {
@@ -1477,6 +1480,7 @@ impl RangeHost {
                 applied: core.state_machine(*g).map_or(ZERO, RangeState::applied_mark),
                 applied_index: core.state_machine(*g).map_or(0, StateMachine::applied_index),
                 answered: Arc::clone(&l.answered),
+                withdrawn: l.standing.flag(),
             };
             let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());
             views.insert(*g, Arc::new(view));
@@ -1545,6 +1549,7 @@ impl RangeHost {
             recount: recount::RecountJob::default(),
             read_outside_at: None,
             answered: Arc::default(),
+            standing: crate::view::Standing::default(),
         });
         let lost: Vec<ReqId> = self
             .reqs

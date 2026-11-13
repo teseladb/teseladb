@@ -178,6 +178,83 @@ fn a_range_that_splits_keeps_its_view_until_the_cut_and_then_narrows_it() {
     assert_eq!(scan(&c, (START, AT)), Some(vec![b"\x01b".to_vec()]));
 }
 
+/// A read of `key` through `view` by a thread that took the view at `taken` and was stopped: its
+/// mark comes now, and by its own monotonic time the view has not run out.
+fn read_stopped(
+    c: &Cluster,
+    n: NodeId,
+    view: &teseladb_range::view::RangeView,
+    key: &[u8],
+    taken: Nanos,
+) -> teseladb_range::view::FastRead {
+    let mut cache = teseladb_lsm::ViewCache::default();
+    let concern = teseladb_range::read::ReadConcern::Local;
+    view.read(&mut cache, key, c.wall_of(n), || taken, concern)
+}
+
+/// The view a thread took before a cut serves nothing once the cut is applied (005 FR-028,
+/// `spec/tla/ViewWithdrawn.tla`, H-058 of the native tests). The new range, which leads at once
+/// when it has one voter, takes the marks of its writes from the same clock as that thread: a
+/// read through the old view at a later mark would miss a write of it that is not applied yet.
+/// The view was limited only in time, 50 ms from its publication.
+#[test]
+fn a_view_taken_before_a_cut_serves_nothing_once_the_cut_is_applied() {
+    use teseladb_range::view::FastRead;
+    let mut c = Cluster::single();
+    let l = c.elect();
+    write_on(&mut c, l, G, b"\x01b", 2, 1);
+    write_on(&mut c, l, G, b"\x01q", 1, 2);
+    c.follow();
+    let wide = c.nodes[&l].host.views().get(G).expect("the view of the whole range");
+    let taken = c.now;
+    assert!(matches!(read_stopped(&c, l, &wide, b"\x01q", taken), FastRead::Found { .. }));
+    assert!(c.nodes.get_mut(&l).unwrap().host.split(G, AT, NEW));
+    c.follow();
+    let done = c.nodes.get_mut(&l).unwrap().host.take_splits();
+    assert_eq!(done, [SplitDone { g: G, at: AT.to_vec(), new_range: NEW }]);
+    // Neither a key it gave away nor one it keeps: the thread asks the core.
+    assert!(matches!(read_stopped(&c, l, &wide, b"\x01q", taken), FastRead::Core));
+    assert!(matches!(read_stopped(&c, l, &wide, b"\x01b", taken), FastRead::Core));
+    // The view published after the cut stands.
+    let narrow = c.nodes[&l].host.views().get(G).expect("the view of the keys it keeps");
+    assert!(matches!(read_stopped(&c, l, &narrow, b"\x01b", c.now), FastRead::Found { .. }));
+}
+
+/// The view of a term serves nothing once its leader lost the term (FR-028): the same replica
+/// may win a later one and write, with marks of the same clock, before the view runs out.
+#[test]
+fn a_view_of_a_term_serves_nothing_once_its_leader_lost_the_term() {
+    use teseladb_range::view::FastRead;
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    write_on(&mut c, l, G, b"\x01b", 2, 1);
+    c.follow();
+    // The view comes with a round of the lease that covers its whole span.
+    let mut view = None;
+    for _ in 0..50 {
+        c.ticks_following(1);
+        view = c.nodes[&l].host.views().get(G);
+        if view.is_some() {
+            break;
+        }
+    }
+    let view = view.expect("the leader's view");
+    let taken = c.now;
+    assert!(matches!(read_stopped(&c, l, &view, b"\x01b", taken), FastRead::Found { .. }));
+    // Cut off, it loses the term to another voter and hears of it once the cut heals.
+    c.isolate(l);
+    for _ in 0..1_000 {
+        c.ticks(1);
+        if leader_of(&c, G).is_some_and(|n| n != l) {
+            break;
+        }
+    }
+    c.cut.clear();
+    c.ticks_following(5);
+    assert!(c.nodes[&l].core.status(G).is_some_and(|s| s.role != Role::Leader), "it follows");
+    assert!(matches!(read_stopped(&c, l, &view, b"\x01b", taken), FastRead::Core));
+}
+
 #[test]
 fn a_table_that_cannot_be_read_drops_the_split_until_it_is_asked_again() {
     let mut c = Cluster::standard();

@@ -20,11 +20,19 @@
 //! after, the mark is at most the clock's at `valid_until`, at most [`VIEW_SPAN`] past the
 //! publication.
 //!
+//! A leader of the same keys that starts on the same node takes the marks of its writes from the
+//! clock the thread takes its own from: the half a split cuts from the range, the same replica
+//! in a later term, the replica another core imports. With one voter it leads at once, within
+//! the time the view holds. The core withdraws the view before that leader can start
+//! ([`Standing`]), and the thread looks at that after it takes its mark: a view it finds standing
+//! was standing when the mark was taken, so every write of that leader comes above it
+//! (`spec/tla/ViewWithdrawn.tla`).
+//!
 //! [`VIEW_SPAN`]: crate::host::VIEW_SPAN
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use teseladb_hlc::{Hlc, Next};
 use teseladb_lsm::{
@@ -42,6 +50,31 @@ use crate::latch::{KeySlots, SpanKeys};
 use crate::read::ReadConcern;
 use crate::sm::{dedup_key, split_value};
 use crate::tscache::word;
+
+/// Whether the views a leader published of the keys it holds still stand (005 FR-028). The core
+/// withdraws them before another leader of those keys can start on the same node: when a cut
+/// takes keys from the range, and when the leader's state goes, because its term ended or its
+/// range left the core. Dropping it withdraws them.
+#[derive(Debug, Default)]
+pub(crate) struct Standing(Arc<AtomicBool>);
+
+impl Standing {
+    /// The flag of the views published from now on: set once they are withdrawn.
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+
+    /// Withdraws the views published so far; those published after it stand.
+    pub(crate) fn renew(&mut self) {
+        *self = Standing::default();
+    }
+}
+
+impl Drop for Standing {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 
 /// The view of one range.
 pub struct RangeView {
@@ -71,6 +104,8 @@ pub struct RangeView {
     /// The live documents of each collection when the core published the view, if exact (007
     /// FR-039).
     counts: Option<Arc<Counts>>,
+    /// Set once the core withdrew the view ([`Standing`]).
+    withdrawn: Arc<AtomicBool>,
     lsm: SharedLsm,
     clock: NodeClock,
 }
@@ -125,6 +160,7 @@ pub(crate) struct ViewParts {
     pub(crate) applied: Hlc,
     pub(crate) applied_index: u64,
     pub(crate) answered: Arc<AtomicU64>,
+    pub(crate) withdrawn: Arc<AtomicBool>,
 }
 
 impl RangeView {
@@ -145,6 +181,7 @@ impl RangeView {
             released: p.released,
             outside: p.outside,
             counts: p.counts,
+            withdrawn: p.withdrawn,
             lsm,
             clock,
         }
@@ -193,11 +230,18 @@ impl RangeView {
             Decline::Writing.count();
             return None;
         }
-        if now() >= self.valid_until {
+        if self.gone(now) {
             Decline::Expired.count();
             return None;
         }
         Some(ts)
+    }
+
+    /// Whether the view no longer serves a read whose mark was just taken: the core withdrew it,
+    /// or the time it holds until passed (`now` gives the monotonic time). Both are looked at
+    /// after the mark (FR-028).
+    fn gone(&self, now: impl FnOnce() -> Nanos) -> bool {
+        self.withdrawn.load(Ordering::SeqCst) || now() >= self.valid_until
     }
 
     /// Reads `key` at a mark of the node's clock, with the wall clock at `wall_ms`, if this
@@ -523,7 +567,7 @@ impl RangeView {
             Decline::Other.count();
             return None;
         }
-        if now() >= self.valid_until {
+        if self.gone(now) {
             Decline::Expired.count();
             return None;
         }

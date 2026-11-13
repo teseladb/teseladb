@@ -200,6 +200,11 @@ impl RangeHost {
             if let Some(end) = sm.and_then(RangeState::end).filter(|e| *e != r.end.as_slice()) {
                 r.end = end.to_vec();
                 moved = true;
+                // The views of the keys it held serve nothing more (FR-028): the range that
+                // takes the keys it gives away starts after this, on this node too.
+                if let Some(l) = r.leader.as_mut() {
+                    l.standing.renew();
+                }
             }
             let frozen = sm.is_some_and(RangeState::frozen);
             moved |= r.frozen != frozen;

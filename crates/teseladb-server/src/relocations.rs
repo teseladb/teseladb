@@ -950,6 +950,29 @@ mod tests {
         assert!(clock.0.peek().physical <= wall + 1, "the node's clock stays at its wall clock");
     }
 
+    /// The view a thread took of a range serves nothing once the range is handed over to
+    /// another core (005 FR-028, H-058 of the native tests): with one voter the core that takes
+    /// it leads at once, and its writes take their marks from the same clock as that thread.
+    #[test]
+    fn a_view_of_a_range_serves_nothing_once_the_range_is_handed_over() {
+        use teseladb_range::read::ReadConcern;
+        use teseladb_range::view::FastRead;
+        let mut n = Node::new();
+        for _ in 0..3 {
+            n.turn(&mut [Fault::None; 2]);
+        }
+        let view = n.cores[0].host.views().get(G).expect("core 0 publishes the view of its range");
+        let taken = n.now;
+        // A thread stopped since it took the view: by its own time the view has not run out.
+        let read = |n: &Node| {
+            let mut cache = teseladb_lsm::ViewCache::default();
+            view.read(&mut cache, KEY, n.now.0 / 1_000_000, || taken, ReadConcern::Local)
+        };
+        assert!(!matches!(read(&n), FastRead::Core), "served on the thread while core 0 leads");
+        n.relocate(&mut [Fault::None; 2]);
+        assert!(matches!(read(&n), FastRead::Core), "the core that handed it over withdrew it");
+    }
+
     #[test]
     fn a_hand_over_the_target_core_cannot_write_is_refused_and_handed_over_again() {
         let mut n = Node::new();
