@@ -126,15 +126,16 @@ impl SortSpec {
         doc: &Document,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<Vec<Value>, MqlError> {
-        let bytes = crate::raw::bytes_of(doc)?;
-        let raw = RawDoc::from_bytes(&bytes).map_err(crate::raw::bad)?;
         let mut keys = Vec::with_capacity(self.keys.len());
         let mut arrays = 0;
-        for (path, asc) in &self.keys {
-            let (v, through_array) = key_of(raw, path, *asc, col)?;
-            arrays += usize::from(through_array);
-            keys.push(v);
-        }
+        crate::raw::with_raw_doc(doc, |raw| {
+            for (path, asc) in &self.keys {
+                let (v, through_array) = key_of(raw, path, *asc, col)?;
+                arrays += usize::from(through_array);
+                keys.push(v);
+            }
+            Ok(())
+        })?;
         if arrays > 1 {
             return Err(error(
                 super::errors::BAD_VALUE,
@@ -171,6 +172,19 @@ impl SortSpec {
             .into_iter()
             .map(|d| Ok((self.key(&d, col)?, d)))
             .collect::<Result<_, MqlError>>()?;
+        // Keys of numbers, dates, `ObjectId`s and strings without a collation go by radix sort
+        // (010 FR-032); the comparison sort takes the rest.
+        if col.is_none() {
+            let ascending: Vec<bool> = self.keys.iter().map(|(_, asc)| *asc).collect();
+            if let Some(bytes) = super::radix::encode_by(&keyed, &ascending, |(k, _)| k) {
+                let mut slots: Vec<Option<Document>> =
+                    keyed.into_iter().map(|(_, d)| Some(d)).collect();
+                return Ok(super::radix::sort(&bytes)
+                    .into_iter()
+                    .filter_map(|i| slots[i].take())
+                    .collect());
+            }
+        }
         crate::expr::try_sort_by(&mut keyed, |(a, _), (b, _)| self.compare(a, b, col))?;
         Ok(keyed.into_iter().map(|(_, d)| d).collect())
     }

@@ -10,4 +10,5 @@ pub mod cost;
 pub mod logical;
 pub mod rules;
 pub mod stages;
+pub mod stats;
 pub mod views;

@@ -69,12 +69,25 @@ impl Match {
         Match { filter: Arc::new(filter) }
     }
 
-    /// The documents of `docs` that match.
+    /// The documents of `docs` that match, in their order: batches of up to
+    /// [`super::BATCH_DOCS`] documents, each filtered 64 at a time by the register machine
+    /// (010 FR-028, FR-031).
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
-        let mut out = Vec::new();
-        for d in docs {
-            if matches(&self.filter, &d, env)? {
-                out.push(d);
+        let mut out = Vec::with_capacity(docs.len());
+        let mut masks = Vec::with_capacity(super::BATCH_DOCS / teseladb_mql::vm::BATCH);
+        let mut docs = docs.into_iter().peekable();
+        let mut batch: Vec<Document> = Vec::with_capacity(super::BATCH_DOCS);
+        while docs.peek().is_some() {
+            batch.extend(docs.by_ref().take(super::BATCH_DOCS));
+            masks.clear();
+            for lanes in batch.chunks(teseladb_mql::vm::BATCH) {
+                masks.push(super::scoped::matches_batch(&self.filter, lanes, env)?);
+            }
+            for (i, d) in batch.drain(..).enumerate() {
+                let mask = masks[i / teseladb_mql::vm::BATCH];
+                if mask >> (i % teseladb_mql::vm::BATCH) & 1 == 1 {
+                    out.push(d);
+                }
             }
         }
         Ok(out)

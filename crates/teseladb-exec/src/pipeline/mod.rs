@@ -11,10 +11,12 @@ pub mod fusion;
 pub mod geo_near;
 mod granularity;
 mod group;
+mod group_columns;
 mod joined;
 pub mod meta;
 pub mod optimize;
 pub mod out_merge;
+pub mod radix;
 mod sbe;
 mod scoped;
 pub mod search;
@@ -39,6 +41,9 @@ use group::{Bucket, BucketAuto, Group};
 use shape::{AddFields, Projection, ReplaceRoot};
 use sort::SortSpec;
 use stages::{Facet, Lookup, Match, Sample, UnionWith, Unwind};
+
+/// The documents a stage handles in one batch (010 FR-028).
+pub const BATCH_DOCS: usize = 1024;
 
 /// What a pipeline reads besides its input.
 pub trait Env {

@@ -272,6 +272,25 @@ impl Accumulator {
         }
     }
 
+    /// Takes into state `st` a document whose input is `v`, already evaluated: for the unary
+    /// accumulators and `$count` only (the ones `$group` feeds from register columns, 010
+    /// FR-031).
+    pub(crate) fn add_evaluated(
+        &self,
+        st: &mut State,
+        v: Eval,
+        (col, sbe): (Option<&dyn teseladb_bson::Collator>, bool),
+    ) -> Result<(), MqlError> {
+        match (self, st) {
+            (Accumulator::Unary(u, _), st) => add_unary(*u, v, st, (col, sbe)),
+            (Accumulator::Count, State::Count(c)) => {
+                *c += 1;
+                Ok(())
+            }
+            _ => Err(error(BAD_VALUE, "an accumulator that takes no evaluated input")),
+        }
+    }
+
     /// The value of state `st`, values ordered in collation `col`, equal ones kept as SBE
     /// keeps them when `sbe`.
     pub(crate) fn finish(
