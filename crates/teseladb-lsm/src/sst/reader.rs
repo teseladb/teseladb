@@ -156,7 +156,7 @@ impl Table {
             number,
             size,
             props,
-            pgm: Pgm::build(last_keys.iter().map(|k| &k[..])),
+            pgm: Pgm::build(last_keys.iter().map(|k| entry::logical(k))),
             bounds: EliasFano::new(&bounds),
             last_keys,
             filter,
@@ -216,7 +216,7 @@ impl Table {
     /// The first block that may hold internal keys at or after `ikey`.
     pub(crate) fn find_block(&self, ikey: &[u8]) -> Option<usize> {
         let before = |last: &[u8], key: &[u8]| entry::compare(last, key).is_lt();
-        let i = pgm::find(self.pgm.as_ref(), &self.last_keys, ikey, before);
+        let i = pgm::find(self.pgm.as_ref(), &self.last_keys, (ikey, entry::logical(ikey)), before);
         (i < self.last_keys.len()).then_some(i)
     }
 
