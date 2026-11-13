@@ -172,3 +172,35 @@ fn groups_of_numbers_a_batch_at_a_time_equal_groups_by_expressions() {
         }
     }
 }
+
+/// A `$group` after stages that pass batches takes each batch as it comes out (010 FR-028): over
+/// several batches of 1,024 it gives the groups it gives over the whole of their output.
+#[test]
+fn a_group_after_streaming_stages_takes_their_batches() {
+    let mut rng = Rng(0x0B10_C4ED);
+    let docs: Vec<Document> = (0..3000).map(|i| doc(&mut rng, i)).collect();
+    let keep = |x: &Document| !matches!(x.get("w"), Some(Value::Boolean(true)));
+    let marked: Vec<Document> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, x)| x.clone().with("w", Value::Boolean(i % 3 == 0)))
+        .collect();
+    // The documents the stages before the group give, for a group that runs alone.
+    let filtered: Vec<Document> =
+        marked.iter().filter(|x| keep(x)).map(|x| x.clone().with("z", 1)).collect();
+    let streamed = Reference::new(1).with_collection("c", marked);
+    let whole = Reference::new(1).with_collection("c", filtered);
+    for key in ["$k", "$d.k", "x"] {
+        let sort = d().with("$sort", d().with("_id", 1));
+        let after = [
+            d().with("$match", d().with("w", d().with("$ne", true))),
+            d().with("$addFields", d().with("z", 1)),
+            group(key, "$v"),
+            sort.clone(),
+        ];
+        let alone = [group(key, "$v"), sort];
+        let a = streamed.evaluate("c", &after).expect("groups");
+        let b = whole.evaluate("c", &alone).expect("groups");
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "{key}");
+    }
+}

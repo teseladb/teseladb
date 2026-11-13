@@ -21,7 +21,7 @@ use teseladb_range::mutate::Outcome;
 use teseladb_range::push::Row;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_range::view::{Decline, FastRead, Newest, Part};
+use teseladb_range::view::{Decline, FastRead, MATCH_BATCH, Newest, Part};
 use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -767,6 +767,58 @@ fn a_scan_outside_the_core_reads_what_was_applied_whatever_is_in_flight() {
     assert_eq!(all, vec![(b"\x01a".to_vec(), (1, vec![9])), (b"\x01m".to_vec(), (1, vec![2]))]);
 }
 
+/// The filter of a matching scan that keeps the documents of a batch `one` accepts, checking
+/// that no batch passes [`MATCH_BATCH`] documents.
+fn each(one: impl Fn(&[u8]) -> bool + Copy) -> impl FnMut(&[&[u8]]) -> u64 + Copy {
+    move |batch: &[&[u8]]| {
+        assert!(!batch.is_empty() && batch.len() <= MATCH_BATCH, "{} documents", batch.len());
+        batch.iter().enumerate().fold(0, |m, (l, d)| m | (u64::from(one(d)) << l))
+    }
+}
+
+/// A scan whose filter takes its documents a batch at a time (010 FR-028) takes, over more than
+/// a batch, those it would take one at a time: how many it examined at each, and where it goes
+/// on when it stops at its number of documents inside a batch.
+#[test]
+fn a_matching_scan_hands_its_filter_batches() {
+    let mut n = Node::new();
+    let key = |i: u32| format!("\x01k{i:03}").into_bytes();
+    for i in 0..150u32 {
+        n.mutate(&key(i), Box::new(SetKey(key(i), Some(i as u8))), MAJORITY);
+        n.settle();
+    }
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let mut cache = ViewCache::default();
+    let thirds = each(|v| v[0] % 3 == 0);
+    let span: (&[u8], &[u8]) = (b"\x01k", b"\x01l");
+    let mut from = span.0.to_vec();
+    let (mut kept, mut seen, mut examined) = (Vec::new(), Vec::new(), 0);
+    loop {
+        let most = (100, 64);
+        let got = view
+            .scan_matching(
+                &mut cache,
+                (&from, span.1),
+                most,
+                || n.now,
+                ReadConcern::Local,
+                |_| false,
+                thirds,
+            )
+            .expect("served outside");
+        seen.extend(got.seen.iter().map(|s| s + examined));
+        examined += got.examined;
+        kept.extend(got.rows.into_iter().map(|(k, _)| k));
+        match got.next {
+            Some(next) => from = next,
+            None => break,
+        }
+    }
+    let wanted: Vec<Vec<u8>> = (0..150).step_by(3).map(key).collect();
+    let wanted_seen: Vec<usize> = (0..150).step_by(3).map(|i| i + 1).collect();
+    assert_eq!((kept, seen, examined), (wanted, wanted_seen, 150));
+}
+
 /// A scan with a filter runs it on the stored bytes and copies only what it accepts (010
 /// FR-027): it says how many documents it examined, how many it had examined at each one it
 /// took, and where it goes on when it stops at its number of documents.
@@ -780,7 +832,7 @@ fn a_matching_scan_outside_the_core_copies_only_what_its_filter_accepts() {
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let mut cache = ViewCache::default();
     let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
-    let odd = |v: &[u8]| v[0] % 2 == 1;
+    let odd = each(|v| v[0] % 2 == 1);
     let mut scan = |span, examine| {
         let most = (examine, 64);
         view.scan_matching(&mut cache, span, most, || n.now, ReadConcern::Local, |_| false, odd)
@@ -964,7 +1016,7 @@ fn a_matching_scan_outside_the_core_stops_at_its_blocks_and_goes_on_from_there()
                 || now,
                 ReadConcern::Local,
                 |need| supply_block(&mut n.disk, &view, need, &mut read),
-                |v| v[0] % 2 == 0,
+                each(|v| v[0] % 2 == 0),
             )
             .expect("served outside");
         assert!(read <= 4 && got.examined > 0, "{read} blocks, {} examined", got.examined);
