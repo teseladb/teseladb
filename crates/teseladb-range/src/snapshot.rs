@@ -224,7 +224,7 @@ pub fn write_ops(files: &[Vec<u8>], dir: &Path, first: FileId) -> (Vec<IoOp>, Ve
         ops.push(IoOp::WriteAt { file, offset: 0, data: Bytes::from_vec(data.clone()), batch: 0 });
         ops.push(IoOp::Sync { file, batch: 0 });
         ops.push(IoOp::Close { file });
-        refs.push(FileRef { path, size: data.len() as u64 });
+        refs.push(FileRef::new(path, data.len() as u64));
     }
     (ops, refs)
 }

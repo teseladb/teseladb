@@ -737,7 +737,7 @@ mod tests {
         let r = ask(&mut b, &mut w, DATA_RANGE, RemoteReq::RestoreIngest { files: 1 });
         assert!(matches!(&r, Err(RangeError::Mutation(m)) if m.0.contains("not empty")), "{r:?}");
         let ingesting = |id| {
-            let refs = vec![FileRef { path: "r/a.sst".into(), size: 1 }];
+            let refs = vec![FileRef::new("r/a.sst".into(), 1)];
             Restore::Ingesting(Ingestion { id, refs, interval: (vec![1], vec![3]), cleared: false })
         };
         b.restores.insert(DATA_RANGE, ingesting(5));
@@ -799,7 +799,7 @@ mod tests {
         assert!(matches!(b.exports[&key].state, ExportState::Exporting(8)));
         // A read of an export not ready, or that read nothing.
         b.read(3, (key, 1), (0, 0), Some(b"ab".to_vec()));
-        let f = FileRef { path: "x".into(), size: 4 };
+        let f = FileRef::new("x".into(), 4);
         b.exports.insert(key, export(ExportState::Ready(vec![(FileId(1), f)])));
         b.read(4, (key, 1), (0, 0), None);
         let replies = b.take_replies();
@@ -834,7 +834,7 @@ mod tests {
         assert!(b.on_exported(8, Vec::new()).is_ok());
         assert!(matches!(&b.exports[&key].state, ExportState::Ready(f) if f.is_empty()));
         b.exports.insert(key, export(ExportState::Exporting(9)));
-        let f = FileRef { path: path.clone(), size: 4 };
+        let f = FileRef::new(path.clone(), 4);
         assert!(b.on_exported(9, vec![f.clone(), f.clone()]).is_ok());
         // One open fails: the export goes, its files are closed and removed.
         let ok = IoDone::Ok(IoOp::Close { file: FileId(1) });
@@ -906,7 +906,7 @@ mod tests {
         let empty =
             Some(Ok(RemoteReply::Piece { ready: true, sizes: Vec::new(), data: Vec::new() }));
         assert_eq!(fetch(&mut b, &mut core, &mut host, 0, 0), empty);
-        let f = FileRef { path: "x".into(), size: 4 };
+        let f = FileRef::new("x".into(), 4);
         b.exports.insert(key, export(ExportState::Ready(vec![(FileId(1), f)])));
         assert!(matches!(fetch(&mut b, &mut core, &mut host, 3, 0), Some(Err(_))));
         assert_eq!(fetch(&mut b, &mut core, &mut host, 0, 0), None, "read from the disk");

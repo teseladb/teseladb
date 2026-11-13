@@ -31,7 +31,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
@@ -77,8 +77,11 @@ pub struct Handover {
     pub imp: GroupImport,
     /// Its local keys and data intervals.
     pub intervals: Intervals,
-    /// The SST files of those intervals.
+    /// The SST files of those intervals the export wrote.
     pub files: Vec<Vec<u8>>,
+    /// The files the export linked whole, with their history files (004 FR-033): the target
+    /// core ingests them where they are, on the node's file system.
+    pub linked: Vec<FileRef>,
 }
 
 /// A message of a core change between two cores of a node.
@@ -104,9 +107,17 @@ enum Out {
     /// index the copy had applied when the export was asked for: the files hold that state.
     Exporting { target: u16, jobs: Vec<u64>, files: Vec<FileRef>, at: u64 },
     /// The exported files are being read.
-    Reading { target: u16, refs: Vec<FileRef>, data: Vec<Option<Vec<u8>>>, failed: bool, at: u64 },
+    /// The files linked whole are kept apart, unread (004 FR-033).
+    Reading {
+        target: u16,
+        refs: Vec<FileRef>,
+        data: Vec<Option<Vec<u8>>>,
+        failed: bool,
+        at: u64,
+        linked: Vec<FileRef>,
+    },
     /// Read whole: it goes once the group closes, if its copy still holds the state `at`.
-    Read { target: u16, files: Vec<Vec<u8>>, at: u64 },
+    Read { target: u16, files: Vec<Vec<u8>>, at: u64, linked: Vec<FileRef> },
     /// Handed over: waits for the import.
     Sent { intervals: Intervals },
     /// Imported by the target core: its group goes.
@@ -172,6 +183,17 @@ pub struct Relocations {
     next_file: u32,
     next_name: u64,
     resend_at: BTreeMap<GroupId, Nanos>,
+    /// The node's cores share one file system: a range that leaves hands over its whole files
+    /// as hard links (004 FR-033, D-167).
+    link: bool,
+}
+
+/// The removals of the names of `linked` files and of their history files.
+fn unlink(linked: &[FileRef]) -> impl Iterator<Item = IoOp> + '_ {
+    linked.iter().flat_map(|f| {
+        let history = f.history.iter().map(|(path, _)| path.clone());
+        std::iter::once(f.path.clone()).chain(history).map(|path| IoOp::Remove { path })
+    })
 }
 
 /// The state machine of range `g` on this core.
@@ -213,7 +235,40 @@ impl Relocations {
             next_file: 0,
             next_name: 0,
             resend_at: BTreeMap::new(),
+            link: false,
         }
+    }
+
+    /// The core changes hand over whole files as hard links: the node's cores share one file
+    /// system (004 FR-033).
+    #[must_use]
+    pub fn linking(self) -> Relocations {
+        Relocations { link: true, ..self }
+    }
+
+    /// Exports `[start, end)` at `mark` into `dir`, linking the whole files when the cores share
+    /// a file system.
+    fn export(
+        &self,
+        lsm: &RefCell<Lsm>,
+        (start, end): (&[u8], &[u8]),
+        mark: Hlc,
+        dir: &Path,
+    ) -> u64 {
+        let dir = dir.to_path_buf();
+        match self.link {
+            true => lsm.borrow_mut().export_linked(start, end, mark, dir),
+            false => lsm.borrow_mut().export(start, end, mark, dir),
+        }
+    }
+
+    /// Lets go of what this core has of the hand-over of `g`: the names it linked go.
+    fn drop_out(&mut self, g: GroupId) {
+        let linked = match self.out.remove(&g) {
+            Some(Out::Reading { linked, .. } | Out::Read { linked, .. }) => linked,
+            _ => return,
+        };
+        self.ops.extend(unlink(&linked).map(|op| (op, Tag::Cleanup)));
     }
 
     /// Group 0's core changes in progress.
@@ -326,7 +381,7 @@ impl Relocations {
             let dir = self.name("out", g);
             let jobs = intervals
                 .iter()
-                .map(|(start, end)| lsm.borrow_mut().export(start, end, NEWEST, dir.clone()))
+                .map(|(start, end)| self.export(lsm, (start, end), NEWEST, &dir))
                 .collect();
             self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at });
             self.told("a range leaves this core: exporting it", g, target);
@@ -370,7 +425,7 @@ impl Relocations {
             let (dir, mark) = (self.name("out", g), base.mark);
             let jobs = intervals
                 .iter()
-                .map(|(start, end)| lsm.borrow_mut().export(start, end, mark, dir.clone()))
+                .map(|(start, end)| self.export(lsm, (start, end), mark, &dir))
                 .collect();
             self.out.insert(g, Out::Exporting { target, jobs, files: Vec::new(), at: base.index });
             self.ahead.insert(g, Ahead { base, intervals });
@@ -493,7 +548,7 @@ impl Relocations {
                 let Some(sm) = range_sm(core, g) else { continue };
                 let moves = sm.relocated().is_some_and(|(to, _)| to == target);
                 if !moves || sm.intervals() != a.intervals {
-                    self.out.remove(&g);
+                    self.drop_out(g);
                     continue;
                 }
                 if !sm.halted() {
@@ -512,7 +567,7 @@ impl Relocations {
                     // Something of the group is in flight with the disk: on the next turn.
                     Err(OpError::Busy) => continue,
                     Err(_) => {
-                        self.out.remove(&g);
+                        self.drop_out(g);
                         continue;
                     }
                 };
@@ -526,12 +581,12 @@ impl Relocations {
                 // go with the state after it, so the writes between the two would be lost (H-046
                 // of the native tests). It is exported again.
                 Some(sm) if sm.halted() => {
-                    self.out.remove(&g);
+                    self.drop_out(g);
                     continue;
                 }
                 // Restored from its snapshot, its state does not move it: it runs on here.
                 Some(_) => {
-                    self.out.remove(&g);
+                    self.drop_out(g);
                     continue;
                 }
                 None => continue,
@@ -554,9 +609,11 @@ impl Relocations {
         host.remove_range(g);
         replicas.hold(g);
         let sent = Out::Sent { intervals: intervals.clone() };
-        let Some(Out::Read { target, files, .. }) = self.out.insert(g, sent) else { return };
+        let Some(Out::Read { target, files, linked, .. }) = self.out.insert(g, sent) else {
+            return;
+        };
         self.told("a range leaves this core: handed over", g, target);
-        let h = Handover { group: g, from: self.core, imp, intervals, files };
+        let h = Handover { group: g, from: self.core, imp, intervals, files, linked };
         self.msgs.push((target, RelocateMsg::Handover(Box::new(h))));
     }
 
@@ -659,6 +716,7 @@ impl Relocations {
             if running {
                 self.msgs.push((h.from, RelocateMsg::Imported { group: g }));
             }
+            self.ops.extend(unlink(&h.linked).map(|op| (op, Tag::Cleanup)));
             return;
         }
         if core.store().group(g).is_some() {
@@ -669,6 +727,7 @@ impl Relocations {
             if core.retire_group(g).is_ok() {
                 self.inbound.insert(g, In::Dropping(h));
             } else {
+                self.ops.extend(unlink(&h.linked).map(|op| (op, Tag::Cleanup)));
                 self.msgs.push((h.from, RelocateMsg::Failed { group: g }));
             }
             return;
@@ -697,12 +756,22 @@ impl Relocations {
 
     /// The files of `g` are written: its intervals are cleared if this core's LSM has something
     /// of the range, and the files ingested.
-    fn written(&mut self, lsm: &RefCell<Lsm>, h: Box<Handover>, refs: Vec<FileRef>, failed: bool) {
+    fn written(
+        &mut self,
+        lsm: &RefCell<Lsm>,
+        h: Box<Handover>,
+        mut refs: Vec<FileRef>,
+        failed: bool,
+    ) {
         let g = h.group;
         if failed {
+            self.ops.extend(unlink(&h.linked).map(|op| (op, Tag::Cleanup)));
             self.fail(h.from, g);
             return;
         }
+        // The linked files go with the written ones, and are removed with them after the
+        // ingestion, which renames them into the LSM's directory.
+        refs.extend(h.linked.iter().cloned());
         if lsm.borrow().flushed_index(g) > 0 {
             let job = lsm.borrow_mut().clear_range(g, h.intervals.clone());
             self.inbound.insert(g, In::Clearing { h, refs, job });
@@ -735,7 +804,10 @@ impl Relocations {
         if !jobs.is_empty() {
             return Ok(());
         }
-        let (target, refs) = (*target, std::mem::take(files));
+        let (target, all) = (*target, std::mem::take(files));
+        // The files linked whole are not read: their names go to the target core (FR-033).
+        let (linked, refs): (Vec<FileRef>, Vec<FileRef>) =
+            all.into_iter().partition(|f| f.group > 0);
         for (i, f) in refs.iter().enumerate() {
             let file = self.file_id();
             let len = u32::try_from(f.size).unwrap_or(u32::MAX);
@@ -746,8 +818,8 @@ impl Relocations {
         }
         let data = vec![None; refs.len()];
         let next = match refs.is_empty() {
-            true => Out::Read { target, files: Vec::new(), at },
-            false => Out::Reading { target, refs, data, failed: false, at },
+            true => Out::Read { target, files: Vec::new(), at, linked },
+            false => Out::Reading { target, refs, data, failed: false, at, linked },
         };
         self.out.insert(g, next);
         Ok(())
@@ -768,9 +840,7 @@ impl Relocations {
         };
         // The files are kept for the ingestion that follows a clearing.
         if r != Err(LsmError::IngestOverlap) {
-            for f in &refs {
-                self.ops.push_back((IoOp::Remove { path: f.path.clone() }, Tag::Cleanup));
-            }
+            self.ops.extend(unlink(&refs).map(|op| (op, Tag::Cleanup)));
         }
         match r {
             Ok(()) => {
@@ -839,7 +909,7 @@ impl Relocations {
 
     /// A read of file `i` of the export of `g` came back.
     fn read(&mut self, g: GroupId, i: usize, done: IoDone) {
-        let Some(Out::Reading { target, refs, data, failed, at }) = self.out.get_mut(&g) else {
+        let Some(Out::Reading { refs, data, failed, .. }) = self.out.get_mut(&g) else {
             return;
         };
         match done {
@@ -854,12 +924,14 @@ impl Relocations {
         }
         if *failed {
             // The export goes again on the next turn.
-            self.out.remove(&g);
+            self.drop_out(g);
             return;
         }
-        let (target, at) = (*target, *at);
-        let files = std::mem::take(data).into_iter().flatten().collect();
-        self.out.insert(g, Out::Read { target, files, at });
+        let Some(Out::Reading { target, data, at, linked, .. }) = self.out.remove(&g) else {
+            return;
+        };
+        let files = data.into_iter().flatten().collect();
+        self.out.insert(g, Out::Read { target, files, at, linked });
     }
 }
 
@@ -1395,7 +1467,7 @@ mod tests {
         // the state it really has: once read, its files go only if it is still halted.
         let mut n = Node::new();
         let c = &mut n.cores[0];
-        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: 0 });
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: 0, linked: Vec::new() });
         let lsm = c.lsm.clone();
         c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, Nanos::from_secs(9));
         assert!(c.rel.take_msgs().is_empty() && c.r.is_open(G) && c.core.status(G).is_some());
@@ -1429,7 +1501,14 @@ mod tests {
             entries: Vec::new(),
             led: None,
         };
-        let h = Handover { group: G, from: 1, imp, intervals: Vec::new(), files: Vec::new() };
+        let h = Handover {
+            group: G,
+            from: 1,
+            imp,
+            intervals: Vec::new(),
+            files: Vec::new(),
+            linked: Vec::new(),
+        };
         c.rel.on_message(&mut c.core, &mut c.r, &c.lsm, RelocateMsg::Handover(Box::new(h)));
         let msgs = c.rel.take_msgs();
         assert!(matches!(msgs[..], [(1, RelocateMsg::Imported { group: G })]));
@@ -1445,7 +1524,14 @@ mod tests {
             entries: Vec::new(),
             led: None,
         };
-        Box::new(Handover { group: g, from: 0, imp, intervals: vec![(vec![1], vec![4])], files })
+        Box::new(Handover {
+            group: g,
+            from: 0,
+            imp,
+            intervals: vec![(vec![1], vec![4])],
+            files,
+            linked: Vec::new(),
+        })
     }
 
     #[test]
@@ -1662,6 +1748,39 @@ mod tests {
         assert!(matches!(c.rel.inbound.get(&empty), Some(In::Ingesting { .. })));
     }
 
+    /// The files an export linked whole are not read: their names go with the hand-over, and
+    /// they are removed when the hand-over is given up (004 FR-033).
+    #[test]
+    fn linked_files_go_unread_and_their_names_go_when_the_export_is_given_up() {
+        let mut n = Node::new();
+        let c = &mut n.cores[1];
+        let linked = FileRef {
+            path: "relocate/out-55-1/000007.sst".into(),
+            size: 4096,
+            history: Some(("relocate/out-55-1/000008.sst".into(), 4096)),
+            group: 2,
+        };
+        c.rel.out.insert(
+            GroupId(55),
+            Out::Exporting { target: 0, jobs: vec![5], files: Vec::new(), at: 0 },
+        );
+        assert_eq!(c.rel.on_exported(5, vec![linked.clone()]), Ok(()));
+        let read = c.rel.out.get(&GroupId(55));
+        assert!(
+            matches!(read, Some(Out::Read { files, linked: l, .. }) if files.is_empty() && *l == [linked.clone()])
+        );
+        assert!(c.rel.ops.is_empty(), "nothing is read");
+        c.rel.drop_out(GroupId(55));
+        let removed: Vec<IoOp> = c.rel.ops.drain(..).map(|(op, _)| op).collect();
+        assert_eq!(
+            removed,
+            vec![
+                IoOp::Remove { path: linked.path.clone() },
+                IoOp::Remove { path: linked.history.clone().expect("history").0 },
+            ]
+        );
+    }
+
     #[test]
     fn job_completions_of_other_jobs_go_back() {
         let mut n = Node::new();
@@ -1707,7 +1826,7 @@ mod tests {
         n.stop(7);
         let c = &mut n.cores[0];
         let at = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
-        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at });
+        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at, linked: Vec::new() });
         // An entry on its way to the disk: the group cannot close yet.
         let payload = Command::Relocate { core: 1, intent: 7 }.encode();
         let build = |_| Ok::<_, std::convert::Infallible>(payload);
@@ -1727,7 +1846,10 @@ mod tests {
         n.stop(7);
         let c = &mut n.cores[0];
         let applied = range_sm(&c.core, G).map(StateMachine::applied_index).expect("the range");
-        c.rel.out.insert(G, Out::Read { target: 1, files: Vec::new(), at: applied - 1 });
+        c.rel.out.insert(
+            G,
+            Out::Read { target: 1, files: Vec::new(), at: applied - 1, linked: Vec::new() },
+        );
         let lsm = c.lsm.clone();
         c.rel.step(&mut c.core, &mut c.host, &mut c.r, &lsm, n.now);
         assert!(c.rel.take_msgs().is_empty(), "nothing is handed over");

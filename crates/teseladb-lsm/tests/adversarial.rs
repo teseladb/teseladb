@@ -246,7 +246,7 @@ fn files_that_reach_past_the_range_or_are_too_small_are_refused() {
         ingest(&mut lsm, &mut disk, files.clone(), &key(0), &half),
         Err(LsmError::IngestOverlap)
     );
-    let tiny = vec![FileRef { path: files[0].path.clone(), size: 0 }];
+    let tiny = vec![FileRef::new(files[0].path.clone(), 0)];
     assert!(matches!(
         ingest(&mut lsm, &mut disk, tiny, &key(0), &key(KEYS)),
         Err(LsmError::Corrupt { .. })

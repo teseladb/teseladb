@@ -6,7 +6,9 @@
 //! nothing between its start and end in the one block where it would begin. Then it opens each
 //! file (its footer and meta bytes), checks it stays inside one of the intervals, renames it into
 //! the LSM's directory, syncs the directory and adds the files with one manifest edit, at the
-//! deepest level where they overlap no file. A range snapshot also records the range's flushed
+//! deepest level where they overlap no file. A file an export linked whole comes with its history
+//! file, and both are added together; the groups of such an export go each to its own level, so
+//! that a copy of a version never ends below an older one (FR-033). A range snapshot also records the range's flushed
 //! index in that edit, so the files and the index are durable together. An interval with data
 //! fails with `IngestOverlap` and changes nothing: a range tombstone and a compaction that removes
 //! the data must come first.
@@ -22,7 +24,7 @@ use crate::compaction::JOB_TOKEN;
 use crate::config::LsmConfig;
 use crate::entry;
 use crate::error::LsmError;
-use crate::jobs::{ManifestFile, Next, Outcome, file_meta};
+use crate::jobs::{ManifestFile, Next, Outcome, file_metas};
 use crate::manifest::Edit;
 use crate::sst::block::BlockCursor;
 use crate::sst::reader::Table;
@@ -36,6 +38,28 @@ pub struct FileRef {
     pub path: PathBuf,
     /// Its size in bytes.
     pub size: u64,
+    /// Its history file, where it has one: a file an export linked whole (FR-033).
+    pub history: Option<(PathBuf, u64)>,
+    /// Its precedence group in an export that linked files (FR-033): 0 for the files the export
+    /// wrote, which hold the newest copies, then one group per level or file of level 0 it
+    /// linked, from the newest. The ingestion places a group above every higher group whose keys
+    /// it touches, so a copy of a version never ends below an older one.
+    pub group: u32,
+}
+
+impl FileRef {
+    /// A file the export wrote: no history file, group 0.
+    pub fn new(path: PathBuf, size: u64) -> FileRef {
+        FileRef { path, size, history: None, group: 0 }
+    }
+}
+
+/// One file the ingestion opens: a file or a history file.
+#[derive(Clone, Debug)]
+struct Part {
+    path: PathBuf,
+    size: u64,
+    number: u64,
 }
 
 /// What the read in flight is for.
@@ -43,9 +67,9 @@ pub struct FileRef {
 enum Pending {
     /// The block of an existing file where interval `.2` would begin (block `.1`).
     Check(Arc<Table>, usize, usize),
-    /// The footer page of file `i` of the ingestion.
+    /// The footer page of part `i` of the ingestion.
     Footer(usize),
-    /// The meta bytes of file `i`, from `start`.
+    /// The meta bytes of part `i`, from `start`.
     Meta(usize, u64),
 }
 
@@ -55,14 +79,17 @@ pub(crate) struct IngestJob {
     /// The key ring that opens encrypted files (013 FR-015).
     encryption: Option<crate::config::Encryption>,
     id: u64,
+    /// The files, from the highest precedence group to group 0 (FR-033).
     files: Vec<FileRef>,
-    numbers: Vec<u64>,
+    /// Each file and, right after it, its history file, with their numbers here.
+    parts: Vec<Part>,
     intervals: Vec<(Vec<u8>, Vec<u8>)>,
     flushed: Option<(GroupId, u64)>,
     /// Files to read one block of, with the interval they are checked for.
     checks: VecDeque<(Arc<Table>, usize)>,
+    /// The parts opened so far, in order.
     opened: Vec<Table>,
-    /// Files opened so far (closed again if the ingestion fails).
+    /// Parts opened so far (closed again if the ingestion fails).
     opens: usize,
     queued: VecDeque<IoOp>,
     pending: Option<Pending>,
@@ -98,14 +125,56 @@ fn quick_check(v: &Version, start: &[u8], end: &[u8], checks: &mut VecDeque<Arc<
     true
 }
 
+/// Whether two key spans touch.
+fn touch(a: &Table, b: &Table) -> bool {
+    a.props.lo <= b.props.hi && b.props.lo <= a.props.hi
+}
+
+/// The level of each of `tables` (with their groups), placed over `v` (FR-009, FR-033). The
+/// groups go from the highest, the oldest copies, down to group 0: each one to the deepest level
+/// where none of its files touches a file there or one placed before, and above every level that
+/// holds a placed file of a higher group whose keys it touches. A group with no such level goes
+/// to level 0, where the files of a lower group have higher numbers and so come first.
+pub(crate) fn place(v: &Version, tables: &[(u32, &Table)]) -> Vec<u8> {
+    let mut levels = vec![0u8; tables.len()];
+    let mut done: Vec<usize> = Vec::new();
+    let mut groups: Vec<u32> = tables.iter().map(|(g, _)| *g).collect();
+    groups.sort_unstable_by(|a, b| b.cmp(a));
+    groups.dedup();
+    for g in groups {
+        let members: Vec<usize> = (0..tables.len()).filter(|i| tables[*i].0 == g).collect();
+        let below = done
+            .iter()
+            .filter(|p| members.iter().any(|m| touch(tables[**p].1, tables[*m].1)))
+            .map(|p| usize::from(levels[*p]))
+            .min()
+            .unwrap_or(v.levels.len());
+        let free = |level: usize| {
+            members.iter().all(|m| {
+                let t = tables[*m].1;
+                let placed =
+                    done.iter().any(|p| usize::from(levels[*p]) == level && touch(tables[*p].1, t));
+                !placed && v.overlapping(level, &t.props.lo, &t.props.hi).is_empty()
+            })
+        };
+        let level = (1..below).rev().find(|l| free(*l)).unwrap_or(0) as u8;
+        for m in members {
+            levels[m] = level;
+            done.push(m);
+        }
+    }
+    levels
+}
+
 impl IngestJob {
     /// Ingestion `id` of `files` into `intervals`, recording `flushed` in its edit; `next_file`
-    /// gives their numbers.
+    /// gives their numbers, from the highest group down, so that in level 0 a file of a lower
+    /// group has a higher number and comes first.
     pub(crate) fn new(
         cfg: &LsmConfig,
         v: &Version,
         id: u64,
-        files: Vec<FileRef>,
+        mut files: Vec<FileRef>,
         intervals: Vec<(Vec<u8>, Vec<u8>)>,
         flushed: Option<(GroupId, u64)>,
         next_file: &mut u64,
@@ -117,18 +186,19 @@ impl IngestJob {
             empty &= quick_check(v, start, end, &mut found);
             checks.extend(found.into_iter().map(|t| (t, i)));
         }
-        let numbers = files
-            .iter()
-            .map(|_| {
-                let n = *next_file;
+        files.sort_by_key(|f| std::cmp::Reverse(f.group));
+        let mut parts = Vec::new();
+        for f in &files {
+            let history = f.history.iter().map(|(path, size)| (path.clone(), *size));
+            for (path, size) in std::iter::once((f.path.clone(), f.size)).chain(history) {
+                parts.push(Part { path, size, number: *next_file });
                 *next_file += 1;
-                n
-            })
-            .collect();
+            }
+        }
         IngestJob {
             id,
             files,
-            numbers,
+            parts,
             intervals,
             flushed,
             checks,
@@ -166,8 +236,7 @@ impl IngestJob {
                 }
             }
             Pending::Footer(i) => {
-                let n = self.numbers[i];
-                let size = self.files[i].size;
+                let Part { number: n, size, .. } = self.parts[i];
                 match Table::footer(&data) {
                     Ok(f) if f.filter.offset < size => {
                         let start = f.filter.offset;
@@ -187,11 +256,11 @@ impl IngestJob {
                 }
             }
             Pending::Meta(i, start) => {
-                let n = self.numbers[i];
+                let Part { number: n, size, .. } = self.parts[i];
                 let ring = self.encryption.as_ref().map(|e| &*e.0);
                 // Exports never use dictionaries: a file that names one is refused.
                 let none = crate::sst::reader::Dictionaries::new();
-                match Table::from_meta(n, self.files[i].size, start, &data, (ring, &none)) {
+                match Table::from_meta(n, size, start, &data, (ring, &none)) {
                     Ok(t)
                         if self
                             .intervals
@@ -211,24 +280,24 @@ impl IngestJob {
     fn fail(&mut self, e: LsmError) {
         self.queued.clear();
         self.pending = None;
-        for n in &self.numbers[..self.opens] {
-            self.queued.push_back(IoOp::Close { file: file_id(*n) });
+        for p in &self.parts[..self.opens] {
+            self.queued.push_back(IoOp::Close { file: file_id(p.number) });
         }
         self.failed = Some(e);
     }
 
-    /// The deepest level where none of the files overlaps one already there.
-    fn level(&self, v: &Version) -> u8 {
-        for level in (1..v.levels.len()).rev() {
-            let clear = self
-                .opened
-                .iter()
-                .all(|t| v.overlapping(level, &t.props.lo, &t.props.hi).is_empty());
-            if clear {
-                return level as u8;
+    /// The files opened, each with its history file attached, and their groups.
+    fn assemble(&mut self) -> Vec<(u32, Table)> {
+        let mut opened = std::mem::take(&mut self.opened).into_iter();
+        let mut out = Vec::new();
+        for f in &self.files {
+            let mut t = opened.next().expect("every part is opened");
+            if f.history.is_some() {
+                t.history = Some(Arc::new(opened.next().expect("every part is opened")));
             }
+            out.push((f.group, t));
         }
-        0
+        out
     }
 
     pub(crate) fn next(
@@ -268,17 +337,17 @@ impl IngestJob {
                 }));
             }
             let i = self.opened.len();
-            if i < self.files.len() {
-                let (n, f) = (self.numbers[i], &self.files[i]);
-                if f.size < ALIGN as u64 || !f.size.is_multiple_of(ALIGN as u64) {
-                    self.fail(LsmError::Corrupt { file: n, offset: 0 });
+            if i < self.parts.len() {
+                let p = &self.parts[i];
+                if p.size < ALIGN as u64 || !p.size.is_multiple_of(ALIGN as u64) {
+                    self.fail(LsmError::Corrupt { file: p.number, offset: 0 });
                     continue;
                 }
-                self.queued.push_back(IoOp::Open { file: file_id(n), path: f.path.clone() });
+                self.queued.push_back(IoOp::Open { file: file_id(p.number), path: p.path.clone() });
                 self.opens += 1;
-                let last = f.size - ALIGN as u64;
+                let last = p.size - ALIGN as u64;
                 self.queued.push_back(IoOp::ReadAt {
-                    file: file_id(n),
+                    file: file_id(p.number),
                     offset: last,
                     len: ALIGN as u32,
                     token: JOB_TOKEN,
@@ -287,22 +356,27 @@ impl IngestJob {
                 continue;
             }
             self.placed = true;
-            for (f, n) in self.files.iter().zip(&self.numbers) {
+            for p in &self.parts {
                 self.queued.push_back(IoOp::Rename {
-                    from: f.path.clone(),
-                    to: self.dir.join(file_name(*n)),
+                    from: p.path.clone(),
+                    to: self.dir.join(file_name(p.number)),
                 });
             }
             self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
-            let level = self.level(v);
+            let tables = self.assemble();
+            let levels = place(v, &tables.iter().map(|(g, t)| (*g, t)).collect::<Vec<_>>());
             let edit = Edit {
-                adds: self.opened.iter().map(|t| file_meta(level, t)).collect(),
+                adds: tables
+                    .iter()
+                    .zip(&levels)
+                    .flat_map(|((_, t), l)| file_metas(*l, t))
+                    .collect(),
                 flushed: self.flushed.into_iter().collect(),
                 next_file,
                 ..Edit::default()
             };
             self.queued.extend(manifest.append(&edit));
-            let added = std::mem::take(&mut self.opened).into_iter().map(|t| (level, t)).collect();
+            let added = tables.into_iter().zip(levels).map(|((_, t), l)| (l, t)).collect();
             self.edited = Some((added, edit));
             continue;
         }

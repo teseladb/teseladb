@@ -644,6 +644,8 @@ pub fn start(
     };
     log.info(&choice.to_string(), &[]);
     cfg.direct_io = choice.direct;
+    // Every core's disk is rooted at the data directory.
+    cfg.shared_files = true;
     let node = match Node::start(cfg, || NodeDisk::open(&data, &choice), Some(lock)) {
         Ok(n) => n,
         Err(e) => {

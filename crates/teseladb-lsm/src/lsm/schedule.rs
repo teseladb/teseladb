@@ -210,6 +210,9 @@ impl Lsm {
             self.adopt(&t);
             v.levels[usize::from(level)].push(Arc::new(t));
         }
+        // Level 0 from the newest file, as recovery orders it: an ingested file of level 0 has a
+        // higher number than the files below it in precedence (FR-033).
+        v.levels[0].sort_by_key(|t| std::cmp::Reverse(t.number));
         for level in &mut v.levels[1..] {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
