@@ -1,8 +1,8 @@
-//! Allocations of reading a request (006 FR-039): an `insert` of a hundred documents is read
-//! with one pass per document that keeps each canonical document as the bytes it came in, where
-//! the earlier reading checked each one three times and copied it field by field. The count of
-//! the earlier reading is measured here too, with the same calls it made, so the two stay
-//! comparable on any host.
+//! Allocations of reading a request (006 FR-039, 012 FR-027): an `insert` of a hundred documents
+//! is read with one pass per document, and each canonical document keeps a view of the request's
+//! one buffer, where the earlier reading checked each one three times and copied it field by
+//! field. The count of the earlier reading is measured here too, with the same calls it made, so
+//! the two stay comparable on any host.
 
 use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 use teseladb_wire::connection::Connection;
@@ -81,7 +81,19 @@ fn an_insert_of_canonical_documents_allocates_a_fraction_of_the_earlier_reading(
     assert_eq!(got.len(), DOCS);
 
     eprintln!("allocations reading {DOCS} documents: earlier {earlier_count}, now {now}");
+    // 012 FR-027: the documents keep views of the request's one buffer, in message order.
+    let views: Vec<*const u8> = got
+        .iter()
+        .map(|v| match v {
+            Value::Document(d) => d.canonical_bytes().expect("kept").as_ptr(),
+            _ => panic!("a document"),
+        })
+        .collect();
+    let first = views[0] as usize;
+    let last = views[DOCS - 1] as usize;
+    assert!(views.windows(2).all(|w| w[0] < w[1]), "in the order of the message");
+    assert!(last - first < message.len(), "inside the one buffer of the message");
     // Each canonical document is one copy of its bytes and its box; the earlier reading made a
     // string and a value for every field, nested ones included.
-    assert!(now * 4 < earlier_count, "now {now}, earlier {earlier_count}");
+    assert!(now * 10 < earlier_count, "now {now}, earlier {earlier_count}");
 }

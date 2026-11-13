@@ -14,8 +14,9 @@
 //! document keeps the bytes it came in: its fields are read only when the command asks for them,
 //! and a stored one is written by copying those bytes.
 
-use teseladb_bson::{BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message};
+use teseladb_bson::{BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message_in};
 use teseladb_hash::{Crc32c, crc32c};
+use teseladb_types::Bytes;
 
 use crate::WireError;
 use crate::error::{
@@ -157,11 +158,18 @@ pub(crate) fn document(b: &[u8]) -> Result<&[u8], WireError> {
     Ok(doc)
 }
 
-/// A document of an `OP_MSG` section at the start of `b`: its length and the document, or the
-/// error RefDb answers for it instead of closing the connection.
-fn section_document(b: &[u8]) -> Result<Result<(usize, Document), CommandError>, WireError> {
-    let doc = framed(b)?;
-    match read_message(doc, command_limits()) {
+/// A document of an `OP_MSG` section at byte `at` of `msg` (which it does not pass `end`): its
+/// length and the document, or the error RefDb answers for it instead of closing the
+/// connection. A canonical document keeps a view of `msg`, the request's buffer (012 FR-027).
+fn section_document(
+    msg: &Bytes,
+    at: usize,
+    end: usize,
+) -> Result<Result<(usize, Document), CommandError>, WireError> {
+    let len = framed(&msg[at..end])?.len();
+    let shared = msg.slice(at..at + len);
+    let doc: &[u8] = &shared;
+    match read_message_in(&shared, command_limits()) {
         Ok(read) => Ok(read.map(|d| (doc.len(), d)).map_err(CommandError::from)),
         Err(BsonError::TooDeep { path, .. }) => Ok(Err(too_deep(doc, &path))),
         Err(BsonError::InvalidColumn { path, .. }) => Ok(Err(invalid_column(doc, &path))),
@@ -204,9 +212,16 @@ fn invalid_column(doc: &[u8], path: &str) -> CommandError {
 
 impl OpMsg {
     /// Parses the message after its header (`whole` is the message with its header, for the
-    /// checksum).
+    /// checksum), copying it into a buffer its documents share.
     pub fn parse(whole: &[u8]) -> Result<OpMsg, WireError> {
-        let b = &whole[HEADER_LEN..];
+        OpMsg::parse_in(&Bytes::copy_from_slice(whole))
+    }
+
+    /// [`OpMsg::parse`] over the request's buffer `whole`: each canonical document keeps a view
+    /// of it instead of a copy of its bytes, and the buffer goes with the last of them (012
+    /// FR-027).
+    pub fn parse_in(whole: &Bytes) -> Result<OpMsg, WireError> {
+        let b = whole.slice(HEADER_LEN..);
         if b.len() < 4 {
             return Err(WireError::Malformed("OP_MSG without flags"));
         }
@@ -237,7 +252,7 @@ impl OpMsg {
                     // A `refrouter` 9.0 closes the connection (measured).
                     return Err(WireError::Malformed("Multiple body sections in message"));
                 }
-                KIND_BODY => match section_document(&b[at..end])? {
+                KIND_BODY => match section_document(&b, at, end)? {
                     Ok((len, doc)) => {
                         at += len;
                         msg.body = Some(doc);
@@ -247,7 +262,7 @@ impl OpMsg {
                         return Ok(msg);
                     }
                 },
-                KIND_SEQUENCE => match msg.sequence(&b[..end], at)? {
+                KIND_SEQUENCE => match msg.sequence(&b.slice(..end), at)? {
                     Ok(next) => at = next,
                     Err(problem) => {
                         msg.problem = Some(problem);
@@ -276,7 +291,7 @@ impl OpMsg {
 
     /// Reads a document sequence starting at `at` (after its kind byte); where it ends, or the
     /// error RefDb answers for one of its documents.
-    fn sequence(&mut self, b: &[u8], at: usize) -> Result<Result<usize, CommandError>, WireError> {
+    fn sequence(&mut self, b: &Bytes, at: usize) -> Result<Result<usize, CommandError>, WireError> {
         if b.len() < at + 4 {
             return Err(WireError::Malformed("document sequence cut short"));
         }
@@ -287,7 +302,7 @@ impl OpMsg {
         let (id, mut pos) = cstring(&b[..end], at + 4)?;
         let mut docs = Vec::new();
         while pos < end {
-            let (len, doc) = match section_document(&b[pos..end])? {
+            let (len, doc) = match section_document(b, pos, end)? {
                 Ok(read) => read,
                 Err(problem) => return Ok(Err(problem)),
             };

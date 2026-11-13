@@ -1110,7 +1110,7 @@ impl Client {
                 match pieces {
                     ReplyPieces::Pieces(f) if f.borrowed() > 0 => self.send_pieces(&f.slices()),
                     ReplyPieces::Pieces(f) => {
-                        self.transport.outgoing_owned(f.to_vec(), &mut self.out)
+                        self.transport.outgoing_owned(f.into_vec(), &mut self.out)
                     }
                     ReplyPieces::Bytes(bytes) => {
                         self.transport.outgoing_owned(bytes, &mut self.out)

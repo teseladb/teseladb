@@ -4,6 +4,7 @@
 //! one, as an `OP_REPLY` for the `OP_QUERY` handshake).
 
 use teseladb_bson::{Document, Fragments, RawDoc, Value};
+use teseladb_types::Bytes;
 
 use crate::commands::auth::AuthState;
 use crate::compressed::{self, Compressor};
@@ -169,7 +170,9 @@ impl Connection {
         if self.buf.len() < size {
             return Ok(None);
         }
-        let whole: Vec<u8> = self.buf.drain(..size).collect();
+        // The request's buffer: every canonical document of the message keeps a view of it, and
+        // it goes with the last of them once the reply is written (012 FR-027).
+        let whole = Bytes::from_owner(self.buf.drain(..size).collect::<Vec<u8>>());
         let header = Header::parse(&whole);
         match header.op_code {
             opcode::OP_MSG => msg_request(&whole, None).map(Some),
@@ -179,7 +182,7 @@ impl Connection {
                 if !self.hello.enabled.contains(&c) {
                     return Err(WireError::UnknownCompressor(c.id()));
                 }
-                msg_request(&inner, Some(c)).map(Some)
+                msg_request(&Bytes::from_owner(inner), Some(c)).map(Some)
             }
             op => Err(WireError::UnsupportedOpcode(op)),
         }
@@ -301,9 +304,9 @@ impl ReplyPieces<'_> {
     }
 }
 
-fn msg_request(whole: &[u8], compressor: Option<Compressor>) -> Result<Request, WireError> {
+fn msg_request(whole: &Bytes, compressor: Option<Compressor>) -> Result<Request, WireError> {
     let header = Header::parse(whole);
-    let m = OpMsg::parse(whole)?;
+    let m = OpMsg::parse_in(whole)?;
     let mut command = m.body.unwrap_or_default();
     let problem = m.problem;
     let mut sequences = Vec::with_capacity(m.sequences.len());
