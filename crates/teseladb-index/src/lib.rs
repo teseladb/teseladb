@@ -9,6 +9,7 @@ pub mod geo;
 pub mod keygen;
 pub mod planner_api;
 pub mod prepared;
+pub mod roaring;
 pub mod shell;
 pub mod spec;
 pub mod ttl;
