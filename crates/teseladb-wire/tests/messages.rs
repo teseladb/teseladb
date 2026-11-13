@@ -88,7 +88,7 @@ fn op_msg_body_and_sequences() {
     let mut sections = body(&insert);
     sections.extend_from_slice(&sequence("documents", &docs));
     let m = OpMsg::parse(&op_msg(1, 0, &sections)).unwrap();
-    assert_eq!(m.body.as_deref(), Some(&bson(&insert)[..]));
+    assert_eq!(m.body.as_ref(), Some(&insert));
     assert_eq!(m.sequences.len(), 1);
     assert_eq!(m.sequences[0].id, "documents");
     assert_eq!(m.sequences[0].docs.len(), 2);
@@ -101,6 +101,46 @@ fn op_msg_body_and_sequences() {
     assert_eq!(req.name(), "insert");
     let want: Vec<Value> = docs.iter().cloned().map(Value::Document).collect();
     assert_eq!(req.command.get("documents"), Some(&Value::Array(want)));
+}
+
+#[test]
+fn canonical_documents_of_a_message_keep_their_bytes_until_a_field_is_read() {
+    // 006 FR-039: one pass checks each document as a `refrouter` checks it and with the rules of the
+    // BSON specification; a canonical document is not read into fields until the command asks.
+    let insert = Document::new().with("insert", "items").with("$db", "test");
+    let docs = [
+        Document::new().with("_id", 1).with("tags", vec![Value::from("a"), Value::from("b")]),
+        Document::new().with("_id", 2),
+    ];
+    let mut sections = body(&insert);
+    sections.extend_from_slice(&sequence("documents", &docs));
+    let m = OpMsg::parse(&op_msg(1, 0, &sections)).unwrap();
+    assert_eq!(m.body.as_ref().and_then(Document::canonical_bytes), Some(&bson(&insert)[..]));
+    for (got, want) in m.sequences[0].docs.iter().zip(&docs) {
+        assert_eq!(got.canonical_bytes(), Some(&bson(want)[..]));
+    }
+    let mut c = Connection::new(1);
+    let req = first(&mut c, &op_msg(1, 0, &sections)).unwrap();
+    let Some(Value::Array(got)) = req.command.get("documents") else { panic!("documents") };
+    for (g, want) in got.iter().zip(&docs) {
+        let Value::Document(g) = g else { panic!("a document") };
+        assert_eq!(g.canonical_bytes(), Some(&bson(want)[..]), "stored as it came");
+    }
+
+    // An array named out of order is read into its fields and written canonical.
+    let mut odd = bson(&Document::new().with("a", Document::new().with("1", 1).with("0", 2)));
+    odd[4] = 0x04;
+    let mut sections = body(&insert);
+    let mut seq = vec![1u8];
+    let len = 4 + "documents".len() + 1 + odd.len();
+    seq.extend_from_slice(&i32::try_from(len).unwrap().to_le_bytes());
+    seq.extend_from_slice(b"documents\0");
+    seq.extend_from_slice(&odd);
+    sections.extend_from_slice(&seq);
+    let m = OpMsg::parse(&op_msg(1, 0, &sections)).unwrap();
+    let d = &m.sequences[0].docs[0];
+    assert_eq!(d.canonical_bytes(), None);
+    assert_eq!(d.get("a"), Some(&Value::Array(vec![Value::Int32(1), Value::Int32(2)])));
 }
 
 #[test]
@@ -545,4 +585,65 @@ fn a_body_written_behind_the_header_is_the_message_written_apart() {
     // A document past the limits is the error of that fault.
     let tight = teseladb_bson::Limits { max_size: 10, max_depth: 10 };
     assert!(teseladb_wire::msg::OpMsg::encode_document(7, 3, 0, &doc, tight).is_err());
+}
+
+/// A find reply whose batch holds documents read from storage.
+fn stored_reply(n: usize) -> Document {
+    let batch: Vec<Value> = (0..n)
+        .map(|i| {
+            let d = Document::new().with("_id", i as i64).with("pad", "p".repeat(300));
+            Value::Document(Document::from_stored(bson(&d)).unwrap())
+        })
+        .collect();
+    let cursor = Document::new().with("firstBatch", batch).with("id", 0i64).with("ns", "t.c");
+    Document::new().with("cursor", cursor).with("ok", 1.0)
+}
+
+#[test]
+fn a_reply_in_pieces_is_the_reply_and_sends_stored_documents_from_their_buffers() {
+    // 006 FR-040: the header and the reply's own bytes, and each stored document from the
+    // buffer it lives in, for one vectored write.
+    let doc = stored_reply(5);
+    for (flag_bits, compressor) in
+        [(0, None), (flags::CHECKSUM_PRESENT, None), (0, Some(Compressor::Snappy))]
+    {
+        let mut c = Connection::new(1);
+        let mut d = Connection::new(1);
+        let mut msg = op_msg(7, flag_bits, &body(&ping()));
+        if flag_bits & flags::CHECKSUM_PRESENT != 0 {
+            let len = (msg.len() + 4) as i32;
+            msg[..4].copy_from_slice(&len.to_le_bytes());
+            let crc = crc32c(&msg);
+            msg.extend_from_slice(&crc.to_le_bytes());
+        }
+        let msg = match compressor {
+            Some(z) => compressed::compress(&msg, z),
+            None => msg,
+        };
+        let req = first(&mut c, &msg).unwrap();
+        let _ = first(&mut d, &msg).unwrap();
+        let want = d.reply(&req, &doc, false);
+        let pieces = c.reply_pieces(&req, &doc, false);
+        assert_eq!(pieces.slices().concat(), want, "flags {flag_bits}, {compressor:?}");
+        let borrowed = pieces.borrowed();
+        if compressor.is_some() {
+            assert_eq!(borrowed, 0, "a compressed reply is one buffer");
+        } else {
+            let one = Document::new().with("_id", 0i64).with("pad", "p".repeat(300));
+            assert_eq!(borrowed, 5 * bson(&one).len());
+        }
+    }
+}
+
+#[test]
+fn a_reply_in_pieces_to_the_handshake_is_one_buffer() {
+    let mut c = Connection::new(1);
+    let mut d = Connection::new(1);
+    let q = op_query("admin.$cmd", &Document::new().with("hello", 1));
+    let req = first(&mut c, &q).unwrap();
+    let doc = stored_reply(2);
+    let want = d.reply(&req, &doc, false);
+    let pieces = c.reply_pieces(&req, &doc, false);
+    assert_eq!(pieces.borrowed(), 0);
+    assert_eq!(pieces.slices().concat(), want);
 }

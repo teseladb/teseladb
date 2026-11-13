@@ -79,6 +79,7 @@ pub mod tls_port;
 pub mod tls_stream;
 pub mod transfer;
 pub mod txn_wire;
+mod vectored;
 
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};

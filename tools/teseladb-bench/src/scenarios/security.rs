@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
-use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_bson::{Document, Value};
 use teseladb_tls::{ClientConfig, Connection, ENTROPY_LEN, Trust};
 use teseladb_types::Histogram;
 use teseladb_x509::Certificate;
@@ -193,9 +193,10 @@ impl TlsClient {
                 && i32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize
                     == reply.len();
             if whole {
-                let body =
-                    OpMsg::parse(&reply).map_err(debug)?.body.ok_or("a reply without a body")?;
-                return Ok(Document::from(RawDoc::from_bytes(&body).map_err(debug)?));
+                return Ok(OpMsg::parse(&reply)
+                    .map_err(debug)?
+                    .body
+                    .ok_or("a reply without a body")?);
             }
             self.receive()?;
         }

@@ -5,15 +5,17 @@
 //! reply (two bodies, no body, a security token section, a document nested too deep) comes back
 //! as [`OpMsg::problem`].
 //!
-//! Each document is checked first as a `refrouter` 9.0.4 checks it ([`validate_message`]: the first
-//! fault in document order decides between closing and answering), then with the rules of the
-//! BSON specification RefDb does not apply: a string or name that is not UTF-8 and an old binary
-//! whose two lengths differ get an `InvalidBSON` reply where RefDb would store them (003 T009).
-//! A BSON column that does not follow the column layout gets RefDb's `NonConformantBSON`
-//! (003 T029).
+//! The header is read with little-endian integer reads. Each document is checked in one pass
+//! ([`read_message`], 006 FR-039) as a `refrouter` 9.0.4 checks it (the first fault in document
+//! order decides between closing and answering) and with the rules of the BSON specification
+//! RefDb does not apply: a string or name that is not UTF-8 and an old binary whose two lengths
+//! differ get an `InvalidBSON` reply where RefDb would store them (003 T009). A BSON column that
+//! does not follow the column layout gets RefDb's `NonConformantBSON` (003 T029). A canonical
+//! document keeps the bytes it came in: its fields are read only when the command asks for them,
+//! and a stored one is written by copying those bytes.
 
-use teseladb_bson::{BsonError, Limits, RawDoc, first_element, validate_message};
-use teseladb_hash::crc32c;
+use teseladb_bson::{BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message};
+use teseladb_hash::{Crc32c, crc32c};
 
 use crate::WireError;
 use crate::error::{
@@ -108,12 +110,12 @@ impl Header {
 }
 
 /// A document sequence (section kind 1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sequence {
     /// Identifier: the name of the field it stands for.
     pub id: String,
     /// Its documents.
-    pub docs: Vec<Vec<u8>>,
+    pub docs: Vec<Document>,
 }
 
 /// A parsed `OP_MSG`.
@@ -122,7 +124,7 @@ pub struct OpMsg {
     /// Flag bits.
     pub flags: u32,
     /// The body (section kind 0), if there was one.
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Document>,
     /// Document sequences.
     pub sequences: Vec<Sequence>,
     /// An error RefDb answers instead of running the command.
@@ -155,17 +157,16 @@ pub(crate) fn document(b: &[u8]) -> Result<&[u8], WireError> {
     Ok(doc)
 }
 
-/// A document of an `OP_MSG` section at the start of `b`: its bytes, or the error RefDb answers
-/// for it instead of closing the connection.
-fn section_document(b: &[u8]) -> Result<Result<&[u8], CommandError>, WireError> {
+/// A document of an `OP_MSG` section at the start of `b`: its length and the document, or the
+/// error RefDb answers for it instead of closing the connection.
+fn section_document(b: &[u8]) -> Result<Result<(usize, Document), CommandError>, WireError> {
     let doc = framed(b)?;
-    match validate_message(doc, command_limits()) {
-        Ok(()) => {}
-        Err(BsonError::TooDeep { path, .. }) => return Ok(Err(too_deep(doc, &path))),
-        Err(BsonError::InvalidColumn { path, .. }) => return Ok(Err(invalid_column(doc, &path))),
-        Err(e) => return Err(WireError::Bson(e)),
+    match read_message(doc, command_limits()) {
+        Ok(read) => Ok(read.map(|d| (doc.len(), d)).map_err(CommandError::from)),
+        Err(BsonError::TooDeep { path, .. }) => Ok(Err(too_deep(doc, &path))),
+        Err(BsonError::InvalidColumn { path, .. }) => Ok(Err(invalid_column(doc, &path))),
+        Err(e) => Err(WireError::Bson(e)),
     }
-    Ok(RawDoc::from_bytes_with(doc, command_limits()).map(|_| doc).map_err(CommandError::from))
 }
 
 /// How RefDb names a document of a message in its errors: by its `_id` when that is its first
@@ -237,9 +238,9 @@ impl OpMsg {
                     return Err(WireError::Malformed("Multiple body sections in message"));
                 }
                 KIND_BODY => match section_document(&b[at..end])? {
-                    Ok(doc) => {
-                        at += doc.len();
-                        msg.body = Some(doc.to_vec());
+                    Ok((len, doc)) => {
+                        at += len;
+                        msg.body = Some(doc);
                     }
                     Err(problem) => {
                         msg.problem = Some(problem);
@@ -286,12 +287,12 @@ impl OpMsg {
         let (id, mut pos) = cstring(&b[..end], at + 4)?;
         let mut docs = Vec::new();
         while pos < end {
-            let doc = match section_document(&b[pos..end])? {
-                Ok(doc) => doc,
+            let (len, doc) = match section_document(&b[pos..end])? {
+                Ok(read) => read,
                 Err(problem) => return Ok(Err(problem)),
             };
-            pos += doc.len();
-            docs.push(doc.to_vec());
+            pos += len;
+            docs.push(doc);
         }
         if self.sequences.iter().any(|s| s.id == id) && self.problem.is_none() {
             let text = format!("Duplicate document sequence: {id}");
@@ -329,6 +330,41 @@ impl OpMsg {
         if checksum {
             let crc = crc32c(&out);
             out.extend_from_slice(&crc.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// [`OpMsg::encode_document`] as pieces for a vectored write (006 FR-040): the header, the
+    /// flags and the reply's own bytes are written here, and every document of `doc` that keeps
+    /// the bytes it was stored with goes by reference to its own buffer, without a copy.
+    ///
+    /// # Errors
+    ///
+    /// The [`BsonError`](teseladb_bson::BsonError) of a document that does not encode.
+    pub fn encode_fragments<'a>(
+        request_id: i32,
+        response_to: i32,
+        flag_bits: u32,
+        doc: &'a Document,
+        limits: Limits,
+    ) -> Result<Fragments<'a>, teseladb_bson::BsonError> {
+        let checksum = flag_bits & flags::CHECKSUM_PRESENT != 0;
+        let tail = if checksum { 4 } else { 0 };
+        let mut out = Fragments::new(1);
+        let mut head = Vec::with_capacity(HEADER_LEN + 5);
+        Header { length: 0, request_id, response_to, op_code: opcode::OP_MSG }.write(&mut head);
+        head.extend_from_slice(&flag_bits.to_le_bytes());
+        head.push(KIND_BODY);
+        out.extend(&head);
+        doc.append_fragments(&mut out, limits)?;
+        let length = i32::try_from(out.len() + tail).unwrap_or(i32::MAX);
+        out.overwrite(0, &length.to_le_bytes());
+        if checksum {
+            let mut crc = Crc32c::new();
+            for piece in out.slices() {
+                crc.update(piece);
+            }
+            out.extend(&crc.value().to_le_bytes());
         }
         Ok(out)
     }
