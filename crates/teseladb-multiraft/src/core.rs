@@ -1074,6 +1074,12 @@ impl<S: StateMachine> MultiRaftCore<S> {
         op
     }
 
+    /// The HLC an answer to a forwarded request carries ([`MultiRaftCore::answer_forward`]), for
+    /// an answer the caller hands to the network itself (012 FR-026).
+    pub fn answer_clock(&self) -> Hlc {
+        self.cfg.clock.0.peek()
+    }
+
     /// Answers a request `to` forwarded to this node.
     pub fn answer_forward(&mut self, to: NodeId, req: u64, body: Bytes) {
         let hlc = Some(self.cfg.clock.0.peek());

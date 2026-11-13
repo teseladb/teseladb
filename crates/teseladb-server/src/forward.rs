@@ -274,6 +274,12 @@ impl FetchReply {
         }
     }
 
+    /// The encoding of [`FetchReply::Chunk`] of `c` up to its bytes, for `len` bytes that follow
+    /// (012 FR-026).
+    pub fn chunk_head(c: &Chunk, len: u64) -> Vec<u8> {
+        [&[CHUNK][..], &c.encode_head(len)].concat()
+    }
+
     /// Decodes what [`FetchReply::encode`] wrote.
     pub fn decode(b: &[u8]) -> Result<FetchReply, DecodeError> {
         match b.split_first() {
@@ -332,6 +338,9 @@ mod tests {
             size: 3,
             data: vec![1, 2, 3],
         };
+        // The head of a piece and its bytes read apart make the piece (012 FR-026).
+        let head = FetchReply::chunk_head(&Chunk { data: Vec::new(), ..chunk.clone() }, 3);
+        assert_eq!([head, chunk.data.clone()].concat(), FetchReply::Chunk(chunk.clone()).encode());
         for a in [FetchReply::NotReady, FetchReply::Chunk(chunk), FetchReply::Stale] {
             assert_eq!(FetchReply::decode(&a.encode()), Ok(a));
         }

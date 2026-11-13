@@ -1,7 +1,9 @@
 //! The core loop with an io_uring disk (Linux, 012 FR-002 and acceptance scenario 1 of story 1):
 //! the logic's operations go to the core's ring, their completions come back through the same
 //! poller in submission order, and no disk thread exists. Large frames on a plaintext peer link go
-//! out through the same ring with `IORING_OP_SEND_ZC` (012 FR-026).
+//! out through the same ring with `IORING_OP_SEND_ZC`, and the pieces of a file with
+//! `IORING_OP_SENDMSG_ZC` from the ring's registered buffers; a TLS link sends neither way (012
+//! FR-026).
 #![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
@@ -10,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use teseladb_io::file_send::FileSend;
 use teseladb_io::node_disk::{DirectIo, IoExecutor, choose};
 use teseladb_io::peer::{Hello, PeerMsg, Versions};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreRuntime, RuntimeConfig};
@@ -150,6 +153,8 @@ fn drives_its_disk(sqpoll: bool) {
 struct Streamer {
     out: Vec<(NodeId, PeerMsg)>,
     peer: String,
+    /// What the runtime told of file sends.
+    told: Option<bool>,
 }
 
 /// The body of piece `i`.
@@ -176,6 +181,9 @@ impl CoreLogic for Streamer {
     }
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>) {
         out.append(&mut self.out);
+    }
+    fn file_sends(&mut self, on: bool) {
+        self.told = Some(on);
     }
     fn peer_addr(&self, _node: NodeId) -> Option<String> {
         Some(self.peer.clone())
@@ -221,16 +229,212 @@ fn a_range_s_pieces_go_to_a_plaintext_peer_with_zero_copy_sends() {
             }
         }
     });
-    let logic = Streamer { out: Vec::new(), peer };
+    let logic = Streamer { out: Vec::new(), peer, told: None };
     let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 3, tls: None, origin: None };
     let (rt, tx) = CoreRuntime::new(logic, disk, hello(), cfg).unwrap();
     let core = thread::spawn(move || rt.run().unwrap());
     tx.send(CoreInput::App(pieces)).ok().unwrap();
     reader.join().unwrap();
     tx.send(CoreInput::Stop).ok().unwrap();
-    let (_, disk) = core.join().unwrap();
+    let (logic, disk) = core.join().unwrap();
+    assert_eq!(logic.told, Some(true), "a ring and plaintext links send files");
     let mut disk = disk.unwrap();
     let sent = disk.uring().unwrap().zero_copy_sends();
     assert!(sent > 0, "the pieces went out with SEND_ZC");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[path = "common/tls.rs"]
+mod tls;
+
+#[test]
+fn a_tls_link_sends_no_frame_with_zero_copy_and_no_file_from_the_ring() {
+    use teseladb_io::handshake::{Acceptor, AcceptorOptions, Inbound};
+    use teseladb_io::mailbox::{Notify, channel};
+    struct Quiet;
+    impl Notify for Quiet {
+        fn notify(&self) {}
+    }
+    let root = std::env::temp_dir().join(format!("teseladb-rt-zc-tls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
+    let disk = NodeDisk::open(&root, &choice).unwrap();
+    let the_ca = tls::ca(1);
+    let ours = Hello { core: 0, cores: 1, ..hello() };
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = l.local_addr().unwrap().to_string();
+    let theirs = Hello { node_id: NodeId(2), peer_addr: peer.clone(), ..ours.clone() };
+    let (inbox, mut inbound) = channel::<Inbound>(Arc::new(Quiet));
+    let opts = AcceptorOptions { tls: Some(tls::peer_tls(&the_ca, 2)), ..Default::default() };
+    let acceptor = Acceptor::spawn_with(l, theirs, vec![inbox], |i| i, opts).unwrap();
+    let pieces = 4u64;
+    let logic = Streamer { out: Vec::new(), peer, told: None };
+    let tls = Some(tls::peer_tls(&the_ca, 3));
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 3, tls, origin: None };
+    let (rt, tx) = CoreRuntime::new(logic, disk, ours, cfg).unwrap();
+    let core = thread::spawn(move || rt.run().unwrap());
+    tx.send(CoreInput::App(pieces)).ok().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = Vec::new();
+    let Inbound { mut stream, mut channel, .. } = loop {
+        inbound.drain_into(&mut got);
+        if let Some(i) = got.pop() {
+            break i;
+        }
+        assert!(Instant::now() < deadline, "no connection");
+        thread::sleep(Duration::from_millis(2));
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (mut buf, mut next) = (Vec::new(), 0u64);
+    while next < pieces {
+        channel.recv(&mut stream, &mut buf).unwrap_or_else(|e| panic!("after {next}: {e}"));
+        while let Some((msg, used)) = teseladb_io::peer::decode_frame(&buf).unwrap() {
+            let PeerMsg::ForwardResp { req, body, .. } = msg else { panic!("{msg:?}") };
+            assert_eq!(req, next, "in order");
+            assert!(body.as_ref() == piece(req).as_slice(), "piece {req} whole");
+            buf.drain(..used);
+            next += 1;
+        }
+    }
+    tx.send(CoreInput::Stop).ok().unwrap();
+    let (logic, disk) = core.join().unwrap();
+    acceptor.stop();
+    assert_eq!(logic.told, Some(false), "TLS encrypts in the process");
+    assert_eq!(disk.unwrap().uring().unwrap().zero_copy_sends(), 0);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Bytes of the file whose pieces [`Pieces`] sends: four pieces, the last one not a whole
+/// number of blocks.
+const FILE_LEN: u64 = 3 * PIECE + 100_000;
+const PIECE: u64 = 1 << 20;
+/// The answer that goes when a file's bytes cannot be read.
+const NOT_READ: u8 = 0xEE;
+
+fn file_byte(i: u64) -> u8 {
+    ((i * 7 + i / 4096) % 253) as u8
+}
+
+/// Writes a file, then answers each of its pieces to node 2 with a file send, and two more that
+/// cannot be read: one of a file that is not open, one past the file's end.
+struct Pieces {
+    io: Vec<IoOp>,
+    out: Vec<(NodeId, FileSend)>,
+    peer: String,
+    told: Option<bool>,
+}
+
+fn file_send(req: u64, file: FileId, offset: u64, len: u64) -> FileSend {
+    FileSend {
+        req,
+        hlc: Some(teseladb_keys::Hlc { physical: 5, logical: 1 }),
+        head: format!("piece {req}").into_bytes(),
+        file,
+        offset,
+        len: len as u32,
+        fallback: Bytes::from_vec(vec![NOT_READ]),
+    }
+}
+
+impl CoreLogic for Pieces {
+    type Msg = ();
+    fn tick(&mut self, _now: Nanos, _wall_ms: u64) {}
+    fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
+        if self.io.is_empty() { None } else { Some((self.io.remove(0), IoClass::Data)) }
+    }
+    fn on_io_done(&mut self, done: IoDone, _class: IoClass, _now: Nanos) {
+        let IoDone::Ok(IoOp::WriteAt { file, .. }) = done else { return };
+        let mut req = 0;
+        let mut at = 0;
+        while at < FILE_LEN {
+            let len = PIECE.min(FILE_LEN - at);
+            self.out.push((NodeId(2), file_send(req, file, at, len)));
+            (req, at) = (req + 1, at + len);
+        }
+        self.out.push((NodeId(2), file_send(req, FileId(77), 0, 10)));
+        self.out.push((NodeId(2), file_send(req + 1, file, FILE_LEN - 10, 100)));
+    }
+    fn next_deadline(&self) -> Option<Nanos> {
+        None
+    }
+    fn on_peer(&mut self, _from: NodeId, _msg: PeerMsg, _now: Nanos) {}
+    fn on_message(&mut self, _msg: (), _now: Nanos) {
+        let file = FileId(5);
+        self.io.push(IoOp::Create { file, path: PathBuf::from("pieces"), prealloc: 0 });
+        let data = Bytes::from_vec((0..FILE_LEN).map(file_byte).collect());
+        self.io.push(IoOp::WriteAt { file, offset: 0, data, batch: 0 });
+    }
+    fn take_outbound(&mut self, _out: &mut Vec<(NodeId, PeerMsg)>) {}
+    fn file_sends(&mut self, on: bool) {
+        self.told = Some(on);
+    }
+    fn take_file_sends(&mut self, out: &mut Vec<(NodeId, FileSend)>) {
+        out.append(&mut self.out);
+    }
+    fn peer_addr(&self, _node: NodeId) -> Option<String> {
+        Some(self.peer.clone())
+    }
+    fn peer_unreachable(&mut self, _node: NodeId) {}
+    fn io_settled(&self) -> bool {
+        self.io.is_empty()
+    }
+    fn resting(&self) -> bool {
+        false
+    }
+    fn wake(&mut self, _now: Nanos, _wall_ms: u64) {}
+    fn clock(&mut self, _now: Nanos, _wall_ms: u64) {}
+}
+
+#[test]
+fn a_file_s_pieces_go_from_the_ring_s_buffers_and_what_cannot_be_read_gets_its_fallback() {
+    use std::io::Read;
+    let root = std::env::temp_dir().join(format!("teseladb-rt-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
+    let disk = NodeDisk::open(&root, &choice).unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = l.local_addr().unwrap().to_string();
+    let theirs = Hello { node_id: NodeId(2), core: 0, peer_addr: peer.clone(), ..hello() };
+    let pieces = FILE_LEN.div_ceil(PIECE);
+    let reader = thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        teseladb_io::handshake::answer(&mut s, &theirs).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (mut buf, mut chunk, mut got) = (Vec::new(), vec![0u8; 1 << 16], Vec::new());
+        while (got.len() as u64) < pieces + 2 {
+            let n = s.read(&mut chunk).unwrap_or_else(|e| panic!("after {}: {e}", got.len()));
+            assert!(n > 0, "closed after {} answers", got.len());
+            buf.extend_from_slice(&chunk[..n]);
+            while let Some((msg, used)) = teseladb_io::peer::decode_frame(&buf).unwrap() {
+                let PeerMsg::ForwardResp { req, body, hlc } = msg else { panic!("{msg:?}") };
+                assert_eq!(hlc.map(|h| h.physical), Some(5));
+                got.push((req, body.as_ref().to_vec()));
+                buf.drain(..used);
+            }
+        }
+        got
+    });
+    let logic = Pieces { io: Vec::new(), out: Vec::new(), peer, told: None };
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 3, tls: None, origin: None };
+    let (rt, tx) = CoreRuntime::new(logic, disk, hello(), cfg).unwrap();
+    let core = thread::spawn(move || rt.run().unwrap());
+    tx.send(CoreInput::App(())).ok().unwrap();
+    let got = reader.join().unwrap();
+    tx.send(CoreInput::Stop).ok().unwrap();
+    let (logic, disk) = core.join().unwrap();
+    assert_eq!(logic.told, Some(true));
+    for (i, (req, body)) in got.iter().enumerate() {
+        assert_eq!(*req, i as u64, "in the order they were handed");
+        if *req >= pieces {
+            assert_eq!(body, &[NOT_READ], "answer {req} could not be read");
+            continue;
+        }
+        let head = format!("piece {req}").into_bytes();
+        let at = req * PIECE;
+        let want: Vec<u8> = (at..FILE_LEN.min(at + PIECE)).map(file_byte).collect();
+        assert!(body[..head.len()] == head[..] && body[head.len()..] == want[..], "piece {req}");
+    }
+    let mut disk = disk.unwrap();
+    assert_eq!(disk.uring().unwrap().zero_copy_sends(), pieces, "each piece from the buffers");
     std::fs::remove_dir_all(&root).unwrap();
 }

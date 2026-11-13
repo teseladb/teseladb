@@ -33,6 +33,10 @@ use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
 use crate::file_disk::{O_DIRECT, errno, io_errno};
 use crate::io_class::IoClass;
 
+mod file_sends;
+
+pub use file_sends::MAX_FILE_SENDS;
+
 /// Submission slots of a core's ring.
 pub const RING_ENTRIES: u32 = 128;
 
@@ -79,11 +83,17 @@ const MAX_SYNCS: usize = 16;
 /// Zero-copy sends to other nodes in flight at once on a core's ring (012 FR-026).
 pub const MAX_PEER_SENDS: usize = 8;
 
-// Data jobs hold a buffer each; in each of the two classes at most [`MAX_SYNCS`] `Sync`s run next
-// to them and one job alone, each with one ring operation, and at most [`MAX_PEER_SENDS`] sends to
-// peers: what is in flight never passes the ring's slots.
+// Data jobs and the reads of file sends hold a buffer each; in each of the two classes at most
+// [`MAX_SYNCS`] `Sync`s run next to them and one job alone, each with one ring operation, and at
+// most [`MAX_PEER_SENDS`] sends to peers and [`MAX_FILE_SENDS`] sends of files: what is in flight
+// never passes the ring's slots.
 const _: () = assert!(
-    (BUFFERS_PER_CORE as u32) + 2 * (MAX_SYNCS as u32) + 2 + (MAX_PEER_SENDS as u32) < RING_ENTRIES
+    (BUFFERS_PER_CORE as u32)
+        + 2 * (MAX_SYNCS as u32)
+        + 2
+        + (MAX_PEER_SENDS as u32)
+        + (MAX_FILE_SENDS as u32)
+        < RING_ENTRIES
 );
 
 fn missing_ops(probe: &Probe) -> Result<(), String> {
@@ -196,8 +206,10 @@ pub struct IoUringDisk {
     peer_sends: HashMap<u64, Option<io::Result<u32>>>,
     /// Sends to peers whose buffer the kernel released, with their result.
     peer_sent: Vec<(u64, io::Result<u32>)>,
-    /// Zero-copy sends to peers that went out whole.
+    /// Zero-copy sends to peers that went out whole, of bytes and of files.
     zero_copy_sends: u64,
+    /// Frames for peers whose last bytes come from a file (012 FR-026).
+    file_sends: file_sends::FileSends,
 }
 
 fn cpath(p: &Path) -> CString {
@@ -335,6 +347,7 @@ impl IoUringDisk {
             peer_sends: HashMap::new(),
             peer_sent: Vec::new(),
             zero_copy_sends: 0,
+            file_sends: file_sends::FileSends::default(),
             next_seq: 0,
             wake,
             buffers_ready: false,
@@ -375,17 +388,24 @@ impl IoUringDisk {
     }
 
     /// Whether results are waiting for [`IoUringDisk::reap`] without a completion to signal them
-    /// (an operation that failed before reaching the ring).
+    /// (an operation that failed before reaching the ring, or a file send that read nothing).
     pub fn ready(&self) -> bool {
-        !self.done.is_empty()
+        !self.done.is_empty() || self.file_sends.has_unread()
     }
 
     /// Waits for every submitted operation and drops the results (when the core stops).
     pub fn drain(&mut self) {
-        while self.queues.iter().any(|q| !q.is_empty()) || !self.running.is_empty() {
+        // The frames not started go with the connections; the ones running end first, as their
+        // buffers return to the reserve with their last completion.
+        self.file_sends.drop_queued();
+        while self.queues.iter().any(|q| !q.is_empty())
+            || !self.running.is_empty()
+            || self.file_sends.running()
+        {
             self.start_ready();
-            let wait = u32::from(self.running.iter().any(|j| j.waiting.is_some()));
-            if self.ring.submit(wait).is_err() {
+            let wait =
+                self.running.iter().any(|j| j.waiting.is_some()) || self.file_sends.running();
+            if self.ring.submit(u32::from(wait)).is_err() {
                 break;
             }
             self.collect();
@@ -461,6 +481,7 @@ impl IoUringDisk {
 
     fn collect(&mut self) {
         while let Some(c) = self.ring.complete() {
+            let Some(c) = self.file_send_completed(c) else { continue };
             if let Some(first) = self.peer_sends.get_mut(&c.id) {
                 if !c.notification {
                     *first = Some(c.result);
@@ -534,6 +555,7 @@ impl IoUringDisk {
         // What the log started no longer waits in its queue.
         self.note_log_state();
         self.start_class(IoClass::Data);
+        self.start_file_sends();
         self.collect();
     }
 
@@ -567,9 +589,9 @@ impl IoUringDisk {
             let waited =
                 u64::try_from(started.duration_since(queued).as_nanos()).unwrap_or(u64::MAX);
             teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
-            if data_range(&op).is_some() && !self.buffers_ready {
-                match self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE)) {
-                    Ok(()) => self.buffers_ready = true,
+            if data_range(&op).is_some() {
+                match self.ensure_buffers() {
+                    Ok(()) => {}
                     Err(e) => {
                         // Finished at once, behind the ones still running.
                         let result = Some(fail(&op, errno(&e)));
@@ -627,6 +649,16 @@ impl IoUringDisk {
             });
             self.advance(self.running.len() - 1, None);
         }
+    }
+
+    /// Registers the reserve's buffers if they are not yet: on the first read or write, from the
+    /// core's thread (012 FR-006).
+    fn ensure_buffers(&mut self) -> io::Result<()> {
+        if !self.buffers_ready {
+            self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE))?;
+            self.buffers_ready = true;
+        }
+        Ok(())
     }
 
     /// The steps of an operation that is not a read or a write. Those done without the ring

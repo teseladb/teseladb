@@ -196,6 +196,41 @@ fn a_zero_copy_send_keeps_its_buffer_until_the_notification() {
 }
 
 #[test]
+fn a_vectored_zero_copy_send_takes_a_head_and_registered_buffers_until_the_notification() {
+    let (mut c, s) = pair();
+    let mut r = Ring::new(8).unwrap();
+    r.register_buffers(vec![AlignedBuf::new(8192), AlignedBuf::new(8192), AlignedBuf::new(8192)])
+        .unwrap();
+    r.buffer(2).unwrap()[..4].copy_from_slice(b"two!");
+    r.buffer(0).unwrap()[..8192].fill(5);
+    let head = Part::new(b"head".to_vec());
+    let send = Op::SendMsgZc { fd: s.as_raw_fd(), head, bufs: vec![(2, 4), (0, 8192)] };
+    let id = r.push(send).unwrap();
+    assert!(r.buffer(2).is_none() && r.buffer(0).is_none(), "taken while the kernel reads");
+    assert!(r.buffer(1).is_some());
+    let first = next(&mut r);
+    assert_eq!((first.id, first.result.unwrap(), first.more), (id, 4 + 4 + 8192, true));
+    assert!(r.buffer(0).is_none(), "until the notification");
+    let notif = next(&mut r);
+    assert_eq!((notif.id, notif.more, notif.notification), (id, false, true));
+    assert!(r.buffer(2).is_some() && r.buffer(0).is_some());
+    let mut back = vec![0u8; 8200];
+    c.read_exact(&mut back).unwrap();
+    assert_eq!(&back[..8], b"headtwo!");
+    assert!(back[8..].iter().all(|&b| b == 5));
+    // A buffer named twice, one not registered, one too short or one in use is refused.
+    let bad = |bufs| Op::SendMsgZc { fd: s.as_raw_fd(), head: Part::new(Vec::new()), bufs };
+    assert_eq!(r.push(bad(vec![(1, 1), (1, 1)])).unwrap_err().1, "buffer named twice");
+    assert_eq!(r.push(bad(vec![(7, 1)])).unwrap_err().1, "buffer not registered");
+    assert_eq!(r.push(bad(vec![(1, 8193)])).unwrap_err().1, "range outside the buffer");
+    let fixed = SendData::Fixed { buf: 1, at: 0, len: 1 };
+    let id = r.push(Op::SendZc { fd: s.as_raw_fd(), data: fixed }).unwrap();
+    assert_eq!(r.push(bad(vec![(1, 1)])).unwrap_err().1, "buffer in use by another operation");
+    while next(&mut r).more {}
+    assert!(r.buffer(1).is_some(), "send {id} done");
+}
+
+#[test]
 fn bad_rings_and_groups_are_refused() {
     let mut r = Ring::new(4).unwrap();
     for (n, len) in [(3, 64), (0, 64), (4, 0)] {

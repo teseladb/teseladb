@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ use teseladb_types::{Nanos, NodeId, Rng};
 
 use crate::admission::Admission;
 use crate::disk_thread::DiskThread;
+use crate::file_send::FileSend;
 use crate::handshake::{self, Inbound, Outbound};
 use crate::mailbox::{self, Mailbox, MailboxSender};
 use crate::peer::{Hello, PeerMsg, decode_frame, encode_frame_for};
@@ -88,6 +89,13 @@ pub trait CoreLogic {
     }
     /// Moves the frames to send to `out`.
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>);
+    /// Whether the runtime sends answers that end with a file's bytes itself (012 FR-026): told
+    /// once, before the first turn. It does on a core with an io_uring disk whose links to other
+    /// nodes are plaintext; otherwise the logic reads the bytes and answers them whole.
+    fn file_sends(&mut self, _on: bool) {}
+    /// Moves the answers that end with a file's bytes to `out`, after [`CoreLogic::take_outbound`]
+    /// (only after `file_sends(true)`).
+    fn take_file_sends(&mut self, _out: &mut Vec<(NodeId, FileSend)>) {}
     /// Inter-node address of `node`, if known.
     fn peer_addr(&self, node: NodeId) -> Option<String>;
     /// The connection to `node` failed or closed: what was in flight may be lost.
@@ -156,6 +164,11 @@ struct Conn {
     /// A zero-copy send of the ring in flight (012 FR-026) and its bytes: what comes after it
     /// waits in `wbuf` until it completes.
     zc: Option<(u64, usize)>,
+    /// The answer of the send in flight when its last bytes come from a file.
+    #[cfg(target_os = "linux")]
+    zc_file: Option<FileSend>,
+    /// Answers that end with a file's bytes, sent one at a time once `wbuf` is out.
+    files: VecDeque<FileSend>,
 }
 
 /// Bytes waiting on a plaintext peer link from which a core with a ring sends them with
@@ -177,10 +190,23 @@ enum LinkState {
 struct Link {
     state: LinkState,
     pending: Vec<u8>,
+    /// Answers that end with a file's bytes, for the connection once it is up.
+    files: VecDeque<FileSend>,
     backoff_ms: u64,
     /// The protocol version both nodes spoke on the last connection (0: none yet): what the
     /// frames for this node may use.
     version: u16,
+}
+
+/// What [`CoreRuntime::start_file_send`] did.
+enum FileStart {
+    /// No answer of a file waits, or the connection is not free for one.
+    Nothing,
+    /// The ring sends one.
+    #[cfg(target_os = "linux")]
+    Started,
+    /// One could not go through the ring: its fallback waits in `wbuf`.
+    Queued,
 }
 
 /// Poller token of the ring's `eventfd`.
@@ -258,6 +284,10 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     /// Background requests waiting for a turn with nothing else to do (012 FR-030).
     background: VecDeque<L::Msg>,
     outbox: Vec<(NodeId, PeerMsg)>,
+    /// Answers that end with a file's bytes, taken from the logic this turn.
+    file_outbox: Vec<(NodeId, FileSend)>,
+    /// Whether the logic hands such answers ([`CoreLogic::file_sends`]).
+    file_sends: bool,
     events: Vec<Event>,
     fired: Vec<NodeId>,
     /// Whether the last turn took any work (a message, a disk result or a socket event): only
@@ -329,6 +359,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             admission: Admission::new(),
             background: VecDeque::new(),
             outbox: Vec::new(),
+            file_outbox: Vec::new(),
+            file_sends: false,
             events: Vec::new(),
             fired: Vec::new(),
             worked: false,
@@ -336,6 +368,14 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             busy_at: Nanos::ZERO,
             resting: false,
         };
+        let mut rt = rt;
+        // The ring sends the file's bytes from its buffers; TLS encrypts them in the process.
+        #[cfg(target_os = "linux")]
+        {
+            rt.file_sends = matches!(rt.disk, Exec::InLoop(_)) && rt.cfg.tls.is_none();
+        }
+        let on = rt.file_sends;
+        rt.logic.file_sends(on);
         Ok((rt, sender))
     }
 
@@ -586,9 +626,25 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             let Some(token) = self.zc_sends.remove(&id) else { continue };
             let Some(conn) = self.conns.get_mut(&token) else { continue };
             let Some((_, len)) = conn.zc.take() else { continue };
+            conn.zc_file = None;
             match result {
                 Ok(n) if n as usize == len => self.flush(token),
                 _ => self.close(token),
+            }
+        }
+        let unread = match &mut self.disk {
+            Exec::InLoop(d) => ring(d).take_unread(),
+            Exec::Thread(_) => return,
+        };
+        for id in unread {
+            // The file's bytes could not be read whole: nothing went, and the fallback goes.
+            let Some(token) = self.zc_sends.remove(&id) else { continue };
+            let Some(conn) = self.conns.get_mut(&token) else { continue };
+            conn.zc = None;
+            let Some(send) = conn.zc_file.take() else { continue };
+            self.queue_fallback(token, &send);
+            if self.conns.contains_key(&token) {
+                self.flush(token);
             }
         }
     }
@@ -626,6 +682,13 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
         for (node, msg) in std::mem::take(&mut self.outbox) {
             self.send_to(node, &msg);
+        }
+        self.logic.take_file_sends(&mut self.file_outbox);
+        if !self.file_outbox.is_empty() {
+            self.busy_at = now;
+        }
+        for (node, send) in std::mem::take(&mut self.file_outbox) {
+            self.send_file_to(node, send);
         }
     }
 
@@ -715,8 +778,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                     link.backoff_ms = 0;
                     link.version = version;
                     let pending = std::mem::take(&mut link.pending);
+                    let files = std::mem::take(&mut link.files);
                     // Frames that came with the handshake go first; garbage there closes it.
                     if self.deliver(token) {
+                        self.conns.get_mut(&token).expect("open connection").files = files;
                         self.queue_on(token, &pending);
                     }
                 }
@@ -750,6 +815,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             wpos: 0,
             want_write: false,
             zc: None,
+            #[cfg(target_os = "linux")]
+            zc_file: None,
+            files: VecDeque::new(),
         };
         self.conns.insert(token, conn);
         Ok(token)
@@ -818,6 +886,12 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
 
     fn close(&mut self, token: u64) {
         let conn = self.conns.remove(&token).expect("open connection");
+        // A file send still reading sends nothing to a connection that is gone.
+        #[cfg(target_os = "linux")]
+        if let (Some((id, _)), Some(_), Exec::InLoop(d)) = (conn.zc, &conn.zc_file, &mut self.disk)
+        {
+            ring(d).cancel_file_send(id);
+        }
         let _ = self.poller.deregister(&conn.stream);
         if conn.outbound {
             self.link_failed(conn.peer);
@@ -831,6 +905,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         link.backoff_ms = backoff;
         link.state = LinkState::Backoff;
         link.pending.clear();
+        link.files.clear();
         // An announced address that fails is forgotten: the next dial uses the logic's, which may be
         // newer (the node moved again without dialing us).
         self.learned.remove(&node);
@@ -844,7 +919,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     fn on_backoff_done(&mut self, node: NodeId) {
         let link = self.links.get_mut(&node).expect("link of a backoff timer");
         link.state = LinkState::Idle;
-        if !link.pending.is_empty() {
+        if !link.pending.is_empty() || !link.files.is_empty() {
             self.dial(node);
         }
     }
@@ -855,7 +930,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         let Some(addr) = self.learned.get(&node).cloned().or_else(|| self.logic.peer_addr(node))
         else {
             // Unknown address: nothing to dial; frames are dropped (Raft resends).
-            self.links.get_mut(&node).expect("link").pending.clear();
+            let link = self.links.get_mut(&node).expect("link");
+            link.pending.clear();
+            link.files.clear();
             return;
         };
         self.links.get_mut(&node).expect("link").state = LinkState::Dialing;
@@ -881,6 +958,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         let link = self.links.entry(node).or_insert(Link {
             state: LinkState::Idle,
             pending: Vec::new(),
+            files: VecDeque::new(),
             backoff_ms: 0,
             version: 0,
         });
@@ -894,6 +972,80 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                     self.dial(node);
                 }
             }
+        }
+    }
+
+    /// Queues an answer that ends with a file's bytes for `node` (012 FR-026). A runtime that
+    /// does not send them itself sends its fallback (the logic was told so; this is its bug).
+    fn send_file_to(&mut self, node: NodeId, send: FileSend) {
+        if !self.file_sends {
+            return self.send_to(node, &send.fallback());
+        }
+        let link = self.links.entry(node).or_insert(Link {
+            state: LinkState::Idle,
+            pending: Vec::new(),
+            files: VecDeque::new(),
+            backoff_ms: 0,
+            version: 0,
+        });
+        match link.state {
+            LinkState::Up(token) => {
+                self.conns.get_mut(&token).expect("connection of an up link").files.push_back(send);
+                self.flush(token);
+            }
+            LinkState::Idle | LinkState::Backoff | LinkState::Dialing => {
+                // What waits for a link that is not up stays under its cap, as frames do.
+                let waiting: usize = link.files.iter().map(|f| f.len as usize).sum();
+                if link.pending.len() + waiting + send.len as usize <= MAX_PENDING {
+                    link.files.push_back(send);
+                }
+                if matches!(link.state, LinkState::Idle) {
+                    self.dial(node);
+                }
+            }
+        }
+    }
+
+    /// Starts the next answer that ends with a file's bytes on connection `token`, once nothing
+    /// is in flight or waits in `wbuf`: the ring reads the bytes and sends them behind the
+    /// frame's head (012 FR-026). An answer that cannot go so has its fallback queued in `wbuf`.
+    fn start_file_send(&mut self, token: u64) -> FileStart {
+        let conn = self.conns.get_mut(&token).expect("open connection");
+        if conn.zc.is_some() || conn.wpos < conn.wbuf.len() {
+            return FileStart::Nothing;
+        }
+        let Some(send) = conn.files.pop_front() else { return FileStart::Nothing };
+        #[cfg(target_os = "linux")]
+        if let Exec::InLoop(d) = &mut self.disk
+            && matches!(conn.channel, Channel::Plain)
+        {
+            let version = self.links.get(&conn.peer).map_or(0, |l| l.version);
+            let sock = conn.stream.try_clone().map(OwnedFd::from);
+            if let (Some(head), Ok(sock)) = (send.frame_head(version), sock) {
+                let len = head.len() + send.len as usize;
+                let id = ring(d).send_file(sock, head, send.file, send.offset, send.len);
+                conn.zc = Some((id, len));
+                conn.zc_file = Some(send);
+                self.zc_sends.insert(id, token);
+                return FileStart::Started;
+            }
+        }
+        self.queue_fallback(token, &send);
+        FileStart::Queued
+    }
+
+    /// Queues the fallback of `send` in the `wbuf` of connection `token`.
+    fn queue_fallback(&mut self, token: u64, send: &FileSend) {
+        let version = self.links.get(&self.conns[&token].peer).map_or(0, |l| l.version);
+        let mut frame = Vec::new();
+        // The fallback is a short answer the logic built; one that cannot be encoded is dropped
+        // like a lost message.
+        if encode_frame_for(&send.fallback(), false, version, &mut frame).is_err() {
+            return;
+        }
+        let conn = self.conns.get_mut(&token).expect("open connection");
+        if !conn.channel.outgoing(&frame, &mut conn.wbuf) {
+            self.close(token);
         }
     }
 
@@ -917,7 +1069,20 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         if done {
             conn.wbuf.clear();
             conn.wpos = 0;
+            match self.start_file_send(token) {
+                // Nothing waits for the socket to be writable until the ring's send completes.
+                #[cfg(target_os = "linux")]
+                FileStart::Started => {}
+                FileStart::Nothing => {}
+                FileStart::Queued => {
+                    if self.conns.contains_key(&token) {
+                        self.flush(token);
+                    }
+                    return;
+                }
+            }
         }
+        let conn = self.conns.get_mut(&token).expect("open connection");
         if done == conn.want_write {
             // Interest changes: write while bytes are left, read only once they are out.
             conn.want_write = !done;

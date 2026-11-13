@@ -11,7 +11,8 @@
 //! that complete several times per submission ([`Completion::more`]), the provided buffer rings the
 //! kernel picks a `recv`'s buffer from ([`Completion::buffer`]), `send` and `sendmsg`, and
 //! `IORING_OP_SEND_ZC`, whose buffer the kernel keeps until its notification
-//! ([`Completion::notification`]).
+//! ([`Completion::notification`]), and `IORING_OP_SENDMSG_ZC`, which sends a head and registered
+//! buffers in one call the same way.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -106,6 +107,8 @@ pub mod opcode {
     pub const RECV: u8 = 27;
     /// `IORING_OP_SEND_ZC`.
     pub const SEND_ZC: u8 = 47;
+    /// `IORING_OP_SENDMSG_ZC`.
+    pub const SENDMSG_ZC: u8 = 48;
     /// `IORING_OP_READ_FIXED`.
     pub const READ_FIXED: u8 = 4;
     /// `IORING_OP_WRITE_FIXED`.
@@ -358,6 +361,18 @@ pub enum Op {
         /// Bytes.
         data: SendData,
     },
+    /// `IORING_OP_SENDMSG_ZC`: `head` and then `len` bytes of each registered buffer of `bufs`
+    /// go out in one `sendmsg`, without the kernel copying them to the socket (012 FR-026). The
+    /// completions are those of an [`Op::SendZc`]; the buffers stay taken until the
+    /// notification.
+    SendMsgZc {
+        /// Connected socket.
+        fd: RawFd,
+        /// Bytes that go before the buffers', owned by the ring until the notification.
+        head: Part,
+        /// Registered buffers and how many of their first bytes go.
+        bufs: Vec<(u16, u32)>,
+    },
     /// One-shot `IORING_OP_POLL_ADD` for `POLLIN` on `fd` (an `epoll` descriptor, say): completes
     /// when it can be read.
     PollIn {
@@ -415,6 +430,14 @@ enum Keep {
         _parts: Vec<Part>,
         _iov: Vec<[u64; 2]>,
         _msg: Option<Box<MsgHdr>>,
+    },
+    /// The head of an [`Op::SendMsgZc`] with its `iovec`s and `msghdr`, and its registered
+    /// buffers, taken until the notification.
+    SendBuffers {
+        _head: Part,
+        _iov: Vec<[u64; 2]>,
+        _msg: Box<MsgHdr>,
+        bufs: Vec<u16>,
     },
     /// An operation to cancel: done when its own completion comes.
     Cancel,
@@ -718,6 +741,17 @@ impl Ring {
         Ok(())
     }
 
+    /// Whether every buffer of `bufs` is registered, idle, named once and holds its length.
+    fn check_bufs(&self, bufs: &[(u16, u32)]) -> Result<(), &'static str> {
+        for (i, (buf, len)) in bufs.iter().enumerate() {
+            self.check_buf(*buf, 0, *len)?;
+            if bufs[..i].iter().any(|(b, _)| b == buf) {
+                return Err("buffer named twice");
+            }
+        }
+        Ok(())
+    }
+
     /// Queues `op` and returns its identifier, or gives it back with the reason when the queue is
     /// full or the operation names a buffer or slot the ring does not have (or a buffer in use).
     /// Nothing reaches the kernel until [`Ring::submit`].
@@ -739,6 +773,7 @@ impl Ring {
             Op::SendZc { data: SendData::Fixed { buf, at, len }, .. } => {
                 self.check_buf(*buf, *at, *len)
             }
+            Op::SendMsgZc { bufs, .. } => self.check_bufs(bufs),
             _ => Ok(()),
         };
         if let Err(why) = checked {
@@ -891,6 +926,22 @@ impl Ring {
                     }
                 }
             }
+            Op::SendMsgZc { fd, head, bufs } => {
+                let h = head.bytes();
+                let mut iov = vec![[h.as_ptr() as u64, h.len() as u64]];
+                for (buf, len) in &bufs {
+                    iov.push([self.buffers[usize::from(*buf)].addr(), u64::from(*len)]);
+                    self.busy[usize::from(*buf)] = true;
+                }
+                let msg = Box::new(MsgHdr::of(&iov));
+                sqe.opcode = opcode::SENDMSG_ZC;
+                sqe.fd = fd;
+                sqe.addr = &*msg as *const MsgHdr as u64;
+                sqe.len = 1;
+                sqe.op_flags = MSG_NOSIGNAL | MSG_WAITALL;
+                let bufs = bufs.into_iter().map(|(b, _)| b).collect();
+                Keep::SendBuffers { _head: head, _iov: iov, _msg: msg, bufs }
+            }
             Op::PollIn { fd } => {
                 sqe.opcode = opcode::POLL_ADD;
                 sqe.fd = fd;
@@ -1031,7 +1082,13 @@ impl Ring {
         let keep = if more {
             self.in_flight.get(&cqe.user_data).map(KeepKind::of)
         } else {
-            self.in_flight.remove(&cqe.user_data).as_ref().map(KeepKind::of)
+            let gone = self.in_flight.remove(&cqe.user_data);
+            if let Some(Keep::SendBuffers { bufs, .. }) = &gone {
+                for b in bufs {
+                    self.busy[usize::from(*b)] = false;
+                }
+            }
+            gone.as_ref().map(KeepKind::of)
         };
         match keep {
             Some(KeepKind::Buffer(b)) if !more => self.busy[usize::from(b)] = false,

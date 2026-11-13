@@ -11,6 +11,7 @@ pub mod counters;
 pub mod disk_thread;
 mod drive_flush;
 mod file_disk;
+pub mod file_send;
 pub mod handshake;
 mod io_class;
 #[cfg(target_os = "linux")]
