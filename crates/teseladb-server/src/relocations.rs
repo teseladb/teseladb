@@ -188,12 +188,12 @@ pub struct Relocations {
     link: bool,
 }
 
-/// The removals of the names of `linked` files and of their history files.
+/// The removals of the names of `linked` files, of their history files and of their value files
+/// (004 FR-034), each name once: files share value files.
 fn unlink(linked: &[FileRef]) -> impl Iterator<Item = IoOp> + '_ {
-    linked.iter().flat_map(|f| {
-        let history = f.history.iter().map(|(path, _)| path.clone());
-        std::iter::once(f.path.clone()).chain(history).map(|path| IoOp::Remove { path })
-    })
+    let names: std::collections::BTreeSet<&std::path::PathBuf> =
+        linked.iter().flat_map(FileRef::paths).collect();
+    names.into_iter().map(|path| IoOp::Remove { path: path.clone() })
 }
 
 /// The state machine of range `g` on this core.
@@ -1759,6 +1759,12 @@ mod tests {
             size: 4096,
             history: Some(("relocate/out-55-1/000008.sst".into(), 4096)),
             group: 2,
+            // A value file both point to goes once (004 FR-034).
+            values: vec![("relocate/out-55-1/000009.sst".into(), 8192)],
+            history_values: vec![
+                ("relocate/out-55-1/000009.sst".into(), 8192),
+                ("relocate/out-55-1/000010.sst".into(), 8192),
+            ],
         };
         c.rel.out.insert(
             GroupId(55),
@@ -1777,6 +1783,8 @@ mod tests {
             vec![
                 IoOp::Remove { path: linked.path.clone() },
                 IoOp::Remove { path: linked.history.clone().expect("history").0 },
+                IoOp::Remove { path: linked.values[0].0.clone() },
+                IoOp::Remove { path: linked.history_values[1].0.clone() },
             ]
         );
     }

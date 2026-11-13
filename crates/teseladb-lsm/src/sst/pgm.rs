@@ -48,6 +48,13 @@ impl Pgm {
             .min()
             .unwrap_or(0);
         let xs: Vec<u64> = keys.map(|k| project(k, prefix)).collect();
+        // Internal keys sort by their logical key first: a logical key that is the start of the
+        // next one, with its 12 bytes of mark after it, can make a larger number than the key
+        // after it. The numbers must not go down for the segments to hold; such an index gets no
+        // model and is searched whole.
+        if xs.windows(2).any(|w| w[1] < w[0]) {
+            return None;
+        }
         let mut segments = Vec::new();
         let mut i = 0;
         while i < xs.len() {
@@ -128,6 +135,21 @@ mod tests {
         k.extend_from_slice(&(1_700_000_000 + i / 4).to_be_bytes()[4..]);
         k.extend_from_slice(&i.to_be_bytes()[2..]);
         k
+    }
+
+    /// Keys whose numbers go down (a logical key followed by one it starts, each with its mark)
+    /// get no model, and the subtraction of the segments never wraps.
+    #[test]
+    fn keys_whose_numbers_go_down_get_no_model() {
+        let mark = [0xffu8; 12];
+        let keys: Vec<Vec<u8>> = (0..200u32)
+            .flat_map(|i| {
+                let base = format!("doc{i:05}").into_bytes();
+                let longer = [base.as_slice(), b"x"].concat();
+                [[base.as_slice(), &mark].concat(), [longer.as_slice(), &mark].concat()]
+            })
+            .collect();
+        assert!(Pgm::build(keys.iter().map(|k| k.as_slice())).is_none());
     }
 
     #[test]

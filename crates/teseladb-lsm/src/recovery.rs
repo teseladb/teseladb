@@ -92,28 +92,35 @@ fn open_table(
     f: &manifest::FileMeta,
     dicts: &crate::sst::reader::Dictionaries,
 ) -> Result<Table, LsmError> {
-    let dir = &cfg.dir;
+    let t = open_file(disk, cfg, f, dicts)?;
+    if t.props.lo != f.lo || t.props.hi != f.hi {
+        return Err(LsmError::Corrupt { file: f.number, offset: 0 });
+    }
+    Ok(t)
+}
+
+/// Opens file `f`: its footer, then its meta bytes. A value file opens with no dictionary (FR-034).
+fn open_file(
+    disk: &mut dyn Disk,
+    cfg: &LsmConfig,
+    f: &manifest::FileMeta,
+    dicts: &crate::sst::reader::Dictionaries,
+) -> Result<Table, LsmError> {
     let bad = |offset| LsmError::Corrupt { file: f.number, offset };
     if f.size < ALIGN as u64 || !f.size.is_multiple_of(ALIGN as u64) {
         return Err(bad(0));
     }
-    run(disk, IoOp::Open { file: file_id(f.number), path: dir.join(file_name(f.number)) })?;
+    run(disk, IoOp::Open { file: file_id(f.number), path: cfg.dir.join(file_name(f.number)) })?;
     let last = f.size - ALIGN as u64;
     let page = read_at(disk, f.number, last, ALIGN as u64)?;
-    let footer = Table::footer(&page).map_err(|_| bad(last))?;
-    let start = footer.filter.offset;
+    let start = Table::footer(&page).map_err(|_| bad(last))?.filter.offset;
     if start > last {
         return Err(bad(last));
     }
     let meta = read_at(disk, f.number, start, f.size - start)?;
     let ring = cfg.encryption.as_ref().map(|e| &*e.0);
     // A file whose dictionary the manifest does not have is as unreadable as a broken one.
-    let t =
-        Table::from_meta(f.number, f.size, start, &meta, (ring, dicts)).map_err(|_| bad(start))?;
-    if t.props.lo != f.lo || t.props.hi != f.hi {
-        return Err(bad(start));
-    }
-    Ok(t)
+    Table::from_meta(f.number, f.size, start, &meta, (ring, dicts)).map_err(|_| bad(start))
 }
 
 /// Whether `name` is something of ours the state does not keep.
@@ -122,7 +129,8 @@ fn is_leftover(name: &str, state: &State, manifest: u64) -> bool {
         return true;
     }
     if let Some(n) = name.strip_suffix(".sst").and_then(|n| n.parse::<u64>().ok()) {
-        return !state.files.contains_key(&n);
+        let a_value_file = state.files.values().any(|f| f.values.iter().any(|(v, _)| *v == n));
+        return !state.files.contains_key(&n) && !a_value_file;
     }
     if let Some(n) = name.strip_prefix("MANIFEST-").and_then(|n| n.parse::<u64>().ok()) {
         return n != manifest;
@@ -189,19 +197,42 @@ pub(crate) fn recover(cfg: &LsmConfig, disk: &mut dyn Disk) -> Result<Recovered,
     let dicts = state.dictionary_contents();
     // Each history file goes with the file it is of (FR-031); one whose file the manifest does
     // not list is as broken as a file it cannot read.
+    // Each value file once, whatever number of files point to it (FR-034).
+    let mut values = std::collections::BTreeMap::new();
+    for f in state.files.values() {
+        for (number, size) in &f.values {
+            if !values.contains_key(number) {
+                let meta = manifest::FileMeta { number: *number, size: *size, ..f.clone() };
+                let none = crate::sst::reader::Dictionaries::new();
+                let t = open_file(disk, cfg, &meta, &none)?;
+                values.insert(*number, std::sync::Arc::new(t));
+            }
+        }
+    }
+    let attached = |f: &manifest::FileMeta, mut t: Table| -> Table {
+        t.values = f.values.iter().map(|(n, _)| values[n].clone()).collect();
+        t
+    };
     let mut histories = std::collections::BTreeMap::new();
     for f in state.files.values() {
         if let Some(of) = f.history_of {
             if !state.files.get(&of).is_some_and(|t| t.history_of.is_none()) {
                 return Err(LsmError::Corrupt { file: f.number, offset: 0 });
             }
-            histories.insert(of, open_table(disk, cfg, f, &dicts)?);
+            histories.insert(of, attached(f, open_table(disk, cfg, f, &dicts)?));
         }
     }
     for f in state.files.values().filter(|f| f.history_of.is_none()) {
-        let mut t = open_table(disk, cfg, f, &dicts)?;
+        let mut t = attached(f, open_table(disk, cfg, f, &dicts)?);
         t.history = histories.remove(&f.number).map(std::sync::Arc::new);
         tables.push((f.level, t));
+    }
+    for (_, t) in &tables {
+        for f in std::iter::once(t).chain(t.history.as_deref()) {
+            if f.values.len() != f.props.values.len() {
+                return Err(LsmError::Corrupt { file: f.number, offset: 0 });
+            }
+        }
     }
     remove_leftovers(disk, cfg, &names, &state, number)?;
     Ok(Recovered { state, manifest: number, manifest_tail: tail, tables })
@@ -226,6 +257,7 @@ mod tests {
                 min_ts: teseladb_keys::Hlc { physical: 0, logical: 0 },
                 max_ts: teseladb_keys::Hlc { physical: 0, logical: 0 },
                 history_of: None,
+                values: Vec::new(),
             },
         );
         assert!(!is_leftover("000004.sst", &state, 2));

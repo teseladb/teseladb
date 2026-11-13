@@ -285,3 +285,45 @@ fn linked_groups_of_level_zero_keep_their_order() {
         assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(10), ts(40, 0)).len(), 3);
     }
 }
+
+/// Large documents in value files (004 FR-034): a file linked whole brings its value files, linked
+/// too, and the files written hold their values with their keys. The new core reads the same,
+/// after a restart and after the old core let the range go and compacted.
+#[test]
+fn linked_files_bring_their_value_files() {
+    let mut disk = MemDisk::new();
+    let mut a = open(&cfg(0), &mut core(&mut disk, 0));
+    let doc = |i: u64, round: u64| vec![(i * 7 + round) as u8; 5_000 + (i as usize % 7) * 1_000];
+    let mut index = 0;
+    for round in 0..2u64 {
+        for i in 0..60u64 {
+            index += 1;
+            a.put(G, index, &key(i), ts(10 + round * 10, 0), &doc(i, round)).unwrap();
+        }
+        settle(&mut a, &mut disk, 0);
+        compact(&mut a, &mut disk, 0);
+    }
+    // A newer version above the mark: its file is rewritten, with the value in it.
+    a.put(G, index + 1, &key(3), ts(50, 0), &doc(3, 9)).unwrap();
+    settle(&mut a, &mut disk, 0);
+    assert!(a.metrics().value_files > 0);
+    let at = ts(40, 0);
+    let files = export(&mut a, &mut disk, &key(0), &key(60), at);
+    let linked: Vec<&FileRef> = files.iter().filter(|f| f.group > 0).collect();
+    assert!(linked.iter().any(|f| !f.values.is_empty()), "{files:?}");
+    assert!(files.iter().filter(|f| f.group == 0).all(|f| f.values.is_empty()));
+    let mut b = open(&cfg(1), &mut core(&mut disk, 1));
+    ingest(&mut b, &mut disk, files, &key(0), &key(60));
+    assert!(b.metrics().value_files > 0);
+    let want = rows(&mut a, &mut disk, 0, &key(0), &key(60), at);
+    assert_eq!(want.len(), 60);
+    assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), at), want);
+    let id = a.drop_range(G, vec![(key(0), key(60))]);
+    assert_eq!(a.run_io(&mut core(&mut disk, 0), Nanos::ZERO).cleared, vec![id]);
+    compact(&mut a, &mut disk, 0);
+    drop(b);
+    let mut b = open(&cfg(1), &mut core(&mut disk, 1));
+    assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), at), want);
+    compact(&mut b, &mut disk, 1);
+    assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), at), want);
+}

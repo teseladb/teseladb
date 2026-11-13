@@ -13,6 +13,7 @@ use crate::config::Codec;
 use crate::dict::Training;
 use crate::jobs::{Outcome, Script};
 use crate::sst::reader::Table;
+use crate::version::Version;
 
 impl Lsm {
     pub(super) fn schedule(&mut self) -> Option<Job> {
@@ -67,6 +68,9 @@ impl Lsm {
         // Nothing to compact: the clearings and the compactions asked for are done.
         self.done.cleared.extend(std::mem::take(&mut self.clears_compacting));
         self.done.compacted.extend(std::mem::take(&mut self.manual_compacting));
+        if let Some(plan) = compaction::collect_values(&self.version) {
+            return Some(Job::Compact(Box::new(self.compaction(plan))));
+        }
         // Background jobs start only when no flush runs (`poll_flush` came back empty).
         if self.manifest.tail > self.cfg.manifest_rotate_bytes {
             let number = self.alloc_file();
@@ -82,9 +86,24 @@ impl Lsm {
         None
     }
 
-    /// Bytes of every file of the current version.
+    /// Bytes of every file of the current version, its value files included (FR-034).
     pub(super) fn files_bytes(&self) -> u64 {
-        self.version.levels.iter().flatten().map(|t| t.bytes()).sum()
+        let values: u64 = self.version.value_files().values().map(|v| v.size).sum();
+        self.version.levels.iter().flatten().map(|t| t.bytes()).sum::<u64>() + values
+    }
+
+    /// Takes the value files that joined the version since `before`, and leaves those that
+    /// left it to go from the disk once nothing holds them (FR-034).
+    fn note_values(&mut self, before: &Version) {
+        let (old, new) = (before.value_files(), self.version.value_files());
+        for (n, v) in &new {
+            if !old.contains_key(n) {
+                self.reader.cache.pin_meta(v.number, v.meta.clone());
+                self.counters.written_bytes += v.size;
+                self.counters.note_codes(v);
+            }
+        }
+        self.obsolete.extend(old.into_iter().filter(|(n, _)| !new.contains_key(n)).map(|(_, v)| v));
     }
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
@@ -136,7 +155,8 @@ impl Lsm {
                     self.adopt(&t);
                     v.levels[0].insert(0, Arc::new(*t));
                 }
-                self.version = Arc::new(v);
+                let before = std::mem::replace(&mut self.version, Arc::new(v));
+                self.note_values(&before);
                 self.done.flushed.extend(edit.flushed);
             }
             Outcome::Rotated { manifest } => self.manifest = manifest,
@@ -226,7 +246,8 @@ impl Lsm {
         for level in &mut v.levels[1..] {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
-        self.version = Arc::new(v);
+        let before = std::mem::replace(&mut self.version, Arc::new(v));
+        self.note_values(&before);
     }
 
     /// Adds the compaction budgets earned since the last call, up to one second of each.
