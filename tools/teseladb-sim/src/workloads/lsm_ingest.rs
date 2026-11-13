@@ -388,6 +388,17 @@ impl LsmIngest {
         }
     }
 
+    /// Times the second ingestion of a run whose fault window ends at `heal`, if it has one:
+    /// after the heal, wherever the length of the run puts it. At its fixed instant a run longer
+    /// than 20 s had it inside the fault window, and a disk filled there held the writes whose
+    /// latency the check compares (seeds 7, 19 and 24 with `--sim-time 30s`, plan `heavy`).
+    fn plan_second(&mut self, heal: Option<Nanos>) {
+        let Some(heal) = heal else { return };
+        for cl in &mut self.clients {
+            cl.ingests[1] = Ingest::Due(heal + SECOND_INGEST);
+        }
+    }
+
     /// Level 0 stays below the slow-down limit.
     fn check_level0(w: &mut World, node: u32, core: u16) {
         let c = &w.nodes[node as usize].cores[core as usize];
@@ -483,6 +494,7 @@ impl Workload for LsmIngest {
     }
 
     fn start(&mut self, w: &mut World) {
+        self.plan_second(w.heal_at);
         self.sources = (0..2).map(|i| Source::build(i, w)).collect();
         for node in 0..w.nodes.len() as u32 {
             for core in 0..self.cores {
@@ -649,6 +661,19 @@ mod tests {
         wl.clients[0].latencies[1].1 = ms(50);
         wl.restarted[0].push(ms(10_200));
         wl.check_latency(0).expect("restarted");
+    }
+
+    #[test]
+    fn the_second_ingestion_of_a_run_with_faults_comes_after_its_heal() {
+        let mut wl = LsmIngest::new(2, 1);
+        // Without faults nothing heals: it comes at its fixed instant.
+        wl.plan_second(None);
+        assert!(wl.clients.iter().all(|c| c.ingests[1] == Ingest::Due(SECOND_AT)));
+        // A run of 30 s heals at 25 s, past that instant.
+        let heal = Nanos::from_secs(25);
+        wl.plan_second(Some(heal));
+        assert!(wl.clients.iter().all(|c| c.ingests[1] == Ingest::Due(heal + SECOND_INGEST)));
+        assert!(wl.clients.iter().all(|c| c.ingests[0] == Ingest::Due(Nanos::ZERO)));
     }
 
     #[test]

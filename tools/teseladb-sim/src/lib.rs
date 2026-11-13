@@ -204,6 +204,7 @@ pub fn run_with_checkers(
         w.schedule(at, Event::Fault(a));
     }
     if faulty {
+        w.heal_at = Some(window);
         w.schedule(window, Event::Heal);
     }
     wl.start(&mut w);

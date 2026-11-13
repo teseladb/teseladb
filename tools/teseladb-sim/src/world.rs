@@ -439,6 +439,9 @@ pub struct World {
     pub range_lsm: Option<LsmConfig>,
     /// The fault window ended: NTP resynchronized the clocks, and no clock changes after that.
     pub healed: bool,
+    /// When the fault window ends, in a run with faults: what a workload does after the heal is
+    /// timed from it, whatever the length of the run.
+    pub heal_at: Option<Nanos>,
     /// A node at the edge of the clock margin that leads (with its distance from the median, ns), to
     /// be cut off for this long as soon as a follower answers its heartbeats, which renews its
     /// lease (D-044).
@@ -568,6 +571,7 @@ impl World {
             registry: Registry::default(),
             range_lsm: None,
             healed: false,
+            heal_at: None,
             edge_cut: None,
             edge_cut_at: None,
             snapshot_waits: Vec::new(),
