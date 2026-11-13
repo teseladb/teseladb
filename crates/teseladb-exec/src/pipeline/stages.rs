@@ -554,6 +554,11 @@ impl Facet {
         Ok(Facet { facets })
     }
 
+    /// Its facets: each name with its pipeline.
+    pub(super) fn facets(&self) -> &[(String, Pipeline)] {
+        &self.facets
+    }
+
     /// Whether one of its pipelines starts with a `$match` with `$text`.
     pub(crate) fn has_text(&self) -> bool {
         self.facets.iter().any(|(_, p)| p.starts_with_text())

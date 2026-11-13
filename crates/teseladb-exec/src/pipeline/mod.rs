@@ -22,6 +22,7 @@ mod scatter;
 mod scoped;
 pub mod search;
 mod shape;
+mod sink;
 pub mod sort;
 pub mod spill;
 mod stages;
@@ -540,47 +541,34 @@ impl Pipeline {
                 // Stages that change or filter each document on its own pass batches of
                 // [`BATCH_DOCS`] from one to the next (010 FR-028).
                 let end = self.streaming_end(at - 1);
-                if end > at - 1 {
-                    let run = &self.stages[at - 1..end];
-                    for (st, spec) in run.iter().zip(&self.sbe_specs[at - 1..end]) {
-                        sbe = sbe && *spec && sbe_capable(st);
-                    }
-                    // A `$group` right after them takes each batch as it comes out, without
-                    // the whole of their output in between.
-                    if let (Some(group @ Stage::Group(g)), Some(spec)) =
-                        (self.stages.get(end), self.sbe_specs.get(end))
-                    {
-                        let group_sbe = sbe && *spec && sbe_capable(group);
-                        let mut grouping = g.start(env, group_sbe);
-                        for_each_batch(run, docs, env, sbe, &mut |batch| {
+                let run = &self.stages[at - 1..end];
+                let mut run_sbe = sbe;
+                for (st, spec) in run.iter().zip(&self.sbe_specs[at - 1..end]) {
+                    run_sbe = run_sbe && *spec && sbe_capable(st);
+                }
+                // A blocking stage right after them takes each batch as it comes out, without
+                // the whole of their output in between.
+                if let (Some(last), Some(spec)) = (self.stages.get(end), self.sbe_specs.get(end)) {
+                    let sink_sbe = run_sbe && *spec && sbe_capable(last);
+                    if let Some(mut sink) = sink::Sink::of(self, end, env, sink_sbe) {
+                        for_each_batch(run, docs, env, run_sbe, &mut |batch| {
                             env.interrupted()?;
-                            grouping.absorb(batch)
+                            sink.absorb(batch)
                         })?;
-                        docs = grouping.finish()?;
-                        sbe = group_sbe;
-                        required.clear();
-                        given.clear();
+                        docs = sink.finish()?;
+                        sbe = sink_sbe;
+                        if makes_new_documents(last) {
+                            required.clear();
+                            given.clear();
+                        }
                         at = end + 1;
                         continue;
                     }
-                    docs = run_batched(run, docs, env, sbe)?;
-                    if run.iter().any(makes_new_documents) {
-                        given.clear();
-                    }
-                    at = end;
-                    continue;
                 }
-                // `$sort` followed by `$limit` keeps only the documents the limit takes (010
-                // FR-029); the `$limit` then takes them all.
-                if let (Stage::Sort(sort), Some(Stage::Limit(n))) = (st, self.stages.get(at)) {
-                    sbe = sbe && *spec && sbe_capable(st);
-                    let k = usize::try_from(*n).unwrap_or(usize::MAX);
-                    docs = sort.sort_top(docs, env.collation().get(), k)?;
-                    errors::check_sort_memory(
-                        &docs,
-                        env.allow_disk_use(),
-                        env.stage_memory_limit(),
-                    )?;
+                if end > at - 1 {
+                    sbe = run_sbe;
+                    docs = run_batched(run, docs, env, sbe)?;
+                    at = end;
                     continue;
                 }
             }
@@ -1089,16 +1077,9 @@ fn run_stage(
             docs.iter().map(|d| r.apply(d, &env.scope(d))).collect::<Result<_, _>>()?
         }
         Stage::Sort(s) => {
-            let limit = env.stage_memory_limit();
-            match (env.allow_disk_use(), env.spill()) {
-                (true, Some(store)) if errors::bytes_of(&docs) > limit => {
-                    spill::sort_runs(s, docs, env.collation().get(), limit, store)?
-                }
-                _ => {
-                    errors::check_sort_memory(&docs, env.allow_disk_use(), limit)?;
-                    s.sort(docs, env.collation().get())?
-                }
-            }
+            let mut sorting = sink::Sorting::new(s, env);
+            sorting.absorb(docs)?;
+            sorting.finish()?
         }
         Stage::Limit(n) => {
             docs.into_iter().take(usize::try_from(*n).unwrap_or(usize::MAX)).collect()
@@ -1111,10 +1092,7 @@ fn run_stage(
         Stage::Group(g) => g.run(docs, env, sbe)?,
         Stage::SortByCount(e) => group::run_sort_by_count(e, docs, env, sbe)?,
         Stage::Bucket(b) => b.run(docs, env, sbe)?,
-        Stage::BucketAuto(b) => {
-            errors::check_sort_memory(&docs, env.allow_disk_use(), env.stage_memory_limit())?;
-            b.run(docs, env)?
-        }
+        Stage::BucketAuto(b) => b.run(docs, env)?,
         Stage::Sample(s) => s.run(docs, env),
         Stage::Redact(e) => stages::run_redact(e, docs, env)?,
         Stage::Facet(f) => f.run(docs, env)?,
