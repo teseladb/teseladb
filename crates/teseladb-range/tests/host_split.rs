@@ -140,6 +140,44 @@ fn a_leader_splits_its_range_and_the_new_range_keeps_the_idempotence_table() {
     assert_eq!(c.reply(nl, wrong_side), Some(Err(RangeError::OutOfRange)));
 }
 
+/// A range keeps publishing its view while it splits, and the poll that follows the cut
+/// publishes the view of the keys it keeps (005 FR-028, `spec/tla/SplitView.tla`): the scans of
+/// the range stay on their connections' threads meanwhile, and none reads the old range's view
+/// for a key it gave away.
+#[test]
+fn a_range_that_splits_keeps_its_view_until_the_cut_and_then_narrows_it() {
+    use teseladb_range::read::ReadConcern;
+    use teseladb_range::view::Part;
+    let mut c = Cluster::single();
+    let l = c.elect();
+    write_on(&mut c, l, G, b"\x01b", 2, 1);
+    write_on(&mut c, l, G, b"\x01q", 1, 2);
+    c.follow();
+    let scan = |c: &Cluster, span: (&[u8], &[u8])| {
+        let view = c.nodes[&l].host.views().get(G)?;
+        let mut cache = teseladb_lsm::ViewCache::default();
+        let part = Part { docs: 10, backward: false, blocks: 64 };
+        let read = view.scan(&mut cache, span, part, || c.now, ReadConcern::Local, |_| false)?;
+        Some(read.rows.into_iter().map(|(k, _)| k).collect::<Vec<_>>())
+    };
+    let both = Some(vec![b"\x01b".to_vec(), b"\x01q".to_vec()]);
+    assert_eq!(scan(&c, (START, END)), both);
+    // The split starts and its leader polls once: it is reading the idempotence table, the cut
+    // is not proposed yet, and the view of the whole range is still there.
+    let (now, wall) = (c.now, c.wall_of(l));
+    let node = c.nodes.get_mut(&l).unwrap();
+    assert!(node.host.split(G, AT, NEW));
+    node.host.poll(&mut node.core, now, wall);
+    assert!(node.host.take_splits().is_empty(), "the cut is not applied yet");
+    assert_eq!(scan(&c, (START, END)), both, "served outside the core while it splits");
+    // Once the cut is applied the view is that of the keys the range keeps.
+    c.follow();
+    let done = c.nodes.get_mut(&l).unwrap().host.take_splits();
+    assert_eq!(done, [SplitDone { g: G, at: AT.to_vec(), new_range: NEW }]);
+    assert_eq!(scan(&c, (START, END)), None, "the span reaches keys the range gave away");
+    assert_eq!(scan(&c, (START, AT)), Some(vec![b"\x01b".to_vec()]));
+}
+
 #[test]
 fn a_table_that_cannot_be_read_drops_the_split_until_it_is_asked_again() {
     let mut c = Cluster::standard();

@@ -1384,9 +1384,9 @@ impl RangeHost {
 
     /// Publishes the LSM's version and a view of each range it leads and may serve reads of on
     /// other threads for [`VIEW_SPAN`]: caught up with its term, with the lease and the clock rule
-    /// holding now and at the end of the span, and no split or merge in progress (the keys may
-    /// change range). The embedder takes the replies after `poll`, so a write is answered after
-    /// the view that shows it.
+    /// holding now and at the end of the span, and no merge or change of core in progress (the
+    /// keys change range or core). The embedder takes the replies after `poll`, so a write is
+    /// answered after the view that shows it.
     /// The requests that have waited longer than `limit` at `now` and were not reported yet,
     /// each described once: a request that never ends holds its latches and its client.
     pub fn long_waits(&mut self, now: Nanos, limit: Nanos) -> Vec<String> {
@@ -1447,10 +1447,12 @@ impl RangeHost {
         let mut views = BTreeMap::new();
         for (g, r) in &self.ranges {
             let Some(l) = r.leader.as_ref() else { continue };
-            let still = matches!(l.split, split::SplitJob::Idle)
-                && matches!(l.merge, merge::MergeJob::Idle)
-                && !r.frozen
-                && !self.moving.contains(g);
+            // A range that splits keeps its view (FR-028, `spec/tla/SplitView.tla`): until its
+            // cut is applied it holds all its keys and no write takes the ones it gives away,
+            // and the poll that follows the cut publishes the view of the keys it keeps before
+            // the new range can answer anything.
+            let still =
+                matches!(l.merge, merge::MergeJob::Idle) && !r.frozen && !self.moving.contains(g);
             if !still
                 || !l.caught_up(core, *g)
                 || !core.lease_readable(*g, now)
