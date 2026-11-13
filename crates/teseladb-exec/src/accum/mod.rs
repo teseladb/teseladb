@@ -552,3 +552,83 @@ fn top_value(
     }
     Ok(chosen.into_iter().next().unwrap_or(Value::Null))
 }
+
+/// The state of an accumulator whose states of consecutive parts of the input merge into the
+/// state of the whole (010 FR-034): `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last` and
+/// `$count`. Unlike [`State`] it holds only values, so it goes from one core to another.
+#[derive(Clone, Debug)]
+pub(crate) enum Part {
+    Total(Total),
+    Extreme(Extreme),
+    One(Option<Value>),
+    Count(i64),
+}
+
+impl Accumulator {
+    /// Whether the states of this accumulator over consecutive parts merge ([`Part`]).
+    pub(crate) fn merges(&self) -> bool {
+        matches!(
+            self,
+            Accumulator::Count
+                | Accumulator::Unary(
+                    Unary::Sum | Unary::Avg | Unary::Min | Unary::Max | Unary::First | Unary::Last,
+                    _
+                )
+        )
+    }
+
+    /// Merges `later`, the state over the input after that of `into`, into `into`: `false` when
+    /// the merged state would not be the one taking the whole input one at a time gives
+    /// ([`Total::merge_exact`]).
+    pub(crate) fn merge(
+        &self,
+        into: &mut Part,
+        later: &Part,
+        (col, sbe): (Option<&dyn teseladb_bson::Collator>, bool),
+    ) -> Result<bool, MqlError> {
+        match (self, into, later) {
+            (_, Part::Total(a), Part::Total(b)) => Ok(a.merge_exact(b)),
+            (_, Part::Extreme(a), Part::Extreme(b)) => a.merge(b, col, sbe).map(|()| true),
+            (Accumulator::Unary(Unary::First, _), Part::One(a), Part::One(b)) => {
+                if a.is_none() {
+                    a.clone_from(b);
+                }
+                Ok(true)
+            }
+            (_, Part::One(a), Part::One(b)) => {
+                if b.is_some() {
+                    a.clone_from(b);
+                }
+                Ok(true)
+            }
+            (_, Part::Count(a), Part::Count(b)) => {
+                *a += *b;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+impl Part {
+    /// The part of state `st`; `None` for a state that does not merge.
+    pub(crate) fn of(st: State) -> Option<Part> {
+        Some(match st {
+            State::Total(t) => Part::Total(t),
+            State::Extreme(e) => Part::Extreme(e),
+            State::One(v) => Part::One(v),
+            State::Count(c) => Part::Count(c),
+            _ => return None,
+        })
+    }
+
+    /// The state the part stands for.
+    pub(crate) fn into_state(self) -> State {
+        match self {
+            Part::Total(t) => State::Total(t),
+            Part::Extreme(e) => State::Extreme(e),
+            Part::One(v) => State::One(v),
+            Part::Count(c) => State::Count(c),
+        }
+    }
+}

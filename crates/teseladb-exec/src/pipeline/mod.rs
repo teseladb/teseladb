@@ -18,6 +18,7 @@ pub mod optimize;
 pub mod out_merge;
 pub mod radix;
 mod sbe;
+mod scatter;
 mod scoped;
 pub mod search;
 mod shape;
@@ -27,6 +28,8 @@ mod stages;
 mod system;
 pub use system::{LIST_SAMPLED_QUERIES, SHARDED_DATA_DISTRIBUTION};
 
+pub use group::PartialGroups;
+pub use scatter::{Program, Scatter};
 pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};
@@ -500,7 +503,7 @@ impl Pipeline {
     pub fn run_after_matches(
         &self,
         applied: usize,
-        (mut docs, mut metas): (Vec<Document>, Option<Vec<meta::Meta>>),
+        (docs, metas): (Vec<Document>, Option<Vec<meta::Meta>>),
         env: &dyn Env,
         sbe: bool,
     ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
@@ -509,6 +512,18 @@ impl Pipeline {
         for (st, spec) in self.stages.iter().zip(&self.sbe_specs).take(applied) {
             sbe = sbe && *spec && sbe_capable(st);
         }
+        self.run_from(applied, (docs, metas), env, sbe)
+    }
+
+    /// Runs the stages from the one at `at` over `docs`, the output of those before it, with
+    /// `sbe` as those before it leave it.
+    fn run_from(
+        &self,
+        at: usize,
+        (mut docs, mut metas): (Vec<Document>, Option<Vec<meta::Meta>>),
+        env: &dyn Env,
+        mut sbe: bool,
+    ) -> Result<(Vec<Document>, Option<Vec<meta::Meta>>), MqlError> {
         // The scores search stages gave: a document without them is an error until a stage
         // makes new documents, after which they read as nothing (measured on 9.0.4).
         let mut required: Vec<String> = Vec::new();
@@ -517,7 +532,7 @@ impl Pipeline {
         // The scores the stages so far gave every document (`$text`, `$score`): those that a
         // `$unionWith` adds without them read as an error after it (measured on 9.0.4).
         let mut given: Vec<String> = Vec::new();
-        let mut at = applied;
+        let mut at = at;
         while let (Some(st), Some(spec)) = (self.stages.get(at), self.sbe_specs.get(at)) {
             at += 1;
             env.interrupted()?;
@@ -529,6 +544,24 @@ impl Pipeline {
                     let run = &self.stages[at - 1..end];
                     for (st, spec) in run.iter().zip(&self.sbe_specs[at - 1..end]) {
                         sbe = sbe && *spec && sbe_capable(st);
+                    }
+                    // A `$group` right after them takes each batch as it comes out, without
+                    // the whole of their output in between.
+                    if let (Some(group @ Stage::Group(g)), Some(spec)) =
+                        (self.stages.get(end), self.sbe_specs.get(end))
+                    {
+                        let group_sbe = sbe && *spec && sbe_capable(group);
+                        let mut grouping = g.start(env, group_sbe);
+                        for_each_batch(run, docs, env, sbe, &mut |batch| {
+                            env.interrupted()?;
+                            grouping.absorb(batch)
+                        })?;
+                        docs = grouping.finish()?;
+                        sbe = group_sbe;
+                        required.clear();
+                        given.clear();
+                        at = end + 1;
+                        continue;
                     }
                     docs = run_batched(run, docs, env, sbe)?;
                     if run.iter().any(makes_new_documents) {
@@ -1003,11 +1036,27 @@ fn run_batched(
     sbe: bool,
 ) -> Result<Vec<Document>, MqlError> {
     let mut out = Vec::with_capacity(docs.len());
+    for_each_batch(stages, docs, env, sbe, &mut |mut batch| {
+        out.append(&mut batch);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// [`run_batched`] handing each batch that comes out of the last stage to `each`, in order
+/// (a blocking stage that takes its input a batch at a time; 010 FR-028).
+fn for_each_batch(
+    stages: &[Stage],
+    docs: Vec<Document>,
+    env: &dyn Env,
+    sbe: bool,
+    each: &mut dyn FnMut(Vec<Document>) -> Result<(), MqlError>,
+) -> Result<(), MqlError> {
     let mut input = docs.into_iter();
     loop {
         let mut batch: Vec<Document> = input.by_ref().take(BATCH_DOCS).collect();
         if batch.is_empty() {
-            return Ok(out);
+            return Ok(());
         }
         for st in stages {
             if batch.is_empty() {
@@ -1016,7 +1065,9 @@ fn run_batched(
             env.interrupted()?;
             batch = run_stage(st, batch, env, sbe)?;
         }
-        out.append(&mut batch);
+        if !batch.is_empty() {
+            each(batch)?;
+        }
     }
 }
 

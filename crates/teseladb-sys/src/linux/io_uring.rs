@@ -6,6 +6,12 @@
 //! keeps alive until the operation's completion is taken ([`Ring::complete`]). Paths are owned by
 //! the ring while the operation is in flight, registered buffers belong to the ring and cannot be
 //! borrowed while the kernel uses them, and a descriptor to close is given up by its owner.
+//!
+//! The network operations of 012 FR-024 and FR-026 live in [`net`]: multishot `accept` and `recv`
+//! that complete several times per submission ([`Completion::more`]), the provided buffer rings the
+//! kernel picks a `recv`'s buffer from ([`Completion::buffer`]), `send` and `sendmsg`, and
+//! `IORING_OP_SEND_ZC`, whose buffer the kernel keeps until its notification
+//! ([`Completion::notification`]).
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -16,6 +22,11 @@ use std::sync::atomic::{AtomicU32, Ordering, fence};
 
 use crate::aligned::AlignedBuf;
 
+pub mod net;
+
+use net::{BufRing, MsgHdr};
+pub use net::{Part, SendData};
+
 const SYS_IO_URING_SETUP: i64 = 425;
 const SYS_IO_URING_ENTER: i64 = 426;
 const SYS_IO_URING_REGISTER: i64 = 427;
@@ -24,6 +35,10 @@ const IORING_OFF_SQ_RING: i64 = 0;
 const IORING_OFF_SQES: i64 = 0x1000_0000;
 const IORING_FEAT_SINGLE_MMAP: u32 = 1;
 const IORING_ENTER_GETEVENTS: u32 = 1;
+/// `io_uring_enter` takes a `struct io_uring_getevents_arg` with a timeout (Linux 5.11).
+const IORING_ENTER_EXT_ARG: u32 = 1 << 3;
+const ETIME: i32 = 62;
+const POLLIN: u32 = 1;
 const IORING_ENTER_SQ_WAKEUP: u32 = 2;
 const IORING_SETUP_SQPOLL: u32 = 2;
 const IORING_SQ_NEED_WAKEUP: u32 = 1;
@@ -36,9 +51,28 @@ const IORING_REGISTER_FILES: u32 = 2;
 const IORING_REGISTER_EVENTFD: u32 = 4;
 const IORING_REGISTER_FILES_UPDATE: u32 = 6;
 const IORING_REGISTER_PROBE: u32 = 8;
+const IORING_REGISTER_PBUF_RING: u32 = 22;
 const IO_URING_OP_SUPPORTED: u16 = 1;
 
 const IOSQE_FIXED_FILE: u8 = 1;
+const IOSQE_BUFFER_SELECT: u8 = 1 << 5;
+/// `ioprio` of an `IORING_OP_ACCEPT` that accepts until cancelled.
+const IORING_ACCEPT_MULTISHOT: u16 = 1;
+/// `ioprio` of an `IORING_OP_RECV` that receives until the end of the stream or an error.
+const IORING_RECV_MULTISHOT: u16 = 1 << 1;
+/// `ioprio` of an `IORING_OP_SEND_ZC` that sends from a registered buffer.
+const IORING_RECVSEND_FIXED_BUF: u16 = 1 << 2;
+/// The completion carries a provided buffer's identifier in its upper 16 bits.
+const IORING_CQE_F_BUFFER: u32 = 1;
+/// More completions of the same operation follow.
+const IORING_CQE_F_MORE: u32 = 1 << 1;
+/// The notification of an `IORING_OP_SEND_ZC`: the kernel no longer uses the buffer.
+const IORING_CQE_F_NOTIF: u32 = 1 << 3;
+const IORING_CQE_BUFFER_SHIFT: u32 = 16;
+const SOCK_CLOEXEC: u32 = 0o2_000_000;
+/// No `SIGPIPE` on a closed connection, and the whole buffer goes out before the completion.
+const MSG_NOSIGNAL: u32 = 0x4000;
+const MSG_WAITALL: u32 = 0x100;
 const IORING_FSYNC_DATASYNC: u32 = 1;
 const AT_FDCWD: i32 = -100;
 const AT_REMOVEDIR: u32 = 0x200;
@@ -58,6 +92,20 @@ pub mod opcode {
     pub const NOP: u8 = 0;
     /// `IORING_OP_FSYNC`.
     pub const FSYNC: u8 = 3;
+    /// `IORING_OP_POLL_ADD`.
+    pub const POLL_ADD: u8 = 6;
+    /// `IORING_OP_SENDMSG`.
+    pub const SENDMSG: u8 = 9;
+    /// `IORING_OP_ACCEPT`.
+    pub const ACCEPT: u8 = 13;
+    /// `IORING_OP_ASYNC_CANCEL`.
+    pub const ASYNC_CANCEL: u8 = 14;
+    /// `IORING_OP_SEND`.
+    pub const SEND: u8 = 26;
+    /// `IORING_OP_RECV`.
+    pub const RECV: u8 = 27;
+    /// `IORING_OP_SEND_ZC`.
+    pub const SEND_ZC: u8 = 47;
     /// `IORING_OP_READ_FIXED`.
     pub const READ_FIXED: u8 = 4;
     /// `IORING_OP_WRITE_FIXED`.
@@ -269,6 +317,58 @@ pub enum Op {
         /// Mode.
         mode: u32,
     },
+    /// Multishot `accept4(fd, NULL, NULL, SOCK_CLOEXEC)` on a listening socket: one completion
+    /// per connection, with its descriptor in [`Completion::fd`], until [`Op::Cancel`] or an
+    /// error ends it (a completion without [`Completion::more`]).
+    AcceptMulti {
+        /// Listening socket, kept open by the caller until the last completion.
+        fd: RawFd,
+    },
+    /// Multishot `recv(fd, …)` into the buffers of provided buffer ring `group`
+    /// ([`Ring::register_buf_ring`]): one completion per arrival, with the buffer in
+    /// [`Completion::buffer`], until the end of the stream (a result of 0), an error, or
+    /// [`Op::Cancel`]. With every buffer of the group taken it ends with `ENOBUFS`.
+    RecvMulti {
+        /// Connected socket, kept open by the caller until the last completion.
+        fd: RawFd,
+        /// Provided buffer ring.
+        group: u16,
+    },
+    /// `send(fd, data, MSG_NOSIGNAL | MSG_WAITALL)`.
+    Send {
+        /// Connected socket.
+        fd: RawFd,
+        /// Bytes, owned by the ring until the completion.
+        data: Part,
+    },
+    /// `sendmsg(fd, {parts}, MSG_NOSIGNAL | MSG_WAITALL)`: the parts go out in order in one call.
+    SendMsg {
+        /// Connected socket.
+        fd: RawFd,
+        /// Bytes, owned by the ring until the completion.
+        parts: Vec<Part>,
+    },
+    /// `IORING_OP_SEND_ZC`: the kernel sends straight from `data` without copying it to the
+    /// socket. The first completion has the bytes sent and [`Completion::more`]; the second,
+    /// [`Completion::notification`], says the kernel no longer reads the buffer, which the ring
+    /// keeps (or a registered buffer stays taken) until then.
+    SendZc {
+        /// Connected socket.
+        fd: RawFd,
+        /// Bytes.
+        data: SendData,
+    },
+    /// One-shot `IORING_OP_POLL_ADD` for `POLLIN` on `fd` (an `epoll` descriptor, say): completes
+    /// when it can be read.
+    PollIn {
+        /// Descriptor, kept open by the caller until the completion.
+        fd: RawFd,
+    },
+    /// `IORING_OP_ASYNC_CANCEL` of operation `id`: it ends with `ECANCELED`.
+    Cancel {
+        /// Identifier [`Ring::push`] returned.
+        id: u64,
+    },
 }
 
 /// A completion: the identifier [`Ring::push`] returned and the result (`res` of the CQE, a
@@ -279,8 +379,17 @@ pub struct Completion {
     pub id: u64,
     /// Its result.
     pub result: io::Result<u32>,
-    /// The descriptor an [`Op::OpenAt`] opened, owned by whoever takes it.
+    /// The descriptor an [`Op::OpenAt`] opened or an [`Op::AcceptMulti`] accepted, owned by
+    /// whoever takes it.
     pub fd: Option<OwnedFd>,
+    /// More completions of this operation follow (`IORING_CQE_F_MORE`): a multishot operation
+    /// still running, or an [`Op::SendZc`] whose notification is to come.
+    pub more: bool,
+    /// The provided buffer an [`Op::RecvMulti`] filled with `result` bytes: read it with
+    /// [`Ring::provided`] and give it back with [`Ring::recycle`].
+    pub buffer: Option<u16>,
+    /// The notification of an [`Op::SendZc`]: the kernel no longer reads its buffer.
+    pub notification: bool,
 }
 
 /// What the kernel may still read or write for an operation in flight.
@@ -295,6 +404,30 @@ enum Keep {
     Paths {
         _alive: Vec<CString>,
     },
+    /// A multishot accept: each result is a new descriptor.
+    Accept,
+    /// A multishot receive into provided buffer ring `group`.
+    Recv {
+        group: u16,
+    },
+    /// Bytes the kernel reads, with the `msghdr` and the `iovec`s of a `sendmsg`.
+    Send {
+        _parts: Vec<Part>,
+        _iov: Vec<[u64; 2]>,
+        _msg: Option<Box<MsgHdr>>,
+    },
+    /// An operation to cancel: done when its own completion comes.
+    Cancel,
+    /// A poll, which waits for its descriptor.
+    Poll,
+}
+
+impl Keep {
+    /// An operation that only ends when cancelled or when something outside the process acts:
+    /// a multishot one, or a poll.
+    fn waits(&self) -> bool {
+        matches!(self, Keep::Accept | Keep::Recv { .. } | Keep::Poll)
+    }
 }
 
 /// The operations the running kernel supports (`IORING_REGISTER_PROBE`).
@@ -387,6 +520,8 @@ pub struct Ring {
     _sqe_map: Map,
     _sq_map: Map,
     fd: OwnedFd,
+    /// Provided buffer rings by group; after `fd`, so the ring is gone before their memory.
+    buf_rings: HashMap<u16, BufRing>,
 }
 
 // SAFETY: the raw pointers point into mappings the ring owns; the ring is used by one thread at a
@@ -457,6 +592,7 @@ impl Ring {
             _sqe_map: sqe_map,
             _sq_map: sq_map,
             fd,
+            buf_rings: HashMap::new(),
         })
     }
 
@@ -597,6 +733,12 @@ impl Ring {
             Op::Fsync { target, .. }
             | Op::Fallocate { target, .. }
             | Op::Ftruncate { target, .. } => self.check_target(*target),
+            Op::RecvMulti { group, .. } if !self.buf_rings.contains_key(group) => {
+                Err("buffer ring not registered")
+            }
+            Op::SendZc { data: SendData::Fixed { buf, at, len }, .. } => {
+                self.check_buf(*buf, *at, *len)
+            }
             _ => Ok(()),
         };
         if let Err(why) = checked {
@@ -688,6 +830,79 @@ impl Ring {
                 sqe.len = mode;
                 Keep::Paths { _alive: vec![path] }
             }
+            Op::AcceptMulti { fd } => {
+                sqe.opcode = opcode::ACCEPT;
+                sqe.fd = fd;
+                sqe.ioprio = IORING_ACCEPT_MULTISHOT;
+                sqe.op_flags = SOCK_CLOEXEC;
+                Keep::Accept
+            }
+            Op::RecvMulti { fd, group } => {
+                sqe.opcode = opcode::RECV;
+                sqe.fd = fd;
+                sqe.ioprio = IORING_RECV_MULTISHOT;
+                sqe.flags |= IOSQE_BUFFER_SELECT;
+                sqe.buf_index = group;
+                Keep::Recv { group }
+            }
+            Op::Send { fd, data } => {
+                let bytes = data.bytes();
+                sqe.opcode = opcode::SEND;
+                sqe.fd = fd;
+                sqe.addr = bytes.as_ptr() as u64;
+                sqe.len = len_u32(bytes.len());
+                sqe.op_flags = MSG_NOSIGNAL | MSG_WAITALL;
+                Keep::Send { _parts: vec![data], _iov: Vec::new(), _msg: None }
+            }
+            Op::SendMsg { fd, parts } => {
+                let iov: Vec<[u64; 2]> = parts
+                    .iter()
+                    .map(|p| {
+                        let b = p.bytes();
+                        [b.as_ptr() as u64, b.len() as u64]
+                    })
+                    .collect();
+                let msg = Box::new(MsgHdr::of(&iov));
+                sqe.opcode = opcode::SENDMSG;
+                sqe.fd = fd;
+                sqe.addr = &*msg as *const MsgHdr as u64;
+                sqe.len = 1;
+                sqe.op_flags = MSG_NOSIGNAL | MSG_WAITALL;
+                Keep::Send { _parts: parts, _iov: iov, _msg: Some(msg) }
+            }
+            Op::SendZc { fd, data } => {
+                sqe.opcode = opcode::SEND_ZC;
+                sqe.fd = fd;
+                sqe.op_flags = MSG_NOSIGNAL | MSG_WAITALL;
+                match data {
+                    SendData::Owned(part) => {
+                        let bytes = part.bytes();
+                        sqe.addr = bytes.as_ptr() as u64;
+                        sqe.len = len_u32(bytes.len());
+                        Keep::Send { _parts: vec![part], _iov: Vec::new(), _msg: None }
+                    }
+                    SendData::Fixed { buf, at, len } => {
+                        sqe.ioprio = IORING_RECVSEND_FIXED_BUF;
+                        sqe.addr = self.buffers[usize::from(buf)].addr() + u64::from(at);
+                        sqe.len = len;
+                        sqe.buf_index = buf;
+                        self.busy[usize::from(buf)] = true;
+                        Keep::Buffer(buf)
+                    }
+                }
+            }
+            Op::PollIn { fd } => {
+                sqe.opcode = opcode::POLL_ADD;
+                sqe.fd = fd;
+                sqe.op_flags = POLLIN;
+                Keep::Poll
+            }
+            Op::Cancel { id } => {
+                sqe.opcode = opcode::ASYNC_CANCEL;
+                sqe.fd = -1;
+                sqe.addr = id;
+                Keep::Cancel
+            }
         };
         // SAFETY: only this thread writes the tail.
         let tail = unsafe { (*self.sq_tail).load(Ordering::Relaxed) };
@@ -724,6 +939,40 @@ impl Ring {
             return Ok(handed);
         }
         self.enter(self.unsubmitted, wait, flags)
+    }
+
+    /// Hands the queued operations to the kernel and waits up to `timeout` for one completion;
+    /// returns the operations submitted. A timeout that passes is no error.
+    pub fn submit_and_wait_for(&mut self, timeout: std::time::Duration) -> io::Result<u32> {
+        if self.sqpoll {
+            // The polling thread takes the queue; the call below only waits.
+            self.submit(0)?;
+        }
+        let ts = [timeout.as_secs() as i64, i64::from(timeout.subsec_nanos())];
+        // `struct io_uring_getevents_arg`: signal mask, its size, padding, and the timeout.
+        let arg: [u64; 3] = [0, 0, ts.as_ptr() as u64];
+        let to_submit = if self.sqpoll { 0 } else { self.unsubmitted };
+        // SAFETY: `arg` and the `timespec` it points to live during the call; the kernel reads
+        // `size_of_val(&arg)` bytes of `arg`.
+        let rc = unsafe {
+            syscall(
+                SYS_IO_URING_ENTER,
+                self.fd.as_raw_fd(),
+                to_submit,
+                1u32,
+                IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG,
+                arg.as_ptr(),
+                size_of_val(&arg),
+            )
+        };
+        let n = match cvt(rc) {
+            Ok(n) => n,
+            // Only a call that submitted nothing reports the wait's end: a timeout or a signal.
+            Err(e) if e.raw_os_error() == Some(ETIME) || interrupted(&e) => 0,
+            Err(e) => return Err(e),
+        };
+        self.unsubmitted -= n.min(self.unsubmitted);
+        Ok(n)
     }
 
     /// Whether a kernel thread polls this ring's submissions (`--io-uring-sqpoll`).
@@ -774,13 +1023,29 @@ impl Ring {
         let cqe = unsafe { self.cqes.add((head & self.cq_mask) as usize).read() };
         // SAFETY: the release store hands the slot back to the kernel after reading it.
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
+        let more = cqe.flags & IORING_CQE_F_MORE != 0;
+        let notification = cqe.flags & IORING_CQE_F_NOTIF != 0;
         let mut fd = None;
-        match self.in_flight.remove(&cqe.user_data) {
-            Some(Keep::Buffer(b)) => self.busy[usize::from(b)] = false,
-            Some(Keep::Open { .. }) if cqe.res >= 0 => {
-                // SAFETY: the kernel has just opened this descriptor for the operation and
-                // nobody else owns it.
+        let mut buffer = None;
+        // An operation with more completions to come keeps what the kernel may still use.
+        let keep = if more {
+            self.in_flight.get(&cqe.user_data).map(KeepKind::of)
+        } else {
+            self.in_flight.remove(&cqe.user_data).as_ref().map(KeepKind::of)
+        };
+        match keep {
+            Some(KeepKind::Buffer(b)) if !more => self.busy[usize::from(b)] = false,
+            Some(KeepKind::Fd) if cqe.res >= 0 => {
+                // SAFETY: the kernel has just opened or accepted this descriptor for the
+                // operation and nobody else owns it.
                 fd = Some(unsafe { OwnedFd::from_raw_fd(cqe.res) });
+            }
+            Some(KeepKind::Recv(group)) if cqe.flags & IORING_CQE_F_BUFFER != 0 => {
+                let bid = (cqe.flags >> IORING_CQE_BUFFER_SHIFT) as u16;
+                if let Some(ring) = self.buf_rings.get_mut(&group) {
+                    ring.hand_out(bid, cqe.res.max(0) as u32);
+                    buffer = Some(bid);
+                }
             }
             _ => {}
         }
@@ -789,7 +1054,52 @@ impl Ring {
         } else {
             Ok(cqe.res as u32)
         };
-        Some(Completion { id: cqe.user_data, result, fd })
+        Some(Completion { id: cqe.user_data, result, fd, more, buffer, notification })
+    }
+
+    /// Registers a provided buffer ring for group `group` with `entries` buffers (a power of two,
+    /// at most 32 768) of `buf_len` bytes, all given to the kernel (`IORING_REGISTER_PBUF_RING`,
+    /// Linux 5.19). [`Op::RecvMulti`] of that group takes its buffers from it.
+    pub fn register_buf_ring(&mut self, group: u16, entries: u16, buf_len: u32) -> io::Result<()> {
+        if self.buf_rings.contains_key(&group) {
+            return Err(io::Error::from_raw_os_error(EBUSY));
+        }
+        let ring = BufRing::new(entries, buf_len)?;
+        let reg = ring.registration(group);
+        self.register(IORING_REGISTER_PBUF_RING, (&reg as *const net::BufReg).cast(), 1)?;
+        self.buf_rings.insert(group, ring);
+        Ok(())
+    }
+
+    /// The `len` bytes a completion of [`Op::RecvMulti`] left in buffer `bid` of `group`, while
+    /// the caller holds it (until [`Ring::recycle`]).
+    pub fn provided(&self, group: u16, bid: u16) -> Option<&[u8]> {
+        self.buf_rings.get(&group)?.held(bid)
+    }
+
+    /// Gives buffer `bid` of `group` back to the kernel; false if the caller did not hold it.
+    pub fn recycle(&mut self, group: u16, bid: u16) -> bool {
+        self.buf_rings.get_mut(&group).is_some_and(|r| r.give_back(bid))
+    }
+
+    /// Buffers of `group` the caller holds, not yet given back.
+    pub fn held_buffers(&self, group: u16) -> usize {
+        self.buf_rings.get(&group).map_or(0, BufRing::held_count)
+    }
+
+    /// Cancels every operation in flight that waits for the world (multishot ones, polls), which
+    /// might otherwise never end.
+    fn cancel_waiting(&mut self) -> io::Result<()> {
+        let ids: Vec<u64> =
+            self.in_flight.iter().filter(|(_, k)| k.waits()).map(|(id, _)| *id).collect();
+        for id in ids {
+            while self.space() == 0 {
+                self.submit(0)?;
+            }
+            // The queue has room, and a cancel names no buffer nor slot.
+            let _ = self.push(Op::Cancel { id });
+        }
+        Ok(())
     }
 }
 
@@ -797,6 +1107,10 @@ impl Drop for Ring {
     fn drop(&mut self) {
         // The kernel may still read paths and use buffers of operations in flight: wait for them
         // before the memory goes. A ring that cannot wait any more (an error) stops waiting.
+        // Multishot operations and polls only end when cancelled.
+        if self.cancel_waiting().is_err() {
+            return;
+        }
         while !self.in_flight.is_empty() {
             if self.submit(1).is_err() {
                 break;
@@ -814,6 +1128,33 @@ impl std::fmt::Debug for Ring {
             .field("buffers", &self.buffers.len())
             .finish()
     }
+}
+
+/// What [`Ring::complete`] needs to know of an operation's [`Keep`].
+#[derive(Clone, Copy)]
+enum KeepKind {
+    Buffer(u16),
+    /// Its result is a new descriptor.
+    Fd,
+    Recv(u16),
+    Other,
+}
+
+impl KeepKind {
+    fn of(k: &Keep) -> KeepKind {
+        match k {
+            Keep::Buffer(b) => KeepKind::Buffer(*b),
+            Keep::Open { .. } | Keep::Accept => KeepKind::Fd,
+            Keep::Recv { group } => KeepKind::Recv(*group),
+            _ => KeepKind::Other,
+        }
+    }
+}
+
+/// A length for a submission entry: a send of more than 4 GiB is cut to what fits, and the
+/// caller sends the rest after the completion says how much went.
+fn len_u32(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
 }
 
 /// Whether a call failed only because a signal interrupted it.

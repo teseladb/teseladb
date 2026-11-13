@@ -409,22 +409,37 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     let mut next = start;
     let mut examined = 0u64;
     loop {
-        // The filter runs where the documents are read, and only those it accepts are copied
-        // (010 FR-027). Only the frame of a stored document is checked, as in
-        // [`Plan::apply_row`]: one whose frame does not hold is a fault, not a miss, and it
-        // stops the scan.
+        // The filter runs where the documents are read, a batch at a time on the register
+        // machine, and only those it accepts are copied (010 FR-027, FR-028). Only the frame of
+        // a stored document is checked, as in [`Plan::apply_row`]: one whose frame does not
+        // hold is a fault, not a miss, and it stops the scan. The fault is the first one the
+        // documents give in order: the filter's on those before it, or the frame's.
         let mut fault: Option<CommandError> = None;
-        let mut keep = |bytes: &[u8]| {
+        let mut keep = |batch: &[&[u8]]| {
             if fault.is_some() {
-                return false;
+                return 0;
             }
-            let matched = RawDoc::from_stored(bytes)
-                .map_err(CommandError::from)
-                .and_then(|doc| plan.filter.matches(doc, &ctx).map_err(from_mql));
-            matched.unwrap_or_else(|e| {
-                fault = Some(e);
-                false
-            })
+            let mut docs = Vec::with_capacity(batch.len());
+            let mut frame = None;
+            for bytes in batch {
+                match RawDoc::from_stored(bytes) {
+                    Ok(doc) => docs.push(doc),
+                    Err(e) => {
+                        frame = Some(CommandError::from(e));
+                        break;
+                    }
+                }
+            }
+            match plan.filter.matches_batch(&docs, &ctx) {
+                Ok(kept) => {
+                    fault = frame;
+                    kept
+                }
+                Err(e) => {
+                    fault = Some(from_mql(e));
+                    0
+                }
+            }
         };
         // The storage passes over the blocks whose zone maps the filter rules out, unread
         // and unexamined (004 FR-039). A collation orders strings otherwise than the zones.

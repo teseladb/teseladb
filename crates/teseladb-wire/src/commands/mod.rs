@@ -151,26 +151,57 @@ pub struct Matching {
     pub next: Option<Vec<u8>>,
 }
 
-/// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered.
+/// What the cores that own the ranges of a span gave for a [`Backend::scatter_groups`] (010
+/// FR-034): the partial groups of each part of the span, in key order, and the documents they
+/// examined.
+#[derive(Debug, Default)]
+pub struct Scattered {
+    /// The partial groups of each part, in key order.
+    pub parts: Vec<teseladb_exec::pipeline::PartialGroups>,
+    /// Documents examined.
+    pub examined: usize,
+}
+
+/// The most documents a scan hands its filter at once: a batch of the register machine
+/// (010 FR-028).
+pub const SCAN_BATCH: usize = teseladb_mql::vm::BATCH;
+
+/// The filter of a scan (010 FR-027, FR-028): it takes the documents of a batch, at most
+/// [`SCAN_BATCH`] in key order, and gives the bits of those it keeps (bit `i` for the document
+/// at `i`).
+pub type Keep<'k> = dyn FnMut(&[&[u8]]) -> u64 + 'k;
+
+/// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered a batch at
+/// a time.
 pub fn matching_by_scan<B: Backend + ?Sized>(
     backend: &mut B,
     (start, end): (&[u8], &[u8]),
     examine: usize,
     concern: ReadConcern,
-    keep: &mut dyn FnMut(&[u8]) -> bool,
+    keep: &mut Keep<'_>,
 ) -> Result<Matching, CommandError> {
     let read = backend.scan(start, end, examine, concern)?;
     let mut out = Matching { examined: read.len(), ..Matching::default() };
     if read.len() >= examine {
         out.next = read.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
     }
-    for (i, (key, doc)) in read.into_iter().enumerate() {
-        if keep(&doc) {
-            out.seen.push(i + 1);
-            out.rows.push((key, doc));
+    let mut seen = 0;
+    let mut rows = read.into_iter();
+    loop {
+        let batch: Rows = rows.by_ref().take(SCAN_BATCH).collect();
+        if batch.is_empty() {
+            return Ok(out);
+        }
+        let docs: Vec<&[u8]> = batch.iter().map(|(_, d)| d.as_slice()).collect();
+        let kept = keep(&docs);
+        for (l, row) in batch.into_iter().enumerate() {
+            seen += 1;
+            if (kept >> l) & 1 == 1 {
+                out.seen.push(seen);
+                out.rows.push(row);
+            }
         }
     }
-    Ok(out)
 }
 
 /// A span of keys `[start, end)` a read takes at most `limit` documents of.
@@ -505,20 +536,34 @@ pub trait Backend {
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
     /// Examines at most `examine` documents of `[start, end)` in key order and gives those
-    /// `keep` accepts (010 FR-027). A backend that can evaluates `keep` on the stored bytes and
-    /// copies only what it accepts; by default it reads them all and filters. A backend whose
-    /// storage keeps zone maps passes over, unread and unexamined, the blocks for which `block`
-    /// says no document of theirs can be accepted (004 FR-039).
+    /// `keep` accepts, handing it the documents a batch at a time (010 FR-027, FR-028). A
+    /// backend that can evaluates `keep` on the stored bytes and copies only what it accepts;
+    /// by default it reads them all and filters. A backend whose storage keeps zone maps passes
+    /// over, unread and unexamined, the blocks for which `block` says no document of theirs can
+    /// be accepted (004 FR-039).
     fn scan_matching(
         &mut self,
         start: &[u8],
         end: &[u8],
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut Keep<'_>,
         _block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
     ) -> Result<Matching, CommandError> {
         matching_by_scan(self, (start, end), examine, concern, keep)
+    }
+    /// Runs `program` (the `$match`es and the partial `$group` of an aggregation) over the
+    /// documents of `[start, end)` on the cores that own its ranges, all at once, each giving
+    /// back only its partial groups (010 FR-034). `None` when the span is not held by several
+    /// ranges this node leads, a core declined or a range moved: the caller then reads the
+    /// documents and runs the pipeline itself. By default it never does.
+    fn scatter_groups(
+        &mut self,
+        _span: (&[u8], &[u8]),
+        _program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
+        _concern: ReadConcern,
+    ) -> Result<Option<Scattered>, CommandError> {
+        Ok(None)
     }
     /// The live documents of collection `collection` of tenant `tenant`, added up from the counts
     /// its ranges keep (007 FR-039), when every one of them is exact; `None` when one is

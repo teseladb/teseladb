@@ -198,6 +198,14 @@ mod tests {
     }
 
     #[test]
+    fn keys_whose_bytes_go_down_keep_the_search() {
+        // A user key and its version, then a longer user key: in the comparator's order, not in
+        // the bytes'.
+        let keys: Vec<&[u8]> = vec![b"a\xff\x01", b"a\x00\x02", b"a\x00\x03"];
+        assert_eq!(Pgm::build(keys.into_iter()), None);
+    }
+
+    #[test]
     fn irregular_keys_keep_the_search() {
         let mut x = 1u64;
         let mut keys: Vec<Vec<u8>> = (0..2000)

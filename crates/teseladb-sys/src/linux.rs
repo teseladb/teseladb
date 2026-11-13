@@ -195,6 +195,10 @@ impl Poller {
     pub(crate) fn waker(&self) -> Waker {
         Waker { wake: Arc::clone(&self.wake) }
     }
+
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        raw(&self.ep)
+    }
 }
 
 impl Waker {

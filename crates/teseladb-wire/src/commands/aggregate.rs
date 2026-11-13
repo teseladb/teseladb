@@ -1010,19 +1010,46 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         pipeline.check_collection_plan().map_err(from_mql)?;
     }
     let collation = command_collation(&mut *ctx.backend, &ns, on_collection, a.collation.as_ref())?;
-    let planned = match on_collection && pipeline.reads_collection() && collation.get().is_none() {
-        true => planned_read(
+    let plans_read = on_collection && pipeline.reads_collection() && collation.get().is_none();
+    // Over the ranges of several cores when it starts with `$match`es and a `$group` that
+    // merges and the read scans the collection (010 FR-034); never for a `find`, with a `let`
+    // or inside a transaction (whose backend does not scatter).
+    let stage_docs: Vec<Document> = stages
+        .iter()
+        .filter_map(|v| match v {
+            RawValue::Document(d) => Some(Document::from(*d)),
+            _ => None,
+        })
+        .collect();
+    // The limit of a stage's memory, as the command's environment gives it below.
+    let limit = {
+        let shared = super::lock(ctx.shared);
+        let operation = usize::try_from(shared.params.operation_memory).unwrap_or(usize::MAX);
+        shared.spill.stage_limit().min(operation)
+    };
+    // The system variables are always there; the stages that split read none (`$$`).
+    let scatter = (plans_read && !find && ctx.cmd.get("let").is_none())
+        .then(|| pipeline.scatter(&stage_docs, true, limit))
+        .flatten();
+    let planned = match plans_read {
+        true => plan_read(
             ctx,
             &ns,
             (&stages, a.vars.as_ref()),
             a.concern,
-            pipeline.reads_index_key(),
+            (pipeline.reads_index_key(), scatter.is_some()),
         )
         .map_err(|e| executor_on(&ns_text, e))?,
         false => None,
     };
+    let (scan, planned) = match planned {
+        Some(Read::Scan(coll)) => (Some(coll), None),
+        Some(Read::Planned(read)) => (None, Some(read)),
+        None => (None, None),
+    };
     let (docs, metas, sbe, applied) = match planned {
         Some((docs, metas, applied)) => (docs, metas, true, applied),
+        None if scan.is_some() => (Vec::new(), None, true, 0),
         None if on_collection && pipeline.reads_collection() => {
             let (docs, sbe) = read_engine(&mut *ctx.backend, Some(ctx.shared), &ns, a.concern)?;
             (docs, None, sbe, 0)
@@ -1048,9 +1075,38 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         err
     };
     pipeline.check_plan(&env).map_err(from_mql)?;
-    let (mut results, _) = pipeline
-        .run_after_matches(applied, (docs, metas), &env, sbe)
-        .map_err(|e| executor(from_mql(e)))?;
+    let scattered = match (&scatter, &scan) {
+        (Some(split), Some(coll)) => run_scattered(&env, (&pipeline, split), coll, a.concern)
+            .map_err(|e| executor(from_mql(e)))?,
+        _ => None,
+    };
+    let mut results = match (scattered, scan) {
+        (Some(out), _) => out,
+        (None, coll) => {
+            // The scan the split would have taken, read here.
+            let (docs, metas, sbe, applied) = match coll {
+                Some(coll) => {
+                    let mut backend = env.backend.borrow_mut();
+                    let filter = super::explain::planned_query(&stage_docs).0;
+                    match scan_read(&mut **backend, &coll, &stage_docs, &filter, a.concern)
+                        .map_err(|e| executor_on(&ns_text, e))?
+                    {
+                        Some((docs, metas, applied)) => (docs, metas, true, applied),
+                        None => {
+                            let (docs, sbe) =
+                                read_engine(&mut **backend, Some(ctx.shared), &ns, a.concern)?;
+                            (docs, None, sbe, 0)
+                        }
+                    }
+                }
+                None => (docs, metas, sbe, applied),
+            };
+            pipeline
+                .run_after_matches(applied, (docs, metas), &env, sbe)
+                .map_err(|e| executor(from_mql(e)))?
+                .0
+        }
+    };
     let vars = env.vars.clone();
     drop(env);
     // A classic stage at the end writes each document it gives as BSON, which may not pass
@@ -1230,10 +1286,56 @@ fn executor_on(ns_text: &str, mut err: CommandError) -> CommandError {
 fn planned_read<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
-    (stages, vars): (&[RawValue<'_>], Option<&Document>),
+    stages: (&[RawValue<'_>], Option<&Document>),
     concern: ReadConcern,
     index_keys: bool,
 ) -> Result<Option<PlannedRead>, CommandError> {
+    Ok(match plan_read(ctx, ns, stages, concern, (index_keys, false))? {
+        Some(Read::Planned(read)) => Some(read),
+        Some(Read::Scan(_)) | None => None,
+    })
+}
+
+/// The output of `pipeline` over collection `coll` with its `$match`es and `$group` run by the
+/// cores that own the collection's ranges (010 FR-034): their partial groups merged in key
+/// order, then the stages after the `$group`. `None` when the backend does not scatter the read
+/// or the partial groups do not merge exactly; the caller then reads the collection.
+fn run_scattered<B: Backend + ?Sized>(
+    env: &WireEnv<'_, B>,
+    (pipeline, split): (&Pipeline, &teseladb_exec::pipeline::Scatter),
+    coll: &CollectionEntry,
+    concern: ReadConcern,
+) -> Result<Option<Vec<Document>>, teseladb_mql::MqlError> {
+    let (start, end) = documents_of(coll);
+    let found = env
+        .backend
+        .borrow_mut()
+        .scatter_groups((&start, &end), split.program(), concern)
+        .map_err(to_mql)?;
+    match found {
+        Some(found) => split.finish(pipeline, found.parts, env),
+        None => Ok(None),
+    }
+}
+
+/// How the documents of an aggregation's collection are read.
+enum Read {
+    /// Read already, by an index plan or a filtered scan.
+    Planned(PlannedRead),
+    /// To be read by a scan of collection `.0` in key order, which may run on the cores that own
+    /// its ranges (010 FR-034); not read yet.
+    Scan(CollectionEntry),
+}
+
+/// [`planned_read`]; with `scatter`, a read that would scan the whole collection in key order is
+/// not done but given as [`Read::Scan`].
+fn plan_read<B: Backend + ?Sized>(
+    ctx: &mut Ctx<'_, B>,
+    ns: &Namespace,
+    (stages, vars): (&[RawValue<'_>], Option<&Document>),
+    concern: ReadConcern,
+    (index_keys, scatter): (bool, bool),
+) -> Result<Option<Read>, CommandError> {
     let stages: Vec<Document> = stages
         .iter()
         .map(|v| match v {
@@ -1243,7 +1345,7 @@ fn planned_read<B: Backend + ?Sized>(
         .collect::<Option<_>>()
         .unwrap_or_default();
     let (filter, sort, limit) = super::explain::planned_query(&stages);
-    if filter.is_empty() && sort.is_none() {
+    if filter.is_empty() && sort.is_none() && !scatter {
         return Ok(None);
     }
     if super::authz_collections::documents(ctx.backend, ns)?.is_some()
@@ -1252,6 +1354,11 @@ fn planned_read<B: Backend + ?Sized>(
         return Ok(None);
     }
     let Some(coll) = ctx.backend.collection(ns)? else { return Ok(None) };
+    let plain = super::plan_exec::plannable_kind(&coll)?
+        && super::timeseries::spec_of(&coll).is_ok_and(|t| t.is_none());
+    if filter.is_empty() && sort.is_none() {
+        return Ok(plain.then_some(Read::Scan(coll)));
+    }
     // An `_id` equality alone reads by RefDb's express path, without the planner and with no
     // index key (H-011 of the native tests; measured on a `refnode` 9.0.4). The caller runs
     // with no collation, and the pipeline applies its stages to what this reads.
@@ -1267,7 +1374,7 @@ fn planned_read<B: Backend + ?Sized>(
             .map(|b| Ok(Document::from_stored(b)?))
             .collect::<Result<Vec<_>, CommandError>>()?;
         let metas = index_keys.then(|| docs.iter().map(|_| Meta::new()).collect());
-        return Ok(Some((docs, metas, 0)));
+        return Ok(Some(Read::Planned((docs, metas, 0))));
     }
     let parsed = super::plan_exec::parsed_filter(&filter, vars)?;
     let read = super::plan_exec::ReadPlan {
@@ -1303,12 +1410,11 @@ fn planned_read<B: Backend + ?Sized>(
         // pipeline starts with when it decides with the document alone (010 FR-027). With
         // `$expr`, `$where`, `$text`, `$sampleRate` or a geographic operator the stages run
         // it themselves, with their variables and engines, on the whole collection.
-        let applied = filter_of_leading_matches(&stages, &filter);
-        if applied == 0 || !super::query::decides_alone(&filter)? {
-            return Ok(None);
+        if scatter && plain {
+            return Ok(Some(Read::Scan(coll)));
         }
-        let docs = scanned(ctx.backend, &coll, &filter, concern)?;
-        return Ok(Some((docs, None, applied)));
+        return scan_read(ctx.backend, &coll, &stages, &filter, concern)
+            .map(|read| read.map(Read::Planned));
     };
     // Taken whole, as `find` takes the rows it reads from the node's storage: their fields are
     // read when a stage asks for them.
@@ -1330,7 +1436,26 @@ fn planned_read<B: Backend + ?Sized>(
             })
             .collect()
     });
-    Ok(Some((docs, metas, filter_of_leading_matches(&stages, &filter))))
+    Ok(Some(Read::Planned((docs, metas, filter_of_leading_matches(&stages, &filter)))))
+}
+
+/// The read of a collection without an index plan: a scan that runs the filter of the
+/// `$match`es the pipeline starts with where it reads, when it decides with the document alone
+/// (010 FR-027). With `$expr`, `$where`, `$text`, `$sampleRate` or a geographic operator the
+/// stages run it themselves, with their variables and engines, on the whole collection: `None`.
+fn scan_read<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    stages: &[Document],
+    filter: &Document,
+    concern: ReadConcern,
+) -> Result<Option<PlannedRead>, CommandError> {
+    let applied = filter_of_leading_matches(stages, filter);
+    if applied == 0 || !super::query::decides_alone(filter)? {
+        return Ok(None);
+    }
+    let docs = scanned(backend, coll, filter, concern)?;
+    Ok(Some((docs, None, applied)))
 }
 
 /// The documents of `coll` that `filter` accepts, read by a scan of the collection that runs the

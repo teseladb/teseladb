@@ -1066,7 +1066,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         end: &[u8],
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut crate::commands::Keep<'_>,
         block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
     ) -> Result<crate::commands::Matching, CommandError> {
         let m = self.call(|b| b.scan_matching(start, end, examine, concern, keep, block))?;
@@ -1078,6 +1078,21 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
             self.tally(&m.rows);
         }
         Ok(m)
+    }
+
+    fn scatter_groups(
+        &mut self,
+        span: (&[u8], &[u8]),
+        program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
+        concern: ReadConcern,
+    ) -> Result<Option<crate::commands::Scattered>, CommandError> {
+        let found = self.call(|b| b.scatter_groups(span, program, concern))?;
+        self.check()?;
+        // Every document the cores examined counts, as in a scan of the collection.
+        if let Some(s) = &found {
+            self.report.docs += s.examined as u64;
+        }
+        Ok(found)
     }
 
     fn doc_count(&mut self, tenant: u32, collection: u32) -> Result<Option<u64>, CommandError> {

@@ -25,6 +25,8 @@ pub mod certs;
 pub mod checksums;
 pub mod cli;
 pub mod client_listener;
+#[cfg(target_os = "linux")]
+mod client_ring;
 pub mod clock;
 pub mod cluster_auth;
 pub mod clustertime_keys;
@@ -646,6 +648,12 @@ pub fn start(
     };
     log.info(&choice.to_string(), &[]);
     cfg.direct_io = choice.direct;
+    // With io_uring the clients' port runs on a ring per core too (012 FR-024).
+    if let Some(client) = cfg.client.as_mut() {
+        let machine = std::thread::available_parallelism().map_or(1, |n| n.get().min(256));
+        let cores = cfg.cores.map_or(machine, usize::from);
+        client.rings = choice.uring.then_some(cores);
+    }
     // Every core's disk is rooted at the data directory.
     cfg.shared_files = true;
     let node = match Node::start(cfg, || NodeDisk::open(&data, &choice), Some(lock)) {

@@ -225,6 +225,10 @@ fn raw(fd: &OwnedFd) -> RawFd {
 }
 
 impl Poller {
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        self.kq.as_raw_fd()
+    }
+
     pub(crate) fn new() -> std::io::Result<Poller> {
         // SAFETY: no arguments.
         let kq = Arc::new(owned(unsafe { kqueue() })?);

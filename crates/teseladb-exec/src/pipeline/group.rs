@@ -17,7 +17,7 @@ use super::errors::{
     UNKNOWN_FIELD, error,
 };
 use super::granularity::Granularity;
-use crate::accum::{Accumulator, State};
+use crate::accum::{Accumulator, Part, State};
 use crate::expr::arith::type_name_of;
 use crate::expr::values::display;
 use crate::expr::{Ctx, Expr, Scope, order};
@@ -141,57 +141,24 @@ impl Group {
         env: &dyn Env,
         sbe: bool,
     ) -> Result<Vec<Document>, MqlError> {
-        let collation = env.collation();
-        let col = collation.get();
-        let limit = env.stage_memory_limit().min(env.operation_memory_limit());
-        let store = env.spill().filter(|_| env.allow_disk_use());
-        let mut groups: Groups = Groups::default();
-        let mut held = 0usize;
-        let plan = super::group_columns::columnar(&self.id, &self.outputs);
-        let mut spill = false;
-        'batches: for chunk in docs.chunks(teseladb_mql::vm::BATCH) {
-            // The batch's columns, when the group runs on them and the documents are stored.
-            let raws = plan.as_ref().and_then(|_| super::group_columns::stored(chunk));
-            let columns = plan.as_ref().zip(raws.as_deref()).map(|(p, r)| (p, p.load(r)));
-            for (lane, doc) in chunk.iter().enumerate() {
-                let mut scope: Option<Scope> = None;
-                let key = match columns.as_ref().and_then(|(p, c)| p.key(c, lane)) {
-                    Some(k) => k,
-                    None => {
-                        let s = scope.get_or_insert_with(|| group_scope(env, doc, sbe));
-                        self.id.eval(doc, s)?.unwrap_or(Value::Null)
-                    }
-                };
-                let before = groups.list.len();
-                let size = super::errors::value_size(&key);
-                let states = groups.entry(key, &self.outputs, col)?;
-                for (k, ((_, acc), st)) in self.outputs.iter().zip(states.iter_mut()).enumerate() {
-                    match columns.as_ref().and_then(|(p, c)| p.input(c, k, lane)) {
-                        Some(v) => acc.add_evaluated(st, v, (col, sbe))?,
-                        None => {
-                            let s = scope.get_or_insert_with(|| group_scope(env, doc, sbe));
-                            acc.add(st, doc, s)?;
-                        }
-                    }
-                    held += held_by(acc, st);
-                }
-                if groups.list.len() > before {
-                    held += size;
-                }
-                if store.is_some() && held > limit {
-                    spill = true;
-                    break 'batches;
-                }
-            }
+        let mut grouping = self.start(env, sbe);
+        grouping.absorb(docs)?;
+        grouping.finish()
+    }
+
+    /// A run of the stage that takes its input a batch at a time ([`Grouping::absorb`]), as the
+    /// stages before it give it (010 FR-028).
+    pub(super) fn start<'g>(&'g self, env: &'g dyn Env, sbe: bool) -> Grouping<'g> {
+        Grouping {
+            group: self,
+            env,
+            sbe,
+            groups: Groups::default(),
+            held: 0,
+            plan: super::group_columns::columnar(&self.id, &self.outputs),
+            spill: false,
+            kept: Vec::new(),
         }
-        if let (true, Some(store)) = (spill, store) {
-            drop(groups);
-            return self.run_sorted(docs, env, sbe, (limit, store));
-        }
-        drop(docs);
-        let out = groups.finish("_id", &self.outputs, col, sbe)?;
-        check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
-        Ok(out)
     }
 
     /// The groups of `docs` sorted by key through `store` in runs of at most `limit` bytes,
@@ -228,6 +195,242 @@ impl Group {
             d.push(name.clone(), acc.finish(st, col, sbe)?);
         }
         Ok(d)
+    }
+}
+
+/// The groups of a `$group` over one part of its input, before their values are finished (010
+/// FR-034): in the order they appeared, each with its canonical key, its key and its
+/// accumulators' states. The groups of consecutive parts merge into those of the whole
+/// ([`Group::merge_parts`]).
+#[derive(Clone, Debug, Default)]
+pub struct PartialGroups {
+    list: Vec<(Vec<u8>, Value, Vec<Part>)>,
+}
+
+impl PartialGroups {
+    /// How many groups.
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+}
+
+impl Group {
+    /// Whether the states of every accumulator merge, so that the groups of parts of the input
+    /// give those of the whole ([`Accumulator::merges`]).
+    pub fn merges(&self) -> bool {
+        self.outputs.iter().all(|(_, a)| a.merges())
+    }
+
+    /// The groups of `docs`, one part of the input, as [`Group::run`] would build them before
+    /// finishing them; `None` when their keys pass `limit` bytes (the whole would then go through
+    /// the store, in the order of the keys, or fail) or an accumulator does not merge.
+    pub fn partial(
+        &self,
+        docs: Vec<Document>,
+        env: &dyn Env,
+        sbe: bool,
+        limit: usize,
+    ) -> Result<Option<PartialGroups>, MqlError> {
+        if !self.merges() {
+            return Ok(None);
+        }
+        let mut grouping = self.start(env, sbe);
+        grouping.absorb_groups(&docs, (limit, true))?;
+        if grouping.spill {
+            return Ok(None);
+        }
+        let collation = env.collation();
+        let col = collation.get();
+        let mut list = Vec::with_capacity(grouping.groups.list.len());
+        for (key, states) in grouping.groups.list {
+            let parts: Option<Vec<Part>> = states.into_iter().map(Part::of).collect();
+            let Some(parts) = parts else { return Ok(None) };
+            list.push((canonical(&key, col), key, parts));
+        }
+        Ok(Some(PartialGroups { list }))
+    }
+
+    /// The documents of the groups of the whole input from those of its consecutive parts
+    /// `parts`, in their order: each group in the order it first appeared, with the key of its
+    /// first document, as [`Group::run`] gives them over the parts one after the other, the
+    /// memory limit included. `None` when a merge would not give the same states
+    /// ([`Accumulator::merge`]) or the groups pass the limit with a store to write to (the run
+    /// would then sort them by key through it), and the caller runs the stage over the whole.
+    pub fn merge_parts(
+        &self,
+        parts: Vec<PartialGroups>,
+        env: &dyn Env,
+        sbe: bool,
+    ) -> Result<Option<Vec<Document>>, MqlError> {
+        let collation = env.collation();
+        let col = collation.get();
+        let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut list: Vec<(Value, Vec<Part>)> = Vec::new();
+        let mut held = 0usize;
+        for part in parts {
+            for (canon, key, states) in part.list {
+                let Some(&i) = index.get(&canon) else {
+                    held += super::errors::value_size(&key);
+                    index.insert(canon, list.len());
+                    list.push((key, states));
+                    continue;
+                };
+                for ((_, acc), (into, later)) in
+                    self.outputs.iter().zip(list[i].1.iter_mut().zip(&states))
+                {
+                    if !acc.merge(into, later, (col, sbe))? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let (limit, store) = limits(env);
+        if store.is_some() && held > limit {
+            return Ok(None);
+        }
+        let mut out = Vec::with_capacity(list.len());
+        for (key, parts) in list {
+            let states = parts.into_iter().map(Part::into_state).collect();
+            out.push(self.finished(key, states, col, sbe)?);
+        }
+        check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
+        Ok(Some(out))
+    }
+}
+
+/// A `$group` taking its input a batch at a time (010 FR-028): the groups so far and the bytes
+/// they hold; with a store, the documents so far, which go through the store sorted by key if the
+/// groups pass the stage's limit.
+pub(super) struct Grouping<'g> {
+    group: &'g Group,
+    env: &'g dyn Env,
+    sbe: bool,
+    groups: Groups,
+    held: usize,
+    plan: Option<super::group_columns::Columnar>,
+    /// The groups passed the limit: the rest only waits for the sort through the store.
+    spill: bool,
+    /// The input so far, kept only with a store to write to.
+    kept: Vec<Document>,
+}
+
+/// The limit of a group's memory in `env`, and the store it writes to with `allowDiskUse`.
+fn limits(env: &dyn Env) -> (usize, Option<&dyn super::spill::SpillStore>) {
+    let limit = env.stage_memory_limit().min(env.operation_memory_limit());
+    (limit, env.spill().filter(|_| env.allow_disk_use()))
+}
+
+impl Grouping<'_> {
+    /// Takes the documents of `batch`, in their order, into the groups.
+    pub(super) fn absorb(&mut self, batch: Vec<Document>) -> Result<(), MqlError> {
+        let (limit, store) = limits(self.env);
+        if !self.spill {
+            self.absorb_groups(&batch, (limit, store.is_some()))?;
+        }
+        if store.is_some() {
+            self.kept.extend(batch);
+        }
+        Ok(())
+    }
+
+    /// The groups of the documents of `batch` with those so far, until they pass `limit` when
+    /// there is a store to write to.
+    fn absorb_groups(
+        &mut self,
+        batch: &[Document],
+        (limit, store): (usize, bool),
+    ) -> Result<(), MqlError> {
+        let (group, sbe) = (self.group, self.sbe);
+        let collation = self.env.collation();
+        let col = collation.get();
+        'batches: for chunk in batch.chunks(teseladb_mql::vm::BATCH) {
+            // The batch's columns, when the group runs on them and the documents are stored.
+            let raws = self.plan.as_ref().and_then(|_| super::group_columns::stored(chunk));
+            let columns = self.plan.as_ref().zip(raws.as_deref()).map(|(p, r)| (p, p.load(r)));
+            if let Some((p, c)) = columns.as_ref().filter(|(p, c)| p.whole(c)) {
+                // Every key and input from the columns: the lanes of each group of the batch
+                // go into its accumulators together.
+                let mut lanes_of: Vec<(usize, u64)> = Vec::new();
+                for lane in 0..chunk.len() {
+                    let key = p.key(c, lane).expect("a whole batch's keys come from its columns");
+                    let before = self.groups.list.len();
+                    let size = super::errors::value_size(&key);
+                    let g = self.groups.index_of(key, &group.outputs, col);
+                    if self.groups.list.len() > before {
+                        self.held += size;
+                    }
+                    match lanes_of.iter_mut().find(|(x, _)| *x == g) {
+                        Some((_, mask)) => *mask |= 1 << lane,
+                        None => lanes_of.push((g, 1 << lane)),
+                    }
+                    if store && self.held > limit {
+                        self.spill = true;
+                        break 'batches;
+                    }
+                }
+                // The accumulators on columns collect no values, so they hold no more bytes.
+                for (g, mask) in lanes_of {
+                    let states = &mut self.groups.list[g].1;
+                    for (k, ((_, acc), st)) in
+                        group.outputs.iter().zip(states.iter_mut()).enumerate()
+                    {
+                        p.accumulate(c, k, acc, st, mask, (col, sbe))?;
+                    }
+                }
+                continue;
+            }
+            for (lane, doc) in chunk.iter().enumerate() {
+                let mut scope: Option<Scope> = None;
+                let key = match columns.as_ref().and_then(|(p, c)| p.key(c, lane)) {
+                    Some(k) => k,
+                    None => {
+                        let s = scope.get_or_insert_with(|| group_scope(self.env, doc, sbe));
+                        group.id.eval(doc, s)?.unwrap_or(Value::Null)
+                    }
+                };
+                let before = self.groups.list.len();
+                let size = super::errors::value_size(&key);
+                let states = self.groups.entry(key, &group.outputs, col)?;
+                for (k, ((_, acc), st)) in group.outputs.iter().zip(states.iter_mut()).enumerate() {
+                    match columns.as_ref().and_then(|(p, c)| p.input(c, k, lane)) {
+                        Some(v) => acc.add_evaluated(st, v, (col, sbe))?,
+                        None => {
+                            let s = scope.get_or_insert_with(|| group_scope(self.env, doc, sbe));
+                            acc.add(st, doc, s)?;
+                        }
+                    }
+                    self.held += held_by(acc, st);
+                }
+                if self.groups.list.len() > before {
+                    self.held += size;
+                }
+                if store && self.held > limit {
+                    self.spill = true;
+                    break 'batches;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The documents of the groups, or of the groups sorted through the store when they passed
+    /// the limit.
+    pub(super) fn finish(self) -> Result<Vec<Document>, MqlError> {
+        let (limit, store) = limits(self.env);
+        let (env, sbe, outputs) = (self.env, self.sbe, &self.group.outputs);
+        if let (true, Some(store)) = (self.spill, store) {
+            drop(self.groups);
+            return self.group.run_sorted(self.kept, env, sbe, (limit, store));
+        }
+        let collation = env.collation();
+        let out = self.groups.finish("_id", outputs, collation.get(), sbe)?;
+        check_memory(outputs, &out, env.allow_disk_use(), sbe, limit)?;
+        Ok(out)
     }
 }
 
@@ -285,16 +488,26 @@ impl Groups {
         outputs: &Outputs,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<&mut Vec<State>, MqlError> {
+        let i = self.index_of(key, outputs, col);
+        Ok(&mut self.list[i].1)
+    }
+
+    /// The position of the group of `key` in the list, which it joins when new.
+    fn index_of(
+        &mut self,
+        key: Value,
+        outputs: &Outputs,
+        col: Option<&dyn teseladb_bson::Collator>,
+    ) -> usize {
         let canon = canonical(&key, col);
-        let i = match self.index.get(&canon) {
+        match self.index.get(&canon) {
             Some(i) => *i,
             None => {
                 self.list.push((key, outputs.iter().map(|(_, a)| a.start()).collect()));
                 self.index.insert(canon, self.list.len() - 1);
                 self.list.len() - 1
             }
-        };
-        Ok(&mut self.list[i].1)
+        }
     }
 
     fn finish(

@@ -441,6 +441,37 @@ pub struct Matched {
     pub next: Option<Vec<u8>>,
 }
 
+/// The most documents [`RangeView::scan_matching_begun`] hands its filter at once: a batch of
+/// the register machine (010 FR-028).
+pub const MATCH_BATCH: usize = 64;
+
+/// Hands the documents of `batch` (examined in key order, the last of them the last examined)
+/// to `keep` and moves those it accepts into `out`, each with how many documents the scan had
+/// examined when it took it; the key of the last one when `keep` left it out. `batch` is not
+/// empty.
+fn keep_batch(
+    batch: &mut Vec<(Vec<u8>, teseladb_types::Bytes)>,
+    keep: &mut impl FnMut(&[&[u8]]) -> u64,
+    out: &mut Matched,
+) -> Option<Vec<u8>> {
+    let docs: Vec<&[u8]> =
+        batch.iter().map(|(_, v)| split_value(v).map_or(&[][..], |(_, d)| d)).collect();
+    let kept = keep(&docs);
+    let first = out.examined - batch.len();
+    let mut left_out = None;
+    for (l, (key, value)) in batch.drain(..).enumerate() {
+        match split_value(&value) {
+            Some((t, doc)) if (kept >> l) & 1 == 1 => {
+                out.seen.push(first + l + 1);
+                out.rows.push((key, (t, doc.to_vec())));
+                left_out = None;
+            }
+            _ => left_out = Some(key),
+        }
+    }
+    left_out
+}
+
 impl RangeView {
     /// A scan begins: what it has to see. It reads this view if the view
     /// [`holds`](RangeView::holds) that, or a later view of the range that does (FR-034).
@@ -584,7 +615,7 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         supply: impl FnMut(&BlockNeed) -> bool,
-        keep: (impl FnMut(&[u8]) -> bool, &dyn Fn(&dyn Zones) -> bool),
+        keep: (impl FnMut(&[&[u8]]) -> u64, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let most = (examine, blocks, &self.begin());
         self.scan_matching_begun(cache, span, most, now, concern, supply, keep)
@@ -592,11 +623,12 @@ impl RangeView {
 
     /// As [`RangeView::scan_begun`] in key order, over at most `examine` documents of which it
     /// copies only those `keep` accepts (010 FR-027): a collection scan with a filter evaluates
-    /// it on the stored bytes and leaves the rest where they are. It reads at most `blocks`
-    /// blocks from their files once it has examined a document, as a [`Part`] does. `block`
-    /// says whether a data block may hold a document `keep` accepts, from its zone map: the
-    /// blocks it rules out are passed over unread and their documents are not examined (004
-    /// FR-039).
+    /// it on the stored bytes and leaves the rest where they are. `keep` takes the documents a
+    /// batch of at most [`MATCH_BATCH`] at a time and gives the bits of those it accepts (bit
+    /// `i` for the document at `i`; 010 FR-028). It reads at most `blocks` blocks from their
+    /// files once it has examined a document, as a [`Part`] does. `block` says whether a data
+    /// block may hold a document `keep` accepts, from its zone map: the blocks it rules out are
+    /// passed over unread and their documents are not examined (004 FR-039).
     pub fn scan_matching_begun(
         &self,
         cache: &mut ViewCache,
@@ -605,45 +637,46 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
-        (mut keep, block): (impl FnMut(&[u8]) -> bool, &dyn Fn(&dyn Zones) -> bool),
+        (mut keep, block): (impl FnMut(&[&[u8]]) -> u64, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = view.scan(start, end, ts);
         let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
         let mut blocks = Blocks::new(blocks);
+        // The documents examined that `keep` has not seen yet, with their keys.
+        let mut batch: Vec<(Vec<u8>, teseladb_types::Bytes)> = Vec::with_capacity(MATCH_BATCH);
         // The key of the last document examined, when the filter left it out.
         let mut left_out: Option<Vec<u8>> = None;
         while out.examined < examine {
+            if batch.len() == MATCH_BATCH {
+                left_out = keep_batch(&mut batch, &mut keep, &mut out);
+            }
             match scan.next_pruned(&self.lsm, block) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
                     Decline::Intent.count();
                     return None;
                 }
                 SharedStep::Item(i) => {
-                    let Some((t, v)) = split_value(&i.value) else { continue };
+                    let Some((t, _)) = split_value(&i.value) else { continue };
                     if t == crate::HISTORY_VALUE {
                         continue;
                     }
                     out.examined += 1;
-                    let kept = keep(v);
                     if out.examined == examine {
                         out.next = Some([i.key.as_slice(), &[0]].concat());
                     }
-                    if kept {
-                        out.seen.push(out.examined);
-                        out.rows.push((i.key, (t, v.to_vec())));
-                        left_out = None;
-                    } else {
-                        left_out = Some(i.key);
-                    }
+                    batch.push((i.key, i.value));
                 }
                 SharedStep::Done => break,
                 SharedStep::Need(_) if blocks.spent(out.examined > 0) => {
+                    if !batch.is_empty() {
+                        left_out = keep_batch(&mut batch, &mut keep, &mut out);
+                    }
                     // The scan goes on after the last document it examined.
                     let last = left_out.as_ref().or(out.rows.last().map(|(k, _)| k));
                     out.next = last.map(|k| [k.as_slice(), &[0]].concat());
-                    break;
+                    return Some(out);
                 }
                 SharedStep::Need(need) if !blocks.exhausted() && supply(&need) => blocks.read += 1,
                 SharedStep::Need(_) | SharedStep::Failed(_) => {
@@ -651,6 +684,9 @@ impl RangeView {
                     return None;
                 }
             }
+        }
+        if !batch.is_empty() {
+            keep_batch(&mut batch, &mut keep, &mut out);
         }
         Some(out)
     }
