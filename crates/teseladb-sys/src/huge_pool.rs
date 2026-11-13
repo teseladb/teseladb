@@ -7,10 +7,18 @@
 //! its size and is the first taken for that size again; blocks of one size are not joined into a
 //! larger one, so a pool carved into small blocks gives none of a larger size, and the caller
 //! keeps that block on the heap. The mapping goes with the pool and its last block.
+//!
+//! Without locks (012 FR-008): the first byte never handed out moves with a compare-and-swap, and
+//! each size's free blocks form a Treiber stack whose head packs a version with the block, so a
+//! block taken and given back between a reader's load and its swap does not fool it (ABA). The next
+//! block of each stack is kept in a side table of atomics, one per 4 KiB of the pool, never in the
+//! block itself: a reader that loads the link of a block another thread just took would otherwise
+//! race with that thread's writes to it.
 
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::aligned::{AlignedBuf, HUGE_PAGE};
 
@@ -33,7 +41,14 @@ struct Pool {
     len: usize,
     /// What the memory is: a huge mapping, or a heap buffer in the tests.
     region: Region,
-    state: Mutex<State>,
+    /// The first byte never handed out.
+    bump: AtomicUsize,
+    /// The head of each size's stack of freed blocks: version in the high 32 bits, block index
+    /// plus one in the low ones (0 for an empty stack).
+    free: [AtomicU64; CLASSES],
+    /// For each 4 KiB unit that starts a free block, the index plus one of the next free block of
+    /// its stack (0 for none).
+    next: Box<[AtomicU32]>,
 }
 
 enum Region {
@@ -42,16 +57,8 @@ enum Region {
     Heap(#[expect(dead_code, reason = "held only to keep the memory the pool carves")] AlignedBuf),
 }
 
-/// The blocks not handed out.
-struct State {
-    /// The first byte never handed out.
-    bump: usize,
-    /// Freed blocks of each size, by offset.
-    free: [Vec<usize>; CLASSES],
-}
-
 // SAFETY: the pool owns its memory; each byte of it is reached only through the one live
-// `HugeBlock` that covers it, and the state that hands blocks out is behind a mutex.
+// `HugeBlock` that covers it, and what hands blocks out is atomic.
 unsafe impl Send for Pool {}
 // SAFETY: as above.
 unsafe impl Sync for Pool {}
@@ -142,32 +149,66 @@ impl HugePool {
     }
 }
 
+/// The index of the block at `at`, plus one, in the low half of a stack head.
+const INDEX_BITS: u32 = 32;
+const INDEX_MASK: u64 = (1 << INDEX_BITS) - 1;
+
 impl Pool {
     fn new(base: NonNull<u8>, len: usize, region: Region) -> Pool {
-        let state = State { bump: 0, free: std::array::from_fn(|_| Vec::new()) };
-        Pool { base, len, region, state: Mutex::new(state) }
+        let free = std::array::from_fn(|_| AtomicU64::new(0));
+        let units = len >> MIN_SHIFT;
+        assert!(units < u32::MAX as usize, "a pool of fewer than 16 TiB");
+        let next = (0..units).map(|_| AtomicU32::new(0)).collect();
+        Pool { base, len, region, bump: AtomicUsize::new(0), free, next }
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
-        // A panic while holding the lock leaves the lists whole: each change is one push or pop.
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    /// The link of the block at `at` to the next free block of its stack.
+    fn next_of(&self, at: usize) -> &AtomicU32 {
+        &self.next[at >> MIN_SHIFT]
     }
 
     /// The offset of a free block of `class`.
     fn take(&self, class: usize) -> Option<usize> {
-        let mut s = self.state();
-        if let Some(at) = s.free[class].pop() {
-            return Some(at);
+        let unit = 1usize << MIN_SHIFT;
+        let head = &self.free[class];
+        let mut cur = head.load(Ordering::Acquire);
+        while cur & INDEX_MASK != 0 {
+            let at = ((cur & INDEX_MASK) as usize - 1) * unit;
+            let next = u64::from(self.next_of(at).load(Ordering::Acquire));
+            let version = (cur >> INDEX_BITS).wrapping_add(1);
+            let new = (version << INDEX_BITS) | next;
+            match head.compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(at),
+                Err(seen) => cur = seen,
+            }
         }
         let size = size_of_class(class);
-        let at = s.bump.next_multiple_of(size);
-        let end = at.checked_add(size).filter(|&e| e <= self.len)?;
-        s.bump = end;
+        let mut at = 0;
+        self.bump
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bump| {
+                at = bump.next_multiple_of(size);
+                at.checked_add(size).filter(|&e| e <= self.len)
+            })
+            .ok()?;
         Some(at)
     }
 
     fn give_back(&self, class: usize, at: usize) {
-        self.state().free[class].push(at);
+        let unit = 1usize << MIN_SHIFT;
+        let index = (at / unit + 1) as u64;
+        let head = &self.free[class];
+        let mut cur = head.load(Ordering::Acquire);
+        loop {
+            // The low half is an index plus one below u32::MAX (checked when the pool was made).
+            let link = u32::try_from(cur & INDEX_MASK).unwrap_or(0);
+            self.next_of(at).store(link, Ordering::Release);
+            let version = (cur >> INDEX_BITS).wrapping_add(1);
+            let new = (version << INDEX_BITS) | index;
+            match head.compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return,
+                Err(seen) => cur = seen,
+            }
+        }
     }
 }
 
@@ -283,5 +324,29 @@ mod tests {
             assert!(pool.block(10).is_none());
         }
         assert!(HugePool::new(0).block(1).is_none());
+    }
+
+    #[test]
+    fn threads_taking_and_giving_back_blocks_never_share_one() {
+        let pool = HugePool::on_normal_pages(4 << 20);
+        let workers: Vec<_> = (0..if cfg!(miri) { 4u8 } else { 8 })
+            .map(|t| {
+                let pool = pool.clone();
+                std::thread::spawn(move || {
+                    // Miri interprets every step; a few rounds already interleave the threads.
+                    let rounds = if cfg!(miri) { 40 } else { 2_000 };
+                    for round in 0..rounds {
+                        let len = 4096 << (round % 3);
+                        let Some(mut b) = pool.block(len) else { continue };
+                        b.fill(t);
+                        std::thread::yield_now();
+                        assert!(b.iter().all(|&x| x == t), "a block was handed out twice");
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
     }
 }
