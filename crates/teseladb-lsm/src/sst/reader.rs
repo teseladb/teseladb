@@ -10,8 +10,10 @@ use teseladb_crypto::at_rest::{FileKey, KeyRing};
 use teseladb_types::Bytes;
 
 use super::block::{Block, BlockCursor, unframe_with};
+use super::elias_fano::EliasFano;
 use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
+use super::pgm::{self, Pgm};
 use super::{ALIGN, Bad, get_varint};
 use crate::entry;
 
@@ -24,7 +26,13 @@ pub struct Table {
     pub size: u64,
     /// Properties.
     pub props: Props,
-    index: Vec<(Box<[u8]>, Handle)>,
+    /// The last internal key of each data block.
+    last_keys: Vec<Box<[u8]>>,
+    /// Where each data block starts and ends, in turn, as Elias-Fano (FR-040): the blocks follow
+    /// one another, so the sequence never decreases.
+    bounds: EliasFano,
+    /// The model that narrows the search of a block when the keys grow regularly (FR-041).
+    pgm: Option<Pgm>,
     filter: Filter,
     /// The filter's and the index's payloads, which the filter points into; the cache pins them.
     pub(crate) meta: Bytes,
@@ -119,13 +127,14 @@ impl Table {
             v => Some(dict_of(v).ok_or(Bad)?),
         };
         let mut cursor = BlockCursor::first(Block::parse(index_payload)?)?;
-        let mut index: Vec<(Box<[u8]>, Handle)> = Vec::new();
+        let mut last_keys: Vec<Box<[u8]>> = Vec::new();
+        let mut bounds: Vec<u64> = Vec::new();
         let mut next_free = 0;
         while cursor.valid() {
             let v = cursor.value_slice();
             let mut at = 0;
             let h = Handle { offset: get_varint(v, &mut at)?, len: get_varint(v, &mut at)? };
-            let ordered = index.last().is_none_or(|(k, _)| entry::compare(k, cursor.key()).is_lt());
+            let ordered = last_keys.last().is_none_or(|k| entry::compare(k, cursor.key()).is_lt());
             let end = h.offset.checked_add(h.len).ok_or(Bad)?;
             if at != v.len()
                 || !ordered
@@ -137,14 +146,17 @@ impl Table {
                 return Err(Bad);
             }
             next_free = end;
-            index.push((cursor.key().into(), h));
+            last_keys.push(cursor.key().into());
+            bounds.extend([h.offset, end]);
             cursor.advance()?;
         }
         Ok(Table {
             number,
             size,
             props,
-            index,
+            pgm: Pgm::build(last_keys.iter().map(|k| &k[..])),
+            bounds: EliasFano::new(&bounds),
+            last_keys,
             filter,
             meta: pinned,
             key,
@@ -161,12 +173,12 @@ impl Table {
 
     /// Each data block's last internal key and its length.
     pub(crate) fn index_entries(&self) -> impl Iterator<Item = (&[u8], u64)> {
-        self.index.iter().map(|(k, h)| (&k[..], h.len))
+        self.last_keys.iter().enumerate().map(|(i, k)| (&k[..], self.handle(i).len))
     }
 
     /// Number of data blocks.
     pub fn blocks(&self) -> usize {
-        self.index.len()
+        self.last_keys.len()
     }
 
     /// Whether the filter lets the logical key through.
@@ -176,23 +188,31 @@ impl Table {
 
     /// The first block that may hold internal keys at or after `ikey`.
     pub(crate) fn find_block(&self, ikey: &[u8]) -> Option<usize> {
-        let i = self.index.partition_point(|(last, _)| entry::compare(last, ikey).is_lt());
-        (i < self.index.len()).then_some(i)
+        let before = |last: &[u8], key: &[u8]| entry::compare(last, key).is_lt();
+        let i = pgm::find(self.pgm.as_ref(), &self.last_keys, ikey, before);
+        (i < self.last_keys.len()).then_some(i)
     }
 
     /// The last internal key of data block `i`.
     pub(crate) fn last_key(&self, i: usize) -> &[u8] {
-        &self.index[i].0
+        &self.last_keys[i]
     }
 
     /// Where block `i` is.
     pub(crate) fn handle(&self, i: usize) -> Handle {
-        self.index[i].1
+        let offset = self.bounds.get(2 * i);
+        Handle { offset, len: self.bounds.get(2 * i + 1) - offset }
+    }
+
+    #[cfg(test)]
+    /// Whether a model narrows its block searches (FR-041).
+    pub(crate) fn has_model(&self) -> bool {
+        self.pgm.is_some()
     }
 
     /// The checked payload of data block `i` from the bytes read at its offset (aligned length).
     pub(crate) fn payload(&self, i: usize, read: &Bytes) -> Result<Bytes, Bad> {
-        let h = self.index[i].1;
+        let h = self.handle(i);
         if read.len() < h.len as usize {
             return Err(Bad);
         }
@@ -252,6 +272,53 @@ mod tests {
             &Bytes::from_vec(bytes[start as usize..].to_vec()),
             (None, &Dictionaries::new()),
         )
+    }
+
+    /// A file of `n` versions whose logical keys are the big-endian numbers `i · 1000`, as an
+    /// ObjectId or a timestamp grows.
+    fn numbered(n: u64) -> Vec<u8> {
+        let mut w = TableWriter::new(4096, crate::config::Codec::None);
+        let mut bytes = Vec::new();
+        for i in 0..n {
+            let key =
+                entry::internal_key(&(i * 1000).to_be_bytes(), Hlc { physical: i, logical: 0 });
+            w.add(&key, Kind::Put, &[i as u8; 100]);
+            if let Some((_, c)) = w.take() {
+                bytes.extend_from_slice(&c);
+            }
+        }
+        let (_, c, _) = w.finish(3, Vec::new()).unwrap();
+        bytes.extend_from_slice(&c);
+        bytes
+    }
+
+    /// FR-040, FR-041: the blocks' places come back from their Elias-Fano code, and over keys
+    /// that grow regularly the model finds the block a search of the whole index finds.
+    #[test]
+    fn block_places_and_the_model_answer_as_the_plain_index() {
+        let t = open(&numbered(20_000)).unwrap();
+        assert!(t.blocks() > 200, "{} blocks", t.blocks());
+        assert!(t.has_model(), "increasing keys get a model");
+        let mut end = 0;
+        for i in 0..t.blocks() {
+            let h = t.handle(i);
+            assert!(h.offset >= end && h.offset.is_multiple_of(ALIGN as u64) && h.len > 0);
+            end = h.offset + h.len;
+        }
+        for i in (0..20_010u64).map(|i| i * 1000).chain([1, 999, 7_777_777]) {
+            for physical in [0, i / 1000, u64::MAX] {
+                let key = entry::internal_key(&i.to_be_bytes(), Hlc { physical, logical: 0 });
+                let plain = t.last_keys.partition_point(|k| entry::compare(k, &key).is_lt());
+                assert_eq!(t.find_block(&key), (plain < t.blocks()).then_some(plain), "{i}");
+            }
+        }
+        assert!(t.bounds.bytes() < t.blocks() * 16, "{} bytes", t.bounds.bytes());
+        // Keys that are text, not numbers, get no model and the same answers.
+        let (bytes, _) = file(500, crate::config::Codec::None);
+        let t = open(&bytes).unwrap();
+        let key = entry::internal_key(b"k00250", Hlc { physical: 0, logical: 0 });
+        let plain = t.last_keys.partition_point(|k| entry::compare(k, &key).is_lt());
+        assert_eq!(t.find_block(&key), Some(plain));
     }
 
     #[test]

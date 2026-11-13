@@ -14,8 +14,10 @@
 
 pub(crate) mod block;
 pub(crate) mod delta;
+pub(crate) mod elias_fano;
 pub(crate) mod filter;
 pub(crate) mod meta;
+pub(crate) mod pgm;
 pub(crate) mod reader;
 pub(crate) mod ribbon;
 pub(crate) mod writer;
