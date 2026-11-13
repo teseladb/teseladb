@@ -98,10 +98,36 @@ impl Lsm {
     /// memtable is flushed first; the files come in
     /// [`Completions::exported`](super::Completions::exported) with the returned identifier. Writes up to `ts` must all be applied before.
     pub fn export(&mut self, start: &[u8], end: &[u8], ts: Hlc, dir: std::path::PathBuf) -> u64 {
+        self.push_export(start, end, ts, dir, false)
+    }
+
+    /// As [`Lsm::export`], for another core of the node, whose LSM is on the same file system
+    /// (004 FR-033, D-167): each file whose keys all fall inside `[start, end)`, with versions at
+    /// or below `ts` and no range tombstones, goes with its history file as hard links in `dir`,
+    /// unread; only the rest is read and written. The linked files come with their history files
+    /// and precedence groups, which [`Lsm::ingest_range`] keeps.
+    pub fn export_linked(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        ts: Hlc,
+        dir: std::path::PathBuf,
+    ) -> u64 {
+        self.push_export(start, end, ts, dir, true)
+    }
+
+    fn push_export(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        ts: Hlc,
+        dir: std::path::PathBuf,
+        link: bool,
+    ) -> u64 {
         self.freeze();
         let id = self.next_request;
         self.next_request += 1;
-        let spec = ExportSpec { id, start: start.to_vec(), end: end.to_vec(), ts, dir };
+        let spec = ExportSpec { id, start: start.to_vec(), end: end.to_vec(), ts, dir, link };
         self.requests.push_back(Request::Export(spec));
         id
     }
@@ -163,7 +189,8 @@ impl Lsm {
                             && t.props.lo.as_slice() < spec.end.as_slice()
                     })
                     .collect();
-                Some(Job::Compact(Box::new(CompactJob::export(&self.cfg, inputs, spec))))
+                let (links, inputs) = crate::compaction::split_links(inputs, &spec);
+                Some(Job::Compact(Box::new(CompactJob::export(&self.cfg, inputs, links, spec))))
             }
             Request::Ingest { id, files, intervals, flushed, room: false } => {
                 let room = crate::compaction::room_for_ingest(&self.version, &intervals);

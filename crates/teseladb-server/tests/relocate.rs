@@ -98,14 +98,16 @@ impl Drop for Dir {
     }
 }
 
+/// The cores of a node over real files share them: the moved range's whole files go to its new
+/// core as hard links (004 FR-033).
 #[test]
 fn a_moved_range_survives_a_restart_on_its_new_core() {
     let dir = Dir(std::env::temp_dir().join(format!("teseladb-relocate-{}", std::process::id())));
     let _ = fs::remove_dir_all(&dir.0);
     let start = || {
         let path = dir.0.clone();
-        Node::start(with_admin(), move || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap()))
-            .unwrap()
+        let cfg = NodeConfig { shared_files: true, ..with_admin() };
+        Node::start(cfg, move || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap())).unwrap()
     };
     let n = start();
     assert!(n.wait_ready(READY));
@@ -124,6 +126,11 @@ fn a_moved_range_survives_a_restart_on_its_new_core() {
     let at = n.admin_addr().unwrap().to_string();
     assert_eq!(until("range 1", || core_of_range_1(&at)), 1 - from);
     let mut c = Client::new(&n);
+    assert_eq!(all(&mut c), 40);
+    // And back, with what the first move linked now in the files of the new core.
+    let (code, _, err) = admin(&at, &["range", "relocate", "1", "--core", &from.to_string()]);
+    assert_eq!(code, 0, "{err}");
+    until("the range back", || (core_of_range_1(&at) == Some(from)).then_some(()));
     assert_eq!(all(&mut c), 40);
     n.stop();
 }

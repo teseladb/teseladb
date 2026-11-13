@@ -44,7 +44,7 @@ fn send(files: &[FileRef], from: &mut MemDisk, to: &mut MemDisk) -> Vec<FileRef>
             });
             to.execute(IoOp::Sync { file: id, batch: 0 });
             to.execute(IoOp::Close { file: id });
-            FileRef { path, size: f.size }
+            FileRef::new(path, f.size)
         })
         .collect()
 }
@@ -176,12 +176,12 @@ fn a_file_outside_the_range_or_broken_is_refused() {
         ingest(&mut b, &mut b_disk, sent.clone(), &key(3), &key(10)),
         Err(LsmError::IngestOverlap)
     );
-    let wrong_size = vec![FileRef { path: sent[0].path.clone(), size: sent[0].size - 1 }];
+    let wrong_size = vec![FileRef::new(sent[0].path.clone(), sent[0].size - 1)];
     assert!(matches!(
         ingest(&mut b, &mut b_disk, wrong_size, &key(0), &key(10)),
         Err(LsmError::Corrupt { .. })
     ));
-    let short = vec![FileRef { path: sent[0].path.clone(), size: 4096 }];
+    let short = vec![FileRef::new(sent[0].path.clone(), 4096)];
     assert!(matches!(
         ingest(&mut b, &mut b_disk, short, &key(0), &key(10)),
         Err(LsmError::Corrupt { .. })

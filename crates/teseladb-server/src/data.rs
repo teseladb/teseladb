@@ -365,11 +365,13 @@ impl DataCore {
     }
 
     /// Core changes with their files under `dir` and the node's table of which cores hold each
-    /// range (007 FR-011).
-    pub fn with_relocations(mut self, dir: PathBuf, hosting: Hosting) -> DataCore {
+    /// range (007 FR-011); with `link`, the node's cores share one file system and a range that
+    /// changes core hands over its whole files as hard links (004 FR-033).
+    pub fn with_relocations(mut self, dir: PathBuf, hosting: Hosting, link: bool) -> DataCore {
         let core = self.replicas.core();
         self.replicas.set_hosting(hosting.clone());
-        self.relocations = Relocations::new(core, dir, hosting);
+        let relocations = Relocations::new(core, dir, hosting);
+        self.relocations = if link { relocations.linking() } else { relocations };
         self
     }
 

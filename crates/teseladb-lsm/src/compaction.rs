@@ -167,6 +167,64 @@ pub(crate) struct ExportSpec {
     pub(crate) end: Vec<u8>,
     pub(crate) ts: Hlc,
     pub(crate) dir: PathBuf,
+    /// The export goes to another core of the node, on the same file system: the files it can
+    /// hand over whole go as hard links (FR-033).
+    pub(crate) link: bool,
+}
+
+/// A file an export links whole, with its precedence group (FR-033).
+pub(crate) type Linked = (u32, Arc<Table>);
+
+/// The files of an export that go whole, as hard links (FR-033), with their precedence groups,
+/// and the inputs it rewrites. `inputs` are in order of precedence.
+///
+/// A file goes whole when its keys all fall inside the interval, its versions and those of its
+/// history file are all at or below the export's mark, neither has range tombstones nor names a
+/// dictionary, and no input rewritten from a deeper group touches its keys: the rewritten files
+/// go above every linked group where they are ingested, and an older copy of a version must
+/// never end above a newer one. Each file of level 0 is a group, and each deeper level is one.
+pub(crate) fn split_links(
+    inputs: Vec<(u8, Arc<Table>)>,
+    spec: &ExportSpec,
+) -> (Vec<Linked>, Vec<(u8, Arc<Table>)>) {
+    if !spec.link {
+        return (Vec::new(), inputs);
+    }
+    let mut groups = Vec::with_capacity(inputs.len());
+    let mut group = 0u32;
+    for (i, (level, _)) in inputs.iter().enumerate() {
+        if *level == 0 || i == 0 || inputs[i - 1].0 != *level {
+            group += 1;
+        }
+        groups.push(group);
+    }
+    let whole = |t: &Table| {
+        std::iter::once(t).chain(t.history.as_deref()).all(|f| {
+            f.props.max_ts <= spec.ts && f.props.tombstones.is_empty() && f.props.dictionary == 0
+        }) && spec.start <= t.props.lo
+            && t.props.hi < spec.end
+    };
+    let mut linked = vec![false; inputs.len()];
+    // From the deepest group up: whether a file goes whole depends on the deeper ones only.
+    for i in (0..inputs.len()).rev() {
+        let t = &inputs[i].1;
+        let under = (i + 1..inputs.len()).any(|j| {
+            !linked[j]
+                && groups[j] > groups[i]
+                && inputs[j].1.props.lo <= t.props.hi
+                && t.props.lo <= inputs[j].1.props.hi
+        });
+        linked[i] = whole(t) && !under;
+    }
+    let mut links = Vec::new();
+    let mut rewritten = Vec::new();
+    for ((input, g), l) in inputs.into_iter().zip(groups).zip(linked) {
+        match l {
+            true => links.push((g, input.1)),
+            false => rewritten.push(input),
+        }
+    }
+    (links, rewritten)
 }
 
 /// One input read in order.
@@ -288,6 +346,10 @@ pub(crate) struct CompactJob {
     stage: Stage,
     edit: Option<Edit>,
     export: Option<ExportSpec>,
+    /// The files an export hands over whole, with their groups (FR-033).
+    links: Vec<(u32, Arc<Table>)>,
+    /// The LSM's directory, where linked files are.
+    home: PathBuf,
     dir: PathBuf,
     chunk: usize,
     block_bytes: usize,
@@ -338,6 +400,8 @@ impl CompactJob {
             stage: Stage::Merge,
             edit: None,
             export: None,
+            links: Vec::new(),
+            home: cfg.dir.clone(),
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             block_bytes: cfg.block_bytes,
@@ -376,10 +440,12 @@ impl CompactJob {
         CompactJob { training: Some(training), ..self }
     }
 
-    /// An export of `spec` from the files `inputs` (in order of precedence).
+    /// An export of `spec` from the files `inputs` (in order of precedence), which links the
+    /// files of `links` whole (FR-033).
     pub(crate) fn export(
         cfg: &LsmConfig,
         inputs: Vec<(u8, Arc<Table>)>,
+        links: Vec<(u32, Arc<Table>)>,
         spec: ExportSpec,
     ) -> CompactJob {
         let first = entry::first_version(&spec.start);
@@ -399,6 +465,7 @@ impl CompactJob {
         job.surviving = surviving;
         job.dir = spec.dir.clone();
         job.export = Some(spec);
+        job.links = links;
         job
     }
 
@@ -483,7 +550,12 @@ impl CompactJob {
         let cands: Vec<Candidate> = self.versions.iter().map(|(c, _)| c.clone()).collect();
         let keep = match &self.export {
             // Every version up to the timestamp; a `Retract` goes with the intent it merged with.
-            Some(_) => cands.iter().map(|c| c.kind != Kind::Retract).collect(),
+            // One that met no intent here stays when files go whole: its intent may be in one of
+            // them, below the files written (FR-033).
+            Some(_) => cands
+                .iter()
+                .map(|c| c.kind != Kind::Retract || (!self.links.is_empty() && !c.shadowed))
+                .collect(),
             None => {
                 gc::keep(&key, &cands, self.gc.threshold(&key), &self.hiding, self.plan.bottommost)
             }
@@ -637,15 +709,35 @@ impl CompactJob {
                     for t in &self.finished {
                         self.queued.push_back(IoOp::Close { file: file_id(t.number) });
                     }
+                    // The linked names are durable with the sync of the export's directory.
+                    for (_, t) in &self.links {
+                        for f in std::iter::once(t).chain(t.history.as_ref()) {
+                            let name = file_name(f.number);
+                            let (from, to) = (self.home.join(&name), self.dir.join(&name));
+                            self.queued.push_back(IoOp::Link { from, to });
+                        }
+                    }
+                    if !self.links.is_empty() {
+                        self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
+                    }
                     self.stage = Stage::Done;
                 }
                 Stage::Done if self.export.is_some() => {
                     let spec = self.export.take().expect("checked");
-                    let files = self
+                    let written = self
                         .finished
                         .iter()
-                        .map(|t| FileRef { path: spec.dir.join(file_name(t.number)), size: t.size })
-                        .collect();
+                        .map(|t| FileRef::new(spec.dir.join(file_name(t.number)), t.size));
+                    let linked = self.links.iter().map(|(group, t)| FileRef {
+                        path: spec.dir.join(file_name(t.number)),
+                        size: t.size,
+                        history: t
+                            .history
+                            .as_ref()
+                            .map(|h| (spec.dir.join(file_name(h.number)), h.size)),
+                        group: *group,
+                    });
+                    let files = written.chain(linked).collect();
                     return Ok(Next::Done(Box::new(Outcome::Exported { id: spec.id, files })));
                 }
                 Stage::Edit => {

@@ -282,6 +282,10 @@ pub struct NodeConfig {
     /// Whether the files the node writes outside its cores' disks (the search segments) use
     /// `O_DIRECT` (012 FR-003): what `--direct-io` decided for the cores' disks.
     pub direct_io: bool,
+    /// The disks of the node's cores are one file system (the data directory): a range that
+    /// changes core hands over its whole files as hard links (004 FR-033). A disk per core,
+    /// as in memory, does not share its files.
+    pub shared_files: bool,
     /// How the clients' port starts its executors and runs the TTL monitor; a test changes them.
     #[doc(hidden)]
     pub client_hooks: crate::client_listener::Hooks,
@@ -326,6 +330,7 @@ impl Default for NodeConfig {
             memory_limit: None,
             affinity: crate::affinity::Affinity::Off,
             direct_io: false,
+            shared_files: false,
             client_hooks: crate::client_listener::Hooks::default(),
             startup_log: StartupLog::default(),
         }
@@ -500,6 +505,8 @@ struct CoreSpec {
     clock: NodeClock,
     storage: StorageConfig,
     lsm: LsmConfig,
+    /// The cores' disks are one file system (004 FR-033).
+    shared_files: bool,
     /// What the node's cores hold together (012 FR-018, FR-019).
     pressure: Arc<NodePressure>,
     snapshot_entries: u64,
@@ -557,7 +564,7 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
         .with_cores(spec.node_cores);
     let data = data.with_backups(dir.join("backup"), random_u64());
     let data = data.with_views(spec.views.clone()).with_pressure(spec.pressure.clone());
-    Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone()))
+    Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone(), spec.shared_files))
 }
 
 /// A core's state, built on its thread.
@@ -1076,6 +1083,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                 clock: clock.clone(),
                 storage: cfg.storage.clone(),
                 lsm: lsm.clone(),
+                shared_files: cfg.shared_files,
                 pressure: pressure.clone(),
                 snapshot_entries: cfg.snapshot_entries,
                 seed: seed.wrapping_add(u64::from(k)),
