@@ -95,7 +95,12 @@ pub fn run_write(args: &Args) -> Result<Report, String> {
         (target.admin_addr(), target.ranges().and_then(|r| r.first().copied()))
     {
         let at = format!("{{\"ns\": \"{DB}.{WRITES}\", \"_id\": \"{ABOVE_EVERY_ID}\"}}");
-        super::cluster::admin(admin_at, &["range", "split", &range.to_string(), "--at", &at])?;
+        // The writes above may have asked for a split by load, or moved the range, which Group 0
+        // is still carrying out: it answers that the range is busy, and the request goes again.
+        let split = || {
+            super::cluster::admin(admin_at, &["range", "split", &range.to_string(), "--at", &at])
+        };
+        super::cluster::when_free(split, super::cluster::CHANGE_WAIT)?;
         target.wait_ranges(2)?;
         let other = each(args.warmup, args.duration, || {
             next += 1;

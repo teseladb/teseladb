@@ -83,7 +83,13 @@ fn an_index_entry_read_at_or_above_the_mark_asks_for_a_higher_one() {
     // The document keeps its size; the new index entry adds its own (D-068).
     assert_eq!(*live_delta, teseladb_range::mutate::live_size(INDEX_NEW, &[]));
     // The record keeps the mutation's result.
-    let record = DedupRecord { lsid: 1, txn_number: 2, stmt_id: 0, result: e.result.clone() };
+    let record = DedupRecord {
+        lsid: 1,
+        txn_number: 2,
+        stmt_id: 0,
+        result: e.result.clone(),
+        reaching: false,
+    };
     assert_eq!((deletes.as_slice(), d.as_ref()), (&[INDEX_OLD.to_vec()][..], Some(&record)));
     for key in [DOC, INDEX_OLD, INDEX_NEW] {
         assert!(latches.is_held(key), "{key:?}");

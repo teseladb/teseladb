@@ -387,3 +387,70 @@ fn a_write_whose_entry_falls_past_a_cut_in_progress_needs_a_transaction_across_r
     c.follow();
     mutated_ts(c.reply(l, after));
 }
+
+/// H-065 of the native tests (FR-022): a split gives its new range only the records of the
+/// statements that wrote a key in it, since a retry goes to the range of its key. A table copied
+/// whole made the cut's entry pass the log's largest entry once the range held minutes of writes,
+/// and the leader asked for the cut again without end.
+/// What the new range's table holds of the statements 1 (right of the cut) and 2 (left) after a
+/// split, on every node, with the nodes reading records that keep their key or not.
+fn copied_after_split(reaching: bool) -> Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    use teseladb_lsm::Lookup;
+    use teseladb_range::sm::dedup_key;
+    let mut c = Cluster::standard();
+    for node in c.nodes.values_mut() {
+        node.host.set_counted_writes(reaching);
+        node.host.set_reaching_records(reaching);
+    }
+    let l = c.elect();
+    let right = write_on(&mut c, l, G, b"\x01q", 1, 1);
+    let left = write_on(&mut c, l, G, b"\x01b", 2, 2);
+    c.follow();
+    mutated_ts(c.reply(l, right));
+    mutated_ts(c.reply(l, left));
+    assert!(c.nodes.get_mut(&l).unwrap().host.split(G, AT, NEW));
+    c.follow();
+    let done = c.nodes.get_mut(&l).unwrap().host.take_splits();
+    assert_eq!(done, [SplitDone { g: G, at: AT.to_vec(), new_range: NEW }]);
+    assert!(c.nodes.get_mut(&l).unwrap().host.take_split_drops().is_empty());
+    let newest = Hlc { physical: u64::MAX, logical: u32::MAX };
+    c.nodes
+        .values()
+        .map(|node| {
+            let lsm = node.host.lsm();
+            let view = lsm.borrow().view();
+            let stored = |g: GroupId, stmt: u32| match view.get(
+                &mut lsm.borrow_mut(),
+                &dedup_key(g, 5, 1, stmt),
+                newest,
+            ) {
+                Lookup::Hit(f) => Some(f.value.to_vec()),
+                Lookup::NotFound => None,
+                other => panic!("{other:?}"),
+            };
+            // The parent keeps both records.
+            assert!(stored(G, 1).is_some() && stored(G, 2).is_some());
+            (stored(NEW, 1), stored(NEW, 2))
+        })
+        .collect()
+}
+
+/// H-065 of the native tests (FR-022): a split gives its new range only the records of the
+/// statements that wrote a key in it, since a retry goes to the range of its key. A table copied
+/// whole made the cut's entry pass the log's largest entry once the range held minutes of writes,
+/// and the leader asked for the cut again without end.
+#[test]
+fn a_split_gives_the_new_range_only_the_records_a_retry_can_bring_there() {
+    use teseladb_range::sm::{parse_record_value, record_reach};
+    for (right, left) in copied_after_split(true) {
+        let right = right.expect("the right statement's record is copied");
+        assert!(parse_record_value(&right).is_some());
+        assert_eq!(record_reach(&right), Some(&b"\x01q"[..]));
+        assert_eq!(left, None, "a left statement cannot be retried in the new range");
+    }
+    // Nodes that do not read the records that keep their key: the table goes whole, as before.
+    for (right, left) in copied_after_split(false) {
+        assert!(right.is_some() && left.is_some());
+        assert_eq!(record_reach(&right.unwrap()), None);
+    }
+}

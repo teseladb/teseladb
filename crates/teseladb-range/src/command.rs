@@ -44,10 +44,11 @@ pub const KIND_FORGET_RECORD: u16 = 15;
 /// `kind` of [`Command::Fence`] (018).
 pub const KIND_FENCE: u16 = 16;
 /// The format of the range commands this binary reads and writes: 1 adds
-/// [`KIND_WRITE_COUNTED`] (007 FR-039), 2 [`KIND_RESOLVE_INTENTS_COUNTED`]. A node records it in
+/// [`KIND_WRITE_COUNTED`] (007 FR-039), 2 [`KIND_RESOLVE_INTENTS_COUNTED`], 3
+/// [`KIND_WRITE_REACHING`], [`KIND_SPLIT_REACHING`] and [`KIND_MERGE_REACHING`]. A node records it in
 /// Group 0 (FR-027), and a leader writes a command of a format only once every node that is not
 /// removed records it.
-pub const FORMAT: u8 = 2;
+pub const FORMAT: u8 = 3;
 /// The format that brings [`KIND_WRITE_COUNTED`].
 pub const FORMAT_COUNTED: u8 = 1;
 /// `kind` of a [`Command::Write`] that carries the change of each collection's live documents
@@ -63,6 +64,15 @@ pub const FORMAT_RESOLVE_COUNTED: u8 = 2;
 /// documents (007 FR-039), as [`KIND_WRITE_COUNTED`] does for a write: without it a transaction's
 /// commit leaves the counts estimated, and its range counts all its documents again.
 pub const KIND_RESOLVE_INTENTS_COUNTED: u16 = 19;
+/// The format that brings [`KIND_WRITE_REACHING`].
+pub const FORMAT_REACHING: u8 = 3;
+/// `kind` of a counted [`Command::Write`] whose idempotence record keeps the greatest data key the
+/// write wrote (FR-022): a split copies to its new range only the records that reach it.
+pub const KIND_WRITE_REACHING: u16 = 20;
+/// `kind` of a [`Command::Split`] whose copied records carry their greatest key.
+pub const KIND_SPLIT_REACHING: u16 = 21;
+/// `kind` of a [`Command::Merge`] whose copied records carry their greatest key.
+pub const KIND_MERGE_REACHING: u16 = 22;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -99,6 +109,9 @@ pub struct DedupRecord {
     pub stmt_id: u32,
     /// Encoded result the driver expects back.
     pub result: Vec<u8>,
+    /// Whether the record keeps the greatest data key the write wrote (FR-022,
+    /// [`KIND_WRITE_REACHING`]): a split gives it to its new range only if that key falls there.
+    pub reaching: bool,
 }
 
 /// An idempotence record copied by a split (007 FR-022), with the mark of the write that left it,
@@ -111,6 +124,9 @@ pub struct CopiedRecord {
     pub mark: Hlc,
     /// The mutation's result.
     pub result: Vec<u8>,
+    /// The greatest data key the statement wrote, if its record keeps it (FR-022): a split gives
+    /// the record to its new range only if this key falls in it.
+    pub reach: Option<Vec<u8>>,
 }
 
 /// The state of the right range a [`Command::Merge`] takes (007 FR-009, FR-022): its end, GC
@@ -317,6 +333,7 @@ fn get_record(d: &mut Decoder<'_>) -> Result<DedupRecord, DecodeError> {
         txn_number: d.i64()?,
         stmt_id: d.u32()?,
         result: d.bytes()?.to_vec(),
+        reaching: false,
     })
 }
 
@@ -362,9 +379,31 @@ fn get_copied(d: &mut Decoder<'_>) -> Result<Vec<CopiedRecord>, DecodeError> {
     for _ in 0..n {
         let key = DedupKey { lsid: d.u128()?, txn_number: d.i64()?, stmt_id: d.u32()? };
         let mark = get_hlc(d)?;
-        records.push(CopiedRecord { key, mark, result: d.bytes()?.to_vec() });
+        records.push(CopiedRecord { key, mark, result: d.bytes()?.to_vec(), reach: None });
     }
     Ok(records)
+}
+
+/// The greatest key of each copied record, after everything else the entry carries (FR-022).
+fn put_reaches(e: &mut Encoder, records: &[CopiedRecord]) {
+    e.var(records.len() as u64);
+    for r in records {
+        e.bool(r.reach.is_some());
+        if let Some(k) = &r.reach {
+            e.bytes(k);
+        }
+    }
+}
+
+fn get_reaches(d: &mut Decoder<'_>, records: &mut [CopiedRecord]) -> Result<(), DecodeError> {
+    let offset = d.position();
+    if usize::try_from(d.var()?).ok() != Some(records.len()) {
+        return Err(DecodeError::InvalidValue { offset });
+    }
+    for r in records {
+        r.reach = if d.bool()? { Some(d.bytes()?.to_vec()) } else { None };
+    }
+    Ok(())
 }
 
 impl Command {
@@ -372,6 +411,9 @@ impl Command {
     pub fn kind(&self) -> u16 {
         match self {
             Command::Noop => KIND_NOOP,
+            Command::Write { docs: Some(_), dedup: Some(r), .. } if r.reaching => {
+                KIND_WRITE_REACHING
+            }
             Command::Write { docs: Some(_), .. } => KIND_WRITE_COUNTED,
             Command::Write { docs: None, .. } => KIND_WRITE,
             Command::SetGcThreshold { .. } => KIND_SET_GC_THRESHOLD,
@@ -380,9 +422,17 @@ impl Command {
             Command::PurgeDedup { .. } => KIND_PURGE_DEDUP,
             Command::ForgetRecord { .. } => KIND_FORGET_RECORD,
             Command::Relocate { .. } => KIND_RELOCATE,
+            Command::Split { records, .. } if records.iter().any(|r| r.reach.is_some()) => {
+                KIND_SPLIT_REACHING
+            }
             Command::Split { .. } => KIND_SPLIT,
             Command::SplitGenesis { .. } => KIND_SPLIT_GENESIS,
             Command::MergeFreeze { .. } => KIND_MERGE_FREEZE,
+            Command::Merge { absorb: Some(a), .. }
+                if a.records.iter().any(|r| r.reach.is_some()) =>
+            {
+                KIND_MERGE_REACHING
+            }
             Command::Merge { .. } => KIND_MERGE,
             Command::PutIntents { .. } => KIND_PUT_INTENTS,
             Command::EndTxn { .. } => KIND_END_TXN,
@@ -437,6 +487,9 @@ impl Command {
                 e.bytes(at).u64(new_range.0);
                 put_copied(&mut e, records);
                 e.u64(*right_live);
+                if self.kind() == KIND_SPLIT_REACHING {
+                    put_reaches(&mut e, records);
+                }
             }
             Command::MergeFreeze { merge } => {
                 e.u64(*merge);
@@ -450,6 +503,9 @@ impl Command {
                     e.u64(a.live);
                     put_copied(&mut e, &a.records);
                     crate::fence::put(&mut e, &a.fences);
+                    if self.kind() == KIND_MERGE_REACHING {
+                        put_reaches(&mut e, &a.records);
+                    }
                 }
             }
             Command::Fence { start, end, on } => {
@@ -505,7 +561,7 @@ impl Command {
         let kind = d.u16()?;
         let command = match kind {
             KIND_NOOP => Command::Noop,
-            KIND_WRITE | KIND_WRITE_COUNTED => {
+            KIND_WRITE | KIND_WRITE_COUNTED | KIND_WRITE_REACHING => {
                 let n = d.var()?;
                 let mut puts = Vec::new();
                 for _ in 0..n {
@@ -519,9 +575,14 @@ impl Command {
                 for _ in 0..n {
                     deletes.push(d.bytes()?.to_vec());
                 }
-                let dedup = if d.bool()? { Some(get_record(&mut d)?) } else { None };
+                let offset = d.position();
+                let mut dedup = if d.bool()? { Some(get_record(&mut d)?) } else { None };
+                if kind == KIND_WRITE_REACHING {
+                    let r = dedup.as_mut().ok_or(DecodeError::InvalidValue { offset })?;
+                    r.reaching = true;
+                }
                 let live_delta = unzigzag(d.var()?);
-                let docs = match kind == KIND_WRITE_COUNTED {
+                let docs = match kind != KIND_WRITE {
                     true => Some(get_docs(&mut d)?),
                     false => None,
                 };
@@ -540,11 +601,15 @@ impl Command {
             }
             KIND_RELOCATE => Command::Relocate { core: d.u16()?, intent: d.u64()? },
             KIND_FORGET_RECORD => Command::ForgetRecord { txn: crate::intents::TxnId(d.u128()?) },
-            KIND_SPLIT => {
+            KIND_SPLIT | KIND_SPLIT_REACHING => {
                 let at = d.bytes()?.to_vec();
                 let new_range = GroupId(d.u64()?);
-                let records = get_copied(&mut d)?;
-                Command::Split { at, new_range, records, right_live: d.u64()? }
+                let mut records = get_copied(&mut d)?;
+                let right_live = d.u64()?;
+                if kind == KIND_SPLIT_REACHING {
+                    get_reaches(&mut d, &mut records)?;
+                }
+                Command::Split { at, new_range, records, right_live }
             }
             KIND_SPLIT_GENESIS => {
                 let (parent, at_index) = (GroupId(d.u64()?), d.u64()?);
@@ -563,13 +628,16 @@ impl Command {
                 }
                 Command::AdjustCounts { base, counts }
             }
-            KIND_MERGE => {
+            KIND_MERGE | KIND_MERGE_REACHING => {
                 let (right, merge) = (GroupId(d.u64()?), d.u64()?);
                 let absorb = if d.bool()? {
                     let end = d.bytes()?.to_vec();
                     let (gc, mark, live) = (get_hlc(&mut d)?, get_hlc(&mut d)?, d.u64()?);
-                    let records = get_copied(&mut d)?;
+                    let mut records = get_copied(&mut d)?;
                     let fences = crate::fence::get(&mut d)?;
+                    if kind == KIND_MERGE_REACHING {
+                        get_reaches(&mut d, &mut records)?;
+                    }
                     Some(Absorbed { end, gc, mark, live, records, fences })
                 } else {
                     None

@@ -620,6 +620,8 @@ pub struct RangeHost {
     replies: Vec<(ReqId, Result<Reply, RangeError>)>,
     /// Splits its leaders saw applied, for the embedder (007).
     splits: Vec<SplitDone>,
+    /// Splits this host's leaders dropped since the last call, with why (007 FR-005).
+    split_drops: Vec<(GroupId, String)>,
     next: ReqId,
     /// Latches of writes that failed with an uncertain outcome, `(range, term, latch, index)`: the
     /// entry may still be applied at its mark, so the reads above it wait until it is or the term
@@ -631,6 +633,8 @@ pub struct RangeHost {
     /// Every node reads the writes that carry their change of documents (007 FR-039): the
     /// leaders write them.
     counted_writes: bool,
+    /// Whether every node reads the writes whose records keep their greatest key (FR-022).
+    reaching_records: bool,
     counted_resolutions: bool,
     wall_ms: u64,
     /// Monotonic time of the last call.
@@ -716,10 +720,12 @@ impl RangeHost {
             ops: BTreeMap::new(),
             replies: Vec::new(),
             splits: Vec::new(),
+            split_drops: Vec::new(),
             next: 1,
             uncertain: Vec::new(),
             moving: BTreeSet::new(),
             counted_writes: false,
+            reaching_records: false,
             counted_resolutions: false,
             wall_ms: 0,
             now: Nanos::ZERO,
@@ -848,6 +854,13 @@ impl RangeHost {
     /// collection's documents (007 FR-039): from then on this core's leaders write them.
     pub fn set_counted_writes(&mut self, on: bool) {
         self.counted_writes = on;
+    }
+
+    /// Whether every node reads the writes whose idempotence records keep the greatest data key
+    /// they wrote ([`crate::command::KIND_WRITE_REACHING`], FR-022): only then does a leader
+    /// write them, counted as well.
+    pub fn set_reaching_records(&mut self, on: bool) {
+        self.reaching_records = on;
     }
 
     /// Whether a transaction's commit says how it changes each collection's live documents

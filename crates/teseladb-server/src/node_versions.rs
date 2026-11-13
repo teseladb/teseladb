@@ -64,6 +64,16 @@ pub fn counted_writes(sm: &Group0Sm) -> bool {
         .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_COUNTED)
 }
 
+/// Whether every node that is not removed reads the writes whose idempotence records keep the
+/// greatest data key they wrote (007 FR-022). A node that recorded nothing yet runs this binary.
+pub fn reaching_records(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_REACHING)
+}
+
 /// Whether every node that is not removed reads the commits of transactions that carry their
 /// change of each collection's documents (007 FR-039). A node that recorded nothing yet runs this
 /// binary.
@@ -174,7 +184,17 @@ mod tests {
         sm.settings.insert(key(NodeId(2)), format_1);
         assert!(counted_writes(&sm));
         assert!(!counted_resolutions(&sm));
+        // A node of format 2 reads counted commits and not the records that keep their key.
+        let format_2 = Document::new()
+            .with(FCV, "9.0")
+            .with(RANGE, i64::from(teseladb_range::command::FORMAT_RESOLVE_COUNTED))
+            .to_bytes()
+            .unwrap();
+        sm.settings.insert(key(NodeId(2)), format_2);
+        assert!(counted_resolutions(&sm));
+        assert!(!reaching_records(&sm));
         sm.settings.insert(key(NodeId(2)), ours());
+        assert!(reaching_records(&sm));
         assert!(ordered_ids(&sm));
         sm.settings.insert(key(NodeId(2)), Document::new().with(FCV, "9.0").to_bytes().unwrap());
         assert!(!ordered_ids(&sm), "a node of the version before keys documents by hash");

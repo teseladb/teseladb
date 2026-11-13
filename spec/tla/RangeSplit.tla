@@ -3,7 +3,8 @@
 (* Each range is a linearizable state machine (its Raft log). Group 0 first records the intent  *)
 (* (SplitRange, Pending); G's leader then proposes SetRangeBounds { out: [P] }: from the index   *)
 (* i where it is applied, G answers OutOfRange to keys under P, and every replica builds G''s    *)
-(* complete state at i (the keys under P and G's whole dedup table, which carries no keys) as   *)
+(* complete state at i (the keys under P and the records of G's dedup table whose request wrote *)
+(* a key under P: a retry goes to the range of its key, so no other record can be asked there) as*)
 (* a pending snapshot. CompleteSplit in Group 0 creates G' from that snapshot. Routers follow   *)
 (* their copy of Group 0, which may lag: a stale one sends a key under P to G and gets          *)
 (* OutOfRange, then retries in G' once its copy shows it, with the same request id. Answers may *)
@@ -16,7 +17,7 @@
 (* current replica epoch.                                                                        *)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Key, Under, Req, Val
+CONSTANTS Key, Under, Req, Val, WholeTable
 
 None == 0
 
@@ -26,10 +27,10 @@ VARIABLES
     gc,         \* Group 0: a collection holds the partition (GcStart .. GcFinish)
     out,        \* G applied SetRangeBounds { out: [P] }
     gKeys,      \* G's keys: Key -> value (None: absent)
-    gDedup,     \* G's dedup table: request ids applied
+    gDedup,     \* G's dedup table: <<request id, key it wrote>> applied
     snap,       \* G''s pending snapshot (built at i), or a record with ok = FALSE
     g2Keys,     \* G''s keys
-    g2Dedup,    \* G''s dedup table
+    g2Dedup,    \* G''s dedup table, as G's
     fresh,      \* the router's copy of Group 0 shows G'
     reqs,       \* outstanding requests: id -> <<key, value>> (absent ids: not issued or answered)
     issued,     \* request ids used
@@ -68,6 +69,13 @@ Issue(id, k, v) ==
 
 Answer(id) == reqs' = [x \in DOMAIN reqs \ {id} |-> reqs[x]]
 
+\* Whether a dedup table has a record of request `id`.
+Known(table, id) == \E p \in table : p[1] = id
+
+\* The records G' takes: those whose request wrote a key under P (007 FR-022). With
+\* `WholeTable`, the whole table, as before H-065.
+Copied(table) == IF WholeTable THEN table ELSE {p \in table : p[2] \in Under}
+
 \* The request reaches G (the router does not know G' yet, or the key is not under P). A key
 \* under P after SetRangeBounds gets OutOfRange: the request stays and is retried. With `lost`,
 \* the answer does not reach the client, which retries with the same id.
@@ -76,11 +84,11 @@ ToG(id, lost) ==
     /\ id \in DOMAIN reqs
     /\ ~(k \in Under /\ fresh /\ done)
     /\ ~(k \in Under /\ out)
-    /\ IF id \in gDedup
+    /\ IF Known(gDedup, id)
        THEN /\ acked' = IF lost THEN acked ELSE [acked EXCEPT ![k] = v]
             /\ UNCHANGED <<gKeys, gDedup, applied, stale>>
        ELSE /\ gKeys' = [gKeys EXCEPT ![k] = v]
-            /\ gDedup' = gDedup \cup {id}
+            /\ gDedup' = gDedup \cup {<<id, k>>}
             /\ applied' = [applied EXCEPT ![id] = @ + 1]
             /\ acked' = IF lost THEN acked ELSE [acked EXCEPT ![k] = v]
             /\ stale' = (stale \/ gEpoch /= epoch0)
@@ -93,11 +101,11 @@ ToG2(id, lost) ==
     LET k == reqs[id][1] v == reqs[id][2] IN
     /\ id \in DOMAIN reqs
     /\ k \in Under /\ fresh /\ done
-    /\ IF id \in g2Dedup
+    /\ IF Known(g2Dedup, id)
        THEN /\ acked' = IF lost THEN acked ELSE [acked EXCEPT ![k] = v]
             /\ UNCHANGED <<g2Keys, g2Dedup, applied, stale>>
        ELSE /\ g2Keys' = [g2Keys EXCEPT ![k] = v]
-            /\ g2Dedup' = g2Dedup \cup {id}
+            /\ g2Dedup' = g2Dedup \cup {<<id, k>>}
             /\ applied' = [applied EXCEPT ![id] = @ + 1]
             /\ acked' = IF lost THEN acked ELSE [acked EXCEPT ![k] = v]
             /\ stale' = (stale \/ g2Epoch /= epoch0)
@@ -129,7 +137,7 @@ SetBounds ==
     /\ out' = TRUE
     /\ snap' = [ok |-> TRUE,
                 keys |-> [k \in Key |-> IF k \in Under THEN gKeys[k] ELSE None],
-                dedup |-> gDedup,
+                dedup |-> Copied(gDedup),
                 epoch |-> gEpoch]
     /\ UNCHANGED <<pending, done, gc, gKeys, gDedup, g2Keys, g2Dedup, fresh, reqs, issued, acked,
                    applied, epoch0, gEpoch, g2Epoch, stale>>
@@ -188,7 +196,7 @@ Serves(k) == IF k \in Under /\ out THEN g2Keys[k] ELSE gKeys[k]
 NoRefLost ==
     \A k \in Key :
         \/ Serves(k) = acked[k]
-        \/ \E id \in DOMAIN reqs : reqs[id] = <<k, Serves(k)>> /\ id \in gDedup \cup g2Dedup
+        \/ \E id \in DOMAIN reqs : reqs[id] = <<k, Serves(k)>> /\ Known(gDedup \cup g2Dedup, id)
         \/ (k \in Under /\ out /\ ~done)
 
 AtMostOnce == \A id \in Req : applied[id] <= 1

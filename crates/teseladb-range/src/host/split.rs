@@ -87,6 +87,23 @@ impl RangeHost {
         std::mem::take(&mut self.splits)
     }
 
+    /// The splits this host's leaders dropped since the last call, with why: the embedder asks
+    /// again, and the node's log says it (FR-005).
+    pub fn take_split_drops(&mut self) -> Vec<(GroupId, String)> {
+        std::mem::take(&mut self.split_drops)
+    }
+
+    /// Where the split of range `g` is, if this host leads it and one runs.
+    pub fn split_phase(&self, g: GroupId) -> Option<&'static str> {
+        match &self.ranges.get(&g)?.leader.as_ref()?.split {
+            SplitJob::Idle => None,
+            SplitJob::Draining { .. } => Some("draining"),
+            SplitJob::Scanning { .. } => Some("scanning"),
+            SplitJob::Counting { .. } => Some("counting"),
+            SplitJob::Proposed { .. } => Some("proposed"),
+        }
+    }
+
     /// Moves the split of range `g` if this host leads it and its range applied the entries of
     /// earlier terms; `true` if it moved.
     pub(super) fn split_step<S: StateMachine>(
@@ -123,6 +140,7 @@ impl RangeHost {
                 Some(Err(())) => {
                     // The table could not be read: the embedder asks again.
                     l.split = SplitJob::Idle;
+                    self.split_drops.push((g, "the idempotence table could not be read".into()));
                     true
                 }
                 Some(Ok(records)) => {
@@ -137,13 +155,18 @@ impl RangeHost {
                 Some(Err(())) => {
                     // The count could not be read: the embedder asks again.
                     l.split = SplitJob::Idle;
+                    self.split_drops.push((g, "the live bytes could not be counted".into()));
                     true
                 }
                 Some(Ok(right_live)) => {
                     #[cfg(teseladb_bug = "split_loses_intents")]
                     drop_intents(core, g, &scan.intents, now);
                     let (at, new_range) = (at.clone(), *new_range);
-                    let records = std::mem::take(records);
+                    // Only the records a retry can bring to the new range (FR-022).
+                    let records: Vec<CopiedRecord> = std::mem::take(records)
+                        .into_iter()
+                        .filter(|r| crate::local_keys::reaches(r, &at))
+                        .collect();
                     let split = Command::Split { at: at.clone(), new_range, records, right_live };
                     let payload = split.encode();
                     let zero = Hlc { physical: 0, logical: 0 };
@@ -151,8 +174,13 @@ impl RangeHost {
                     // A proposal refused (full queue, a handover) drops the job: the embedder asks
                     // again.
                     let proposed = core.propose_at(g, zero, now, build);
+                    let refused =
+                        proposed.as_ref().err().map(|e| format!("its log refused the cut: {e:?}"));
                     l.split =
                         proposed.map_or(SplitJob::Idle, |_| SplitJob::Proposed { at, new_range });
+                    if let Some(why) = refused {
+                        self.split_drops.push((g, why));
+                    }
                     true
                 }
             },

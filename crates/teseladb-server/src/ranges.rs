@@ -97,6 +97,8 @@ pub struct Ranges {
     pub chunk_size: Option<u64>,
     /// Every node reads the writes that carry their change of documents (007 FR-039).
     pub counted_writes: bool,
+    /// Whether every node reads the writes whose records keep their greatest key (FR-022).
+    pub reaching_records: bool,
     /// Every node reads the transactions' commits that carry their change of documents.
     pub counted_resolutions: bool,
 }
@@ -164,6 +166,7 @@ impl Ranges {
                 .collect(),
             chunk_size: teseladb_meta::config_settings::chunk_size_bytes(&sm.settings),
             counted_writes: crate::node_versions::counted_writes(sm),
+            reaching_records: crate::node_versions::reaching_records(sm),
             counted_resolutions: crate::node_versions::counted_resolutions(sm),
         }
     }
@@ -505,6 +508,10 @@ impl Replicas {
             tell_split("a range was cut", done.g, &done.at, &attr);
             out.push(Group0Command::CompleteSplit { group: done.g, at: done.at, at_index });
         }
+        for (g, why) in host.take_split_drops() {
+            let at = self.told.get(&g).cloned().unwrap_or_default();
+            tell_split("a range's cut was dropped", g, &at, &format!(",\"why\":{why:?}"));
+        }
         self.spread_halves(&mut out);
         let measure = now >= self.check_at;
         if measure {
@@ -636,6 +643,9 @@ impl Replicas {
         let (g, desc) = (l.desc.group, &l.desc);
         let (start, end) = (&l.bounds.0, &l.bounds.1);
         if let Some(at) = &desc.pending_split {
+            if measure && let Some(phase) = host.split_phase(g) {
+                tell_split("a range's cut waits", g, at, &format!(",\"phase\":\"{phase}\""));
+            }
             // The cut into the split's new range, never an end that matches: a leader that has
             // not applied the merge that undid an earlier cut at the same key ends there too.
             if l.cut {

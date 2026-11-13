@@ -11,7 +11,7 @@ use teseladb_types::GroupId;
 use crate::command::{CopiedRecord, DedupKey};
 use crate::sm::{
     dedup_key, encode_hlc, end_key, gc_threshold_key, last_mark_key, parse_record_value,
-    record_value,
+    record_value, record_value_reaching,
 };
 
 /// The local keys and values with which `new_range`, ending at `new_end`, starts: its parent's
@@ -31,7 +31,10 @@ pub fn split_writes(
     out.extend(records.iter().map(|r| {
         (
             dedup_key(new_range, r.key.lsid, r.key.txn_number, r.key.stmt_id),
-            record_value(r.mark, &r.result),
+            match &r.reach {
+                Some(k) => record_value_reaching(r.mark, k, &r.result),
+                None => record_value(r.mark, &r.result),
+            },
         )
     }));
     out
@@ -65,8 +68,16 @@ pub fn record_of(key: &[u8], stored: &[u8]) -> Option<CopiedRecord> {
     let txn = u64::from_be_bytes(s[16..24].try_into().ok()?) ^ (1 << 63);
     let stmt_id = u32::from_be_bytes(s[24..].try_into().ok()?);
     let (mark, result) = parse_record_value(stored)?;
+    let reach = crate::sm::record_reach(stored).map(<[u8]>::to_vec);
     let key = DedupKey { lsid, txn_number: txn as i64, stmt_id };
-    Some(CopiedRecord { key, mark, result: result.to_vec() })
+    Some(CopiedRecord { key, mark, result: result.to_vec(), reach })
+}
+
+/// Whether a split at `at` gives record `r` to its new range (007 FR-022): a retry goes to the
+/// range of its first key, so only a statement that wrote a key at or past `at` can be retried
+/// there. A record that does not keep its greatest key goes, as before records kept it.
+pub fn reaches(r: &CopiedRecord, at: &[u8]) -> bool {
+    r.reach.as_deref().is_none_or(|k| k >= at)
 }
 
 /// The leader's read of a range's whole idempotence table before a split.

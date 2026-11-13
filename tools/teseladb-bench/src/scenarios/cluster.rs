@@ -48,7 +48,7 @@ const COPY_BYTES_PER_S: f64 = 200.0 * 1024.0 * 1024.0;
 /// SC-003: how many times the p99 of the load may grow while replicas move.
 const LOAD_GROWTH: f64 = 2.0;
 /// Longest wait for a cluster's change.
-const CHANGE_WAIT: Duration = Duration::from_secs(600);
+pub(crate) const CHANGE_WAIT: Duration = Duration::from_secs(600);
 /// How often the scenario looks at the nodes.
 const POLL: Duration = Duration::from_millis(5);
 /// How long a node's core may take to answer.
@@ -150,7 +150,7 @@ const BUSY: &str = "RangeBusy";
 /// Asks for a change of a range with `ask` again while Group 0 answers that the range is busy,
 /// for at most `wait`: nothing changed then. The instant of the request it took; any other
 /// answer is the error.
-fn when_free(
+pub(crate) fn when_free(
     mut ask: impl FnMut() -> Result<(), String>,
     wait: Duration,
 ) -> Result<Instant, String> {

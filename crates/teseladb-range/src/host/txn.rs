@@ -355,7 +355,7 @@ fn resolutions(
 /// ([`crate::onepc::COMMITTED`] or [`crate::onepc::REFUSED`]).
 fn decision(lsid: u128, txn_number: i64, result: &[u8]) -> DedupRecord {
     let stmt_id = crate::onepc::COMMIT_STMT;
-    DedupRecord { lsid, txn_number, stmt_id, result: result.to_vec() }
+    DedupRecord { lsid, txn_number, stmt_id, result: result.to_vec(), reaching: false }
 }
 
 /// The command a transaction's request proposes at mark `ts`, with the record it leaves.

@@ -5,7 +5,8 @@
 use teseladb_hlc::Hlc;
 use teseladb_range::command::{
     Absorbed, Command, CopiedRecord, DedupKey, DedupRecord, KIND_COMPUTE_CHECKSUM, KIND_FENCE,
-    KIND_MERGE, KIND_MERGE_FREEZE, KIND_NOOP, KIND_SET_GC_THRESHOLD, KIND_WRITE, Put,
+    KIND_MERGE, KIND_MERGE_FREEZE, KIND_MERGE_REACHING, KIND_NOOP, KIND_SET_GC_THRESHOLD,
+    KIND_SPLIT, KIND_SPLIT_REACHING, KIND_WRITE, KIND_WRITE_COUNTED, KIND_WRITE_REACHING, Put,
 };
 use teseladb_types::GroupId;
 
@@ -25,6 +26,7 @@ fn samples() -> Vec<Command> {
                 txn_number: -1,
                 stmt_id: 9,
                 result: b"n=1".to_vec(),
+                reaching: false,
             }),
             live_delta: 0,
             docs: None,
@@ -45,6 +47,7 @@ fn samples() -> Vec<Command> {
                     key: DedupKey { lsid: 5, txn_number: -2, stmt_id: 1 },
                     mark: ts,
                     result: b"ok".to_vec(),
+                    reach: Some(b"q".to_vec()),
                 }],
                 fences: vec![(b"a".to_vec(), b"c".to_vec())],
             }),
@@ -68,7 +71,7 @@ fn every_command_survives_its_encoding() {
             KIND_COMPUTE_CHECKSUM,
             KIND_MERGE_FREEZE,
             KIND_MERGE_FREEZE,
-            KIND_MERGE,
+            KIND_MERGE_REACHING,
             KIND_MERGE,
             KIND_FENCE,
             KIND_FENCE,
@@ -120,4 +123,55 @@ fn unknown_kinds_cut_payloads_and_trailing_bytes_do_not_decode() {
         longer.push(0);
         assert!(Command::decode(&longer).is_err(), "{c:?} with a trailing byte");
     }
+}
+
+/// 007 FR-022: a split whose records keep their greatest key is of format 3 and carries the keys;
+/// one whose records do not is the split nodes of the format before read, and a counted write
+/// whose record keeps its key is of format 3 as well.
+#[test]
+fn records_that_keep_their_greatest_key_go_in_the_commands_of_format_3() {
+    let record = |reach: Option<&[u8]>| CopiedRecord {
+        key: DedupKey { lsid: 9, txn_number: 3, stmt_id: 2 },
+        mark: Hlc { physical: 7, logical: 1 },
+        result: b"r".to_vec(),
+        reach: reach.map(<[u8]>::to_vec),
+    };
+    let split = |records| Command::Split {
+        at: b"m".to_vec(),
+        new_range: GroupId(4),
+        records,
+        right_live: 12,
+    };
+    let reaching = split(vec![record(Some(b"q")), record(None)]);
+    let older = split(vec![record(None), record(None)]);
+    assert_eq!(reaching.kind(), KIND_SPLIT_REACHING);
+    assert_eq!(older.kind(), KIND_SPLIT);
+    for c in [&reaching, &older] {
+        assert_eq!(Command::decode(&c.encode()).as_ref(), Ok(c));
+    }
+    // The keys follow the split's fields: the same entry without them is the older one.
+    let (new, old) = (reaching.encode(), older.encode());
+    assert_eq!(new[2..old.len()], old[2..]);
+    let write = |reaching, docs: Option<Vec<((u32, u32), i64)>>| Command::Write {
+        puts: vec![Put { key: b"k".to_vec(), value_type: 1, value: b"v".to_vec() }],
+        deletes: vec![],
+        dedup: Some(DedupRecord { lsid: 1, txn_number: 2, stmt_id: 3, result: vec![], reaching }),
+        live_delta: 4,
+        docs,
+    };
+    let w = write(true, Some(vec![((0, 1), 1)]));
+    assert_eq!(w.kind(), KIND_WRITE_REACHING);
+    assert_eq!(Command::decode(&w.encode()), Ok(w));
+    assert_eq!(write(false, Some(vec![])).kind(), KIND_WRITE_COUNTED);
+    // A write of format 3 without a record does not decode.
+    let no_record = Command::Write {
+        puts: vec![],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: Some(vec![]),
+    };
+    let mut bad = no_record.encode();
+    bad[..2].copy_from_slice(&KIND_WRITE_REACHING.to_le_bytes());
+    assert!(Command::decode(&bad).is_err());
 }

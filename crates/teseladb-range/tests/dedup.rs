@@ -228,3 +228,38 @@ fn a_session_keeps_the_records_of_its_newest_txn_number_only() {
     }
     assert_eq!(read(&mut c, l), Some(3), "no retry wrote again");
 }
+
+/// A record keeps the greatest key its statement wrote before its result (007 FR-022), and a
+/// record written before records kept it still reads with its mark and result.
+#[test]
+fn a_record_keeps_the_greatest_key_its_statement_wrote() {
+    use teseladb_range::command::CopiedRecord;
+    use teseladb_range::local_keys::{reaches, record_of};
+    use teseladb_range::sm::{
+        parse_record_value, record_reach, record_value, record_value_reaching,
+    };
+    let mark = Hlc { physical: 1_794_000_000_000, logical: 7 };
+    let kept = record_value_reaching(mark, b"\x01q", b"result");
+    assert_eq!(parse_record_value(&kept), Some((mark, &b"result"[..])));
+    assert_eq!(record_reach(&kept), Some(&b"\x01q"[..]));
+    let old = record_value(mark, b"result");
+    assert_eq!(parse_record_value(&old), Some((mark, &b"result"[..])));
+    assert_eq!(record_reach(&old), None);
+    // A copy keeps the key: a split copies it as it is stored.
+    let key = dedup_key(G, K.lsid, K.txn_number, K.stmt_id);
+    let copy: CopiedRecord = record_of(&key, &kept).expect("a record");
+    assert_eq!((copy.mark, &copy.result[..]), (mark, &b"result"[..]));
+    assert_eq!(copy.reach.as_deref(), Some(&b"\x01q"[..]));
+    // The new range stores it as the parent did.
+    let born = teseladb_range::local_keys::split_writes(
+        GroupId(9),
+        b"\x02",
+        mark,
+        mark,
+        std::slice::from_ref(&copy),
+    );
+    assert!(born.iter().any(|(_, v)| *v == kept));
+    assert!(reaches(&copy, b"\x01m") && reaches(&copy, b"\x01q") && !reaches(&copy, b"\x01r"));
+    // One that does not keep it goes to the new range, as before.
+    assert!(reaches(&record_of(&key, &old).expect("a record"), b"\x01z"));
+}

@@ -91,12 +91,12 @@ fn put(key: &[u8], v: u8) -> Put {
 }
 
 fn record(stmt: u32) -> DedupRecord {
-    DedupRecord { lsid: 5, txn_number: 1, stmt_id: stmt, result: vec![stmt as u8] }
+    DedupRecord { lsid: 5, txn_number: 1, stmt_id: stmt, result: vec![stmt as u8], reaching: false }
 }
 
 fn copied(stmt: u32) -> CopiedRecord {
     let key = DedupKey { lsid: 5, txn_number: 1, stmt_id: stmt };
-    CopiedRecord { key, mark: ts(u64::from(stmt)), result: vec![stmt as u8] }
+    CopiedRecord { key, mark: ts(u64::from(stmt)), result: vec![stmt as u8], reach: None }
 }
 
 fn write(key: &[u8], v: u8, stmt: u32) -> Command {

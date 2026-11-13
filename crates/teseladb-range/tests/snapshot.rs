@@ -98,6 +98,7 @@ fn a_64_mb_range_travels_in_chunks_and_the_replica_catches_up() {
             txn_number: 1,
             stmt_id: 0,
             result: b"n=1".to_vec(),
+            reaching: false,
         });
         a.write(i, &doc(i), value, dedup);
         if i % 4096 == 0 {

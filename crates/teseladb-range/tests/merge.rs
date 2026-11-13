@@ -107,6 +107,7 @@ fn write(key: &[u8], v: u8, stmt: u32, live_delta: i64) -> Command {
             txn_number: 1,
             stmt_id: stmt,
             result: vec![stmt as u8],
+            reaching: false,
         }),
         live_delta,
         docs: None,

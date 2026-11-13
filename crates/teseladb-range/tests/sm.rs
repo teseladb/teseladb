@@ -132,7 +132,13 @@ fn a_write_puts_and_deletes_at_the_entry_mark() {
 #[test]
 fn the_dedup_record_is_written_with_the_entry() {
     let mut r = Replica::new();
-    let record = DedupRecord { lsid: 42, txn_number: 3, stmt_id: 1, result: b"n=1".to_vec() };
+    let record = DedupRecord {
+        lsid: 42,
+        txn_number: 3,
+        stmt_id: 1,
+        result: b"n=1".to_vec(),
+        reaching: false,
+    };
     let w = Command::Write {
         puts: vec![put(b"\x01d", b"x")],
         deletes: vec![],
@@ -350,7 +356,13 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
     let write = |stmt_id: u32| Command::Write {
         puts: vec![],
         deletes: vec![],
-        dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
+        dedup: Some(DedupRecord {
+            lsid: 7,
+            txn_number: 1,
+            stmt_id,
+            result: vec![],
+            reaching: false,
+        }),
         live_delta: 0,
         docs: None,
     };
@@ -393,7 +405,13 @@ fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
     let write = |stmt_id: u32| Command::Write {
         puts: vec![],
         deletes: vec![],
-        dedup: Some(DedupRecord { lsid: 7, txn_number: 1, stmt_id, result: vec![] }),
+        dedup: Some(DedupRecord {
+            lsid: 7,
+            txn_number: 1,
+            stmt_id,
+            result: vec![],
+            reaching: false,
+        }),
         live_delta: 0,
         docs: None,
     };

@@ -120,9 +120,41 @@ pub fn record_value(mark: Hlc, result: &[u8]) -> Vec<u8> {
     [&encode_hlc(mark)[..], result].concat()
 }
 
+/// The top bit of a stored record's mark: the record keeps the greatest data key its statement
+/// wrote, before its result (007 FR-022). A mark's physical part never reaches it.
+const REACH_FLAG: u64 = 1 << 63;
+
+/// The stored value of an idempotence record that keeps `reach`, the greatest data key its
+/// statement wrote: a split copies to its new range only the records that reach it (FR-022).
+pub fn record_value_reaching(mark: Hlc, reach: &[u8], result: &[u8]) -> Vec<u8> {
+    let flagged = Hlc { physical: mark.physical | REACH_FLAG, logical: mark.logical };
+    let len = u32::try_from(reach.len()).unwrap_or(u32::MAX).to_be_bytes();
+    [&encode_hlc(flagged)[..], &len, reach, result].concat()
+}
+
+/// The greatest data key and the result of a stored record after its mark: `None` for the key of
+/// a record written before records kept it.
+fn record_parts(stored: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
+    let physical = u64::from_be_bytes(stored.get(..8)?.try_into().ok()?);
+    let rest = stored.get(12..)?;
+    if physical & REACH_FLAG == 0 {
+        return Some((None, rest));
+    }
+    let len = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+    let reach = rest.get(4..4 + len)?;
+    Some((Some(reach), &rest[4 + len..]))
+}
+
 /// The mark and result of a stored idempotence record.
 pub fn parse_record_value(stored: &[u8]) -> Option<(Hlc, &[u8])> {
-    Some((decode_hlc(stored.get(..12)?)?, &stored[12..]))
+    let mark = decode_hlc(stored.get(..12)?)?;
+    let (_, result) = record_parts(stored)?;
+    Some((Hlc { physical: mark.physical & !REACH_FLAG, logical: mark.logical }, result))
+}
+
+/// The greatest data key the statement of a stored record wrote, if the record keeps it.
+pub fn record_reach(stored: &[u8]) -> Option<&[u8]> {
+    record_parts(stored)?.0
 }
 
 /// Splits a stored value into its type and the value written.
@@ -766,9 +798,18 @@ impl RangeSm {
             puts.iter().map(|p| [&[p.value_type][..], &p.value].concat()).collect();
         let mark_key = last_mark_key(self.range);
         let mark = encode_hlc(ctx.ts);
+        // The record keeps the greatest key the statement wrote: a split gives it to its new range
+        // only if a retry can go there (FR-022).
+        let reach = puts.iter().map(|p| &p.key).chain(deletes).max();
         let dedup_entry = dedup.map(|r| {
             let key = dedup_key(self.range, r.lsid, r.txn_number, r.stmt_id);
-            (key, record_value(ctx.ts, &r.result))
+            // Only a write of the format that keeps it (KIND_WRITE_REACHING): every replica stores
+            // the same bytes, whatever binary it runs.
+            let value = match reach.filter(|_| r.reaching) {
+                Some(k) => record_value_reaching(ctx.ts, k, &r.result),
+                None => record_value(ctx.ts, &r.result),
+            };
+            (key, value)
         });
         let mut writes: Vec<EntryWrite<'_>> = puts
             .iter()

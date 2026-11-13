@@ -97,6 +97,7 @@ where
         txn_number: k.txn_number,
         stmt_id: k.stmt_id,
         result: result.clone(),
+        reaching: false,
     });
     let command = Command::Write { puts, deletes, dedup, live_delta, docs: None };
     Ok(Evaluated { command, change, result, latch: id })
