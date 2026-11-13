@@ -210,6 +210,56 @@ pub struct Replicas {
     /// for and Group 0 has not recorded yet, which the least loaded core counts (FR-040).
     moving_to: BTreeMap<GroupId, u16>,
     asked_moves: BTreeMap<GroupId, u16>,
+    /// The cut each range asked for, as the node's log said it (FR-005): a request Group 0 has
+    /// not applied goes again every second, and its line once.
+    told: BTreeMap<GroupId, Vec<u8>>,
+}
+
+/// The rule that asked for a split (FR-005, FR-006, FR-009), as the node's log says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitRule {
+    /// A capped collection gets a range of its own.
+    Capped,
+    /// The range passed its live bytes.
+    Live,
+    /// The range passed its bytes on disk, versions included.
+    Disk,
+    /// The range served more than the load threshold for 10 s.
+    Load,
+}
+
+impl SplitRule {
+    /// The rule as the log names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            SplitRule::Capped => "capped",
+            SplitRule::Live => "live",
+            SplitRule::Disk => "disk",
+            SplitRule::Load => "load",
+        }
+    }
+
+    /// The rule of a split by size or by load: the live bytes first, then the bytes on disk.
+    fn of(live: bool, disk: bool) -> SplitRule {
+        match (live, disk) {
+            (true, _) => SplitRule::Live,
+            (false, true) => SplitRule::Disk,
+            (false, false) => SplitRule::Load,
+        }
+    }
+}
+
+/// A line of the node's log about a split of range `g` at `at`.
+fn tell_split(msg: &str, g: GroupId, at: &[u8], attr: &str) {
+    let key: String = at.iter().map(|b| format!("{b:02x}")).collect();
+    crate::log::defer_at(
+        crate::log::Level::Info,
+        crate::log::Pending {
+            id: 0,
+            msg: msg.to_owned(),
+            attr: format!("{{\"range\":{},\"at\":\"{key}\"{attr}}}", g.0),
+        },
+    );
 }
 
 impl Replicas {
@@ -237,6 +287,7 @@ impl Replicas {
             moving_to: BTreeMap::new(),
             asked_moves: BTreeMap::new(),
             chunks: (BTreeMap::new(), None),
+            told: BTreeMap::new(),
         }
     }
 
@@ -449,6 +500,9 @@ impl Replicas {
         let mut out = Vec::new();
         for done in host.take_splits() {
             let at_index = core.status(done.g).map_or(0, |s| s.applied);
+            self.told.remove(&done.g);
+            let attr = format!(",\"newRange\":{}", done.new_range.0);
+            tell_split("a range was cut", done.g, &done.at, &attr);
             out.push(Group0Command::CompleteSplit { group: done.g, at: done.at, at_index });
         }
         self.spread_halves(&mut out);
@@ -601,7 +655,7 @@ impl Replicas {
         }
         // A capped collection gets a range of its own first (FR-009).
         if let Some(at) = capped_cut(start, end, &self.capped) {
-            out.push(Group0Command::SplitRange { group: g, at });
+            self.ask_split(g, at, SplitRule::Capped, l.live, out);
             return;
         }
         let split_bytes = split_size(start, &self.chunks, self.split_bytes);
@@ -612,7 +666,9 @@ impl Replicas {
         // a full memtable held the core's thread for tens of milliseconds every second (H-049).
         let could = l.live >= split_bytes || lsm.interval_size_bound(start, end) >= disk_limit;
         let size = could.then(|| lsm.interval_size(start, end));
-        let by_size = l.live >= split_bytes || size.as_ref().is_some_and(|s| s.bytes >= disk_limit);
+        let by_disk = size.as_ref().is_some_and(|s| s.bytes >= disk_limit);
+        let by_size = l.live >= split_bytes || by_disk;
+        let rule = SplitRule::of(l.live >= split_bytes, by_disk);
         let at = match size {
             Some(s) if by_size => s.cut.map(|cut| {
                 let below = |k: &[u8]| lsm.interval_size(start, k).bytes;
@@ -633,8 +689,25 @@ impl Replicas {
         // Measured once a second: a request Group 0 has not applied yet goes again then.
         if let Some(at) = at {
             self.cuts.insert(g, at.clone());
-            out.push(Group0Command::SplitRange { group: g, at });
+            self.ask_split(g, at, rule, l.live, out);
         }
+    }
+
+    /// Asks Group 0 to split range `g` at `at`, and says so in the node's log once per cut.
+    fn ask_split(
+        &mut self,
+        g: GroupId,
+        at: Vec<u8>,
+        rule: SplitRule,
+        live: u64,
+        out: &mut Vec<Group0Command>,
+    ) {
+        if self.told.get(&g) != Some(&at) {
+            let attr = format!(",\"rule\":\"{}\",\"liveBytes\":{live}", rule.name());
+            tell_split("a range asks to be cut", g, &at, &attr);
+            self.told.insert(g, at.clone());
+        }
+        out.push(Group0Command::SplitRange { group: g, at });
     }
 
     /// The node's cores, among which the new half of a split moves (FR-040).
@@ -964,6 +1037,20 @@ mod tests {
     }
 
     #[test]
+    fn a_split_names_the_rule_that_asked_for_it() {
+        assert_eq!(SplitRule::of(true, true), SplitRule::Live);
+        assert_eq!(SplitRule::of(true, false), SplitRule::Live);
+        assert_eq!(SplitRule::of(false, true), SplitRule::Disk);
+        assert_eq!(SplitRule::of(false, false), SplitRule::Load);
+        let names: Vec<&str> =
+            [SplitRule::Capped, SplitRule::Live, SplitRule::Disk, SplitRule::Load]
+                .into_iter()
+                .map(SplitRule::name)
+                .collect();
+        assert_eq!(names, ["capped", "live", "disk", "load"]);
+    }
+
+    #[test]
     fn a_leader_compacts_first_then_asks_to_split_what_grew_and_completes_a_cut() {
         let mut o = One::new();
         // A range of another core, and one of another node, are not this core's.
@@ -1007,6 +1094,9 @@ mod tests {
             matches!(asked.as_slice(), [Group0Command::SplitRange { group: G, .. }]),
             "{asked:?}"
         );
+        // The node's log said the cut once, by the bytes on disk (FR-005).
+        let Some(Group0Command::SplitRange { at, .. }) = asked.first() else { unreachable!() };
+        assert_eq!(o.r.told.get(&G), Some(at));
         // Measured once a second, and asked again only after the pause.
         assert!(o.lead().is_empty());
         // Settling, or with other bounds in Group 0, it is not measured.
