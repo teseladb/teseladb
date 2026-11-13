@@ -15,7 +15,9 @@ struct Node<T> {
     next: *mut Node<T>,
 }
 
-/// Values handed from any thread to the one that takes them.
+/// Values handed from any thread to the one that takes them; its head on a cache line of its own
+/// (012 FR-031).
+#[repr(align(64))]
 pub struct Handoff<T> {
     head: AtomicPtr<Node<T>>,
 }

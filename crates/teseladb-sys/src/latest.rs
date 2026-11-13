@@ -16,7 +16,8 @@ struct Node<T> {
     older: *mut Node<T>,
 }
 
-/// The newest of the values set so far.
+/// The newest of the values set so far; its head on a cache line of its own (012 FR-031).
+#[repr(align(64))]
 pub struct Latest<T> {
     head: AtomicPtr<Node<T>>,
 }

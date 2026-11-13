@@ -67,3 +67,9 @@ fn readers_see_whole_values_that_only_go_forward_while_one_thread_replaces_them(
     }
     assert_eq!(*l.get(), [SETS; 8]);
 }
+
+#[test]
+fn the_head_has_its_own_cache_line() {
+    // 012 FR-031.
+    assert_eq!(std::mem::align_of::<teseladb_sys::latest::Latest<u64>>(), 64);
+}

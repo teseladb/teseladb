@@ -41,6 +41,8 @@ pub const CAPACITY: usize = 256;
 /// FR-015).
 type Timed<T> = (Instant, T);
 
+/// On cache lines of its own (012 FR-031): every sender and the receiver touch its flags.
+#[repr(align(64))]
 struct Shared<T> {
     /// Rings of the senders made since the receiver last looked.
     new_rings: Handoff<Consumer<Timed<T>>>,
@@ -252,3 +254,11 @@ impl<T: Send> fmt::Debug for Mailbox<T> {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod alignment_tests {
+    #[test]
+    fn the_shared_flags_start_a_cache_line() {
+        assert_eq!(std::mem::align_of::<super::Shared<u8>>(), 64);
+    }
+}

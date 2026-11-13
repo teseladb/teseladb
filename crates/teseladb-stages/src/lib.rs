@@ -170,7 +170,9 @@ impl Stage {
     }
 }
 
-/// The counters of one stage.
+/// The counters of one stage, from a cache line boundary (012 FR-031): two stages that cores
+/// record at once do not share a line.
+#[repr(align(64))]
 struct Counters {
     buckets: [AtomicU64; SLOTS],
     sum_nanos: AtomicU64,
@@ -241,6 +243,13 @@ pub fn render(out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_stage_starts_a_cache_line() {
+        // 012 FR-031.
+        assert_eq!(std::mem::align_of::<super::Counters>(), 64);
+        assert_eq!(std::ptr::addr_of!(super::STAGES) as usize % 64, 0);
+    }
+
     use super::*;
 
     #[test]
