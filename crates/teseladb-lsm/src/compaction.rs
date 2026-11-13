@@ -540,7 +540,7 @@ impl CompactJob {
             path: self.dir.join(file_name(number)),
             prealloc: 0,
         });
-        let writer = self.writer();
+        let writer = self.writer().for_history();
         self.out.as_mut().expect("an output in hand").history = Some((number, writer));
     }
 

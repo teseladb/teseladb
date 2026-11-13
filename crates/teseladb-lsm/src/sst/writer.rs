@@ -121,6 +121,12 @@ impl TableWriter {
         TableWriter { key, ..self }
     }
 
+    /// The writer of a history file: an old version goes as a delta against the next newer
+    /// version of its key when that takes fewer bytes (FR-035).
+    pub(crate) fn for_history(self) -> TableWriter {
+        TableWriter { data: self.data.with_deltas(), ..self }
+    }
+
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
     pub(crate) fn with_dicts(self, dicts: Arc<CurrentDictionaries>) -> TableWriter {
         TableWriter { dicts: Some(dicts), ..self }

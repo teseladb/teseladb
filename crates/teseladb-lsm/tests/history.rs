@@ -301,3 +301,52 @@ fn random_histories_read_as_the_model_after_their_files_are_compacted() {
         check_all(&mut lsm, &mut disk, &model, 500 + 100);
     }
 }
+
+/// A document of about 300 bytes at `version`: each version changes two fields of a few bytes.
+fn document(i: u64, version: u64) -> Vec<u8> {
+    let mut doc: Vec<u8> = (0..300u64).map(|b| ((b * 7 + i) % 251) as u8).collect();
+    doc[40..48].copy_from_slice(&version.to_le_bytes());
+    doc[200..208].copy_from_slice(&(version * 31).to_le_bytes());
+    doc
+}
+
+/// FR-035: the history file keeps each old version as a delta against the next newer version
+/// of its key, and every version reads whole at its mark, warm and on a cold cache.
+#[test]
+fn old_versions_take_the_bytes_of_their_changes() {
+    const VERSIONS: u64 = 30;
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut index = 0;
+    for version in 1..=VERSIONS {
+        for i in 0..KEYS {
+            index += 1;
+            lsm.put(G, index, &key(i), ts(version, 0), &document(i, version)).unwrap();
+        }
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    compact(&mut lsm, &mut disk);
+    let m = lsm.metrics();
+    assert!(m.history_files >= 1, "{m:?}");
+    // Whole, the old versions would take 29 × 100 × 300 bytes.
+    let whole = (VERSIONS - 1) * KEYS * 300;
+    assert!(m.history_bytes * 4 < whole, "{} bytes of history for {whole}", m.history_bytes);
+    let view = lsm.view();
+    for at in 1..=VERSIONS {
+        let rows = scan(&mut lsm, &mut disk, &view, b"k", b"l", ts(at, 0));
+        assert_eq!(rows.len() as u64, KEYS, "at {at}");
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!((r.1, &r.3), (ts(at, 0), &document(i as u64, at)), "at {at}");
+        }
+        let back = scan_back(&mut lsm, &mut disk, &view, b"k", b"l", ts(at, 0));
+        assert_eq!(back[0].3, document(KEYS - 1, at), "backward at {at}");
+        let one = get(&mut lsm, &mut disk, &view, &key(42), ts(at, 0)).expect("a version");
+        assert_eq!((one.1, one.3), (ts(at, 0), document(42, at)));
+    }
+    for at in [1, VERSIONS / 2, VERSIONS - 1] {
+        let (rows, _) = cold_scan(&cfg, &mut disk, at);
+        assert!(rows.iter().enumerate().all(|(i, r)| r.3 == document(i as u64, at)), "at {at}");
+    }
+}
