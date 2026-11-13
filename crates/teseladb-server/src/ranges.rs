@@ -402,7 +402,14 @@ impl Replicas {
                 voters: role(ReplicaRole::Voter).map(|(n, _)| *n).collect(),
                 learners: role(ReplicaRole::Learner).map(|(n, _)| *n).collect(),
             };
-            if core.create_group(desc, CoreSm::Range(sm)).is_err() {
+            // A range a split cut from another says so to the core: on the node that leads the
+            // range it was cut from, its first leader takes no margin over the wall clock (005
+            // FR-005).
+            let created = match born {
+                Some(cut) => core.create_group_cut_from(desc, CoreSm::Range(sm), cut),
+                None => core.create_group(desc, CoreSm::Range(sm)),
+            };
+            if created.is_err() {
                 break;
             }
             self.hosting.0.add(d.group, self.core);

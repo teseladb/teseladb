@@ -7,7 +7,8 @@ mod common;
 
 use common::*;
 use teseladb_hlc::Hlc;
-use teseladb_multiraft::{CoreConfig, GroupDesc, NodeClock};
+use teseladb_multiraft::{CoreConfig, Durable, GroupDesc, GroupImport, MultiRaftCore, NodeClock};
+use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
 use teseladb_types::GroupId;
 
 const MARGIN: u64 = 250;
@@ -204,4 +205,199 @@ fn a_leader_cut_off_with_a_clock_ahead_leaves_the_cluster_time_alone() {
         let clock = clock_of(&clocks, n);
         assert!(clock.physical < wall + AHEAD_MS / 2, "{n:?} at {clock:?}, the wall at {wall}");
     }
+}
+
+/// A group of one voter next to `G` on the same core.
+const H: GroupId = GroupId(8);
+/// Ticks after which the wall clock is past a clock raised the margin above it.
+const PAST_THE_MARGIN: u32 = 40;
+
+/// Node 1 alone with its clock, ticked once: the only voter of the groups a test creates on it.
+fn alone() -> (Cluster, NodeClock) {
+    let clock = NodeClock::for_node(id(1));
+    let mut c = Cluster::with(0, cfg);
+    let mine = clock.clone();
+    c.add_node(1, |i| CoreConfig { clock: mine.clone(), ..cfg(i) });
+    c.ticks(1);
+    (c, clock)
+}
+
+fn cached() -> Appender {
+    Appender { cache_margin: Some(MARGIN), ..Appender::default() }
+}
+
+/// Group `g` as the log has it, for a core that opens it again.
+fn recovered(g: GroupId) -> GroupDesc {
+    GroupDesc { group: g, voters: vec![], learners: vec![] }
+}
+
+fn core_of(c: &mut Cluster) -> &mut MultiRaftCore<Appender> {
+    &mut c.nodes.get_mut(&id(1)).unwrap().core
+}
+
+/// Creates group `g` on node 1, its only voter, which leads it at once.
+fn lead_alone(c: &mut Cluster, g: GroupId) {
+    let desc = GroupDesc { group: g, voters: vec![id(1)], learners: vec![] };
+    core_of(c).create_group(desc, cached()).unwrap();
+    c.settle();
+}
+
+/// The minimum of the read cache of the term node 1 leads `g` in.
+fn minimum(c: &Cluster, g: GroupId) -> u64 {
+    c.nodes[&id(1)].core.lease_mark(g).expect("alone, it leads").physical + MARGIN
+}
+
+fn wall(c: &Cluster) -> u64 {
+    WALL0 + c.now.as_millis()
+}
+
+fn run_disk(core: &mut MultiRaftCore<Appender>, disk: &mut MemDisk, c: &Cluster) {
+    for _ in 0..10_000 {
+        let Some(op) = core.poll_io(c.now) else { return };
+        let d = disk.execute(op);
+        core.on_io_done(d, c.now);
+    }
+    panic!("the disk never empties");
+}
+
+/// Another core of node 1, with the node's clock, that imports `imp` of `G` and opens it: the
+/// minimum of the read cache of the term it wins.
+fn minimum_on_another_core(c: &Cluster, clock: &NodeClock, imp: GroupImport) -> u64 {
+    let mut disk = MemDisk::new();
+    let (store, _) = CoreStore::recover(&StorageConfig::default(), 1, &mut disk).unwrap();
+    let config = CoreConfig { core: 1, clock: clock.clone(), ..cfg(1) };
+    let mut core = MultiRaftCore::new(config, store, 9);
+    core.on_tick(c.now, wall(c));
+    core.import_group(G, imp).unwrap();
+    run_disk(&mut core, &mut disk, c);
+    assert_eq!(core.take_durable(), vec![Durable::Imported(G)]);
+    core.create_group(recovered(G), cached()).unwrap();
+    run_disk(&mut core, &mut disk, c);
+    core.lease_mark(G).expect("alone, it leads").physical + MARGIN
+}
+
+/// A replica that led the last term of its log wins the next one without the margin over its wall
+/// clock (005 FR-005, H-057 of the native tests): every read of its keys was this node's, at or
+/// below its clock. With the margin, each range of a node that was opened again took the node's
+/// clock 250 ms above its wall clock, and the reads of a transaction at a mark of that clock
+/// waited on every other range until the wall clock passed it.
+#[test]
+fn a_replica_that_led_the_last_term_of_its_log_wins_the_next_at_its_own_clock() {
+    let (mut c, clock) = alone();
+    lead_alone(&mut c, G);
+    assert!(minimum(&c, G) >= wall(&c) + MARGIN, "nothing says who read before its first term");
+    c.ticks(PAST_THE_MARGIN);
+    core_of(&mut c).close_group(G).unwrap();
+    core_of(&mut c).create_group(recovered(G), cached()).unwrap();
+    c.settle();
+    assert_eq!(c.nodes[&id(1)].core.status(G).unwrap().hard_state.term, 2);
+    assert!(
+        minimum(&c, G) <= wall(&c) + 1,
+        "its cache starts {} ms above its wall clock",
+        minimum(&c, G) - wall(&c)
+    );
+    assert!(clock.0.peek().physical <= wall(&c) + 1, "its clock stays at its wall clock");
+}
+
+/// After a restart nothing in memory says the node served the reads, and its clock starts over
+/// at its wall clock, which may be behind the marks it read at: it takes the margin (FR-005).
+#[test]
+fn a_replica_of_a_node_that_restarted_takes_the_margin_again() {
+    let (mut c, _clock) = alone();
+    lead_alone(&mut c, G);
+    c.ticks(PAST_THE_MARGIN);
+    c.restart(id(1));
+    c.ticks(1);
+    core_of(&mut c).create_group(recovered(G), cached()).unwrap();
+    c.settle();
+    assert_eq!(c.nodes[&id(1)].core.status(G).unwrap().hard_state.term, 2);
+    assert!(minimum(&c, G) >= wall(&c) + MARGIN, "the margin over its wall clock");
+}
+
+/// A replica handed over to another core of its node takes with it the term it led (FR-005):
+/// the reads were this node's whichever core served them, and the core that takes it wins the
+/// next term at the node's clock. A hand-over that says nothing of who led takes the margin.
+#[test]
+fn a_replica_that_changes_core_wins_its_next_term_at_the_clock_of_its_node() {
+    let (mut c, clock) = alone();
+    lead_alone(&mut c, G);
+    c.ticks(PAST_THE_MARGIN);
+    let imp = core_of(&mut c).export_group(G).unwrap();
+    assert_eq!(imp.led, Some(1), "the term it led goes with it");
+    let unknown = GroupImport { led: None, ..imp.clone() };
+    let own = minimum_on_another_core(&c, &clock, imp);
+    assert!(own <= wall(&c) + 1, "its cache starts {} ms above the wall clock", own - wall(&c));
+    let margin = minimum_on_another_core(&c, &clock, unknown);
+    assert!(margin >= wall(&c) + MARGIN, "the margin over its wall clock");
+}
+
+/// The half a split cut from a range takes its first term without the margin on the node that
+/// leads, in the term that proposed the cut, the range it was cut from (FR-005): until the cut
+/// the reads of its keys were that leader's. A cut of an earlier term of that range, or of a
+/// range this node does not have, says nothing of who read since.
+#[test]
+fn the_half_of_a_split_takes_its_first_term_at_the_clock_of_the_leader_that_cut_it() {
+    const BORN: GroupId = GroupId(20);
+    const OF_AN_OLD_CUT: GroupId = GroupId(21);
+    const OF_NOBODY: GroupId = GroupId(22);
+    let (mut c, _clock) = alone();
+    lead_alone(&mut c, G);
+    lead_alone(&mut c, H);
+    c.ticks(PAST_THE_MARGIN);
+    let born = |c: &mut Cluster, g: GroupId, parent: (GroupId, u64)| {
+        let desc = GroupDesc { group: g, voters: vec![id(1)], learners: vec![] };
+        core_of(c).create_group_cut_from(desc, cached(), parent).unwrap();
+        c.settle();
+        minimum(c, g)
+    };
+    // The last entry of `G` is of the term node 1 leads it in.
+    let cut = c.nodes[&id(1)].core.status(G).unwrap().hard_state.commit;
+    let own = born(&mut c, BORN, (G, cut));
+    assert!(own <= wall(&c) + 1, "its cache starts {} ms above the wall clock", own - wall(&c));
+    // `H` is opened again and node 1 leads another term of it: its entry is of the one before.
+    let old_cut = c.nodes[&id(1)].core.status(H).unwrap().hard_state.commit;
+    core_of(&mut c).close_group(H).unwrap();
+    core_of(&mut c).create_group(recovered(H), cached()).unwrap();
+    c.settle();
+    c.ticks(PAST_THE_MARGIN);
+    let old = born(&mut c, OF_AN_OLD_CUT, (H, old_cut));
+    assert!(old >= wall(&c) + MARGIN, "another leader may have read between the terms");
+    let nobody = born(&mut c, OF_NOBODY, (GroupId(999), 1));
+    assert!(nobody >= wall(&c) + MARGIN, "this node does not lead the range it was cut from");
+}
+
+/// A replica that led wins a later term after another node led one in between: that node read
+/// at its own clock, and the margin over the wall clock stands (FR-005). The entries of the term
+/// in between are in its log, above the last one of the term it led.
+#[test]
+fn a_replica_takes_the_margin_again_once_another_node_led_in_between() {
+    let (mut c, _clocks) = cluster();
+    let first = c.elect();
+    let mut leader = first;
+    let mut terms_of_others = 0;
+    let mut checked = false;
+    for _ in 0..50 {
+        // The leader is cut off until another voter wins a term.
+        c.isolate(leader);
+        let old = leader;
+        for _ in 0..1_000 {
+            c.tick();
+            if let Some(n) = c.leader().filter(|&n| n != old) {
+                leader = n;
+                break;
+            }
+        }
+        assert_ne!(leader, old, "another voter leads");
+        if leader == first {
+            // In the tick it won: its cache starts the margin above the wall clock it read then.
+            let lease = c.nodes[&first].core.lease_mark(G).expect("it leads again");
+            assert!(lease.physical >= wall(&c), "the margin over its wall clock");
+            checked = true;
+            break;
+        }
+        terms_of_others += 1;
+        c.heal();
+        c.ticks(5);
+    }
+    assert!(checked && terms_of_others > 0, "the first leader won again after another led");
 }

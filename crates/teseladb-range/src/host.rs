@@ -1501,11 +1501,18 @@ impl RangeHost {
     /// marks belong to the old state); the client retries. `true` if it changed.
     fn refresh<S: StateMachine>(&mut self, core: &MultiRaftCore<S>, g: GroupId) -> bool {
         let Some(st) = core.status(g) else { return false };
-        // The core raised the clock to the cache's minimum as the replica won the term.
+        // The core raised the clock to the cache's minimum as the replica won the term. A
+        // replica whose election the core has not seen yet (the only voter of a group that is
+        // still reading its snapshot leads at once) has no mark: the host follows its term once
+        // the core gives it one. A cache built before that started 250 ms above the clock, also
+        // for a replica that takes no margin (FR-005), and its writes carried the clock there.
         let now = Hlc { physical: self.cluster_ms(), logical: 0 };
-        let lease = core.lease_mark(g).unwrap_or(now);
+        let mark = core.lease_mark(g);
+        let cached = core.state_machine(g).is_some_and(|sm| sm.read_cache_margin_ms().is_some());
+        let leads = st.role == Role::Leader && (mark.is_some() || !cached);
+        let lease = mark.unwrap_or(now);
         let range = self.ranges.get_mut(&g).expect("a range of this host");
-        let term = (st.role == Role::Leader).then_some(st.hard_state.term);
+        let term = leads.then_some(st.hard_state.term);
         if range.leader.as_ref().map(|l| l.term) == term {
             return false;
         }

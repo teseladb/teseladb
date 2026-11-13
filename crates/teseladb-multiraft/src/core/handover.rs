@@ -10,7 +10,7 @@ use teseladb_raft::ConfState;
 use teseladb_raftlog::{HardState, LogEntry, SnapshotMeta};
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, NodeId};
 
-use super::{MultiRaftCore, Wait, wrap_snapshot};
+use super::{Led, MultiRaftCore, Wait, wrap_snapshot};
 use crate::error::OpError;
 use crate::frame::PeerFrame;
 use crate::log_store::{decode_conf, encode_conf};
@@ -32,6 +32,10 @@ pub struct GroupImport {
     pub state: Vec<u8>,
     /// The entries past `index`, committed or not.
     pub entries: Vec<LogEntry>,
+    /// The term this replica led when it was handed over, if it led: every read of the group's
+    /// keys was then its node's, and the core that takes it on the same node may win its next
+    /// term without the margin over its wall clock (005 FR-005).
+    pub led: Option<u64>,
 }
 
 /// A hand-over step that reached the disk.
@@ -77,6 +81,9 @@ impl<S: StateMachine> MultiRaftCore<S> {
         let conf = grp.raw.conf().clone();
         let state = wrap_snapshot(grp.last_mark.physical, &terms, &grp.sm.snapshot()).to_vec();
         self.close_group(g)?;
+        // What this node served of its reads goes with the replica. One that never led keeps
+        // nothing: its parent stays in this core.
+        let led = self.led.remove(&g).filter(|l| l.parent.is_none()).map(|l| l.term);
         let log = self.store.group(g).ok_or(OpError::GroupNotFound)?;
         let term = log.term(index).ok_or(OpError::Unavailable)?;
         let (hard, last) = (log.hard, log.last_index());
@@ -88,7 +95,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
                 .to_vec(),
             false => Vec::new(),
         };
-        Ok(GroupImport { conf, hard, index, term, state, entries })
+        Ok(GroupImport { conf, hard, index, term, state, entries, led })
     }
 
     /// Writes group `g` whole to this core's log from `imp`, without starting it:
@@ -112,6 +119,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
         let t = self.store.save_snapshot(g, meta, Bytes::from_vec(imp.state));
         let wait = Wait::Import { group: g, hard: imp.hard, entries: imp.entries };
         self.waits.insert(t.map_err(unavailable)?, wait);
+        // What its node served of its reads comes with the replica (005 FR-005).
+        match imp.led {
+            Some(term) => self.led.insert(g, Led { term, parent: None }),
+            None => self.led.remove(&g),
+        };
         Ok(())
     }
 

@@ -27,9 +27,27 @@ pub(crate) fn read_cache_minimum(
     Hlc { physical: after_lease.max(after_own).max(wall_ms + margin_ms), logical: 0 }
 }
 
+/// The minimum of the read cache of a replica that just won a term of a group whose reads this
+/// node served so far (005 FR-005): the millisecond after its own clock `own`, which holds every
+/// mark it read at. No previous leader read on another clock: nothing it heard gets a lease on
+/// top, and its wall clock gets no margin (`OwnLease` of `spec/tla/HlcLease.tla`).
+pub(crate) fn own_minimum(own: Hlc) -> Hlc {
+    Hlc { physical: own.physical + 1, logical: 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_that_served_every_read_starts_its_cache_right_after_its_own_clock() {
+        let own = Hlc { physical: 5_000, logical: 9 };
+        assert_eq!(own_minimum(own), Hlc { physical: 5_001, logical: 0 });
+        // Against the same clocks, a node that may not have served them all starts the margin
+        // above its wall clock and a lease above what it heard.
+        let other = read_cache_minimum(4_990, own, 5_000, (110, 250));
+        assert_eq!(other, Hlc { physical: 5_250, logical: 0 });
+    }
 
     const LEASE_MS: u64 = 110;
     const MARGIN_MS: u64 = 250;

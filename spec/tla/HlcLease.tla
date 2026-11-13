@@ -35,7 +35,9 @@
 (* no version appears later at or below t.                                                         *)
 EXTENDS Integers, FiniteSets, Sequences
 
-CONSTANTS N, MaxTime, LeaseTicks, MaxWrites, MaxReads, Window, Back, SingleJumps, MaxJumps
+CONSTANTS N, MaxTime, LeaseTicks, MaxWrites, MaxReads, Window, Back, SingleJumps, MaxJumps,
+          OwnLease  \* who takes the lease at the tick after its own clock: "previous", the node
+                    \* that held it last (FR-005); "nobody"; or "anyone", which is unsafe
 
 Node == 1..N
 
@@ -114,12 +116,19 @@ Tick ==
 \* the code, the millisecond a lease above it: both clocks are read in whole milliseconds). Its clock
 \* goes to the cache's minimum, and the rounds of its lease carry that clock to its voters. Raft
 \* gives it the group's last entry.
+\* The node that held the lease last takes it at the tick after its own clock, without the margin
+\* over its wall clock nor a lease over what its own rounds carried (FR-005): since it took the
+\* lease before, every read was its own, at or below its clock, and what earlier holders read is
+\* below the cache it started then. No other node took the lease in between: `holder` is still it.
 Acquire(n) ==
     /\ InMargin(n)
     /\ holder = 0 \/ leaseEnd < now
     /\ LET heard == Max2(IF last[2] = n THEN <<0, 0>> ELSE last, carried)
-           f == Max2(Max2(<<heard[1] + LeaseTicks + 1, 0>>, <<hlc[n][1] + 1, 0>>),
-                     <<Phys(n) + 2, 0>>)
+           own == (OwnLease = "previous" /\ holder = n) \/ OwnLease = "anyone"
+           f == IF own
+                THEN <<hlc[n][1] + 1, 0>>
+                ELSE Max2(Max2(<<heard[1] + LeaseTicks + 1, 0>>, <<hlc[n][1] + 1, 0>>),
+                          <<Phys(n) + 2, 0>>)
        IN /\ hlc' = [hlc EXCEPT ![n] = f]
           /\ floor' = f
           /\ carried' = f
@@ -206,10 +215,11 @@ Spec == Init /\ [][Next]_vars
 
 \* What TLC tells states apart by: a node's aside time and the lease end only matter while they are
 \* ahead (every earlier value behaves the same from now on), and once the lease ended no action
-\* reads its holder or its read cache until the next one takes the lease.
+\* reads its read cache until the next one takes the lease. Who held it last still matters to the
+\* node that takes it again.
 View == LET over == leaseEnd < now
         IN <<now, off, [n \in Node |-> IF aside[n] < now THEN 0 ELSE aside[n]], peak, hlc,
-             IF over THEN 0 ELSE holder, IF over THEN 0 ELSE leaseEnd, IF over THEN Zero ELSE floor,
+             holder, IF over THEN 0 ELSE leaseEnd, IF over THEN Zero ELSE floor,
              carried, last, versions, reads, writes, lost, jumps>>
 
 \* Every write that commits leaves its own version: no two writes share a mark (FR-025, D-003).

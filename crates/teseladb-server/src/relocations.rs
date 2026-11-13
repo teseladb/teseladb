@@ -664,6 +664,9 @@ mod tests {
     use teseladb_lsm::{EntryWrite, Kind, Lookup, LsmConfig};
     use teseladb_meta::group0::{RangeDesc, ReplicaRole};
     use teseladb_multiraft::{CoreConfig, NodeClock};
+    use teseladb_range::ack::{W, WriteConcern};
+    use teseladb_range::host::DeleteReq;
+    use teseladb_range::tscache::LEASE_MARGIN_MS;
     use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
     use teseladb_types::NodeId;
 
@@ -713,16 +716,32 @@ mod tests {
     }
 
     impl Core {
-        fn start(id: u16, mut disk: MemDisk, hosting: &Hosting) -> Core {
+        fn start(id: u16, disk: MemDisk, hosting: &Hosting) -> Core {
+            Core::start_with(id, disk, hosting, None)
+        }
+
+        /// A core with the clock of its node, `clock`, as the cores of a node have it, or with
+        /// clocks of its own.
+        fn start_with(
+            id: u16,
+            mut disk: MemDisk,
+            hosting: &Hosting,
+            clock: Option<&NodeClock>,
+        ) -> Core {
             let (store, _) = CoreStore::recover(&StorageConfig::default(), id, &mut disk).unwrap();
             for g in store.group_ids() {
                 hosting.add(g, id);
             }
-            let core = MultiRaftCore::new(CoreConfig::new(ME, id), store, u64::from(id) + 1);
+            let cfg = match clock {
+                Some(c) => CoreConfig { clock: c.clone(), ..CoreConfig::new(ME, id) },
+                None => CoreConfig::new(ME, id),
+            };
+            let core = MultiRaftCore::new(cfg, store, u64::from(id) + 1);
             let lcfg =
                 LsmConfig { dir: format!("core-{id:02}/lsm").into(), ..LsmConfig::default() };
             let lsm = Rc::new(RefCell::new(Lsm::recover(&lcfg, &mut disk).unwrap().0));
-            let host = RangeHost::new(lsm.clone(), NodeClock::for_node(ME));
+            let host_clock = clock.cloned().unwrap_or_else(|| NodeClock::for_node(ME));
+            let host = RangeHost::new(lsm.clone(), host_clock);
             let mut r = Replicas::new(ME, id, 1 << 30);
             r.set_hosting(hosting.clone());
             let dir = PathBuf::from(format!("core-{id:02}/relocate"));
@@ -809,8 +828,13 @@ mod tests {
 
     impl Node {
         fn new() -> Node {
+            Node::over(None)
+        }
+
+        /// A node whose two cores share `clock`, if given.
+        fn over(clock: Option<&NodeClock>) -> Node {
             let hosting = Hosting::default();
-            let cores = [0, 1].map(|id| Core::start(id, MemDisk::new(), &hosting));
+            let cores = [0, 1].map(|id| Core::start_with(id, MemDisk::new(), &hosting, clock));
             let mut n = Node { cores, hosting, now: Nanos::ZERO, hold_back: false };
             n.set(&BTreeMap::new());
             n.run_until(|n| n.leads(0), &mut [Fault::None; 2]);
@@ -880,6 +904,50 @@ mod tests {
         n.relocate(&mut [Fault::None; 2]);
         // The leader of the old core asks for nothing more.
         assert!(n.cores[0].group0.is_empty());
+    }
+
+    /// A range that changes core leads on its new core at the clock of its node (005 FR-005,
+    /// H-057 of the native tests): the core that hands it over says which term it led, and the
+    /// reads of its keys were this node's whichever core served them. Taking the margin over
+    /// the wall clock again, every core change left the node's clock 250 ms ahead, and the reads
+    /// of a transaction at a mark of that clock waited for the wall clock on every other range.
+    /// The host follows the term once the core saw the replica win it: the only voter of a
+    /// group leads while the group still reads its snapshot, and a read cache built then
+    /// started 250 ms above the clock whatever the core decided later.
+    #[test]
+    fn a_range_that_changes_core_leads_on_its_new_core_at_the_clock_of_its_node() {
+        /// Turns after which the wall clock is past the clock the first election raised.
+        const PAST_THE_MARGIN: usize = 60;
+        let clock = NodeClock::for_node(ME);
+        let mut n = Node::over(Some(&clock));
+        for _ in 0..PAST_THE_MARGIN {
+            n.turn(&mut [Fault::None; 2]);
+        }
+        n.set(&BTreeMap::from([(G, (1, 7))]));
+        n.run_until(|n| n.cores[1].core.lease_mark(G).is_some(), &mut [Fault::None; 2]);
+        let wall = n.now.0 / 1_000_000;
+        let lease = n.cores[1].core.lease_mark(G).expect("core 1 leads it");
+        let minimum = lease.physical + LEASE_MARGIN_MS;
+        assert!(minimum <= wall + 1, "its cache starts {} ms above the wall clock", minimum - wall);
+        // A write takes its mark above the host's read cache: at the wall clock too. The host
+        // refuses it until it follows the term.
+        let mut proposed = None;
+        for _ in 0..20 {
+            n.turn(&mut [Fault::None; 2]);
+            let (now, wall) = (n.now, n.now.0 / 1_000_000);
+            let c = &mut n.cores[1];
+            let wc = WriteConcern { w: W::Majority, j: true };
+            let req = DeleteReq { g: G, key: KEY.to_vec(), dedup: None, wc };
+            let id = c.host.delete(&mut c.core, req, now, wall);
+            if let Some((mark, _)) = c.host.proposed(id) {
+                proposed = Some((mark, wall));
+                break;
+            }
+            c.host.take_replies();
+        }
+        let (mark, wall) = proposed.expect("core 1 proposes the write");
+        assert!(mark.physical <= wall + 1, "a write went {} ms ahead", mark.physical - wall);
+        assert!(clock.0.peek().physical <= wall + 1, "the node's clock stays at its wall clock");
     }
 
     #[test]
@@ -972,6 +1040,7 @@ mod tests {
             term: 0,
             state: Vec::new(),
             entries: Vec::new(),
+            led: None,
         };
         let h = Handover { group: G, from: 1, imp, intervals: Vec::new(), files: Vec::new() };
         c.rel.on_message(&mut c.core, &mut c.r, &c.lsm, RelocateMsg::Handover(Box::new(h)));
@@ -987,6 +1056,7 @@ mod tests {
             term: 0,
             state: Vec::new(),
             entries: Vec::new(),
+            led: None,
         };
         Box::new(Handover { group: g, from: 0, imp, intervals: vec![(vec![1], vec![4])], files })
     }

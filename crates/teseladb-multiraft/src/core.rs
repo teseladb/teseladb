@@ -23,7 +23,7 @@ use crate::error::OpError;
 use crate::frame::{
     GroupHeartbeat, PeerFrame, coalesce, expand_heartbeat_resps, expand_heartbeats,
 };
-use crate::lease_clock::read_cache_minimum;
+use crate::lease_clock::{own_minimum, read_cache_minimum};
 use crate::log_store::{
     GroupStore, decode_conf, encode_conf, hs_from_store, hs_to_store, to_store,
 };
@@ -388,12 +388,26 @@ const NEEDS_SNAPSHOT_EVERY: Nanos = Nanos::from_millis(100);
 /// Stray frames kept for the layer above at most: one that never takes them keeps no more.
 const MAX_STRAYS: usize = 256;
 
+/// What this node served of a group's reads (005 FR-005).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Led {
+    /// The term of the last entry of the group's log while every read of its keys was this
+    /// node's.
+    term: u64,
+    /// For a group that has led nothing yet, the group a split cut it from and the index of the
+    /// cut in that group's log.
+    parent: Option<(GroupId, u64)>,
+}
+
 /// Multi-Raft facade of one core.
 pub struct MultiRaftCore<S: StateMachine> {
     cfg: CoreConfig,
     store: CoreStore,
     rng: Rng,
     groups: BTreeMap<GroupId, Group<S>>,
+    /// What this node served of each group's reads, in this process (005 FR-005). It outlives a
+    /// group that is closed and opened again, and comes with one handed over from another core.
+    led: BTreeMap<GroupId, Led>,
     ops: BTreeMap<OpId, Op>,
     next_op: u64,
     next_ctx: u64,
@@ -482,6 +496,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             waits: BTreeMap::new(),
             loads: BTreeMap::new(),
             outbox: Vec::new(),
+            led: BTreeMap::new(),
             read_rounds: BTreeSet::new(),
             hold_read_rounds: false,
             frames: Vec::new(),
@@ -541,6 +556,28 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
         self.open_group(g, sm);
         Ok(())
+    }
+
+    /// [`MultiRaftCore::create_group`] for a new group whose keys a split cut from group `parent`
+    /// with the entry at `cut` of its log (005 FR-005). While this node leads the term that
+    /// proposed the cut, the reads of those keys were its own: the group's first leader here
+    /// takes its term without the margin over its wall clock.
+    pub fn create_group_cut_from(
+        &mut self,
+        desc: GroupDesc,
+        sm: S,
+        (parent, cut): (GroupId, u64),
+    ) -> Result<(), OpError> {
+        let g = desc.group;
+        let new = !self.groups.contains_key(&g) && self.store.group(g).is_none();
+        if new {
+            self.led.insert(g, Led { term: 0, parent: Some((parent, cut)) });
+        }
+        let created = self.create_group(desc, sm);
+        if new && created.is_err() {
+            self.led.remove(&g);
+        }
+        created
     }
 
     fn raft_cfg(&self) -> RaftConfig {
@@ -614,6 +651,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// deletion, or `None` if the store refused it (the core stopped).
     fn forget_group(&mut self, g: GroupId) -> Option<Ticket> {
         let ticket = self.store.delete_group(g).ok();
+        self.led.remove(&g);
         self.received.remove(&g);
         self.snapshot_reqs.remove(&g);
         self.installing_from.remove(&g);
@@ -1599,14 +1637,22 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// term). The node's own raises get no lease on top: the halves of several splits elected
     /// together stacked one each (H-013 of the native tests).
     fn raise_to_read_cache(&mut self, g: GroupId) {
+        let own = self.reads_were_own(g);
         let grp = self.groups.get_mut(&g).expect("group");
         let Some(margin) = grp.sm.read_cache_margin_ms() else { return };
         let clock = &self.cfg.clock.0;
         let lease_ms = self.cfg.raft.lease_dur.0.div_ceil(1_000_000);
-        let minimum =
-            read_cache_minimum(clock.heard_ms(), clock.peek(), self.wall_ms, (lease_ms, margin));
+        // A replica whose node served every read of the group's keys so far has no other clock
+        // to cover (FR-005): the margin and the lease are for a previous leader on another node.
+        let minimum = match own {
+            true => own_minimum(clock.peek()),
+            false => {
+                let heard = clock.heard_ms();
+                read_cache_minimum(heard, clock.peek(), self.wall_ms, (lease_ms, margin))
+            }
+        };
         // The read cache starts at the lease mark plus the margin: at the minimum.
-        let lease = Hlc { physical: minimum.physical - margin, logical: 0 };
+        let lease = Hlc { physical: minimum.physical.saturating_sub(margin), logical: 0 };
         // Faulty variant (005 T017): the clock stays where it was; with the write's read floor
         // gone too (see `RangeHost::propose`), nothing keeps the new leader's writes above the
         // reads the previous one served.
@@ -1614,6 +1660,41 @@ impl<S: StateMachine> MultiRaftCore<S> {
         clock.update(minimum);
         let term = grp.raw.status(&GroupStore::new(&self.store, g)).hard_state.term;
         grp.lease_mark = Some((term, lease));
+        // From now on the reads of its keys are this node's, while its log ends in this term.
+        self.led.insert(g, Led { term, parent: None });
+    }
+
+    /// Whether this node served, in this process, every read of the keys of `g` so far, as its
+    /// replica wins a term (005 FR-005). The last entry its log has from before that term is of
+    /// the term until which that held: no other replica led in between, since a leader reads
+    /// only once it committed an entry of its term, and the log of a later leader holds every
+    /// committed entry. A group that a split cut from another has led nothing yet: its reads
+    /// were its parent's, and this node's while it still leads, with its lease, the term that
+    /// proposed the cut.
+    fn reads_were_own(&self, g: GroupId) -> bool {
+        let (Some(led), Some(grp), Some(log)) =
+            (self.led.get(&g), self.groups.get(&g), self.store.group(g))
+        else {
+            return false;
+        };
+        let term = grp.raw.status(&GroupStore::new(&self.store, g)).hard_state.term;
+        // The entries of the term it just won are its own; under them, the snapshot's term
+        // stands for what the log no longer holds.
+        let mut at = log.last_index();
+        while at > log.snapshot_index && log.term(at) == Some(term) {
+            at -= 1;
+        }
+        let last = log.term(at);
+        let parent_led = led.parent.is_none_or(|(p, cut)| {
+            let (Some(pg), Some(plog)) = (self.groups.get(&p), self.store.group(p)) else {
+                return false;
+            };
+            let st = pg.raw.status(&GroupStore::new(&self.store, p));
+            st.role == Role::Leader
+                && pg.raw.can_lease_read(self.now)
+                && plog.term(cut) == Some(st.hard_state.term)
+        });
+        last == Some(led.term) && parent_led
     }
 
     /// While this node leads a group with a read cache, its clock is at least its wall clock, so
