@@ -17,11 +17,13 @@
 //! Each document is a register of unique tags; the history goes to the progress, durability and
 //! linearizability checkers.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use teseladb_keys::Hlc;
-use teseladb_lsm::{FileRef, LsmError};
+use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{Done, GroupDesc, OpError, OpId, StateMachine};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Put;
@@ -31,7 +33,7 @@ use teseladb_range::host::{
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_range::snapshot::{Assembler, local_interval, split, write_ops};
+use teseladb_range::snapshot::{Assembler, local_interval, split};
 use teseladb_raftlog::{Completions, Disk, FileId, IoDone, IoOp, SimDisk};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -39,6 +41,7 @@ use crate::checkers::{Violation, durability, linearizable, liveness};
 use crate::history::{History, OpKind, OpRecord, OpResult};
 use crate::node::{NodeOutput, NodeSm, SmKind};
 use crate::workloads::Workload;
+use crate::workloads::carry;
 use crate::world::{Event, World};
 
 /// The first range: it starts the space, so no merge ever absorbs it.
@@ -192,6 +195,8 @@ pub struct MultiRangeWorkload {
     /// Snapshots waiting for a source.
     waiting: BTreeMap<(u32, GroupId), u64>,
     attempt: u64,
+    /// Whole files the snapshots linked (004 FR-033).
+    pub linked: u64,
     /// Splits and merges completed, merges given up.
     pub done: (u64, u64, u64),
     /// Times a split and a merge were in progress at once (`split-merge`).
@@ -247,6 +252,7 @@ impl MultiRangeWorkload {
             transfers: BTreeMap::new(),
             waiting: BTreeMap::new(),
             attempt: 0,
+            linked: 0,
             done: (0, 0, 0),
             overlaps: 0,
             overlapping: false,
@@ -904,9 +910,8 @@ impl MultiRangeWorkload {
             let (local_start, local_end) = local_interval(g);
             self.attempt += 1;
             let dir = format!("export-n{node}-g{}-0-{}", g.0, self.attempt);
-            let local =
-                lsm.borrow_mut().export(&local_start, &local_end, NEWEST, dir.clone().into());
-            let data = lsm.borrow_mut().export(&start, &end, NEWEST, dir.clone().into());
+            let (local, data) =
+                export(&lsm, self.attempt, (&local_start, &local_end), (&start, &end), &dir);
             let t = Transfer::Exporting { source, exports: vec![local, data], files: vec![], dir };
             self.transfers.insert((node, g), (0, (start, end), t));
             w.pump(source, core);
@@ -1005,9 +1010,8 @@ impl MultiRangeWorkload {
             let (local_start, local_end) = local_interval(g);
             self.attempt += 1;
             let dir = format!("export-n{node}-g{}-{index}-{}", g.0, self.attempt);
-            let local =
-                lsm.borrow_mut().export(&local_start, &local_end, NEWEST, dir.clone().into());
-            let data = lsm.borrow_mut().export(&start, &end, NEWEST, dir.clone().into());
+            let (local, data) =
+                export(&lsm, self.attempt, (&local_start, &local_end), (&start, &end), &dir);
             let t = Transfer::Exporting { source, exports: vec![local, data], files: vec![], dir };
             self.transfers.insert((node, g), (index, (start, end), t));
             w.pump(source, core);
@@ -1042,10 +1046,10 @@ impl MultiRangeWorkload {
                     Some(Transfer::Exporting { source, exports, files, dir })
                 } else {
                     let disk = &mut w.nodes[source as usize].cores[cu].disk;
-                    let bytes: Vec<Vec<u8>> = files
-                        .iter()
-                        .map(|f| disk.read_all(&f.path).expect("an exported file"))
-                        .collect();
+                    // The linked files go beside the snapshot's chunks, which carry the written
+                    // ones (004 FR-033).
+                    let (bytes, linked) = carry::read(disk, &files);
+                    self.linked += linked.len() as u64;
                     remove_tree(disk, &dir);
                     let mut asm = Assembler::new(g, index);
                     let mut whole = None;
@@ -1055,8 +1059,9 @@ impl MultiRangeWorkload {
                     let c = &mut w.nodes[node as usize].cores[cu];
                     self.attempt += 1;
                     let dir = format!("incoming-g{}-{index}-{}", g.0, self.attempt);
+                    let whole = whole.expect("whole");
                     let (ops, refs) =
-                        write_ops(&whole.expect("whole"), Path::new(&dir), FileId(INCOMING_FILES));
+                        carry::write(&whole, &linked, Path::new(&dir), FileId(INCOMING_FILES));
                     // A write that fails (a full disk) leaves a damaged file: as the server
                     // does, the files go and the replica asks again.
                     let done: Vec<IoDone> = ops.into_iter().map(|op| c.disk.execute(op)).collect();
@@ -1212,6 +1217,23 @@ pub(crate) fn record_answer(
         }
     }
     rec.complete = Some(now);
+}
+
+/// Exports a range's local and data intervals from `lsm` into `dir`, every other attempt
+/// linking the files that go whole (004 FR-033): the ingestion meets both kinds of export.
+fn export(
+    lsm: &Rc<RefCell<Lsm>>,
+    attempt: u64,
+    (local_start, local_end): (&[u8], &[u8]),
+    (start, end): (&[u8], &[u8]),
+    dir: &str,
+) -> (u64, u64) {
+    let mut lsm = lsm.borrow_mut();
+    let mut one = |s: &[u8], e: &[u8]| match carry::links(attempt) {
+        true => lsm.export_linked(s, e, NEWEST, dir.into()),
+        false => lsm.export(s, e, NEWEST, dir.into()),
+    };
+    (one(local_start, local_end), one(start, end))
 }
 
 pub(crate) fn remove_tree(disk: &mut SimDisk, dir: &str) {

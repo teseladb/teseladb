@@ -41,7 +41,6 @@ use teseladb_range::command::Command;
 use teseladb_range::host::{RangeHost, ReqId, WriteReq};
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_range::snapshot::write_ops;
 use teseladb_raft::Role;
 use teseladb_raftlog::{Completions, Disk, FileId, IoDone};
 use teseladb_types::{GroupId, Nanos, NodeId};
@@ -50,6 +49,7 @@ use crate::checkers::{Violation, durability, linearizable, liveness};
 use crate::history::{History, OpKind, OpRecord, OpResult};
 use crate::node::{NodeOutput, NodeSm};
 use crate::workloads::Workload;
+use crate::workloads::carry::{self, Carried};
 use crate::workloads::data_ship::Shipper;
 use crate::workloads::multirange::{SetTag, as_range, doc, key_name, record_answer, remove_tree};
 use crate::world::{Event, World};
@@ -74,7 +74,7 @@ enum Move {
     /// The old core exports the range's intervals; `at` is the index its copy had applied then.
     Exporting { jobs: Vec<u64>, files: Vec<FileRef>, dir: String, at: u64 },
     /// The target core removes a copy imported before a restart and never started.
-    Dropping { imp: GroupImport, bytes: Vec<Vec<u8>> },
+    Dropping { imp: GroupImport, files: (Vec<Vec<u8>>, Vec<Carried>) },
     /// The target core empties what its LSM kept of the range.
     Clearing { imp: GroupImport, refs: Vec<FileRef>, job: u64 },
     /// The target core ingests the files.
@@ -120,6 +120,8 @@ pub struct RelocateWorkload {
     pub ahead_done: u64,
     /// Replicas that went on applying and stopped on their own, because they did not lead.
     pub cut_alone: u64,
+    /// Whole files the hand-overs linked (004 FR-033).
+    pub linked: u64,
     /// The range was created on every node: a replica created later gets it as a snapshot.
     born: bool,
 }
@@ -155,6 +157,7 @@ impl RelocateWorkload {
             done: 0,
             ahead_done: 0,
             cut_alone: 0,
+            linked: 0,
             born: false,
         }
     }
@@ -522,9 +525,15 @@ impl RelocateWorkload {
         let Some(lsm) = Self::lsm(w, node, from) else { return };
         self.attempt += 1;
         let dir = format!("handover-n{node}-{}", self.attempt);
+        // Every other attempt hands whole files over as links, as between the cores of a node on
+        // one file system (004 FR-033); the rest exports every file, as to another node.
+        let link = carry::links(self.attempt);
         let jobs = intervals
             .iter()
-            .map(|(s, e)| lsm.borrow_mut().export(s, e, upto, dir.clone().into()))
+            .map(|(s, e)| match link {
+                true => lsm.borrow_mut().export_linked(s, e, upto, dir.clone().into()),
+                false => lsm.borrow_mut().export(s, e, upto, dir.clone().into()),
+            })
             .collect();
         self.moves.insert(node, (from, to, Move::Exporting { jobs, files: vec![], dir, at }));
         w.pump(node, from);
@@ -577,15 +586,15 @@ impl RelocateWorkload {
                     self.hand(w, node, (from, to), (files, dir, at))
                 }
             }
-            Move::Dropping { imp, bytes } => {
+            Move::Dropping { imp, files } => {
                 if self.took(node, to, Durable::Removed(G)) {
                     let lsm = Self::lsm(w, node, to).expect("open");
                     let job = lsm.borrow_mut().clear_range(G, Self::intervals());
-                    let refs = self.write(w, node, to, &bytes);
+                    let refs = self.write(w, node, to, &files);
                     w.pump(node, to);
                     refs.map(|refs| Move::Clearing { imp, refs, job })
                 } else {
-                    Some(Move::Dropping { imp, bytes })
+                    Some(Move::Dropping { imp, files })
                 }
             }
             Move::Clearing { imp, refs, job } => {
@@ -707,17 +716,17 @@ impl RelocateWorkload {
         }
         w.settle(node, from);
         let disk = &mut w.nodes[node as usize].cores[from as usize].disk;
-        let bytes: Vec<Vec<u8>> =
-            files.iter().map(|f| disk.read_all(&f.path).expect("an exported file")).collect();
+        let carried = carry::read(disk, &files);
+        self.linked += carried.1.len() as u64;
         remove_tree(disk, &dir);
         let target = w.cluster_core(node, to).expect("powered on and not frozen");
         if target.store().group(G).is_some() {
             // A copy imported before a restart and never started: it goes first.
             let r = target.retire_group(G);
             w.settle(node, to);
-            return r.ok().map(|()| Move::Dropping { imp, bytes });
+            return r.ok().map(|()| Move::Dropping { imp, files: carried });
         }
-        let refs = self.write(w, node, to, &bytes)?;
+        let refs = self.write(w, node, to, &carried)?;
         let lsm = Self::lsm(w, node, to).expect("open");
         if lsm.borrow().flushed_index(G) > 0 {
             let job = lsm.borrow_mut().clear_range(G, Self::intervals());
@@ -733,12 +742,12 @@ impl RelocateWorkload {
         w: &mut World,
         node: u32,
         to: u16,
-        bytes: &[Vec<u8>],
+        (written, linked): &(Vec<Vec<u8>>, Vec<Carried>),
     ) -> Option<Vec<FileRef>> {
         self.attempt += 1;
         let dir = format!("incoming-handover-{}", self.attempt);
         let c = &mut w.nodes[node as usize].cores[to as usize];
-        let (ops, refs) = write_ops(bytes, Path::new(&dir), FileId(HANDOVER_FILES));
+        let (ops, refs) = carry::write(written, linked, Path::new(&dir), FileId(HANDOVER_FILES));
         let done: Vec<IoDone> = ops.into_iter().map(|op| c.disk.execute(op)).collect();
         if done.iter().any(|d| matches!(d, IoDone::Err { .. })) {
             remove_tree(&mut c.disk, &dir);
@@ -888,6 +897,7 @@ mod tests {
         assert!(wl.done >= 4, "{} core changes", wl.done);
         assert!(wl.ahead_done >= wl.done, "{} of {}", wl.ahead_done, wl.done);
         assert!(wl.cut_alone > 0, "a replica that does not lead stops on its own");
+        assert!(wl.linked > 0, "no hand-over linked a whole file (004 FR-033)");
         assert!(wl.finish(&mut w).is_ok());
     }
 
