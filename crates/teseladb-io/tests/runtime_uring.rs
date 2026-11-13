@@ -85,10 +85,21 @@ fn threads_named(name: &str) -> usize {
 
 #[test]
 fn the_core_drives_its_disk_through_its_own_ring() {
-    let root = std::env::temp_dir().join(format!("teseladb-rt-uring-{}", std::process::id()));
+    drives_its_disk(false);
+}
+
+#[test]
+fn the_core_drives_its_disk_through_a_ring_its_kernel_thread_polls() {
+    // 012 FR-025.
+    drives_its_disk(true);
+}
+
+fn drives_its_disk(sqpoll: bool) {
+    let root =
+        std::env::temp_dir().join(format!("teseladb-rt-uring-{sqpoll}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let choice = choose(IoExecutor::Uring, DirectIo::Auto, &std::env::temp_dir()).unwrap();
-    assert!(choice.uring && choice.direct, "{choice}");
+    let choice = choose(IoExecutor::Uring, DirectIo::Auto, sqpoll, &std::env::temp_dir()).unwrap();
+    assert!(choice.uring && choice.direct && choice.sqpoll == sqpoll, "{choice}");
     let disk = NodeDisk::open(&root, &choice).unwrap();
     let file = FileId(1);
     let mut io = vec![IoOp::Create { file, path: PathBuf::from("wal/1"), prealloc: 1 << 20 }];

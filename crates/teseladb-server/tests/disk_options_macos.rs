@@ -27,4 +27,8 @@ fn io_uring_and_o_direct_are_refused_with_the_reason() {
     let (code, err) = start_with("direct", &["--direct-io", "on"]);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("--direct-io on: the file system"), "{err}");
+    // 012 FR-025: without io_uring there is no ring to poll.
+    let (code, err) = start_with("sqpoll", &["--io-uring-sqpoll"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("--io-uring-sqpoll: the cores do not use io_uring"), "{err}");
 }

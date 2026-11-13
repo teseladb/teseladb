@@ -29,6 +29,6 @@ pub fn from_env() -> IoExecutor {
 pub fn open(dir: impl AsRef<Path>, exec: IoExecutor) -> NodeDisk {
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir).unwrap();
-    let choice = choose(exec, DirectIo::Auto, dir).unwrap();
+    let choice = choose(exec, DirectIo::Auto, false, dir).unwrap();
     NodeDisk::open(dir, &choice).unwrap()
 }

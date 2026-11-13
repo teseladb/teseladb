@@ -278,19 +278,30 @@ impl IoUringDisk {
     /// Disk rooted at `root` (created if it does not exist), with its own ring, its reserve of
     /// registered buffers and, with `direct_io`, `O_DIRECT` for whole-block accesses.
     pub fn open(root: impl Into<PathBuf>, direct_io: bool) -> io::Result<IoUringDisk> {
-        IoUringDisk::open_with(root, direct_io, FILE_SLOTS)
+        IoUringDisk::open_with(root, direct_io, FILE_SLOTS, false)
     }
 
-    /// [`IoUringDisk::open`] with `file_slots` slots in the registered file table: the files
-    /// opened beyond them use their plain descriptor.
+    /// [`IoUringDisk::open`] with, if `sqpoll`, a kernel thread that polls the ring's
+    /// submissions (`--io-uring-sqpoll`, 012 FR-025).
+    pub fn open_polled(
+        root: impl Into<PathBuf>,
+        direct_io: bool,
+        sqpoll: bool,
+    ) -> io::Result<IoUringDisk> {
+        IoUringDisk::open_with(root, direct_io, FILE_SLOTS, sqpoll)
+    }
+
+    /// [`IoUringDisk::open_polled`] with `file_slots` slots in the registered file table: the
+    /// files opened beyond them use their plain descriptor.
     pub fn open_with(
         root: impl Into<PathBuf>,
         direct_io: bool,
         file_slots: u32,
+        sqpoll: bool,
     ) -> io::Result<IoUringDisk> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        let mut ring = Ring::new(RING_ENTRIES)?;
+        let mut ring = Ring::with_sqpoll(RING_ENTRIES, sqpoll)?;
         let probe = ring.probe()?;
         missing_ops(&probe).map_err(io::Error::other)?;
         ring.register_files(file_slots)?;
@@ -934,7 +945,7 @@ mod tests {
     #[test]
     fn files_past_the_registered_table_use_their_descriptor() {
         let root = temp("slots");
-        let mut d = IoUringDisk::open_with(&root, false, 1).unwrap();
+        let mut d = IoUringDisk::open_with(&root, false, 1, false).unwrap();
         assert_eq!((d.root(), d.direct_io()), (root.as_path(), false));
         for f in 1..=2 {
             ok(&mut d, IoOp::Create { file: FileId(f), path: format!("f{f}").into(), prealloc: 0 });
@@ -1078,6 +1089,32 @@ mod tests {
             assert_eq!(fs::metadata(root.join("data")).unwrap().len(), 16 * 4096);
             fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn a_polled_ring_writes_syncs_and_reads_like_the_plain_one() {
+        // 012 FR-025.
+        let root = temp("sqpoll");
+        let mut d = IoUringDisk::open_polled(&root, false, true).unwrap();
+        assert!(d.ring.sqpoll());
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 0 });
+        for i in 0..64u64 {
+            let data = Bytes::from_vec(vec![i as u8; 4096]);
+            d.submit(IoOp::WriteAt { file: FileId(1), offset: i * 4096, data, batch: i });
+        }
+        d.submit(IoOp::Sync { file: FileId(1), batch: 64 });
+        d.flush().unwrap();
+        let mut got = Vec::new();
+        while got.len() < 65 {
+            if d.running.iter().any(|j| j.waiting.is_some()) {
+                d.ring.submit(1).unwrap();
+            }
+            d.reap(&mut got).unwrap();
+        }
+        assert!(got.iter().all(|(r, _)| matches!(r, IoDone::Ok(_))), "{got:?}");
+        let r = d.execute(IoOp::ReadAt { file: FileId(1), offset: 63 * 4096, len: 4096, token: 2 });
+        assert_eq!(r, IoDone::Read { token: 2, data: Ok(Bytes::from_vec(vec![63; 4096])) });
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

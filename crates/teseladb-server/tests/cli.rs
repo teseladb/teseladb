@@ -70,6 +70,9 @@ fn every_start_option_in_both_forms() {
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 7]));
     assert_eq!(start("start --insecure --io-executor threads").io_executor, IoExecutor::Threads);
     assert_eq!(start("start --insecure --direct-io on").direct_io, DirectIo::On);
+    // 012 FR-025: off unless asked for.
+    assert!(!start("start --insecure").io_uring_sqpoll);
+    assert!(start("start --insecure --io-uring-sqpoll").io_uring_sqpoll);
     assert!(bad("start --insecure --io-executor fast").starts_with("--io-executor: "));
     assert!(bad("start --insecure --direct-io yes").starts_with("--direct-io: "));
     assert!(bad("start --insecure --cpu-list 3-1").starts_with("--cpu-list: "));
