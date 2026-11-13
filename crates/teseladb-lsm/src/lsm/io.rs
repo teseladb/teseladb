@@ -74,14 +74,19 @@ impl Lsm {
                 let Some(job) = job else { return Polled::Idle };
                 self.bg_job = Some(job);
             }
+            // The compactions the embedder asked for run now, and so does the one they wait
+            // behind (007 FR-018).
+            let asked = !self.manual.is_empty() || !self.manual_compacting.is_empty();
             let next = match self.bg_job.as_mut().expect("scheduled") {
                 Job::Delete(s) | Job::Rotate(s) | Job::Reset(s) => s.next(),
                 Job::Ingest(j) => j.next(&mut self.manifest, self.next_file, &self.version),
                 Job::Compact(c) => {
-                    // An export is not held back; a compaction for an ingestion spends its own.
+                    // An export is not held back, nor a compaction asked for; a compaction for
+                    // an ingestion spends its own.
                     let budget = match (c.is_export(), c.is_for_ingest()) {
                         (true, _) => None,
                         (false, true) => Some(&mut self.ingest_budget),
+                        (false, false) if asked => None,
                         (false, false) => Some(&mut self.budget),
                     };
                     if budget.as_ref().is_some_and(|b| **b <= 0) {

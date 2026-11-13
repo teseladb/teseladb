@@ -8,7 +8,7 @@
 mod common;
 
 use common::{get, open, small, ts};
-use teseladb_lsm::{Commit, GcTable, Kind, Lsm};
+use teseladb_lsm::{Commit, GcTable, Kind, Lsm, LsmConfig};
 use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 
@@ -345,6 +345,34 @@ fn a_compaction_of_everything_follows_once_the_threshold_passed_half_of_what_the
     lsm.run_io(&mut disk, Nanos::from_secs(40));
     let second = files_bytes(&lsm);
     assert!(second * 10 < first * 6, "{second} bytes of files after {first}");
+    for k in &keys {
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+    }
+}
+
+#[test]
+fn a_compaction_asked_for_does_not_wait_for_the_background_budget() {
+    // 007 FR-018: `compact` wants its compaction now. With a budget of a kilobyte a second and
+    // the clock still, the compactions the LSM starts by itself wait and the one asked for ends.
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 10, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let value = vec![6u8; 1024];
+    let keys: Vec<Vec<u8>> = (0..100u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let mut index = 0;
+    for round in 1..=10u64 {
+        for k in &keys {
+            index += 1;
+            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+        }
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    let waiting = lsm.metrics().level_files[0];
+    assert!(waiting > 4, "{waiting} files of level 0 wait for the background budget");
+    let id = lsm.compact_now();
+    let done = lsm.run_io(&mut disk, Nanos::ZERO).compacted;
+    assert_eq!(done, vec![id], "it ends without a second of budget");
+    assert_eq!(lsm.metrics().level_files[0], 0, "every file went to the last level");
     for k in &keys {
         assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
     }

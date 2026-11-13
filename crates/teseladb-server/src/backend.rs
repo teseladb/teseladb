@@ -19,7 +19,7 @@ pub(crate) use txn_reaper::SCAN_EVERY;
 use crate::authz_lease::{AuthGate, DEADLINE_SKEW};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 use teseladb_stages::Stage;
@@ -44,8 +44,8 @@ use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::{Backend, LdapLogin, Shared, WriteOp, lock, txn_stats};
 use teseladb_wire::error::{
     CommandError, DATABASE_DIFFER_CASE, FAILED_TO_SATISFY_READ_PREFERENCE, INDEX_NOT_FOUND,
-    INTERNAL_ERROR, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND, NETWORK_TIMEOUT, NOT_WRITABLE_PRIMARY,
-    RangeContext, from_range,
+    INTERNAL_ERROR, INTERRUPTED_AT_SHUTDOWN, MAX_TIME_MS_EXPIRED, NAMESPACE_EXISTS,
+    NAMESPACE_NOT_FOUND, NETWORK_TIMEOUT, NOT_WRITABLE_PRIMARY, RangeContext, from_range,
 };
 use teseladb_types::NodeId;
 
@@ -66,6 +66,8 @@ pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 pub const SELECTION_LIMIT: Duration = Duration::from_secs(15);
 /// Pause before trying a request again.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
+/// How often the wait for a core's compaction looks at the order's time limit (007 FR-018).
+const COMPACTION_LOOK: Duration = Duration::from_millis(50);
 /// Most documents a scan asks a core for at once.
 const CORE_SCAN_PART: usize = 1024;
 
@@ -401,6 +403,31 @@ impl ServerBackend {
     fn until(&self) -> Instant {
         let own = Instant::now() + self.deadline;
         self.max_until.map_or(own, |m| m.min(own))
+    }
+
+    /// The bytes a core freed with the compaction `compact` asked it for, once it ends: the
+    /// wait looks every [`COMPACTION_LOOK`] at the order's `maxTimeMS` and at the node stopping.
+    fn compacted(&self, rx: &Receiver<u64>) -> Result<u64, CommandError> {
+        loop {
+            match rx.recv_timeout(COMPACTION_LOOK) {
+                Ok(bytes) => return Ok(bytes),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    let msg = "a core of the node stopped before it ended its compaction";
+                    return Err(CommandError::new(INTERRUPTED_AT_SHUTDOWN, msg));
+                }
+            }
+            if self.max_until.is_some_and(|m| Instant::now() >= m) {
+                return Err(CommandError::new(
+                    MAX_TIME_MS_EXPIRED,
+                    "operation exceeded time limit",
+                ));
+            }
+            if self.h.shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                let msg = "the node is stopping";
+                return Err(CommandError::new(INTERRUPTED_AT_SHUTDOWN, msg));
+            }
+        }
     }
 
     fn ask<T>(
@@ -1721,9 +1748,10 @@ impl Backend for ServerBackend {
     }
 
     /// Every core of the node compacts its LSM at once; the bytes they freed, added up, once all
-    /// answered (DV-017, H-054).
+    /// answered (DV-017, H-054). It waits for them however long they take: the deadline of a
+    /// request does not bound a compaction of everything, only the order's `maxTimeMS` and the
+    /// node stopping do (007 FR-018).
     fn compact(&mut self) -> Result<u64, CommandError> {
-        let until = self.until();
         let waits: Vec<Receiver<u64>> = self
             .cores
             .iter()
@@ -1734,13 +1762,7 @@ impl Backend for ServerBackend {
             .collect();
         let mut freed = 0u64;
         for rx in waits {
-            match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                Ok(bytes) => freed = freed.saturating_add(bytes),
-                Err(_) => {
-                    let msg = "a core of the node did not end its compaction in time";
-                    return Err(CommandError::new(NETWORK_TIMEOUT, msg));
-                }
-            }
+            freed = freed.saturating_add(self.compacted(&rx)?);
         }
         Ok(freed)
     }

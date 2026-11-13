@@ -42,6 +42,9 @@ impl Notify for Quiet {
     fn notify(&self) {}
 }
 
+/// How long a core's compaction takes here: more than the deadline of a request.
+const COMPACTION: Duration = Duration::from_millis(600);
+
 type DataScript = Arc<Mutex<VecDeque<Result<DataReply, RangeError>>>>;
 type CatalogScript = Arc<Mutex<VecDeque<CatalogAnswer>>>;
 type KillScript = Arc<Mutex<VecDeque<bool>>>;
@@ -90,6 +93,14 @@ fn cores_with_ops(
                             if let Some(a) = catalog.lock().unwrap().pop_front() {
                                 let _ = reply.send(a);
                             }
+                        }
+                        // Each core frees its megabytes once its compaction ends.
+                        CoreInput::App(NodeMsg::Compact(reply)) => {
+                            let freed: u64 = if core == 0 { 1 << 20 } else { 2 << 20 };
+                            thread::spawn(move || {
+                                thread::sleep(COMPACTION);
+                                let _ = reply.send(freed);
+                            });
                         }
                         _ => {}
                     }
@@ -379,6 +390,19 @@ fn users_and_roles_are_read_and_changed_through_core_zero() {
     }
     let mut b = backend(vec![], vec![CatalogAnswer::Refused(Group0Error::BadSplit)]);
     assert_eq!(b.security_write(vec![]).unwrap_err().code.code, 1);
+}
+
+/// `compact` waits for the compaction of every core however long it takes: the deadline of a
+/// request does not bound it, and the order's `maxTimeMS` does (007 FR-018).
+#[test]
+fn compact_waits_for_every_core_past_the_deadline_of_a_request() {
+    let h = cores(Arc::default(), Arc::default(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(50));
+    assert_eq!(b.compact(), Ok(3 << 20), "the bytes the two cores freed");
+    let soon = b.now_micros() / 1000 + 100;
+    b.set_deadline(Some(soon));
+    let e = b.compact().unwrap_err();
+    assert_eq!(e.code.code, teseladb_wire::error::MAX_TIME_MS_EXPIRED.code, "{e:?}");
 }
 
 #[test]
