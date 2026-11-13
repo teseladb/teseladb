@@ -594,3 +594,16 @@ pub(crate) fn distribution() -> (String, String) {
 pub(crate) fn usec(v: Suseconds) -> i64 {
     i64::from(v)
 }
+
+/// macOS has no `MAP_HUGETLB`: the buffers stay on normal pages (012 FR-032).
+pub(crate) fn map_huge(_len: usize) -> Option<std::ptr::NonNull<u8>> {
+    None
+}
+
+/// Never called: [`map_huge`] maps nothing on macOS.
+pub(crate) fn unmap(_ptr: std::ptr::NonNull<u8>, _len: usize) {}
+
+/// macOS reserves no huge pages.
+pub(crate) fn huge_pages_free() -> usize {
+    0
+}
