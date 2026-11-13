@@ -4,6 +4,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
+pub mod admission;
 pub mod bandwidth;
 pub mod buffers;
 pub mod counters;
@@ -21,6 +22,7 @@ pub mod peer;
 pub mod poller;
 pub mod runtime;
 pub mod secure;
+pub mod service;
 pub mod spin;
 pub mod spsc;
 pub mod timer;

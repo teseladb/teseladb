@@ -22,6 +22,7 @@ use teseladb_io::handshake::JoinRequest;
 use teseladb_io::mailbox::SendError;
 use teseladb_io::peer::{JoinAccepted, PeerMsg};
 use teseladb_io::runtime::{CoreInput, CoreLogic, CoreSender};
+use teseladb_io::service::ServiceClass;
 use teseladb_io::{IoClass, answered_apart};
 use teseladb_meta::balancer::{BALANCE_EVERY, Decision, View, plan};
 use teseladb_meta::bootstrap::{create_data_range, data_range, needs_data_range};
@@ -44,6 +45,7 @@ use crate::catalog_ops::{CatalogAnswer, CatalogOps, CatalogReq, CatalogSender};
 use crate::clustertime_keys::KeyDriver;
 use crate::coresm::{CoreOutput, CoreSm, Group0Holder};
 use crate::data::{DataCore, DataReq, DataSender, IoOwner};
+use crate::data_wire::RemoteReq;
 use crate::forward::{GATE_BEHIND, GATE_HELD, Request};
 use crate::frames::{from_wire, to_wire};
 use crate::liveness::{LivenessDriver, NodeRoles, SharedLoads, core_load};
@@ -1726,6 +1728,26 @@ fn took(stage: Stage, began: Instant) {
     teseladb_stages::record(stage, nanos);
 }
 
+/// Documents past which a scan is long: more than a cursor's first batch.
+const LONG_SCAN_DOCS: u32 = 101;
+
+/// The service class of a request for a range (012 FR-030): scans of more than
+/// [`LONG_SCAN_DOCS`] documents (the pages of aggregations and large finds) and backup pieces go
+/// behind the document operations and transactions.
+fn remote_class(req: &RemoteReq) -> ServiceClass {
+    let long = |limit: u32| limit > LONG_SCAN_DOCS;
+    match req {
+        RemoteReq::Scan { limit, .. } | RemoteReq::FollowerScan { limit, .. } if long(*limit) => {
+            ServiceClass::Background
+        }
+        RemoteReq::ReadWith { scan: Some((_, limit)), .. } if long(*limit) => {
+            ServiceClass::Background
+        }
+        RemoteReq::BackupFetch { .. } => ServiceClass::Background,
+        _ => ServiceClass::Foreground,
+    }
+}
+
 impl CoreLogic for NodeLogic {
     type Msg = NodeMsg;
 
@@ -1863,6 +1885,28 @@ impl CoreLogic for NodeLogic {
             self.core.on_peer_message(from, frame, now);
             self.forward_strays();
             self.data_step();
+        }
+    }
+
+    fn service_class(&self, msg: &NodeMsg) -> ServiceClass {
+        match msg {
+            NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _) => remote_class(req),
+            _ => ServiceClass::Foreground,
+        }
+    }
+
+    fn refuse_overloaded(&mut self, msg: NodeMsg) -> Option<NodeMsg> {
+        // 012 FR-029: the clients' requests are refused while the core's queue wait stays high;
+        // the node's own status, cut and size questions still run.
+        match msg {
+            NodeMsg::Data(
+                DataReq::Put { .. } | DataReq::Get { .. } | DataReq::Remote(..) | DataReq::At(..),
+                reply,
+            ) => {
+                let _ = reply.send(Err(RangeError::Overloaded));
+                None
+            }
+            other => Some(other),
         }
     }
 
@@ -2772,6 +2816,49 @@ mod tests {
     }
 
     #[test]
+    fn long_scans_and_backup_pieces_run_behind_document_operations() {
+        // 012 FR-030.
+        use teseladb_range::read::ReadConcern;
+        let scan = |limit| RemoteReq::Scan {
+            start: vec![1],
+            end: vec![2],
+            limit,
+            concern: ReadConcern::Local,
+            backward: false,
+        };
+        let follower = RemoteReq::FollowerScan {
+            start: vec![1],
+            end: vec![2],
+            limit: 10_000,
+            max_stale_ms: None,
+            nodes: Vec::new(),
+            backward: false,
+        };
+        assert_eq!(remote_class(&scan(LONG_SCAN_DOCS)), ServiceClass::Foreground);
+        assert_eq!(remote_class(&scan(LONG_SCAN_DOCS + 1)), ServiceClass::Background);
+        assert_eq!(remote_class(&follower), ServiceClass::Background);
+        let backup = RemoteReq::BackupFetch {
+            at: teseladb_hlc::Hlc { physical: 0, logical: 0 },
+            file: 0,
+            offset: 0,
+        };
+        assert_eq!(remote_class(&backup), ServiceClass::Background);
+        assert_eq!(
+            remote_class(&RemoteReq::Read { key: vec![1], at: None }),
+            ServiceClass::Foreground
+        );
+        let mut c = Cluster::new();
+        c.found();
+        let l = c.logic(1);
+        let (tx, _rx) = channel();
+        let msg = NodeMsg::Data(DataReq::Remote(teseladb_types::GroupId(1), scan(1_000)), tx);
+        assert_eq!(l.service_class(&msg), ServiceClass::Background);
+        let (tx, _rx) = channel();
+        let msg = NodeMsg::Data(DataReq::Get { key: vec![1] }, tx);
+        assert_eq!(l.service_class(&msg), ServiceClass::Foreground);
+    }
+
+    #[test]
     fn group0_takes_what_a_range_leader_on_another_node_asks() {
         let g = teseladb_types::GroupId(4);
         let split = Group0Command::SplitRange { group: g, at: vec![1, 5] };
@@ -3346,6 +3433,15 @@ mod tests {
         let (tx, rx) = channel();
         l.on_message(NodeMsg::Data(DataReq::Status(teseladb_types::GroupId(1)), tx), now);
         assert_eq!(rx.try_recv().unwrap(), Err(RangeError::OutOfRange));
+        // An overloaded core refuses a client's request and still answers its own questions
+        // (012 FR-029).
+        let (tx, rx) = channel();
+        let get = NodeMsg::Data(DataReq::Get { key: vec![1] }, tx);
+        assert!(l.refuse_overloaded(get).is_none());
+        assert_eq!(rx.try_recv().unwrap(), Err(RangeError::Overloaded));
+        let (tx, _rx) = channel();
+        let status = NodeMsg::Data(DataReq::Status(teseladb_types::GroupId(1)), tx);
+        assert!(l.refuse_overloaded(status).is_some());
         l.on_message(NodeMsg::Peers(BTreeMap::from([(NodeId(1), addr(1))])), now);
         assert_eq!(l.peer_addr(NodeId(1)), Some(addr(1)));
     }
