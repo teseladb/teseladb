@@ -1066,7 +1066,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         end: &[u8],
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut crate::commands::Keep<'_>,
     ) -> Result<crate::commands::Matching, CommandError> {
         let m = self.call(|b| b.scan_matching(start, end, examine, concern, keep))?;
         self.check()?;

@@ -71,6 +71,30 @@ impl Version {
         level0.chain(deeper)
     }
 
+    /// The value files the files point to, by number, each once (FR-034).
+    pub(crate) fn value_files(&self) -> std::collections::BTreeMap<u64, Arc<Table>> {
+        self.files().flat_map(|f| f.values.iter()).map(|v| (v.number, v.clone())).collect()
+    }
+
+    /// The bytes of each value file that the references of the files keep alive (FR-034).
+    pub(crate) fn live_values(&self) -> std::collections::BTreeMap<u64, u64> {
+        let mut live = std::collections::BTreeMap::new();
+        for f in self.files() {
+            for (v, bytes) in f.values.iter().zip(&f.props.values) {
+                *live.entry(v.number).or_insert(0) += bytes;
+            }
+        }
+        live
+    }
+
+    /// The value files whose live bytes are under half of their values, by number (FR-034).
+    pub(crate) fn sparse_values(&self) -> Vec<u64> {
+        let live = self.live_values();
+        let sparse =
+            |f: &&Arc<Table>| 2 * live.get(&f.number).copied().unwrap_or(0) < f.data_bytes();
+        self.value_files().values().filter(sparse).map(|f| f.number).collect()
+    }
+
     /// Files of `level` that touch `[lo, hi]`.
     pub(crate) fn overlapping(&self, level: usize, lo: &[u8], hi: &[u8]) -> Vec<Arc<Table>> {
         self.levels[level]

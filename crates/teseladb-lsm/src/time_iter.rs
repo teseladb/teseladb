@@ -14,7 +14,7 @@ use teseladb_keys::Hlc;
 use crate::cursor::{Cursor, MemCursor, Pos};
 use crate::entry::{self, Kind, RangeTombstone};
 use crate::lsm::Lsm;
-use crate::read::{Item, Step};
+use crate::read::{Deferred, Item, Step, fetch};
 use crate::version::{Version, View};
 
 /// A scan by time in progress: call [`TimeScan::next`] until [`Step::Done`].
@@ -27,6 +27,8 @@ pub struct TimeScan {
     cursors: Option<Vec<Cursor>>,
     tombstones: Vec<RangeTombstone>,
     last: Vec<u8>,
+    /// A version whose value is still in its value file (FR-034).
+    ready: Option<(Item, Box<Deferred>)>,
     finished: bool,
 }
 
@@ -48,6 +50,7 @@ impl View {
             cursors: None,
             tombstones: Vec::new(),
             last: Vec::new(),
+            ready: None,
             finished: false,
         }
     }
@@ -126,6 +129,16 @@ impl TimeScan {
         if let Some(e) = &lsm.reader.failure {
             return Step::Failed(e.clone());
         }
+        if let Some((item, d)) = &mut self.ready {
+            return match fetch(&mut lsm.reader, d) {
+                Err(e) => Step::Failed(e),
+                Ok(Err(token)) => Step::Miss(token),
+                Ok(Ok(value)) => {
+                    item.value = value;
+                    Step::Item(self.ready.take().expect("checked").0)
+                }
+            };
+        }
         if self.finished {
             return Step::Done;
         }
@@ -184,13 +197,21 @@ impl TimeScan {
                 cursors[i].seek(entry::after_all_versions(logical));
                 continue;
             }
-            let (kind, value) = (cursors[i].kind(), cursors[i].value());
+            let kind = cursors[i].kind();
+            let (value, deferred) = match cursors[i].stored() {
+                Ok(v) => v,
+                Err(e) => return Step::Failed(e),
+            };
             let item = Item { key: logical.to_vec(), ts, kind, value };
             self.last = key;
             if let Err(e) = cursors[i].advance() {
                 return Step::Failed(e);
             }
             if kind != Kind::Retract {
+                if let Some(d) = deferred {
+                    self.ready = Some((item, d));
+                    return self.step(lsm);
+                }
                 return Step::Item(item);
             }
         }

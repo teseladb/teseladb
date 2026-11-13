@@ -1,7 +1,8 @@
 //! The size of an interval of keys and the key that halves it, from the memtables and the files'
 //! block indexes without reading a data block (007 FR-005): a range decides whether to split, and
 //! where, from this. Every version counts, so the bytes are those the interval takes on disk with
-//! its retained versions; a block counts whole for the key that closes it.
+//! its retained versions; a block counts whole for the key that closes it. The values a file keeps
+//! in value files (FR-034) count with its blocks, shared among them by their bytes.
 
 use teseladb_keys::VERSION_LEN;
 
@@ -36,7 +37,7 @@ impl Lsm {
             .version
             .files()
             .filter(|t| t.props.hi.as_slice() >= start && t.props.lo.as_slice() < end)
-            .map(|t| t.index_entries().map(|(_, len)| len).sum::<u64>())
+            .map(|t| t.index_entries_with_values().map(|(_, len)| len).sum::<u64>())
             .sum();
         memtables + files
     }
@@ -64,7 +65,7 @@ impl Lsm {
             if t.props.hi.as_slice() < start || t.props.lo.as_slice() >= end {
                 continue;
             }
-            for (last, len) in t.index_entries() {
+            for (last, len) in t.index_entries_with_values() {
                 let k = logical(last);
                 if inside(k) {
                     pieces.push((k.to_vec(), len));

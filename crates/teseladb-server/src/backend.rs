@@ -1090,7 +1090,7 @@ impl Backend for ServerBackend {
         end: &[u8],
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut teseladb_wire::commands::Keep<'_>,
     ) -> Result<teseladb_wire::commands::Matching, CommandError> {
         // On this thread when the range's view serves it, for a read at the latest mark on the
         // leaders (005 FR-028, FR-031): the filter runs on the stored bytes (010 FR-027).

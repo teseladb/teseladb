@@ -1,7 +1,7 @@
 //! TeselaDB's MQL (006): query filters and their matcher, projections, update operators and
 //! upserts, schema validation and the regular expressions of `$regex`.
 #![cfg_attr(coverage, feature(coverage_attribute))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod arith;
 mod canonical;
@@ -24,6 +24,7 @@ mod parse;
 mod parsed;
 pub mod projection;
 pub mod regex;
+pub mod simd;
 pub mod timeseries_write;
 pub mod types;
 pub mod update;

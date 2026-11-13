@@ -530,6 +530,24 @@ impl Pipeline {
                     for (st, spec) in run.iter().zip(&self.sbe_specs[at - 1..end]) {
                         sbe = sbe && *spec && sbe_capable(st);
                     }
+                    // A `$group` right after them takes each batch as it comes out, without
+                    // the whole of their output in between.
+                    if let (Some(group @ Stage::Group(g)), Some(spec)) =
+                        (self.stages.get(end), self.sbe_specs.get(end))
+                    {
+                        let group_sbe = sbe && *spec && sbe_capable(group);
+                        let mut grouping = g.start(env, group_sbe);
+                        for_each_batch(run, docs, env, sbe, &mut |batch| {
+                            env.interrupted()?;
+                            grouping.absorb(batch)
+                        })?;
+                        docs = grouping.finish()?;
+                        sbe = group_sbe;
+                        required.clear();
+                        given.clear();
+                        at = end + 1;
+                        continue;
+                    }
                     docs = run_batched(run, docs, env, sbe)?;
                     if run.iter().any(makes_new_documents) {
                         given.clear();
@@ -1003,11 +1021,27 @@ fn run_batched(
     sbe: bool,
 ) -> Result<Vec<Document>, MqlError> {
     let mut out = Vec::with_capacity(docs.len());
+    for_each_batch(stages, docs, env, sbe, &mut |mut batch| {
+        out.append(&mut batch);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// [`run_batched`] handing each batch that comes out of the last stage to `each`, in order
+/// (a blocking stage that takes its input a batch at a time; 010 FR-028).
+fn for_each_batch(
+    stages: &[Stage],
+    docs: Vec<Document>,
+    env: &dyn Env,
+    sbe: bool,
+    each: &mut dyn FnMut(Vec<Document>) -> Result<(), MqlError>,
+) -> Result<(), MqlError> {
     let mut input = docs.into_iter();
     loop {
         let mut batch: Vec<Document> = input.by_ref().take(BATCH_DOCS).collect();
         if batch.is_empty() {
-            return Ok(out);
+            return Ok(());
         }
         for st in stages {
             if batch.is_empty() {
@@ -1016,7 +1050,9 @@ fn run_batched(
             env.interrupted()?;
             batch = run_stage(st, batch, env, sbe)?;
         }
-        out.append(&mut batch);
+        if !batch.is_empty() {
+            each(batch)?;
+        }
     }
 }
 

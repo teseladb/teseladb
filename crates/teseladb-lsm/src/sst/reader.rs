@@ -45,6 +45,8 @@ pub struct Table {
     /// Its history file (FR-031): the versions older than the value or the deletion that is the
     /// newest version here of their key. A read at or above `props.max_ts` does not open it.
     pub(crate) history: Option<Arc<Table>>,
+    /// The value files its references point to, by slot (FR-034).
+    pub(crate) values: Vec<Arc<Table>>,
 }
 
 /// Data blocks written: how many with each compression code, and their bytes before and after
@@ -163,6 +165,7 @@ impl Table {
             dict,
             written: BlockStats::default(),
             history: None,
+            values: Vec::new(),
         })
     }
 
@@ -171,9 +174,33 @@ impl Table {
         self.size + self.history.as_ref().map_or(0, |h| h.size)
     }
 
+    /// Bytes of its data blocks with their padding: what a value file holds of values (FR-034).
+    pub(crate) fn data_bytes(&self) -> u64 {
+        match self.blocks() {
+            0 => 0,
+            n => super::align_up(self.bounds.get(2 * n - 1)),
+        }
+    }
+
+    /// The value file of `slot` (FR-034).
+    pub(crate) fn value_file(&self, slot: u32) -> Result<&Arc<Table>, Bad> {
+        self.values.get(slot as usize).ok_or(Bad)
+    }
+
     /// Each data block's last internal key and its length.
     pub(crate) fn index_entries(&self) -> impl Iterator<Item = (&[u8], u64)> {
         self.last_keys.iter().enumerate().map(|(i, k)| (&k[..], self.handle(i).len))
+    }
+
+    /// [`Table::index_entries`] with the bytes the file keeps in value files (FR-034) shared
+    /// among its blocks by their length: the references do not say which block holds which.
+    pub(crate) fn index_entries_with_values(&self) -> impl Iterator<Item = (&[u8], u64)> {
+        let values: u64 = self.props.values.iter().sum();
+        let blocks: u64 = self.index_entries().map(|(_, len)| len).sum();
+        self.index_entries().map(move |(k, len)| {
+            let share = u128::from(values) * u128::from(len) / u128::from(blocks.max(1));
+            (k, len + share as u64)
+        })
     }
 
     /// Number of data blocks.
@@ -436,6 +463,7 @@ mod tests {
             versions: 1,
             tombstones: Vec::new(),
             dictionary: 0,
+            values: Vec::new(),
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);

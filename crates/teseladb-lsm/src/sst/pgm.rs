@@ -48,8 +48,10 @@ impl Pgm {
             .min()
             .unwrap_or(0);
         let xs: Vec<u64> = keys.map(|k| project(k, prefix)).collect();
-        // The keys come in the comparator's order, which is not always the bytes' order (a
-        // version after a shorter user key): a line needs projections that never go down.
+        // Internal keys sort by their logical key first: a logical key that is the start of the
+        // next one, with its 12 bytes of mark after it, can make a larger number than the key
+        // after it. The numbers must not go down for the segments to hold; such an index gets no
+        // model and is searched whole.
         if xs.windows(2).any(|w| w[1] < w[0]) {
             return None;
         }
@@ -135,6 +137,21 @@ mod tests {
         k
     }
 
+    /// Keys whose numbers go down (a logical key followed by one it starts, each with its mark)
+    /// get no model, and the subtraction of the segments never wraps.
+    #[test]
+    fn keys_whose_numbers_go_down_get_no_model() {
+        let mark = [0xffu8; 12];
+        let keys: Vec<Vec<u8>> = (0..200u32)
+            .flat_map(|i| {
+                let base = format!("doc{i:05}").into_bytes();
+                let longer = [base.as_slice(), b"x"].concat();
+                [[base.as_slice(), &mark].concat(), [longer.as_slice(), &mark].concat()]
+            })
+            .collect();
+        assert!(Pgm::build(keys.iter().map(|k| k.as_slice())).is_none());
+    }
+
     #[test]
     fn regular_keys_take_a_few_segments_and_find_every_block() {
         let keys: Vec<Vec<u8>> = (0..20_000).step_by(7).map(object_id).collect();
@@ -147,14 +164,6 @@ mod tests {
             let (lo, hi) = pgm.window(&probe, keys.len());
             assert!(hi - lo <= 2 * EPSILON + 3);
         }
-    }
-
-    #[test]
-    fn keys_whose_bytes_go_down_keep_the_search() {
-        // A user key and its version, then a longer user key: in the comparator's order, not in
-        // the bytes'.
-        let keys: Vec<&[u8]> = vec![b"a\xff\x01", b"a\x00\x02", b"a\x00\x03"];
-        assert_eq!(Pgm::build(keys.into_iter()), None);
     }
 
     #[test]

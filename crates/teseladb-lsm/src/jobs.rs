@@ -20,6 +20,7 @@ use crate::manifest::{self, Edit, FileMeta};
 use crate::memtable::Memtable;
 use crate::recovery::switch_current;
 use crate::sst::reader::Table;
+use crate::sst::value::ValueRef;
 use crate::sst::writer::{Split, TableWriter};
 use crate::sst::{file_id, file_name};
 
@@ -57,6 +58,7 @@ pub(crate) fn file_meta(level: u8, t: &Table) -> FileMeta {
         min_ts: t.props.min_ts,
         max_ts: t.props.max_ts,
         history_of: None,
+        values: t.values.iter().map(|v| (v.number, v.size)).collect(),
     }
 }
 
@@ -74,6 +76,80 @@ fn new_writer(
 ) -> TableWriter {
     let ring = format.2.as_ref().map(|e| &*e.0);
     TableWriter::new(format.0, format.1).sealed(ring)
+}
+
+/// The value file an output writes its values above the threshold to, from the first one on
+/// (FR-034).
+#[derive(Debug)]
+pub(crate) struct ValueSink {
+    threshold: usize,
+    file: Option<(u64, TableWriter)>,
+}
+
+impl ValueSink {
+    /// A sink for values longer than `threshold` bytes.
+    pub(crate) fn new(threshold: usize) -> ValueSink {
+        ValueSink { threshold, file: None }
+    }
+
+    /// Whether a version of `kind` with `value` goes to the value file.
+    pub(crate) fn wants(&self, kind: Kind, value: &[u8]) -> bool {
+        crate::sst::value::separates(self.threshold, kind, value)
+    }
+
+    /// Whether it started its value file.
+    pub(crate) fn started(&self) -> bool {
+        self.file.is_some()
+    }
+
+    /// Starts its value file `number` in `dir` with `writer`, queueing its creation.
+    pub(crate) fn start(
+        &mut self,
+        number: u64,
+        writer: TableWriter,
+        dir: &std::path::Path,
+        queued: &mut VecDeque<IoOp>,
+    ) {
+        queued.push_back(IoOp::Create {
+            file: file_id(number),
+            path: dir.join(file_name(number)),
+            prealloc: 0,
+        });
+        self.file = Some((number, writer));
+    }
+
+    /// Writes the value of `ikey` to the started value file; its number and the reference.
+    pub(crate) fn put(&mut self, ikey: &[u8], value: &[u8]) -> (u64, ValueRef) {
+        let (number, w) = self.file.as_mut().expect("a value file started");
+        (*number, w.add_alone(ikey, value))
+    }
+
+    /// The write of what it has ready, when that fills `chunk` bytes.
+    pub(crate) fn full_chunk(&mut self, chunk: usize) -> Option<IoOp> {
+        let (number, w) = self.file.as_mut().filter(|(_, w)| w.pending() >= chunk)?;
+        let (at, bytes) = w.take().expect("a full chunk");
+        Some(write_at(*number, at, bytes))
+    }
+
+    /// Bytes ready to write.
+    pub(crate) fn pending(&self) -> usize {
+        self.file.as_ref().map_or(0, |(_, w)| w.pending())
+    }
+
+    /// Ends its value file, if it started one, queueing its last write and its sync.
+    pub(crate) fn finish(&mut self, queued: &mut VecDeque<IoOp>) -> Option<Arc<Table>> {
+        let (number, w) = self.file.take()?;
+        let (at, chunk, table) = w.finish(number, Vec::new()).expect("a value file has values");
+        queued.push_back(write_at(number, at, chunk));
+        queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+        Some(Arc::new(table))
+    }
+}
+
+/// Gives `table` the value files its references point to, from `numbers` by slot, each found
+/// with `find` (FR-034).
+pub(crate) fn attach_values(table: &mut Table, numbers: &[u64], find: impl Fn(u64) -> Arc<Table>) {
+    table.values = numbers.iter().map(|n| find(*n)).collect();
 }
 
 /// The write of `chunk` at `offset` of file `number`.
@@ -139,6 +215,9 @@ pub(crate) struct FlushJob {
     /// The number of its history file, which exists once a key has a version under a value or a
     /// deletion (FR-031).
     history_number: u64,
+    /// The number of its value file, which exists once a value goes apart (FR-034).
+    values_number: u64,
+    values: ValueSink,
     dir: PathBuf,
     chunk: usize,
     /// How its files are written: block size, codec and key ring.
@@ -168,7 +247,7 @@ impl FlushJob {
     pub(crate) fn new(
         cfg: &LsmConfig,
         mem: Arc<Memtable>,
-        (number, history_number): (u64, u64),
+        (number, history_number, values_number): (u64, u64, u64),
         next_file: u64,
     ) -> FlushJob {
         let has_data = !mem.is_empty();
@@ -191,6 +270,8 @@ impl FlushJob {
             mem,
             number,
             history_number,
+            values_number,
+            values: ValueSink::new(cfg.value_separation_bytes),
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             writer: has_data.then(|| new_writer(&format)),
@@ -208,14 +289,24 @@ impl FlushJob {
     /// The most bytes one of its two writers has ready to write.
     fn pending(&self) -> usize {
         let of = |w: &Option<TableWriter>| w.as_ref().map_or(0, TableWriter::pending);
-        of(&self.writer).max(of(&self.history))
+        of(&self.writer).max(of(&self.history)).max(self.values.pending())
     }
 
     /// Adds a version to the file or to its history file (FR-031), which starts with its first
     /// one.
     fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
+        let apart = self.values.wants(kind, value);
+        if apart && !self.values.started() {
+            let w = new_writer(&self.format);
+            self.values.start(self.values_number, w, &self.dir, &mut self.queued);
+        }
+        let stored = apart.then(|| self.values.put(ikey, value));
+        let to = |w: &mut TableWriter| match &stored {
+            Some((file, r)) => w.add_ref(ikey, kind, *file, r),
+            None => w.add(ikey, kind, value),
+        };
         if !self.split.sets_apart(ikey, kind) {
-            self.writer.as_mut().expect("a flush with data has a writer").add(ikey, kind, value);
+            to(self.writer.as_mut().expect("a flush with data has a writer"));
             return;
         }
         if self.history.is_none() {
@@ -226,7 +317,7 @@ impl FlushJob {
             });
             self.history = Some(new_writer(&self.format).for_history());
         }
-        self.history.as_mut().expect("started above").add(ikey, kind, value);
+        to(self.history.as_mut().expect("started above"));
     }
 
     /// Queues the write of what each writer has ready, when it fills a chunk.
@@ -237,6 +328,7 @@ impl FlushJob {
             let (at, chunk) = w.take().expect("a full chunk");
             self.queued.push_back(write_at(number, at, chunk));
         }
+        self.queued.extend(self.values.full_chunk(self.chunk));
     }
 
     fn fill(&mut self) {
@@ -265,15 +357,21 @@ impl FlushJob {
             self.write_full_chunks();
             return;
         }
+        let values = self.values.finish(&mut self.queued);
+        let find = |_| values.clone().expect("the flush's value file");
         let w = self.writer.take().expect("a flush with data has a writer");
+        let numbers = w.value_numbers();
         let (at, chunk, mut table) = w
             .finish(self.number, mem.tombstones().cloned().collect())
             .expect("a memtable with data writes a file");
         self.queued.push_back(write_at(self.number, at, chunk));
         self.queued.push_back(IoOp::Sync { file: file_id(self.number), batch: 0 });
+        attach_values(&mut table, &numbers, find);
         if let Some(h) = self.history.take() {
-            let (at, chunk, history) =
+            let numbers = h.value_numbers();
+            let (at, chunk, mut history) =
                 h.finish(self.history_number, Vec::new()).expect("a history file has versions");
+            attach_values(&mut history, &numbers, find);
             self.queued.push_back(write_at(self.history_number, at, chunk));
             self.queued.push_back(IoOp::Sync { file: file_id(self.history_number), batch: 0 });
             table.history = Some(Arc::new(history));

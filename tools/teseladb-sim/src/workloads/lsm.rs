@@ -172,6 +172,10 @@ fn at(physical: u64) -> Hlc {
     Hlc { physical, logical: 0 }
 }
 
+/// Time after the heal within which every client sees a write applied: the LSM retries a full
+/// disk every second, and a core that stopped restarts and replays its log.
+const SETTLE: Nanos = Nanos::from_millis(4_000);
+
 fn cfg(core: u16) -> LsmConfig {
     LsmConfig {
         dir: format!("core-{core:02}/lsm").into(),
@@ -600,8 +604,10 @@ impl Workload for LsmWorkload {
         self.heal_at = Some(w.now());
     }
 
-    fn finish(&mut self, _w: &mut World) -> Result<(), Violation> {
-        let Some(heal) = self.heal_at else { return Ok(()) };
+    fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
+        // A run that the step limit ended within `SETTLE` of the heal did not see the time a core
+        // takes to come back (a full disk is retried every second): there is nothing to judge.
+        let Some(heal) = self.heal_at.filter(|h| w.now() >= *h + SETTLE) else { return Ok(()) };
         for (i, cl) in self.clients.iter().enumerate() {
             if cl.last_confirm < heal {
                 let (node, core) = self.place(i as u32);
@@ -645,6 +651,10 @@ mod tests {
         let mut wl = LsmWorkload { cores: 1, clients: vec![Client::default()], heal_at: None };
         wl.finish(&mut w).expect("no fault window, nothing to check");
         wl.heal_at = Some(Nanos::from_millis(5));
+        // A run that ended right after the heal is not judged.
+        wl.finish(&mut w).expect("no time after the heal to judge");
+        w.schedule(Nanos::from_millis(5) + SETTLE, Event::CheckPoint);
+        w.pop();
         let v = wl.finish(&mut w).expect_err("nothing applied after the heal");
         assert_eq!((v.checker, v.liveness), ("progress", true));
         assert_eq!(v.detail, "n0 c0: nothing applied after healing");

@@ -293,6 +293,9 @@ impl Lsm {
         for level in &mut v.levels[1..] {
             level.sort_by(|a, b| a.props.lo.cmp(&b.props.lo));
         }
+        for f in v.value_files().values() {
+            reader.cache.pin_meta(f.number, f.meta.clone());
+        }
         let flushed = r.state.flushed.clone();
         // The clearings under way when the node stopped, from their tombstones (004 FR-032): a
         // range dropped from this core has no one to clear it again, and what its removed files

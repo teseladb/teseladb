@@ -17,7 +17,7 @@
 //! between logical keys. They are synced, the directory is synced, and one manifest edit removes
 //! the inputs and adds the outputs. The inputs leave the disk when no view holds them.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,12 +31,15 @@ use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::gc::{self, Candidate, GcTable};
 use crate::ingest::FileRef;
-use crate::jobs::{ManifestFile, Next, Outcome, STEP_BYTES, file_metas, write_at};
+use crate::jobs::{
+    ManifestFile, Next, Outcome, STEP_BYTES, ValueSink, attach_values, file_metas, write_at,
+};
 use crate::manifest::Edit;
 use crate::range_tombstone;
 use crate::read::corrupt;
 use crate::sst::block::{Block, BlockCursor};
 use crate::sst::reader::Table;
+use crate::sst::value::ValueRef;
 use crate::sst::writer::{Split, TableWriter};
 use crate::sst::{align_up, file_id, file_name};
 use crate::version::Version;
@@ -58,6 +61,9 @@ pub(crate) struct Plan {
     /// The number of the one output of a tier of level 0 (FR-036), taken when the compaction
     /// starts: every flush after it gets a higher number and stays above it.
     pub(crate) reserved: Option<u64>,
+    /// Value files it collects (FR-034): the values its inputs keep in them are read and written
+    /// again, to a value file of its own.
+    pub(crate) collect: Vec<u64>,
 }
 
 fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
@@ -70,7 +76,7 @@ fn plan(v: &Version, inputs: Vec<(u8, Arc<Table>)>, output_level: usize) -> Plan
     let (lo, hi) = span(&inputs);
     let bottommost =
         (output_level + 1..v.levels.len()).all(|l| v.overlapping(l, &lo, &hi).is_empty());
-    Plan { inputs, output_level, bottommost, cuts: Vec::new(), reserved: None }
+    Plan { inputs, output_level, bottommost, cuts: Vec::new(), reserved: None, collect: Vec::new() }
 }
 
 /// Largest ratio between the sizes of the files a tier joins (FR-036).
@@ -160,6 +166,28 @@ pub(crate) fn pick(
         return Some(plan(v, inputs, n + 1));
     }
     None
+}
+
+/// The collection of a value file whose live bytes fell under half of its values (FR-034): one
+/// file of a level below 0 that points to it is written again in its level, with the values it
+/// keeps there in a value file of its own. Each such compaction takes another of those files,
+/// until none points to it and it leaves the disk. Files of level 0 wait for their compaction to
+/// level 1, which keeps the precedence of level 0 by number.
+pub(crate) fn collect_values(v: &Version) -> Option<Plan> {
+    v.sparse_values().into_iter().find_map(|number| {
+        let points = |t: &Arc<Table>| {
+            std::iter::once(t)
+                .chain(t.history.as_ref())
+                .any(|f| f.values.iter().any(|x| x.number == number))
+        };
+        let (level, t) = v
+            .levels
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(l, files)| files.iter().find(|t| points(t)).map(|t| (l, t.clone())))?;
+        Some(Plan { collect: vec![number], ..plan(v, vec![(level as u8, t)], level) })
+    })
 }
 
 /// The compaction an ingestion into `intervals` needs before it starts (FR-024), if any: when
@@ -260,6 +288,15 @@ pub(crate) fn split_links(
     (links, rewritten)
 }
 
+/// The GC description of a version of `kind` at `ts` with `value`: a reference is never a
+/// value that only serves the history, which stays with its key (FR-034).
+fn candidate(ts: Hlc, kind: Kind, value: &Val) -> Candidate {
+    match value {
+        Val::Inline(v) => Candidate::new(ts, kind, v),
+        Val::Ref(..) => Candidate::new(ts, kind, &[]),
+    }
+}
+
 /// One input read in order.
 #[derive(Debug)]
 struct Lane {
@@ -342,6 +379,10 @@ struct Output {
     writer: TableWriter,
     /// Its history file, from its first version on (FR-031).
     history: Option<(u64, TableWriter)>,
+    /// Its value file, from the first value that goes apart on (FR-034).
+    values: ValueSink,
+    /// The value files of its inputs its references point to, by number.
+    known: BTreeMap<u64, Arc<Table>>,
     lo: Option<Vec<u8>>,
 }
 
@@ -350,6 +391,24 @@ impl Output {
     fn size(&self) -> u64 {
         self.writer.size() + self.history.as_ref().map_or(0, |(_, h)| h.size())
     }
+}
+
+/// A version's value as the merge holds it (FR-034).
+#[derive(Clone, Debug)]
+enum Val {
+    /// The value itself.
+    Inline(Bytes),
+    /// A reference into a value file of an input.
+    Ref(Arc<Table>, ValueRef),
+}
+
+/// What the read in flight is for.
+#[derive(Debug)]
+enum Reading {
+    /// Blocks of lane `.0`, up to block `.1`.
+    Lane(usize, usize),
+    /// The value of version `.0` of the key in hand, in block `.2` of value file `.1`.
+    Value(usize, Arc<Table>, usize, Vec<u8>, ValueRef),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -368,14 +427,14 @@ pub(crate) struct CompactJob {
     hiding: Vec<RangeTombstone>,
     surviving: Vec<RangeTombstone>,
     key: Option<Vec<u8>>,
-    versions: Vec<(Candidate, Bytes)>,
+    versions: Vec<(Candidate, Val)>,
     /// Which of an output and its history file each version goes to.
     split: Split,
     out: Option<Output>,
     finished: Vec<Table>,
     started: bool,
     queued: VecDeque<IoOp>,
-    reading: Option<(usize, usize)>,
+    reading: Option<Reading>,
     stage: Stage,
     edit: Option<Edit>,
     export: Option<ExportSpec>,
@@ -393,11 +452,15 @@ pub(crate) struct CompactJob {
     dict_written: Option<crate::dict::Written>,
     /// The key ring of encrypted outputs (013 FR-015).
     encryption: Option<crate::config::Encryption>,
+    /// Values longer than this go to value files (FR-034).
+    separation: usize,
     target: u64,
     /// The cuts of the plan already passed by the keys written.
     passed_cuts: usize,
     /// It makes room for an ingestion: it spends the ingestions' budget (FR-024).
     for_ingest: bool,
+    /// A reference that points nowhere it says, found while taking a version.
+    broken: Option<LsmError>,
 }
 
 impl CompactJob {
@@ -443,6 +506,7 @@ impl CompactJob {
             training: None,
             dict_written: None,
             encryption: cfg.encryption.clone(),
+            separation: cfg.value_separation_bytes,
             // A tier of level 0 is one file, whose number was taken when it started.
             target: match plan_reserved {
                 true => u64::MAX,
@@ -450,6 +514,7 @@ impl CompactJob {
             },
             passed_cuts: 0,
             for_ingest: false,
+            broken: None,
         }
     }
 
@@ -494,8 +559,14 @@ impl CompactJob {
             .cloned()
             .collect();
         let surviving = range_tombstone::pieces(&tombstones, Some(&spec.start), Some(&spec.end));
-        let plan =
-            Plan { inputs, output_level: 0, bottommost: false, cuts: Vec::new(), reserved: None };
+        let plan = Plan {
+            inputs,
+            output_level: 0,
+            bottommost: false,
+            cuts: Vec::new(),
+            reserved: None,
+            collect: Vec::new(),
+        };
         let mut job = CompactJob::new(cfg, plan, GcTable::default());
         for lane in &mut job.lanes {
             lane.next_block = lane.table.find_block(&first).unwrap_or(lane.table.blocks());
@@ -524,9 +595,26 @@ impl CompactJob {
 
     /// Takes the data of the job's read.
     pub(crate) fn on_read(&mut self, data: Result<Bytes, IoErrno>) -> Result<(), LsmError> {
-        let (lane, upto) = self.reading.take().expect("a read was issued");
+        let reading = self.reading.take().expect("a read was issued");
         let data = data.map_err(LsmError::Stopped)?;
-        self.lanes[lane].on_read(&data, upto)
+        match reading {
+            Reading::Lane(lane, upto) => self.lanes[lane].on_read(&data, upto),
+            Reading::Value(at, file, block, ikey, r) => {
+                let value = file
+                    .block(block, &data)
+                    .and_then(|b| crate::sst::value::value_in(b, &ikey, &r))
+                    .map_err(|_| corrupt(&file, block))?;
+                self.versions[at].1 = Val::Inline(value);
+                Ok(())
+            }
+        }
+    }
+
+    /// A writer for the value file of an output: no dictionary, a new data key when the files
+    /// are encrypted.
+    fn values_writer(&self) -> TableWriter {
+        let ring = self.encryption.as_ref().map(|e| &*e.0);
+        TableWriter::new(self.block_bytes, self.codec).sealed(ring)
     }
 
     /// A writer for a new output, with a new data key when the files are encrypted.
@@ -552,19 +640,29 @@ impl CompactJob {
             path: self.dir.join(file_name(number)),
             prealloc: 0,
         });
-        self.out = Some(Output { number, writer: self.writer(), history: None, lo });
+        let values = ValueSink::new(self.separation);
+        let (writer, known) = (self.writer(), BTreeMap::new());
+        self.out = Some(Output { number, writer, history: None, values, known, lo });
     }
 
     fn finish_output(&mut self, hi: Option<&[u8]>) {
-        let Some(o) = self.out.take() else { return };
+        let Some(mut o) = self.out.take() else { return };
+        if let Some(v) = o.values.finish(&mut self.queued) {
+            o.known.insert(v.number, v);
+        }
+        let find = |n| o.known.get(&n).expect("a value file the output refers to").clone();
         let pieces = range_tombstone::pieces(&self.surviving, o.lo.as_deref(), hi);
+        let numbers = o.writer.value_numbers();
         let (at, chunk, mut table) =
             o.writer.finish(o.number, pieces).expect("an output has versions or tombstones");
+        attach_values(&mut table, &numbers, find);
         self.queued.push_back(write_at(o.number, at, chunk));
         self.queued.push_back(IoOp::Sync { file: file_id(o.number), batch: 0 });
         if let Some((number, h)) = o.history {
-            let (at, chunk, history) =
+            let numbers = h.value_numbers();
+            let (at, chunk, mut history) =
                 h.finish(number, Vec::new()).expect("a history file has versions");
+            attach_values(&mut history, &numbers, find);
             self.queued.push_back(write_at(number, at, chunk));
             self.queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
             table.history = Some(Arc::new(history));
@@ -623,16 +721,42 @@ impl CompactJob {
             if apart && self.out.as_ref().is_some_and(|o| o.history.is_none()) {
                 self.start_history(next_file);
             }
-            let o = self.out.as_mut().expect("started above");
-            match &mut o.history {
-                Some((_, h)) if apart => h.add(&ikey, c.kind, &value),
-                _ => o.writer.add(&ikey, c.kind, &value),
+            // An export writes every value with its key: its files go whole to another LSM.
+            let goes_apart = match &value {
+                Val::Inline(v) => self.export.is_none() && self.out_wants(c.kind, v),
+                Val::Ref(..) => false,
+            };
+            if goes_apart && self.out.as_ref().is_some_and(|o| !o.values.started()) {
+                let number = *next_file;
+                *next_file += 1;
+                let w = self.values_writer();
+                let o = self.out.as_mut().expect("started above");
+                o.values.start(number, w, &self.dir, &mut self.queued);
             }
-            if let Some(t) = &mut self.training {
-                t.note(&key, &value);
+            let o = self.out.as_mut().expect("started above");
+            let stored = match &value {
+                Val::Ref(file, r) => {
+                    o.known.insert(file.number, file.clone());
+                    Some((file.number, *r))
+                }
+                Val::Inline(v) if goes_apart => Some(o.values.put(&ikey, v)),
+                Val::Inline(_) => None,
+            };
+            let w = match &mut o.history {
+                Some((_, h)) if apart => h,
+                _ => &mut o.writer,
+            };
+            match (&stored, &value) {
+                (Some((file, r)), _) => w.add_ref(&ikey, c.kind, *file, r),
+                (None, Val::Inline(v)) => w.add(&ikey, c.kind, v),
+                (None, Val::Ref(..)) => unreachable!("a reference is stored as one"),
+            }
+            if let (Some(t), Val::Inline(v), None) = (&mut self.training, &value, &stored) {
+                t.note(&key, v);
             }
         }
         let Some(o) = &mut self.out else { return };
+        self.queued.extend(o.values.full_chunk(self.chunk));
         if o.writer.pending() >= self.chunk {
             let (at, chunk) = o.writer.take().expect("pending bytes");
             self.queued.push_back(write_at(o.number, at, chunk));
@@ -645,7 +769,40 @@ impl CompactJob {
         }
     }
 
+    /// Whether the output in hand sends a version of `kind` with `value` to its value file.
+    fn out_wants(&self, kind: Kind, value: &[u8]) -> bool {
+        crate::sst::value::separates(self.separation, kind, value)
+    }
+
+    /// Queues the read of the value of the version just taken, internal key `ikey`, when it is
+    /// a reference that this job does not move: an export writes values with their keys, and a
+    /// collection writes the values of the files it collects again (FR-034).
+    fn fetch_if_rewritten(&mut self, ikey: Vec<u8>) {
+        let at = self.versions.len() - 1;
+        let Val::Ref(file, r) = &self.versions[at].1 else { return };
+        if self.export.is_none() && !self.plan.collect.contains(&file.number) {
+            return;
+        }
+        let block = match crate::sst::value::block_of(file, &ikey, r) {
+            Ok(b) => b,
+            Err(_) => {
+                self.broken = Some(corrupt(file, 0));
+                return;
+            }
+        };
+        self.queued.push_back(IoOp::ReadAt {
+            file: file_id(file.number),
+            offset: r.offset,
+            len: align_up(r.len) as u32,
+            token: JOB_TOKEN,
+        });
+        self.reading = Some(Reading::Value(at, file.clone(), block, ikey, *r));
+    }
+
     fn merge(&mut self, next_file: &mut u64) -> Result<(), LsmError> {
+        if let Some(e) = self.broken.take() {
+            return Err(e);
+        }
         // The bytes of the entries taken in this call: past a step, the job yields (FR-030).
         let mut taken = 0;
         loop {
@@ -654,7 +811,7 @@ impl CompactJob {
             }
             if let Some(i) = self.lanes.iter().position(Lane::needs_read) {
                 let (op, upto) = self.lanes[i].read_op(self.chunk);
-                self.reading = Some((i, upto));
+                self.reading = Some(Reading::Lane(i, upto));
                 self.queued.push_back(op);
                 return Ok(());
             }
@@ -679,8 +836,10 @@ impl CompactJob {
                         path: self.dir.join(file_name(n)),
                         prealloc: 0,
                     });
-                    let writer = self.writer();
-                    self.out = Some(Output { number: n, writer, history: None, lo: None });
+                    let (writer, values) = (self.writer(), ValueSink::new(self.separation));
+                    let known = BTreeMap::new();
+                    self.out =
+                        Some(Output { number: n, writer, history: None, values, known, lo: None });
                 }
                 self.finish_output(None);
                 if !self.finished.is_empty() {
@@ -706,8 +865,17 @@ impl CompactJob {
             }
             let c = self.lanes[i].cur.as_ref().expect("has an entry");
             let (logical, ts) = entry::split(c.key());
-            let (kind, value) = (c.kind(), c.value());
-            taken += c.key().len() + value.len();
+            let (kind, raw) = (c.kind(), c.value());
+            taken += c.key().len() + raw.len();
+            let value = match c.is_ref() {
+                false => Val::Inline(raw),
+                true => {
+                    let t = &self.lanes[i].table;
+                    let r = ValueRef::decode(&raw).map_err(|_| corrupt(t, 0))?;
+                    Val::Ref(t.value_file(r.slot).map_err(|_| corrupt(t, 0))?.clone(), r)
+                }
+            };
+            let ikey = c.key().to_vec();
             if self.key.as_deref() != Some(logical) {
                 let logical = logical.to_vec();
                 self.finish_key(next_file);
@@ -717,12 +885,18 @@ impl CompactJob {
                 // Faulty variant (004 T032): the intent survives the `Retract` that resolved it.
                 #[cfg(teseladb_bug = "resolved_intent_reappears")]
                 Some((last, v)) if last.ts == ts && last.kind == Kind::Retract => {
-                    (*last, *v) = (Candidate::new(ts, kind, &value), value);
+                    (*last, *v) = (candidate(ts, kind, &value), value);
                 }
                 Some((last, _)) if last.ts == ts => last.shadowed = true,
-                _ => self.versions.push((Candidate::new(ts, kind, &value), value)),
+                _ => {
+                    self.versions.push((candidate(ts, kind, &value), value));
+                    self.fetch_if_rewritten(ikey);
+                }
             }
             self.lanes[i].advance()?;
+            if let Some(e) = self.broken.take() {
+                return Err(e);
+            }
             if !self.queued.is_empty() {
                 return Ok(());
             }
@@ -751,11 +925,19 @@ impl CompactJob {
                         self.queued.push_back(IoOp::Close { file: file_id(t.number) });
                     }
                     // The linked names are durable with the sync of the export's directory.
+                    // Each with its history file and their value files, each value file once
+                    // (FR-034).
+                    let mut linked = std::collections::BTreeSet::new();
                     for (_, t) in &self.links {
                         for f in std::iter::once(t).chain(t.history.as_ref()) {
-                            let name = file_name(f.number);
-                            let (from, to) = (self.home.join(&name), self.dir.join(&name));
-                            self.queued.push_back(IoOp::Link { from, to });
+                            for g in std::iter::once(f).chain(&f.values) {
+                                if !linked.insert(g.number) {
+                                    continue;
+                                }
+                                let name = file_name(g.number);
+                                let (from, to) = (self.home.join(&name), self.dir.join(&name));
+                                self.queued.push_back(IoOp::Link { from, to });
+                            }
                         }
                     }
                     if !self.links.is_empty() {
@@ -769,7 +951,15 @@ impl CompactJob {
                         .finished
                         .iter()
                         .map(|t| FileRef::new(spec.dir.join(file_name(t.number)), t.size));
+                    let named = |values: &[Arc<Table>]| -> Vec<(PathBuf, u64)> {
+                        values
+                            .iter()
+                            .map(|v| (spec.dir.join(file_name(v.number)), v.size))
+                            .collect()
+                    };
                     let linked = self.links.iter().map(|(group, t)| FileRef {
+                        values: named(&t.values),
+                        history_values: t.history.as_ref().map_or(Vec::new(), |h| named(&h.values)),
                         path: spec.dir.join(file_name(t.number)),
                         size: t.size,
                         history: t

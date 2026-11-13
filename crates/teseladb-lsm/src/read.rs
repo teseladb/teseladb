@@ -26,6 +26,7 @@ use crate::lsm::Lsm;
 use crate::memtable::Memtable;
 use crate::sst::block::{Block, BlockCursor};
 use crate::sst::reader::Table;
+use crate::sst::value::{self, ValueRef};
 use crate::sst::{align_up, file_id, filter};
 use crate::version::{Version, View};
 
@@ -42,6 +43,66 @@ pub struct Found {
     pub kind: Kind,
     /// Its value.
     pub value: Bytes,
+}
+
+/// The version a read holds for a key so far: its value, or where it is while the read has not
+/// read it from its value file (FR-034).
+pub(crate) struct Cand {
+    ts: Hlc,
+    kind: Kind,
+    value: Bytes,
+    deferred: Option<Box<Deferred>>,
+}
+
+/// A value still in its value file (FR-034): the file, the version's internal key and the
+/// reference.
+#[derive(Clone)]
+pub(crate) struct Deferred {
+    file: Arc<Table>,
+    ikey: Vec<u8>,
+    at: ValueRef,
+}
+
+impl PartialEq for Deferred {
+    fn eq(&self, other: &Deferred) -> bool {
+        (self.file.number, &self.ikey, self.at) == (other.file.number, &other.ikey, other.at)
+    }
+}
+
+impl Eq for Deferred {}
+
+impl std::fmt::Debug for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Deferred").field("file", &self.file.number).field("at", &self.at).finish()
+    }
+}
+
+/// The value of the entry `c` of `table` stands at: its bytes, or where they are when it is a
+/// reference to a value file (FR-034).
+pub(crate) fn stored(
+    table: &Table,
+    i: usize,
+    c: &BlockCursor,
+) -> Result<(Bytes, Option<Box<Deferred>>), LsmError> {
+    if !c.is_ref() {
+        return Ok((c.value(), None));
+    }
+    let at = ValueRef::decode(c.value_slice()).map_err(|_| corrupt(table, i))?;
+    let file = table.value_file(at.slot).map_err(|_| corrupt(table, i))?.clone();
+    Ok((Bytes::new(), Some(Box::new(Deferred { file, ikey: c.key().to_vec(), at }))))
+}
+
+/// Reads the value `d` points to: `Ok(Err(token))` while its block is being read.
+pub(crate) fn fetch<B: Blocks>(
+    r: &mut B,
+    d: &Deferred,
+) -> Result<Result<Bytes, ReadToken>, LsmError> {
+    let bad = |i| corrupt(&d.file, i);
+    let i = value::block_of(&d.file, &d.ikey, &d.at).map_err(|_| bad(0))?;
+    match r.block(&d.file, i)? {
+        Fetch::Wait(token) => Ok(Err(token)),
+        Fetch::Ready(block) => Ok(Ok(value::value_in(block, &d.ikey, &d.at).map_err(|_| bad(i))?)),
+    }
 }
 
 /// Result of [`View::get`].
@@ -280,21 +341,22 @@ enum Seen {
 fn see(
     ts: Hlc,
     kind: Kind,
-    value: impl FnOnce() -> Bytes,
+    value: impl FnOnce() -> Result<(Bytes, Option<Box<Deferred>>), LsmError>,
     retracted: &mut Vec<Hlc>,
-    best: &mut Option<Found>,
-) -> Seen {
+    best: &mut Option<Cand>,
+) -> Result<Seen, LsmError> {
     if retracted.contains(&ts) {
-        return Seen::Next;
+        return Ok(Seen::Next);
     }
     if kind == Kind::Retract {
         retracted.push(ts);
-        return Seen::Next;
+        return Ok(Seen::Next);
     }
     if best.as_ref().is_none_or(|b| ts > b.ts) {
-        *best = Some(Found { ts, kind, value: value() });
+        let (value, deferred) = value()?;
+        *best = Some(Cand { ts, kind, value, deferred });
     }
-    Seen::Answer
+    Ok(Seen::Answer)
 }
 
 fn get_in_memtable(
@@ -302,7 +364,7 @@ fn get_in_memtable(
     key: &[u8],
     target: &[u8],
     retracted: &mut Vec<Hlc>,
-    best: &mut Option<Found>,
+    best: &mut Option<Cand>,
 ) {
     let mut at = m.seek(target);
     while let Some((pos, k, slot)) = at {
@@ -310,7 +372,8 @@ fn get_in_memtable(
         if logical != key {
             return;
         }
-        if let Seen::Answer = see(ts, slot.kind, || slot.value.clone(), retracted, best) {
+        let inline = || Ok((slot.value.clone(), None));
+        if let Ok(Seen::Answer) = see(ts, slot.kind, inline, retracted, best) {
             return;
         }
         at = m.next_after(pos, k);
@@ -324,7 +387,7 @@ fn get_in_table<B: Blocks>(
     key: &[u8],
     target: &[u8],
     retracted: &mut Vec<Hlc>,
-    best: &mut Option<Found>,
+    best: &mut Option<Cand>,
     passed: &mut bool,
 ) -> Result<Option<ReadToken>, LsmError> {
     let Some(mut i) = t.find_block(target) else {
@@ -348,7 +411,7 @@ fn get_in_table<B: Blocks>(
             if logical != key {
                 return Ok(None);
             }
-            if let Seen::Answer = see(ts, c.kind(), || c.value(), retracted, best) {
+            if let Seen::Answer = see(ts, c.kind(), || stored(t, i, &c), retracted, best)? {
                 return Ok(None);
             }
             // A version passed over: what the read wants is under it.
@@ -392,7 +455,7 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
     }
     let target = entry::internal_key(key, read);
     let mut retracted = Vec::new();
-    let mut best: Option<Found> = None;
+    let mut best: Option<Cand> = None;
     let mut hidden: Option<Hlc> = None;
     for m in &v.memtables {
         note_tombstones(&mut hidden, m.tombstones(), key, read);
@@ -435,7 +498,17 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
     }
     r.counted(probes);
     match best {
-        Some(b) if b.kind != Kind::Delete && hidden.is_none_or(|h| b.ts > h) => Lookup::Hit(b),
+        Some(mut b) if b.kind != Kind::Delete && hidden.is_none_or(|h| b.ts > h) => {
+            // A value in a value file is read once the version is decided (FR-034).
+            if let Some(d) = b.deferred.take() {
+                match fetch(r, &d) {
+                    Err(e) => return Lookup::Failed(e),
+                    Ok(Err(token)) => return Lookup::Miss(token),
+                    Ok(Ok(value)) => b.value = value,
+                }
+            }
+            Lookup::Hit(Found { ts: b.ts, kind: b.kind, value: b.value })
+        }
         _ => Lookup::NotFound,
     }
 }
@@ -460,6 +533,7 @@ impl View {
             joining: None,
             tombstones: Vec::new(),
             current: None,
+            ready: None,
             finished: false,
         }
     }
@@ -500,7 +574,7 @@ fn sift_down(heap: &mut [usize], cursors: &[Cursor], mut at: usize) {
 struct KeyState {
     key: Vec<u8>,
     retracted: Vec<Hlc>,
-    found: Option<Found>,
+    found: Option<Cand>,
 }
 
 /// A range read in progress: call [`Scan::next`] until [`Step::Done`].
@@ -526,6 +600,9 @@ pub struct Scan {
     joining: Option<usize>,
     tombstones: Vec<RangeTombstone>,
     current: Option<KeyState>,
+    /// A decided item whose value is still in its value file (FR-034); boxed, since few scans
+    /// hold one and every scan carries the field.
+    ready: Option<Box<(Item, Box<Deferred>)>>,
     finished: bool,
 }
 
@@ -583,15 +660,35 @@ impl Scan {
         cursors
     }
 
-    /// The decided key's item, if it shows.
-    fn emit(&self, st: KeyState) -> Option<Item> {
+    /// The decided key's item, if it shows: ready, or waiting for its value (FR-034).
+    fn emit(&mut self, st: KeyState) -> Option<Item> {
         let f = st.found?;
         if f.kind == Kind::Delete
             || self.tombstones.iter().any(|t| t.hides(&st.key, f.ts, self.read))
         {
             return None;
         }
-        Some(Item { key: st.key, ts: f.ts, kind: f.kind, value: f.value })
+        let item = Item { key: st.key, ts: f.ts, kind: f.kind, value: f.value };
+        match f.deferred {
+            None => Some(item),
+            Some(d) => {
+                self.ready = Some(Box::new((item, d)));
+                None
+            }
+        }
+    }
+
+    /// The item waiting for its value, once the value is read (FR-034).
+    fn deliver<B: Blocks>(&mut self, r: &mut B) -> Step {
+        let (item, d) = &mut **self.ready.as_mut().expect("an item waits");
+        match fetch(r, d) {
+            Err(e) => Step::Failed(e),
+            Ok(Err(token)) => Step::Miss(token),
+            Ok(Ok(value)) => {
+                item.value = value;
+                Step::Item(self.ready.take().expect("an item waits").0)
+            }
+        }
     }
 
     /// The next key's visible version.
@@ -612,6 +709,9 @@ impl Scan {
     fn step<B: Blocks>(&mut self, r: &mut B) -> Step {
         if let Some(e) = r.failure() {
             return Step::Failed(e.clone());
+        }
+        if self.ready.is_some() {
+            return self.deliver(r);
         }
         if self.finished {
             return Step::Done;
@@ -690,6 +790,7 @@ impl Scan {
                 let st = self.current.take();
                 return match st.and_then(|s| self.emit(s)) {
                     Some(item) => Step::Item(item),
+                    None if self.ready.is_some() => self.deliver(r),
                     None => Step::Done,
                 };
             };
@@ -697,6 +798,9 @@ impl Scan {
                 let st = self.current.take().expect("checked");
                 if let Some(item) = self.emit(st) {
                     return Step::Item(item);
+                }
+                if self.ready.is_some() {
+                    return self.deliver(r);
                 }
                 continue;
             }
@@ -720,7 +824,10 @@ impl Scan {
                 continue;
             }
             let c = &cursors[i];
-            let seen = see(ts, c.kind(), || c.value(), &mut st.retracted, &mut st.found);
+            let seen = match see(ts, c.kind(), || c.stored(), &mut st.retracted, &mut st.found) {
+                Ok(seen) => seen,
+                Err(e) => return Step::Failed(e),
+            };
             // The scan passes over this version: the ones under it may be in the history file
             // it left closed, which it opens at this key (FR-031).
             if let (Seen::Next, Some(j)) = (seen, self.asleep[i]) {

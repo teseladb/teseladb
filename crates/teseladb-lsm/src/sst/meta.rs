@@ -48,6 +48,9 @@ pub struct Props {
     /// Version of the dictionary of its blocks with code 3 (0: none; 004 FR-022). A file written
     /// before dictionaries existed ends its properties without it.
     pub dictionary: u64,
+    /// Bytes of each value file its references point to, by slot (FR-034): what the file keeps
+    /// alive of each. A file written before value files ends its properties without them.
+    pub values: Vec<u64>,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -76,6 +79,12 @@ impl Props {
             put_ts(&mut out, t.ts);
         }
         put_varint(&mut out, self.dictionary);
+        if !self.values.is_empty() {
+            put_varint(&mut out, self.values.len() as u64);
+            for bytes in &self.values {
+                put_varint(&mut out, *bytes);
+            }
+        }
         out
     }
 
@@ -96,10 +105,20 @@ impl Props {
             tombstones.push(RangeTombstone { start, end, ts });
         }
         let dictionary = if at == b.len() { 0 } else { get_varint(b, &mut at)? };
+        let mut values = Vec::new();
+        if at < b.len() {
+            let n = get_varint(b, &mut at)?;
+            if n == 0 {
+                return Err(Bad);
+            }
+            for _ in 0..n {
+                values.push(get_varint(b, &mut at)?);
+            }
+        }
         if at != b.len() || lo > hi || min_ts > max_ts {
             return Err(Bad);
         }
-        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary })
+        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary, values })
     }
 }
 
@@ -197,6 +216,7 @@ mod tests {
                 ts: ts(5),
             }],
             dictionary: 7,
+            values: Vec::new(),
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
@@ -207,6 +227,11 @@ mod tests {
         let old = Props { dictionary: 0, ..p.clone() };
         assert_eq!(Props::decode(&b[..b.len() - 1]), Ok(old));
         assert_eq!(Props::decode(&b[..b.len() - 2]), Err(Bad));
+        // With the bytes kept alive in each value file (FR-034), after the dictionary.
+        let with_values = Props { values: vec![8192, 4096], ..p.clone() };
+        let v = with_values.encode();
+        assert_eq!(Props::decode(&v), Ok(with_values));
+        assert_eq!(Props::decode(&v[..v.len() - 1]), Err(Bad));
         let upside_down = Props { lo: b"z".to_vec(), ..p.clone() };
         assert_eq!(Props::decode(&upside_down.encode()), Err(Bad));
         let backwards = Props { min_ts: ts(10), ..p };

@@ -11,6 +11,9 @@
 //!
 //! Every block is framed as `payload · compression(u8) · encryption(32 bytes) · crc32c(u32 LE)`
 //! and padded with `0x5a` up to the next 4 KiB, so that every read and write is aligned.
+//!
+//! A value longer than `value_separation_bytes` goes to a value file, an SST with one version per
+//! data block, and its entry holds a reference instead ([`value`], FR-034).
 
 pub(crate) mod block;
 pub(crate) mod delta;
@@ -21,6 +24,7 @@ pub(crate) mod meta;
 pub(crate) mod pgm;
 pub(crate) mod reader;
 pub(crate) mod ribbon;
+pub(crate) mod value;
 pub(crate) mod writer;
 
 use teseladb_raftlog::FileId;

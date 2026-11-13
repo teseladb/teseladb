@@ -602,3 +602,60 @@ fn shapes_tell_literal_kinds_apart() {
         key(d().with("a", op("$regex", Value::String("y".into()))))
     );
 }
+
+/// The comparisons the batch machine answers with vector kernels (010 FR-030): integers against
+/// literals that fit the immediate and against those of the pool, doubles with `-0.0`, NaN and
+/// infinities, lanes of other kinds mixed in, give the tree evaluator's answers.
+#[test]
+fn vector_comparisons_match_the_tree() {
+    let numbers = [
+        Value::Int32(0),
+        Value::Int32(-1),
+        Value::Int32(i32::MAX),
+        Value::Int32(i32::MIN),
+        Value::Int64(i64::MAX),
+        Value::Int64(i64::MIN),
+        Value::Int64(1 << 40),
+        Value::Int64(-(1 << 40)),
+        Value::Double(0.0),
+        Value::Double(-0.0),
+        Value::Double(1.5),
+        Value::Double(f64::NAN),
+        Value::Double(f64::INFINITY),
+        Value::Double(f64::NEG_INFINITY),
+        Value::Double((1u64 << 40) as f64),
+        Value::Decimal128(Decimal128::from_parts(false, 1, 0).expect("1")),
+        Value::Null,
+        Value::String("1".into()),
+        arr(vec![Value::Int32(3), Value::Double(-0.0)]),
+    ];
+    let mut rng = Rng(0x0FEC_70B5);
+    let docs: Vec<Vec<u8>> = (0..200)
+        .map(|_| {
+            let mut out = d();
+            if rng.below(8) != 0 {
+                out.insert("n", rng.pick(&numbers).clone());
+            }
+            out.to_bytes().expect("small")
+        })
+        .collect();
+    let ext = NoExtensions;
+    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    let literals = [
+        Value::Int32(0),
+        Value::Int32(-1),
+        Value::Int64(i64::MAX),
+        Value::Int64(1 << 40),
+        Value::Int64(i64::MIN),
+        Value::Double(0.0),
+        Value::Double(-0.0),
+        Value::Double(1.5),
+        Value::Double(f64::INFINITY),
+        Value::Double((1u64 << 40) as f64),
+    ];
+    for k in &literals {
+        for name in ["$eq", "$gt", "$gte", "$lt", "$lte"] {
+            check(&d().with("n", op(name, k.clone())), &docs, &ctx);
+        }
+    }
+}

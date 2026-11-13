@@ -151,26 +151,46 @@ pub struct Matching {
     pub next: Option<Vec<u8>>,
 }
 
-/// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered.
+/// The most documents a scan hands its filter at once: a batch of the register machine
+/// (010 FR-028).
+pub const SCAN_BATCH: usize = teseladb_mql::vm::BATCH;
+
+/// The filter of a scan (010 FR-027, FR-028): it takes the documents of a batch, at most
+/// [`SCAN_BATCH`] in key order, and gives the bits of those it keeps (bit `i` for the document
+/// at `i`).
+pub type Keep<'k> = dyn FnMut(&[&[u8]]) -> u64 + 'k;
+
+/// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered a batch at
+/// a time.
 pub fn matching_by_scan<B: Backend + ?Sized>(
     backend: &mut B,
     (start, end): (&[u8], &[u8]),
     examine: usize,
     concern: ReadConcern,
-    keep: &mut dyn FnMut(&[u8]) -> bool,
+    keep: &mut Keep<'_>,
 ) -> Result<Matching, CommandError> {
     let read = backend.scan(start, end, examine, concern)?;
     let mut out = Matching { examined: read.len(), ..Matching::default() };
     if read.len() >= examine {
         out.next = read.last().map(|(k, _)| [k.as_slice(), &[0]].concat());
     }
-    for (i, (key, doc)) in read.into_iter().enumerate() {
-        if keep(&doc) {
-            out.seen.push(i + 1);
-            out.rows.push((key, doc));
+    let mut seen = 0;
+    let mut rows = read.into_iter();
+    loop {
+        let batch: Rows = rows.by_ref().take(SCAN_BATCH).collect();
+        if batch.is_empty() {
+            return Ok(out);
+        }
+        let docs: Vec<&[u8]> = batch.iter().map(|(_, d)| d.as_slice()).collect();
+        let kept = keep(&docs);
+        for (l, row) in batch.into_iter().enumerate() {
+            seen += 1;
+            if (kept >> l) & 1 == 1 {
+                out.seen.push(seen);
+                out.rows.push(row);
+            }
         }
     }
-    Ok(out)
 }
 
 /// A span of keys `[start, end)` a read takes at most `limit` documents of.
@@ -505,15 +525,16 @@ pub trait Backend {
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError>;
     /// Examines at most `examine` documents of `[start, end)` in key order and gives those
-    /// `keep` accepts (010 FR-027). A backend that can evaluates `keep` on the stored bytes and
-    /// copies only what it accepts; by default it reads them all and filters.
+    /// `keep` accepts, handing it the documents a batch at a time (010 FR-027, FR-028). A
+    /// backend that can evaluates `keep` on the stored bytes and copies only what it accepts;
+    /// by default it reads them all and filters.
     fn scan_matching(
         &mut self,
         start: &[u8],
         end: &[u8],
         examine: usize,
         concern: ReadConcern,
-        keep: &mut dyn FnMut(&[u8]) -> bool,
+        keep: &mut Keep<'_>,
     ) -> Result<Matching, CommandError> {
         matching_by_scan(self, (start, end), examine, concern, keep)
     }
