@@ -169,11 +169,12 @@ impl TableWriter {
         let first = self.block_first.take().unwrap_or_default();
         let dict = match self.codec {
             Codec::ZstdDict => self.block_dict(&first),
-            Codec::None | Codec::Zlib | Codec::Zstd => None,
+            Codec::None | Codec::Zlib | Codec::Zstd | Codec::Lz4 => None,
         };
         let method = match (self.codec, &dict) {
             (Codec::None, _) => Method::None,
             (Codec::Zlib, _) => Method::Zlib,
+            (Codec::Lz4, _) => Method::Lz4,
             (Codec::ZstdDict, Some(d)) => Method::Dict(d),
             (Codec::Zstd | Codec::ZstdDict, _) => Method::Zstd,
         };

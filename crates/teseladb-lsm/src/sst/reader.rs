@@ -51,7 +51,7 @@ pub struct Table {
 /// compression (the latter framed, without the padding to the page).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BlockStats {
-    pub(crate) codes: [u64; 4],
+    pub(crate) codes: [u64; 5],
     pub(crate) raw: u64,
     pub(crate) stored: u64,
 }

@@ -22,7 +22,7 @@ use teseladb_deflate::zlib;
 use teseladb_hash::crc32c;
 use teseladb_types::Bytes;
 
-use super::{Bad, delta, get_varint, put_varint};
+use super::{Bad, delta, get_varint, lz4, put_varint};
 use crate::entry::{Kind, logical};
 
 /// Bytes after the payload of a framed block.
@@ -33,6 +33,7 @@ pub(crate) const COMPRESSION_NONE: u8 = 0;
 pub(crate) const COMPRESSION_ZLIB: u8 = 1;
 pub(crate) const COMPRESSION_ZSTD: u8 = 2;
 pub(crate) const COMPRESSION_ZSTD_DICT: u8 = 3;
+pub(crate) const COMPRESSION_LZ4: u8 = 4;
 const ZLIB_LEVEL: u8 = 6;
 /// Largest payload a block decompresses to: a version larger than a block takes one of its own,
 /// and a document is at most 16 MiB.
@@ -46,6 +47,8 @@ pub(crate) enum Method<'a> {
     Zstd,
     /// zstd with this raw content dictionary, the file's.
     Dict(&'a [u8]),
+    /// LZ4 (FR-037).
+    Lz4,
 }
 
 /// Frames a payload, compressed with `method` when that makes it smaller.
@@ -62,6 +65,7 @@ pub(crate) fn compressed(payload: &[u8], method: Method<'_>) -> (Vec<u8>, u8) {
         Method::Zlib => Some((zlib::compress(payload, ZLIB_LEVEL), COMPRESSION_ZLIB)),
         Method::Zstd => Some((zstd::compress(payload), COMPRESSION_ZSTD)),
         Method::Dict(d) => Some((zstd::compress_with_dict(payload, d), COMPRESSION_ZSTD_DICT)),
+        Method::Lz4 => Some((lz4::compress(payload), COMPRESSION_LZ4)),
     };
     match packed {
         Some((z, code)) if z.len() < payload.len() => (z, code),
@@ -134,6 +138,7 @@ pub(crate) fn unframe_with(
         COMPRESSION_ZSTD => {
             zstd::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec).map_err(|_| Bad)
         }
+        COMPRESSION_LZ4 => lz4::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec),
         COMPRESSION_ZSTD_DICT => {
             let dict = dict.ok_or(Bad)?;
             zstd::decompress_with_dict(&body, MAX_PAYLOAD, dict)

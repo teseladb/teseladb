@@ -91,6 +91,31 @@ fn zstd_blocks_are_written_and_read() {
     }
 }
 
+/// FR-037: blocks compressed with LZ4 read back, also after a restart and once a compaction with
+/// another codec rewrites them; LZ4 makes documents smaller.
+#[test]
+fn lz4_blocks_are_written_and_read() {
+    for seed in 300..302 {
+        let mut disk = MemDisk::new();
+        let mut lsm = open(&with(Codec::Lz4), &mut disk);
+        history(seed, 2_000, &mut lsm, &mut disk);
+        let m = lsm.metrics();
+        assert!(m.blocks_written[4] > 0, "{m:?}");
+        assert_eq!(m.blocks_written[1..4], [0, 0, 0], "{m:?}");
+    }
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&with(Codec::Lz4), &mut disk);
+    let (mut model, mut clock) = (Model::default(), 0);
+    write_docs(&mut lsm, &mut disk, &mut model, (3, 0, 300), &mut clock);
+    let m = lsm.metrics();
+    assert!(m.block_bytes_written[1] * 2 < m.block_bytes_written[0], "{m:?}");
+    drop(lsm);
+    let mut lsm = open(&with(Codec::Zstd), &mut disk);
+    check_all(&mut lsm, &mut disk, &model, clock + 1);
+    compact_all(&mut lsm, &mut disk);
+    check_all(&mut lsm, &mut disk, &model, clock + 1);
+}
+
 #[test]
 fn dictionary_blocks_are_written_read_and_kept_across_a_restart() {
     let cfg = with(Codec::ZstdDict);

@@ -38,7 +38,7 @@ pub struct LsmMetrics {
     /// of their file.
     pub history_bytes: u64,
     /// Data blocks written since the LSM opened, by compression code (`sst-format.md`).
-    pub blocks_written: [u64; 4],
+    pub blocks_written: [u64; 5],
     /// Bytes of the data blocks written since the LSM opened, before and after compression
     /// (framed, without the padding to the page): the compression rate of 004 SC-006.
     pub block_bytes_written: [u64; 2],

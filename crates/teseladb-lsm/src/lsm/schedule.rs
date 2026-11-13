@@ -122,7 +122,7 @@ impl Lsm {
                 let written = self.dict_written.clone();
                 job.with_training(Training::new(&self.cfg, &self.state, &self.version, written))
             }
-            Codec::None | Codec::Zlib | Codec::Zstd => job,
+            Codec::None | Codec::Zlib | Codec::Zstd | Codec::Lz4 => job,
         }
     }
 
