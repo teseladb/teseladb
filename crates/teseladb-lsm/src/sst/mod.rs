@@ -17,6 +17,7 @@ pub(crate) mod delta;
 pub(crate) mod filter;
 pub(crate) mod meta;
 pub(crate) mod reader;
+pub(crate) mod ribbon;
 pub(crate) mod writer;
 
 use teseladb_raftlog::FileId;
