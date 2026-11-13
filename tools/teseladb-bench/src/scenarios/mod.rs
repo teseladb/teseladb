@@ -17,11 +17,14 @@ pub mod fle;
 pub mod follower_read;
 pub mod group0_limits;
 pub mod index;
+pub mod ingest;
 pub mod js;
 pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
 pub mod noisy_tenant;
+pub mod open;
+pub mod profiles;
 pub mod query;
 pub mod raftlog;
 pub mod read;
@@ -193,6 +196,14 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "aggregate" => query::run_aggregate(args),
         "sort" => query::run_sort(args),
         "group-large" => query::run_group_large(args),
+        "ingest" => ingest::run(args),
+        "open-read" => open::read(args),
+        "open-insert" => open::insert(args),
+        "profile-a" => profiles::a(args),
+        "profile-b" => profiles::b(args),
+        "profile-c" => profiles::c(args),
+        "profile-d" => profiles::d(args),
+        "profile-e" => profiles::e(args),
         "fle-query" => fle::run(args),
         "txn" => txn::run(args),
         "txn-readers" => txn::readers_run(args),

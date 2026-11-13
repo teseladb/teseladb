@@ -13,6 +13,7 @@ pub mod aligned;
 pub mod alloc_count;
 pub mod handoff;
 pub mod host;
+pub mod huge_pool;
 pub mod latest;
 #[cfg(target_os = "linux")]
 mod linux;

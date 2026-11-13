@@ -3,7 +3,8 @@
 //! document into the bytes to write (compressed like the request, with a checksum if it had
 //! one, as an `OP_REPLY` for the `OP_QUERY` handshake).
 
-use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_bson::{Document, Fragments, RawDoc, Value};
+use teseladb_types::Bytes;
 
 use crate::commands::auth::AuthState;
 use crate::compressed::{self, Compressor};
@@ -90,6 +91,14 @@ impl Default for HelloState {
     }
 }
 
+/// Where a connection keeps the buffer of each request it reads, which the request's documents
+/// share (012 FR-027): the server places it on pages of 2 MiB when the system has them (012
+/// FR-032).
+pub trait RequestArena: Send + Sync + std::fmt::Debug {
+    /// `message` copied into this memory, or `None` when it has no room for it.
+    fn hold(&self, message: &[u8]) -> Option<Bytes>;
+}
+
 /// A client connection.
 #[derive(Debug)]
 pub struct Connection {
@@ -109,6 +118,8 @@ pub struct Connection {
     pub auth: AuthState,
     /// The tenant the request being run works in (007 FR-025).
     pub tenant: u32,
+    /// Where the buffers of its requests go; the heap without one.
+    pub arena: Option<std::sync::Arc<dyn RequestArena>>,
 }
 
 /// The longest message a connection takes before it authenticates, with authentication on: a
@@ -135,6 +146,7 @@ impl Connection {
             bypass_default_max_time: true,
             auth: AuthState::default(),
             tenant: 0,
+            arena: None,
         }
     }
 
@@ -169,7 +181,14 @@ impl Connection {
         if self.buf.len() < size {
             return Ok(None);
         }
-        let whole: Vec<u8> = self.buf.drain(..size).collect();
+        // The request's buffer: every canonical document of the message keeps a view of it, and
+        // it goes with the last of them once the reply is written (012 FR-027).
+        let whole = self
+            .arena
+            .as_ref()
+            .and_then(|a| a.hold(&self.buf[..size]))
+            .unwrap_or_else(|| Bytes::from_owner(self.buf[..size].to_vec()));
+        self.buf.drain(..size);
         let header = Header::parse(&whole);
         match header.op_code {
             opcode::OP_MSG => msg_request(&whole, None).map(Some),
@@ -179,7 +198,7 @@ impl Connection {
                 if !self.hello.enabled.contains(&c) {
                     return Err(WireError::UnknownCompressor(c.id()));
                 }
-                msg_request(&inner, Some(c)).map(Some)
+                msg_request(&Bytes::from_owner(inner), Some(c)).map(Some)
             }
             op => Err(WireError::UnsupportedOpcode(op)),
         }
@@ -189,6 +208,32 @@ impl Connection {
     /// not write them). `more_to_come` streams it (exhaust).
     pub fn reply(&mut self, req: &Request, doc: &Document, more_to_come: bool) -> Vec<u8> {
         self.reply_to(req.header.request_id, req, doc, more_to_come).0
+    }
+
+    /// [`Connection::reply`] as pieces for a vectored write: an uncompressed `OP_MSG` reply
+    /// takes each document of `doc` that keeps its stored bytes from its own buffer (006 FR-040);
+    /// any other reply is one buffer.
+    pub fn reply_pieces<'a>(
+        &mut self,
+        req: &Request,
+        doc: &'a Document,
+        more_to_come: bool,
+    ) -> ReplyPieces<'a> {
+        if req.kind != Kind::Msg || req.compressor.is_some() {
+            return ReplyPieces::Bytes(self.reply(req, doc, more_to_come));
+        }
+        let id = self.next_id;
+        let mut bits = req.flags & flags::CHECKSUM_PRESENT;
+        if more_to_come {
+            bits |= flags::MORE_TO_COME;
+        }
+        match OpMsg::encode_fragments(id, req.header.request_id, bits, doc, reply_limits()) {
+            Ok(f) => {
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                ReplyPieces::Pieces(f)
+            }
+            Err(_) => ReplyPieces::Bytes(self.reply(req, doc, more_to_come)),
+        }
     }
 
     /// [`Connection::reply`] answering message `response_to` (the previous reply of an exhaust
@@ -233,15 +278,52 @@ impl Connection {
     }
 }
 
-fn msg_request(whole: &[u8], compressor: Option<Compressor>) -> Result<Request, WireError> {
-    let header = Header::parse(whole);
-    let m = OpMsg::parse(whole)?;
-    let mut command = match &m.body {
-        Some(b) => {
-            Document::from(RawDoc::from_bytes_with(b, command_limits()).map_err(WireError::Bson)?)
+/// A reply ready to write: one buffer, or pieces whose stored documents stay in their own
+/// buffers (006 FR-040).
+#[derive(Debug)]
+pub enum ReplyPieces<'a> {
+    /// The whole message in one buffer: an `OP_QUERY` reply, a compressed one, or a reply whose
+    /// document did not encode and carries its error.
+    Bytes(Vec<u8>),
+    /// An `OP_MSG` reply in pieces.
+    Pieces(Fragments<'a>),
+}
+
+impl ReplyPieces<'_> {
+    /// The pieces in order, for a vectored write.
+    pub fn slices(&self) -> Vec<&[u8]> {
+        match self {
+            ReplyPieces::Bytes(b) => vec![b.as_slice()],
+            ReplyPieces::Pieces(f) => f.slices(),
         }
-        None => Document::new(),
-    };
+    }
+
+    /// Bytes in all.
+    pub fn len(&self) -> usize {
+        match self {
+            ReplyPieces::Bytes(b) => b.len(),
+            ReplyPieces::Pieces(f) => f.len(),
+        }
+    }
+
+    /// Whether it has no bytes (never, for a reply).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes that go from the buffers of stored documents.
+    pub fn borrowed(&self) -> usize {
+        match self {
+            ReplyPieces::Bytes(_) => 0,
+            ReplyPieces::Pieces(f) => f.borrowed(),
+        }
+    }
+}
+
+fn msg_request(whole: &Bytes, compressor: Option<Compressor>) -> Result<Request, WireError> {
+    let header = Header::parse(whole);
+    let m = OpMsg::parse_in(whole)?;
+    let mut command = m.body.unwrap_or_default();
     let problem = m.problem;
     let mut sequences = Vec::with_capacity(m.sequences.len());
     for s in m.sequences {
@@ -249,11 +331,7 @@ fn msg_request(whole: &[u8], compressor: Option<Compressor>) -> Result<Request, 
             // A `refrouter` 9.0 closes the connection (measured).
             return Err(WireError::Malformed("Duplicate field between body and document sequence"));
         }
-        let mut docs = Vec::with_capacity(s.docs.len());
-        for d in &s.docs {
-            let raw = RawDoc::from_bytes_with(d, command_limits()).map_err(WireError::Bson)?;
-            docs.push(Value::Document(Document::from(raw)));
-        }
+        let docs: Vec<Value> = s.docs.into_iter().map(Value::Document).collect();
         sequences.push(s.id.clone());
         command.push(s.id, docs);
     }

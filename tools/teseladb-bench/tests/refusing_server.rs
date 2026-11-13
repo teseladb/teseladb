@@ -7,7 +7,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Output};
 
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
-use teseladb_bson::{Document, RawDoc};
+use teseladb_bson::Document;
 
 /// The commands the server refuses; it answers `ok: 1` to every other one.
 const REFUSED: [&str; 2] = ["find", "update"];
@@ -31,7 +31,8 @@ fn serve(mut s: TcpStream, transient: bool) {
         whole.resize(usize::try_from(header.length).expect("length"), 0);
         s.read_exact(&mut whole[HEADER_LEN..]).expect("message");
         let body = OpMsg::parse(&whole).expect("OP_MSG").body.expect("body");
-        let name = RawDoc::from_bytes(&body).expect("command").iter().next().expect("name").0;
+        let name = body.iter().next().expect("name").0.to_owned();
+        let name = name.as_str();
         let reply = if REFUSED.contains(&name) {
             let refusal = Document::new().with("ok", 0.0).with("errmsg", REFUSAL).with("code", 13);
             if transient {

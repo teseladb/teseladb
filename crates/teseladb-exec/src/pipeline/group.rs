@@ -147,23 +147,46 @@ impl Group {
         let store = env.spill().filter(|_| env.allow_disk_use());
         let mut groups: Groups = Groups::default();
         let mut held = 0usize;
-        for doc in &docs {
-            let scope = group_scope(env, doc, sbe);
-            let key = self.id.eval(doc, &scope)?.unwrap_or(Value::Null);
-            let before = groups.list.len();
-            let size = super::errors::value_size(&key);
-            let states = groups.entry(key, &self.outputs, col)?;
-            for ((_, acc), st) in self.outputs.iter().zip(states.iter_mut()) {
-                acc.add(st, doc, &scope)?;
-                held += held_by(acc, st);
+        let plan = super::group_columns::columnar(&self.id, &self.outputs);
+        let mut spill = false;
+        'batches: for chunk in docs.chunks(teseladb_mql::vm::BATCH) {
+            // The batch's columns, when the group runs on them and the documents are stored.
+            let raws = plan.as_ref().and_then(|_| super::group_columns::stored(chunk));
+            let columns = plan.as_ref().zip(raws.as_deref()).map(|(p, r)| (p, p.load(r)));
+            for (lane, doc) in chunk.iter().enumerate() {
+                let mut scope: Option<Scope> = None;
+                let key = match columns.as_ref().and_then(|(p, c)| p.key(c, lane)) {
+                    Some(k) => k,
+                    None => {
+                        let s = scope.get_or_insert_with(|| group_scope(env, doc, sbe));
+                        self.id.eval(doc, s)?.unwrap_or(Value::Null)
+                    }
+                };
+                let before = groups.list.len();
+                let size = super::errors::value_size(&key);
+                let states = groups.entry(key, &self.outputs, col)?;
+                for (k, ((_, acc), st)) in self.outputs.iter().zip(states.iter_mut()).enumerate() {
+                    match columns.as_ref().and_then(|(p, c)| p.input(c, k, lane)) {
+                        Some(v) => acc.add_evaluated(st, v, (col, sbe))?,
+                        None => {
+                            let s = scope.get_or_insert_with(|| group_scope(env, doc, sbe));
+                            acc.add(st, doc, s)?;
+                        }
+                    }
+                    held += held_by(acc, st);
+                }
+                if groups.list.len() > before {
+                    held += size;
+                }
+                if store.is_some() && held > limit {
+                    spill = true;
+                    break 'batches;
+                }
             }
-            if groups.list.len() > before {
-                held += size;
-            }
-            if let Some(store) = store.filter(|_| held > limit) {
-                drop(groups);
-                return self.run_sorted(docs, env, sbe, (limit, store));
-            }
+        }
+        if let (true, Some(store)) = (spill, store) {
+            drop(groups);
+            return self.run_sorted(docs, env, sbe, (limit, store));
         }
         drop(docs);
         let out = groups.finish("_id", &self.outputs, col, sbe)?;

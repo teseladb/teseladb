@@ -412,11 +412,12 @@ dependencies = [
 
 [[package]]
 name = "teseladb-bson"
-version = "0.1.5"
+version = "0.4.1"
 source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "6a313054c2ce39c476b1455db24c4d10bd473d9b74ff7c2a8322484eb00ca4a9"
+checksum = "e61071ecd4fae2b2520a1df2caa36f694aed91fb3b4de8c379adbdb9229060fa"
 dependencies = [
  "teseladb-json",
+ "teseladb-types",
 ]
 
 [[package]]
@@ -493,9 +494,9 @@ dependencies = [
 
 [[package]]
 name = "teseladb-types"
-version = "0.1.0"
+version = "0.1.1"
 source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "9515c27a3640eccd4ccb3caea6027ba02f34e49dc89b6357d3ba2b3a721da8c8"
+checksum = "9fb45b1ded77ed44808459ec26abac73cc9444ae3a5d1da74c9665f843b28516"
 
 [[package]]
 name = "teseladb-tz"

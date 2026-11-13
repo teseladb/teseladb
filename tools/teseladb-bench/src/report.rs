@@ -65,8 +65,12 @@ impl Report {
     /// Adds p50, p99 and p99.9 of a histogram in nanoseconds, with optional targets.
     pub fn latency(&mut self, name: &str, h: &Histogram, p50: Option<f64>, p99: Option<f64>) {
         self.push(&format!("{name}.p50"), "ns", h.percentile(50.0) as f64, p50.map(Target::AtMost));
+        self.push(&format!("{name}.p90"), "ns", h.percentile(90.0) as f64, None);
         self.push(&format!("{name}.p99"), "ns", h.percentile(99.0) as f64, p99.map(Target::AtMost));
         self.push(&format!("{name}.p999"), "ns", h.percentile(99.9) as f64, None);
+        // 002 FR-036: the tail to p99.99 and the worst one.
+        self.push(&format!("{name}.p9999"), "ns", h.percentile(99.99) as f64, None);
+        self.push(&format!("{name}.max"), "ns", h.max() as f64, None);
     }
 
     /// Metrics with a target they do not meet.
@@ -186,5 +190,27 @@ mod tests {
         assert!(j.contains("\"target\":{\"at_least\":20},\"met\":false"), "{j}");
         assert!(j.contains("\"value\":null"));
         assert!(j.contains("\\\"indicative\\\"\\u000a"), "{j}");
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod latency_tests {
+    use super::*;
+
+    #[test]
+    fn a_latency_gives_the_tail_to_p9999_and_the_max() {
+        let mut h = Histogram::new();
+        for v in 1..=100_000u64 {
+            h.record(v * 1000);
+        }
+        let mut r = Report::new("x");
+        r.latency("op", &h, None, None);
+        let names: Vec<&str> = r.metrics.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["op.p50", "op.p90", "op.p99", "op.p999", "op.p9999", "op.max"]);
+        let value = |n: &str| r.metrics.iter().find(|m| m.name == n).unwrap().value;
+        assert!(value("op.p9999") >= value("op.p999"));
+        let max = value("op.max");
+        assert!((max - 100_000_000.0).abs() / 100_000_000.0 < 0.01, "{max}");
     }
 }

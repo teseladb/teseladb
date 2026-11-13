@@ -23,9 +23,10 @@ impl BufferPool {
         BufferPool { free: (0..count).rev().collect(), taken: vec![false; usize::from(count)] }
     }
 
-    /// The memory of `count` buffers, to register.
+    /// The memory of `count` buffers, to register: on huge pages when the system has them
+    /// reserved, on normal pages otherwise (012 FR-032).
     pub fn allocate(count: u16) -> Vec<AlignedBuf> {
-        (0..count).map(|_| AlignedBuf::new(BUFFER_BYTES)).collect()
+        teseladb_sys::aligned::allocate_huge(usize::from(count), BUFFER_BYTES)
     }
 
     /// Takes a free buffer, the lowest one; `None` when all are in use.

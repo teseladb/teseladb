@@ -885,6 +885,8 @@ struct Checker {
     /// The collection's level is `constraint`, which does not let writes bypass validation.
     constraint: bool,
     collation: Option<teseladb_collation::Collation>,
+    /// The extensions under that collation.
+    ext: super::engines::CollatedExtensions,
     /// The collection's secondary indexes.
     indexes: Maintainer,
     /// The unique keys the write's statements have put or removed so far.
@@ -907,6 +909,20 @@ struct Checker {
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
 }
 
+/// The collator of the collation `spec` of a write (the command's, or else the collection's
+/// default): `None` for the binary order.
+pub(crate) fn collator_of(
+    spec: Option<&Document>,
+) -> Result<Option<teseladb_collation::Collation>, CommandError> {
+    let Some(c) = spec else { return Ok(None) };
+    let bytes = c.to_bytes()?;
+    let raw = RawDoc::from_bytes(&bytes)?;
+    Ok(match parse_collation(raw)? {
+        ParsedCollation::Simple => None,
+        ParsedCollation::Collation(c, _) => Some(c),
+    })
+}
+
 impl Checker {
     /// The checker of a write with rules `r`; `enforce` is false in an index build's backfill,
     /// which takes the duplicates of an index with `prepareUnique`.
@@ -921,17 +937,7 @@ impl Checker {
             }
             None => None,
         };
-        let collation = match &r.collation {
-            Some(c) => {
-                let bytes = c.to_bytes()?;
-                let raw = RawDoc::from_bytes(&bytes)?;
-                match parse_collation(raw)? {
-                    ParsedCollation::Simple => None,
-                    ParsedCollation::Collation(c, _) => Some(c),
-                }
-            }
-            None => None,
-        };
+        let collation = collator_of(r.collation.as_ref())?;
         let constraint = matches!(&r.validator, Some((_, level, _)) if level == CONSTRAINT_LEVEL);
         Ok(Checker {
             validator,
@@ -940,6 +946,7 @@ impl Checker {
             bypass: r.bypass,
             constraint,
             collation,
+            ext: super::engines::CollatedExtensions::new(collation),
             indexes: Maintainer::new(&r.ns, (r.tenant, r.collection), &r.indexes)?
                 .with_probes(r.probes.clone(), enforce),
             unique: std::cell::RefCell::default(),
@@ -956,7 +963,7 @@ impl Checker {
     fn ctx(&self) -> MatchContext<'_> {
         MatchContext {
             collation: self.collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &self.ext,
             vars: self.vars.as_ref(),
         }
     }

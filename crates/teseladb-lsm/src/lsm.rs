@@ -394,6 +394,13 @@ impl Lsm {
         self.freeze();
     }
 
+    /// Keeps the blocks its caches take from now on in `memory` (012 FR-032): the core's cache
+    /// and the one readers on other threads share.
+    pub fn place_blocks(&mut self, memory: std::sync::Arc<dyn crate::BlockMemory>) {
+        self.reader.cache.set_memory(memory.clone());
+        self.shared.place_blocks(&memory);
+    }
+
     /// The handle readers on other threads keep (FR-026).
     pub fn shared(&self) -> crate::concurrent::SharedLsm {
         self.shared.clone()

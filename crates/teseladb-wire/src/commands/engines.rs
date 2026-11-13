@@ -131,19 +131,110 @@ impl Extensions for NodeExtensions {
         doc: RawDoc<'_>,
         vars: Option<&Document>,
     ) -> Result<Document> {
-        let stages: Vec<RawValue<'_>> = match pipeline {
-            RawValue::Array(a) => a.iter().collect(),
-            _ => Vec::new(),
-        };
-        refuse_outside_update(&stages)?;
-        let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
-        let ctx = teseladb_exec::expr::Ctx::checked(names);
-        let p = teseladb_exec::pipeline::Pipeline::parse(&stages, &ctx)?;
-        let env = VarsEnv(vars.cloned().unwrap_or_default());
-        let d = Document::from(doc);
-        // An empty pipeline leaves the document as it is.
-        Ok(p.run(vec![d.clone()], &env)?.into_iter().next().unwrap_or(d))
+        run_update_pipeline(pipeline, doc, vars, teseladb_exec::collation::Collation::default())
     }
+}
+
+/// The node's extensions under the collation of the operation (the command's, or else the
+/// collection's default): the expressions of a filter (`$expr`) and of a `find` projection
+/// compare strings with it, as RefDb 9.0.4 evaluates them with the operation's collator.
+#[derive(Clone, Debug, Default)]
+pub struct CollatedExtensions(teseladb_exec::collation::Collation);
+
+impl CollatedExtensions {
+    /// The extensions comparing strings with `collation`, the binary order for `None`.
+    pub fn new(collation: Option<teseladb_collation::Collation>) -> CollatedExtensions {
+        CollatedExtensions(
+            collation
+                .map(|c| teseladb_exec::collation::Collation::new(std::rc::Rc::new(c)))
+                .unwrap_or_default(),
+        )
+    }
+
+    fn scope(&self, d: &Document, vars: Option<&Document>) -> Scope {
+        drawing_scope(d, vars).with_collation(self.0.clone())
+    }
+}
+
+impl Extensions for CollatedExtensions {
+    fn expr(&self, e: RawValue<'_>, doc: RawDoc<'_>, vars: Option<&Document>) -> Result<bool> {
+        let (expr, d) = (Expr::parse(e)?, Document::from(doc));
+        let v = expr.eval(&d, &self.scope(&d, vars))?;
+        Ok(teseladb_exec::expr::truthy(&v))
+    }
+
+    fn where_js(&self, code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool> {
+        NodeExtensions.where_js(code, doc)
+    }
+
+    fn text(&self, query: &TextQuery, doc: RawDoc<'_>) -> Result<bool> {
+        NodeExtensions.text(query, doc)
+    }
+
+    fn geo(&self, query: &GeoQuery, value: RawValue<'_>) -> Result<bool> {
+        NodeExtensions.geo(query, value)
+    }
+
+    fn random(&self) -> f64 {
+        NodeExtensions.random()
+    }
+
+    fn meta(&self, name: &str, doc: RawDoc<'_>) -> Result<Option<Value>> {
+        NodeExtensions.meta(name, doc)
+    }
+
+    fn eval(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        let (expr, d) = (Expr::parse(e)?, Document::from(doc));
+        expr.eval(&d, &self.scope(&d, vars))
+    }
+
+    fn eval_projection(
+        &self,
+        e: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Option<Value>> {
+        let expr =
+            teseladb_exec::pipeline::projected_expr(e, &teseladb_exec::expr::Ctx::default())?;
+        let d = Document::from(doc);
+        expr.eval(&d, &self.scope(&d, vars))
+    }
+
+    fn update_pipeline(
+        &self,
+        pipeline: RawValue<'_>,
+        doc: RawDoc<'_>,
+        vars: Option<&Document>,
+    ) -> Result<Document> {
+        run_update_pipeline(pipeline, doc, vars, self.0.clone())
+    }
+}
+
+/// Runs the pipeline of an update on `doc` with the command's variables `vars`, its expressions
+/// comparing strings with `collation` (the operation's, as RefDb 9.0.4 evaluates them).
+fn run_update_pipeline(
+    pipeline: RawValue<'_>,
+    doc: RawDoc<'_>,
+    vars: Option<&Document>,
+    collation: teseladb_exec::collation::Collation,
+) -> Result<Document> {
+    let stages: Vec<RawValue<'_>> = match pipeline {
+        RawValue::Array(a) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    refuse_outside_update(&stages)?;
+    let names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();
+    let ctx = teseladb_exec::expr::Ctx::checked(names);
+    let p = teseladb_exec::pipeline::Pipeline::parse(&stages, &ctx)?;
+    let env = VarsEnv(vars.cloned().unwrap_or_default(), collation);
+    let d = Document::from(doc);
+    // An empty pipeline leaves the document as it is.
+    Ok(p.run(vec![d.clone()], &env)?.into_iter().next().unwrap_or(d))
 }
 
 /// The stages an update's pipeline takes (measured on 9.0.4).
@@ -188,9 +279,20 @@ pub(crate) fn refuse_outside_update(stages: &[RawValue<'_>]) -> Result<()> {
 
 /// The environment of a pipeline that reads only the command's variables (an update's, the
 /// `whenMatched` pipeline of `$merge`).
-pub(crate) struct VarsEnv(pub(crate) Document);
+pub(crate) struct VarsEnv(Document, teseladb_exec::collation::Collation);
+
+impl VarsEnv {
+    /// The environment of the variables `vars`, comparing strings in binary order.
+    pub(crate) fn new(vars: Document) -> VarsEnv {
+        VarsEnv(vars, teseladb_exec::collation::Collation::default())
+    }
+}
 
 impl teseladb_exec::pipeline::Env for VarsEnv {
+    fn collation(&self) -> teseladb_exec::collation::Collation {
+        self.1.clone()
+    }
+
     fn ext(&self) -> &dyn Extensions {
         &NodeExtensions
     }

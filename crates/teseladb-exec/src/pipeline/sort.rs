@@ -126,15 +126,16 @@ impl SortSpec {
         doc: &Document,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> Result<Vec<Value>, MqlError> {
-        let bytes = crate::raw::bytes_of(doc)?;
-        let raw = RawDoc::from_bytes(&bytes).map_err(crate::raw::bad)?;
         let mut keys = Vec::with_capacity(self.keys.len());
         let mut arrays = 0;
-        for (path, asc) in &self.keys {
-            let (v, through_array) = key_of(raw, path, *asc, col)?;
-            arrays += usize::from(through_array);
-            keys.push(v);
-        }
+        crate::raw::with_raw_doc(doc, |raw| {
+            for (path, asc) in &self.keys {
+                let (v, through_array) = key_of(raw, path, *asc, col)?;
+                arrays += usize::from(through_array);
+                keys.push(v);
+            }
+            Ok(())
+        })?;
         if arrays > 1 {
             return Err(error(
                 super::errors::BAD_VALUE,
@@ -171,8 +172,61 @@ impl SortSpec {
             .into_iter()
             .map(|d| Ok((self.key(&d, col)?, d)))
             .collect::<Result<_, MqlError>>()?;
+        // Keys of numbers, dates, `ObjectId`s and strings without a collation go by radix sort
+        // (010 FR-032); the comparison sort takes the rest.
+        if col.is_none() {
+            let ascending: Vec<bool> = self.keys.iter().map(|(_, asc)| *asc).collect();
+            if let Some(bytes) = super::radix::encode_by(&keyed, &ascending, |(k, _)| k) {
+                let mut slots: Vec<Option<Document>> =
+                    keyed.into_iter().map(|(_, d)| Some(d)).collect();
+                return Ok(super::radix::sort(&bytes)
+                    .into_iter()
+                    .filter_map(|i| slots[i].take())
+                    .collect());
+            }
+        }
         crate::expr::try_sort_by(&mut keyed, |(a, _), (b, _)| self.compare(a, b, col))?;
         Ok(keyed.into_iter().map(|(_, d)| d).collect())
+    }
+}
+
+/// The most documents a top-k keeps in order by insertion; a larger `$limit` sorts every
+/// document and keeps the first ones.
+const TOP_K_INSERTION: usize = 4096;
+
+impl SortSpec {
+    /// The first `k` documents of `docs` in the order of [`SortSpec::sort`] (`$sort` followed by
+    /// `$limit`, 010 FR-029): every key is read in the documents' order, as the whole sort reads
+    /// them, and only the `k` least are kept, equal keys in their order.
+    pub fn sort_top(
+        &self,
+        docs: Vec<Document>,
+        col: Option<&dyn teseladb_bson::Collator>,
+        k: usize,
+    ) -> Result<Vec<Document>, MqlError> {
+        if k >= docs.len() || k > TOP_K_INSERTION {
+            let mut sorted = self.sort(docs, col)?;
+            sorted.truncate(k);
+            return Ok(sorted);
+        }
+        let mut kept: Vec<(Vec<Value>, Document)> = Vec::with_capacity(k + 1);
+        for d in docs {
+            let key = self.key(&d, col)?;
+            // After every kept key that is not greater: equal keys stay in their order.
+            let (mut low, mut high) = (0, kept.len());
+            while low < high {
+                let mid = low + (high - low) / 2;
+                match self.compare(&kept[mid].0, &key, col)? {
+                    Ordering::Greater => high = mid,
+                    Ordering::Less | Ordering::Equal => low = mid + 1,
+                }
+            }
+            if low < k {
+                kept.insert(low, (key, d));
+                kept.truncate(k);
+            }
+        }
+        Ok(kept.into_iter().map(|(_, d)| d).collect())
     }
 }
 

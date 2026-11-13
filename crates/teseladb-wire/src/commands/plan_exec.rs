@@ -20,6 +20,7 @@ use teseladb_plan::logical::Bound;
 use teseladb_plan::rules::{
     Access, IndexMeta, IndexScan, Request, branch_scans, candidates, joined_or,
 };
+use teseladb_plan::stats::{Choice, RangeStats, choose as choose_by_cost};
 use teseladb_range::read::ReadConcern;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
@@ -556,6 +557,12 @@ pub(crate) fn choose<B: Backend + ?Sized>(
         let scans = subplanned(backend, coll, indexes, read, branches)?;
         plans = vec![Access::Or(joined_or(scans, &metas, &read.sort))];
     }
+    if read.hint.is_none() {
+        let key = query::documents_of(coll).0;
+        let stats = teseladb_keys::space::collection_of(&key)
+            .and_then(teseladb_plan::stats::collection_stats);
+        plans = by_estimate(plans, stats.as_ref().map(|(_, s)| &**s), &metas, &read.sort);
+    }
     if plans.len() < 2 {
         let Some(access) = plans.pop().filter(|a| *a != Access::Collscan) else {
             return Ok(None);
@@ -586,6 +593,26 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     winner.tried = best.tried;
     let others = order[1..].iter().map(|i| trials[*i].clone()).collect();
     Ok(Some(Chosen { winner, others, planning_micros }))
+}
+
+/// The plans that go on after their estimates (010 FR-029): the one the statistics of the
+/// collection (`stats`) find cheapest by more than twice, alone, or those within twice the best
+/// estimate, which run a trial. Without statistics, or when a plan reads a field that has none,
+/// every plan runs the trial, as RefDb's planner does.
+fn by_estimate(
+    plans: Vec<Access>,
+    stats: Option<&RangeStats>,
+    metas: &[IndexMeta],
+    sort: &[(String, i32)],
+) -> Vec<Access> {
+    let Some(stats) = stats.filter(|_| plans.len() > 1) else { return plans };
+    let keep = match choose_by_cost(&plans, stats, metas, !sort.is_empty()) {
+        Choice::Pick(i) => vec![i],
+        Choice::Trial(ids) if ids.is_empty() => return plans,
+        Choice::Trial(ids) => ids,
+    };
+    let mut slots: Vec<Option<Access>> = plans.into_iter().map(Some).collect();
+    keep.into_iter().filter_map(|i| slots.get_mut(i).and_then(Option::take)).collect()
 }
 
 /// The works the first round of a trial gives each plan; each round doubles them.
@@ -771,7 +798,9 @@ fn run_reading<B: Backend + ?Sized>(
     let plan_filter = |f: &Document| -> Result<teseladb_mql::Filter, CommandError> {
         let bytes = super::query::raw_bytes(f)?;
         let raw = RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?;
-        teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)
+        let f =
+            teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)?;
+        Ok(super::query::by_statistics(f, coll))
     };
     let ext = super::engines::NodeExtensions;
     let ctx = teseladb_mql::MatchContext { collation, ext: &ext, vars: read.vars };
@@ -1003,13 +1032,12 @@ fn intersected<B: Backend + ?Sized>(
     let filter = match filter {
         Some(f) => {
             let bytes = super::query::raw_bytes(f)?;
-            Some(
-                teseladb_mql::Filter::parse(
-                    RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?,
-                    teseladb_mql::FilterUse::Query,
-                )
-                .map_err(from_mql)?,
+            let f = teseladb_mql::Filter::parse(
+                RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?,
+                teseladb_mql::FilterUse::Query,
             )
+            .map_err(from_mql)?;
+            Some(super::query::by_statistics(f, coll))
         }
         None => None,
     };
@@ -2165,5 +2193,49 @@ mod tests {
         assert!(same_shape(&hash(1), &hash(2)));
         assert!(!same_shape(&hash(1), &or(1, 1)));
         assert!(!same_shape(&Access::Collscan, &Access::Index(scan(1, "a", 1))));
+    }
+
+    fn stats_of(fields: &[(&str, Vec<Value>)]) -> RangeStats {
+        RangeStats {
+            documents: 10_000,
+            fields: fields
+                .iter()
+                .map(|(f, v)| ((*f).to_owned(), teseladb_plan::stats::FieldStats::build(v.clone())))
+                .collect(),
+        }
+    }
+
+    fn meta(name: &str, field: &str) -> IndexMeta {
+        IndexMeta {
+            name: name.into(),
+            key: vec![(field.into(), 1)],
+            multikey: false,
+            plannable: true,
+        }
+    }
+
+    #[test]
+    fn statistics_pick_a_plan_far_cheaper_than_the_others_without_a_trial() {
+        // `a` is unique, `b` holds one value: `{a: 1, b: 1}` reads one key by `a`.
+        let a: Vec<Value> = (0..10_000).map(Value::Int32).collect();
+        let b: Vec<Value> = std::iter::repeat_n(Value::Int32(1), 10_000).collect();
+        let stats = stats_of(&[("a", a), ("b", b)]);
+        let metas = [meta("a_1", "a"), meta("b_1", "b")];
+        let plans = vec![Access::Index(scan(0, "a", 1)), Access::Index(scan(1, "b", 1))];
+        let kept = by_estimate(plans.clone(), Some(&stats), &metas, &[]);
+        assert_eq!(kept, vec![plans[0].clone()]);
+    }
+
+    #[test]
+    fn plans_within_twice_each_other_or_without_statistics_all_run_the_trial() {
+        let a: Vec<Value> = (0..10_000).map(|i| Value::Int32(i % 100)).collect();
+        let stats = stats_of(&[("a", a.clone()), ("b", a)]);
+        let metas = [meta("a_1", "a"), meta("b_1", "b")];
+        let plans = vec![Access::Index(scan(0, "a", 1)), Access::Index(scan(1, "b", 1))];
+        assert_eq!(by_estimate(plans.clone(), Some(&stats), &metas, &[]), plans);
+        // No statistics at all, or none for `c`: every plan.
+        assert_eq!(by_estimate(plans.clone(), None, &metas, &[]), plans);
+        let with_c = vec![plans[0].clone(), Access::Index(scan(1, "c", 1))];
+        assert_eq!(by_estimate(with_c.clone(), Some(&stats), &metas, &[]), with_c);
     }
 }

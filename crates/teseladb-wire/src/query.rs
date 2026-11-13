@@ -33,10 +33,8 @@ impl OpQuery {
             return Err(WireError::Malformed("OP_QUERY cut short"));
         }
         let flags = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-        let len = b[4..]
-            .iter()
-            .position(|&c| c == 0)
-            .ok_or(WireError::Malformed("unterminated namespace"))?;
+        let len =
+            teseladb_bson::find_nul(&b[4..]).ok_or(WireError::Malformed("unterminated namespace"))?;
         let namespace = std::str::from_utf8(&b[4..4 + len])
             .map_err(|_| WireError::Malformed("invalid UTF-8"))?;
         // Skip and return counts, then the query (a projection may follow; it is ignored).

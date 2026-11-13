@@ -276,6 +276,7 @@ fn take(root: &mut MVal, path: &[String], text: &str, id: &str) -> Result<Option
     let mut cur = root;
     let mut top: Option<(String, MVal)> = None;
     for (i, seg) in path.iter().enumerate() {
+        cur.unpack();
         let MVal::Doc(d) = cur else {
             if let (MVal::Arr(_), Some((name, array))) = (&*cur, &top) {
                 // A position goes into the array; a field name cannot (measured).
@@ -300,6 +301,7 @@ fn take(root: &mut MVal, path: &[String], text: &str, id: &str) -> Result<Option
             return Ok(d.remove(seg));
         }
         let Some(next) = d.get_mut(seg) else { return Ok(None) };
+        next.unpack();
         if top.is_none() || matches!(next, MVal::Arr(_)) {
             top = Some((seg.clone(), next.clone()));
         }
@@ -310,7 +312,8 @@ fn take(root: &mut MVal, path: &[String], text: &str, id: &str) -> Result<Option
 
 /// The `_id` of the document as RefDb names it in `$rename`'s messages (`_id: 1`).
 fn id_element(root: &MVal) -> String {
-    let MVal::Doc(d) = root else { return NO_ID.to_owned() };
+    let root = root.expanded();
+    let MVal::Doc(d) = &*root else { return NO_ID.to_owned() };
     let Some(id) = d.get(ops::ID) else { return NO_ID.to_owned() };
     OwnedDoc::new(&MDoc { fields: vec![(ops::ID.to_owned(), id.clone())] }.to_document())
         .ok()
@@ -328,16 +331,17 @@ fn array_element(which: &str, text: &str, name: &str, id: &str) -> MqlError {
 }
 
 fn check_no_array(root: &MVal, path: &[String], text: &str, id: &str) -> Result<()> {
-    let mut cur = root;
-    for seg in &path[..path.len().saturating_sub(1)] {
-        let MVal::Doc(d) = cur else { return Ok(()) };
-        match d.get(seg) {
-            Some(MVal::Arr(_)) => return Err(array_element("destination", text, seg, id)),
-            Some(v) => cur = v,
-            None => return Ok(()),
+    // The last segment of `path` is the destination itself, which may be anything.
+    let Some(seg) = path[..path.len().saturating_sub(1)].first() else { return Ok(()) };
+    let cur = root.expanded();
+    let MVal::Doc(d) = &*cur else { return Ok(()) };
+    match d.get(seg) {
+        Some(v) if matches!(&*v.expanded(), MVal::Arr(_)) => {
+            Err(array_element("destination", text, seg, id))
         }
+        Some(v) => check_no_array(v, &path[1..], text, id),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Sets `path` to `value`, creating documents on the way.
@@ -345,6 +349,7 @@ fn put(root: &mut MVal, path: &[String], value: MVal) -> Result<()> {
     let mut cur = root;
     let mut parent_name = String::new();
     for (i, seg) in path.iter().enumerate() {
+        cur.unpack();
         let MVal::Doc(d) = cur else { return Err(not_viable(seg, &parent_name, cur)) };
         if i + 1 == path.len() {
             d.set(seg, value);

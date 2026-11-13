@@ -11,6 +11,7 @@ mod cli;
 mod client;
 mod fingerprint;
 mod load;
+mod open_loop;
 mod report;
 mod scenarios;
 

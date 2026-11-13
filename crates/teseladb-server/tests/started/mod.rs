@@ -13,7 +13,7 @@ use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_server::pki::ROOT_CREDENTIALS;
 use teseladb_server::run;
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
-use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_bson::{Document, Value};
 use teseladb_tls::{Connection, ENTROPY_LEN, Trust};
 use teseladb_x509::Certificate;
 
@@ -152,8 +152,7 @@ impl Client {
             if reply.len() > HEADER_LEN
                 && i32::from_le_bytes(reply[..4].try_into().unwrap()) as usize == reply.len()
             {
-                let body = OpMsg::parse(&reply).unwrap().body.unwrap();
-                return Document::from(RawDoc::from_bytes(&body).unwrap());
+                return OpMsg::parse(&reply).unwrap().body.unwrap();
             }
             let n = self.sock.read(&mut buf).unwrap();
             assert!(n > 0, "the node closed the connection");

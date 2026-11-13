@@ -77,3 +77,9 @@ fn threads_that_add_at_once_lose_nothing_and_keep_their_own_order() {
         assert_eq!(own, (0..EACH).collect::<Vec<_>>(), "thread {t} in its own order");
     }
 }
+
+#[test]
+fn the_head_has_its_own_cache_line() {
+    // 012 FR-031.
+    assert_eq!(std::mem::align_of::<teseladb_sys::handoff::Handoff<u64>>(), 64);
+}

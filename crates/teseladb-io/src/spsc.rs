@@ -19,6 +19,8 @@ pub enum SendError<T> {
     Closed(T),
 }
 
+/// On a cache line of its own (012 FR-031), apart from what the two threads write elsewhere.
+#[repr(align(64))]
 struct Wake {
     /// Set by the send that woke the receiver; cleared by the receiver as it drains.
     notified: AtomicBool,
@@ -98,5 +100,14 @@ impl<T> fmt::Debug for SpscSender<T> {
 impl<T> fmt::Debug for SpscReceiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpscReceiver").field("empty", &self.is_empty()).finish()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod alignment_tests {
+    #[test]
+    fn the_wake_flag_has_its_own_cache_line() {
+        assert_eq!(std::mem::align_of::<super::Wake>(), 64);
     }
 }

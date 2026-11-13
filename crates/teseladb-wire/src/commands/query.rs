@@ -174,6 +174,8 @@ struct Plan {
     filter: Filter,
     projection: Option<Projection>,
     collation: Option<Collation>,
+    /// The extensions under that collation.
+    ext: super::engines::CollatedExtensions,
     /// The command's `let` variables (FR-032).
     vars: Option<Document>,
 }
@@ -195,7 +197,9 @@ impl Plan {
             Filter::parse(RawDoc::from_bytes_with(&fb, command_limits())?, FilterUse::Query)
                 .map_err(from_mql)?;
         let projection = parse_projection(projection)?;
-        Ok(Plan { filter, projection, collation: collation_of(collation)?, vars: None })
+        let collation = collation_of(collation)?;
+        let ext = super::engines::CollatedExtensions::new(collation);
+        Ok(Plan { filter, projection, collation, ext, vars: None })
     }
 
     /// The plan with the command's `let` variables.
@@ -206,7 +210,7 @@ impl Plan {
     fn ctx(&self) -> MatchContext<'_> {
         MatchContext {
             collation: self.collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator),
-            ext: &super::engines::NodeExtensions,
+            ext: &self.ext,
             vars: self.vars.as_ref(),
         }
     }
@@ -375,6 +379,20 @@ pub(crate) fn decides_alone(filter: &Document) -> Result<bool, CommandError> {
     Ok(Plan::new(filter, None, None)?.filter.reads_document_alone())
 }
 
+/// `filter` with its conditions ordered by the statistics of collection `c` (010 FR-029,
+/// FR-031).
+pub(crate) fn by_statistics(filter: Filter, c: &CollectionEntry) -> Filter {
+    by_statistics_of_key(filter, &documents_of(c).0)
+}
+
+/// `filter` with its conditions ordered by the statistics of the collection key `key` is in.
+fn by_statistics_of_key(filter: Filter, key: &[u8]) -> Filter {
+    match teseladb_keys::space::collection_of(key) {
+        Some(c) => teseladb_exec::selectivity::ordered_by_statistics(filter, c),
+        None => filter,
+    }
+}
+
 /// [`for_each_match_counted`] giving `each` the bytes of the document, to keep them.
 pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     backend: &mut B,
@@ -385,7 +403,8 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     concern: ReadConcern,
     mut each: impl FnMut(Vec<u8>, Vec<u8>) -> Result<bool, CommandError>,
 ) -> Result<u64, CommandError> {
-    let plan = Plan::new(filter, None, collation)?.with_vars(vars);
+    let mut plan = Plan::new(filter, None, collation)?.with_vars(vars);
+    plan.filter = by_statistics_of_key(plan.filter, &start);
     let ctx = plan.ctx();
     let mut next = start;
     let mut examined = 0u64;

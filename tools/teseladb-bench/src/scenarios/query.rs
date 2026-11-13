@@ -154,7 +154,7 @@ const RESIDENT_PER_CORE_MB: f64 = 256.0;
 const LARGE_PAD: usize = 1000;
 
 /// A number of a reply at a dotted path.
-fn number_at(reply: &[u8], path: &str) -> Option<f64> {
+pub(crate) fn number_at(reply: &[u8], path: &str) -> Option<f64> {
     let mut doc = Document::from(teseladb_bson::RawDoc::from_bytes(reply).ok()?);
     let parts: Vec<&str> = path.split('.').collect();
     for (i, p) in parts.iter().enumerate() {

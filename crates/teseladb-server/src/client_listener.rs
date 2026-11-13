@@ -29,7 +29,7 @@ use teseladb_wire::commands::{
     Backend, NodeSessions, REAP_INTERVAL_MS, Shared, Timeouts, lock, reap,
 };
 use teseladb_wire::compressed::Compressor;
-use teseladb_wire::connection::{Connection, Request};
+use teseladb_wire::connection::{Connection, ReplyPieces, Request, RequestArena};
 use teseladb_wire::dispatch::{
     Action, ClusterTime, NodeInfo, Topology, dispatch_with, hello_after_wait,
 };
@@ -535,6 +535,7 @@ impl ClientListener {
             open: open.clone(),
             stop: stop.clone(),
             spawn: hooks.spawn_connection,
+            arena: crate::block_memory::HugeRequests::for_port(),
         };
         let poller = Poller::new()?;
         for (i, l) in listeners.iter().enumerate() {
@@ -826,6 +827,8 @@ struct PortParts {
     open: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     spawn: SpawnFn,
+    /// Where its connections keep the buffers of their requests (012 FR-032).
+    arena: Option<Arc<dyn RequestArena>>,
 }
 
 impl PortParts {
@@ -853,6 +856,7 @@ impl PortParts {
                 .map(|h| ServerBackend::new(h, seed(id as u64)).with_diag(self.diag.clone())),
             shared: self.shared.clone(),
             compressors: self.compressors.clone(),
+            arena: self.arena.clone(),
             tls: self.tls.clone(),
             auth: self.auth,
             mechanisms: self.mechanisms.clone(),
@@ -1104,6 +1108,19 @@ impl Client {
                 drop(doc);
                 true
             }
+            Action::Reply(doc) if self.transport.is_plain() => {
+                let pieces = conn.reply_pieces(&req, &doc, false);
+                PortStats::add(&self.diag.stats.bytes_out, pieces.len());
+                match pieces {
+                    ReplyPieces::Pieces(f) if f.borrowed() > 0 => self.send_pieces(&f.slices()),
+                    ReplyPieces::Pieces(f) => {
+                        self.transport.outgoing_owned(f.into_vec(), &mut self.out)
+                    }
+                    ReplyPieces::Bytes(bytes) => {
+                        self.transport.outgoing_owned(bytes, &mut self.out)
+                    }
+                }
+            }
             Action::Reply(doc) => {
                 let bytes = conn.reply(&req, &doc, false);
                 PortStats::add(&self.diag.stats.bytes_out, bytes.len());
@@ -1201,6 +1218,23 @@ impl Client {
         self.handle(conn, req, info, cmds)
     }
 
+    /// Sends a plain reply in `pieces` behind the bytes still waiting, with vectored writes: its
+    /// stored documents go from their own buffers, and only what the socket does not take now is
+    /// copied to wait (006 FR-040). `false` if the socket failed.
+    fn send_pieces(&mut self, pieces: &[&[u8]]) -> bool {
+        let waiting = &self.out[self.pos..];
+        let all: Vec<&[u8]> = std::iter::once(waiting).chain(pieces.iter().copied()).collect();
+        match crate::vectored::write_pieces(&mut self.stream, &all) {
+            Ok((n, rest)) => {
+                PortStats::add(&self.diag.stats.physical_out, n);
+                self.out = rest;
+                self.pos = 0;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Writes what it can; `false` if the socket failed.
     fn write(&mut self) -> bool {
         while self.pos < self.out.len() {
@@ -1282,6 +1316,8 @@ struct Worker {
     /// The node's cursors and sessions, shared by its workers.
     shared: Arc<Shared>,
     compressors: Vec<Compressor>,
+    /// Where its connection keeps the buffers of its requests (012 FR-032).
+    arena: Option<Arc<dyn RequestArena>>,
     tls: TlsPort,
     /// Clients authenticate before running commands.
     auth: bool,
@@ -1452,6 +1488,7 @@ impl Worker {
         match (ready, transport) {
             (Ok(()), Some(transport)) => {
                 let mut conn = Connection::with_compressors(id, &self.compressors);
+                conn.arena.clone_from(&self.arena);
                 conn.peer = stream.peer_addr().ok().map(|a| a.to_string());
                 conn.auth.required = self.auth;
                 conn.auth.mechanisms.clone_from(&self.mechanisms);

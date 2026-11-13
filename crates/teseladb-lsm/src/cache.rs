@@ -7,26 +7,51 @@
 //! the last reader drops them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use teseladb_raftlog::cache::ContentCache;
 use teseladb_types::Bytes;
+
+/// Where the cache keeps the bytes of the blocks it takes (012 FR-032): the node places them on
+/// pages of 2 MiB when the system has them reserved. Without one, a block stays where it was read.
+pub trait BlockMemory: Send + Sync {
+    /// `block` in this memory, or `block` itself when there is no room.
+    fn place(&self, block: Bytes) -> Bytes;
+}
 
 /// Block number of a file's meta bytes.
 const META: u32 = u32::MAX;
 
 /// The cache.
-#[derive(Debug)]
 pub(crate) struct BlockCache {
     cache: ContentCache<(u64, u32)>,
     slots: HashMap<(u64, u32), u32>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
+    memory: Option<Arc<dyn BlockMemory>>,
+}
+
+impl std::fmt::Debug for BlockCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockCache")
+            .field("used", &self.cache.used())
+            .field("hits", &self.hits)
+            .field("misses", &self.misses)
+            .field("placed", &self.memory.is_some())
+            .finish()
+    }
 }
 
 impl BlockCache {
     /// An empty cache of `budget` bytes.
     pub(crate) fn new(budget: u64) -> BlockCache {
-        BlockCache { cache: ContentCache::new(budget), slots: HashMap::new(), hits: 0, misses: 0 }
+        let cache = ContentCache::new(budget);
+        BlockCache { cache, slots: HashMap::new(), hits: 0, misses: 0, memory: None }
+    }
+
+    /// Keeps the blocks it takes from now on in `memory`.
+    pub(crate) fn set_memory(&mut self, memory: Arc<dyn BlockMemory>) {
+        self.memory = Some(memory);
     }
 
     /// Bytes in use.
@@ -46,6 +71,10 @@ impl BlockCache {
     }
 
     fn put(&mut self, key: (u64, u32), data: Bytes, pinned: bool) {
+        let data = match &self.memory {
+            Some(m) => m.place(data),
+            None => data,
+        };
         if let Some(old) = self.slots.remove(&key) {
             self.cache.remove(old);
         }
@@ -105,5 +134,30 @@ mod tests {
         assert!(!c.slots.contains_key(&(1, META)));
         assert!(!c.slots.contains_key(&(1, 3)));
         assert_eq!(c.used(), 0);
+    }
+
+    /// A memory that copies each block into a buffer of its own, and counts them.
+    struct Copying(std::sync::atomic::AtomicUsize);
+
+    impl BlockMemory for Copying {
+        fn place(&self, block: Bytes) -> Bytes {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Bytes::from_owner(block.to_vec())
+        }
+    }
+
+    #[test]
+    fn blocks_and_meta_go_to_the_memory_the_cache_was_given() {
+        let memory = Arc::new(Copying(std::sync::atomic::AtomicUsize::new(0)));
+        let mut c = BlockCache::new(10_000);
+        c.set_memory(memory.clone());
+        let block = Bytes::from_vec(vec![7; 100]);
+        c.insert(1, 0, block.clone());
+        c.pin_meta(1, Bytes::from_vec(vec![1; 10]));
+        let cached = c.get(1, 0).unwrap();
+        assert_eq!(cached, block);
+        assert_ne!(cached.as_ptr(), block.as_ptr(), "the cache holds the placed copy");
+        assert_eq!(memory.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(format!("{c:?}").contains("placed: true"));
     }
 }

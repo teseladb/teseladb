@@ -10,7 +10,8 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The index of each side on its own cache line, so the two sides do not share one.
+/// The index of each side on its own cache line, so the two sides do not share one (012
+/// FR-031): 128 bytes, since some CPUs fetch lines in adjacent pairs.
 #[repr(align(128))]
 struct Padded(AtomicUsize);
 
@@ -153,5 +154,15 @@ impl<T> fmt::Debug for Producer<T> {
 impl<T> fmt::Debug for Consumer<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Consumer").field("capacity", &(self.ring.mask + 1)).finish()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod alignment_tests {
+    #[test]
+    fn the_two_indices_never_share_a_cache_line() {
+        assert_eq!(std::mem::align_of::<super::Padded>(), 128);
+        assert!(std::mem::size_of::<super::Padded>() >= 64);
     }
 }

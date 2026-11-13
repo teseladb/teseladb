@@ -27,6 +27,9 @@ mod positional;
 mod tree;
 mod upsert;
 
+#[cfg(test)]
+mod lazy_tests;
+
 use teseladb_bson::{Document, RawArray, RawDoc, RawValue, Value};
 
 use crate::error::{MqlError, Result, codes, failed_to_parse};
@@ -244,25 +247,10 @@ impl Update {
             Kind::Pipeline(p) => {
                 return self.apply_pipeline(p.get(), doc, old_id.as_ref(), ctx);
             }
+            // The stored document is read only where the operators walk (003 FR-020).
             Kind::Operators { entries, filters } => {
-                let mut root = MVal::Doc(MDoc::from_raw(doc));
-                for e in entries {
-                    if matches!(e.action, Action::SetOnInsert) && !ctx.insert {
-                        continue;
-                    }
-                    apply_entry(e, &mut root, filters, ctx, doc)?;
-                }
-                let new = match root {
-                    MVal::Doc(d) => d.to_document(),
-                    _ => Document::new(),
-                };
-                if old_id.is_some() && new.get(ops::ID) != old_id.as_ref() {
-                    return Err(MqlError::new(
-                        codes::IMMUTABLE_FIELD,
-                        "Performing an update on the path '_id' would modify the immutable field '_id'",
-                    ));
-                }
-                new
+                let root = MVal::Doc(MDoc::from_raw_lazy(doc));
+                operators(entries, filters, root, doc, old_id.as_ref(), ctx)?
             }
         };
         top_level_names(&new)?;
@@ -289,6 +277,34 @@ impl Update {
         new.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
         Ok(UpdateOutcome { modified: piped_bytes != doc.as_bytes(), doc: new })
     }
+}
+
+/// The document `root` (the copy of `doc`) becomes after the operators `entries`.
+fn operators(
+    entries: &[Entry],
+    filters: &ArrayFilters,
+    mut root: MVal,
+    doc: RawDoc<'_>,
+    old_id: Option<&Value>,
+    ctx: &UpdateContext<'_>,
+) -> Result<Document> {
+    for e in entries {
+        if matches!(e.action, Action::SetOnInsert) && !ctx.insert {
+            continue;
+        }
+        apply_entry(e, &mut root, filters, ctx, doc)?;
+    }
+    let new = match root {
+        MVal::Doc(d) => d.to_document(),
+        _ => Document::new(),
+    };
+    if old_id.is_some() && new.get(ops::ID) != old_id {
+        return Err(MqlError::new(
+            codes::IMMUTABLE_FIELD,
+            "Performing an update on the path '_id' would modify the immutable field '_id'",
+        ));
+    }
+    Ok(new)
 }
 
 /// The replacement, keeping the old `_id` first.
