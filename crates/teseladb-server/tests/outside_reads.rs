@@ -204,6 +204,50 @@ fn a_scan_right_after_a_write_answered_from_the_log_sees_it() {
     assert!(served_outside() - served >= 64, "scans outside: {}", served_outside() - served);
 }
 
+/// Each connection's thread prepares the evaluation of its update on the version it reads, and
+/// the range's core takes it only if that version is still the one in force (005 FR-035). Four
+/// connections increment one counter at once: every increment counts, whoever reached the
+/// document first.
+#[test]
+fn increments_from_several_connections_all_count() {
+    let dir = Dir::new("prepared");
+    let cfg = NodeConfig { data_dir: Some(dir.0.clone()), ..config(Vec::new()) };
+    let path = dir.0.clone();
+    let lock = lock_dir(&dir.0).expect("locks the directory");
+    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    let counter = Document::new().with("_id", 1).with("n", 0);
+    let insert = Document::new().with("insert", "counter").with("documents", vec![counter.into()]);
+    let r = c.run(DB, insert);
+    assert!(ok(&r), "{r:?}");
+    const EACH: i32 = 100;
+    let workers: Vec<_> = (0..4)
+        .map(|_| Client::new(&node))
+        .map(|mut client| {
+            std::thread::spawn(move || {
+                for _ in 0..EACH {
+                    let q = Document::new().with("_id", 1);
+                    let u = Document::new().with("$inc", Document::new().with("n", 1));
+                    let update = Document::new().with("q", q).with("u", u);
+                    let cmd = Document::new()
+                        .with("update", "counter")
+                        .with("updates", vec![update.into()]);
+                    let r = client.run(DB, cmd);
+                    assert!(ok(&r), "{r:?}");
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().expect("a client");
+    }
+    let find = Document::new().with("find", "counter").with("filter", Document::new());
+    let r = c.run(DB, find);
+    assert!(ok(&r), "{r:?}");
+    assert_eq!(field(&batch(&r, "firstBatch")[0], "n"), Some(Value::Int32(4 * EACH)));
+}
+
 /// `$in` of `_id`s examines, as RefDb, each value's key and the key after it that ends its
 /// interval (`totalKeysExamined`, measured on a `refnode` 9.0.4): the reads of the stretches
 /// between the values find those keys also when they are served outside the core.

@@ -13,6 +13,20 @@ use teseladb_range::push::{Known, TxnView};
 use teseladb_range::read::ReadConcern;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 
+/// The evaluation of a write prepared on the connection's thread (005 FR-035). It travels with
+/// the request inside the node and is no part of it: a request forwarded to another node goes
+/// without, and two requests are the same whatever was prepared for them.
+#[derive(Clone, Debug, Default)]
+pub struct Ahead(pub Option<Box<teseladb_wire::commands::mutation::Prepared>>);
+
+impl PartialEq for Ahead {
+    fn eq(&self, _: &Ahead) -> bool {
+        true
+    }
+}
+
+impl Eq for Ahead {}
+
 /// A request for the leader of the data range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteReq {
@@ -29,6 +43,8 @@ pub enum RemoteReq {
         wc: WriteConcern,
         /// The mark's physical part past which the leader no longer evaluates it (009 FR-006).
         deadline: Option<u64>,
+        /// Its evaluation, when the connection's thread prepared it.
+        prepared: Ahead,
     },
     /// A scan of `[start, end)` of at most `limit` documents.
     Scan {
@@ -368,7 +384,7 @@ impl RemoteReq {
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         match self {
-            RemoteReq::Write { keys, mutation, dedup, wc, deadline } => {
+            RemoteReq::Write { keys, mutation, dedup, wc, deadline, prepared: _ } => {
                 e.u8(WRITE).var(keys.len() as u64);
                 for k in keys {
                     e.bytes(k);
@@ -465,7 +481,8 @@ impl RemoteReq {
                     None
                 };
                 let wc = get_wc(&mut d)?;
-                RemoteReq::Write { keys, mutation, dedup, wc, deadline: get_deadline(&mut d)? }
+                let deadline = get_deadline(&mut d)?;
+                RemoteReq::Write { keys, mutation, dedup, wc, deadline, prepared: Ahead::default() }
             }
             SCAN | SCAN_BACK => RemoteReq::Scan {
                 start: d.bytes()?.to_vec(),
@@ -792,6 +809,7 @@ mod tests {
                 dedup: Some(DedupKey { lsid: 7, txn_number: 2, stmt_id: 1 }),
                 wc: WriteConcern { w: W::Nodes(2), j: true },
                 deadline: Some(1_800_000_000_000),
+                prepared: Ahead::default(),
             },
             RemoteReq::Write {
                 keys: vec![],
@@ -799,6 +817,7 @@ mod tests {
                 dedup: None,
                 wc: WriteConcern { w: W::Zero, j: false },
                 deadline: None,
+                prepared: Ahead::default(),
             },
             RemoteReq::Write {
                 keys: vec![vec![1]],
@@ -806,6 +825,7 @@ mod tests {
                 dedup: None,
                 wc: WriteConcern { w: W::Majority, j: true },
                 deadline: Some(0),
+                prepared: Ahead::default(),
             },
             RemoteReq::Scan {
                 start: vec![1],
@@ -1028,6 +1048,7 @@ mod tests {
             dedup: None,
             wc: WriteConcern { w: W::Zero, j: false },
             deadline: None,
+            prepared: Ahead::default(),
         }
         .encode();
         // The tag of the write concern, before its count, `j` and the deadline.

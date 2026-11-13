@@ -97,7 +97,7 @@ pub(super) fn eval(
             let [doc] = docs.as_slice() else {
                 return Err(internal("a capped insert writes one document"));
             };
-            let filled = fill_timestamps(doc, ts);
+            let filled = fill_timestamps(doc, Some(ts))?;
             let doc = filled.as_ref().unwrap_or(doc);
             let written = stored_bytes(doc, Stored::Insert)
                 .and_then(|b| checker.check(&b, None).map(|()| b))
@@ -188,7 +188,7 @@ fn change(
     if matches!(m, DocMutation::Update { upsert: Some(_), .. }) {
         keys.push(upsert_key.clone());
     }
-    let (mut puts, mut deletes, result) = modify(&keys, m, ts, checker, lookup)?;
+    let (mut puts, mut deletes, result) = modify(&keys, m, Some(ts), checker, lookup)?;
     let mut state = r.state;
     for k in r.own {
         let Some((_, old)) = lookup(k) else { continue };

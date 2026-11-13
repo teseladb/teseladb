@@ -21,7 +21,7 @@ use teseladb_range::mutate::Outcome;
 use teseladb_range::push::Row;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_range::view::{Decline, FastRead, Part};
+use teseladb_range::view::{Decline, FastRead, Newest, Part};
 use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
@@ -1121,6 +1121,31 @@ fn a_view_of_another_leader_of_the_range_takes_what_that_leader_has_answered() {
     assert!(!view.holds(&begun), "a write answered there, not applied yet");
     second.settle();
     assert!(second.host.views().get(G).expect("the view").holds(&begun));
+}
+
+#[test]
+fn the_newest_versions_of_keys_are_read_on_a_view_without_a_mark() {
+    // 005 FR-035: what a connection's thread prepares the evaluation of a write on.
+    let mut n = Node::new();
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    let view = n.host.views().get(G).expect("the view");
+    let mut cache = ViewCache::default();
+    let keys = vec![b"\x01a".to_vec(), b"\x01b".to_vec()];
+    let Newest::Versions(versions) = view.newest(&mut cache, &keys) else {
+        panic!("both keys are in the memtable or nowhere")
+    };
+    assert_eq!(versions, vec![Some((1, vec![1])), None]);
+    // A write applied since shows in the same view: the memtable it went to is shared.
+    n.mutate(b"\x01b", Box::new(SetKey(b"\x01b".to_vec(), Some(7))), MAJORITY);
+    n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), None)), MAJORITY);
+    n.settle();
+    let Newest::Versions(versions) = view.newest(&mut cache, &keys) else {
+        panic!("both keys are in the memtable")
+    };
+    assert_eq!(versions, vec![None, Some((1, vec![7]))]);
+    // A key of another range is not this view's to give.
+    assert!(matches!(view.newest(&mut cache, &[b"\x02".to_vec()]), Newest::No));
 }
 
 #[test]

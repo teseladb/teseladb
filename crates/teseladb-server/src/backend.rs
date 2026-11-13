@@ -51,7 +51,7 @@ use teseladb_types::NodeId;
 
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::data::{DataReply, DataReq};
-use crate::data_wire::{RemoteReply, RemoteReq};
+use crate::data_wire::{Ahead, RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
 use crate::routes::SharedRoutes;
 
@@ -986,6 +986,9 @@ impl Backend for ServerBackend {
         let Some(first) = op.keys.first().cloned() else {
             return Err(CommandError::new(INTERNAL_ERROR, "a write without keys has no range"));
         };
+        // Its evaluation on the versions this thread sees, for the range's core to take if
+        // they are still the versions in force (005 FR-035).
+        let prepared = Ahead(self.prepare_outside(&op).map(Box::new));
         let (keys, mutation, wc) = (op.keys, op.mutation, op.wc);
         let build = |_: &RouteEntry, deadline| RemoteReq::Write {
             keys: keys.clone(),
@@ -993,6 +996,7 @@ impl Backend for ServerBackend {
             dedup,
             wc,
             deadline: Some(deadline),
+            prepared: prepared.clone(),
         };
         match self.data(&first, dedup.is_some(), build)?.1 {
             // The write's mark comes into the node's clock, as a commit's does (`txn_send`): a

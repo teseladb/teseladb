@@ -147,6 +147,7 @@ fn an_undecodable_mutation_is_refused_by_the_range() {
         dedup: None,
         wc: WriteConcern { w: W::Nodes(1), j: false },
         deadline: None,
+        prepared: teseladb_server::data_wire::Ahead::default(),
     };
     let r = until("the range's answer", || {
         match node.data(DataReq::Remote(DATA_RANGE, req.clone()), READY) {
@@ -177,6 +178,7 @@ fn a_request_past_its_deadline_is_refused_by_the_range() {
         dedup: None,
         wc: WriteConcern { w: W::Nodes(1), j: false },
         deadline: Some(1),
+        prepared: teseladb_server::data_wire::Ahead::default(),
     };
     let push = RemoteReq::Txn {
         op: TxnOp::PushTxn {

@@ -27,9 +27,11 @@ use teseladb_range::command::DedupKey;
 use teseladb_range::host::{Mutation, MutationError};
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
-use teseladb_range::view::{Begun, Decline, FastRead, FastWrite, NoChange, Part, RangeView};
+use teseladb_range::view::{
+    Begun, Decline, FastRead, FastWrite, Newest, NoChange, Part, RangeView,
+};
 use teseladb_stages::Stage;
-use teseladb_wire::commands::mutation::Bound;
+use teseladb_wire::commands::mutation::{Bound, Prepared};
 use teseladb_wire::commands::{Backend, Rows, WriteOp};
 use teseladb_types::{GroupId, Nanos};
 
@@ -321,6 +323,36 @@ impl ServerBackend {
                     view.lsm().supply(&need, &bytes).ok()?;
                 }
                 FastWrite::Core => return None,
+            }
+        }
+        None
+    }
+
+    /// The evaluation of `op` prepared on this thread (005 FR-035): what its mutation writes on
+    /// the newest versions of its keys, as the view of their range has them. `None` when the
+    /// view cannot give them, the mutation does not decode or what it writes depends on the mark
+    /// of the write; the range's core evaluates it then, as it does when a version changed.
+    pub(super) fn prepare_outside(&mut self, op: &WriteOp) -> Option<Prepared> {
+        let first = op.keys.first()?;
+        let (g, core) = self.h.routes.route_of(&mut self.outside.routes, first)?;
+        let core = usize::from(core);
+        let view = self.h.views.get(core).and_then(|v| v.get(g))?;
+        if self.outside.caches.len() <= core {
+            self.outside.caches.resize_with(core + 1, ViewCache::default);
+        }
+        // A block each key at most, and a few more for the keys of its indexes.
+        for _ in 0..=op.keys.len() + MAX_BLOCKS {
+            match view.newest(&mut self.outside.caches[core], &op.keys) {
+                Newest::Versions(current) => {
+                    let bound = Bound::decode(&op.mutation).ok()?;
+                    return bound.prepare(&op.keys, current);
+                }
+                Newest::Need(need) => {
+                    let dir = self.h.data_dir.as_deref()?;
+                    let bytes = block(&mut self.outside.files, dir, &need)?;
+                    view.lsm().supply(&need, &bytes).ok()?;
+                }
+                Newest::No => return None,
             }
         }
         None

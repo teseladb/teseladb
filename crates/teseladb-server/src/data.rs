@@ -30,7 +30,7 @@ use teseladb_range::host::{
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::route::{Answer, Router};
-use teseladb_wire::commands::mutation::Bound;
+use teseladb_wire::commands::mutation::Sent;
 use teseladb_raft::Role;
 use teseladb_raftlog::{IoDone, IoOp};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
@@ -693,12 +693,10 @@ impl DataCore {
         (now, wall_ms): (Nanos, u64),
     ) {
         let id = match r {
-            RemoteReq::Write { keys, mutation, dedup, wc, deadline } => {
-                let m: Box<dyn Mutation> = match Bound::decode(&mutation) {
-                    Ok(m) => Box::new(m),
-                    // An undecodable mutation fails inside the host as a refused one.
-                    Err(e) => Box::new(Refuse(e.to_mutation())),
-                };
+            RemoteReq::Write { keys, mutation, dedup, wc, deadline, prepared } => {
+                // Decoded only if the host has to evaluate it (005 FR-035); a mutation that
+                // does not decode fails inside the host as a refused one.
+                let m: Box<dyn Mutation> = Box::new(Sent::new(mutation, prepared.0.map(|p| *p)));
                 let w = WriteReq { g, keys, m, dedup, wc };
                 match deadline {
                     Some(d) => self.host.mutate_until(core, w, d, (now, wall_ms)),
@@ -1374,15 +1372,6 @@ fn remote_reply(reply: Reply) -> RemoteReply {
             RemoteReply::Changes { rows, to, oldest_intent }
         }
         Reply::Fenced { ts } => RemoteReply::Fenced { ts },
-    }
-}
-
-/// A mutation that fails with the error it carries.
-struct Refuse(MutationError);
-
-impl Mutation for Refuse {
-    fn eval(&self, _: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
-        Err(self.0.clone())
     }
 }
 

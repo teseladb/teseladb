@@ -543,12 +543,12 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         let _ =
             writeln!(out, "teseladb_range_latch_waits_total{{core=\"{core}\"}} {}", s.latch_waits);
     }
+    teseladb_stages::render(out);
     let _ = writeln!(
         out,
         "# HELP teseladb_reads_outside_declined_by_reason_total Reads outside the cores sent back to them, by reason."
     );
     let _ = writeln!(out, "# TYPE teseladb_reads_outside_declined_by_reason_total counter");
-    teseladb_stages::render(out);
     let counts = teseladb_range::view::decline_counts();
     for (reason, n) in teseladb_range::view::Decline::ALL.iter().zip(counts) {
         let _ = writeln!(
@@ -556,6 +556,16 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "teseladb_reads_outside_declined_by_reason_total{{reason=\"{}\"}} {n}",
             reason.label()
         );
+    }
+    let name = "teseladb_writes_evaluated_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Writes a range evaluated, by how: with the evaluation their connection prepared, again because a version had changed, or in the core without one."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter");
+    let evaluated = teseladb_wire::commands::mutation::evaluated_counts();
+    for (how, n) in teseladb_wire::commands::mutation::EvaluatedBy::ALL.iter().zip(evaluated) {
+        let _ = writeln!(out, "{name}{{how=\"{}\"}} {n}", how.label());
     }
     let name = "teseladb_range_retries_total";
     let _ = writeln!(out, "# HELP {name} Requests sent to their range again, by the reason.");

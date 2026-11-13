@@ -191,6 +191,17 @@ impl Update {
         Ok(Update { kind: Kind::Operators { entries, filters } })
     }
 
+    /// Whether applying it reads the current time (`$currentDate`): what it writes then depends
+    /// on when it is applied.
+    pub fn reads_now(&self) -> bool {
+        match &self.kind {
+            Kind::Operators { entries, .. } => {
+                entries.iter().any(|e| matches!(e.action, Action::CurrentDate { .. }))
+            }
+            Kind::Replacement(_) | Kind::Pipeline(_) => false,
+        }
+    }
+
     /// Whether this is a pipeline-style update.
     pub fn is_pipeline(&self) -> bool {
         matches!(self.kind, Kind::Pipeline(_))

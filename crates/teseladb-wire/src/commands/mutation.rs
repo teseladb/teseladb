@@ -1228,6 +1228,61 @@ impl Mutation for Bound {
         current: &[Option<(u8, &[u8])>],
         ts: Hlc,
     ) -> Result<Outcome, MutationError> {
+        self.evaluate(latch, current, Some(ts))?.finish(ts)
+    }
+}
+
+/// The refusal of an evaluation without the mark of its write that needs it ([`Bound::evaluate`]).
+const NEEDS_MARK: &str = "the mutation writes the mark of its write";
+
+fn needs_mark() -> CommandError {
+    CommandError::new(INTERNAL_ERROR, NEEDS_MARK)
+}
+
+/// What a mutation writes and answers, before the mark of its write goes into its result: the
+/// range proposes it once [`Evaluation::finish`] has the mark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Evaluation {
+    puts: Vec<Put>,
+    deletes: Vec<Vec<u8>>,
+    change: Vec<u8>,
+    result: MutationResult,
+    /// Its result carries the write's mark: a retryable write that applied.
+    marked: bool,
+}
+
+impl Evaluation {
+    /// What the range proposes and answers for a write at mark `ts`.
+    pub fn finish(self, ts: Hlc) -> Result<Outcome, MutationError> {
+        let Evaluation { puts, deletes, change, mut result, marked } = self;
+        if marked {
+            result.mark = Some(ts);
+        }
+        match result.encode() {
+            Ok(result) => Ok(Outcome { puts, deletes, change, result }),
+            // A result past the limits of an entry writes nothing and answers with that error.
+            Err(error) => {
+                let errors = vec![WriteError { index: 0, error }];
+                let attempt = result.attempt;
+                let refused = MutationResult { errors, attempt, ..MutationResult::default() };
+                let result = refused.encode().map_err(|e| MutationError(e.errmsg))?;
+                Ok(Outcome { puts: Vec::new(), deletes: Vec::new(), change: Vec::new(), result })
+            }
+        }
+    }
+}
+
+impl Bound {
+    /// What the mutation writes and answers on the versions `current` of the keys `latch`, at
+    /// mark `mark`. Without a mark (005 FR-035: an evaluation prepared ahead of the write) it
+    /// fails when what it writes depends on the mark: `$currentDate`, an empty timestamp the
+    /// server fills, a capped collection or a time series.
+    pub fn evaluate(
+        &self,
+        latch: &[Vec<u8>],
+        current: &[Option<(u8, &[u8])>],
+        mark: Option<Hlc>,
+    ) -> Result<Evaluation, MutationError> {
         let lookup = |k: &[u8]| {
             latch.iter().position(|x| x == k).and_then(|i| current.get(i).copied().flatten())
         };
@@ -1239,16 +1294,17 @@ impl Mutation for Bound {
             | DocMutation::Delete { .. })
                 if self.rules().capped.is_some() =>
             {
-                capped::eval(&self.keys, m, ts, checker, &lookup)
+                capped::eval(&self.keys, m, mark.ok_or_else(needs_mark)?, checker, &lookup)
             }
             DocMutation::Insert { docs, rules: Rules { timeseries: Some(t), .. }, .. } => {
+                let ts = mark.ok_or_else(needs_mark)?;
                 timeseries::insert(&self.keys, docs, (&t.spec, t.bucket), ts, checker, &lookup)
             }
             DocMutation::Insert { docs, ordered, rules } => {
-                insert(&self.keys, docs, *ordered, rules, ts, checker, &lookup)
+                insert(&self.keys, docs, *ordered, rules, mark, checker, &lookup)
             }
             DocMutation::Update { .. } | DocMutation::Delete { .. } => {
-                modify(&self.keys, &self.mutation, ts, checker, &lookup)
+                modify(&self.keys, &self.mutation, mark, checker, &lookup)
             }
             DocMutation::Backfill { .. } => backfill(&self.keys, checker, &lookup),
             DocMutation::Erase { .. } => {
@@ -1267,8 +1323,9 @@ impl Mutation for Bound {
             return Err(e.to_mutation());
         }
         // A capped write whose scan of the oldest documents fell short: the command scans again.
+        // An evaluation without the mark that needs it is no evaluation either.
         if let Err(e) = &r
-            && (capped::is_refusal(e) || timeseries::is_refusal(e))
+            && (capped::is_refusal(e) || timeseries::is_refusal(e) || e.errmsg == NEEDS_MARK)
         {
             return Err(e.to_mutation());
         }
@@ -1288,11 +1345,8 @@ impl Mutation for Bound {
                 change = changes;
             }
         }
-        let attempt = self.rules().attempt;
-        result.attempt = attempt;
-        if applied && self.rules().retry.is_some() {
-            result.mark = Some(ts);
-        }
+        result.attempt = self.rules().attempt;
+        let marked = applied && self.rules().retry.is_some();
         if applied {
             result.keys = key_counts((&puts, &deletes), &lookup, self.rules().capped.is_some());
         }
@@ -1315,15 +1369,135 @@ impl Mutation for Bound {
                 Written { change: &change, replaced: &replaced, moved: &moved, retry, rekeys };
             puts.extend(history_puts(&self.keys, (&puts, &deletes), &docs)?);
         }
-        match result.encode() {
-            Ok(result) => Ok(Outcome { puts, deletes, change, result }),
-            // A result past the limits of an entry writes nothing and answers with that error.
-            Err(error) => {
-                let errors = vec![WriteError { index: 0, error }];
-                let refused = MutationResult { errors, attempt, ..MutationResult::default() };
-                let result = refused.encode().map_err(|e| MutationError(e.errmsg))?;
-                Ok(Outcome { puts: Vec::new(), deletes: Vec::new(), change: Vec::new(), result })
-            }
+        Ok(Evaluation { puts, deletes, change, result, marked })
+    }
+
+    /// Its evaluation on the versions `current` of the keys `latch`, prepared without the mark
+    /// of its write (005 FR-035). `None` when what it writes depends on that mark or the
+    /// evaluation fails: its range evaluates it then.
+    pub fn prepare(
+        &self,
+        latch: &[Vec<u8>],
+        current: Vec<Option<(u8, Vec<u8>)>>,
+    ) -> Option<Prepared> {
+        let seen: Vec<Option<(u8, &[u8])>> =
+            current.iter().map(|c| c.as_ref().map(|(t, v)| (*t, v.as_slice()))).collect();
+        let evaluation = self.evaluate(latch, &seen, None).ok()?;
+        let reads = index_maintenance::unique_keys(&self.rules().indexes, &evaluation.puts);
+        Some(Prepared { keys: latch.to_vec(), basis: current, evaluation, reads })
+    }
+}
+
+/// The evaluation of a bound mutation prepared ahead of its range's core (005 FR-035): what it
+/// writes and answers when the versions of its keys are those of `basis`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prepared {
+    keys: Vec<Vec<u8>>,
+    basis: Vec<Option<(u8, Vec<u8>)>>,
+    evaluation: Evaluation,
+    /// The keys [`Mutation::reads`] asks for on what the evaluation puts.
+    reads: Vec<Vec<u8>>,
+}
+
+impl Prepared {
+    /// Whether it was prepared on exactly the versions `current` of the keys `latch`.
+    fn holds(&self, latch: &[Vec<u8>], current: &[Option<(u8, &[u8])>]) -> bool {
+        let mine = self.basis.iter().map(|v| v.as_ref().map(|(t, v)| (*t, v.as_slice())));
+        self.keys == latch && self.basis.len() == current.len() && mine.eq(current.iter().copied())
+    }
+}
+
+/// How a range evaluated a write it took (005 FR-035).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluatedBy {
+    /// With the evaluation the connection's thread prepared.
+    Prepared,
+    /// Again in the core: a version had changed since the evaluation was prepared.
+    Again,
+    /// In the core, without a prepared evaluation.
+    Core,
+}
+
+impl EvaluatedBy {
+    /// Every way, in the order of [`evaluated_counts`].
+    pub const ALL: [EvaluatedBy; 3] =
+        [EvaluatedBy::Prepared, EvaluatedBy::Again, EvaluatedBy::Core];
+
+    /// Its label in the metrics.
+    pub fn label(self) -> &'static str {
+        match self {
+            EvaluatedBy::Prepared => "prepared",
+            EvaluatedBy::Again => "again",
+            EvaluatedBy::Core => "core",
+        }
+    }
+}
+
+static EVALUATED: [std::sync::atomic::AtomicU64; 3] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// How many writes the ranges of this process evaluated each way of [`EvaluatedBy::ALL`].
+pub fn evaluated_counts() -> [u64; 3] {
+    std::array::from_fn(|i| EVALUATED[i].load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// A bound mutation as its range takes it (005 FR-035): its bytes, decoded only if the range
+/// has to evaluate it, and its evaluation when the connection's thread prepared it. The range
+/// reads the versions in force under its latches as for any write; if they are byte for byte
+/// the ones the evaluation was prepared on, what it wrote is what the range would compute.
+pub struct Sent {
+    bytes: Vec<u8>,
+    bound: std::cell::OnceCell<Result<Bound, MutationError>>,
+    prepared: Option<Prepared>,
+}
+
+impl Sent {
+    /// The mutation of encoding `bytes` with its evaluation `prepared`, if any.
+    pub fn new(bytes: Vec<u8>, prepared: Option<Prepared>) -> Sent {
+        Sent { bytes, bound: std::cell::OnceCell::new(), prepared }
+    }
+
+    fn bound(&self) -> Result<&Bound, MutationError> {
+        let decoded = || Bound::decode(&self.bytes).map_err(|e| e.to_mutation());
+        self.bound.get_or_init(decoded).as_ref().map_err(Clone::clone)
+    }
+
+    /// Whether the mutation was decoded: the range had to evaluate it.
+    pub fn decoded(&self) -> bool {
+        self.bound.get().is_some()
+    }
+}
+
+impl Mutation for Sent {
+    fn eval(&self, current: &[Option<(u8, &[u8])>], ts: Hlc) -> Result<Outcome, MutationError> {
+        self.bound()?.eval(current, ts)
+    }
+
+    fn eval_with(
+        &self,
+        latch: &[Vec<u8>],
+        current: &[Option<(u8, &[u8])>],
+        ts: Hlc,
+    ) -> Result<Outcome, MutationError> {
+        let taken = self.prepared.as_ref().filter(|p| p.holds(latch, current));
+        let how = match (&self.prepared, taken) {
+            (_, Some(_)) => EvaluatedBy::Prepared,
+            (Some(_), None) => EvaluatedBy::Again,
+            (None, None) => EvaluatedBy::Core,
+        };
+        EVALUATED[how as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match taken {
+            Some(p) => p.evaluation.clone().finish(ts),
+            None => self.bound()?.eval_with(latch, current, ts),
+        }
+    }
+
+    fn reads(&self, outcome: &Outcome) -> Vec<Vec<u8>> {
+        // What the write reads next depends on what it puts alone: of the prepared evaluation
+        // it is known without decoding the mutation.
+        match &self.prepared {
+            Some(p) if p.evaluation.puts == outcome.puts => p.reads.clone(),
+            _ => self.bound().map_or_else(|_| Vec::new(), |b| b.reads(outcome)),
         }
     }
 }
@@ -1423,7 +1597,9 @@ type Lookup<'a> = dyn Fn(&[u8]) -> Option<(u8, &'a [u8])> + 'a;
 /// `doc` with each top-level `Timestamp(0, 0)` other than `_id` set to the write's time, one
 /// increment apart, as a `refrouter` 9.0.4 does on inserts and replacements (measured); `None` when
 /// it has none.
-fn fill_timestamps(doc: &Document, ts: Hlc) -> Option<Document> {
+/// Without a mark (an evaluation prepared ahead of the write), a document with such a field
+/// cannot be filled: the evaluation needs the mark.
+fn fill_timestamps(doc: &Document, mark: Option<Hlc>) -> Result<Option<Document>, CommandError> {
     let empty = Value::Timestamp { time: 0, increment: 0 };
     let fields: Vec<String> = doc
         .iter()
@@ -1431,14 +1607,14 @@ fn fill_timestamps(doc: &Document, ts: Hlc) -> Option<Document> {
         .map(|(k, _)| k.to_owned())
         .collect();
     if fields.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let (time, first) = teseladb_hlc::to_timestamp(ts);
+    let (time, first) = teseladb_hlc::to_timestamp(mark.ok_or_else(needs_mark)?);
     let mut out = doc.clone();
     for (n, k) in (0u32..).zip(fields) {
         out.insert(k, Value::Timestamp { time, increment: first.saturating_add(n) });
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 fn insert(
@@ -1446,14 +1622,14 @@ fn insert(
     docs: &[Document],
     ordered: bool,
     rules: &Rules,
-    ts: Hlc,
+    mark: Option<Hlc>,
     checker: &Checker,
     lookup: &Lookup<'_>,
 ) -> Result<Evaluated, CommandError> {
     let mut r = MutationResult::default();
     let (mut puts, mut deletes): (Vec<Put>, Vec<Vec<u8>>) = (Vec::new(), Vec::new());
     for (i, (doc, key)) in docs.iter().zip(keys).enumerate() {
-        let filled = fill_timestamps(doc, ts);
+        let filled = fill_timestamps(doc, mark)?;
         let doc = filled.as_ref().unwrap_or(doc);
         let taken = lookup(key).is_some() || puts.iter().any(|p| &p.key == key);
         let outcome = if taken {
@@ -1548,7 +1724,7 @@ fn now_of(ts: Hlc) -> Now {
 fn modify(
     keys: &[Vec<u8>],
     m: &DocMutation,
-    ts: Hlc,
+    mark: Option<Hlc>,
     checker: &Checker,
     lookup: &Lookup<'_>,
 ) -> Result<Evaluated, CommandError> {
@@ -1581,6 +1757,11 @@ fn modify(
         | DocMutation::Backfill { .. }
         | DocMutation::Erase { .. } => None,
     };
+    // `$currentDate` writes the time of the write, which is its mark.
+    if mark.is_none() && update.as_ref().is_some_and(Update::reads_now) {
+        return Err(needs_mark());
+    }
+    let now = now_of(mark.unwrap_or(Hlc { physical: 0, logical: 0 }));
     let ctx = checker.ctx();
     let mut r = MutationResult::default();
     let (mut puts, mut deletes) = (Vec::new(), Vec::new());
@@ -1615,11 +1796,11 @@ fn modify(
                 }
             }
             Some(u) => {
-                let uctx = UpdateContext { matcher: ctx, position, now: now_of(ts), insert: false };
+                let uctx = UpdateContext { matcher: ctx, position, now, insert: false };
                 let during = executor_error(executor_of(image));
                 let mut out = u.apply(doc, &uctx).map_err(from_mql).map_err(&during)?;
-                if let Some(filled) =
-                    u.is_replacement().then(|| fill_timestamps(&out.doc, ts)).flatten()
+                if u.is_replacement()
+                    && let Some(filled) = fill_timestamps(&out.doc, mark)?
                 {
                     out = UpdateOutcome { doc: filled, modified: true };
                 }
@@ -1671,7 +1852,7 @@ fn modify(
         }
         let during = executor_error(executor_of(image));
         let replacement = update.as_ref().is_some_and(|u| u.is_replacement());
-        let filled = replacement.then(|| fill_timestamps(doc, ts)).flatten();
+        let filled = if replacement { fill_timestamps(doc, mark)? } else { None };
         let doc = filled.as_ref().unwrap_or(doc);
         let new = stored_bytes(doc, Stored::Upsert).map_err(&during)?;
         checker.check(&new, None).map_err(&during)?;

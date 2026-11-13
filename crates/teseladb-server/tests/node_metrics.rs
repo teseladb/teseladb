@@ -70,6 +70,11 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         let count = format!("teseladb_stage_seconds_count{{stage=\"{stage}\"}}");
         assert!(text.contains(&count), "{count} in {text}");
     }
+    // How the ranges evaluated their writes (005 FR-035).
+    for how in ["prepared", "again", "core"] {
+        let line = format!("teseladb_writes_evaluated_total{{how=\"{how}\"}} ");
+        assert!(text.contains(&line), "{line} in {text}");
+    }
     // The memory by component (012 FR-016).
     for name in ["teseladb_memory_frozen_memtables_bytes", "teseladb_memory_aggregations_bytes"] {
         assert!(sample(&text, name).is_some(), "{name} in {text}");

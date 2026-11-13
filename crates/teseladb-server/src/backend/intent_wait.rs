@@ -178,6 +178,7 @@ impl ServerBackend {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use crate::data_wire::Ahead;
     use teseladb_range::ack::{W, WriteConcern};
     use teseladb_range::intents::TxnId;
 
@@ -271,6 +272,7 @@ mod tests {
             dedup: None,
             wc: WriteConcern { w: W::Majority, j: true },
             deadline: None,
+            prepared: Ahead::default(),
         };
         assert_eq!(pin(write.clone(), Some(&learned)), write);
     }

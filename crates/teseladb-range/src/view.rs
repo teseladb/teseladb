@@ -646,6 +646,17 @@ pub enum FastWrite {
     Core,
 }
 
+/// What [`RangeView::newest`] gives.
+#[derive(Debug)]
+pub enum Newest {
+    /// The newest version of each key, its value type and its value (`None`: no version).
+    Versions(Vec<Option<(u8, Vec<u8>)>>),
+    /// A block to read from its file and give to [`SharedLsm::supply`]; then it runs again.
+    Need(BlockNeed),
+    /// Not from this view: a key outside the range, an intent or a failed read.
+    No,
+}
+
 /// A mutation to answer outside the core if it changes nothing (005 FR-030).
 pub struct NoChange<'a> {
     /// The mutation.
@@ -736,6 +747,31 @@ impl RangeView {
             }
             _ => FastWrite::Core,
         }
+    }
+
+    /// The newest versions of `keys` as the view's LSM holds them now, for an evaluation
+    /// prepared ahead of the range's core (FR-035). No mark is taken and no latch looked at:
+    /// the core compares these versions with the ones it reads under its latches, and
+    /// evaluates the write itself when they differ.
+    pub fn newest(&self, cache: &mut ViewCache, keys: &[Vec<u8>]) -> Newest {
+        let inside = |k: &Vec<u8>| self.start.as_slice() <= k.as_slice() && k < &self.end;
+        if !keys.iter().all(inside) {
+            return Newest::No;
+        }
+        let view = self.lsm.view_cached(cache);
+        let mut versions = Vec::with_capacity(keys.len());
+        for k in keys {
+            match view.get(&self.lsm, k, NEWEST) {
+                SharedRead::Hit(f) if f.kind == Kind::Intent => return Newest::No,
+                SharedRead::Hit(f) => {
+                    versions.push(split_value(&f.value).map(|(t, v)| (t, v.to_vec())));
+                }
+                SharedRead::NotFound => versions.push(None),
+                SharedRead::Need(need) => return Newest::Need(need),
+                SharedRead::Failed(_) => return Newest::No,
+            }
+        }
+        Newest::Versions(versions)
     }
 
     /// The live documents of collection `coll` in the range, read as [`RangeView::read`] reads a

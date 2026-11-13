@@ -67,6 +67,9 @@ fn intents_answered_in_the_log_do_not_hold_back_a_scan_outside_the_core() {
     let view = n.host.views().get(G).expect("the view of a range this node leads");
     let read = view.scan(&mut cache, (A, END), part, || n.now, ReadConcern::Local, |_| false);
     assert!(read.is_none(), "{read:?}");
+    // No evaluation is prepared on a key with an intent either (FR-035): its core decides it.
+    let newest = view.newest(&mut cache, &[B.to_vec()]);
+    assert!(matches!(newest, teseladb_range::view::Newest::No), "{newest:?}");
 }
 
 /// Before its commit a coordinator asks each range whether its intents were applied (FR-021,

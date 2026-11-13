@@ -88,7 +88,7 @@ pub(super) fn insert(
     let mut filled = Vec::with_capacity(docs.len());
     let mut refused = None;
     for (index, doc) in docs.iter().enumerate() {
-        let one = fill_timestamps(doc, ts).unwrap_or_else(|| doc.clone());
+        let one = fill_timestamps(doc, Some(ts))?.unwrap_or_else(|| doc.clone());
         let checked = stored_bytes(&one, Stored::Insert)
             .and_then(|b| checker.check(&b, None))
             .and_then(|()| alone(&one));
@@ -131,7 +131,9 @@ pub fn first_refused(docs: &[Document], spec: &BucketSpec, rules: &super::Rules)
     let none = |_: &[u8]| -> Option<(u8, &[u8])> { None };
     let ts = Hlc { physical: 0, logical: 0 };
     docs.iter().position(|doc| {
-        let one = fill_timestamps(doc, ts).unwrap_or_else(|| doc.clone());
+        // With a mark the filling never fails.
+        let filled = fill_timestamps(doc, Some(ts)).ok().flatten();
+        let one = filled.unwrap_or_else(|| doc.clone());
         let alone = || -> Result<(), CommandError> {
             let bucket = spec.append([0; 12], None, &one).map_err(ts_error)?.to_bytes()?;
             checker.entries_at(Some(&[]), None, Some(&bucket), &none).map(|_| ())
