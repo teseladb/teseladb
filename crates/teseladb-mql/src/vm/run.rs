@@ -5,11 +5,14 @@ use std::cmp::Ordering;
 
 use teseladb_bson::{RawDoc, RawValue};
 
+use super::compile::elem_match_docs;
+use super::expr::{EXPR_EQ, EXPR_NE};
 use super::value::{Tag, ValueRef, element_type, elements, field, iter, next, root};
 use super::{Address, BATCH, Fast, Insn, Leaf, Literal, NO_EXPAND, Op, Program, REGISTERS, cmp_of};
 use crate::error::Result;
-use crate::matcher::{Eval, MatchContext, compare, eq};
+use crate::matcher::{Eval, MatchContext, array_index, compare, eq};
 use crate::parse::{CmpOp, Expr, Pred};
+use crate::value::{bson_error, cmp};
 
 /// What the instructions read besides their registers.
 struct Env<'p, 'c, 'a> {
@@ -32,7 +35,7 @@ impl Literal {
 
 /// The value at `path`, walked on the bytes through documents.
 #[inline(always)]
-fn load<'d>(doc: &'d [u8], path: &[String]) -> ValueRef<'d> {
+pub(super) fn load<'d>(doc: &'d [u8], path: &[String]) -> ValueRef<'d> {
     let mut cur = root(doc);
     for seg in path {
         cur = match cur.tag {
@@ -42,6 +45,90 @@ fn load<'d>(doc: &'d [u8], path: &[String]) -> ValueRef<'d> {
         };
     }
     cur
+}
+
+/// Walks `segs` from `cur` with RefDb's rules for arrays inside a path, calling `f` on each
+/// value reached with whether an array there is also tried element by element, until `f` says
+/// yes: the walk of the tree evaluator, on the bytes.
+fn walk<'d>(
+    doc: &'d [u8],
+    cur: ValueRef<'d>,
+    segs: &[String],
+    f: &mut dyn FnMut(ValueRef<'d>, bool) -> Result<bool>,
+) -> Result<bool> {
+    let Some((seg, rest)) = segs.split_first() else { return f(cur, true) };
+    match cur.tag {
+        Tag::Doc => walk(doc, field(doc, cur, seg.as_bytes()), rest, f),
+        Tag::Array => {
+            // An array reached by position at the end of the path is not expanded.
+            if let Some(e) = array_index(seg).and_then(|i| elements(doc, cur).nth(i)) {
+                let hit = if rest.is_empty() { f(e, false)? } else { walk(doc, e, rest, f)? };
+                if hit {
+                    return Ok(true);
+                }
+            }
+            for e in elements(doc, cur) {
+                if e.tag == Tag::Doc && walk(doc, field(doc, e, seg.as_bytes()), rest, f)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => f(ValueRef::MISSING, true),
+    }
+}
+
+/// The node at `at` of `root`, and its predicate when `at` names one; `None` when `root` has
+/// another shape.
+pub(super) fn find_node<'r>(
+    root: &'r Expr,
+    at: &Address,
+) -> Option<(&'r Expr, Option<(&'r str, &'r Pred)>)> {
+    let mut e = root;
+    for &i in &at.exprs {
+        e = match e {
+            Expr::And(items) | Expr::Or(items) | Expr::Nor(items) => items.get(i)?,
+            _ => return None,
+        };
+    }
+    let Some(preds) = &at.preds else { return Some((e, None)) };
+    let Expr::Field { path, pred } = e else { return None };
+    Some((e, Some((path.as_str(), descend(pred, preds)?))))
+}
+
+/// The predicate at positions `place` inside `p`'s `$and`s and `$not`s.
+fn descend<'r>(mut p: &'r Pred, place: &[usize]) -> Option<&'r Pred> {
+    for &i in place {
+        p = match p {
+            Pred::And(items) => items.get(i)?,
+            Pred::Not(inner) => inner,
+            _ => return None,
+        };
+    }
+    Some(p)
+}
+
+/// The predicate of a leaf: at `at`, then at `elem` inside its `$elemMatch`.
+pub(super) fn find_pred<'r>(
+    root: &'r Expr,
+    at: &Address,
+    elem: Option<&[usize]>,
+) -> Option<&'r Pred> {
+    let (_, Some((_, p))) = find_node(root, at)? else { return None };
+    match elem {
+        None => Some(p),
+        Some(place) => match p {
+            Pred::ElemMatchValue(inner) => descend(inner, place),
+            _ => None,
+        },
+    }
+}
+
+/// How many `$elemMatch`es on documents [`elem_match_docs`] finds in `p`.
+fn elem_match_count(p: &Pred) -> usize {
+    let mut docs = Vec::new();
+    elem_match_docs(p, &mut docs);
+    docs.len()
 }
 
 /// Whether ordering `o` satisfies `op`.
@@ -58,26 +145,161 @@ fn ordered(op: CmpOp, o: Ordering) -> bool {
 impl Env<'_, '_, '_> {
     /// The subtree at `at` of the filter's tree, and its predicate when `at` names one.
     fn find(&self, at: &Address) -> (&Expr, Option<(&str, &Pred)>) {
-        let mut e = self.root;
-        for &i in &at.exprs {
-            e = match e {
-                Expr::And(items) | Expr::Or(items) | Expr::Nor(items) => &items[i],
-                _ => unreachable!("an address follows the tree it was compiled from"),
-            };
+        find_node(self.root, at).expect("an address follows the tree it was compiled from")
+    }
+
+    /// The extensions' answer for node `at` (`$expr`, `$text`, `$sampleRate`, `$jsonSchema`).
+    fn ext(&self, at: &Address, doc: RawDoc<'_>) -> Result<bool> {
+        let ctx = self.ctx;
+        match self.find(at).0 {
+            Expr::Expr(e) => ctx.ext.expr(e.get(), doc, ctx.vars),
+            Expr::Text(q) => ctx.ext.text(q, doc),
+            Expr::SampleRate(rate) => Ok(ctx.ext.random() < *rate),
+            Expr::JsonSchema(schema) => schema.matches(doc),
+            _ => unreachable!("an extension instruction stands for an extension's node"),
         }
-        let Some(preds) = &at.preds else { return (e, None) };
-        let Expr::Field { path, pred } = e else {
-            unreachable!("a predicate's address ends at its field");
+    }
+
+    /// `$expr` comparison `i` of `a` and `b` (or the leaf's literal), in RefDb's order of
+    /// values with a missing value below every other; a path through an array leaves the
+    /// comparison to the extensions.
+    fn expr_cmp(
+        &self,
+        i: Insn,
+        leaf: &Leaf,
+        a: ValueRef<'_>,
+        b: Option<ValueRef<'_>>,
+        doc: RawDoc<'_>,
+    ) -> Result<bool> {
+        // A path through an array, and strings under a collation (which the extensions' scope
+        // decides, not the filter's context), are the extensions' to compare.
+        let collated = self.ctx.collation.is_some();
+        let theirs = |v: ValueRef<'_>| {
+            v.tag == Tag::ThroughArray
+                || (collated && matches!(v.tag, Tag::Str | Tag::Symbol | Tag::Doc | Tag::Array))
         };
-        let mut p = pred;
-        for &i in preds {
-            p = match p {
-                Pred::And(items) => &items[i],
-                Pred::Not(inner) => inner,
-                _ => unreachable!("an address follows the tree it was compiled from"),
-            };
+        let literal_text = b.is_none()
+            && collated
+            && matches!(self.leaf_literal(leaf).value(), RawValue::String(_) | RawValue::Symbol(_));
+        if theirs(a) || b.is_some_and(theirs) || literal_text {
+            let whole = &self.program.pool[leaf.expr.expect("an $expr comparison keeps itself")];
+            return self.ctx.ext.expr(whole.value(), doc, self.ctx.vars);
         }
-        (e, Some((path.as_str(), p)))
+        let bytes = doc.as_bytes();
+        let x = a.raw(bytes);
+        let y = match b {
+            Some(b) => b.raw(bytes),
+            None => Some(self.leaf_literal(leaf).value()),
+        };
+        let o = match (x, y) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(x), Some(y)) => cmp(x, y, self.ctx.collation),
+        };
+        Ok(match i.src2() {
+            EXPR_EQ => o == Ordering::Equal,
+            EXPR_NE => o != Ordering::Equal,
+            code => ordered(cmp_of(code), o),
+        })
+    }
+
+    /// `Pred` instruction `leaf` on `v`: the leaf's predicate on the value, or on each value the
+    /// path reaches through arrays.
+    fn pred(&self, leaf: &Leaf, v: ValueRef<'_>, doc: RawDoc<'_>) -> Result<bool> {
+        let (_, Some((_, pred))) = self.find(&leaf.at) else {
+            unreachable!("a predicate instruction's address names a predicate");
+        };
+        let bytes = doc.as_bytes();
+        if let Pred::ExprEq(_) | Pred::ExprCmp(..) = pred {
+            // The first array on the path stands for the whole path, and an array matches.
+            if v.tag == Tag::ThroughArray {
+                return Ok(true);
+            }
+            return Eval::new(self.ctx, false).single(pred, v.raw(bytes));
+        }
+        if v.tag == Tag::ThroughArray {
+            let path = &self.program.paths[leaf.path as usize];
+            return walk(bytes, root(bytes), path, &mut |w, expand| {
+                self.on_value(leaf, pred, 0, w, expand, doc)
+            });
+        }
+        self.on_value(leaf, pred, 0, v, true, doc)
+    }
+
+    /// Predicate `p` on value `v` at the end of a path (`expand` also tries an array's
+    /// elements); `subs` is the index of `p`'s first `$elemMatch` on documents in the leaf's
+    /// programs.
+    fn on_value(
+        &self,
+        leaf: &Leaf,
+        p: &Pred,
+        subs: usize,
+        v: ValueRef<'_>,
+        expand: bool,
+        doc: RawDoc<'_>,
+    ) -> Result<bool> {
+        let bytes = doc.as_bytes();
+        match p {
+            Pred::And(items) => {
+                let mut at = subs;
+                for q in items {
+                    if !self.on_value(leaf, q, at, v, expand, doc)? {
+                        return Ok(false);
+                    }
+                    at += elem_match_count(q);
+                }
+                Ok(true)
+            }
+            Pred::Not(q) => Ok(!self.on_value(leaf, q, subs, v, expand, doc)?),
+            Pred::Exists => Ok(v.tag != Tag::Missing),
+            Pred::Size(n) => {
+                Ok(v.tag == Tag::Array
+                    && i64::try_from(elements(bytes, v).count()).ok() == Some(*n))
+            }
+            Pred::ElemMatchDoc(e) => {
+                if v.tag != Tag::Array {
+                    return Ok(false);
+                }
+                let program = &leaf.subs[subs];
+                for el in elements(bytes, v) {
+                    if !matches!(el.tag, Tag::Doc | Tag::Array) {
+                        continue;
+                    }
+                    let Some(b) = el.bytes(bytes) else { continue };
+                    let d = RawDoc::from_stored(b).map_err(bson_error)?;
+                    if program.run(e, d, self.ctx)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Pred::ElemMatchValue(q) => {
+                if v.tag != Tag::Array {
+                    return Ok(false);
+                }
+                for el in elements(bytes, v) {
+                    if self.on_value(leaf, q, subs, el, false, doc)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => {
+                let eval = Eval::new(self.ctx, false);
+                if eval.single(p, v.raw(bytes))? {
+                    return Ok(true);
+                }
+                if expand && v.tag == Tag::Array {
+                    for el in elements(bytes, v) {
+                        if eval.single(p, el.raw(bytes))? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// The tree evaluator's answer for the subtree at `at`.
@@ -98,17 +320,27 @@ impl Env<'_, '_, '_> {
     #[inline(always)]
     fn leaf(&self, pc: usize, i: Insn, v: ValueRef<'_>, doc: RawDoc<'_>) -> Result<bool> {
         let leaf: &Leaf = &self.program.leaves[self.program.leaf_of[pc] as usize];
-        if v.tag == Tag::ThroughArray {
-            return self.tree(&leaf.at, doc);
+        if i.op() == Op::Pred {
+            return self.pred(leaf, v, doc);
         }
         let bytes = doc.as_bytes();
-        if self.single(i, leaf, v, bytes) {
-            return Ok(true);
+        let mut on = |w: ValueRef<'_>, expand: bool| {
+            Ok(self.single(i, leaf, w, bytes)
+                || (expand
+                    && i.src2() & NO_EXPAND == 0
+                    && w.tag == Tag::Array
+                    && elements(bytes, w).any(|e| self.single(i, leaf, e, bytes))))
+        };
+        if v.tag == Tag::ThroughArray {
+            let path = &self.program.paths[leaf.path as usize];
+            return walk(bytes, root(bytes), path, &mut on);
         }
-        if i.src2() & NO_EXPAND == 0 && v.tag == Tag::Array {
-            return Ok(elements(bytes, v).any(|e| self.single(i, leaf, e, bytes)));
-        }
-        Ok(false)
+        on(v, true)
+    }
+
+    /// The leaf of the instruction at `pc`.
+    fn leaf_at(&self, pc: usize) -> &Leaf {
+        &self.program.leaves[self.program.leaf_of[pc] as usize]
     }
 
     /// Comparison instruction `i` on one value.
@@ -205,6 +437,14 @@ impl Program {
                 Op::LoadField => regs[i.dst()] = load(bytes, &self.paths[i.index()]),
                 Op::Tree => {
                     regs[i.dst()] = ValueRef::boolean(env.tree(&self.trees[i.index()], doc)?);
+                }
+                Op::Ext => {
+                    regs[i.dst()] = ValueRef::boolean(env.ext(&self.trees[i.index()], doc)?);
+                }
+                Op::ExprCmp | Op::ExprCmpLit => {
+                    let b = (i.op() == Op::ExprCmp).then(|| regs[i.index()]);
+                    let answer = env.expr_cmp(i, env.leaf_at(pc), regs[i.src1()], b, doc)?;
+                    regs[i.dst()] = ValueRef::boolean(answer);
                 }
                 Op::IterInit => {
                     let a = regs[i.src1()];
@@ -316,6 +556,21 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                     let a = &p.trees[i.index()];
                     for l in lanes(m) {
                         self.regs[i.dst()][l] = ValueRef::boolean(env.tree(a, self.docs[l])?);
+                    }
+                }
+                Op::Ext => {
+                    let a = &p.trees[i.index()];
+                    for l in lanes(m) {
+                        self.regs[i.dst()][l] = ValueRef::boolean(env.ext(a, self.docs[l])?);
+                    }
+                }
+                Op::ExprCmp | Op::ExprCmpLit => {
+                    let leaf = env.leaf_at(pc);
+                    for l in lanes(m) {
+                        let b = (i.op() == Op::ExprCmp).then(|| self.regs[i.index()][l]);
+                        let a = self.regs[i.src1()][l];
+                        let answer = env.expr_cmp(i, leaf, a, b, self.docs[l])?;
+                        self.regs[i.dst()][l] = ValueRef::boolean(answer);
                     }
                 }
                 Op::IterInit => {

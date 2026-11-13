@@ -149,3 +149,27 @@ fn statistics_of_two_ranges_merge() {
     let f = m.fraction("a", &[range(100, 150)]).expect("stats");
     assert!((0.25..0.42).contains(&f), "{f}");
 }
+
+#[test]
+fn a_compaction_publishes_its_range_s_statistics_merged_by_collection() {
+    use teseladb_plan::stats::{collection_stats, forget_range, recompute_at_compaction};
+    let coll = b"\x01test-collection-a";
+    assert!(collection_stats(coll).is_none());
+    recompute_at_compaction(coll, 1, 100, vec![("a".to_owned(), ints(0..100))]);
+    let (first, s) = collection_stats(coll).expect("published");
+    assert_eq!(s.documents, 100);
+    assert_eq!(s.fields["a"].count, 100);
+    recompute_at_compaction(coll, 2, 50, vec![("a".to_owned(), ints(0..50))]);
+    let (second, s) = collection_stats(coll).expect("published");
+    assert!(second > first, "a new epoch for new statistics");
+    assert_eq!(s.documents, 150);
+    assert_eq!(s.fields["a"].count, 150);
+    // The same range compacted again replaces its statistics.
+    recompute_at_compaction(coll, 2, 10, vec![("a".to_owned(), ints(0..10))]);
+    let (_, s) = collection_stats(coll).expect("published");
+    assert_eq!(s.documents, 110);
+    forget_range(coll, 1);
+    forget_range(coll, 2);
+    assert!(collection_stats(coll).is_none());
+    assert!(collection_stats(b"\x01other").is_none());
+}

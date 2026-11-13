@@ -12,5 +12,6 @@ pub mod expr;
 pub mod pipeline;
 pub(crate) mod raw;
 pub mod reference;
+pub mod selectivity;
 pub mod timeseries_read;
 pub(crate) mod window;

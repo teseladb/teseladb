@@ -56,17 +56,22 @@ impl Filter {
         } else {
             None
         };
-        let program = Box::new(crate::vm::Program::compile(
+        let program = Box::new(crate::vm::Program::compile_cached(
             run.as_ref().unwrap_or(&expr),
             &crate::vm::DefaultSelectivity,
+            0,
         ));
         Ok(Filter { expr, ordered, run, program })
     }
 
     /// The filter with the conditions of its `$and`s and `$or`s ordered by `sel`, the range's
-    /// estimate of what each lets through (010 FR-029, FR-031).
-    pub fn with_selectivity(mut self, sel: &dyn crate::vm::Selectivity) -> Filter {
-        self.program = Box::new(crate::vm::Program::compile(self.run_tree(), sel));
+    /// estimate of what each lets through (010 FR-029, FR-031). `epoch` names the statistics
+    /// behind `sel` (never 0, which is the default estimate's) and changes with them: the
+    /// program of the filter's shape is kept on the core for that epoch
+    /// ([`crate::vm::Program::compile_cached`]).
+    pub fn with_selectivity(mut self, sel: &dyn crate::vm::Selectivity, epoch: u64) -> Filter {
+        self.program =
+            Box::new(crate::vm::Program::compile_cached(self.run_tree(), sel, epoch.max(1)));
         self
     }
 
@@ -423,7 +428,7 @@ impl<'c, 'a> Eval<'c, 'a> {
     }
 
     /// A predicate that tests one value.
-    fn single(&self, pred: &Pred, v: Option<RawValue<'_>>) -> Result<bool> {
+    pub(crate) fn single(&self, pred: &Pred, v: Option<RawValue<'_>>) -> Result<bool> {
         let coll = self.ctx.collation;
         Ok(match pred {
             Pred::Eq(t) => eq(v, t.get(), coll),

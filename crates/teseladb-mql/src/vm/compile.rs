@@ -2,7 +2,9 @@
 
 use teseladb_bson::RawValue;
 
-use super::{Address, Fast, Insn, Leaf, Literal, NO_EXPAND, Op, Program, REGISTERS, cmp_code};
+use super::{
+    Address, Fast, Insn, Leaf, Literal, NO_EXPAND, NO_PATH, Op, Program, REGISTERS, cmp_code,
+};
 use crate::parse::{Expr, InItem, Pred};
 use crate::value::OwnedValue;
 
@@ -96,9 +98,9 @@ fn infallible_pred(p: &Pred) -> bool {
 
 /// A place in the code that jumps go to, bound once the code there is emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Label(usize);
+pub(super) struct Label(usize);
 
-struct Compiler<'s> {
+pub(super) struct Compiler<'s> {
     sel: &'s dyn Selectivity,
     code: Vec<Insn>,
     leaf_of: Vec<u32>,
@@ -119,7 +121,7 @@ struct Compiler<'s> {
 }
 
 /// Registers one comparison uses: the value, the answer, an iterator and an element.
-const LEAF_REGISTERS: usize = 4;
+pub(super) const LEAF_REGISTERS: usize = 4;
 
 impl Program {
     /// Compiles `root`, ordering the conditions of its `$and`s and `$or`s by `sel`.
@@ -168,22 +170,22 @@ fn reg(r: usize) -> u8 {
 }
 
 impl Compiler<'_> {
-    fn emit(&mut self, op: Op, dst: usize, src1: usize, src2: u8, at: i32) {
+    pub(super) fn emit(&mut self, op: Op, dst: usize, src1: usize, src2: u8, at: i32) {
         self.code.push(Insn::new(op, reg(dst), reg(src1), src2, at));
         self.leaf_of.push(u32::MAX);
     }
 
-    fn label(&mut self) -> Label {
+    pub(super) fn label(&mut self) -> Label {
         self.labels.push(None);
         Label(self.labels.len() - 1)
     }
 
-    fn bind(&mut self, l: Label) {
+    pub(super) fn bind(&mut self, l: Label) {
         self.labels[l.0] = Some(self.code.len());
     }
 
     /// A jump (or an instruction that may jump) to `l`.
-    fn jump(&mut self, op: Op, dst: usize, src1: usize, l: Label) {
+    pub(super) fn jump(&mut self, op: Op, dst: usize, src1: usize, l: Label) {
         self.jumps.push((self.code.len(), l));
         self.emit(op, dst, src1, 0, 0);
     }
@@ -200,7 +202,7 @@ impl Compiler<'_> {
 
     /// Goes to `yes` when `cond` holds and to `no` otherwise, falling through to the next
     /// instruction for the answer `fall`.
-    fn branch(&mut self, cond: usize, yes: Label, no: Label, fall: bool) {
+    pub(super) fn branch(&mut self, cond: usize, yes: Label, no: Label, fall: bool) {
         if fall {
             self.jump(Op::JumpIfFalse, 0, cond, no);
         } else {
@@ -209,7 +211,7 @@ impl Compiler<'_> {
     }
 
     /// Goes to `yes` or `no` by constant answer `b`.
-    fn constant(&mut self, b: bool, yes: Label, no: Label, fall: bool) {
+    pub(super) fn constant(&mut self, b: bool, yes: Label, no: Label, fall: bool) {
         if b != fall {
             self.jump(Op::Jump, 0, 0, if b { yes } else { no });
         }
@@ -223,6 +225,29 @@ impl Compiler<'_> {
         self.branch(r, yes, no, fall);
     }
 
+    /// The extensions' answer for the node at `at`.
+    fn ext(&mut self, at: Address, yes: Label, no: Label, fall: bool) {
+        self.trees.push(at);
+        let r = self.free;
+        let n = imm(self.trees.len() - 1);
+        self.emit(Op::Ext, r, 0, 0, n);
+        self.branch(r, yes, no, fall);
+    }
+
+    /// Adds `leaf` and makes it the last instruction's.
+    pub(super) fn attach(&mut self, leaf: Leaf) {
+        self.leaves.push(leaf);
+        let l = u32::try_from(self.leaves.len() - 1).expect("few leaves");
+        if let Some(last) = self.leaf_of.last_mut() {
+            *last = l;
+        }
+    }
+
+    /// The first free register.
+    pub(super) fn free(&self) -> usize {
+        self.free
+    }
+
     /// Code for `e`: to `yes` when it matches, to `no` otherwise; `fall` is the answer that
     /// falls through.
     fn expr(&mut self, e: &Expr, at: &mut Vec<usize>, yes: Label, no: Label, fall: bool) {
@@ -234,9 +259,20 @@ impl Compiler<'_> {
             Expr::True => self.constant(true, yes, no, fall),
             Expr::False => self.constant(false, yes, no, fall),
             Expr::JsonSchema(_) => {
-                self.tree(Address { exprs: at.clone(), preds: None }, yes, no, fall);
+                self.ext(Address { exprs: at.clone(), preds: None }, yes, no, fall);
             }
-            Expr::Expr(_) | Expr::Where(_) | Expr::Text(_) | Expr::SampleRate(_) => {
+            Expr::Expr(e) => {
+                let enough = self.free + LEAF_REGISTERS <= REGISTERS;
+                if !(enough && super::expr::compile_expr(self, e.get(), at, yes, no, fall)) {
+                    self.sequential = true;
+                    self.ext(Address { exprs: at.clone(), preds: None }, yes, no, fall);
+                }
+            }
+            Expr::Text(_) | Expr::SampleRate(_) => {
+                self.sequential = true;
+                self.ext(Address { exprs: at.clone(), preds: None }, yes, no, fall);
+            }
+            Expr::Where(_) => {
                 self.sequential = true;
                 self.tree(Address { exprs: at.clone(), preds: None }, yes, no, fall);
             }
@@ -321,14 +357,26 @@ impl Compiler<'_> {
             }
             p if enough && leaf_op(p).is_some() => {
                 let addr = Address { exprs: at.clone(), preds: Some(preds.clone()) };
-                let v = self.load(path);
+                let (v, pi) = self.load(path);
                 let r = self.free + 1;
-                self.compare(p, addr, r, v, 0);
+                self.compare(p, addr, r, v, 0, pi, None);
                 self.branch(r, yes, no, fall);
             }
             Pred::ElemMatchValue(inner) if enough && on_element(inner) => {
                 let addr = Address { exprs: at.clone(), preds: Some(preds.clone()) };
                 self.elem_match(path, inner, addr, yes, no, fall);
+            }
+            p if enough && !geometric(p) => {
+                self.sequential |= asks_extensions(p);
+                let addr = Address { exprs: at.clone(), preds: Some(preds.clone()) };
+                let mut docs = Vec::new();
+                elem_match_docs(p, &mut docs);
+                let subs = docs.into_iter().map(|e| Program::compile(e, self.sel)).collect();
+                let (v, pi) = self.load(path);
+                let r = self.free + 1;
+                self.emit(Op::Pred, r, v, 0, 0);
+                self.attach(Leaf { subs, ..Leaf::new(addr, pi) });
+                self.branch(r, yes, no, fall);
             }
             p => {
                 self.sequential |= asks_extensions(p);
@@ -337,8 +385,8 @@ impl Compiler<'_> {
         }
     }
 
-    /// Loads `path` into the first free register.
-    fn load(&mut self, path: &str) -> usize {
+    /// Loads `path` into the first free register: the register and the path's index.
+    pub(super) fn load(&mut self, path: &str) -> (usize, u32) {
         let p = match self.path_texts.iter().position(|t| t == path) {
             Some(p) => p,
             None => {
@@ -349,20 +397,40 @@ impl Compiler<'_> {
         };
         let r = self.free;
         self.emit(Op::LoadField, r, 0, 0, imm(p));
-        r
+        (r, u32::try_from(p).expect("few paths"))
     }
 
-    fn literal(&mut self, v: &OwnedValue) -> (usize, Fast) {
+    /// Loads `path` into register `r`.
+    pub(super) fn load_into(&mut self, path: &str, r: usize) {
+        let saved = self.free;
+        self.free = r;
+        self.load(path);
+        self.free = saved;
+    }
+
+    /// Adds `v` to the pool.
+    pub(super) fn literal(&mut self, v: &OwnedValue) -> (usize, Fast) {
         let l = literal(v);
         let fast = l.fast.clone();
         self.pool.push(l);
         (self.pool.len() - 1, fast)
     }
 
-    /// The comparison of `pred` on register `v` into `dst`; `flags` may be [`NO_EXPAND`].
-    fn compare(&mut self, pred: &Pred, at: Address, dst: usize, v: usize, flags: u8) {
+    /// The comparison of `pred` on register `v` into `dst`; `flags` may be [`NO_EXPAND`]; `path`
+    /// is the path `v` was loaded from and `elem` the comparison's place inside `$elemMatch`.
+    #[allow(clippy::too_many_arguments)]
+    fn compare(
+        &mut self,
+        pred: &Pred,
+        at: Address,
+        dst: usize,
+        v: usize,
+        flags: u8,
+        path: u32,
+        elem: Option<Vec<usize>>,
+    ) {
         let small = |k: i64| i32::try_from(k).ok();
-        let mut leaf = Leaf { literals: Vec::new(), types: Vec::new(), at };
+        let mut leaf = Leaf { elem, ..Leaf::new(at, path) };
         let (op, src2, value) = match pred {
             Pred::Eq(t) => {
                 let (i, fast) = self.literal(t);
@@ -408,12 +476,8 @@ impl Compiler<'_> {
             Pred::Size(n) => (Op::Size, NO_EXPAND, i32::try_from(*n).unwrap_or(-1)),
             _ => (Op::Exists, 0, 0),
         };
-        self.leaves.push(leaf);
-        let l = u32::try_from(self.leaves.len() - 1).expect("few leaves");
         self.emit(op, dst, v, src2 | flags, value);
-        if let Some(last) = self.leaf_of.last_mut() {
-            *last = l;
-        }
+        self.attach(leaf);
     }
 
     /// `$elemMatch` with operators on `path`: some element of the array satisfies `inner`.
@@ -426,7 +490,7 @@ impl Compiler<'_> {
         no: Label,
         fall: bool,
     ) {
-        let v = self.load(path);
+        let (v, pi) = self.load(path);
         let (it, elem, answer) = (v + 1, v + 2, v + 3);
         let (through, next, done) = (self.label(), self.label(), self.label());
         self.jump(Op::JumpIfThrough, 0, v, through);
@@ -435,7 +499,7 @@ impl Compiler<'_> {
         self.jump(Op::IterNext, elem, it, no);
         self.free += 4;
         let found = self.label();
-        self.on_element(inner, &at, elem, answer, found, next);
+        self.on_element(inner, &at, elem, answer, found, next, &mut Vec::new());
         self.free -= 4;
         self.bind(found);
         if fall {
@@ -443,17 +507,21 @@ impl Compiler<'_> {
         } else {
             self.jump(Op::Jump, 0, 0, yes);
         }
-        // A path through an array: the tree evaluator answers for the whole predicate.
+        // A path through an array: the whole predicate on each value the walk reaches.
         self.bind(through);
-        self.trees.push(at);
-        let n = imm(self.trees.len() - 1);
-        self.emit(Op::Tree, answer, 0, 0, n);
+        self.emit(Op::Pred, answer, v, 0, 0);
+        let mut docs = Vec::new();
+        elem_match_docs(inner, &mut docs);
+        let subs = docs.into_iter().map(|e| Program::compile(e, self.sel)).collect();
+        self.attach(Leaf { subs, ..Leaf::new(at, pi) });
         self.branch(answer, yes, no, fall);
         self.bind(done);
     }
 
     /// Code that goes to `yes` when element `elem` satisfies `p` (without looking into an
-    /// array it holds) and to `no` otherwise, falling through on `yes`.
+    /// array it holds) and to `no` otherwise, falling through on `yes`; `place` is `p`'s place
+    /// inside the `$elemMatch`'s predicate.
+    #[allow(clippy::too_many_arguments)]
     fn on_element(
         &mut self,
         p: &Pred,
@@ -462,26 +530,32 @@ impl Compiler<'_> {
         answer: usize,
         yes: Label,
         no: Label,
+        place: &mut Vec<usize>,
     ) {
         match p {
             Pred::And(items) => {
-                for q in items {
+                for (i, q) in items.iter().enumerate() {
                     let next = self.label();
-                    self.on_element(q, at, elem, answer, next, no);
+                    place.push(i);
+                    self.on_element(q, at, elem, answer, next, no, place);
+                    place.pop();
                     self.bind(next);
                 }
                 self.constant(true, yes, no, true);
             }
             Pred::Not(q) => {
                 let (inner_yes, inner_no) = (self.label(), self.label());
-                self.on_element(q, at, elem, answer, inner_yes, inner_no);
+                place.push(0);
+                self.on_element(q, at, elem, answer, inner_yes, inner_no, place);
+                place.pop();
                 self.bind(inner_yes);
                 self.jump(Op::Jump, 0, 0, no);
                 self.bind(inner_no);
                 self.constant(true, yes, no, true);
             }
             q => {
-                self.compare(q, at.clone(), answer, elem, NO_EXPAND);
+                let place = Some(place.clone());
+                self.compare(q, at.clone(), answer, elem, NO_EXPAND, NO_PATH, place);
                 self.branch(answer, yes, no, true);
             }
         }
@@ -495,6 +569,27 @@ fn asks_extensions(p: &Pred) -> bool {
         Pred::And(items) => items.iter().any(asks_extensions),
         Pred::Not(q) | Pred::ElemMatchValue(q) => asks_extensions(q),
         Pred::ElemMatchDoc(e) => !infallible(e),
+        _ => false,
+    }
+}
+
+/// The filters of the `$elemMatch`es on documents inside `p`, outermost first, in the order of
+/// `p`'s tree (not those inside them, which their own programs hold).
+pub(super) fn elem_match_docs<'e>(p: &'e Pred, out: &mut Vec<&'e Expr>) {
+    match p {
+        Pred::ElemMatchDoc(e) => out.push(e),
+        Pred::And(items) => items.iter().for_each(|q| elem_match_docs(q, out)),
+        Pred::Not(q) | Pred::ElemMatchValue(q) => elem_match_docs(q, out),
+        _ => {}
+    }
+}
+
+/// Whether `p` asks the geometry engine, which the tree evaluator answers.
+fn geometric(p: &Pred) -> bool {
+    match p {
+        Pred::Geo(_) => true,
+        Pred::And(items) => items.iter().any(geometric),
+        Pred::Not(q) | Pred::ElemMatchValue(q) => geometric(q),
         _ => false,
     }
 }
@@ -517,8 +612,23 @@ fn on_element(p: &Pred) -> bool {
     }
 }
 
+impl Leaf {
+    /// A leaf for the predicate at `at` on path `path`, without literals.
+    pub(super) fn new(at: Address, path: u32) -> Leaf {
+        Leaf {
+            literals: Vec::new(),
+            types: Vec::new(),
+            at,
+            path,
+            elem: None,
+            subs: Vec::new(),
+            expr: None,
+        }
+    }
+}
+
 /// The literal of `v` with its machine value.
-fn literal(v: &OwnedValue) -> Literal {
+pub(super) fn literal(v: &OwnedValue) -> Literal {
     let fast = match v.get() {
         RawValue::Int32(x) => Fast::I64(i64::from(x)),
         RawValue::Int64(x) => Fast::I64(x),

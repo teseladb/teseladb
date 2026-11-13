@@ -771,7 +771,9 @@ fn run_reading<B: Backend + ?Sized>(
     let plan_filter = |f: &Document| -> Result<teseladb_mql::Filter, CommandError> {
         let bytes = super::query::raw_bytes(f)?;
         let raw = RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?;
-        teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)
+        let f =
+            teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).map_err(from_mql)?;
+        Ok(super::query::by_statistics(f, coll))
     };
     let ext = super::engines::NodeExtensions;
     let ctx = teseladb_mql::MatchContext { collation, ext: &ext, vars: read.vars };
@@ -1003,13 +1005,12 @@ fn intersected<B: Backend + ?Sized>(
     let filter = match filter {
         Some(f) => {
             let bytes = super::query::raw_bytes(f)?;
-            Some(
-                teseladb_mql::Filter::parse(
-                    RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?,
-                    teseladb_mql::FilterUse::Query,
-                )
-                .map_err(from_mql)?,
+            let f = teseladb_mql::Filter::parse(
+                RawDoc::from_bytes_with(&bytes, crate::msg::command_limits())?,
+                teseladb_mql::FilterUse::Query,
             )
+            .map_err(from_mql)?;
+            Some(super::query::by_statistics(f, coll))
         }
         None => None,
     };

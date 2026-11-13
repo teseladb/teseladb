@@ -11,6 +11,7 @@ pub mod fusion;
 pub mod geo_near;
 mod granularity;
 mod group;
+mod group_columns;
 mod joined;
 pub mod meta;
 pub mod optimize;

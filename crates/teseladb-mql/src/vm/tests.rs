@@ -38,6 +38,14 @@ fn answers(
 fn check(filter: &Document, docs: &[Vec<u8>], ctx: &MatchContext<'_>) {
     for sel in [&DefaultSelectivity as &dyn Selectivity, &Reversed] {
         let Some((tree, one, batch)) = answers(filter, docs, ctx, sel) else { return };
+        let bytes = filter.to_bytes().expect("small");
+        let parsed = Filter::parse(RawDoc::from_bytes(&bytes).expect("valid"), FilterUse::Query)
+            .expect("parsed above");
+        assert_eq!(
+            Program::compile(parsed.run_tree(), sel).tree_calls(),
+            0,
+            "only $where and geometry ask the tree: {filter:?}"
+        );
         for (i, d) in docs.iter().enumerate() {
             let doc = Document::from(RawDoc::from_bytes(d).expect("valid"));
             assert_eq!(one[i], tree[i], "run: {filter:?} on {doc:?}");
@@ -135,7 +143,26 @@ fn the_edges_of_the_semantics_match_the_tree() {
         filters.push(d().with(path, op("$type", Value::String("number".into()))));
         filters.push(d().with(path, op("$size", Value::Int32(2))));
         filters.push(d().with(path, op("$regex", Value::String("^b".into()))));
+        filters.push(d().with(path, op("$not", op("$regex", Value::String("^b".into())))));
+        filters.push(d().with(path, op("$mod", arr(vec![Value::Int32(2), Value::Int32(1)]))));
+        filters.push(d().with(path, op("$bitsAllSet", Value::Int32(5))));
         filters.push(d().with(path, op("$elemMatch", Value::Document(d().with("$gt", 4)))));
+        filters.push(d().with(path, op("$elemMatch", Value::Document(d().with("b", 5)))));
+        filters.push(d().with(
+            path,
+            op("$elemMatch", Value::Document(d().with("$elemMatch", op("$gte", Value::Int32(5))))),
+        ));
+        filters.push(d().with(path, op("$all", arr(vec![Value::Int32(5), Value::Int32(1)]))));
+        filters.push(d().with(
+            path,
+            op(
+                "$in",
+                arr(vec![
+                    Value::Regex { pattern: "^B".into(), options: "i".into() },
+                    Value::Int32(5),
+                ]),
+            ),
+        ));
         filters.push(
             d().with(path, Value::Document(d().with("$gt", 1).with("$lt", 6).with("$ne", 5.5))),
         );
@@ -238,7 +265,23 @@ fn predicate(rng: &mut Rng) -> Value {
             Value::Document(d().with("$gte", scalar(rng)).with("$ne", scalar(rng))),
         ),
         9 if rng.below(2) == 0 => op("$size", Value::Int32(rng.below(3) as i32)),
+        9 => native(rng),
         _ => Value::Document(d().with("$gte", scalar(rng)).with("$lt", scalar(rng))),
+    }
+}
+
+/// The predicates that run as one `Pred` instruction.
+fn native(rng: &mut Rng) -> Value {
+    match rng.below(6) {
+        0 => op("$regex", Value::String(rng.pick(&["^a", "b", "^$", "B"]).to_string())),
+        1 => op("$mod", arr(vec![Value::Int32(2), Value::Int32(rng.below(2) as i32)])),
+        2 => op(rng.pick(&["$bitsAllSet", "$bitsAnyClear"]), Value::Int32(rng.below(4) as i32)),
+        3 => op("$elemMatch", Value::Document(d().with(*rng.pick(&FIELDS), scalar(rng)))),
+        4 => op(
+            "$in",
+            arr(vec![Value::Regex { pattern: "^a".into(), options: String::new() }, scalar(rng)]),
+        ),
+        _ => op("$elemMatch", Value::Document(d().with("$regex", Value::String("a".into())))),
     }
 }
 
@@ -362,7 +405,7 @@ fn elem_match_on_values_loops_over_the_array() {
     let (_, p) = compiled(
         &d().with("a", op("$elemMatch", Value::Document(d().with("$gt", 1).with("$lt", 5)))),
     );
-    assert_eq!(p.tree_calls(), 1, "only for a path through an array: {:#?}", p.listing());
+    assert_eq!(p.tree_calls(), 0, "{:#?}", p.listing());
     let text = p.listing().join("\n");
     assert!(text.contains("IterInit") && text.contains("IterNext"), "{text}");
 }
@@ -390,4 +433,172 @@ fn an_error_in_a_batch_is_the_first_document_s() {
     let tree = Eval::new(&ctx, false).expr(filter.run_tree(), raw).expect_err("no engine");
     let batch = p.run_batch(filter.run_tree(), &[raw, raw], &ctx).expect_err("no engine");
     assert_eq!(batch.code, tree.code);
+}
+
+#[test]
+fn a_path_through_an_array_walks_on_the_bytes() {
+    let (filter, p) = compiled(&d().with("a.b", op("$gt", Value::Int32(4))));
+    assert_eq!(p.tree_calls(), 0);
+    let ext = NoExtensions;
+    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    let item = |b: i32| Value::Document(d().with("b", b));
+    for (doc, want) in [
+        (d().with("a", arr(vec![item(1), item(5)])), true),
+        (d().with("a", arr(vec![item(1), arr(vec![item(9)])])), false),
+        (
+            d().with("a", arr(vec![Value::Document(d().with("b", arr(vec![Value::Int32(7)])))])),
+            true,
+        ),
+        (d().with("a", arr(vec![Value::Int32(9)])), false),
+    ] {
+        let b = doc.to_bytes().expect("small");
+        let raw = RawDoc::from_bytes(&b).expect("valid");
+        assert_eq!(p.run(filter.run_tree(), raw, &ctx).expect("no error"), want, "{doc:?}");
+        assert_eq!(filter.matches_by_tree(raw, &ctx).expect("no error"), want, "{doc:?}");
+    }
+}
+
+#[test]
+fn regex_mod_bits_and_elem_match_on_documents_run_without_the_tree() {
+    for f in [
+        d().with("a", op("$regex", Value::String("^x".into()))),
+        d().with("a", op("$mod", arr(vec![Value::Int32(3), Value::Int32(0)]))),
+        d().with("a", op("$bitsAnySet", Value::Int32(1))),
+        d().with(
+            "a",
+            op(
+                "$elemMatch",
+                Value::Document(d().with("b", 1).with("c", op("$gt", Value::Int32(2)))),
+            ),
+        ),
+    ] {
+        let (_, p) = compiled(&f);
+        assert_eq!(p.tree_calls(), 0, "{f:?}: {:#?}", p.listing());
+        assert!(p.listing().iter().any(|l| l.starts_with("Pred")), "{f:?}");
+    }
+}
+
+#[test]
+fn where_and_geometry_still_ask_the_tree() {
+    let (_, p) = compiled(&d().with("$where", Value::String("true".into())));
+    assert_eq!(p.tree_calls(), 1);
+    let near = op(
+        "$geoWithin",
+        Value::Document(d().with(
+            "$center",
+            arr(vec![arr(vec![Value::Int32(0), Value::Int32(0)]), Value::Int32(1)]),
+        )),
+    );
+    let (_, p) = compiled(&d().with("loc", near));
+    assert_eq!(p.tree_calls(), 1);
+}
+
+#[test]
+fn expr_comparisons_compile_to_register_comparisons() {
+    let f = d().with(
+        "$expr",
+        Value::Document(d().with(
+            "$and",
+            arr(vec![
+                Value::Document(d().with(
+                    "$gt",
+                    arr(vec![Value::String("$a".into()), Value::String("$b".into())]),
+                )),
+                Value::Document(
+                    d().with("$ne", arr(vec![Value::Int32(3), Value::String("$a".into())])),
+                ),
+            ]),
+        )),
+    );
+    let (filter, p) = compiled(&f);
+    let text = p.listing().join("\n");
+    assert!(text.contains("ExprCmp ") && text.contains("ExprCmpLit"), "{text}");
+    assert!(!text.contains("Ext ") && p.tree_calls() == 0, "{text}");
+    let ext = NoExtensions;
+    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    for (doc, want) in [
+        (d().with("a", 5).with("b", 2), true),
+        (d().with("a", 3).with("b", 2), false),
+        (d().with("a", 5).with("b", 9), false),
+        (d().with("a", 5), true),
+        (d().with("b", 5), false),
+        (d().with("a", "x").with("b", 5), true),
+        (d().with("a", Value::Null), true),
+    ] {
+        let b = doc.to_bytes().expect("small");
+        let raw = RawDoc::from_bytes(&b).expect("valid");
+        assert_eq!(p.run(filter.run_tree(), raw, &ctx).expect("no error"), want, "{doc:?}");
+        let mask = p.run_batch(filter.run_tree(), &[raw, raw], &ctx).expect("no error");
+        assert_eq!(mask, if want { 3 } else { 0 }, "{doc:?}");
+    }
+}
+
+#[test]
+fn other_expressions_call_the_extensions_directly() {
+    let f = d().with("$expr", Value::Document(d().with("$add", arr(vec![Value::Int32(1)]))));
+    let (_, p) = compiled(&f);
+    assert_eq!(p.tree_calls(), 0);
+    assert!(p.listing().iter().any(|l| l.starts_with("Ext")), "{:#?}", p.listing());
+}
+
+#[test]
+fn a_cached_program_takes_the_literals_of_each_query() {
+    let ext = NoExtensions;
+    let ctx = MatchContext { collation: None, ext: &ext, vars: None };
+    let shaped = |n: i64, s: &str| {
+        d().with("n", op("$gt", Value::Int64(n)))
+            .with("s", Value::String(s.into()))
+            .with("t", op("$in", arr(vec![Value::Int32(n as i32), Value::Boolean(true)])))
+            .with("e", op("$elemMatch", Value::Document(d().with("$lt", Value::Int64(n)))))
+    };
+    let docs: Vec<Vec<u8>> = (0..6)
+        .map(|k| {
+            d().with("n", k)
+                .with("s", if k % 2 == 0 { "x" } else { "y" })
+                .with("t", k)
+                .with("e", arr(vec![Value::Int32(k), Value::Int32(10)]))
+                .to_bytes()
+                .expect("small")
+        })
+        .collect();
+    let mut first = None;
+    for (n, s) in [(1, "x"), (3, "y"), (0, "x"), (4, "x")] {
+        let f = shaped(n, s);
+        let bytes = f.to_bytes().expect("small");
+        let filter = Filter::parse(RawDoc::from_bytes(&bytes).expect("valid"), FilterUse::Query)
+            .expect("a filter");
+        let key = super::shape_key(filter.run_tree());
+        assert_eq!(*first.get_or_insert_with(|| key.clone()), key, "one shape");
+        let cached = Program::compile_cached(filter.run_tree(), &DefaultSelectivity, 77);
+        let fresh = Program::compile(filter.run_tree(), &DefaultSelectivity);
+        assert_eq!(cached.listing(), fresh.listing(), "{f:?}");
+        for d in &docs {
+            let raw = RawDoc::from_bytes(d).expect("valid");
+            assert_eq!(
+                cached.run(filter.run_tree(), raw, &ctx).expect("no error"),
+                filter.matches_by_tree(raw, &ctx).expect("no error"),
+                "{f:?}"
+            );
+        }
+    }
+    assert!(Program::cached_programs() >= 1);
+}
+
+#[test]
+fn shapes_tell_literal_kinds_apart() {
+    let key = |f: Document| {
+        let bytes = f.to_bytes().expect("small");
+        let filter = Filter::parse(RawDoc::from_bytes(&bytes).expect("valid"), FilterUse::Query)
+            .expect("a filter");
+        super::shape_key(filter.run_tree())
+    };
+    assert_eq!(key(d().with("a", 1)), key(d().with("a", 2)));
+    assert_ne!(key(d().with("a", 1)), key(d().with("a", "1")));
+    assert_ne!(key(d().with("a", 1)), key(d().with("a", Value::Int64(1 << 40))));
+    assert_ne!(key(d().with("a", 1)), key(d().with("a", Value::Null)));
+    assert_ne!(key(d().with("a", 1)), key(d().with("b", 1)));
+    assert_ne!(
+        key(d().with("a", op("$regex", Value::String("x".into())))),
+        key(d().with("a", op("$regex", Value::String("y".into()))))
+    );
 }

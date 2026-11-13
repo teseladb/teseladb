@@ -8,7 +8,9 @@
 //! ([`RangeStats::merge`]).
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use teseladb_bson::Value;
 
@@ -274,4 +276,77 @@ pub fn choose(plans: &[Access], stats: &RangeStats, indexes: &[IndexMeta], sorte
         [one] => Choice::Pick(*one),
         _ => Choice::Trial(close),
     }
+}
+
+/// The statistics of a collection: each range's, as its last compaction left them, and their
+/// merge with the epoch it was made in.
+#[derive(Default)]
+struct Published {
+    ranges: BTreeMap<u64, RangeStats>,
+    merged: Option<(u64, Arc<RangeStats>)>,
+}
+
+/// The statistics of the node's collections, by the `01 · tenant · collection` prefix of their
+/// keys.
+fn registry() -> &'static Mutex<HashMap<Vec<u8>, Published>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<Vec<u8>, Published>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The epochs of statistics: each publication takes the next one, so a program ordered by
+/// statistics is kept only while they hold (010 FR-031). 0 is the default estimate's.
+static EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn locked() -> std::sync::MutexGuard<'static, HashMap<Vec<u8>, Published>> {
+    // A panic while holding the lock leaves whole entries behind: the map stays usable.
+    registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The hook the storage calls when it compacts range `range` of `collection` (the
+/// `01 · tenant · collection` prefix of its keys): the range holds `documents` documents and,
+/// for each indexed field, the values the compaction read in index order. The range's
+/// statistics are rebuilt from them and replace the ones it published before (010 FR-029).
+pub fn recompute_at_compaction(
+    collection: &[u8],
+    range: u64,
+    documents: u64,
+    fields: Vec<(String, Vec<Value>)>,
+) {
+    let fields =
+        fields.into_iter().map(|(path, values)| (path, FieldStats::build(values))).collect();
+    publish_range(collection, range, RangeStats { documents, fields });
+}
+
+/// Range `range` of `collection` now has statistics `stats`.
+pub fn publish_range(collection: &[u8], range: u64, stats: RangeStats) {
+    let mut map = locked();
+    let entry = map.entry(collection.to_vec()).or_default();
+    entry.ranges.insert(range, stats);
+    entry.merged = None;
+}
+
+/// Range `range` of `collection` is gone from this node (moved, merged or dropped).
+pub fn forget_range(collection: &[u8], range: u64) {
+    let mut map = locked();
+    if let Some(entry) = map.get_mut(collection) {
+        entry.ranges.remove(&range);
+        entry.merged = None;
+        if entry.ranges.is_empty() {
+            map.remove(collection);
+        }
+    }
+}
+
+/// The statistics of `collection`'s ranges merged, with their epoch; `None` before any
+/// compaction published some.
+pub fn collection_stats(collection: &[u8]) -> Option<(u64, Arc<RangeStats>)> {
+    let mut map = locked();
+    let entry = map.get_mut(collection)?;
+    if let Some(m) = &entry.merged {
+        return Some(m.clone());
+    }
+    let merged = entry.ranges.values().fold(RangeStats::default(), |acc, r| acc.merge(r));
+    let m = (EPOCH.fetch_add(1, AtomicOrdering::Relaxed), Arc::new(merged));
+    entry.merged = Some(m.clone());
+    Some(m)
 }

@@ -10,10 +10,11 @@
 //!   length of a string, document or array inside the document's bytes. Nothing is copied onto
 //!   the heap while a program runs.
 //! - `LoadField` walks a dotted path on the bytes, crossing documents. A path that meets an array
-//!   before its end leaves the register "through an array", and the comparison that reads it asks
-//!   the tree evaluator about that one predicate, so RefDb's walk of arrays inside a path stays
-//!   exactly the evaluator's. An array at the end of the path is compared whole, then element by
-//!   element, inside the comparison's own loop.
+//!   before its end leaves the register "through an array", and the comparison that reads it
+//!   walks the path again on the bytes with RefDb's rules for arrays inside a path (each
+//!   document of the array, and the element at a numeric segment), testing every value it
+//!   reaches. An array at the end of the path is compared whole, then element by element, inside
+//!   the comparison's own loop.
 //! - Comparisons are specialized by the literal's type (`CmpEqStr`, `CmpGtI64Imm`, `CmpF64`…):
 //!   when the document's value has the literal's type they compare machine values; any other
 //!   type goes to RefDb's generic comparison inside the same instruction (mixed numbers,
@@ -23,19 +24,31 @@
 //!   the estimated fraction of documents they let through ([`Selectivity`]): the most selective
 //!   first in `$and`, the least in `$or`.
 //! - `$elemMatch` on values loops over the array with `IterInit` and `IterNext`.
-//! - Anything else (`$expr`, `$where`, `$regex`, `$elemMatch` on documents…) is one `Tree`
-//!   instruction that asks the tree evaluator about its own subtree, in the same order.
+//! - `$regex`, `$mod`, the bit operators, `$in` with expressions and `$elemMatch` on documents
+//!   (a program of its own run on each element) are one `Pred` instruction on the path's value.
+//! - `$expr` comparisons of field paths and constants compile to `ExprCmp` instructions; any other
+//!   `$expr`, `$text`, `$sampleRate` and `$jsonSchema` are one `Ext` instruction that calls the
+//!   command's extensions directly. Only `$where` and the geometric operators remain `Tree`
+//!   instructions that ask the tree evaluator about their own subtree.
+//! - [`Program::compile_cached`] keeps the program of each query shape (the tree without the
+//!   values of its equalities, comparisons and `$in`s) on its core, and a query of a known shape
+//!   takes a copy whose literal pool is rebound to its own values.
 //! - [`Program::run_batch`] runs up to 64 documents with a `u64` mask of live documents: each
 //!   instruction runs on the lanes that reached it, a jump moves lanes, and the batch ends when
 //!   every lane has yielded or been rejected.
 
+mod cache;
+mod column;
 mod compile;
+mod expr;
 mod run;
 pub(crate) mod value;
 
 #[cfg(test)]
 mod tests;
 
+pub use cache::shape_key;
+pub use column::{Cell, load_column};
 pub use compile::{DefaultSelectivity, Selectivity};
 
 use crate::parse::CmpOp;
@@ -101,6 +114,11 @@ impl Insn {
         pc.wrapping_add_signed(self.imm() as isize)
     }
 
+    /// The same instruction with immediate `imm`.
+    fn with_imm(self, imm: i32) -> Insn {
+        Insn((self.0 & 0xFFFF_FFFF) | ((imm as u32 as u64) << 32))
+    }
+
     /// Its 64 bits.
     pub fn bits(self) -> u64 {
         self.0
@@ -159,6 +177,15 @@ enum Op {
     Size,
     /// `dst` = the tree evaluator's answer for subtree `imm`.
     Tree,
+    /// `dst` = the leaf's predicate (any predicate on values) on `src1`.
+    Pred,
+    /// `dst` = the extension's answer for node `imm` (`$expr`, `$text`, `$sampleRate`,
+    /// `$jsonSchema`).
+    Ext,
+    /// `dst` = `$expr` comparison (`src2`) of `src1` and register `imm`.
+    ExprCmp,
+    /// `dst` = `$expr` comparison (`src2`) of `src1` and the leaf's literal.
+    ExprCmpLit,
     /// `dst` = an iterator over array `src1`; jumps by `imm` when `src1` is no array.
     IterInit,
     /// `dst` = the next element of iterator `src1`; jumps by `imm` at the end.
@@ -178,7 +205,7 @@ enum Op {
 }
 
 impl Op {
-    const ALL: [Op; 25] = [
+    const ALL: [Op; 29] = [
         Op::LoadField,
         Op::CmpEqI64Imm,
         Op::CmpEqI64,
@@ -196,6 +223,10 @@ impl Op {
         Op::Type,
         Op::Size,
         Op::Tree,
+        Op::Pred,
+        Op::Ext,
+        Op::ExprCmp,
+        Op::ExprCmpLit,
         Op::IterInit,
         Op::IterNext,
         Op::JumpIfThrough,
@@ -225,6 +256,10 @@ impl Op {
             Op::Type => "Type",
             Op::Size => "Size",
             Op::Tree => "Tree",
+            Op::Pred => "Pred",
+            Op::Ext => "Ext",
+            Op::ExprCmp => "ExprCmp",
+            Op::ExprCmpLit => "ExprCmpLit",
             Op::IterInit => "IterInit",
             Op::IterNext => "IterNext",
             Op::JumpIfThrough => "JumpIfThrough",
@@ -288,13 +323,29 @@ enum Fast {
 }
 
 /// What a comparison instruction needs besides its operands: its literals, the types of
-/// `$type`, and the predicate it stands for (for values reached through an array).
+/// `$type`, the predicate it stands for and the path it reads (for values reached through an
+/// array).
 #[derive(Clone, Debug)]
 struct Leaf {
     literals: Vec<usize>,
     types: Vec<TypeSpec>,
     at: Address,
+    /// The path it reads (an index of [`Program::paths`]), or [`NO_PATH`] for an element of
+    /// `$elemMatch`.
+    path: u32,
+    /// For a comparison on the elements of `$elemMatch`: its place inside the `$elemMatch`'s
+    /// predicate (the positions inside `$and`s and `$not`s).
+    elem: Option<Vec<usize>>,
+    /// For `Pred`: the programs of the filters of the `$elemMatch`es on documents inside its
+    /// predicate, in the order of [`compile::elem_match_docs`], run on each element.
+    subs: Vec<Program>,
+    /// For an `$expr` comparison: the comparison as an expression, which the extensions evaluate
+    /// when a path crosses an array.
+    expr: Option<usize>,
 }
+
+/// The path of a leaf that reads no path.
+const NO_PATH: u32 = u32::MAX;
 
 /// A compiled filter.
 #[derive(Clone, Debug)]
@@ -325,8 +376,10 @@ impl Program {
         self.code.iter().map(|i| format!("{i:?}")).collect()
     }
 
-    /// How many instructions hand a subtree to the tree evaluator.
+    /// How many instructions hand a subtree to the tree evaluator, here and in the programs of
+    /// its `$elemMatch`es.
     pub fn tree_calls(&self) -> usize {
-        self.code.iter().filter(|i| i.op() == Op::Tree).count()
+        let own = self.code.iter().filter(|i| i.op() == Op::Tree).count();
+        own + self.leaves.iter().flat_map(|l| &l.subs).map(Program::tree_calls).sum::<usize>()
     }
 }
