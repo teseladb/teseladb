@@ -1,6 +1,7 @@
 //! The core loop with an io_uring disk (Linux, 012 FR-002 and acceptance scenario 1 of story 1):
 //! the logic's operations go to the core's ring, their completions come back through the same
-//! poller in submission order, and no disk thread exists.
+//! poller in submission order, and no disk thread exists. Large frames on a plaintext peer link go
+//! out through the same ring with `IORING_OP_SEND_ZC` (012 FR-026).
 #![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
@@ -142,5 +143,94 @@ fn drives_its_disk(sqpoll: bool) {
     assert_eq!(d[66], IoDone::Read { token: 5, data: Ok(Bytes::from_vec(vec![63; 4096])) });
     assert!(matches!(d[67], IoDone::Err { errno: IoErrno::BadFile, .. }));
     assert!(matches!(d[68], IoDone::Err { op: IoOp::Close { .. }, errno: IoErrno::BadFile }));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Sends `n` forwarded answers of 512 KiB, the size of a range file's pieces, to node 2.
+struct Streamer {
+    out: Vec<(NodeId, PeerMsg)>,
+    peer: String,
+}
+
+/// The body of piece `i`.
+fn piece(i: u64) -> Vec<u8> {
+    (0..512 * 1024u64).map(|b| ((b * 31 + i) % 251) as u8).collect()
+}
+
+impl CoreLogic for Streamer {
+    type Msg = u64;
+    fn tick(&mut self, _now: Nanos, _wall_ms: u64) {}
+    fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
+        None
+    }
+    fn on_io_done(&mut self, _done: IoDone, _class: IoClass, _now: Nanos) {}
+    fn next_deadline(&self) -> Option<Nanos> {
+        None
+    }
+    fn on_peer(&mut self, _from: NodeId, _msg: PeerMsg, _now: Nanos) {}
+    fn on_message(&mut self, n: u64, _now: Nanos) {
+        for req in 0..n {
+            let body = Bytes::from_vec(piece(req));
+            self.out.push((NodeId(2), PeerMsg::ForwardResp { req, hlc: None, body }));
+        }
+    }
+    fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>) {
+        out.append(&mut self.out);
+    }
+    fn peer_addr(&self, _node: NodeId) -> Option<String> {
+        Some(self.peer.clone())
+    }
+    fn peer_unreachable(&mut self, _node: NodeId) {}
+    fn io_settled(&self) -> bool {
+        true
+    }
+    fn resting(&self) -> bool {
+        false
+    }
+    fn wake(&mut self, _now: Nanos, _wall_ms: u64) {}
+    fn clock(&mut self, _now: Nanos, _wall_ms: u64) {}
+}
+
+#[test]
+fn a_range_s_pieces_go_to_a_plaintext_peer_with_zero_copy_sends() {
+    use std::io::Read;
+    let root = std::env::temp_dir().join(format!("teseladb-rt-zc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
+    let disk = NodeDisk::open(&root, &choice).unwrap();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer = l.local_addr().unwrap().to_string();
+    let theirs = Hello { node_id: NodeId(2), core: 0, peer_addr: peer.clone(), ..hello() };
+    // 6 MiB: what waits for a link that is still dialing stays under its 8 MiB.
+    let pieces = 12u64;
+    let reader = thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        teseladb_io::handshake::answer(&mut s, &theirs).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (mut buf, mut chunk, mut next) = (Vec::new(), vec![0u8; 1 << 16], 0u64);
+        while next < pieces {
+            let n = s.read(&mut chunk).unwrap_or_else(|e| panic!("after {next} pieces: {e}"));
+            assert!(n > 0, "closed after {next} pieces");
+            buf.extend_from_slice(&chunk[..n]);
+            while let Some((msg, used)) = teseladb_io::peer::decode_frame(&buf).unwrap() {
+                let PeerMsg::ForwardResp { req, body, .. } = msg else { panic!("{msg:?}") };
+                assert_eq!(req, next, "in order");
+                assert!(body.as_ref() == piece(req).as_slice(), "piece {req} whole");
+                buf.drain(..used);
+                next += 1;
+            }
+        }
+    });
+    let logic = Streamer { out: Vec::new(), peer };
+    let cfg = RuntimeConfig { tick: Duration::from_millis(5), seed: 3, tls: None, origin: None };
+    let (rt, tx) = CoreRuntime::new(logic, disk, hello(), cfg).unwrap();
+    let core = thread::spawn(move || rt.run().unwrap());
+    tx.send(CoreInput::App(pieces)).ok().unwrap();
+    reader.join().unwrap();
+    tx.send(CoreInput::Stop).ok().unwrap();
+    let (_, disk) = core.join().unwrap();
+    let mut disk = disk.unwrap();
+    let sent = disk.uring().unwrap().zero_copy_sends();
+    assert!(sent > 0, "the pieces went out with SEND_ZC");
     std::fs::remove_dir_all(&root).unwrap();
 }

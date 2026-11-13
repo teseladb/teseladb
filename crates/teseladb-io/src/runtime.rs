@@ -6,9 +6,13 @@
 //! kernel in one call; frames for other nodes go to one outbound connection per node (dialed in the background,
 //! redialed with a 10 ms–1 s backoff with jitter after a failure).
 
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -149,7 +153,15 @@ struct Conn {
     wbuf: Vec<u8>,
     wpos: usize,
     want_write: bool,
+    /// A zero-copy send of the ring in flight (012 FR-026) and its bytes: what comes after it
+    /// waits in `wbuf` until it completes.
+    zc: Option<(u64, usize)>,
 }
+
+/// Bytes waiting on a plaintext peer link from which a core with a ring sends them with
+/// `IORING_OP_SEND_ZC` (012 FR-026): the pieces of a range's files (up to 1 MiB) and large Raft
+/// batches. Below it the copy into the socket costs less than pinning the pages.
+pub const ZERO_COPY_MIN: usize = 64 * 1024;
 
 enum LinkState {
     /// Not connected; the next frame dials.
@@ -224,6 +236,9 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     /// apart, which are all the log's ([`crate::answered_apart`]).
     thread_classes: VecDeque<crate::IoClass>,
     conns: BTreeMap<u64, Conn>,
+    /// The connection of each zero-copy send in flight (012 FR-026).
+    #[cfg(target_os = "linux")]
+    zc_sends: HashMap<u64, u64>,
     links: BTreeMap<NodeId, Link>,
     /// Inter-node addresses announced in the `Hello` of incoming connections: used when the logic
     /// does not know a node's address yet (a node that just joined answers whoever reached it).
@@ -301,6 +316,8 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             reaped: Vec::new(),
             thread_classes: VecDeque::new(),
             conns: BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            zc_sends: HashMap::new(),
             links: BTreeMap::new(),
             learned: BTreeMap::new(),
             timers: TimerWheel::new(0),
@@ -522,12 +539,67 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
     }
 
+    /// Hands what waits on connection `token` to the core's ring as one zero-copy send when the
+    /// link is plaintext and it is large (012 FR-026); TLS links and cores without a ring write
+    /// it. Returns whether the connection waits for a send of the ring.
+    fn send_zero_copy(&mut self, token: u64) -> bool {
+        let conn = self.conns.get_mut(&token).expect("open connection");
+        if conn.zc.is_some() {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        if let Exec::InLoop(d) = &mut self.disk
+            && matches!(conn.channel, Channel::Plain)
+            && conn.wbuf.len() - conn.wpos >= ZERO_COPY_MIN
+        {
+            let mut bytes = std::mem::take(&mut conn.wbuf);
+            bytes.drain(..std::mem::take(&mut conn.wpos));
+            let len = bytes.len();
+            match ring(d).send_zc(conn.stream.as_raw_fd(), bytes) {
+                Ok(id) => {
+                    conn.zc = Some((id, len));
+                    self.zc_sends.insert(id, token);
+                    // Nothing waits for the socket to be writable until the send completes.
+                    if std::mem::take(&mut conn.want_write)
+                        && self.poller.reregister(&conn.stream, token, Interest::READ).is_err()
+                    {
+                        self.close(token);
+                    }
+                    return true;
+                }
+                Err(back) => conn.wbuf = back,
+            }
+        }
+        false
+    }
+
+    /// The zero-copy sends of the ring that finished: a link whose send went out whole goes on
+    /// with what waited behind it; one whose send failed or went short closes.
+    #[cfg(target_os = "linux")]
+    fn zero_copy_sent(&mut self) {
+        let sent = match &mut self.disk {
+            Exec::InLoop(d) => ring(d).take_sent(),
+            Exec::Thread(_) => return,
+        };
+        for (id, result) in sent {
+            // A connection that closed meanwhile has nothing to go on with.
+            let Some(token) = self.zc_sends.remove(&id) else { continue };
+            let Some(conn) = self.conns.get_mut(&token) else { continue };
+            let Some((_, len)) = conn.zc.take() else { continue };
+            match result {
+                Ok(n) if n as usize == len => self.flush(token),
+                _ => self.close(token),
+            }
+        }
+    }
+
     /// Feeds the logic with the ring's completions. A ring that fails is a disk that cannot make
     /// anything durable any more: the loop ends with the error. Returns whether it took any.
     fn reap_ring(&mut self) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         if let Exec::InLoop(d) = &mut self.disk {
             ring(d).reap(&mut self.reaped)?;
+            self.zero_copy_sent();
             let now = self.now();
             let took = !self.reaped.is_empty();
             for (done, class) in std::mem::take(&mut self.reaped) {
@@ -677,6 +749,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             wbuf: Vec::new(),
             wpos: 0,
             want_write: false,
+            zc: None,
         };
         self.conns.insert(token, conn);
         Ok(token)
@@ -833,6 +906,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
     }
 
     fn flush(&mut self, token: u64) {
+        if self.send_zero_copy(token) {
+            return;
+        }
         let conn = self.conns.get_mut(&token).expect("open connection");
         if !write_pending(&mut conn.stream, &conn.wbuf, &mut conn.wpos) {
             return self.close(token);
