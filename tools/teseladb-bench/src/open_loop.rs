@@ -234,7 +234,8 @@ fn read_answers(c: &mut Conn, out: &mut Measured, ok: &Success<'_>) -> Result<()
         if !timed {
             continue;
         }
-        if OpMsg::parse(msg).ok().and_then(|m| m.body).is_some_and(|b| ok(&b)) {
+        let body = OpMsg::parse(msg).ok().and_then(|m| m.body).and_then(|b| b.to_bytes().ok());
+        if body.is_some_and(|b| ok(&b)) {
             out.answered += 1;
             out.latency
                 .record(u64::try_from(now.duration_since(due).as_nanos()).unwrap_or(u64::MAX));
