@@ -139,12 +139,19 @@ pub struct FileDisk {
     scratch: AlignedBuf,
 }
 
+/// Probes this process started: each one has a file of its own.
+#[cfg(target_os = "linux")]
+static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Whether the file system of `dir` takes `O_DIRECT` writes of whole 4 KiB blocks (012 FR-003):
-/// it writes, reads back and removes a probe file.
+/// it writes, reads back and removes a probe file of its own. With one name for every probe,
+/// one truncated the file another was about to read back, which failed with an unexpected end
+/// of file.
 #[cfg(target_os = "linux")]
 pub fn direct_io_supported(dir: &Path) -> io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
-    let probe = dir.join(".direct-io-probe");
+    let n = PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let probe = dir.join(format!(".direct-io-probe-{}-{n}", std::process::id()));
     let mut o = OpenOptions::new();
     o.read(true).write(true).create(true).truncate(true).custom_flags(O_DIRECT);
     let r = o.open(&probe).and_then(|f| {
@@ -460,6 +467,45 @@ mod tests {
         p.push(format!("teseladb-io-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         p
+    }
+
+    /// Probes of one directory at once do not touch each other's file (012 FR-003). With one
+    /// name for every probe, a probe truncated the file another was about to read back, which
+    /// then failed with an unexpected end of file: the executors' equivalence battery, whose
+    /// tests probe the same directory in parallel, failed so on Linux.
+    #[test]
+    fn a_probe_leaves_the_file_of_another_probe_alone() {
+        let dir = temp_root("probe");
+        fs::create_dir_all(&dir).unwrap();
+        // Another probe half way: its block written and not read back yet.
+        let other = dir.join(".direct-io-probe");
+        fs::write(&other, [7u8; 4096]).unwrap();
+        direct_io_supported(&dir).unwrap();
+        assert_eq!(fs::read(&other).unwrap(), [7u8; 4096]);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "only the other probe's file is left");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn probes_of_one_directory_at_once_agree_and_leave_no_file() {
+        let dir = temp_root("probes");
+        fs::create_dir_all(&dir).unwrap();
+        let alone = direct_io_supported(&dir).unwrap();
+        let probes: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    (0..200).map(|_| direct_io_supported(&dir)).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for t in probes {
+            for answer in t.join().unwrap() {
+                assert_eq!(answer.unwrap(), alone);
+            }
+        }
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "no probe file is left");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
