@@ -48,6 +48,11 @@ impl Pgm {
             .min()
             .unwrap_or(0);
         let xs: Vec<u64> = keys.map(|k| project(k, prefix)).collect();
+        // The keys come in the comparator's order, which is not always the bytes' order (a
+        // version after a shorter user key): a line needs projections that never go down.
+        if xs.windows(2).any(|w| w[1] < w[0]) {
+            return None;
+        }
         let mut segments = Vec::new();
         let mut i = 0;
         while i < xs.len() {
@@ -142,6 +147,14 @@ mod tests {
             let (lo, hi) = pgm.window(&probe, keys.len());
             assert!(hi - lo <= 2 * EPSILON + 3);
         }
+    }
+
+    #[test]
+    fn keys_whose_bytes_go_down_keep_the_search() {
+        // A user key and its version, then a longer user key: in the comparator's order, not in
+        // the bytes'.
+        let keys: Vec<&[u8]> = vec![b"a\xff\x01", b"a\x00\x02", b"a\x00\x03"];
+        assert_eq!(Pgm::build(keys.into_iter()), None);
     }
 
     #[test]
