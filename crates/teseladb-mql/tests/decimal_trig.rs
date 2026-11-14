@@ -180,3 +180,18 @@ fn special_values_and_domains() {
     let cosh = trig(Trig::Cosh, d("60")).expect("a value").to_string();
     assert!(cosh.starts_with("57100369490784214183147859.1572"), "{cosh}");
 }
+
+/// An exponent past every decimal ends at once: `sinh(1E+30)` ran its series for ever, as the
+/// count of tens of `exp` saturated and left a remainder as large as the argument (found by
+/// the differential suite of 002 on 14-11-2026; the answers measured on a reference router 9.0.4).
+#[test]
+fn exponents_past_every_decimal_overflow_or_underflow_at_once() {
+    let shown = |v: Option<Decimal128>| v.map(|x| x.to_string());
+    assert_eq!(shown(trig(Trig::Sinh, d("1E+30"))), Some("Infinity".into()));
+    assert_eq!(shown(trig(Trig::Sinh, d("-1E+20"))), Some("-Infinity".into()));
+    assert_eq!(shown(trig(Trig::Cosh, d("-2.5E+40"))), Some("Infinity".into()));
+    assert_eq!(shown(trig(Trig::Sinh, d("20000"))), Some("Infinity".into()));
+    let pow = |b: &str, x: &str| teseladb_mql::decimal_math::pow(d(b), d(x)).to_string();
+    assert_eq!(pow("10", "1E+30"), "Infinity");
+    assert_eq!(pow("10", "-1E+30"), "0E-6176");
+}

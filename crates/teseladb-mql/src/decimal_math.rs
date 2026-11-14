@@ -299,8 +299,22 @@ pub(crate) fn ln_of(c: u128, e: i32) -> Fixed {
     ln_fixed(&m).add(&tens)
 }
 
-/// `exp x` as `(m, n)` with `exp x = m × 10^n` and `m` in fixed point.
+/// The largest `|x|` `exp` works with: e^20 000 is about 10^8 686, past the largest decimal, and
+/// e^−20 000 below the smallest, so a larger argument gives the same overflow or underflow.
+const EXP_LIMIT: u128 = 20_000;
+
+/// `exp x` as `(m, n)` with `exp x = m × 10^n` and `m` in fixed point. An argument past
+/// [`EXP_LIMIT`] is taken as the limit: with it the count of tens saturated and left a remainder
+/// as large as the argument, whose series never ended (`sinh(1E+30)`, 002 T065).
 pub(crate) fn exp_fixed(x: &Fixed) -> (Fixed, i64) {
+    let limit = Big::from_u128(EXP_LIMIT).shl10(PRECISION);
+    let clamped;
+    let x = if x.mag.cmp(&limit) == Ordering::Greater {
+        clamped = Fixed::new(x.neg, limit);
+        &clamped
+    } else {
+        x
+    };
     let l10 = ln10();
     // n = round(x / ln 10), r = x − n·ln 10.
     let ratio = x.div(&l10);
