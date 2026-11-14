@@ -7,6 +7,9 @@
 //! several batches in flight, whose syncs run on its second thread and end out of order with the
 //! writes of the next batches.
 //!
+//! In the `shared` mode (012 FR-035, D-154) four cores write at once through the node's device log,
+//! each from its own thread, and the parent checks every core's entries after each kill.
+//!
 //! Without the test harness: the same binary is the parent and, with `TESELADB_CHILD_DIR`, the
 //! child. `TESELADB_KILL_ROUNDS` (10 by default) sets the number of kills.
 
@@ -16,6 +19,7 @@ use std::process::{Command, Stdio};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
 use teseladb_io::disk_thread::DiskThread;
 use teseladb_io::mailbox::{Notify, channel};
 use teseladb_raftlog::format::wal::EntryKind;
@@ -28,6 +32,9 @@ const SNAPSHOT_EVERY: u64 = 100;
 /// Variable that tells the child to write through the disk thread with batches in flight.
 const MODE_VAR: &str = "TESELADB_CHILD_MODE";
 const PIPELINED: &str = "pipelined";
+const SHARED: &str = "shared";
+/// Cores writing to the device log at once in the `shared` mode.
+const SHARED_CORES: u16 = 4;
 /// Batches in flight in the `pipelined` mode, as the server has them.
 const INFLIGHT: usize = 4;
 /// Entries the `pipelined` child keeps waiting for their acknowledgement.
@@ -125,12 +132,57 @@ fn child_pipelined(dir: &str) {
     }
 }
 
+/// Child process of the `shared` mode: every core appends from its own thread through the device
+/// log and prints "ok <core> <index>" for every acknowledged entry.
+fn child_shared(dir: &str) {
+    let exec = disks::from_env();
+    let (_log, ports) = DeviceLog::start(
+        disks::open(dir, exec),
+        SHARED_CORES,
+        DeviceLogConfig { file_bytes: 1 << 20 },
+    )
+    .unwrap();
+    let _writers: Vec<_> = ports
+        .into_iter()
+        .map(|mut port| {
+            let dir = dir.to_string();
+            std::thread::spawn(move || {
+                let core = port.core();
+                let mut own = disks::open(&dir, exec);
+                let mut disk = port.disk(&mut own);
+                let mut s = CoreStore::recover(&cfg(), core, &mut disk).unwrap().0;
+                if s.group(G).is_none() {
+                    s.create_group(G, Bytes::new(), Durability::Strict).unwrap();
+                }
+                let mut index = s.group(G).unwrap().last_index() + 1;
+                loop {
+                    s.append_raft(G, &[entry(index)], None, Durability::Strict).unwrap();
+                    if index.is_multiple_of(SNAPSHOT_EVERY) {
+                        let meta = SnapshotMeta { index, term: 1, conf: Bytes::new() };
+                        s.save_snapshot(G, meta, Bytes::from("state")).unwrap();
+                    }
+                    for (_, r) in s.run_io(&mut disk, Nanos::ZERO).tickets {
+                        r.unwrap();
+                    }
+                    println!("ok {core} {index}");
+                    index += 1;
+                }
+            })
+        })
+        .collect();
+    // Until the parent kills it.
+    loop {
+        std::thread::park();
+    }
+}
+
 #[path = "common/disks.rs"]
 mod disks;
 
 fn main() {
     match std::env::var("TESELADB_CHILD_DIR") {
         Ok(dir) if std::env::var(MODE_VAR).as_deref() == Ok(PIPELINED) => child_pipelined(&dir),
+        Ok(dir) if std::env::var(MODE_VAR).as_deref() == Ok(SHARED) => child_shared(&dir),
         Ok(dir) => child(&dir),
         Err(_) => {
             for (name, exec) in disks::executors() {
@@ -138,6 +190,9 @@ fn main() {
             }
             let threads = teseladb_io::node_disk::IoExecutor::Threads;
             sigkill_never_loses_confirmed_entries("threads", threads, Some(PIPELINED));
+            for (name, exec) in disks::executors() {
+                sigkill_never_loses_confirmed_entries(name, exec, Some(SHARED));
+            }
             println!("crash_real: ok");
         }
     }
@@ -152,7 +207,9 @@ fn sigkill_never_loses_confirmed_entries(
     let dir = std::env::temp_dir()
         .join(format!("teseladb-crash-real-{name}-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let mut confirmed: Vec<u64> = Vec::new();
+    let shared = mode == Some(SHARED);
+    let cores = if shared { SHARED_CORES } else { 1 };
+    let mut confirmed: Vec<Vec<u64>> = vec![Vec::new(); usize::from(cores)];
     let mut rng = Rng::new(42);
     let rounds: u64 =
         std::env::var("TESELADB_KILL_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
@@ -170,8 +227,12 @@ fn sigkill_never_loses_confirmed_entries(
         let mut seen = 0;
         for line in BufReader::new(stdout).lines() {
             let line = line.unwrap();
-            if let Some(i) = line.strip_prefix("ok ") {
-                confirmed.push(i.parse().unwrap());
+            if let Some(rest) = line.strip_prefix("ok ") {
+                let (core, i) = match rest.split_once(' ') {
+                    Some((c, i)) => (c.parse::<usize>().unwrap(), i),
+                    None => (0, rest),
+                };
+                confirmed[core].push(i.parse().unwrap());
                 seen += 1;
                 if seen >= wanted {
                     break;
@@ -180,22 +241,45 @@ fn sigkill_never_loses_confirmed_entries(
         }
         c.kill().unwrap(); // SIGKILL
         c.wait().unwrap();
-        let mut disk = disks::open(&dir, exec);
-        let s = CoreStore::recover(&cfg(), 0, &mut disk)
-            .unwrap_or_else(|e| panic!("{name} {tag}, round {round}: {e:?}"))
-            .0;
-        for &i in &confirmed {
-            match s.entries(G, i, i + 1, u64::MAX) {
-                // Covered by a durable snapshot: released from the WAL, which is correct.
-                Err(LogGap::Compacted { first }) if i < first => {}
-                got => assert_eq!(
-                    got.ok().and_then(|v| v.first().cloned()),
-                    Some(entry(i)),
-                    "{tag}, round {round}, entry {i}"
-                ),
+        let stores: Vec<CoreStore> = if shared {
+            let cfg_log = DeviceLogConfig { file_bytes: 1 << 20 };
+            let (log, ports) = DeviceLog::start(disks::open(&dir, exec), cores, cfg_log).unwrap();
+            let stores = ports
+                .into_iter()
+                .map(|mut port| {
+                    let mut own = disks::open(&dir, exec);
+                    CoreStore::recover(&cfg(), port.core(), &mut port.disk(&mut own))
+                        .unwrap_or_else(|e| panic!("{name} {tag}, round {round}: {e:?}"))
+                        .0
+                })
+                .collect();
+            drop(log);
+            stores
+        } else {
+            let mut disk = disks::open(&dir, exec);
+            vec![
+                CoreStore::recover(&cfg(), 0, &mut disk)
+                    .unwrap_or_else(|e| panic!("{name} {tag}, round {round}: {e:?}"))
+                    .0,
+            ]
+        };
+        for (s, confirmed) in stores.iter().zip(&confirmed) {
+            for &i in confirmed {
+                match s.entries(G, i, i + 1, u64::MAX) {
+                    // Covered by a durable snapshot: released from the WAL, which is correct.
+                    Err(LogGap::Compacted { first }) if i < first => {}
+                    got => assert_eq!(
+                        got.ok().and_then(|v| v.first().cloned()),
+                        Some(entry(i)),
+                        "{tag}, round {round}, core {}, entry {i}",
+                        s.core()
+                    ),
+                }
             }
+            let last = confirmed.last().copied().unwrap_or(0);
+            let have = s.group(G).map_or(0, |g| g.last_index());
+            assert!(have >= last, "{tag}, round {round}, core {}", s.core());
         }
-        assert!(s.group(G).unwrap().last_index() >= confirmed.last().copied().unwrap_or(0));
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

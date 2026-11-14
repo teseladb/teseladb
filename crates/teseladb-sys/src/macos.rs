@@ -94,16 +94,6 @@ pub(crate) fn favor_current_thread() -> io::Result<()> {
     Ok(())
 }
 
-/// [`push_to_drive`] by descriptor: `fd` is open in another thread that waits for this push.
-pub(crate) fn push_descriptor(fd: RawFd) -> io::Result<()> {
-    // SAFETY: `fsync` takes a descriptor and touches no memory of the caller; a descriptor that
-    // is not open fails with `EBADF`, which is returned.
-    if unsafe { fsync(fd) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// `fcntl(F_FULLFSYNC)`: the file goes to the drive and the drive writes its whole cache to
 /// permanent storage, so everything any file sent to that drive before is durable.
 pub(crate) fn flush_drive(file: &File) -> io::Result<()> {
