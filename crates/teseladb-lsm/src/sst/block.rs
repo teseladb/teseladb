@@ -613,6 +613,11 @@ impl BlockCursor {
         self.kind = raw.kind;
         self.is_ref = raw.is_ref;
         self.value = raw.value;
+        // The entry `AHEAD` places on, at the length of this one (009 FR-024): its bytes are in
+        // the cache when the walk reaches it.
+        let len = next - self.next;
+        let ahead = next.saturating_add(len.saturating_mul(teseladb_keys::prefetch::AHEAD - 1));
+        teseladb_keys::prefetch::prefetch_byte(&self.block.data[..self.block.restarts], ahead);
         self.next = next;
         self.valid = true;
         Ok(())

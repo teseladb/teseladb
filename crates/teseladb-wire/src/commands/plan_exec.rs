@@ -1124,16 +1124,27 @@ fn intersected<B: Backend + ?Sized>(
     let last_index = &indexes[last.index];
     let scanned =
         entries(backend, (coll.tenant, coll.id), last_index, last, (read.concern, false), None)?;
+    // Which entries every held set may hold, walked with prefetch (009 FR-024).
+    let walk: Vec<(&[u8], Option<u32>)> =
+        scanned.entries.iter().flatten().map(|e| (e.pk.as_slice(), e.local)).collect();
+    let mut held_by_all = vec![true; walk.len()];
+    for set in &sets {
+        for (all, may) in held_by_all.iter_mut().zip(set.may_hold_each(&walk)) {
+            *all &= may;
+        }
+    }
+    drop(walk);
+    let mut held_by_all = held_by_all.into_iter();
     for entry in scanned.entries {
         ran.keys += 1;
         last_keys += 1;
-        let Some(Entry { pk, local, doc, .. }) = entry else {
+        let Some(Entry { pk, doc, .. }) = entry else {
             ran.past += 1;
             last_past += 1;
             continue;
         };
         // A document with no number in some scan is read and the whole filter decides.
-        if !sets.iter().all(|set| set.may_hold(&pk, local)) {
+        if !held_by_all.next().unwrap_or(true) {
             continue;
         }
         let Some((dk, bytes)) = fetched(backend, (coll, unbucketed), (&pk, doc), read.concern)?

@@ -29,6 +29,7 @@ dependencies = [
  "teseladb-deflate",
  "teseladb-fle",
  "teseladb-http",
+ "teseladb-index",
  "teseladb-io",
  "teseladb-js",
  "teseladb-json",

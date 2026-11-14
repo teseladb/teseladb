@@ -30,6 +30,7 @@ teseladb-js = { path = "../../crates/teseladb-js" }
 teseladb-keys = { path = "../../crates/teseladb-keys" }
 teseladb-meta = { path = "../../crates/teseladb-meta" }
 teseladb-lsm = { path = "../../crates/teseladb-lsm" }
+teseladb-index = { path = "../../crates/teseladb-index" }
 teseladb-collation = { path = "../../crates/teseladb-collation" }
 teseladb-multiraft = { path = "../../crates/teseladb-multiraft" }
 teseladb-raft = { workspace = true }

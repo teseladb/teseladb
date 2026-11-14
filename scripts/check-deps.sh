@@ -38,7 +38,8 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   crates/teseladb-mql/src/simd.rs
   crates/teseladb-search/src/segment/lanes.rs
   crates/teseladb-search/src/byte_simd.rs
-  crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs)
+  crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs
+  crates/teseladb-keys/src/prefetch.rs)
 
 fail=0
 finding() {

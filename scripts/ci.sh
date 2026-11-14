@@ -76,6 +76,9 @@ MIRI_TEST=(cargo +nightly miri test --config profile.dev.opt-level=0
 # The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
 gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
   "${MIRI_TEST[@]}" -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable:: art::
+# The prefetch of 009 FR-024: under Miri it runs no instruction, so the test checks the calls.
+gate "1. Miri on the prefetch of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
+  "${MIRI_TEST[@]}" -q -p teseladb-keys --lib -- prefetch::
 # The vector kernels of the query engine (010 FR-030): NEON on the host, and the x86_64 ones
 # interpreted, SSE2 by default and AVX2 with the feature on.
 gate "1. Miri on the vector kernels (host)" env MIRIFLAGS=-Zmiri-disable-isolation \

@@ -203,6 +203,18 @@ impl Roaring {
         }
     }
 
+    /// Prefetches the part of the set where `id` would be (009 FR-024): the word of a bitmap,
+    /// the start of an array or of the runs.
+    pub fn prefetch(&self, id: u32) {
+        use teseladb_keys::prefetch::{prefetch, prefetch_item};
+        let Ok(i) = self.keys.binary_search(&((id >> 16) as u16)) else { return };
+        match &self.containers[i] {
+            Container::Array(a) => prefetch_item(a, a.len() / 2),
+            Container::Bitmap(b) => prefetch(&b[usize::from(id as u16 >> 6)]),
+            Container::Run(r) => prefetch_item(r, 0),
+        }
+    }
+
     /// The ids in order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.keys
@@ -392,5 +404,20 @@ mod tests {
         assert!(matches!(dense.containers[0], Container::Bitmap(_)));
         assert!(runs.size_in_bytes() < 16);
         assert!(Roaring::new().is_empty());
+    }
+
+    #[test]
+    fn a_prefetch_of_each_container_leaves_the_set_as_it_was() {
+        let runs = Roaring::from_ids(0..60_000);
+        let sparse = Roaring::from_ids((0..100).map(|i| i * 7));
+        let dense = Roaring::from_ids((0..65_536).filter(|i| i % 3 == 0));
+        for set in [&runs, &sparse, &dense, &Roaring::new()] {
+            let before: Vec<u32> = set.iter().collect();
+            // Inside the set, past its last word, and in a high part it has no container for.
+            for id in [0, 63, 64, 65_535, 70_000, u32::MAX] {
+                set.prefetch(id);
+            }
+            assert_eq!(set.iter().collect::<Vec<u32>>(), before);
+        }
     }
 }

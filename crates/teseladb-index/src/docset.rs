@@ -46,6 +46,27 @@ impl Held {
         }
     }
 
+    /// [`Held::may_hold`] for each entry of `entries` in order, prefetching the set where the
+    /// entry [`teseladb_keys::prefetch::AHEAD`] places on falls (009 FR-024).
+    pub fn may_hold_each(&self, entries: &[(&[u8], Option<u32>)]) -> Vec<bool> {
+        self.may_hold_each_ahead(entries, teseladb_keys::prefetch::AHEAD)
+    }
+
+    /// [`Held::may_hold_each`] prefetching `ahead` places on; 0 prefetches nothing (the bench of
+    /// FR-024 compares the two).
+    pub fn may_hold_each_ahead(&self, entries: &[(&[u8], Option<u32>)], ahead: usize) -> Vec<bool> {
+        let mut out = Vec::with_capacity(entries.len());
+        for (i, (pk, id)) in entries.iter().enumerate() {
+            if ahead > 0
+                && let Some((_, Some(next))) = entries.get(i + ahead)
+            {
+                self.ids.prefetch(*next);
+            }
+            out.push(self.may_hold(pk, *id));
+        }
+        out
+    }
+
     /// Whether every document of the set has a number.
     pub fn all_numbered(&self) -> bool {
         self.unnumbered.is_empty()
@@ -172,6 +193,12 @@ mod tests {
                 }
             }
             assert_eq!(held.all_numbered(), a.iter().all(|&i| docs[i].1.is_some()));
+            let walk: Vec<(&[u8], Option<u32>)> =
+                b.iter().map(|&i| (docs[i].0.as_slice(), docs[i].1)).collect();
+            let one_by_one: Vec<bool> =
+                walk.iter().map(|(pk, id)| held.may_hold(pk, *id)).collect();
+            assert_eq!(held.may_hold_each(&walk), one_by_one);
+            assert_eq!(held.may_hold_each_ahead(&walk, 0), one_by_one);
         }
     }
 

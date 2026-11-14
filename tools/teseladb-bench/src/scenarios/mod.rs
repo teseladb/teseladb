@@ -3,7 +3,8 @@
 //! `failover`; 006 adds `wire` and `crud`; 007 adds `follower-read`, `group0-limits`, `split`, `add-node`, `rebalance` and `noisy-tenant`; 008 adds `txn`, `txn-readers` and `contention`; 013 adds
 //! `tls-handshake` and `scram`; 010 adds `aggregate`, `sort` and `group-large`; 015 adds
 //! `timeseries`; 014 adds `changestream-lag`; 016 adds `js`; 017 adds `fle-query`; 012 adds
-//! `cores-curve` and `disk-usage`; 019 adds `rest`; every specification adds its own.
+//! `cores-curve` and `disk-usage`; 019 adds `rest`; 009 adds `prefetch`; every specification
+//! adds its own.
 
 pub mod bson;
 pub mod changestream;
@@ -24,6 +25,7 @@ pub mod lsm;
 pub mod lsm_compression;
 pub mod noisy_tenant;
 pub mod open;
+pub mod prefetch;
 pub mod profiles;
 pub mod query;
 pub mod raftlog;
@@ -174,6 +176,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         "bson" => bson::run(args),
         "js" => js::run(args),
         "keys" => keys::run(args),
+        "prefetch" => prefetch::run(args),
         "lsm" => lsm::run(args),
         "lsm-sustained" => lsm::sustained(args),
         "lsm-compression" => lsm_compression::run_with(args, lsm_compression::MEASUREMENT),

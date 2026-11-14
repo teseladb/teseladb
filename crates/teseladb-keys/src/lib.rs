@@ -15,7 +15,7 @@
 //! assert!(ka < kb);
 //! ```
 #![cfg_attr(coverage, feature(coverage_attribute))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod bounds;
 mod bucket;
@@ -23,6 +23,7 @@ mod decode;
 mod encode;
 pub mod fields;
 pub mod local_id;
+pub mod prefetch;
 pub mod space;
 pub mod stored;
 mod typebits;
