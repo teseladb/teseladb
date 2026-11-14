@@ -3,8 +3,8 @@
 //! follows: the replicas of the ranges inside an interval stay on the zone's nodes. A shard is a
 //! node (`node<N>`, [`super::shard_name`]).
 //!
-//! The replies, messages and the order of the checks are those of a `refrouter` 9.0.4 of two shards
-//! (measured on 02-11-2026): an interval is stored with the shard key's missing fields as
+//! The replies, messages and the order of the checks are those of the reference router 9.0.4 of two
+//! shards (measured on 02-11-2026): an interval is stored with the shard key's missing fields as
 //! `MinKey`, one of a collection without a shard key is kept as given, and removing one
 //! (`zone: null`) takes the interval with exactly those bounds, if there is one.
 
@@ -111,8 +111,8 @@ pub fn remove_shard_from_zone<B: Backend + ?Sized>(
     let shard = match ctx.first() {
         Value::String(s) => s.clone(),
         v => {
-            // Not the parser's message: a `refrouter` 9.0.4 reads this field by hand (measured on
-            // 03-11-2026).
+            // Not the parser's message: the reference router 9.0.4 reads this field by hand
+            // (measured on 03-11-2026).
             let t = crate::types::type_name(v);
             let msg = format!(
                 "\"{REMOVE_SHARD_FROM_ZONE}\" had the wrong type. Expected string, found {t}"

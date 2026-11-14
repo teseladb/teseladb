@@ -4,8 +4,8 @@
 //! The counters every command adds to are split in stripes: each worker thread writes its own
 //! stripe, and `serverStatus` and `$collStats` add the stripes to the node's counters when they
 //! read them. The counts stay exact: a reader takes every stripe's lock. The technique is that of
-//! striped counters (Java's `LongAdder`, Linux's per-CPU counters); RefDb keeps these metrics
-//! in atomic counters.
+//! striped counters (Java's `LongAdder`, Linux's per-CPU counters); the reference server keeps
+//! these metrics in atomic counters.
 //!
 //! The server parameters every command reads are kept here too, as atomics: they are their only
 //! copy, which `setParameter` and `getParameter` write and read.

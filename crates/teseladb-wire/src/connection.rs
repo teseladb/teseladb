@@ -21,7 +21,7 @@ pub enum Kind {
     Msg,
     /// `OP_QUERY` on `<db>.$cmd`: the handshake.
     Query,
-    /// `OP_QUERY` on a collection, removed from RefDb.
+    /// `OP_QUERY` on a collection, removed from the reference server.
     LegacyQuery,
 }
 
@@ -40,8 +40,8 @@ pub struct Request {
     pub db: String,
     /// The command: the body with the document sequences as array fields.
     pub command: Document,
-    /// The fields of `command` that arrived as document sequences, which RefDb leaves out of
-    /// the command it quotes in an `Unauthorized` message (013).
+    /// The fields of `command` that arrived as document sequences, which the reference server
+    /// leaves out of the command it quotes in an `Unauthorized` message (013).
     pub sequences: Vec<String>,
     /// An error to answer instead of running it.
     pub problem: Option<CommandError>,
@@ -112,7 +112,8 @@ pub struct Connection {
     /// The client's address (`host:port`), when the server knows it.
     pub peer: Option<String>,
     /// The client holds the action `bypassDefaultMaxTimeMS` on the cluster: set by each
-    /// authorization; always on a node that does not authorize, as on a RefDb without `--auth`.
+    /// authorization; always on a node that does not authorize, as on a reference server without
+    /// `--auth`.
     pub bypass_default_max_time: bool,
     /// Its authentication (013).
     pub auth: AuthState,
@@ -123,8 +124,8 @@ pub struct Connection {
 }
 
 /// The longest message a connection takes before it authenticates, with authentication on: a
-/// longer one closes it at its header, without an answer (measured on 04-11-2026 on a `refrouter`
-/// and a `refnode` 9.0.4: 16,384 bytes answered, 16,385 closed).
+/// longer one closes it at its header, without an answer (measured on 04-11-2026 on the reference
+/// router and a reference replica set member 9.0.4: 16,384 bytes answered, 16,385 closed).
 pub const UNAUTHENTICATED_MAX_MESSAGE: usize = 16 * 1024;
 
 impl Connection {
@@ -328,7 +329,7 @@ fn msg_request(whole: &Bytes, compressor: Option<Compressor>) -> Result<Request,
     let mut sequences = Vec::with_capacity(m.sequences.len());
     for s in m.sequences {
         if command.get(&s.id).is_some() {
-            // A `refrouter` 9.0 closes the connection (measured).
+            // The reference router 9.0 closes the connection (measured).
             return Err(WireError::Malformed("Duplicate field between body and document sequence"));
         }
         let docs: Vec<Value> = s.docs.into_iter().map(Value::Document).collect();

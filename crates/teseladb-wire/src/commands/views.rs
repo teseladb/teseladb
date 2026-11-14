@@ -1,5 +1,5 @@
 //! Reads on a view (015 FR-001): `find`, `count` and `distinct` on a view become the view's
-//! pipeline followed by the stages of the read, as a `refrouter` 9.0.4 runs them (measured
+//! pipeline followed by the stages of the read, as the reference router 9.0.4 runs them (measured
 //! 31-10-2026): the options an aggregation cannot take are refused, and the read cannot change
 //! the view's collation.
 
@@ -83,7 +83,7 @@ fn asks(cmd: &Document, name: &str) -> bool {
     }
 }
 
-/// The options of `find` an aggregation cannot take, in the order RefDb checks them.
+/// The options of `find` an aggregation cannot take, in the order the reference server checks them.
 const FIND_OPTIONS: [&str; 6] =
     ["showRecordId", "min", "max", "returnKey", "singleBatch", "noCursorTimeout"];
 

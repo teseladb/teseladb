@@ -1,4 +1,4 @@
-//! RefDb's error codes, the error of a command and its reply document (contract
+//! The reference server's error codes, the error of a command and its reply document (contract
 //! `error-codes.md`, FR-021), and the translation of the range's errors (005) into them.
 
 use crate::commands::txn::{ABORT_TRANSACTION, COMMIT_TRANSACTION};
@@ -9,7 +9,7 @@ use teseladb_range::host::{MutationError, RangeError};
 /// as an internal transaction in parts (008 FR-006).
 pub const ENTRY_TOO_LARGE: &str = "object to insert too large";
 
-/// A RefDb error code with its `codeName`.
+/// A reference server error code with its `codeName`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Code {
     /// Number.
@@ -18,8 +18,8 @@ pub struct Code {
     pub name: &'static str,
 }
 
-/// An error a `refrouter` 9.0.4 answers with `errmsg` alone, without `code` nor `codeName` (some of
-/// `split`'s, 018 FR-004).
+/// An error the reference router 9.0.4 answers with `errmsg` alone, without `code` nor `codeName`
+/// (some of `split`'s, 018 FR-004).
 pub const UNCODED: Code = Code { code: 0, name: "" };
 
 macro_rules! codes {
@@ -47,13 +47,15 @@ codes! {
     ILLEGAL_OPERATION = 20, "IllegalOperation";
     /// A field of the wrong BSON type.
     TYPE_MISMATCH = 14, "TypeMismatch";
-    /// An error `refsearch` gives without a code of its own (011: a search index definition).
+    /// An error the reference search server gives without a code of its own (011: a search index
+    /// definition).
     UNKNOWN_ERROR = 8, "UnknownError";
     /// A search index with the same name and another definition (011).
     INDEX_ALREADY_EXISTS = 68, "IndexAlreadyExists";
-    /// A command that `refsearch` refused (011: `updateSearchIndex` with a wrong definition).
+    /// A command that the reference search server refused (011: `updateSearchIndex` with a wrong
+    /// definition).
     COMMAND_FAILED = 125, "CommandFailed";
-    /// A document past RefDb's nesting limit (003 FR-003).
+    /// A document past the reference server's nesting limit (003 FR-003).
     OVERFLOW = 15, "Overflow";
     /// Authentication failed (013).
     AUTHENTICATION_FAILED = 18, "AuthenticationFailed";
@@ -128,8 +130,8 @@ codes! {
     /// The resharding was aborted (018 FR-002).
     RESHARD_COLLECTION_ABORTED = 341, "ReshardCollectionAborted";
     /// A write that found the collection before a resharding's critical section and reached a
-    /// range that the critical section fences (018 FR-002): what a shard answers `refrouter`, which
-    /// refreshes its routing and sends the write again.
+    /// range that the critical section fences (018 FR-002): what a shard answers the reference
+    /// router, which refreshes its routing and sends the write again.
     STALE_CONFIG = 13_388, "StaleConfig";
     /// A new shard key without the cardinality for the chunks asked (018 FR-002).
     RESHARD_CARDINALITY = 4_952_606, "Location4952606";
@@ -137,14 +139,14 @@ codes! {
     SAMPLE_SIZE = 28_747, "Location28747";
     /// A forwarded request timed out.
     NETWORK_TIMEOUT = 89, "NetworkTimeout";
-    /// A request of the node that got no answer within its time limit: what a `refrouter` answers
-    /// when a shard does not answer in time.
+    /// A request of the node that got no answer within its time limit: what the reference router
+    /// answers when a shard does not answer in time.
     NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT = 202, "NetworkInterfaceExceededTimeLimit";
     /// The codes `failGetMoreAfterCursorCheckout` may inject that the node has no other use for
     /// (006 FR-034).
     HOST_NOT_FOUND = 7, "HostNotFound";
-    /// What a `refrouter` 9.0.4 turns a shard's not-primary and shutdown errors of a `getMore` into
-    /// (measured with `failGetMoreAfterCursorCheckout` on 05-11-2026).
+    /// What the reference router 9.0.4 turns a shard's not-primary and shutdown errors of a
+    /// `getMore` into (measured with `failGetMoreAfterCursorCheckout` on 05-11-2026).
     HOST_UNREACHABLE = 6, "HostUnreachable";
     /// See [`HOST_NOT_FOUND`].
     SOCKET_EXCEPTION = 9001, "SocketException";
@@ -213,7 +215,8 @@ codes! {
     FCV_NOT_CONFIRMED = 7_369_100, "Location7369100";
     /// A downgrade of the feature compatibility version that a collection's options prevent.
     CANNOT_DOWNGRADE = 332, "CannotDowngrade";
-    /// A change of the feature compatibility version RefDb does not allow from the current one.
+    /// A change of the feature compatibility version the reference server does not allow from the
+    /// current one.
     FCV_BAD_TRANSITION = 5_147_403, "Location5147403";
     /// Two fields of a compound index go through different arrays (009).
     CANNOT_INDEX_PARALLEL_ARRAYS = 171, "CannotIndexParallelArrays";
@@ -307,11 +310,12 @@ codes! {
     CS_SPLIT_NOT_LAST = 7_182_802, "Location7182802";
     /// `getMore` in a session on a cursor opened outside any, on a member of a replica set.
     CURSOR_NOT_IN_SESSION = 50736, "Location50736";
-    /// `getMore` in a session on a cursor opened outside any, on a `refrouter` (`validateLSID`).
+    /// `getMore` in a session on a cursor opened outside any, on the reference router
+    /// (`validateLSID`).
     ROUTER_CURSOR_NOT_IN_SESSION = 50799, "Location50799";
-    /// `getMore` without a session on a session's cursor, on a `refrouter`.
+    /// `getMore` without a session on a session's cursor, on the reference router.
     ROUTER_CURSOR_SESSION_REQUIRED = 50800, "Location50800";
-    /// `getMore` in a session other than its cursor's, on a `refrouter`.
+    /// `getMore` in a session other than its cursor's, on the reference router.
     ROUTER_CURSOR_OTHER_SESSION = 50801, "Location50801";
     /// `killOp` without `op`.
     KILL_OP_MISSING_OP = 50759, "Location50759";
@@ -401,8 +405,8 @@ codes! {
     API_WITHOUT_VERSION = 4_886_600, "Location4886600";
     /// `dropIndexes` of a clustered collection's index (015 FR-009).
     CLUSTERED_INDEX_DROP = 5_979_800, "Location5979800";
-    /// A value that is not the object RefDb reads there: a `readConcern.afterOpTime`, a field of
-    /// a stored user or role (013 FR-030).
+    /// A value that is not the object the reference server reads there: a
+    /// `readConcern.afterOpTime`, a field of a stored user or role (013 FR-030).
     EXPECTED_OBJECT = 10_065, "Location10065";
     /// A stored SCRAM credential without a valid iteration count (measured, 013 FR-030).
     SCRAM_ITERATION_COUNT = 17_501, "Location17501";
@@ -428,11 +432,12 @@ codes! {
     ROLE_NOT_FOUND = 31, "RoleNotFound";
     /// `createRole` of a role that exists (013).
     ROLE_ALREADY_EXISTS = 51_002, "Location51002";
-    /// A role change RefDb refuses: a cycle, a privilege outside the role's database (013).
+    /// A role change the reference server refuses: a cycle, a privilege outside the role's database
+    /// (013).
     INVALID_ROLE_MODIFICATION = 49, "InvalidRoleModification";
     /// `createUser` of a user that exists (013).
     USER_ALREADY_EXISTS = 51_003, "Location51003";
-    /// An empty password, refused by RefDb's SASLprep (013).
+    /// An empty password, refused by the reference server's SASLprep (013).
     PASSWORD_NOT_TERMINATED = 50_687, "Location50687";
     /// A command that needs a collection, run on a view (015 FR-002).
     COMMAND_NOT_SUPPORTED_ON_VIEW = 166, "CommandNotSupportedOnView";
@@ -441,7 +446,8 @@ codes! {
     /// A pipeline operator or cursor option a pipeline does not take (a tailable cursor on a view
     /// or a time series, 015 FR-004).
     INVALID_PIPELINE_OPERATOR = 168, "InvalidPipelineOperator";
-    /// A command on a `system.buckets.*` namespace, which RefDb 9.0 no longer serves (015 FR-006).
+    /// A command on a `system.buckets.*` namespace, which the reference server 9.0 no longer serves
+    /// (015 FR-006).
     LEGACY_TIMESERIES_BUCKETS = 491, "CommandNotSupportedOnLegacyTimeseriesBucketsNamespace";
     /// A partial filter of a time series index that has no form over the buckets (015 FR-008).
     TIMESERIES_PREDICATE = 5_916_301, "Location5916301";
@@ -451,9 +457,9 @@ codes! {
     GRAPH_CONTAINS_CYCLE = 5, "GraphContainsCycle";
     /// A pipeline stage with more or fewer than one field (010).
     STAGE_ONE_FIELD = 40_323, "Location40323";
-    /// A pipeline stage RefDb does not know (010).
+    /// A pipeline stage the reference server does not know (010).
     UNRECOGNIZED_STAGE = 40_324, "Location40324";
-    /// A stage RefDb keeps for its own pipelines (010).
+    /// A stage the reference server keeps for its own pipelines (010).
     INTERNAL_STAGE = 5_491_300, "Location5491300";
     /// A writing stage inside `$facet` (010).
     FACET_WRITES = 40_600, "Location40600";
@@ -471,7 +477,7 @@ codes! {
     CLUSTERED_ON_VIEW = 6_026_500, "Location6026500";
     /// A clustered collection with `capped` and `size` (015 FR-009).
     CLUSTERED_CAPPED_SIZE = 6_049_200, "Location6049200";
-    /// A clustered capped collection, a test feature of RefDb (015 FR-009).
+    /// A clustered capped collection, a test feature of the reference server (015 FR-009).
     CLUSTERED_CAPPED_TEST = 6_127_800, "Location6127800";
     /// A `txnNumber` without `autocommit: false` on a command that is no retryable write (008).
     NOT_A_RETRYABLE_WRITE_COMMAND = 50768, "NotARetryableWriteCommand";
@@ -479,7 +485,7 @@ codes! {
     TXN_NUMBER_NOT_ALLOWED = 50889, "Location50889";
     /// A commit of a transaction the node has no record of, without its `recoveryToken` (008).
     RECOVERY_TOKEN_REQUIRED = 50940, "Location50940";
-    /// A `count` on a view whose pipeline fails on the shard, as a `refrouter` relays it.
+    /// A `count` on a view whose pipeline fails on the shard, as the reference router relays it.
     COUNT_ON_VIEW_FAILED = 4_848_401, "Location4848401";
 }
 
@@ -489,7 +495,7 @@ pub const RETRYABLE_WRITE_ERROR: &str = "RetryableWriteError";
 pub const TRANSIENT_TRANSACTION_ERROR: &str = "TransientTransactionError";
 /// Label of a commit whose result is unknown: the driver asks again (008).
 pub const UNKNOWN_TRANSACTION_COMMIT_RESULT: &str = "UnknownTransactionCommitResult";
-/// The `errmsg` of a write conflict in a transaction, as RefDb 9.0 writes it.
+/// The `errmsg` of a write conflict in a transaction, as the reference server 9.0 writes it.
 pub const WRITE_CONFLICT_MESSAGE: &str = "Caused by :: Write conflict during plan execution and \
      yielding is disabled. :: Please retry your operation or multi-document transaction.";
 /// The `errmsg` of a write a resharding's critical section refused (018 FR-002).
@@ -507,17 +513,18 @@ pub struct CommandError {
     pub labels: Vec<&'static str>,
     /// Fields after `codeName` (such as `keyPattern` and `keyValue`, or `errInfo`).
     pub extra: Document,
-    /// Who raises it, as a `refrouter` would: what decides whether it ends a transaction (008).
+    /// Who raises it, as the reference router would: what decides whether it ends a transaction
+    /// (008).
     pub origin: ErrorOrigin,
-    /// `errorLabels` go first, before `ok`: the order of a `refrouter` 9.0.4's answer to the
+    /// `errorLabels` go first, before `ok`: the order of the reference router 9.0.4's answer to the
     /// `commitTransaction` or `abortTransaction` it ends with `recoveryToken` (measured on
     /// 03-11-2026).
     pub labels_first: bool,
 }
 
-/// Who raises an error of a command, as a `refrouter` 9.0.4 and its shard share the work (measured on
-/// 01-11-2026): an error of a statement of a transaction ends the transaction only if the shard
-/// raised it.
+/// Who raises an error of a command, as the reference router 9.0.4 and its shard share the work
+/// (measured on 01-11-2026): an error of a statement of a transaction ends the transaction only if
+/// the shard raised it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorOrigin {
     /// The router, while it parses the command: the command's fields and their types, and the
@@ -603,7 +610,8 @@ impl CommandError {
     }
 
     /// The reply document: `ok: 0`, `errmsg`, `code`, `codeName`, the extra fields and
-    /// `errorLabels`, in RefDb's order (the labels first when [`CommandError::labels_first`]).
+    /// `errorLabels`, in the reference server's order (the labels first when
+    /// [`CommandError::labels_first`]).
     pub fn to_document(&self) -> Document {
         let labels = self.labels.iter().map(|&l| Value::from(l)).collect::<Vec<_>>();
         let mut d = Document::new();
@@ -626,7 +634,7 @@ impl CommandError {
     }
 
     /// The error carried as a range mutation's error, so that a mutation evaluated on the
-    /// range's leader brings back its RefDb code (see [`CommandError::from_mutation`]).
+    /// range's leader brings back its reference server code (see [`CommandError::from_mutation`]).
     pub fn to_mutation(&self) -> MutationError {
         MutationError(format!("{}\u{0}{}", self.code.code, self.errmsg))
     }
@@ -643,7 +651,7 @@ impl CommandError {
 }
 
 impl From<teseladb_bson::BsonError> for CommandError {
-    /// A BSON fault with RefDb's code for it (`BSONObjectTooLarge`, `Overflow`, …).
+    /// A BSON fault with the reference server's code for it (`BSONObjectTooLarge`, `Overflow`, …).
     fn from(e: teseladb_bson::BsonError) -> CommandError {
         let (n, name) = e.code();
         CommandError::new(Code { code: n, name }, e.to_string())
@@ -651,7 +659,7 @@ impl From<teseladb_bson::BsonError> for CommandError {
 }
 
 impl From<teseladb_collation::SpecError> for CommandError {
-    /// A collation document RefDb refuses, with its code.
+    /// A collation document the reference server refuses, with its code.
     fn from(e: teseladb_collation::SpecError) -> CommandError {
         CommandError::new(Code { code: e.code, name: e.code_name }, e.message)
     }
@@ -680,7 +688,7 @@ pub struct RangeContext {
     pub max_time_expired: bool,
 }
 
-/// The RefDb error for a range error (005), as a `refrouter` reports a shard's.
+/// The reference server error for a range error (005), as the reference router reports a shard's.
 pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
     let (err, retryable) = match e {
         RangeError::NotLeader { .. } => {

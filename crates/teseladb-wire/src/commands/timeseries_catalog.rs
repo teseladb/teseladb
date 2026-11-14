@@ -1,9 +1,9 @@
 //! The bucket catalog of a time series as `collStats.timeseries` counts it (015 FR-010, T024,
-//! T025), measured on a `refnode` 9.0.4 on 02-11-2026: for each meta value the catalog holds the
-//! windows it writes to (open), those a lookup or a fetch left behind (displaced, still open
-//! until the next insert of the meta value archives them) and those it archived; it reopens an
-//! archived window from memory (a fetch) or looks a bucket up in the collection (a query), and
-//! closes the windows before a measurement past them.
+//! T025), measured on a reference replica set member 9.0.4 on 02-11-2026: for each meta value the
+//! catalog holds the windows it writes to (open), those a lookup or a fetch left behind (displaced,
+//! still open until the next insert of the meta value archives them) and those it archived; it
+//! reopens an archived window from memory (a fetch) or looks a bucket up in the collection (a
+//! query), and closes the windows before a measurement past them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -79,9 +79,9 @@ pub enum Route {
     },
 }
 
-/// What one write of measurements did to the catalog so far. RefDb writes the measurements
-/// of a batch in time order; a window the write already used closes by time forward when a
-/// later one of its meta value is reopened. A failed ordered insert is first tried whole (an
+/// What one write of measurements did to the catalog so far. The reference server writes the
+/// measurements of a batch in time order; a window the write already used closes by time forward
+/// when a later one of its meta value is reopened. A failed ordered insert is first tried whole (an
 /// `attempt`) and aborted: its lookups and the buckets it closed count, the windows it opened
 /// do not, and it leaves none of the windows it went to in the catalog.
 #[derive(Debug, Default)]
@@ -119,8 +119,9 @@ fn count(n: usize) -> i64 {
 }
 
 /// The counters of `collStats.timeseries` that this node never moves: memory thresholds,
-/// cache pressure, frozen buckets, compression and failed reopenings are RefDb's bucket
-/// catalog's own machinery (measured at zero on a `refnode` 9.0.4 on 02-11-2026).
+/// cache pressure, frozen buckets, compression and failed reopenings are the reference server's
+/// bucket catalog's own machinery (measured at zero on a reference replica set member 9.0.4 on
+/// 02-11-2026).
 const ALWAYS_ZERO: [&str; 22] = [
     "numBucketDocumentsTooLargeInsert",
     "numBucketDocumentsTooLargeUpdate",
@@ -148,7 +149,7 @@ const ALWAYS_ZERO: [&str; 22] = [
 
 impl TsStats {
     /// The counters as `collStats.timeseries` writes them after `bucketsNs`, with `bucketCount`
-    /// and `avgBucketSize`, in alphabetical order as a `refrouter` merges them.
+    /// and `avgBucketSize`, in alphabetical order as the reference router merges them.
     pub fn fields(&self, bucket_count: i64, avg_bucket_size: i64) -> Vec<(&'static str, i64)> {
         let avg = if self.commits > 0 { self.measurements / self.commits } else { 0 };
         let active: usize =
@@ -400,10 +401,11 @@ impl Stored {
 }
 
 /// The bucket a lookup for measurements from time `t` lands on among `buckets`, those of one
-/// window and meta value: RefDb's query takes the first bucket that starts at or before `t`
-/// in the order of the index on the meta value and the time (start, then end), or in `_id`
-/// order without a meta field (measured on a `refnode` 9.0.4 on 02-11-2026: after a full bucket
-/// and one with room, the lookup lands on the full one; after one with an earlier end, on it).
+/// window and meta value: the reference server's query takes the first bucket that starts at or
+/// before `t` in the order of the index on the meta value and the time (start, then end), or in
+/// `_id` order without a meta field (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026: after a full bucket and one with room, the lookup lands on the full one; after one
+/// with an earlier end, on it).
 pub fn lookup(buckets: &[Stored], t: i64, by_index: bool) -> Option<&Stored> {
     let candidates = buckets.iter().filter(|b| b.min <= t);
     match by_index {

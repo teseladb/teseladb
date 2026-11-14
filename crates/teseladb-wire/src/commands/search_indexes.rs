@@ -1,9 +1,9 @@
 //! The search index commands (011 FR-008): `createSearchIndexes`, `listSearchIndexes`,
 //! `updateSearchIndex` and `dropSearchIndex`, with the answers and errors of a 9.0.4 replica set
-//! with `refsearch` 1.70.6 (measured 01-11-2026). The indexes live in Group 0's catalog under the
-//! collection; an index asked for on a view is kept under the collection the view reads, as
-//! RefDb does. The definition's own rules are the search engine's; here only what decides the
-//! command's answer is checked.
+//! with the reference search server 1.70.6 (measured 01-11-2026). The indexes live in Group 0's
+//! catalog under the collection; an index asked for on a view is kept under the collection the view
+//! reads, as the reference server does. The definition's own rules are the search engine's; here
+//! only what decides the command's answer is checked.
 
 use teseladb_bson::{Document, RawValue, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -38,7 +38,7 @@ const NAME: &str = "name";
 const ID: &str = "id";
 const TYPE: &str = "type";
 const DEFINITION: &str = "definition";
-/// How `refsearch` names the command in its errors.
+/// How the reference search server names the command in its errors.
 const USER_COMMAND: &str = "userCommand";
 /// The error when both `name` and `id` are given.
 const BOTH: &str = "Cannot set both 'name' and 'id'.";
@@ -65,14 +65,13 @@ pub struct IndexView {
     pub stages: Vec<Vec<u8>>,
 }
 
-/// RefDb's error for a view stage `refsearch` cannot index through.
+/// The reference server's error for a view stage the reference search server cannot index through.
 const VIEW_STAGE_NOT_ALLOWED: crate::error::Code =
     crate::error::Code { code: 10_623_000, name: "Location10623000" };
-/// RefDb's error for a view's `$match` with more than `$expr`.
+/// The reference server's error for a view's `$match` with more than `$expr`.
 const VIEW_MATCH_NOT_EXPR: crate::error::Code =
     crate::error::Code { code: 10_623_001, name: "Location10623001" };
-const VIEW_INCOMPATIBLE: &str =
-    "Cannot perform a search operation as the view definition is incompatible with RefCloud: ";
+const VIEW_INCOMPATIBLE: &str = teseladb_names::ERR_SEARCH_VIEW_INCOMPATIBLE;
 
 /// Checks that a view's stages are ones a search index can follow (011 FR-021, measured on
 /// 9.0.4: `$addFields`, `$set` and a `$match` with only `$expr`).
@@ -193,7 +192,8 @@ fn unknown_field(name: &str, k: &str) -> CommandError {
     )
 }
 
-/// The index an `id` or a `name` picks, with RefDb's errors when both or neither are given.
+/// The index an `id` or a `name` picks, with the reference server's errors when both or neither are
+/// given.
 pub enum Pick {
     /// By name.
     Name(String),
@@ -252,7 +252,7 @@ fn matches(entry: &SearchIndexEntry, which: &Pick) -> bool {
     }
 }
 
-/// RefDb's error for an index `which` names that is not there.
+/// The reference server's error for an index `which` names that is not there.
 fn not_found(which: &Pick, ns: &Namespace) -> CommandError {
     let (what, value) = match which {
         Pick::Name(n) => ("name", n.clone()),
@@ -264,7 +264,7 @@ fn not_found(which: &Pick, ns: &Namespace) -> CommandError {
     )
 }
 
-/// The first problem of a definition of type `kind`, as `refsearch` finds it.
+/// The first problem of a definition of type `kind`, as the reference search server finds it.
 fn check_definition(kind: SearchIndexKind, def: &Document) -> Result<(), DefinitionError> {
     match kind {
         SearchIndexKind::Search => Definition::parse(def).map(|_| ()),
@@ -640,7 +640,8 @@ mod tests {
     }
 
     /// While its first build runs, an index and its host are `BUILDING` and not queryable, with
-    /// the definition being built (measured with `refsearch` 1.70.6, `scratchpad/lane3m/m32.js`).
+    /// the definition being built (measured with the reference search server 1.70.6,
+    /// `scratchpad/lane3m/m32.js`).
     #[test]
     fn an_index_being_built_lists_as_building() {
         let definition = Document::new().with("mappings", Document::new().with("dynamic", true));

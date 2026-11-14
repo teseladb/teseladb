@@ -1,7 +1,7 @@
 //! `enableSharding` and `shardCollection` (018 FR-001): the shard key of a collection, checked
-//! with the messages of a `refrouter` 9.0.4 (measured on 01-11-2026), kept with the collection's
-//! options under [`SHARD_KEY`] (not a collection option: `listCollections` does not show it) and
-//! listed in `config.collections`.
+//! with the messages of the reference router 9.0.4 (measured on 01-11-2026), kept with the
+//! collection's options under [`SHARD_KEY`] (not a collection option: `listCollections` does not
+//! show it) and listed in `config.collections`.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
@@ -52,12 +52,13 @@ pub fn shard_key_of(coll: &CollectionEntry) -> Result<Option<ShardKey>, CommandE
     Ok(Some(ShardKey { key, unique: matches!(d.get("unique"), Some(Value::Boolean(true))) }))
 }
 
-/// The size of a chunk of `config.system.sessions` in a `refrouter` 9.0.4's `config.collections`.
+/// The size of a chunk of `config.system.sessions` in the reference router 9.0.4's
+/// `config.collections`.
 const SESSIONS_CHUNK_BYTES: i64 = 200_000;
 
 /// Whether `ns` is the cluster's record of sessions, `config.system.sessions`, which a cluster of
-/// RefDb shards by `{_id: 1}` (006 FR-038). Its documents stay keyed as in any collection
-/// without a shard key; it is presented as sharded, in one chunk.
+/// the reference server shards by `{_id: 1}` (006 FR-038). Its documents stay keyed as in any
+/// collection without a shard key; it is presented as sharded, in one chunk.
 pub fn is_sessions_record(ns: &Namespace) -> bool {
     ns.db == super::registry::SESSIONS_DB && ns.coll == super::registry::SESSIONS_COLL
 }
@@ -81,7 +82,7 @@ pub fn is_sharded(coll: &CollectionEntry) -> bool {
 }
 
 /// The value at dotted `path` of `doc`: `None` when it is missing; an array on the way is
-/// refused, as no shard key holds one (measured on a `refrouter` 9.0.4 on 02-11-2026).
+/// refused, as no shard key holds one (measured on the reference router 9.0.4 on 02-11-2026).
 fn shard_value<'a>(doc: &'a Document, path: &str) -> Result<Option<&'a Value>, CommandError> {
     let array = || {
         let msg = "Shard key cannot contain array values or array descendants.";
@@ -168,7 +169,7 @@ pub fn split_point(coll: &CollectionEntry, at: &Document) -> Result<Vec<u8>, Com
 }
 
 /// The key a change event gives a document of `coll`: the fields of its shard key it has, by
-/// their paths, then `_id` (measured on a `refrouter` 9.0.4 on 02-11-2026).
+/// their paths, then `_id` (measured on the reference router 9.0.4 on 02-11-2026).
 pub fn event_key(coll: &CollectionEntry, doc: &Document) -> Result<Document, CommandError> {
     let mut out = Document::new();
     if let Some(k) = shard_key_of(coll)? {
@@ -188,7 +189,7 @@ pub fn enable_sharding<B: Backend + ?Sized>(
 ) -> Result<Document, CommandError> {
     super::admin::admin_only(ENABLE_SHARDING, ctx.db)?;
     match ctx.first() {
-        // The messages of a `refrouter` 9.0.4 (measured on 02-11-2026).
+        // The messages of the reference router 9.0.4 (measured on 02-11-2026).
         Value::String(db) if db.contains('.') => Err(CommandError::new(
             INVALID_NAMESPACE,
             format!("'.' is an invalid character in a db name: {db}"),
@@ -217,7 +218,7 @@ pub fn shard_collection<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
     super::admin::admin_only(SHARD_COLLECTION, ctx.db)?;
-    // The messages of a `refrouter` 9.0.4 (measured on 03-11-2026).
+    // The messages of the reference router 9.0.4 (measured on 03-11-2026).
     let name = match ctx.first() {
         Value::String(s) => s.clone(),
         v => {
@@ -504,8 +505,8 @@ pub(super) fn is_empty<B: Backend + ?Sized>(
 /// is), or the one `shardCollection` makes on empty collection `c`; the index of `_id` serves a
 /// key `{_id: 1}`. An index serves when it is not sparse, partial, hidden or multikey; without
 /// one, an index on exactly the shard key that is not sparse refuses the command with each
-/// index's reason, and a collection with documents asks for an index (measured on a `refrouter`
-/// 9.0.4 on 03-11-2026, `sh3.js` to `sh6.js`).
+/// index's reason, and a collection with documents asks for an index (measured on the reference
+/// router 9.0.4 on 03-11-2026, `sh3.js` to `sh6.js`).
 fn supporting_index<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     (ns, c): (&Namespace, &CollectionEntry),
@@ -631,7 +632,8 @@ pub(super) fn same_value(index: &Value, shard: &Value) -> bool {
     }
 }
 
-/// The `config.collections` document of sharded collection `ns`, as a `refrouter` 9.0.4 lists it.
+/// The `config.collections` document of sharded collection `ns`, as the reference router 9.0.4
+/// lists it.
 pub fn config_entry(ns: &Namespace, c: &CollectionEntry, k: &ShardKey) -> Document {
     let mut epoch = [0u8; 12];
     epoch.copy_from_slice(&c.uuid[..12]);
@@ -653,8 +655,8 @@ pub fn config_entry(ns: &Namespace, c: &CollectionEntry, k: &ShardKey) -> Docume
 
 /// The `config.collections` document of collection `ns`, if the cluster tracks it: with its
 /// shard key, or with key `{_id: 1}` and `unsplittable: true` once `moveCollection` or
-/// `unshardCollection` left it without one, the field where each command puts it (measured on a
-/// `refrouter` 9.0.4 on 02-11-2026).
+/// `unshardCollection` left it without one, the field where each command puts it (measured on
+/// the reference router 9.0.4 on 02-11-2026).
 pub fn tracked_entry(
     ns: &Namespace,
     c: &CollectionEntry,

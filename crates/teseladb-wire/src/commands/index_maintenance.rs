@@ -132,7 +132,7 @@ pub fn collation_of(spec: RawDoc<'_>) -> Result<Option<Collation>, CommandError>
     })
 }
 
-/// The error RefDb answers for a document an index refuses.
+/// The error the reference server answers for a document an index refuses.
 pub fn keygen_error(e: &KeygenError, doc: RawDoc<'_>) -> CommandError {
     let n = e.code();
     let code = error::code(n).unwrap_or(INTERNAL_ERROR);
@@ -203,7 +203,7 @@ impl Maintainer {
     }
 
     /// The maintainer with the write's `probes`; with `enforce` false (an index build's
-    /// backfill) its prepared indexes take duplicates, as a `refrouter` 9.0.4 builds them.
+    /// backfill) its prepared indexes take duplicates, as the reference router 9.0.4 builds them.
     pub fn with_probes(self, probes: Vec<Probe>, enforce: bool) -> Maintainer {
         Maintainer { probes, enforce, ..self }
     }

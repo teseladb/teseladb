@@ -3,7 +3,7 @@
 //!
 //! A command runs on the node its client is connected to, so the node's table holds every
 //! operation of its clients. `currentOp` names each one `node<N>:<id>` under the node's shard
-//! name (D-102), as a `refrouter` names a shard's; `killOp` takes that, or the number alone.
+//! name (D-102), as the reference router names a shard's; `killOp` takes that, or the number alone.
 
 use teseladb_bson::{Document, Value};
 
@@ -52,8 +52,9 @@ const CURRENT_OP_OPTIONS: [&str; 20] = [
 /// `replSetGetStatus`.
 pub const REPL_SET_GET_STATUS: &str = "replSetGetStatus";
 
-/// `replSetGetStatus` as a `refrouter` 9.0.4 answers it (FR-024): `ok: 0` with no code, since a
-/// node that presents itself as a `refrouter` has no replica set (018 adds the replica set mode).
+/// `replSetGetStatus` as the reference router 9.0.4 answers it (FR-024): `ok: 0` with no code,
+/// since a node that presents itself as a router has no replica set (018 adds the replica set
+/// mode).
 pub fn repl_set_get_status<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -81,13 +82,15 @@ pub fn admin_only(name: &str, db: &str) -> Result<(), CommandError> {
 /// What `killOp`'s `op` names.
 enum Target {
     /// An operation of this node, by number: `None` for a valid number that cannot be running
-    /// (it does not fit the table's ids), which `killOp` accepts and ignores, as RefDb does.
+    /// (it does not fit the table's ids), which `killOp` accepts and ignores, as the reference
+    /// server does.
     Local(Option<u32>),
     /// Operation `id` of shard `shard` (`shardid:opid`): a node (`node<N>`, D-102) or `config`.
     Shard { shard: String, node: Option<u64>, id: i32 },
 }
 
-/// The name a `refrouter` gives its config server, which `killOp` takes as a shard (measured).
+/// The name the reference router gives its config server, which `killOp` takes as a shard
+/// (measured).
 pub const CONFIG_SHARD: &str = "config";
 
 /// The node a shard name (`node<N>`) of the cluster names, if it is one.
@@ -102,8 +105,8 @@ fn named_node<B: Backend + ?Sized>(
     Ok(node.filter(|_| listed || shard == mine))
 }
 
-/// The number of a `shardid:opid`, read as RefDb reads a 32-bit integer (measured): an
-/// optional sign and decimal digits, nothing else.
+/// The number of a `shardid:opid`, read as the reference server reads a 32-bit integer (measured):
+/// an optional sign and decimal digits, nothing else.
 fn shard_op_id(text: &str) -> Result<i32, CommandError> {
     let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -161,7 +164,7 @@ fn op_target<B: Backend + ?Sized>(backend: &mut B, v: &Value) -> Result<Target, 
 
 /// `killOp`: marks the operation; it stops at its next step with `Interrupted`. A
 /// `shardid:opid` of another node goes to that node, and the reply names the shard and the
-/// number, as a `refrouter` gives them (DV-031, D-102).
+/// number, as the reference router gives them (DV-031, D-102).
 pub fn kill_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(KILL_OP, ctx.db)?;
     let Some(v) = ctx.cmd.get("op") else {
@@ -188,8 +191,8 @@ pub fn kill_op<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
     }
 }
 
-/// One operation as `currentOp` shows it, on node `shard` at `host` (as a `refrouter` shows a
-/// shard's, DV-031, D-102).
+/// One operation as `currentOp` shows it, on node `shard` at `host` (as the reference router shows
+/// a shard's, DV-031, D-102).
 fn describe(id: u32, op: &Op, now_ms: u64, (shard, host): (&str, &str)) -> Document {
     let mut d = Document::new().with("shard", shard).with("type", "op").with("host", host);
     match &op.desc {
@@ -212,7 +215,7 @@ fn describe(id: u32, op: &Op, now_ms: u64, (shard, host): (&str, &str)) -> Docum
     let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
     let time = teseladb_bson::extjson::to_log_time(now).unwrap_or_default();
     let micros = now_ms.saturating_sub(op.started_ms).saturating_mul(1000);
-    // A `refnode` 9.0.4 lists an index build as inactive (measured).
+    // A reference replica set member 9.0.4 lists an index build as inactive (measured).
     d.insert("active", op.desc.is_none());
     d.insert("currentOpTime", time);
     d.insert("opid", format!("{shard}:{id}"));
@@ -257,7 +260,7 @@ pub fn node_operations(
 }
 
 /// The operations of every node of the cluster, this one's first, as `currentOp` describes
-/// them (010 T033, FR-016): a `refrouter` lists those of all its shards.
+/// them (010 T033, FR-016): the reference router lists those of all its shards.
 pub(crate) fn current_operations<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,

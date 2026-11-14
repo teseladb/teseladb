@@ -128,7 +128,8 @@ pub fn client<B: Backend + ?Sized>(
 
 /// Records `events` of the connection with `result`. An `auditConfig` this node set applies
 /// right before its `auditConfigure`, so the events before it go through the old filter, as on
-/// RefDb 9.0.4 (measured); one another node set is picked up first, at most once a second.
+/// the reference server 9.0.4 (measured); one another node set is picked up first, at most once a
+/// second.
 pub fn record<B: Backend + ?Sized>(
     shared: &Shared,
     conn: &mut Connection,
@@ -159,7 +160,7 @@ pub fn record<B: Backend + ?Sized>(
 pub const LOG_APPLICATION_MESSAGE: &str = "logApplicationMessage";
 /// The cluster parameter of the runtime audit configuration.
 pub const AUDIT_CONFIG: &str = "auditConfig";
-/// The name of its structure in RefDb's errors.
+/// The name of its structure in the reference server's errors.
 pub const AUDIT_CONFIG_IDL: &str = "auditConfigDocument";
 /// Its filter.
 const FILTER: &str = "filter";
@@ -383,8 +384,8 @@ pub fn on_close<B: Backend + ?Sized>(shared: &Shared, conn: &mut Connection, bac
 }
 
 /// The namespace as the client knows it: a collection a transaction created goes under the name
-/// the client gave it, which ends its name until the commit (008 T019); RefDb Enterprise 9.0.4
-/// records it with that name when the statement creates it (measured).
+/// the client gave it, which ends its name until the commit (008 T019); the enterprise reference
+/// server 9.0.4 records it with that name when the statement creates it (measured).
 fn ns_text(ns: &Namespace) -> String {
     let coll = match ns.coll.strip_prefix(super::txn_ddl::SCRATCH_PREFIX) {
         // `<node>.<transaction>.<name>`; the name may have dots of its own.
@@ -466,7 +467,7 @@ fn drop_events(dropped: Vec<(String, Vec<String>)>, out: &mut Pending) {
     }
 }
 
-/// The events of a catalog command that succeeded with `result`, in RefDb's order.
+/// The events of a catalog command that succeeded with `result`, in the reference server's order.
 pub fn after_catalog(before: CatalogBefore, result: Option<&CollectionEntry>) -> Pending {
     let mut out = Pending::new();
     let new_db = |db: &str| !before.databases.iter().any(|d| d == db);

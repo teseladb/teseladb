@@ -1,8 +1,8 @@
 //! `OP_COMPRESSED` (FR-001, FR-002, D-025): `originalOpcode`, `uncompressedSize`,
 //! `compressorId` and the compressed message without its header.
 //!
-//! As a `refrouter` with its default compressors does: snappy, zlib and zstd are accepted on any
-//! connection (also before negotiating them), `noop` and unknown ids close the connection, and
+//! As the reference router with its default compressors does: snappy, zlib and zstd are accepted on
+//! any connection (also before negotiating them), `noop` and unknown ids close the connection, and
 //! only an `OP_MSG` may travel compressed.
 
 use teseladb_compress::{snappy, zstd};
@@ -22,9 +22,9 @@ pub enum Compressor {
     Zstd,
 }
 
-/// Id of `noop`, which a `refrouter` does not enable by default.
+/// Id of `noop`, which the reference router does not enable by default.
 pub const NOOP_ID: u8 = 0;
-/// zlib level of the replies (RefDb's default, 6).
+/// zlib level of the replies (the reference server's default, 6).
 const ZLIB_LEVEL: u8 = 6;
 
 impl Compressor {

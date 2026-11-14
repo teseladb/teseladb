@@ -4,8 +4,8 @@
 //!
 //! A command runs against a [`Guarded`] backend: before each call to the node (the catalog, a
 //! read or a write of the range) it checks whether its deadline passed or whether `killOp`
-//! marked it, so an operation stops at its next step as RefDb's stops at its next interrupt
-//! check.
+//! marked it, so an operation stops at its next step as the reference server's stops at its next
+//! interrupt check.
 
 use std::collections::BTreeMap;
 use teseladb_keys::stored;
@@ -34,7 +34,7 @@ pub const TIME_LIMIT_MESSAGE: &str = "operation exceeded time limit";
 /// Message of an operation `killOp` interrupted.
 pub const INTERRUPTED_MESSAGE: &str = "operation was interrupted";
 
-/// The order in which a `refrouter` 9.0.4 lists the numeric types of `maxTimeMS` in its
+/// The order in which the reference router 9.0.4 lists the numeric types of `maxTimeMS` in its
 /// `TypeMismatch` message, command by command (measured; the IDL of each command keeps its own
 /// set, whose order is stable).
 fn max_time_types(cmd: &str) -> [&'static str; 4] {
@@ -78,15 +78,15 @@ fn out_of_range(n: i64) -> Option<CommandError> {
     None
 }
 
-/// The integer value of a `maxTimeMS` field, as RefDb's `parseMaxTimeMS` reads it.
+/// The integer value of a `maxTimeMS` field, as the reference server's `parseMaxTimeMS` reads it.
 fn integer(v: &Value, cmd: &str) -> Result<i64, CommandError> {
     exact_integer(v, MAX_TIME_MS).unwrap_or_else(|| {
         Err(wrong_types(&format!("{cmd}.{MAX_TIME_MS}"), v, &max_time_types(cmd)))
     })
 }
 
-/// A number that must be a whole 64-bit integer, read as RefDb's `exactInt64` reads it
-/// (`maxTimeMS`, `count`'s `limit`), with its messages naming `field`; `None` when `v` is not a
+/// A number that must be a whole 64-bit integer, read as the reference server's `exactInt64` reads
+/// it (`maxTimeMS`, `count`'s `limit`), with its messages naming `field`; `None` when `v` is not a
 /// number.
 pub fn exact_integer(v: &Value, field: &str) -> Option<Result<i64, CommandError>> {
     if !matches!(v, Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_)) {
@@ -203,9 +203,9 @@ pub struct Op {
 }
 
 /// A plan's report built only when something reads it: the profiler, the slow query log, a
-/// sampled query's statistics or a cursor that stays open. RefDb builds a plan's summary from
-/// its executor when it profiles or logs the operation, not for every read (H-035 of the native
-/// tests).
+/// sampled query's statistics or a cursor that stays open. The reference server builds a plan's
+/// summary from its executor when it profiles or logs the operation, not for every read (H-035 of
+/// the native tests).
 #[derive(Clone)]
 pub struct PendingPlan(std::sync::Arc<dyn Fn() -> Document + Send + Sync>);
 
@@ -292,7 +292,8 @@ pub struct OpTable {
     reports: BTreeMap<u32, OpReport>,
     /// Each operation's own flag of `killOp`, which its calls read without this table's lock
     /// (H-013 of the native tests: every call of every worker took the node's lock to read
-    /// `killed`; RefDb's `OperationContext` keeps its kill code in an atomic the same way).
+    /// `killed`; the reference server's `OperationContext` keeps its kill code in an atomic the
+    /// same way).
     cancels: BTreeMap<u32, Interrupt>,
 }
 
@@ -407,8 +408,8 @@ const OP_STRIPES: usize = 16;
 /// The node's commands in progress, in stripes that each take their own lock (H-013 of the native
 /// tests): an operation begins and ends taking only its stripe's, not the node's, and with 8
 /// connections the node's lock was where their threads queued. `currentOp` and `killOp` go
-/// through the stripes; RefDb likewise registers each operation with its client, under that
-/// client's own lock, and `currentOp` visits the clients one by one.
+/// through the stripes; the reference server likewise registers each operation with its client,
+/// under that client's own lock, and `currentOp` visits the clients one by one.
 #[derive(Debug, Default)]
 pub struct Ops {
     /// The last id given.
@@ -625,8 +626,8 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
 
 impl<B: Backend + ?Sized> Guarded<'_, B> {
     /// A collection or a database a tenant creates, explicitly or by writing, within its
-    /// `maxCollections` and `maxDatabases` (007 FR-031): 14031 past them, since RefDb has no
-    /// code of its own for it.
+    /// `maxCollections` and `maxDatabases` (007 FR-031): 14031 past them, since the reference
+    /// server has no code of its own for it.
     fn check_tenant_quotas(&mut self, cmd: &CatalogCommand) -> Result<(), CommandError> {
         let CatalogCommand::Create { ns, .. } = cmd else { return Ok(()) };
         if self.tenant == 0 {
@@ -1419,7 +1420,8 @@ pub fn default_read_ms(params: &BTreeMap<String, Vec<u8>>) -> u64 {
 pub fn op_ns(db: &str, cmd: &Document) -> String {
     match cmd.iter().next() {
         Some((_, Value::String(coll))) if !coll.is_empty() => format!("{db}.{coll}"),
-        // An `aggregate: 1` runs on the database's own namespace (measured on a `refrouter` 9.0.4).
+        // An `aggregate: 1` runs on the database's own namespace (measured on the reference router
+        // 9.0.4).
         Some(("aggregate", _)) => format!("{db}.$cmd.aggregate"),
         _ => format!("{db}.$cmd"),
     }

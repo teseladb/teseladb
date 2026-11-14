@@ -1,7 +1,7 @@
-//! How `usersInfo` shows the documents of `admin.system.users` (013 FR-030), as RefDb 9.0.4
-//! shows them, whether a user command or a direct write stored them (measured on a `refrouter`,
-//! 31-10-2026): the stored document with `mechanisms` set as `$addFields` sets a field (in the
-//! place of a stored `mechanisms`, else at the end), without `credentials`,
+//! How `usersInfo` shows the documents of `admin.system.users` (013 FR-030), as the reference
+//! server 9.0.4 shows them, whether a user command or a direct write stored them (measured on the
+//! reference router, 31-10-2026): the stored document with `mechanisms` set as `$addFields` sets a
+//! field (in the place of a stored `mechanisms`, else at the end), without `credentials`,
 //! `authenticationRestrictions` and, unless asked, `customData`, sorted by `user` and `db`. With
 //! `showPrivileges` or `showAuthenticationRestrictions` a stored `mechanisms` stays, the computed
 //! one takes the place of `credentials`, and what the roles give follows.

@@ -1,7 +1,8 @@
 //! `collMod` of the special collections (015 FR-001, FR-006, FR-009): the definition of a view
 //! (`viewOn`, `pipeline`), the buckets of a time series (`timeseries`, which only widen) and the
 //! expiry of a time series or a clustered collection (`expireAfterSeconds`), with the checks, the
-//! messages and the order of the options of a `refnode` 9.0.4 (measured on 02-11-2026).
+//! messages and the order of the options of a reference replica set member 9.0.4 (measured on
+//! 02-11-2026).
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -47,7 +48,8 @@ pub fn definition<B: Backend + ?Sized>(
 ) -> Result<Option<Document>, CommandError> {
     let kind = kind_of(c)?;
     let time_series = matches!(kind, CollectionKind::TimeSeries(_));
-    // Its type before what the collection is (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    // Its type before what the collection is (measured on the reference router 9.0.4 on
+    // 05-11-2026).
     if let Some(v) = changes.get(TIMESERIES).filter(|v| !matches!(v, Value::Document(_))) {
         return Err(wrong_type("collMod.timeseries", v, "object"));
     }
@@ -277,7 +279,7 @@ pub fn expiry(
 pub const CAPPED_SIZE: &str = "cappedSize";
 /// The field of `collMod` that changes a capped collection's most documents.
 pub const CAPPED_MAX: &str = "cappedMax";
-/// The types of `cappedSize` and `cappedMax`, in RefDb's order.
+/// The types of `cappedSize` and `cappedMax`, in the reference server's order.
 const CAPPED_LIMIT_TYPES: [&str; 4] = ["double", "decimal", "int", "long"];
 /// The largest `cappedSize`: 1 PiB.
 const MAX_CAPPED_SIZE: i128 = 1 << 50;
@@ -293,10 +295,10 @@ pub struct CappedLimits {
     max: Option<i64>,
 }
 
-/// Takes `cappedSize` and `cappedMax` out of `changes`, checked as a `refrouter` 9.0.4 checks them
-/// before it looks at the collection (measured on 05-11-2026): numbers, a size from 1 to 1 PiB
-/// (a `double` truncated, a `decimal` rounded half to even) and a most under 2^31, where zero or
-/// less means none.
+/// Takes `cappedSize` and `cappedMax` out of `changes`, checked as the reference router 9.0.4
+/// checks them before it looks at the collection (measured on 05-11-2026): numbers, a size from 1
+/// to 1 PiB (a `double` truncated, a `decimal` rounded half to even) and a most under 2^31, where
+/// zero or less means none.
 pub fn capped_limits(changes: &mut Document) -> Result<Option<CappedLimits>, CommandError> {
     let mut limits = CappedLimits::default();
     for field in [CAPPED_SIZE, CAPPED_MAX] {

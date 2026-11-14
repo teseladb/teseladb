@@ -3,8 +3,8 @@
 //! documents scanned before them ([`write`]); its `_id` is kept unique by an `_id_` index of its
 //! own ([`id_index_rule`], [`id_key`]), because its documents are keyed by insertion order;
 //! `convertToCapped` copies a collection into a new capped one that takes its name
-//! ([`convert_to_capped`]). `cloneCollectionAsCapped` is not a command of a `refrouter` 9.0.4
-//! (measured: 59), and TeselaDB answers it the same.
+//! ([`convert_to_capped`]). `cloneCollectionAsCapped` is not a command of the reference router
+//! 9.0.4 (measured: 59), and TeselaDB answers it the same.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::delta::{IndexSet, Version};
@@ -52,7 +52,7 @@ pub fn rule_of(coll: &CollectionEntry) -> Result<Option<CappedRule>, CommandErro
 }
 
 /// The `_id_` index of capped collection `coll`, unique and with the collection's collation, as
-/// RefDb builds it.
+/// the reference server builds it.
 pub fn id_index_rule(coll: &CollectionEntry) -> IndexRule {
     let mut spec = Document::new()
         .with("v", 2)
@@ -132,9 +132,9 @@ fn doc_key_of_entry(coll: &CollectionEntry, value: &[u8]) -> Result<Vec<u8>, Com
     Ok(cap::doc_key(coll.tenant, coll.id, u64::from_be_bytes(seq)))
 }
 
-/// The error of capped write `bound` in a transaction, as a `refrouter` 9.0.4's shard answers it
-/// (measured): an insert or an update is `OperationNotSupportedInTransaction`, a deletion
-/// `IllegalOperation`.
+/// The error of capped write `bound` in a transaction, as the reference router 9.0.4's shard
+/// answers it (measured): an insert or an update is `OperationNotSupportedInTransaction`, a
+/// deletion `IllegalOperation`.
 pub fn in_transaction(bound: &Bound) -> CommandError {
     let ns = &bound.rules().ns;
     match bound.mutation {
@@ -245,8 +245,8 @@ pub fn purge<B: Backend + ?Sized>(
     }
 }
 
-/// The `size` of `convertToCapped`, as a `refrouter` 9.0.4 reads it (measured): a number, truncated,
-/// from 1 to 1 PiB.
+/// The `size` of `convertToCapped`, as the reference router 9.0.4 reads it (measured): a number,
+/// truncated, from 1 to 1 PiB.
 fn convert_size(v: Option<&Value>) -> Result<u64, CommandError> {
     let n = match v {
         Some(Value::Int32(n)) => *n as f64,
@@ -265,7 +265,7 @@ fn convert_size(v: Option<&Value>) -> Result<u64, CommandError> {
 }
 
 /// The name of the collection `convertToCapped` fills before it takes the original's name:
-/// `tmp` and five random letters or digits, as RefDb names it.
+/// `tmp` and five random letters or digits, as the reference server names it.
 fn temporary<B: Backend + ?Sized>(backend: &mut B, ns: &Namespace) -> Namespace {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut r = backend.random();
@@ -294,8 +294,8 @@ fn converted_options(coll: &CollectionEntry, size: u64) -> Result<Vec<u8>, Comma
 
 /// `convertToCapped`: the collection's documents, in its key order, go into a new capped
 /// collection (the oldest evicted by `size`), which then takes the collection's name; the
-/// secondary indexes do not follow and the collection gets a new UUID (measured on a `refrouter`
-/// 9.0.4).
+/// secondary indexes do not follow and the collection gets a new UUID (measured on the reference
+/// router 9.0.4).
 pub fn convert_to_capped<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -312,7 +312,7 @@ pub fn convert_to_capped<B: Backend + ?Sized>(
             let msg = "Cannot convert a timeseries collection to a capped collection";
             return Err(CommandError::new(ILLEGAL_OPERATION, msg));
         }
-        // A capped and clustered collection is a test feature of RefDb (DV-057).
+        // A capped and clustered collection is a test feature of the reference server (DV-057).
         CollectionKind::Clustered { .. } => {
             let msg = "Clustered capped collection only available with 'enableTestCommands' server parameter";
             return Err(CommandError::new(CLUSTERED_CAPPED_TEST, msg));

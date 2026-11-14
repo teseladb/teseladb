@@ -1,10 +1,10 @@
-//! The cluster's default concerns (007 FR-018, measured on a `refrouter` 9.0.4):
+//! The cluster's default concerns (007 FR-018, measured on the reference router 9.0.4):
 //! `setDefaultRWConcern` keeps them in Group 0 (as the internal cluster parameter
 //! [`RW_DEFAULTS`], which `getClusterParameter` does not list) and `getDefaultRWConcern` shows
 //! them over the implicit ones (`level: "local"`, `w: "majority"`). A command without its own
 //! `readConcern` or `writeConcern` takes them ([`Defaults`], cached on each node for at most
-//! [`DEFAULTS_REFRESH_MS`], as a `refrouter` caches them); errors then print the write concern with
-//! `provenance: "customDefault"`.
+//! [`DEFAULTS_REFRESH_MS`], as the reference router caches them); errors then print the write
+//! concern with `provenance: "customDefault"`.
 
 use std::collections::BTreeMap;
 
@@ -20,8 +20,8 @@ use crate::types::wrong_type;
 pub const GET_DEFAULT_RW_CONCERN: &str = "getDefaultRWConcern";
 /// `setDefaultRWConcern`.
 pub const SET_DEFAULT_RW_CONCERN: &str = "setDefaultRWConcern";
-/// The cluster parameter, internal, that keeps the defaults (RefDb's `config.settings`
-/// document of the same `_id`).
+/// The cluster parameter, internal, that keeps the defaults (the reference server's
+/// `config.settings` document of the same `_id`).
 pub const RW_DEFAULTS: &str = "ReadWriteConcernDefaults";
 /// How long a node keeps the defaults it read before it reads them again.
 pub const DEFAULTS_REFRESH_MS: u64 = 1_000;
@@ -281,12 +281,12 @@ pub const AUTO_COMPACT: &str = "autoCompact";
 /// `shutdown`.
 pub const SHUTDOWN: &str = "shutdown";
 
-/// The types `fsync.lock` takes, in a `refrouter` 9.0.4's order (measured).
+/// The types `fsync.lock` takes, in the reference router 9.0.4's order (measured).
 const LOCK_TYPES: [&str; 5] = ["decimal", "int", "long", "bool", "double"];
 /// The types `shutdown.timeoutSecs` takes (measured).
 const TIMEOUT_TYPES: [&str; 4] = ["long", "decimal", "double", "int"];
 
-/// Each node as a `refrouter` names a shard in `fsync`'s `raw`: `<shard>/<host>`.
+/// Each node as the reference router names a shard in `fsync`'s `raw`: `<shard>/<host>`.
 pub(crate) fn raw_names<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<String>, CommandError> {
     Ok(backend
         .config_documents("shards")?
@@ -298,8 +298,8 @@ pub(crate) fn raw_names<B: Backend + ?Sized>(backend: &mut B) -> Result<Vec<Stri
         .collect())
 }
 
-/// The failure of a command a `refrouter` sent to every shard, with the shards' answers in `raw`:
-/// `raw`, `code`, `codeName`, `ok` and `errmsg`, in that order (measured on 9.0.4 with
+/// The failure of a command the reference router sent to every shard, with the shards' answers in
+/// `raw`: `raw`, `code`, `codeName`, `ok` and `errmsg`, in that order (measured on 9.0.4 with
 /// `fsyncUnlock` and `appendOplogNote`).
 pub(crate) fn raw_failure(raw: Document, code: Code, errmsg: &str) -> Document {
     Document::new()
@@ -310,9 +310,9 @@ pub(crate) fn raw_failure(raw: Document, code: Code, errmsg: &str) -> Document {
         .with("errmsg", errmsg)
 }
 
-/// An error of `fsync` as a `refrouter` 9.0.4 gives it (measured on 03-11-2026): `numFiles`, each
-/// shard's answer in `all.raw` with the code beside it, `ok: 0` and `errmsg`, without a code of
-/// its own.
+/// An error of `fsync` as the reference router 9.0.4 gives it (measured on 03-11-2026): `numFiles`,
+/// each shard's answer in `all.raw` with the code beside it, `ok: 0` and `errmsg`, without a code
+/// of its own.
 fn fsync_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> Document {
     let names = raw_names(backend).unwrap_or_default();
     let each = Document::new()
@@ -339,8 +339,8 @@ fn generic(k: &str) -> bool {
 }
 
 /// `fsync`: every write a node acknowledged is already on its disk, so there is nothing to
-/// flush; the answer has each node as a `refrouter` has each shard. With `lock` it takes one more of
-/// the cluster's locks against writes ([`super::write_block::lock`]).
+/// flush; the answer has each node as the reference router has each shard. With `lock` it takes one
+/// more of the cluster's locks against writes ([`super::write_block::lock`]).
 pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(FSYNC, ctx.db)?;
     let mut lock = false;
@@ -373,11 +373,12 @@ pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
         .with("ok", 1.0))
 }
 
-/// `compact` (DV-017): a `refrouter` refuses it and a `refnode` runs it on itself; TeselaDB takes
-/// it on any node with the fields and checks of a `refnode` 9.0.4 (measured: without `force`
-/// the node refuses, as a primary does). The node compacts the files of all its cores, as a
-/// `refnode` rewrites the collection, and answers the bytes freed: what the history no longer
-/// needs stayed on disk until the space of the files asked for a compaction (H-054).
+/// `compact` (DV-017): the reference router refuses it and a reference replica set member runs it
+/// on itself; TeselaDB takes it on any node with the fields and checks of a reference replica set
+/// member 9.0.4 (measured: without `force` the node refuses, as a primary does). The node compacts
+/// the files of all its cores, as a reference replica set member rewrites the collection, and
+/// answers the bytes freed: what the history no longer needs stayed on disk until the space of the
+/// files asked for a compaction (H-054).
 pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let mut force = false;
     for (k, v) in ctx.cmd.iter().skip(1) {
@@ -409,7 +410,7 @@ pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
 }
 
 /// `autoCompact` (DV-017): the node's LSM always compacts in the background; the switch is
-/// taken with a `refnode`'s checks (measured).
+/// taken with a reference replica set member's checks (measured).
 pub fn auto_compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(AUTO_COMPACT, ctx.db)?;
     if !matches!(ctx.first(), Value::Boolean(_)) {
@@ -428,7 +429,7 @@ pub fn auto_compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
     Ok(Document::new().with("ok", 1.0))
 }
 
-/// `shutdown`: stops this node, as a `refrouter` stops itself, with its checks (measured).
+/// `shutdown`: stops this node, as the reference router stops itself, with its checks (measured).
 pub fn shutdown<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(SHUTDOWN, ctx.db)?;
     for (k, v) in ctx.cmd.iter().skip(1) {

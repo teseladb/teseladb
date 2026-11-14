@@ -1,9 +1,9 @@
 //! `collMod` of an index (009 FR-004, FR-007, contract `index-commands.md`): `hidden`,
 //! `expireAfterSeconds`, `prepareUnique` and the conversion to `unique`, with the replies and
-//! errors of a `refrouter` 9.0.4 (measured). The conversion first looks for documents with the same
-//! values in the index's entries (`CannotConvertIndexToUnique` with their `_id`s), then builds a
-//! unique index under another name, which takes the old one's place in Group 0 before the old
-//! entries go.
+//! errors of the reference router 9.0.4 (measured). The conversion first looks for documents with
+//! the same values in the index's entries (`CannotConvertIndexToUnique` with their `_id`s), then
+//! builds a unique index under another name, which takes the old one's place in Group 0 before the
+//! old entries go.
 
 use std::collections::BTreeMap;
 
@@ -177,8 +177,8 @@ fn set(spec: &Document, field: &str) -> bool {
 }
 
 /// `collMod` of an index: the index's specification changes in Group 0 and the reply gives each
-/// old and new value that changed, as a `refrouter` 9.0.4 does (measured; a field set to what it
-/// already is gives nothing, `hidden: false` and `prepareUnique: false` drop the field).
+/// old and new value that changed, as the reference router 9.0.4 does (measured; a field set to
+/// what it already is gives nothing, `hidden: false` and `prepareUnique: false` drop the field).
 pub fn modify_index<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
@@ -187,7 +187,7 @@ pub fn modify_index<B: Backend + ?Sized>(
     how: Modify,
 ) -> Result<Document, CommandError> {
     let r = parse(change)?;
-    // The index of `_id` cannot be hidden (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    // The index of `_id` cannot be hidden (measured on the reference router 9.0.4 on 05-11-2026).
     let id_key = Value::Document(Document::new().with("_id", 1));
     let names_id = r.name.as_deref() == Some("_id_") || r.key.as_ref() == Some(&id_key);
     if names_id && r.hidden.is_some() {
@@ -258,7 +258,7 @@ pub fn modify_index<B: Backend + ?Sized>(
         }
     }
     if converting {
-        // The duplicates come before the type of the index (a `refrouter` 9.0.4, measured).
+        // The duplicates come before the type of the index (the reference router 9.0.4, measured).
         let groups = violations(backend, coll, &entry)?;
         if !groups.is_empty() {
             return Err(cannot_convert(groups));
@@ -282,8 +282,9 @@ pub fn modify_index<B: Backend + ?Sized>(
 }
 
 /// Whether an index of specification `spec` can be unique: a hashed one cannot, with the error
-/// of a `refrouter` 9.0.4 (measured). Nor can a wildcard one, with the error `createIndexes` gives
-/// (DV: a `refnode` 9.0.4 accepts the conversion and aborts on the invalid index it wrote).
+/// of the reference router 9.0.4 (measured). Nor can a wildcard one, with the error `createIndexes`
+/// gives (DV: a reference replica set member 9.0.4 accepts the conversion and aborts on the invalid
+/// index it wrote).
 fn convertible(spec: &Document) -> Result<(), CommandError> {
     // The node stored the specification with its key.
     let key = match spec.get(KEY) {
@@ -315,9 +316,10 @@ fn cannot_convert(groups: Vec<Vec<Value>>) -> CommandError {
 }
 
 /// The groups of documents whose entries in index `entry` have the same values, in the order of
-/// the values (past the bucket, D-008), each with its `_id`s in their order (a `refrouter` 9.0.4 lists them in the order the
-/// documents were inserted; DV). The entries are read in order: the values end where the
-/// primary key starts. Then the documents give the `_id`s of the primary keys found.
+/// the values (past the bucket, D-008), each with its `_id`s in their order (the reference router
+/// 9.0.4 lists them in the order the documents were inserted; DV). The entries are read in order:
+/// the values end where the primary key starts. Then the documents give the `_id`s of the primary
+/// keys found.
 pub(super) fn violations<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,

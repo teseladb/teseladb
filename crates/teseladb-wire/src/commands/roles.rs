@@ -3,9 +3,9 @@
 //! `grantRolesToRole`, `revokeRolesFromRole` and `rolesInfo`, and the role graph that gives a
 //! user or a role what it inherits. Built-in roles cannot be changed; a role cannot inherit from
 //! itself; dropping a role takes it from every user and role in the same Group 0 batch. Fields,
-//! checks, field order and messages are RefDb 9.0.4's (measured on a `refrouter` with
-//! `--keyFile`). RefDb lists inherited roles in an order that changes between processes;
-//! TeselaDB lists them breadth first from the roles granted.
+//! checks, field order and messages are the reference server 9.0.4's (measured on the reference
+//! router with `--keyFile`). The reference server lists inherited roles in an order that changes
+//! between processes; TeselaDB lists them breadth first from the roles granted.
 
 use std::collections::BTreeMap;
 
@@ -82,9 +82,9 @@ fn decode(bytes: &[u8]) -> Result<Role, CommandError> {
     Role::from_document(&doc).map_err(super::authz_collections::stored_error)
 }
 
-/// A custom role as `rolesInfo` reads it (measured on RefDb 9.0.4): its stored document, which
-/// it shows as it is, the role with the privileges that parse, and those that do not, which it
-/// still lists as inherited. `name` prefixes the error of a role asked by name.
+/// A custom role as `rolesInfo` reads it (measured on the reference server 9.0.4): its stored
+/// document, which it shows as it is, the role with the privileges that parse, and those that do
+/// not, which it still lists as inherited. `name` prefixes the error of a role asked by name.
 struct Listed {
     role: Role,
     raw: Document,

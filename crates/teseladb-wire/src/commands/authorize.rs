@@ -1,6 +1,7 @@
 //! Authorization of each command (013 FR-011, T023): the user's privileges from its roles in
 //! Group 0, the table of `teseladb_auth::authz_rules`, the cursors of the node for `getMore` and
-//! `killCursors`, and RefDb 9.0.4's `Unauthorized` messages (measured on a `refrouter`).
+//! `killCursors`, and the reference server 9.0.4's `Unauthorized` messages (measured on the
+//! reference router).
 
 use teseladb_auth::actions::ActionType;
 use teseladb_auth::authz::{self, Check, Target};
@@ -13,24 +14,24 @@ use super::{Backend, Shared, display, lock};
 use crate::connection::{Connection, Request};
 use crate::error::{CommandError, NOT_PRIMARY_OR_SECONDARY, UNAUTHORIZED};
 
-/// Bytes from which RefDb shortens a string it quotes in a message (measured: 159 stay whole,
-/// 160 are cut).
+/// Bytes from which the reference server shortens a string it quotes in a message (measured: 159
+/// stay whole, 160 are cut).
 pub const QUOTE_CUT_FROM: usize = 160;
 /// Bytes a shortened string keeps, before `...`.
 pub const QUOTE_KEEP: usize = 150;
-/// What RefDb writes for a password it quotes.
+/// What the reference server writes for a password it quotes.
 pub const REDACTED: &str = "xxx";
-/// The commands whose `pwd` RefDb hides in its messages.
+/// The commands whose `pwd` the reference server hides in its messages.
 const WITH_PASSWORD: [&str; 2] = ["createUser", "updateUser"];
 /// The answer of a node without an authorization lease: drivers take the code as a node that is
 /// recovering and send the command to another (D-073).
 pub const LEASE_LOST: &str = "node is recovering: its copy of the users and roles may be behind and it authorizes nothing until it catches up";
-/// The field RefDb hides.
+/// The field the reference server hides.
 const PASSWORD_FIELD: &str = "pwd";
 
 /// Authorizes `req` on `conn` and returns the user's privileges, or `None` when the node does not
-/// authorize (`--insecure`, as a RefDb without `--auth`). Also sets whether the connection may
-/// skip the default time limit (`bypassDefaultMaxTimeMS` on the cluster).
+/// authorize (`--insecure`, as a reference server without `--auth`). Also sets whether the
+/// connection may skip the default time limit (`bypassDefaultMaxTimeMS` on the cluster).
 pub fn authorize<B: Backend + ?Sized>(
     conn: &mut Connection,
     req: &Request,
@@ -98,9 +99,9 @@ pub fn authorize<B: Backend + ?Sized>(
         _ if !check.passes(&privileges, true) => return Err(unauthorized(req)),
         _ => {}
     }
-    // `rawData` also asks for `performRawDataOperations` on the collection (measured on a
-    // `refnode` 9.0.4 with authentication on 02-11-2026: `find` alone, or the action alone, is
-    // refused with 13).
+    // `rawData` also asks for `performRawDataOperations` on the collection (measured on
+    // a reference replica set member 9.0.4 with authentication on 02-11-2026: `find` alone, or the
+    // action alone, is refused with 13).
     let raw = matches!(cmd.get("rawData"), Some(Value::Boolean(true)));
     if raw
         && let Some((_, Value::String(coll))) = cmd.iter().next()
@@ -115,8 +116,9 @@ pub fn authorize<B: Backend + ?Sized>(
     Ok(Some(privileges))
 }
 
-/// The command with a collection given by its UUID named instead, as RefDb resolves it before
-/// authorizing; the command itself when its first field is not a UUID of a collection of `db`.
+/// The command with a collection given by its UUID named instead, as the reference server resolves
+/// it before authorizing; the command itself when its first field is not a UUID of a collection of
+/// `db`.
 fn by_name<B: Backend + ?Sized>(
     backend: &mut B,
     db: &str,
@@ -165,8 +167,8 @@ pub fn unauthorized(req: &Request) -> CommandError {
 }
 
 /// `v` with each string of [`QUOTE_CUT_FROM`] bytes or more cut to [`QUOTE_KEEP`] and `...`.
-/// RefDb cuts at the byte even inside a character, which leaves the reply with invalid UTF-8;
-/// this cuts at the last character boundary before it (DV-044).
+/// The reference server cuts at the byte even inside a character, which leaves the reply with
+/// invalid UTF-8; this cuts at the last character boundary before it (DV-044).
 fn quoted(v: &Value) -> Value {
     match v {
         Value::String(s) if s.len() >= QUOTE_CUT_FROM => {

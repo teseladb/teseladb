@@ -1,6 +1,6 @@
-//! The 9.0 limiter of new connections (006 FR-036), as a `refnode` 9.0.4 behaves (measured on
-//! 05-11-2026). With it on, a connection takes a token from a bucket when its first message
-//! arrives; the bucket holds `RatePerSec × BurstCapacitySecs` tokens, starts full and gains
+//! The 9.0 limiter of new connections (006 FR-036), as a reference replica set member 9.0.4 behaves
+//! (measured on 05-11-2026). With it on, a connection takes a token from a bucket when its first
+//! message arrives; the bucket holds `RatePerSec × BurstCapacitySecs` tokens, starts full and gains
 //! `RatePerSec` a second. Without a token the connection waits its turn in a queue of
 //! `MaxQueueDepth` places; with the queue full it is closed without a reply. The addresses of the
 //! bypass list take no token. Sans-I/O: the caller gives the time and the peer's address.
@@ -28,7 +28,7 @@ pub const NAMES: [&str; 5] = [BURST_CAPACITY_SECS, MAX_QUEUE_DEPTH, BYPASS, ENAB
 
 /// The field of the bypass list.
 const RANGES: &str = "ranges";
-/// The name RefDb's errors give the bypass list's document.
+/// The name the reference server's errors give the bypass list's document.
 const RANGES_STRUCT: &str = "CIDRRangeListParameters";
 const MICROS_PER_SEC: f64 = 1_000_000.0;
 
@@ -191,7 +191,7 @@ impl Limiter {
 }
 
 /// Whether `ip` is in `range`, an address or a CIDR range; a range that does not read holds
-/// nothing (RefDb keeps it as given).
+/// nothing (the reference server keeps it as given).
 fn in_range(ip: IpAddr, range: &str) -> bool {
     let (addr, bits) = match range.split_once('/') {
         Some((a, b)) => (a, b.parse::<u32>().ok()),
@@ -212,8 +212,8 @@ fn in_range(ip: IpAddr, range: &str) -> bool {
     shift == width || (a >> shift) == (b >> shift)
 }
 
-/// The new value `v` of parameter `name`, one of [`NAMES`], checked and coerced as a `refnode`
-/// 9.0.4 does; `integral` reads an integer as the other parameters do.
+/// The new value `v` of parameter `name`, one of [`NAMES`], checked and coerced as a reference
+/// replica set member 9.0.4 does; `integral` reads an integer as the other parameters do.
 pub fn parse(
     name: &str,
     v: &Value,

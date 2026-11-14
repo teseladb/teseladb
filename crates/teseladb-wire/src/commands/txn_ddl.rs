@@ -1,15 +1,16 @@
-//! The collections a client transaction creates (008 FR-014, T019), as a `refrouter` 9.0.4 lets a
-//! transaction create them (measured on 31-10-2026): `create`, an insert into a collection that
-//! does not exist, and `createIndexes` on a collection the transaction created while it is still
-//! empty. The collection is created in Group 0 under a name of its own, which no command of a
+//! The collections a client transaction creates (008 FR-014, T019), as the reference router 9.0.4
+//! lets a transaction create them (measured on 31-10-2026): `create`, an insert into a collection
+//! that does not exist, and `createIndexes` on a collection the transaction created while it is
+//! still empty. The collection is created in Group 0 under a name of its own, which no command of a
 //! client sees ([`is_scratch`]), and the transaction's statements see it under its own name. The
 //! commit renames it to that name before the transaction's record commits; a name that another
-//! client took in the meantime aborts the transaction with `WriteConflict`, as RefDb does. An
-//! abort drops it, and the node's keeper drops those left by transactions that are no longer
-//! running on the node (a restart ends them all).
+//! client took in the meantime aborts the transaction with `WriteConflict`, as the reference server
+//! does. An abort drops it, and the node's keeper drops those left by transactions that are no
+//! longer running on the node (a restart ends them all).
 //!
 //! The database of the collection exists from its creation, also if the transaction aborts, as on
-//! a `refrouter` 9.0.4 (measured: `listDatabases` lists it before the commit and after the abort).
+//! the reference router 9.0.4 (measured: `listDatabases` lists it before the commit and after the
+//! abort).
 
 use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
@@ -119,7 +120,8 @@ pub fn catalog_write(
     Ok(Some(entry))
 }
 
-/// RefDb's error for a collection a transaction creates that exists (measured on 9.0.4).
+/// The reference server's error for a collection a transaction creates that exists (measured on
+/// 9.0.4).
 fn exists(ns: &Namespace) -> CommandError {
     CommandError::new(NAMESPACE_EXISTS, format!("Collection {} already exists.", full(ns)))
 }
@@ -128,9 +130,9 @@ fn refused(msg: impl Into<String>) -> CommandError {
     CommandError::new(OPERATION_NOT_SUPPORTED_IN_TRANSACTION, msg)
 }
 
-/// The rules of RefDb 9.0.4 for `create` and `createIndexes` in a transaction (measured): no
-/// view, no time series, no collection that exists, and indexes only on an empty collection the
-/// transaction created. `backend` reads as the transaction reads.
+/// The rules of the reference server 9.0.4 for `create` and `createIndexes` in a transaction
+/// (measured): no view, no time series, no collection that exists, and indexes only on an empty
+/// collection the transaction created. `backend` reads as the transaction reads.
 pub fn precheck(
     backend: &mut dyn Backend,
     created: &[Created],
@@ -180,9 +182,9 @@ pub fn precheck(
     }
 }
 
-/// `createIndexes`' reply on a collection the transaction created: RefDb says it created the
-/// collection, also when an earlier statement did, at the top and in the shard's reply under
-/// `raw` (measured on 9.0.4 on 31-10-2026 and 03-11-2026).
+/// `createIndexes`' reply on a collection the transaction created: the reference server says it
+/// created the collection, also when an earlier statement did, at the top and in the shard's reply
+/// under `raw` (measured on 9.0.4 on 31-10-2026 and 03-11-2026).
 pub fn mark_created(created: &[Created], db: &str, cmd: &Document, reply: &mut Document) {
     let Some(Value::String(c)) = cmd.get(CREATE_INDEXES) else { return };
     let ns = Namespace { db: db.to_owned(), coll: c.clone() };
@@ -207,7 +209,7 @@ pub fn mark_created(created: &[Created], db: &str, cmd: &Document, reply: &mut D
 }
 
 /// Gives the transaction's collections their names before its commit. A name another client
-/// took in the meantime puts back the ones already renamed and fails with RefDb's
+/// took in the meantime puts back the ones already renamed and fails with the reference server's
 /// `WriteConflict` (measured on 9.0.4); the caller aborts the transaction.
 pub fn publish(inner: &mut dyn Backend, created: &[Created]) -> Result<(), CommandError> {
     for (i, c) in created.iter().enumerate() {

@@ -1,7 +1,7 @@
 //! `explain` (010 FR-003, T018): the plan of a `find`, `count`, `distinct`, `update`, `delete` or
-//! `findAndModify` in the shape a `refrouter` 9.0.4 gives it (measured 01-11-2026), with one section
-//! for the node that runs it, and with `executionStats` or `allPlansExecution` what running it
-//! counted, without writing anything. The plan is the one this node runs: a collection scan, or
+//! `findAndModify` in the shape the reference router 9.0.4 gives it (measured 01-11-2026), with one
+//! section for the node that runs it, and with `executionStats` or `allPlansExecution` what running
+//! it counted, without writing anything. The plan is the one this node runs: a collection scan, or
 //! the key of an `_id` equality; sorts, skips, limits and projections over it.
 
 use teseladb_bson::{Document, RawDoc, Value};
@@ -77,7 +77,7 @@ struct Stage {
     input: Option<Box<Stage>>,
     /// The other inputs of a stage that reads several (`EQ_LOOKUP`), which it lists itself.
     inputs: Vec<Stage>,
-    /// Its number in a plan of RefDb's slot-based engine (`planNodeId`).
+    /// Its number in a plan of the reference server's slot-based engine (`planNodeId`).
     id: Option<u32>,
     /// The plan comes from an active entry of the plan cache (`isCached`).
     cached: bool,
@@ -106,8 +106,8 @@ impl Stage {
 
     /// The `works` of the stage: one per document it read or got, and one to end. A stage over
     /// several inputs (`OR`, `MERGE_SORT`) works once for each work of one of them, so its works
-    /// are theirs added (measured on a `refnode` 9.0.4: an `OR` of two scans of two works each
-    /// works 4 times, with one `needTime` when the first ends).
+    /// are theirs added (measured on a reference replica set member 9.0.4: an `OR` of two scans of
+    /// two works each works 4 times, with one `needTime` when the first ends).
     fn works(&self) -> i64 {
         match &self.input {
             Some(i) => i.works(),
@@ -140,8 +140,9 @@ impl Stage {
     }
 
     /// [`Stage::executed`] for a plan that saved and restored its state `saves` times: a plan
-    /// chosen among several does it once when the trial ends (measured on a `refnode` 9.0.4: the
-    /// winner of a multi-plan shows `saveState` and `restoreState` 1 in each stage).
+    /// chosen among several does it once when the trial ends (measured on a reference replica set
+    /// member 9.0.4: the winner of a multi-plan shows `saveState` and `restoreState` 1 in each
+    /// stage).
     fn executed_saving(&self, saves: u64) -> Document {
         let mut d = Document::new().with("stage", self.name);
         if let Some(id) = self.id {
@@ -272,7 +273,7 @@ pub fn explain<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         }
         return Err(if known {
             let e = CommandError::new(ILLEGAL_OPERATION, format!("Cannot explain cmd: {name}"));
-            // A `refrouter` hands an `insert` to the shard, which refuses it.
+            // The reference router hands an `insert` to the shard, which refuses it.
             if name == crud::INSERT { on_node(ctx, e) } else { e }
         } else {
             CommandError::new(
@@ -305,7 +306,8 @@ pub fn explain<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
 
 /// The explained command as the router echoes it: `findAndModify` in the order of its fields
 /// `aggregate` with `explain: true`: the explain of its pipeline as `explain` gives it in
-/// `queryPlanner` mode, the command echoed without the flag (measured on a `refrouter` 9.0.4).
+/// `queryPlanner` mode, the command echoed without the flag (measured on the reference router
+/// 9.0.4).
 pub(crate) fn aggregate_flag<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -363,9 +365,9 @@ fn echoed(inner: &Document, name: &str, db: &str, outer: &Document) -> Document 
     out
 }
 
-/// The session and the cluster time the client sent with `explain`, which a `refrouter` 9.0.4 echoes
-/// after the explained command's own fields, except in an `aggregate` (measured on 09-11-2026,
-/// H-028).
+/// The session and the cluster time the client sent with `explain`, which the reference router
+/// 9.0.4 echoes after the explained command's own fields, except in an `aggregate` (measured on
+/// 09-11-2026, H-028).
 fn session_fields(out: &mut Document, outer: &Document) {
     for k in ["lsid", "$clusterTime"] {
         if let Some(v) = outer.get(k) {
@@ -412,7 +414,8 @@ fn read_parts(
         return (doc(st, "q"), doc(st, "sort"), None, None);
     }
     let filter = doc(command, "filter").or_else(|| doc(command, "query"));
-    // The `fields` of `findAndModify` shape its reply, not its read (measured on a `refrouter` 9.0.4).
+    // The `fields` of `findAndModify` shape its reply, not its read (measured on the reference
+    // router 9.0.4).
     let projection = doc(command, "projection");
     let key = match (command.get("distinct"), command.get("key")) {
         (Some(_), Some(Value::String(k))) => Some(k.as_str()),
@@ -421,8 +424,8 @@ fn read_parts(
     (filter, doc(command, "sort"), projection, key)
 }
 
-/// `queryHash`, `planCacheShapeHash` and `planCacheKey` of the explained read, as a `refnode`
-/// 9.0.4 computes them (H-028); none when the collection does not exist.
+/// `queryHash`, `planCacheShapeHash` and `planCacheKey` of the explained read, as a reference
+/// replica set member 9.0.4 computes them (H-028); none when the collection does not exist.
 fn plan_hashes<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
@@ -481,7 +484,8 @@ fn reply<B: Backend + ?Sized>(
             }
         }
     }
-    // The planning time, as a `refnode` 9.0.4 gives it next to the milliseconds (H-028).
+    // The planning time, as a reference replica set member 9.0.4 gives it next to the milliseconds
+    // (H-028).
     section.push("optimizationTimeMillis", 0);
     section.push("optimizationTimeMicros", 0);
     for k in [
@@ -556,8 +560,8 @@ fn node_parts<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> NodeParts {
     NodeParts { shard: super::shard_name(ctx.backend.node()), host, server, params }
 }
 
-/// An error the node gives while it plans or runs the explained command, as a `refrouter` relays
-/// it: after the shard that failed.
+/// An error the node gives while it plans or runs the explained command, as the reference router
+/// relays it: after the shard that failed.
 fn on_node<B: Backend + ?Sized>(ctx: &Ctx<'_, B>, mut e: CommandError) -> CommandError {
     e.errmsg = format!(
         "Explain command on shard {} failed :: caused by :: {}",
@@ -630,8 +634,8 @@ fn stats(e: &Explained, node: &str, verbosity: Verbosity) -> Document {
     out
 }
 
-/// A filter parsed as a query, with each `$expr` as RefDb rewrites it, and written back as
-/// RefDb does.
+/// A filter parsed as a query, with each `$expr` as the reference server rewrites it, and written
+/// back as the reference server does.
 pub(crate) fn parsed(filter: &Document, vars: Option<&Document>) -> Result<Document, CommandError> {
     let filter = teseladb_exec::expr::optimize::optimize_filter(filter, vars).map_err(from_mql)?;
     let bytes = filter.to_bytes()?;
@@ -684,13 +688,14 @@ fn collscan(ns: &Namespace, shown: &Document, examined: u64, matched: u64) -> St
     s
 }
 
-/// Whether parsed query `shown` matches no document, which RefDb plans as `EOF`.
+/// Whether parsed query `shown` matches no document, which the reference server plans as `EOF`.
 pub(super) fn matches_nothing(shown: &Document) -> bool {
     shown.len() == 1 && shown.get(teseladb_mql::ops::ALWAYS_FALSE).is_some()
 }
 
 /// Whether a projection only keeps or drops fields (`PROJECTION_SIMPLE`), with no dotted path:
-/// the projections RefDb's express path takes (measured on a `refnode` 9.0.4).
+/// the projections the reference server's express path takes (measured on a reference replica set
+/// member 9.0.4).
 pub(crate) fn simple_projection(p: &Document) -> bool {
     p.iter().all(|(k, v)| {
         !k.contains('.')
@@ -744,9 +749,9 @@ fn scan<B: Backend + ?Sized>(
     Ok((examined, matched))
 }
 
-/// The stage of RefDb's express path that read an `_id` equality and found `found` documents.
-/// A collection kept in `_id` order reads the document itself, with no key (measured on a
-/// `refnode` 9.0.4, 015 FR-014); an `_id` that is not there examines no key.
+/// The stage of the reference server's express path that read an `_id` equality and found `found`
+/// documents. A collection kept in `_id` order reads the document itself, with no key (measured on
+/// a reference replica set member 9.0.4, 015 FR-014); an `_id` that is not there examines no key.
 fn express_stage(clustered: bool, found: u64) -> Stage {
     let mut s = Stage::new(if clustered { "EXPRESS_CLUSTERED_IXSCAN" } else { "EXPRESS_IXSCAN" });
     if !clustered {
@@ -760,7 +765,8 @@ fn express_stage(clustered: bool, found: u64) -> Stage {
 }
 
 /// `find`: an `_id` equality reads its key (`EXPRESS_IXSCAN`); anything else scans, then sorts
-/// (with the limit folded into the sort), skips, projects and limits as RefDb orders them.
+/// (with the limit folded into the sort), skips, projects and limits as the reference server orders
+/// them.
 fn find<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
@@ -860,7 +866,7 @@ fn find<B: Backend + ?Sized>(
             let return_key = ctx.cmd.get("returnKey") == Some(&Value::Boolean(true));
             let shape = |r: &super::plan_exec::Ran, run: bool| {
                 // `returnKey` drops the projection, and a plan that reads its keys alone has no
-                // `FETCH` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+                // `FETCH` (measured on the reference router 9.0.4 on 05-11-2026).
                 let keys_alone = reads_keys_alone(r, &indexes, sort.as_ref());
                 let covered = projection.as_ref().filter(|p| !return_key && covers(p, &indexes, r));
                 let shown_projection = match covered.is_some() || return_key {
@@ -1112,7 +1118,7 @@ fn planned_read<B: Backend + ?Sized>(
 
 /// The plans of a write that takes the first document of `read` (its limit of one) or all of
 /// them: plans compete without the limit, and the plan that wins shows its trial; a plan alone
-/// stops at the first document (measured on a `refrouter` 9.0.4).
+/// stops at the first document (measured on the reference router 9.0.4).
 fn planned_write<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     coll: Option<&CollectionEntry>,
@@ -1402,8 +1408,8 @@ fn or_stage(
 /// The memory an `AND_HASH` may hold (`internalQueryMaxAndHashMemory`, 32 MiB as measured).
 const AND_HASH_MEM_LIMIT: i32 = 33_554_432;
 
-/// The bytes TeselaDB counts for each key an `AND_HASH` holds (RefDb counts its own record
-/// identifiers, which `explain` comparisons leave out).
+/// The bytes TeselaDB counts for each key an `AND_HASH` holds (the reference server counts its own
+/// record identifiers, which `explain` comparisons leave out).
 const AND_HASH_ENTRY_BYTES: u64 = 43;
 
 /// `DISTINCT_SCAN` of the values of `key`, the first field of `index`, as the projection of that
@@ -1503,8 +1509,8 @@ fn fetch_stage(
 
 /// `IXSCAN` of `index` within the intervals of `scan`.
 /// The counters of the `IXSCAN` of a multikey index that read `within` entries in its intervals
-/// and dropped `dups` of them as repeats of a document it gave (measured on a `refnode` 9.0.4:
-/// it tests each entry and gives the rest).
+/// and dropped `dups` of them as repeats of a document it gave (measured on a reference replica set
+/// member 9.0.4: it tests each entry and gives the rest).
 fn multikey_dups(ix: &mut Stage, index: &super::plan_exec::PlanIndex, within: u64, dups: u64) {
     if !index.meta.multikey {
         return;
@@ -1514,10 +1520,10 @@ fn multikey_dups(ix: &mut Stage, index: &super::plan_exec::PlanIndex, within: u6
     ix.returned = within.saturating_sub(dups);
 }
 
-/// The scan of the `_id` of a collection kept in `_id` order, as a `refnode` 9.0.4 shows it
-/// (measured on 09-11-2026, 015 FR-014): `CLUSTERED_IXSCAN` with the ends of its intervals, the
-/// `_id` condition as its filter when it has several intervals and the rest of the filter in an
-/// `$and`; without bounds, a `COLLSCAN` in the scan's direction.
+/// The scan of the `_id` of a collection kept in `_id` order, as a reference replica set member
+/// 9.0.4 shows it (measured on 09-11-2026, 015 FR-014): `CLUSTERED_IXSCAN` with the ends of its
+/// intervals, the `_id` condition as its filter when it has several intervals and the rest of the
+/// filter in an `$and`; without bounds, a `COLLSCAN` in the scan's direction.
 fn clustered_stage(
     ns: &Namespace,
     shown: &Document,
@@ -1608,8 +1614,8 @@ fn index_stage(
     let mut bounds = Document::new();
     for ((field, list), (_, dir)) in scan.bounds.iter().zip(&index.meta.key) {
         let against = (*dir < 0) != scan.backward;
-        // A hashed field's points are values, which the index reads by their hashes: RefDb
-        // shows the hashes (measured on 05-11-2026).
+        // A hashed field's points are values, which the index reads by their hashes: the reference
+        // server shows the hashes (measured on 05-11-2026).
         let hashed = *dir == teseladb_plan::rules::HASHED;
         let mut shown: Vec<Value> = list
             .iter()
@@ -1724,7 +1730,8 @@ fn count_plan<B: Backend + ?Sized>(
         if run { scan(ctx, coll.as_ref(), &read, None, |_| Ok(()))? } else { (0, 0) };
     let counted =
         limit.map_or(matched.saturating_sub(skip), |l| matched.saturating_sub(skip).min(l));
-    // A missing collection counts nothing, whatever the query (measured on a `refrouter` 9.0.4).
+    // A missing collection counts nothing, whatever the query (measured on the reference router
+    // 9.0.4).
     if coll.is_none() {
         let mut s = Stage::new("COUNT");
         s.counters.push("nCounted", 0);
@@ -1875,7 +1882,7 @@ fn distinct<B: Backend + ?Sized>(
             trials: Vec::new(),
         });
     };
-    // One `_id` reads by the express path (measured on a `refrouter` 9.0.4, H-011).
+    // One `_id` reads by the express path (measured on the reference router 9.0.4, H-011).
     if let Some(id) = super::query::express_id(c, &query, collation.as_ref(), ctx.cmd)? {
         let found = if run { read_id(ctx, c, &id, concern)? } else { 0 };
         return Ok(Explained {
@@ -1957,7 +1964,7 @@ fn distinct<B: Backend + ?Sized>(
 /// The plan of a `distinct` with a query that indexes serve, and the plans it rejected: a plan
 /// whose index holds the key after fields the query fixes, and decides the whole query, reads one
 /// key per value (`DISTINCT_SCAN`) and goes first; the others fetch their documents (measured on
-/// a `refrouter` 9.0.4).
+/// the reference router 9.0.4).
 fn distinct_plans<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     (ns, coll, shown): (&Namespace, &CollectionEntry, &Document),
@@ -2294,7 +2301,7 @@ fn delete_on_node<B: Backend + ?Sized>(
         || matches!(st.get("limit"), Some(Value::Double(x)) if *x == 1.0);
     check_filter(&q, collation, vars)?;
     let shown = parsed(&q, vars)?;
-    // A missing collection deletes nothing (measured on a `refrouter` 9.0.4).
+    // A missing collection deletes nothing (measured on the reference router 9.0.4).
     if coll.is_none() {
         return Ok(Explained {
             parsed: Value::Null,
@@ -2458,7 +2465,8 @@ fn find_and_modify<B: Backend + ?Sized>(
 }
 
 /// The `planSummary` of a plan: each scan it reads by (`COLLSCAN`, `IXSCAN { a: 1 }`), in the
-/// order of the plan, joined by commas as a `refnode` 9.0.4 writes it in `system.profile`.
+/// order of the plan, joined by commas as a reference replica set member 9.0.4 writes it in
+/// `system.profile`.
 fn plan_summary(s: &Stage) -> String {
     fn leaves(s: &Stage, out: &mut Vec<String>) {
         if s.input.is_none() && s.inputs.is_empty() {

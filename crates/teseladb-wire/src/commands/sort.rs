@@ -3,7 +3,7 @@
 //! descending their largest, a missing field is `null` and an empty array sorts as `undefined`
 //! (after MinKey, before `null`). Strings compare with the command's collation, and values as a
 //! sort without an index compares them ([`compare_for_sort`]: DBPointers by ObjectId before
-//! namespace), as a `refrouter` 9.0.4 does (measured, 003 T012).
+//! namespace), as the reference router 9.0.4 does (measured, 003 T012).
 
 use std::cmp::Ordering;
 
@@ -50,7 +50,7 @@ pub struct SortSpec {
     pub metas: Vec<String>,
 }
 
-/// The checks of `FieldPath` on a sort key's path, with RefDb's messages.
+/// The checks of `FieldPath` on a sort key's path, with the reference server's messages.
 fn check_path(path: &str) -> Result<(), CommandError> {
     const HINT: &str =
         "Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: ";
@@ -77,7 +77,8 @@ fn check_path(path: &str) -> Result<(), CommandError> {
 }
 
 impl SortSpec {
-    /// Reads `{path: 1 | -1 | {$meta: …}, …}` with the errors of a `refrouter` 9.0.4 (measured).
+    /// Reads `{path: 1 | -1 | {$meta: …}, …}` with the errors of the reference router 9.0.4
+    /// (measured).
     pub fn parse(spec: &Document) -> Result<SortSpec, CommandError> {
         let mut fields = Vec::new();
         let mut metas = Vec::new();
@@ -224,7 +225,7 @@ fn walk<'a>(v: RawValue<'a>, segs: &[&str], out: &mut Vec<RawValue<'a>>) {
 fn key(doc: RawDoc<'_>, path: &str, asc: bool, collation: Option<&dyn Collator>) -> SortKey {
     let candidates = teseladb_exec::pipeline::sort::sort_candidates(doc, path);
     // The element is chosen in the order of queries; the key then sorts in the order of a sort
-    // (they differ for DBPointers, measured on a `refrouter` 9.0.4).
+    // (they differ for DBPointers, measured on the reference router 9.0.4).
     let best = candidates.into_iter().reduce(|x, y| {
         let o = compare(x, y, collation);
         match (asc, o) {

@@ -1,5 +1,5 @@
-//! `applyOps` (018 FR-011): applies entries of `local.oplog.rs` one by one, as RefDb 9.0.4
-//! does (measured on 02-11-2026 on a replica set of `ref:9.0`):
+//! `applyOps` (018 FR-011): applies entries of `local.oplog.rs` one by one, as the reference server
+//! 9.0.4 does (measured on 02-11-2026 on a replica set of the reference server 9.0):
 //!
 //! - `i` writes the document whole (an `_id` already there is replaced);
 //! - `u` applies `{$v: 2, diff}`, an update by operators or a replacement to the document `o2`
@@ -43,8 +43,8 @@ const UPDATE_ERROR: &str = "Plan executor error during update :: caused by :: ";
 /// The subtype and length of a UUID.
 const UUID_SUBTYPE: u8 = 4;
 const UUID_LEN: usize = 16;
-/// The commands a `c` entry may carry (RefDb 9.0.4 refuses any other with 2, measured on
-/// 03-11-2026, `ap.js`).
+/// The commands a `c` entry may carry (the reference server 9.0.4 refuses any other with 2,
+/// measured on 03-11-2026, `ap.js`).
 const ENTRY_COMMANDS: [&str; 18] = [
     "create",
     "renameCollection",
@@ -66,8 +66,8 @@ const ENTRY_COMMANDS: [&str; 18] = [
     "createDatabaseMetadata",
 ];
 
-/// Entry `i`, checked before any entry applies, as RefDb 9.0.4 does: a document whose `op` and
-/// `ns` are strings, and a `c` entry's command one that an oplog carries.
+/// Entry `i`, checked before any entry applies, as the reference server 9.0.4 does: a document
+/// whose `op` and `ns` are strings, and a `c` entry's command one that an oplog carries.
 fn precheck((i, v): (usize, &Value)) -> Result<&Document, CommandError> {
     let type_name = crate::types::type_name;
     let Value::Document(d) = v else {
@@ -110,10 +110,11 @@ fn precheck((i, v): (usize, &Value)) -> Result<&Document, CommandError> {
     Ok(d)
 }
 
-/// The values of `needsRetryImage` (RefDb 9.0.4's enumeration).
+/// The values of `needsRetryImage` (the reference server 9.0.4's enumeration).
 const RETRY_IMAGES: [&str; 2] = ["preImage", "postImage"];
 
-/// Field `field` of an entry with the wrong type, as the parser of RefDb 9.0.4 says it.
+/// Field `field` of an entry with the wrong type, as the parser of the reference server 9.0.4 says
+/// it.
 fn wrong_type(field: &str, v: &Value, expected: &str) -> CommandError {
     let t = crate::types::type_name(v);
     let msg =
@@ -121,8 +122,8 @@ fn wrong_type(field: &str, v: &Value, expected: &str) -> CommandError {
     CommandError::new(TYPE_MISMATCH, msg)
 }
 
-/// Field `field` of an entry, checked as RefDb 9.0.4 reads it when the entry's turn comes
-/// (measured on 03-11-2026, `ap9.js` and `ap10.js`).
+/// Field `field` of an entry, checked as the reference server 9.0.4 reads it when the entry's turn
+/// comes (measured on 03-11-2026, `ap9.js` and `ap10.js`).
 fn check_field(field: &str, v: &Value) -> Result<(), CommandError> {
     const NUMBER: &str = "types '[double, long, int, decimal]'";
     let missing = |path: &str| {
@@ -142,8 +143,9 @@ fn check_field(field: &str, v: &Value) -> Result<(), CommandError> {
         ("ts", v) if !matches!(v, Value::Timestamp { .. }) => {
             Err(wrong_type(field, v, "type 'timestamp'"))
         }
-        // `refrestore --oplogReplay` gives the operations of a transaction with `t: null`, and
-        // a member takes them (02-11-2026, refrestore 100.20.0 against 9.0.4).
+        // The reference restore tool with `--oplogReplay` gives the operations of a transaction
+        // with `t: null`, and a member takes them (02-11-2026, the reference restore tool 100.20.0
+        // against 9.0.4).
         ("t" | "v", v) if !number && !matches!(v, Value::Null) => Err(wrong_type(field, v, NUMBER)),
         ("wall", v) if !matches!(v, Value::DateTime(_)) => Err(wrong_type(field, v, "type 'date'")),
         ("needsRetryImage", Value::String(s)) if !RETRY_IMAGES.contains(&s.as_str()) => {
@@ -211,7 +213,8 @@ fn parse(d: &Document) -> Result<Operation, CommandError> {
     Ok(operation)
 }
 
-/// The error of a diff RefDb does not write (measured on 03-11-2026, `ap7.js` and `ap8.js`).
+/// The error of a diff the reference server does not write (measured on 03-11-2026, `ap7.js` and
+/// `ap8.js`).
 fn diff_error(e: DiffError) -> CommandError {
     match e {
         DiffError::Unexpected(k) => CommandError::new(
@@ -227,7 +230,8 @@ fn diff_error(e: DiffError) -> CommandError {
 /// Whether the reply of a write or command says it went through; its first write error ends the
 /// command.
 fn ok(reply: Document) -> Result<bool, CommandError> {
-    // An insert entry is written as an upsert, but its error is the insert's, as RefDb gives it.
+    // An insert entry is written as an upsert, but its error is the insert's, as the reference
+    // server gives it.
     let reply = super::fle_write::checked(reply).map_err(|mut e| {
         let plain = e.errmsg.strip_prefix(UPDATE_ERROR).map(str::to_owned);
         e.errmsg = plain.unwrap_or(e.errmsg);
@@ -305,7 +309,7 @@ fn apply_one<B: Backend + ?Sized>(
         }
         _ => {
             let Some(q) = op.o2.clone() else {
-                // As RefDb 9.0.4 shows the entry: with its null `ts` and `wall`.
+                // As the reference server 9.0.4 shows the entry: with its null `ts` and `wall`.
                 let shown = op
                     .to_document()
                     .with("ts", Value::Timestamp { time: 0, increment: 0 })

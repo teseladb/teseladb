@@ -2,7 +2,7 @@
 //! configuration from the cluster parameter `topologyPresentation` and the cluster's nodes,
 //! `local.system.replset`, the `replSet*` commands and what a member refuses.
 //!
-//! Measured on a replica set of three members of RefDb 9.0.4 (`ref:9.0`, 02-11-2026): a
+//! Measured on a replica set of three members of the reference server 9.0.4 (02-11-2026): a
 //! secondary refuses writes and DDL with `NotWritablePrimary` (`not primary`, with the
 //! `topologyVersion`); the router's commands do not exist on a member (`no such command`);
 //! `replSetInitiate` answers `already initialized`; `replSetFreeze`, `replSetMaintenance` and
@@ -12,7 +12,7 @@
 //! A member's holds (`replSetFreeze`, `replSetMaintenance` and the stepped-down primary's
 //! `stepDownSecs`) are kept in Group 0 ([`super::presentation::Hold`]) and keep it from being
 //! designated; one in maintenance mode is `RECOVERING` to every member and to the drivers, as on
-//! RefDb 9.0.4 (measured on 02-11-2026, `f1.js`, `f2.js`).
+//! the reference server 9.0.4 (measured on 02-11-2026, `f1.js`, `f2.js`).
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{Member, MemberId, ReplicaSet, whole_number};
@@ -197,13 +197,13 @@ pub fn system_replset<B: Backend + ?Sized>(
 }
 
 /// The set, this node's member and the stored presentation, or the refusal of a node that
-/// presents itself as a `refrouter`.
+/// presents itself as a router.
 fn member_view<B: Backend + ?Sized>(
     backend: &mut B,
     name: &str,
 ) -> Result<(ReplicaSet, MemberId, Presentation, [u8; 12]), CommandError> {
     let Some((rs, id)) = super::presentation::replica_set(backend)? else {
-        // A `refrouter` 9.0.4 does not have them (measured).
+        // The reference router 9.0.4 does not have them (measured).
         return Err(CommandError::new(COMMAND_NOT_FOUND, format!("no such cmd: {name}")));
     };
     let me = my_host(backend)?;
@@ -258,7 +258,8 @@ pub fn step_down<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
             "No electable secondaries caught up as of the step down deadline",
         ));
     };
-    // The old primary may not be designated again for `stepDownSecs`, as RefDb freezes it.
+    // The old primary may not be designated again for `stepDownSecs`, as the reference server
+    // freezes it.
     let secs = seconds(ctx.first()).unwrap_or(STEP_DOWN_SECS).max(0);
     let me_host = rs.members()[member_index(&rs, me)].host().to_owned();
     let hold = held.iter().find(|(h, _)| *h == me_host).map(|(_, x)| *x).unwrap_or_default();
@@ -276,7 +277,8 @@ fn member_index(rs: &ReplicaSet, me: MemberId) -> usize {
     rs.members().iter().position(|m| rs.member(m.host()) == Some(me)).unwrap_or(0)
 }
 
-/// A number of seconds as RefDb reads it (a double truncated); `None` for anything else.
+/// A number of seconds as the reference server reads it (a double truncated); `None` for anything
+/// else.
 fn seconds(v: &Value) -> Option<i64> {
     match v {
         Value::Int32(n) => Some(i64::from(*n)),
@@ -304,7 +306,7 @@ fn member_error(d: &Document, why: &str) -> CommandError {
     )
 }
 
-/// A member of `replSetReconfig` checked as RefDb 9.0.4 checks it.
+/// A member of `replSetReconfig` checked as the reference server 9.0.4 checks it.
 fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
     const NUMBERS: &str = "[long, double, decimal, int]";
     const FLAGS: &str = "[double, bool, int, long, decimal]";
@@ -350,9 +352,9 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
         Some(_) => num("hidden").is_some_and(|n| n != 0.0),
         None => false,
     };
-    // RefDb keeps the whole part of `votes` (0.5 is 0, measured).
+    // The reference server keeps the whole part of `votes` (0.5 is 0, measured).
     let votes = num("votes").unwrap_or(1.0).trunc();
-    // RefDb's default priority is 1, also for a member without votes or hidden.
+    // The reference server's default priority is 1, also for a member without votes or hidden.
     let priority = num("priority").unwrap_or(1.0);
     if votes == 0.0 && priority > 0.0 {
         return Err(member_error(d, "priority must be 0 when non-voting (votes:0)"));
@@ -375,8 +377,8 @@ fn reconfig_member(d: &Document) -> Result<Member, CommandError> {
     })
 }
 
-/// The `version` of a `replSetReconfig` configuration as RefDb 9.0.4 reads it: any whole
-/// number within 64 bits.
+/// The `version` of a `replSetReconfig` configuration as the reference server 9.0.4 reads it: any
+/// whole number within 64 bits.
 fn config_version(v: Option<&Value>) -> Result<i64, CommandError> {
     let invalid = |why: String| CommandError::new(INVALID_REPLICA_SET_CONFIG, why);
     let Some(v) = v else {
@@ -470,8 +472,8 @@ pub fn reconfig<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
 }
 
 /// `replSetFreeze`: a secondary may not be designated primary for that many seconds (0, or what
-/// is not a number, unfreezes it); the primary refuses. The answers are RefDb 9.0.4's
-/// (measured on 02-11-2026, `f1.js`).
+/// is not a number, unfreezes it); the primary refuses. The answers are the reference server
+/// 9.0.4's (measured on 02-11-2026, `f1.js`).
 pub fn freeze<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     super::admin::admin_only(REPL_SET_FREEZE, ctx.db)?;
     let (rs, me, _, _) = member_view(ctx.backend, REPL_SET_FREEZE)?;
@@ -497,7 +499,7 @@ pub fn freeze<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     Ok(d.with("ok", 1.0))
 }
 
-/// Whether `v` is true as RefDb reads a flag (anything but `false`, 0 and null).
+/// Whether `v` is true as the reference server reads a flag (anything but `false`, 0 and null).
 fn truthy(v: &Value) -> bool {
     !matches!(v, Value::Boolean(false) | Value::Null | Value::Undefined)
         && seconds(v).is_none_or(|n| n != 0)
@@ -627,12 +629,12 @@ pub fn run<B: Backend + ?Sized>(
 
 /// `heartbeatIntervalMillis` of `replSetGetStatus`.
 const HEARTBEAT_INTERVAL_MS: i64 = 2000;
-/// `electionTimeoutMillis` of RefDb's default `settings`.
+/// `electionTimeoutMillis` of the reference server's default `settings`.
 const ELECTION_TIMEOUT_MS: i64 = 10_000;
 
 /// `replSetGetStatus` in the replica set presentation (measured on a replica set of three
-/// members of RefDb 9.0.4 on 02-11-2026, `s1.js`, `s2.js`): a member in maintenance mode is
-/// `RECOVERING`, the secondaries name the primary as their sync source, and the latest
+/// members of the reference server 9.0.4 on 02-11-2026, `s1.js`, `s2.js`): a member in maintenance
+/// mode is `RECOVERING`, the secondaries name the primary as their sync source, and the latest
 /// designation by Group 0 is the election (`electionTime`, `electionCandidateMetrics` on the
 /// primary, `electionParticipantMetrics` on the others). The ranges replicate by Raft, not by the
 /// oplog, so every member's optimes are the node's mark; the members do not send each other
@@ -762,7 +764,7 @@ fn stable_recovery(mark: teseladb_hlc::Hlc) -> Value {
     Value::Timestamp { time, increment }
 }
 
-/// A priority as RefDb shows it: an integer when it is whole.
+/// A priority as the reference server shows it: an integer when it is whole.
 fn priority_value(p: f64) -> Value {
     // A member's priority is within 0 and 1000, checked when the set is made.
     if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
@@ -840,12 +842,13 @@ const MEMBER_WRITES: [&str; 3] = ["insert", "update", "delete"];
 const AFTER_OP_TIME: [&str; 3] = ["writeErrors", "upserted", "nModified"];
 
 /// The reply of write `command` as a replica set member gives it (measured on a replica set of
-/// `ref:9.0.4`, 03-11-2026): `n`, then `electionId` and `opTime` (the write's optime: its
-/// `operationTime` and the presentation's term), then `writeErrors`, `upserted` and `nModified`,
-/// then the rest. A reply without `n` (an error) or another command's stays as it is, without the
-/// `recoveryToken` a `refrouter` adds inside a transaction, which a member never gives (measured on
-/// the same replica set). An error's `errorLabels` go first, as a member puts them (measured on
-/// a replica set of `ref:9.0.4`, 03-11-2026, for `NoSuchTransaction` and `WriteConflict`).
+/// the reference server 9.0.4, 03-11-2026): `n`, then `electionId` and `opTime` (the write's
+/// optime: its `operationTime` and the presentation's term), then `writeErrors`, `upserted` and
+/// `nModified`, then the rest. A reply without `n` (an error) or another command's stays as it is,
+/// without the `recoveryToken` the reference router adds inside a transaction, which a member never
+/// gives (measured on the same replica set). An error's `errorLabels` go first, as a member puts
+/// them (measured on a replica set of the reference server 9.0.4, 03-11-2026, for
+/// `NoSuchTransaction` and `WriteConflict`).
 pub fn member_write_reply(
     view: &crate::hello::ReplicaView,
     command: &str,

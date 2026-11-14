@@ -1,8 +1,8 @@
-//! `explain` of a read on a view (010 FR-003, 015 FR-001), as a `refrouter` 9.0.4 gives it (measured
-//! 01-11-2026): the explain of the aggregation the read becomes on the collection the view reads
-//! (the view's stages, then the read's), which it echoes as `command` in the form RefDb keeps
-//! its stages (a `$match` as given), with the view's collation. A write on a view fails, after
-//! the shard's name for `update` and `delete`.
+//! `explain` of a read on a view (010 FR-003, 015 FR-001), as the reference router 9.0.4 gives it
+//! (measured 01-11-2026): the explain of the aggregation the read becomes on the collection the
+//! view reads (the view's stages, then the read's), which it echoes as `command` in the form the
+//! reference server keeps its stages (a `$match` as given), with the view's collation. A write on a
+//! view fails, after the shard's name for `update` and `delete`.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::Namespace;
@@ -104,8 +104,8 @@ pub(super) fn on_view<B: Backend + ?Sized>(
     Ok(reply)
 }
 
-/// The stages as RefDb echoes them: `$match` and `$sort` as given, the others in the form it
-/// keeps.
+/// The stages as the reference server echoes them: `$match` and `$sort` as given, the others in the
+/// form it keeps.
 fn echoed(stages: &[Document]) -> Vec<Document> {
     stages
         .iter()
@@ -117,8 +117,8 @@ fn echoed(stages: &[Document]) -> Vec<Document> {
         .collect()
 }
 
-/// The stages a `distinct` of `key` on a view ends with in RefDb: every value at the path,
-/// unwound, gathered in one set.
+/// The stages a `distinct` of `key` on a view ends with in the reference server: every value at the
+/// path, unwound, gathered in one set.
 fn distinct_tail(key: &str) -> Vec<Document> {
     let values = Document::new().with(
         "$_internalFindAllValuesAtPath",
@@ -146,7 +146,7 @@ fn distinct_tail(key: &str) -> Vec<Document> {
 }
 
 /// The reply of the explain of a `distinct` of `key` on a view: after the plan, which keeps
-/// the key alone, come RefDb's own stages (`tail`).
+/// the key alone, come the reference server's own stages (`tail`).
 fn with_distinct_tail(
     reply: Document,
     tail: &[Document],
@@ -174,8 +174,9 @@ fn with_distinct_tail(
 }
 
 /// A node's section of a `distinct` on a view: its plan under a `$cursor` keeping only `key`,
-/// then RefDb's stages. The plan cache hashes are those of a read of `key` alone (measured on a
-/// `refrouter` 9.0.4: a view on `{$match: {g: "a"}}` gives the shape `eqg||s||ftr`).
+/// then the reference server's stages. The plan cache hashes are those of a read of `key` alone
+/// (measured on the reference router 9.0.4: a view on `{$match: {g: "a"}}` gives the shape
+/// `eqg||s||ftr`).
 fn distinct_section(
     sec: &Document,
     tail: &[Value],

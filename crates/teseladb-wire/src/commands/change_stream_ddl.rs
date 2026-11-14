@@ -1,9 +1,9 @@
 //! The catalog events of a change stream (014 FR-002, FR-014): each change Group 0 recorded
-//! becomes the event a `refrouter` 9.0.4 gives (measured on 01-11): `create` with the options and
-//! the `_id` index (a view with `viewOn` and `pipeline`, no `collectionUUID` and `nsType: "view"`;
-//! a time series gives none), `createIndexes` and `dropIndexes` with the index, `modify` with what
-//! `collMod` asked for and the options before, `rename` with `to` (and `dropTarget`, the
-//! collection it dropped), `drop` and `dropDatabase`.
+//! becomes the event the reference router 9.0.4 gives (measured on 01-11): `create` with the
+//! options and the `_id` index (a view with `viewOn` and `pipeline`, no `collectionUUID` and
+//! `nsType: "view"`; a time series gives none), `createIndexes` and `dropIndexes` with the index,
+//! `modify` with what `collMod` asked for and the options before, `rename` with `to` (and
+//! `dropTarget`, the collection it dropped), `drop` and `dropDatabase`.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::ddl::{ddl_key, index_change, shown};
@@ -71,7 +71,7 @@ fn in_watch(w: &Watch<'_>, ns: &Namespace) -> bool {
 
 /// The type of a collection's event, and whether a time series gives none.
 /// The description `shardCollection` writes with its catalog change: what the
-/// `shardCollection` event shows (measured on a `refrouter` 9.0.4 on 02-11).
+/// `shardCollection` event shows (measured on the reference router 9.0.4 on 02-11).
 pub fn shard_description(
     key: &Document,
     unique: bool,

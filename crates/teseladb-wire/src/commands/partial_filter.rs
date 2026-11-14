@@ -1,9 +1,9 @@
-//! The filter of a partial index (009 FR-008) as `createIndexes` checks it on a `refrouter` 9.0.4
-//! (measured): `$expr`, `$where`, `$text` and `$jsonSchema` are not allowed, an unknown operator
-//! is a parse error, and an expression the index cannot hold (`$ne`, `$nin`, `$not`, a regular
-//! expression, `$exists: false`, `$elemMatch`, `$size`, `$mod`, the bit tests, `$nor`) is
-//! «Expression not supported in partial index:» followed by RefDb's description of the first
-//! one, one line per node, four spaces deeper per level.
+//! The filter of a partial index (009 FR-008) as `createIndexes` checks it on the reference router
+//! 9.0.4 (measured): `$expr`, `$where`, `$text` and `$jsonSchema` are not allowed, an unknown
+//! operator is a parse error, and an expression the index cannot hold (`$ne`, `$nin`, `$not`, a
+//! regular expression, `$exists: false`, `$elemMatch`, `$size`, `$mod`, the bit tests, `$nor`) is
+//! «Expression not supported in partial index:» followed by the reference server's description of
+//! the first one, one line per node, four spaces deeper per level.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_mql::{Filter, FilterUse};
@@ -13,7 +13,7 @@ use crate::error::{BAD_VALUE, CommandError, QUERY_FEATURE_NOT_ALLOWED};
 
 /// The start of the reason of an expression a partial index cannot hold.
 pub const NOT_SUPPORTED: &str = "Expression not supported in partial index: ";
-/// One level of RefDb's description.
+/// One level of the reference server's description.
 const INDENT: &str = "    ";
 
 /// Checks that `filter` is a filter a partial index may have: the operators it may not use and
@@ -35,7 +35,8 @@ pub fn parse_error(filter: &Document) -> Result<(), CommandError> {
         .map_err(super::mutation::from_mql)
 }
 
-/// RefDb's description of the first expression of `filter` a partial index cannot hold.
+/// The reference server's description of the first expression of `filter` a partial index cannot
+/// hold.
 pub fn unsupported(filter: &Document) -> Option<String> {
     conjunction(filter)
 }
@@ -61,9 +62,9 @@ fn conjunction(filter: &Document) -> Option<String> {
     })
 }
 
-/// The description of the plain predicates of `filter` at depth `depth`, as RefDb prints the
-/// children of `$nor` and `$elemMatch`: equalities and comparisons, under an `$and` one level
-/// deeper when there are several (measured on a `refnode` 9.0.4).
+/// The description of the plain predicates of `filter` at depth `depth`, as the reference server
+/// prints the children of `$nor` and `$elemMatch`: equalities and comparisons, under an `$and` one
+/// level deeper when there are several (measured on a reference replica set member 9.0.4).
 fn lines(filter: &Document, depth: usize) -> String {
     let predicates: Vec<String> = filter
         .iter()
@@ -85,7 +86,7 @@ fn lines(filter: &Document, depth: usize) -> String {
     }
 }
 
-/// A value as RefDb prints it in a description; an array as `[ a b]`.
+/// A value as the reference server prints it in a description; an array as `[ a b]`.
 fn shown(v: &Value) -> String {
     match v {
         Value::Array(items) => {

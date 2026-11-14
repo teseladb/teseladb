@@ -95,7 +95,7 @@ mod f {
     pub const WARNINGS: &str = "warnings";
     pub const KEYS_INSERTED: &str = "keysInserted";
     pub const KEYS_DELETED: &str = "keysDeleted";
-    /// The identifier of a log line of validation (`id` in RefDb's log).
+    /// The identifier of a log line of validation (`id` in the reference server's log).
     pub const LOG_ID: &str = "id";
     /// The document of a log line of validation.
     pub const LOG_DOCUMENT: &str = "document";
@@ -142,7 +142,7 @@ impl Image {
 pub struct Rules {
     /// Namespace `db.coll`, for the messages.
     pub ns: String,
-    /// Validator with its level and action (names as RefDb writes them).
+    /// Validator with its level and action (names as the reference server writes them).
     pub validator: Option<(Document, String, String)>,
     /// `bypassDocumentValidation`.
     pub bypass: bool,
@@ -174,8 +174,8 @@ pub struct Rules {
     /// which their index entries end in.
     pub shard_key: Option<Document>,
     /// A retryable write or a statement of a transaction: an update that changes the shard key
-    /// moves its document to the key of the new values (018 FR-001), as a `refrouter` 9.0.4 moves
-    /// it there and refuses it elsewhere (measured on 02-11-2026).
+    /// moves its document to the key of the new values (018 FR-001), as the reference router 9.0.4
+    /// moves it there and refuses it elsewhere (measured on 02-11-2026).
     pub moves: bool,
     /// A move of `shardCollection` keying the documents again by the new shard key (018 FR-001):
     /// each write keeps an internal meta ([`teseladb_changestream::meta::Moved::Internal`]), so
@@ -374,9 +374,9 @@ fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
 }
 
 /// Where an update of `old` into `new` moves its document when it changes the values of shard
-/// key `key` (`None` when it keeps them): the document's key is its shard key and its `_id`. As a
-/// `refrouter` 9.0.4 (measured on 02-11-2026), a multi-update cannot change them, and a single one
-/// only in a transaction or a retryable write (`home`, the tenant and the collection).
+/// key `key` (`None` when it keeps them): the document's key is its shard key and its `_id`. As
+/// the reference router 9.0.4 (measured on 02-11-2026), a multi-update cannot change them, and a
+/// single one only in a transaction or a retryable write (`home`, the tenant and the collection).
 fn moved_to(
     key: &Document,
     (old, new): (RawDoc<'_>, &Document),
@@ -480,8 +480,8 @@ impl<'a> FieldSource<'a> for RawDoc<'a> {
 }
 
 /// A document's fields read once (H-042): a mutation's rules look up some twenty fields, most of
-/// them absent, and each [`RawDoc::get`] reads the elements again from the first. RefDb's IDL
-/// parsers read a command's elements in one pass the same way.
+/// them absent, and each [`RawDoc::get`] reads the elements again from the first. The reference
+/// server's IDL parsers read a command's elements in one pass the same way.
 struct Fields<'a>(Vec<(&'a str, RawValue<'a>)>);
 
 impl<'a> Fields<'a> {
@@ -797,7 +797,7 @@ fn read_error(e: RawDoc<'_>) -> Option<WriteError> {
     Some(WriteError { index: usize::try_from(index).ok()?, error })
 }
 
-/// The command an update with `image` runs in, as RefDb's executor names it.
+/// The command an update with `image` runs in, as the reference server's executor names it.
 pub fn executor_of(image: Image) -> &'static str {
     match image {
         Image::None => super::crud::UPDATE,
@@ -805,7 +805,7 @@ pub fn executor_of(image: Image) -> &'static str {
     }
 }
 
-/// An error raised while an update of command `op` runs, as a `refrouter` 9.0.4 words it
+/// An error raised while an update of command `op` runs, as the reference router 9.0.4 words it
 /// ("Plan executor error during update :: caused by :: …", measured); errors of parsing the
 /// statement come without it.
 pub fn executor_error(op: &str) -> impl Fn(CommandError) -> CommandError + '_ {
@@ -838,9 +838,9 @@ pub enum Stored {
     Upsert,
 }
 
-/// The BSON of a document a write stores, refused as a `refrouter` 9.0.4 refuses one past 16 MiB or
-/// past [`MAX_DEPTH`] levels (measured, 003 T009). An update's error still gets the executor's
-/// prefix from its caller.
+/// The BSON of a document a write stores, refused as the reference router 9.0.4 refuses one past 16
+/// MiB or past [`MAX_DEPTH`] levels (measured, 003 T009). An update's error still gets the
+/// executor's prefix from its caller.
 pub fn stored_bytes(doc: &Document, how: Stored) -> Result<Vec<u8>, CommandError> {
     // Written within the mutation's size first, to name the document's whole size.
     let wide = Limits { max_size: MUTATION_LIMITS.max_size, max_depth: MAX_DEPTH };
@@ -887,9 +887,9 @@ pub const LOG_DOCUMENT_FIELD: &str = f::LOG_DOCUMENT;
 /// The `errInfo` of a log line of validation.
 pub const LOG_ERR_INFO_FIELD: &str = f::ERR_INFO;
 
-/// The log line of a document `warn` lets through (RefDb's identifier, measured).
+/// The log line of a document `warn` lets through (the reference server's identifier, measured).
 pub const LOG_WOULD_FAIL: i32 = 20_294;
-/// The log line of a document `errorAndLog` refuses (RefDb's identifier, measured).
+/// The log line of a document `errorAndLog` refuses (the reference server's identifier, measured).
 pub const LOG_FAILED: i32 = 7_488_700;
 
 struct Checker {
@@ -1099,7 +1099,7 @@ fn bad_rules() -> CommandError {
 
 /// The 11000 of a document whose `_id` is taken. In a clustered collection the documents are
 /// the index: the message names no index and ends in the value found, an empty document, which
-/// `foundValue` repeats (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// `foundValue` repeats (measured on the reference router 9.0.4 on 05-11-2026).
 fn duplicate(rules: &Rules, id: &Value) -> CommandError {
     let (ns, shown) = (&rules.ns, crate::commands::display(id));
     let errmsg = match rules.clustered {
@@ -1561,10 +1561,10 @@ impl Mutation for Sent {
 
 type Evaluated = (Vec<Put>, Vec<Vec<u8>>, MutationResult);
 
-/// The index keys a write adds and removes (`keysInserted`, `keysDeleted` of a `refnode` 9.0.4,
-/// measured 01-11-2026): its entries in the collection's indexes, and the key of `_id` of each
-/// document it inserts or deletes, which is the document's own key here (a capped collection
-/// keeps an index of `_id` of its own, counted among the others).
+/// The index keys a write adds and removes (`keysInserted`, `keysDeleted` of a reference replica
+/// set member 9.0.4, measured 01-11-2026): its entries in the collection's indexes, and the key of
+/// `_id` of each document it inserts or deletes, which is the document's own key here (a capped
+/// collection keeps an index of `_id` of its own, counted among the others).
 pub fn key_counts(
     (puts, deletes): (&[Put], &[Vec<u8>]),
     lookup: &Lookup<'_>,
@@ -1652,8 +1652,8 @@ fn history_puts(
 type Lookup<'a> = dyn Fn(&[u8]) -> Option<(u8, &'a [u8])> + 'a;
 
 /// `doc` with each top-level `Timestamp(0, 0)` other than `_id` set to the write's time, one
-/// increment apart, as a `refrouter` 9.0.4 does on inserts and replacements (measured); `None` when
-/// it has none.
+/// increment apart, as the reference router 9.0.4 does on inserts and replacements (measured);
+/// `None` when it has none.
 /// Without a mark (an evaluation prepared ahead of the write), a document with such a field
 /// cannot be filled: the evaluation needs the mark.
 fn fill_timestamps(doc: &Document, mark: Option<Hlc>) -> Result<Option<Document>, CommandError> {

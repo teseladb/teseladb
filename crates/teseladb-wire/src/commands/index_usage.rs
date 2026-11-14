@@ -1,6 +1,6 @@
-//! How often each index of the node served a query plan, for `$indexStats` (010 FR-018): a
-//! `refnode` 9.0.4 counts in `accesses.ops` each read whose winning plan scans the index, since
-//! `accesses.since`, the moment it began counting (measured 01-11-2026).
+//! How often each index of the node served a query plan, for `$indexStats` (010 FR-018):
+//! a reference replica set member 9.0.4 counts in `accesses.ops` each read whose winning plan scans
+//! the index, since `accesses.since`, the moment it began counting (measured 01-11-2026).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};

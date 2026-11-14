@@ -1,8 +1,8 @@
 //! The profiler (010 FR-015): `profile` sets each database's level (0, 1 or 2) and filter and
-//! the node's `slowms`, `slowinprogms` and `sampleRate`, as a `refnode` 9.0.4 does (measured on a
-//! shard; a `refrouter` refuses levels 1 and 2 because it holds no data, and every TeselaDB node
-//! holds data). After each command, a profiled database gets a document in its
-//! `system.profile` (capped at 1 MiB, created on first use) with the operation, and a command
+//! the node's `slowms`, `slowinprogms` and `sampleRate`, as a reference replica set member 9.0.4
+//! does (measured on a shard; the reference router refuses levels 1 and 2 because it holds no data,
+//! and every TeselaDB node holds data). After each command, a profiled database gets a document in
+//! its `system.profile` (capped at 1 MiB, created on first use) with the operation, and a command
 //! slower than `slowms` writes a «Slow query» line in the node's log.
 
 use std::collections::BTreeMap;
@@ -20,11 +20,11 @@ pub const PROFILE: &str = "profile";
 pub const SYSTEM_PROFILE: &str = "system.profile";
 /// The size of a `system.profile` the profiler creates (measured: 1 MiB).
 const PROFILE_SIZE: i64 = 1_048_576;
-/// RefDb's identifier of a «Slow query» log line.
+/// The reference server's identifier of a «Slow query» log line.
 pub const SLOW_QUERY_ID: i32 = 51803;
 /// The note of a reply when a filter decides what is profiled and logged.
 const FILTER_NOTE: &str = "When a filter expression is set, slowms and sampleRate are not used for profiling and slow-query log lines.";
-/// The numeric types `profile`'s fields take, in RefDb's order.
+/// The numeric types `profile`'s fields take, in the reference server's order.
 const NUMBER_TYPES: [&str; 4] = ["int", "double", "decimal", "long"];
 /// The `filter` that removes the database's filter.
 const UNSET: &str = "unset";
@@ -40,7 +40,7 @@ pub struct Profiler {
     pub sample_rate: f64,
     /// Each database's level, 0 when absent.
     levels: BTreeMap<String, i32>,
-    /// Each database's filter, as RefDb writes it back.
+    /// Each database's filter, as the reference server writes it back.
     filters: BTreeMap<String, Document>,
 }
 
@@ -83,7 +83,7 @@ fn whole(v: &Value, field: &str) -> Result<i64, CommandError> {
     }
 }
 
-/// A filter of `profile`, as RefDb parses it and writes it back.
+/// A filter of `profile`, as the reference server parses it and writes it back.
 fn read_filter(v: &Value) -> Result<Option<Document>, CommandError> {
     match v {
         Value::String(s) if s == UNSET => Ok(None),
@@ -189,7 +189,8 @@ pub struct Ended<'a> {
 }
 
 /// The commands the profiler never records: itself, the handshake, and those that carry a
-/// password (a `refnode` 9.0.4 profiles no `createUser` nor `updateUser`, measured 01-11-2026).
+/// password (a reference replica set member 9.0.4 profiles no `createUser` nor `updateUser`,
+/// measured 01-11-2026).
 const NOT_PROFILED: [&str; 9] = [
     PROFILE,
     "hello",
@@ -202,8 +203,8 @@ const NOT_PROFILED: [&str; 9] = [
     "saslContinue",
 ];
 
-/// The commands whose `pwd` the slow query log shows as [`HIDDEN_PASSWORD`], as a `refnode`
-/// 9.0.4 writes them.
+/// The commands whose `pwd` the slow query log shows as [`HIDDEN_PASSWORD`], as a reference replica
+/// set member 9.0.4 writes them.
 const WITH_PASSWORD: [&str; 2] = ["createUser", "updateUser"];
 const HIDDEN_PASSWORD: &str = "xxx";
 
@@ -235,8 +236,8 @@ fn logged_command(cmd: &Document) -> Document {
     out
 }
 
-/// What the profiler shows of the read of `e`, in the order of a `refnode` 9.0.4 (measured
-/// 01-11-2026): the hashes of its shape, then after the times its `planSummary` and the
+/// What the profiler shows of the read of `e`, in the order of a reference replica set member 9.0.4
+/// (measured 01-11-2026): the hashes of its shape, then after the times its `planSummary` and the
 /// `execStats` of the plan as it ran. A read the planner left to a collection scan shows a
 /// `COLLSCAN` with the documents it read.
 struct ReadParts {
@@ -276,8 +277,8 @@ fn read_parts(e: &Ended<'_>, returned: u64) -> ReadParts {
     parts
 }
 
-/// How the planner chose the plan `plan` of a read, as a `refnode` 9.0.4 writes it after
-/// `docsExamined` (measured 02-11-2026): `fromMultiPlanner` when plans competed, then
+/// How the planner chose the plan `plan` of a read, as a reference replica set member 9.0.4 writes
+/// it after `docsExamined` (measured 02-11-2026): `fromMultiPlanner` when plans competed, then
 /// `replanned` and `replanReason` when the cached plan was dropped, or `fromPlanCache` when the
 /// cached plan ran; a `getMore` repeats its cursor's.
 fn push_planner(d: &mut Document, plan: Option<&Document>) {
@@ -298,7 +299,7 @@ fn push_planner(d: &mut Document, plan: Option<&Document>) {
 /// The counters of what `e` read: the planner's for a plan of an index, the operation's own
 /// reads otherwise. A write by `_id` reads its documents in their range while it writes them,
 /// by their key, which is their `_id`: each document it matched is one key and one document
-/// examined, as the `EXPRESS` plan of a `refnode` 9.0.4 counts them (measured).
+/// examined, as the `EXPRESS` plan of a reference replica set member 9.0.4 counts them (measured).
 fn examined(e: &Ended<'_>) -> (Value, Value) {
     let own = |n: u64| Value::Int64(i64::try_from(n).unwrap_or(i64::MAX));
     // A `getMore` carries its cursor's plan, whose counters are those of the command that
@@ -322,10 +323,10 @@ fn examined(e: &Ended<'_>) -> (Value, Value) {
     (own(keys), own(docs))
 }
 
-/// The document of `e` as `system.profile` and the slow query log write it, with the fields of a
-/// `refnode` 9.0.4 that TeselaDB has (measured 01-11-2026). `locks`, `flowControl`, `queues`,
-/// `planRanker` and `isFromPriorityPortConnection` are RefEngine's and the classic engine's and
-/// have no counterpart here (DV-038).
+/// The document of `e` as `system.profile` and the slow query log write it, with the fields of
+/// a reference replica set member 9.0.4 that TeselaDB has (measured 01-11-2026). `locks`,
+/// `flowControl`, `queues`, `planRanker` and `isFromPriorityPortConnection` are the reference
+/// storage engine's and the classic engine's and have no counterpart here (DV-038).
 fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     let mut d =
         Document::new().with("op", e.op).with("ns", e.ns).with("command", e.command.clone());
@@ -433,15 +434,15 @@ fn describe(e: &Ended<'_>, now_ms: i64) -> Document {
     d
 }
 
-/// `nUpserted`, `keysInserted` and `keysDeleted` of a write that replied `r`, as a `refnode`
-/// 9.0.4 writes them (measured 01-11-2026): an insert its keys inserted, a delete its keys
-/// deleted, an update and a `findAndModify` how many documents they upserted and the keys
-/// inserted, and the keys deleted unless they upserted.
+/// `nUpserted`, `keysInserted` and `keysDeleted` of a write that replied `r`, as a reference
+/// replica set member 9.0.4 writes them (measured 01-11-2026): an insert its keys inserted, a
+/// delete its keys deleted, an update and a `findAndModify` how many documents they upserted and
+/// the keys inserted, and the keys deleted unless they upserted.
 fn push_key_counts(d: &mut Document, e: &Ended<'_>, r: &Document) {
     let (inserted, deleted) = e.report.keys_written;
     let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
     // The counts show only when a document was written, also when its keys were none (measured
-    // on a `refnode` 9.0.4 on 01-11-2026 and 03-11-2026).
+    // on a reference replica set member 9.0.4 on 01-11-2026 and 03-11-2026).
     let positive = |v: Option<&Value>| v.and_then(crate::types::number).is_some_and(|n| n > 0.0);
     let modify = e.command.iter().next().is_some_and(|(k, _)| FIND_AND_MODIFY.contains(&k));
     match e.op {
@@ -474,7 +475,7 @@ fn push_key_counts(d: &mut Document, e: &Ended<'_>, r: &Document) {
 
 /// Whether an operation `op` of command `name` plans its read, so that the profiler shows how
 /// long that took (`planningTimeMicros`): `find`, the writes but `insert`, and the commands that
-/// read through a query (measured on a `refnode` 9.0.4, 01-11-2026).
+/// read through a query (measured on a reference replica set member 9.0.4, 01-11-2026).
 fn plans(op: &str, name: &str) -> bool {
     match op {
         "query" | "update" | "remove" => true,
@@ -490,7 +491,7 @@ const FIND_AND_MODIFY: [&str; 2] = ["findAndModify", "findandmodify"];
 
 /// The framework of a read that profiles one (`queryFramework`): the slot-based engine for a
 /// pipeline whose query plan it runs, the classic engine for the other reads with a cursor and
-/// `distinct`; none for a write (measured on a `refnode` 9.0.4, 01-11-2026).
+/// `distinct`; none for a write (measured on a reference replica set member 9.0.4, 01-11-2026).
 fn query_framework(e: &Ended<'_>, name: &str) -> Option<&'static str> {
     let command = match origin(e) {
         Some(Value::Document(o)) => o,
@@ -532,7 +533,7 @@ pub fn after_command<B: Backend + ?Sized>(backend: &mut B, shared: &super::Share
     let name = e.command.iter().next().map_or("", |(k, _)| k);
     keep_origin(shared, e);
     // Nothing of Queryable Encryption is profiled or logged: its payloads and tokens (017
-    // FR-008, measured on a `refnode` 9.0.4).
+    // FR-008, measured on a reference replica set member 9.0.4).
     if super::fle::is_secret(e.command) {
         return;
     }
@@ -607,7 +608,7 @@ fn cursor_id(e: &Ended<'_>) -> Option<i64> {
 }
 
 /// Keeps with the cursor `e` left open the command and its plan, which the profile of each
-/// `getMore` of it shows (measured on a `refnode` 9.0.4, 01-11-2026).
+/// `getMore` of it shows (measured on a reference replica set member 9.0.4, 01-11-2026).
 /// Whether what runs after a command that took `micros` and answered `reply` reads its plan:
 /// the profiler and the slow query log past the quiet threshold, and a cursor that stays open,
 /// which keeps it for its `getMore`s ([`after_command`]).

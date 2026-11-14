@@ -1,4 +1,4 @@
-//! What `$out` and `$merge` write (010 FR-012, T029), as a `refrouter` 9.0.4 does (measured
+//! What `$out` and `$merge` write (010 FR-012, T029), as the reference router 9.0.4 does (measured
 //! 01-11-2026). `$out` writes the documents into a new collection of the target's database,
 //! with the target's indexes, and renames it over the target at the end: a reader sees the old
 //! documents or all the new ones. `$merge` writes document by document what
@@ -19,7 +19,7 @@ use crate::error::{CommandError, DUPLICATE_KEY, INTERNAL_ERROR};
 /// The database `renameCollection` runs on.
 const ADMIN: &str = "admin";
 
-/// The error RefDb gives when no unique index covers `$merge`'s `on` fields.
+/// The error the reference server gives when no unique index covers `$merge`'s `on` fields.
 const NO_UNIQUE_INDEX: crate::error::Code =
     crate::error::Code { code: 51190, name: "Location51190" };
 
@@ -267,7 +267,7 @@ fn merge<B: Backend + ?Sized>(
 
 /// `whenMatched: fail` on a document whose target has the same `on` fields `key`, under unique
 /// index `(name, pattern)`; the reply carries `keyPattern` and `keyValue` in the index's order,
-/// as a `refrouter` 9.0.4's does (measured).
+/// as the reference router 9.0.4's does (measured).
 fn duplicate(
     ns: &Namespace,
     (index, pattern): &(String, Document),
@@ -297,7 +297,8 @@ mod tests {
 
     #[test]
     fn a_duplicate_carries_the_key_pattern_and_value() {
-        // As a `refrouter` 9.0.4 answers it (measured on 03-11-2026), for the drivers to read.
+        // As the reference router 9.0.4 answers it (measured on 03-11-2026), for the drivers to
+        // read.
         let ns = names::ns("db", "t");
         let id = ("_id_".to_owned(), Document::new().with("_id", 1));
         let e = duplicate(&ns, &id, &Document::new().with("_id", 2));

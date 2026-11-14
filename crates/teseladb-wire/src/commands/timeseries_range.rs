@@ -2,11 +2,11 @@
 //! A015-3-1): a bucket's `_id` starts with its window's start in seconds as 32 bits, which keeps
 //! the buckets in time order only for windows from 1970 to 2106. A measurement before or after
 //! them wraps around and lands anywhere in that order, so once a collection has one, a read
-//! bounded in time scans every bucket, as RefDb does once a collection needs its extended range
-//! (measured on a `refnode` 9.0.4 on 02-11-2026: a bucket of `new Date(-1)` gets `_id` time
-//! `0xffffffc4` and the reads by time still find it). The catalog keeps that among the options
-//! under [`EXTENDED_RANGE`], which `listCollections` and `collMod` never show and whose catalog
-//! change gives no change event.
+//! bounded in time scans every bucket, as the reference server does once a collection needs its
+//! extended range (measured on a reference replica set member 9.0.4 on 02-11-2026: a bucket of `new
+//! Date(-1)` gets `_id` time `0xffffffc4` and the reads by time still find it). The catalog keeps
+//! that among the options under [`EXTENDED_RANGE`], which `listCollections` and `collMod` never
+//! show and whose catalog change gives no change event.
 
 use teseladb_bson::{Document, RawDoc};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry};

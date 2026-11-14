@@ -1,18 +1,19 @@
 //! The message header and `OP_MSG` (contract `wire-messages.md`, FR-001).
 //!
 //! A structural fault (a length that does not add up, an unknown required flag, a bad checksum,
-//! invalid BSON) closes the connection, as in RefDb; a fault RefDb answers with an error
-//! reply (two bodies, no body, a security token section, a document nested too deep) comes back
-//! as [`OpMsg::problem`].
+//! invalid BSON) closes the connection, as in the reference server; a fault the reference server
+//! answers with an error reply (two bodies, no body, a security token section, a document nested
+//! too deep) comes back as [`OpMsg::problem`].
 //!
 //! The header is read with little-endian integer reads. Each document is checked in one pass
-//! ([`read_message`], 006 FR-039) as a `refrouter` 9.0.4 checks it (the first fault in document
-//! order decides between closing and answering) and with the rules of the BSON specification
-//! RefDb does not apply: a string or name that is not UTF-8 and an old binary whose two lengths
-//! differ get an `InvalidBSON` reply where RefDb would store them (003 T009). A BSON column that
-//! does not follow the column layout gets RefDb's `NonConformantBSON` (003 T029). A canonical
-//! document keeps the bytes it came in: its fields are read only when the command asks for them,
-//! and a stored one is written by copying those bytes.
+//! ([`read_message`], 006 FR-039) as the reference router 9.0.4 checks it (the first fault in
+//! document order decides between closing and answering) and with the rules of the BSON
+//! specification the reference server does not apply: a string or name that is not UTF-8 and an old
+//! binary whose two lengths differ get an `InvalidBSON` reply where the reference server would
+//! store them (003 T009). A BSON column that does not follow the column layout gets the reference
+//! server's `NonConformantBSON` (003 T029). A canonical document keeps the bytes it came in: its
+//! fields are read only when the command asks for them, and a stored one is written by copying
+//! those bytes.
 
 use teseladb_bson::{
     BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message_in,
@@ -57,7 +58,7 @@ const KIND_BODY: u8 = 0;
 const KIND_SEQUENCE: u8 = 1;
 const KIND_SECURITY_TOKEN: u8 = 2;
 
-/// Command documents may exceed a stored document by 16 KiB, as in RefDb.
+/// Command documents may exceed a stored document by 16 KiB, as in the reference server.
 pub const MAX_COMMAND_SIZE: usize = teseladb_bson::MAX_SIZE + 16 * 1024;
 
 pub use teseladb_bson::MAX_COMMAND_DEPTH;
@@ -130,7 +131,7 @@ pub struct OpMsg {
     pub body: Option<Document>,
     /// Document sequences.
     pub sequences: Vec<Sequence>,
-    /// An error RefDb answers instead of running the command.
+    /// An error the reference server answers instead of running the command.
     pub problem: Option<CommandError>,
 }
 
@@ -162,7 +163,7 @@ pub(crate) fn document(b: &[u8]) -> Result<&[u8], WireError> {
 }
 
 /// A document of an `OP_MSG` section at byte `at` of `msg` (which it does not pass `end`): its
-/// length and the document, or the error RefDb answers for it instead of closing the
+/// length and the document, or the error the reference server answers for it instead of closing the
 /// connection. A canonical document keeps a view of `msg`, the request's buffer (012 FR-027).
 fn section_document(
     msg: &Bytes,
@@ -180,9 +181,9 @@ fn section_document(
     }
 }
 
-/// How RefDb names a document of a message in its errors: by its `_id` when that is its first
-/// field, with the quotes and backslashes of the value escaped (a `refrouter` 9.0.4 writes
-/// `_id: \"k\"`, measured).
+/// How the reference server names a document of a message in its errors: by its `_id` when that is
+/// its first field, with the quotes and backslashes of the value escaped (the reference router
+/// 9.0.4 writes `_id: \"k\"`, measured).
 fn named(doc: &[u8]) -> String {
     match first_element(doc, command_limits()) {
         Some(("_id", v)) => {
@@ -193,7 +194,7 @@ fn named(doc: &[u8]) -> String {
     }
 }
 
-/// RefDb's `Overflow` for a document nested too deep at `path`.
+/// The reference server's `Overflow` for a document nested too deep at `path`.
 fn too_deep(doc: &[u8], path: &str) -> CommandError {
     let text = format!(
         "BSONObj exceeds maximum nested object depth in element with field name '{path}' in \
@@ -203,8 +204,8 @@ fn too_deep(doc: &[u8], path: &str) -> CommandError {
     CommandError::new(OVERFLOW, text)
 }
 
-/// RefDb's `NonConformantBSON` for a BSON column at `path` that does not follow the column
-/// layout (measured on a `refrouter` 9.0.4, 003 T029).
+/// The reference server's `NonConformantBSON` for a BSON column at `path` that does not follow the
+/// column layout (measured on the reference router 9.0.4, 003 T029).
 fn invalid_column(doc: &[u8], path: &str) -> CommandError {
     let text = format!(
         "Invalid BSON column in element with field name '{path}' in object with {}",
@@ -252,7 +253,7 @@ impl OpMsg {
             at += 1;
             match kind {
                 KIND_BODY if msg.body.is_some() => {
-                    // A `refrouter` 9.0 closes the connection (measured).
+                    // The reference router 9.0 closes the connection (measured).
                     return Err(WireError::Malformed("Multiple body sections in message"));
                 }
                 KIND_BODY => match section_document(&b, at, end)? {
@@ -293,7 +294,7 @@ impl OpMsg {
     }
 
     /// Reads a document sequence starting at `at` (after its kind byte); where it ends, or the
-    /// error RefDb answers for one of its documents.
+    /// error the reference server answers for one of its documents.
     fn sequence(&mut self, b: &Bytes, at: usize) -> Result<Result<usize, CommandError>, WireError> {
         if b.len() < at + 4 {
             return Err(WireError::Malformed("document sequence cut short"));

@@ -3,8 +3,8 @@
 //! no node still runs a write that read the catalog before it (the barrier, which the server
 //! keeps with the authorization fence). Then the backfill writes, chunk by chunk, the entries of
 //! the documents' current versions, each chunk in one range write that waits for the
-//! `commitQuorum`; `currentOp` shows its progress and `killOp` stops it. Replies and errors as a
-//! `refnode` and a `refrouter` 9.0.4 give them (measured).
+//! `commitQuorum`; `currentOp` shows its progress and `killOp` stops it. Replies and errors as
+//! a reference replica set member and the reference router 9.0.4 give them (measured).
 
 use teseladb_bson::{Document, RawDoc, Value};
 
@@ -52,8 +52,8 @@ impl Default for Quorum {
     }
 }
 
-/// A number of `commitQuorum` as RefDb reads it: a double truncated, a decimal rounded half to
-/// even, NaN as 0.
+/// A number of `commitQuorum` as the reference server reads it: a double truncated, a decimal
+/// rounded half to even, NaN as 0.
 fn quorum_number(v: &Value) -> Option<i64> {
     match v {
         Value::Int32(n) => Some(i64::from(*n)),
@@ -65,7 +65,8 @@ fn quorum_number(v: &Value) -> Option<i64> {
     }
 }
 
-/// The command's `commitQuorum` (measured on a `refnode` and a `refrouter` 9.0.4).
+/// The command's `commitQuorum` (measured on a reference replica set member and the reference
+/// router 9.0.4).
 pub fn commit_quorum(cmd: &Document) -> Result<Quorum, CommandError> {
     let v = match cmd.get(COMMIT_QUORUM) {
         None | Some(Value::Null) => return Ok(Quorum::default()),
@@ -222,8 +223,8 @@ pub struct Backfill<'a> {
     pub op: Option<BuildOp<'a>>,
 }
 
-/// `cause` of a scan that stopped after `done` documents at the `at`-th (measured on a `refnode`
-/// and a `refrouter` 9.0.4; the build's prefix comes from the caller).
+/// `cause` of a scan that stopped after `done` documents at the `at`-th (measured on a reference
+/// replica set member and the reference router 9.0.4; the build's prefix comes from the caller).
 fn scan_stopped(cause: CommandError, done: u64, at: u64, ms: u64) -> CommandError {
     let msg = format!(
         "collection scan stopped. totalRecords: {done}; durationMillis: {ms}ms; phase: \
@@ -238,7 +239,7 @@ fn scan_stopped(cause: CommandError, done: u64, at: u64, ms: u64) -> CommandErro
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stopped {
     /// The build failed: a duplicate in a unique index, a document an index refuses, `killOp`.
-    /// RefDb's message of a failed build goes around it.
+    /// The reference server's message of a failed build goes around it.
     Build(CommandError),
     /// The node could not go on (no leader, a timeout).
     Node(CommandError),
@@ -275,10 +276,10 @@ fn count<B: Backend + ?Sized>(
 }
 
 /// The document of `coll` the indexes of `rules` refuse that comes first in `_id` order, with
-/// why, and how many documents come before it. RefDb's scan stops at the first refused
-/// document in insertion order (measured on a `refrouter` 9.0.4); TeselaDB keeps no insertion order
-/// (DV-056) and its keys follow a hash of `_id`, so it names the first in `_id` order, the same
-/// document whenever the `_id`s grow as they are inserted (`ObjectId`s, counters).
+/// why, and how many documents come before it. The reference server's scan stops at the first
+/// refused document in insertion order (measured on the reference router 9.0.4); TeselaDB keeps no
+/// insertion order (DV-056) and its keys follow a hash of `_id`, so it names the first in `_id`
+/// order, the same document whenever the `_id`s grow as they are inserted (`ObjectId`s, counters).
 fn first_refused<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -332,8 +333,9 @@ fn first_refused<B: Backend + ?Sized>(
 }
 
 /// The duplicate of a unique index of `rules` among the documents of `coll` with the smallest
-/// key: RefDb sorts the keys of a build and names the first two that are equal (measured on a
-/// `refrouter` 9.0.4, `dup key: { b: 0 }` where TeselaDB's scan met `{ b: 1 }` first).
+/// key: the reference server sorts the keys of a build and names the first two that are equal
+/// (measured on the reference router 9.0.4, `dup key: { b: 0 }` where TeselaDB's scan met `{ b: 1
+/// }` first).
 fn smallest_duplicate<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -413,7 +415,8 @@ impl Backfill<'_> {
                     return Err(Stopped::Build(first.unwrap_or(e.error)));
                 }
                 let (cause, done) = match rules.capped {
-                    // A capped collection's keys are its insertion order, as RefDb scans.
+                    // A capped collection's keys are its insertion order, as the reference server
+                    // scans.
                     Some(_) => (e.error, progress.done + e.index as u64),
                     None => first_refused(backend, coll, rules)?
                         .unwrap_or((e.error, progress.done + e.index as u64)),

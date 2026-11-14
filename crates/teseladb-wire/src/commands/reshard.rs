@@ -19,8 +19,8 @@
 //!   ([`super::move_collection`]) run the same steps with their own [`Provenance`]: the first
 //!   two leave the copy without shard key ([`UNSPLITTABLE`]) and send its ranges to a shard.
 //!
-//! The replies, messages and events are those of a `refrouter` 9.0.4 of two shards (measured on
-//! 02-11-2026). `currentOp` lists the operation as `ReshardingMetricsRecipientService <uuid>`.
+//! The replies, messages and events are those of the reference router 9.0.4 of two shards (measured
+//! on 02-11-2026). `currentOp` lists the operation as `ReshardingMetricsRecipientService <uuid>`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -511,7 +511,7 @@ pub fn copy_name(ns: &str) -> bool {
 }
 
 /// The refusal of a client's write that would store a document in `ns`, a collection named as a
-/// resharding's copy that no resharding owns (measured on a `refrouter` 9.0.4, 03-11-2026).
+/// resharding's copy that no resharding owns (measured on the reference router 9.0.4, 03-11-2026).
 pub fn not_a_copy(ns: &str) -> CommandError {
     CommandError::new(
         NAMESPACE_NOT_FOUND,
@@ -619,7 +619,7 @@ pub(super) fn has_prefix_index<B: Backend + ?Sized>(
 
 /// The chunks the documents of `c` give under `key`: sorted by it, every tenth one is a split
 /// point and the distinct points cut one chunk more than their number; with more documents than
-/// `need` × 10, evenly spaced ones stand for the sample of a `refrouter`.
+/// `need` × 10, evenly spaced ones stand for the sample of the reference router.
 pub(super) fn check_cardinality<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,

@@ -6,15 +6,15 @@
 //!   size, the distinct values, the five most common ones (by frequency, then in key order) and
 //!   the monotonicity, the correlation between the order of the key and the order in which the
 //!   documents were inserted. TeselaDB keeps no record id, so the order of `_id` stands for it.
-//!   The coefficient is rounded up to nine decimals and is monotonic from 0.7, as on a
-//!   `refrouter` 9.0.4.
+//!   The coefficient is rounded up to nine decimals and is monotonic from 0.7, as on
+//!   the reference router 9.0.4.
 //! - `readWriteDistribution` cuts the key's values into 100 ranges at evenly spaced documents
-//!   (a `refrouter` takes them from a random sample, so its counts per range change from run to
-//!   run) and routes each sample by the conditions of its filter on the key's first field: one
+//!   (the reference router takes them from a random sample, so its counts per range change from run
+//!   to run) and routes each sample by the conditions of its filter on the key's first field: one
 //!   range, several, or all (scatter-gather) when the filter does not bound it. Percentages are
-//!   rounded up to ten decimals, as on a `refrouter`.
+//!   rounded up to ten decimals, as on the reference router.
 //!
-//! The replies and messages are those of a `refrouter` 9.0.4 of two shards (measured on
+//! The replies and messages are those of the reference router 9.0.4 of two shards (measured on
 //! 02-11-2026, `t5.js` to `t8.js` in the lane's notes).
 
 use std::collections::BTreeMap;

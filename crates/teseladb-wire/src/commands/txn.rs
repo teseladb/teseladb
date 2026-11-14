@@ -1,15 +1,15 @@
 //! Client transactions (008 FR-009, T016): `startTransaction` with `autocommit: false`, the
 //! statements that continue it, `commitTransaction` and `abortTransaction`, with the session
-//! rules and errors of [`SessionTxn`] as RefDb 9.0.4 gives them.
+//! rules and errors of [`SessionTxn`] as the reference server 9.0.4 gives them.
 //!
 //! The transaction's coordinator ([`Coordinator`]) lives in the session's entry of the node's
 //! tables between commands. A command of the session waits while another one has it. A statement
 //! takes it out, runs with a [`TxnBackend`] (reads at the
 //! transaction's mark with its own intents; writes evaluated here as the range's leader would and
 //! written as intents) and puts it back; a statement that fails aborts the transaction, as
-//! RefDb does. `commitTransaction` answers as [`commit_answer`] says, and a commit asked again
-//! gets the first one's answer. Between commands the node's keeper ticks the idle transactions
-//! ([`tick_idle`]): their heartbeats keep the reaper away until the lifetime limit.
+//! the reference server does. `commitTransaction` answers as [`commit_answer`] says, and a commit
+//! asked again gets the first one's answer. Between commands the node's keeper ticks the idle
+//! transactions ([`tick_idle`]): their heartbeats keep the reaper away until the lifetime limit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,9 +85,9 @@ struct Running {
     started_us: u64,
     coord: Coordinator,
     view: TxnView,
-    /// Statements run so far, which names the next one in RefDb's messages.
+    /// Statements run so far, which names the next one in the reference server's messages.
     statements: u32,
-    /// A statement got past the router's parse: a `refrouter` 9.0.4 sent it to a participant
+    /// A statement got past the router's parse: the reference router 9.0.4 sent it to a participant
     /// (measured on 03-11-2026; until then the router answers the commit and the abort itself).
     sent: bool,
     /// The collections it created (T019).
@@ -190,8 +190,9 @@ fn flag(cmd: &Document, name: &str) -> Result<Option<bool>, CommandError> {
 
 /// The transaction fields of `cmd`, `None` for a command outside a transaction.
 ///
-/// The session fields are checked as a `refrouter` 9.0.4 checks them (measured): a `txnNumber`
-/// needs a session, `autocommit` needs a `txnNumber`, and a commit or an abort needs both.
+/// The session fields are checked as the reference router 9.0.4 checks them (measured): a
+/// `txnNumber` needs a session, `autocommit` needs a `txnNumber`, and a commit or an abort needs
+/// both.
 pub fn fields(name: &str, cmd: &Document) -> Result<Option<TxnFields>, CommandError> {
     let autocommit = flag(cmd, AUTOCOMMIT)?;
     let start = flag(cmd, START_TRANSACTION)?;
@@ -225,15 +226,15 @@ pub fn ends(name: &str) -> bool {
     name == COMMIT_TRANSACTION || name == ABORT_TRANSACTION
 }
 
-/// `errmsg` of a `txnNumber` without a session (measured on a `refrouter` 9.0.4).
+/// `errmsg` of a `txnNumber` without a session (measured on the reference router 9.0.4).
 const NUMBER_WITHOUT_SESSION: &str =
     "Transaction number requires a session ID to also be specified";
-/// `errmsg` of `autocommit` without a `txnNumber` (measured on a `refrouter` 9.0.4).
+/// `errmsg` of `autocommit` without a `txnNumber` (measured on the reference router 9.0.4).
 const AUTOCOMMIT_WITHOUT_NUMBER: &str =
     "'autocommit' field requires a transaction number to also be specified";
 
-/// The error of a `txnNumber` sent without `autocommit: false` to command `name`, as a `refrouter`
-/// 9.0.4 answers it (measured): only a retryable write takes it; the commands of
+/// The error of a `txnNumber` sent without `autocommit: false` to command `name`, as the reference
+/// router 9.0.4 answers it (measured): only a retryable write takes it; the commands of
 /// [`ROUTER_COMMANDS`] take none at all.
 fn bare_txn_number(name: &str, cmd: &Document) -> Option<CommandError> {
     let bare = cmd.get("lsid").is_some()
@@ -259,8 +260,8 @@ fn bare_txn_number(name: &str, cmd: &Document) -> Option<CommandError> {
     ))
 }
 
-/// The commands a statement of a transaction can be (measured on a `refrouter` 9.0.4; `count` has a
-/// message of its own).
+/// The commands a statement of a transaction can be (measured on the reference router 9.0.4;
+/// `count` has a message of its own).
 const IN_TRANSACTION: [&str; 15] = [
     "find",
     "getMore",
@@ -280,7 +281,7 @@ const IN_TRANSACTION: [&str; 15] = [
 ];
 /// `killCursors`, which cannot start a transaction.
 const KILL_CURSORS: &str = "killCursors";
-/// The commands a `refrouter` 9.0.4 runs itself and refuses in a transaction with
+/// The commands the reference router 9.0.4 runs itself and refuses in a transaction with
 /// [`NOT_SUPPORTED_IN_TRANSACTION`] (measured).
 const ROUTER_COMMANDS: [&str; 6] =
     ["hello", "isMaster", "ismaster", "ping", "connectionStatus", "listCommands"];
@@ -290,9 +291,9 @@ pub const NOT_SUPPORTED_IN_TRANSACTION: &str = "This command is not supported in
 pub const KILL_CURSORS_FIRST: &str =
     "Cannot run killCursors as the first operation in a multi-document transaction.";
 
-/// The commands refused before their arguments are read: those a `refrouter` 9.0.4 refuses at once
-/// ([`ROUTER_COMMANDS`], and `killOp`, measured), and those that change the node's tables without
-/// asking the node, which a refused command must not do while its arguments are read.
+/// The commands refused before their arguments are read: those the reference router 9.0.4 refuses
+/// at once ([`ROUTER_COMMANDS`], and `killOp`, measured), and those that change the node's tables
+/// without asking the node, which a refused command must not do while its arguments are read.
 const REFUSED_AT_ONCE: [&str; 12] = [
     super::session::END_SESSIONS,
     super::session::REFRESH_SESSIONS,
@@ -310,14 +311,14 @@ const REFUSED_AT_ONCE: [&str; 12] = [
 
 /// Whether a command [`refused`] in a transaction is refused before its arguments are read; the
 /// others run first with every request to the node refused, so that their argument errors come
-/// first, as on a `refrouter` 9.0.4 (measured), and nothing changes.
+/// first, as on the reference router 9.0.4 (measured), and nothing changes.
 pub fn refused_at_once(name: &str) -> bool {
     ROUTER_COMMANDS.contains(&name) || REFUSED_AT_ONCE.contains(&name)
 }
 
 /// The error of command `name` sent as a statement of a transaction that a transaction cannot
-/// run, as a `refrouter` 9.0.4 answers it (measured); `None` for a command that is no statement or
-/// that a transaction runs.
+/// run, as the reference router 9.0.4 answers it (measured); `None` for a command that is no
+/// statement or that a transaction runs.
 pub fn refused(name: &str, cmd: &Document) -> Option<CommandError> {
     if let Some(e) = bare_txn_number(name, cmd) {
         return Some(e);
@@ -330,21 +331,22 @@ pub fn refused(name: &str, cmd: &Document) -> Option<CommandError> {
     if IN_TRANSACTION.contains(&name) || name == COUNT {
         return None;
     }
-    // `configureFailPoint` as the router refuses its own commands (measured on a `refrouter` 9.0.4
-    // with test commands; without them it does not exist, `dispatch`).
+    // `configureFailPoint` as the router refuses its own commands (measured on the reference router
+    // 9.0.4 with test commands; without them it does not exist, `dispatch`).
     if ROUTER_COMMANDS.contains(&name) || name == crate::failpoint::CONFIGURE_FAIL_POINT {
         return refuse(NOT_SUPPORTED_IN_TRANSACTION.to_owned());
     }
     refuse(format!("Cannot run '{name}' in a multi-document transaction."))
 }
 
-/// How a session's transaction is named in RefDb's messages.
+/// How a session's transaction is named in the reference server's messages.
 pub(super) fn session_name(lsid: u128) -> String {
     format!("{} - {ANONYMOUS_UID} -  - ", uuid_text(&lsid.to_be_bytes()))
 }
 
-/// The `uid` of the session of `user` in RefDb's messages: the base64 of the SHA-256 of
-/// `user@db`, [`ANONYMOUS_UID`] without a login (measured on a `refrouter` 9.0.4 on 03-11-2026).
+/// The `uid` of the session of `user` in the reference server's messages: the base64 of the SHA-256
+/// of `user@db`, [`ANONYMOUS_UID`] without a login (measured on the reference router 9.0.4 on
+/// 03-11-2026).
 pub(super) fn user_uid(user: Option<&UserName>) -> String {
     match user {
         Some(u) => {
@@ -402,7 +404,7 @@ fn txn_error(e: TxnError, txn_number: i64) -> CommandError {
     match e {
         TxnError::WriteConflict => CommandError::new(WRITE_CONFLICT, WRITE_CONFLICT_MESSAGE)
             .with_label(TRANSIENT_TRANSACTION_ERROR),
-        // As the shard answers through a `refrouter` 9.0.4 (measured on 01-11-2026).
+        // As the shard answers through the reference router 9.0.4 (measured on 01-11-2026).
         TxnError::NoSuchTransaction => CommandError::new(
             NO_SUCH_TRANSACTION,
             format!("Transaction with {{ txnNumber: {txn_number} }} has been aborted."),
@@ -820,13 +822,13 @@ const WRITES: [&str; 6] = [
     super::crud::BULK_WRITE,
 ];
 
-/// `result` with the `recoveryToken` a `refrouter` 9.0.4 adds inside a transaction (measured): `{}`
-/// until a write or a `create` ran in it, then `recoveryShardId`, the node's name in
-/// `config.shards`. Among the errors only those of `commitTransaction` and `abortTransaction` of a
-/// transaction that started get it, with their `errorLabels` first; not the commit after a first
-/// statement that failed, which the router answers: a statement's error is the shard's, which the
-/// `refrouter` sends as it is (measured on 03-11-2026 with 48 `NamespaceExists` and 2 `BadValue`,
-/// before and after a write, and with a time ahead of the cluster time).
+/// `result` with the `recoveryToken` the reference router 9.0.4 adds inside a transaction
+/// (measured): `{}` until a write or a `create` ran in it, then `recoveryShardId`, the node's name
+/// in `config.shards`. Among the errors only those of `commitTransaction` and `abortTransaction` of
+/// a transaction that started get it, with their `errorLabels` first; not the commit after a first
+/// statement that failed, which the router answers: a statement's error is the shard's, which
+/// the reference router sends as it is (measured on 03-11-2026 with 48 `NamespaceExists` and 2
+/// `BadValue`, before and after a write, and with a time ahead of the cluster time).
 fn with_token(
     backend: &mut dyn Backend,
     shared: &Shared,
@@ -898,7 +900,8 @@ fn run_command(
         Ask::Continue | Ask::Commit | Ask::Abort => None,
     };
     // Another command of the session has its transaction: this one waits for it, as a session's
-    // commands wait for each other in RefDb 9.0.4 (measured through `refrouter`).
+    // commands wait for each other in the reference server 9.0.4 (measured through the reference
+    // router).
     while lock(shared).txns.get(&f.lsid).is_some_and(|s| s.in_use) {
         if !backend.txn_pause() {
             return Some(Err(CommandError::new(MAX_TIME_MS_EXPIRED, TIME_LIMIT_MESSAGE)));
@@ -913,7 +916,7 @@ fn run_command(
     let verdict = match checked {
         Ok(v) => v,
         // A member of a replica set has no router that recovers a decision (measured on a replica
-        // set of `ref:9.0.4`, 03-11-2026): the number stays unused.
+        // set of the reference server 9.0.4, 03-11-2026): the number stays unused.
         Err(SessionError::Unrecorded { last, .. }) if member(backend) => {
             restore(shared, f, before);
             return Some(Err(not_in_progress(f, last)));
@@ -927,7 +930,7 @@ fn run_command(
                 false => not_in_progress(f, last),
             }));
         }
-        // As the shard answers through a `refrouter` 9.0.4 (measured on 01-11-2026).
+        // As the shard answers through the reference router 9.0.4 (measured on 01-11-2026).
         Err(SessionError::NoSuchTransaction { .. })
             if let Some(first) = failed_first(shared, f) =>
         {
@@ -940,7 +943,7 @@ fn run_command(
         Verdict::Begin => {
             if let Some(e) = too_many_open(shared, f) {
                 // A member leaves the session as it was: the number can start later (measured on
-                // a replica set of `ref:9.0.4`, 03-11-2026).
+                // a replica set of the reference server 9.0.4, 03-11-2026).
                 if member(backend) {
                     restore(shared, f, before);
                 }
@@ -948,8 +951,9 @@ fn run_command(
                 return Some(refused_write(&shard, name, e));
             }
             // A higher number ends the session's transaction still in progress, which a failed
-            // commit leaves (RefDb aborts it: PyRef's `commit-transienttransactionerror`
-            // retries on the same session and its first statement found the old intents).
+            // commit leaves (the reference server aborts it: the reference Python driver's
+            // `commit-transienttransactionerror` retries on the same session and its first
+            // statement found the old intents).
             let superseded = lock(shared).txns.get_mut(&f.lsid).and_then(|s| s.running.take());
             if let Some(run) = superseded {
                 end_abandoned(backend, shared, run);
@@ -1019,8 +1023,8 @@ fn run_command(
 
 /// The reply of a commit that committed: with a `w` above the voters of the node's ranges, the
 /// transaction stays committed and the reply carries `UnsatisfiableWriteConcern` as a
-/// `writeConcernError` before `ok`, with the concern asked (measured on a `refrouter` 9.0.4 on
-/// 05-11-2026).
+/// `writeConcernError` before `ok`, with the concern asked (measured on the reference router 9.0.4
+/// on 05-11-2026).
 fn commit_reply(backend: &mut dyn Backend, cmd: &Document) -> Document {
     let ok = Document::new().with("ok", 1.0);
     let Some(Value::Document(wc)) = cmd.get(WRITE_CONCERN) else { return ok };
@@ -1043,8 +1047,8 @@ fn commit_reply(backend: &mut dyn Backend, cmd: &Document) -> Document {
 /// The start of the router's own `NoSuchTransaction` for a transaction that was aborted.
 const ABORTED_PREFIX: &str = "Transaction with { txnNumber: ";
 
-/// The reply of command `name` as a `refrouter` 9.0.4 gives it: its own `NoSuchTransaction` to a
-/// commit or an abort of an aborted transaction carries `errorLabels` first, where an error
+/// The reply of command `name` as the reference router 9.0.4 gives it: its own `NoSuchTransaction`
+/// to a commit or an abort of an aborted transaction carries `errorLabels` first, where an error
 /// relayed from a shard has them last (measured on 03-11-2026 for the commit and the abort after
 /// a failed statement and an abort repeated); a statement after the abort gets the shard's, with
 /// them last (`txn-errors`).
@@ -1058,8 +1062,9 @@ pub fn router_reply(name: &str, reply: Document) -> Document {
     }
 }
 
-/// Whether the node presents itself as a member of a replica set (018), which answers as a
-/// `refnode` and not as a `refrouter` where they differ; a presentation it cannot read is `refrouter`'s.
+/// Whether the node presents itself as a member of a replica set (018), which answers as
+/// a reference replica set member and not as the reference router where they differ; a presentation
+/// it cannot read is the router's.
 fn member(backend: &mut dyn Backend) -> bool {
     super::config_db::as_member(backend).unwrap_or(false)
 }
@@ -1070,8 +1075,8 @@ fn restore(shared: &Shared, f: TxnFields, before: SessionTxn) {
 }
 
 /// A member's `NoSuchTransaction` for a number of the session that no transaction runs with
-/// (measured on a replica set of `ref:9.0.4`, 03-11-2026): it names the number asked and the
-/// session's active one, -1 before the first.
+/// (measured on a replica set of the reference server 9.0.4, 03-11-2026): it names the number asked
+/// and the session's active one, -1 before the first.
 fn not_in_progress(f: TxnFields, active: Option<i64>) -> CommandError {
     CommandError::new(
         NO_SUCH_TRANSACTION,
@@ -1090,9 +1095,9 @@ fn not_in_progress(f: TxnFields, active: Option<i64>) -> CommandError {
 const NOTHING_SENT: &str = "no known command has been sent by this router for this transaction";
 
 /// The answer to the commit (`commit`) or the abort of transaction `f`, which ended, when none of
-/// its statements got past the router's parse: a `refrouter` 9.0.4 answers both itself (measured on
-/// 03-11-2026), the commit with an integer `ok` and the abort with `NoSuchTransaction` and no
-/// `recoveryToken`.
+/// its statements got past the router's parse: the reference router 9.0.4 answers both itself
+/// (measured on 03-11-2026), the commit with an integer `ok` and the abort with `NoSuchTransaction`
+/// and no `recoveryToken`.
 fn nothing_sent(shared: &Shared, f: TxnFields, commit: bool) -> Result<Document, CommandError> {
     if commit {
         return Ok(Document::new().with("ok", 1));
@@ -1107,7 +1112,7 @@ fn nothing_sent(shared: &Shared, f: TxnFields, commit: bool) -> Result<Document,
 /// The answer to the first statement of transaction `f`, which the shard started and whose
 /// statement failed with `e` before it read anything (a time ahead of the cluster time): the
 /// transaction is over, as after any first statement that failed, and a write answers with `e` as
-/// its first write error from the node (measured on a `refrouter` 9.0.4 on 03-11-2026).
+/// its first write error from the node (measured on the reference router 9.0.4 on 03-11-2026).
 fn failed_at_start(
     backend: &mut dyn Backend,
     shared: &Shared,
@@ -1135,9 +1140,9 @@ fn failed_first(shared: &Shared, f: TxnFields) -> Option<bool> {
     }
 }
 
-/// The answer to a command of a transaction a statement's error ended, as through a `refrouter`
-/// 9.0.4 (measured on 03-11-2026): the shard's `NoSuchTransaction`, except for a commit after a
-/// failed first statement, which the router answers itself naming the participant.
+/// The answer to a command of a transaction a statement's error ended, as through the reference
+/// router 9.0.4 (measured on 03-11-2026): the shard's `NoSuchTransaction`, except for a commit
+/// after a failed first statement, which the router answers itself naming the participant.
 fn failed_answer(backend: &mut dyn Backend, ask: Ask, f: TxnFields, first: bool) -> CommandError {
     if !(first && ask == Ask::Commit) {
         return txn_error(TxnError::NoSuchTransaction, f.txn_number);
@@ -1155,22 +1160,22 @@ fn failed_answer(backend: &mut dyn Backend, ask: Ask, f: TxnFields, first: bool)
     .with_label(TRANSIENT_TRANSACTION_ERROR)
 }
 
-/// The only database `commitTransaction` runs on, and its error elsewhere (measured on a
-/// `refrouter` 9.0.4; `abortTransaction` runs on any).
+/// The only database `commitTransaction` runs on, and its error elsewhere (measured on
+/// the reference router 9.0.4; `abortTransaction` runs on any).
 const ADMIN: &str = "admin";
 const COMMIT_OUTSIDE_ADMIN: &str = "commitTransaction may only be run against the admin database.";
 /// `errmsg` of a commit of a transaction the node has no record of, without `recoveryToken`.
 const RECOVERY_TOKEN_MISSING: &str =
     "Cannot recover the transaction decision without a recoveryToken";
 
-/// The answer to a commit of transaction `asked` that session `lsid` has no record of, as a
-/// `refrouter` 9.0.4 gives it from the command's `recoveryToken` (measured on 01-11-2026 through two
-/// routers): without one it cannot recover the decision; an empty one says the transaction only
-/// read; one that names a node of `config.shards` gets the decision from the transaction's
-/// record, which Raft keeps in its range and any node finds from the session and the number
-/// ([`Recovery`]): committed answers `ok`, a running one aborts, and a number the session never
-/// began is stopped there. A name `config.shards` does not list is not found; a record that does
-/// not answer by the deadline fails as a shard that cannot be reached. The session's running
+/// The answer to a commit of transaction `asked` that session `lsid` has no record of, as
+/// the reference router 9.0.4 gives it from the command's `recoveryToken` (measured on 01-11-2026
+/// through two routers): without one it cannot recover the decision; an empty one says the
+/// transaction only read; one that names a node of `config.shards` gets the decision from the
+/// transaction's record, which Raft keeps in its range and any node finds from the session and the
+/// number ([`Recovery`]): committed answers `ok`, a running one aborts, and a number the session
+/// never began is stopped there. A name `config.shards` does not list is not found; a record that
+/// does not answer by the deadline fails as a shard that cannot be reached. The session's running
 /// transaction, of a lower number, is over.
 fn unrecorded(
     backend: &mut dyn Backend,
@@ -1286,8 +1291,8 @@ fn end_abandoned(backend: &mut dyn Backend, shared: &Shared, mut run: Running) {
 }
 
 /// `TooManyOpenTransactions` for a transaction that would pass the node's
-/// `maxConcurrentMultiDocumentTransactions` (FR-020; 0 lifts the limit), with a `refnode` 9.0.4's
-/// message; the refused one does not start.
+/// `maxConcurrentMultiDocumentTransactions` (FR-020; 0 lifts the limit), with a reference replica
+/// set member 9.0.4's message; the refused one does not start.
 fn too_many_open(shared: &Shared, f: TxnFields) -> Option<CommandError> {
     let mut g = lock(shared);
     let limit = g.params.max_concurrent_transactions;
@@ -1305,8 +1310,8 @@ fn too_many_open(shared: &Shared, f: TxnFields) -> Option<CommandError> {
 }
 
 /// The answer to a command whose transaction did not start, or failed as it started, because of
-/// `e`: a write answers as a `refrouter` 9.0.4 does (measured), `ok` with nothing written and the
-/// shard's error, from `from`, as its first write error; another command fails with `e`.
+/// `e`: a write answers as the reference router 9.0.4 does (measured), `ok` with nothing written
+/// and the shard's error, from `from`, as its first write error; another command fails with `e`.
 fn refused_write(from: &str, name: &str, e: CommandError) -> Result<Document, CommandError> {
     let counts: &[&str] = match name {
         super::crud::INSERT | super::crud::DELETE => &["n"],
@@ -1319,8 +1324,8 @@ fn refused_write(from: &str, name: &str, e: CommandError) -> Result<Document, Co
     Ok(reply.with("writeErrors", Value::Array(vec![Value::Document(error)])).with("ok", 1.0))
 }
 
-/// A statement's `WriteConflict` as a `refrouter` 9.0.4 relays it from the shard (measured, DV-031,
-/// D-102): with the node's host and port where it names the shard's.
+/// A statement's `WriteConflict` as the reference router 9.0.4 relays it from the shard (measured,
+/// DV-031, D-102): with the node's host and port where it names the shard's.
 fn from_participant(backend: &mut dyn Backend, mut e: CommandError) -> CommandError {
     if e.code == WRITE_CONFLICT {
         let host = super::host_port(backend);
@@ -1362,9 +1367,9 @@ fn take(shared: &Shared, f: TxnFields) -> Result<Running, CommandError> {
     }
 }
 
-/// A reply whose first write error ends the transaction for the driver to repeat it: as RefDb
-/// does in a transaction, the command fails with that error and `TransientTransactionError`
-/// (measured on 9.0.4 for `WriteConflict`).
+/// A reply whose first write error ends the transaction for the driver to repeat it: as the
+/// reference server does in a transaction, the command fails with that error and
+/// `TransientTransactionError` (measured on 9.0.4 for `WriteConflict`).
 fn transient_on_top(reply: Document, txn_number: i64) -> Result<Document, CommandError> {
     let Some(Value::Array(errors)) = reply.get("writeErrors") else { return Ok(reply) };
     let code = match errors.first() {
@@ -2247,8 +2252,9 @@ mod tests {
     use crate::commands::{NodeSessions, Timeouts, txn_stats};
     use teseladb_range::intents::TxnId;
 
-    /// A session's messages name its user as `refrouter` 9.0.4 does: the base64 of the SHA-256 of
-    /// `user@db` (measured on 03-11-2026 for `compat@admin`), the empty name without a login.
+    /// A session's messages name its user as the reference router 9.0.4 does: the base64 of the
+    /// SHA-256 of `user@db` (measured on 03-11-2026 for `compat@admin`), the empty name without a
+    /// login.
     #[test]
     fn session_messages_name_the_logged_in_user() {
         let user = UserName { user: "compat".into(), db: "admin".into() };

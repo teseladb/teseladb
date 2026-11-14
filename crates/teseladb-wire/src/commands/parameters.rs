@@ -1,11 +1,12 @@
 //! Cluster parameters (006 FR-020): `setClusterParameter` and `getClusterParameter`, kept in
-//! Group 0 so every node reads the same value, with the forms and errors of a `refrouter` 9.0.4
-//! (measured). Each specification adds its parameters to [`KNOWN`]; 006 has `defaultMaxTimeMS`,
-//! 013 `auditConfig` (FR-031) and 007 TeselaDB's own `teselaHistoryRetention` (FR-019, DV-016)
-//! and `teselaLoadSplitOpsPerSecond` (D-075) and RefDb's `changeStreamOptions` (FR-019), and
-//! 019 `httpOptions` and `mcpOptions` (DV-016). Each read and change goes to the audit log as on RefDb
-//! Enterprise 9.0.4: `getClusterParameter` with the names asked for, `setClusterParameter` and
-//! `updateCachedClusterServerParameter` with the value before and the one given.
+//! Group 0 so every node reads the same value, with the forms and errors of the reference router
+//! 9.0.4 (measured). Each specification adds its parameters to [`KNOWN`]; 006 has
+//! `defaultMaxTimeMS`, 013 `auditConfig` (FR-031) and 007 TeselaDB's own `teselaHistoryRetention`
+//! (FR-019, DV-016) and `teselaLoadSplitOpsPerSecond` (D-075) and the reference server's
+//! `changeStreamOptions` (FR-019), and 019 `httpOptions` and `mcpOptions` (DV-016). Each read and
+//! change goes to the audit log as on the reference server Enterprise 9.0.4: `getClusterParameter`
+//! with the names asked for, `setClusterParameter` and `updateCachedClusterServerParameter` with
+//! the value before and the one given.
 
 use std::collections::BTreeMap;
 
@@ -39,7 +40,7 @@ struct Known {
     name: &'static str,
     default: fn() -> Document,
     parse: fn(&Document) -> Result<Document, (Code, String)>,
-    /// The name of its structure in RefDb's errors.
+    /// The name of its structure in the reference server's errors.
     idl: &'static str,
     /// Whether its errors go after `Failed parsing ClusterServerParameter '<name>' :: caused by ::`.
     prefixed: bool,
@@ -139,9 +140,9 @@ fn change_stream_default() -> Document {
     Document::new().with(PRE_AND_POST_IMAGES, Document::new().with(EXPIRE_AFTER_SECONDS, OFF))
 }
 
-/// Reads `changeStreamOptions` with the order of checks and the messages of a `refrouter` 9.0.4
-/// (measured on 07-11-2026): the parser's errors after «Failed parsing new changeStreamOptions
-/// value», the value's own without it, all `BadValue`.
+/// Reads `changeStreamOptions` with the order of checks and the messages of the reference router
+/// 9.0.4 (measured on 07-11-2026): the parser's errors after «Failed parsing new
+/// changeStreamOptions value», the value's own without it, all `BadValue`.
 fn change_stream_parse(v: &Document) -> Result<Document, (Code, String)> {
     let parser =
         |why: String| (BAD_VALUE, format!("Failed parsing new {CHANGE_STREAM_OPTIONS} value{why}"));

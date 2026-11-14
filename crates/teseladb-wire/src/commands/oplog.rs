@@ -55,7 +55,7 @@ pub const OPLOG_COLL: &str = "oplog.rs";
 /// The prefix of the Group 0 settings that keep the notes of `appendOplogNote`, followed by the
 /// note's mark (physical and logical parts, big-endian).
 pub const NOTE_PREFIX: &[u8] = b"oplogNote\0";
-/// `drop` of the oplog (RefDb 9.0.4).
+/// `drop` of the oplog (the reference server 9.0.4).
 const CANNOT_DROP_LIVE_OPLOG: Code = Code { code: DROP_REFUSED_CODE, name: "Location5255000" };
 /// The `_id` index of a collection, as `create` entries carry it.
 fn id_index() -> Document {
@@ -180,10 +180,11 @@ fn plain(operation: Operation, extra: Document, mark: Hlc, term: i64) -> Documen
     .to_document()
 }
 
-/// The entries of retryable write `r` at `mark` (018 FR-009), as a replica set member of RefDb
-/// 9.0.4 writes them (measured on 02-11-2026): one document is a plain entry with the session,
-/// several are one `applyOps` entry on `admin.$cmd` with `multiOpType: 1`, each operation with
-/// its `stmtId`; `prevOpTime` is the command's previous statement, or null for the first.
+/// The entries of retryable write `r` at `mark` (018 FR-009), as a replica set member of the
+/// reference server 9.0.4 writes them (measured on 02-11-2026): one document is a plain entry with
+/// the session, several are one `applyOps` entry on `admin.$cmd` with `multiOpType: 1`, each
+/// operation with its `stmtId`; `prevOpTime` is the command's previous statement, or null for the
+/// first.
 fn retryable(r: &RetryInfo, ops: Vec<(u32, Operation)>, mark: Hlc, term: i64) -> Document {
     let stmt = |op: u32| i32::try_from(r.stmt_id.saturating_add(op)).unwrap_or(i32::MAX);
     let prev = r.prev.map_or(NULL_OP_TIME, |p| op_time(p, term));
@@ -215,7 +216,7 @@ fn retryable(r: &RetryInfo, ops: Vec<(u32, Operation)>, mark: Hlc, term: i64) ->
 /// The entries of the operations of one write at `mark` that is neither a transaction nor a
 /// retryable write: the inserts of several documents in a row are one `applyOps` entry on
 /// `admin.$cmd`, without session, `stmtId` or `multiOpType`; every other operation is an entry
-/// of its own (measured on a replica set of `ref:9.0.4`, 03-11-2026).
+/// of its own (measured on a replica set of the reference server 9.0.4, 03-11-2026).
 fn plain_entries(ops: Vec<Operation>, mark: Hlc, term: i64) -> Vec<Document> {
     let mut out = Vec::new();
     let mut inserts: Vec<Operation> = Vec::new();
@@ -271,9 +272,9 @@ fn create_options(entry: &CollectionEntry) -> Result<Document, CommandError> {
         .fold(Document::new(), |d, (k, v)| d.with(k, v.clone())))
 }
 
-/// An identifier in the form of RefDb's storage idents (a UUID's text): TeselaDB keeps no
-/// files per collection or index, so it is derived from the collection's UUID and `what` (the
-/// collection, its `_id` index or an index by name), the same on every read.
+/// An identifier in the form of the reference server's storage idents (a UUID's text): TeselaDB
+/// keeps no files per collection or index, so it is derived from the collection's UUID and `what`
+/// (the collection, its `_id` index or an index by name), the same on every read.
 fn ident(collection: &CollectionEntry, what: &str) -> Value {
     let mut seed = collection.uuid.to_vec();
     seed.extend_from_slice(what.as_bytes());
@@ -291,7 +292,7 @@ fn ident(collection: &CollectionEntry, what: &str) -> Value {
     ))
 }
 
-/// `versionContext` of the entries a RefDb 9.0.4 member writes under its feature
+/// `versionContext` of the entries a reference server 9.0.4 member writes under its feature
 /// compatibility version (`create`, `createIndexes`, `collMod`).
 fn version_context() -> Document {
     Document::new().with("OFCV", "9.0")
@@ -723,10 +724,10 @@ pub fn read<B: Backend + ?Sized>(backend: &mut B, from: Hlc) -> Result<OplogRead
 
 /// The entries of the history window `filter` can match, for a read that is not tailable, in
 /// commit order: up to the node's clock when the read starts, so that the newest entry is at
-/// least the last write the node acknowledged (what `refdump --oplog` takes as the end of its
-/// copy). With `newest` (a `$natural: -1` read with that limit and no lower bound on `ts`), only
-/// the newest entries, at least that many when the window has them: the read goes back from the
-/// clock one second at a time instead of reading the whole window.
+/// least the last write the node acknowledged (what the reference dump tool with `--oplog` takes as
+/// the end of its copy). With `newest` (a `$natural: -1` read with that limit and no lower bound on
+/// `ts`), only the newest entries, at least that many when the window has them: the read goes back
+/// from the clock one second at a time instead of reading the whole window.
 pub fn documents<B: Backend + ?Sized>(
     backend: &mut B,
     filter: &Document,

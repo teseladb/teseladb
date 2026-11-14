@@ -1,8 +1,8 @@
-//! The fields of RefDb's own protocol between a router and its shards that a client may send
-//! a `refrouter` (006 FR-021): a `refrouter` 9.0.4 checks their types, refuses those meant for a
-//! shard, and asks a privilege no user has for the others. TeselaDB has no such protocol and
-//! uses none of them; it refuses them as that `refrouter` does (measured on 05-11-2026, scenario
-//! `api-strict`).
+//! The fields of the reference server's own protocol between a router and its shards that a client
+//! may send the reference router (006 FR-021): the reference router 9.0.4 checks their types,
+//! refuses those meant for a shard, and asks a privilege no user has for the others. TeselaDB has
+//! no such protocol and uses none of them; it refuses them as the reference router does (measured
+//! on 05-11-2026, scenario `api-strict`).
 
 use teseladb_bson::{Document, Value};
 
@@ -92,7 +92,7 @@ fn typed(name: &str) -> Vec<(&'static str, Want)> {
     out
 }
 
-/// Refuses the internal fields of command `req` (named `name`) as a `refrouter` 9.0.4 does.
+/// Refuses the internal fields of command `req` (named `name`) as the reference router 9.0.4 does.
 pub fn check(req: &Request, name: &str) -> Result<(), CommandError> {
     let cmd = &req.command;
     let wanted = typed(name);
@@ -114,8 +114,8 @@ pub fn check(req: &Request, name: &str) -> Result<(), CommandError> {
 }
 
 /// Refuses the internal fields of command `req` (named `name`) that ask a privilege no user has:
-/// a `refrouter` 9.0.4 checks it after the API parameters, so `apiStrict` refuses an unstable one
-/// first (RefDb r9.0.4 `coll_mod.idl`, measured on 09-11-2026).
+/// The reference router 9.0.4 checks it after the API parameters, so `apiStrict` refuses an
+/// unstable one first (the reference server r9.0.4 `coll_mod.idl`, measured on 09-11-2026).
 pub fn check_privileged(req: &Request, name: &str) -> Result<(), CommandError> {
     match name {
         "collMod" if req.command.get(REMOVE_LEGACY_BUCKETING).is_some() => {

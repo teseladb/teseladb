@@ -37,7 +37,7 @@ pub const ELECTED_AT: &str = "electedAt";
 /// The field with the reason of the latest designation.
 pub const ELECTION_REASON: &str = "electionReason";
 /// The reason of a designation by `setClusterParameter` or by Group 0 when the primary fell
-/// (`lastElectionReason` of RefDb 9.0.4's `electionCandidateMetrics`).
+/// (`lastElectionReason` of the reference server 9.0.4's `electionCandidateMetrics`).
 pub const REASON_TIMEOUT: &str = "electionTimeout";
 /// The reason of a designation by Group 0 of a live member with a higher priority than the
 /// primary's.
@@ -57,7 +57,7 @@ pub struct Election {
 /// The stored presentation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Presentation {
-    /// `refrouter` or `replicaset`.
+    /// The router presentation ([`teseladb_names::ROUTER`]) or `replicaset`.
     pub mode: PresentationMode,
     /// `setName`.
     pub set_name: String,
@@ -78,7 +78,7 @@ pub struct Presentation {
 impl Default for Presentation {
     fn default() -> Presentation {
         Presentation {
-            mode: PresentationMode::RefRouter,
+            mode: PresentationMode::default(),
             set_name: String::new(),
             primary: None,
             set_version: FIRST_SET_VERSION,
@@ -205,7 +205,7 @@ impl Presentation {
 
     /// The replica set its own port serves (018 FR-016): the same members, primary and
     /// attributes at each node's host with port `replicaSetPort`; without a designated primary
-    /// (the `refrouter` presentation never designated one), the electable member with the highest
+    /// (the router presentation never designated one), the electable member with the highest
     /// priority. `None` without the port or a set name.
     pub fn on_port(&self, hosts: &[String]) -> Option<ReplicaSet> {
         let port = self.replica_set_port?;
@@ -357,7 +357,7 @@ pub fn set_hold<B: Backend + ?Sized>(
     backend.set_cluster_parameter(&hold_name(host), hold.to_document().to_bytes()?)
 }
 
-/// The stored presentation (`refrouter` by default).
+/// The stored presentation (the router presentation by default).
 pub fn stored<B: Backend + ?Sized>(backend: &mut B) -> Result<Presentation, CommandError> {
     let params = backend.cluster_parameters()?;
     match params.get(TOPOLOGY_PRESENTATION) {
@@ -408,7 +408,7 @@ pub fn replica_set<B: Backend + ?Sized>(
     Ok(Some((rs, cluster_id(backend)?)))
 }
 
-/// The value without `setClusterParameter`: the `refrouter` presentation.
+/// The value without `setClusterParameter`: the router presentation.
 pub fn default_value() -> Document {
     Presentation::default().to_document()
 }
@@ -498,7 +498,7 @@ pub fn next(
     if p.replica_set_port.is_some() && p.set_name.is_empty() {
         return Err(bad("replicaSetPort needs a setName"));
     }
-    if mode == PresentationMode::RefRouter {
+    if mode != PresentationMode::ReplicaSet {
         return Ok(p);
     }
     if p.set_name.is_empty() {

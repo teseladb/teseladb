@@ -1,7 +1,8 @@
 //! The stages of a pipeline that `explain` checked (010 FR-003, T018), each read once into its
 //! kind with the parts of its specification the plan uses, in the types the check guarantees:
 //! a `$match` holds its filter, an `$unwind` its path, a `$group` its key and accumulators. The
-//! functions that build the plan match on the kind and never meet a stage RefDb refuses.
+//! functions that build the plan match on the kind and never meet a stage the reference server
+//! refuses.
 //!
 //! A stage keeps the document it came from too, which the engine reads when `explain` runs the
 //! pipeline's first stages.
@@ -186,7 +187,7 @@ fn strings(items: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The stages of `items`, each read, as RefDb rewrites them before planning.
+/// The stages of `items`, each read, as the reference server rewrites them before planning.
 pub(super) fn of_values(items: &[Value]) -> Vec<Step> {
     super::aggregate::swapped(documents(items).map(|d| Step::new(d.clone())).collect())
 }
@@ -194,8 +195,8 @@ pub(super) fn of_values(items: &[Value]) -> Vec<Step> {
 /// The field a `$lookup` without a collection holds its `$documents` in.
 const DOCUMENTS_FIELD: &str = "_tempDocumentsField";
 
-/// A pipeline that starts with `$documents` as RefDb runs it inside a `$lookup` (measured):
-/// one empty document whose field holds the documents, unwound and made the root.
+/// A pipeline that starts with `$documents` as the reference server runs it inside a `$lookup`
+/// (measured): one empty document whose field holds the documents, unwound and made the root.
 fn without_documents(items: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     for (i, st) in items.iter().enumerate() {

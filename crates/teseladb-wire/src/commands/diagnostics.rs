@@ -1,9 +1,9 @@
-//! Diagnostic commands with RefDb's shapes and TeselaDB's data (FR-023): `buildInfo`,
-//! `hostInfo`, `serverStatus`, `connectionStatus`, `listCommands`, `getCmdLineOpts`, `getLog`,
-//! `dbStats` and `collStats` (`whatsmyuri` answers in the dispatch, which knows the connection).
-//! Shapes, types and messages measured against a `refrouter` 9.0.4 on 30-10-2026; the sections
-//! that describe parts TeselaDB does not have (RefEngine, anotherproduct, shards) are left out, as
-//! the divergences of 006 record.
+//! Diagnostic commands with the reference server's shapes and TeselaDB's data (FR-023):
+//! `buildInfo`, `hostInfo`, `serverStatus`, `connectionStatus`, `listCommands`, `getCmdLineOpts`,
+//! `getLog`, `dbStats` and `collStats` (`whatsmyuri` answers in the dispatch, which knows the
+//! connection). Shapes, types and messages measured against the reference router 9.0.4 on
+//! 30-10-2026; the sections that describe parts TeselaDB does not have (the reference storage
+//! engine, the allocator, shards) are left out, as the divergences of 006 record.
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::RoleName;
@@ -49,15 +49,16 @@ pub const DB_STATS: &str = "dbStats";
 /// `collStats`.
 pub const COLL_STATS: &str = "collStats";
 
-/// The RefDb version TeselaDB announces (D-024), the one its behaviour was measured against.
+/// The reference server version TeselaDB announces (D-024), the one its behaviour was measured
+/// against.
 pub const ANNOUNCED_VERSION: &str = "9.0.4";
 /// The announced version as `buildInfo`'s `versionArray`.
 const VERSION_ARRAY: [i32; 4] = [9, 0, 4, 0];
-/// What `serverStatus` calls the process: TeselaDB presents itself as a `refrouter` (D-024).
+/// What `serverStatus` calls the process: TeselaDB presents itself as a router (D-024).
 const PROCESS_NAME: &str = teseladb_names::ROUTER;
-/// The port after which RefDb writes `host:port` instead of the bare host name.
+/// The port after which the reference server writes `host:port` instead of the bare host name.
 const DEFAULT_PORT: u16 = 27017;
-/// The log `getLog` names with `'*'`, as a `refrouter` 9.0.4 lists them.
+/// The log `getLog` names with `'*'`, as the reference router 9.0.4 lists them.
 const GLOBAL_LOG: &str = "global";
 /// The log of the warnings written at startup.
 const STARTUP_WARNINGS: &str = "startupWarnings";
@@ -220,7 +221,7 @@ pub struct ProcessFacts {
 }
 
 impl ProcessFacts {
-    /// The host as RefDb names it: `host`, or `host:port` off the default port.
+    /// The host as the reference server names it: `host`, or `host:port` off the default port.
     pub fn host_name(&self) -> String {
         match self.port {
             0 | DEFAULT_PORT => self.host.hostname.clone(),
@@ -251,7 +252,7 @@ pub struct OpCounters {
 }
 
 /// [`OpCounters`] that every thread adds to without a lock (H-013 of the native tests), as
-/// RefDb keeps its `opcounters` in atomics.
+/// the reference server keeps its `opcounters` in atomics.
 #[derive(Debug, Default)]
 pub struct AtomicOpCounters {
     insert: std::sync::atomic::AtomicI64,
@@ -304,7 +305,8 @@ impl AtomicOpCounters {
 }
 
 impl OpCounters {
-    /// Counts `cmd`, named `name`, as RefDb's `opcounters` do, and whether it failed.
+    /// Counts `cmd`, named `name`, as the reference server's `opcounters` do, and whether it
+    /// failed.
     pub fn count(&mut self, name: &str, cmd: &Document, failed: bool) {
         let statements = |field: &str| match cmd.get(field) {
             Some(Value::Array(a)) => i64::try_from(a.len()).unwrap_or(i64::MAX),
@@ -325,7 +327,8 @@ impl OpCounters {
     }
 }
 
-/// A whole number as RefDb's `appendNumber` writes it: `int` when it fits, `long` otherwise.
+/// A whole number as the reference server's `appendNumber` writes it: `int` when it fits, `long`
+/// otherwise.
 fn number(n: i64) -> Value {
     i32::try_from(n).map_or(Value::Int64(n), Value::Int32)
 }
@@ -422,7 +425,8 @@ pub fn server_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
         .with("uptimeMillis", Value::Int64(i64::try_from(uptime_ms).unwrap_or(i64::MAX)))
         .with("uptimeEstimate", Value::Int64(i64::try_from(uptime_ms / 1000).unwrap_or(i64::MAX)))
         .with("localTime", Value::DateTime(i64::try_from(facts.now_ms).unwrap_or(i64::MAX)));
-    // In a `refrouter` 9.0.4's order; the sections that cannot apply to TeselaDB are in DV-038.
+    // In the reference router 9.0.4's order; the sections that cannot apply to TeselaDB are in
+    // DV-038.
     let sections = [
         ("asserts", asserts(&counters)),
         ("connections", connections(&facts.connections, &ingress)),
@@ -461,7 +465,7 @@ fn self_tests(shared: &super::Shared) -> bool {
 }
 
 /// `security`: the authentications, then the client port's certificate when it has TLS (measured
-/// on a `refrouter` 9.0.4 with `--tlsMode allowTLS` on 03-11-2026).
+/// on the reference router 9.0.4 with `--tlsMode allowTLS` on 03-11-2026).
 fn security(authentication: Document, cert: Option<&ServerCertificate>) -> Document {
     match cert {
         None => authentication,
@@ -481,7 +485,7 @@ fn transport_security(n: &NetworkCounts) -> Document {
         .with("unknown", Value::Int64(0))
 }
 
-/// `metrics`: the subsections TeselaDB has data for, in a `refrouter` 9.0.4's order.
+/// `metrics`: the subsections TeselaDB has data for, in the reference router 9.0.4's order.
 fn metrics(
     s: &super::status::StatusCounters,
     n: &NetworkCounts,
@@ -491,8 +495,8 @@ fn metrics(
     let names =
         COMMANDS.iter().map(|c| c.name).filter(|name| tests || *name != CONFIGURE_FAIL_POINT);
     let mut network = Document::new();
-    // Once a client completed a handshake (measured on a `refrouter` 9.0.4). RefDb's value is its
-    // own running average; TeselaDB gives the mean of every handshake.
+    // Once a client completed a handshake (measured on the reference router 9.0.4). The reference
+    // server's value is its own running average; TeselaDB gives the mean of every handshake.
     if n.tls_handshakes > 0 {
         let mean = n.tls_handshake_micros as f64 / n.tls_handshakes as f64;
         network.push("averageTimeToCompletedTLSHandshakeMicros", mean);
@@ -574,9 +578,9 @@ fn mem(r: &ResourceUse) -> Document {
         .with("supported", true)
 }
 
-/// What RefDb 9.0.4 says of the process in `extra_info`, which varies by platform: on macOS the
-/// task's page-ins as `page_faults` (`processinfo_osx.cpp`), on Linux `getrusage(2)` and the
-/// threads.
+/// What the reference server 9.0.4 says of the process in `extra_info`, which varies by platform:
+/// on macOS the task's page-ins as `page_faults` (`processinfo_osx.cpp`), on Linux `getrusage(2)`
+/// and the threads.
 fn extra_info(r: &ResourceUse) -> Document {
     let note = Document::new().with("note", "fields vary by platform");
     if let Some(pageins) = r.pageins {
@@ -595,7 +599,7 @@ fn extra_info(r: &ResourceUse) -> Document {
 }
 
 /// The roles of the running command's user: its direct roles, then those they inherit, as
-/// RefDb 9.0.4 lists them in `connectionStatus`; none without a user.
+/// the reference server 9.0.4 lists them in `connectionStatus`; none without a user.
 pub(crate) fn authenticated_roles<B: Backend + ?Sized>(
     backend: &mut B,
 ) -> Result<Vec<RoleName>, CommandError> {
@@ -609,7 +613,7 @@ fn authenticated_grants<B: Backend + ?Sized>(
 ) -> Result<(Vec<RoleName>, Vec<Privilege>), CommandError> {
     let Some(name) = backend.authenticated_user() else { return Ok((Vec::new(), Vec::new())) };
     let direct = match backend.authenticated_roles() {
-        // `__system` lists no role (measured on `refnode` 9.0.4, 013 FR-034).
+        // `__system` lists no role (measured on a reference replica set member 9.0.4, 013 FR-034).
         _ if super::auth::is_internal(&name) => Vec::new(),
         Some(r) => r,
         None => backend.user(&name)?.map(|u| u.roles).unwrap_or_default(),
@@ -671,8 +675,8 @@ pub fn get_log<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
     };
     let facts = ctx.backend.process();
     if which == "*" {
-        // RefDb's in-memory logs are created on first use: `startupWarnings` exists once a
-        // warning was logged at start (as the warning of the insecure mode).
+        // The reference server's in-memory logs are created on first use: `startupWarnings` exists
+        // once a warning was logged at start (as the warning of the insecure mode).
         let mut names = vec![Value::from(GLOBAL_LOG)];
         if facts.startup_warnings.total > 0 {
             names.push(Value::from(STARTUP_WARNINGS));
@@ -694,7 +698,7 @@ pub fn get_log<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         .with("ok", 1.0))
 }
 
-/// The numeric types of `scale`, in a `refrouter` 9.0.4's order.
+/// The numeric types of `scale`, in the reference router 9.0.4's order.
 const SCALE_TYPES: [&str; 4] = ["int", "decimal", "double", "long"];
 
 /// The `scale` of `dbStats` and `collStats`: a positive whole number, 1 by default.
@@ -811,7 +815,7 @@ pub(super) fn tally_within<B: Backend + ?Sized>(
 }
 
 /// Bytes `stored` takes in whole storage blocks, at least one (an empty index takes 4096 bytes
-/// in RefEngine, measured on 9.0.4; DV-037).
+/// in the reference storage engine, measured on 9.0.4; DV-037).
 pub(super) fn in_blocks(stored: u64) -> u64 {
     stored.div_ceil(INDEX_BYTES).max(1) * INDEX_BYTES
 }
@@ -860,8 +864,8 @@ pub(super) fn index_sizes_within<B: Backend + ?Sized>(
 }
 
 /// The `nindexes` of `collStats` for a collection with `sized` indexes in `indexSizes`: a
-/// clustered collection's index counts and has no size of its own (measured on a `refrouter` 9.0.4
-/// on 05-11-2026: `nindexes: 1`, `indexSizes: {}`).
+/// clustered collection's index counts and has no size of its own (measured on the reference router
+/// 9.0.4 on 05-11-2026: `nindexes: 1`, `indexSizes: {}`).
 fn index_count(kind: &CollectionKind, sized: usize) -> i32 {
     let clustered = usize::from(matches!(kind, CollectionKind::Clustered { .. }));
     i32::try_from(sized + clustered).unwrap_or(i32::MAX)
@@ -931,10 +935,10 @@ fn average(bytes: u64, count: i64) -> Option<i64> {
 }
 
 /// The `storageStats` of `$collStats` for collection `c` of `ns`, sizes divided by `scale`, in
-/// the order of a `refrouter` 9.0.4 (measured 31-10-2026): a capped collection shows its limits, a
-/// time series its buckets instead of documents, and the index of a time series is on its
-/// `metaField` and `timeField`. Like `collStats` it has no `refengine`, `indexDetails` nor
-/// `indexBuilds` (DV-038).
+/// the order of the reference router 9.0.4 (measured 31-10-2026): a capped collection shows its
+/// limits, a time series its buckets instead of documents, and the index of a time series is on its
+/// `metaField` and `timeField`. Like `collStats` it has no storage engine section
+/// ([`teseladb_names::STORAGE_ENGINE`]), `indexDetails` nor `indexBuilds` (DV-038).
 pub(crate) fn storage_stats<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
@@ -952,7 +956,7 @@ pub(crate) fn storage_stats<B: Backend + ?Sized>(
     let mut d = Document::new().with("size", scaled(bytes));
     match &kind {
         // Without documents (buckets) there is no average, and before its first insert a time
-        // series has no counters (measured on a `refnode` 9.0.4 on 03-11-2026).
+        // series has no counters (measured on a reference replica set member 9.0.4 on 03-11-2026).
         CollectionKind::TimeSeries(_) => {
             let stats = lock(shared).timeseries.get(&c.id).cloned();
             let mut series = Document::new().with("bucketsNs", full(ns));
@@ -1017,7 +1021,7 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     let scaled =
         |b: u64| number(i64::try_from(b / u64::try_from(scale).unwrap_or(1)).unwrap_or(i64::MAX));
     let Some(c) = ctx.backend.collection(&ns)? else {
-        // In a database the catalog does not have, `refrouter` 9.0.4 fails (measured).
+        // In a database the catalog does not have, the reference router 9.0.4 fails (measured).
         if !super::catalog::has_database(ctx.backend, &ns.db)? {
             return Err(super::catalog::missing_namespace(ctx.backend, &ns, String::new())?);
         }
@@ -1053,9 +1057,9 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     let (start, end) = documents_of(&c);
     let storage = collection_size(ctx.backend.stored_bytes(&start, &end)?) - INDEX_BYTES;
     let avg = if count > 0 { (bytes / u64::try_from(count).unwrap_or(1)) as f64 } else { 0.0 };
-    // Each kind with its shape (015 FR-010, measured on a `refrouter` 9.0.4): a capped collection
-    // shows its limits, a clustered one has no `_id_` index of its own, and a time series counts
-    // buckets instead of documents.
+    // Each kind with its shape (015 FR-010, measured on the reference router 9.0.4): a capped
+    // collection shows its limits, a clustered one has no `_id_` index of its own, and a time
+    // series counts buckets instead of documents.
     let kind = super::kinds::kind_of(&c)?;
     d.push("capped", matches!(kind, CollectionKind::Capped { .. }));
     let mut max_size = 0;
@@ -1078,7 +1082,8 @@ pub fn coll_stats<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     d.push("totalSize", scaled(storage + index_bytes));
     if series {
         let avg_bucket = if count > 0 { bytes / u64::try_from(count).unwrap_or(1) } else { 0 };
-        // The bucket counters of this node since it started, as RefDb's catalog counts them.
+        // The bucket counters of this node since it started, as the reference server's catalog
+        // counts them.
         let stats = lock(ctx.shared).timeseries.get(&c.id).cloned().unwrap_or_default();
         let mut ts = Document::new().with("bucketsNs", full(&ns));
         let avg = i64::try_from(avg_bucket).unwrap_or(i64::MAX);
@@ -1199,8 +1204,8 @@ fn set_parameter_help() -> String {
 }
 
 /// `listCommands`: every command the node answers ([`crate::dispatch::command_names`]), in
-/// byte order of their names as a `refrouter` 9.0.4 lists them, with the fields measured there;
-/// `configureFailPoint` only on a node with `enableTestCommands`.
+/// byte order of their names as the reference router 9.0.4 lists them, with the fields measured
+/// there; `configureFailPoint` only on a node with `enableTestCommands`.
 pub fn list_commands<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let tests = lock(ctx.shared).failpoint.is_some();
     let mut entries: Vec<(&str, Document)> = Vec::new();

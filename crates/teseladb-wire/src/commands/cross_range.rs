@@ -18,9 +18,9 @@ use super::Backend;
 use super::mutation::Bound;
 use crate::error::{BSON_OBJECT_TOO_LARGE, CommandError, ENTRY_TOO_LARGE, WRITE_CONFLICT};
 
-/// Times a statement starts again after a conflict before it answers `WriteConflict`: as a
-/// `refnode` retries a write conflict, it waits for the other transaction; the node pauses between
-/// rounds, so this is about its request deadline.
+/// Times a statement starts again after a conflict before it answers `WriteConflict`: as
+/// a reference replica set member retries a write conflict, it waits for the other transaction; the
+/// node pauses between rounds, so this is about its request deadline.
 pub const MAX_CONFLICT_ROUNDS: u32 = 1_500;
 /// Value type of a statement's result.
 pub const STATEMENT_RESULT: u8 = 4;

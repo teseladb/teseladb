@@ -12,8 +12,8 @@
 //!   sends the leadership of its ranges (its documents are keyed by insertion order or by bucket,
 //!   which a copy by `_id` does not keep).
 //!
-//! The replies, messages and codes are those of a `refrouter` 9.0.4 of two shards (measured on
-//! 02-11-2026, `t1.js` to `t12.js` in the lane's notes).
+//! The replies, messages and codes are those of the reference router 9.0.4 of two shards (measured
+//! on 02-11-2026, `t1.js` to `t12.js` in the lane's notes).
 
 use std::collections::BTreeMap;
 
@@ -49,7 +49,7 @@ pub const ABORT_REWRITE_COLLECTION: &str = "abortRewriteCollection";
 /// `commitReshardCollection`.
 pub const COMMIT_RESHARD_COLLECTION: &str = "commitReshardCollection";
 /// The argument that asks for a verification of the copy, which this cluster does not run
-/// (`reshardingDocumentVerification` is off on a `refrouter` 9.0.4).
+/// (`reshardingDocumentVerification` is off on the reference router 9.0.4).
 const PERFORM_VERIFICATION: &str = "performVerification";
 const TO_SHARD: &str = "toShard";
 const CONFIG_DB: &str = "config";
@@ -257,8 +257,8 @@ pub fn lead_from<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// The shard among the cluster's that holds the least data, the first listed on a tie: as a
-/// `refrouter` 9.0.4 picks the shard of `unshardCollection` without `toShard` (measured on
+/// The shard among the cluster's that holds the least data, the first listed on a tie: as
+/// the reference router 9.0.4 picks the shard of `unshardCollection` without `toShard` (measured on
 /// 02-11-2026, whatever the chunks of each shard). The data of a shard are the live bytes of the
 /// ranges with collections it leads, which their state machines keep (no data is read).
 fn least_loaded<B: Backend + ?Sized>(backend: &mut B) -> Result<NodeId, CommandError> {
@@ -368,7 +368,8 @@ fn not_in_catalog(ns: &Namespace) -> CommandError {
     )
 }
 
-/// A copy is never verified here: `performVerification: true` fails as on a `refrouter` 9.0.4.
+/// A copy is never verified here: `performVerification: true` fails as on the reference router
+/// 9.0.4.
 pub(super) fn check_verification(cmd: &Document) -> Result<(), CommandError> {
     match cmd.get(PERFORM_VERIFICATION) {
         Some(Value::Boolean(true)) => Err(CommandError::new(

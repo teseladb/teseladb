@@ -6,9 +6,9 @@
 //! `config.collections` shows them and the leaders of its ranges read the size at which they split
 //! ([`max_chunk_bytes`]).
 //!
-//! The replies and messages are those of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026,
-//! `c1.js`…`c8.js` in the lane's notes): the commands run only on `admin` (13); `balancerStart`
-//! and `balancerStop` take any field and write `{mode: "full", stopped: false}` and
+//! The replies and messages are those of the reference router 9.0.4 of two shards (measured on
+//! 02-11-2026, `c1.js`…`c8.js` in the lane's notes): the commands run only on `admin` (13);
+//! `balancerStart` and `balancerStop` take any field and write `{mode: "full", stopped: false}` and
 //! `{mode: "off", stopped: true}`; `balancerStatus` answers `mode`, `inBalancerRound`,
 //! `numBalancerRounds` and `term`; `configureCollectionBalancing` takes `chunkSize` in MiB,
 //! truncated, from 0 to 1024 (0 drops it) as `maxChunkSizeBytes`, `enableAutoMerger` as
@@ -200,7 +200,7 @@ fn namespace(ctx: &Ctx<'_, impl Backend + ?Sized>, name: &str) -> Result<Namespa
         Value::String(s) => s.clone(),
         v => return Err(wrong_type(&format!("{name}.{name}"), v, "string")),
     };
-    // A `refrouter` 9.0.4 names `db.` by the database (measured on 03-11-2026).
+    // The reference router 9.0.4 names `db.` by the database (measured on 03-11-2026).
     let shown = full.strip_suffix('.').unwrap_or(&full);
     parse_full(&full).filter(|n| !n.db.is_empty() && !n.coll.is_empty()).ok_or_else(|| {
         CommandError::new(INVALID_NAMESPACE, format!("Invalid namespace specified '{shown}'"))
@@ -371,8 +371,8 @@ pub fn set_allow_migrations<B: Backend + ?Sized>(
         None => return Err(super::args::missing(name, "allowMigrations")),
     };
     admin::admin_only(name, ctx.db)?;
-    // A `refrouter` 9.0.4 checks the database's name, then that it exists, then the collection's
-    // (measured on 03-11-2026).
+    // The reference router 9.0.4 checks the database's name, then that it exists, then the
+    // collection's (measured on 03-11-2026).
     let db = text.split_once('.').map_or(text.as_str(), |(db, _)| db);
     if db.is_empty() || db.contains(super::names::DB_FORBIDDEN) {
         return Err(CommandError::new(INVALID_NAMESPACE, format!("{db} is not a valid db name")));

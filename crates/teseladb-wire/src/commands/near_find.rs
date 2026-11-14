@@ -2,8 +2,8 @@
 //! on the operator's field, with the rest of the filter as its query, followed by the command's
 //! sort, skip, limit and projection, so the documents come nearest first through the collection's
 //! `2d` or `2dsphere` index. Without an index that answers the point, the error is the planner's
-//! of a `refrouter` 9.0.4 (measured on `lc12`): `NoQueryExecutionPlans` naming the `GEONEAR` node of
-//! the query tree, its field, its `$maxDistance` and whether it is a legacy `$nearSphere`.
+//! of the reference router 9.0.4 (measured on `lc12`): `NoQueryExecutionPlans` naming the `GEONEAR`
+//! node of the query tree, its field, its `$maxDistance` and whether it is a legacy `$nearSphere`.
 
 use teseladb_bson::{Document, Value};
 
@@ -152,7 +152,7 @@ impl NearFind {
         format!("$and\n{children}\n    {node}")
     }
 
-    /// The error of a read no index answers, as the planner of a `refrouter` 9.0.4 gives it;
+    /// The error of a read no index answers, as the planner of the reference router 9.0.4 gives it;
     /// any other error as it is.
     pub fn planner_error(
         &self,

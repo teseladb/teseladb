@@ -1,13 +1,14 @@
-//! TeselaDB's RefDb wire protocol, without I/O (specification 006): the server hands each
+//! The wire protocol of TeselaDB, without I/O (specification 006): the server hands each
 //! connection the bytes it reads and writes back the bytes it gets.
 //!
 //! - [`msg`], [`query`] and [`compressed`]: `OP_MSG`, the `OP_QUERY` handshake with its
 //!   `OP_REPLY`, and `OP_COMPRESSED` with snappy, zlib and zstd (FR-001, FR-002).
 //! - [`connection`]: one client connection, from bytes to [`connection::Request`] and from a
 //!   reply document to bytes.
-//! - [`dispatch`] and [`hello`]: the commands a node answers by itself, the handshake as a
-//!   `refrouter` among them (FR-003, FR-004).
-//! - [`error`]: RefDb's error codes and the translation of the range's errors (FR-021).
+//! - [`dispatch`] and [`hello`]: the commands a node answers by itself, the handshake as
+//!   the reference router answers it among them (FR-003, FR-004).
+//! - [`error`]: the reference server's error codes and the translation of the range's errors
+//!   (FR-021).
 //! - [`api_version`]: the parameters of the Stable API and what `apiStrict` refuses (FR-035).
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
@@ -39,14 +40,14 @@ pub const MAX_MESSAGE_SIZE: usize = 48_000_000;
 pub const MAX_BSON_OBJECT_SIZE: i32 = 16 * 1024 * 1024;
 /// Most writes in one batch (`maxWriteBatchSize`).
 pub const MAX_WRITE_BATCH_SIZE: i32 = 100_000;
-/// Newest wire version: RefDb 9.0's (D-024).
+/// Newest wire version: the reference server 9.0's (D-024).
 pub const MAX_WIRE_VERSION: i32 = 29;
 /// Oldest wire version a client may speak.
 pub const MIN_WIRE_VERSION: i32 = 0;
 /// Minutes a logical session lives without use (`logicalSessionTimeoutMinutes`).
 pub const LOGICAL_SESSION_TIMEOUT_MINUTES: i32 = 30;
 
-/// A fault that closes the connection, as RefDb closes it.
+/// A fault that closes the connection, as the reference server closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WireError {
     /// `messageLength` below the header or above [`MAX_MESSAGE_SIZE`].

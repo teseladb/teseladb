@@ -1,9 +1,9 @@
 //! Authentication commands (013 FR-008): `saslStart`, `saslContinue` and `authenticate`,
 //! `speculativeAuthenticate` in `hello`, the commands a client may run before it
 //! authenticates, and what a connection keeps of its authentication. Fields, types, order of
-//! checks and messages are those of RefDb 9.0.4 (measured on a `refrouter` with `--keyFile` and a
-//! `refnode` with TLS and client certificates). `logout`, deprecated since 5.0, answers as a
-//! command that does not exist (DV-014).
+//! checks and messages are those of the reference server 9.0.4 (measured on the reference router
+//! with `--keyFile` and a reference replica set member with TLS and client certificates). `logout`,
+//! deprecated since 5.0, answers as a command that does not exist (DV-014).
 
 use std::fmt;
 
@@ -49,7 +49,7 @@ const OPEN: [&str; 9] = [
     AUTHENTICATE,
 ];
 
-/// The types `saslStart.autoAuthorize` takes, in RefDb's order.
+/// The types `saslStart.autoAuthorize` takes, in the reference server's order.
 const AUTO_AUTHORIZE_TYPES: [&str; 5] = ["long", "decimal", "double", "bool", "int"];
 
 /// Whether `name` is an authentication command.
@@ -101,29 +101,29 @@ pub struct AuthState {
     /// Commands other than [`allowed_unauthenticated`] need an authenticated user (a node
     /// started without `--insecure`).
     pub required: bool,
-    /// The REFDB-X509 user name of the client certificate, when the client sent one.
+    /// The X.509 user name of the client certificate, when the client sent one.
     pub peer_user: Option<String>,
     /// The client's address (`host:port`), for `authenticationRestrictions`.
     pub client_addr: Option<String>,
     /// The node's address the client reached, for `authenticationRestrictions`.
     pub server_addr: Option<String>,
-    /// The authenticated user. RefDb 9.0 keeps one per connection.
+    /// The authenticated user. The reference server 9.0 keeps one per connection.
     pub user: Option<Authenticated>,
     /// The SASL conversation in progress, and whether its payloads go as Base64 strings.
     conversation: Option<(Conversation, bool)>,
-    /// The REFDB-AWS conversation in progress, and whether its payloads go as Base64 strings.
+    /// The AWS IAM conversation in progress, and whether its payloads go as Base64 strings.
     aws: Option<(teseladb_auth::aws::Server, bool)>,
     /// A GSSAPI conversation: the context, the user, whether the security layer was offered,
     /// and whether its payloads go as Base64 strings.
     gss: Option<(kerberos::Context, UserName, bool, bool)>,
-    /// A REFDB-OIDC conversation waiting for the token, and whether its payloads go as Base64
+    /// An OIDC conversation waiting for the token, and whether its payloads go as Base64
     /// strings.
     oidc: Option<bool>,
     /// The user and mechanism of the authentication in progress, for the audit log.
     pub attempt: Option<(UserName, String)>,
     /// The connection's identifier in the audit log, once drawn.
     pub audit_uuid: Option<[u8; 16]>,
-    /// `authenticationMechanisms`; empty, RefDb's default.
+    /// `authenticationMechanisms`; empty, the reference server's default.
     pub mechanisms: Vec<SaslMechanism>,
     /// The URI of the protected resource the connection serves (`/mcp`): an OIDC access token
     /// must be issued for it (RFC 8707, 019 FR-027) instead of the provider's `audience`.
@@ -157,8 +157,8 @@ impl AuthState {
     }
 
     /// Records that `name` authenticated with `mechanism`. A connection authenticated as another
-    /// user fails, as RefDb 9.0 allows one user per connection (measured: the second user's
-    /// SCRAM ends in `Authentication failed.` and the first stays).
+    /// user fails, as the reference server 9.0 allows one user per connection (measured: the second
+    /// user's SCRAM ends in `Authentication failed.` and the first stays).
     fn login(
         &mut self,
         name: UserName,
@@ -391,7 +391,7 @@ fn sasl_start<B: Backend + ?Sized>(
         return Ok(conversation_reply(true, Vec::new(), args.as_string));
     }
     let Some(scram) = mech.scram() else {
-        // REFDB-X509: the certificate is the whole proof.
+        // X.509: the certificate is the whole proof.
         let name =
             sasl::x509_user(db, None, state.peer_user.as_deref()).map_err(|e| sasl_error(&e))?;
         state.attempt = Some((name.clone(), mech.name().to_owned()));
@@ -500,9 +500,10 @@ fn conv_mechanism(conv: &Conversation) -> SaslMechanism {
     }
 }
 
-/// The roles of a REFDB-X509 user: with LDAP authorization its LDAP groups, without its
+/// The roles of an X.509 user: with LDAP authorization its LDAP groups, without its
 /// document in `$external` being read or needed, whatever `useInternalAuthzForX509` says
-/// (measured on RefDb Enterprise 9.0.4, 013 FR-033); otherwise its document, which must exist.
+/// (measured on the enterprise reference server 9.0.4, 013 FR-033); otherwise its document, which
+/// must exist.
 fn x509_roles<B: Backend + ?Sized>(
     state: &AuthState,
     backend: &mut B,
@@ -510,7 +511,7 @@ fn x509_roles<B: Backend + ?Sized>(
     via_sasl: bool,
 ) -> Result<(UserName, Option<Vec<RoleName>>), CommandError> {
     // A member's certificate, while `clusterAuthMode` takes them, is `__system` (measured on
-    // `refnode` 9.0.4 with `sendX509` and `x509`).
+    // a reference replica set member 9.0.4 with `sendX509` and `x509`).
     if state.peer_member && state.members_by_x509 {
         return Ok((UserName::new(INTERNAL_USER, LOCAL_DB), None));
     }
@@ -522,7 +523,7 @@ fn x509_roles<B: Backend + ?Sized>(
     Ok((name, None))
 }
 
-/// `authenticate`: only REFDB-X509 (any other mechanism fails as on RefDb 9.0).
+/// `authenticate`: only X.509 (any other mechanism fails as on the reference server 9.0).
 fn authenticate<B: Backend + ?Sized>(
     state: &mut AuthState,
     db: &str,
@@ -567,9 +568,9 @@ pub fn run<B: Backend + ?Sized>(
     }
 }
 
-/// A stored user or role RefDb would not use fails a login as any other failure does
-/// (measured on RefDb 9.0.4: `hello` names the fault, `saslStart` does not); errors of the
-/// node itself go through.
+/// A stored user or role the reference server would not use fails a login as any other failure does
+/// (measured on the reference server 9.0.4: `hello` names the fault, `saslStart` does not); errors
+/// of the node itself go through.
 fn login_fault(e: CommandError) -> CommandError {
     match STORED_FAULTS.contains(&e.code.code) {
         true => sasl_error(&SaslError::AuthenticationFailed),
@@ -585,7 +586,7 @@ fn login_user<B: Backend + ?Sized>(
     acquire(backend, name).map_err(login_fault)
 }
 
-/// The codes of a stored user or role document RefDb would not use.
+/// The codes of a stored user or role document the reference server would not use.
 const STORED_FAULTS: [i32; 10] = [
     teseladb_auth::users::BAD_VALUE,
     teseladb_auth::users::UNSUPPORTED_FORMAT,
@@ -599,9 +600,9 @@ const STORED_FAULTS: [i32; 10] = [
     teseladb_auth::users::MISSING_FIELD,
 ];
 
-/// User `name` as RefDb acquires it to log in: its document and the roles it inherits, so that
-/// a stored user or role it would not use is an error with RefDb's code and words (measured on
-/// `hello` with `saslSupportedMechs`).
+/// User `name` as the reference server acquires it to log in: its document and the roles it
+/// inherits, so that a stored user or role it would not use is an error with the reference server's
+/// code and words (measured on `hello` with `saslSupportedMechs`).
 pub fn acquire<B: Backend + ?Sized>(
     backend: &mut B,
     name: &UserName,
@@ -636,10 +637,10 @@ pub fn speculative<B: Backend + ?Sized>(
     Some(doc)
 }
 
-/// REFDB-OIDC with the access token `jwt` (013 FR-025): the token checked against its
+/// OIDC with the access token `jwt` (013 FR-025): the token checked against its
 /// provider's JWKS (read again once for a key it does not know), then the user logged in with the
 /// roles of its authorization claim, or with its document in `$external` without one. Every
-/// failure is `Authentication failed.`, as RefDb Enterprise 9.0.4 answers it.
+/// failure is `Authentication failed.`, as the enterprise reference server 9.0.4 answers it.
 fn oidc_login<B: Backend + ?Sized>(
     state: &mut AuthState,
     jwt: &str,
@@ -699,9 +700,9 @@ pub fn api_key_login<B: Backend + ?Sized>(
     Ok(found)
 }
 
-/// The end of REFDB-AWS (013 FR-025): the client's signed request goes to the STS, whose
+/// The end of AWS IAM (013 FR-025): the client's signed request goes to the STS, whose
 /// answer names the user, which must exist in `$external`. Every failure is `Authentication
-/// failed.`, as RefDb Enterprise 9.0.4 answers it.
+/// failed.`, as the enterprise reference server 9.0.4 answers it.
 fn aws_login<B: Backend + ?Sized>(
     server: &aws::Server,
     payload: &[u8],
@@ -722,8 +723,8 @@ fn aws_login<B: Backend + ?Sized>(
 /// PLAIN (013 FR-025): on `$external` the LDAP server checks the password and the user must
 /// exist in `$external`, unless the node authorizes by LDAP groups (FR-026): then the groups are
 /// its roles and its document, if any, is not read. On another database the password is checked
-/// against the user's SCRAM credentials. Measured on RefDb Enterprise 9.0.4; any failure is
-/// `Authentication failed.`.
+/// against the user's SCRAM credentials. Measured on the enterprise reference server 9.0.4; any
+/// failure is `Authentication failed.`.
 fn plain_login<B: Backend + ?Sized>(
     state: &mut AuthState,
     db: &str,

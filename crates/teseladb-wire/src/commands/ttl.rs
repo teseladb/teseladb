@@ -14,7 +14,7 @@ use super::mutation::Image;
 use super::{Backend, Ctx, Shared};
 use crate::error::CommandError;
 
-/// How often the monitor runs, as RefDb's `ttlMonitorSleepSecs` by default.
+/// How often the monitor runs, as the reference server's `ttlMonitorSleepSecs` by default.
 pub const TTL_MONITOR_SECS: u64 = 60;
 
 /// The filter of the documents index `ttl` lets go at cluster time `now_ms` (the simulator's

@@ -1,6 +1,6 @@
 //! Server parameters of a node (006 FR-017, FR-023): `getParameter` and `setParameter`, with the
-//! forms, coercions and errors of a `refrouter` 9.0.4 (measured). Each node keeps its own, as each
-//! `refrouter` does; `getParameter: "*"` lists TeselaDB's.
+//! forms, coercions and errors of the reference router 9.0.4 (measured). Each node keeps its own,
+//! as each the reference router does; `getParameter: "*"` lists TeselaDB's.
 
 use teseladb_bson::{Document, Value};
 
@@ -28,13 +28,14 @@ pub const ENABLE_TEST_COMMANDS: &str = "enableTestCommands";
 pub const REDACT_CLIENT_LOG_DATA: &str = "redactClientLogData";
 /// Successful authorization checks go to the audit log too (013 FR-016).
 pub const AUDIT_AUTHORIZATION_SUCCESS: &str = "auditAuthorizationSuccess";
-/// The version of the users' and roles' schema, which `refdump` and `refrestore` read
-/// (013 FR-030); it cannot change.
+/// The version of the users' and roles' schema, which the reference dump tool and the reference
+/// restore tool read (013 FR-030); it cannot change.
 pub const AUTH_SCHEMA_VERSION: &str = "authSchemaVersion";
 /// OCSP stapling of the server's certificate (013 FR-031): on by default, set at startup.
 pub const OCSP_ENABLED: &str = "ocspEnabled";
-/// The OCSP parameters a `refnode` 9.0.4 shows with their defaults (measured): TeselaDB refreshes
-/// the staple halfway to its `nextUpdate` and waits five seconds for the responder.
+/// The OCSP parameters a reference replica set member 9.0.4 shows with their defaults (measured):
+/// TeselaDB refreshes the staple halfway to its `nextUpdate` and waits five seconds for the
+/// responder.
 pub const OCSP_STAPLING_REFRESH_PERIOD_SECS: &str = "ocspStaplingRefreshPeriodSecs";
 /// See [`OCSP_STAPLING_REFRESH_PERIOD_SECS`].
 pub const OCSP_VALIDATION_REFRESH_PERIOD_SECS: &str = "ocspValidationRefreshPeriodSecs";
@@ -46,43 +47,44 @@ pub const TLS_OCSP_VERIFY_TIMEOUT_SECS: &str = "tlsOCSPVerifyTimeoutSecs";
 const TLS_OCSP_VERIFY_TIMEOUT_DEFAULT: i32 = 4;
 /// `transactionLifetimeLimitSeconds`: a transaction older than this is aborted (008 FR-010).
 pub const TRANSACTION_LIFETIME_LIMIT_SECONDS: &str = "transactionLifetimeLimitSeconds";
-/// Its default, as a `refnode` 9.0.4 has it (measured).
+/// Its default, as a reference replica set member 9.0.4 has it (measured).
 pub const TRANSACTION_LIFETIME_DEFAULT_SECS: i64 = 60;
-/// Internal authorization for REFDB-X509 users under LDAP authorization (013 FR-033): kept and
-/// shown, and, as on RefDb Enterprise 9.0.4 (measured), it changes nothing: those users keep
-/// the roles of their LDAP groups.
+/// Internal authorization for X.509 users under LDAP authorization (013 FR-033): kept and
+/// shown, and, as on the enterprise reference server 9.0.4 (measured), it changes nothing: those
+/// users keep the roles of their LDAP groups.
 pub const USE_INTERNAL_AUTHZ_FOR_X509: &str = "useInternalAuthzForX509";
 /// `maxConcurrentMultiDocumentTransactions`: the transactions of clients a node keeps open at
 /// once; 0 lifts the limit (008 FR-020).
 pub const MAX_CONCURRENT_MULTI_DOCUMENT_TRANSACTIONS: &str =
     "maxConcurrentMultiDocumentTransactions";
-/// Its default, as a `refnode` 9.0.4 has it (measured).
+/// Its default, as a reference replica set member 9.0.4 has it (measured).
 pub const MAX_CONCURRENT_TRANSACTIONS_DEFAULT: i64 = 10_000;
 /// How members of the cluster authenticate (013 FR-034): set at startup with
 /// `--clusterAuthMode` and moved one step at a time at runtime.
 pub const CLUSTER_AUTH_MODE: &str = "clusterAuthMode";
-/// Index intersection by hashing (`AND_HASH` plans, 010 FR-001): off by default, as on a
-/// `refrouter` 9.0.4 (measured).
+/// Index intersection by hashing (`AND_HASH` plans, 010 FR-001): off by default, as on
+/// the reference router 9.0.4 (measured).
 pub const HASH_INTERSECTION: &str = "internalQueryPlannerEnableHashIntersection";
 /// The memory one operation may hold in its stages (010 FR-010); past it a `$group` writes to
-/// disk, or fails with 292 without `allowDiskUse` (measured on a `refnode` 9.0.4).
+/// disk, or fails with 292 without `allowDiskUse` (measured on a reference replica set member
+/// 9.0.4).
 pub const MAX_OPERATION_MEMORY: &str = "internalQueryMaxMemoryUsageBytesPerOperation";
-/// Its default: 1 GiB, the least RefDb gives it.
+/// Its default: 1 GiB, the least the reference server gives it.
 pub const MAX_OPERATION_MEMORY_DEFAULT: i64 = 1 << 30;
 /// The memory one constant expression may hold when it is folded (010 FR-010).
 pub const MAX_EXPRESSION_MEMORY: &str = "internalQueryMaxSingleExpressionMemoryUsageBytes";
 /// How many queries a second `$queryStats` counts when it does not sample: -1 all, 0 none
-/// (010 FR-023; 0 by default on a `refrouter` 9.0.4, measured).
+/// (010 FR-023; 0 by default on the reference router 9.0.4, measured).
 pub const QUERY_STATS_RATE_LIMIT: &str = "internalQueryStatsRateLimit";
 /// The probability that `$queryStats` counts a query; 0 leaves it to the rate limit.
 pub const QUERY_STATS_SAMPLE_RATE: &str = "internalQueryStatsSampleRate";
-/// [`QUERY_STATS_SAMPLE_RATE`] by default (measured on a `refrouter` 9.0.4).
+/// [`QUERY_STATS_SAMPLE_RATE`] by default (measured on the reference router 9.0.4).
 pub const QUERY_STATS_SAMPLE_RATE_DEFAULT: f64 = 0.01;
 /// `getParameter: "*"`.
 const ALL: &str = "*";
 
 /// The values of `clusterAuthMode`, in the order of the steps a node may take at runtime
-/// (measured on `refnode` 9.0.4).
+/// (measured on a reference replica set member 9.0.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ClusterAuthMode {
     /// Neither `--keyFile` nor `--clusterAuthMode`.
@@ -311,7 +313,8 @@ fn rate_value(x: f64) -> Value {
     if x.fract() == 0.0 { Value::Int32(x as i32) } else { Value::Double(x) }
 }
 
-/// A new `internalQueryStatsSampleRate`: a number from 0 to 1 (measured on a `refrouter` 9.0.4).
+/// A new `internalQueryStatsSampleRate`: a number from 0 to 1 (measured on the reference router
+/// 9.0.4).
 fn sample_rate(v: &Value) -> Result<f64, CommandError> {
     let x = match v {
         Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
@@ -343,7 +346,8 @@ fn clamp_i32(n: i64) -> i32 {
     i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX })
 }
 
-/// A value read as an integer as RefDb coerces a parameter's (`1.5` is 1, `true` is 1).
+/// A value read as an integer as the reference server coerces a parameter's (`1.5` is 1, `true` is
+/// 1).
 fn integral(name: &str, v: &Value) -> Result<i64, CommandError> {
     let failed =
         |why: &str| CommandError::new(BAD_VALUE, format!("Failed validating {name}: {why}"));
@@ -355,7 +359,8 @@ fn integral(name: &str, v: &Value) -> Result<i64, CommandError> {
         Value::Double(_) | Value::Decimal128(_) => crate::types::number(v).ok_or_else(unable)?,
         _ => return Err(unable()),
     };
-    // NaN and the infinities have their own message (measured on a `refnode` 9.0.4).
+    // NaN and the infinities have their own message (measured on a reference replica set member
+    // 9.0.4).
     if !x.is_finite() {
         return Err(failed("Unable to coerce NaN/Inf to integral type"));
     }
@@ -366,7 +371,7 @@ fn integral(name: &str, v: &Value) -> Result<i64, CommandError> {
 }
 
 /// A new `auditAuthorizationSuccess`: a boolean or a number, not with the runtime audit
-/// configuration (measured on RefDb Enterprise 9.0.4).
+/// configuration (measured on the enterprise reference server 9.0.4).
 fn audit_authorization_success(shared: &super::Shared, v: &Value) -> Result<i64, CommandError> {
     let runtime = lock(shared).audit.as_ref().is_some_and(|a| a.current().config().runtime);
     if runtime {
@@ -421,9 +426,9 @@ pub fn get_parameter<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docume
     Ok(out.with("ok", 1.0))
 }
 
-/// The `clusterAuthMode` that `v` asks, one step after the node's (measured on `refnode` 9.0.4):
-/// any mode but `keyFile` needs TLS on the connections the node opens (not with `allowTLS`, as a
-/// `refrouter` 9.0.4 answers); another step is refused.
+/// The `clusterAuthMode` that `v` asks, one step after the node's (measured on a reference replica
+/// set member 9.0.4): any mode but `keyFile` needs TLS on the connections the node opens (not with
+/// `allowTLS`, as the reference router 9.0.4 answers); another step is refused.
 fn cluster_auth_mode_step(
     shared: &super::Shared,
     v: &Value,
@@ -468,9 +473,9 @@ pub struct Startup {
     change: Change,
 }
 
-/// The parameter `name` given at startup as `text`, with the messages of a `refnode` 9.0.4's
-/// start (measured on 05-11-2026): one that does not exist, one that is not settable at
-/// startup, and a value that does not read as the parameter's type or that `setParameter`
+/// The parameter `name` given at startup as `text`, with the messages of a reference replica set
+/// member 9.0.4's start (measured on 05-11-2026): one that does not exist, one that is not settable
+/// at startup, and a value that does not read as the parameter's type or that `setParameter`
 /// refuses, after «Bad value for parameter "<name>": ».
 ///
 /// # Errors

@@ -15,7 +15,7 @@ fn geo_shape(op: GeoOperator, query: &GeoQuery) -> Result<teseladb_index::geo::q
 }
 
 /// Checks the shapes of the geospatial operators of `filter` before any document is read, as
-/// RefDb parses them with the query.
+/// the reference server parses them with the query.
 pub fn check_geo(filter: &teseladb_mql::Filter) -> Result<()> {
     use teseladb_mql::{Expr as F, Pred};
     fn pred(p: &Pred) -> Result<()> {
@@ -137,7 +137,8 @@ impl Extensions for NodeExtensions {
 
 /// The node's extensions under the collation of the operation (the command's, or else the
 /// collection's default): the expressions of a filter (`$expr`) and of a `find` projection
-/// compare strings with it, as RefDb 9.0.4 evaluates them with the operation's collator.
+/// compare strings with it, as the reference server 9.0.4 evaluates them with the operation's
+/// collator.
 #[derive(Clone, Debug, Default)]
 pub struct CollatedExtensions(teseladb_exec::collation::Collation);
 
@@ -216,7 +217,8 @@ impl Extensions for CollatedExtensions {
 }
 
 /// Runs the pipeline of an update on `doc` with the command's variables `vars`, its expressions
-/// comparing strings with `collation` (the operation's, as RefDb 9.0.4 evaluates them).
+/// comparing strings with `collation` (the operation's, as the reference server 9.0.4 evaluates
+/// them).
 fn run_update_pipeline(
     pipeline: RawValue<'_>,
     doc: RawDoc<'_>,
@@ -246,7 +248,7 @@ const INVALID_OPTIONS: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 72, name: "InvalidOptions" };
 
 /// Checks the pipeline `u` of an update with variables `vars`: its stages and their arguments,
-/// as RefDb parses it with the statement.
+/// as the reference server parses it with the statement.
 pub(crate) fn check_update_pipeline(u: &Value, vars: Option<&Document>) -> Result<()> {
     let holder = Document::new().with("u", u.clone());
     let bytes = holder.to_bytes().map_err(|e| MqlError::new(codes::BAD_VALUE, e.to_string()))?;

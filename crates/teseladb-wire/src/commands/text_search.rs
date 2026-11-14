@@ -1,7 +1,7 @@
 //! `$text` over the collection's text index (011 FR-001, T029): the documents the filter of a
-//! pipeline's first `$match` selects, each with its `textScore`, as a RefDb 9.0.4 replica set
-//! gives them (measured 02-11-2026, `scratchpad/lane3m/m33.js` and `m37.js`). The text index
-//! keeps no entries of its own: each query reads the collection and scores what it reads with
+//! pipeline's first `$match` selects, each with its `textScore`, as a reference server 9.0.4
+//! replica set gives them (measured 02-11-2026, `scratchpad/lane3m/m33.js` and `m37.js`). The text
+//! index keeps no entries of its own: each query reads the collection and scores what it reads with
 //! [`teseladb_search::text_index`].
 
 use std::collections::BTreeMap;
@@ -165,7 +165,8 @@ pub fn read_namespace<B: Backend + ?Sized>(
 }
 
 /// Plans the `$text` of `filter` on `ns`: one text expression, the collection's text index and
-/// the query's `$language`, in `refnode`'s order (measured: the missing index comes first).
+/// the query's `$language`, in a reference replica set member's order (measured: the missing index
+/// comes first).
 pub fn check<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,

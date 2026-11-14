@@ -1,9 +1,9 @@
 //! The planner at work on a node (010 FR-001, T019): the indexes of a collection as the planner
 //! sees them, the plans of a read, their trial on the node's own documents and the run of the
-//! plan that wins, as RefDb's classic engine does (measured on a `refrouter` 9.0.4, 01-11-2026).
-//! An index scan reads the entries within the plan's intervals in key order (backwards when the
-//! plan reads the index the other way), takes each document once and keeps those the rest of
-//! the filter matches.
+//! plan that wins, as the reference server's classic engine does (measured on the reference router
+//! 9.0.4, 01-11-2026). An index scan reads the entries within the plan's intervals in key order
+//! (backwards when the plan reads the index the other way), takes each document once and keeps
+//! those the rest of the filter matches.
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_index::planner_api::{CatalogIndex, IndexCatalog, IndexState};
@@ -38,7 +38,7 @@ pub(crate) const PLANNING_TIME: &str = "planningTimeMicros";
 
 /// The field of a noted plan that lists the indexes its winner scans, for `$indexStats`
 /// ([`crate::ops::OpReport::used`]) of a write, which knows no namespace but the command's:
-/// `{names}`. A control character starts it, so that no field of RefDb's can be it.
+/// `{names}`. A control character starts it, so that no field of the reference server's can be it.
 pub(crate) const USED_INDEXES: &str = "\u{1}used";
 
 /// The field of a noted plan that says several plans competed (`fromMultiPlanner` of
@@ -120,8 +120,8 @@ impl PlanIndex {
     }
 
     /// The index of `_id` of a clustered collection, whose entries are its documents (015
-    /// FR-009): `explain` shows its scans as RefDb's `CLUSTERED_IXSCAN`. A collection created in
-    /// `_id` order (D-153) shows the index `_id_` of any collection.
+    /// FR-009): `explain` shows its scans as the reference server's `CLUSTERED_IXSCAN`. A
+    /// collection created in `_id` order (D-153) shows the index `_id_` of any collection.
     pub fn clustered(&self) -> bool {
         self.clustered
     }
@@ -136,8 +136,8 @@ impl PlanIndex {
         self.catalog.partial
     }
 
-    /// The index as the plan cache key sees it (H-028): a hidden one counts too (measured on a
-    /// `refrouter` 9.0.4).
+    /// The index as the plan cache key sees it (H-028): a hidden one counts too (measured on
+    /// the reference router 9.0.4).
     pub(crate) fn key_index(&self) -> super::plan_hash::KeyIndex {
         let collation = RawDoc::from_bytes(&self.entry.spec).ok().and_then(|spec| {
             let c = match Document::from(spec).get("collation") {
@@ -189,8 +189,8 @@ fn allowed_by_settings(coll: u32, name: &str, pattern: &Document) -> bool {
 }
 
 /// The ready indexes of `coll` the planner may consider, in the catalog's order: the index of
-/// `_id` first, as RefDb lists it; none for a collection that is not a plain one (its
-/// documents' keys are not those of their `_id`).
+/// `_id` first, as the reference server lists it; none for a collection that is not a plain one
+/// (its documents' keys are not those of their `_id`).
 pub(crate) fn plan_indexes<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -211,8 +211,8 @@ pub(crate) fn plannable_kind(coll: &CollectionEntry) -> Result<bool, CommandErro
 }
 
 /// The parts of an index that its catalog entries alone decide, with those entries: the
-/// collection's and the index's (RefDb keeps an `IndexCatalog` per collection, built when an
-/// index is created or dropped, instead of parsing the definitions on every query).
+/// collection's and the index's (the reference server keeps an `IndexCatalog` per collection, built
+/// when an index is created or dropped, instead of parsing the definitions on every query).
 #[derive(Clone)]
 struct BuiltIndex {
     coll: CollectionEntry,
@@ -373,8 +373,8 @@ fn build_index(
 }
 
 /// Whether an index of key `pattern` keeps the paths through arrays of its fields: btree and
-/// `2dsphere` indexes do, the others (hashed, text, 2d, wildcard) do not (RefDb r9.0.4
-/// `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`).
+/// `2dsphere` indexes do, the others (hashed, text, 2d, wildcard) do not (the reference server
+/// r9.0.4 `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`).
 pub(crate) fn tracks_multikey_paths(pattern: &Document) -> bool {
     pattern
         .iter()
@@ -432,7 +432,7 @@ pub(crate) fn multikey_paths<B: Backend + ?Sized>(
 pub(crate) struct ReadPlan<'a> {
     /// The filter as given (what matches).
     pub filter: &'a Document,
-    /// The filter as RefDb writes it back after parsing it.
+    /// The filter as the reference server writes it back after parsing it.
     pub parsed: &'a Document,
     /// The sort.
     pub sort: Vec<(String, i32)>,
@@ -449,8 +449,9 @@ pub(crate) struct ReadPlan<'a> {
     /// Whether the read wants the index key each document was found by (`{$meta: "indexKey"}`).
     pub index_keys: bool,
     /// Whether it gives out the index key alone (`returnKey`): a plan whose filter its bounds
-    /// answer and whose index has the sort's fields reads no document, and RefDb's score gives
-    /// it the bonus of a plan without `FETCH` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    /// answer and whose index has the sort's fields reads no document, and the reference server's
+    /// score gives it the bonus of a plan without `FETCH` (measured on the reference router 9.0.4
+    /// on 05-11-2026).
     pub key_only: bool,
 }
 
@@ -503,7 +504,7 @@ pub(crate) struct Tried {
     pub docs: u64,
     /// Documents given.
     pub returned: u64,
-    /// RefDb's score.
+    /// The reference server's score.
     pub score: f64,
     /// Units of work of the trial.
     pub works: u64,
@@ -613,7 +614,7 @@ pub(crate) fn choose<B: Backend + ?Sized>(
 /// The plans that go on after their estimates (010 FR-029): the one the statistics of the
 /// collection (`stats`) find cheapest by more than twice, alone, or those within twice the best
 /// estimate, which run a trial. Without statistics, or when a plan reads a field that has none,
-/// every plan runs the trial, as RefDb's planner does.
+/// every plan runs the trial, as the reference server's planner does.
 fn by_estimate(
     plans: Vec<Access>,
     stats: Option<&RangeStats>,
@@ -633,9 +634,10 @@ fn by_estimate(
 /// The works the first round of a trial gives each plan; each round doubles them.
 const FIRST_ROUND_WORKS: u64 = 128;
 
-/// The documents that end the trial of `read`'s plans: RefDb's [`TRIAL_RESULTS`], or the read's
-/// limit when it is smaller (`getTrialPeriodNumToReturn`, measured on a `refnode` 9.0.4: a `findOne`
-/// ends its trial, and keeps its cached plan, at its first document).
+/// The documents that end the trial of `read`'s plans: the reference server's [`TRIAL_RESULTS`], or
+/// the read's limit when it is smaller (`getTrialPeriodNumToReturn`, measured on a reference
+/// replica set member 9.0.4: a `findOne` ends its trial, and keeps its cached plan, at its first
+/// document).
 fn trial_results(read: &ReadPlan<'_>) -> u64 {
     read.limit.filter(|l| *l > 0).map_or(TRIAL_RESULTS, |l| l.min(TRIAL_RESULTS))
 }
@@ -646,13 +648,13 @@ fn ended(t: &Ran, results: u64) -> bool {
     t.trial.eof || t.trial.advanced >= results
 }
 
-/// The trials of `plans` up to the round where one of them ends. RefDb alternates the plans and
-/// stops at that round; here every plan runs again with twice the works until one ends, so none
-/// reads more than twice that round whatever the order of the plans (a plan of a broad index tried
-/// before one that ends at once read the whole budget, 157.000 entries, on the internal cluster of
-/// TeselaDB Cloud). The budget is RefDb's, [`trial_works`] of the collection's documents, which
-/// passes its least, [`TRIAL_WORKS`], only past 33.333 documents: they are counted, which reads
-/// them all, only when no plan ended within that least.
+/// The trials of `plans` up to the round where one of them ends. The reference server alternates
+/// the plans and stops at that round; here every plan runs again with twice the works until one
+/// ends, so none reads more than twice that round whatever the order of the plans (a plan of a
+/// broad index tried before one that ends at once read the whole budget, 157.000 entries, on the
+/// internal cluster of TeselaDB Cloud). The budget is the reference server's, [`trial_works`] of
+/// the collection's documents, which passes its least, [`TRIAL_WORKS`], only past 33.333 documents:
+/// they are counted, which reads them all, only when no plan ended within that least.
 fn trial<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -764,10 +766,10 @@ const FIRST_LIMITED_ENTRIES: usize = 16;
 
 /// Runs `access` for `read`: for a trial (`budget` works at most), until it gives a batch, or
 /// to its end. A read with a limit that needs no sort, or whose index scan already gives the
-/// sort's order, reads its index entries a few at a time, as RefDb's index scan does, and stops
-/// at its limit: before, a `findOne` by an index of equality read every entry of its value to give
-/// one document, and a YCSB scan (`_id` from a value, by `_id`, with a limit) read every document
-/// after that value.
+/// sort's order, reads its index entries a few at a time, as the reference server's index scan
+/// does, and stops at its limit: before, a `findOne` by an index of equality read every entry of
+/// its value to give one document, and a YCSB scan (`_id` from a value, by `_id`, with a limit)
+/// read every document after that value.
 fn run<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -915,7 +917,7 @@ fn run_reading<B: Backend + ?Sized>(
             .collect();
         let mut fetcher = Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit));
         // A multikey scan drops the other entries of a document it gave before fetching it
-        // again (`dupsDropped` of its `IXSCAN`, measured on a `refnode` 9.0.4).
+        // again (`dupsDropped` of its `IXSCAN`, measured on a reference replica set member 9.0.4).
         let mut own = teseladb_index::docset::Seen::new();
         for entry in scanned.entries {
             if budget.is_some_and(|b| ran.keys >= b) {
@@ -1030,7 +1032,8 @@ pub(crate) fn in_id_order(coll: &CollectionEntry) -> Result<bool, CommandError> 
 /// The document an index entry with primary key `pk` names, with its key. An index entry and its
 /// document are written in the same write, but a read that is not at a snapshot reads the index
 /// and the documents one after the other: a delete in between leaves an entry whose document is
-/// gone (`None`), which the read skips, as RefDb skips a record deleted while a read yields.
+/// gone (`None`), which the read skips, as the reference server skips a record deleted while a read
+/// yields.
 fn indexed_document<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -1161,8 +1164,8 @@ fn intersected<B: Backend + ?Sized>(
 /// The entries of `index` a scan of `scan` examines, in its order: the primary key of each
 /// entry within its intervals, and `None` for an entry outside them. A scan of one interval stops
 /// at its end; a scan of several reads, after each interval, the next entry, which is outside
-/// them when it lies before the next interval or after the last (measured on a `refrouter` 9.0.4:
-/// `_id` in `[2, 5, 7]` over `_id` 1 to 8 examines 6 keys).
+/// them when it lies before the next interval or after the last (measured on the reference router
+/// 9.0.4: `_id` in `[2, 5, 7]` over `_id` 1 to 8 examines 6 keys).
 fn entries<B: Backend + ?Sized>(
     backend: &mut B,
     (tenant, collection): (u32, u32),
@@ -1252,7 +1255,7 @@ fn checks_keys(scan: &IndexScan) -> bool {
 }
 
 /// The entries of a scan that checks its keys ([`checks_keys`]): every entry from its first
-/// interval to its last, walked as RefDb's index bounds checker walks them
+/// interval to its last, walked as the reference server's index bounds checker walks them
 /// ([`teseladb_plan::checker`]), and the next entry of the index when the walk runs out of
 /// them, which is outside the leading field's intervals.
 fn walked<B: Backend + ?Sized>(
@@ -1366,11 +1369,12 @@ impl PlanIndex {
         teseladb_keys::decode(values, &bits, &self.dirs).ok()
     }
 
-    /// The key of an entry of values `values`, each field with its value as RefDb gives
-    /// `{$meta: "indexKey"}`.
+    /// The key of an entry of values `values`, each field with its value as the reference server
+    /// gives `{$meta: "indexKey"}`.
     fn key_from(&self, values: &[Value]) -> Document {
         let names = self.pattern.iter().map(|(k, _)| k);
-        // The key of an empty array is `undefined`; RefDb gives it back as `null` (measured).
+        // The key of an empty array is `undefined`; the reference server gives it back as `null`
+        // (measured).
         let shown = values.iter().map(|v| match v {
             Value::Undefined => Value::Null,
             other => other.clone(),
@@ -1466,7 +1470,8 @@ fn any_entry<B: Backend + ?Sized>(
 ) -> Result<bool, CommandError> {
     // A collection kept in `_id` order holds its keys in order, without hash buckets (D-153):
     // the stretch is read as it is. Probing the buckets there found nothing, so `$in` counted
-    // fewer keys than RefDb examines and read 16 spans per stretch (H-011 of the native tests).
+    // fewer keys than the reference server examines and read 16 spans per stretch (H-011 of the
+    // native tests).
     if !index.id_index || index.ordered {
         return Ok(!backend.scan(from, to, 1, concern)?.is_empty());
     }
@@ -1752,8 +1757,8 @@ fn id_point<B: Backend + ?Sized>(
         return Ok(None);
     }
     let key = KeyBuilder::document_of_pk(tenant, collection, pk);
-    // A point read, as RefDb's `IDHACK` plan reads one `_id` (H-013): the node reads the key
-    // with its filters instead of opening a scan.
+    // A point read, as the reference server's `IDHACK` plan reads one `_id` (H-013): the node reads
+    // the key with its filters instead of opening a scan.
     let key = key.as_bytes().to_vec();
     let found = backend.points(std::slice::from_ref(&key), concern)?;
     Ok(Some(
@@ -1987,7 +1992,7 @@ pub(crate) fn planned_keys<B: Backend + ?Sized>(
     Ok(chosen.map(|c| c.winner.found.into_iter().take(take).map(|(k, _)| k).collect()))
 }
 
-/// Filter `filter` as RefDb writes it back after parsing it, each `$expr` optimised.
+/// Filter `filter` as the reference server writes it back after parsing it, each `$expr` optimised.
 pub(crate) fn parsed_filter(
     filter: &Document,
     vars: Option<&Document>,
@@ -2119,7 +2124,7 @@ struct Shown {
     ns: teseladb_meta::catalog::Namespace,
     /// The read's shape, which its hashes come from.
     shape: String,
-    /// The read's filter as RefDb writes it back after parsing it.
+    /// The read's filter as the reference server writes it back after parsing it.
     parsed: Document,
 }
 
@@ -2200,14 +2205,14 @@ fn same_scan(a: &IndexScan, b: &IndexScan) -> bool {
 enum Cached {
     /// It gave a batch or ended within [`EVICTION_RATIO`] times its entry's works: its run.
     Kept(Box<Chosen>),
-    /// It did not: the works its entry expected and those it reached, after which RefDb plans
-    /// again (`replanReason`).
+    /// It did not: the works its entry expected and those it reached, after which the reference
+    /// server plans again (`replanReason`).
     Replan(u64, u64),
 }
 
 /// The run of `access`, the plan the cache holds for `read`, whose entry's trial worked `works`,
-/// as RefDb's cached plan runs: a trial of [`EVICTION_RATIO`] times those works that keeps the
-/// plan when it gives a batch or ends.
+/// as the reference server's cached plan runs: a trial of [`EVICTION_RATIO`] times those works that
+/// keeps the plan when it gives a batch or ends.
 fn cached_run<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,

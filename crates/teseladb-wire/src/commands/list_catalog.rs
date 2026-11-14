@@ -1,8 +1,8 @@
-//! `$listCatalog` (010 T037): the node's catalog entry of each collection and view, as a
-//! `refrouter` 9.0.4 gives its shard's (measured 01-11-2026): `db`, `name`, `type` and `shard`;
-//! for a collection, `md` with its namespace, its options after its `uuid` and each ready index
-//! with `ready`, `multikey` and `multikeyPaths` (one byte per component of each field's path, 1
-//! where an array was met); for a view, its `_id`, `viewOn` and `pipeline`; and `ns` last.
+//! `$listCatalog` (010 T037): the node's catalog entry of each collection and view, as
+//! the reference router 9.0.4 gives its shard's (measured 01-11-2026): `db`, `name`, `type` and
+//! `shard`; for a collection, `md` with its namespace, its options after its `uuid` and each ready
+//! index with `ready`, `multikey` and `multikeyPaths` (one byte per component of each field's path,
+//! 1 where an array was met); for a view, its `_id`, `viewOn` and `pipeline`; and `ns` last.
 //! `system.views` comes as the collection it is in TeselaDB's catalog, as in 9.0.4. TeselaDB has
 //! no storage engine idents (`idxIdent`, `ident`), and lists in namespace order (DV-078).
 
@@ -55,8 +55,8 @@ pub fn entries<B: Backend + ?Sized>(
 }
 
 /// `md` of collection `c` of kind `kind`. A time series is its buckets' collection, clustered
-/// by `_id`, with their indexes, and says whether its buckets may mix schemas (measured on a
-/// `refnode` and a `refrouter` 9.0.4 on 03-11-2026).
+/// by `_id`, with their indexes, and says whether its buckets may mix schemas (measured on
+/// a reference replica set member and the reference router 9.0.4 on 03-11-2026).
 fn metadata<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,

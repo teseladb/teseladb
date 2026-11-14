@@ -1,15 +1,15 @@
-//! The plan cache hashes of a read as a `refnode` 9.0.4 shows them (010 FR-002, H-028):
-//! `planCacheShapeHash` (and `queryHash`, its old name) and `planCacheKey`.
+//! The plan cache hashes of a read as a reference replica set member 9.0.4 shows them (010 FR-002,
+//! H-028): `planCacheShapeHash` (and `queryHash`, its old name) and `planCacheKey`.
 //!
-//! The shape is the text a `refnode` builds for its classic plan cache: each node of the parsed
-//! filter as a two-letter code and its path, its children between brackets, then the sections of
-//! the sort, the projection's required fields, the collation and the key of a `distinct`, each
-//! after a `|`, and three flags (`apiStrict`, the deferred engine choice, the regular path). The
-//! key adds, for each predicate on a path some index holds, one digit per index saying whether
-//! the index can answer it. Both are hashed with MurmurHash3 x64-128 and seed 0, keeping the low
-//! 32 bits of the first word; the key also mixes the hash of the query settings (none) as
-//! `boost::hash_combine` does. Measured against 290 hashes of a `refnode` 9.0.4
-//! (`tests/explain/query-hash-vectors.jsonl`).
+//! The shape is the text a reference replica set member builds for its classic plan cache: each
+//! node of the parsed filter as a two-letter code and its path, its children between brackets, then
+//! the sections of the sort, the projection's required fields, the collation and the key of a
+//! `distinct`, each after a `|`, and three flags (`apiStrict`, the deferred engine choice, the
+//! regular path). The key adds, for each predicate on a path some index holds, one digit per index
+//! saying whether the index can answer it. Both are hashed with MurmurHash3 x64-128 and seed 0,
+//! keeping the low 32 bits of the first word; the key also mixes the hash of the query settings
+//! (none) as `boost::hash_combine` does. Measured against 290 hashes of a reference replica set
+//! member 9.0.4 (`tests/explain/query-hash-vectors.jsonl`).
 
 use std::collections::BTreeSet;
 
@@ -104,7 +104,8 @@ pub(crate) fn indexability(
 }
 
 /// The key of a `distinct` as its shape keeps it: none when the filter is a `$or`, or empty and
-/// no index holds the key (measured on a `refnode` 9.0.4: those reads plan without the key).
+/// no index holds the key (measured on a reference replica set member 9.0.4: those reads plan
+/// without the key).
 pub(crate) fn distinct_key<'a>(
     parsed: &Document,
     key: Option<&'a str>,
@@ -121,8 +122,8 @@ pub(crate) fn distinct_key<'a>(
 }
 
 /// The key of a `$group` stage by one field that an index starting with that field may answer
-/// as a `distinct` (measured on a `refrouter` 9.0.4: with an index on `g`, `$group: {_id: "$g"}`
-/// over a `$match` adds the key `g` to the shape; without it, nothing).
+/// as a `distinct` (measured on the reference router 9.0.4: with an index on `g`, `$group: {_id:
+/// "$g"}` over a `$match` adds the key `g` to the shape; without it, nothing).
 pub(crate) fn group_key<'a>(stage: Option<&'a Document>, indexes: &[KeyIndex]) -> Option<&'a str> {
     let Some(Value::Document(group)) = stage?.get("$group") else { return None };
     let Some(Value::String(path)) = group.get("_id") else { return None };
@@ -135,8 +136,8 @@ pub(crate) fn group_key<'a>(stage: Option<&'a Document>, indexes: &[KeyIndex]) -
 
 /// The fields a pipeline's query reads as its shape counts them, from the paths its stages use
 /// (`fields`) and its first stage: a `$project` that computes `_id` does not read `_id`, and one
-/// that computes a field inside a subdocument reads that subdocument too (measured on a `refrouter`
-/// 9.0.4: `{o: {k: 1, z: "$n"}}` reads `_id`, `n`, `o` and `o.k`).
+/// that computes a field inside a subdocument reads that subdocument too (measured on the reference
+/// router 9.0.4: `{o: {k: 1, z: "$n"}}` reads `_id`, `n`, `o` and `o.k`).
 pub(crate) fn shaped_fields(mut fields: Vec<String>, first: Option<&Document>) -> Vec<String> {
     let Some(Value::Document(spec)) = first.and_then(|st| st.get("$project")) else {
         return fields;
@@ -620,7 +621,8 @@ fn collation(c: &CollationSpec, out: &mut String) {
 }
 
 /// The path of each `$expr` of filter `f`, in order: the field an `$eq` of one field and one
-/// constant compares, as the `refnode` takes it when it parses the expression; empty otherwise.
+/// constant compares, as the reference server takes it when it parses the expression; empty
+/// otherwise.
 fn expr_paths(f: &Document) -> Vec<String> {
     fn walk(d: &Document, out: &mut Vec<String>) {
         for (k, v) in d.iter() {
@@ -787,7 +789,8 @@ fn collatable(op: &str, x: &Value) -> bool {
 mod tests {
     use super::*;
 
-    /// Hashes a `refnode` 9.0.4 gave for these reads (`$planCacheStats` and `explain`).
+    /// Hashes a reference replica set member 9.0.4 gave for these reads (`$planCacheStats` and
+    /// `explain`).
     const VECTORS: &str = include_str!("../../tests/explain/query-hash-vectors.jsonl");
 
     fn doc_of(v: Option<&Value>) -> Option<&Document> {
@@ -798,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn shapes_hash_as_a_refnode_hashes_them() {
+    fn shapes_hash_as_the_reference_hashes_them() {
         let mut checked = 0;
         for line in VECTORS.lines().filter(|l| !l.trim().is_empty()) {
             let v = teseladb_bson::extjson::parse(line).expect("vector");

@@ -4,10 +4,10 @@
 //! 0 setting, `dbPrimary.<db>` with the node and the version ([`Primary`]); a database without
 //! one has the first active node, version 1.
 //!
-//! Messages and order of the checks of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026,
-//! `c9.js` and `s2.js` in the lane's notes): `movePrimary` runs only on `admin`, needs `to`,
-//! refuses `admin` and `config` (72), an invalid name (73), a database that does not exist (26)
-//! before a shard that does not exist (70), and moving to the primary it has is `ok`.
+//! Messages and order of the checks of the reference router 9.0.4 of two shards (measured on
+//! 02-11-2026, `c9.js` and `s2.js` in the lane's notes): `movePrimary` runs only on `admin`, needs
+//! `to`, refuses `admin` and `config` (72), an invalid name (73), a database that does not exist
+//! (26) before a shard that does not exist (70), and moving to the primary it has is `ok`.
 
 use std::collections::BTreeMap;
 
@@ -189,7 +189,7 @@ pub fn move_primary<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
         return Err(CommandError::new(NAMESPACE_NOT_FOUND, format!("database {db} not found")));
     }
     // A cluster of one shard moves no data, whatever the target (`assertDataMovementAllowed` of
-    // RefDb r9.0.4, before the target is looked up).
+    // the reference server r9.0.4, before the target is looked up).
     if ctx.backend.config_documents(super::config_db::SHARDS)?.len() < 2 {
         return Err(CommandError::new(
             crate::error::ILLEGAL_OPERATION,

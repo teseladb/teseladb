@@ -1,8 +1,8 @@
 //! The read concern's marks (008 FR-011, FR-012, FR-013, DV-012): the mark a client transaction's
 //! snapshot is read at, the times a read concern asks for checked against the cluster time, the
 //! mark of a `snapshot` or causal read outside a transaction with the `atClusterTime` of its
-//! reply, and the errors of a read below the history, as a `refrouter` 9.0.4 answers them (measured
-//! on 31-10-2026).
+//! reply, and the errors of a read below the history, as the reference router 9.0.4 answers them
+//! (measured on 31-10-2026).
 
 use teseladb_bson::{Document, Value};
 use teseladb_hlc::{Hlc, from_timestamp, to_timestamp};
@@ -44,8 +44,9 @@ fn gossip(cmd: &Document, name: &str) -> Option<Hlc> {
     }
 }
 
-/// RefDb's error for a time ahead of the cluster time `current` (measured on 9.0.4): the
-/// message names `atClusterTime` for a `snapshot` read, which a `refrouter` reads at that time.
+/// The reference server's error for a time ahead of the cluster time `current` (measured on 9.0.4):
+/// the message names `atClusterTime` for a `snapshot` read, which the reference router reads at
+/// that time.
 fn ahead_error(word: &str, (t, i): (u32, u32), current: Hlc) -> CommandError {
     let (ct, ci) = to_timestamp(current);
     CommandError::new(
@@ -75,9 +76,9 @@ pub fn causal_mark<B: Backend + ?Sized>(
     let at = rc.at_cluster_time.map(|t| (t, from_timestamp(t)));
     let after = rc.after_cluster_time.map(|t| (t, from_timestamp(t)));
     not_ahead(rc, current)?;
-    // Before its database was added, a `refrouter` 9.0.4 answers `MigrationConflict` (measured).
-    // Only a read at a cluster time looks the database up: the lookup is a round trip to the
-    // catalog that the other reads of the hot path do not pay (012 FR-008).
+    // Before its database was added, the reference router 9.0.4 answers `MigrationConflict`
+    // (measured). Only a read at a cluster time looks the database up: the lookup is a round trip
+    // to the catalog that the other reads of the hot path do not pay (012 FR-008).
     if let Some((given, mark)) = at
         && let Some(added) = backend.database_mark(db)?
         && mark < added
@@ -116,7 +117,7 @@ fn not_ahead(rc: &ReadConcernArgs, current: Hlc) -> Result<(), CommandError> {
 
 /// The reply of a command whose reads were served at `mark`: a reply that gives it gets
 /// `atClusterTime` (last in its cursor, or after `distinct`'s values, measured on 9.0.4), and a
-/// mark below the history is refnode's `SnapshotTooOld`.
+/// mark below the history is a reference replica set member's `SnapshotTooOld`.
 pub fn stamp(
     result: Result<Document, CommandError>,
     mark: Option<teseladb_txn::causal::ReadMark>,
@@ -160,7 +161,7 @@ pub fn stamp(
 pub(super) enum Begin {
     /// It reads at the mark, with the end of its uncertainty window if it has one.
     At(Hlc, Option<Hlc>),
-    /// A time ahead of the cluster time: as on a `refrouter` 9.0.4, the shard starts the
+    /// A time ahead of the cluster time: as on the reference router 9.0.4, the shard starts the
     /// transaction and the statement fails with this error, which aborts it (measured on
     /// 03-11-2026 with `atClusterTime` and `afterClusterTime`).
     Ahead(CommandError),
@@ -169,8 +170,8 @@ pub(super) enum Begin {
 /// The mark a transaction reads at, from its first statement's `readConcern` (FR-011, DV-012):
 /// `local`, `majority`, `snapshot` and none read at [`now_mark`], or at least at
 /// `afterClusterTime`; `atClusterTime` reads at it. A time ahead of the cluster time is
-/// [`Begin::Ahead`]. The other levels are refused before the transaction starts, as a `refrouter`
-/// 9.0.4 refuses them (measured).
+/// [`Begin::Ahead`]. The other levels are refused before the transaction starts, as the reference
+/// router 9.0.4 refuses them (measured).
 pub(super) fn begin_mark<B: Backend + ?Sized>(
     backend: &B,
     name: &str,
@@ -192,8 +193,8 @@ pub(super) fn begin_mark<B: Backend + ?Sized>(
     clock(rc.after_cluster_time.map_or(now, |t| now.max(from_timestamp(t))))
 }
 
-/// A statement's read below the history (`SnapshotTooOld`) with RefDb's message and label
-/// (measured on 9.0.4): the transaction is over and the driver repeats it.
+/// A statement's read below the history (`SnapshotTooOld`) with the reference server's message and
+/// label (measured on 9.0.4): the transaction is over and the driver repeats it.
 pub(super) fn snapshot_error(
     e: CommandError,
     (lsid, txn_number): (u128, i64),

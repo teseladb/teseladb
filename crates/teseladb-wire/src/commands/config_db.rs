@@ -1,8 +1,8 @@
-//! The `config` database as a `refrouter` shows it (007 FR-017, contract `config-db.md`): its
-//! collections of the cluster's topology are generated from this node's copy of Group 0 (the
+//! The `config` database as the reference router shows it (007 FR-017, contract `config-db.md`):
+//! its collections of the cluster's topology are generated from this node's copy of Group 0 (the
 //! backend builds their documents, [`Backend::config_documents`]) and read like any collection;
-//! TeselaDB cannot write them, since Group 0 is what they show (a `refrouter` takes the write and
-//! its shard list breaks, measured on 9.0.4).
+//! TeselaDB cannot write them, since Group 0 is what they show (the reference router takes the
+//! write and its shard list breaks, measured on 9.0.4).
 
 use teseladb_bson::{Document, Value};
 
@@ -45,8 +45,8 @@ pub const LISTED: [&str; 9] = [
 ];
 
 /// The listed collections of `config` that a member of a replica set does not have (measured on
-/// a replica set of `ref:9.0.4`, 02-11-2026): the replica set presentation (018) leaves them
-/// out of `listCollections`.
+/// a replica set of the reference server 9.0.4, 02-11-2026): the replica set presentation (018)
+/// leaves them out of `listCollections`.
 pub const NOT_ON_A_MEMBER: [&str; 3] =
     ["changelog", teseladb_names::ROUTER, super::config_settings::SETTINGS];
 
@@ -57,7 +57,7 @@ pub fn generated(ns: &Namespace) -> bool {
 
 /// Whether the node presents itself as a member of a replica set (018), whose collections of
 /// `config` that show a cluster are empty and can be dropped (measured on a replica set of
-/// `ref:9.0.4`, 02-11-2026).
+/// the reference server 9.0.4, 02-11-2026).
 pub fn as_member<B: Backend + ?Sized>(backend: &mut B) -> Result<bool, CommandError> {
     let mode = super::presentation::stored(backend)?.mode;
     Ok(mode == teseladb_topology::replset::PresentationMode::ReplicaSet)
@@ -78,8 +78,8 @@ pub fn documents<B: Backend + ?Sized>(
     backend.config_documents(&ns.coll).map(Some)
 }
 
-/// The refusal of a write to a generated collection of `config` (divergence: a `refrouter` takes
-/// it).
+/// The refusal of a write to a generated collection of `config` (divergence: the reference router
+/// takes it).
 pub fn not_writable(ns: &Namespace) -> CommandError {
     CommandError::new(
         ILLEGAL_OPERATION,
