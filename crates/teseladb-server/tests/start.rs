@@ -236,3 +236,51 @@ fn a_directory_of_another_data_format_refuses_to_start_and_says_so() {
     assert!(n.wait_ready(READY));
     n.stop();
 }
+
+/// Puts the cores' WAL back where format 7 kept it, one file per segment under `core-NN/wal`, and
+/// removes the device log.
+fn back_to_per_core_logs(dir: &Dir, cores: u16) {
+    use teseladb_io::device_log::state::LogState;
+    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut log = LogState::recover(&mut disk, 64 << 20).unwrap();
+    for core in 0..cores {
+        for seq in log.segments_of(core) {
+            let bytes = log.read(&mut disk, core, seq).unwrap();
+            let path = dir.0.join(teseladb_raftlog::paths::wal_segment(core, seq));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+    }
+    fs::remove_dir_all(dir.0.join(teseladb_io::device_log::format::DIR)).unwrap();
+    fs::write(dir.0.join(DATA_FORMAT_FILE), "7").unwrap();
+}
+
+#[test]
+fn a_directory_of_format_7_moves_its_logs_to_the_device_log() {
+    // 012 FR-035: the WAL segments of each core go into the device log on the first start.
+    let dir = Dir::new("format-7");
+    let n = start(&dir, 2).unwrap();
+    assert!(n.wait_ready(READY));
+    wait_status(&n, leads);
+    for i in 0..50 {
+        put(&n, i);
+    }
+    n.stop();
+    back_to_per_core_logs(&dir, 2);
+    let n = start(&dir, 2).unwrap();
+    assert!(n.wait_ready(READY));
+    for i in 0..50 {
+        assert_eq!(get(&n, i), Some(value(i)), "document {i}");
+    }
+    n.stop();
+    assert_eq!(fs::read_to_string(dir.0.join(DATA_FORMAT_FILE)).unwrap(), DATA_FORMAT.to_string());
+    for core in 0..2 {
+        let wal = dir.0.join(teseladb_raftlog::paths::wal_dir(core));
+        assert_eq!(fs::read_dir(&wal).map_or(0, Iterator::count), 0, "core {core}");
+    }
+    // And it starts again from the device log alone.
+    let n = start(&dir, 2).unwrap();
+    assert!(n.wait_ready(READY));
+    assert_eq!(get(&n, 49), Some(value(49)));
+    n.stop();
+}

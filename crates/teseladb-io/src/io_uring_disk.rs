@@ -942,11 +942,19 @@ impl Disk for IoUringDisk {
         fs::read(self.root.join(path)).map_err(io_errno)
     }
 
-    /// Submits `op` and waits for it; earlier submitted results stay for [`IoUringDisk::reap`].
+    /// Submits `op` in the data class and waits for it.
     fn execute(&mut self, op: IoOp) -> IoDone {
+        self.execute_in(op, IoClass::Data)
+    }
+}
+
+impl IoUringDisk {
+    /// Submits `op` in `class` (012 FR-023) and waits for it; earlier submitted results stay for
+    /// [`IoUringDisk::reap`].
+    pub fn execute_in(&mut self, op: IoOp, class: IoClass) -> IoDone {
         let seq = self.next_seq;
         let fallback = op.without_data();
-        self.submit(op);
+        self.submit_in(op, class);
         loop {
             if let Some(i) = self.done.iter().position(|(s, _, _)| *s == seq) {
                 return self.done.remove(i).expect("found result").1;

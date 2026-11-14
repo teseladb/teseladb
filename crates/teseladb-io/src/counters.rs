@@ -10,9 +10,8 @@ struct Line(AtomicU64);
 static SYNCS: Line = Line(AtomicU64::new(0));
 static DEVICE_FLUSHES: Line = Line(AtomicU64::new(0));
 static DEVICE_FLUSH_MICROS: Line = Line(AtomicU64::new(0));
-static DEVICE_PUSHES: Line = Line(AtomicU64::new(0));
-static DEVICE_PUSH_MICROS: Line = Line(AtomicU64::new(0));
 static WRITE_BEHINDS: Line = Line(AtomicU64::new(0));
+static LOG_SYNCS: Line = Line(AtomicU64::new(0));
 
 /// Counts a sync of a file or a folder to the disk.
 pub(crate) fn record_sync() {
@@ -29,8 +28,7 @@ pub(crate) fn record_device_flush() {
     DEVICE_FLUSHES.0.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The flushes of a drive's cache since the process started: on macOS one serves every sync that
-/// waited for it (H-015 of the native tests).
+/// The flushes of a drive's cache since the process started.
 pub fn device_flushes() -> u64 {
     DEVICE_FLUSHES.0.load(Ordering::Relaxed)
 }
@@ -46,23 +44,14 @@ pub fn device_flush_micros() -> u64 {
     DEVICE_FLUSH_MICROS.0.load(Ordering::Relaxed)
 }
 
-/// Counts the files the leader of a flush group sent to the drive before its flush, and the time
-/// it took to send them all.
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn record_device_pushes(files: u64, micros: u64) {
-    DEVICE_PUSHES.0.fetch_add(files, Ordering::Relaxed);
-    DEVICE_PUSH_MICROS.0.fetch_add(micros, Ordering::Relaxed);
+/// Counts a sync of the node's Raft log (012 FR-035): one for every core's writes of a turn.
+pub(crate) fn record_log_sync() {
+    LOG_SYNCS.0.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The files the leaders of flush groups sent to the drive since the process started.
-pub fn device_pushes() -> u64 {
-    DEVICE_PUSHES.0.load(Ordering::Relaxed)
-}
-
-/// The microseconds the leaders of flush groups spent sending their files to the drive before
-/// each flush: added to the flushes', the length of the groups a confirmed write waits for.
-pub fn device_push_micros() -> u64 {
-    DEVICE_PUSH_MICROS.0.load(Ordering::Relaxed)
+/// The syncs of the Raft logs since the process started.
+pub fn log_syncs() -> u64 {
+    LOG_SYNCS.0.load(Ordering::Relaxed)
 }
 
 /// Counts a file sent towards the device as it grows (`teseladb_sys::write_behind`).

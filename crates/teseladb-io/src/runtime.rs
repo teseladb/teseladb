@@ -43,6 +43,9 @@ pub const STOP_SETTLE_LIMIT: Duration = Duration::from_secs(10);
 /// while the core waits for it is noticed.
 const STOP_SETTLE_POLL: Duration = Duration::from_millis(10);
 
+/// How soon a core tries again to queue WAL operations for the device log when its queue was full.
+const LOG_QUEUE_RETRY: Nanos = Nanos::from_millis(1);
+
 /// How long a core goes without work, with its logic at rest, before it ticks every
 /// [`REST_TICK`].
 pub const REST_AFTER: Nanos = Nanos::from_secs(1);
@@ -115,6 +118,8 @@ pub trait CoreLogic {
 pub enum CoreInput<M> {
     /// Completion from the disk thread.
     Disk(IoDone),
+    /// Completion of a sync of the core's WAL from the node's device log (012 FR-035).
+    Log(IoDone),
     /// Connection accepted for this core.
     Inbound(Inbound),
     /// Outcome of a dial this core asked for.
@@ -299,6 +304,8 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     busy_at: Nanos,
     /// It ticks every [`REST_TICK`].
     resting: bool,
+    /// Where the core's WAL goes: the node's device log (012 FR-035). Without one, its disk.
+    log: Option<crate::device_log::LogPort>,
 }
 
 fn wall_ms() -> u64 {
@@ -367,6 +374,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             spins: 0,
             busy_at: Nanos::ZERO,
             resting: false,
+            log: None,
         };
         let mut rt = rt;
         // The ring sends the file's bytes from its buffers; TLS encrypts them in the process.
@@ -377,6 +385,14 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         let on = rt.file_sends;
         rt.logic.file_sends(on);
         Ok((rt, sender))
+    }
+
+    /// Sends the core's WAL operations to the node's device log through `port` (012 FR-035): the
+    /// core has recovered from it, and the writer answers the core's syncs in its mailbox.
+    pub fn attach_log(&mut self, mut port: crate::device_log::LogPort) {
+        let mailbox = self.sender.clone();
+        port.attach(Box::new(move |d| mailbox.send_waiting(CoreInput::Log(d)).is_ok()));
+        self.log = Some(port);
     }
 
     /// The core's logic.
@@ -436,9 +452,15 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.reap_ring()?;
             self.mailbox.drain_timed_into(&mut self.inputs);
             for (_, input) in std::mem::take(&mut self.inputs) {
-                if let CoreInput::Disk(done) = input {
-                    let class = self.thread_class(&done);
-                    self.logic.on_io_done(done, class, self.now());
+                match input {
+                    CoreInput::Disk(done) => {
+                        let class = self.thread_class(&done);
+                        self.logic.on_io_done(done, class, self.now());
+                    }
+                    CoreInput::Log(done) => {
+                        self.logic.on_io_done(done, crate::IoClass::Log, self.now());
+                    }
+                    _ => {}
                 }
             }
             self.submit_io(self.now());
@@ -479,6 +501,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         }
         if let Some(ms) = self.timers.next_deadline() {
             deadline = deadline.min(Nanos::from_millis(ms));
+        }
+        // What waits for room in the log's queue is tried again soon.
+        if self.log.as_mut().is_some_and(crate::device_log::LogPort::pump) {
+            deadline = deadline.min(Nanos(now.0 + LOG_QUEUE_RETRY.0));
         }
         let timeout = Duration::from_nanos(deadline.0.saturating_sub(now.0));
         // A background request waits for nothing but the core's other work.
@@ -698,6 +724,13 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         let mut handed = 0;
         while let Some((op, class)) = self.logic.poll_io(now) {
             handed += 1;
+            if let Some(port) = self.log.as_mut().filter(|p| p.takes(&op)) {
+                // Answered at once but for a sync, which the writer answers in the mailbox.
+                if let Some(done) = port.submit(op) {
+                    self.logic.on_io_done(done, crate::IoClass::Log, now);
+                }
+                continue;
+            }
             let gone = match &mut self.disk {
                 Exec::Thread(t) => {
                     if !crate::answered_apart(&op) {
@@ -716,6 +749,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 (self.stopped, self.disk_gone) = (true, true);
                 return (handed, false);
             }
+        }
+        if let Some(port) = self.log.as_mut() {
+            port.pump();
         }
         // One `io_uring_enter` for the whole turn.
         #[cfg(target_os = "linux")]
@@ -752,6 +788,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 let class = self.thread_class(&done);
                 self.logic.on_io_done(done, class, now);
             }
+            CoreInput::Log(done) => self.logic.on_io_done(done, crate::IoClass::Log, now),
             CoreInput::App(m) if overloaded => {
                 // 012 FR-029: a new request is refused before the core spends CPU on it.
                 match self.logic.refuse_overloaded(m) {

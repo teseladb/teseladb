@@ -14,6 +14,7 @@ workspace = true
 teseladb-stages = { path = "../teseladb-stages" }
 teseladb-types = { workspace = true }
 teseladb-raftlog = { workspace = true }
+teseladb-hash = { workspace = true }
 teseladb-sys = { path = "../teseladb-sys" }
 teseladb-raft = { workspace = true }
 teseladb-deflate = { workspace = true }
