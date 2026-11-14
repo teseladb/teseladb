@@ -95,7 +95,7 @@ stop_node
 
 step "builds with the profile"
 for target in $TARGETS; do
-  RUSTFLAGS="-Cprofile-use=$WORK/merged.profdata -Cllvm-args=-pgo-warn-mismatch=false" \
+  RUSTFLAGS="-Cprofile-use=$WORK/merged.profdata -Cllvm-args=-no-pgo-warn-mismatch" \
     cargo "$BUILD" --locked --profile dist -p teseladb-server --bin teseladb --target "$target"
 done
 
