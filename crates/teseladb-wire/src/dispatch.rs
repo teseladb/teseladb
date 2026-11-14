@@ -480,9 +480,12 @@ fn command<B: Backend + ?Sized>(
         crate::commands::hot::of(s).counters.count(name, &req.command, false);
     }
     // The tenant's `maxTimeMS` (007 FR-036): no command of its users that takes one runs longer,
-    // and one without it gets it; `getMore` and the end of a transaction wait as they do.
+    // and one without it gets it; the `getMore` of a change stream or a tailable cursor and the
+    // end of a transaction wait as they do.
     let own_limit = match (cmds.as_mut(), conn.auth.user.as_ref()) {
-        (Some((backend, _)), Some(u)) if u.tenant != 0 && !free_of_time_limit(name) => {
+        (Some((backend, shared)), Some(u))
+            if u.tenant != 0 && !free_of_time_limit(name, &req.command, shared) =>
+        {
             let cap = backend.tenant_state(u.tenant).map_or(0, |s| s.limits.max_time_ms);
             match (cap, own_limit) {
                 (0, limit) => limit,
@@ -535,12 +538,13 @@ fn free_of_limits(name: &str) -> bool {
         || name == crate::commands::query::KILL_CURSORS
 }
 
-/// The commands a tenant's `maxTimeMS` does not hold (007 FR-036): those that spend no token,
-/// `getMore` (a tailable cursor or a change stream waits with `maxAwaitTimeMS`) and the end of a
-/// transaction.
-fn free_of_time_limit(name: &str) -> bool {
+/// The commands a tenant's `maxTimeMS` does not hold (007 FR-036): those that spend no token, the
+/// `getMore` of a tailable cursor or a change stream (they wait with `maxAwaitTimeMS`) and the
+/// end of a transaction.
+fn free_of_time_limit(name: &str, cmd: &Document, shared: &Shared) -> bool {
     free_of_limits(name)
-        || name == crate::commands::query::GET_MORE
+        || (name == crate::commands::query::GET_MORE
+            && crate::commands::query::waits_for_data(shared, cmd))
         || name == crate::commands::txn::COMMIT_TRANSACTION
         || name == crate::commands::txn::ABORT_TRANSACTION
 }
