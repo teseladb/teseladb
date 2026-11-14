@@ -180,6 +180,12 @@ const BASE: u8 = 0x20;
 /// entry with it.
 const REF: u8 = 0x40;
 
+/// The bit of an entry's kind byte that marks its value as a packed document (003 FR-024): the
+/// number of one of its file's shapes and the document's values ([`super::schema`]). A block
+/// loaded from the disk is rebuilt without it ([`unpack`]), so a cursor never meets one. Files
+/// written before have no entry with it.
+const PACKED: u8 = 0x10;
+
 /// Bytes of entries after which the next entry starts a restart point, whatever the interval: a
 /// seek walks from the restart point below its key, and with documents of a few hundred bytes an
 /// interval of entries alone would have it decode several kilobytes of headers per read.
@@ -224,7 +230,7 @@ impl BlockBuilder {
 
     /// Adds an entry; keys come in order.
     pub(crate) fn add(&mut self, key: &[u8], kind: Kind, value: &[u8]) {
-        self.add_entry(key, kind, value, false, None);
+        self.add_entry(key, kind, value, 0, None);
     }
 
     /// Adds an old version whose next newer version is `newer` (its internal key and value, a
@@ -232,23 +238,31 @@ impl BlockBuilder {
     /// against the entry before when that is the one, or naming its timestamp otherwise, when
     /// the delta is smaller (FR-035).
     pub(crate) fn add_old(&mut self, key: &[u8], kind: Kind, value: &[u8], newer: (&[u8], &[u8])) {
-        self.add_entry(key, kind, value, false, Some(newer));
+        self.add_entry(key, kind, value, 0, Some(newer));
     }
 
     /// Adds an entry whose value is a reference to a value file (FR-034); it is never a delta,
     /// and the entry after it is never a delta against it.
     pub(crate) fn add_ref(&mut self, key: &[u8], kind: Kind, encoded: &[u8]) {
-        self.add_entry(key, kind, encoded, true, None);
+        self.add_entry(key, kind, encoded, REF, None);
     }
 
+    /// Adds an entry whose value is a packed document (003 FR-024); as a reference, it is never
+    /// a delta nor the base of one.
+    pub(crate) fn add_packed(&mut self, key: &[u8], kind: Kind, packed: &[u8]) {
+        self.add_entry(key, kind, packed, PACKED, None);
+    }
+
+    /// Adds an entry; `form` is 0 for a value in line, or [`REF`] or [`PACKED`].
     fn add_entry(
         &mut self,
         key: &[u8],
         kind: Kind,
         value: &[u8],
-        is_ref: bool,
+        form: u8,
         newer: Option<(&[u8], &[u8])>,
     ) {
+        let whole = form == 0;
         let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
         let restart = self.since_restart == self.interval
             || self.restarts.is_empty()
@@ -263,7 +277,7 @@ impl BlockBuilder {
         let patch = match &self.last_value {
             Some((Kind::Put, newer))
                 if !restart
-                    && !is_ref
+                    && whole
                     && kind == Kind::Put
                     && logical(&self.last) == logical(key) =>
             {
@@ -276,7 +290,7 @@ impl BlockBuilder {
             Some((nkey, nvalue))
                 if self.deltas
                     && patch.is_none()
-                    && !is_ref
+                    && whole
                     && kind == Kind::Put
                     && logical(nkey) == logical(key) =>
             {
@@ -290,13 +304,12 @@ impl BlockBuilder {
             _ => None,
         };
         if self.deltas {
-            self.last_value = (!is_ref).then(|| (kind, value.to_vec()));
+            self.last_value = whole.then(|| (kind, value.to_vec()));
         }
         let (flag, stored) = match (&patch, &based) {
             (Some(d), _) => (PATCH, d.as_slice()),
             (None, Some(b)) => (BASE, b.as_slice()),
-            (None, None) if is_ref => (REF, value),
-            (None, None) => (0, value),
+            (None, None) => (form, value),
         };
         put_varint(&mut self.buf, shared as u64);
         put_varint(&mut self.buf, (key.len() - shared) as u64);
@@ -343,6 +356,8 @@ struct Raw {
     based: bool,
     /// The value is a reference to a value file (FR-034).
     is_ref: bool,
+    /// The value is a packed document (003 FR-024).
+    packed: bool,
     value: Range<usize>,
 }
 
@@ -379,15 +394,16 @@ impl Block {
         let delta = p..p.checked_add(unshared).ok_or(Bad)?;
         let kind_at = delta.end;
         let byte = *d.get(kind_at).ok_or(Bad)?;
-        let kind = Kind::from_u8(byte & !(PATCH | REF | BASE)).ok_or(Bad)?;
+        let kind = Kind::from_u8(byte & !(PATCH | REF | BASE | PACKED)).ok_or(Bad)?;
         let (patch, is_ref, based) = (byte & PATCH != 0, byte & REF != 0, byte & BASE != 0);
+        let packed = byte & PACKED != 0;
         let value = kind_at + 1..(kind_at + 1).checked_add(vlen).ok_or(Bad)?;
-        let flags = u8::from(patch) + u8::from(is_ref) + u8::from(based);
+        let flags = u8::from(patch) + u8::from(is_ref) + u8::from(based) + u8::from(packed);
         if value.end > d.len() || flags > 1 || (based && vlen < VERSION_LEN) {
             return Err(Bad);
         }
         let next = value.end;
-        Ok((Raw { shared, delta, kind, patch, is_ref, based, value }, next))
+        Ok((Raw { shared, delta, kind, patch, is_ref, based, packed, value }, next))
     }
 
     /// Key of the entry at restart point `i`, stored whole.
@@ -398,6 +414,52 @@ impl Block {
         }
         Ok(&self.data[raw.delta])
     }
+}
+
+/// The payload of a data block with its packed documents rebuilt with `shapes`, those of its
+/// file (003 FR-024): the same entries, keys and restart points, each document whole. A block
+/// without one comes back as it is.
+pub(crate) fn unpack(data: Bytes, shapes: &[Vec<u8>]) -> Result<Bytes, Bad> {
+    let block = Block::parse(data)?;
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while at < block.restarts {
+        let (raw, next) = block.raw(at)?;
+        entries.push((at, raw));
+        at = next;
+    }
+    if !entries.iter().any(|(_, raw)| raw.packed) {
+        return Ok(block.data);
+    }
+    let d = &block.data;
+    let mut out = Vec::with_capacity(d.len() * 2);
+    let mut moved = Vec::with_capacity(entries.len());
+    let mut value = Vec::new();
+    for (old, raw) in &entries {
+        moved.push((*old, out.len()));
+        value.clear();
+        let stored = match raw.packed {
+            true => {
+                super::schema::unpack(shapes, &d[raw.value.clone()], &mut value)?;
+                &value[..]
+            }
+            false => &d[raw.value.clone()],
+        };
+        put_varint(&mut out, raw.shared as u64);
+        put_varint(&mut out, raw.delta.len() as u64);
+        put_varint(&mut out, stored.len() as u64);
+        out.extend_from_slice(&d[raw.delta.clone()]);
+        // The kind byte keeps its other bits, which a packed entry does not have.
+        out.push(d[raw.delta.end] & !PACKED);
+        out.extend_from_slice(stored);
+    }
+    for i in 0..block.count {
+        let old = block.restart(i)?;
+        let new = moved.binary_search_by_key(&old, |m| m.0).map_err(|_| Bad)?;
+        out.extend_from_slice(&(moved[new].1 as u32).to_le_bytes());
+    }
+    out.extend_from_slice(&(block.count as u32).to_le_bytes());
+    Ok(Bytes::from_vec(out))
 }
 
 /// A position in a block.
@@ -523,7 +585,8 @@ impl BlockCursor {
             return Ok(());
         }
         let (raw, next) = self.block.raw(self.next)?;
-        if raw.shared > self.key.len() {
+        // A packed document is rebuilt when its block is loaded: one left is a broken block.
+        if raw.shared > self.key.len() || raw.packed {
             return Err(Bad);
         }
         let (patched, pending) = match raw.patch {
@@ -1076,5 +1139,61 @@ mod tests {
             let block = Block::parse(Bytes::from_vec(payload)).unwrap();
             assert_eq!(BlockCursor::first(block).err(), Some(Bad), "{flags:#x}");
         }
+    }
+
+    /// 003 FR-024: unpacking rebuilds every packed document and moves the restart points with
+    /// their entries, so seeks find what they found before; a packed entry left reaches no cursor.
+    #[test]
+    fn unpacking_a_block_rebuilds_its_documents_and_keeps_its_restarts() {
+        use crate::sst::schema::Packer;
+        use teseladb_bson::Document;
+        let mut packer = Packer::default();
+        let mut b = BlockBuilder::new(4);
+        // Documents' keys start with their bucket: in the order of their keys, not of their ids.
+        let mut ids: Vec<(Vec<u8>, u32)> = (0..40u32)
+            .map(|i| {
+                let id = teseladb_bson::RawValue::Int32(i as i32);
+                (teseladb_keys::KeyBuilder::document(1, 7, id).as_bytes().to_vec(), i)
+            })
+            .collect();
+        ids.sort();
+        let mut want = Vec::new();
+        for (logical, i) in ids {
+            let key =
+                crate::entry::internal_key(&logical, teseladb_keys::Hlc::from_be_bytes([0; 12]));
+            let doc = Document::new().with("_id", i as i32).with("v", "x".repeat(i as usize));
+            let value = [&[crate::DOCUMENT_VALUE][..], &doc.to_bytes().unwrap()].concat();
+            match (i % 3, packer.pack(&logical, &value)) {
+                (0, _) | (_, None) => b.add(&key, Kind::Put, &value),
+                (_, Some(p)) => b.add_packed(&key, Kind::Put, &p),
+            }
+            want.push((key, value));
+        }
+        let packed = Bytes::from_vec(b.finish());
+        let shapes = packer.finish();
+        // A cursor over the block as stored meets a packed entry: the block was not loaded.
+        let walk = |mut c: BlockCursor| -> Result<(), Bad> {
+            while c.valid() {
+                c.advance()?;
+            }
+            Ok(())
+        };
+        let stored = BlockCursor::first(Block::parse(packed.clone()).unwrap()).and_then(walk);
+        assert_eq!(stored, Err(Bad));
+        assert_eq!(unpack(packed.clone(), &[]).err(), Some(Bad), "shapes the file lacks");
+        let whole = unpack(packed, &shapes).unwrap();
+        let block = Block::parse(whole.clone()).unwrap();
+        let mut c = BlockCursor::first(block.clone()).unwrap();
+        for (k, v) in &want {
+            assert_eq!((c.key(), c.value_slice()), (&k[..], &v[..]));
+            c.advance().unwrap();
+        }
+        assert!(!c.valid());
+        for (k, v) in &want {
+            let c = BlockCursor::seek(block.clone(), k, crate::entry::compare).unwrap();
+            assert_eq!(c.value_slice(), &v[..]);
+        }
+        // A block without a packed entry comes back as it is.
+        assert_eq!(unpack(whole.clone(), &shapes).unwrap(), whole);
     }
 }

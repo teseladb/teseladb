@@ -78,6 +78,14 @@ fn new_writer(
     TableWriter::new(format.0, format.1).sealed(ring)
 }
 
+/// `w`, storing every document whole unless `pack` (003 FR-024).
+pub(crate) fn packing(w: TableWriter, pack: bool) -> TableWriter {
+    match pack {
+        true => w,
+        false => w.unpacked(),
+    }
+}
+
 /// The value file an output writes its values above the threshold to, from the first one on
 /// (FR-034).
 #[derive(Debug)]
@@ -277,7 +285,7 @@ impl FlushJob {
             values: ValueSink::new(cfg.value_separation_bytes),
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
-            writer: has_data.then(|| new_writer(&format)),
+            writer: has_data.then(|| packing(new_writer(&format), cfg.pack_documents)),
             format,
             history: None,
             newer: None,

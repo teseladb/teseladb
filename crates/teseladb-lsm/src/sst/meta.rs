@@ -4,6 +4,7 @@
 //! props  := lo · hi (length-prefixed) · min_ts(12 BE) · max_ts(12 BE) · versions(varint)
 //!           · tombstones(varint) · (start · end · ts(12 BE))* · dictionary(varint)
 //!           · [values(varint) · bytes(varint)*] · [zone_off(varint) · zone_len(varint)]
+//!           · [shapes(varint) · shape(length-prefixed)*]
 //! footer := filter_off · filter_len · props_off · props_len · index_off · index_len (u64 LE)
 //!           · encryption(32 bytes) · version(u32 LE = 1) · magic "TSLSST01"
 //!           · padding(32 bytes) · crc32c(u32 LE), 128 bytes
@@ -55,6 +56,11 @@ pub struct Props {
     /// Offset and framed length of its zone block (FR-039), when it has one. A file without
     /// value files that has one writes a count of value files of zero before it.
     pub zones: Option<(u64, u64)>,
+    /// The shapes of its packed documents, by number (003 FR-024): each the bytes
+    /// `(type · name · 00)*` of a document's top-level fields. A file with shapes writes the
+    /// count of value files and the zones before them, the zones as `0 · 0` without a zone
+    /// block; a file without packed documents ends its properties without them.
+    pub shapes: Vec<Vec<u8>>,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -83,15 +89,23 @@ impl Props {
             put_ts(&mut out, t.ts);
         }
         put_varint(&mut out, self.dictionary);
-        if !self.values.is_empty() || self.zones.is_some() {
+        let shapes = !self.shapes.is_empty();
+        if !self.values.is_empty() || self.zones.is_some() || shapes {
             put_varint(&mut out, self.values.len() as u64);
             for bytes in &self.values {
                 put_varint(&mut out, *bytes);
             }
         }
-        if let Some((offset, len)) = self.zones {
+        if self.zones.is_some() || shapes {
+            let (offset, len) = self.zones.unwrap_or((0, 0));
             put_varint(&mut out, offset);
             put_varint(&mut out, len);
+        }
+        if shapes {
+            put_varint(&mut out, self.shapes.len() as u64);
+            for shape in &self.shapes {
+                put_bytes(&mut out, shape);
+            }
         }
         out
     }
@@ -128,10 +142,35 @@ impl Props {
             true => Some((get_varint(b, &mut at)?, get_varint(b, &mut at)?)),
             false => None,
         };
+        let mut shapes = Vec::new();
+        if at < b.len() {
+            let n = get_varint(b, &mut at)?;
+            for _ in 0..n {
+                let shape = get_bytes(b, &mut at)?;
+                super::schema::check_shape(shape)?;
+                shapes.push(shape.to_vec());
+            }
+            if n == 0 {
+                return Err(Bad);
+            }
+        }
+        // A zone block at offset 0 stands for none: data blocks come first.
+        let zones = zones.filter(|z| *z != (0, 0));
         if at != b.len() || lo > hi || min_ts > max_ts {
             return Err(Bad);
         }
-        Ok(Props { lo, hi, min_ts, max_ts, versions, tombstones, dictionary, values, zones })
+        Ok(Props {
+            lo,
+            hi,
+            min_ts,
+            max_ts,
+            versions,
+            tombstones,
+            dictionary,
+            values,
+            zones,
+            shapes,
+        })
     }
 }
 
@@ -231,6 +270,7 @@ mod tests {
             dictionary: 7,
             values: Vec::new(),
             zones: None,
+            shapes: Vec::new(),
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
@@ -253,6 +293,19 @@ mod tests {
             assert_eq!(Props::decode(&z), Ok(zoned));
             assert_eq!(Props::decode(&z[..z.len() - 1]), Err(Bad));
         }
+        // With the shapes of packed documents (003 FR-024), with and without the fields before.
+        let shapes = vec![vec![0x10, b'a', 0, 0x02, b's', 0], Vec::new()];
+        for (values, zones) in [(Vec::new(), None), (vec![4096], Some((12_288, 300)))] {
+            let packed = Props { values, zones, shapes: shapes.clone(), ..p.clone() };
+            let e = packed.encode();
+            assert_eq!(Props::decode(&e), Ok(packed));
+            assert_eq!(Props::decode(&e[..e.len() - 1]), Err(Bad));
+        }
+        let mut no_shape = Props { zones: Some((12_288, 300)), ..p.clone() }.encode();
+        no_shape.push(0);
+        assert_eq!(Props::decode(&no_shape), Err(Bad), "a count of no shapes");
+        let broken = Props { shapes: vec![vec![0x42, b'a', 0]], ..p.clone() };
+        assert_eq!(Props::decode(&broken.encode()), Err(Bad), "a shape with an unknown type");
         let mut no_zone = p.encode();
         no_zone.push(0);
         assert_eq!(Props::decode(&no_zone), Err(Bad), "a count of zero and nothing after");

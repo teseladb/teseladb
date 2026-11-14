@@ -26,6 +26,7 @@ pub(crate) mod meta;
 pub(crate) mod pgm;
 pub(crate) mod reader;
 pub(crate) mod ribbon;
+pub(crate) mod schema;
 pub(crate) mod value;
 pub(crate) mod writer;
 pub(crate) mod zone;
