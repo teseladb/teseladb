@@ -18,9 +18,15 @@ const DEFINITION: &str = r#"{
     "g": {"type": "token"},
     "n": {"type": "number"},
     "items": {"type": "embeddedDocuments", "dynamic": true},
-    "syn": {"type": "string", "analyzer": "${name:ANALYZER_ENGLISH}"}
+    "syn": {"type": "string", "analyzer": "${name:ANALYZER_ENGLISH}"},
+    "a": {"type": "autocomplete", "tokenization": "nGram", "minGrams": 2, "maxGrams": 6, "foldDiacritics": true},
+    "loc": {"type": "geo", "indexShapes": true},
+    "flag": {"type": "boolean"}
   }},
-  "synonyms": [{"name": "s", "analyzer": "${name:ANALYZER_STANDARD}", "source": {"collection": "syn"}}]
+  "synonyms": [
+    {"name": "s", "analyzer": "${name:ANALYZER_STANDARD}", "source": {"collection": "syn"}},
+    {"name": "bad", "analyzer": "${name:ANALYZER_STANDARD}", "source": {"collection": "bad"}}
+  ]
 }"#;
 
 const SYNONYMS: &[&str] = &[
@@ -48,6 +54,9 @@ fn index() -> Indexer {
     let synonyms: Vec<Document> =
         SYNONYMS.iter().map(|s| extjson::parse(s).expect("JSON")).collect();
     ix.set_synonyms("s", &synonyms).expect("synonyms");
+    let invalid =
+        extjson::parse(r#"{"mappingType": "explicit", "synonyms": ["x"]}"#).expect("JSON");
+    ix.set_synonyms("bad", &[invalid]).expect("synonyms");
     let docs = TEXTS.iter().enumerate().map(|(i, t)| {
         let item =
             |k: usize| Document::new().with("t", TEXTS[(i + k) % TEXTS.len()]).with("k", k as i32);
@@ -57,7 +66,19 @@ fn index() -> Indexer {
             .with("syn", *t)
             .with("g", ["red", "green", "blue"][i % 3])
             .with("n", (i * 7 % 30) as i32)
-            .with("items", vec![item(1).into(), item(2).into()]);
+            .with("items", vec![item(1).into(), item(2).into()])
+            .with("a", *t)
+            .with("flag", i % 2 == 0)
+            .with(
+                "loc",
+                Document::new().with("type", "Point").with(
+                    "coordinates",
+                    vec![
+                        teseladb_bson::Value::Double(i as f64 * 0.5 - 2.0),
+                        teseladb_bson::Value::Double(1.0 - i as f64 * 0.25),
+                    ],
+                ),
+            );
         (vec![i as u8], Some(doc))
     });
     ix.apply(docs).expect("indexed");
@@ -107,6 +128,100 @@ const SEARCHES: &[(&str, &str)] = &[
             "score": {"embedded": {"aggregate": "maximum"}}}}"#,
     ),
     ("equals-token", r#"{"equals": {"path": "g", "value": "red"}}"#),
+    ("equals-bool", r#"{"equals": {"path": "flag", "value": true}}"#),
+    ("in-numbers", r#"{"in": {"path": "n", "value": [0, 7, 14]}}"#),
+    ("near-number", r#"{"near": {"path": "n", "origin": 10, "pivot": 2}}"#),
+    ("range-number", r#"{"range": {"path": "n", "gt": 3, "lt": 25}}"#),
+    (
+        "criteria-any",
+        r#"{"text": {"query": "fast car zoo", "path": "t", "synonyms": "s", "matchCriteria": "any"}}"#,
+    ),
+    (
+        "criteria-all",
+        r#"{"text": {"query": "big cat zoo", "path": "t", "synonyms": "s", "matchCriteria": "all"}}"#,
+    ),
+    (
+        "criteria-words",
+        r#"{"text": {"query": "motor car", "path": ["t", "syn"], "synonyms": "s", "matchCriteria": "any"}}"#,
+    ),
+    ("synonyms-one-phrase", r#"{"phrase": {"query": "fast", "path": "t", "synonyms": "s"}}"#),
+    (
+        "synonyms-plain-phrase",
+        r#"{"phrase": {"query": "lazy dog", "path": "t", "synonyms": "s", "slop": 1}}"#,
+    ),
+    ("synonyms-invalid", r#"{"text": {"query": "car", "path": "t", "synonyms": "bad"}}"#),
+    ("synonyms-words", r#"{"text": {"query": "motor car", "path": "t", "synonyms": "s"}}"#),
+    ("autocomplete", r#"{"autocomplete": {"query": "qui bro", "path": "a"}}"#),
+    (
+        "autocomplete-sequential",
+        r#"{"autocomplete": {"query": "quick bro", "path": "a", "tokenOrder": "sequential", "fuzzy": {"maxEdits": 1}}}"#,
+    ),
+    (
+        "fuzzy",
+        r#"{"text": {"query": "quikc fxo", "path": "t", "fuzzy": {"maxEdits": 2, "prefixLength": 1}}}"#,
+    ),
+    ("wildcard", r#"{"wildcard": {"query": "qu*k", "path": "t", "allowAnalyzedField": true}}"#),
+    ("regex", r#"{"regex": {"query": "(fox|dog)s?", "path": "t", "allowAnalyzedField": true}}"#),
+    (
+        "query-string",
+        r#"{"queryString": {"defaultPath": "t", "query": "quick AND (fox OR dogs)"}}"#,
+    ),
+    ("more-like-this", r#"{"moreLikeThis": {"like": {"t": "quick brown fox jumps"}}}"#),
+    ("exists", r#"{"exists": {"path": "items.t"}}"#),
+    (
+        "minimum-should",
+        r#"{"compound": {"should": [{"text": {"query": "fox", "path": "t"}}, {"text": {"query": "dog", "path": "t"}},
+            {"text": {"query": "cat", "path": "t"}}], "minimumShouldMatch": 2}}"#,
+    ),
+    (
+        "geo-circle",
+        r#"{"geoWithin": {"path": "loc", "circle": {"center": {"type": "Point", "coordinates": [0, 0]}, "radius": 200000}}}"#,
+    ),
+    (
+        "geo-box",
+        r#"{"geoWithin": {"path": "loc", "box": {"bottomLeft": {"type": "Point", "coordinates": [-1, -1]},
+            "topRight": {"type": "Point", "coordinates": [1, 1]}}}}"#,
+    ),
+    (
+        "geo-shape",
+        r#"{"geoShape": {"path": "loc", "relation": "within", "geometry": {"type": "Polygon",
+            "coordinates": [[[-3, -3], [3, -3], [3, 3], [-3, 3], [-3, -3]]]}}}"#,
+    ),
+    (
+        "geo-near",
+        r#"{"near": {"path": "loc", "origin": {"type": "Point", "coordinates": [0, 0]}, "pivot": 50000}}"#,
+    ),
+    (
+        "embedded-sum",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "quick fox", "path": "items.t"}},
+            "score": {"embedded": {"aggregate": "sum"}}}}"#,
+    ),
+    (
+        "embedded-mean",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"range": {"path": "items.k", "gte": 2}},
+            "score": {"embedded": {"aggregate": "mean"}}}}"#,
+    ),
+    (
+        "highlight-phrase",
+        r#"{"phrase": {"query": "brown fox", "path": "t"}, "highlight": {"path": "t", "maxCharsToExamine": 30}}"#,
+    ),
+    (
+        "highlight-synonyms",
+        r#"{"text": {"query": "fast", "path": "t", "synonyms": "s"}, "highlight": {"path": ["t", "syn"]}}"#,
+    ),
+    (
+        "highlight-compound",
+        r#"{"compound": {"must": [{"wildcard": {"query": "dog*", "path": "t", "allowAnalyzedField": true}}],
+            "should": [{"autocomplete": {"query": "laz", "path": "a"}}]}, "highlight": {"path": {"wildcard": "*"}}}"#,
+    ),
+    (
+        "score-boost",
+        r#"{"text": {"query": "quick", "path": "t", "score": {"boost": {"path": "n", "undefined": 1}}}}"#,
+    ),
+    (
+        "score-function",
+        r#"{"text": {"query": "quick", "path": "t", "score": {"function": {"add": [{"score": "relevance"}, {"path": {"value": "n", "undefined": 0}}]}}}}"#,
+    ),
     (
         "facet-operator",
         r#"{"facet": {"operator": {"exists": {"path": "t"}},
@@ -140,7 +255,23 @@ fn fnv(hash: &mut u64, bytes: &[u8]) {
 fn every_feature_answers_as_it_did() {
     let ix = index();
     let mut found: Vec<(String, u64)> = Vec::new();
-    for (name, spec) in SEARCHES {
+    // Each query also with `scoreDetails`, whose descriptions name every part of it.
+    let detailed: Vec<(String, String)> = SEARCHES
+        .iter()
+        .filter(|(_, spec)| !spec.contains("scoreDetails"))
+        .flat_map(|(name, spec)| {
+            let open = spec.trim_end().strip_suffix('}').expect("an object");
+            let with = format!("{open}, \"scoreDetails\": true}}");
+            [(name.to_string(), spec.to_string()), (format!("{name}+details"), with)]
+        })
+        .chain(
+            SEARCHES
+                .iter()
+                .filter(|(_, spec)| spec.contains("scoreDetails"))
+                .map(|(name, spec)| (name.to_string(), spec.to_string())),
+        )
+        .collect();
+    for (name, spec) in &detailed {
         let spec = extjson::parse(spec).expect("JSON");
         let mut h = 0xcbf2_9ce4_8422_2325;
         let answer = match ix.search(&spec) {

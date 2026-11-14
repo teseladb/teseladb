@@ -23,6 +23,11 @@ const STEMMER_FINGERPRINTS: &str = include_str!("data/stemmer_fingerprints.txt")
 /// 14-11-2026: they take the branches of the rules that the stop lists do not reach.
 const STEMMER_WORDS: &str = include_str!("data/stemmer_words.txt");
 
+/// Sentences in Japanese, Korean, Thai and Chinese, for the dictionary tokenizers, and their
+/// fingerprints, recorded as `FINGERPRINTS` were.
+const SENTENCES: &str = include_str!("data/sentences.txt");
+const SENTENCE_FINGERPRINTS: &str = include_str!("data/sentence_fingerprints.txt");
+
 /// The stop lists the corpus takes its words from.
 const STOP_LISTS: &[&str] = &[
     include_str!("../src/analysis/stopwords/arabic.txt"),
@@ -369,4 +374,10 @@ fn every_stemmer_gives_the_stems_it_gave() {
     let words: Vec<&str> = STEMMER_WORDS.lines().collect();
     let texts: Vec<String> = words.chunks(WORDS_PER_TEXT).map(|c| c.join(" ")).collect();
     compare(&fingerprints(&texts), STEMMER_FINGERPRINTS);
+}
+
+#[test]
+fn every_analyzer_cuts_sentences_as_it_did() {
+    let texts: Vec<String> = SENTENCES.lines().map(str::to_owned).collect();
+    compare(&fingerprints(&texts), SENTENCE_FINGERPRINTS);
 }
