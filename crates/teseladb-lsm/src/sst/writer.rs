@@ -214,8 +214,8 @@ impl TableWriter {
         put_varint(&mut handle, offset);
         put_varint(&mut handle, framed.len() as u64);
         let written = Handle { offset, len: framed.len() as u64 };
+        // The next block starts right after it (FR-043).
         self.out.extend_from_slice(&framed);
-        pad(&mut self.out);
         self.index.add(&last, Kind::Put, &handle);
         written
     }
@@ -322,20 +322,23 @@ impl TableWriter {
         self.versions += 1;
     }
 
-    /// The bytes ready to write and their offset, if any (always whole aligned pages).
+    /// The bytes ready to write and their offset, if any: the whole aligned pages; the start of
+    /// a page that a block only began waits for the rest.
     pub(crate) fn take(&mut self) -> Option<(u64, Vec<u8>)> {
-        if self.out.is_empty() {
+        let whole = self.out.len() - self.out.len() % ALIGN;
+        if whole == 0 {
             return None;
         }
         let at = self.taken;
-        let chunk = std::mem::take(&mut self.out);
+        let rest = self.out.split_off(whole);
+        let chunk = std::mem::replace(&mut self.out, rest);
         self.taken += chunk.len() as u64;
         Some((at, chunk))
     }
 
-    /// Bytes waiting in [`TableWriter::take`].
+    /// Bytes [`TableWriter::take`] would give.
     pub(crate) fn pending(&self) -> usize {
-        self.out.len()
+        self.out.len() - self.out.len() % ALIGN
     }
 
     fn meta_block(&mut self, payload: &[u8]) -> Handle {
@@ -360,6 +363,7 @@ impl TableWriter {
         if !self.data.is_empty() {
             self.flush_block();
         }
+        pad(&mut self.out);
         let meta_start = self.taken + self.out.len() as u64;
         let filter = self.meta_block(&filter::build(&self.hashes));
         let zones = self.zones.take().and_then(ZoneBuilder::finish).map(|z| {
@@ -509,9 +513,8 @@ mod tests {
         let dicts = crate::sst::reader::Dictionaries::from([(4, dict)]);
         let t = Table::from_meta(9, size, footer.filter.offset, &meta, (None, &dicts)).unwrap();
         for i in 0..t.blocks() {
-            let h = t.handle(i);
-            let read =
-                Bytes::from_vec(file[h.offset as usize..(h.offset + h.len) as usize].to_vec());
+            let (start, len) = t.pages(i);
+            let read = Bytes::from_vec(file[start as usize..(start + len) as usize].to_vec());
             assert!(t.block(i, &read).is_ok(), "block {i}");
         }
         let none = crate::sst::reader::Dictionaries::new();
@@ -564,9 +567,8 @@ mod tests {
         let read_all = |file: &[u8], t: &Table| {
             let mut out = Vec::new();
             for i in 0..t.blocks() {
-                let h = t.handle(i);
-                let read =
-                    Bytes::from_vec(file[h.offset as usize..(h.offset + h.len) as usize].to_vec());
+                let (start, len) = t.pages(i);
+                let read = Bytes::from_vec(file[start as usize..(start + len) as usize].to_vec());
                 let mut c = BlockCursor::first(t.block(i, &read).unwrap()).unwrap();
                 while c.valid() {
                     out.push((c.key().to_vec(), c.kind(), c.value_slice().to_vec()));

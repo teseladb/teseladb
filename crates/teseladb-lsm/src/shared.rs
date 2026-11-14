@@ -66,9 +66,17 @@ impl<T> Published<T> {
 
     /// The published value.
     pub fn load(&self) -> Arc<T> {
+        self.load_racing(|| {})
+    }
+
+    /// [`Published::load`], running `registered` after the reader registered in an epoch and
+    /// before it checks that epoch is still current: a store that flips the epoch at that point
+    /// makes the reader register again. Tests put the flip there without a race between threads.
+    fn load_racing(&self, mut registered: impl FnMut()) -> Arc<T> {
         let e = loop {
             let e = self.epoch.load(Ordering::SeqCst) & 1;
             self.readers[e].fetch_add(1, Ordering::SeqCst);
+            registered();
             if self.epoch.load(Ordering::SeqCst) & 1 == e {
                 break e;
             }
@@ -89,6 +97,12 @@ impl<T> Published<T> {
 
     /// Publishes `value`; only one thread stores (the core).
     pub fn store(&self, value: Arc<T>) {
+        self.store_waiting(value, std::hint::spin_loop);
+    }
+
+    /// [`Published::store`], running `wait` each time it finds a reader of the old epoch still
+    /// registered. Tests let that reader go from `wait`, without a race between threads.
+    fn store_waiting(&self, value: Arc<T>, mut wait: impl FnMut()) {
         if ptr_eq(self.ptr.load(Ordering::SeqCst), &value) {
             return;
         }
@@ -96,7 +110,7 @@ impl<T> Published<T> {
         let old = self.ptr.swap(Arc::into_raw(value).cast_mut(), Ordering::SeqCst);
         let e = self.epoch.fetch_add(1, Ordering::SeqCst) & 1;
         while self.readers[e].load(Ordering::SeqCst) != 0 {
-            std::hint::spin_loop();
+            wait();
         }
         // SAFETY: `old` came from `Arc::into_raw` and was the cell's reference; no reader of
         // epoch `e` is left, and readers of the new epoch load the new pointer, so nobody is
@@ -155,6 +169,22 @@ impl<T> TryCell<T> {
         // other `try_with` reaches the value, so this is its only reference.
         Some(f(unsafe { &mut *self.value.get() }))
     }
+
+    /// Runs `f` on the value, waiting while somebody else has it: for the core's work on every
+    /// shard, which must reach each one, and for a block a reader already paid a disk read for.
+    pub(crate) fn with_waiting<R>(&self, f: impl FnMut(&mut T) -> R) -> R {
+        self.wait_with(f, std::hint::spin_loop)
+    }
+
+    /// [`TryCell::with_waiting`], running `busy` each time it finds the value taken.
+    fn wait_with<R>(&self, mut f: impl FnMut(&mut T) -> R, mut busy: impl FnMut()) -> R {
+        loop {
+            if let Some(r) = self.try_with(&mut f) {
+                return r;
+            }
+            busy();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,6 +236,51 @@ mod tests {
         for r in readers {
             r.join().expect("a reader");
         }
+    }
+
+    #[test]
+    fn a_reader_that_sees_the_epoch_move_while_it_registers_registers_again() {
+        let cell = Published::new(Arc::new(1u64));
+        let mut flips = 0;
+        let value = cell.load_racing(|| {
+            if flips == 0 {
+                cell.epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            flips += 1;
+        });
+        assert_eq!((*value, flips), (1, 2));
+        assert!(cell.readers.iter().all(|r| r.load(Ordering::SeqCst) == 0));
+    }
+
+    #[test]
+    fn a_store_waits_for_the_readers_of_the_old_epoch() {
+        let cell = Published::new(Arc::new(1u64));
+        let first = cell.load();
+        cell.readers[0].fetch_add(1, Ordering::SeqCst);
+        let mut waits = 0;
+        cell.store_waiting(Arc::new(2), || {
+            waits += 1;
+            cell.readers[0].fetch_sub(1, Ordering::SeqCst);
+        });
+        assert_eq!((*first, *cell.load(), waits), (1, 2, 1));
+    }
+
+    #[test]
+    fn a_caller_that_waits_for_a_busy_cell_gets_it_once_it_is_free() {
+        let cell = TryCell::new(5u32);
+        cell.busy.store(true, Ordering::SeqCst);
+        let mut waits = 0;
+        let got = cell.wait_with(
+            |v| {
+                *v += 1;
+                *v
+            },
+            || {
+                waits += 1;
+                cell.busy.store(false, Ordering::Release);
+            },
+        );
+        assert_eq!((got, waits, cell.with_waiting(|v| *v)), (6, 1, 6));
     }
 
     #[test]

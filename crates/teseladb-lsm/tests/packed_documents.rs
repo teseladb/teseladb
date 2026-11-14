@@ -109,8 +109,10 @@ fn check(lsm: &mut Lsm, disk: &mut MemDisk, model: &Model, at: u64) {
     assert_eq!(all, model.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>());
 }
 
+/// Bytes of the data blocks of the files as stored, without the pages of the filter, index,
+/// properties and footer, which hold the same in both kinds of file.
 fn files_bytes(lsm: &Lsm) -> u64 {
-    lsm.metrics().level_bytes.iter().sum()
+    lsm.space().data.stored
 }
 
 fn config(pack_documents: bool) -> LsmConfig {

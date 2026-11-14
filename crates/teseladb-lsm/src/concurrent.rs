@@ -21,8 +21,8 @@ use crate::read::{self, Blocks, Fetch, Found, Item, Lookup, ReadToken, Scan, Ste
 use crate::read_back::BackScan;
 use crate::shared::{Published, TryCell};
 use crate::sst::block::Block;
+use crate::sst::file_name;
 use crate::sst::reader::Table;
-use crate::sst::{align_up, file_name};
 use crate::version::{Version, View};
 
 /// Shards of the shared block cache.
@@ -46,7 +46,8 @@ impl std::fmt::Debug for SharedLsm {
     }
 }
 
-/// A block a read misses: the bytes of `len` at `offset` of the file at `path`.
+/// A block a read misses: the bytes of `len` at `offset` of the file at `path`, the aligned pages
+/// that hold it.
 #[derive(Clone)]
 pub struct BlockNeed {
     /// The file's path, as the core's disk names it.
@@ -144,9 +145,7 @@ impl SharedLsm {
     /// the LSM; a shard busy at that moment is waited for, as a block read waits for it.
     pub(crate) fn place_blocks(&self, memory: &Arc<dyn crate::BlockMemory>) {
         for shard in &self.inner.cache {
-            while shard.try_with(|c| c.set_memory(Arc::clone(memory))).is_none() {
-                std::hint::spin_loop();
-            }
+            shard.with_waiting(|c| c.set_memory(Arc::clone(memory)));
         }
     }
 
@@ -178,29 +177,14 @@ impl SharedLsm {
 
     /// Bytes the shared cache holds.
     pub fn cache_bytes(&self) -> u64 {
-        let mut total = 0;
-        for shard in self.inner.cache.iter() {
-            loop {
-                if let Some(used) = shard.try_with(|c| c.used()) {
-                    total += used;
-                    break;
-                }
-                std::hint::spin_loop();
-            }
-        }
-        total
+        self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.used())).sum()
     }
 
     /// Drops the blocks of file `file` (of `blocks` data blocks) from the shared cache: the file
     /// is gone, and its blocks would hold the cache's memory until other blocks evict them.
     pub(crate) fn forget(&self, file: u64, blocks: usize) {
         for shard in self.inner.cache.iter() {
-            loop {
-                if shard.try_with(|c| c.forget(file, blocks)).is_some() {
-                    break;
-                }
-                std::hint::spin_loop();
-            }
+            shard.with_waiting(|c| c.forget(file, blocks));
         }
     }
 
@@ -213,12 +197,8 @@ impl SharedLsm {
         let shard = self.inner.shard(file, block);
         // A miss already cost a read of the disk; a moment's retry keeps the block for the next
         // reads instead of dropping it when another thread holds the shard.
-        loop {
-            if shard.try_with(|c| c.insert(file, block as u32, payload.clone())).is_some() {
-                return Ok(());
-            }
-            std::hint::spin_loop();
-        }
+        shard.with_waiting(|c| c.insert(file, block as u32, payload.clone()));
+        Ok(())
     }
 }
 
@@ -252,11 +232,11 @@ impl Blocks for Source<'_> {
             return Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i));
         }
         if self.need.is_none() {
-            let h = table.handle(i);
+            let (offset, len) = table.pages(i);
             self.need = Some(BlockNeed {
                 path: self.inner.dir.join(file_name(table.number)).display().to_string(),
-                offset: h.offset,
-                len: align_up(h.len),
+                offset,
+                len,
                 table: table.clone(),
                 block: i,
             });
