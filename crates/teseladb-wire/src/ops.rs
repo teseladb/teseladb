@@ -8,6 +8,7 @@
 //! check.
 
 use std::collections::BTreeMap;
+use teseladb_keys::stored;
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::{RoleName, UserName};
@@ -675,6 +676,22 @@ impl<B: Backend + ?Sized> Drop for Guarded<'_, B> {
     }
 }
 
+/// A command reads documents as their BSON (003 FR-021): the values of document keys come back
+/// without their table of offsets, which only [`Backend::scan_matching`]'s filter and the
+/// mutations' reads of the stored versions see.
+fn document_value(value_type: u8, key: &[u8], value: Vec<u8>) -> Vec<u8> {
+    if value_type == crate::commands::mutation::DOCUMENT {
+        stored::document_value(key, value)
+    } else {
+        value
+    }
+}
+
+/// [`stored::document_value`] on the values of point reads of `keys`.
+fn point_documents(keys: &[Vec<u8>], found: Vec<Option<Vec<u8>>>) -> Vec<Option<Vec<u8>>> {
+    keys.iter().zip(found).map(|(k, v)| v.map(|v| stored::document_value(k, v))).collect()
+}
+
 impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     // A collection a transaction created and has not committed is no client's (008 T019).
     fn collection(&mut self, ns: &Namespace) -> Result<Option<CollectionEntry>, CommandError> {
@@ -888,7 +905,8 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
-        self.call(|b| b.txn_get(key, at, view, uncertain_to))
+        let found = self.call(|b| b.txn_get(key, at, view, uncertain_to))?;
+        Ok(found.map(|(t, v)| (t, document_value(t, key, v))))
     }
 
     fn txn_scan(
@@ -902,7 +920,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         let rows = self.call(|b| b.txn_scan(start, end, limit, at, view, uncertain_to))?;
         self.tally(&rows);
-        Ok(rows)
+        Ok(stored::document_rows(rows))
     }
 
     fn txn_scan_back(
@@ -916,7 +934,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         let rows = self.call(|b| b.txn_scan_back(start, end, limit, at, view, uncertain_to))?;
         self.tally(&rows);
-        Ok(rows)
+        Ok(stored::document_rows(rows))
     }
 
     fn txn_gets(
@@ -926,7 +944,12 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
-        self.call(|b| b.txn_gets(keys, at, view, uncertain_to))
+        let found = self.call(|b| b.txn_gets(keys, at, view, uncertain_to))?;
+        Ok(keys
+            .iter()
+            .zip(found)
+            .map(|(k, v)| v.map(|(t, v)| (t, document_value(t, k, v))))
+            .collect())
     }
 
     fn txn_points(
@@ -944,7 +967,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
             .filter_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
             .collect();
         self.tally(&rows);
-        Ok(found)
+        Ok(point_documents(keys, found))
     }
 
     fn not_examined(&mut self, docs: u64) {
@@ -1057,7 +1080,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         let rows = self.call(|b| b.scan(start, end, limit, concern))?;
         self.check()?;
         self.tally(&rows);
-        Ok(rows)
+        Ok(stored::document_rows(rows))
     }
 
     fn scan_matching(
@@ -1131,7 +1154,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
             .filter_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
             .collect();
         self.tally(&rows);
-        Ok(found)
+        Ok(point_documents(keys, found))
     }
 
     fn scan_back(
@@ -1145,7 +1168,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         let rows = self.call(|b| b.scan_back(start, end, limit, concern))?;
         self.check()?;
         self.tally(&rows);
-        Ok(rows)
+        Ok(stored::document_rows(rows))
     }
 
     /// The spans go to the node together, as [`Backend::scan_spans`] of the backend underneath
@@ -1160,7 +1183,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         for rows in &all {
             self.tally(rows);
         }
-        Ok(all)
+        Ok(all.into_iter().map(stored::document_rows).collect())
     }
 
     fn catalog_barrier(&mut self) -> Result<(), CommandError> {

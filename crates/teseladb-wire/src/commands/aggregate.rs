@@ -1377,7 +1377,7 @@ fn plan_read<B: Backend + ?Sized>(
     {
         let docs = super::query::read_by_id(ctx.backend, &coll, &id, concern)?
             .into_iter()
-            .map(|b| Ok(Document::from_stored(b)?))
+            .map(|b| Ok(Document::from_stored(teseladb_keys::stored::into_bson(b)?)?))
             .collect::<Result<Vec<_>, CommandError>>()?;
         let metas = index_keys.then(|| docs.iter().map(|_| Meta::new()).collect());
         return Ok(Some(Read::Planned((docs, metas, 0))));
@@ -1428,7 +1428,7 @@ fn plan_read<B: Backend + ?Sized>(
     super::agg_memory::hold(found.iter().map(|b| b.len() as u64).sum());
     let docs = found
         .into_iter()
-        .map(|b| Ok(Document::from_stored(b)?))
+        .map(|b| Ok(Document::from_stored(teseladb_keys::stored::into_bson(b)?)?))
         .collect::<Result<_, CommandError>>()?;
     let metas = index_keys.then(|| {
         let mut keys = keys.into_iter();
@@ -1477,7 +1477,7 @@ fn scanned<B: Backend + ?Sized>(
     let range = documents_of(coll);
     super::query::for_each_match_taken(backend, range, filter, None, None, concern, |_, bytes| {
         super::agg_memory::hold(bytes.len() as u64);
-        docs.push(Document::from_stored(bytes)?);
+        docs.push(Document::from_stored(teseladb_keys::stored::into_bson(bytes)?)?);
         Ok(true)
     })?;
     Ok(docs)

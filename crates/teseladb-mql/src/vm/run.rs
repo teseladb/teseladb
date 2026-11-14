@@ -7,13 +7,14 @@ use teseladb_bson::{RawDoc, RawValue};
 
 use super::compile::elem_match_docs;
 use super::expr::{EXPR_EQ, EXPR_NE};
-use super::value::{Tag, ValueRef, element_type, elements, field, iter, next, root};
+use super::value::{Tag, ValueRef, element_type, elements, field, iter, next, root, stored_field};
 use super::{Address, BATCH, Fast, Insn, Leaf, Literal, NO_EXPAND, Op, Program, REGISTERS, cmp_of};
 use crate::error::Result;
 use crate::matcher::{Eval, MatchContext, array_index, compare, eq};
 use crate::parse::{CmpOp, Expr, Pred};
 use crate::simd::{self, Cmp};
 use crate::value::{bson_error, cmp};
+use teseladb_keys::stored::Stored;
 
 /// What the instructions read besides their registers.
 struct Env<'p, 'c, 'a> {
@@ -34,13 +35,14 @@ impl Literal {
     }
 }
 
-/// The value at `path`, walked on the bytes through documents.
+/// The value at `path`, read through documents: through the stored document's table of offsets
+/// where it has one (003 FR-021), else walked on the bytes.
 #[inline(always)]
-pub(super) fn load<'d>(doc: &'d [u8], path: &[String]) -> ValueRef<'d> {
-    let mut cur = root(doc);
+pub(super) fn load<'d>(doc: &Stored<'d>, path: &[String]) -> ValueRef<'d> {
+    let mut cur = root(doc.bson());
     for seg in path {
         cur = match cur.tag {
-            Tag::Doc => field(doc, cur, seg.as_bytes()),
+            Tag::Doc => stored_field(doc, cur, seg.as_bytes()),
             Tag::Array => return ValueRef::new(Tag::ThroughArray, 0, 0),
             _ => return ValueRef::MISSING,
         };
@@ -269,7 +271,7 @@ impl Env<'_, '_, '_> {
                     }
                     let Some(b) = el.bytes(bytes) else { continue };
                     let d = RawDoc::from_stored(b).map_err(bson_error)?;
-                    if program.run(e, d, self.ctx)? {
+                    if program.run(e, Stored::plain(d), self.ctx)? {
                         return Ok(true);
                     }
                 }
@@ -414,18 +416,25 @@ impl Env<'_, '_, '_> {
 
 impl Program {
     /// Whether `doc` matches the filter `root` this program was compiled from.
-    pub fn run(&self, root: &Expr, doc: RawDoc<'_>, ctx: &MatchContext<'_>) -> Result<bool> {
-        self.run_counted(root, doc, ctx).map(|(m, _)| m)
+    pub fn run<'d>(
+        &self,
+        root: &Expr,
+        doc: impl Into<Stored<'d>>,
+        ctx: &MatchContext<'_>,
+    ) -> Result<bool> {
+        self.run_counted(root, doc.into(), ctx).map(|(m, _)| m)
     }
 
     /// [`Program::run`] and the number of instructions it executed.
-    pub fn run_counted(
+    pub fn run_counted<'d>(
         &self,
         root: &Expr,
-        doc: RawDoc<'_>,
+        stored: impl Into<Stored<'d>>,
         ctx: &MatchContext<'_>,
     ) -> Result<(bool, usize)> {
+        let stored = stored.into();
         let env = Env { program: self, root, ctx };
+        let doc = stored.raw();
         let bytes = doc.as_bytes();
         let mut regs = [ValueRef::MISSING; REGISTERS];
         let mut pc = 0;
@@ -435,7 +444,7 @@ impl Program {
             steps += 1;
             let mut next_pc = pc + 1;
             match i.op() {
-                Op::LoadField => regs[i.dst()] = load(bytes, &self.paths[i.index()]),
+                Op::LoadField => regs[i.dst()] = load(&stored, &self.paths[i.index()]),
                 Op::Tree => {
                     regs[i.dst()] = ValueRef::boolean(env.tree(&self.trees[i.index()], doc)?);
                 }
@@ -482,7 +491,7 @@ impl Program {
     pub fn run_batch(
         &self,
         root: &Expr,
-        docs: &[RawDoc<'_>],
+        docs: &[Stored<'_>],
         ctx: &MatchContext<'_>,
     ) -> Result<u64> {
         assert!(docs.len() <= BATCH, "a batch holds at most {BATCH} documents");
@@ -508,13 +517,13 @@ impl Program {
 /// The machine over a batch: a document per lane, the lanes still running, and a bank of
 /// registers per lane.
 struct VectorVm<'d, 'b> {
-    docs: &'b [RawDoc<'d>],
+    docs: &'b [Stored<'d>],
     active: u64,
     regs: [[ValueRef<'d>; BATCH]; REGISTERS],
 }
 
 impl<'d, 'b> VectorVm<'d, 'b> {
-    fn new(docs: &'b [RawDoc<'d>]) -> VectorVm<'d, 'b> {
+    fn new(docs: &'b [Stored<'d>]) -> VectorVm<'d, 'b> {
         let active = if docs.len() == BATCH { u64::MAX } else { (1u64 << docs.len()) - 1 };
         VectorVm { docs, active, regs: [[ValueRef::MISSING; BATCH]; REGISTERS] }
     }
@@ -550,19 +559,19 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                 Op::LoadField => {
                     let path = &p.paths[i.index()];
                     for l in lanes(m) {
-                        self.regs[i.dst()][l] = load(self.docs[l].as_bytes(), path);
+                        self.regs[i.dst()][l] = load(&self.docs[l], path);
                     }
                 }
                 Op::Tree => {
                     let a = &p.trees[i.index()];
                     for l in lanes(m) {
-                        self.regs[i.dst()][l] = ValueRef::boolean(env.tree(a, self.docs[l])?);
+                        self.regs[i.dst()][l] = ValueRef::boolean(env.tree(a, self.docs[l].raw())?);
                     }
                 }
                 Op::Ext => {
                     let a = &p.trees[i.index()];
                     for l in lanes(m) {
-                        self.regs[i.dst()][l] = ValueRef::boolean(env.ext(a, self.docs[l])?);
+                        self.regs[i.dst()][l] = ValueRef::boolean(env.ext(a, self.docs[l].raw())?);
                     }
                 }
                 Op::ExprCmp | Op::ExprCmpLit => {
@@ -570,7 +579,7 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                     for l in lanes(m) {
                         let b = (i.op() == Op::ExprCmp).then(|| self.regs[i.index()][l]);
                         let a = self.regs[i.src1()][l];
-                        let answer = env.expr_cmp(i, leaf, a, b, self.docs[l])?;
+                        let answer = env.expr_cmp(i, leaf, a, b, self.docs[l].raw())?;
                         self.regs[i.dst()][l] = ValueRef::boolean(answer);
                     }
                 }
@@ -586,7 +595,7 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                 }
                 Op::IterNext => {
                     for l in lanes(m) {
-                        let bytes = self.docs[l].as_bytes();
+                        let bytes = self.docs[l].bson();
                         match next(bytes, &mut self.regs[i.src1()][l]) {
                             Some(e) => self.regs[i.dst()][l] = e,
                             None => jump |= 1 << l,
@@ -617,7 +626,7 @@ impl<'d, 'b> VectorVm<'d, 'b> {
                     let rest = self.vector_cmp(env, i, m);
                     for l in lanes(rest) {
                         let v = self.regs[i.src1()][l];
-                        let answer = env.leaf(pc, i, v, self.docs[l])?;
+                        let answer = env.leaf(pc, i, v, self.docs[l].raw())?;
                         self.regs[i.dst()][l] = ValueRef::boolean(answer);
                     }
                 }

@@ -948,7 +948,7 @@ fn run_reading<B: Backend + ?Sized>(
             let keep = match (decided, &residual) {
                 (Some(kept), _) => kept,
                 (None, Some(f)) => {
-                    f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?
+                    f.matches(teseladb_keys::stored::split(&bytes)?, &ctx).map_err(from_mql)?
                 }
                 (None, None) => true,
             };
@@ -1120,7 +1120,7 @@ fn intersected<B: Backend + ?Sized>(
         ran.docs += 1;
         ran.docs_at.push(ran.keys + 1);
         let keep = match &filter {
-            Some(f) => f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?,
+            Some(f) => f.matches(teseladb_keys::stored::split(&bytes)?, &ctx).map_err(from_mql)?,
             None => true,
         };
         if keep {

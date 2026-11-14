@@ -118,7 +118,7 @@ impl ZoneBuilder {
             (Kind::Delete, _) => {}
             (Kind::Put, Some(HISTORY_VALUE)) if space::in_documents(logical) => {}
             (Kind::Put, Some(DOCUMENT_VALUE)) if space::in_documents(logical) => {
-                let doc = value.and_then(|v| RawDoc::from_stored(&v[1..]).ok());
+                let doc = value.and_then(|v| teseladb_keys::stored::raw(&v[1..]).ok());
                 match doc {
                     Some(doc) => self.document(doc),
                     None => self.open.summarised = false,
@@ -359,6 +359,32 @@ mod tests {
         assert!(map.block(2).is_none(), "not summarised");
         assert_eq!(map.block(3).unwrap().field("b"), Bounds::Absent);
         assert!(ZoneMap::decode(&ZoneBuilder::default().finish().unwrap_or_default(), 0).is_err());
+    }
+
+    #[test]
+    fn a_document_stored_with_its_table_is_summarised_as_its_bson() {
+        let wide = |a: i32| {
+            let mut d = Document::new().with("a", a);
+            for i in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+                d.push(format!("f{i}"), i as i32);
+            }
+            d
+        };
+        let (mut plain, mut tabled) = (ZoneBuilder::default(), ZoneBuilder::default());
+        for a in [3, 11] {
+            let bson = wide(a).to_bytes().unwrap();
+            let kept = teseladb_keys::stored::encode(bson.clone());
+            assert!(kept.len() > bson.len());
+            plain.add(&ikey(a, 9), Kind::Put, Some(&[&[DOCUMENT_VALUE][..], &bson].concat()));
+            tabled.add(&ikey(a, 9), Kind::Put, Some(&[&[DOCUMENT_VALUE][..], &kept].concat()));
+        }
+        plain.end_block();
+        tabled.end_block();
+        let (p, t) = (plain.finish().unwrap(), tabled.finish().unwrap());
+        assert_eq!(p, t);
+        let map = ZoneMap::decode(&t, 1).unwrap();
+        let (three, eleven) = (enc(RawValue::Int32(3)), enc(RawValue::Int32(11)));
+        assert_eq!(map.block(0).unwrap().field("a"), Bounds::Within { min: &three, max: &eleven });
     }
 
     #[test]

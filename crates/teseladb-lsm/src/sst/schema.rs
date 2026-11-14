@@ -10,9 +10,12 @@
 //! documents, and one document of another shape after them is stored whole.
 //!
 //! ```text
-//! stored document := DOCUMENT_VALUE · length(i32 LE) · (type · name · 00 · value)* · 00
-//! packed document := shape(varint) · value*
+//! stored document := DOCUMENT_VALUE · length(i32 LE) · (type · name · 00 · value)* · 00 · table?
+//! packed document := shape(varint) · value* · table?
 //! ```
+//!
+//! The table is the one of 003 FR-021 ([`teseladb_keys::stored`]), whose offsets point into the
+//! BSON: the rebuilt BSON is the one written, so the table goes after it as it was.
 
 use std::collections::HashMap;
 
@@ -67,30 +70,36 @@ fn value_len(t: u8, rest: &[u8]) -> Option<usize> {
     (len <= rest.len()).then_some(len)
 }
 
-/// Splits stored document `doc` (without its first byte) into its shape and its values: `false`
-/// when its frame or an element does not hold, which leaves it whole.
-fn split(doc: &[u8], shape: &mut Vec<u8>, values: &mut Vec<u8>) -> bool {
+/// Whether `doc` (a stored document without its first byte) is a BSON document followed by a
+/// table that holds.
+fn tabled(doc: &[u8]) -> bool {
+    teseladb_keys::stored::split(doc).is_ok_and(|s| s.table().is_some())
+}
+
+/// Splits stored document `doc` (without its first byte) into its shape, its values and the
+/// length of its BSON, the table after it left out: `None` when its frame, an element or its
+/// table does not hold, which leaves it whole.
+fn split(doc: &[u8], shape: &mut Vec<u8>, values: &mut Vec<u8>) -> Option<usize> {
     shape.clear();
     values.clear();
     let declared = doc.first_chunk::<4>().map(|b| i32::from_le_bytes(*b));
-    if declared.and_then(|n| usize::try_from(n).ok()) != Some(doc.len())
-        || doc.len() < FRAME
-        || doc[doc.len() - 1] != 0
-    {
-        return false;
+    let n = declared.and_then(|n| usize::try_from(n).ok()).filter(|n| *n <= doc.len())?;
+    if n < FRAME || doc[n - 1] != 0 || (n < doc.len() && !tabled(doc)) {
+        return None;
     }
+    let doc = &doc[..n];
     let body = &doc[4..doc.len() - 1];
     let mut at = 0;
     while at < body.len() {
         let t = body[at];
-        let Some(name) = body[at + 1..].iter().position(|b| *b == 0) else { return false };
+        let name = body[at + 1..].iter().position(|b| *b == 0)?;
         let value = at + 1 + name + 1;
-        let Some(len) = value_len(t, &body[value..]) else { return false };
+        let len = value_len(t, &body[value..])?;
         shape.extend_from_slice(&body[at..value]);
         values.extend_from_slice(&body[value..value + len]);
         at = value + len;
     }
-    true
+    Some(n)
 }
 
 /// Checks that `shape` is a sequence of elements without values, as a file's properties keep
@@ -108,7 +117,8 @@ pub(crate) fn check_shape(shape: &[u8]) -> Result<(), Bad> {
     Ok(())
 }
 
-/// Rebuilds into `out` the stored document `packed` holds, with the shapes of its file.
+/// Rebuilds into `out` the stored document `packed` holds, with the shapes of its file. The bytes
+/// after the values are the document's table, which must hold on the rebuilt BSON.
 pub(crate) fn unpack(shapes: &[Vec<u8>], packed: &[u8], out: &mut Vec<u8>) -> Result<(), Bad> {
     let mut at = 0;
     let number = usize::try_from(get_varint(packed, &mut at)?).map_err(|_| Bad)?;
@@ -126,12 +136,15 @@ pub(crate) fn unpack(shapes: &[Vec<u8>], packed: &[u8], out: &mut Vec<u8>) -> Re
         at += len;
         s += element.len();
     }
-    if at != packed.len() {
-        return Err(Bad);
-    }
     out.push(0);
     let len = i32::try_from(out.len() - start - 1).map_err(|_| Bad)?;
     out[start + 1..start + FRAME].copy_from_slice(&len.to_le_bytes());
+    if at < packed.len() {
+        out.extend_from_slice(&packed[at..]);
+        if !tabled(&out[start + 1..]) {
+            return Err(Bad);
+        }
+    }
     Ok(())
 }
 
@@ -156,16 +169,16 @@ impl Packer {
         if !space::in_documents(logical) || value.first() != Some(&DOCUMENT_VALUE) {
             return None;
         }
-        if !split(&value[1..], &mut self.shape, &mut self.values) {
-            return None;
-        }
+        let n = split(&value[1..], &mut self.shape, &mut self.values)?;
         let number = match self.numbers.get(&self.shape) {
             Some(n) => *n,
             None => self.take(logical)?,
         };
-        let mut out = Vec::with_capacity(self.values.len() + 5);
+        let table = &value[1 + n..];
+        let mut out = Vec::with_capacity(self.values.len() + table.len() + 5);
         put_varint(&mut out, u64::from(number));
         out.extend_from_slice(&self.values);
+        out.extend_from_slice(table);
         Some(out)
     }
 
@@ -243,6 +256,29 @@ mod tests {
         let mut out = Vec::new();
         unpack(&p.finish(), &packed, &mut out).unwrap();
         assert_eq!(out, empty);
+    }
+
+    #[test]
+    fn a_document_with_its_table_packs_and_comes_back_byte_for_byte() {
+        let mut p = Packer::default();
+        let mut value = vec![DOCUMENT_VALUE];
+        value.extend(teseladb_keys::stored::encode(every_type().to_bytes().unwrap()));
+        assert!(tabled(&value[1..]), "the document has a table");
+        let packed = p.pack(&doc_key(7, 1), &value).expect("a document with a table packs");
+        let shapes = p.finish();
+        let mut out = Vec::new();
+        unpack(&shapes, &packed, &mut out).unwrap();
+        assert_eq!(out, value);
+        // A table that does not hold on the rebuilt document is refused, and so is a document
+        // with bytes after its BSON that are not a table.
+        let mut broken = packed.clone();
+        *broken.last_mut().unwrap() ^= 1;
+        out.clear();
+        assert_eq!(unpack(&shapes, &broken, &mut out), Err(Bad));
+        let mut p = Packer::default();
+        let mut trailing = stored(&Document::new().with("a", 1));
+        trailing.extend_from_slice(&[1, 2, 3, 4]);
+        assert!(p.pack(&doc_key(7, 1), &trailing).is_none());
     }
 
     #[test]

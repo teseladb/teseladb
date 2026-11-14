@@ -256,13 +256,13 @@ impl Plan {
         bytes: Vec<u8>,
         index_key: Option<&Document>,
     ) -> Result<Option<Document>, CommandError> {
-        let doc = RawDoc::from_stored(&bytes)?;
+        let doc = teseladb_keys::stored::raw(&bytes)?;
         let ctx = self.ctx();
         let Some(position) = self.filter.match_position(doc, &ctx).map_err(from_mql)? else {
             return Ok(None);
         };
         match &self.projection {
-            None => Ok(Some(Document::from_stored(bytes)?)),
+            None => Ok(Some(Document::from_stored(teseladb_keys::stored::into_bson(bytes)?)?)),
             Some(p) => {
                 let pctx = ProjectionContext { matcher: ctx, position, sort_key: None, index_key };
                 p.apply(doc, &pctx).map(Some).map_err(from_mql)
@@ -424,7 +424,7 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
             let mut docs = Vec::with_capacity(batch.len());
             let mut frame = None;
             for bytes in batch {
-                match RawDoc::from_stored(bytes) {
+                match teseladb_keys::stored::split(bytes) {
                     Ok(doc) => docs.push(doc),
                     Err(e) => {
                         frame = Some(CommandError::from(e));
@@ -461,8 +461,9 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
         if let Some(e) = fault {
             return Err(e);
         }
+        // The filter read the documents through their tables; what it accepted goes on as BSON.
         for ((key, bytes), seen) in found.rows.into_iter().zip(found.seen) {
-            if !each(key, bytes)? {
+            if !each(key, teseladb_keys::stored::strip(bytes))? {
                 return Ok(examined + seen as u64);
             }
         }
@@ -522,7 +523,7 @@ pub fn for_each_doc<B: Backend + ?Sized>(
     let ctx = plan.ctx();
     // The measurements of one bucket that match; `false` when `each` wants no more.
     let mut bucket = |key: &[u8], bytes: &[u8]| -> Result<bool, CommandError> {
-        let bucket = RawDoc::from_bytes(bytes)?;
+        let bucket = RawDoc::from_bytes(teseladb_keys::stored::bson(bytes)?)?;
         if !bounds.may_match(&spec, bucket, ctx.collation).map_err(ts_error)? {
             return Ok(true);
         }

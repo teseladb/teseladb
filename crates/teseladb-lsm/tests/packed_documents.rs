@@ -1,7 +1,8 @@
 //! Packed documents (003 FR-024): the data files store the documents of their shapes as the
 //! shape's number and the values, and every read sees each document byte for byte as written,
 //! after a flush, after a restart and after compactions that mix files with shapes and files
-//! written whole, as before 003 FR-024.
+//! written whole, as before 003 FR-024. Documents stored with their table of offsets after the
+//! BSON (003 FR-021) pack and come back with it.
 
 mod common;
 
@@ -36,13 +37,39 @@ fn document(i: u32, round: u64) -> Vec<u8> {
     [&[DOCUMENT_VALUE][..], &d.to_bytes().unwrap()].concat()
 }
 
+/// The stored value of document `i` of a round wide enough for its table, which goes after the
+/// BSON (003 FR-021); one in two has a nested document.
+fn tabled(i: u32, round: u64) -> Vec<u8> {
+    let mut d = Document::new().with("_id", i64::from(i)).with("round", round as i64);
+    for f in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+        d.push(format!("f{f}"), format!("value {i} {f}"));
+    }
+    if i.is_multiple_of(2) {
+        d.push("nested", Document::new().with("n", i as i32));
+    }
+    let stored = teseladb_keys::stored::encode(d.to_bytes().unwrap());
+    assert!(teseladb_keys::stored::split(&stored).unwrap().table().is_some(), "a table");
+    [&[DOCUMENT_VALUE][..], &stored].concat()
+}
+
 /// Writes a round of documents of collections 7 and 8 at timestamp `round`, a value that is not
 /// a document and an index entry, and flushes them into a file.
 fn round(lsm: &mut Lsm, disk: &mut MemDisk, model: &mut Model, index: &mut u64, round: u64) {
+    round_of(document, (lsm, disk), model, index, round);
+}
+
+/// [`round`] with the documents `doc` gives.
+fn round_of(
+    doc: fn(u32, u64) -> Vec<u8>,
+    (lsm, disk): (&mut Lsm, &mut MemDisk),
+    model: &mut Model,
+    index: &mut u64,
+    round: u64,
+) {
     for coll in [7, 8] {
         for i in 0..DOCS {
             let key = KeyBuilder::document(1, coll, RawValue::Int32(i as i32)).as_bytes().to_vec();
-            let value = document(i, round);
+            let value = doc(i, round);
             *index += 1;
             lsm.put(G, *index, &key, ts(round, 0), &value).unwrap();
             model.insert(key, value);
@@ -135,5 +162,37 @@ fn mixed(then_pack: bool) -> u64 {
 fn compactions_mix_files_with_and_without_shapes() {
     // The compaction packs the newest versions again, those from the file written whole too.
     let (packed, whole) = (mixed(true), mixed(false));
+    assert!(packed < whole, "{packed} and {whole}");
+}
+
+/// Writes two rounds of documents with their tables, the first into a file written whole, and
+/// compacts them with `then_pack`, checking every read before and after a restart. Gives the
+/// bytes of the files after the compaction.
+fn with_tables(then_pack: bool) -> u64 {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&config(false), &mut disk);
+    let (mut model, mut index) = (Model::new(), 0);
+    round_of(tabled, (&mut lsm, &mut disk), &mut model, &mut index, 10);
+    let first = model.clone();
+    drop(lsm);
+    let mut lsm = open(&config(then_pack), &mut disk);
+    check(&mut lsm, &mut disk, &first, 10);
+    round_of(tabled, (&mut lsm, &mut disk), &mut model, &mut index, 20);
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    check(&mut lsm, &mut disk, &first, 10);
+    check(&mut lsm, &mut disk, &model, 20);
+    let bytes = files_bytes(&lsm);
+    drop(lsm);
+    let mut lsm = open(&config(then_pack), &mut disk);
+    check(&mut lsm, &mut disk, &first, 10);
+    check(&mut lsm, &mut disk, &model, 20);
+    bytes
+}
+
+#[test]
+fn documents_with_their_tables_pack_and_come_back_after_a_restart_and_a_compaction() {
+    // Their names and types go in the shapes, and their tables after the values.
+    let (packed, whole) = (with_tables(true), with_tables(false));
     assert!(packed < whole, "{packed} and {whole}");
 }

@@ -424,7 +424,9 @@ fn expired_when_deleted(done: &Finished, now_ms: i64) -> Result<(), Violation> {
             continue;
         }
         let fail = |what: String| Violation::safety(TTL_CHECKER, what);
-        let doc = RawDoc::from_bytes(bytes).map_err(|e| fail(format!("a document: {e:?}")))?;
+        let doc = teseladb_keys::stored::bson(bytes)
+            .and_then(RawDoc::from_bytes)
+            .map_err(|e| fail(format!("a document: {e:?}")))?;
         let Some(teseladb_bson::RawValue::DateTime(t)) = doc.get("t") else {
             return Err(fail(format!("a TTL delete took a document without a date: {doc:?}")));
         };

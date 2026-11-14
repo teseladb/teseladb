@@ -109,13 +109,17 @@ impl ServerBackend {
                 _ => note_fallback(Fallback::Lookup),
             }
         }
+        // The documents go on without their tables (003 FR-021), as from a point read.
+        let document = |key: &[u8], doc| teseladb_keys::stored::document_value(key, doc);
         keys.iter()
             .zip(found)
             .map(|(key, f)| match f {
+                Some(Fetched::Doc(doc)) => Ok(Fetched::Doc(document(key, doc))),
+                Some(Fetched::Kept(doc)) => Ok(Fetched::Kept(document(key, doc))),
                 Some(f) => Ok(f),
                 None => {
                     let doc = self.point_on_leader(key, concern)?;
-                    Ok(doc.map_or(Fetched::Missing, Fetched::Doc))
+                    Ok(doc.map_or(Fetched::Missing, |doc| Fetched::Doc(document(key, doc))))
                 }
             })
             .collect::<Result<Vec<_>, _>>()

@@ -49,7 +49,9 @@ pub fn check(state: &RangeState) -> Result<(), Violation> {
     };
     let mut docs = Vec::with_capacity(state.docs.len());
     for (bytes, pk) in &state.docs {
-        let doc = RawDoc::from_bytes(bytes).map_err(|e| fail(format!("stored document: {e:?}")))?;
+        let doc = teseladb_keys::stored::bson(bytes)
+            .and_then(RawDoc::from_bytes)
+            .map_err(|e| fail(format!("stored document: {e:?}")))?;
         docs.push(Version { doc, pk });
     }
     let checked: BTreeSet<u32> = ready.indexes.iter().map(|(id, _)| *id).collect();

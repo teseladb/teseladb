@@ -707,7 +707,8 @@ fn validate_reports_missing_and_extra_entries() {
     let last = entries.iter().filter(|k| entries.iter().all(|o| o.len() <= k.len())).max();
     m.data.remove(last.expect("an entry"));
     let one = Document::new().with("_id", 1).with("a", 1).to_bytes().expect("small");
-    let doc_key = m.data.iter().find(|(_, v)| **v == one).map(|(k, _)| k.clone());
+    let bson = |v: &[u8]| teseladb_keys::stored::bson(v).ok().map(<[u8]>::to_vec);
+    let doc_key = m.data.iter().find(|(_, v)| bson(v) == Some(one.clone())).map(|(k, _)| k.clone());
     m.data.remove(&doc_key.expect("the document"));
     let got = ours(&mut m, r#"{"validate":"v"}"#);
     let r = extjson::parse(got.strip_prefix("=> ").expect("a reply")).expect("json");

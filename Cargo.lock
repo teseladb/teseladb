@@ -201,6 +201,7 @@ name = "teseladb-mql"
 version = "0.1.0"
 dependencies = [
  "teseladb-collation",
+ "teseladb-keys",
  "teseladb-bson",
 ]
 

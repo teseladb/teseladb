@@ -37,6 +37,12 @@ fn databases(r: &Document) -> Vec<Document> {
     }
 }
 
+/// The bytes the sizes count: the keys and the documents' BSON, without their tables (003
+/// FR-021).
+fn stored_bytes(m: &Mem) -> u64 {
+    let bson = |k: &[u8], v: &[u8]| teseladb_keys::stored::document_value(k, v.to_vec()).len();
+    m.stored(..).iter().map(|(k, v)| (k.len() + bson(k, v)) as u64).sum()
+}
 #[test]
 fn a_collection_takes_whole_blocks_and_one_for_its_id_index() {
     assert_eq!(BLOCK_BYTES, 4096);
@@ -73,7 +79,7 @@ fn sizes_count_the_stored_documents_of_each_collection() {
     let dbs = databases(&r);
     let names: Vec<&Value> = dbs.iter().map(|x| field(x, "name")).collect();
     assert_eq!(names, vec![&s("admin"), &s("beta"), &s("config"), &s("zeta")]);
-    let stored: u64 = m.stored(..).iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+    let stored = stored_bytes(&m);
     let d_bytes: u64 =
         m.data.iter().filter(|(_, v)| v.len() < 100).map(|(k, v)| (k.len() + v.len()) as u64).sum();
     let beta = collection_size(stored - d_bytes) + collection_size(d_bytes);
@@ -105,7 +111,7 @@ fn sizes_read_large_collections_in_chunks() {
     let mut m = Mem::new();
     let docs = (0..2_500).map(|i| d(&[("_id", Value::Int32(i))])).collect();
     m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(docs))]));
-    let stored: u64 = m.stored(..).iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+    let stored = stored_bytes(&m);
     let r = list(&mut m, &[("filter", d(&[("name", s("db"))]))]);
     let size = collection_size(stored) as i64;
     assert_eq!(
