@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Publishes a release from the deploy workflows (.forgejo/workflows/deploy.yml and deploy-production.yml), already inside
-# AWS with the role of the stage: cross-compiles the binary for each platform with cargo-zigbuild, packs it, checks the
+# Publishes a release from the direct release of the operations repository, already inside AWS with the role of the
+# stage and with the CDK of the downloads copied to cdk/ of the tree it runs in: cross-compiles the binary for each platform with cargo-zigbuild, packs it, checks the
 # install script against it, deploys the downloads bucket and its CloudFront with CDK, copies the release there, builds
 # one image per architecture and installs the release from the public host to check it. Only production, a release of
 # main, pushes the images to Docker Hub, joined under the version and :latest; development builds and runs them locally.
 #   scripts/release/publish.sh <version> <stage dev|prd>
 # PGO_SECONDS (default 120) sets how long each workload of the profiles runs.
-# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow, and DOCKERHUB_TOKEN in production,
-# which the workflow reads from Vault (scripts/ci/release-tokens.sh).
+# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from its caller, and DOCKERHUB_TOKEN in production.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then

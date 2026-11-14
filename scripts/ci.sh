@@ -125,7 +125,6 @@ gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the check of the release images" scripts/tests/check_image_test.sh
-gate "2. tests of the Docker Hub and GitHub tokens of the releases" scripts/tests/release_tokens_test.sh
 gate "2. tests of the GitHub release" scripts/tests/github_release_test.sh
 gate "2. tests of the platform check of the install script" scripts/tests/install_platform_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh

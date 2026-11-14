@@ -10,9 +10,10 @@ target/
 __pycache__/
 *.pyc
 
-# Synth output of the downloads CDK (cdk/)
-/cdk/cdk.out/
-/cdk/cdk.context.json
+# The instructions of the local tooling, which each checkout keeps on its own (D-171)
+/CLAUDE.md
+# The CDK of the downloads, copied in by the direct release, and its synth output
+/cdk/
 # Temporary files of a merge driver
 .merge_file_*
 # Build folders of separate lint and test runs
