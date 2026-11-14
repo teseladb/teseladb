@@ -4,6 +4,10 @@
 //! and answers only its partial groups. A range goes on in bounded parts, as any scan on a core
 //! (H-051 of the native tests), each part again at once for every range that has more. The
 //! parts come back in key order, which the coordinator merges in.
+//!
+//! A range this node does not lead gets the program in bytes inside the request its core
+//! forwards to the leader ([`RemoteReq::Pushed`]); the leader runs it on its core over its part
+//! and answers the partial groups in bytes, which merge with those of this node's cores.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -13,15 +17,25 @@ use teseladb_exec::pipeline::{PartialGroups, Program};
 use teseladb_io::runtime::CoreInput;
 use teseladb_range::host::RangeError;
 use teseladb_range::read::ReadConcern;
+use teseladb_range::view::RangeViews;
 use teseladb_wire::commands::Scattered;
 
 use super::{CORE_SCAN_PART, ServerBackend};
 use crate::data::{DataReply, DataReq, Fold, Folded};
-use crate::data_wire::RemoteReq;
+use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
+use crate::pushed::{Work, Worked};
 
 /// Aggregations whose partial groups the cores gave since the process started.
 static SCATTERED: AtomicU64 = AtomicU64::new(0);
+/// Parts of those aggregations whose program went to the leader of their range on another node.
+static SENT_AWAY: AtomicU64 = AtomicU64::new(0);
+
+/// Parts of split aggregations whose program this node sent to the leader of their range on
+/// another node, since the process started (010 FR-034).
+pub fn scattered_parts_sent_away() -> u64 {
+    SENT_AWAY.load(Ordering::Relaxed)
+}
 
 /// Aggregations whose `$match`es and partial `$group` ran on the cores that own the ranges, all
 /// of whose parts came back, since the process started.
@@ -39,8 +53,9 @@ struct Part {
 
 impl ServerBackend {
     /// [`teseladb_wire::commands::Backend::scatter_groups`]: `None` for a read at a command's
-    /// mark or with a read preference, a span of one range, and whenever a core declines, a
-    /// range does not answer or its leader is not this node; the caller then reads the span.
+    /// mark or with a read preference, a span of one range, and whenever a core or a leader
+    /// declines, a range does not answer or its answer does not read; the caller then reads the
+    /// span.
     pub(super) fn scatter_together(
         &self,
         (start, end): (&[u8], &[u8]),
@@ -55,23 +70,22 @@ impl ServerBackend {
             return None;
         }
         let until = self.until();
+        // In bytes once, for the ranges another node leads.
+        let sent = std::cell::OnceCell::new();
         let mut groups: Vec<Vec<PartialGroups>> = vec![Vec::new(); pending.len()];
         let mut examined = 0usize;
         let mut index: Vec<usize> = (0..pending.len()).collect();
         while !pending.is_empty() {
             let mut waiting = Vec::with_capacity(pending.len());
             for p in &pending {
-                waiting.push(self.send_part(p, program, concern)?);
+                waiting.push(self.send_part(p, (program, &sent), concern)?);
             }
             let mut next = Vec::new();
             let mut next_index = Vec::new();
             for ((p, i), rx) in pending.into_iter().zip(index).zip(waiting) {
                 let wait = until.saturating_duration_since(Instant::now());
-                let Ok(Ok(DataReply::Partial(folded))) = rx.recv_timeout(wait) else {
-                    return None;
-                };
-                let Folded { groups: found, examined: n, next: more } = folded;
-                let found = Arc::try_unwrap(found?).unwrap_or_else(|a| (*a).clone());
+                let Ok(Ok(reply)) = rx.recv_timeout(wait) else { return None };
+                let (found, n, more) = groups_of(reply)?;
                 groups[i].push(found);
                 examined += n;
                 if let Some(from) = more.filter(|from| *from < p.stop) {
@@ -101,19 +115,49 @@ impl ServerBackend {
         Some(parts)
     }
 
-    /// Sends the next part of the scan of range `p` with `program` to its core.
+    /// Sends the next part of the scan of range `p` with `program` to its core: to run there when
+    /// this node leads the range, or in bytes (`sent`, encoded on the first need) for its core to
+    /// forward to the leader.
     fn send_part(
         &self,
         p: &Part,
-        program: &Arc<Program>,
+        (program, sent): (&Arc<Program>, &std::cell::OnceCell<Option<Vec<u8>>>),
         concern: ReadConcern,
     ) -> Option<mpsc::Receiver<Result<DataReply, RangeError>>> {
         let limit = u32::try_from(CORE_SCAN_PART).unwrap_or(u32::MAX);
         let (start, end) = (p.from.clone(), p.stop.clone());
-        let scan = RemoteReq::Scan { start, end, limit, concern, backward: false };
         let (tx, rx) = mpsc::channel();
-        let msg = NodeMsg::Data(DataReq::Partial(p.group, scan, Fold(program.clone())), tx);
+        let msg = if leads_here(&self.h.views, p) {
+            let scan = RemoteReq::Scan { start, end, limit, concern, backward: false };
+            NodeMsg::Data(DataReq::Partial(p.group, scan, Fold(program.clone())), tx)
+        } else {
+            let work = Work::Fold(sent.get_or_init(|| program.encode()).clone()?);
+            SENT_AWAY.fetch_add(1, Ordering::Relaxed);
+            let req = RemoteReq::Pushed { start, end, limit, concern, work };
+            NodeMsg::Data(DataReq::Remote(p.group, req), tx)
+        };
         self.cores.get(usize::from(p.core))?.send(CoreInput::App(msg)).ok()?;
         Some(rx)
+    }
+}
+
+/// Whether this node publishes a view of the range of `p`, which only the range's leader does.
+fn leads_here(views: &[RangeViews], p: &Part) -> bool {
+    views.get(usize::from(p.core)).is_some_and(|v| v.get(p.group).is_some())
+}
+
+/// The partial groups of a part, the documents it read and where its range goes on, from the
+/// answer of this node's core or of the leader on another node; `None` when either declined or
+/// the groups do not read.
+fn groups_of(reply: DataReply) -> Option<(PartialGroups, usize, Option<Vec<u8>>)> {
+    match reply {
+        DataReply::Partial(Folded { groups, examined, next }) => {
+            Some((Arc::try_unwrap(groups?).unwrap_or_else(|a| (*a).clone()), examined, next))
+        }
+        DataReply::Remote(RemoteReply::Pushed(Worked::Folded { groups, examined, next })) => {
+            let examined = usize::try_from(examined).ok()?;
+            Some((PartialGroups::decode(&groups)?, examined, next))
+        }
+        _ => None,
     }
 }

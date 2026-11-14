@@ -247,6 +247,79 @@ impl Total {
     }
 }
 
+/// `v` as the value that stands for it when a state travels (010 FR-034): `[]` for none, `[v]`.
+pub(crate) fn opt_to_value(v: &Option<Value>) -> Value {
+    Value::Array(v.iter().cloned().collect())
+}
+
+/// What [`opt_to_value`] gave.
+pub(crate) fn opt_from_value(v: &Value) -> Option<Option<Value>> {
+    match v {
+        Value::Array(a) if a.len() <= 1 => Some(a.first().cloned()),
+        _ => None,
+    }
+}
+
+impl Total {
+    /// The total as a value that travels to another node (010 FR-034), every field bit for bit:
+    /// the integers in 128 bits, the doubles as they are (a BSON double keeps its bits).
+    pub(crate) fn to_value(&self) -> Value {
+        Value::Array(vec![
+            Value::Binary { subtype: 0, bytes: self.ints.to_le_bytes().to_vec() },
+            Value::Boolean(self.has_long),
+            Value::Double(self.doubles.hi),
+            Value::Double(self.doubles.lo),
+            Value::Boolean(self.has_double),
+            Value::Double(self.plain),
+            opt_to_value(&self.decimals.map(Value::Decimal128)),
+            Value::Int64(i64::from_le_bytes(self.count.to_le_bytes())),
+            Value::Boolean(self.inexact),
+            Value::Double(self.magnitude),
+        ])
+    }
+
+    /// What [`Total::to_value`] gave; `None` for anything else.
+    pub(crate) fn from_value(v: &Value) -> Option<Total> {
+        let Value::Array(a) = v else { return None };
+        let [ints, has_long, hi, lo, has_double, plain, decimals, count, inexact, magnitude] =
+            a.as_slice()
+        else {
+            return None;
+        };
+        let double = |v: &Value| match v {
+            Value::Double(x) => Some(*x),
+            _ => None,
+        };
+        let flag = |v: &Value| match v {
+            Value::Boolean(b) => Some(*b),
+            _ => None,
+        };
+        let ints = match ints {
+            Value::Binary { subtype: 0, bytes } => {
+                i128::from_le_bytes(bytes.as_slice().try_into().ok()?)
+            }
+            _ => return None,
+        };
+        let decimals = match opt_from_value(decimals)? {
+            None => None,
+            Some(Value::Decimal128(d)) => Some(d),
+            Some(_) => return None,
+        };
+        let Value::Int64(count) = count else { return None };
+        Some(Total {
+            ints,
+            has_long: flag(has_long)?,
+            doubles: DoubleDouble { hi: double(hi)?, lo: double(lo)? },
+            has_double: flag(has_double)?,
+            plain: double(plain)?,
+            decimals,
+            count: u64::from_le_bytes(count.to_le_bytes()),
+            inexact: flag(inexact)?,
+            magnitude: double(magnitude)?,
+        })
+    }
+}
+
 /// The running greatest or least value of `$max` and `$min`.
 #[derive(Clone, Debug)]
 pub(crate) struct Extreme {
@@ -300,6 +373,31 @@ impl Extreme {
             Some(v) => self.add(v, col, keep_last),
             None => Ok(()),
         }
+    }
+}
+
+impl Extreme {
+    /// The extreme as a value that travels to another node (010 FR-034).
+    pub(crate) fn to_value(&self) -> Value {
+        Value::Array(vec![Value::Boolean(self.max), opt_to_value(&self.best)])
+    }
+
+    /// What [`Extreme::to_value`] gave; `None` for anything else.
+    pub(crate) fn from_value(v: &Value) -> Option<Extreme> {
+        match v {
+            Value::Array(a) => match a.as_slice() {
+                [Value::Boolean(max), best] => {
+                    Some(Extreme { max: *max, best: opt_from_value(best)? })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether it keeps the greatest value (`$max`) rather than the least.
+    pub(crate) fn is_max(&self) -> bool {
+        self.max
     }
 }
 
