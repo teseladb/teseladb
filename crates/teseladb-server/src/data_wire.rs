@@ -182,6 +182,16 @@ pub enum RemoteReq {
         /// What the leader runs over the rows.
         work: crate::pushed::Work,
     },
+    /// Point reads of `keys` on the leader, answered together (010 FR-027): the documents of an
+    /// index scan's entries, with the scan's residual filter in BSON when it may travel.
+    Lookup {
+        /// The keys, all in the range.
+        keys: Vec<Vec<u8>>,
+        /// Read concern.
+        concern: ReadConcern,
+        /// The filter the leader evaluates on each document.
+        filter: Option<Vec<u8>>,
+    },
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -276,6 +286,8 @@ pub enum RemoteReply {
     },
     /// What the work of a [`RemoteReq::Pushed`] gave.
     Pushed(crate::pushed::Worked),
+    /// What the leader read for each key of a [`RemoteReq::Lookup`].
+    Looked(crate::lookup::Looked),
 }
 
 const WRITE: u8 = 0;
@@ -296,6 +308,7 @@ const FOLLOWER_SCAN_BACK: u8 = 13;
 const READ_WITH_BACK: u8 = 14;
 const DOC_COUNT: u8 = 15;
 const PUSHED: u8 = 16;
+const LOOKUP: u8 = 17;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -478,6 +491,14 @@ impl RemoteReq {
                 e.u8(PUSHED).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
                 work.put(&mut e);
             }
+            RemoteReq::Lookup { keys, concern, filter } => {
+                e.u8(LOOKUP).var(keys.len() as u64);
+                for k in keys {
+                    e.bytes(k);
+                }
+                e.u8(concern_code(*concern)).bool(filter.is_some());
+                e.bytes(filter.as_deref().unwrap_or_default());
+            }
         }
         e.finish()
     }
@@ -588,6 +609,16 @@ impl RemoteReq {
                 concern: get_concern(&mut d)?,
                 work: crate::pushed::Work::get(&mut d)?,
             },
+            LOOKUP => {
+                let n = d.var()?;
+                if n > d.remaining() as u64 {
+                    return Err(DecodeError::InvalidValue { offset: at });
+                }
+                let keys = (0..n).map(|_| Ok(d.bytes()?.to_vec())).collect::<Result<_, _>>()?;
+                let concern = get_concern(&mut d)?;
+                let (some, filter) = (d.bool()?, d.bytes()?.to_vec());
+                RemoteReq::Lookup { keys, concern, filter: some.then_some(filter) }
+            }
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -608,6 +639,7 @@ const OK_FENCED: u8 = 9;
 const OK_LIVE: u8 = 10;
 const OK_DOC_COUNT: u8 = 11;
 const OK_PUSHED: u8 = 12;
+const OK_LOOKED: u8 = 13;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -744,6 +776,10 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
             e.u8(OK_PUSHED);
             worked.put(&mut e);
         }
+        Ok(RemoteReply::Looked(found)) => {
+            e.u8(OK_LOOKED);
+            crate::lookup::put(found, &mut e);
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -822,6 +858,7 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
             Ok(RemoteReply::DocCount { n: some.then_some(n) })
         }
         OK_PUSHED => Ok(RemoteReply::Pushed(crate::pushed::Worked::get(&mut d)?)),
+        OK_LOOKED => Ok(RemoteReply::Looked(crate::lookup::get(&mut d)?)),
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -986,6 +1023,12 @@ mod tests {
                 concern: ReadConcern::Local,
                 work: crate::pushed::Work::Fold(vec![5, 6]),
             },
+            RemoteReq::Lookup {
+                keys: vec![vec![1, 2], vec![]],
+                concern: ReadConcern::Majority,
+                filter: Some(vec![5, 0, 0, 0, 0]),
+            },
+            RemoteReq::Lookup { keys: Vec::new(), concern: ReadConcern::Local, filter: None },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -1012,6 +1055,11 @@ mod tests {
             Ok(RemoteReply::Fenced { ts: Hlc { physical: 6, logical: 4 } }),
             Ok(RemoteReply::Live { bytes: 1 << 40 }),
             Ok(RemoteReply::Pushed(crate::pushed::Worked::Declined)),
+            Ok(RemoteReply::Looked(vec![
+                None,
+                Some(teseladb_wire::commands::Fetched::Kept(vec![7])),
+                Some(teseladb_wire::commands::Fetched::Refused),
+            ])),
             Ok(RemoteReply::Pushed(crate::pushed::Worked::Folded {
                 groups: vec![3; 9],
                 examined: 1024,

@@ -6,6 +6,7 @@
 
 mod across;
 mod intent_wait;
+mod lookups;
 mod outside;
 mod pushed_scan;
 mod scatter;
@@ -14,6 +15,7 @@ mod spans;
 mod together;
 mod txn_reaper;
 
+pub use lookups::{lookup_batches_sent, lookup_keys_filtered, lookup_keys_here, lookup_keys_sent};
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
 pub use pushed_scan::{filtered_parts_sent, parts_taken_ahead};
 pub use scatter::{scattered_groups, scattered_parts_sent_away};
@@ -314,7 +316,8 @@ impl ServerBackend {
                     | RemoteReply::Fenced { .. }
                     | RemoteReply::Live { .. }
                     | RemoteReply::DocCount { .. }
-                    | RemoteReply::Pushed(_),
+                    | RemoteReply::Pushed(_)
+                    | RemoteReply::Looked(_),
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -1052,7 +1055,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Fenced { .. }
             | RemoteReply::Live { .. }
             | RemoteReply::DocCount { .. }
-            | RemoteReply::Pushed(_) => {
+            | RemoteReply::Pushed(_)
+            | RemoteReply::Looked(_) => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
@@ -1132,6 +1136,15 @@ impl Backend for ServerBackend {
         concern: ReadConcern,
     ) -> Result<Option<teseladb_wire::commands::Scattered>, CommandError> {
         Ok(self.scatter_together(span, program, concern))
+    }
+
+    fn fetch_documents(
+        &mut self,
+        keys: &[Vec<u8>],
+        filter: Option<&[u8]>,
+        concern: ReadConcern,
+    ) -> Result<Option<Vec<teseladb_wire::commands::Fetched>>, CommandError> {
+        self.fetch_together(keys, filter, concern)
     }
 
     fn points(

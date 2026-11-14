@@ -74,6 +74,7 @@ pub mod partial_filter;
 pub mod placement;
 pub(crate) mod plan_cache;
 pub(crate) mod plan_exec;
+pub(crate) mod plan_fetch;
 pub(crate) mod plan_hash;
 pub mod presentation;
 pub mod primaries;
@@ -138,6 +139,8 @@ use crate::failpoint::FailPoint;
 
 /// What a read of a span gives: `(key, document)` in key order.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
+pub use plan_fetch::Fetched;
 
 /// What [`Backend::scan_matching`] read.
 #[derive(Debug, Default)]
@@ -567,6 +570,20 @@ pub trait Backend {
         _program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
         _concern: ReadConcern,
     ) -> Result<Option<Scattered>, CommandError> {
+        Ok(None)
+    }
+    /// The documents stored at `keys`, an index scan's entries, read together (010 FR-027): a
+    /// backend whose ranges live on several nodes groups them by range and asks each leader for
+    /// its batch at once. `filter` is the scan's residual filter in BSON when the leader may
+    /// evaluate it alone ([`pushed_filter::sendable`]); the leader then says which documents it
+    /// kept and which it refused. `None` when the backend reads key by key, and the caller reads
+    /// each document with [`Backend::scan`]. By default it never reads them together.
+    fn fetch_documents(
+        &mut self,
+        _keys: &[Vec<u8>],
+        _filter: Option<&[u8]>,
+        _concern: ReadConcern,
+    ) -> Result<Option<Vec<Fetched>>, CommandError> {
         Ok(None)
     }
     /// The live documents of collection `collection` of tenant `tenant`, added up from the counts

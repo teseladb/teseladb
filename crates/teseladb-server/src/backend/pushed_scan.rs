@@ -23,7 +23,7 @@ use super::{CORE_SCAN_PART, ServerBackend};
 use crate::data::{DataReply, DataReq};
 use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
-use crate::pushed::{Work, Worked};
+use crate::pushed::{Fallback, Work, Worked, note_fallback};
 
 /// The most parts of one scan in flight at once.
 const AHEAD: usize = 4;
@@ -101,11 +101,14 @@ impl ServerBackend {
         let part = match asked {
             Some(i) => {
                 TAKEN_AHEAD.fetch_add(1, Ordering::Relaxed);
-                self.ahead.parts.remove(i)
+                Some(self.ahead.parts.remove(i))
             }
-            None => self.send_filtered(start, &scan)?,
+            None => self.send_filtered(start, &scan),
         };
-        let found = self.matching_of(part, end);
+        let found = part.and_then(|part| self.matching_of(part, end));
+        if found.is_none() {
+            note_fallback(Fallback::Filter);
+        }
         let next = found.as_ref().and_then(|m| m.next.clone());
         self.ahead.scan = found.as_ref().map(|_| (scan.clone(), next.clone()));
         if found.is_none() {

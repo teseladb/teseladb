@@ -24,7 +24,7 @@ use super::{CORE_SCAN_PART, ServerBackend};
 use crate::data::{DataReply, DataReq, Fold, Folded};
 use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
-use crate::pushed::{Work, Worked};
+use crate::pushed::{Fallback, Work, Worked, note_fallback};
 
 /// Aggregations whose partial groups the cores gave since the process started.
 static SCATTERED: AtomicU64 = AtomicU64::new(0);
@@ -65,10 +65,26 @@ impl ServerBackend {
         if !self.plain_reads() {
             return None;
         }
-        let mut pending = self.parts_of(start, end)?;
+        let pending = self.parts_of(start, end)?;
         if pending.len() < 2 {
             return None;
         }
+        let found = self.scatter_parts(pending, program, concern);
+        if found.is_none() {
+            note_fallback(Fallback::Fold);
+        }
+        found
+    }
+
+    /// Runs `program` over the ranges of `pending`, all at once and each in parts until its
+    /// stop; `None` when a core or a leader declines, a range does not answer or its answer does
+    /// not read.
+    fn scatter_parts(
+        &self,
+        mut pending: Vec<Part>,
+        program: &Arc<Program>,
+        concern: ReadConcern,
+    ) -> Option<Scattered> {
         let until = self.until();
         // In bytes once, for the ranges another node leads.
         let sent = std::cell::OnceCell::new();

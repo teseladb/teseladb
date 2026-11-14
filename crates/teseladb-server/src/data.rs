@@ -259,6 +259,18 @@ enum Client {
     /// A scan whose rows go through work for whoever asked (`.0`), of at most `.2` documents
     /// (010 FR-034): run here when this replica leads the range.
     Worked(Box<Client>, crate::pushed::Work, usize),
+    /// The read of key `.1` of lookup `.0` (010 FR-027).
+    Looked(u64, usize),
+}
+
+/// A lookup whose point reads the host runs: who waits, its keys and filter, and the reads
+/// answered so far.
+struct Gather {
+    client: Client,
+    keys: Vec<Vec<u8>>,
+    filter: Option<Vec<u8>>,
+    reads: Vec<Option<Result<RemoteReply, RangeError>>>,
+    left: usize,
 }
 
 /// The answer to a [`DataReq::Partial`] from the answer `r` of its scan of at most `limit`
@@ -314,6 +326,10 @@ pub struct DataCore {
     host: RangeHost,
     lsm: Rc<RefCell<Lsm>>,
     clients: BTreeMap<ReqId, Client>,
+    /// Lookups waiting for their point reads, by number.
+    lookups: BTreeMap<u64, Gather>,
+    /// The number of the next lookup.
+    next_lookup: u64,
     /// Requests forwarded to a range's leader: who waits, the range and the node asked.
     forwarded: BTreeMap<OpId, (DataSender, GroupId, NodeId)>,
     /// Scans with a read preference forwarded to a candidate, with the request whose next
@@ -383,6 +399,8 @@ impl DataCore {
             host: RangeHost::new(lsm.clone(), clock),
             lsm,
             clients: BTreeMap::new(),
+            lookups: BTreeMap::new(),
+            next_lookup: 0,
             forwarded: BTreeMap::new(),
             follower_forwards: BTreeMap::new(),
             wall_ms: 0,
@@ -805,6 +823,11 @@ impl DataCore {
                 self.answer(core, now);
                 return;
             }
+            // A point read of each key, answered together once all of them are (010 FR-027).
+            RemoteReq::Lookup { keys, concern, filter } => {
+                self.lookup(core, g, (keys, concern, filter), client, (now, wall_ms));
+                return;
+            }
             // The leader scans as for `primary`; a follower at its closed mark. The replica that
             // leads serves it as the leader even when the router did not know it led yet, if the
             // request lets the leader serve it (each candidate's flag); `follower_scan` skipped it
@@ -903,6 +926,57 @@ impl DataCore {
         };
         self.clients.insert(id, client);
         self.answer(core, now);
+    }
+
+    /// Runs a point read of each of `keys` on the host, whose answers [`DataCore::looked`]
+    /// gathers for `client`.
+    fn lookup(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        g: GroupId,
+        (keys, concern, filter): (Vec<Vec<u8>>, ReadConcern, Option<Vec<u8>>),
+        client: Client,
+        (now, wall_ms): (Nanos, u64),
+    ) {
+        let id = self.next_lookup;
+        self.next_lookup += 1;
+        let reads = (0..keys.len()).map(|_| None).collect();
+        let left = keys.len();
+        let specs: Vec<ReadSpec> = keys
+            .iter()
+            .map(|key| ReadSpec {
+                g,
+                key: key.clone(),
+                scan: None,
+                backward: false,
+                at: None,
+                concern,
+                view: teseladb_range::push::TxnView::default(),
+                uncertain_to: None,
+            })
+            .collect();
+        self.lookups.insert(id, Gather { client, keys, filter, reads, left });
+        // The host answers through `answer`, once every read is sent.
+        for (at, spec) in specs.into_iter().enumerate() {
+            let req = self.host.read_with(core, spec, now, wall_ms);
+            self.clients.insert(req, Client::Looked(id, at));
+        }
+        if left == 0 {
+            self.looked(core, id, now);
+        }
+        self.answer(core, now);
+    }
+
+    /// Lookup `id` once every read of it answered: its answer goes to whoever asked.
+    fn looked(&mut self, core: &mut MultiRaftCore<CoreSm>, id: u64, now: Nanos) {
+        let Some(gather) = self.lookups.remove(&id) else { return };
+        let reads =
+            gather.reads.into_iter().map(|r| r.unwrap_or(Err(RangeError::Unavailable))).collect();
+        let r = crate::lookup::answer(&gather.keys, reads, gather.filter.as_deref());
+        if r.is_ok() && matches!(gather.client, Client::Remote(..)) {
+            crate::pushed::note_ran_for_other_node();
+        }
+        self.send_answer(core, gather.client, r, now);
     }
 
     /// A request another node forwarded to this replica (as the range's leader). A range this
@@ -1025,6 +1099,16 @@ impl DataCore {
                     crate::pushed::note_ran_for_other_node();
                 }
                 self.send_answer(core, *client, r, now);
+            }
+            Client::Looked(id, at) => {
+                let Some(gather) = self.lookups.get_mut(&id) else { return };
+                if let Some(slot @ None) = gather.reads.get_mut(at) {
+                    *slot = Some(r);
+                    gather.left -= 1;
+                }
+                if gather.left == 0 {
+                    self.looked(core, id, now);
+                }
             }
             Client::Remote(node, req) => {
                 let body = encode_reply(&r);
