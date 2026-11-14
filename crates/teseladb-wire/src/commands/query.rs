@@ -2123,6 +2123,17 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     Ok(cursor_reply(out_id, &ns_text, "nextBatch", docs))
 }
 
+/// Whether the `getMore` `cmd` goes on with a change stream or a tailable cursor, which wait for
+/// data with their own `maxAwaitTimeMS` and are held by no tenant's `maxTimeMS` (007 FR-036). A
+/// cursor that is not open is not one: its `getMore` fails before it runs.
+pub(crate) fn waits_for_data(shared: &super::Shared, cmd: &Document) -> bool {
+    let Some((_, Value::Int64(id))) = cmd.iter().next() else { return false };
+    lock(shared)
+        .cursors
+        .get(*id)
+        .is_some_and(|c| c.state.stream.is_some() || c.state.tail.is_some())
+}
+
 /// The next batch of a tailable cursor (015 FR-004): the documents written after the last one it
 /// read, waiting for some up to its wait when it has `awaitData`. Its last document gone is
 /// `CappedPositionLost`, and the cursor dies.

@@ -2,8 +2,9 @@
 //! `maxTimeMS`. With `httpEnabled` off the REST API answers `401` to the tenant's users, and with
 //! `mcpEnabled` off `/mcp` does; `createApiKey` refuses with 13 the key past `maxApiKeys`, whoever
 //! asks for it, and any key when both parts are off; the service user is held by neither. A
-//! command of the tenant's users runs for at most the tenant's `maxTimeMS`, save the `getMore` of
-//! a change stream or a tailable cursor and the end of a transaction.
+//! command of the tenant's users runs for at most the tenant's `maxTimeMS`, the `getMore` of a
+//! plain cursor too, save the `getMore` of a change stream or a tailable cursor and the end of a
+//! transaction.
 
 mod common;
 
@@ -298,11 +299,16 @@ fn the_key_past_max_api_keys_is_refused_whoever_asks_and_the_service_user_has_no
     drop(node.stop());
 }
 
+/// The `$where` that runs [`TURNS`] turns for each document.
+fn slow_filter() -> String {
+    format!("function() {{ for (var i = 0; i < {TURNS}; i++) {{}} return true; }}")
+}
+
 /// A `find` of `c` whose filter runs [`TURNS`] turns for each document.
 fn slow(c: &mut Client, max: Option<i64>) -> Document {
-    let js = format!("function() {{ for (var i = 0; i < {TURNS}; i++) {{}} return true; }}");
-    let mut find =
-        Document::new().with("find", "c").with("filter", Document::new().with("$where", js));
+    let mut find = Document::new()
+        .with("find", "c")
+        .with("filter", Document::new().with("$where", slow_filter()));
     if let Some(m) = max {
         find.push("maxTimeMS", m);
     }
@@ -325,6 +331,15 @@ fn the_tenant_max_time_ms_caps_its_commands_but_not_a_change_stream_or_a_commit(
     let r = slow(&mut ann, None);
     let uncapped = at.elapsed();
     assert!(ok(&r), "{r:?}");
+    // A plain cursor opened before the cap, with one document of its slow filter read.
+    let one = Document::new()
+        .with("find", "c")
+        .with("filter", Document::new().with("$where", slow_filter()))
+        .with("batchSize", 1);
+    let r = ann.run("app", one);
+    let Some(Value::Document(cursor)) = r.get("cursor") else { panic!("{r:?}") };
+    let Some(Value::Int64(plain)) = cursor.get("id") else { panic!("{cursor:?}") };
+    let plain = *plain;
     let cap = TENANT_MAX_TIME_MS.to_string();
     limits(&node, &["--max-time-ms", &cap]);
     // A command that gives none receives the tenant's, and a larger one is cut to it.
@@ -332,6 +347,9 @@ fn the_tenant_max_time_ms_caps_its_commands_but_not_a_change_stream_or_a_commit(
     let at = Instant::now();
     assert_eq!(code(&slow(&mut ann, Some(LARGE_MAX_TIME_MS))), Some(MAX_TIME_MS_EXPIRED));
     assert!(at.elapsed() < uncapped, "{:?} against {uncapped:?}", at.elapsed());
+    // The `getMore` of a cursor that does not wait for data is held by the cap too.
+    let more = Document::new().with("getMore", plain).with("collection", "c");
+    assert_eq!(code(&ann.run("app", more)), Some(MAX_TIME_MS_EXPIRED));
     // The default tenant is held by none.
     assert!(ok(&slow(&mut root, None)));
     // The `getMore` of a change stream waits for its own `maxTimeMS`, past the cap.
