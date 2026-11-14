@@ -9,6 +9,7 @@
 
 pub mod checkers;
 pub mod clock;
+pub mod device_log;
 pub mod faults;
 pub mod history;
 pub mod net;
@@ -131,9 +132,10 @@ const CORRUPT_DOWN: Nanos = Nanos::from_millis(200);
 
 fn summary(ev: &Event) -> String {
     match ev {
-        Event::Disk { node, core, .. } | Event::Tick { node, core, .. } => {
-            format!("n{node}c{core}")
-        }
+        Event::Disk { node, core, .. }
+        | Event::Tick { node, core, .. }
+        | Event::LogDone { node, core, .. } => format!("n{node}c{core}"),
+        Event::LogFlush { node, .. } => format!("n{node}"),
         Event::Client { client } => format!("cl{client}"),
         Event::Deliver { from, to, core, .. } => format!("{from}->{to}c{core}"),
         Event::Fault(a) | Event::FaultEnd(a) => format!("{a:?}"),
@@ -230,7 +232,11 @@ pub fn run_with_checkers(
         }
         let (kind, sum) = (ev.kind(), summary(&ev));
         let node = match &ev {
-            Event::Disk { node, .. } | Event::Tick { node, .. } | Event::Restart { node } => *node,
+            Event::Disk { node, .. }
+            | Event::Tick { node, .. }
+            | Event::LogFlush { node, .. }
+            | Event::LogDone { node, .. }
+            | Event::Restart { node } => *node,
             _ => 0,
         };
         w.trace.record(at, seq, kind, node, &sum);
@@ -376,6 +382,19 @@ fn dispatch(
                 restart_if_failed(w, node, core, restarting);
             }
         }
+        Event::LogFlush { node, life, sync } => w.on_log_flush(node, life, sync),
+        Event::LogDone { node, core, life, done } => {
+            let frozen = w.nodes[node as usize].cores[core as usize].frozen_until;
+            if frozen > w.now() && w.nodes[node as usize].life == life {
+                // The answer waits in the frozen core's mailbox.
+                w.schedule(frozen, Event::LogDone { node, core, life, done });
+                return Ok(());
+            }
+            if let Some(c) = w.on_log_done(node, core, life, done) {
+                wl.on_completions(w, node, core, c);
+                restart_if_failed(w, node, core, restarting);
+            }
+        }
         Event::Tick { node, core, life } => {
             if let Some(c) = w.on_tick(node, core, life) {
                 wl.on_completions(w, node, core, c);
@@ -430,8 +449,8 @@ fn dispatch(
             for n in &mut w.nodes {
                 n.clock.resync();
                 n.disk_slow = 1;
-                for c in &mut n.cores {
-                    c.disk.set_capacity(u64::MAX);
+                for d in n.disks_mut() {
+                    d.set_capacity(u64::MAX);
                 }
             }
             wl.on_heal(w);
@@ -486,12 +505,13 @@ fn start_fails_again(e: &teseladb_raftlog::StorageError, injected: bool) -> bool
 
 /// Operations of `node`'s disks that failed with an injected error so far.
 fn injected_errors(w: &World, node: u32) -> u64 {
-    w.nodes[node as usize].cores.iter().map(|c| c.disk.stats().injected_errors).sum()
+    w.nodes[node as usize].disks().map(|d| d.stats().injected_errors).sum()
 }
 
-/// Damages a WAL segment header of `core` of `node` while it is down (research R3c): only in
-/// cluster worlds, where the other replicas keep the data, and on one node per run.
-fn corrupt_core(w: &mut World, wl: &mut dyn workloads::Workload, node: u32, core: u16) {
+/// Damages the header of a file of `node`'s device log, which holds the WAL of every core of the
+/// node, while the node is down (research R3c): only in cluster worlds, where the
+/// other replicas keep the data, and on one node per run. The file is the oldest one with records.
+fn corrupt_core(w: &mut World, wl: &mut dyn workloads::Workload, node: u32) {
     if !w.cluster_mode || w.nodes.iter().any(|n| n.lost || n.corrupted) {
         return;
     }
@@ -501,14 +521,27 @@ fn corrupt_core(w: &mut World, wl: &mut dyn workloads::Workload, node: u32, core
         let at = w.now() + CORRUPT_DOWN;
         w.schedule(at, Event::Restart { node });
     }
-    let offset = w.rng.range(0, teseladb_raftlog::format::BLOCK as u64);
-    let disk = &mut w.nodes[node as usize].cores[core as usize].disk;
-    let wal = teseladb_raftlog::Disk::list(disk, &teseladb_raftlog::paths::wal_dir(core));
-    if let Some(segment) = wal.unwrap_or_default().into_iter().find(|p| disk.is_durable(p))
-        && disk.corrupt(&segment, offset)
+    let offset = w.rng.range(0, teseladb_devlog::format::BLOCK);
+    let disk = &mut w.nodes[node as usize].log_disk;
+    if let Some(file) = oldest_log_file_with_records(disk)
+        && disk.corrupt(&file, offset)
     {
         w.nodes[node as usize].corrupted = true;
     }
+}
+
+/// The oldest durable file of a device log on `disk` with a record after its header.
+pub fn oldest_log_file_with_records(
+    disk: &mut teseladb_raftlog::SimDisk,
+) -> Option<std::path::PathBuf> {
+    use teseladb_raftlog::Disk;
+    let dir = std::path::Path::new(teseladb_devlog::format::DIR);
+    let mut files = disk.list(dir).unwrap_or_default();
+    files.sort();
+    let block = teseladb_devlog::format::BLOCK as usize;
+    files.into_iter().find(|p| {
+        disk.is_durable(p) && disk.read_all(p).is_ok_and(|d| d.iter().skip(block).any(|b| *b != 0))
+    })
 }
 
 /// A stopped core (fail-stop) does not come back by itself: the supervisor restarts the node's
@@ -573,7 +606,7 @@ fn apply_fault(w: &mut World, wl: &mut dyn workloads::Workload, a: FaultAction) 
         a => a,
     };
     match &a {
-        FaultAction::CorruptCore { node, core } => corrupt_core(w, wl, *node, *core),
+        FaultAction::CorruptCore { node, .. } => corrupt_core(w, wl, *node),
         FaultAction::Crash { node, down } => {
             if w.nodes[*node as usize].alive {
                 wl.on_crash(w, *node);
@@ -590,17 +623,23 @@ fn apply_fault(w: &mut World, wl: &mut dyn workloads::Workload, a: FaultAction) 
             w.schedule(now + *dur, Event::FaultEnd(a.clone()));
         }
         FaultAction::DiskFull { node, dur } => {
-            for c in &mut w.nodes[*node as usize].cores {
-                let used = c.disk.used();
-                c.disk.set_capacity(used);
+            for d in w.nodes[*node as usize].disks_mut() {
+                let used = d.used();
+                d.set_capacity(used);
             }
             w.schedule(now + *dur, Event::FaultEnd(a.clone()));
         }
         FaultAction::SyncError { node } => {
-            let core = w.rng.range(0, w.nodes[*node as usize].cores.len() as u64) as usize;
-            w.nodes[*node as usize].cores[core]
-                .disk
-                .inject_error("sync", teseladb_raftlog::IoErrno::Io);
+            // The device log's sync, which every core's WAL waits for, or one of a core's own
+            // disk (its LSM, its snapshots), half of the time each.
+            let n = &mut w.nodes[*node as usize];
+            let disk = if w.rng.chance(0.5) {
+                &mut n.log_disk
+            } else {
+                let core = w.rng.range(0, n.cores.len() as u64) as usize;
+                &mut n.cores[core].disk
+            };
+            disk.inject_error("sync", teseladb_raftlog::IoErrno::Io);
         }
         FaultAction::Partition { side, dur } => {
             let rest: Vec<u32> = (0..w.nodes.len() as u32).filter(|n| !side.contains(n)).collect();
@@ -706,8 +745,8 @@ fn end_fault(w: &mut World, a: FaultAction) {
     match a {
         FaultAction::DiskSlow { node, .. } => w.nodes[node as usize].disk_slow = 1,
         FaultAction::DiskFull { node, .. } => {
-            for c in &mut w.nodes[node as usize].cores {
-                c.disk.set_capacity(u64::MAX);
+            for d in w.nodes[node as usize].disks_mut() {
+                d.set_capacity(u64::MAX);
             }
         }
         FaultAction::Partition { .. } | FaultAction::Loss { .. } => w.net.heal(),

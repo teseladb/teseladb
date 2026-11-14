@@ -1,6 +1,7 @@
 //! The state of a device log, without threads: what each core's WAL segments hold and where, the
-//! flush being built, and the steps of a flush on a [`Disk`]. The writer thread drives it
-//! ([`super::writer`]); the tests drive it directly, also on a simulated disk that crashes.
+//! flush being built, and the steps of a flush on a [`Disk`]. The node's writer thread drives it,
+//! the simulator drives it on its simulated disk, and the tests drive it directly, also on a
+//! simulated disk that crashes.
 //!
 //! Each core's WAL segment lives in the log as a map from its offsets to the places of the log's
 //! files that hold them. A file of the log is needed while a map points into it; the oldest files
@@ -8,14 +9,18 @@
 //! never replayed without what came before it. A core that writes little keeps its current WAL
 //! segment for a long time: when the log has more than [`KEPT_FILES`] files and the oldest holds
 //! little that is still needed, a flush copies that part forward and the file goes.
+//!
+//! A file's header is durable before any record goes into it. On recovery a file without a valid
+//! header is the one whose creation a crash cut short, and holds only zeros after its header; one
+//! with anything else there was damaged, and the log does not start.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
+use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp, StorageError};
 use teseladb_types::Bytes;
 
-use super::format::{self, BLOCK, FrameKind, HEAD};
+use crate::format::{self, BLOCK, FrameKind, HEAD};
 
 /// Files of the log kept before the oldest one is copied forward.
 pub const KEPT_FILES: usize = 4;
@@ -80,8 +85,6 @@ pub struct LogState {
     pending: Vec<Pending>,
     /// Files with records written and not synced (two when a flush opened a file).
     dirty: Vec<u64>,
-    /// A file made and its name not synced.
-    name_dirty: bool,
     waiting: Vec<(u16, IoOp)>,
     failed: Option<IoErrno>,
     disk_full: bool,
@@ -89,7 +92,7 @@ pub struct LogState {
     /// Whether old files may be copied forward and removed: not while cores recover.
     tidy: bool,
     /// Whether the log's directory may be new: its name in the data directory is synced with the
-    /// first file.
+    /// first file's.
     dir_new: bool,
 }
 
@@ -106,8 +109,9 @@ impl LogState {
     ///
     /// # Errors
     ///
-    /// The error of a listing, read or open that failed.
-    pub fn recover(disk: &mut dyn Disk, file_bytes: u64) -> Result<LogState, IoErrno> {
+    /// [`StorageError::Corrupt`] for a file whose header was damaged, and [`StorageError::Io`]
+    /// with the error of a listing, read or open that failed.
+    pub fn recover(disk: &mut dyn Disk, file_bytes: u64) -> Result<LogState, StorageError> {
         let mut s = LogState {
             file_bytes: file_bytes.max(2 * BLOCK),
             files: BTreeMap::new(),
@@ -119,7 +123,6 @@ impl LogState {
             body: Vec::new(),
             pending: Vec::new(),
             dirty: Vec::new(),
-            name_dirty: false,
             waiting: Vec::new(),
             failed: None,
             disk_full: false,
@@ -132,15 +135,23 @@ impl LogState {
                 v.into_iter().filter_map(|p| format::segment_seq(&p).map(|q| (q, p))).collect()
             }
             Err(IoErrno::NotFound) => Vec::new(),
-            Err(e) => return Err(e),
+            Err(errno) => return Err(StorageError::Io { op: "list", errno }),
         };
         paths.sort();
         s.dir_new = paths.is_empty();
         let mut expected: Option<u64> = None;
         for (seq, path) in paths {
-            let data = disk.read_all(&path)?;
+            let data =
+                disk.read_all(&path).map_err(|errno| StorageError::Io { op: "read", errno })?;
+            if !format::header_ok(&data, seq) {
+                // Its creation was cut short, or it was damaged.
+                if data.iter().skip(BLOCK as usize).any(|b| *b != 0) {
+                    return Err(StorageError::Corrupt { file: path, offset: 0 });
+                }
+            }
             let id = s.new_id();
-            ok(disk.execute(IoOp::Open { file: id, path }))?;
+            let opened = ok(disk.execute(IoOp::Open { file: id, path: path.clone() }));
+            opened.map_err(|errno| StorageError::Io { op: "open", errno })?;
             let size = data.len() as u64;
             s.files.insert(seq, LogFile { id, size, used: size, refs: 0, live: 0 });
             s.next_file = seq + 1;
@@ -416,22 +427,28 @@ impl LogState {
         Ok(())
     }
 
-    /// Makes file `seq` for a record of `need` bytes: created, its header written with the record
-    /// by the caller, and its name made durable by the sync of the flush.
+    /// Makes file `seq` for a record of `need` bytes, with its header and its name durable before
+    /// any record goes into it: a file without a valid header then holds nothing.
     fn new_file(&mut self, disk: &mut dyn Disk, need: u64) -> Result<u64, IoErrno> {
         let seq = self.next_file;
         let size = self.file_bytes.max(BLOCK + need);
         let id = self.new_id();
         let path = format::segment_path(seq);
-        match disk.execute(IoOp::Create { file: id, path, prealloc: size }) {
-            IoDone::Err { errno, .. } => Err(errno),
-            _ => {
-                self.next_file += 1;
-                self.files.insert(seq, LogFile { id, size, used: 0, refs: 0, live: 0 });
-                self.active = Some(seq);
-                Ok(seq)
-            }
+        // A full disk leaves the record waiting for the next try; nothing was made.
+        let made = ok(disk.execute(IoOp::Create { file: id, path, prealloc: size }));
+        self.disk_full = matches!(made, Err(IoErrno::NoSpace));
+        made?;
+        self.next_file += 1;
+        self.files.insert(seq, LogFile { id, size, used: BLOCK, refs: 0, live: 0 });
+        self.active = Some(seq);
+        let header = Bytes::from_vec(format::segment_header(seq));
+        ok(disk.execute(IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 }))?;
+        ok(disk.execute(IoOp::Sync { file: id, batch: 0 }))?;
+        ok(disk.execute(IoOp::SyncDir { path: format::DIR.into() }))?;
+        if std::mem::take(&mut self.dir_new) {
+            ok(disk.execute(IoOp::SyncDir { path: "".into() }))?;
         }
+        Ok(seq)
     }
 
     /// Writes the flush being built as one record, unsynced.
@@ -439,40 +456,14 @@ impl LogState {
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
         let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
-        let opened = !fits;
-        let seq = if fits {
-            self.active.expect("an active file")
-        } else {
-            match self.new_file(disk, need) {
-                Ok(s) => s,
-                Err(IoErrno::NoSpace) => {
-                    self.disk_full = true;
-                    return Err(IoErrno::NoSpace);
-                }
-                Err(e) => return Err(e),
-            }
-        };
-        self.disk_full = false;
+        let seq =
+            if fits { self.active.expect("an active file") } else { self.new_file(disk, need)? };
         let (id, at) = {
             let f = &self.files[&seq];
-            (f.id, if opened { BLOCK } else { f.used })
+            (f.id, f.used)
         };
-        let data = if opened {
-            let mut d = format::segment_header(seq);
-            d.extend_from_slice(&record);
-            ok(disk.execute(IoOp::WriteAt {
-                file: id,
-                offset: 0,
-                data: Bytes::from_vec(d),
-                batch: 0,
-            }))?;
-            Bytes::new()
-        } else {
-            Bytes::from_vec(record)
-        };
-        if !data.is_empty() {
-            ok(disk.execute(IoOp::WriteAt { file: id, offset: at, data, batch: 0 }))?;
-        }
+        let data = Bytes::from_vec(record);
+        ok(disk.execute(IoOp::WriteAt { file: id, offset: at, data, batch: 0 }))?;
         self.files.get_mut(&seq).expect("the file written").used = at + need;
         let base = at + HEAD as u64;
         for p in std::mem::take(&mut self.pending) {
@@ -484,12 +475,11 @@ impl LogState {
         if !self.dirty.contains(&seq) {
             self.dirty.push(seq);
         }
-        self.name_dirty |= opened;
         Ok(())
     }
 
     /// Writes what is waiting as one record and, if anything waits for durability, makes it
-    /// durable with one sync (two when the record opened a file, whose name is synced too).
+    /// durable with one sync.
     /// Returns the answers of the operations waiting. A full disk leaves everything waiting for
     /// the next try; any other error fails every operation waiting and every later one.
     pub fn flush(&mut self, disk: &mut dyn Disk) -> Answers {
@@ -504,6 +494,24 @@ impl LogState {
                 }
                 out
             }
+            Err(IoErrno::NoSpace) if self.disk_full => Vec::new(),
+            Err(e) => {
+                self.failed = Some(e);
+                self.answer(Some(e))
+            }
+        }
+    }
+
+    /// Writes what is waiting as one record without syncing it, as the writer does with what
+    /// piles up between syncs: the next [`flush`](LogState::flush) syncs it. Returns the answers
+    /// of the operations waiting if the write failed for any reason but a full disk, which stops
+    /// the log as in a flush.
+    pub fn write_ahead(&mut self, disk: &mut dyn Disk) -> Answers {
+        if self.failed.is_some() || self.body.is_empty() {
+            return Vec::new();
+        }
+        match self.write_out(disk) {
+            Ok(()) => Vec::new(),
             Err(IoErrno::NoSpace) if self.disk_full => Vec::new(),
             Err(e) => {
                 self.failed = Some(e);
@@ -527,14 +535,7 @@ impl LogState {
                 let id = self.files[&seq].id;
                 ok(disk.execute(IoOp::Sync { file: id, batch: 0 }))?;
             }
-            if std::mem::take(&mut self.name_dirty) {
-                ok(disk.execute(IoOp::SyncDir { path: format::DIR.into() }))?;
-                if std::mem::take(&mut self.dir_new) {
-                    ok(disk.execute(IoOp::SyncDir { path: "".into() }))?;
-                }
-            }
             self.syncs += 1;
-            crate::counters::record_log_sync();
         } else if self.waiting.is_empty() {
             self.write_out(disk)?;
         }

@@ -5,10 +5,12 @@
 //! log's files and makes it durable with one sync, then answers each core's syncs. On start the log
 //! is read once and each core recovers its segments from it through [`LogPort::disk`].
 
-pub mod format;
 mod port;
-pub mod state;
 mod writer;
 
-pub use port::{LogPort, PortDisk};
+pub use port::{LogPort, ThreadLink};
+pub use teseladb_devlog::{format, state};
 pub use writer::{DeviceLog, DeviceLogConfig, Sink};
+
+/// A core's disk with its WAL in the node's device log ([`LogPort::disk`]).
+pub type PortDisk<'a, D> = teseladb_devlog::port::PortDisk<'a, ThreadLink, D>;

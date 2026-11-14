@@ -41,8 +41,8 @@ fn storage(
     wl.after = Box::new(move |w: &mut World| {
         let per_node = w.nodes.iter().map(|n| {
             let mut t = SimDiskStats::default();
-            for c in &n.cores {
-                let d = c.disk.stats();
+            for d in n.disks() {
+                let d = d.stats();
                 t.ops += d.ops;
                 t.crashes += d.crashes;
                 t.torn_sectors += d.torn_sectors;

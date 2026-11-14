@@ -2,7 +2,7 @@
 //! then flush records, one per write of the writer.
 //!
 //! ```text
-//! segment header := magic(8) · version(u32) · 0(u32) · seq(u64) · crc32c(u32), in a 4 KiB block
+//! segment header := magic(8) · version(u32) · 0(u32) · seq(u64) · crc32c(u32) · zeros to 4 KiB
 //! flush record   := head · body · zeros up to the next 4 KiB
 //! head           := magic(u32) · version(u16) · 0(u16) · flush(u64) · body_len(u32) · body_crc(u32)
 //!                   · head_crc(u32) · 0(u32)
@@ -99,7 +99,8 @@ pub fn segment_header(seq: u64) -> Vec<u8> {
     b
 }
 
-/// Whether `data` starts with the header of segment `seq`.
+/// Whether `data` starts with the header of segment `seq`, zeros to the end of its block
+/// included.
 #[must_use]
 pub fn header_ok(data: &[u8], seq: u64) -> bool {
     data.len() >= BLOCK as usize
@@ -107,6 +108,7 @@ pub fn header_ok(data: &[u8], seq: u64) -> bool {
         && u32_at(data, 8) == u32::from(VERSION)
         && u64_at(data, 16) == seq
         && u32_at(data, 24) == crc32c(&data[..24])
+        && data[28..BLOCK as usize].iter().all(|b| *b == 0)
 }
 
 /// Appends a frame to `body`.
@@ -266,9 +268,11 @@ mod tests {
         let h = segment_header(26);
         assert!(header_ok(&h, 26));
         assert!(!header_ok(&h, 27));
-        let mut bad = h.clone();
-        bad[20] = 1;
-        assert!(!header_ok(&bad, 26));
+        for at in [3, 20, 26, 28, 4000] {
+            let mut bad = h.clone();
+            bad[at] ^= 1;
+            assert!(!header_ok(&bad, 26), "{at}");
+        }
         assert!(!header_ok(&h[..100], 26));
     }
 

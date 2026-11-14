@@ -95,13 +95,13 @@ pub enum FaultAction {
         /// Duration.
         dur: Nanos,
     },
-    /// A byte of the header of a durable WAL segment of `core` of `node` is damaged while the
-    /// node is down; its restart must detect it, and then the node stays out (research R3c). In
-    /// cluster worlds and on one node per run.
+    /// A byte of the header of a durable file of `node`'s device log, which holds the WAL of
+    /// `core` with the other cores', is damaged while the node is down; its restart must detect
+    /// it, and then the node stays out (research R3c). In cluster worlds and on one node per run.
     CorruptCore {
         /// Node.
         node: u32,
-        /// Core.
+        /// Core whose WAL the damaged log holds.
         core: u16,
     },
     /// The link between `a` and `b` is down in both directions for `dur`.

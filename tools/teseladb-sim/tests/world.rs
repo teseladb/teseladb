@@ -16,6 +16,10 @@ fn settle(w: &mut World) {
             Event::Disk { node, core, life } => {
                 w.on_disk(node, core, life);
             }
+            Event::LogFlush { node, life, sync } => w.on_log_flush(node, life, sync),
+            Event::LogDone { node, core, life, done } => {
+                w.on_log_done(node, core, life, done);
+            }
             Event::Tick { node, core, life } => {
                 w.on_tick(node, core, life);
             }
@@ -213,6 +217,10 @@ fn with_every_live_node_leading_any_live_node_is_a_follower() {
         match ev {
             Event::Disk { node, core, life } => {
                 w.on_disk(node, core, life);
+            }
+            Event::LogFlush { node, life, sync } => w.on_log_flush(node, life, sync),
+            Event::LogDone { node, core, life, done } => {
+                w.on_log_done(node, core, life, done);
             }
             Event::Tick { node, core, life } => {
                 w.on_tick(node, core, life);

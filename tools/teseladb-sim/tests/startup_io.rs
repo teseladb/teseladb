@@ -71,7 +71,7 @@ impl Workload for DownWithErrors {
         self.inner.on_heal(w);
     }
     fn finish(&mut self, w: &mut World) -> Result<(), Violation> {
-        let hit: u64 = w.nodes[0].cores.iter().map(|c| c.disk.stats().injected_errors).sum();
+        let hit: u64 = w.nodes[0].disks().map(|d| d.stats().injected_errors).sum();
         assert!(hit > 0, "no restart reached a sync while the error waited");
         assert!(w.nodes[0].alive && !w.nodes[0].lost, "node 0 came back");
         self.inner.finish(w)

@@ -15,6 +15,7 @@ teseladb-auth = { path = "../../crates/teseladb-auth" }
 teseladb-types = { workspace = true }
 teseladb-hash = { workspace = true }
 teseladb-raftlog = { workspace = true }
+teseladb-devlog = { path = "../../crates/teseladb-devlog" }
 teseladb-lsm = { path = "../../crates/teseladb-lsm" }
 teseladb-keys = { path = "../../crates/teseladb-keys" }
 teseladb-mql = { path = "../../crates/teseladb-mql" }

@@ -1,7 +1,9 @@
 //! Simulated world: event scheduler by `(time, sequence)` and nodes with their
-//! cores (`CoreStore` over the node's `SimDisk`). The world runs each core's I/O with the simulated
-//! disk's latency (one operation in flight per core, like the disk thread) and its deadlines
-//! (`next_deadline`); workloads only request work and receive what completed.
+//! cores (`CoreStore` over the core's `SimDisk`, its WAL in the node's device log on a `SimDisk` of
+//! its own, [`crate::device_log`]). The world runs each core's I/O with the simulated disk's latency
+//! (one operation in flight per core, like the disk thread; a WAL operation goes to the device log
+//! at once) and its deadlines (`next_deadline`); workloads only request work and receive what
+//! completed.
 //!
 //! In cluster mode every core runs a `MultiRaftCore` with `teseladb-testkv` over its store, like the
 //! node's core loop: a tick every 10 ms of its local clock, frames over the simulated network, and
@@ -13,6 +15,8 @@ use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use teseladb_devlog::port::{DirectLink, PortBook};
+use teseladb_devlog::state::LogState;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig, LsmError};
 use teseladb_multiraft::chunks::Chunk;
@@ -32,6 +36,7 @@ use teseladb_types::{Bytes, Decoder, Encoder, GroupId, Nanos, NodeId, Rng};
 use crate::checkers::Violation;
 use crate::checkers::raft_safety::{AppliedEntry, RaftSafety, ReadRegistration};
 use crate::clock::{ClockLimits, SimClock};
+use crate::device_log::SIM_LOG_FILE_BYTES;
 use crate::faults::FaultAction;
 use crate::net::{ANY_CONNECTION, NetParams, SimNetwork};
 use crate::node::{NodeOutput, NodeSm, Registry, SmKind};
@@ -230,6 +235,27 @@ pub enum Event {
         /// Node generation when it was emitted (if the node crashed, it is dropped).
         life: u64,
     },
+    /// The node's device log writes what its cores asked, and then, with `sync`, makes it
+    /// durable and answers their syncs (012 FR-035).
+    LogFlush {
+        /// Node.
+        node: u32,
+        /// Node generation.
+        life: u64,
+        /// The sync that ends the flush, after its write.
+        sync: bool,
+    },
+    /// A core takes the answer of a sync of its WAL from the node's device log.
+    LogDone {
+        /// Node.
+        node: u32,
+        /// Core.
+        core: u16,
+        /// Node generation.
+        life: u64,
+        /// The answer.
+        done: IoDone,
+    },
     /// Deadline of a core (`next_deadline`).
     Tick {
         /// Node.
@@ -277,6 +303,8 @@ impl Event {
     pub fn kind(&self) -> &'static str {
         match self {
             Event::Disk { .. } => "disk",
+            Event::LogFlush { .. } => "log",
+            Event::LogDone { .. } => "log-done",
             Event::Tick { .. } => "tick",
             Event::Client { .. } => "client",
             Event::Deliver { .. } => "deliver",
@@ -336,8 +364,11 @@ pub struct SimCore {
     /// The core's LSM (004), beside its log on the same disk; the workload that uses it opens it
     /// and drops it with the rest of the RAM in a crash.
     pub lsm: Option<Rc<RefCell<Lsm>>>,
-    /// Disk of the core.
+    /// Disk of the core: its LSM, snapshots and rollback files; its WAL is in the node's device
+    /// log.
     pub disk: SimDisk,
+    /// The core's side of the node's device log (`None` while the node is down).
+    pub book: Option<PortBook>,
     inflight: Option<IoOp>,
     /// The operation in flight is the LSM's.
     lsm_inflight: bool,
@@ -364,6 +395,12 @@ pub struct SimNode {
     pub cores: Vec<SimCore>,
     /// Disk slowness factor (1 = normal).
     pub disk_slow: u64,
+    /// The device holding the node's Raft log, `raftlog/` (012 FR-035, D-154).
+    pub log_disk: SimDisk,
+    /// The node's device log (`None` while the node is down).
+    pub log: Option<LogState>,
+    /// When the device log's next flush runs, if one is due.
+    pub log_flush_at: Option<Nanos>,
     /// A core's WAL was damaged while it was down and its restart has not checked it yet.
     pub corrupted: bool,
     /// Out for good: its recovery found the damage (002 research R3c).
@@ -374,6 +411,18 @@ pub struct SimNode {
     /// start waits until the wall clock passes it. Written at once and always (the server's
     /// thread retries a failed write, and marks wait for it meanwhile).
     pub hlc_bound: u64,
+}
+
+impl SimNode {
+    /// Its disks: each core's and its device log's.
+    pub fn disks(&self) -> impl Iterator<Item = &SimDisk> {
+        self.cores.iter().map(|c| &c.disk).chain(std::iter::once(&self.log_disk))
+    }
+
+    /// The same, to change them.
+    pub fn disks_mut(&mut self) -> impl Iterator<Item = &mut SimDisk> {
+        self.cores.iter_mut().map(|c| &mut c.disk).chain(std::iter::once(&mut self.log_disk))
+    }
 }
 
 /// An LSM error as the storage reports it when a node starts.
@@ -497,6 +546,11 @@ fn write_file_once(disk: &mut SimDisk, f: &RollbackFile) -> bool {
     true
 }
 
+/// A disk of the simulator: half of the last unsynced writes of a file are torn on a crash.
+fn sim_disk() -> SimDisk {
+    SimDisk::new(SimDiskConfig { torn_write_probability: 0.5, ..Default::default() })
+}
+
 /// Storage configuration of the simulator: small files so that they rotate often.
 pub fn sim_storage_config() -> StorageConfig {
     StorageConfig {
@@ -534,15 +588,8 @@ impl World {
         let mut list = Vec::new();
         for id in 0..nodes {
             let clock = SimClock::within(&mut rng, 1_800_000_000_000, clocks);
-            let cores = (0..cores)
-                .map(|_| SimCore {
-                    disk: SimDisk::new(SimDiskConfig {
-                        torn_write_probability: 0.5,
-                        ..Default::default()
-                    }),
-                    ..SimCore::default()
-                })
-                .collect();
+            let cores =
+                (0..cores).map(|_| SimCore { disk: sim_disk(), ..SimCore::default() }).collect();
             list.push(SimNode {
                 id,
                 alive: false,
@@ -550,6 +597,9 @@ impl World {
                 clock,
                 cores,
                 disk_slow: 1,
+                log_disk: sim_disk(),
+                log: None,
+                log_flush_at: None,
                 corrupted: false,
                 lost: false,
                 hlc: NodeClock::for_node(NodeId(u64::from(id) + 1)),
@@ -809,8 +859,15 @@ impl World {
         // One HLC per node, shared by its cores, with the bound on disk (005 FR-003).
         let clock = NodeClock::with_bound(NodeId(u64::from(node) + 1), n.hlc_bound);
         n.hlc = clock.clone();
+        // The device log first, then each core's WAL from it (012 FR-035).
+        let mut log = LogState::recover(&mut n.log_disk, SIM_LOG_FILE_BYTES)?;
         for (i, c) in n.cores.iter_mut().enumerate() {
-            let (s, _) = CoreStore::recover(&self.storage, i as u16, &mut c.disk)?;
+            let core = i as u16;
+            let mut book = PortBook::new(core, log.segments_of(core).into_iter().collect());
+            let mut link = DirectLink { state: &mut log, disk: &mut n.log_disk, core };
+            let (s, _) =
+                CoreStore::recover(&self.storage, core, &mut book.disk(&mut link, &mut c.disk))?;
+            c.book = Some(book);
             if self.cluster_mode {
                 let id = NodeId(u64::from(node) + 1);
                 let cfg = CoreConfig {
@@ -841,6 +898,9 @@ impl World {
             c.tick_at = None;
             c.frozen_until = Nanos::ZERO;
         }
+        log.allow_tidying();
+        n.log = Some(log);
+        n.log_flush_at = None;
         n.alive = true;
         self.renew_bound(node);
         for core in 0..self.nodes[node as usize].cores.len() as u16 {
@@ -888,7 +948,11 @@ impl World {
         let n = &mut self.nodes[node as usize];
         n.alive = false;
         n.life += 1;
+        n.log = None;
+        n.log_flush_at = None;
+        n.log_disk.crash(&mut self.rng);
         for c in &mut n.cores {
+            c.book = None;
             c.store = None;
             c.cluster = None;
             c.lsm = None;
@@ -958,8 +1022,12 @@ impl World {
                 (op, _) => op,
             };
             if let Some(op) = next {
-                let lat = c.disk.latency(&op, &mut self.rng);
-                let lat = Nanos(lat.0 * n.disk_slow);
+                // An operation of the WAL goes to the device log's queue in memory, at once.
+                let lat = if c.book.as_ref().is_some_and(|b| b.takes(&op)) {
+                    Nanos::ZERO
+                } else {
+                    Nanos(c.disk.latency(&op, &mut self.rng).0 * n.disk_slow)
+                };
                 c.inflight = Some(op);
                 self.schedule(now + lat, Event::Disk { node, core, life });
             }
@@ -998,7 +1066,23 @@ impl World {
         }
         let c = &mut n.cores[core as usize];
         let op = c.inflight.take().expect("operation in flight");
-        let done = c.disk.execute(op);
+        let done = match c.book.as_mut().filter(|b| b.takes(&op)) {
+            Some(book) => {
+                let state = n.log.as_mut().expect("a running node has its device log");
+                let mut link = DirectLink { state, disk: &mut n.log_disk, core };
+                match book.submit(&mut link, op) {
+                    Some(done) => done,
+                    // A sync: the device log answers it once durable.
+                    None => {
+                        self.schedule_log_flush(node);
+                        self.pump(node, core);
+                        return Some(Completions::default());
+                    }
+                }
+            }
+            None => c.disk.execute(op),
+        };
+        let c = &mut self.nodes[node as usize].cores[core as usize];
         if std::mem::take(&mut c.lsm_inflight) {
             let d = c.lsm.as_ref().expect("its LSM is open").borrow_mut().on_io_done(done, local);
             c.lsm_done.flushed.extend(d.flushed);
@@ -1008,6 +1092,18 @@ impl World {
             self.pump(node, core);
             return Some(Completions::default());
         }
+        Some(self.core_io_done(node, core, done, local))
+    }
+
+    /// Hands a disk result to a core's engine, moves what it produced and starts its I/O.
+    pub(crate) fn core_io_done(
+        &mut self,
+        node: u32,
+        core: u16,
+        done: IoDone,
+        local: Nanos,
+    ) -> Completions {
+        let c = &mut self.nodes[node as usize].cores[core as usize];
         let out = match (&mut c.store, &mut c.cluster) {
             (Some(store), _) => store.on_io_done(done, local),
             (None, Some(cluster)) => {
@@ -1018,7 +1114,7 @@ impl World {
             (None, None) => unreachable!("a powered-on core has an engine"),
         };
         self.pump(node, core);
-        Some(out)
+        out
     }
 
     /// Deadline of a core.

@@ -71,6 +71,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-devlog"
+version = "0.1.0"
+dependencies = [
+ "teseladb-hash",
+ "teseladb-raftlog",
+ "teseladb-types",
+]
+
+[[package]]
 name = "teseladb-exec"
 version = "0.1.0"
 dependencies = [
@@ -116,6 +125,7 @@ dependencies = [
 name = "teseladb-io"
 version = "0.1.0"
 dependencies = [
+ "teseladb-devlog",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-stages",
@@ -312,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "teseladb-auth",
  "teseladb-changestream",
+ "teseladb-devlog",
  "teseladb-exec",
  "teseladb-hlc",
  "teseladb-index",

@@ -139,6 +139,7 @@ fn group0_lost_by_every_node_fails_the_seed_as_durability() {
         for c in &mut w.nodes[node as usize].cores {
             c.disk = SimDisk::new(SimDiskConfig::default());
         }
+        w.nodes[node as usize].log_disk = SimDisk::new(SimDiskConfig::default());
         w.raft_safety = Default::default();
     });
     let r = teseladb_sim::run_workload(&cfg, 3, Box::new(wl));
