@@ -197,14 +197,17 @@ impl RangeStats {
                 keys * (KEY_COST + FETCH_COST) + sort(keys, scans.iter().all(|s| s.sorts))
             }
             Access::AndHash { scans, .. } => {
+                // The documents found are those every scan holds: with the fields independent,
+                // the share of each scan multiplied (009 FR-023). Each key read joins a set of
+                // local identifiers, which costs a key; only the documents found are fetched.
                 let mut keys = 0.0;
-                let mut least = docs;
+                let mut found = docs;
                 for s in scans {
                     let k = self.keys(s, indexes)?;
                     keys += k;
-                    least = least.min(k);
+                    found *= if docs > 0.0 { (k / docs).min(1.0) } else { 0.0 };
                 }
-                keys * KEY_COST + least * FETCH_COST + sort(least, false)
+                keys * KEY_COST + found * FETCH_COST + sort(found, false)
             }
         })
     }
@@ -276,6 +279,30 @@ pub fn choose(plans: &[Access], stats: &RangeStats, indexes: &[IndexMeta], sorte
         [one] => Choice::Pick(*one),
         _ => Choice::Trial(close),
     }
+}
+
+/// The intersection of index scans among `intersections` (009 FR-023) that the statistics find
+/// cheaper than every plan of `plans` by more than [`TRIAL_FACTOR`]: the planner takes it without
+/// a trial. `None` when no intersection is that much cheaper or a field has no statistics.
+pub fn cheaper_intersection(
+    plans: &[Access],
+    intersections: Vec<Access>,
+    stats: &RangeStats,
+    indexes: &[IndexMeta],
+    sorted: bool,
+) -> Option<Access> {
+    let mut best = f64::INFINITY;
+    for p in plans {
+        best = best.min(stats.cost(p, indexes, sorted)?);
+    }
+    let mut chosen: Option<(f64, Access)> = None;
+    for a in intersections {
+        let cost = stats.cost(&a, indexes, sorted)?;
+        if cost * TRIAL_FACTOR < best && chosen.as_ref().is_none_or(|(c, _)| cost < *c) {
+            chosen = Some((cost, a));
+        }
+    }
+    chosen.map(|(_, a)| a)
 }
 
 /// The statistics of a collection: each range's, as its last compaction left them, and their

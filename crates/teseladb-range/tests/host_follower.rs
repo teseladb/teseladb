@@ -176,6 +176,10 @@ fn a_state_without_closed_marks_has_none() {
         fn txn_mark(&self) -> u64 {
             0
         }
+
+        fn next_local_id(&self) -> u32 {
+            0
+        }
     }
     assert_eq!(NoRange.closed_mark(), None);
     assert!(NoRange.shared_counts().is_none());

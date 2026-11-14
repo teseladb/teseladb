@@ -211,6 +211,37 @@ impl Roaring {
             .flat_map(|(&k, c)| c.values().map(move |v| u32::from(k) << 16 | u32::from(v)))
     }
 
+    /// Adds `id`; whether it was not in the set yet. An array container that outgrows its
+    /// largest size becomes a bitmap, and so does a container of runs that takes a value.
+    pub fn insert(&mut self, id: u32) -> bool {
+        let (high, low) = ((id >> 16) as u16, id as u16);
+        let i = match self.keys.binary_search(&high) {
+            Ok(i) => i,
+            Err(i) => {
+                self.keys.insert(i, high);
+                self.containers.insert(i, Container::Array(vec![low]));
+                return true;
+            }
+        };
+        let c = &mut self.containers[i];
+        if c.contains(low) {
+            return false;
+        }
+        match c {
+            Container::Array(a) if a.len() < ARRAY_MAX => {
+                let at = a.partition_point(|v| *v < low);
+                a.insert(at, low);
+            }
+            Container::Bitmap(b) => b[usize::from(low >> 6)] |= 1 << (low & 63),
+            Container::Array(_) | Container::Run(_) => {
+                let mut b = c.bitmap();
+                b[usize::from(low >> 6)] |= 1 << (low & 63);
+                *c = Container::Bitmap(b);
+            }
+        }
+        true
+    }
+
     /// The ids in both (`$and`).
     pub fn and(&self, other: &Roaring) -> Roaring {
         let mut out = Roaring::new();
@@ -332,6 +363,22 @@ mod tests {
                 let id = rng.below(300_000) as u32 + probe;
                 assert_eq!(ra.contains(id), a.contains(&id));
             }
+        }
+    }
+
+    #[test]
+    fn inserting_ids_equals_an_ordered_set() {
+        let mut rng = Rng(0x5EED_0F1D_0000_0045);
+        for _ in 0..40 {
+            let mut want = BTreeSet::new();
+            let base = ids(&mut rng);
+            let mut set = Roaring::from_ids(base.iter().copied());
+            want.extend(base);
+            for _ in 0..rng.below(6000) {
+                let id = rng.below(200_000) as u32;
+                assert_eq!(set.insert(id), want.insert(id), "id {id}");
+            }
+            assert_eq!(set.iter().collect::<Vec<_>>(), want.iter().copied().collect::<Vec<_>>());
         }
     }
 

@@ -320,6 +320,7 @@ pub fn unique_value(pk: &PrimaryKey, bits: &TypeBits) -> Vec<u8> {
 /// The primary key and the type bits of a unique index entry's value ([`unique_value`]).
 pub fn split_unique_value(value: &[u8]) -> Result<(&[u8], TypeBits), KeyError> {
     const SHORT: KeyError = KeyError("unique index value shorter than its primary key");
+    let value = crate::local_id::entry_rest(value);
     let (len, rest) = take::<4>(value).map_err(|_| SHORT)?;
     let len = u32::from_be_bytes(len) as usize;
     if rest.len() < len {

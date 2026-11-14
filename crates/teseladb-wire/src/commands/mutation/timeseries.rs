@@ -4,6 +4,7 @@
 //! command sends it to the next bucket of the window.
 
 use teseladb_hlc::Hlc;
+use teseladb_keys::local_id::NO_LOCAL_ID;
 use teseladb_mql::timeseries_write::{BucketSpec, Full, TsError};
 use teseladb_bson::Document;
 
@@ -82,7 +83,7 @@ pub(super) fn insert(
     // bucket's entries are checked before it goes in.
     let alone = |doc: &Document| -> Result<(), CommandError> {
         let one = spec.append(id, None, doc).map_err(ts_error)?.to_bytes()?;
-        checker.entries_at(Some(key), None, Some(&one), lookup).map(|_| ())
+        checker.entries_at(Some(key), (None, NO_LOCAL_ID), Some(&one), lookup).map(|_| ())
     };
     let mut r = MutationResult::default();
     let mut filled = Vec::with_capacity(docs.len());
@@ -118,8 +119,9 @@ pub(super) fn insert(
         | if stopped.kept_open { KEPT_OPEN_LARGE } else { 0 };
     let new = bucket.to_bytes()?;
     // The bucket's own indexes (on the meta value and the time, 015 FR-008) follow it.
-    let (mut puts, deletes) = checker.entries_at(Some(key), old, Some(&new), lookup)?;
-    puts.push(put(key, new, checker, lookup(key).map(|(_, v)| v)));
+    let (mut puts, deletes) =
+        checker.entries_at(Some(key), (old, NO_LOCAL_ID), Some(&new), lookup)?;
+    puts.push(put(key, (new, NO_LOCAL_ID), checker, lookup(key).map(|(_, v)| v)));
     Ok((puts, deletes, r))
 }
 
@@ -136,7 +138,7 @@ pub fn first_refused(docs: &[Document], spec: &BucketSpec, rules: &super::Rules)
         let one = filled.unwrap_or_else(|| doc.clone());
         let alone = || -> Result<(), CommandError> {
             let bucket = spec.append([0; 12], None, &one).map_err(ts_error)?.to_bytes()?;
-            checker.entries_at(Some(&[]), None, Some(&bucket), &none).map(|_| ())
+            checker.entries_at(Some(&[]), (None, NO_LOCAL_ID), Some(&bucket), &none).map(|_| ())
         };
         stored_bytes(&one, Stored::Insert)
             .and_then(|b| checker.check(&b, None))

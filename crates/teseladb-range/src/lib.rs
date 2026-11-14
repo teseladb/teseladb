@@ -20,6 +20,7 @@ pub mod host;
 pub mod intents;
 pub mod latch;
 pub mod load;
+pub mod local_ids;
 pub mod local_keys;
 pub mod locks;
 pub mod metrics;

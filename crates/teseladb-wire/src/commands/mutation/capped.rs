@@ -9,6 +9,7 @@
 //! [`is_refusal`] and the command scans again.
 
 use teseladb_hlc::Hlc;
+use teseladb_keys::local_id::NO_LOCAL_ID;
 use teseladb_range::capped::{
     self as cap, CappedError, CappedState, plan_delete, plan_insert, plan_update,
 };
@@ -147,9 +148,10 @@ fn admit(
 ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
     let key = cap::doc_key(r.tenant, r.collection, state.next);
     // The new document first: a unique value an evicted one holds is still a duplicate.
-    let (mut puts, mut deletes) = checker.entries_at(Some(&key), None, Some(&bytes), lookup)?;
+    let (mut puts, mut deletes) =
+        checker.entries_at(Some(&key), (None, NO_LOCAL_ID), Some(&bytes), lookup)?;
     let size = bytes.len() as u64;
-    puts.push(put(&key, bytes, checker, None));
+    puts.push(put(&key, (bytes, NO_LOCAL_ID), checker, None));
     let (p, d) = evict(r, state, size, checker, lookup)?;
     puts.extend(p);
     deletes.extend(d);
@@ -171,7 +173,7 @@ fn evict(
     for (seq, doc) in &r.oldest[..plan.evict.len()] {
         let k = cap::doc_key(r.tenant, r.collection, *seq);
         let old = RawDoc::from_bytes(doc)?;
-        let (p, d) = checker.entries_at(Some(&k), Some(old), None, lookup)?;
+        let (p, d) = checker.entries_at(Some(&k), (Some(old), NO_LOCAL_ID), None, lookup)?;
         puts.extend(p);
         deletes.push(k);
         deletes.extend(d);

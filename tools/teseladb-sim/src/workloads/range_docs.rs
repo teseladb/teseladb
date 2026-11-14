@@ -466,6 +466,8 @@ impl RangeDocsWorkload {
         let mut host = RangeHost::new(lsm, n.hlc.clone());
         // Half the nodes write the counted format (007 FR-039), as during an upgrade.
         host.set_counted_writes(node.is_multiple_of(2));
+        // Two nodes in three number the new documents of the writes they lead (009 FR-023).
+        host.set_local_ids(!node.is_multiple_of(3));
         host.add_range(G, START.to_vec(), END.to_vec());
         self.hosts.insert(node, host);
     }

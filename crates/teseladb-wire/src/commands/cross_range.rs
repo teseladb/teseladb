@@ -173,8 +173,11 @@ pub fn intent_writes(outcome: Outcome) -> Vec<(Vec<u8>, IntentOp)> {
         });
         o
     };
+    // A transaction's writes keep no local identifiers (009 FR-023): no leader numbers them.
+    let mut puts = outcome.puts;
+    teseladb_range::local_ids::settle(&mut puts);
     let mut writes: Vec<(Vec<u8>, IntentOp)> = Vec::new();
-    for p in outcome.puts {
+    for p in puts {
         writes.retain(|(k, _)| k != &p.key);
         writes.push((p.key, IntentOp::Put { value_type: p.value_type, value: p.value }));
     }

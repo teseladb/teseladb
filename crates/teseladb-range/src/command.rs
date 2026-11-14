@@ -45,10 +45,14 @@ pub const KIND_FORGET_RECORD: u16 = 15;
 pub const KIND_FENCE: u16 = 16;
 /// The format of the range commands this binary reads and writes: 1 adds
 /// [`KIND_WRITE_COUNTED`] (007 FR-039), 2 [`KIND_RESOLVE_INTENTS_COUNTED`], 3
-/// [`KIND_WRITE_REACHING`], [`KIND_SPLIT_REACHING`] and [`KIND_MERGE_REACHING`]. A node records it in
-/// Group 0 (FR-027), and a leader writes a command of a format only once every node that is not
-/// removed records it.
-pub const FORMAT: u8 = 3;
+/// [`KIND_WRITE_REACHING`], [`KIND_SPLIT_REACHING`] and [`KIND_MERGE_REACHING`], 4 the writes
+/// that number their new documents ([`FORMAT_LOCAL_IDS`]). A node records it in Group 0 (FR-027),
+/// and a leader writes a command of a format only once every node that is not removed records it.
+pub const FORMAT: u8 = 4;
+/// The format whose writes put the range's next local identifier (009 FR-023,
+/// [`crate::sm::next_local_key`]), a key a node of the version before refuses as outside the
+/// range.
+pub const FORMAT_LOCAL_IDS: u8 = 4;
 /// The format that brings [`KIND_WRITE_COUNTED`].
 pub const FORMAT_COUNTED: u8 = 1;
 /// `kind` of a [`Command::Write`] that carries the change of each collection's live documents

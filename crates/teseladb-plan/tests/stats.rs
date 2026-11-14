@@ -173,3 +173,47 @@ fn a_compaction_publishes_its_range_s_statistics_merged_by_collection() {
     assert!(collection_stats(coll).is_none());
     assert!(collection_stats(b"\x01other").is_none());
 }
+
+fn and_hash(a: Access, b: Access) -> Access {
+    let (Access::Index(a), Access::Index(mut b)) = (a, b) else { unreachable!("two scans") };
+    b.preds = vec![1];
+    Access::AndHash { scans: vec![a, b], filter: None }
+}
+
+#[test]
+fn an_intersection_of_two_selective_conditions_wins_by_its_estimate() {
+    // `a` and `b` each keep a tenth of the documents, independently: together a hundredth.
+    let s = stats(
+        100_000,
+        &[
+            ("a", ints((0..100_000).map(|i| i % 10))),
+            ("b", ints((0..100_000).map(|i| i / 10 % 10))),
+        ],
+    );
+    let idx = [index("a_1", "a"), index("b_1", "b")];
+    let (sa, sb) = (
+        scan(0, "a", vec![Bound::point(Value::Int32(3))]),
+        scan(1, "b", vec![Bound::point(Value::Int32(4))]),
+    );
+    let plans = [sa.clone(), sb.clone(), Access::Collscan];
+    let both = and_hash(sa.clone(), sb.clone());
+    let got =
+        teseladb_plan::stats::cheaper_intersection(&plans, vec![both.clone()], &s, &idx, false);
+    assert_eq!(got, Some(both));
+    // One condition that keeps almost nothing: its index alone is cheaper.
+    let rare = scan(0, "a", vec![range(20, 30)]);
+    let plans = [rare.clone(), sb.clone()];
+    let pair = and_hash(rare, sb.clone());
+    assert_eq!(
+        teseladb_plan::stats::cheaper_intersection(&plans, vec![pair], &s, &idx, false),
+        None
+    );
+    // A field without statistics: no estimate, no intersection.
+    let idx = [index("a_1", "a"), index("c_1", "c")];
+    let sc = scan(1, "c", vec![Bound::point(Value::Int32(4))]);
+    let pair = and_hash(sa.clone(), sc.clone());
+    assert_eq!(
+        teseladb_plan::stats::cheaper_intersection(&[sa, sc], vec![pair], &s, &idx, false),
+        None
+    );
+}

@@ -101,6 +101,8 @@ pub struct Ranges {
     pub reaching_records: bool,
     /// Every node reads the transactions' commits that carry their change of documents.
     pub counted_resolutions: bool,
+    /// Every node reads the writes that number their new documents (009 FR-023).
+    pub local_ids: bool,
 }
 
 /// The stored value of cluster parameter `name` in a copy of Group 0.
@@ -168,6 +170,7 @@ impl Ranges {
             counted_writes: crate::node_versions::counted_writes(sm),
             reaching_records: crate::node_versions::reaching_records(sm),
             counted_resolutions: crate::node_versions::counted_resolutions(sm),
+            local_ids: crate::node_versions::local_ids(sm),
         }
     }
 }

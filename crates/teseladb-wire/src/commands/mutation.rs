@@ -404,11 +404,13 @@ fn moved_to(
 fn moved_entries(
     checker: &Checker,
     (from, to): (&[u8], &[u8]),
-    (old, new): (RawDoc<'_>, &[u8]),
+    (old, new, local): (RawDoc<'_>, &[u8], u32),
     lookup: &Lookup<'_>,
 ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
-    let (mut puts, mut deletes) = checker.entries_at(Some(from), Some(old), None, lookup)?;
-    let (added, gone) = checker.entries_at(Some(to), None, Some(new), lookup)?;
+    let none = teseladb_keys::local_id::NO_LOCAL_ID;
+    let (mut puts, mut deletes) =
+        checker.entries_at(Some(from), (Some(old), none), None, lookup)?;
+    let (added, gone) = checker.entries_at(Some(to), (None, local), Some(new), lookup)?;
     puts.extend(added);
     deletes.extend(gone);
     deletes.push(from.to_vec());
@@ -927,6 +929,8 @@ struct Checker {
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
     /// The numbers of the names the write carries ([`Rules::fields`]).
     fields: FieldNumbers,
+    /// The new documents the write numbered so far (009 FR-023).
+    numbered: std::cell::Cell<u32>,
 }
 
 /// The collator of the collation `spec` of a write (the command's, or else the collection's
@@ -978,6 +982,7 @@ impl Checker {
             moved: std::cell::RefCell::default(),
             changes: std::cell::RefCell::default(),
             fields: r.fields.clone(),
+            numbered: std::cell::Cell::new(0),
         })
     }
 
@@ -1029,7 +1034,7 @@ impl Checker {
     fn entries_at<'a>(
         &self,
         key: Option<&[u8]>,
-        old: Option<RawDoc<'a>>,
+        (old, local): (Option<RawDoc<'a>>, u32),
         new: Option<&'a [u8]>,
         lookup: &Lookup<'_>,
     ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
@@ -1048,7 +1053,21 @@ impl Checker {
             )),
             _ => None,
         };
-        self.indexes.changes(old, new, pk.as_ref(), &mut self.unique.borrow_mut(), &stored)
+        let pk = (pk.as_ref(), local);
+        self.indexes.changes(old, new, pk, &mut self.unique.borrow_mut(), &stored)
+    }
+
+    /// The local identifier of the version a write stores in place of `old` (009 FR-023): the
+    /// one `old` was given, or the provisional number of the write's next new document, which
+    /// the range replaces with its own.
+    fn local_id(&self, old: Option<&[u8]>) -> u32 {
+        use teseladb_keys::local_id::{document_id, is_given, provisional};
+        if let Some(id) = old.and_then(document_id).filter(|id| is_given(*id)) {
+            return id;
+        }
+        let n = self.numbered.get();
+        self.numbered.set(n.saturating_add(1));
+        provisional(n)
     }
 
     /// The log lines this write made.
@@ -1108,9 +1127,14 @@ fn id_of(doc: &Document) -> Value {
 /// The put of a document's new version, stored with its table of field offsets (003 FR-021)
 /// tagged by the numbers of the write's names and those of the table of `old`, the stored version
 /// it replaces (FR-022).
-fn put(key: &[u8], bytes: Vec<u8>, checker: &Checker, old: Option<&[u8]>) -> Put {
+fn put(key: &[u8], (bytes, local): (Vec<u8>, u32), checker: &Checker, old: Option<&[u8]>) -> Put {
     let old = old.and_then(|o| teseladb_keys::stored::split(o).ok());
     let value = teseladb_keys::stored::encode_numbered(bytes, &checker.fields, old.as_ref());
+    // A document the write numbers carries its local identifier (009 FR-023).
+    let value = match local {
+        teseladb_keys::local_id::NO_LOCAL_ID => value,
+        id => teseladb_keys::local_id::with_document_id(value, id),
+    };
     Put { key: key.to_vec(), value_type: DOCUMENT, value }
 }
 
@@ -1665,16 +1689,19 @@ fn insert(
         let filled = fill_timestamps(doc, mark)?;
         let doc = filled.as_ref().unwrap_or(doc);
         let taken = lookup(key).is_some() || puts.iter().any(|p| &p.key == key);
+        let local = checker.local_id(None);
         let outcome = if taken {
             Err(duplicate(rules, &id_of(doc)))
         } else {
             stored_bytes(doc, Stored::Insert)
                 .and_then(|b| checker.check(&b, None).map(|()| b))
-                .and_then(|b| checker.entries_at(Some(key), None, Some(&b), lookup).map(|e| (b, e)))
+                .and_then(|b| {
+                    checker.entries_at(Some(key), (None, local), Some(&b), lookup).map(|e| (b, e))
+                })
         };
         match outcome {
             Ok((bytes, (entries, gone))) => {
-                puts.push(put(key, bytes, checker, None));
+                puts.push(put(key, (bytes, local), checker, None));
                 puts.extend(entries);
                 deletes.extend(gone);
                 r.n += 1;
@@ -1703,7 +1730,11 @@ fn backfill(
     for (index, key) in keys.iter().enumerate() {
         let Some((_, stored)) = lookup(key) else { continue };
         let bytes = teseladb_keys::stored::bson(stored)?;
-        match checker.entries_at(Some(key), None, Some(bytes), lookup) {
+        // The entries carry the number the document was given, if any (009 FR-023).
+        let local = teseladb_keys::local_id::document_id(stored)
+            .filter(|id| teseladb_keys::local_id::is_given(*id))
+            .unwrap_or(teseladb_keys::local_id::NO_LOCAL_ID);
+        match checker.entries_at(Some(key), (None, local), Some(bytes), lookup) {
             Ok((entries, gone)) => {
                 puts.extend(entries);
                 deletes.extend(gone);
@@ -1731,7 +1762,8 @@ impl DocCheck {
     /// Why the indexes refuse document `bytes` stored at `key`, if they do.
     pub(crate) fn check(&self, key: &[u8], bytes: &[u8]) -> Option<CommandError> {
         let none = |_: &[u8]| None;
-        self.0.entries_at(Some(key), None, Some(bytes), &none).err()
+        let local = teseladb_keys::local_id::NO_LOCAL_ID;
+        self.0.entries_at(Some(key), (None, local), Some(bytes), &none).err()
     }
 }
 
@@ -1823,7 +1855,9 @@ fn modify(
         match &update {
             None => {
                 deletes.push(key.clone());
-                let (entries, gone) = checker.entries_at(Some(key), Some(doc), None, lookup)?;
+                let none = teseladb_keys::local_id::NO_LOCAL_ID;
+                let (entries, gone) =
+                    checker.entries_at(Some(key), (Some(doc), none), None, lookup)?;
                 puts.extend(entries);
                 deletes.extend(gone);
                 if image != Image::None {
@@ -1860,12 +1894,15 @@ fn modify(
                     }
                     let new = stored_bytes(&out.doc, Stored::Update).map_err(&during)?;
                     checker.check(&new, Some(doc)).map_err(&during)?;
+                    let local = checker.local_id(Some(bytes));
                     let written = match target {
-                        None => checker.entries_at(Some(key), Some(doc), Some(&new), lookup),
-                        Some(_) => moved_entries(checker, (key, &at), (doc, &new), lookup),
+                        None => {
+                            checker.entries_at(Some(key), (Some(doc), local), Some(&new), lookup)
+                        }
+                        Some(_) => moved_entries(checker, (key, &at), (doc, &new, local), lookup),
                     };
                     let (entries, gone) = written.map_err(&during)?;
-                    puts.push(put(&at, new, checker, Some(bytes)));
+                    puts.push(put(&at, (new, local), checker, Some(bytes)));
                     puts.extend(entries);
                     deletes.extend(gone);
                     r.n_modified += 1;
@@ -1891,9 +1928,10 @@ fn modify(
         let doc = filled.as_ref().unwrap_or(doc);
         let new = stored_bytes(doc, Stored::Upsert).map_err(&during)?;
         checker.check(&new, None).map_err(&during)?;
+        let local = checker.local_id(None);
         let (entries, gone) =
-            checker.entries_at(Some(key), None, Some(&new), lookup).map_err(&during)?;
-        puts.push(put(key, new, checker, None));
+            checker.entries_at(Some(key), (None, local), Some(&new), lookup).map_err(&during)?;
+        puts.push(put(key, (new, local), checker, None));
         puts.extend(entries);
         deletes.extend(gone);
         r.upserted = Some(id_of(doc));

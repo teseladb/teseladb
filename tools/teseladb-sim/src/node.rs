@@ -275,6 +275,13 @@ impl RangeState for NodeSm {
         }
     }
 
+    fn next_local_id(&self) -> u32 {
+        match self {
+            NodeSm::Range(sm) => sm.next_local_id(),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => 0,
+        }
+    }
+
     fn applied_mark(&self) -> Hlc {
         match self {
             NodeSm::Range(sm) => sm.applied_mark(),

@@ -123,7 +123,9 @@ pub fn verify_range<'a>(
         index.entries += 1;
         let wanted = needed.get_mut(&id).and_then(|n| n.remove(&key));
         match wanted {
-            Some((want, _)) if want == value => {}
+            // The local identifier an entry carries (009 FR-023) is no part of what its document
+            // gives it.
+            Some((want, _)) if want == teseladb_keys::local_id::entry_rest(&value) => {}
             Some((want, pk)) => {
                 index.missing.push(MissingEntry { key: key.clone(), value: want, pk });
                 index.extra.push((key, value));

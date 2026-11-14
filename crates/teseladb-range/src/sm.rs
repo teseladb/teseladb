@@ -59,6 +59,9 @@ const FENCES: u8 = 0x0D;
 /// Local key of the live documents of each collection and of the last entry that left them
 /// estimated (007 FR-039, [`crate::doc_count`]).
 const COUNTS: u8 = 0x0E;
+/// Local key of the next local identifier the range gives a new document (009 FR-023,
+/// [`crate::local_ids`]): a big-endian `u32`.
+const NEXT_LOCAL: u8 = 0x0F;
 /// The mark of a range nothing was written to.
 const ZERO: Hlc = Hlc { physical: 0, logical: 0 };
 /// The newest mark: reads of local keys see their last version.
@@ -87,6 +90,12 @@ pub fn end_key(range: GroupId) -> Vec<u8> {
 /// Local key of the parent of a range born from a split, with the index of the parent's `Split`.
 pub fn parent_key(range: GroupId) -> Vec<u8> {
     local_key(range, PARENT)
+}
+
+/// Local key of the next local identifier the range gives (009 FR-023): a write that numbers
+/// new documents puts it, the only key outside the range's data a write may put.
+pub fn next_local_key(range: GroupId) -> Vec<u8> {
+    local_key(range, NEXT_LOCAL)
 }
 
 /// Local key of the range's live bytes.
@@ -247,6 +256,10 @@ pub trait RangeState {
     /// FR-007, H-040): the applied index when the range opened or restored a snapshot. Without a
     /// default, so a wrapping state machine hands it on.
     fn txn_mark(&self) -> u64;
+
+    /// The next local identifier the range gives a new document (009 FR-023). Without a default,
+    /// so a wrapping state machine hands it on.
+    fn next_local_id(&self) -> u32;
     /// Whether a write fence holds `key` (018, [`crate::fence`]).
     fn fenced(&self, _key: &[u8]) -> bool {
         false
@@ -332,6 +345,8 @@ pub struct RangeSm {
     recent: std::collections::VecDeque<(u64, Vec<(Coll, i64)>)>,
     /// Every counted write after this entry is in `recent`.
     recent_from: u64,
+    /// The next local identifier of a new document (009 FR-023): past every one a write gave.
+    next_local: u32,
 }
 
 /// What a `Write` carries besides its versions: its idempotence record, and its change of the
@@ -367,6 +382,7 @@ struct SnapState {
     relocated: Option<(u16, u64)>,
     cut: Option<GroupId>,
     fences: Vec<Span>,
+    next_local: u32,
 }
 
 /// What a range keeps of merges: the merge it is frozen for, the last range it absorbed and the
@@ -376,6 +392,10 @@ struct MergeState {
     frozen: u64,
     merged: Option<(GroupId, u64)>,
     abandoned: u64,
+}
+
+fn decode_u32(v: &[u8]) -> Option<u32> {
+    Some(u32::from_be_bytes(v.try_into().ok()?))
 }
 
 fn decode_u64(v: &[u8]) -> Option<u64> {
@@ -397,6 +417,8 @@ struct LocalState {
     fences: Vec<Span>,
     /// The counts of local key `0E`; `None` for a range written before they were kept.
     counts: Option<Counts>,
+    /// The next local identifier of local key `0F`; 0 for a range that never gave one.
+    next_local: u32,
 }
 
 /// The value of local key `0B`: the target core (u16) and the intent (u64).
@@ -434,6 +456,7 @@ fn read_state(
         CUT,
         FENCES,
         COUNTS,
+        NEXT_LOCAL,
     ];
     for sub in subs {
         match read(&local_key(range, sub))? {
@@ -482,6 +505,10 @@ fn read_state(
         counts: match &values[12] {
             Some(v) => Some(Counts::decode(v).ok_or_else(corrupt)?),
             None => None,
+        },
+        next_local: match &values[13] {
+            Some(v) => decode_u32(v).ok_or_else(corrupt)?,
+            None => 0,
         },
     }))
 }
@@ -584,6 +611,7 @@ impl RangeSm {
             recent: std::collections::VecDeque::new(),
             recent_from: applied,
             fences: s.fences,
+            next_local: s.next_local,
         }
     }
 
@@ -775,7 +803,7 @@ impl RangeSm {
 
     fn apply_write(
         &mut self,
-        puts: &[Put],
+        all_puts: &[Put],
         deletes: &[Vec<u8>],
         (dedup, (live_delta, docs)): WriteExtras<'_>,
         ctx: &ApplyCtx,
@@ -787,7 +815,18 @@ impl RangeSm {
                 self.range.0, ctx.index, self.frozen
             )));
         }
-        let outside = puts.iter().map(|p| &p.key).chain(deletes).find(|k| !self.inside(k));
+        // The range's next local identifier (009 FR-023) is the one key outside its data a write
+        // puts: it only goes up.
+        let next_key = next_local_key(self.range);
+        let given = all_puts
+            .iter()
+            .filter(|p| p.key == next_key)
+            .filter_map(|p| decode_u32(&p.value))
+            .max()
+            .filter(|n| *n > self.next_local);
+        let puts: Vec<&Put> = all_puts.iter().filter(|p| p.key != next_key).collect();
+        let outside =
+            puts.iter().map(|p| &p.key).chain(deletes).find(|k| !self.inside(k.as_slice()));
         if let Some(key) = outside {
             return Err(ApplyError(format!(
                 "range {}: entry {} writes {key:?} outside the range",
@@ -818,6 +857,10 @@ impl RangeSm {
             .chain(deletes.iter().map(|k| EntryWrite { key: k, kind: Kind::Delete, value: &[] }))
             .collect();
         writes.push(EntryWrite { key: &mark_key, kind: Kind::Put, value: &mark });
+        let next_value = given.map(u32::to_be_bytes);
+        if let Some(v) = &next_value {
+            writes.push(EntryWrite { key: &next_key, kind: Kind::Put, value: v });
+        }
         if let Some((key, result)) = &dedup_entry {
             writes.push(EntryWrite { key, kind: Kind::Put, value: result });
         }
@@ -830,7 +873,7 @@ impl RangeSm {
         let mut counts = Counts::clone(&self.counts);
         match docs {
             Some(delta) => counts.apply(delta),
-            None if doc_count::touches_documents(puts, deletes) => counts.dirty(ctx.index),
+            None if doc_count::touches_documents(all_puts, deletes) => counts.dirty(ctx.index),
             None => {}
         }
         if let Some(delta) = docs.filter(|d| !d.is_empty()) {
@@ -844,6 +887,9 @@ impl RangeSm {
         self.write(ctx.index, ctx.ts, &writes)?;
         self.last_mark = ctx.ts;
         self.live = live;
+        if let Some(n) = given {
+            self.next_local = n;
+        }
         if counts_value.is_some() {
             self.counts = Arc::new(counts);
         }
@@ -982,12 +1028,16 @@ impl RangeSm {
         let own_counts = self.counts_dirty_write(ctx.index);
         let (new_counts_key, new_counts) =
             (local_key(new_range, COUNTS), Counts::unknown(0).encode());
+        // The new range goes on numbering its documents where this one is (009 FR-023): the
+        // numbers of the documents it takes stay unique in it.
+        let (new_next_key, new_next) = (next_local_key(new_range), self.next_local.to_be_bytes());
         let writes: Vec<EntryWrite<'_>> = born
             .iter()
             .map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v })
             .chain(own_counts.iter().map(|(k, v)| EntryWrite { key: k, kind: Kind::Put, value: v }))
             .chain([
                 EntryWrite { key: &new_counts_key, kind: Kind::Put, value: &new_counts },
+                EntryWrite { key: &new_next_key, kind: Kind::Put, value: &new_next },
                 EntryWrite { key: &own_end, kind: Kind::Put, value: at },
                 EntryWrite { key: &parent_key, kind: Kind::Put, value: &parent },
                 EntryWrite { key: &own_live_key, kind: Kind::Put, value: &own_live },
@@ -1127,8 +1177,25 @@ impl RangeSm {
             0 => Vec::new(),
             _ => crate::fence::get(&mut d)?,
         };
+        // And those taken before ranges numbered their documents (009 FR-023).
+        let next_local = match d.remaining() {
+            0 => 0,
+            _ => d.u32()?,
+        };
         d.finish()?;
-        Ok(SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut, fences })
+        Ok(SnapState {
+            applied,
+            last_write,
+            gc,
+            mark,
+            end,
+            live,
+            merges,
+            relocated,
+            cut,
+            fences,
+            next_local,
+        })
     }
 }
 
@@ -1151,6 +1218,10 @@ impl RangeState for RangeSm {
 
     fn txn_mark(&self) -> u64 {
         self.txn_mark
+    }
+
+    fn next_local_id(&self) -> u32 {
+        self.next_local
     }
 
     fn checksum_request(&self) -> Option<(u64, Hlc)> {
@@ -1351,13 +1422,26 @@ impl StateMachine for RangeSm {
         e.u16(core).u64(intent);
         e.u64(self.cut.map_or(0, |g| g.0));
         crate::fence::put(&mut e, &self.fences);
+        e.u32(self.next_local);
         e.finish()
     }
 
     fn restore(&mut self, snap: &[u8]) -> Result<(), RestoreError> {
-        let SnapState { applied, last_write, gc, mark, end, live, merges, relocated, cut, fences } =
-            self.decode_snapshot(snap)
-                .map_err(|e| RestoreError(format!("range {}: {e}", self.range.0)))?;
+        let SnapState {
+            applied,
+            last_write,
+            gc,
+            mark,
+            end,
+            live,
+            merges,
+            relocated,
+            cut,
+            fences,
+            next_local,
+        } = self
+            .decode_snapshot(snap)
+            .map_err(|e| RestoreError(format!("range {}: {e}", self.range.0)))?;
         let flushed = self.lsm.borrow().flushed_index(self.range);
         if flushed < last_write {
             return Err(RestoreError(format!(
@@ -1381,6 +1465,7 @@ impl StateMachine for RangeSm {
         self.lingering.set(None);
         self.cut = cut;
         self.fences = fences;
+        self.next_local = next_local;
         // The snapshot does not carry the counts yet (007 T073, step 4): they are estimated from
         // its index until a recount.
         self.counts = Arc::new(Counts::unknown(applied));

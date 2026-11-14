@@ -393,7 +393,7 @@ impl RangeHost {
     }
 
     /// Proposes the write at a mark above the reads of its keys, evaluating it at that mark.
-    pub(super) fn propose<S: StateMachine>(
+    pub(super) fn propose<S: StateMachine + RangeState>(
         &mut self,
         core: &mut MultiRaftCore<S>,
         id: ReqId,
@@ -423,6 +423,9 @@ impl RangeHost {
         let inside = |k: &[u8]| {
             interval.as_ref().is_some_and(|(s, e)| s.as_slice() <= k && k < e.as_slice())
         };
+        // The numbers the range gave its documents so far (009 FR-023).
+        let applied_next = core.state_machine(m.g).map_or(0, RangeState::next_local_id);
+        let local_ids = self.local_ids;
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         // Evaluated on a pending write of its keys (FR-029): its answer waits for that write to
         // commit, so a write without change still goes through the log, behind it.
@@ -450,12 +453,19 @@ impl RangeHost {
             // What the write leaves under each key it writes, for the next writes of those keys
             // while it is pending (FR-029).
             let mut written: BTreeMap<Vec<u8>, crate::latch::Pending> = BTreeMap::new();
+            // The new documents of the write get the range's next numbers (009 FR-023).
+            let first_local = applied_next.max(l.next_local);
+            let next_local = std::cell::Cell::new(first_local);
             let build = |ts| {
                 let f = |c: &[Option<(u8, &[u8])>], t: Hlc| {
                     if deadline.is_some_and(|d| t.physical > d) {
                         return Err(Eval::Expired);
                     }
-                    let o = mutation.eval_with(&m.keys, c, t)?;
+                    let mut o = mutation.eval_with(&m.keys, c, t)?;
+                    match local_ids {
+                        true => next_local.set(crate::local_ids::fill(&mut o.puts, first_local)),
+                        false => crate::local_ids::settle(&mut o.puts),
+                    }
                     let keys = o.puts.iter().map(|p| p.key.as_slice());
                     if let Some(k) =
                         keys.chain(o.deletes.iter().map(Vec::as_slice)).find(|k| !inside(k))
@@ -494,12 +504,20 @@ impl RangeHost {
                         puts.iter().map(|p| (p.key.clone(), Some((p.value_type, p.value.clone())))),
                     );
                 }
+                // Every replica raises the range's next number with the entry.
+                if let (true, Command::Write { puts, .. }) =
+                    (next_local.get() > first_local, &mut e.command)
+                {
+                    let value = next_local.get().to_be_bytes().to_vec();
+                    puts.push(Put { key: crate::sm::next_local_key(m.g), value_type: 0, value });
+                }
                 (change, result) = (e.change, e.result);
                 Ok::<_, Refused<Eval>>(e.command.encode())
             };
             match core.propose_at(m.g, floor, now, build) {
                 Ok((op, ts)) => {
                     l.latches.set_mark(latch, ts);
+                    l.next_local = l.next_local.max(next_local.get());
                     // In the leader's log: the next writes of its keys go on it (FR-029); the
                     // reads and the transactions still wait for it to be applied.
                     let records: Vec<Vec<u8>> = m

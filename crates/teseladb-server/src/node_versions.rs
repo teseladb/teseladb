@@ -74,6 +74,16 @@ pub fn reaching_records(sm: &Group0Sm) -> bool {
         .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_REACHING)
 }
 
+/// Whether every node that is not removed reads the writes that number their new documents
+/// (009 FR-023). A node that recorded nothing yet runs this binary.
+pub fn local_ids(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_LOCAL_IDS)
+}
+
 /// Whether every node that is not removed reads the commits of transactions that carry their
 /// change of each collection's documents (007 FR-039). A node that recorded nothing yet runs this
 /// binary.
@@ -193,8 +203,19 @@ mod tests {
         sm.settings.insert(key(NodeId(2)), format_2);
         assert!(counted_resolutions(&sm));
         assert!(!reaching_records(&sm));
+        assert!(!local_ids(&sm));
+        // A node of format 3 keeps the records' key and does not number documents.
+        let format_3 = Document::new()
+            .with(FCV, "9.0")
+            .with(RANGE, i64::from(teseladb_range::command::FORMAT_REACHING))
+            .to_bytes()
+            .unwrap();
+        sm.settings.insert(key(NodeId(2)), format_3);
+        assert!(reaching_records(&sm));
+        assert!(!local_ids(&sm));
         sm.settings.insert(key(NodeId(2)), ours());
         assert!(reaching_records(&sm));
+        assert!(local_ids(&sm));
         assert!(ordered_ids(&sm));
         sm.settings.insert(key(NodeId(2)), Document::new().with(FCV, "9.0").to_bytes().unwrap());
         assert!(!ordered_ids(&sm), "a node of the version before keys documents by hash");
