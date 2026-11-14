@@ -13,7 +13,9 @@ cd "$(dirname "$0")/.."
 out=target/teseladb-src
 mkdir -p "$out"
 # Downloads the crates of Cargo.lock when they are not unpacked yet; the metadata then names their manifests.
-cargo fetch --locked >/dev/null
+# Offline first, as the gates build: going to the registry when everything is unpacked already waited on the lock of
+# Cargo's package cache while another build held it, and the gate failed with only that wait in its log.
+cargo fetch --locked --offline >/dev/null 2>&1 || cargo fetch --locked >/dev/null
 found=0
 while IFS= read -r manifest; do
   dir=${manifest%/Cargo.toml}
@@ -21,7 +23,7 @@ while IFS= read -r manifest; do
   name=${base%-[0-9]*.[0-9]*.[0-9]*}
   ln -sfn "$dir" "$out/$name"
   found=$((found + 1))
-done < <(cargo metadata --locked --format-version 1 |
+done < <(cargo metadata --locked --offline --format-version 1 |
   grep -oE '"manifest_path":"[^"]*/viuzi-[a-z0-9-]+-[0-9]+\.[0-9]+\.[0-9]+[^"/]*/Cargo.toml"' |
   sed -E 's/^"manifest_path":"(.*)"$/\1/' | sort -u)
 [[ $found -gt 0 ]] || { echo "teseladb-src: the build has no viuzi-* crate from the registry" >&2; exit 1; }
