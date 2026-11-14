@@ -187,3 +187,43 @@ fn a_transfer_lost_while_the_replica_asks_again_goes_again_after_its_timeout() {
     }
     assert_ne!(c.nodes[&f].core.awaited_snapshot(G).map(<[u8]>::to_vec), own, "never sent again");
 }
+
+/// A leader's snapshot that a replica parked and then kept as its own without its data
+/// (`reject_awaited`) stays without it across a restart until its data arrives, whatever the
+/// state machine then says of its data: the LSM's flushed index may reach the snapshot's last
+/// write with none of the data the snapshot needs (D-067).
+#[test]
+fn a_snapshot_kept_without_its_data_still_waits_for_it_after_a_restart() {
+    let mut c = Cluster::with(3, small);
+    let l = c.elect();
+    let f = c.others(l)[0];
+    c.isolate(f);
+    for i in 0..8u8 {
+        c.propose(l, &[b'a' + i]).unwrap();
+        c.ticks(1);
+    }
+    c.ticks(5);
+    assert!(c.nodes[&l].core.store().group(G).unwrap().snapshot_index > 0, "compacted");
+    // The leader's snapshot reaches the follower without its data, and nobody serves it.
+    c.sm(f).missing_data.set(true);
+    c.heal();
+    c.ticks(10);
+    assert!(c.nodes[&f].core.awaited_snapshot(G).is_some(), "parked");
+    c.nodes.get_mut(&f).unwrap().core.reject_awaited(G);
+    c.ticks(5);
+    c.restart(f);
+    // Its state machine now claims the data.
+    let recovered = GroupDesc { group: G, voters: vec![], learners: vec![] };
+    c.nodes.get_mut(&f).unwrap().core.create_group(recovered, Appender::default()).unwrap();
+    c.ticks(20);
+    assert!(c.nodes[&f].core.awaited_snapshot(G).is_some(), "it still waits for the data");
+    assert_eq!(c.sm(f).entries, 0, "nothing restored or applied without the data");
+    assert_ne!(c.leader(), Some(f));
+    // Once the data is here it catches up.
+    let now = c.now;
+    c.nodes.get_mut(&f).unwrap().core.snapshot_data_ready(G, now);
+    c.ticks(10);
+    assert_eq!(c.nodes[&f].core.awaited_snapshot(G), None);
+    write(&mut c, l, b"after");
+    assert_eq!(c.sm(f).data, c.sm(l).data);
+}

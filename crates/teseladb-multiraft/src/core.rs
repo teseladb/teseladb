@@ -366,9 +366,30 @@ fn wrap_snapshot(last_ms: u64, terms: &TermRuns, sm: &[u8]) -> Bytes {
     Bytes::from_vec(e.finish())
 }
 
+/// The bit of a stored snapshot's first word that says the replica keeps it as its own without
+/// its data (`reject_awaited`, D-067). It is durable with the snapshot, so after a restart the
+/// replica waits for the data whatever its state machine says of it, and it goes when a
+/// leader's snapshot replaces this one. Wall-clock milliseconds never reach it.
+const WITHOUT_DATA: u64 = 1 << 63;
+
+/// Whether stored snapshot `b` is kept without its data.
+fn kept_without_data(b: &[u8]) -> bool {
+    Decoder::new(b).u64().is_ok_and(|w| w & WITHOUT_DATA != 0)
+}
+
+/// Snapshot `b` with its mark of [`WITHOUT_DATA`] set to `on`.
+fn marked(b: &[u8], on: bool) -> Bytes {
+    let Ok(word) = Decoder::new(b).u64() else { return Bytes::from_vec(b.to_vec()) };
+    let word = if on { word | WITHOUT_DATA } else { word & !WITHOUT_DATA };
+    let mut e = Encoder::new();
+    e.u64(word);
+    e.raw(&b[8..]);
+    Bytes::from_vec(e.finish())
+}
+
 fn unwrap_snapshot(b: &[u8]) -> Result<(u64, TermRuns, &[u8]), DecodeError> {
     let mut d = Decoder::new(b);
-    let ms = d.u64()?;
+    let ms = d.u64()? & !WITHOUT_DATA;
     let terms = TermRuns::decode(&mut d)?;
     Ok((ms, terms, d.raw(d.remaining())?))
 }
@@ -1528,7 +1549,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
         for (token, r) in c.snapshots {
             match (self.loads.remove(&token), r) {
                 (Some(Load::Restore { group }), Ok((meta, data))) => {
-                    if self.missing_data(group, &data) {
+                    let without = kept_without_data(&data);
+                    if without || self.missing_data(group, &data) {
                         // Its data comes another way (a range cleared before a crash): the group
                         // asks for it and meanwhile votes, appends and commits, but applies
                         // nothing; the leader's snapshot may come first (007 T016).
@@ -1538,6 +1560,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
                         grp.own = Some((meta.index, data));
                         grp.loading = false;
                         ready.insert(group);
+                        // Nobody served its data before the restart: it asks the leader for a
+                        // newer snapshot again.
+                        if without {
+                            self.reject_awaited(group);
+                        }
                     } else if self.restore(group, &data) {
                         self.restored_own(group);
                         ready.insert(group);
@@ -2258,6 +2285,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
     }
 
     fn install(&mut self, g: GroupId, snap: Snapshot, d: Deferred) -> bool {
+        // The leader's own copy may be one it once kept without its data: this replica's is not.
+        let snap = match kept_without_data(&snap.data) {
+            true => Snapshot { data: marked(&snap.data, false), ..snap },
+            false => snap,
+        };
         let grp = self.groups.get_mut(&g).expect("a group of this core");
         if let Ok((_, _, sm)) = unwrap_snapshot(&snap.data)
             && !grp.sm.has_data_for(sm)
@@ -2367,6 +2399,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // round of entries (007 T016). Parked, it answered nothing, and a leader that needs its
         // vote to commit past the snapshot (the split that would make a newer one) never got it.
         if let Some((snap, d)) = grp.parked.take() {
+            // Durable with its mark: a restart does not take it for a snapshot with its data.
+            let snap = Snapshot { data: marked(&snap.data, true), ..snap };
             grp.own = Some((snap.meta.index, snap.data.clone()));
             grp.sync_awaiting();
             if !self.save_installed(g, snap, d) {
