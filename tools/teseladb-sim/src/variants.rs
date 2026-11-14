@@ -56,8 +56,10 @@ variants!(
     // A commit below a push (008 T024): `splits` reads at a mark above the commit and misses the
     // write (`intents`, seed 7 on main 842d14f). Seed 1 of `txn-append` finds it first: two
     // transactions close a cycle (`snapshot-isolation`, G-SI; measured 04-11-2026 with the
-    // fixes of seeds 883 of `indexes` and 790 and 548 of `search`).
-    ("commit_below_push", "snapshot-isolation", Default, 1000),
+    // fixes of seeds 883 of `indexes` and 790 and 548 of `search`). Measured 14-11-2026 with
+    // `--only`: seed 6 of `search` finds it first, a read at a mark above the commit that misses
+    // the write (`intents`); `txn-append` still closes a G-SI cycle, at seed 9.
+    ("commit_below_push", "intents", Default, 1000),
     // A commit that ignores the reads of its record (008 T043): a reader pushed the transaction by
     // reading its record and read below the intent, and the transaction commits at or below that
     // read: seed 6 of `txn-append` closes a cycle (measured 08-11-2026 on t043 d505e97).
@@ -160,8 +162,10 @@ variants!(
     // of `search`; on main 842d14f `indexes` found it first, at seed 1). Since then seed 1 of
     // `indexes` decides again: `index_consistency` (measured 11-11-2026 on 96a2dd48, where seed 1
     // of `txn-append` found it with `snapshot-isolation`, and with the pipelined intents of 008
-    // FR-021, where `indexes` finds it first).
-    ("reader_ignores_intent", "index_consistency", Default, 1000),
+    // FR-021, where `indexes` finds it first). Measured 14-11-2026 with `--only`: seed 1 of
+    // `changestream`, which sorts before `indexes`, finds it first, a read that misses a committed
+    // write whose intent it read past (`intents`); `indexes` still finds it at seed 2.
+    ("reader_ignores_intent", "intents", Default, 1000),
     // A reader that ignores what its push found (008 T029): it reads below the intent of a
     // transaction that committed at or below its mark. Seed 1 fails in two workloads: `indexes`,
     // whose index maintenance reads the old document and leaves entries no document needs, and
@@ -192,7 +196,10 @@ variants!(
     // clock rule and the coordinator, it no longer did (measured 04-11-2026). With the pipelined
     // intents of 008 FR-021 seed 7 of `changestream` finds it first: a change delivered for a
     // write whose commit never became durable (`changestream_delivery`, measured 11-11-2026).
-    ("resolve_before_durable_commit", "changestream_delivery", Default, 1000),
+    // Measured 14-11-2026 with `--only`: seed 1 of `txn-append` finds it first, a transaction
+    // that read a value of one that then aborted (`snapshot-isolation`, G1a); `changestream`
+    // finds it at seed 19 (`intents`) and its delivery checker at seed 45.
+    ("resolve_before_durable_commit", "snapshot-isolation", Default, 1000),
     ("resolved_intent_reappears", "lsm", Default, 1000),
     ("rollback_unrecorded", "rollback", Default, 1000),
     // A search that answers before its segments reach its mark (011 T018): the `search` workload
