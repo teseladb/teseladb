@@ -15,6 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use teseladb_keys::Hlc;
+use teseladb_keys::zone::Zones;
 use teseladb_raftlog::{IoErrno, IoOp};
 use teseladb_types::Bytes;
 
@@ -535,6 +536,7 @@ impl View {
             current: None,
             ready: None,
             finished: false,
+            skipped: 0,
         }
     }
 }
@@ -548,6 +550,30 @@ const VERSIONS_STEPPED: usize = 8;
 fn goes_before(cursors: &[Cursor], a: usize, b: usize) -> bool {
     let key = |i: usize| cursors[i].key().expect("a cursor in the heap is at an entry");
     entry::compare(key(a), key(b)).then(a.cmp(&b)).is_lt()
+}
+
+/// Whether a filtered scan passes over data block `i` of `table` without reading it (FR-039):
+/// its zones exist and `prune` rules them out, and no source after it in the order of precedence
+/// may hold a key of the block. `older` are those sources' cursors, and `asleep(j)` says that the
+/// `j`-th of them is a history file the read keeps closed. A newer version elsewhere hides the
+/// block's versions anyway; an older one would show through once they are passed over, and could
+/// match where the block's newer version, or its deletion, does not.
+fn skippable(
+    table: &Table,
+    i: usize,
+    prune: &dyn Fn(&dyn Zones) -> bool,
+    older: &[Cursor],
+    asleep: impl Fn(usize) -> bool,
+) -> bool {
+    let Some(zones) = table.zones.as_ref().and_then(|z| z.block(i)) else { return false };
+    if prune(&zones) {
+        return false;
+    }
+    let (lo, hi) = table.block_span(i);
+    older.iter().enumerate().all(|(j, c)| match c {
+        Cursor::Table { table: t, .. } => asleep(j) || !t.may_hold(lo, hi),
+        Cursor::Mem(_) => true,
+    })
 }
 
 /// Puts the cursor at `at` of `heap` in its place below.
@@ -604,6 +630,8 @@ pub struct Scan {
     /// hold one and every scan carries the field.
     ready: Option<Box<(Item, Box<Deferred>)>>,
     finished: bool,
+    /// Data blocks passed over by their zone maps (FR-039).
+    skipped: u64,
 }
 
 impl std::fmt::Debug for Scan {
@@ -696,17 +724,57 @@ impl Scan {
         self.next_with(&mut lsm.reader)
     }
 
+    /// [`Scan::next`] passing over the data blocks whose zones `prune` rules out (FR-039):
+    /// `prune` says whether a block may hold a version the scan's filter accepts.
+    pub fn next_pruned(&mut self, lsm: &mut Lsm, prune: &dyn Fn(&dyn Zones) -> bool) -> Step {
+        self.next_pruned_with(&mut lsm.reader, Some(prune))
+    }
+
+    /// Data blocks the scan passed over by their zone maps so far (FR-039).
+    pub fn skipped_blocks(&self) -> u64 {
+        self.skipped
+    }
+
     /// [`Scan::next`] with the blocks from `r`.
     pub(crate) fn next_with<B: Blocks>(&mut self, r: &mut B) -> Step {
+        self.next_pruned_with(r, None)
+    }
+
+    /// [`Scan::next_pruned`] with the blocks from `r`.
+    pub(crate) fn next_pruned_with<B: Blocks>(
+        &mut self,
+        r: &mut B,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> Step {
         r.begin();
-        let step = self.step(r);
+        let step = self.step(r, prune);
         if !matches!(step, Step::Miss(_)) {
             r.finish();
         }
         step
     }
 
-    fn step<B: Blocks>(&mut self, r: &mut B) -> Step {
+    /// Makes cursor `at` ready, passing over the blocks `prune` lets it skip.
+    fn ready_at<B: Blocks>(
+        &mut self,
+        at: usize,
+        r: &mut B,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> Result<Option<ReadToken>, LsmError> {
+        let cursors = self.cursors.as_mut().expect("opened");
+        let Some(prune) = prune else { return cursors[at].ready(r) };
+        let (head, older) = cursors.split_at_mut(at + 1);
+        let asleep = &self.asleep;
+        let skipped = &mut self.skipped;
+        let mut skip = |table: &Table, i: usize| {
+            let gone = skippable(table, i, prune, older, |j| asleep.contains(&Some(at + 1 + j)));
+            *skipped += u64::from(gone);
+            gone
+        };
+        head[at].ready_skipping(r, &mut skip)
+    }
+
+    fn step<B: Blocks>(&mut self, r: &mut B, prune: Option<&dyn Fn(&dyn Zones) -> bool>) -> Step {
         if let Some(e) = r.failure() {
             return Step::Failed(e.clone());
         }
@@ -722,10 +790,9 @@ impl Scan {
         }
         if self.heap.is_none() {
             // Every cursor at its first entry; then they are ordered once.
-            let cursors = self.cursors.as_mut().expect("opened");
             let mut waiting = None;
-            for c in cursors.iter_mut() {
-                match c.ready(r) {
+            for at in 0..self.cursors.as_ref().expect("opened").len() {
+                match self.ready_at(at, r, prune) {
                     Err(e) => return Step::Failed(e),
                     Ok(Some(t)) => {
                         waiting.get_or_insert(t);
@@ -736,6 +803,7 @@ impl Scan {
             if let Some(t) = waiting {
                 return Step::Miss(t);
             }
+            let cursors = self.cursors.as_mut().expect("opened");
             let mut heap: Vec<usize> =
                 (0..cursors.len()).filter(|i| cursors[*i].key().is_some()).collect();
             for at in (0..heap.len() / 2).rev() {
@@ -746,14 +814,14 @@ impl Scan {
         loop {
             if self.moved {
                 // Only the first cursor moves: ready again, it goes to its place or leaves.
-                let cursors = self.cursors.as_mut().expect("opened");
-                let heap = self.heap.as_mut().expect("ordered");
-                let top = heap[0];
-                match cursors[top].ready(r) {
+                let top = self.heap.as_ref().expect("ordered")[0];
+                match self.ready_at(top, r, prune) {
                     Err(e) => return Step::Failed(e),
                     Ok(Some(t)) => return Step::Miss(t),
                     Ok(None) => {}
                 }
+                let cursors = self.cursors.as_mut().expect("opened");
+                let heap = self.heap.as_mut().expect("ordered");
                 self.moved = false;
                 if cursors[top].key().is_none() {
                     heap.swap_remove(0);
@@ -762,12 +830,12 @@ impl Scan {
             }
             if let Some(j) = self.joining {
                 // A history file a key woke: at its entry, it takes its place among the others.
-                let cursors = self.cursors.as_mut().expect("opened");
-                match cursors[j].ready(r) {
+                match self.ready_at(j, r, prune) {
                     Err(e) => return Step::Failed(e),
                     Ok(Some(t)) => return Step::Miss(t),
                     Ok(None) => {}
                 }
+                let cursors = self.cursors.as_mut().expect("opened");
                 self.joining = None;
                 if cursors[j].key().is_some() {
                     let heap = self.heap.as_mut().expect("ordered");

@@ -160,6 +160,16 @@ impl Cursor {
 
     /// Loads what the cursor needs; `Some(token)` if it waits for a read.
     pub(crate) fn ready<B: Blocks>(&mut self, r: &mut B) -> Result<Option<ReadToken>, LsmError> {
+        self.ready_skipping(r, &mut |_, _| false)
+    }
+
+    /// [`Cursor::ready`] passing over, without reading it, each data block that `skip` names
+    /// (FR-039): the cursor goes on at the next block.
+    pub(crate) fn ready_skipping<B: Blocks>(
+        &mut self,
+        r: &mut B,
+        skip: &mut dyn FnMut(&Table, usize) -> bool,
+    ) -> Result<Option<ReadToken>, LsmError> {
         let Cursor::Table { table, pos } = self else {
             return Ok(None);
         };
@@ -171,6 +181,10 @@ impl Cursor {
                         *pos = Pos::Done;
                         continue;
                     };
+                    if skip(table, i) {
+                        *pos = Pos::Block(i + 1);
+                        continue;
+                    }
                     let block = match r.block(table, i)? {
                         Fetch::Ready(b) => b,
                         Fetch::Wait(t) => return Ok(Some(t)),
@@ -183,6 +197,10 @@ impl Cursor {
                     let i = *i;
                     if i >= table.blocks() {
                         *pos = Pos::Done;
+                        continue;
+                    }
+                    if skip(table, i) {
+                        *pos = Pos::Block(i + 1);
                         continue;
                     }
                     let block = match r.block(table, i)? {

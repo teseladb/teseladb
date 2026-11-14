@@ -1093,6 +1093,7 @@ impl Backend for ServerBackend {
         examine: usize,
         concern: ReadConcern,
         keep: &mut teseladb_wire::commands::Keep<'_>,
+        block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
     ) -> Result<teseladb_wire::commands::Matching, CommandError> {
         // On this thread when the range's view serves it, for a read at the latest mark on the
         // leaders (005 FR-028, FR-031): the filter runs on the stored bytes (010 FR-027).
@@ -1100,7 +1101,9 @@ impl Backend for ServerBackend {
             && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         if outside && start < end {
             let began = Instant::now();
-            if let Some(found) = self.scan_matching_outside((start, end), examine, concern, keep) {
+            if let Some(found) =
+                self.scan_matching_outside((start, end), examine, concern, (keep, block))
+            {
                 stage_since(Stage::ScanOutside, began);
                 return Ok(found);
             }
