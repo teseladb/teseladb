@@ -38,6 +38,14 @@ impl RangeHost {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;
         }
+        // A replica that waits for a snapshot's data holds a state behind its log, maybe over
+        // keys the data of another range of the core took: it serves nothing until the data is
+        // here (D-067).
+        if core.awaited_snapshot(g).is_some() {
+            let hint = core.status(g).map_or(NodeId(0), |s| s.leader);
+            self.reply(id, Err(RangeError::NotLeader { hint }));
+            return id;
+        }
         let sm = core.state_machine(g);
         let applied = sm.map_or(0, StateMachine::applied_index);
         let known = [core.closed(g), sm.and_then(RangeState::closed_mark)];

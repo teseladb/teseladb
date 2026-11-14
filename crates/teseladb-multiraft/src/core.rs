@@ -2561,8 +2561,14 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// The highest mark a leader of `g` closed that this replica heard, with the index up to which
     /// it has to apply to read at it (007 FR-012). A closed mark holds for good: no leader of a
     /// later term writes at or below it either.
+    /// `None` while the replica waits for a snapshot's data: its state machine is behind the
+    /// log Raft holds, and it serves no read until the data is here (D-067).
     pub fn closed(&self, g: GroupId) -> Option<(Hlc, u64)> {
-        self.groups.get(&g)?.closed_in
+        let grp = self.groups.get(&g)?;
+        if grp.parked.is_some() || grp.own.is_some() {
+            return None;
+        }
+        grp.closed_in
     }
 
     /// Takes the closed marks of the heartbeats `beats`.

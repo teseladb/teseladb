@@ -539,6 +539,21 @@ fn a_replica_whose_parked_snapshot_nobody_serves_keeps_it_and_lets_the_leader_co
     assert_eq!(c.nodes[&f].core.awaited_snapshot(G).map(<[u8]>::to_vec), Some(parked));
     assert_eq!(c.nodes[&f].core.state_machine(G).unwrap().entries, applied, "nothing applied");
     assert_ne!(c.nodes[&f].core.status(G).unwrap().role, Role::Leader);
+    // It serves no read at a closed mark while its state machine is behind its log.
+    assert_eq!(c.nodes[&f].core.closed(G), None);
+    // Asked by the leader to take the leadership, it does not stand: a candidate without the
+    // data would lead with a state behind what it committed.
+    let leads = |c: &Cluster, n: NodeId| c.nodes[&n].core.status(G).unwrap().role == Role::Leader;
+    c.nodes.get_mut(&l).unwrap().core.transfer_leader(G, f);
+    c.ticks(50);
+    assert!(!leads(&c, f), "a replica without its snapshot's data takes no leadership");
+    // Nor with the leader gone, though its log is the newest of the two left.
+    c.cut.clear();
+    c.cut.insert(l);
+    c.ticks(300);
+    assert!(!leads(&c, f), "a replica without its snapshot's data does not campaign");
+    c.cut.clear();
+    c.ticks(50);
     // Once its data is here it applies what it held back.
     c.nodes[&f].missing.set(false);
     let now = c.now;
