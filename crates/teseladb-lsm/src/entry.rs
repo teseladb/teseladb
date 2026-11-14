@@ -100,6 +100,14 @@ pub(crate) fn byte_order(ikey: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(version);
 }
 
+/// The order of the bytes [`byte_order`] makes from `ikey` against the bytes `sort`, without
+/// making them.
+pub(crate) fn byte_order_compare(ikey: &[u8], sort: &[u8]) -> Ordering {
+    let (logical, version) = ikey.split_at(ikey.len() - VERSION_LEN);
+    let escaped = logical.iter().flat_map(|&b| std::iter::once(b).chain((b == 0).then_some(0xFF)));
+    escaped.chain([0, 0]).chain(version.iter().copied()).cmp(sort.iter().copied())
+}
+
 /// The smallest internal key after every version of `logical`.
 pub fn after_all_versions(logical: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(logical.len() + 1 + VERSION_LEN);
