@@ -93,7 +93,7 @@ gate "1. lints for x86_64 Linux" cargo clippy --workspace --all-targets --offlin
 gate "1. shell scripts" shellcheck_all
 # The unsafe modules of D-151 (UNSAFE_MODULES of scripts/check-deps.sh), under Miri.
 gate "1. Miri on the unsafe modules of D-151" env MIRIFLAGS=-Zmiri-disable-isolation \
-  cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable::
+  cargo +nightly miri test -q -p teseladb-lsm --lib -- skiplist:: shared:: memtable:: art::
 # The vector kernels of the query engine (010 FR-030): NEON on the host, and the x86_64 ones
 # interpreted, SSE2 by default and AVX2 with the feature on.
 gate "1. Miri on the vector kernels (host)" env MIRIFLAGS=-Zmiri-disable-isolation \

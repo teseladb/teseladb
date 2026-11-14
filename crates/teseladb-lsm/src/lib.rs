@@ -43,6 +43,7 @@
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![deny(unsafe_code)]
 
+mod art;
 mod cache;
 mod compaction;
 mod concurrent;
@@ -64,6 +65,7 @@ mod read_back;
 mod recovery;
 mod shared;
 mod size;
+#[cfg(test)]
 mod skiplist;
 pub mod sst;
 mod time_iter;

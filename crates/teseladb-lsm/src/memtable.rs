@@ -1,8 +1,9 @@
 //! Memtables (FR-002, FR-026): the writes not yet in an SST.
 //!
-//! A memtable is a skiplist by internal key with one writer, the core, and readers on any thread
-//! without a lock ([`crate::skiplist`]); when it reaches its budget it is frozen (no more writes)
-//! and waits for its flush. Each memtable keeps its range tombstones, the lowest and highest
+//! A memtable is an adaptive radix tree by internal key (FR-038) with one writer, the core, and
+//! readers on any thread without a lock ([`crate::art`]); the tree walks the bytes of
+//! [`entry::byte_order`], which sort as internal keys do. When it reaches its budget it is frozen
+//! (no more writes) and waits for its flush. Each memtable keeps its range tombstones, the lowest and highest
 //! timestamps it holds and, per range, the lowest and highest Raft index applied to it (FR-010,
 //! FR-011). The exact timestamps and the applied indexes are the core's; readers on other threads
 //! see the physical part of the timestamps, which only ever widens, to skip a memtable that cannot
@@ -14,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use teseladb_keys::Hlc;
 use teseladb_types::{Bytes, GroupId};
 
+use crate::art::{Art, WriterCell, bytes_order};
 use crate::entry::{self, Kind, RangeTombstone};
-use crate::skiplist::{SkipList, WriterCell};
 
 /// Fixed memory cost counted per version, besides its key and value.
 pub(crate) const ENTRY_OVERHEAD: u64 = 64;
@@ -46,9 +47,9 @@ struct Meta {
 
 /// A memtable.
 pub(crate) struct Memtable {
-    versions: SkipList<Slot>,
+    versions: Art<Slot>,
     /// Range tombstones by their order of arrival.
-    tombstones: SkipList<RangeTombstone>,
+    tombstones: Art<RangeTombstone>,
     /// Lowest and highest physical time of its versions and tombstones (`u64::MAX` and 0 while
     /// empty), for readers on any thread.
     min_physical: AtomicU64,
@@ -84,8 +85,8 @@ impl Drop for Memtable {
 impl Default for Memtable {
     fn default() -> Memtable {
         Memtable {
-            versions: SkipList::new(entry::compare),
-            tombstones: SkipList::new(|a, b| a.cmp(b)),
+            versions: Art::new(entry::byte_order),
+            tombstones: Art::new(bytes_order),
             min_physical: AtomicU64::new(u64::MAX),
             max_physical: AtomicU64::new(0),
             frozen: AtomicBool::new(false),
@@ -313,6 +314,170 @@ mod tests {
         assert!(m.seek(&entry::after_all_versions(b"b")).is_none());
         let last_a = m.before(&entry::first_version(b"b")).map(|k| entry::split(k).0.to_vec());
         assert_eq!(last_a, Some(b"a".to_vec()));
+    }
+
+    /// A small random internal key: logical keys of up to 4 bytes from an alphabet with the
+    /// zero byte and 0xFF, so that some are the start of others, and a few timestamps.
+    fn random_key(rng: &mut u64) -> Vec<u8> {
+        let len = (next(rng) % 5) as usize;
+        let logical: Vec<u8> =
+            (0..len).map(|_| [0, 1, b'a', 0xFF][(next(rng) % 4) as usize]).collect();
+        let at = Hlc { physical: next(rng) % 4, logical: (next(rng) % 2) as u32 };
+        entry::internal_key(&logical, at)
+    }
+
+    /// The next number of a xorshift generator.
+    fn next(rng: &mut u64) -> u64 {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        *rng
+    }
+
+    /// Keys the memtable may be asked about: any internal key, and the first and last bounds of
+    /// a logical key that the reads build.
+    fn random_probe(rng: &mut u64) -> Vec<u8> {
+        let k = random_key(rng);
+        match next(rng) % 3 {
+            0 => k,
+            1 => entry::first_version(entry::logical(&k)),
+            _ => entry::after_all_versions(entry::logical(&k)),
+        }
+    }
+
+    const KINDS: [Kind; 4] = [Kind::Put, Kind::Delete, Kind::Intent, Kind::Retract];
+
+    /// Every version from the first, by `seek` and `next_after`.
+    fn forward(m: &Memtable) -> Vec<(Vec<u8>, Kind, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut at = m.seek(&entry::first_version(b""));
+        while let Some((pos, k, s)) = at {
+            out.push((k.to_vec(), s.kind, s.value.to_vec()));
+            at = m.next_after(pos, k);
+        }
+        out
+    }
+
+    /// Every key from the last, by `before`.
+    fn backward(m: &Memtable) -> Vec<Vec<u8>> {
+        let end = entry::after_all_versions(&[0xFF; 8]);
+        std::iter::successors(m.before(&end), |k| m.before(k)).map(<[u8]>::to_vec).collect()
+    }
+
+    /// FR-038: for every seed, the memtable over the radix tree gives the answers the skiplist
+    /// gave under the order of internal keys: puts, deletions, intents and retractions of several
+    /// versions of keys that start one another, versions written again, walks in both directions
+    /// and the neighbours of any key.
+    #[test]
+    fn the_tree_answers_as_the_skiplist_did() {
+        use crate::skiplist::SkipList;
+        // Fewer seeds and steps under Miri, the same cases.
+        let (seeds, steps): (u64, u64) = if cfg!(miri) { (2, 120) } else { (64, 600) };
+        for seed in 0..seeds {
+            let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let m = Memtable::default();
+            let list: SkipList<Slot> = SkipList::new(entry::compare);
+            for step in 0..steps {
+                let k = random_key(&mut rng);
+                let kind = KINDS[(next(&mut rng) % 4) as usize];
+                let value = match kind {
+                    Kind::Put | Kind::Intent => step.to_be_bytes().to_vec(),
+                    Kind::Delete | Kind::Retract => Vec::new(),
+                };
+                let (logical, ts) = entry::split(&k);
+                m.insert(GroupId(1), step, logical, ts, kind, &value);
+                list.insert(k.clone(), Slot { kind, value: Bytes::copy_from_slice(&value) });
+                let probe = random_probe(&mut rng);
+                let ours = m.seek(&probe).map(|(_, k, s)| (k.to_vec(), s.kind));
+                let theirs = list.seek(&probe).map(|e| (e.key().to_vec(), e.value().kind));
+                assert_eq!(ours, theirs, "seed {seed} step {step}");
+                let ours = m.next_after(0, &probe).map(|(_, k, _)| k.to_vec());
+                assert_eq!(ours, list.after(&probe).map(|e| e.key().to_vec()), "seed {seed}");
+                let ours = m.before(&probe).map(<[u8]>::to_vec);
+                assert_eq!(ours, list.before(&probe).map(|e| e.key().to_vec()), "seed {seed}");
+                let ours: Vec<Vec<u8>> = m.from(Some(&probe)).map(|(k, _)| k.to_vec()).collect();
+                let start = list.after(&probe);
+                let theirs: Vec<Vec<u8>> =
+                    std::iter::successors(start, |e| e.next()).map(|e| e.key().to_vec()).collect();
+                assert_eq!(ours, theirs, "seed {seed} step {step}");
+            }
+            let theirs: Vec<(Vec<u8>, Kind, Vec<u8>)> = list
+                .iter()
+                .map(|e| (e.key().to_vec(), e.value().kind, e.value().value.to_vec()))
+                .collect();
+            assert_eq!(forward(&m), theirs, "seed {seed}");
+            let mut reversed: Vec<Vec<u8>> = theirs.into_iter().map(|e| e.0).collect();
+            reversed.reverse();
+            assert_eq!(backward(&m), reversed, "seed {seed}");
+            let all: Vec<Vec<u8>> = m.from(None).map(|(k, _)| k.to_vec()).collect();
+            assert_eq!(all.len(), list.len(), "seed {seed}");
+            assert_eq!(m.len(), list.len(), "seed {seed}");
+        }
+    }
+
+    /// FR-038, FR-026: readers on other threads walk the memtable in both directions while the
+    /// core writes; each sees keys in order, each with the value written with it, and every key
+    /// written before the walk started.
+    #[test]
+    fn readers_walk_both_ways_while_the_core_writes() {
+        let n: u64 = if cfg!(miri) { 40 } else { 4_000 };
+        let m = std::sync::Arc::new(Memtable::default());
+        let written = std::sync::Arc::new(AtomicU64::new(0));
+        let readers: Vec<_> = (0..3)
+            .map(|r| {
+                let (m, written) = (m.clone(), written.clone());
+                std::thread::spawn(move || {
+                    loop {
+                        let floor = written.load(Ordering::Acquire);
+                        let keys = match r % 2 {
+                            0 => forward(&m).into_iter().map(|e| (e.0, e.2)).collect::<Vec<_>>(),
+                            _ => {
+                                let mut keys: Vec<(Vec<u8>, Vec<u8>)> = backward(&m)
+                                    .into_iter()
+                                    .map(|k| {
+                                        let (_, _, s) = m.seek(&k).expect("a key it walked");
+                                        (k, s.value.to_vec())
+                                    })
+                                    .collect();
+                                keys.reverse();
+                                keys
+                            }
+                        };
+                        assert!(keys.windows(2).all(|w| entry::compare(&w[0].0, &w[1].0).is_lt()));
+                        for (k, v) in &keys {
+                            assert_eq!(entry::logical(k), &v[..], "a whole version");
+                        }
+                        assert!(keys.len() as u64 >= floor, "{} of {floor}", keys.len());
+                        if floor == n {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+        let mut rng = 0xC0FFEE;
+        for i in 0..n {
+            // Distinct logical keys in random order, the value being the key itself.
+            let logical = [(next(&mut rng) % 7) as u8, (i >> 8) as u8, i as u8];
+            m.insert(GroupId(1), i, &logical, ts(next(&mut rng) % 3), Kind::Put, &logical);
+            written.store(i + 1, Ordering::Release);
+        }
+        for r in readers {
+            r.join().expect("a reader");
+        }
+    }
+
+    #[test]
+    fn the_bytes_of_internal_keys_sort_as_the_keys_do() {
+        let mut rng = 0x5EED;
+        for _ in 0..if cfg!(miri) { 200 } else { 5_000 } {
+            let (a, b) = (random_key(&mut rng), random_key(&mut rng));
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            entry::byte_order(&a, &mut x);
+            entry::byte_order(&b, &mut y);
+            assert_eq!(x.cmp(&y), entry::compare(&a, &b), "{a:?} {b:?}");
+            assert!(a == b || !(x.starts_with(&y) || y.starts_with(&x)), "{a:?} {b:?}");
+        }
     }
 
     #[test]
