@@ -142,7 +142,23 @@ enum Next {
 pub fn run(args: &Args) -> Result<Report, String> {
     let target = Target::open(args.target.as_deref())?;
     let addr = target.addr()?;
-    let mut setup = Client::connect(addr)?;
+    let mut report = measure(args, &|| Client::connect(addr))?;
+    report.notes.push(format!(
+        "{} workers, {}, target {}",
+        args.concurrency.max(1),
+        args.rate.map_or("closed loop".to_owned(), |r| format!("{r} op/s")),
+        args.target.as_deref().unwrap_or("local cluster of three nodes")
+    ));
+    Ok(report)
+}
+
+/// The scenario's load over the connections `connect` opens: one for the setup and one for each
+/// worker (`noisy-tenant` opens them signed in as a tenant's user, 007 SC-010).
+pub(crate) fn measure(
+    args: &Args,
+    connect: &(dyn Fn() -> Result<Client, String> + Sync),
+) -> Result<Report, String> {
+    let mut setup = connect()?;
     // The collection may not exist yet.
     let _ = setup.command(DB, doc(vec![("drop", Value::String(COLLECTION.into()))]));
     create_index(&mut setup)?;
@@ -169,7 +185,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     // searches its value.
     let out = drive(
         &load,
-        |w| Ok((Client::connect(addr)?, Rng::new(SEED + w as u64), Next::Write)),
+        |w| Ok((connect()?, Rng::new(SEED + w as u64), Next::Write)),
         |(c, rng, next_op)| match std::mem::replace(next_op, Next::Write) {
             Next::Write => {
                 let id = key(next.fetch_add(1, Ordering::Relaxed));
@@ -208,12 +224,6 @@ pub fn run(args: &Args) -> Result<Report, String> {
     if let Some(e) = &out.first_error {
         report.notes.push(format!("first error: {e}"));
     }
-    report.notes.push(format!(
-        "{} workers, {}, target {}",
-        args.concurrency.max(1),
-        args.rate.map_or("closed loop".to_owned(), |r| format!("{r} op/s")),
-        args.target.as_deref().unwrap_or("local cluster of three nodes")
-    ));
     Ok(report)
 }
 

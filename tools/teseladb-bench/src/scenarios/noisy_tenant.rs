@@ -3,7 +3,10 @@
 //! tries as many commands as its connections can send; `quiet` has no cap and reads one document
 //! at a time. The scenario times the reads of `quiet` alone, then while `noisy` sends cheap
 //! commands, then while it sends aggregations and `$where`; the p99 of `quiet` with `noisy` may
-//! be at most 10 % over the p99 alone.
+//! be at most 10 % over the p99 alone. Last it runs the `reference` load as `quiet`, without
+//! limits and then with limits it never reaches, to time what checking them costs: each p99 at
+//! most 3 % over the one without limits, and the throughput at least the one without over 1.03
+//! (the budget of the plan of 007 for the token bucket, the concurrency count and the quota).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,9 +28,35 @@ use crate::report::{Report, Target};
 
 /// SC-010: the p99 of `quiet` with `noisy` at most 10 % over the p99 alone.
 const P99_RATIO: f64 = 1.10;
+/// The plan of 007: checking the limits that a tenant does not reach costs at most 3 % of p99.
+const LIMITS_P99_RATIO: f64 = 1.03;
 /// The cap of `noisy` in commands per second, and its `maxTimeMS` (SC-010).
 const NOISY_OPS: &str = "100";
 const NOISY_MAX_TIME_MS: &str = "30000";
+/// Limits of `quiet` for the `reference` load that it never reaches: what is timed is checking
+/// them on each command.
+const UNREACHED_LIMITS: [&str; 18] = [
+    "--storage-bytes",
+    "1099511627776",
+    "--max-connections",
+    "10000",
+    "--ops-per-second",
+    "10000000",
+    "--max-time-ms",
+    NOISY_MAX_TIME_MS,
+    "--max-concurrent-ops",
+    "10000",
+    "--max-write-bytes-per-second",
+    "1099511627776",
+    "--max-databases",
+    "10000",
+    "--max-collections",
+    "10000",
+    "--max-search-indexes",
+    "10000",
+];
+/// The kinds of operation of the `reference` load whose p99 is compared.
+const REFERENCE_KINDS: [&str; 4] = ["write", "read", "query", "search"];
 /// The connections of `noisy`, each sending without a pause.
 const NOISY_CONNECTIONS: usize = 8;
 /// The cores of the node.
@@ -130,29 +159,36 @@ impl Cluster {
 
     /// A connection signed in as `user` with SCRAM-SHA-256.
     fn login(&self, user: &str, password: &str) -> Result<Client, String> {
-        let addr = *self.node.client_addrs().first().ok_or("the node has no clients' port")?;
-        let mut c = Client::connect(addr)?;
-        let mech = Mechanism::ScramSha256;
-        let prepared = mech.prepare_password(user, password, false).map_err(debug)?;
-        let (mut s, first) = ClientSession::start(mech, user, &prepared, "noisy-tenant-nonce");
-        let bin = |bytes: Vec<u8>| Value::Binary { subtype: 0, bytes };
-        let start = Document::new()
-            .with("saslStart", 1)
-            .with("mechanism", mech.name())
-            .with("payload", bin(first))
-            .with("options", Document::new().with("skipEmptyExchange", true));
-        let r = reply(&c.command(ADMIN, start)?)?;
-        let Some(Value::Binary { bytes, .. }) = r.get("payload") else {
-            return Err(format!("no payload in {r:?}"));
-        };
-        let fin = s.respond(bytes).map_err(debug)?;
-        let next = Document::new()
-            .with("saslContinue", 1)
-            .with("conversationId", 1)
-            .with("payload", bin(fin));
-        c.command(ADMIN, next)?;
-        Ok(c)
+        login_at(self.addr()?, user, password)
     }
+
+    /// The address of the node's clients' port.
+    fn addr(&self) -> Result<SocketAddr, String> {
+        Ok(*self.node.client_addrs().first().ok_or("the node has no clients' port")?)
+    }
+}
+
+/// A connection to `addr` signed in as `user` with SCRAM-SHA-256.
+fn login_at(addr: SocketAddr, user: &str, password: &str) -> Result<Client, String> {
+    let mut c = Client::connect(addr)?;
+    let mech = Mechanism::ScramSha256;
+    let prepared = mech.prepare_password(user, password, false).map_err(debug)?;
+    let (mut s, first) = ClientSession::start(mech, user, &prepared, "noisy-tenant-nonce");
+    let bin = |bytes: Vec<u8>| Value::Binary { subtype: 0, bytes };
+    let start = Document::new()
+        .with("saslStart", 1)
+        .with("mechanism", mech.name())
+        .with("payload", bin(first))
+        .with("options", Document::new().with("skipEmptyExchange", true));
+    let r = reply(&c.command(ADMIN, start)?)?;
+    let Some(Value::Binary { bytes, .. }) = r.get("payload") else {
+        return Err(format!("no payload in {r:?}"));
+    };
+    let fin = s.respond(bytes).map_err(debug)?;
+    let next =
+        Document::new().with("saslContinue", 1).with("conversationId", 1).with("payload", bin(fin));
+    c.command(ADMIN, next)?;
+    Ok(c)
 }
 
 /// The `root` user of a credentials file in `dir`, as a first start creates it (013 FR-004).
@@ -275,6 +311,63 @@ fn ratio(h: &Histogram, alone: &Histogram) -> f64 {
     h.percentile(99.0) as f64 / alone.percentile(99.0).max(1) as f64
 }
 
+/// The value of metric `name` of `r`.
+fn metric(r: &Report, name: &str) -> Result<f64, String> {
+    r.metrics
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| m.value)
+        .ok_or_else(|| format!("no {name} in the reference load"))
+}
+
+/// The `reference` load as `quiet`, without limits and then with [`UNREACHED_LIMITS`].
+fn reference_with_limits(
+    args: &Args,
+    cluster: &Cluster,
+    report: &mut Report,
+) -> Result<(), String> {
+    let addr = cluster.addr()?;
+    let login = || login_at(addr, QUIET, PASSWORD);
+    let free =
+        super::reference::measure(args, &login).map_err(context("reference without limits"))?;
+    let mut opts = vec!["tenant", "limits", QUIET];
+    opts.extend(UNREACHED_LIMITS);
+    cluster.admin(&opts)?;
+    let held = super::reference::measure(args, &login).map_err(context("reference with limits"))?;
+    for kind in REFERENCE_KINDS {
+        let p99 = format!("{kind}.p99");
+        let (alone, limited) = (metric(&free, &p99)?, metric(&held, &p99)?);
+        report.push(&format!("reference.free.{p99}"), "ns", alone, None);
+        report.push(&format!("reference.limited.{p99}"), "ns", limited, None);
+        let r = limited / alone.max(1.0);
+        report.push(
+            &format!("reference.{kind}.p99_ratio"),
+            "ratio",
+            r,
+            Some(Target::AtMost(LIMITS_P99_RATIO)),
+        );
+    }
+    let (alone, limited) = (metric(&free, "throughput")?, metric(&held, "throughput")?);
+    report.push("reference.free.throughput", "op/s", alone, None);
+    report.push("reference.limited.throughput", "op/s", limited, None);
+    let r = limited / alone.max(f64::MIN_POSITIVE);
+    report.push(
+        "reference.throughput_ratio",
+        "ratio",
+        r,
+        Some(Target::AtLeast(1.0 / LIMITS_P99_RATIO)),
+    );
+    for (name, r) in [("free", &free), ("limited", &held)] {
+        report.push(
+            &format!("reference.{name}.errors"),
+            "op",
+            metric(r, "errors")?,
+            Some(Target::AtMost(0.0)),
+        );
+    }
+    Ok(())
+}
+
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
     if args.target.is_some() {
@@ -300,6 +393,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         report.push(&format!("noisy.{name}.sent"), "ops/s", sent, None);
         report.push(&format!("noisy.{name}.served"), "ops/s", served, Some(Target::AtMost(cap)));
     }
+    reference_with_limits(args, &cluster, &mut report)?;
     report.notes.push(format!(
         "one node of {CORES} cores; noisy capped at {NOISY_OPS} commands per second and \
          maxTimeMS {NOISY_MAX_TIME_MS} with {NOISY_CONNECTIONS} connections; quiet reads one \
@@ -324,13 +418,26 @@ mod tests {
             ..Args::default()
         };
         let r = run(&args).unwrap();
-        for name in ["quiet.alone.p99", "quiet.cheap.p99_ratio", "quiet.heavy.p99_ratio"] {
+        let names = [
+            "quiet.alone.p99",
+            "quiet.cheap.p99_ratio",
+            "quiet.heavy.p99_ratio",
+            "reference.read.p99_ratio",
+            "reference.search.p99_ratio",
+            "reference.throughput_ratio",
+        ];
+        for name in names {
             assert!(r.metrics.iter().any(|m| m.name == name), "{name} in {r:?}");
         }
         // A run this short fits in the burst of the cap: the cap itself is measured by the
         // scenario's 10 s windows and by `tests/tenant_rate_limits.rs` of the server.
         let sent = r.metrics.iter().find(|m| m.name == "noisy.heavy.sent").unwrap();
         assert!(sent.value > 0.0, "{r:?}");
+        // The reference load ran as `quiet`, with and without limits, without errors.
+        for name in ["reference.free.errors", "reference.limited.errors"] {
+            assert_eq!(metric(&r, name).unwrap(), 0.0, "{name} in {r:?}");
+        }
+        assert!(metric(&r, "reference.limited.throughput").unwrap() > 0.0, "{r:?}");
     }
 
     #[test]

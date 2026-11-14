@@ -189,10 +189,25 @@ fn error_code(reply: &[u8]) -> Result<Option<i32>, String> {
     Ok(None)
 }
 
+/// The label of an error that a driver sends again (a node that has not read a tenant's data yet
+/// refuses its writes with it, 007 FR-031).
+const RETRYABLE_LABEL: &str = teseladb_server::tenant_limits::RETRYABLE;
+
+/// Whether a failed reply carries [`RETRYABLE_LABEL`].
+fn retryable_label(reply: &[u8]) -> Result<bool, String> {
+    let doc = RawDoc::from_bytes(reply).map_err(debug)?;
+    let Some(RawValue::Array(labels)) = doc.get("errorLabels") else {
+        return Ok(false);
+    };
+    Ok(labels.iter().any(|l| matches!(l, RawValue::String(s) if s == RETRYABLE_LABEL)))
+}
+
 impl Client {
-    /// Runs `command` until it succeeds, while it fails with `NotWritablePrimary`, at most
-    /// [`TIMEOUT`], as a driver retries: a local cluster that just started may still be electing
-    /// its leaders. For the setup of a scenario, outside its timing.
+    /// Runs `command` until it succeeds, while it fails with `NotWritablePrimary` or an error
+    /// labelled [`RETRYABLE_LABEL`], at most [`TIMEOUT`], as a driver retries: a local cluster
+    /// that just started may still be electing its leaders, and a node that was just given a
+    /// tenant's storage quota reads that tenant's data first. For the setup of a scenario, outside
+    /// its timing.
     pub fn until_ready(&mut self, db: &str, command: Document) -> Result<(), String> {
         self.until_ready_within(db, command, TIMEOUT)
     }
@@ -208,7 +223,8 @@ impl Client {
         // Settled or not, the last reply says how the command went.
         retry(timeout, RANGE_POLL, || {
             last = self.send(db, command.clone())?;
-            Ok((error_code(&last)? != Some(NOT_WRITABLE_PRIMARY)).then_some(()))
+            let again = error_code(&last)? == Some(NOT_WRITABLE_PRIMARY) || retryable_label(&last)?;
+            Ok((!again).then_some(()))
         })?;
         check(&last)
     }
@@ -342,6 +358,27 @@ mod tests {
         let mut c = Client::connect(answering(vec![not_writable()])).unwrap();
         let err = c.until_ready_within("db", Document::new().with("ping", 1), Duration::ZERO);
         assert!(err.unwrap_err().contains("not primary"));
+    }
+
+    #[test]
+    fn until_ready_repeats_a_command_the_server_labels_retryable() {
+        // A node that has not read a tenant's data yet refuses its write with 462 and the label
+        // the drivers retry (007 FR-031); a refusal without the label is the error at once.
+        let labelled = |labels: Vec<Value>| {
+            Document::new()
+                .with("ok", 0.0)
+                .with("errmsg", "try again")
+                .with("code", 462)
+                .with("errorLabels", Value::Array(labels))
+        };
+        let retryable = || labelled(vec![Value::from(RETRYABLE_LABEL)]);
+        let ok = Document::new().with("ok", 1.0);
+        let mut c = Client::connect(answering(vec![retryable(), retryable(), ok])).unwrap();
+        assert_eq!(c.until_ready("db", Document::new().with("ping", 1)), Ok(()));
+        let mut c = Client::connect(answering(vec![labelled(vec![Value::from("Other")])])).unwrap();
+        let err = c.until_ready("db", Document::new().with("ping", 1));
+        assert_eq!(err, Err("try again".to_owned()));
+        assert_eq!(retryable_label(&[1, 2, 3]).map_err(drop), Err(()));
     }
 
     #[test]
