@@ -37,7 +37,7 @@ impl RangeSm {
     fn write_txn_entry(
         &mut self,
         versions: Vec<VersionWrite<'_>>,
-        (live, docs): (Option<u64>, Option<&[(crate::doc_count::Coll, i64)]>),
+        (live, docs): (Option<u64>, Option<&[(crate::doc_count::Coll, crate::doc_count::Change)]>),
         ctx: &ApplyCtx,
     ) -> Result<(), ApplyError> {
         let (mark_key, mark) = (last_mark_key(self.range), encode_hlc(ctx.ts));
@@ -135,7 +135,7 @@ impl RangeSm {
         &mut self,
         (status, commit_ts): (TxnStatus, teseladb_hlc::Hlc),
         resolutions: &[Resolution],
-        (live_delta, docs): (i64, Option<&[(crate::doc_count::Coll, i64)]>),
+        (live_delta, docs): (i64, Option<&[(crate::doc_count::Coll, crate::doc_count::Change)]>),
         ctx: &ApplyCtx,
     ) -> Result<(), ApplyError> {
         self.check_txn_keys(resolutions.iter().map(|r| r.key.as_slice()), ctx)?;

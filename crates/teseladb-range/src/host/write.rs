@@ -439,6 +439,7 @@ impl RangeHost {
         let mut floor = floor;
         let counted = self.counted_writes;
         let reaching = counted && self.reaching_records;
+        let sized = counted && self.sized_counts;
         // Keys the mutation asked to read (`Mutation::reads`): they join its keys for the retry.
         let mut more = Vec::new();
         // A mutation without change, answered without an entry (005 FR-026).
@@ -491,7 +492,8 @@ impl RangeHost {
                 if let (true, Command::Write { puts, deletes, docs, .. }) =
                     (counted, &mut e.command)
                 {
-                    *docs = Some(crate::doc_count::doc_delta(read.0, read.1, puts, deletes));
+                    *docs =
+                        Some(crate::doc_count::doc_delta(read.0, read.1, (puts, deletes), sized));
                 }
                 // With every node reading it, the record keeps the greatest key the write wrote
                 // (007 FR-022).

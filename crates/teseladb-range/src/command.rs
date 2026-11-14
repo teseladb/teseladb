@@ -46,9 +46,10 @@ pub const KIND_FENCE: u16 = 16;
 /// The format of the range commands this binary reads and writes: 1 adds
 /// [`KIND_WRITE_COUNTED`] (007 FR-039), 2 [`KIND_RESOLVE_INTENTS_COUNTED`], 3
 /// [`KIND_WRITE_REACHING`], [`KIND_SPLIT_REACHING`] and [`KIND_MERGE_REACHING`], 4 the writes
-/// that number their new documents ([`FORMAT_LOCAL_IDS`]). A node records it in Group 0 (FR-027),
+/// that number their new documents ([`FORMAT_LOCAL_IDS`]), 5 [`KIND_WRITE_SIZED`],
+/// [`KIND_RESOLVE_INTENTS_SIZED`] and [`KIND_ADJUST_SIZED`]. A node records it in Group 0 (FR-027),
 /// and a leader writes a command of a format only once every node that is not removed records it.
-pub const FORMAT: u8 = 4;
+pub const FORMAT: u8 = 5;
 /// The format whose writes put the range's next local identifier (009 FR-023,
 /// [`crate::sm::next_local_key`]), a key a node of the version before refuses as outside the
 /// range.
@@ -77,6 +78,16 @@ pub const KIND_WRITE_REACHING: u16 = 20;
 pub const KIND_SPLIT_REACHING: u16 = 21;
 /// `kind` of a [`Command::Merge`] whose copied records carry their greatest key.
 pub const KIND_MERGE_REACHING: u16 = 22;
+/// The format that brings [`KIND_WRITE_SIZED`].
+pub const FORMAT_SIZED: u8 = 5;
+/// `kind` of a counted [`Command::Write`] whose change of each collection's documents carries
+/// their bytes of BSON and of keys too (007 FR-039, `collStats`), with whether its idempotence
+/// record reaches as in [`KIND_WRITE_REACHING`].
+pub const KIND_WRITE_SIZED: u16 = 23;
+/// `kind` of a counted [`Command::ResolveIntents`] whose change carries the bytes too.
+pub const KIND_RESOLVE_INTENTS_SIZED: u16 = 24;
+/// `kind` of an [`Command::AdjustCounts`] that carries the bytes the leader counted.
+pub const KIND_ADJUST_SIZED: u16 = 25;
 
 /// The statement a retryable write belongs to (FR-011): the driver sends it again with the same
 /// key after a lost answer.
@@ -192,7 +203,7 @@ pub enum Command {
         live_delta: i64,
         /// Change of each collection's live documents (007 FR-039), computed as `live_delta`;
         /// `None`: not counted, and a write of documents without it leaves the counts estimated.
-        docs: Option<Vec<(crate::doc_count::Coll, i64)>>,
+        docs: Option<Vec<(crate::doc_count::Coll, crate::doc_count::Change)>>,
     },
     /// Raises the GC threshold if it is higher.
     SetGcThreshold {
@@ -289,7 +300,7 @@ pub enum Command {
         live_delta: i64,
         /// Change of each collection's live documents (007 FR-039), computed as `live_delta`;
         /// `None`: not counted, and a commit of documents without it leaves the counts estimated.
-        docs: Option<Vec<(crate::doc_count::Coll, i64)>>,
+        docs: Option<Vec<(crate::doc_count::Coll, crate::doc_count::Change)>>,
     },
     /// Writes the record a push left (008 FR-002, FR-003).
     PushTxn {
@@ -314,6 +325,8 @@ pub enum Command {
         base: u64,
         /// Live documents of each collection at `base`.
         counts: Vec<(crate::doc_count::Coll, u64)>,
+        /// Their bytes of BSON and of keys at `base`, from [`FORMAT_SIZED`] on.
+        sizes: Option<Vec<(crate::doc_count::Coll, crate::doc_count::Size)>>,
     },
     /// First entry of a range born from a split: its parent, the entry that cut it and its end,
     /// so that a replica that replays the range's log from its first entry knows its bounds.
@@ -342,20 +355,41 @@ fn get_record(d: &mut Decoder<'_>) -> Result<DedupRecord, DecodeError> {
 }
 
 /// Writes the change of each collection's live documents of a counted command.
-fn put_docs(e: &mut Encoder, docs: &[(crate::doc_count::Coll, i64)]) {
+/// The change of each collection's documents of a command; with `sized`, its bytes too.
+type Docs = [(crate::doc_count::Coll, crate::doc_count::Change)];
+
+/// Whether a change of documents says the bytes of every collection it changes, so that its
+/// command goes in a kind of [`FORMAT_SIZED`]. An empty one changes nothing.
+fn sized(docs: &Docs) -> bool {
+    !docs.is_empty() && docs.iter().all(|(_, c)| c.size.is_some())
+}
+
+fn put_docs(e: &mut Encoder, docs: &Docs) {
+    let sized = sized(docs);
     e.var(docs.len() as u64);
-    for ((tenant, collection), n) in docs {
-        e.u32(*tenant).u32(*collection).var(zigzag(*n));
+    for ((tenant, collection), c) in docs {
+        e.u32(*tenant).u32(*collection).var(zigzag(c.docs));
+        if let (true, Some((bytes, keys))) = (sized, c.size) {
+            e.var(zigzag(bytes)).var(zigzag(keys));
+        }
     }
 }
 
-/// Reads what [`put_docs`] wrote.
-fn get_docs(d: &mut Decoder<'_>) -> Result<Vec<(crate::doc_count::Coll, i64)>, DecodeError> {
+/// Reads what [`put_docs`] wrote; `sized` for a kind of [`FORMAT_SIZED`].
+fn get_docs(
+    d: &mut Decoder<'_>,
+    sized: bool,
+) -> Result<Vec<(crate::doc_count::Coll, crate::doc_count::Change)>, DecodeError> {
     let n = d.var()?;
     let mut docs = Vec::new();
     for _ in 0..n {
         let coll = (d.u32()?, d.u32()?);
-        docs.push((coll, unzigzag(d.var()?)));
+        let n = unzigzag(d.var()?);
+        let change = match sized {
+            true => crate::doc_count::Change::sized(n, unzigzag(d.var()?), unzigzag(d.var()?)),
+            false => crate::doc_count::Change::docs(n),
+        };
+        docs.push((coll, change));
     }
     Ok(docs)
 }
@@ -415,6 +449,7 @@ impl Command {
     pub fn kind(&self) -> u16 {
         match self {
             Command::Noop => KIND_NOOP,
+            Command::Write { docs: Some(d), .. } if sized(d) => KIND_WRITE_SIZED,
             Command::Write { docs: Some(_), dedup: Some(r), .. } if r.reaching => {
                 KIND_WRITE_REACHING
             }
@@ -440,11 +475,13 @@ impl Command {
             Command::Merge { .. } => KIND_MERGE,
             Command::PutIntents { .. } => KIND_PUT_INTENTS,
             Command::EndTxn { .. } => KIND_END_TXN,
+            Command::ResolveIntents { docs: Some(d), .. } if sized(d) => KIND_RESOLVE_INTENTS_SIZED,
             Command::ResolveIntents { docs: Some(_), .. } => KIND_RESOLVE_INTENTS_COUNTED,
             Command::ResolveIntents { docs: None, .. } => KIND_RESOLVE_INTENTS,
             Command::PushTxn { .. } => KIND_PUSH_TXN,
             Command::Fence { .. } => KIND_FENCE,
-            Command::AdjustCounts { .. } => KIND_ADJUST_COUNTS,
+            Command::AdjustCounts { sizes: Some(_), .. } => KIND_ADJUST_SIZED,
+            Command::AdjustCounts { sizes: None, .. } => KIND_ADJUST_COUNTS,
         }
     }
 
@@ -470,6 +507,9 @@ impl Command {
                 e.var(zigzag(*live_delta));
                 if let Some(docs) = docs {
                     put_docs(&mut e, docs);
+                    if sized(docs) {
+                        e.bool(dedup.as_ref().is_some_and(|r| r.reaching));
+                    }
                 }
             }
             Command::SetGcThreshold { ts } => put_hlc(&mut e, *ts),
@@ -515,10 +555,16 @@ impl Command {
             Command::Fence { start, end, on } => {
                 e.bytes(start).bytes(end).bool(*on);
             }
-            Command::AdjustCounts { base, counts } => {
+            Command::AdjustCounts { base, counts, sizes } => {
                 e.u64(*base).var(counts.len() as u64);
                 for ((tenant, collection), n) in counts {
                     e.u32(*tenant).u32(*collection).u64(*n);
+                }
+                if let Some(sizes) = sizes {
+                    e.var(sizes.len() as u64);
+                    for ((tenant, collection), (bytes, keys)) in sizes {
+                        e.u32(*tenant).u32(*collection).u64(*bytes).u64(*keys);
+                    }
                 }
             }
             Command::SplitGenesis { parent, at_index, end } => {
@@ -565,7 +611,7 @@ impl Command {
         let kind = d.u16()?;
         let command = match kind {
             KIND_NOOP => Command::Noop,
-            KIND_WRITE | KIND_WRITE_COUNTED | KIND_WRITE_REACHING => {
+            KIND_WRITE | KIND_WRITE_COUNTED | KIND_WRITE_REACHING | KIND_WRITE_SIZED => {
                 let n = d.var()?;
                 let mut puts = Vec::new();
                 for _ in 0..n {
@@ -587,9 +633,13 @@ impl Command {
                 }
                 let live_delta = unzigzag(d.var()?);
                 let docs = match kind != KIND_WRITE {
-                    true => Some(get_docs(&mut d)?),
+                    true => Some(get_docs(&mut d, kind == KIND_WRITE_SIZED)?),
                     false => None,
                 };
+                if kind == KIND_WRITE_SIZED && d.bool()? {
+                    let r = dedup.as_mut().ok_or(DecodeError::InvalidValue { offset })?;
+                    r.reaching = true;
+                }
                 Command::Write { puts, deletes, dedup, live_delta, docs }
             }
             KIND_SET_GC_THRESHOLD => Command::SetGcThreshold { ts: get_hlc(&mut d)? },
@@ -624,13 +674,24 @@ impl Command {
                 let (start, end) = (d.bytes()?.to_vec(), d.bytes()?.to_vec());
                 Command::Fence { start, end, on: d.bool()? }
             }
-            KIND_ADJUST_COUNTS => {
+            KIND_ADJUST_COUNTS | KIND_ADJUST_SIZED => {
                 let (base, n) = (d.u64()?, d.var()?);
                 let mut counts = Vec::new();
                 for _ in 0..n {
                     counts.push(((d.u32()?, d.u32()?), d.u64()?));
                 }
-                Command::AdjustCounts { base, counts }
+                let sizes = match kind == KIND_ADJUST_SIZED {
+                    true => {
+                        let m = d.var()?;
+                        let mut sizes = Vec::new();
+                        for _ in 0..m {
+                            sizes.push(((d.u32()?, d.u32()?), (d.u64()?, d.u64()?)));
+                        }
+                        Some(sizes)
+                    }
+                    false => None,
+                };
+                Command::AdjustCounts { base, counts, sizes }
             }
             KIND_MERGE | KIND_MERGE_REACHING => {
                 let (right, merge) = (GroupId(d.u64()?), d.u64()?);
@@ -662,7 +723,7 @@ impl Command {
             }
             KIND_END_TXN => Command::EndTxn { record: TxnRecord::decode_from(&mut d)? },
             KIND_PUSH_TXN => Command::PushTxn { record: TxnRecord::decode_from(&mut d)? },
-            KIND_RESOLVE_INTENTS | KIND_RESOLVE_INTENTS_COUNTED => {
+            KIND_RESOLVE_INTENTS | KIND_RESOLVE_INTENTS_COUNTED | KIND_RESOLVE_INTENTS_SIZED => {
                 let txn = TxnId(d.u128()?);
                 let offset = d.position();
                 let status =
@@ -676,9 +737,9 @@ impl Command {
                     resolutions.push(Resolution { key, intent_ts, commit });
                 }
                 let live_delta = unzigzag(d.var()?);
-                let docs = match kind == KIND_RESOLVE_INTENTS_COUNTED {
-                    true => Some(get_docs(&mut d)?),
-                    false => None,
+                let docs = match kind {
+                    KIND_RESOLVE_INTENTS => None,
+                    _ => Some(get_docs(&mut d, kind == KIND_RESOLVE_INTENTS_SIZED)?),
                 };
                 Command::ResolveIntents { txn, status, commit_ts, resolutions, live_delta, docs }
             }

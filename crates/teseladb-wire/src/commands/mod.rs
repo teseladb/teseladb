@@ -613,6 +613,17 @@ pub trait Backend {
     fn doc_count(&mut self, _tenant: u32, _collection: u32) -> Result<Option<u64>, CommandError> {
         Ok(None)
     }
+    /// The live documents of collection `coll` (tenant and number) in `span` of its documents,
+    /// with their bytes of BSON and of keys, added up from the counts its ranges keep (007
+    /// FR-039, `collStats`); `None` when a range's counts or their bytes are estimated or the
+    /// backend keeps none, and the caller reads the documents. `span` covers whole ranges.
+    fn doc_tally(
+        &mut self,
+        _coll: (u32, u32),
+        _span: (&[u8], &[u8]),
+    ) -> Result<Option<(u64, u64, u64)>, CommandError> {
+        Ok(None)
+    }
     /// Reads at most `limit` documents of `[start, end)` from the last key down: those nearest
     /// `end` first (H-003). A backend without a backward read reads the interval in key order and
     /// keeps its last documents.

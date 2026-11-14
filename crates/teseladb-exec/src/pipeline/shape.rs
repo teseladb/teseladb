@@ -77,6 +77,9 @@ pub struct Projection {
     tree: Tree,
     /// Whether `_id` stays (an inclusion keeps it unless `_id: 0`).
     keep_id: bool,
+    /// The same fields as a projection on the register machine, which copies them from the
+    /// document's bytes (010 FR-031); `None` with a computed field.
+    machine: Option<teseladb_mql::projection::Projection>,
 }
 
 /// Whether a projection value keeps the field (`true`, a non-zero number).
@@ -99,7 +102,8 @@ impl Projection {
         let RawValue::Document(d) = v else {
             return Err(error(PROJECT_NOT_OBJECT, "$project specification must be an object"));
         };
-        let mut p = Projection { inclusion: true, tree: Tree::default(), keep_id: true };
+        let mut p =
+            Projection { inclusion: true, tree: Tree::default(), keep_id: true, machine: None };
         let mut mode: Option<bool> = None;
         let mut empty = true;
         p.read(d, "", ctx, &mut mode, &mut empty)?;
@@ -112,7 +116,48 @@ impl Projection {
         // `_id` alone decides: `{_id: 0}` is an exclusion that drops only `_id`, `{_id: 1}` an
         // inclusion that keeps only `_id`.
         p.inclusion = mode.unwrap_or(p.keep_id);
+        p.machine = p.on_machine();
         Ok(p)
+    }
+
+    /// The projection of the register machine with its fields, when it has no computed field:
+    /// an inclusion or an exclusion of the same paths, `_id` as this one keeps it.
+    fn on_machine(&self) -> Option<teseladb_mql::projection::Projection> {
+        if has_compute(&self.tree) {
+            return None;
+        }
+        let mut spec = Document::new();
+        let named = self.tree.get("_id").is_some();
+        match (self.inclusion, self.keep_id) {
+            (true, true) if !named => spec.push("_id", 1),
+            (_, false) if named => return None,
+            (_, false) => spec.push("_id", 0),
+            _ => {}
+        }
+        flatten(&self.tree, "", &mut spec);
+        let bytes = spec.to_bytes().ok()?;
+        let raw = teseladb_bson::RawDoc::from_bytes(&bytes).ok()?;
+        teseladb_mql::projection::Projection::parse(raw).ok()
+    }
+
+    /// `doc` projected by the register machine, when its bytes are at hand and the machine gives
+    /// what [`Projection::apply`] gives: an inclusion that keeps `_id` without naming it puts it
+    /// first, and the machine keeps the document's order.
+    fn on_bytes(&self, doc: &Document) -> Option<Result<Document, MqlError>> {
+        let machine = self.machine.as_ref()?;
+        let raw = teseladb_bson::RawDoc::from_stored(doc.canonical_bytes()?).ok()?;
+        let id_first = !self.inclusion || !self.keep_id || self.tree.get("_id").is_some();
+        if !id_first && raw.iter().position(|(k, _)| k == "_id").is_some_and(|at| at > 0) {
+            return None;
+        }
+        let ext = teseladb_mql::NoExtensions;
+        let ctx = teseladb_mql::projection::ProjectionContext {
+            matcher: teseladb_mql::MatchContext { collation: None, ext: &ext, vars: None },
+            position: None,
+            sort_key: None,
+            index_key: None,
+        };
+        Some(machine.apply(raw, &ctx))
     }
 
     /// Reads the fields of `d` under `prefix`.
@@ -198,7 +243,8 @@ impl Projection {
             }
             _ => return Err(unset_type()),
         };
-        let mut p = Projection { inclusion: false, tree: Tree::default(), keep_id: true };
+        let mut p =
+            Projection { inclusion: false, tree: Tree::default(), keep_id: true, machine: None };
         for path in paths {
             check_path(path)?;
             if path == "_id" {
@@ -207,11 +253,20 @@ impl Projection {
             }
             p.tree.put(path, path, Item::Exclude)?;
         }
+        p.machine = p.on_machine();
         Ok(p)
     }
 
-    /// `doc` projected.
+    /// `doc` projected: by the register machine when it can (010 FR-031), otherwise here.
     pub fn apply(&self, doc: &Document, scope: &Scope) -> Result<Document, MqlError> {
+        match self.on_bytes(doc) {
+            Some(done) => done,
+            None => self.apply_here(doc, scope),
+        }
+    }
+
+    /// `doc` projected without the register machine.
+    pub fn apply_here(&self, doc: &Document, scope: &Scope) -> Result<Document, MqlError> {
         if self.inclusion {
             let mut out = Document::new();
             if self.keep_id
@@ -228,6 +283,20 @@ impl Projection {
             out.remove("_id");
         }
         Ok(out)
+    }
+}
+
+/// Adds to `spec` the paths of `tree` under `prefix`, with 1 for those an inclusion keeps and 0
+/// for those an exclusion drops.
+fn flatten(tree: &Tree, prefix: &str, spec: &mut Document) {
+    for (k, item) in &tree.fields {
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        match item {
+            Item::Include => spec.push(path, 1),
+            Item::Exclude => spec.push(path, 0),
+            Item::Sub(sub) => flatten(sub, &path, spec),
+            Item::Compute(_) => {}
+        }
     }
 }
 

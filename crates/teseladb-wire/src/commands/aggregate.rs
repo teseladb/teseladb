@@ -392,19 +392,26 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         if spec.get("count").is_some() {
             let c = needs("count")?;
             let (start, end) = documents_of(c);
-            let mut n: i64 = 0;
-            for_each_match_with(
-                &mut **backend,
-                (start, end),
-                &Document::new(),
-                None,
-                None,
-                self.concern,
-                |_, _| {
-                    n += 1;
-                    Ok(true)
-                },
-            )?;
+            // The counts the collection's ranges keep (007 FR-039); estimated, the documents.
+            let kept = match self.concern {
+                ReadConcern::Local | ReadConcern::Majority => backend.doc_count(c.tenant, c.id)?,
+                _ => None,
+            };
+            let mut n: i64 = kept.map_or(0, |k| i64::try_from(k).unwrap_or(i64::MAX));
+            if kept.is_none() {
+                for_each_match_with(
+                    &mut **backend,
+                    (start, end),
+                    &Document::new(),
+                    None,
+                    None,
+                    self.concern,
+                    |_, _| {
+                        n += 1;
+                        Ok(true)
+                    },
+                )?;
+            }
             d.push("count", i32::try_from(n).map_or(Value::Int64(n), Value::Int32));
         }
         if spec.get("queryExecStats").is_some() {

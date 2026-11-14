@@ -1158,6 +1158,16 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(n)
     }
 
+    fn doc_tally(
+        &mut self,
+        coll: (u32, u32),
+        span: (&[u8], &[u8]),
+    ) -> Result<Option<(u64, u64, u64)>, CommandError> {
+        let t = self.call(|b| b.doc_tally(coll, span))?;
+        self.check()?;
+        Ok(t)
+    }
+
     fn points(
         &mut self,
         keys: &[Vec<u8>],

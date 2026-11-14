@@ -4,10 +4,12 @@
 
 use teseladb_hlc::Hlc;
 use teseladb_range::command::{
-    Absorbed, Command, CopiedRecord, DedupKey, DedupRecord, KIND_COMPUTE_CHECKSUM, KIND_FENCE,
-    KIND_MERGE, KIND_MERGE_FREEZE, KIND_MERGE_REACHING, KIND_NOOP, KIND_SET_GC_THRESHOLD,
-    KIND_SPLIT, KIND_SPLIT_REACHING, KIND_WRITE, KIND_WRITE_COUNTED, KIND_WRITE_REACHING, Put,
+    Absorbed, Command, CopiedRecord, DedupKey, DedupRecord, KIND_ADJUST_COUNTS, KIND_ADJUST_SIZED,
+    KIND_COMPUTE_CHECKSUM, KIND_FENCE, KIND_MERGE, KIND_MERGE_FREEZE, KIND_MERGE_REACHING,
+    KIND_NOOP, KIND_SET_GC_THRESHOLD, KIND_SPLIT, KIND_SPLIT_REACHING, KIND_WRITE,
+    KIND_WRITE_COUNTED, KIND_WRITE_REACHING, KIND_WRITE_SIZED, Put,
 };
+use teseladb_range::doc_count::Change;
 use teseladb_types::GroupId;
 
 fn samples() -> Vec<Command> {
@@ -152,17 +154,29 @@ fn records_that_keep_their_greatest_key_go_in_the_commands_of_format_3() {
     // The keys follow the split's fields: the same entry without them is the older one.
     let (new, old) = (reaching.encode(), older.encode());
     assert_eq!(new[2..old.len()], old[2..]);
-    let write = |reaching, docs: Option<Vec<((u32, u32), i64)>>| Command::Write {
+    let write = |reaching, docs: Option<Vec<((u32, u32), Change)>>| Command::Write {
         puts: vec![Put { key: b"k".to_vec(), value_type: 1, value: b"v".to_vec() }],
         deletes: vec![],
         dedup: Some(DedupRecord { lsid: 1, txn_number: 2, stmt_id: 3, result: vec![], reaching }),
         live_delta: 4,
         docs,
     };
-    let w = write(true, Some(vec![((0, 1), 1)]));
+    let w = write(true, Some(vec![((0, 1), Change::docs(1))]));
     assert_eq!(w.kind(), KIND_WRITE_REACHING);
     assert_eq!(Command::decode(&w.encode()), Ok(w));
     assert_eq!(write(false, Some(vec![])).kind(), KIND_WRITE_COUNTED);
+    // With the bytes of each collection (format 4), reaching or not.
+    for reaching in [true, false] {
+        let sized = write(reaching, Some(vec![((0, 1), Change::sized(1, 30, -4))]));
+        assert_eq!(sized.kind(), KIND_WRITE_SIZED);
+        assert_eq!(Command::decode(&sized.encode()), Ok(sized));
+    }
+    let adjust = |sizes| Command::AdjustCounts { base: 3, counts: vec![((0, 1), 2)], sizes };
+    assert_eq!(adjust(None).kind(), KIND_ADJUST_COUNTS);
+    assert_eq!(adjust(Some(vec![((0, 1), (60, 8))])).kind(), KIND_ADJUST_SIZED);
+    for a in [adjust(None), adjust(Some(vec![((0, 1), (60, 8))]))] {
+        assert_eq!(Command::decode(&a.encode()), Ok(a));
+    }
     // A write of format 3 without a record does not decode.
     let no_record = Command::Write {
         puts: vec![],

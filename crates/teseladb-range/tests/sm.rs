@@ -10,6 +10,7 @@ use teseladb_lsm::{Lookup, Lsm, LsmConfig, Step};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
 use teseladb_raftlog::{IoErrno, MemDisk};
 use teseladb_range::command::{Command, DedupRecord, Put};
+use teseladb_range::doc_count::Change;
 use teseladb_range::sm::{
     RangeOutput, RangeSm, dedup_key, last_mark_key, parse_record_value, record_value, split_value,
 };
@@ -481,7 +482,7 @@ fn a_counted_write_keeps_each_collections_documents_exact_across_a_restart() {
         deletes: vec![],
         dedup: None,
         live_delta: 0,
-        docs: Some(vec![(coll, 2)]),
+        docs: Some(vec![(coll, Change::docs(2))]),
     };
     r.apply(1, ts(10), &insert).unwrap();
     let delete = Command::Write {
@@ -489,12 +490,46 @@ fn a_counted_write_keeps_each_collections_documents_exact_across_a_restart() {
         deletes: vec![a.clone()],
         dedup: None,
         live_delta: 0,
-        docs: Some(vec![(coll, -1)]),
+        docs: Some(vec![(coll, Change::docs(-1))]),
     };
     r.apply(2, ts(20), &delete).unwrap();
     assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(1));
     let r = r.restart();
     assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(1), "kept on disk");
+}
+
+#[test]
+fn sized_writes_and_a_sized_recount_keep_the_bytes_of_each_collection_exact() {
+    // 007 FR-039 (`collStats`): the bytes of BSON and of keys move with the leader's change.
+    let mut r = Replica::new();
+    let coll = (0x6100_0000, 4);
+    let sized = |n, bytes, keys| Command::Write {
+        puts: vec![],
+        deletes: vec![],
+        dedup: None,
+        live_delta: 0,
+        docs: Some(vec![(coll, Change::sized(n, bytes, keys))]),
+    };
+    r.apply(1, ts(10), &sized(2, 200, 40)).unwrap();
+    r.apply(2, ts(20), &sized(-1, -90, -20)).unwrap();
+    assert!(r.sm.counts().sized());
+    assert_eq!(r.sm.counts().sizes.get(&coll), Some(&(110, 20)));
+    let mut r = r.restart();
+    assert_eq!(r.sm.counts().sizes.get(&coll), Some(&(110, 20)), "kept on disk");
+    // A counted write of an earlier format leaves the bytes estimated, not the documents.
+    r.apply(3, ts(30), &counted(&doc_key(4, b"z"), 1)).unwrap();
+    assert!(r.sm.counts().exact() && !r.sm.counts().sized());
+    // The leader's count of the bytes at entry 3, with a sized write after it, makes them exact.
+    r.apply(4, ts(40), &sized(1, 50, 10)).unwrap();
+    let adjust = Command::AdjustCounts {
+        base: 3,
+        counts: vec![(coll, 2)],
+        sizes: Some(vec![(coll, (150, 30))]),
+    };
+    r.apply(5, ts(50), &adjust).unwrap();
+    assert!(r.sm.counts().sized());
+    assert_eq!(r.sm.doc_counts().and_then(|c| c.get(&coll)).copied(), Some(3));
+    assert_eq!(r.sm.counts().sizes.get(&coll), Some(&(200, 40)));
 }
 
 #[test]
@@ -530,7 +565,7 @@ fn counted(key: &[u8], n: i64) -> Command {
         deletes: vec![],
         dedup: None,
         live_delta: 0,
-        docs: Some(vec![((0x6100_0000, 4), n)]),
+        docs: Some(vec![((0x6100_0000, 4), Change::docs(n))]),
     }
 }
 
@@ -547,7 +582,7 @@ fn uncounted(key: &[u8]) -> Command {
 #[test]
 fn a_recount_adds_the_counted_writes_after_its_entry_and_nothing_else() {
     let coll = (0x6100_0000, 4);
-    let adjust = |base, n| Command::AdjustCounts { base, counts: vec![(coll, n)] };
+    let adjust = |base, n| Command::AdjustCounts { base, counts: vec![(coll, n)], sizes: None };
     // Estimated at 1; the leader counted 5 at entry 2; a counted insert at 3 follows.
     let mut r = Replica::new();
     r.apply(1, ts(10), &uncounted(&doc_key(4, b"a"))).unwrap();

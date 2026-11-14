@@ -2,6 +2,10 @@
 //! paths that cross arrays of documents, the positional `$`, `$elemMatch`, `$slice`, `$meta` and
 //! computed fields, whose expressions go to [`crate::Extensions::eval`] (FR-032).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use teseladb_bson::{Document, RawArray, RawDoc, RawValue, Value};
 
 use crate::error::{ErrorCode, MqlError, Result, bad_value, codes};
@@ -9,6 +13,7 @@ use crate::matcher::{Eval, MatchContext};
 use crate::ops;
 use crate::parse::{self, Expr, FilterUse, Pred};
 use crate::value::{OwnedValue, is_number, truncate_i64, truthy};
+use crate::vm::project::Projector;
 
 /// `$meta` names RefDb accepts.
 pub const META_NAMES: [&str; 14] = [
@@ -84,32 +89,47 @@ pub struct ProjectionContext<'a> {
     pub index_key: Option<&'a Document>,
 }
 
-/// A parsed projection.
-#[derive(Debug)]
+/// A parsed projection, with its program for the register machine (010 FR-031).
+#[derive(Debug, Clone)]
 pub struct Projection {
+    inner: Arc<Parsed>,
+}
+
+#[derive(Debug)]
+struct Parsed {
     tree: Tree,
     inclusion: bool,
     positional: bool,
     metas: Vec<String>,
+    /// `None` for a projection too large for the steps' fields: the tree evaluates it.
+    program: Option<Projector>,
+}
+
+/// The projections a core keeps by their specification; past this many, the cache starts over.
+pub const CACHED_PROJECTIONS: usize = 1024;
+
+thread_local! {
+    /// The projections of this core by the bytes of their specification.
+    static PROJECTIONS: RefCell<HashMap<Box<[u8]>, Arc<Parsed>>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Debug, Default)]
-struct Tree {
-    fields: Vec<(String, Node)>,
+pub(crate) struct Tree {
+    pub(crate) fields: Vec<(String, Node)>,
 }
 
 #[derive(Debug)]
-enum Node {
+pub(crate) enum Node {
     Leaf(Action),
     Sub(Tree),
 }
 
 #[derive(Debug)]
-enum Action {
+pub(crate) enum Action {
     Include,
     Exclude,
     Slice { skip: Option<i64>, limit: i64 },
-    ElemMatch(Pred),
+    ElemMatch(Arc<Pred>),
     Meta(String),
     Computed(OwnedValue),
     Positional,
@@ -251,7 +271,7 @@ impl Builder {
                         ));
                     }
                     self.elem_match = true;
-                    Action::ElemMatch(elem_match(path, arg)?)
+                    Action::ElemMatch(Arc::new(elem_match(path, arg)?))
                 }
                 (Some((ops::META, arg)), 1) => {
                     let RawValue::String(meta) = arg else {
@@ -411,8 +431,25 @@ fn elem_match(path: &str, arg: RawValue<'_>) -> Result<Pred> {
 }
 
 impl Projection {
-    /// Reads a projection.
+    /// Reads a projection, or takes the one this core read for the same specification.
     pub fn parse(spec: RawDoc<'_>) -> Result<Projection> {
+        let key = spec.as_bytes();
+        if let Some(inner) = PROJECTIONS.with(|c| c.borrow().get(key).cloned()) {
+            return Ok(Projection { inner });
+        }
+        let inner = Arc::new(Projection::read(spec)?);
+        PROJECTIONS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.len() >= CACHED_PROJECTIONS {
+                c.clear();
+            }
+            c.insert(key.into(), Arc::clone(&inner));
+        });
+        Ok(Projection { inner })
+    }
+
+    /// Reads a projection and compiles it.
+    fn read(spec: RawDoc<'_>) -> Result<Parsed> {
         let mut b = Builder {
             tree: Tree::default(),
             mode: None,
@@ -434,7 +471,8 @@ impl Projection {
         if inclusion && b.tree.get(ops::ID).is_none() {
             b.tree.fields.insert(0, (ops::ID.to_owned(), Node::Leaf(Action::Include)));
         }
-        Ok(Projection { tree: b.tree, inclusion, positional: b.positional, metas: b.metas })
+        let program = Projector::compile(&b.tree, inclusion).ok();
+        Ok(Parsed { tree: b.tree, inclusion, positional: b.positional, metas: b.metas, program })
     }
 
     /// The error of a `$meta` the query cannot give: `text_search` and `near` say whether the
@@ -445,7 +483,7 @@ impl Projection {
             let msg = format!("query requires {what} metadata, but it is not available");
             Err(err(code::META_UNAVAILABLE, msg))
         };
-        let has = |name: &str| self.metas.iter().any(|m| m == name);
+        let has = |name: &str| self.inner.metas.iter().any(|m| m == name);
         for (name, what) in [
             ("searchScore", "$search score"),
             ("vectorSearchScore", "$vectorSearch score"),
@@ -474,19 +512,44 @@ impl Projection {
 
     /// Whether the projection uses `$` and so needs the filter's match position.
     pub fn needs_position(&self) -> bool {
-        self.positional
+        self.inner.positional
     }
 
-    /// The projected document.
+    /// The projected document, by the register machine: the fields it keeps are copied from the
+    /// document's bytes, and its computed fields are evaluated after them (010 FR-031). `doc` is
+    /// canonical BSON, as the node stores and reads it.
     pub fn apply(&self, doc: RawDoc<'_>, ctx: &ProjectionContext<'_>) -> Result<Document> {
-        let run = Run { ctx, root: doc };
-        let mut out = if self.inclusion {
-            run.include(&self.tree, doc, false)?
-        } else {
-            run.exclude(&self.tree, doc)?
-        };
-        run.computed(&self.tree, &mut out, self.inclusion)?;
+        let p = &*self.inner;
+        let Some(program) = &p.program else { return self.apply_by_tree(doc, ctx) };
+        let (bytes, ext) = program.run(doc, ctx)?;
+        let mut out = Document::from_stored(bytes).map_err(crate::value::bson_error)?;
+        if ext {
+            Run { ctx, root: doc }.computed(&p.tree, &mut out, p.inclusion)?;
+        }
         Ok(out)
+    }
+
+    /// The projected document by the tree evaluator, which the register machine answers as.
+    pub fn apply_by_tree(&self, doc: RawDoc<'_>, ctx: &ProjectionContext<'_>) -> Result<Document> {
+        let p = &*self.inner;
+        let run = Run { ctx, root: doc };
+        let mut out = if p.inclusion {
+            run.include(&p.tree, doc, false)?
+        } else {
+            run.exclude(&p.tree, doc)?
+        };
+        run.computed(&p.tree, &mut out, p.inclusion)?;
+        Ok(out)
+    }
+
+    /// Whether it and `other` share their parsed tree and program (the cache by specification).
+    pub fn same_program(&self, other: &Projection) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// The steps of its program, one per line; empty when the tree evaluates it.
+    pub fn listing(&self) -> Vec<String> {
+        self.inner.program.as_ref().map(Projector::listing).unwrap_or_default()
     }
 }
 
@@ -648,24 +711,12 @@ impl Run<'_, '_, '_> {
 
     fn first_match(&self, pred: &Pred, v: RawValue<'_>) -> Result<Option<Value>> {
         let RawValue::Array(arr) = v else { return Ok(None) };
-        let eval = Eval::new(&self.ctx.matcher, false);
-        for e in arr.iter() {
-            let single = crate::value::OwnedValue::new(Value::Array(vec![Value::from(e)]))?;
-            if eval.leaf(pred, Some(single.get()), None, false)? {
-                return Ok(Some(Value::from(e)));
-            }
-        }
-        Ok(None)
+        Ok(first_match_at(self.ctx, pred, arr)?.and_then(|i| arr.iter().nth(i)).map(Value::from))
     }
 
     /// The element of `arr` at the position the filter matched.
     fn element<'v>(&self, arr: RawArray<'v>) -> Result<RawValue<'v>> {
-        let Some(pos) = self.ctx.position else {
-            return Err(err(
-                code::POSITIONAL_NO_MATCH,
-                "positional operator '.$' couldn't find a matching element in the array",
-            ));
-        };
+        let pos = self.ctx.position.ok_or_else(no_position)?;
         arr.iter().nth(pos).ok_or_else(mismatch)
     }
 
@@ -678,11 +729,35 @@ impl Run<'_, '_, '_> {
     }
 }
 
-fn mismatch() -> MqlError {
+/// The position of the first element of `arr` that `$elemMatch` predicate `pred` accepts.
+pub(crate) fn first_match_at(
+    ctx: &ProjectionContext<'_>,
+    pred: &Pred,
+    arr: RawArray<'_>,
+) -> Result<Option<usize>> {
+    let eval = Eval::new(&ctx.matcher, false);
+    for (i, e) in arr.iter().enumerate() {
+        let single = crate::value::OwnedValue::new(Value::Array(vec![Value::from(e)]))?;
+        if eval.leaf(pred, Some(single.get()), None, false)? {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
+/// The error of `$` without a position of the filter.
+pub(crate) fn no_position() -> MqlError {
+    err(
+        code::POSITIONAL_NO_MATCH,
+        "positional operator '.$' couldn't find a matching element in the array",
+    )
+}
+
+pub(crate) fn mismatch() -> MqlError {
     err(code::POSITIONAL_MISMATCH, "positional operator '.$' element mismatch")
 }
 
-fn has_positional(tree: &Tree) -> bool {
+pub(crate) fn has_positional(tree: &Tree) -> bool {
     tree.fields.iter().any(|(_, n)| match n {
         Node::Leaf(Action::Positional) => true,
         Node::Sub(sub) => has_positional(sub),
@@ -690,7 +765,7 @@ fn has_positional(tree: &Tree) -> bool {
     })
 }
 
-fn has_computed(tree: &Tree) -> bool {
+pub(crate) fn has_computed(tree: &Tree) -> bool {
     tree.fields.iter().any(|(_, n)| match n {
         Node::Leaf(Action::Computed(_) | Action::Meta(_) | Action::ElemMatch(_)) => true,
         Node::Sub(sub) => has_computed(sub),

@@ -767,7 +767,30 @@ pub(super) fn tally_within<B: Backend + ?Sized>(
 ) -> Result<Tally, CommandError> {
     let (docs_start, docs_end) = documents_of(c);
     let mut t = Tally { count: 0, bytes: 0, key_bytes: 0 };
-    for (mut start, end) in clip((&docs_start, &docs_end), within) {
+    let spans = clip((&docs_start, &docs_end), within);
+    // The counts the collection's ranges keep and their bytes (007 FR-039), when every range
+    // of every span says them; otherwise the documents are read.
+    let mut kept = Tally { count: 0, bytes: 0, key_bytes: 0 };
+    let mut all = true;
+    for (start, end) in &spans {
+        match backend.doc_tally((c.tenant, c.id), (start, end))? {
+            Some((n, bytes, keys)) => {
+                kept = Tally {
+                    count: kept.count.saturating_add(i64::try_from(n).unwrap_or(i64::MAX)),
+                    bytes: kept.bytes + bytes,
+                    key_bytes: kept.key_bytes + keys,
+                };
+            }
+            None => {
+                all = false;
+                break;
+            }
+        }
+    }
+    if all {
+        return Ok(kept);
+    }
+    for (mut start, end) in spans {
         loop {
             let chunk = backend.scan(&start, &end, SCAN_CHUNK, ReadConcern::Local)?;
             let Some((last, _)) = chunk.last() else { break };

@@ -1,4 +1,5 @@
-//! The register machine that runs compiled filters (010 FR-031).
+//! The register machine that runs compiled filters (010 FR-031); the projections of `find` and
+//! `$project` run on their own steps ([`project`]).
 //!
 //! Two phases. A filter's tree ([`crate::Expr`]) is compiled once per query shape into a
 //! [`Program`]: a contiguous array of 64-bit instructions ([`Insn`]: an 8-bit code, a
@@ -41,9 +42,12 @@ mod cache;
 mod column;
 mod compile;
 mod expr;
+pub(crate) mod project;
 mod run;
 pub(crate) mod value;
 
+#[cfg(test)]
+mod project_tests;
 #[cfg(test)]
 mod tests;
 

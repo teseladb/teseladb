@@ -95,6 +95,17 @@ pub fn counted_resolutions(sm: &Group0Sm) -> bool {
         .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_RESOLVE_COUNTED)
 }
 
+/// Whether every node that is not removed reads the changes of documents that carry their bytes
+/// of BSON and of keys (007 FR-039, `collStats`). A node that recorded nothing yet runs this
+/// binary.
+pub fn sized_counts(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, RANGE) >= teseladb_range::command::FORMAT_SIZED)
+}
+
 /// Whether every node that is not removed keeps the documents of a new collection in `_id`
 /// order (D-153): a node of the version before would key them by the hash bucket of their `_id`.
 /// A node that recorded nothing yet runs this binary.
@@ -213,9 +224,20 @@ mod tests {
         sm.settings.insert(key(NodeId(2)), format_3);
         assert!(reaching_records(&sm));
         assert!(!local_ids(&sm));
+        assert!(!sized_counts(&sm), "format 3 does not read the bytes of the counts");
+        // A node of format 4 numbers documents and does not read the bytes of the counts.
+        let format_4 = Document::new()
+            .with(FCV, "9.0")
+            .with(RANGE, i64::from(teseladb_range::command::FORMAT_LOCAL_IDS))
+            .to_bytes()
+            .unwrap();
+        sm.settings.insert(key(NodeId(2)), format_4);
+        assert!(local_ids(&sm));
+        assert!(!sized_counts(&sm));
         sm.settings.insert(key(NodeId(2)), ours());
         assert!(reaching_records(&sm));
         assert!(local_ids(&sm));
+        assert!(sized_counts(&sm));
         assert!(ordered_ids(&sm));
         sm.settings.insert(key(NodeId(2)), Document::new().with(FCV, "9.0").to_bytes().unwrap());
         assert!(!ordered_ids(&sm), "a node of the version before keys documents by hash");

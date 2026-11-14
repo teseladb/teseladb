@@ -292,16 +292,9 @@ fn stored_size(key: &[u8], version: Option<&Item>) -> i64 {
         .map_or(0, |(t, value)| live_size_of(key, *t, value))
 }
 
-/// The collection whose live document `version` is, if it is one.
-fn live_document_of(key: &[u8], version: Option<&Item>) -> Option<crate::doc_count::Coll> {
-    let v = version.filter(|v| v.kind == Kind::Put)?;
-    let (t, _) = v.value.split_first()?;
-    crate::doc_count::live_document(key, *t)
-}
-
 /// What resolving a transaction's intents changes: the resolutions, the change of live bytes and
 /// the change of each collection's live documents (007 FR-039).
-type Resolved = (Vec<Resolution>, i64, Vec<(crate::doc_count::Coll, i64)>);
+type Resolved = (Vec<Resolution>, i64, Vec<(crate::doc_count::Coll, crate::doc_count::Change)>);
 
 /// The resolutions of `txn`'s intents among `versions` and the changes of live bytes and of live
 /// documents they make: a committed intent replaces the version below it, which the leader read
@@ -311,6 +304,7 @@ fn resolutions(
     status: TxnStatus,
     keys: &[Vec<u8>],
     versions: &[Vec<Item>],
+    sized: bool,
 ) -> Result<Resolved, RangeError> {
     if status == TxnStatus::Pending {
         let e = "a pending transaction's intents are not resolved";
@@ -318,7 +312,9 @@ fn resolutions(
     }
     let mut out = Vec::new();
     let mut delta = 0;
-    let mut docs: BTreeMap<crate::doc_count::Coll, i64> = BTreeMap::new();
+    // What the commit writes over what it reads, for the change of documents and their bytes.
+    let (mut read, mut current, mut puts, mut deletes) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (key, v) in keys.iter().zip(versions) {
         let Some(newest) = v.first().filter(|i| i.kind == Kind::Intent) else { continue };
         let intent = Intent::decode(&newest.value).map_err(|_| RangeError::Unavailable)?;
@@ -332,22 +328,22 @@ fn resolutions(
                 IntentOp::Delete => 0,
             };
             delta += new - stored_size(key, v.get(1));
-            let now = match op {
-                IntentOp::Put { value_type, .. } => {
-                    crate::doc_count::live_document(key, *value_type)
-                }
-                IntentOp::Delete => None,
-            };
-            let before = live_document_of(key, v.get(1));
-            for (coll, n) in [(now, 1), (before, -1)] {
-                if let Some(c) = coll {
-                    *docs.entry(c).or_default() += n;
-                }
+            let below =
+                v.get(1).filter(|i| i.kind == Kind::Put).and_then(|i| i.value.split_first());
+            read.push(key.clone());
+            current.push(below.map(|(t, rest)| (*t, rest)));
+            match op {
+                IntentOp::Put { value_type, value } => puts.push(crate::command::Put {
+                    key: key.clone(),
+                    value_type: *value_type,
+                    value: value.clone(),
+                }),
+                IntentOp::Delete => deletes.push(key.clone()),
             }
         }
         out.push(Resolution { key: key.clone(), intent_ts: newest.ts, commit });
     }
-    let docs = docs.into_iter().filter(|(_, n)| *n != 0).collect();
+    let docs = crate::doc_count::doc_delta(&read, &current, (&puts, &deletes), sized);
     Ok((out, delta, docs))
 }
 
@@ -364,7 +360,7 @@ fn evaluate_txn(
     keys: &[Vec<u8>],
     versions: &[Vec<Item>],
     (ts, read_floor): (Hlc, Hlc),
-    counted: bool,
+    (counted, sized): (bool, bool),
 ) -> Result<(Command, Option<TxnRecord>), RangeError> {
     match op {
         TxnOp::PutIntents { txn, read_ts, writes } => {
@@ -457,7 +453,8 @@ fn evaluate_txn(
             unreachable!("answered without a proposal (`step_txn`)")
         }
         TxnOp::ResolveIntents { txn, status, commit_ts, .. } => {
-            let (resolutions, live_delta, docs) = resolutions(*txn, *status, keys, versions)?;
+            let (resolutions, live_delta, docs) =
+                resolutions(*txn, *status, keys, versions, sized)?;
             let command = Command::ResolveIntents {
                 txn: *txn,
                 status: *status,
@@ -710,7 +707,7 @@ impl RangeHost {
             }
         }
         let deciding = matches!(**op, TxnOp::DecideOnePhase { .. });
-        let counted_resolutions = self.counted_resolutions;
+        let counted_resolutions = (self.counted_resolutions, self.sized_counts);
         let l = self.ranges.get_mut(&m.g).and_then(|r| r.leader.as_mut()).expect("latched");
         let mut floor = l.cache.floor_of(&m.keys);
         // The reads of the keys, the record's for an `EndTxn`: its commit goes above them (008 T043).
