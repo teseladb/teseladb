@@ -12,7 +12,7 @@ the fix is out. You can report it in one of these two ways:
 
 - with **Report a vulnerability** on the [Security tab](https://github.com/teseladb/teseladb/security) of this
   repository, which opens a private advisory that only the maintainers see;
-- by email to soporte@teseladb.com, with the word security in the subject.
+- by email to support@teseladb.com, with the word security in the subject.
 
 Include the version, your platform, the steps or the request that shows the problem and what an attacker gains with it. You
 get an answer within three working days. Once a fix is published, the advisory is made public and credits you, unless
