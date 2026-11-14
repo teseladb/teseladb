@@ -10,7 +10,7 @@ use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{ErrorCode, Extensions, MqlError, NoExtensions};
 
-/// RefDb's code of a command past its `maxTimeMS`.
+/// The reference server's code of a command past its `maxTimeMS`.
 const MAX_TIME_MS_EXPIRED: i32 = 50;
 
 /// A collection of `size` documents that stops the pipeline on its `budget`-th question.

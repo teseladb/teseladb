@@ -1,6 +1,6 @@
 //! `$group`, `$bucketAuto` and `$setWindowFields` with `allowDiskUse` past their memory limit
 //! (010 FR-010, T024): they sort through the node's store and give what they give in memory
-//! (`$group` in the order of its keys, as a `refnode` 9.0.4 gives a group that spilled), and
+//! (`$group` in the order of its keys, as a reference server 9.0.4 gives a group that spilled), and
 //! leave nothing in the store.
 
 use teseladb_bson::{Document, RawValue, extjson};

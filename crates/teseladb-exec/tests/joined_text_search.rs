@@ -1,6 +1,6 @@
 //! The `$text` and search stages first in the pipelines of `$lookup` and `$unionWith` read the
 //! indexes of the collection the stage joins, and a `$match` with `$text` in a `$facet` has none
-//! to read (011 T054, FR-004; answers measured on a `refnode` 9.0.4 with `refsearch` 1.70.6, whose
+//! to read (011 T054, FR-004; answers measured on a reference server 9.0.4 with the reference search server 1.70.6, whose
 //! cases against a node are in `teseladb-wire/tests/text_search.rs`).
 
 use std::cell::RefCell;

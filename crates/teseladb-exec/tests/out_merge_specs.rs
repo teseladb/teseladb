@@ -1,5 +1,5 @@
 //! The arguments of `$out` and `$merge` and what `$merge` does with each document (010 FR-012),
-//! with the codes a `refrouter` 9.0.4 gives (the same cases run through the protocol in the tests of
+//! with the codes a reference router 9.0.4 gives (the same cases run through the protocol in the tests of
 //! `teseladb-wire`).
 
 use teseladb_bson::{Document, RawValue, extjson};

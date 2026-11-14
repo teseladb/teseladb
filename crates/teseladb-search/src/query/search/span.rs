@@ -1,5 +1,5 @@
-//! The deprecated `span` operator (011 FR-002) as `refsearch` 1.70.6 runs it (measured 02-11-2026,
-//! `scratchpad/lane3j/m3.js`): RefLib's span queries over the positions of one field. A document's
+//! The deprecated `span` operator (011 FR-002) as the reference search server 1.70.6 runs it (measured 02-11-2026,
+//! `scratchpad/lane3j/m3.js`): the reference search library's span queries over the positions of one field. A document's
 //! frequency adds `1 / (1 + width)` for each span it holds, the width being the positions a
 //! `near` match leaves between its clauses, and the weight is the sum of the idf of the terms of
 //! the query (those of `include` alone for `subtract`).
@@ -11,7 +11,7 @@ use teseladb_bson::{Document, Value};
 use super::{Operator, SearchError, parse_score, shape};
 use crate::index::MemIndex;
 
-/// The kinds of span, in the order `refsearch` names them.
+/// The kinds of span, in the order the reference search server names them.
 const KINDS: [&str; 6] = ["contains", "first", "near", "or", "subtract", "term"];
 
 /// Default `endPositionLte` of `first`.
@@ -239,7 +239,7 @@ impl Span {
         })
     }
 
-    /// How RefLib writes the span query (measured with `scoreDetails`).
+    /// How the reference search library writes the span query (measured with `scoreDetails`).
     pub(super) fn description(&self, ctx: &super::explain::Ctx<'_>) -> String {
         let list = |all: &[Span]| -> String {
             all.iter().map(|c| c.description(ctx)).collect::<Vec<_>>().join(", ")

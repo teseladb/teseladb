@@ -1,5 +1,5 @@
 //! `$geoNear` (010 FR-004): its arguments, the index it picks among the collection's 2d and
-//! 2dsphere indexes, and the distances it gives, with the codes of a `refrouter` 9.0.4 (the same
+//! 2dsphere indexes, and the distances it gives, with the codes of a reference router 9.0.4 (the same
 //! cases run through the protocol in the tests of `teseladb-wire`).
 
 use teseladb_bson::{Document, RawValue, Value, extjson};

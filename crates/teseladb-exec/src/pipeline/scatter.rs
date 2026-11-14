@@ -47,7 +47,7 @@ const OUTSIDE_THE_DOCUMENT: [&str; 13] = [
 pub struct Program {
     matches: Vec<Document>,
     group: Document,
-    /// Whether RefDb runs the `$group` with its slot-based engine.
+    /// Whether the reference server runs the `$group` with its slot-based engine.
     sbe: bool,
     /// The bytes of group keys past which the run declines (the groups of the whole would pass
     /// them too).
@@ -203,7 +203,7 @@ impl Scatter {
 
 impl Pipeline {
     /// The split of this pipeline, whose stages are `stages` as the command gave them, for a run
-    /// over the ranges of several cores; `sbe` when RefDb could run it with its slot-based
+    /// over the ranges of several cores; `sbe` when the reference server could run it with its slot-based
     /// engine; `limit` the bytes a stage may hold. `None` when it does not start with `$match`es and a `$group` whose accumulators
     /// merge, or those stages read more than the document.
     pub fn scatter(&self, stages: &[Document], sbe: bool, limit: usize) -> Option<Scatter> {

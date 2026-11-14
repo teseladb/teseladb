@@ -1,8 +1,8 @@
-//! The window functions of `$setWindowFields` that are no accumulator (measured on a `refrouter`
+//! The window functions of `$setWindowFields` that are no accumulator (measured on a reference router
 //! 9.0.4): `$expMovingAvg`, `$derivative`, `$integral`, `$covariancePop`, `$covarianceSamp`,
 //! `$locf`, `$linearFill` and `$minMaxScaler`.
 //!
-//! `$expMovingAvg` and the covariances compute in decimal, as RefDb does, and give a double
+//! `$expMovingAvg` and the covariances compute in decimal, as the reference server does, and give a double
 //! unless a decimal came in; `$derivative` and `$integral` compute in doubles.
 
 use teseladb_bson::{Decimal128, Value};
@@ -14,7 +14,7 @@ use crate::expr::stats::Total;
 use crate::expr::values::is_number;
 use crate::pipeline::errors::{TYPE_MISMATCH, error};
 
-/// A number as a decimal (a double with 15 digits, as RefDb converts it).
+/// A number as a decimal (a double with 15 digits, as the reference server converts it).
 pub(super) fn decimal_of(v: &Value) -> Option<Decimal128> {
     match v {
         Value::Decimal128(d) => Some(*d),
@@ -91,7 +91,7 @@ enum NumOp {
     Div,
 }
 
-/// `a op b` with RefDb's numeric types: a decimal makes a decimal (a double converted with 15
+/// `a op b` with the reference server's numeric types: a decimal makes a decimal (a double converted with 15
 /// digits), a double or a division a double, integers otherwise.
 fn num(a: &Value, b: &Value, op: NumOp) -> Value {
     if matches!(a, Value::Decimal128(_)) || matches!(b, Value::Decimal128(_)) {
@@ -134,7 +134,7 @@ fn num(a: &Value, b: &Value, op: NumOp) -> Value {
 
 /// The covariance of the numeric pairs of `pairs` (`sample`: divided by n − 1), `null` with too
 /// few: `c += (x − mean of x before) × (y − mean of y)`, the means as running sums over the
-/// count, in RefDb's numeric types.
+/// count, in the reference server's numeric types.
 pub(super) fn covariance(pairs: &[(Option<Value>, Option<Value>)], sample: bool) -> Value {
     let (mut sum_x, mut sum_y, mut c) = (Value::Int32(0), Value::Int32(0), Value::Int32(0));
     let mut count: i64 = 0;
@@ -330,7 +330,7 @@ pub(super) fn linear_fill(values: &[Option<Value>], xs: &[f64]) -> Result<Vec<Va
 
 /// `x` scaled from the range of `window` (its least and greatest values in BSON order, `NaN`
 /// first) to `[min, max]` with the engine's arithmetic: `min` itself when the window holds one
-/// value (measured on a `refrouter` 9.0.4).
+/// value (measured on a reference router 9.0.4).
 pub(super) fn min_max_scaled(
     x: &Value,
     window: &[Value],

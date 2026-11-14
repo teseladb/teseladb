@@ -1,8 +1,8 @@
-//! Type expressions (measured on a `refrouter` 9.0.4): `$type`, `$isNumber`, `$convert` and its
+//! Type expressions (measured on a reference router 9.0.4): `$type`, `$isNumber`, `$convert` and its
 //! shorthands `$toBool`, `$toInt`, `$toLong`, `$toDouble`, `$toDecimal`, `$toString`,
 //! `$toObjectId`, `$toDate`, `$toUUID`, `$toArray` and `$toObject`.
 //!
-//! A conversion that fails is RefDb's 241 (`ConversionFailure`), which `onError` replaces; the
+//! A conversion that fails is the reference server's 241 (`ConversionFailure`), which `onError` replaces; the
 //! other errors (a wrong `format`, `base` or `subtype`) are not replaced. A `null` or missing
 //! input gives `onNull`, or `null`.
 
@@ -283,7 +283,7 @@ fn subtype_of(v: Option<&Value>) -> Result<u8, MqlError> {
     }
 }
 
-/// A conversion failure (241), with RefDb's text: `what` and the detail after it.
+/// A conversion failure (241), with the reference server's text: `what` and the detail after it.
 fn failure(what: &str, detail: Option<&str>) -> MqlError {
     let tail = detail.map(|d| format!(": {d}")).unwrap_or_default();
     error(CONVERSION_FAILURE, format!("{what} in $convert with no onError value{tail}"))
@@ -729,7 +729,7 @@ enum DecimalRange {
     Under,
 }
 
-/// The decimal `±digits × 10^exp`, cut to 34 digits toward zero as RefDb's `$convert` reads
+/// The decimal `±digits × 10^exp`, cut to 34 digits toward zero as the reference server's `$convert` reads
 /// decimal text (`…12349` gives `…1234`).
 fn decimal_of_digits(neg: bool, digits: &str, exp: i64) -> Result<Decimal128, DecimalRange> {
     const MAX_DIGITS: usize = 34;
@@ -761,7 +761,7 @@ fn decimal_of_digits(neg: bool, digits: &str, exp: i64) -> Result<Decimal128, De
     Decimal128::from_parts(neg, coefficient, exp as i32).ok_or(DecimalRange::Over)
 }
 
-/// A date as `$toString` writes it, or RefDb's 18537 outside years 0 to 9999.
+/// A date as `$toString` writes it, or the reference server's 18537 outside years 0 to 9999.
 pub(super) fn date_string(ms: i64) -> Result<String, MqlError> {
     let text = date_text(ms);
     let year: i64 = text.get(..text.len() - 20).and_then(|y| y.parse().ok()).unwrap_or(0);

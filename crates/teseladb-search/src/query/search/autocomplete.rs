@@ -1,4 +1,4 @@
-//! The `autocomplete` operator (011 FR-002, FR-003) as `refsearch` 1.70.6 runs it (measured
+//! The `autocomplete` operator (011 FR-002, FR-003) as the reference search server 1.70.6 runs it (measured
 //! 02-11-2026 with `scoreDetails`, `scratchpad/lane3j/m6.js`, `scratchpad/lane3k/m10.js` to
 //! `m13.js`): an `autocomplete` field holds the grams of each word of its value and of each run
 //! of two or three words (`edgeGram` from the start, `rightEdgeGram` from the end, kept
@@ -113,7 +113,7 @@ impl Autocomplete {
 
     /// The explanation of the score of `doc`, with weight `boost` (measured: a sum of the grams'
     /// disjunction and of the `text` query, nested once more for several queries; with `fuzzy`
-    /// RefLib's automaton query, named by its identity, here a hash of its term, DV-083).
+    /// the reference search library's automaton query, named by its identity, here a hash of its term, DV-083).
     pub(super) fn explain(
         &self,
         ctx: &super::explain::Ctx<'_>,
@@ -137,7 +137,8 @@ impl Autocomplete {
                     clauses.push(Explanation::leaf(
                         boost,
                         format!(
-                            "{name}:AutomatonQuery {{\norg.apache.reflib.util.automaton.Automaton@{hash:x}}}"
+                            "{name}:AutomatonQuery {{\n{automaton}@{hash:x}}}",
+                            automaton = teseladb_names::AUTOMATON_CLASS
                         ),
                     ));
                 }

@@ -1,9 +1,9 @@
-//! The query of `$vectorSearch` as `refsearch` reads it (011 FR-005, FR-017): its fields in the
-//! order `refsearch` checks them, the prefilter's shape and the checks against the index
-//! definition, each with `refsearch`'s message (code 8). What `refnode` checks before (`limit` a
+//! The query of `$vectorSearch` as the reference search server reads it (011 FR-005, FR-017): its fields in the
+//! order the reference search server checks them, the prefilter's shape and the checks against the index
+//! definition, each with the reference search server's message (code 8). What the reference server checks before (`limit` a
 //! positive number, `filter` an object and a valid query) is the pipeline's.
 //!
-//! Measured on a 9.0.4 replica set with `refsearch` 1.70.6 (01-11-2026): `index`, `path`, `exact`,
+//! Measured on a 9.0.4 replica set with the reference search server 1.70.6 (01-11-2026): `index`, `path`, `exact`,
 //! `numCandidates`, `limit`, the query vector and the filter are checked in that order, before
 //! the index is looked up; then the path, the dimensions and the filter's paths against the
 //! index. A filter value is a boolean, an `ObjectId`, a number, a string, a date, a UUID or
@@ -18,14 +18,14 @@ use crate::definition::{VectorDefinition, VectorField};
 /// The highest `numCandidates`.
 pub const MAX_CANDIDATES: i64 = 10_000;
 
-/// The operators of a filter field, as `refsearch` lists them.
+/// The operators of a filter field, as the reference search server lists them.
 const FIELD_OPERATORS: [&str; 10] =
     ["$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin", "$exists", "$not"];
 
 /// The operators joining filter clauses.
 const JOINS: [&str; 3] = ["$and", "$or", "$nor"];
 
-/// The message of a filter value of a type `refsearch` does not filter on.
+/// The message of a filter value of a type the reference search server does not filter on.
 const FILTER_TYPES: &str = "must be a boolean, objectId, number, string, date, uuid, or null";
 
 /// A `$vectorSearch` query.
@@ -62,7 +62,7 @@ fn string(spec: &Document, name: &str) -> Result<Option<String>, SearchError> {
     }
 }
 
-/// An integer field as `refsearch` reads it: an integral number; `None` when absent.
+/// An integer field as the reference search server reads it: an integral number; `None` when absent.
 fn integer(spec: &Document, name: &str) -> Result<Option<i64>, SearchError> {
     let n = match spec.get(name) {
         None => return Ok(None),
@@ -71,7 +71,7 @@ fn integer(spec: &Document, name: &str) -> Result<Option<i64>, SearchError> {
         // Saturating: an infinity or a double beyond 64 bits keeps its sign out of 32 bits.
         Some(Value::Double(d)) if d.is_infinite() || d.fract() == 0.0 => *d as i64,
         Some(Value::Double(_)) => return Err(shape(name, "must be an integer")),
-        // `refsearch`'s own wording.
+        // The reference search server's own wording.
         Some(_) => return Err(shape(name, "must be a integer")),
     };
     // Measured in `m88.js` of lane 3.
@@ -82,7 +82,7 @@ fn integer(spec: &Document, name: &str) -> Result<Option<i64>, SearchError> {
     }
 }
 
-/// `refsearch`'s name of a BSON type.
+/// The reference search server's name of a BSON type.
 fn bson_type(v: &Value) -> &'static str {
     match v {
         Value::Double(_) => "DOUBLE",
@@ -134,7 +134,7 @@ fn query_vector(v: &Value) -> Result<Vec<f32>, SearchError> {
     Ok(out)
 }
 
-/// The category of a filter value whose type `refsearch` filters on.
+/// The category of a filter value whose type the reference search server filters on.
 fn category(v: &Value) -> Option<u8> {
     match v {
         Value::Boolean(_) => Some(0),
@@ -229,7 +229,7 @@ fn check_filter(doc: &Document, at: &str, paths: &mut Vec<String>) -> Result<(),
             Value::Document(ops) if ops.iter().next().is_some_and(|(o, _)| o.starts_with('$')) => {
                 check_operators(ops, &format!("{at}.{k}"))?;
             }
-            // `refsearch` names the filter, not the field, for a value it does not filter on.
+            // The reference search server names the filter, not the field, for a value it does not filter on.
             other => {
                 category(other).ok_or_else(|| shape(at, FILTER_TYPES))?;
             }
@@ -242,7 +242,7 @@ fn check_filter(doc: &Document, at: &str, paths: &mut Vec<String>) -> Result<(),
 }
 
 impl VectorQuery {
-    /// Reads a `$vectorSearch` as `refsearch` does, before looking up its index.
+    /// Reads a `$vectorSearch` as the reference search server does, before looking up its index.
     pub fn parse(spec: &Document) -> Result<VectorQuery, SearchError> {
         let index = string(spec, "index")?.ok_or_else(|| shape("index", "is required"))?;
         let path = string(spec, "path")?.ok_or_else(|| shape("path", "is required"))?;

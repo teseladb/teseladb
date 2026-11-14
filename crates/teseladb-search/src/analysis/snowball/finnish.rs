@@ -23,7 +23,7 @@ fn long_vowel_before(c: &[char], end: usize, from: usize) -> bool {
     end >= 2 && end - 2 >= from && c[end - 1] == c[end - 2] && restricted(c[end - 1])
 }
 
-/// `hun` is not among them: `refsearch` only removes its `n` (`karhun` → `karhu`).
+/// `hun` is not among them: the reference search server only removes its `n` (`karhun` → `karhu`).
 const STEP3: &[&str] = &[
     "han", "hen", "hin", "hon", "hän", "hön", "siin", "den", "tten", "seen", "a", "ä", "ta", "tä",
     "ssa", "ssä", "sta", "stä", "lla", "llä", "lta", "ltä", "lle", "na", "nä", "ksi", "ine", "tta",

@@ -1,5 +1,5 @@
 //! The mappings of a `search` index: which fields are indexed and how (011 FR-006), with the
-//! defaults and errors measured on `refsearch` 1.70.6.
+//! defaults and errors measured on the reference search server 1.70.6.
 
 use teseladb_bson::{Document, Value};
 
@@ -8,7 +8,7 @@ use super::{
     one_of, string_of, unrecognized,
 };
 
-/// The field types a mapping may name, in `refsearch`'s order.
+/// The field types a mapping may name, in the reference search server's order.
 pub const FIELD_TYPES: [&str; 14] = [
     "autoEmbedVector",
     "autocomplete",
@@ -302,7 +302,7 @@ pub enum FieldMapping {
         /// Similarity.
         similarity: String,
     },
-    /// A type `refsearch` accepts and this engine keeps as given (`vector`, `autoEmbedVector`).
+    /// A type the reference search server accepts and this engine keeps as given (`vector`, `autoEmbedVector`).
     Other(Document),
 }
 
@@ -411,7 +411,7 @@ impl FieldMapping {
         }
     }
 
-    /// The field mapping as `refsearch` shows it.
+    /// The field mapping as the reference search server shows it.
     pub fn normalized(&self) -> Document {
         match self {
             FieldMapping::String(s) => s.normalized(),
@@ -479,7 +479,7 @@ fn string_analyzers<'a>(s: &'a StringField, out: &mut Vec<&'a str>) {
     }
 }
 
-/// A number of the definition as `refsearch` shows it: a 32-bit integer (measured).
+/// A number of the definition as the reference search server shows it: a 32-bit integer (measured).
 pub(crate) fn int32(n: i64) -> Value {
     Value::Int32(i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX }))
 }

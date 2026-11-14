@@ -1,4 +1,4 @@
-//! `text` and `phrase` with `synonyms` (011 FR-003, T036), as `refsearch` 1.70.6 builds them
+//! `text` and `phrase` with `synonyms` (011 FR-003, T036), as the reference search server 1.70.6 builds them
 //! (measured 02-11-2026, `scratchpad/lane3l/m21.js`, `m22.js`). For `text`, a query of one token
 //! with synonyms asks for any of them, each term with its own weight; a query of several tokens
 //! is a phrase whose positions hold each token's synonyms. For `phrase`, the phrase with the
@@ -40,7 +40,7 @@ enum Clause {
     Term(String),
     /// Any of the terms, each scored alone.
     AnyTerm(Vec<String>),
-    /// RefLib's `Synonym` query of the terms, then the token's term query.
+    /// The reference search library's `Synonym` query of the terms, then the token's term query.
     SynonymAndTerm(Vec<String>, String),
     /// A phrase.
     Phrase(MultiPhrase),
@@ -167,7 +167,7 @@ impl Synonyms {
         })
     }
 
-    /// How RefLib writes the query.
+    /// How the reference search library writes the query.
     pub(super) fn description(&self, index: &MemIndex, name: &dyn Fn(&str) -> String) -> String {
         let Ok(clauses) = self.clauses(index) else { return String::new() };
         let one = |path: &str, c: &Clause| -> String {
@@ -196,7 +196,7 @@ impl Synonyms {
     }
 }
 
-/// How RefLib writes [`Clause::Criteria`] on the field `name` under `ConstantScore` (measured,
+/// How the reference search library writes [`Clause::Criteria`] on the field `name` under `ConstantScore` (measured,
 /// `scratchpad/lane3m/m31.js`): with `all`, both Boolean queries with their clauses as filters
 /// (`#`); with `any`, one disjunction of the distinct clauses.
 fn criteria_description(name: &str, parts: &[Part], exact: &[String], all: bool) -> String {
@@ -236,9 +236,9 @@ fn sum(parts: Vec<Explanation>) -> Explanation {
     Explanation::node(total as f32, "sum of:", parts)
 }
 
-/// How RefLib writes a `Synonym` query of `terms` on the field `name`.
+/// How the reference search library writes a `Synonym` query of `terms` on the field `name`.
 fn synonym_name(name: &str, terms: &[String]) -> String {
-    // RefLib's `SynonymQuery` keeps its terms sorted (measured).
+    // The reference search library's `SynonymQuery` keeps its terms sorted (measured).
     let mut sorted = terms.to_vec();
     sorted.sort();
     let all: Vec<String> = sorted.iter().map(|t| format!("{name}:{t}")).collect();
@@ -349,7 +349,7 @@ fn phrase_of(words: &[String]) -> MultiPhrase {
     MultiPhrase { positions: words.iter().map(|w| vec![w.clone()]).collect(), slop: 0 }
 }
 
-/// RefLib's `DisjunctionMax` score of `scores`: the best plus [`TIE_BREAKER`] times the others,
+/// The reference search library's `DisjunctionMax` score of `scores`: the best plus [`TIE_BREAKER`] times the others,
 /// summed in doubles.
 fn max_plus(scores: &[f32]) -> f32 {
     let mut max = 0f32;

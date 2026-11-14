@@ -1,5 +1,5 @@
 //! Decimal `$sqrt`, `$exp`, `$ln`, `$log10`, `$log` and `$pow` (010 T007, FR-005): 34 digits, as a
-//! `refrouter` 9.0.4 gave each one on 31-10-2026.
+//! reference router 9.0.4 gave each one on 31-10-2026.
 
 use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_exec::expr::{Expr, Scope};
@@ -19,14 +19,14 @@ fn d(s: &str) -> String {
     format!(r#"{{"$numberDecimal":"{s}"}}"#)
 }
 
-/// Three results differ from RefDb's in the last of the 34 digits, where RefDb's decimal
-/// library does not round correctly (e^10 is 22026.465794806716516957900645284244366…, RefDb
-/// gives …28425; e^100 is 2.6881171418161354484126255515800135873…E+43, RefDb gives …580013;
-/// log₁₀ 5 is 0.69897000433601880478626110527550697…, RefDb gives …755069; log₃ 2 is
-/// 0.63092975357145743709952711434276085…, RefDb gives …427607): TeselaDB gives the correctly
+/// Three results differ from the reference server's in the last of the 34 digits, where the reference server's decimal
+/// library does not round correctly (e^10 is 22026.465794806716516957900645284244366…, the reference server
+/// gives …28425; e^100 is 2.6881171418161354484126255515800135873…E+43, the reference server gives …580013;
+/// log₁₀ 5 is 0.69897000433601880478626110527550697…, the reference server gives …755069; log₃ 2 is
+/// 0.63092975357145743709952711434276085…, the reference server gives …427607): TeselaDB gives the correctly
 /// rounded digit (DV-062).
 #[test]
-fn decimal_functions_give_34_digits_as_refdb() {
+fn decimal_functions_give_34_digits_as_the_reference() {
     let cases = [
         (format!(r#"{{"$sqrt":{}}}"#, d("2")), "1.414213562373095048801688724209698"),
         (format!(r#"{{"$sqrt":{}}}"#, d("0.5")), "0.7071067811865475244008443621048490"),

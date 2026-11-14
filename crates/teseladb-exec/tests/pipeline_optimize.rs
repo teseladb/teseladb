@@ -1,5 +1,5 @@
-//! What RefDb does with a pipeline when it parses it (010 FR-003, FR-005, T018), measured on a
-//! `refrouter` 9.0.4 on 01-11-2026: a constant that fails, in any stage, fails the command with
+//! What the reference server does with a pipeline when it parses it (010 FR-003, FR-005, T018), measured on a
+//! reference router 9.0.4 on 01-11-2026: a constant that fails, in any stage, fails the command with
 //! «Failed to optimize pipeline»; and the fields of the documents read that the stages use
 //! (the projection `explain` shows under its query plan).
 
@@ -206,7 +206,7 @@ fn fields_of_facets_projections_windows_and_named_arguments() {
     assert_eq!(fields(r#"[{"$project":{"a":{"$meta":"textScore"}}}]"#), None);
     assert_eq!(fields(r#"[{"$project":{"a":{"$rand":{}}}}]"#), list(&["_id"]));
     // A `distinct` on a view reads the values at its key's path, which the expression names as
-    // a constant (measured on a `refrouter` 9.0.4: the plan cache shape keeps `s`).
+    // a constant (measured on a reference router 9.0.4: the plan cache shape keeps `s`).
     assert_eq!(
         fields(
             r#"[{"$replaceRoot":{"newRoot":{"u":{"$_internalFindAllValuesAtPath":[{"$const":"s"}]}}}},{"$unwind":"$u"},{"$group":{"_id":"$u"}}]"#

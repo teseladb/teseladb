@@ -1,4 +1,4 @@
-//! The Irish stemmer of `snowballStemming` (`irish`), deduced from the stems `refsearch` 1.70.6 gives
+//! The Irish stemmer of `snowballStemming` (`irish`), deduced from the stems the reference search server 1.70.6 gives
 //! for the 186 280 words of the Irish Snowball vocabulary (D-051): the initial mutations come off
 //! first (eclipsis and lenition, `h-`, `n-` and `t-`), then the endings of five steps. RV starts
 //! after the first vowel; R1 and R2 are the standard regions.

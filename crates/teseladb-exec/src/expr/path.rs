@@ -7,7 +7,7 @@ use teseladb_mql::MqlError;
 
 use super::{Ctx, Eval, Expr, Scope, codes, error};
 
-/// The value of dotted path `path` in `v`, RefDb's way.
+/// The value of dotted path `path` in `v`, the reference server's way.
 pub fn field_path(v: &Value, path: &str) -> Eval {
     let (head, rest) = match path.split_once('.') {
         Some((h, r)) => (h, Some(r)),
@@ -78,7 +78,7 @@ pub(crate) fn raw_field_path(v: RawValue<'_>, path: &str) -> Eval {
     }
 }
 
-/// Checks the dotted path after a `$`, as RefDb parses a field path.
+/// Checks the dotted path after a `$`, as the reference server parses a field path.
 fn check_path(text: &str) -> Result<(), MqlError> {
     if text.is_empty() {
         return Err(error(codes::INVALID_FIELD_PATH, "'$' by itself is not a valid FieldPath"));
@@ -126,7 +126,7 @@ pub(super) fn variable(s: &str, ctx: &Ctx) -> Result<Expr, MqlError> {
 }
 
 /// The system variables a command sets (or not, as `IS_MR` and `JS_SCOPE` outside
-/// map-reduce and JavaScript): one it did not set is RefDb's 51144.
+/// map-reduce and JavaScript): one it did not set is the reference server's 51144.
 const BUILTINS: [&str; 5] = ["NOW", "CLUSTER_TIME", "USER_ROLES", "IS_MR", "JS_SCOPE"];
 
 /// `Builtin variable ... is not available`.

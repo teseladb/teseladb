@@ -1,5 +1,5 @@
 //! Custom analyzers of a `search` index (T039): each one's character filters, tokenizer and token
-//! filters read into the components of [`crate::analysis`], checked in `refsearch` 1.70.6's order
+//! filters read into the components of [`crate::analysis`], checked in the reference search server 1.70.6's order
 //! and with its messages (measured 01-11-2026), and shown with their defaults filled in. A few
 //! attribute values pass the definition and only fail when the analyzer is built, that is when it
 //! first analyzes a text (`minGram` 0): those analyzers keep the message of that failure.
@@ -24,7 +24,7 @@ use crate::analysis::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Pattern, Tokenizer};
 pub struct CustomAnalyzer {
     /// Its name.
     pub name: String,
-    /// The analyzer as `refsearch` shows it, with the defaults of its components.
+    /// The analyzer as the reference search server shows it, with the defaults of its components.
     pub normalized: Document,
     /// The analyzer, or the message of the failure building it.
     pub built: Result<Analyzer, String>,
@@ -81,7 +81,7 @@ const TOKEN_FILTERS: &[&str] = &[
     "wordDelimiterGraph",
 ];
 
-/// The `delimiterOptions` of `wordDelimiterGraph`, in the order `refsearch` shows them.
+/// The `delimiterOptions` of `wordDelimiterGraph`, in the order the reference search server shows them.
 const DELIMITER_OPTIONS: &[&str] = &[
     "generateWordParts",
     "generateNumberParts",
@@ -158,7 +158,7 @@ fn analyzer(a: &Document, at: &str) -> Result<CustomAnalyzer, DefinitionError> {
     Ok(CustomAnalyzer { name: name.to_owned(), normalized, built })
 }
 
-/// A component read from the definition: its value, how `refsearch` shows it and, for the values
+/// A component read from the definition: its value, how the reference search server shows it and, for the values
 /// that only fail when built, the message.
 struct Read<T> {
     value: T,
@@ -629,7 +629,7 @@ fn protected_words(
     }
 }
 
-/// The `delimiterOptions` of `wordDelimiterGraph` and how `refsearch` shows them.
+/// The `delimiterOptions` of `wordDelimiterGraph` and how the reference search server shows them.
 fn delimiter_options(
     f: &Document,
     at: &str,

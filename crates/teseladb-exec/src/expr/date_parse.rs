@@ -1,7 +1,7 @@
-//! Dates written as text (measured on a `refrouter` 9.0.4): `$dateFromString`, and `$toDate` and
-//! `$convert` of a string, which read text without a format as RefDb's timelib does (see
+//! Dates written as text (measured on a reference router 9.0.4): `$dateFromString`, and `$toDate` and
+//! `$convert` of a string, which read text without a format as the reference server's timelib does (see
 //! `date_free`), and the formats of `%` specifiers that `$dateFromString` takes; then the zone of
-//! the text or of the `timezone` argument, RefDb's truncation of microseconds and its error
+//! the text or of the `timezone` argument, the reference server's truncation of microseconds and its error
 //! 159 for a date past them.
 
 use teseladb_bson::{Document, RawValue, Value};
@@ -22,13 +22,13 @@ const FROM_UNKNOWN: ErrorCode = ErrorCode { code: 40541, name: "Location40541" }
 const FROM_MISSING: ErrorCode = ErrorCode { code: 40542, name: "Location40542" };
 const FROM_FORMAT: ErrorCode = ErrorCode { code: 40684, name: "Location40684" };
 
-/// RefDb's error for a date past its microseconds.
+/// The reference server's error for a date past its microseconds.
 const DURATION_OVERFLOW: ErrorCode = ErrorCode { code: 159, name: "DurationOverflow" };
 
 const MICROS_SECOND: i128 = 1_000_000;
 const MICROS_MS: i128 = 1000;
 
-/// Whether `tz` is RefDb's plain UTC (`UTC` or a zero offset), with which a text may still
+/// Whether `tz` is the reference server's plain UTC (`UTC` or a zero offset), with which a text may still
 /// carry its own zone; `GMT`, `Etc/UTC` and every other name refuse one.
 fn plain_utc(tz: &Tz) -> bool {
     match tz {
@@ -66,7 +66,7 @@ fn resolve_micros(p: &Parsed, tz: Option<&Tz>) -> Result<i128, DateFail> {
     }
 }
 
-/// The milliseconds of `p`, as RefDb casts timelib's seconds to microseconds (overflowing
+/// The milliseconds of `p`, as the reference server casts timelib's seconds to microseconds (overflowing
 /// past ±9 223 372 036 854 seconds) and truncates them toward zero.
 fn resolve(p: &Parsed, tz: Option<&Tz>) -> Result<i64, DateFail> {
     let us = resolve_micros(p, tz)?;
@@ -75,7 +75,7 @@ fn resolve(p: &Parsed, tz: Option<&Tz>) -> Result<i64, DateFail> {
     i64::try_from(us / MICROS_MS).map_err(|_| DateFail::Overflow)
 }
 
-/// The message of a text RefDb cannot read.
+/// The message of a text the reference server cannot read.
 fn failure_text(text: &str, why: &str) -> String {
     if why.starts_with("an incomplete") || why.starts_with("you cannot") {
         why.to_owned()
@@ -84,7 +84,7 @@ fn failure_text(text: &str, why: &str) -> String {
     }
 }
 
-/// RefDb's error for a date past its microseconds.
+/// The reference server's error for a date past its microseconds.
 fn overflow() -> MqlError {
     error(
         DURATION_OVERFLOW,

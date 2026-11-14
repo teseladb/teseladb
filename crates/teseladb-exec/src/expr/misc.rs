@@ -1,5 +1,5 @@
 //! Bitwise, trigonometric, size, timestamp, hashing, vector and context expressions (measured on
-//! a `refrouter` 9.0.4): `$bitAnd`, `$bitOr`, `$bitXor`, `$bitNot`, `$sin` … `$tanh`, `$atan2`,
+//! a reference router 9.0.4): `$bitAnd`, `$bitOr`, `$bitXor`, `$bitNot`, `$sin` … `$tanh`, `$atan2`,
 //! `$degreesToRadians`, `$radiansToDegrees`, `$sigmoid`, `$binarySize`, `$bsonSize`,
 //! `$tsSecond`, `$tsIncrement`, `$subtype`, `$hash`, `$hexHash`, `$toHashedIndexKey`,
 //! `$similarityDotProduct`, `$similarityCosine`, `$similarityEuclidean`, `$rand`,
@@ -54,7 +54,7 @@ const SIM_TWO: ErrorCode = code!(10413209);
 /// The milliseconds of a second.
 const MS_PER_SECOND: i64 = 1000;
 
-/// The functions of one number, with their names, domains as RefDb writes them and whether
+/// The functions of one number, with their names, domains as the reference server writes them and whether
 /// the domain's bounds are ±1 (`[-1,1]`), from 1 (`[1,inf]`) or every finite number.
 const UNARY: [(&str, Trig, &str); 15] = [
     ("$sin", Trig::Sin, "(-inf,inf)"),
@@ -518,7 +518,7 @@ fn bits(op: Bits, vals: &[Eval]) -> Result<Eval, MqlError> {
     };
     let mut acc: i64 = if op == Bits::And { -1 } else { 0 };
     let mut long = false;
-    // RefDb looks at the operands from the last one.
+    // The reference server looks at the operands from the last one.
     for v in vals.iter().rev() {
         let n = match v {
             Some(Value::Int32(n)) => i64::from(*n),
@@ -578,7 +578,7 @@ fn unary(t: Trig, v: &Eval) -> Result<Eval, MqlError> {
     };
     let finite_only = || if x.is_infinite() { Err(out_of_domain()) } else { Ok(()) };
     // The functions of a finite double go through the decimal engine and back, so that the
-    // double is the one nearest the exact value, as RefDb's results are (macOS's libm is off
+    // double is the one nearest the exact value, as the reference server's results are (macOS's libm is off
     // by one unit for some, `asin(0.5)` among them).
     let exact = |f: fn(f64) -> f64| -> f64 {
         let plain = matches!(t, Trig::DegreesToRadians | Trig::RadiansToDegrees | Trig::Sigmoid);
@@ -698,7 +698,7 @@ const INT8: u8 = 0x03;
 const FLOAT32: u8 = 0x27;
 const PACKED_BIT: u8 = 0x10;
 
-/// The numbers of a vector argument, or RefDb's refusal.
+/// The numbers of a vector argument, or the reference server's refusal.
 fn vector(v: &Value, which: &str, name: &str) -> Result<Vec<f64>, MqlError> {
     match v {
         Value::Array(items) => items

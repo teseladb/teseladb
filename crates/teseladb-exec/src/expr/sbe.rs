@@ -1,5 +1,5 @@
-//! The errors of expressions that RefDb evaluates with its slot-based engine (SBE): the keys
-//! and accumulators of `$group`, `$bucket` and `$bucketAuto`. A `refrouter` 9.0.4 gives other codes
+//! The errors of expressions that the reference server evaluates with its slot-based engine (SBE): the keys
+//! and accumulators of `$group`, `$bucket` and `$bucketAuto`. A reference router 9.0.4 gives other codes
 //! and messages there than in `$project` for some operators (measured 31-10-2026); an error of
 //! one of them is rewritten where the operator raises it.
 

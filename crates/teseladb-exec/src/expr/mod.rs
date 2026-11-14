@@ -2,10 +2,10 @@
 //! and evaluated against each document ([`Expr::eval`]). A value is a literal, a field path
 //! (`"$a.b"`), a variable (`"$$ROOT"`, `"$$name.b"`), a document or array of expressions, or an
 //! operator `{"$op": args}`. Evaluation gives a value or nothing: a missing field is not `null`,
-//! and a document drops a field whose expression gives nothing, as RefDb's do.
+//! and a document drops a field whose expression gives nothing, as the reference server's do.
 //!
 //! The operators are in the submodules by family; what each one returns, with its types, was
-//! measured on a `refrouter` 9.0.4 (`crates/teseladb-exec/tests/expr_*.rs`).
+//! measured on a reference router 9.0.4 (`crates/teseladb-exec/tests/expr_*.rs`).
 
 pub(crate) mod arith;
 mod array;
@@ -53,14 +53,14 @@ pub use path::field_path;
 /// The result of an expression: a value, or nothing (a missing field).
 pub type Eval = Option<Value>;
 
-/// The error codes of expressions, with RefDb's names.
+/// The error codes of expressions, with the reference server's names.
 pub mod codes {
     use teseladb_mql::ErrorCode;
 
     /// A location code: its number and `LocationNNNNN`.
     macro_rules! location {
         ($name:ident, $n:literal) => {
-            #[doc = concat!("RefDb's location code ", stringify!($n), ".")]
+            #[doc = concat!("The reference server's location code ", stringify!($n), ".")]
             pub const $name: ErrorCode = ErrorCode { code: $n, name: concat!("Location", $n) };
         };
     }
@@ -154,7 +154,7 @@ pub enum Expr {
 }
 
 /// What parsing knows of the variables in scope: with `checked`, a variable that is neither a
-/// system variable nor one of `names` is RefDb's 17276 when the expression is parsed, as in
+/// system variable nor one of `names` is the reference server's 17276 when the expression is parsed, as in
 /// `$let`, `$map`, `$filter` and `$reduce`; without it (an expression parsed alone, whose
 /// variables the caller sets) the check waits for evaluation.
 #[derive(Clone, Debug, Default)]
@@ -169,7 +169,7 @@ pub struct Ctx {
 const MD5_SUBTYPE: u8 = 5;
 const MD5_LEN: usize = 16;
 
-/// The variables RefDb defines itself.
+/// The variables the reference server defines itself.
 const SYSTEM_VARIABLES: [&str; 9] = [
     "ROOT",
     "CURRENT",
@@ -285,7 +285,7 @@ pub struct Scope {
     pub vars: BTreeMap<String, Option<Value>>,
     /// The current document's metadata that `$meta` reads (`textScore`, `searchScore`…).
     pub meta: BTreeMap<String, Value>,
-    /// Whether RefDb evaluates this expression with its slot-based engine (the keys and
+    /// Whether the reference server evaluates this expression with its slot-based engine (the keys and
     /// accumulators of `$group`), whose errors differ for some operators ([`sbe`]).
     pub sbe: bool,
     /// The state of `$rand` and `$createObjectId`, shared by the scopes made from this one; the
@@ -436,7 +436,7 @@ impl Expr {
 
     /// Parses operator `name` with argument `arg`.
     fn operator(name: &str, arg: RawValue<'_>, ctx: &Ctx) -> Result<Expr, MqlError> {
-        // `$const` is the name RefDb writes `$literal` back with, and it parses it as well.
+        // `$const` is the name the reference server writes `$literal` back with, and it parses it as well.
         if name == "$literal" || name == "$const" {
             return Ok(Expr::Literal(Value::from(arg)));
         }
@@ -521,7 +521,7 @@ impl Expr {
         }
     }
 
-    /// Evaluates the expression with RefDb's classic engine's errors.
+    /// Evaluates the expression with the reference server's classic engine's errors.
     fn eval_plain(&self, doc: &Document, scope: &Scope) -> Result<Eval, MqlError> {
         match self {
             Expr::Literal(v) => Ok(Some(v.clone())),

@@ -1,9 +1,9 @@
-//! Date text without a format, as RefDb's timelib reads it (measured on a `refrouter` 9.0.4):
+//! Date text without a format, as the reference server's timelib reads it (measured on a reference router 9.0.4):
 //! every form of PHP's "Supported Date and Time Formats" — ISO 8601, American and European
 //! dates, textual months, ISO weeks, days of the year, 12- and 24-hour times, zone
 //! abbreviations and offsets, `@` timestamps and relative dates (`+1 week`, `next monday`,
 //! `last day of`, `2 days ago`) — scanned token by token with the longest match, with timelib's
-//! errors and warnings and RefDb's refusal of an incomplete date.
+//! errors and warnings and the reference server's refusal of an incomplete date.
 
 use super::calendar::month_len;
 use super::date_pattern::longest;
@@ -30,16 +30,16 @@ pub(super) struct Parsed {
 /// Why a date text gives no date.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DateFail {
-    /// timelib's errors, or RefDb's message.
+    /// timelib's errors, or the reference server's message.
     Text(String),
-    /// A date past what RefDb's microseconds hold (its error 159).
+    /// A date past what the reference server's microseconds hold (its error 159).
     Overflow,
 }
 
 /// The year timelib leaves unset, for the length of a month without one (it is no leap year).
 const UNSET_YEAR: i64 = 1;
 
-/// The microseconds of a time timelib leaves unset (`HHMM`), which RefDb adds as they are.
+/// The microseconds of a time timelib leaves unset (`HHMM`), which the reference server adds as they are.
 const UNSET_MICROS: i64 = -9_999_999;
 
 /// A cursor over a date text, for the formats of `$dateFromString`.

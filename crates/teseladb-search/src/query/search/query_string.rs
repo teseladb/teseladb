@@ -1,6 +1,6 @@
-//! The `queryString` operator (011 FR-002): RefLib's classic query syntax, as `refsearch` 1.70.6
+//! The `queryString` operator (011 FR-002): the reference search library's classic query syntax, as the reference search server 1.70.6
 //! parses it (measured 02-11-2026, `scratchpad/lane3j/m3.js`, `m4.js`). Clauses join with `OR`
-//! unless `AND`, `+`, `-`, `!` or `NOT` say otherwise, as RefLib's `QueryParser` joins them (an
+//! unless `AND`, `+`, `-`, `!` or `NOT` say otherwise, as the reference search library's `QueryParser` joins them (an
 //! `AND` makes the clause before it required too); a term is analyzed with its field's query
 //! analyzer and runs as `text`, `"…"~n` as `phrase` with slop `n`, `t~n` as `text` with `n`
 //! edits, `*`, `?` and `/…/` as patterns and `[a TO b]` as a range of terms, those three with
@@ -12,7 +12,7 @@ use teseladb_bson::{Document, Value};
 use super::{Operator, Score, SearchError, parse_score, pattern::Pattern, shape};
 use crate::index::{Fuzzy, MemIndex};
 
-/// The expansions of a fuzzy term, RefLib's default.
+/// The expansions of a fuzzy term, the reference search library's default.
 const FUZZY_EXPANSIONS: usize = 50;
 /// The edits of `t~` without a number.
 const FUZZY_EDITS: u8 = 2;

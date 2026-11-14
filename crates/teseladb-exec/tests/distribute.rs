@@ -1,6 +1,6 @@
 //! The distributed run of a pipeline (010 FR-008, T021, T022) against the reference evaluator
 //! (T003) over the same documents: each pipeline, its documents cut into ranges in every way of a
-//! seeded sequence, gives what the reference gives over all of them (as sets where RefDb
+//! seeded sequence, gives what the reference gives over all of them (as sets where the reference server
 //! leaves the order open).
 
 use teseladb_bson::{Document, Value, extjson};

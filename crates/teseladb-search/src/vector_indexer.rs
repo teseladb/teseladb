@@ -5,11 +5,11 @@
 //! whose tombstones pass a share of its nodes, or that takes documents from another range when
 //! ranges split or merge, is built again whole in key order. A query searches every segment's graph (or scores every vector with `exact`), keeps the
 //! documents the prefilter accepts and gives the `limit` best of all segments, with the scores
-//! `refsearch` gives (`crate::vector`).
+//! the reference search server gives (`crate::vector`).
 //!
 //! A document's vector is an array of numbers or a BSON vector (`BinData` subtype 9) of
 //! `float32` or `int8`, with as many components as the field's `numDimensions`; any other value
-//! is not indexed, as `refsearch` leaves it out (measured 01-11-2026: a vector of 2 components in a
+//! is not indexed, as the reference search server leaves it out (measured 01-11-2026: a vector of 2 components in a
 //! field of 3 and a string are not found).
 
 use std::collections::BTreeMap;
@@ -343,7 +343,7 @@ impl VectorIndexer {
     }
 }
 
-/// The order of two documents of equal score: by `_id`, the order `refsearch` reads a collection
+/// The order of two documents of equal score: by `_id`, the order the reference search server reads a collection
 /// in when it builds the index (measured with `tests/compat/scenarios/vector-quantization.json`:
 /// `_id` 1 before 8).
 fn raw_id(bytes: &[u8]) -> Option<teseladb_bson::RawValue<'_>> {

@@ -1,8 +1,8 @@
 //! `scoreDetails` (011 FR-003, FR-016, T025): the explanation of each result's score as
-//! `refsearch` 1.70.6 gives it, RefLib's `Explanation` of the query it builds (measured
+//! the reference search server 1.70.6 gives it, the reference search library's `Explanation` of the query it builds (measured
 //! 02-11-2026, `scratchpad/lane3k/m15.js` and `scratchpad/lane3l/m18.js` to `m22.js`, kept in
-//! `tests/fixtures/refsearch/score_details/`). Each operator has the description RefLib writes for
-//! its query and its own tree; a score option changes both. What RefLib takes from its memory and
+//! recorded data, `score_details/`). Each operator has the description the reference search library writes for
+//! its query and its own tree; a score option changes both. What the reference search library takes from its memory and
 //! not from the data (the document number of a segment after `in`, the identity of an
 //! automaton) is written with TeselaDB's document number (DV-083).
 
@@ -414,7 +414,7 @@ fn without_score(op: &Operator) -> Operator {
     out
 }
 
-/// A node adding `parts` (a sum in doubles, as RefLib adds the clauses of a query).
+/// A node adding `parts` (a sum in doubles, as the reference search library adds the clauses of a query).
 pub(super) fn sum(parts: Vec<Explanation>) -> Explanation {
     let total: f64 = parts.iter().map(|p| f64::from(p.value)).sum();
     Explanation::node(total as f32, "sum of:", parts)

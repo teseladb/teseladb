@@ -1,5 +1,5 @@
 //! `$sum`, `$avg`, `$max`, `$min`, `$stdDevPop` and `$stdDevSamp` as expressions (measured on a
-//! `refrouter` 9.0.4): with one argument that is an array they work over its elements, otherwise
+//! reference router 9.0.4): with one argument that is an array they work over its elements, otherwise
 //! over their arguments (an array among several is then skipped). The totals are the
 //! accumulators of `$group` (010 T008), which reuses them.
 //!
@@ -7,7 +7,7 @@
 //!   doubles a double (with a compensated sum), a decimal makes the whole total a decimal, where
 //!   each double goes in with its exact value rounded to 34 digits. Anything else counts 0.
 //! - `$avg` divides that total by how many numbers there were, as a double (the integers summed
-//!   as doubles, as RefDb does) or a decimal; no number gives `null`.
+//!   as doubles, as the reference server does) or a decimal; no number gives `null`.
 //! - `$max` and `$min` skip `null`, `undefined` and missing values and keep the first of equal
 //!   values; nothing left gives `null`.
 //! - `$stdDevPop` and `$stdDevSamp` give a double over the numbers (decimals as doubles), `null`
@@ -50,7 +50,7 @@ fn long_decimal(n: i128) -> Decimal128 {
     Decimal128::from_parts(n < 0, n.unsigned_abs(), 0).unwrap_or_else(Decimal128::nan)
 }
 
-/// A double-double sum (Knuth's two-sum), as RefDb's `$sum` keeps its non-decimal total:
+/// A double-double sum (Knuth's two-sum), as the reference server's `$sum` keeps its non-decimal total:
 /// `hi + lo` holds about 106 bits, so integers up to 2^63 add exactly.
 #[derive(Clone, Copy, Debug, Default)]
 struct DoubleDouble {

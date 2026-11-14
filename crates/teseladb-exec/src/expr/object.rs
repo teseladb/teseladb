@@ -1,4 +1,4 @@
-//! Object expressions (measured on a `refrouter` 9.0.4): `$mergeObjects`, `$getField`, `$setField`
+//! Object expressions (measured on a reference router 9.0.4): `$mergeObjects`, `$getField`, `$setField`
 //! and `$unsetField`. `$mergeObjects` replaces fields at the top level only, keeps each field
 //! where it first appeared and skips `null` and missing inputs; given one array it merges its
 //! elements. `$unsetField` is `$setField` with `$$REMOVE`, and says so in its errors.

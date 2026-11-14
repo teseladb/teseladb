@@ -140,7 +140,10 @@ fn errors_of_the_query_come_back_with_no_documents() {
 
 #[test]
 fn a_document_that_cannot_be_analyzed_is_an_error() {
-    let definition = Definition { analyzer: Some("reflib.nothing".to_owned()), ..definition() };
+    let definition = Definition {
+        analyzer: Some(format!("{}nothing", teseladb_names::ANALYZER_PREFIX)),
+        ..definition()
+    };
     let mut ix = Indexer::new(definition);
     assert!(ix.apply(changes()).is_err());
     ix.reshape(&bounds(&[3])).expect("empty segments reshape");

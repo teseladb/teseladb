@@ -1,4 +1,4 @@
-//! Date expressions (measured on a `refrouter` 9.0.4): the field operators (`$year` … `$isoWeekYear`),
+//! Date expressions (measured on a reference router 9.0.4): the field operators (`$year` … `$isoWeekYear`),
 //! `$dateToString`, `$dateToParts` and `$dateFromParts`; `dates_arith` has `$dateAdd`,
 //! `$dateSubtract`, `$dateDiff` and `$dateTrunc`, and `date_parse` `$dateFromString`.
 //!
@@ -93,7 +93,7 @@ const FIELDS: [(&str, Field); 13] = [
     ("$isoWeekYear", Field::IsoWeekYear),
 ];
 
-/// The parts `$dateFromParts` reads, in RefDb's order.
+/// The parts `$dateFromParts` reads, in the reference server's order.
 const NATURAL: [&str; 7] = ["year", "month", "day", "hour", "minute", "second", "millisecond"];
 const ISO: [&str; 3] = ["isoWeekYear", "isoWeek", "isoDayOfWeek"];
 
@@ -125,7 +125,7 @@ pub(super) fn parse(
 
 fn parse_field(name: &str, f: Field, arg: RawValue<'_>, ctx: &Ctx) -> Result<DateExpr, MqlError> {
     // An object is an expression when its first field is an operator; otherwise, an empty one
-    // included, it names the date and the time zone (RefDb r9.0.4,
+    // included, it names the date and the time zone (the reference server r9.0.4,
     // `parseDateExpressionAcceptingTimeZone`).
     if let RawValue::Document(d) = arg
         && !d.iter().next().is_some_and(|(k, _)| k.starts_with('$'))

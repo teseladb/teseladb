@@ -1,4 +1,4 @@
-//! `$sort` and the `sortBy` of `$top`/`$bottom` (measured on a `refrouter` 9.0.4), as `find` sorts
+//! `$sort` and the `sortBy` of `$top`/`$bottom` (measured on a reference router 9.0.4), as `find` sorts
 //! without an index: each field of the key takes the values its path reaches, crossing arrays;
 //! ascending compares their smallest, descending their largest; a missing field is `null` and
 //! an empty array sorts as `undefined`. `_id` sorts by its whole value. Equal keys keep the input
@@ -22,7 +22,7 @@ pub struct SortSpec {
     metas: Vec<Option<String>>,
 }
 
-/// The metadata a sort can sort by (measured on a `refrouter` 9.0.4: any other is 31138).
+/// The metadata a sort can sort by (measured on a reference router 9.0.4: any other is 31138).
 const SORTABLE_METAS: [&str; 6] =
     ["textScore", "randVal", "searchScore", "geoNearDistance", "vectorSearchScore", "score"];
 
@@ -270,7 +270,7 @@ fn walk<'a>(v: RawValue<'a>, segs: &[&str], out: &mut Vec<RawValue<'a>>) {
             }
             // Otherwise each element gives its values, and one where the path ends (a document
             // without the field, a scalar, a nested array) gives null, as an index key does
-            // (measured on a `refrouter` 9.0.4: `{a: [[{b: 7}], {b: 6}]}` sorts by `a.b` as null).
+            // (measured on a reference router 9.0.4: `{a: [[{b: 7}], {b: 6}]}` sorts by `a.b` as null).
             for e in a.iter() {
                 let before = out.len();
                 if matches!(e, RawValue::Document(_)) {
@@ -336,7 +336,7 @@ fn key_of(
 
 /// The values one sort field of `doc` chooses its key from: each value `path` reaches, an
 /// array giving its elements and an empty array `undefined`, and `null` when it reaches none
-/// (measured on a `refrouter` 9.0.4: `{v: [{a: []}, {a: 1}]}` sorts by `v.a` ascending as
+/// (measured on a reference router 9.0.4: `{v: [{a: []}, {a: 1}]}` sorts by `v.a` ascending as
 /// `undefined`, before `null`).
 pub fn sort_candidates<'a>(doc: RawDoc<'a>, path: &str) -> Vec<RawValue<'a>> {
     candidates_of(values_at(doc, path))
@@ -357,7 +357,7 @@ fn candidates_of(found: Vec<RawValue<'_>>) -> Vec<RawValue<'_>> {
     out
 }
 
-/// The stages that change each document without adding or removing any, which RefDb moves a
+/// The stages that change each document without adding or removing any, which the reference server moves a
 /// `$limit` in front of.
 const RESHAPING: [&str; 6] =
     ["$project", "$addFields", "$set", "$unset", "$replaceRoot", "$replaceWith"];
@@ -409,14 +409,14 @@ fn reads_rand_val(v: &RawValue<'_>) -> bool {
 /// The `$meta` name of a random value.
 const RAND_VAL: &str = "randVal";
 
-/// The error a `refrouter` 9.0.4 gives when it plans a `$sort` by `{$meta: "randVal"}` whose
+/// The error a reference router 9.0.4 gives when it plans a `$sort` by `{$meta: "randVal"}` whose
 /// pipeline then stops needing the whole document without reading the random value (measured in
-/// `tests/agg/rand_val.out`): RefDb names the sort key `$computed<n>`, after its place in the
+/// `tests/agg/rand_val.out`): the reference server names the sort key `$computed<n>`, after its place in the
 /// sort, and that name is no field path (16410). A `$limit` after the sort (also past stages
 /// that reshape each document) or a later `$sort` takes the sort away, and so does a `$count` or
 /// a grouping that reads no field right after it, and so does any other stage before the sort.
 /// `stages` are a top-level, `$lookup` or `$unionWith` pipeline on a collection that exists;
-/// RefDb plans those of `$facet` apart.
+/// the reference server plans those of `$facet` apart.
 pub(crate) fn check_random_sort(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
     // Only a `$sort` that `$match` and `$sort` stages alone precede is planned with the read.
     for (i, st) in stages.iter().enumerate() {

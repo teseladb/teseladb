@@ -1,9 +1,9 @@
-//! The `sort` option of `$search` (011 FR-003) as `refsearch` 1.70.6 runs it (measured 02-11-2026
+//! The `sort` option of `$search` (011 FR-003) as the reference search server 1.70.6 runs it (measured 02-11-2026
 //! on a 9.0.4 replica set, `scratchpad/lane3k/m14.js`): fields indexed with a type that keeps
 //! values (`number`, `token`, `date`, `boolean`, `objectId`, `uuid`, and `_id`) or the score;
 //! an array sorts by its least value going up and its greatest going down, a document without a
 //! value (or with an empty array) is the lowest unless `noData: "highest"`, values of different
-//! types follow RefDb's order, and equal documents keep the order of their keys.
+//! types follow the reference server's order, and equal documents keep the order of their keys.
 
 use std::cmp::Ordering;
 
@@ -109,7 +109,7 @@ pub(crate) fn parse(spec: &Document) -> Result<Option<Vec<SortField>>, SearchErr
     Ok(Some(fields))
 }
 
-/// The rank of a value's type in RefDb's order.
+/// The rank of a value's type in the reference server's order.
 fn rank(k: &Key) -> u8 {
     match k {
         Key::Null => 0,
@@ -122,7 +122,7 @@ fn rank(k: &Key) -> u8 {
     }
 }
 
-/// How two values compare, across types in RefDb's order.
+/// How two values compare, across types in the reference server's order.
 pub(crate) fn compare_keys(a: &Key, b: &Key) -> Ordering {
     match (a, b) {
         (Key::Number(x), Key::Number(y)) => x.total_cmp(y),

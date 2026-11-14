@@ -1,4 +1,4 @@
-//! `equals`, `in`, `range` and `near` as `refsearch` 1.70.6 runs them (measured 02-11-2026 on a
+//! `equals`, `in`, `range` and `near` as the reference search server 1.70.6 runs them (measured 02-11-2026 on a
 //! 9.0.4 replica set, `scratchpad/lane3j/m1.js` and `m2.js`; the documents and definitions below
 //! are those of the measures). Equal scores come in key order here.
 
@@ -231,7 +231,7 @@ fn equals_follows_types_normalizers_arrays_and_mappings() {
 }
 
 #[test]
-fn equals_errors_are_refsearch_messages() {
+fn equals_errors_are_the_reference_messages() {
     let idx = m1();
     let err = |args: Document| found(&idx, &op("equals", args)).unwrap_err();
     let paths = arr(vec!["n".into(), "f".into()]);
@@ -287,7 +287,7 @@ fn in_matches_any_value_on_any_path_with_one_score() {
 }
 
 #[test]
-fn in_errors_are_refsearch_messages() {
+fn in_errors_are_the_reference_messages() {
     let idx = m1();
     let err = |args: Document| found(&idx, &op("in", args)).unwrap_err();
     let mixed = arr(vec![5.into(), "gato".into()]);
@@ -380,7 +380,7 @@ fn range_matches_values_between_the_bounds() {
 }
 
 #[test]
-fn range_errors_are_refsearch_messages() {
+fn range_errors_are_the_reference_messages() {
     let idx = m1();
     let err = |p: Value, b: &[(&str, Value)]| found(&idx, &range(p, b)).unwrap_err();
     let n = || Value::from("n");
@@ -426,7 +426,7 @@ fn range_errors_are_refsearch_messages() {
         "\"range.gte.type\" is required"
     );
     // A bound that is a document needs its `type`, checked in the order lt, lte, gt, gte and
-    // before the bounds are paired, whatever their order in the query (measured on refsearch
+    // before the bounds are paired, whatever their order in the query (measured on the reference search server
     // 1.70.6 on 05-11-2026, `search-op-range` step 1).
     let doc = || Value::from(Document::new().with("$date", "2024-01-01T00:00:00Z"));
     for (bounds, named) in [
@@ -516,7 +516,7 @@ fn near_scores_by_distance_to_the_origin() {
 }
 
 #[test]
-fn near_errors_are_refsearch_messages() {
+fn near_errors_are_the_reference_messages() {
     let idx = m1();
     let err = |args: Document| found(&idx, &op("near", args)).unwrap_err();
     assert_eq!(
@@ -598,7 +598,7 @@ fn c(n: impl Into<Value>) -> Value {
 }
 
 #[test]
-fn score_functions_are_computed_as_refsearch_does() {
+fn score_functions_are_computed_as_the_reference_does() {
     let idx = m2();
     let f = |d: Document| found(&idx, &with_function(d)).map(|h| h[0].1);
     let relevance = || Value::from(Document::new().with("score", "relevance"));
@@ -642,7 +642,7 @@ fn score_functions_are_computed_as_refsearch_does() {
 }
 
 #[test]
-fn score_function_errors_are_refsearch_messages() {
+fn score_function_errors_are_the_reference_messages() {
     let idx = m2();
     let err = |d: Document| found(&idx, &with_function(d)).unwrap_err();
     let at = "\"text.score.function";
@@ -917,7 +917,7 @@ fn sterm(q: &str) -> Value {
 }
 
 #[test]
-fn span_queries_score_as_reflib_spans() {
+fn span_queries_score_as_the_reference_spans() {
     let idx = m3();
     let s = |kind: &str, args: Document| found(&idx, &span(kind, args));
     let gato = vec![(3, 0.27881568670272827), (1, 0.16532790660858154)];
@@ -1063,7 +1063,7 @@ fn qs(q: &str) -> Document {
 }
 
 #[test]
-fn query_string_joins_clauses_as_reflib_does() {
+fn query_string_joins_clauses_as_the_reference_does() {
     let idx = m3();
     let q = |text: &str| found(&idx, &qs(text));
     let gato = vec![(3, 0.27881568670272827), (1, 0.16532790660858154)];
@@ -1555,13 +1555,13 @@ fn autocomplete_grams_follow_the_field_options() {
     let folded = Grams::new(2, 3, true, "edgeGram");
     assert_eq!(folded.normalized("Canción"), "cancion");
     assert_eq!(folded.of("ab"), vec!["ab".to_owned()]);
-    // Shorter than `minGrams`: kept whole, as `refsearch` keeps it (T019).
+    // Shorter than `minGrams`: kept whole, as the reference search server keeps it (T019).
     assert_eq!(folded.of("a"), vec!["a".to_owned()]);
     assert_eq!(folded.term("a"), None);
 }
 
 #[test]
-fn vector_search_and_the_nested_operators_answer_as_refsearch() {
+fn vector_search_and_the_nested_operators_answer_as_the_reference() {
     let idx = m3();
     let v = |extra: Document| {
         let mut d =

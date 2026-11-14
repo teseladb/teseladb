@@ -1,4 +1,4 @@
-//! `$rankFusion` and `$scoreFusion` (010 FR-004, T042), as a `refrouter` 9.0.4 runs them (measured
+//! `$rankFusion` and `$scoreFusion` (010 FR-004, T042), as a reference router 9.0.4 runs them (measured
 //! in `crates/teseladb-exec/tests/agg/fusion.out`): each input pipeline runs over the collection,
 //! and every document any of them gives comes out once with a score that combines them, the
 //! highest first (equal scores by `_id`). `$rankFusion` adds `weight / (60 + rank)` over the

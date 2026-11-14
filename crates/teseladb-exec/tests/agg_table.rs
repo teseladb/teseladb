@@ -1,4 +1,4 @@
-//! Pipelines against what a `refrouter` 9.0.4 gave for each one on 31-10 and 01-11-2026 (010 T008,
+//! Pipelines against what a reference router 9.0.4 gave for each one on 31-10 and 01-11-2026 (010 T008,
 //! T010).
 //! Each file of `tests/agg/` holds one request per line — a pipeline, or `{coll, pipeline}` — a
 //! tab, and the result: `=> ` and the documents in canonical extended JSON, or `!! `, the error
@@ -172,7 +172,7 @@ fn sorted_arrays(v: Value) -> Value {
     }
 }
 
-/// What TeselaDB gives for request `spec`, and RefDb's result `want`, written alike.
+/// What TeselaDB gives for request `spec`, and the reference server's result `want`, written alike.
 fn compare(spec: &str, want: &str) -> Option<String> {
     let holder =
         extjson::parse(&format!(r#"{{"s":{spec}}}"#)).expect("json").to_bytes().expect("small");
@@ -254,28 +254,28 @@ fn check(table: &str) {
 }
 
 #[test]
-fn core_stages_match_refdb() {
+fn core_stages_match_the_reference() {
     check(teseladb_names::expand_static(include_str!("agg/core.out")));
 }
 
 #[test]
-fn grouping_sorting_and_granularity_match_refdb() {
+fn grouping_sorting_and_granularity_match_the_reference() {
     check(include_str!("agg/group.out"));
 }
 
 #[test]
-fn window_functions_match_refdb() {
+fn window_functions_match_the_reference() {
     check(include_str!("agg/window.out"));
 }
 
 #[test]
-fn densify_fill_and_graph_lookup_match_refdb() {
+fn densify_fill_and_graph_lookup_match_the_reference() {
     check(include_str!("agg/fill.out"));
 }
 
 /// Collation in comparisons, groups and sorts (010 FR-014).
 #[test]
-fn collation_matches_refdb() {
+fn collation_matches_the_reference() {
     check(include_str!("agg/collation.out"));
 }
 
@@ -283,7 +283,7 @@ fn collation_matches_refdb() {
 /// engine (the first one) does: the operators and stages that send a pipeline to the classic
 /// engine (010 FR-004).
 #[test]
-fn ties_follow_the_engine_refdb_chooses() {
+fn ties_follow_the_engine_the_reference_chooses() {
     check(include_str!("agg/sbe.out"));
 }
 
@@ -291,15 +291,15 @@ fn ties_follow_the_engine_refdb_chooses() {
 /// filter, reorder, unwind or join documents keep it, those that group drop it, `$meta` reads
 /// it and `$sort` sorts by it.
 #[test]
-fn metadata_follows_the_documents_as_refdb() {
+fn metadata_follows_the_documents_as_the_reference() {
     check(include_str!("agg/meta.out"));
 }
 
-/// `$sort` by `{$meta: "randVal"}` without a `$sample` before it, as a `refrouter` 9.0.4 runs it
+/// `$sort` by `{$meta: "randVal"}` without a `$sample` before it, as a reference router 9.0.4 runs it
 /// (`agg/rand_val.out`): the documents keep their order, and a stage that reshapes them after
 /// the sort, with no `$limit` between, fails with 16410 on the sort key's computed field.
 #[test]
-fn sort_by_random_value_matches_refdb() {
+fn sort_by_random_value_matches_the_reference() {
     check(include_str!("agg/rand_val.out"));
 }
 
@@ -307,26 +307,26 @@ fn sort_by_random_value_matches_refdb() {
 /// pipeline that sets no metadata: the names a stage must set fail with 40218 when the pipeline
 /// is parsed, the others read their default, and `$sort` takes only the sortable ones (31138).
 #[test]
-fn meta_names_without_their_stage_match_refdb() {
+fn meta_names_without_their_stage_match_the_reference() {
     check(include_str!("agg/meta_names.out"));
 }
 
 /// `$rankFusion` and `$scoreFusion` (010 T042): their scores, their order and their errors.
 #[test]
-fn fusion_stages_match_refdb() {
+fn fusion_stages_match_the_reference() {
     check(include_str!("agg/fusion.out"));
 }
 
 /// The arguments of `$function` and `$accumulator` (010 T012), checked before any JavaScript
 /// runs; this node has no engine.
 #[test]
-fn javascript_arguments_match_refdb() {
+fn javascript_arguments_match_the_reference() {
     check(include_str!("agg/js.out"));
 }
 
 /// The errors of each stage's and accumulator's arguments (010 FR-001).
 #[test]
-fn argument_errors_match_refdb() {
+fn argument_errors_match_the_reference() {
     check(include_str!("agg/errors.out"));
 }
 
@@ -347,7 +347,7 @@ fn pipelines_say_what_they_read_and_whether_they_stay_in_sbe() {
     assert!(p.reads_collection() && p.runs_in_sbe() && !p.is_empty());
     let p = pipeline(r#"[{"$collStats":{}}]"#).expect("valid");
     assert!(!p.reads_collection() && !p.runs_in_sbe());
-    // The options RefDb 9.0.4 takes (a decimal scale rounded, unknown options ignored).
+    // The options the reference server 9.0.4 takes (a decimal scale rounded, unknown options ignored).
     pipeline(
         r#"[{"$collStats":{"storageStats":{"scale":{"$numberDecimal":"0.9"},"verbose":true,
             "bogus":1},"latencyStats":{"histograms":true},"count":{},"queryExecStats":{}}}]"#,
@@ -382,14 +382,14 @@ fn an_environment_without_system_stages_refuses_them() {
     assert_eq!(format!("{c:?}"), "Collation(collator)");
 }
 
-/// The search stages on a deployment without search (measured on a `refrouter` 9.0.4).
+/// The search stages on a deployment without search (measured on a reference router 9.0.4).
 #[test]
-fn search_stages_without_search_match_refdb() {
+fn search_stages_without_search_match_the_reference() {
     check(teseladb_names::expand_static(include_str!("agg/search.out")));
 }
 
 /// A search stage that is not first, as a deployment with search refuses it (measured on
-/// `refsearch` 1.70.6): `$search` runs as `$_internalSearchRefSearchRemote`.
+/// the reference search server 1.70.6): `$search` runs as `STAGE_INTERNAL_SEARCH_REMOTE`.
 #[test]
 fn search_stages_go_first() {
     for (stage, name) in [
@@ -403,7 +403,7 @@ fn search_stages_go_first() {
     }
 }
 
-/// The random values `$sample` gives the documents it takes, as a `refrouter` 9.0.4 does (measured
+/// The random values `$sample` gives the documents it takes, as a reference router 9.0.4 does (measured
 /// 01-11-2026: `[{$sample: {size: 2}}, {$project: {r: {$meta: "randVal"}}}]` gave 0.749 and then
 /// 0.659): a double in [0, 1) for each, descending through the sample, which a later `$sort` and
 /// `$group` read.

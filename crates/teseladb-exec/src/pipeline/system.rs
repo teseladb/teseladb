@@ -1,4 +1,4 @@
-//! The specifications of the stages a node answers itself (measured on a `refrouter` 9.0.4); the
+//! The specifications of the stages a node answers itself (measured on a reference router 9.0.4); the
 //! pipeline checks them and its [`super::Env`] gives their documents.
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
@@ -11,7 +11,7 @@ use super::errors::{
 use crate::expr::arith::raw_type_name;
 use crate::expr::values::{display, display_bson};
 
-/// RefDb's code for options in a section that takes none.
+/// The reference server's code for options in a section that takes none.
 const NOT_EMPTY: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 31170, name: "Location31170" };
 
@@ -25,8 +25,8 @@ const COLL_STATS_SECTIONS: [&str; 4] = ["latencyStats", "storageStats", "count",
 pub const LIST_SEARCH_INDEXES: &str = "$listSearchIndexes";
 
 /// Checks the specification of `$listSearchIndexes`: an object with at most one of `id` and
-/// `name`, both strings (measured on a 9.0.4 replica set with `refsearch` 1.70.6). Whether `id` is
-/// an `ObjectId` is checked when the stage runs, as RefDb does.
+/// `name`, both strings (measured on a 9.0.4 replica set with the reference search server 1.70.6). Whether `id` is
+/// an `ObjectId` is checked when the stage runs, as the reference server does.
 pub fn list_search_indexes(v: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(d) = v else {
         return Err(error(
@@ -109,7 +109,7 @@ fn boolean(k: &str, x: RawValue<'_>, names: &[&str]) -> Result<(), MqlError> {
 }
 
 /// The `storageStats.scale` a number asks for: a double truncated, a decimal rounded half to
-/// even (measured on a `refrouter` 9.0.4); `None` for anything but a number.
+/// even (measured on a reference router 9.0.4); `None` for anything but a number.
 pub fn scale_of(v: &Value) -> Option<i64> {
     match v {
         Value::Int32(n) => Some(i64::from(*n)),
@@ -158,7 +158,7 @@ const CURRENT_OP_FLAGS: [&str; 8] = [
 ];
 
 /// Checks the specification of `$currentOp`: an object of boolean options (measured on a
-/// `refrouter` 9.0.4).
+/// reference router 9.0.4).
 pub fn current_op(v: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(d) = v else {
         return Err(error(
@@ -189,12 +189,12 @@ pub fn current_op(v: RawValue<'_>) -> Result<Document, MqlError> {
 /// The options of `$listClusterCatalog`, each a flag.
 const CLUSTER_CATALOG_FLAGS: [&str; 3] = ["shards", "balancingConfiguration", "tracked"];
 
-/// RefDb's code for a `$listClusterCatalog` that is no object.
+/// The reference server's code for a `$listClusterCatalog` that is no object.
 const CLUSTER_CATALOG_OBJECT: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 9_621_302, name: "Location9621302" };
 
 /// Checks the specification of `$listClusterCatalog`: an object of its flags (measured on a
-/// `refrouter` 9.0.4).
+/// reference router 9.0.4).
 pub fn cluster_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(d) = v else {
         return Err(error(
@@ -211,7 +211,7 @@ pub fn cluster_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
     Ok(Document::from(d))
 }
 
-/// Checks the specification of `$indexStats`: an empty object (measured on a `refrouter` 9.0.4).
+/// Checks the specification of `$indexStats`: an empty object (measured on a reference router 9.0.4).
 pub fn index_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
@@ -223,7 +223,7 @@ pub fn index_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
 }
 
 /// Checks the specification of `$planCacheStats`: an object whose only field may be
-/// `allHosts` (measured on a `refrouter` 9.0.4).
+/// `allHosts` (measured on a reference router 9.0.4).
 pub fn plan_cache_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(d) = v else {
         return Err(error(
@@ -243,7 +243,7 @@ pub fn plan_cache_stats(v: RawValue<'_>) -> Result<Document, MqlError> {
 }
 
 /// Checks the specification of `$listLocalSessions` or `$listSessions` (`name`): an object with
-/// `allUsers` (a boolean) or `users` (an array of `{user, db}`), not both (measured on a `refrouter`
+/// `allUsers` (a boolean) or `users` (an array of `{user, db}`), not both (measured on a reference router
 /// 9.0.4).
 pub fn sessions(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(d) = v else {
@@ -309,7 +309,7 @@ fn session_user(name: &str, i: usize, u: RawValue<'_>) -> Result<(), MqlError> {
     Ok(())
 }
 
-/// RefDb's code for a `$listExtensions` whose specification is not empty.
+/// The reference server's code for a `$listExtensions` whose specification is not empty.
 const LIST_EXTENSIONS_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 10_983_502, name: "Location10983502" };
 
@@ -317,15 +317,15 @@ const LIST_EXTENSIONS_SPEC: teseladb_mql::ErrorCode =
 pub const LIST_SAMPLED_QUERIES: &str = "$listSampledQueries";
 /// `$shardedDataDistribution` (018 FR-017).
 pub const SHARDED_DATA_DISTRIBUTION: &str = "$shardedDataDistribution";
-/// RefDb's code for a `$listSampledQueries` whose specification is not a document.
+/// The reference server's code for a `$listSampledQueries` whose specification is not a document.
 const LIST_SAMPLED_QUERIES_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_876_000, name: "Location6876000" };
-/// RefDb's code for a `$shardedDataDistribution` whose specification is not empty.
+/// The reference server's code for a `$shardedDataDistribution` whose specification is not empty.
 const SHARDED_DATA_DISTRIBUTION_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_789_100, name: "Location6789100" };
 
 /// Checks the specification of `$listSampledQueries`: a document whose `namespace`, if any, is a
-/// string (measured on a `refrouter` 9.0.4).
+/// string (measured on a reference router 9.0.4).
 pub fn list_sampled_queries(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) => match d.get("namespace") {
@@ -347,7 +347,7 @@ pub fn list_sampled_queries(v: RawValue<'_>) -> Result<Document, MqlError> {
 }
 
 /// Checks the specification of `$shardedDataDistribution`: an empty object (measured on a
-/// `refrouter` 9.0.4).
+/// reference router 9.0.4).
 pub fn sharded_data_distribution(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
@@ -358,17 +358,17 @@ pub fn sharded_data_distribution(v: RawValue<'_>) -> Result<Document, MqlError> 
     }
 }
 
-/// RefDb's code for a `$listCatalog` whose specification is not empty.
+/// The reference server's code for a `$listCatalog` whose specification is not empty.
 const LIST_CATALOG_SPEC: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_200_600, name: "Location6200600" };
 
-/// RefDb's code for a `$querySettings` whose specification is not a document.
+/// The reference server's code for a `$querySettings` whose specification is not a document.
 const QUERY_SETTINGS_OBJECT: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 7_746_800, name: "Location7746800" };
 
 /// The specification of stage `name` (`$querySettings` or `$queryStats`), which must be a
 /// document: `$querySettings` takes only a boolean `showDebugQueryShape`, and the node checks
-/// the fields of `$queryStats`. The errors are a `refnode` 9.0.4's (measured on
+/// the fields of `$queryStats`. The errors are a reference server 9.0.4's (measured on
 /// 02-11-2026).
 pub fn object_spec(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
@@ -393,7 +393,7 @@ pub fn object_spec(name: &str, v: RawValue<'_>) -> Result<Document, MqlError> {
     }
 }
 
-/// Checks the specification of `$listExtensions`: an empty object (measured on a `refrouter`
+/// Checks the specification of `$listExtensions`: an empty object (measured on a reference router
 /// 9.0.4).
 pub fn list_extensions(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
@@ -409,7 +409,7 @@ pub fn list_extensions(v: RawValue<'_>) -> Result<Document, MqlError> {
     }
 }
 
-/// Checks the specification of `$listCatalog`: an empty object (measured on a `refrouter` 9.0.4).
+/// Checks the specification of `$listCatalog`: an empty object (measured on a reference router 9.0.4).
 pub fn list_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
     match v {
         RawValue::Document(d) if d.iter().next().is_none() => Ok(Document::new()),
@@ -420,7 +420,7 @@ pub fn list_catalog(v: RawValue<'_>) -> Result<Document, MqlError> {
     }
 }
 
-/// The error of a stage behind a feature flag that a `refrouter` 9.0.4 does not enable
+/// The error of a stage behind a feature flag that a reference router 9.0.4 does not enable
 /// (`$listMqlEntities`, `$listCachedAndActiveUsers`; measured).
 pub fn behind_flag(name: &str) -> MqlError {
     error(

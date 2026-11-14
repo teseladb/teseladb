@@ -1,5 +1,5 @@
 //! The arguments of the stages that read the node's own state (`$collStats`, `$currentOp`,
-//! `$indexStats`, `$listSessions`…; 010 FR-004, FR-016, FR-018), with the codes of a `refrouter`
+//! `$indexStats`, `$listSessions`…; 010 FR-004, FR-016, FR-018), with the codes of a reference router
 //! 9.0.4 (the same cases run through the protocol in the tests of `teseladb-wire`).
 
 use teseladb_bson::{RawValue, Value, extjson};

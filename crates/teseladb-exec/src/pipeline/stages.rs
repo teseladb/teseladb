@@ -1,4 +1,4 @@
-//! The other stages of a pipeline (measured on a `refrouter` 9.0.4): `$match`, `$limit`, `$skip`,
+//! The other stages of a pipeline (measured on a reference router 9.0.4): `$match`, `$limit`, `$skip`,
 //! `$count`, `$unwind`, `$sample`, `$redact`, `$facet`, `$lookup`, `$unionWith` and
 //! `$documents`.
 
@@ -21,7 +21,7 @@ use crate::expr::arith::raw_type_name;
 use crate::expr::values::display;
 use crate::expr::{Ctx, Expr, Scope};
 
-/// RefDb's message for a geospatial sort inside `$match`.
+/// The reference server's message for a geospatial sort inside `$match`.
 const NEAR_MESSAGE: &str = teseladb_names::ERR_NEAR_NOT_ALLOWED;
 
 use super::scoped::matches;
@@ -44,7 +44,7 @@ fn uses_where(d: RawDoc<'_>) -> bool {
 }
 
 impl Match {
-    /// Reads a `$match`; the expressions of its `$expr`s are checked here, as RefDb parses them
+    /// Reads a `$match`; the expressions of its `$expr`s are checked here, as the reference server parses them
     /// with the stage.
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Match, MqlError> {
         let RawValue::Document(d) = v else {
@@ -402,8 +402,8 @@ impl Sample {
     }
 
     /// The places of the documents a sample of `n` takes and the random value of each, as
-    /// RefDb samples: each document gets a random value, and the `size` largest go first,
-    /// largest first (measured on a `refrouter` 9.0.4: `{$meta: "randVal"}` reads that value and
+    /// the reference server samples: each document gets a random value, and the `size` largest go first,
+    /// largest first (measured on a reference router 9.0.4: `{$meta: "randVal"}` reads that value and
     /// descends through the sample).
     pub(crate) fn pick(&self, n: usize, env: &dyn Env) -> Vec<(usize, f64)> {
         let mut keyed: Vec<(usize, f64)> = (0..n).map(|i| (i, env.random())).collect();
@@ -501,12 +501,12 @@ pub struct Facet {
     facets: Vec<(String, Pipeline)>,
 }
 
-/// RefDb's error for a `$match` with `$text` that is not the first stage of its pipeline.
+/// The reference server's error for a `$match` with `$text` that is not the first stage of its pipeline.
 pub(crate) fn text_not_first() -> MqlError {
     error(TEXT_NOT_FIRST, "$match with $text is only allowed as the first pipeline stage")
 }
 
-/// RefDb's error for a `$match` with `$text` in a `$facet`, which has no text index to read
+/// The reference server's error for a `$match` with `$text` in a `$facet`, which has no text index to read
 /// (measured on 9.0.4, 011 T054).
 pub(crate) fn text_in_facet() -> MqlError {
     error(TEXT_IN_FACET, "Should never call getNext on a $match stage with $text clause")
@@ -752,7 +752,7 @@ impl Lookup {
         for d in docs {
             env.interrupted()?;
             // Without `from`, the equality applies to what the pipeline's `$documents` gives,
-            // before its other stages (measured on a `refrouter` 9.0.4).
+            // before its other stages (measured on a reference router 9.0.4).
             let join = match (&self.local, &self.foreign) {
                 (Some(l), Some(f)) => Some((l, f)),
                 _ => None,
@@ -1055,7 +1055,7 @@ impl UnionWith {
     }
 }
 
-/// RefDb's code for a `$documents` that is no array.
+/// The reference server's code for a `$documents` that is no array.
 const DOCUMENTS_ARRAY: ErrorCode = ErrorCode { code: 5_858_203, name: "Location5858203" };
 
 /// The documents `$documents` gives: its expression's array, evaluated once.

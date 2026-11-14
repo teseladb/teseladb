@@ -1,10 +1,10 @@
-//! The geographic operators (011 FR-002) over `geo` fields, as `refsearch` 1.70.6 runs them
+//! The geographic operators (011 FR-002) over `geo` fields, as the reference search server 1.70.6 runs them
 //! (measured 02-11-2026, `scratchpad/lane3j/m7.js`): `geoWithin` finds the documents with a
 //! point (`Point` or `MultiPoint`) inside a box, a circle (meters on the sphere) or a polygon;
 //! `geoShape` relates any GeoJSON shape of the document to the query's (`intersects`,
 //! `within`, `contains`, `disjoint`) and needs `indexShapes: true`; `near` with a point origin
 //! scores the closest point of a document `pivot / (pivot + meters)`. Shapes are compared on the
-//! longitude-latitude plane, as RefLib compares them; both score 1 otherwise.
+//! longitude-latitude plane, as the reference search library compares them; both score 1 otherwise.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use super::{Operator, Score, SearchError, parse_score, shape, value_at};
 use crate::definition::FieldMapping;
 use crate::index::MemIndex;
 
-/// The Earth's mean radius in meters, as RefLib measures distances.
+/// The Earth's mean radius in meters, as the reference search library measures distances.
 const EARTH_RADIUS: f64 = 6_371_008.771_4;
 
 /// A point: longitude, latitude.
@@ -252,7 +252,7 @@ pub(super) fn parse_near(
     Ok(Operator::Geo(Geo::Near { paths, origin, pivot, score }))
 }
 
-/// `p` as RefLib stores a point: latitude and longitude on 32 bits each.
+/// `p` as the reference search library stores a point: latitude and longitude on 32 bits each.
 fn quantized(p: Pt) -> Pt {
     const STEPS: f64 = 4_294_967_296.0;
     let lat = (p.1 * (STEPS / 180.0)).floor().min(STEPS / 2.0 - 1.0) * (180.0 / STEPS);
@@ -355,7 +355,7 @@ impl Shape {
 }
 
 impl Shape {
-    /// The shape on RefLib's 32-bit coordinates, as a document stores it (measured
+    /// The shape on the reference search library's 32-bit coordinates, as a document stores it (measured
     /// 02-11-2026, `scratchpad/lane3k/m10.js`: a stored point at 45° lies on a query line at
     /// 45°, one at -3.5° does not lie on a line at -3.5°; the query's geometry keeps its values).
     fn stored(self) -> Shape {
@@ -466,7 +466,7 @@ impl Geo {
     }
 }
 
-/// A latitude and a longitude as RefLib writes them.
+/// A latitude and a longitude as the reference search library writes them.
 fn lat_lon(p: Pt) -> (String, String) {
     (crate::index::java_double(p.1), crate::index::java_double(p.0))
 }
@@ -478,9 +478,9 @@ fn on_grid(v: f64, step: f64, up: bool) -> f64 {
 }
 
 impl Shape {
-    /// Each geometry as RefLib writes it (measured: `Point(lon,lat)`, `Line([lon, lat]…)`,
+    /// Each geometry as the reference search library writes it (measured: `Point(lon,lat)`, `Line([lon, lat]…)`,
     /// `Polygon[lat, lon] … , holes=[…]`).
-    fn reflib(&self) -> Vec<String> {
+    fn reference_queries(&self) -> Vec<String> {
         let vertices = |ring: &[Pt]| -> String {
             ring.iter()
                 .map(|&p| {
@@ -521,7 +521,7 @@ impl Shape {
     }
 }
 
-/// A list of geometries in a RefLib query's description.
+/// A list of geometries in a reference search library query's description.
 fn listed(all: &[String]) -> String {
     let inner: String = all.iter().map(|g| format!("{g},")).collect();
     format!("[{inner}]")
@@ -548,13 +548,13 @@ impl Geo {
             )),
             Geo::Within { path, region: Region::Shape(s), .. } => Leaf::Bare(format!(
                 "LatLonPointQuery: field=$type:geoPoint/{path}:{}",
-                listed(&s.reflib())
+                listed(&s.reference_queries())
             )),
             Geo::Shape { path, relation, shape: s, .. } => {
                 let one = |g: &[String]| {
                     format!("LatLonShapeQuery: field=$type:geoShape/{path}:{}", listed(g))
                 };
-                let all = s.reflib();
+                let all = s.reference_queries();
                 if relation == "contains" && s.points.len() > 1 {
                     let each: Vec<String> =
                         all.iter().map(|g| format!("#{}", one(std::slice::from_ref(g)))).collect();

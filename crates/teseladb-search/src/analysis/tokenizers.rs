@@ -1,8 +1,8 @@
-//! Tokenizers of RefDb Search custom analyzers (FR-007): `standard`, `whitespace`, `keyword`,
+//! Tokenizers of the custom analyzers of the reference search server (FR-007): `standard`, `whitespace`, `keyword`,
 //! `nGram`, `edgeGram`, `uaxUrlEmail`, `regexCaptureGroup` and `regexSplit`, with the attributes
 //! and defaults the documentation gives (`maxTokenLength` 255; `minGram` and `maxGram` required;
 //! `pattern` in the syntax of `java.util.regex.Pattern`, see [`super::jregex`]) and the behaviour
-//! measured on `refsearch` 1.70.6 (`tests/fixtures/refsearch/tokenizers/`).
+//! measured on the reference search server 1.70.6 (recorded data, `tokenizers/`).
 //!
 //! `standard` keeps the UAX #29 word segments, by the Unicode 12.1 classes, that hold a letter, a
 //! number (word-break classes ALetter, Hebrew_Letter, Numeric, Katakana), a pair of regional
@@ -13,7 +13,7 @@
 //! `whitespace` cuts at Java's white space (not at no-break spaces) and ends a token once it holds
 //! `maxTokenLength` units. `nGram` emits every run of `minGram` to `maxGram` characters of the
 //! whole text, by start and then by length; `edgeGram` only the runs that start the text (the
-//! documentation's example shows them at every word, `refsearch` does not). `uaxUrlEmail` takes at
+//! documentation's example shows them at every word, the reference search server does not). `uaxUrlEmail` takes at
 //! each place the longest of a URL or email address of [`super::urlemail`] and a `standard` word.
 //! `regexSplit` emits the non-empty text between matches, like `String.split`;
 //! `regexCaptureGroup` emits the non-empty text of group `group` of each match (0 for the whole
@@ -91,21 +91,21 @@ pub enum Tokenizer {
         /// Longest token, in characters.
         max_token_length: usize,
     },
-    /// Runs of letters (general category L), the tokenizer of `reflib.simple`.
+    /// Runs of letters (general category L), the tokenizer of the built-in `simple` analyzer.
     Letter {
         /// Longest token, in characters.
         max_token_length: usize,
     },
     /// The whole text.
     Keyword,
-    /// The Japanese dictionary tokenizer of `reflib.kuromoji` (width-folded text, base forms,
+    /// The Japanese dictionary tokenizer of the built-in `kuromoji` analyzer (width-folded text, base forms,
     /// stop tags dropped).
     Kuromoji,
-    /// The Korean dictionary tokenizer of `reflib.nori` (morphemes, readings, stop tags dropped).
+    /// The Korean dictionary tokenizer of the built-in `nori` analyzer (morphemes, readings, stop tags dropped).
     Nori,
-    /// The Thai dictionary tokenizer of `reflib.thai`.
+    /// The Thai dictionary tokenizer of the built-in `thai` analyzer.
     Thai,
-    /// The Chinese tokenizer of `reflib.smartcn`.
+    /// The Chinese tokenizer of the built-in `smartcn` analyzer.
     SmartCn,
     /// Every run of `min..=max` characters.
     NGram {
@@ -734,7 +734,7 @@ mod tests {
         let url_email = Tokenizer::UaxUrlEmail { max_token_length: DEFAULT_MAX_TOKEN_LENGTH };
         assert_eq!(texts(url_email.clone(), "lewinsky@example.com"), ["lewinsky@example.com"]);
         assert_eq!(texts(STANDARD, "lewinsky@example.com"), ["lewinsky", "example.com"]);
-        // The documentation's example has grams at every word; `refsearch` 1.70.6 gives them only
+        // The documentation's example has grams at every word; the reference search server 1.70.6 gives them only
         // from the start of the text.
         assert_eq!(
             texts(Tokenizer::EdgeGram { min: 2, max: 7 }, "try to sign in"),

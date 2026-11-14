@@ -1,5 +1,5 @@
-//! What each token of date text without a format sets, as RefDb's timelib reads it (measured
-//! on a `refrouter` 9.0.4): the date and time fields, the zone, and the relative parts, with
+//! What each token of date text without a format sets, as the reference server's timelib reads it (measured
+//! on a reference router 9.0.4): the date and time fields, the zone, and the relative parts, with
 //! timelib's errors for a second date, time or zone.
 
 use super::calendar::{days_from_civil, iso_week_one};
@@ -592,7 +592,7 @@ impl State {
 }
 
 /// The zone of an abbreviation (in parentheses or not) or a correction, with the word as
-/// written; `None` for anything else (RefDb refuses zone identifiers).
+/// written; `None` for anything else (the reference server refuses zone identifiers).
 fn zone_of(text: &str) -> Option<(TextZone, &str)> {
     if text.starts_with(['+', '-']) || text.starts_with("GMT+") || text.starts_with("GMT-") {
         return Some((TextZone::Offset(correction(text)), ""));

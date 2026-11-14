@@ -1,5 +1,5 @@
-//! RefLib's limit of 1 024 clauses once `refsearch` has rewritten a query (FR-018, audit A011-3-5),
-//! measured on `refsearch` 1.70.6 on 02-11-2026 (`scratchpad/lane3p/m60.js` to `m66.js`):
+//! The reference search library's limit of 1 024 clauses once the reference search server has rewritten a query (FR-018, audit A011-3-5),
+//! measured on the reference search server 1.70.6 on 02-11-2026 (`scratchpad/lane3p/m60.js` to `m66.js`):
 //!
 //! - a disjunction (a `text` on one path, a `text` on several paths over its paths, the
 //!   expansions of a fuzzy word, a `compound` with only `should`, a numeric `range`) first joins

@@ -124,7 +124,7 @@ pub(super) enum Tz {
 }
 
 impl Tz {
-    /// The zone `text` names, or RefDb's 40485.
+    /// The zone `text` names, or the reference server's 40485.
     pub(super) fn parse(text: &str) -> Result<Tz, MqlError> {
         if let Some(off) = fixed_offset(text) {
             return Ok(Tz::Fixed(off));
@@ -148,7 +148,7 @@ impl Tz {
         ms.saturating_add(i64::from(self.offset_at(ms)) * MS_SECOND)
     }
 
-    /// UTC milliseconds of local milliseconds `local`, as RefDb resolves a local time: a time
+    /// UTC milliseconds of local milliseconds `local`, as the reference server resolves a local time: a time
     /// in a gap is read with the offset before it, one that happens twice is the later.
     pub(super) fn utc(&self, local: i64) -> i64 {
         match self {

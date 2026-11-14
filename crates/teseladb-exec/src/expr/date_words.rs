@@ -1,5 +1,5 @@
-//! The words of date text without a format, as RefDb's timelib knows them (measured on a
-//! `refrouter` 9.0.4 on 31-10-2026): zone abbreviations with their offsets, month and weekday names,
+//! The words of date text without a format, as the reference server's timelib knows them (measured on a
+//! reference router 9.0.4 on 31-10-2026): zone abbreviations with their offsets, month and weekday names,
 //! Roman months, ordinals and the units of relative dates.
 
 /// Every zone abbreviation timelib accepts, lower-case, with its offset in seconds: the 25

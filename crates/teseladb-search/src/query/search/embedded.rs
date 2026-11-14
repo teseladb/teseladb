@@ -1,4 +1,4 @@
-//! The `embeddedDocument` operator (011 FR-002) over an `embeddedDocuments` field, as `refsearch`
+//! The `embeddedDocument` operator (011 FR-002) over an `embeddedDocuments` field, as the reference search server
 //! 1.70.6 runs it (measured 02-11-2026, `scratchpad/lane3j/m3.js`, `m4.js`, and nested in
 //! `scratchpad/lane3k/m10.js`, `m11.js`): each element of the array is a document of its own,
 //! with statistics among the elements of its path alone, its operator runs over them, and a
@@ -402,7 +402,7 @@ impl Embedded {
         let elements = levels[last].index;
         let op = parse_at(elements, &self.operator, &format!("{}.operator", self.at))?;
         let here = format!("embeddedDocument.path '{}'", self.path);
-        // A boost weighs the terms of the elements' operator, as RefLib's `BoostQuery` does.
+        // A boost weighs the terms of the elements' operator, as the reference search library's `BoostQuery` does.
         let op = boosted(resolve(op, &levels, &here)?, boost);
         f(&levels, last, &op)
     }

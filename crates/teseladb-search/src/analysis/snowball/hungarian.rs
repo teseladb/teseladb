@@ -1,5 +1,5 @@
 //! The Hungarian stemmer of snowballstem.org (`algorithms/hungarian/stemmer.html`), with R1
-//! kept out of the middle of a digraph, as `refsearch` does.
+//! kept out of the middle of a digraph, as the reference search server does.
 
 use super::word::Word;
 

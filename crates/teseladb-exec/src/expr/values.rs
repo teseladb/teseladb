@@ -1,12 +1,12 @@
-//! Helpers the operator families share: values written as RefDb writes them in messages,
-//! integral arguments, and comparing and sorting values in RefDb's order.
+//! Helpers the operator families share: values written as the reference server writes them in messages,
+//! integral arguments, and comparing and sorting values in the reference server's order.
 
 use std::cmp::Ordering;
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, shell};
 use teseladb_mql::{MqlError, decimal_to_f64};
 
-/// `v` as RefDb writes a value of an expression in a message (its `Value` printer): strings
+/// `v` as the reference server writes a value of an expression in a message (its `Value` printer): strings
 /// in double quotes, `{a: 1}`, `[1, 2]`, doubles as C++ streams write them (`1.5`, `9.22337e+18`).
 pub(crate) fn display(v: &Value) -> String {
     match v {
@@ -31,7 +31,7 @@ pub(crate) fn display(v: &Value) -> String {
     }
 }
 
-/// `v` as RefDb writes a BSON value of a command in a message (`[ 0.5, "$i" ]`).
+/// `v` as the reference server writes a BSON value of a command in a message (`[ 0.5, "$i" ]`).
 pub(crate) fn display_bson(v: &Value) -> String {
     let holder = Document::new().with("v", v.clone());
     match holder.to_bytes().ok().as_deref().map(RawDoc::from_bytes) {
@@ -113,7 +113,7 @@ pub(super) fn with_raw<R>(
     Ok(f(&raws))
 }
 
-/// The positions of `keys` in RefDb's order (a stable sort): each element's keys compare in
+/// The positions of `keys` in the reference server's order (a stable sort): each element's keys compare in
 /// turn, each in its direction (`true` for descending).
 pub(super) fn sorted_positions(
     keys: &[Vec<Value>],
@@ -140,7 +140,7 @@ pub(super) fn sorted_positions(
     })
 }
 
-/// `values` in RefDb's order, ascending, strings in collation `col`.
+/// `values` in the reference server's order, ascending, strings in collation `col`.
 pub(super) fn sorted(
     values: Vec<Value>,
     col: Option<&dyn teseladb_bson::Collator>,

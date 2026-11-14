@@ -1,6 +1,6 @@
 //! The expressions whose result depends on the operation rather than the document (010 T007,
 //! FR-005, FR-006): `$rand`, `$currentDate`, `$createObjectId` and `$meta`, and the one value a
-//! `refshell` cannot show (`undefined` from `$deserializeEJSON`).
+//! reference shell cannot show (`undefined` from `$deserializeEJSON`).
 
 use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_exec::expr::{Ctx, Eval, Expr, Scope};

@@ -1,5 +1,5 @@
-//! The relative parts of date text without a format and how they move the date, as RefDb's
-//! timelib applies them (measured on a `refrouter` 9.0.4): `<nth> <weekday> of` moves to the
+//! The relative parts of date text without a format and how they move the date, as the reference server's
+//! timelib applies them (measured on a reference router 9.0.4): `<nth> <weekday> of` moves to the
 //! first of its month; the weekday comes next, on that date; then years, months and days; then
 //! `first`/`last day of`; then weekdays as business days; and the time of day on the wall
 //! clock.
@@ -105,7 +105,7 @@ pub(super) fn local_micros(
     rel: &Rel,
 ) -> Option<i128> {
     let (y, m, d) = date;
-    // Past this many years, no date fits RefDb's microseconds anyway.
+    // Past this many years, no date fits the reference server's microseconds anyway.
     const MAX_YEAR: i64 = 1_000_000_000_000;
     let limit = |v: i64| v.unsigned_abs() < MAX_YEAR.unsigned_abs();
     if !limit(y) || !limit(rel.y) || !limit(rel.m) || !limit(rel.d) {

@@ -1,5 +1,5 @@
 //! The token patterns of date text without a format, after the grammar of timelib's "Supported
-//! Date and Time Formats" (PHP manual) and measured on a `refrouter` 9.0.4: a small matcher that
+//! Date and Time Formats" (PHP manual) and measured on a reference router 9.0.4: a small matcher that
 //! gives every length a pattern can take at a position, so that the scanner keeps the longest
 //! match and, among equally long ones, the rule listed first.
 

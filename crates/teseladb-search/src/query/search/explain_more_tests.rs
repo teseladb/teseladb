@@ -1,4 +1,4 @@
-//! `scoreDetails` of the forms the fixtures of `tests/score_details_refsearch.rs` leave out: score
+//! `scoreDetails` of the forms the recorded `scoreDetails` comparison leaves out: score
 //! options on fuzzy, phrase and synonym queries, constant scores of whole `compound`s, values of
 //! other types and paths, and `near` on several `geo` paths. The descriptions follow the rules
 //! measured there (DV-083).

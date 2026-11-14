@@ -1,4 +1,4 @@
-//! The text index and the `$text` operator (011 FR-001, FR-016, T029), as a RefDb 9.0.4 text
+//! The text index and the `$text` operator (011 FR-001, FR-016, T029), as a reference server 9.0.4 text
 //! index of `textIndexVersion` 3 reads documents and queries (measured 02-11-2026 on the 9.0.4
 //! replica set of `scratchpad/lane3m`, `m33.js` to `m38.js`):
 //!
@@ -55,7 +55,7 @@ const LANGUAGES: &[(&str, Option<Stemmer>, &str)] = &[
     ("none", None, ""),
 ];
 
-/// An error of a text index or of a `$text` query, with RefDb's code.
+/// An error of a text index or of a `$text` query, with the reference server's code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextError {
     /// The error code.
@@ -73,7 +73,7 @@ fn bad_value(message: impl Into<String>) -> TextError {
 pub struct Language(usize);
 
 impl Language {
-    /// The language called `name`; an unknown one is RefDb's error.
+    /// The language called `name`; an unknown one is the reference server's error.
     pub fn named(name: &str) -> Result<Language, TextError> {
         LANGUAGES.iter().position(|(n, _, _)| *n == name).map(Language).ok_or_else(|| {
             bad_value(format!("unsupported language: \"{name}\" for text index version 3"))
@@ -229,7 +229,7 @@ pub fn stems(text: &str, language: Language, s: Sensitivity) -> Vec<String> {
             }
             let word = if s.case { normalized(w, keep_marks) } else { lower };
             let stem = match language.stemmer() {
-                Some(stemmer) => stem_as_refnode(stemmer, &word),
+                Some(stemmer) => stem_as_the_reference(stemmer, &word),
                 None => word,
             };
             Some(if s.diacritic { stem } else { normalized(&stem, keep_marks_off(s)) })
@@ -240,10 +240,10 @@ pub fn stems(text: &str, language: Language, s: Sensitivity) -> Vec<String> {
 /// The first private-use code point, where the letters a stemmer must not know stand in.
 const STAND_IN: u32 = 0xE000;
 
-/// `word` stemmed as RefDb's stemmers do (measured, `tests/text_stems_refnode.rs`): the Hungarian
+/// `word` stemmed as the reference server's stemmers do (measured, the recorded stem comparison): the Hungarian
 /// one takes a letter beyond Latin-1 (`ő`, `ű`) for an unknown consonant, which stops its
 /// suffixes, and the Romanian one knows `ş` and `ţ` with cedilla but not with comma below.
-fn stem_as_refnode(stemmer: Stemmer, word: &str) -> String {
+fn stem_as_the_reference(stemmer: Stemmer, word: &str) -> String {
     let hide: fn(char) -> bool = match stemmer {
         Stemmer::Hungarian => |c| u32::from(c) > 0xFF,
         Stemmer::Romanian => |c| matches!(c, 'ș' | 'ț'),
@@ -409,7 +409,7 @@ impl TextIndex {
             return None;
         }
         let terms: Vec<String> = query.plain_terms.clone();
-        // One running sum over every string and term, as `refnode` adds (measured: 7.5 + 2.1 +
+        // One running sum over every string and term, as the reference server adds (measured: 7.5 + 2.1 +
         // 1.2 gives 10.799999999999999, and 10.8 when each string is added up first).
         let mut total = 0.0;
         for (s, weight, language) in &strings {

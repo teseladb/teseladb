@@ -3,7 +3,7 @@
 //! IANA list of top-level domains embedded from `data/tlds-alpha-by-domain.txt`
 //! (`scripts/iana-tlds.sha256`).
 //!
-//! The grammar is the one measured on `refsearch` 1.70.6 (`tests/fixtures/refsearch/tokenizers/`), which
+//! The grammar is the one measured on the reference search server 1.70.6 (recorded data, `tokenizers/`), which
 //! is narrower than the RFCs: only the schemes `http`, `https`, `ftp` and `file`; a host after a
 //! scheme of any labels, without the list; a bare host whose last label is in the list, or an
 //! IPv4 address, where a top-level domain may end inside the last label (`y.comx` gives
@@ -161,7 +161,7 @@ pub fn email(s: &[u8]) -> Option<usize> {
     Some(local + 1 + end + dot)
 }
 
-/// The URL schemes recognised, as measured on `refsearch`.
+/// The URL schemes recognised, as measured on the reference search server.
 const SCHEMES: &[&str] = &["http://", "https://", "ftp://", "file://"];
 
 /// The length of a URL at the start of `s`: a scheme of [`SCHEMES`] (any case) followed by an

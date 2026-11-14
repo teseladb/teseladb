@@ -1,8 +1,8 @@
-//! The Armenian stemmer of `snowballStemming` (`armenian`), deduced from the stems `refsearch` 1.70.6
+//! The Armenian stemmer of `snowballStemming` (`armenian`), deduced from the stems the reference search server 1.70.6
 //! gives for the 101 780 words of the Armenian Snowball vocabulary (D-051): five steps of endings,
 //! each looked for inside RV (after the first vowel), with their conditions and replacements
-//! learned from the vocabulary and from synthetic words asked to `refsearch`. The words of the fixture
-//! the steps do not stem as `refsearch` does are listed with their stems.
+//! learned from the vocabulary and from synthetic words asked to the reference search server. The words of the fixture
+//! the steps do not stem as the reference search server does are listed with their stems.
 
 use std::sync::OnceLock;
 

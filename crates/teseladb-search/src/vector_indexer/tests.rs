@@ -1,4 +1,4 @@
-//! `$vectorSearch` over the corpus measured on a 9.0.4 replica set with `refsearch` 1.70.6
+//! `$vectorSearch` over the corpus measured on a 9.0.4 replica set with the reference search server 1.70.6
 //! (01-11-2026): the documents of `scratchpad lane3g/v1.js`, query vector `[1, 0.2, 0.1]`.
 
 use teseladb_bson::{Document, Value};
@@ -79,7 +79,7 @@ fn ids(ix: &VectorIndexer, q: &VectorQuery) -> Vec<i32> {
 }
 
 #[test]
-fn scores_like_refsearch() {
+fn scores_like_the_reference() {
     let measured: [(&str, [(i32, f64); 6]); 3] = [
         (
             "euclidean",
@@ -128,7 +128,7 @@ fn scores_like_refsearch() {
 }
 
 #[test]
-fn limits_and_prefilters_like_refsearch() {
+fn limits_and_prefilters_like_the_reference() {
     let ix = indexer("euclidean");
     assert_eq!(ids(&ix, &query(|d| drop(d.insert("limit", 2)))), [1, 3]);
     let f = |f: Document| query(|d| d.push("filter", f));

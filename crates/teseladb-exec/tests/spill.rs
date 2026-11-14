@@ -3,7 +3,7 @@
 //! stages that change or filter each document, what they give over the whole of those stages'
 //! output; past their limit they write to the store as the batches come and give the same
 //! documents, and without `allowDiskUse` they fail with 292 as soon as they hold more than their
-//! limit, before the stages before them read the rest of the input, as in RefDb.
+//! limit, before the stages before them read the rest of the input, as in the reference server.
 
 use teseladb_bson::{Document, RawValue, Value, extjson};
 use teseladb_exec::expr::Ctx;
@@ -217,7 +217,7 @@ fn a_top_k_holds_only_the_documents_it_keeps() {
     assert_eq!(e.code.code, 292);
 }
 
-/// `text` over a collection: its `$sort` narrowed as RefDb's query plan narrows it.
+/// `text` over a collection: its `$sort` narrowed as the reference server's query plan narrows it.
 fn over_collection(text: &str) -> Pipeline {
     let holder = extjson::parse(&format!(r#"{{"p":{text}}}"#)).expect("pipeline");
     let Some(Value::Array(stages)) = holder.get("p") else { panic!("not a pipeline") };
@@ -234,7 +234,7 @@ fn over_collection(text: &str) -> Pipeline {
 }
 
 #[test]
-fn a_leading_sort_holds_only_the_fields_the_rest_uses_as_refdb_counts_them() {
+fn a_leading_sort_holds_only_the_fields_the_rest_uses_as_the_reference_counts_them() {
     // Room for the input with two or three small fields each, not for the whole documents.
     let small = SpillEnv { limit: 120_000, disk: false, store: None };
     let roomy = SpillEnv { limit: usize::MAX, disk: false, store: None };

@@ -1,6 +1,6 @@
 //! The stemmers of the `snowballStemming` token filter, written from the algorithm descriptions
-//! of snowballstem.org (research R7) and checked word by word against the stems `refsearch` gives
-//! for the Snowball vocabularies (`tests/fixtures/refsearch/stem/`).
+//! of snowballstem.org (research R7) and checked word by word against the stems the reference search server gives
+//! for the Snowball vocabularies (recorded data, `stem/`).
 
 mod arabic;
 mod armenian;

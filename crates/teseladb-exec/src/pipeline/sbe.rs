@@ -1,4 +1,4 @@
-//! Which stage specifications RefDb's slot-based engine (SBE) can run, measured on a `refrouter`
+//! Which stage specifications the reference server's slot-based engine (SBE) can run, measured on a reference router
 //! 9.0.4 by the `explainVersion` a shard gives (`2` for SBE, `1` for the classic engine): a
 //! pipeline goes to the classic engine from the first stage that names one of the operators
 //! below, whatever stage or position holds it. What a pipeline runs in SBE decides how `$group`

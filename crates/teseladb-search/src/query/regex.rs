@@ -3,15 +3,15 @@
 //! [`crate::query::fuzzy::Utf8`] runs over the dictionary as a lazily built DFA: each state is the
 //! set of NFA states reachable after the characters read.
 //!
-//! The syntax is the one RefDb Search documents for `regex` (a subset of PCRE, whole-term
+//! The syntax is the one the reference search server documents for `regex` (a subset of PCRE, whole-term
 //! matches, no anchors): `.` any character, `?`, `+` and `*` on the preceding unit, `|`, `{n}`,
 //! `{n,}` and `{n,m}`, `(…)`, `[…]` with ranges and a leading `^` for negation, `<n-m>` for a
 //! numeric range and `#` for the empty language. Every reserved character
-//! (`. ? + * | { } [ ] ( ) < > " \ @ #`) is literal after `\`. RefDb lists `"` and `@` as
+//! (`. ? + * | { } [ ] ( ) < > " \ @ #`) is literal after `\`. The reference server lists `"` and `@` as
 //! reserved without describing them; here `"…"` matches its contents literally and `@` matches
 //! any string, the meaning those two characters have in the regular-expression syntax
-//! `refsearch` reads. The battery (T020) compares them, and `<n-m>` (see [`Regex::new`]), with
-//! `refsearch`.
+//! the reference search server reads. The battery (T020) compares them, and `<n-m>` (see [`Regex::new`]), with
+//! the reference search server.
 //!
 //! `wildcard` patterns use `*` for any string, `?` for any character and `\` to escape.
 
@@ -68,7 +68,7 @@ fn literal(c: char) -> Node {
 }
 
 /// The unit `\c` stands for: the classes `\d`, `\s` and `\w` and their complements `\D`, `\S`
-/// and `\W` (`\w` matched the term `g` in `refsearch`), else `c` itself.
+/// and `\W` (`\w` matched the term `g` in the reference search server), else `c` itself.
 fn escaped(c: char) -> Node {
     let digits = vec![('0', '9')];
     let spaces = vec![('\t', '\r'), (' ', ' ')];
@@ -85,7 +85,7 @@ fn escaped(c: char) -> Node {
 }
 
 impl RegexError {
-    /// The message `refsearch` gives for this error in `pattern` (measured 02-11-2026 for an
+    /// The message the reference search server gives for this error in `pattern` (measured 02-11-2026 for an
     /// unclosed group or branch, `a{2`, `a{2,1}` and `[z-a]`).
     pub fn message(&self, pattern: &str) -> String {
         let chars: Vec<char> = pattern.chars().collect();
@@ -207,7 +207,7 @@ impl Parser {
         let mut branches = vec![self.concatenation()?];
         while self.peek() == Some('|') {
             self.at += 1;
-            // As in `refsearch`, a branch cannot be empty at the end of the pattern.
+            // As in the reference search server, a branch cannot be empty at the end of the pattern.
             if self.at == self.chars.len() {
                 return Err(RegexError::UnexpectedEnd);
             }
@@ -315,7 +315,7 @@ impl Parser {
             '[' => self.class(at),
             '"' => self.quoted(),
             '<' => self.interval(at),
-            // Where a unit starts, `refsearch` reads any other character as itself (`[[:alpha:]]`
+            // Where a unit starts, the reference search server reads any other character as itself (`[[:alpha:]]`
             // is a class and a `]`).
             c => Ok(literal(c)),
         }
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn documented_operators_match_whole_terms() {
-        assert!(full("ref.b", teseladb_names::KERBEROS_SERVICE));
+        assert!(full("key.oard", "keyboard"));
         assert!(!full(teseladb_names::AUDIT_SCHEMA_NATIVE, teseladb_names::KERBEROS_SERVICE));
         assert!(full("colou?r", "color") && full("colou?r", "colour"));
         assert!(full("ab+c", "abbbc") && !full("ab+c", "ac"));
@@ -897,7 +897,7 @@ mod tests {
             teseladb_names::KERBEROS_SERVICE,
             teseladb_names::AUDIT_SCHEMA_NATIVE,
             "mango",
-            "anotherproduct",
+            "pastries",
             "m1",
             "m22",
             "m300",

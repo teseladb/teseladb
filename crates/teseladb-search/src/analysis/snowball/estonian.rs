@@ -1,8 +1,8 @@
 //! The Estonian stemmer of snowballstem.org (`algorithms/estonian/stemmer.html`), written from its
-//! description in the version `refsearch` 1.70.6 runs, which is older than the apostrophe rules of
+//! description in the version the reference search server 1.70.6 runs, which is older than the apostrophe rules of
 //! Snowball 3.1.0: the apostrophe is not in RV, R1 has no case for it and a final apostrophe stays.
 //! The emphasis step needs four characters before the suffix rather than before R1. Both measured
-//! on the 57 537 words of the Estonian Snowball vocabulary, all equal to `refsearch`.
+//! on the 57 537 words of the Estonian Snowball vocabulary, all equal to the reference search server.
 
 use super::word::{Word, region};
 

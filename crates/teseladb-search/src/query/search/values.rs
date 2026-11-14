@@ -1,5 +1,5 @@
 //! The operators over indexed values that are not analyzed text: `equals`, `in`, `range` and
-//! `near` (011 FR-002), as `refsearch` 1.70.6 runs them (measured 02-11-2026 on a 9.0.4 replica set,
+//! `near` (011 FR-002), as the reference search server 1.70.6 runs them (measured 02-11-2026 on a 9.0.4 replica set,
 //! `lane3j/m1` and `m2`).
 //!
 //! A path holds the values its mapping indexes: numbers (compared as doubles, so `NumberLong`
@@ -230,7 +230,7 @@ fn leaf_key(t: &FieldMapping, v: &Value) -> Option<Key> {
     }
 }
 
-/// The UTF-16 code units a `token` field keeps of a value (measured on `refsearch` 1.70.6,
+/// The UTF-16 code units a `token` field keeps of a value (measured on the reference search server 1.70.6,
 /// `scratchpad/lane3p/m53.js` and `m55.js`).
 const TOKEN_UNITS: usize = 8191;
 
@@ -254,7 +254,7 @@ fn truncated_token(s: &str) -> String {
     out
 }
 
-/// Refuses a string of `values` over the longest term an index keeps: `refsearch` says the path
+/// Refuses a string of `values` over the longest term an index keeps: the reference search server says the path
 /// is not indexed as `token` (measured with `equals`, `in` and `range`).
 fn check_term_length<'a>(
     paths: &[String],
@@ -466,7 +466,7 @@ pub(super) fn parse_range(d: &Document, path: &str) -> Result<Operator, SearchEr
         }
     };
     // A bound that is a document needs its `type`, checked before the bounds are paired and in
-    // this order whatever theirs in the query (measured on refsearch 1.70.6 on 05-11-2026).
+    // this order whatever theirs in the query (measured on the reference search server 1.70.6 on 05-11-2026).
     for name in ["lt", "lte", "gt", "gte"] {
         if let Some(Value::Document(_)) = present(name) {
             return Err(shape(&format!("{}.type", at(name)), "is required"));

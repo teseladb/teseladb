@@ -1,4 +1,4 @@
-//! The stages that reshape each document (measured on a `refrouter` 9.0.4): `$project`,
+//! The stages that reshape each document (measured on a reference router 9.0.4): `$project`,
 //! `$addFields` and `$set`, `$unset`, and `$replaceRoot` and `$replaceWith`.
 //!
 //! A `$project` is an inclusion (fields to keep and computed fields) or an exclusion (fields to
@@ -476,7 +476,7 @@ impl AddFields {
 /// One field of `$addFields` at `path`: a document that is not an expression (its first field
 /// does not start with `$`) adds each of its fields inside the field's document, or inside each
 /// element of its array, as a dotted path does; any other value is an expression. An empty
-/// document is the value `{}` (measured on a `refnode` 9.0.4 on 04-11-2026).
+/// document is the value `{}` (measured on a reference server 9.0.4 on 04-11-2026).
 fn add_field(
     path: &str,
     x: RawValue<'_>,

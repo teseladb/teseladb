@@ -1,5 +1,5 @@
-//! The expressions of a pipeline as RefDb optimises them when it parses the command (measured
-//! on a `refrouter` 9.0.4, 01-11-2026): a constant that fails, in any stage and at any position,
+//! The expressions of a pipeline as the reference server optimises them when it parses the command (measured
+//! on a reference router 9.0.4, 01-11-2026): a constant that fails, in any stage and at any position,
 //! fails the command with «Failed to optimize pipeline» before any document is read; in a
 //! `$match`, after «Failed to optimize expression» as in a filter.
 
@@ -9,7 +9,7 @@ use teseladb_mql::MqlError;
 use crate::expr::optimize::{optimize, optimize_filter};
 use crate::expr::{Ctx, Scope};
 
-/// What RefDb adds before the error of a constant of a pipeline that fails.
+/// What the reference server adds before the error of a constant of a pipeline that fails.
 const FAILED_TO_OPTIMIZE_PIPELINE: &str = "Failed to optimize pipeline :: caused by :: ";
 
 /// The values of a `$project` field that keep or drop it.
@@ -24,7 +24,7 @@ fn is_flag(v: &Value) -> bool {
     )
 }
 
-/// Optimises the expressions of `pipeline` with the command's variables `vars`, as RefDb does
+/// Optimises the expressions of `pipeline` with the command's variables `vars`, as the reference server does
 /// once the stages parsed.
 pub fn optimize_stages(pipeline: &[RawValue<'_>], vars: Option<&Document>) -> Result<(), MqlError> {
     let mut names: Vec<&str> = vars.map(|v| v.iter().map(|(k, _)| k).collect()).unwrap_or_default();

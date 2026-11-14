@@ -1,4 +1,4 @@
-//! Arithmetic expressions with RefDb's numeric types (measured on a `refrouter` 9.0.4): an `int`
+//! Arithmetic expressions with the reference server's numeric types (measured on a reference router 9.0.4): an `int`
 //! result that overflows becomes a `long`, a `long` that overflows becomes a `double`, a
 //! `double` operand gives a `double` and a `decimal` one a `decimal`; `null` or a missing operand
 //! gives `null`. `$add` and `$subtract` also take dates.
@@ -49,7 +49,7 @@ const NAMES: [(&str, Arith); 16] = [
     ("$trunc", Arith::Trunc),
 ];
 
-/// A number of one of RefDb's numeric types.
+/// A number of one of the reference server's numeric types.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Num {
     Int(i32),
@@ -135,12 +135,12 @@ fn as_i64(n: Num) -> i64 {
     }
 }
 
-/// RefDb's name of a raw value's type in a message.
+/// The reference server's name of a raw value's type in a message.
 pub(crate) fn raw_type_name(v: teseladb_bson::RawValue<'_>) -> &'static str {
     type_name(&Value::from(v))
 }
 
-/// RefDb's name of a value's type in a message.
+/// The reference server's name of a value's type in a message.
 pub(crate) fn type_name_of(v: &Value) -> &'static str {
     type_name(v)
 }
@@ -257,7 +257,7 @@ pub(crate) fn add(vals: &[Eval]) -> Result<Eval, MqlError> {
 }
 
 /// A number of milliseconds added to a date: a double rounded half away from zero, a decimal
-/// half to even (`2.5` is 2), as RefDb converts them.
+/// half to even (`2.5` is 2), as the reference server converts them.
 fn millis_of(n: Num) -> i64 {
     match n {
         Num::Decimal(_) => round_half_even(n.f64()) as i64,
@@ -599,7 +599,7 @@ fn round(op: Arith, vals: &[Eval]) -> Result<Eval, MqlError> {
     }))
 }
 
-/// A number as a decimal (a double with 15 significant digits, as RefDb converts it).
+/// A number as a decimal (a double with 15 significant digits, as the reference server converts it).
 fn as_decimal(n: Num) -> Decimal128 {
     to_decimal128(&n.value()).unwrap_or_else(Decimal128::nan)
 }

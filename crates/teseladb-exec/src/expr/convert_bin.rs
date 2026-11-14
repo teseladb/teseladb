@@ -1,4 +1,4 @@
-//! Binary data for `$convert` (measured on a `refrouter` 9.0.4): the text formats (`base64`,
+//! Binary data for `$convert` (measured on a reference router 9.0.4): the text formats (`base64`,
 //! `base64url`, `hex`, `utf8`, `uuid`) both ways and numbers as their bytes, little-endian unless
 //! `byteOrder` is `big`.
 
@@ -90,7 +90,7 @@ pub(super) fn object_id_text(id: &[u8]) -> String {
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The bytes of hexadecimal text, or RefDb's reason why not.
+/// The bytes of hexadecimal text, or the reference server's reason why not.
 pub(super) fn from_hex(text: &str) -> Result<Vec<u8>, String> {
     if !text.len().is_multiple_of(2) {
         return Err("Hex blob with odd digit count".to_owned());
@@ -128,7 +128,7 @@ pub(super) fn number_bytes(le: Vec<u8>, big: bool) -> Vec<u8> {
     if big { le.into_iter().rev().collect() } else { le }
 }
 
-/// `BinData(0, "0102")`, as RefDb names a binary value in a message.
+/// `BinData(0, "0102")`, as the reference server names a binary value in a message.
 pub(super) fn shown(subtype: u8, bytes: &[u8]) -> String {
     format!("BinData({subtype}, \"{}\")", hex(bytes))
 }

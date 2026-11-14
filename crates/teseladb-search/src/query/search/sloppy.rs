@@ -1,6 +1,6 @@
-//! RefLib's `SloppyMath` haversine distance, which `near` on `geo` fields scores with: `cos`
+//! The reference search library's `SloppyMath` haversine distance, which `near` on `geo` fields scores with: `cos`
 //! and `asin` from tables with a fourth-order Taylor step, so distances (and scores) come out
-//! as RefLib's do rather than as the exact formula's.
+//! as the reference search library's do rather than as the exact formula's.
 
 use std::sync::OnceLock;
 
@@ -84,7 +84,7 @@ fn tables() -> &'static Tables {
     })
 }
 
-/// RefLib's `SloppyMath.cos`.
+/// The reference search library's `SloppyMath.cos`.
 fn cos(a: f64) -> f64 {
     let t = tables();
     let a = a.abs();
@@ -98,7 +98,7 @@ fn cos(a: f64) -> f64 {
     c + delta * (-s + delta * (-c * ONE_DIV_F2 + delta * (s * ONE_DIV_F3 + delta * c * ONE_DIV_F4)))
 }
 
-/// RefLib's `SloppyMath.asin` for `0 <= a <= 1`.
+/// The reference search library's `SloppyMath.asin` for `0 <= a <= 1`.
 fn asin(a: f64) -> f64 {
     let t = tables();
     if a > t.asin_max {
@@ -110,7 +110,7 @@ fn asin(a: f64) -> f64 {
     v + delta * (d1 + delta * (d2 + delta * (d3 + delta * d4)))
 }
 
-/// The meters between two points (latitude and longitude in degrees), as RefLib measures them.
+/// The meters between two points (latitude and longitude in degrees), as the reference search library measures them.
 pub(super) fn haversin_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let (x1, x2) = (lat1.to_radians(), lat2.to_radians());
     let h1 = 1.0 - cos(x1 - x2);

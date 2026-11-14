@@ -1,4 +1,4 @@
-//! The Lithuanian stemmer of `snowballStemming` (`lithuanian`), deduced from the stems `refsearch`
+//! The Lithuanian stemmer of `snowballStemming` (`lithuanian`), deduced from the stems the reference search server
 //! 1.70.6 gives for the 86 109 words of the Lithuanian Snowball vocabulary (D-051). R1 is the
 //! standard region, except that a word of more than six letters that starts with `a` looks for it
 //! from its second letter. A first step settles `okate` and `okatės` as `okatė`; the next steps

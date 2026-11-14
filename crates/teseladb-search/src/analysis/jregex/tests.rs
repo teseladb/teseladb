@@ -176,7 +176,7 @@ fn replacements() {
     assert_eq!(re.replace("ab", "\\$1", true).unwrap(), "$1");
     assert_eq!(re.replace("ab", "$12", true).unwrap(), "a2");
     assert_eq!(re.replace("zz", "$", true).unwrap(), "zz");
-    // The messages of `Matcher.appendReplacement` (measured on `refsearch` 1.70.6).
+    // The messages of `Matcher.appendReplacement` (measured on the reference search server 1.70.6).
     for (bad, message) in [
         ("$", "Illegal group reference: group index is missing"),
         ("\\", "character to be escaped is missing"),
@@ -198,7 +198,7 @@ fn replacements() {
     assert_eq!(twelve.replace("Hello", "[$12]", true).unwrap(), "[]");
 }
 
-/// Patterns `refsearch` 1.70.6 accepts (`m81.js` of lane 3), and what they match.
+/// Patterns the reference search server 1.70.6 accepts (`m81.js` of lane 3), and what they match.
 #[test]
 fn surrogates_quotes_and_case_ranges() {
     assert!(JavaRegex::new("\\uD800\\x41").is_ok());
@@ -224,7 +224,7 @@ fn grapheme_cluster_boundaries() {
     assert!(!matches("\u{1F1EA}\\b{g}\u{1F1F8}", "\u{1F1EA}\u{1F1F8}"));
 }
 
-/// The messages of `PatternSyntaxException` that `refsearch` 1.70.6 gives (measured 01-11-2026).
+/// The messages of `PatternSyntaxException` that the reference search server 1.70.6 gives (measured 01-11-2026).
 #[test]
 fn syntax_messages() {
     let cases = [
@@ -264,7 +264,7 @@ fn syntax_messages() {
         ("\\N{FOO}", "Unknown character name [FOO] near index 6\n\\N{FOO}\n      ^"),
         ("\\0", "Illegal octal escape sequence near index 2\n\\0"),
         ("\\09", "Illegal octal escape sequence near index 2\n\\09\n  ^"),
-        // Measured on `refsearch` 1.70.6 on 02-11-2026 (`scratchpad/lane3r/m81.js`).
+        // Measured on the reference search server 1.70.6 on 02-11-2026 (`scratchpad/lane3r/m81.js`).
         ("a{2,3", "Unclosed counted closure near index 5\na{2,3"),
         ("a{2", "Unclosed counted closure near index 3\na{2"),
         ("(?<ab)", "named capturing group is missing trailing '>' near index 5\n(?<ab)\n     ^"),

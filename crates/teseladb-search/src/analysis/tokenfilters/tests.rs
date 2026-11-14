@@ -53,7 +53,7 @@ fn checks_attributes() {
 }
 
 #[test]
-fn examples_measured_on_refsearch() {
+fn examples_measured_on_the_reference() {
     let af = |original| TokenFilter::AsciiFolding { original };
     assert_eq!(texts(&[af(Original::Omit)], "Café plain"), ["Cafe", "plain"]);
     assert_eq!(shape(&[af(Original::Include)], "Café x"), ["Cafe|0|1", "Café|0|1", "x|1|1"]);
@@ -187,7 +187,7 @@ fn arabic_filters_normalize_and_strip_light_affixes() {
     let stem = TokenFilter::ArabicStemming;
     assert_eq!(texts(std::slice::from_ref(&norm), "آلهة إلى ـمدّ"), ["الهه", "الي", "مد"]);
     // One prefix, then each suffix once in list order; `و` needs three letters after it
-    // (measured on `refsearch` with `reflib.arabic`).
+    // (measured on the reference search server with the built-in `arabic` analyzer).
     assert_eq!(
         texts(&[norm, stem], "آلات الجبهة أذربيجانية وأي واد وادين"),
         ["ات", "جبه", "اذربيجان", "وا", "واد", "اد"]
@@ -196,8 +196,8 @@ fn arabic_filters_normalize_and_strip_light_affixes() {
 }
 
 #[test]
-fn romance_light_stemmers_and_elision_match_refsearch() {
-    // Measured on `refsearch` with `reflib.spanish` and `reflib.italian`.
+fn romance_light_stemmers_and_elision_match_the_reference() {
+    // Measured on the reference search server with the built-in `spanish` analyzer and the built-in `italian` analyzer.
     let spanish = TokenFilter::SpanishLightStemming;
     assert_eq!(
         texts(&[spanish], "abandonadas actrices acné antigüedad abandonamos casas"),
@@ -217,8 +217,8 @@ fn romance_light_stemmers_and_elision_match_refsearch() {
 }
 
 #[test]
-fn portuguese_light_stemmer_matches_refsearch() {
-    // Measured on `refsearch` with `reflib.portuguese`.
+fn portuguese_light_stemmer_matches_the_reference() {
+    // Measured on the reference search server with the built-in `portuguese` analyzer.
     assert_eq!(
         texts(
             &[TokenFilter::PortugueseLightStemming],
@@ -243,8 +243,8 @@ fn portuguese_light_stemmer_matches_refsearch() {
 }
 
 #[test]
-fn german_normalization_and_light_stemmer_match_refsearch() {
-    // Measured on `refsearch` with `reflib.german`.
+fn german_normalization_and_light_stemmer_match_the_reference() {
+    // Measured on the reference search server with the built-in `german` analyzer.
     let filters = [TokenFilter::GermanNormalization, TokenFilter::GermanLightStemming];
     assert_eq!(
         texts(
@@ -259,8 +259,8 @@ fn german_normalization_and_light_stemmer_match_refsearch() {
 }
 
 #[test]
-fn french_light_stemmer_matches_refsearch() {
-    // Measured on `refsearch` with `reflib.french`.
+fn french_light_stemmer_matches_the_reference() {
+    // Measured on the reference search server with the built-in `french` analyzer.
     let words = "abaissement applaudissements abaissant activement certificatrice certificateur \
                  provocatrice prédicateur cantatrice accusateur actrice centième chanteuses \
                  acteurs affreuse adultère actives archifolle molle cannelle constitutionnels \

@@ -1,4 +1,4 @@
-//! The `similarity` of a `string` field (`bm25`, `boolean` and `stableTfl`) as `refsearch` 1.70.6
+//! The `similarity` of a `string` field (`bm25`, `boolean` and `stableTfl`) as the reference search server 1.70.6
 //! scores it (measured 02-11-2026 on a 9.0.4 replica set, `scratchpad/lane3o/sim2.js` and
 //! `sim3.js`, whose documents and indexes these are). `stableTfl` gives each term a rarity from its
 //! length and the document's, `1 - (1 - m·2^(-c·tl))^dl`, instead of the index's statistics, so
@@ -65,7 +65,7 @@ fn text(query: &str) -> Document {
     Document::new().with("text", Document::new().with("path", "t").with("query", query))
 }
 
-/// `sim2.out`: similarity, query and the scores `refsearch` gives, by `_id`.
+/// `sim2.out`: similarity, query and the scores the reference search server gives, by `_id`.
 type Case = (&'static str, &'static str, &'static [(u8, f64)]);
 const SIM2: &[Case] = &[
     (
@@ -329,7 +329,7 @@ const SIM2: &[Case] = &[
 ];
 
 #[test]
-fn stable_tfl_and_boolean_term_scores_match_refsearch() {
+fn stable_tfl_and_boolean_term_scores_match_the_reference() {
     let docs = sim2();
     let indexes = [("stableTfl", index("stableTfl", &docs)), ("boolean", index("boolean", &docs))];
     for &(similarity, query, want) in SIM2 {
@@ -339,7 +339,7 @@ fn stable_tfl_and_boolean_term_scores_match_refsearch() {
 }
 
 #[test]
-fn stable_tfl_and_boolean_phrases_fuzzy_terms_and_boosts_match_refsearch() {
+fn stable_tfl_and_boolean_phrases_fuzzy_terms_and_boosts_match_the_reference() {
     let docs: Vec<(u8, String)> =
         ["quick brown fox", "the quick brown fox quick brown dog", "foxes and a fax", "quick"]
             .iter()
@@ -405,7 +405,7 @@ fn leaves(e: &crate::index::Explanation, out: &mut Vec<(f64, String)>) {
 }
 
 #[test]
-fn stable_tfl_and_boolean_explanations_match_refsearch() {
+fn stable_tfl_and_boolean_explanations_match_the_reference() {
     let docs: Vec<(u8, String)> =
         vec![(1, "quick brown fox".into()), (2, "the quick brown fox quick brown dog".into())];
     let explained = |idx: &MemIndex, spec: &Document, key: u8| {

@@ -1,10 +1,10 @@
 //! `searchAfter`, `searchBefore` and the `searchSequenceToken` of each result (011 FR-003), as
-//! `refsearch` 1.70.6 pages (measured 02-11-2026, `scratchpad/lane3k/m14.js`): a token is a
+//! the reference search server 1.70.6 pages (measured 02-11-2026, `scratchpad/lane3k/m14.js`): a token is a
 //! base64 protocol buffer with the result's score (field 2) or sort values (field 3) and what
 //! breaks ties; `searchAfter` gives the results that follow the token's, `searchBefore` those
-//! that precede it, nearest first. `refsearch` breaks ties with RefLib's document number, which
+//! that precede it, nearest first. The reference search server breaks ties with the reference search library's document number, which
 //! depends on the order it read the collection; here the key of the document breaks them, so a
-//! token carries the key (field 5) and its bytes differ from `refsearch`'s.
+//! token carries the key (field 5) and its bytes differ from the reference search server's.
 
 use std::cmp::Ordering;
 
@@ -80,7 +80,7 @@ fn bytes_field(out: &mut Vec<u8>, field: u8, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-/// A sort value as a message: 1 missing, 3 score, 4 number (as `refsearch`), 5 date, 6 boolean,
+/// A sort value as a message: 1 missing, 3 score, 4 number (as the reference search server), 5 date, 6 boolean,
 /// 7 objectId, 8 UUID, 9 string.
 fn encode_value(v: &SortValue) -> Vec<u8> {
     let mut out = Vec::new();
@@ -314,7 +314,7 @@ mod tests {
             decode_value(&encode_value(&SortValue::Key(Key::Null))),
             Some(SortValue::Missing)
         );
-        // `refsearch`'s token of a sort on a number reads as its value and document.
+        // The reference search server's token of a sort on a number reads as its value and document.
         let p = decode("CAUaCSEAAAAAAAD4vyICEAo=", false).expect("read");
         assert_eq!(p.values, vec![SortValue::Key(Key::Number(-1.5))]);
         assert_eq!(decode("CMlJFWM8A6P+", true), None);

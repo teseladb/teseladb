@@ -1,6 +1,6 @@
 //! The metadata of the search stages through a pipeline (011 FR-022, T026): what `$meta` reads
 //! after `$search`, `$vectorSearch` and `$searchMeta`, and the errors of a 9.0.4 deployment with
-//! `refsearch` 1.70.6 (measured 01-11-2026; the errors without search on a `refrouter` 9.0.4 too).
+//! the reference search server 1.70.6 (measured 01-11-2026; the errors without search on a reference router 9.0.4 too).
 
 use std::collections::BTreeMap;
 
@@ -205,7 +205,7 @@ fn documents_that_did_not_come_from_the_search_stage_refuse_its_score() {
 }
 
 #[test]
-fn refnode_checks_the_limit_and_filter_of_vector_search_first() {
+fn the_reference_checks_the_limit_and_filter_of_vector_search_first() {
     let vs = |spec: Document| run(vec![Document::new().with("$vectorSearch", spec)]);
     let positive = (7_912_700, "Expected limit to be positive".to_owned());
     for limit in [Value::Int32(0), Value::Int64(-1), Value::Double(-0.5), Value::Double(f64::NAN)] {
@@ -229,7 +229,7 @@ fn refnode_checks_the_limit_and_filter_of_vector_search_first() {
         message(vs(Document::new().with("filter", unknown))),
         (2, "unknown operator: $foo".to_owned())
     );
-    // What `refsearch` checks reaches the node: a fractional limit, a missing one.
+    // What the reference search server checks reaches the node: a fractional limit, a missing one.
     let fine = Document::new().with("limit", 2.5).with("filter", Document::new().with("n", 1));
     assert_eq!(vs(fine).expect("runs").len(), 2);
     assert_eq!(vs(Document::new()).expect("runs").len(), 2);

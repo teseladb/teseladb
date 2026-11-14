@@ -1,6 +1,6 @@
-//! The language analyzers `reflib.<language>` (FR-007, FR-019): the standard tokenizer, the
+//! The language analyzers (the prefix [`teseladb_names::ANALYZER_PREFIX`] and the language) (FR-007, FR-019): the standard tokenizer, the
 //! filters of the language and its stop list. The stop lists in `stopwords/` are the words that
-//! `refsearch` 1.70.6 drops, asked one by one among the words of the Snowball stop lists (BSD 3) and
+//! the reference search server 1.70.6 drops, asked one by one among the words of the Snowball stop lists (BSD 3) and
 //! of the test vocabularies.
 
 use std::collections::BTreeSet;
@@ -92,7 +92,7 @@ fn elision(articles: &[&str]) -> TokenFilter {
     TokenFilter::Elision { articles: articles.iter().map(|a| a.to_string()).collect() }
 }
 
-/// The character filters, tokenizer and token filters of `reflib.<language>`.
+/// The character filters, tokenizer and token filters of (the prefix [`teseladb_names::ANALYZER_PREFIX`] and the language).
 pub fn language(language: &str) -> Option<(Vec<CharFilter>, Tokenizer, Vec<TokenFilter>)> {
     match language {
         "kuromoji" => {

@@ -2,7 +2,7 @@
 //! FR-039): the storage passes over the blocks this rules out without reading them.
 //!
 //! A zone gives, for a top-level field, the lowest and the highest value of the block in
-//! RefDb's order across types, arrays left out. A block is ruled out only by predicates whose
+//! the reference server's order across types, arrays left out. A block is ruled out only by predicates whose
 //! documents always hold the field with a value in that order:
 //!
 //! - `$eq`, `$gt`, `$gte`, `$lt`, `$lte` and `$in` of values on a top-level field, when the value

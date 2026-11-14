@@ -1,6 +1,6 @@
-//! The fields of the documents a pipeline reads that its stages use (RefDb's dependency
+//! The fields of the documents a pipeline reads that its stages use (the reference server's dependency
 //! analysis, which decides the projection `explain` shows under the stages a query plan runs,
-//! measured on a `refrouter` 9.0.4): the paths each stage reads, up to the first stage that makes
+//! measured on a reference router 9.0.4): the paths each stage reads, up to the first stage that makes
 //! new documents (`$group`, an inclusion `$project`, `$replaceRoot`…); a stage that passes the
 //! whole document on, or a pipeline that ends without such a stage, needs every field.
 
@@ -275,7 +275,7 @@ fn expression(v: &Value, used: &mut BTreeSet<String>) -> Option<()> {
         Value::Document(d) => match d.iter().next() {
             Some(("$literal" | "$const", _)) => Some(()),
             Some(("$rand", _)) => Some(()),
-            // The path a `distinct` on a view reads, given as a constant (measured on a `refrouter`
+            // The path a `distinct` on a view reads, given as a constant (measured on a reference router
             // 9.0.4).
             Some(("$_internalFindAllValuesAtPath", Value::Array(args))) => {
                 let path = match args.first() {

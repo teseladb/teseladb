@@ -1,6 +1,6 @@
 //! The light stemmers of the Spanish, Italian, Portuguese, German and French analyzers, deduced
-//! from the stems `refsearch` 1.70.6 gives for the words of each language's vocabulary
-//! (`tests/fixtures/refsearch/analyzers/vocab/`) and equal to it on all of them.
+//! from the stems the reference search server 1.70.6 gives for the words of each language's vocabulary
+//! (recorded data, `analyzers/vocab/`) and equal to it on all of them.
 
 use crate::analysis::props::category;
 

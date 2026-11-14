@@ -1,6 +1,6 @@
 //! The stemmers of the Czech, Bulgarian, Latvian and Indonesian analyzers. Each one follows its
-//! published description and was measured equal to `refsearch` 1.70.6 on the vocabulary of its
-//! language (`tests/fixtures/refsearch/analyzers/vocab/`): the Czech and Bulgarian light stemmers of
+//! published description and was measured equal to the reference search server 1.70.6 on the vocabulary of its
+//! language (recorded data, `analyzers/vocab/`): the Czech and Bulgarian light stemmers of
 //! L. Dolamic and J. Savoy, the Latvian one of K. Kreslins, and the Indonesian one of F. Tala.
 
 use super::light::{ends, replace_end};

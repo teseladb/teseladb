@@ -1,4 +1,4 @@
-//! `$densify`, `$fill` and `$graphLookup` (measured on a `refrouter` 9.0.4).
+//! `$densify`, `$fill` and `$graphLookup` (measured on a reference router 9.0.4).
 //!
 //! - `$densify` adds the documents a numeric or date field lacks between bounds (`full`: the
 //!   least and greatest values of all documents, `partition`: of each partition, or two values),
@@ -89,7 +89,7 @@ fn less(a: &Value, b: &Value) -> Result<bool, MqlError> {
     Ok(order(&Some(a.clone()), &Some(b.clone()), None)? == Ordering::Less)
 }
 
-/// `a + b` with RefDb's numeric types.
+/// `a + b` with the reference server's numeric types.
 fn add(a: &Value, b: &Value) -> Value {
     use teseladb_mql::{DecOp, dec_binary};
     if matches!(a, Value::Decimal128(_)) || matches!(b, Value::Decimal128(_)) {
@@ -116,7 +116,7 @@ fn add(a: &Value, b: &Value) -> Value {
 }
 
 impl Densify {
-    /// Reads `{field, partitionByFields, range: {step, unit, bounds}}`, checked in RefDb's
+    /// Reads `{field, partitionByFields, range: {step, unit, bounds}}`, checked in the reference server's
     /// order: the arguments' types in document order, the missing ones, the paths, the step,
     /// the unit and then the bounds.
     pub fn parse(v: RawValue<'_>) -> Result<Densify, MqlError> {

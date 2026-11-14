@@ -1,6 +1,6 @@
-//! The checks and states of `synonyms` (011 T036), with the messages `refsearch` 1.70.6 gives
-//! (measured 02-11-2026, `scratchpad/lane3l/m21.js`). The scores are compared with `refsearch` in
-//! `tests/score_details_refsearch.rs`.
+//! The checks and states of `synonyms` (011 T036), with the messages the reference search server 1.70.6 gives
+//! (measured 02-11-2026, `scratchpad/lane3l/m21.js`). The scores are compared with the reference search server in
+//! the recorded `scoreDetails` comparison.
 
 use teseladb_bson::{Document, Value};
 

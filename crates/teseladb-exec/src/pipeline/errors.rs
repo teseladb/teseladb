@@ -1,4 +1,4 @@
-//! The error codes of pipelines and their stages, with RefDb's names (measured on a `refrouter`
+//! The error codes of pipelines and their stages, with the reference server's names (measured on a reference router
 //! 9.0.4).
 
 use teseladb_bson::Document;
@@ -11,7 +11,7 @@ use crate::expr::arith::raw_type_name;
 macro_rules! location {
     ($($name:ident = $n:literal),* $(,)?) => {
         $(
-            #[doc = concat!("RefDb's location code ", stringify!($n), ".")]
+            #[doc = concat!("The reference server's location code ", stringify!($n), ".")]
             pub const $name: ErrorCode = ErrorCode { code: $n, name: concat!("Location", $n) };
         )*
     };
@@ -141,7 +141,7 @@ pub const MERGE_NO_MATCH: ErrorCode =
     ErrorCode { code: 13113, name: "MergeStageNoMatchingDocument" };
 /// `InvalidOptions`: a stage an update's pipeline does not take.
 pub const INVALID_OPTIONS: ErrorCode = ErrorCode { code: 72, name: "InvalidOptions" };
-/// RefDb's `QueryExceededMemoryLimitNoDiskUseAllowed` (292).
+/// The reference server's `QueryExceededMemoryLimitNoDiskUseAllowed` (292).
 pub const NO_DISK_USE: ErrorCode =
     ErrorCode { code: 292, name: "QueryExceededMemoryLimitNoDiskUseAllowed" };
 
@@ -150,7 +150,7 @@ pub const NO_DISK_USE: ErrorCode =
 pub const STAGE_MEMORY_LIMIT: usize = 104_857_600;
 
 /// The memory an operation may hold in its stages by default
-/// (`internalQueryMaxMemoryUsageBytesPerOperation`, at least 1 GiB in RefDb 9.0.4).
+/// (`internalQueryMaxMemoryUsageBytesPerOperation`, at least 1 GiB in the reference server 9.0.4).
 pub const OPERATION_MEMORY_LIMIT: usize = 1 << 30;
 
 /// The bytes of `docs` in BSON, whatever their size.
@@ -187,7 +187,7 @@ pub(crate) fn value_size(v: &teseladb_bson::Value) -> usize {
 }
 
 /// The 292 of a sort over more than [`STAGE_MEMORY_LIMIT`] bytes of `docs` when the command does
-/// not allow writing to disk (measured on a `refrouter` 9.0.4).
+/// not allow writing to disk (measured on a reference router 9.0.4).
 pub(crate) fn check_sort_memory(
     docs: &[Document],
     allow_disk_use: bool,
@@ -209,7 +209,7 @@ pub(crate) fn sort_memory_error(limit: usize) -> MqlError {
     )
 }
 
-/// RefDb's `UnsupportedFormat` (12).
+/// The reference server's `UnsupportedFormat` (12).
 pub const UNSUPPORTED_FORMAT: ErrorCode = ErrorCode { code: 12, name: "UnsupportedFormat" };
 
 /// An error with `code` and `msg`.

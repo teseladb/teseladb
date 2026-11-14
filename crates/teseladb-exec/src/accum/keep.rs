@@ -1,7 +1,7 @@
-//! The values `$minN`, `$maxN`, `$topN` and `$bottomN` keep, in RefDb's order (measured on a
-//! `refrouter` 9.0.4 with values that compare equal, 31-10-2026).
+//! The values `$minN`, `$maxN`, `$topN` and `$bottomN` keep, in the reference server's order (measured on a
+//! reference router 9.0.4 with values that compare equal, 31-10-2026).
 //!
-//! RefDb's classic engine keeps the values of `$minN` and `$maxN` in a binary heap with
+//! The reference server's classic engine keeps the values of `$minN` and `$maxN` in a binary heap with
 //! libstdc++'s `push_heap`, `pop_heap` and `sort_heap`, so equal values come out in the order
 //! those algorithms leave them, and those of `$topN` and `$bottomN` in an ordered multiset: a
 //! value goes after those equal to it, `$topN` drops its last value and `$bottomN` its first.
@@ -153,7 +153,7 @@ fn upper_bound<T>(kept: &[T], x: &T, less: &mut Less<'_, T>) -> Result<usize, Mq
 }
 
 /// The `n` values of `items` that go first (`first`, `$topN`) or last (`$bottomN`) in `less`'s
-/// order, in that order, kept as RefDb's ordered multiset keeps them.
+/// order, in that order, kept as the reference server's ordered multiset keeps them.
 pub(crate) fn multiset_n<T>(
     items: Vec<T>,
     n: usize,

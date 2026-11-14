@@ -1,4 +1,4 @@
-//! Array expressions that take a document of named arguments (measured on a `refrouter` 9.0.4):
+//! Array expressions that take a document of named arguments (measured on a reference router 9.0.4):
 //! `$zip`, `$sortArray`, `$firstN`, `$lastN`, `$maxN`, `$minN`, `$top`, `$topN`, `$bottom`,
 //! `$bottomN`, `$median` and `$percentile`.
 //!
@@ -6,7 +6,7 @@
 //! the value it reaches in each element, a missing one or an element that is no document as
 //! `null`, and equal elements keep their order. `$median` and `$percentile` take the numbers of
 //! their input (without NaN) and give, for each `p`, the element at rank `⌈p·n⌉ − 1` of the
-//! sorted numbers as a double, as RefDb's `approximate` method does for every input measured.
+//! sorted numbers as a double, as the reference server's `approximate` method does for every input measured.
 
 use teseladb_bson::{Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
@@ -59,7 +59,7 @@ const P_RANGE: ErrorCode = code!(7750303);
 const MEDIAN_OBJECT: ErrorCode = code!(7436201);
 const PERCENTILE_OBJECT: ErrorCode = code!(7436200);
 
-/// The one percentile method RefDb 9.0.4 accepts.
+/// The one percentile method the reference server 9.0.4 accepts.
 const APPROXIMATE: &str = "approximate";
 
 /// A sort of `$sortArray` and the `$top` family: whole elements in a direction, or paths.
@@ -310,7 +310,7 @@ fn eval_zip(
             }
         }
     }
-    // A default that gives nothing leaves the element out, as RefDb does.
+    // A default that gives nothing leaves the element out, as the reference server does.
     let fill: Vec<Option<Value>> = match defaults {
         Some(defs) => defs.iter().map(|e| e.eval(doc, scope)).collect::<Result<_, _>>()?,
         None => vec![Some(Value::Null); arrays.len()],

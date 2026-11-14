@@ -1,7 +1,7 @@
 //! The search stages `$search`, `$searchMeta` and `$vectorSearch` (011 FR-022): first stages
 //! whose documents come from the node's search indexes through [`super::Env::search_source`].
 //! The pipeline only checks that the argument is an object; the search engine checks the rest.
-//! Measured on a `refrouter` 9.0.4 without search and on `refsearch` 1.70.6.
+//! Measured on a reference router 9.0.4 without search and on the reference search server 1.70.6.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use crate::expr::arith::raw_type_name;
 /// The search stages.
 pub const SEARCH_STAGES: [&str; 3] = ["$search", "$searchMeta", "$vectorSearch"];
 
-/// RefDb's error when the deployment has no search.
+/// The reference server's error when the deployment has no search.
 const SEARCH_NOT_ENABLED: ErrorCode = ErrorCode { code: 31082, name: "SearchNotEnabled" };
 
 /// A document a search stage gives, with its metadata for `$meta` (`searchScore`,
@@ -32,11 +32,11 @@ pub fn not_enabled() -> MqlError {
     error(SEARCH_NOT_ENABLED, teseladb_names::ERR_SEARCH_NOT_CONFIGURED)
 }
 
-/// RefDb's error when a field of a stage has the wrong type.
+/// The reference server's error when a field of a stage has the wrong type.
 const WRONG_TYPE: ErrorCode = ErrorCode { code: 13_111, name: "Location13111" };
 
 /// Checks the argument of search stage `name`: an object, whose `scoreDetails` is a boolean in
-/// `$search` (measured on 9.0.4: `refnode` checks it before it asks `refsearch`).
+/// `$search` (measured on 9.0.4: the reference server checks it before it asks the reference search server).
 pub fn parse(name: &str, arg: RawValue<'_>) -> Result<Document, MqlError> {
     match arg {
         RawValue::Document(d) => {
@@ -58,16 +58,16 @@ pub fn parse(name: &str, arg: RawValue<'_>) -> Result<Document, MqlError> {
     }
 }
 
-/// RefDb's error when `$vectorSearch`'s `limit` is not a number.
+/// The reference server's error when `$vectorSearch`'s `limit` is not a number.
 const LIMIT_NOT_NUMBER: ErrorCode = ErrorCode { code: 8_575_100, name: "Location8575100" };
-/// RefDb's error when `$vectorSearch`'s `limit` is not positive.
+/// The reference server's error when `$vectorSearch`'s `limit` is not positive.
 const LIMIT_NOT_POSITIVE: ErrorCode = ErrorCode { code: 7_912_700, name: "Location7912700" };
-/// RefDb's error when `$vectorSearch`'s `filter` is not an object.
+/// The reference server's error when `$vectorSearch`'s `filter` is not an object.
 const FILTER_NOT_OBJECT: ErrorCode = ErrorCode { code: 10_065, name: "Location10065" };
 
-/// Checks the argument of `$vectorSearch` as `refnode` does before it asks `refsearch`: an object
+/// Checks the argument of `$vectorSearch` as the reference server does before it asks the reference search server: an object
 /// whose `limit`, when given, is a positive number and whose `filter`, when given, is a valid
-/// query filter (measured on 9.0.4: `refsearch` checks everything else, and a missing `limit` is
+/// query filter (measured on 9.0.4: the reference search server checks everything else, and a missing `limit` is
 /// its error).
 pub fn parse_vector(arg: RawValue<'_>) -> Result<Document, MqlError> {
     let RawValue::Document(raw) = arg else { return parse("$vectorSearch", arg) };
@@ -102,8 +102,8 @@ pub fn parse_vector(arg: RawValue<'_>) -> Result<Document, MqlError> {
     Ok(spec)
 }
 
-/// The stage name RefDb gives when a search stage is not first: `$search` runs as
-/// `$_internalSearchRefSearchRemote`.
+/// The stage name the reference server gives when a search stage is not first: `$search` runs as
+/// [`teseladb_names::STAGE_INTERNAL_SEARCH_REMOTE`].
 pub fn first_stage_name(name: &str) -> &str {
     if name == "$search" { teseladb_names::STAGE_INTERNAL_SEARCH_REMOTE } else { name }
 }

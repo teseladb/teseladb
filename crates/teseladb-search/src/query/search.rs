@@ -1,5 +1,5 @@
 //! The `$search` specification over an index (011 FR-002, T022): its operator, checked with the
-//! errors `refsearch` 1.70.6 gives (measured on a 9.0.4 replica set, 01-11-2026), and the scored
+//! errors the reference search server 1.70.6 gives (measured on a 9.0.4 replica set, 01-11-2026), and the scored
 //! documents it selects. `compound` adds the scores of its `must` and `should` clauses in 32-bit
 //! floats, `filter` matches without scoring, `mustNot` excludes, and a `compound` with only
 //! `mustNot` returns every other document at score 0.
@@ -10,7 +10,7 @@ use teseladb_bson::{Document, Value};
 
 use crate::index::{Fuzzy, Hit, IndexError, MemIndex};
 
-/// The operators `refsearch` knows, in its order.
+/// The operators the reference search server knows, in its order.
 pub const OPERATORS: [&str; 23] = [
     "autocomplete",
     "compound",
@@ -51,7 +51,7 @@ const STAGE_OPTIONS: [&str; 10] = [
     "tracking",
 ];
 
-/// A `$search` the index cannot run: `refsearch`'s message (code 8, `UnknownError`).
+/// A `$search` the index cannot run: the reference search server's message (code 8, `UnknownError`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchError(pub String);
 
@@ -264,7 +264,7 @@ pub fn count_document(total: bool, n: usize) -> Document {
 }
 
 fn parse_root(index: &MemIndex, spec: &Document) -> Result<Operator, SearchError> {
-    // `refsearch`'s check, which `$searchMeta` reaches (`refnode` checks it first for `$search`).
+    // The reference search server's check, which `$searchMeta` reaches (the reference server checks it first for `$search`).
     if spec.get("scoreDetails").is_some_and(|v| !matches!(v, Value::Boolean(_))) {
         return Err(shape("scoreDetails", "must be a boolean"));
     }
@@ -441,7 +441,7 @@ fn synonym_mapping(
 }
 
 /// The operators whose `fuzzy` option takes the bounds of `text` (`autocomplete` too) or of the
-/// deprecated `term` (measured on `refsearch` 1.70.6, `scratchpad/lane3p/m57.js` to `m59.js`).
+/// deprecated `term` (measured on the reference search server 1.70.6, `scratchpad/lane3p/m57.js` to `m59.js`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FuzzyOf {
     /// `text` and `autocomplete`: `maxEdits` 1 or 2, `maxExpansions` from 1 to 1 000.
@@ -453,8 +453,8 @@ pub(super) enum FuzzyOf {
 /// The largest `maxExpansions` of `text` and `autocomplete`.
 const MAX_EXPANSIONS: i64 = 1000;
 
-/// The `fuzzy` option of `text`, `term` and `autocomplete`: RefLib's defaults of `FuzzyQuery` as
-/// `refsearch` uses them (two edits, no prefix, 50 expansions), within the bounds of `of`.
+/// The `fuzzy` option of `text`, `term` and `autocomplete`: the reference search library's defaults of `FuzzyQuery` as
+/// the reference search server uses them (two edits, no prefix, 50 expansions), within the bounds of `of`.
 pub(super) fn parse_fuzzy(
     v: Option<&Value>,
     at: &str,
@@ -715,7 +715,7 @@ fn clauses(
     }
 }
 
-/// The most clauses one of RefLib's boolean queries takes in `refsearch`: the terms of a `text`
+/// The most clauses one of the reference search library's boolean queries takes in the reference search server: the terms of a `text`
 /// query on one path, the clauses of a `compound` (measured, `scratchpad/lane3p/m60.js` to
 /// `m62.js`).
 const MAX_CLAUSES: usize = 1024;
@@ -999,8 +999,8 @@ fn eval_compound(
         if matched < required {
             continue;
         }
-        // In doubles, as RefLib's boolean queries add (measured: 1 024 `should` clauses give
-        // `refsearch`'s 269.5703125, and 269.56622 added in 32 bits).
+        // In doubles, as the reference search library's boolean queries add (measured: 1 024 `should` clauses give
+        // the reference search server's 269.5703125, and 269.56622 added in 32 bits).
         let mut score = 0.0f64;
         for clause in must.iter().chain(should.iter()) {
             if let Some(s) = clause.get(&doc) {

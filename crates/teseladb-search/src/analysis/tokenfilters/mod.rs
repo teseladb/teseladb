@@ -1,6 +1,6 @@
-//! Token filters of RefDb Search custom analyzers (FR-007): the filters `refsearch` 1.70.6 accepts,
+//! Token filters of the custom analyzers of the reference search server (FR-007): the filters the reference search server 1.70.6 accepts,
 //! with the attributes of `contracts/analyzers.md` and the behaviour measured on it through
-//! `tests/fixtures/refsearch/tokens.js` (fixtures in `tests/fixtures/refsearch/filters/`).
+//! the recorded `tokens.js` (its data in the recorded `filters/`).
 //!
 //! Tokens carry an absolute position and the count of positions they span, so a filter that
 //! stacks tokens (folding with `originalTokens: include`, grams, `keywordRepeat`, phonetic codes)
@@ -9,7 +9,7 @@
 //! span several positions alongside the shorter tokens, which makes the output a token graph
 //! whose nodes are always positions; `flattenGraph` has nothing left to do on it.
 //!
-//! Measured on `refsearch`, where the documentation says otherwise or nothing:
+//! Measured on the reference search server, where the documentation says otherwise or nothing:
 //! - `daitchMokotoffSoundex` keeps the original token unless `originalTokens` is `omit`.
 //! - `length` counts UTF-16 code units; the grams of `edgeGram` and `nGram` count characters.
 //! - `shingle` emits no single tokens, and none at all for a text of one token; a shingle of
@@ -19,7 +19,7 @@
 //!   documentation does not list it.
 //! - `minGram` 0 passes the definition check but the index fails to build, and so does a
 //!   `regex` replacement that names a group the pattern lacks: both are rejected here.
-//! - `doubleMetaphone`, in the documentation, is not a filter `refsearch` 1.70.6 accepts.
+//! - `doubleMetaphone`, in the documentation, is not a filter the reference search server 1.70.6 accepts.
 
 mod arabic_script;
 mod brazilian;
@@ -104,7 +104,7 @@ pub const DEFAULT_LENGTH_MAX: usize = 255;
 /// A token filter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenFilter {
-    /// Folds characters to their ASCII equivalent (the table observed on `refsearch`).
+    /// Folds characters to their ASCII equivalent (the table observed on the reference search server).
     AsciiFolding {
         /// Keep the unfolded token too.
         original: Original,
@@ -129,7 +129,7 @@ pub enum TokenFilter {
     EnglishPossessive,
     /// Turns a token graph into a sequence of positions.
     FlattenGraph,
-    /// Folds case, accents and compatibility characters (the table observed on `refsearch`).
+    /// Folds case, accents and compatibility characters (the table observed on the reference search server).
     IcuFolding,
     /// Unicode normalization.
     IcuNormalizer {

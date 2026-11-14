@@ -1,4 +1,4 @@
-//! The expressions that define variables (measured on a `refrouter` 9.0.4): `$let`, `$map`,
+//! The expressions that define variables (measured on a reference router 9.0.4): `$let`, `$map`,
 //! `$filter` and `$reduce`. Their variables are checked when the expression is parsed: a name
 //! starts with a lowercase letter or a non-ASCII character and goes on with letters, digits, `_`
 //! or non-ASCII characters (`$let` may also rebind `CURRENT`), and a variable used outside its
@@ -62,7 +62,7 @@ pub enum Binding {
     Reduce { input: Expr, index: Option<String>, initial: Expr, body: Expr },
 }
 
-/// Checks `name` as RefDb checks a variable an expression defines.
+/// Checks `name` as the reference server checks a variable an expression defines.
 fn check_name(name: &str) -> Result<(), MqlError> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {

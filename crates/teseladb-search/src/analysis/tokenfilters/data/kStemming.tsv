@@ -3203,7 +3203,7 @@ atities	5	e
 atitions	6	e
 atity	3	e
 atized	4	
-atlas	0	
+${name:WORD_BOOK_OF_MAPS}	0	
 atlied	3	y
 atoming	3	
 atonements	5	
@@ -4569,7 +4569,7 @@ coaxes	2
 coaxing	3	
 coaxings	4	
 cobation	5	
-cockroaches	2	
+${name:WORD_INSECTS_PLURAL}	2	
 cocos	0	
 codation	5	e
 codations	6	e
