@@ -450,7 +450,12 @@ impl Replicas {
             // A replica opened with nothing of its range gets it as a snapshot: the range's log
             // lacks what a split left in its parent's LSM, and what its compaction dropped
             // (D-067). The first replica of the first range takes its entries as their leader.
-            sm.expect_snapshot();
+            // One restarted over a snapshot of its own already had the range: with nothing
+            // flushed yet its LSM is empty, and its log holds the rest. Taken for a new replica,
+            // it waited for its own snapshot's data and applied nothing again, so no read ended.
+            if core.store().group(d.group).is_none_or(|log| log.snapshot_index == 0) {
+                sm.expect_snapshot();
+            }
             let (start, end) = (sm.bounds().0.to_vec(), sm.bounds().1.to_vec());
             let born = sm.born();
             let role = |r: ReplicaRole| d.replicas.iter().filter(move |(_, x)| *x == r);
