@@ -51,8 +51,8 @@ fn read(dir: &Path, name: &str) -> Result<String, String> {
     })
 }
 
-/// The collation bundles of ICU 57.1 that `scripts/icu-coll.sha256` lists: root and RefDb's
-/// locales (D-043).
+/// The collation bundles of ICU 57.1 that `scripts/icu-coll.sha256` lists: root and the reference
+/// server's locales (D-043).
 pub fn icu_collations(root: &Path) -> Result<locales::IcuCollations, String> {
     let (dest, text) = pinned(root, "icu-coll.sha256")?;
     let names: Vec<String> = text
@@ -96,8 +96,8 @@ pub fn build_root(root: &Path) -> Result<(Tables, Vec<Ce>), String> {
     Ok((t, homeless))
 }
 
-/// The tailorings of every locale ID RefDb accepts, built over the root under `root` (the root's
-/// own `standard` collation is the root itself and has none).
+/// The tailorings of every locale ID the reference server accepts, built over the root under `root`
+/// (the root's own `standard` collation is the root itself and has none).
 pub fn build_locales(root: &Path) -> Result<LocaleTables, String> {
     let (tables, homeless) = build_root(root)?;
     let elements = RootElements::new(&tables, &homeless);

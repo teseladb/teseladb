@@ -1,6 +1,7 @@
-//! `$clusterTime` signatures (013 T025, FR-014): the signature of a `refrouter` 9.0.4 with
-//! `--keyFile` (key read from its `admin.system.keys`, 30-10-2026), which key signs which time,
-//! the checks of a time a client sends with RefDb's errors, and the rotation of the keys.
+//! `$clusterTime` signatures (013 T025, FR-014): the signature of a reference router 9.0.4 with
+//! `--keyFile` (key read from its `admin.system.keys`, 30-10-2026), which key signs which time, the
+//! checks of a time a client sends with the reference server's errors, and the rotation of the
+//! keys.
 
 use teseladb_auth::clustertime;
 use teseladb_auth::clustertime::{
@@ -16,7 +17,7 @@ fn key20(s: &str) -> [u8; KEY_LEN] {
     hex(s).try_into().unwrap()
 }
 
-/// The keys of the measured `refrouter`.
+/// The keys of the measured reference router.
 fn measured() -> KeyRing {
     KeyRing {
         keys: vec![
@@ -33,7 +34,7 @@ fn measured() -> KeyRing {
 const NOW: Time = Time { secs: 1_793_376_615, inc: 1 };
 
 #[test]
-fn signs_as_refdb() {
+fn signs_as_the_reference() {
     let ring = measured();
     let (hash, id) = ring.signature(NOW).unwrap();
     assert_eq!(hash.to_vec(), hex("5cc4cc2e629897e88e2dd62f4a351f286b6b2cb4"));
@@ -49,7 +50,7 @@ fn signs_as_refdb() {
 }
 
 #[test]
-fn checks_a_client_time_as_refdb() {
+fn checks_a_client_time_as_the_reference() {
     let ring = measured();
     let (hash, id) = ring.signature(NOW).unwrap();
     let ahead = Time { secs: NOW.secs + 10, inc: 1 };
@@ -58,7 +59,7 @@ fn checks_a_client_time_as_refdb() {
     assert_eq!(ring.check(NOW, current, Some((&[1; KEY_LEN], 5))), Ok(()));
     assert_eq!(ring.check(Time { secs: NOW.secs - 10, inc: 1 }, current, None), Ok(()));
     assert_eq!(ring.check(NOW, current, Some((&hash, id))), Ok(()));
-    // Later: a valid signature, or RefDb's errors.
+    // Later: a valid signature, or the reference server's errors.
     let good = sign(&ring.keys[0].key, ahead);
     assert_eq!(ring.check(ahead, current, Some((&good, id))), Ok(()));
     assert_eq!(

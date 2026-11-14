@@ -1,11 +1,11 @@
-//! REFDB-AWS (013 FR-025): AWS Signature Version 4 and the server's side of the conversation
-//! of the drivers' authentication specification, without I/O. The client proves who it is by
-//! signing an STS `GetCallerIdentity` request bound to the server's nonce; the server sends that
-//! request to the STS (`awsSTSUrl`) and the ARN of the answer names the user of `$external`.
-//! Checks measured on RefDb Enterprise 9.0.4: the first message is exactly `{r: BinData of 32
-//! bytes, p: 'n' or 'y'}`, the second exactly `{a, d[, t]}` with strings, and the signed
-//! headers include the server nonce and the channel binding flag; the signature, the date and
-//! the host are the STS's to check.
+//! AWS IAM authentication (013 FR-025): AWS Signature Version 4 and the server's side of the
+//! conversation of the drivers' authentication specification, without I/O. The client proves who it
+//! is by signing an STS `GetCallerIdentity` request bound to the server's nonce; the server sends
+//! that request to the STS (`awsSTSUrl`) and the ARN of the answer names the user of `$external`.
+//! Checks measured on the reference enterprise server 9.0.4: the first message is exactly `{r:
+//! BinData of 32 bytes, p: 'n' or 'y'}`, the second exactly `{a, d[, t]}` with strings, and the
+//! signed headers include the server nonce and the channel binding flag; the signature, the date
+//! and the host are the STS's to check.
 
 use std::fmt;
 
@@ -25,11 +25,12 @@ pub const NONCE_LEN: usize = 32;
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// `gs2-cb-flag` values a client may send: `n` and `y` (`p` is refused, measured).
 const FLAGS: [u8; 2] = *b"ny";
-/// Headers the client must have signed (measured: without them RefDb refuses before the STS).
+/// Headers the client must have signed (measured: without them the reference server refuses before
+/// the STS).
 const REQUIRED_SIGNED: [&str; 2] =
     [teseladb_names::AWS_SIGNED_SERVER_NONCE, teseladb_names::AWS_SIGNED_CHANNEL_BINDING];
 
-/// Why a REFDB-AWS step failed; the client only learns `Authentication failed.`.
+/// Why a step of AWS IAM authentication failed; the client only learns `Authentication failed.`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AwsError(pub String);
 
@@ -222,7 +223,7 @@ impl Server {
     }
 }
 
-/// The parts of a SigV4 `Authorization` header RefDb checks before sending it.
+/// The parts of a SigV4 `Authorization` header the reference server checks before sending it.
 fn check_authorization(auth: &str) -> Result<(), AwsError> {
     let bad = || AwsError("bad Authorization header".into());
     let rest = auth.strip_prefix(ALGORITHM).and_then(|r| r.strip_prefix(' ')).ok_or_else(bad)?;
@@ -259,7 +260,7 @@ fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 
 /// The user of an STS answer with HTTP status `status`: the `Arn` of
 /// `GetCallerIdentityResponse.GetCallerIdentityResult`, an assumed role named as the role with
-/// any session (`…:assumed-role/<role>/*`), as RefDb names it.
+/// any session (`…:assumed-role/<role>/*`), as the reference server names it.
 pub fn caller(status: u16, body: &[u8]) -> Result<String, AwsError> {
     if status != 200 {
         return err(format!("Failed connecting to AWS STS. HTTP Status Code: {status}"));

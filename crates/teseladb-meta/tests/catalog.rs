@@ -68,7 +68,7 @@ fn err(e: Group0Error) -> Group0Result {
 }
 
 #[test]
-fn renames_keep_the_identifier_and_follow_refdb_rules() {
+fn renames_keep_the_identifier_and_follow_the_reference_rules() {
     let mut sm = cluster();
     apply(&mut sm, 2, create(ns("db", "a"), 1, false));
     apply(&mut sm, 3, create(ns("db", "b"), 2, false));
@@ -118,7 +118,7 @@ fn options_change_and_databases_drop_whole() {
     );
     assert_eq!(sm.catalog.databases(), vec!["keep".to_owned()]);
     assert_eq!(sm.catalog.dropped.iter().copied().collect::<Vec<_>>(), vec![1, 2]);
-    // Dropping a database that has nothing is not an error, as in RefDb.
+    // Dropping a database that has nothing is not an error, as in the reference server.
     assert_eq!(
         apply(&mut sm, 8, CatalogCommand::DropDatabase { db: "db".into() }),
         Group0Result::Ok
@@ -127,8 +127,8 @@ fn options_change_and_databases_drop_whole() {
 
 #[test]
 fn a_database_outlives_its_last_collection_until_drop_database() {
-    // D-077: `refrouter` 9.0.4 keeps the database in `config.databases` after its last collection
-    // is dropped or renamed away, and lists it until `dropDatabase`.
+    // D-077: the reference router 9.0.4 keeps the database in `config.databases` after its last
+    // collection is dropped or renamed away, and lists it until `dropDatabase`.
     let mut sm = cluster();
     apply(&mut sm, 2, create(ns("db", "a"), 1, false));
     apply(&mut sm, 3, CatalogCommand::Drop { ns: ns("db", "a") });
@@ -166,8 +166,8 @@ fn a_database_outlives_its_last_collection_until_drop_database() {
 
 #[test]
 fn databases_that_differ_only_in_case_are_refused() {
-    // 13297 `DatabaseDifferCase` of RefDb: a new database may not differ from another only in
-    // ASCII case; the same name, or another collection of it, is fine.
+    // 13297 `DatabaseDifferCase` of the reference server: a new database may not differ from
+    // another only in ASCII case; the same name, or another collection of it, is fine.
     let mut sm = cluster();
     apply(&mut sm, 2, create(ns("db", "a"), 1, false));
     let clash = err(Group0Error::DatabaseDifferCase);

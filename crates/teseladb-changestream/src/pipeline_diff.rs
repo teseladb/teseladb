@@ -1,6 +1,6 @@
 //! The description of a pipeline update (014 FR-009, 018 FR-009): a pipeline has no operators, so
-//! the leader compares the document before and after it as a `refnode` 9.0.4 does (measured on
-//! 04-11-2026, `tests/fixtures/pipeline_updates.jsonl`).
+//! the leader compares the document before and after it as a reference replica set member 9.0.4
+//! does (measured on 04-11-2026, `tests/fixtures/pipeline_updates.jsonl`).
 //!
 //! Values compare by their BSON bytes. In a document, the fields at the start of the new one that
 //! are in the old one in the same relative order stay; the ones after them go in as inserted
@@ -17,10 +17,10 @@ use teseladb_bson::{Document, Value};
 
 use crate::update_desc::{DESCRIPTION_LIMITS, PathPart, UpdateDescription};
 
-/// Bytes a diff may take, besides itself, and still be an update: a `refnode` 9.0.4 writes the
-/// whole document when the diff plus these bytes is larger than it (measured: a diff of 26 bytes
-/// is an update of a 42-byte document and a replacement of a 41-byte one, and the same 16 with
-/// diffs of 17, 20 and 5 021 bytes).
+/// Bytes a diff may take, besides itself, and still be an update: a reference replica set member
+/// 9.0.4 writes the whole document when the diff plus these bytes is larger than it (measured: a
+/// diff of 26 bytes is an update of a 42-byte document and a replacement of a 41-byte one, and the
+/// same 16 with diffs of 17, 20 and 5 021 bytes).
 pub const UPDATE_OVERHEAD: usize = 16;
 
 /// Key of an array diff that marks it as one.

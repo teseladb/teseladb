@@ -27,7 +27,7 @@ impl From<MutationError> for Eval {
 }
 
 /// The refusal of a retryable statement whose session has a newer `txnNumber` in the range, as
-/// RefDb words it (`TransactionTooOld`, 225).
+/// the reference server words it (`TransactionTooOld`, 225).
 fn too_old(txn_number: i64, newest: i64) -> MutationError {
     MutationError(format!(
         "225\u{0}Retryable write with txnNumber {txn_number} is prohibited on session because a \

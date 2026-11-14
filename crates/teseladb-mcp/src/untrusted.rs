@@ -1,5 +1,5 @@
 //! The block that marks data from the database as untrusted (FR-024, contract `mcp-server.md`):
-//! the text RefDb MCP Server 3.2.2 puts around it, with tags named after a random UUID per
+//! the text the reference MCP server 3.2.2 puts around it, with tags named after a random UUID per
 //! reply. If the data already contains the tag with the drawn UUID, another one is drawn, so a
 //! document cannot close the block early.
 

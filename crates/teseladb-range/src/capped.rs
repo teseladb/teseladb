@@ -5,14 +5,14 @@
 //! ([`state_key`]), so splits, merges, snapshots and `drop` carry it with the documents; an insert
 //! that goes over `size` or `max` deletes the oldest documents in the same `Write`.
 //!
-//! This module is the arithmetic of that: the limits as RefDb accepts them (`size` from 1 to
-//! 1 PiB, used as given: measured on refnode 7.0.45 and 9.0.4, where `size` 257 evicts at 260 bytes
-//! although the documentation rounds it up to a multiple of 256; `max` of 0 or less is no limit,
-//! and `size` takes precedence), the state and its key, and the plan of an insert, an update and
-//! a deletion. The newest document always stays, even alone above `size`. An update may make a
-//! document larger and the collection go over `size` (measured on both); the next insert evicts
-//! the excess. The writes themselves are evaluated by the layer above, which latches the state
-//! key with the documents.
+//! This module is the arithmetic of that: the limits as the reference server accepts them (`size`
+//! from 1 to 1 PiB, used as given: measured on the reference server 7.0.45 and 9.0.4, where `size`
+//! 257 evicts at 260 bytes although the documentation rounds it up to a multiple of 256; `max` of 0
+//! or less is no limit, and `size` takes precedence), the state and its key, and the plan of an
+//! insert, an update and a deletion. The newest document always stays, even alone above `size`. An
+//! update may make a document larger and the collection go over `size` (measured on both); the next
+//! insert evicts the excess. The writes themselves are evaluated by the layer above, which latches
+//! the state key with the documents.
 
 use teseladb_types::{DecodeError, Decoder, Encoder};
 
@@ -23,10 +23,10 @@ pub const STATE_INDEX: u32 = u32::MAX;
 pub const ID_INDEX: u32 = u32::MAX - 1;
 /// First byte of the data key space (`teseladb-keys`).
 const DATA: u8 = 0x01;
-/// Largest `size` RefDb accepts (1024⁵ bytes).
+/// Largest `size` the reference server accepts (1024⁵ bytes).
 pub const MAX_CAPPED_SIZE: u64 = 1 << 50;
-/// RefDb's code of a `size` out of bounds in `create` (`BadValue` on refnode 9.0.4; 7.0.45
-/// answered 51024).
+/// The reference server's code of a `size` out of bounds in `create` (`BadValue` on the reference
+/// server 9.0.4; 7.0.45 answered 51024).
 pub const BAD_SIZE_CODE: i32 = 2;
 
 /// The limits of a capped collection.
@@ -80,7 +80,8 @@ impl CappedLimits {
         Ok(CappedLimits { size, max })
     }
 
-    /// RefDb's message for `create` with a `size` out of bounds (measured on refnode 9.0.4).
+    /// The reference server's message for `create` with a `size` out of bounds (measured on the
+    /// reference server 9.0.4).
     pub fn bad_size_message(size: i64) -> String {
         if size < 1 {
             format!("BSON field 'size' value must be >= 1, actual value '{size}'")

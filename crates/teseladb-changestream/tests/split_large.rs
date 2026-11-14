@@ -1,6 +1,6 @@
-//! 014 T018: `$changeStreamSplitLargeEvent` (FR-011), as a `refrouter` 9.0.4 splits an update of a
-//! 9 MiB document with its pre- and post-image (measured on 01-11): two fragments, the first with
-//! `_id`, `splitEvent`, `wallTime`, `clusterTime`, `operationType`, `documentKey`, `ns`,
+//! 014 T018: `$changeStreamSplitLargeEvent` (FR-011), as a reference router 9.0.4 splits an update
+//! of a 9 MiB document with its pre- and post-image (measured on 01-11): two fragments, the first
+//! with `_id`, `splitEvent`, `wallTime`, `clusterTime`, `operationType`, `documentKey`, `ns`,
 //! `updateDescription` and `fullDocument`, the second with `fullDocumentBeforeChange`.
 
 use teseladb_bson::{Document, Value};
@@ -85,8 +85,8 @@ fn a_field_larger_than_a_fragment_cannot_be_split() {
     assert!(matches!(split(&huge, &token()), Err(SplitError::FieldTooLarge(_))));
 }
 
-/// The limit as measured on a `refrouter` 9.0.4: the event with its metadata up to 16 MiB and 8 KiB
-/// comes whole, a byte more goes in fragments.
+/// The limit as measured on a reference router 9.0.4: the event with its metadata up to 16 MiB and
+/// 8 KiB comes whole, a byte more goes in fragments.
 #[test]
 fn an_event_up_to_the_limit_with_its_metadata_is_whole() {
     let base = event(8 * 1024 * 1024);

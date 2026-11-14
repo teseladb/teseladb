@@ -475,12 +475,12 @@ fn no_pre_vote_for_a_term_it_already_voted_in() {
     assert!(!granted(&f.step(pre_vote(3, 3))));
 }
 
-/// A leader that stops hearing from its quorum keeps the role for `step_down_ticks`, as a RefDb
-/// primary does for `electionTimeoutMillis`: it takes proposals (a `w: 1` write that a new leader
-/// may roll back) but serves no lease read and does not keep others from voting. Only
-/// after that long does it step down. Before, it stepped down after one election timeout, and a
-/// `w: 1` write sent to it right after the cut found no leader (the 002 battery's `rollback-w1`
-/// with Python answered 89).
+/// A leader that stops hearing from its quorum keeps the role for `step_down_ticks`, as a reference
+/// server primary does for `electionTimeoutMillis`: it takes proposals (a `w: 1` write that a new
+/// leader may roll back) but serves no lease read and does not keep others from voting. Only after
+/// that long does it step down. Before, it stepped down after one election timeout, and a `w: 1`
+/// write sent to it right after the cut found no leader (the 002 battery's `rollback-w1` with
+/// Python answered 89).
 #[test]
 fn a_leader_cut_off_keeps_the_role_for_a_while_without_its_lease() {
     let mut c = One::new(1, &[1, 2, 3], &[], &[], HardState::default(), cfg);

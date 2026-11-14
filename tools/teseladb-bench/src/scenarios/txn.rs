@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_remote_server_has_no_restarts_to_read() {
-        let remote = Target::open(Some("refdb://127.0.0.1:1")).expect("target");
+        let remote = Target::open(Some("127.0.0.1:1")).expect("target");
         assert_eq!(uncertainty_restarts(&remote), Ok(None));
         assert_eq!(split(&remote, 1), Ok(()), "a remote server is not split");
     }

@@ -59,7 +59,7 @@ fn label(domain: &str, purpose: &str) -> Vec<u8> {
 /// `--encryptionCipherMode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CipherMode {
-    /// `AES256-CBC`, RefDb's default.
+    /// `AES256-CBC`, the reference server's default.
     Cbc,
     /// `AES256-GCM`.
     Gcm,

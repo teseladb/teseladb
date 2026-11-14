@@ -1,6 +1,7 @@
-//! The `o` of an update by operators in `local.oplog.rs` (018 FR-009, T011): `{$v: 2, diff}`
-//! from the document before the write and the change stream's description of it. The expected
-//! diffs are those RefDb 9.0.4 (`ref:9.0`) wrote on 02-11-2026 for the same updates.
+//! The `o` of an update by operators in `local.oplog.rs` (018 FR-009, T011): `{$v: 2, diff}` from
+//! the document before the write and the change stream's description of it. The expected diffs are
+//! those the reference server 9.0.4 (its 9.0 image) wrote on 02-11-2026 for the
+//! same updates.
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::update_desc::{PathPart, UpdateDescription};
@@ -33,7 +34,7 @@ fn entry(diff: Document) -> Document {
 
 /// `$set: {a: 2, n: 5, "b.c": 9, "b.e": 1, "arr.1": 7}, $unset: {s: 1}`.
 #[test]
-fn sections_and_subdiffs_in_refdb_order() {
+fn sections_and_subdiffs_in_the_reference_order() {
     let d = desc(
         vec![
             ("a", Value::Int32(2)),
@@ -166,7 +167,8 @@ fn applying_a_diff() {
         apply(&before(), &Document::new().with("x", 1)),
         Err(DiffError::Unexpected("x".into()))
     );
-    // An array subdiff on a field that is not an array leaves it null, as RefDb 9.0.4 does.
+    // An array subdiff on a field that is not an array leaves it null, as the reference server
+    // 9.0.4 does.
     let on_scalar = Document::new().with("sa", Document::new().with("a", true));
     assert_eq!(apply(&before(), &on_scalar).expect("applies").get("a"), Some(&Value::Null));
     let bad = Document::new().with("u", 1);

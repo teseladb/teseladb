@@ -514,12 +514,13 @@ fn breaks(schema: &Object, v: &Value, path: &str) -> Vec<String> {
     found
 }
 
-/// 019 T032 (SC-003): each tool, called as the SDK battery calls it (`tests/mcp/calls.json`),
+/// 019 T032 (SC-003): each tool, called as the SDK battery calls it (`tests/data/calls.json`),
 /// answers a `structuredContent` that meets the `outputSchema` it publishes, which the official
 /// SDKs check on every call; and no published schema asks for a field it forbids.
 #[test]
 fn every_structured_content_meets_its_output_schema() {
-    let calls = parse(include_bytes!("../../../tests/mcp/calls.json")).unwrap();
+    let calls =
+        parse(teseladb_names::expand_static(include_str!("data/calls.json")).as_bytes()).unwrap();
     let calls = calls.get("calls").and_then(Value::as_array).unwrap();
     let writes = Options { read_only: false, allow_destructive: true, ..READ_ONLY };
     let (server, mut f) = (Server::new(7), Fake { drops: true, ..Fake::default() });

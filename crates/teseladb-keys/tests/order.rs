@@ -1,7 +1,7 @@
-//! The encoding keeps RefDb's order (003 FR-008, FR-010, SC-002, T013): for every pair of a pool
-//! of random values of every type, `cmp(enc(a), enc(b)) = compare(a, b)`, ascending, descending
-//! (the order reversed) and in compound keys with mixed directions. 3,200 values give 10,240,000
-//! pairs.
+//! The encoding keeps the reference server's order (003 FR-008, FR-010, SC-002, T013): for every
+//! pair of a pool of random values of every type, `cmp(enc(a), enc(b)) = compare(a, b)`, ascending,
+//! descending (the order reversed) and in compound keys with mixed directions. 3,200 values give
+//! 10,240,000 pairs.
 
 use std::cmp::Ordering;
 

@@ -585,7 +585,8 @@ mod tests {
     #[test]
     fn each_sync_of_a_file_or_a_folder_counts_once() {
         // The node's metrics give the syncs to the disk (`teseladb_disk_syncs_total`), so that a
-        // write's cost in syncs can be measured (H-008 of the native tests against RefDb).
+        // write's cost in syncs can be measured (H-008 of the native tests against the reference
+        // server).
         let root = temp_root("syncs");
         let mut d = FileDisk::open(&root).unwrap();
         d.set_direct_io(false);

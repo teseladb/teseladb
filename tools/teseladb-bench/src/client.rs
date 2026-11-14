@@ -1,7 +1,8 @@
 //! The bench's client of the wire protocol (002 FR-019): `OP_MSG` messages built and read with
-//! `teseladb-wire`, so that TeselaDB and RefDb are measured with the same client and not with a
-//! different driver on each side. `--target refdb://host:port` names the server; without it the
-//! scenario starts a development cluster of three nodes in this process (`teseladb dev`).
+//! `teseladb-wire`, so that TeselaDB and the reference server are measured with the same client and
+//! not with a different driver on each side. `--target host:port` names the
+//! server; without it the scenario starts a development cluster of three nodes in this process
+//! (`teseladb dev`).
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -29,13 +30,13 @@ pub enum Target {
 }
 
 impl Target {
-    /// From `--target` (`refdb://host:port[/...]`), or a local cluster without it.
+    /// From `--target` (`host:port`), or a local cluster without it.
     pub fn open(uri: Option<&str>) -> Result<Target, String> {
         let Some(uri) = uri else { return Target::local(LOCAL_NODES, 1) };
-        let rest = uri
-            .strip_prefix("refdb://")
-            .ok_or(format!("--target is refdb://host:port, not {uri}"))?;
-        let host = rest.split(['/', '?', ',']).next().unwrap_or_default();
+        if uri.contains(['/', '?', ',']) {
+            return Err(format!("--target is host:port, not {uri}"));
+        }
+        let host = uri;
         let addr = host
             .to_socket_addrs()
             .map_err(|e| format!("{host}: {e}"))?
@@ -170,7 +171,7 @@ pub fn check(reply: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// RefDb's `NotWritablePrimary`: the node has no leader to take the command yet.
+/// The reference server's `NotWritablePrimary`: the node has no leader to take the command yet.
 const NOT_WRITABLE_PRIMARY: i32 = 10107;
 
 /// The code of a failed reply, or of its first write error.
@@ -399,11 +400,9 @@ mod tests {
     }
 
     #[test]
-    fn targets_are_refdb_uris() {
-        assert!(
-            Target::open(Some("http://x")).err().expect("error").contains("refdb://host:port")
-        );
-        let t = Target::open(Some("refdb://127.0.0.1:27017/db?x=1")).expect("target");
+    fn targets_are_host_and_port() {
+        assert!(Target::open(Some("http://x")).err().expect("error").contains("is host:port"));
+        let t = Target::open(Some("127.0.0.1:27017")).expect("target");
         assert_eq!(t.addr().expect("addr").port(), 27017);
         assert!(Client::connect(SocketAddr::from(([127, 0, 0, 1], 1))).is_err());
         assert_eq!(text(std::io::Error::other("x")), "x");

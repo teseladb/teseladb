@@ -1,5 +1,5 @@
-//! The encrypted audit log of RefDb Enterprise 9.0.4 (`auditLog.localAuditKeyFile`, 013
-//! FR-031), worked out from files it wrote with a known key (measured on 31-10-2026): a header
+//! The encrypted audit log of the reference enterprise server 9.0.4 (`auditLog.localAuditKeyFile`,
+//! 013 FR-031), worked out from files it wrote with a known key (measured on 31-10-2026): a header
 //! with the log's own key wrapped under the key file's (AES-256-CBC) and a GMAC, and each message
 //! as its BSON document, compressed with zstd when asked, sealed with AES-256-GCM under the log's
 //! key with a 12-byte tag, the time as additional data and a counter in the nonce.
@@ -20,7 +20,7 @@ const PROVIDER_LOCAL: &str = "local";
 const PROVIDER_KMIP: &str = "kmip";
 /// `keyStoreIdentifier.keyWrapMethod` of a key wrapped with KMIP's Encrypt.
 const KEY_WRAP_ENCRYPT: &str = "encrypt";
-/// Length of the GCM tag RefDb keeps.
+/// Length of the GCM tag the reference server keeps.
 pub const TAG_LEN: usize = 12;
 /// Length of the GCM nonce: a fixed field and the message counter.
 pub const NONCE_LEN: usize = 12;
@@ -187,8 +187,8 @@ impl AuditEncryption {
     }
 }
 
-/// The JSON line of a header or a message, as RefDb writes it: canonical Extended JSON, with
-/// the binary subtype as one digit.
+/// The JSON line of a header or a message, as the reference server writes it: canonical Extended
+/// JSON, with the binary subtype as one digit.
 pub fn to_json(doc: &Document) -> String {
     let bytes = doc.to_bytes().unwrap_or_default();
     let text = teseladb_bson::RawDoc::from_bytes(&bytes)

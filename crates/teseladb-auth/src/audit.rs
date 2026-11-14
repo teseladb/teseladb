@@ -1,8 +1,9 @@
-//! The audit log of RefDb Enterprise 9.0 (013 FR-016): its action types, the options
-//! `--auditDestination`, `--auditFormat`, `--auditPath` and `--auditFilter` with RefDb's errors,
-//! the message of each event and the filter with the semantics of `auditLog.filter` (a query on
-//! the message). Without I/O: [`Auditor::render`] gives the bytes to write and the server writes
-//! them. The shapes and messages were measured on `refdb-enterprise-server:9.0.4`.
+//! The audit log of the reference enterprise server 9.0 (013 FR-016): its action types, the options
+//! `--auditDestination`, `--auditFormat`, `--auditPath` and `--auditFilter` with the reference
+//! server's errors, the message of each event and the filter with the semantics of
+//! `auditLog.filter` (a query on the message). Without I/O: [`Auditor::render`] gives the bytes to
+//! write and the server writes them. The shapes and messages were measured on the 9.0.4 image of
+//! the reference enterprise server.
 //!
 //! The parameters of each action type are built in [`crate::audit_param`].
 
@@ -137,10 +138,10 @@ impl Format {
     }
 }
 
-/// RefDb's code for every error of the options (`BadValue`).
+/// The reference server's code for every error of the options (`BadValue`).
 pub const BAD_VALUE: i32 = 2;
 
-/// Options that do not configure an audit log: the message RefDb stops with (code
+/// Options that do not configure an audit log: the message the reference server stops with (code
 /// [`BAD_VALUE`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditError(pub String);
@@ -166,14 +167,15 @@ pub struct Options<'a> {
     pub format: Option<&'a str>,
     /// `--auditPath`.
     pub path: Option<&'a str>,
-    /// `--auditFilter`, as JSON text (keys may go without quotes, as RefDb reads them).
+    /// `--auditFilter`, as JSON text (keys may go without quotes, as the reference server reads
+    /// them).
     pub filter: Option<&'a str>,
     /// `--auditRuntimeConfiguration`: the filter and `auditAuthorizationSuccess` come from the
     /// cluster parameter `auditConfig` (013 FR-031).
     pub runtime_configuration: bool,
     /// Whether `--setParameter auditAuthorizationSuccess` was given.
     pub authorization_success_set: bool,
-    /// `--auditSchema`: `ref` or `OCSF`.
+    /// `--auditSchema`: the native schema ([`teseladb_names::AUDIT_SCHEMA_NATIVE`]) or `OCSF`.
     pub schema: Option<&'a str>,
     /// `--auditLocalKeyFile`: the file's messages go encrypted under its key.
     pub local_key_file: Option<&'a str>,
@@ -199,21 +201,21 @@ pub struct ProcessInfo {
 /// The shape of the messages (`auditLog.schema`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Schema {
-    /// RefDb's own (`ref`, the default).
+    /// The reference server's own ([`teseladb_names::AUDIT_SCHEMA_NATIVE`], the default).
     #[default]
-    Ref,
+    Native,
     /// The Open Cybersecurity Schema Framework (`OCSF`).
     Ocsf,
 }
 
 impl Schema {
     /// Every schema.
-    pub const ALL: [Schema; 2] = [Schema::Ref, Schema::Ocsf];
+    pub const ALL: [Schema; 2] = [Schema::Native, Schema::Ocsf];
 
     /// Its name in `auditLog.schema`.
     pub fn name(self) -> &'static str {
         match self {
-            Schema::Ref => teseladb_names::AUDIT_SCHEMA_NATIVE,
+            Schema::Native => teseladb_names::AUDIT_SCHEMA_NATIVE,
             Schema::Ocsf => "OCSF",
         }
     }
@@ -250,8 +252,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// The audit log the options configure, `None` without any, or RefDb's error (in the order
-    /// RefDb checks them).
+    /// The audit log the options configure, `None` without any, or the reference server's error (in
+    /// the order the reference server checks them).
     pub fn from_options(o: &Options<'_>) -> Result<Option<Config>, AuditError> {
         let Some(dest) = o.destination else {
             let runtime = o.runtime_configuration.then_some("true");
@@ -340,7 +342,7 @@ impl Config {
             (Some(_), Some(_)) => return Err(bad("auditLog.compressionMode must be set as zstd")),
         };
         let schema = match o.schema {
-            None => Schema::Ref,
+            None => Schema::Native,
             Some(name) => Schema::ALL
                 .into_iter()
                 .find(|s| s.name() == name)
@@ -373,7 +375,8 @@ impl Config {
 }
 
 /// The filter text as a document: Extended JSON, with keys without quotes and strings in single
-/// quotes as RefDb also reads them; an array counts as the document of its positions.
+/// quotes as the reference server also reads them; an array counts as the document of its
+/// positions.
 fn filter_document(text: &str) -> Result<Document, AuditError> {
     // Inside a field, the text may be a document or an array; anything else is refused.
     let wrapped = format!("{{\"f\":{}}}", crate::shell_json::quote_keys(text));
@@ -395,7 +398,8 @@ fn bad_filter(e: impl fmt::Display) -> AuditError {
     bad(format!("Bad auditFilter: {e}"))
 }
 
-/// Checks `doc` as RefDb checks an audit filter (the cluster parameter `auditConfig`).
+/// Checks `doc` as the reference server checks an audit filter (the cluster parameter
+/// `auditConfig`).
 pub fn check_filter(doc: &Document) -> Result<(), AuditError> {
     parse_filter(doc).map(|_| ())
 }
@@ -487,13 +491,13 @@ pub struct Event {
     pub ts_ms: i64,
     /// The parameters of the action type ([`crate::audit_param`]).
     pub param: Document,
-    /// 0 or RefDb's error code.
+    /// 0 or the reference server's error code.
     pub result: i32,
 }
 
 impl Event {
-    /// The message in RefDb's order of fields: `atype`, `ts`, `uuid`, `local`, `remote`,
-    /// `directRemote` (for a client), `users`, `roles`, `param`, `result`.
+    /// The message in the reference server's order of fields: `atype`, `ts`, `uuid`, `local`,
+    /// `remote`, `directRemote` (for a client), `users`, `roles`, `param`, `result`.
     pub fn to_document(&self, client: &Client) -> Document {
         let users = client
             .users
@@ -540,8 +544,9 @@ impl Auditor {
         &self.config
     }
 
-    /// The cluster parameter `auditConfig` while the node runs: its filter, which RefDb checks
-    /// as an audit filter (the old one stays on error), and `auditAuthorizationSuccess`.
+    /// The cluster parameter `auditConfig` while the node runs: its filter, which the reference
+    /// server checks as an audit filter (the old one stays on error), and
+    /// `auditAuthorizationSuccess`.
     pub fn configure(
         &mut self,
         filter: &Document,
@@ -591,7 +596,7 @@ impl Auditor {
     /// the BSON document for a BSON file. A message the filter cannot evaluate is recorded.
     pub fn render(&self, event: &Event, client: &Client) -> Option<Vec<u8>> {
         let doc = match self.config.schema {
-            Schema::Ref => event.to_document(client),
+            Schema::Native => event.to_document(client),
             Schema::Ocsf => {
                 crate::audit_ocsf::document(event, client, self.config.process.as_ref())
             }
@@ -624,7 +629,7 @@ impl Auditor {
             });
         }
         let json = |raw| match self.config.schema {
-            Schema::Ref => extjson::to_legacy(raw),
+            Schema::Native => extjson::to_legacy(raw),
             Schema::Ocsf => extjson::to_relaxed_uuid(raw),
         };
         Some(match (self.config.format, self.config.destination) {

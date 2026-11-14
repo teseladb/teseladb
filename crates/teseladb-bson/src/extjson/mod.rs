@@ -1,7 +1,7 @@
-//! Extended JSON v2 of RefDb's specification (FR-015): writing a document in its canonical form
-//! (every BSON type kept) or its relaxed one (plain JSON numbers and ISO dates where nothing is
-//! lost for a reader), and reading either back. Doubles print in their shortest form that reads
-//! back the same, with `.0` or an `E±` exponent.
+//! Extended JSON v2 of the reference server's specification (FR-015): writing a document in its
+//! canonical form (every BSON type kept) or its relaxed one (plain JSON numbers and ISO dates where
+//! nothing is lost for a reader), and reading either back. Doubles print in their shortest form
+//! that reads back the same, with `.0` or an `E±` exponent.
 //!
 //! ```
 //! use teseladb_bson::{Document, RawDoc, extjson};
@@ -32,7 +32,7 @@ pub use date::{civil_from_days, to_log_time};
 pub struct ExtJsonError(String);
 
 impl ExtJsonError {
-    /// RefDb's error code and name for it.
+    /// The reference server's error code and name for it.
     #[must_use]
     pub fn code(&self) -> (i32, &'static str) {
         (2, "BadValue")
@@ -63,8 +63,8 @@ pub fn to_relaxed(doc: RawDoc<'_>) -> String {
     out
 }
 
-/// The document in relaxed Extended JSON with UUIDs as `$uuid`, the form of RefDb's OCSF
-/// audit log.
+/// The document in relaxed Extended JSON with UUIDs as `$uuid`, the form of the reference server's
+/// OCSF audit log.
 #[must_use]
 pub fn to_relaxed_uuid(doc: RawDoc<'_>) -> String {
     let mut out = String::new();
@@ -78,7 +78,7 @@ pub fn uuid_text(bytes: &[u8; 16]) -> String {
     write::uuid_text(bytes)
 }
 
-/// The document in the legacy strict JSON of RefDb's audit log (`{ "k" : 1 }`).
+/// The document in the legacy strict JSON of the reference server's audit log (`{ "k" : 1 }`).
 #[must_use]
 pub fn to_legacy(doc: RawDoc<'_>) -> String {
     let mut out = String::new();
@@ -90,8 +90,8 @@ pub fn to_legacy(doc: RawDoc<'_>) -> String {
 ///
 /// # Errors
 ///
-/// An [`ExtJsonError`] (RefDb's `BadValue`) with the reason: text that is not JSON, a wrapper
-/// that breaks the specification, or a document past the limits.
+/// An [`ExtJsonError`] (the reference server's `BadValue`) with the reason: text that is not JSON,
+/// a wrapper that breaks the specification, or a document past the limits.
 pub fn parse(text: &str) -> Result<Document, ExtJsonError> {
     parse_with(text, Limits::default())
 }

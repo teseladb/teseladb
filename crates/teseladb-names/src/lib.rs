@@ -213,14 +213,15 @@ pub const HELP_SHUTDOWN: &str = "Shuts down the mongos. Must be run against the 
 pub const HELP_UPDATE_SEARCH_INDEX: &str =
     "Command to update a search index. Only supported with Atlas.";
 
-// d170-l1
 /// The start of the link that the error of an unknown feature compatibility version gives, before the
 /// last long-term support version.
 pub const DOC_FCV_RELEASE_NOTES: &str = "https://docs.mongodb.com/master/release-notes/";
 
-// d170-l1
 /// The `advice` of `validate` when it finds a corrupt index.
 pub const ADVICE_CORRUPT_NAMESPACE: &str = "A corrupt namespace has been detected. See http://dochub.mongodb.org/core/data-recovery for recovery steps.";
+
+/// The middle part of the text whose hex MD5 digest SCRAM-SHA-1 derives from: `user:<this>:password`.
+pub const SCRAM_SHA1_DIGEST_MIDDLE: &str = "mongo";
 
 /// Every constant with its name, for [`expand`].
 pub const ALL: &[(&str, &str)] = &[
@@ -290,9 +291,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("HELP_SET_PARAMETER", HELP_SET_PARAMETER),
     ("HELP_SHUTDOWN", HELP_SHUTDOWN),
     ("HELP_UPDATE_SEARCH_INDEX", HELP_UPDATE_SEARCH_INDEX),
-    // d170-l1
     ("DOC_FCV_RELEASE_NOTES", DOC_FCV_RELEASE_NOTES),
     ("ADVICE_CORRUPT_NAMESPACE", ADVICE_CORRUPT_NAMESPACE),
+    ("SCRAM_SHA1_DIGEST_MIDDLE", SCRAM_SHA1_DIGEST_MIDDLE),
 ];
 
 /// A mark `${name:X}` whose `X` is not a constant of this crate.

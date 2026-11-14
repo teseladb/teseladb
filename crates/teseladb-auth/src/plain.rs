@@ -1,7 +1,7 @@
-//! The PLAIN mechanism (RFC 4616; 013 FR-025) as RefDb Enterprise 9.0.4 takes it (measured):
-//! `[authzid] NUL authcid NUL password` with the authorization identity empty or the same user;
-//! on `$external` the password goes to LDAP, on any other database it is checked against the
-//! user's SCRAM credentials. Every failure reaches the client as `Authentication failed.`; the
+//! The PLAIN mechanism (RFC 4616; 013 FR-025) as the reference enterprise server 9.0.4 takes it
+//! (measured): `[authzid] NUL authcid NUL password` with the authorization identity empty or the
+//! same user; on `$external` the password goes to LDAP, on any other database it is checked against
+//! the user's SCRAM credentials. Every failure reaches the client as `Authentication failed.`; the
 //! reason is for the log.
 
 use std::fmt;
@@ -11,7 +11,7 @@ use teseladb_crypto::ct;
 use crate::scram::{Credentials, Mechanism};
 use crate::users::User;
 
-/// Why a PLAIN message was refused (RefDb's message for its log).
+/// Why a PLAIN message was refused (the reference server's message for its log).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlainError {
     /// No NUL before the user.

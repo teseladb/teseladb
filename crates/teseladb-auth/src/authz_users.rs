@@ -1,5 +1,5 @@
-//! What the user and role commands need (013 FR-011), measured on RefDb 9.0.4: their own
-//! action on the database, `grantRole` on the database of each role and privilege they grant,
+//! What the user and role commands need (013 FR-011), measured on the reference server 9.0.4: their
+//! own action on the database, `grantRole` on the database of each role and privilege they grant,
 //! `revokeRole` on that of each one they take away, and the cases where a user may act on itself.
 
 use teseladb_bson::{Document, Value};
@@ -118,10 +118,10 @@ pub(crate) fn on_privileges(cmd: &Document, action: A) -> Check {
     needs_all(privilege_dbs(cmd).iter().map(|d| Need::new(Target::database(d), action)).collect())
 }
 
-/// `usersInfo`; with `authenticatedMechanism` also `internal` on the cluster (013 FR-033: a
-/// probe of minimal privileges on RefDb Enterprise 9.0.4 found `viewUser` and `internal`). A
-/// value that names no mechanism needs nothing more: the command refuses it first (measured on a
-/// `refrouter` 9.0.4 with `root`, which has no `internal`).
+/// `usersInfo`; with `authenticatedMechanism` also `internal` on the cluster (013 FR-033: a probe
+/// of minimal privileges on the reference enterprise server 9.0.4 found `viewUser` and `internal`).
+/// A value that names no mechanism needs nothing more: the command refuses it first (measured on a
+/// the reference router 9.0.4 with `root`, which has no `internal`).
 pub(crate) fn users_info(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
     let check = info(true, db, cmd, who);
     let names_a_mechanism = matches!(
@@ -191,8 +191,8 @@ fn info(users: bool, db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
     needs_all(list.iter().map(|(_, d)| Need::new(Target::database(d), action)).collect())
 }
 
-/// `_mergeAuthzCollections` (013 FR-030), as a probe of minimal privileges found on a `refrouter`
-/// 9.0.4: `createUser`, `createRole`, `grantRole` and `revokeRole` on every database, with
+/// `_mergeAuthzCollections` (013 FR-030), as a probe of minimal privileges found on a reference
+/// router 9.0.4: `createUser`, `createRole`, `grantRole` and `revokeRole` on every database, with
 /// `drop` also `dropUser` and `dropRole`, and `find` on each temporary collection it names.
 pub fn merge_authz_collections(cmd: &Document) -> Check {
     let mut actions = vec![A::CreateUser, A::CreateRole, A::GrantRole, A::RevokeRole];

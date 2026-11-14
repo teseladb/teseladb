@@ -1,6 +1,6 @@
-//! PLAIN (013 T036, FR-025) as RefDb Enterprise 9.0.4 takes it (measured 30-10-2026 with an
-//! OpenLDAP server): the message's forms and its refusals with RefDb's log messages, and the
-//! password of a local user checked against its SCRAM credentials.
+//! PLAIN (013 T036, FR-025) as the reference enterprise server 9.0.4 takes it (measured 30-10-2026
+//! with an OpenLDAP server): the message's forms and its refusals with the reference server's log
+//! messages, and the password of a local user checked against its SCRAM credentials.
 
 use teseladb_auth::plain::{self, PlainError};
 use teseladb_auth::scram::{Credentials, Mechanism};

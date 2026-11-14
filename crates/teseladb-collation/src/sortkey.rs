@@ -15,14 +15,14 @@ use crate::data::{Ce, MERGE_SEPARATOR_PRIMARY};
 use crate::options::CaseFirst;
 use crate::reorder::Reordering;
 
-/// How many levels a comparison looks at: RefDb's `strength`, 1 to 5.
+/// How many levels a comparison looks at: the reference server's `strength`, 1 to 5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Strength {
     /// Base letters only.
     Primary = 1,
     /// Also accents.
     Secondary = 2,
-    /// Also case and variants (RefDb's default).
+    /// Also case and variants (the reference server's default).
     Tertiary = 3,
     /// Also, with `shifted`, spaces and punctuation.
     Quaternary = 4,
@@ -30,10 +30,10 @@ pub enum Strength {
     Identical = 5,
 }
 
-/// How spaces and punctuation weigh: RefDb's `alternate`.
+/// How spaces and punctuation weigh: the reference server's `alternate`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alternate {
-    /// Like any other character (RefDb's default).
+    /// Like any other character (the reference server's default).
     NonIgnorable,
     /// Only at the fourth level.
     Shifted,

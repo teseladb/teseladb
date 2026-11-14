@@ -1,13 +1,13 @@
 //! The event document a cursor returns (014 FR-002, contract `events.md`), with its fields in the
-//! order a `refrouter` 9.0.4 gives them (measured on 31-10 with `watch()` from `refshell`):
-//! `txnNumber` and `lsid` first inside a transaction; then `_id`, `operationType`, `clusterTime`,
-//! `collectionUUID` (only with `showExpandedEvents`) and `wallTime`; an insert or a replacement
-//! goes on with `fullDocument`, `ns` and `documentKey`; an update with `ns`, `documentKey`,
-//! `updateDescription` and then `fullDocument` or `fullDocumentBeforeChange` when asked for; a
-//! deletion with `ns` and `documentKey`. A catalog event (measured on 01-11) puts `to` first for
-//! a `rename`, then `_id`, `operationType`, `clusterTime`, `collectionUUID`, `wallTime` and `ns`,
-//! and with `showExpandedEvents` `operationDescription`, `stateBeforeChange` and `nsType`; an
-//! `invalidate` has no `ns`.
+//! order a reference router 9.0.4 gives them (measured on 31-10 with `watch()` from the reference
+//! shell): `txnNumber` and `lsid` first inside a transaction; then `_id`, `operationType`,
+//! `clusterTime`, `collectionUUID` (only with `showExpandedEvents`) and `wallTime`; an insert or a
+//! replacement goes on with `fullDocument`, `ns` and `documentKey`; an update with `ns`,
+//! `documentKey`, `updateDescription` and then `fullDocument` or `fullDocumentBeforeChange` when
+//! asked for; a deletion with `ns` and `documentKey`. A catalog event (measured on 01-11) puts `to`
+//! first for a `rename`, then `_id`, `operationType`, `clusterTime`, `collectionUUID`, `wallTime`
+//! and `ns`, and with `showExpandedEvents` `operationDescription`, `stateBeforeChange` and
+//! `nsType`; an `invalidate` has no `ns`.
 
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
 use teseladb_hlc::{Hlc, to_timestamp};

@@ -1,5 +1,5 @@
-//! `ingest` scenario (002 FR-034, SC-015): bulk ingestion over the wire protocol against
-//! `--target` (TeselaDB or RefDb, with the same client) or a local cluster. `--concurrency`
+//! `ingest` scenario (002 FR-034, SC-015): bulk ingestion over the wire protocol against `--target`
+//! (TeselaDB or the reference server, with the same client) or a local cluster. `--concurrency`
 //! connections each send unordered `insert`s of [`BATCH`] telemetry documents of about 120 bytes
 //! (`{_id, sensor, ts, temperature, humidity, status}`) in a closed loop; the report gives the
 //! documents per second and the latency of each batch.

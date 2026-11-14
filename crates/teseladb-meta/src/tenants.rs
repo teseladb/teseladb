@@ -1,11 +1,11 @@
-//! Tenants (007 FR-025, D-014): Group 0 keeps their names and numbers. Tenant 0 is the default
-//! one, which every cluster has without creating it. A tenant's databases live in the same
-//! catalog as everyone's, with their names qualified by the tenant ([`qualified_db`]): RefDb's
+//! Tenants (007 FR-025, D-014): Group 0 keeps their names and numbers. Tenant 0 is the default one,
+//! which every cluster has without creating it. A tenant's databases live in the same catalog as
+//! everyone's, with their names qualified by the tenant ([`qualified_db`]): the reference server's
 //! database names never hold a zero byte, so the default tenant's names stay as they are and no
 //! name of one tenant meets another's. The collection numbers are shared by every tenant, and a
 //! collection's keys carry its tenant. Each tenant but the default one also has its limits, its
-//! switches, its service user, its access list and whether it is suspended ([`TenantState`],
-//! 007 FR-030, FR-034 to FR-036).
+//! switches, its service user, its access list and whether it is suspended ([`TenantState`], 007
+//! FR-030, FR-034 to FR-036).
 
 use std::collections::BTreeMap;
 

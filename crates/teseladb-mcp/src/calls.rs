@@ -177,7 +177,8 @@ impl<E: Executor + ?Sized> Ctx<'_, E> {
         let max_docs = usize::try_from(self.limits.max_documents).unwrap_or(usize::MAX);
         let asked = bytes_arg.map(|b| b.max(0) as u64).filter(|b| *b < self.limits.max_bytes);
         let max_bytes = asked.unwrap_or(self.limits.max_bytes);
-        // The names RefDb MCP Server gives the limits in `appliedLimits` (its `outputSchema`).
+        // The names the reference MCP server gives the limits in `appliedLimits` (its
+        // `outputSchema`).
         let bytes_limit = if asked.is_some() { LIMIT_TOOL_BYTES } else { LIMIT_CONFIG_BYTES };
         let mut applied = Vec::new();
         let mut kept = Vec::new();
@@ -224,7 +225,7 @@ const LIMIT_TOOL_BYTES: &str = "tool.responseBytesLimit";
 const SEARCH_INDEX_FIELDS: &[&str] = &["name", "type", "status", "queryable", "latestDefinition"];
 /// The name `list-connections` gives the server's connection.
 const CONNECTION_NAME: &str = "teseladb";
-/// `source` of a connection the server fixes (RefDb MCP Server's enumeration).
+/// `source` of a connection the server fixes (the reference MCP server's enumeration).
 const PRECONFIGURED: &str = "preconfigured";
 /// `state` of an open connection.
 const CONNECTED: &str = "connected";

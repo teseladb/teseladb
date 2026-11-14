@@ -1,6 +1,6 @@
 //! The format of `local.oplog.rs` (018 FR-009, contract `oplog-format.md`, T011). The expected
-//! entries are those RefDb 9.0.4 (`ref:9.0`) wrote for the same operations, field by field
-//! and in their order.
+//! entries are those the reference server 9.0.4 (its 9.0 image) wrote for the
+//! same operations, field by field and in their order.
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::oplog::{
@@ -43,7 +43,7 @@ fn null_op_time() -> Document {
 }
 
 #[test]
-fn retryable_update_matches_refdb() {
+fn retryable_update_matches_the_reference() {
     let diff = Document::new()
         .with("d", Document::new().with("sub", false))
         .with("u", Document::new().with("estado", "enviado").with("n", 2));
@@ -81,7 +81,7 @@ fn retryable_update_matches_refdb() {
 
 /// A retryable `findAndModify` carries `needsRetryImage` before `stmtId`, and the `applyOps`
 /// entry of a retryable insert of several documents `multiOpType: 1` after `prevOpTime`
-/// (measured on RefDb 9.0.4 on 02-11-2026).
+/// (measured on the reference server 9.0.4 on 02-11-2026).
 #[test]
 fn retry_image_and_multi_op_type_round_trip() {
     let doc = Document::new()
@@ -201,10 +201,11 @@ fn apply_ops_len(d: &Document) -> usize {
     }
 }
 
-/// RefDb 9.0.4: four inserts of 4 MiB − 400 bytes fit in one entry (`o` of 16 776 048 bytes);
-/// with 4 MiB + 100 they split 3 + 1, and the entries chain with `partialTxn` and `count`.
+/// The reference server 9.0.4: four inserts of 4 MiB − 400 bytes fit in one entry (`o` of 16 776
+/// 048 bytes); with 4 MiB + 100 they split 3 + 1, and the entries chain with `partialTxn` and
+/// `count`.
 #[test]
-fn large_transaction_splits_like_refdb() {
+fn large_transaction_splits_like_the_reference() {
     let under = split((0..4).map(|i| big(i, 4 * 1024 * 1024 - 400)).collect());
     assert_eq!(under.len(), 1);
     let over = split((0..4).map(|i| big(i, 4 * 1024 * 1024 + 100)).collect());
@@ -280,12 +281,13 @@ fn malformed_entries_are_refused() {
     assert_eq!(parse(with("prevOpTime", no_ts.into())), Some(OplogError::Missing("ts")));
 }
 
-/// What `refrestore --oplogReplay` gives `applyOps` for the operations of a transaction:
-/// `ts: Timestamp(0, 0)`, `t: null` and `v: 0` (captured on 02-11-2026 from refrestore
-/// 100.20.0). A `refnode` 9.0.4 takes an entry with `ts` and no `t`, with a null `t` or `v`, and
-/// a term written as a double (measured on 02-11-2026); the term it does not have is -1.
+/// What the reference restore tool with `--oplogReplay` gives `applyOps` for the operations of a
+/// transaction: `ts: Timestamp(0, 0)`, `t: null` and `v: 0` (captured on 02-11-2026 from the
+/// reference restore tool 100.20.0). A reference replica set member 9.0.4 takes an entry with `ts`
+/// and no `t`, with a null `t` or `v`, and a term written as a double (measured on 02-11-2026); the
+/// term it does not have is -1.
 #[test]
-fn entries_of_refrestore() {
+fn entries_of_the_reference_restore_tool() {
     let d = Document::new()
         .with("ts", ts(at(0)))
         .with("t", Value::Null)
@@ -293,7 +295,8 @@ fn entries_of_refrestore() {
         .with("op", "i")
         .with("ns", NS)
         .with("o", id(1));
-    let e = OplogEntry::from_document(&d).expect("a nested operation of refrestore");
+    let e =
+        OplogEntry::from_document(&d).expect("a nested operation of the reference restore tool");
     assert_eq!(e.op_time.map(|o| o.term), Some(-1));
     assert_eq!(e.version, 0);
     let mut no_t = d.clone();
@@ -336,7 +339,7 @@ fn op_types_by_code() {
     assert_eq!(OpType::from_code("db"), None);
 }
 
-/// RefDb 9.0.4 refuses writes to the oplog with `InvalidNamespace` and its drop with
+/// The reference server 9.0.4 refuses writes to the oplog with `InvalidNamespace` and its drop with
 /// `Location5255000`.
 #[test]
 fn writes_to_the_oplog_are_refused() {

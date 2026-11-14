@@ -1,6 +1,6 @@
-//! The tools of contract `mcp-server.md` (FR-021, FR-023): the database tools of RefDb MCP
-//! Server with their arguments, schemas and annotations, each run as the command it names on the
-//! executor of the wire protocol. `inputSchema`, `outputSchema` and the hints are those of the
+//! The tools of contract `mcp-server.md` (FR-021, FR-023): the database tools of the reference MCP
+//! server Server with their arguments, schemas and annotations, each run as the command it names on
+//! the executor of the wire protocol. `inputSchema`, `outputSchema` and the hints are those of the
 //! version fixed in the contract (T026): `reference_tools.json`, written by
 //! `scripts/mcp-reference-tools.sh` from that package's `tools/list`, without its descriptions.
 
@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use teseladb_json::{Number, Object, Value};
 
-/// The shape of each tool of RefDb MCP Server 3.2.2: name, annotations, `inputSchema` and
+/// The shape of each tool of the reference MCP server 3.2.2: name, annotations, `inputSchema` and
 /// `outputSchema` without descriptions.
 /// The file with its name marks expanded.
 pub fn reference_text() -> &'static str {

@@ -4,16 +4,16 @@
 //! record (or finds it finished) is followed by the resolution of its intents, range by range,
 //! from the intervals the record keeps.
 //!
-//! It also removes the records no one needs any more (record GC), as RefDb removes
+//! It also removes the records no one needs any more (record GC), as the reference server removes
 //! `config.transactions` entries: a final record of an internal transaction a while after it ended,
-//! and one of a client transaction once its session has expired ([`SESSION_TTL_MS`], RefDb's
-//! `logicalSessionTimeoutMinutes`) or once its session has a later transaction: the same scan
-//! shows one, or the record of the next number exists (identifiers come from the session and the
-//! number, `recovery::client_txn_id`). RefDb keeps one `config.transactions` entry per session
-//! the same way. A recovery of its commit after that answers as for a number the session never
-//! began. Before the removal it resolves every intent the record covers again
-//! (a no-op for those already resolved): the keys its intervals list, and for an interval it can
-//! only give as a prefix (a key longer than the record keeps) the keys the ranges find with
+//! and one of a client transaction once its session has expired ([`SESSION_TTL_MS`], the reference
+//! server's `logicalSessionTimeoutMinutes`) or once its session has a later transaction: the same
+//! scan shows one, or the record of the next number exists (identifiers come from the session and
+//! the number, `recovery::client_txn_id`). The reference server keeps one `config.transactions`
+//! entry per session the same way. A recovery of its commit after that answers as for a number the
+//! session never began. Before the removal it resolves every intent the record covers again (a
+//! no-op for those already resolved): the keys its intervals list, and for an interval it can only
+//! give as a prefix (a key longer than the record keeps) the keys the ranges find with
 //! `FindIntents`. Then the record forgets its intervals (`RecordOp::Resolved`) and goes
 //! (`ForgetRecord`), which the range checks again under its latch.
 
@@ -28,8 +28,8 @@ use teseladb_types::GroupId;
 
 use crate::coordinator::{ReqNo, Request, Route};
 
-/// How long a client transaction's record stays after its last activity: RefDb's default
-/// `logicalSessionTimeoutMinutes`, 30 (measured on 9.0.4).
+/// How long a client transaction's record stays after its last activity: the reference server's
+/// default `logicalSessionTimeoutMinutes`, 30 (measured on 9.0.4).
 pub const SESSION_TTL_MS: u64 = 30 * 60_000;
 
 /// The cut of a removal for a session that has a later transaction: no age is needed.

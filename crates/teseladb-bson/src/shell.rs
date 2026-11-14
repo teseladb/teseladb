@@ -1,10 +1,11 @@
-//! Values written the way the server writes them inside error messages (`point not in interval
-//! of [ -180, 180 ] :: caused by :: { _id: 1, loc: [ 200, 2 ] }`, the `_id` of a document whose
-//! geometry cannot be indexed, the rings of an invalid polygon). Measured on refnode 9.0.4: doubles
-//! with 16 significant digits and a `.0` when they read as an integer (`2.0`, `-0.0`,
+//! Values written the way the server writes them inside error messages (`point not in interval of [
+//! -180, 180 ] :: caused by :: { _id: 1, loc: [ 200, 2 ] }`, the `_id` of a document whose geometry
+//! cannot be indexed, the rings of an invalid polygon). Measured on the reference server 9.0.4:
+//! doubles with 16 significant digits and a `.0` when they read as an integer (`2.0`, `-0.0`,
 //! `1000000000000000.0`), never after an exponent, `nan` or `inf` (7.0.45 wrote `1e+18.0`, `nan.0`
 //! and `2`); strings and symbols in double quotes without escapes; documents as `{ a: 1 }` and
-//! arrays as `[ 1, 2 ]`. Not measured (`refshell` cannot send them): `undefined` and `DBPointer`.
+//! arrays as `[ 1, 2 ]`. Not measured (the reference shell cannot send them): `undefined` and
+//! `DBPointer`.
 
 use std::fmt::Write;
 

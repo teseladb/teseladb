@@ -221,7 +221,8 @@ fn a_new_leader_proposes_its_rounds_above_the_entries_of_the_term_before() {
 #[test]
 fn a_read_below_the_gc_threshold_fails_with_snapshot_too_old() {
     // Audit A005-4: below the threshold the compaction may have dropped the versions the read
-    // needs; RefDb answers `SnapshotTooOld` (239) to an `atClusterTime` older than its history.
+    // needs; the reference server answers `SnapshotTooOld` (239) to an `atClusterTime` older than
+    // its history.
     let mut c = cluster();
     let l = c.elect();
     write(&mut c, l, 1);

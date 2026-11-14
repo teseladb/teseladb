@@ -1,13 +1,14 @@
-//! Writing BSON columns: the values of one field of a time series bucket, row
-//! by row, as a column that [`super::decode`] and RefDb's unpacking read back the same.
+//! Writing BSON columns: the values of one field of a time series bucket, row by row, as a column
+//! that [`super::decode`] and the reference server's unpacking read back the same.
 //!
-//! The layout is the one [`super`] describes, kept to its simplest parts: a value of a type with
-//! an integer ([`super::stream`]) becomes a zigzag delta of the reference before it (a delta of
-//! deltas for dates, timestamps and `ObjectIds`), packed with the plain Simple-8b selectors; a value
-//! of another type, a type change, a delta that needs more than 60 bits, or a value the integer
-//! cannot rebuild (a string of more than 16 bytes, a binary of another subtype or length) becomes
-//! a new literal. A row without value is a slot with every bit set. The bytes are not RefDb's
-//! own (it also scales doubles and interleaves objects), but every value comes back the same.
+//! The layout is the one [`super`] describes, kept to its simplest parts: a value of a type with an
+//! integer ([`super::stream`]) becomes a zigzag delta of the reference before it (a delta of deltas
+//! for dates, timestamps and `ObjectIds`), packed with the plain Simple-8b selectors; a value of
+//! another type, a type change, a delta that needs more than 60 bits, or a value the integer cannot
+//! rebuild (a string of more than 16 bytes, a binary of another subtype or length) becomes a new
+//! literal. A row without value is a slot with every bit set. The bytes are not the reference
+//! server's own (it also scales doubles and interleaves objects), but every value comes back the
+//! same.
 
 use super::{BLOCK, Cell, END};
 use crate::types;

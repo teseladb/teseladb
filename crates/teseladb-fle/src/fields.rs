@@ -1,6 +1,7 @@
 //! The `encryptedFields` option of a collection (FR-001, FR-002): read with the IDL rules and
-//! messages of `create` on a `refnode` 9.0.4, checked, and kept as `listCollections` shows it, with
-//! the names of the metadata collections and the default contention filled in.
+//! messages of `create` on a reference replica set member 9.0.4, checked, and kept as
+//! `listCollections` shows it, with the names of the metadata collections and the default
+//! contention filled in.
 
 use teseladb_bson::types as t;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
@@ -441,9 +442,10 @@ pub fn for_create(coll: &str, doc: RawDoc<'_>) -> Result<EncryptedFieldConfig, F
     Ok(c)
 }
 
-/// The checks of a configuration beyond its IDL, in the order of a `refnode` 9.0.4: first each
-/// field's type and queries, all fields, then for each field its key id, its path and how it
-/// meets the paths before it (measured with fields that break two rules, `create-two-rules.json`).
+/// The checks of a configuration beyond its IDL, in the order of a reference replica set member
+/// 9.0.4: first each field's type and queries, all fields, then for each field its key id, its path
+/// and how it meets the paths before it (measured with fields that break two rules,
+/// `create-two-rules.json`).
 pub fn check(c: &EncryptedFieldConfig) -> Result<(), FleError> {
     for field in &c.fields {
         check_field(field)?;

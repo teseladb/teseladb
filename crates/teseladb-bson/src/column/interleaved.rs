@@ -1,4 +1,4 @@
-//! Interleaved mode of a BSON column (measured on a `refrouter` 9.0.4, 003 T029).
+//! Interleaved mode of a BSON column (measured on a reference router 9.0.4, 003 T029).
 //!
 //! The control byte (`F0`, `F1` or `F2`) is followed by a reference document; each scalar in it,
 //! in order, starts a stream (with `F0` arrays are scalars too). Row after row, a stream whose
@@ -93,7 +93,7 @@ fn nodes(
     let mut p = 4;
     while doc[p] != END {
         let kind = doc[p];
-        // Names are bytes here: RefDb takes names that are not UTF-8.
+        // Names are bytes here: the reference server takes names that are not UTF-8.
         let (_, _, end) = read::element(doc, p, super::inner_mode()).map_err(|_| super::LAYOUT)?;
         let name_end = p + 1 + crate::arch::find_nul(&doc[p + 1..]).ok_or(super::LAYOUT)?;
         let value = &doc[name_end + 1..end];

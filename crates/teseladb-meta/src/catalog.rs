@@ -1,11 +1,11 @@
 //! The catalog in Group 0 (006 FR-027, 007 data model §1 and contract `catalog.md`): the
-//! collections of each database with their identifier (`u32`, never reused), their RefDb UUID
-//! and their options as the BSON document the client gave. The proposer generates the UUID, so
-//! applying stays deterministic. A dropped collection's identifier waits in [`Catalog::dropped`]
-//! until its documents are deleted (`Purged`). A database stays in [`Catalog::databases`] from its
-//! first collection until `dropDatabase`, also with no collection left, as `config.databases`
-//! of a `refrouter` (D-077). Each collection may have a dictionary of field names (003 FR-022),
-//! by its identifier, which a rename keeps and a drop removes.
+//! collections of each database with their identifier (`u32`, never reused), their UUID in the
+//! reference server and their options as the BSON document the client gave. The proposer generates the
+//! UUID, so applying stays deterministic. A dropped collection's identifier waits in
+//! [`Catalog::dropped`] until its documents are deleted (`Purged`). A database stays in
+//! [`Catalog::databases`] from its first collection until `dropDatabase`, also with no collection
+//! left, as `config.databases` of a reference router (D-077). Each collection may have a dictionary
+//! of field names (003 FR-022), by its identifier, which a rename keeps and a drop removes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub struct Namespace {
 pub struct CollectionEntry {
     /// Identifier, never reused.
     pub id: u32,
-    /// RefDb's UUID.
+    /// The reference server's UUID.
     pub uuid: [u8; 16],
     /// Options (`validator`, `validationLevel`, `collation`, …) as a BSON document.
     pub options: Vec<u8>,
@@ -81,7 +81,7 @@ pub enum CatalogError {
     /// No such index (007, kind 41).
     IndexNotFound,
     /// The command adds a database whose name differs only in case from one of the catalog
-    /// (13297 `DatabaseDifferCase` in RefDb).
+    /// (13297 `DatabaseDifferCase` in the reference server).
     DatabaseDifferCase,
 }
 
@@ -132,7 +132,7 @@ pub enum CatalogCommand {
         db: String,
     },
     /// Records a database without creating a collection: a write to a database that has none
-    /// (`refrouter` creates its entry in `config.databases`, D-077).
+    /// (the reference router creates its entry in `config.databases`, D-077).
     CreateDatabase {
         /// Database.
         db: String,
@@ -296,7 +296,8 @@ impl Catalog {
         self.dbs.keys().cloned().collect()
     }
 
-    /// The databases in the order they were added, as `refrouter` reads `config.databases`.
+    /// The databases in the order they were added, as the reference router reads
+    /// `config.databases`.
     pub fn databases_by_creation(&self) -> Vec<String> {
         let mut v: Vec<(&String, &u64)> = self.dbs.iter().collect();
         v.sort_by_key(|(_, at)| **at);
@@ -318,7 +319,7 @@ impl Catalog {
     }
 
     /// Whether adding database `db` clashes with another that differs only in ASCII case, as
-    /// RefDb compares them.
+    /// the reference server compares them.
     fn differs_in_case(&self, db: &str) -> bool {
         !self.dbs.contains_key(db) && self.dbs.keys().any(|d| d.eq_ignore_ascii_case(db))
     }

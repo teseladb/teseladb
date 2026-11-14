@@ -187,17 +187,17 @@ fn client_certificates_and_alpn() {
     let mut sc = server(&p, ec(NamedCurve::P384, 30));
     sc.client_auth = ClientAuth::Required;
     sc.trust = Trust::anchors(vec![p.ca.clone()]);
-    sc.alpn = vec![b"refdb".to_vec()];
+    sc.alpn = vec![b"teseladb".to_vec()];
     for key in [ec(NamedCurve::P256, 31), PrivateKey::ed25519(&[32; 32]), rsa()] {
         let mut cc = client12(&p);
         cc.identity = Some(identity(&p, key.clone(), "client"));
-        cc.alpn = vec![b"other".to_vec(), b"refdb".to_vec()];
+        cc.alpn = vec![b"other".to_vec(), b"teseladb".to_vec()];
         let (mut c, mut s, r) = connect(cc, sc.clone());
         assert_eq!(r, (Ok(()), Ok(())), "{key:?}");
         assert_eq!(s.peer_certificates()[0].subject.to_rfc4514(), "CN=client");
         assert_eq!(
             (c.alpn_protocol(), s.alpn_protocol()),
-            (Some(&b"refdb"[..]), Some(&b"refdb"[..]))
+            (Some(&b"teseladb"[..]), Some(&b"teseladb"[..]))
         );
         exchange(&mut c, &mut s);
     }

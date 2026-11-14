@@ -1,12 +1,14 @@
-//! The credentials RefDb 9.0.4 (`ref:9.0.4`, 2026-10-30) stored in `admin.system.users` for
-//! two users created with `createUser` and both mechanisms, derived again here from the same
-//! password, salt and count (013 T044, FR-032, FR-013). The second user checks the escaping of
-//! `,` and `=` that does not enter the derivation, and SASLprep of the SCRAM-SHA-256 password.
+//! The credentials the reference server 9.0.4 (its 9.0.4 image, 2026-10-30)
+//! stored in `admin.system.users` for two users created with `createUser` and both mechanisms,
+//! derived again here from the same password, salt and count (013 T044, FR-032, FR-013). The second
+//! user checks the escaping of `,` and `=` that does not enter the derivation, and SASLprep of the
+//! SCRAM-SHA-256 password.
 
 use teseladb_auth::scram::{Credentials, Mechanism};
 use teseladb_x509::pem::{base64_decode, base64_encode};
 
-/// (user, password, mechanism, iterationCount, salt, storedKey, serverKey), as RefDb wrote them.
+/// (user, password, mechanism, iterationCount, salt, storedKey, serverKey), as the reference server
+/// wrote them.
 const OBSERVED: [(&str, &str, &str, u32, &str, &str, &str); 4] = [
     (
         "alice",
@@ -47,7 +49,7 @@ const OBSERVED: [(&str, &str, &str, u32, &str, &str, &str); 4] = [
 ];
 
 #[test]
-fn derivation_matches_refdb() {
+fn derivation_matches_the_reference() {
     for (user, password, mech, iterations, salt, stored, server) in OBSERVED {
         let m = Mechanism::from_name(mech).unwrap();
         assert_eq!(iterations, m.default_iterations());

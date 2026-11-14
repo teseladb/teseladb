@@ -1,7 +1,7 @@
-//! IANA time zones without I/O: the database that RefDb 9.0.4 carries in its
-//! timelib (version 2024a with the `backzone` history, measured on a `refrouter` 9.0.4: Almaty is at
+//! IANA time zones without I/O: the database that the reference server 9.0.4 carries in its timelib
+//! (version 2024a with the `backzone` history, measured on a reference router 9.0.4: Almaty is at
 //! +05 in 2025, Asunción at −04 in July 2025, Amsterdam at +01:19:32 in 1935), generated into
-//! [`tzdata`] by `teseladb-tzgen`. Names are case-sensitive, as in RefDb.
+//! [`tzdata`] by `teseladb-tzgen`. Names are case-sensitive, as in the reference server.
 //!
 //! A zone gives the local type (offset, daylight saving and abbreviation) of any instant: its
 //! transitions up to the last one the data lists, and its POSIX rule after that.
@@ -92,12 +92,12 @@ impl Zone {
         Local { offset: t.offset, dst: t.dst, abbr: t.abbr }
     }
 
-    /// The UTC instant of local time `local` (seconds since the epoch, read as wall clock time),
-    /// as RefDb's timelib resolves it (measured on a `refrouter` 9.0.4 with `$dateFromParts`): the
-    /// offset at `local` read as UTC first, then the offset at the instant that gives. A time in
-    /// a gap is read with the offset before it (`02:30` the night Madrid moves from `02:00` to
-    /// `03:00` is `01:30Z`), and one that happens twice is the later (`02:30` the night it moves
-    /// back is `01:30Z`, not `00:30Z`).
+    /// The UTC instant of local time `local` (seconds since the epoch, read as wall clock time), as
+    /// the reference server's timelib resolves it (measured on a reference router 9.0.4 with
+    /// `$dateFromParts`): the offset at `local` read as UTC first, then the offset at the instant
+    /// that gives. A time in a gap is read with the offset before it (`02:30` the night Madrid
+    /// moves from `02:00` to `03:00` is `01:30Z`), and one that happens twice is the later (`02:30`
+    /// the night it moves back is `01:30Z`, not `00:30Z`).
     #[must_use]
     pub fn utc_of(&self, local: i64) -> i64 {
         let first = i64::from(self.at(local).offset);

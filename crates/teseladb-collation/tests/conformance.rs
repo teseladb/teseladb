@@ -21,7 +21,8 @@ fn test_file(name: &str) -> String {
 
 /// Checks that the lines of `name` come in ascending order; returns how many were compared.
 fn in_order(name: &str, alternate: Alternate) -> usize {
-    // As ICU's conformance test: with canonical reordering (RefDb's default has none).
+    // As ICU's conformance test: with canonical reordering (the reference server's default has
+    // none).
     let c = Collation {
         strength: Strength::Identical,
         alternate,
@@ -51,7 +52,7 @@ fn in_order(name: &str, alternate: Alternate) -> usize {
 #[test]
 fn the_cldr_root_collation_without_ignoring_anything() {
     assert_eq!(uca_version(), "8.0.0");
-    // RefDb's defaults: tertiary, spaces and punctuation like any character.
+    // The reference server's defaults: tertiary, spaces and punctuation like any character.
     let d = Collation::default();
     assert_eq!(
         (d.strength, d.alternate, d.normalization),

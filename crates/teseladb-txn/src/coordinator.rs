@@ -23,7 +23,7 @@
 //!
 //! A write that runs into another transaction's intent pushes that transaction as abandoned: if
 //! the push aborts it (or finds it finished) the coordinator resolves that intent and writes
-//! again; if it is alive the statement fails with `WriteConflict`, as in RefDb.
+//! again; if it is alive the statement fails with `WriteConflict`, as in the reference server.
 //!
 //! A range that no longer holds a request's keys, because a split or a merge moved them, answers
 //! `OutOfRange` without applying it: the coordinator asks its [`Route`] again and sends the
@@ -90,14 +90,16 @@ pub struct Request {
 /// Why a statement, a commit or an abort failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxnError {
-    /// A conflict with another transaction or a newer version: RefDb's `WriteConflict`.
+    /// A conflict with another transaction or a newer version: the reference server's
+    /// `WriteConflict`.
     WriteConflict,
     /// The record was aborted (by a push or the reaper), or the transaction is finished:
-    /// RefDb's `NoSuchTransaction`.
+    /// The reference server's `NoSuchTransaction`.
     NoSuchTransaction,
     /// No range is known for a key.
     NoRange,
-    /// Its state passed the coordinator's memory budget: RefDb's `TransactionTooLarge` (257).
+    /// Its state passed the coordinator's memory budget: the reference server's
+    /// `TransactionTooLarge` (257).
     TooLarge,
     /// A range failed.
     Range(RangeError),
@@ -111,7 +113,7 @@ pub enum Outcome {
     /// Aborted.
     Aborted,
     /// The commit's answer was lost: it may have committed. A new [`Coordinator::commit`] asks
-    /// again (RefDb's `UnknownTransactionCommitResult`).
+    /// again (the reference server's `UnknownTransactionCommitResult`).
     Unknown(RangeError),
     /// Refused before it could commit.
     Failed(TxnError),
@@ -975,7 +977,8 @@ impl Coordinator {
             Err(e) => return self.write_done(w.stmt, Some(TxnError::Range(e))),
         };
         if rec.status == TxnStatus::Pending {
-            // Alive: RefDb answers WriteConflict and the driver repeats the transaction.
+            // Alive: the reference server answers WriteConflict and the driver repeats the
+            // transaction.
             return self.write_done(w.stmt, Some(TxnError::WriteConflict));
         }
         w.rounds += 1;

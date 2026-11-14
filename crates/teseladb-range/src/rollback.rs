@@ -1,18 +1,18 @@
-//! Rollback files (FR-010, D-034, model `WriteConcernW1.tla`): a write acknowledged with `w: 1`
-//! may be lost if its leader falls before the majority has it. The replica whose log a later
-//! leader's log overwrites hands the dropped entries out (`MultiRaftCore::take_rolled_back`), and
-//! the embedder writes them under `<data>/rollback/`, as RefDb writes the documents a rollback
-//! takes back to `<dbpath>/rollback/<collectionUUID>/removed.<timestamp>.bson`.
+//! Rollback files (FR-010, D-034, model `WriteConcernW1.tla`): a write acknowledged with `w: 1` may
+//! be lost if its leader falls before the majority has it. The replica whose log a later leader's
+//! log overwrites hands the dropped entries out (`MultiRaftCore::take_rolled_back`), and the
+//! embedder writes them under `<data>/rollback/`, as the reference server writes the documents a
+//! rollback takes back to `<dbpath>/rollback/<collectionUUID>/removed.<timestamp>.bson`.
 //!
 //! The range layer does not know collections (006): a file holds what one range lost in one
 //! rollback, at `rollback/range-<group>/removed.<YYYY-MM-DDTHH-MM-SS>.<term>.<index>.bson` (UTC
 //! time of the rollback; the term and index of the first entry lost make the name unique). Its
 //! content is a sequence of BSON documents, readable with `bsondump`: one per version a lost write
 //! wrote, with its range, entry index and term, its mark as a BSON timestamp (FR-024) and its key,
-//! value type and value, so that the layer of 006 can map each key to its collection and write
-//! RefDb's files. As in RefDb, deletions are not written. An entry that does not decode as a
-//! command of the range is kept whole as `raw`. This module is sans-I/O: it builds and reads the
-//! bytes; the embedder creates the directory, writes the file and syncs it.
+//! value type and value, so that the layer of 006 can map each key to its collection and write the
+//! reference server's files. As in the reference server, deletions are not written. An entry that
+//! does not decode as a command of the range is kept whole as `raw`. This module is sans-I/O: it
+//! builds and reads the bytes; the embedder creates the directory, writes the file and syncs it.
 
 use std::collections::BTreeMap;
 

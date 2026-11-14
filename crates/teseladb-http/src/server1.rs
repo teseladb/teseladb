@@ -12,7 +12,8 @@ use crate::http1::{
 
 /// Most bytes of a request's line and fields (64 KiB).
 pub const MAX_REQUEST_HEAD: usize = 64 << 10;
-/// Most bytes of a request's body by default: 48 000 000, RefDb's `maxMessageSizeBytes`.
+/// Most bytes of a request's body by default: 48 000 000, the reference server's
+/// `maxMessageSizeBytes`.
 pub const MAX_REQUEST_BODY: usize = 48_000_000;
 
 /// The limits of a server's requests.

@@ -1,7 +1,7 @@
-//! `$changeStreamSplitLargeEvent` (014 FR-011): an event larger than a document may be is
-//! returned in fragments. As a `refrouter` 9.0.4 does (measured on 01-11), the fields other than
-//! `_id` go by the size of their element, smallest first, into fragments of at most
-//! [`MAX_EVENT_BYTES`] with their [`metadata`]; each fragment starts with its own `_id` (the event's token with the
+//! `$changeStreamSplitLargeEvent` (014 FR-011): an event larger than a document may be is returned
+//! in fragments. As a reference router 9.0.4 does (measured on 01-11), the fields other than `_id`
+//! go by the size of their element, smallest first, into fragments of at most [`MAX_EVENT_BYTES`]
+//! with their [`metadata`]; each fragment starts with its own `_id` (the event's token with the
 //! fragment's number) and `splitEvent: {fragment, of}`. Without the stage, an event larger than
 //! [`MAX_SERIALIZED_BYTES`] fails.
 
@@ -10,8 +10,8 @@ use teseladb_bson::{BsonError, Document, Limits, Value};
 use crate::token::ResumeToken;
 
 /// The largest event returned whole, and the largest fragment, each with its [`metadata`]: 16 MiB
-/// and 8 KiB. Measured on 02-11 against a `refrouter` 9.0.4: an event of 16 785 023 bytes whose
-/// token has 168 hexadecimal digits (an `_id` element of 190 bytes) comes whole, and one of a
+/// and 8 KiB. Measured on 02-11 against a reference router 9.0.4: an event of 16 785 023 bytes
+/// whose token has 168 hexadecimal digits (an `_id` element of 190 bytes) comes whole, and one of a
 /// byte more in fragments.
 pub const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024 + 8 * 1024;
 /// The largest document a reply serializes (16 MiB and 16 KiB, measured: `Size … exceeds
@@ -37,8 +37,8 @@ pub fn size(doc: &Document) -> Result<usize, BsonError> {
     Ok(doc.to_bytes_with(limits)?.len())
 }
 
-/// What a `refrouter` counts with an event or a fragment whose `_id` element has `id` bytes: the
-/// token again as its sort key, so twice the element, and 5 bytes.
+/// What a reference router counts with an event or a fragment whose `_id` element has `id` bytes:
+/// the token again as its sort key, so twice the element, and 5 bytes.
 pub fn metadata(id: usize) -> usize {
     2 * id + 5
 }

@@ -2,11 +2,11 @@
 //! over the wire protocol against `--target` or a local cluster of three nodes, one connection,
 //! each `find` timed alone, over `--records` documents `{_id, ssn}` where `ssn` is encrypted with
 //! equality queries and contention 0 and each value has 10 documents. The payloads are built here
-//! from a fixed index key, as a driver builds them with librefcrypt (the same token derivations,
-//! checked against its vectors in `teseladb-fle`); the server never needs the key. The collection
-//! is created with its metadata collections and the index of `__safeContent__`, as a driver's
-//! helper creates it. Target: under 5 ms at p50 with three nodes; `encrypted_insert` is the rate
-//! of the load.
+//! from a fixed index key, as a driver builds them with the reference encryption library (the same
+//! token derivations, checked against its vectors in `teseladb-fle`); the server never needs the
+//! key. The collection is created with its metadata collections and the index of `__safeContent__`,
+//! as a driver's helper creates it. Target: under 5 ms at p50 with three nodes; `encrypted_insert`
+//! is the rate of the load.
 
 use teseladb_bson::{Document, Value};
 use teseladb_fle::tokens::{self, Collection, Token};

@@ -1,5 +1,6 @@
-//! The server side of the SASL conversations with the messages RefDb 9.0.4 gives (measured on
-//! a `refrouter` with `--keyFile` and a `refnode` with TLS, 30-10-2026; 013 T019, FR-008).
+//! The server side of the SASL conversations with the messages the reference server 9.0.4 gives
+//! (measured on a reference router with `--keyFile` and a reference replica set member with TLS,
+//! 30-10-2026; 013 T019, FR-008).
 
 use teseladb_auth::sasl::{
     CONVERSATION_ID, Conversation, SERVER_NONCE_BYTES, SaslError, SaslMechanism, Step, scram_user,
@@ -91,12 +92,12 @@ fn scram_start_refuses_unknown_users_and_missing_credentials() {
     }
 }
 
-/// RefDb takes an authorization identity equal to the user, and in `client-final-message`
-/// any of `n,,`, `y,,` and the header the client sent first (measured): a proof signed over
-/// `c=biws` verifies after `n,a=both,`, and another accepted header reaches the proof check
-/// (which fails, since the client signed `c=biws`) instead of the header check.
+/// The reference server takes an authorization identity equal to the user, and in
+/// `client-final-message` any of `n,,`, `y,,` and the header the client sent first (measured): a
+/// proof signed over `c=biws` verifies after `n,a=both,`, and another accepted header reaches the
+/// proof check (which fails, since the client signed `c=biws`) instead of the header check.
 #[test]
-fn authzid_and_channel_binding_headers_as_refdb_takes_them() {
+fn authzid_and_channel_binding_headers_as_the_reference_takes_them() {
     let mech = Mechanism::ScramSha256;
     let prepared = mech.prepare_password("both", PASSWORD, false).unwrap();
     let creds = both().scram_sha256.unwrap();
@@ -133,20 +134,16 @@ fn mechanisms_known_enabled_and_on_external() {
         start_mechanism(teseladb_names::SASL_X509, EXTERNAL_DB, &[]),
         Ok(SaslMechanism::X509)
     );
+    let not_enabled =
+        |m: &str| format!("Received authentication for mechanism {m} which is not enabled");
+    let not_enabled_aws = not_enabled(teseladb_names::SASL_AWS);
+    let not_enabled_oidc = not_enabled(teseladb_names::SASL_OIDC);
     let cases = [
         ("FOO", ADMIN, "Received authentication for mechanism FOO which is not known"),
         ("PLAIN", EXTERNAL_DB, "Received authentication for mechanism PLAIN which is not enabled"),
         ("GSSAPI", ADMIN, "Received authentication for mechanism GSSAPI which is not enabled"),
-        (
-            teseladb_names::SASL_AWS,
-            ADMIN,
-            "Received authentication for mechanism REFDB-AWS which is not enabled",
-        ),
-        (
-            teseladb_names::SASL_OIDC,
-            ADMIN,
-            "Received authentication for mechanism REFDB-OIDC which is not enabled",
-        ),
+        (teseladb_names::SASL_AWS, ADMIN, not_enabled_aws.as_str()),
+        (teseladb_names::SASL_OIDC, ADMIN, not_enabled_oidc.as_str()),
         (
             "SCRAM-SHA-256",
             EXTERNAL_DB,
@@ -165,7 +162,7 @@ fn mechanisms_known_enabled_and_on_external() {
 }
 
 #[test]
-fn error_messages_are_refdbs() {
+fn error_messages_are_the_reference_servers() {
     let cases = [
         (
             SaslError::NoCredentials(Mechanism::ScramSha256),
@@ -174,8 +171,8 @@ fn error_messages_are_refdbs() {
         (SaslError::AuthenticationFailed, "Authentication failed."),
         (SaslError::NoConversation, "No SASL session state found"),
         (
-            SaslError::UserNotFound(UserName::new("CN=client,O=RefDb", EXTERNAL_DB)),
-            "Could not find user \"CN=client,O=RefDb\" for db \"$external\"",
+            SaslError::UserNotFound(UserName::new("CN=client,O=TeselaDB", EXTERNAL_DB)),
+            "Could not find user \"CN=client,O=TeselaDB\" for db \"$external\"",
         ),
     ];
     for (e, msg) in cases {
@@ -185,7 +182,7 @@ fn error_messages_are_refdbs() {
 
 #[test]
 fn x509_checks_database_certificate_and_user() {
-    let peer = "CN=client,O=RefDb";
+    let peer = "CN=client,O=TeselaDB";
     let name = UserName::new(peer, EXTERNAL_DB);
     assert_eq!(x509_user(EXTERNAL_DB, None, Some(peer)), Ok(name.clone()));
     assert_eq!(x509_user(EXTERNAL_DB, Some(peer), Some(peer)), Ok(name.clone()));
@@ -214,7 +211,7 @@ fn advertised_mechanisms_hide_which_users_exist() {
     assert_eq!(advertised_mechanisms(&nobody, None, &[]), all);
     let ext = UserName::new("CN=x", EXTERNAL_DB);
     assert_eq!(advertised_mechanisms(&ext, None, &[]), [teseladb_names::SASL_X509]);
-    // Only the enabled mechanisms are listed, as `refnode` 9.0.4 does with
+    // Only the enabled mechanisms are listed, as the reference server 9.0.4 does with
     // `authenticationMechanisms=SCRAM-SHA-256` (measured): also in FIPS mode.
     let sha256_only = [SaslMechanism::ScramSha256, SaslMechanism::X509];
     assert_eq!(advertised_mechanisms(&both.name, Some(&both), &sha256_only), ["SCRAM-SHA-256"]);
@@ -227,7 +224,7 @@ fn advertised_mechanisms_hide_which_users_exist() {
 }
 
 #[test]
-fn names_as_refdb_writes_them() {
+fn names_as_the_reference_writes_them() {
     let u = UserName::from_dotted("$external.CN=a.b").unwrap();
     assert_eq!(u, UserName::new("CN=a.b", EXTERNAL_DB));
     assert_eq!(u.to_string(), "$external.CN=a.b");

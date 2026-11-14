@@ -1,7 +1,8 @@
 //! GSSAPI with Kerberos 5 (013 T036, FR-025): a keytab in MIT's format, an `AP-REQ` made here as
 //! MIT's initiator makes it (ticket, authenticator with the GSS-API checksum, subkey and sequence
 //! number), the `AP-REP`, the wrap tokens of RFC 4121 and the security layer of RFC 4752. The
-//! acceptor was also checked against MIT Kerberos 1.19 and `refshell` (013 research.md, R5).
+//! acceptor was also checked against MIT Kerberos 1.19 and the reference shell (013 research.md,
+//! R5).
 
 #[path = "support/krb_initiator.rs"]
 mod krb;
@@ -15,7 +16,8 @@ use teseladb_x509::der;
 fn a_keytab_and_an_ap_req_log_the_user_in() {
     let keys = keytab();
     assert_eq!(keys.len(), 1);
-    assert_eq!((keys[0].principal.as_str(), keys[0].kvno), ("refdb/db.test@TESELA.TEST", 3));
+    let principal = format!("{}/db.test@TESELA.TEST", teseladb_names::KERBEROS_SERVICE);
+    assert_eq!((keys[0].principal.as_str(), keys[0].kvno), (principal.as_str(), 3));
     assert!(!format!("{:?}", keys[0]).contains("[7"));
     let accepted = kerberos::accept(&ap_req(&options()), &keys, NOW, [8; 16]).unwrap();
     assert_eq!(accepted.user, UserName::new("alice@TESELA.TEST", "$external"));

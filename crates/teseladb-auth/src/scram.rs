@@ -1,8 +1,9 @@
-//! SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802, RFC 7677) as RefDb uses them (013 FR-008,
-//! FR-013, FR-032): the stored credentials, the server and client sides of the exchange, and
-//! the passwords each mechanism hashes: for SCRAM-SHA-1, the hex MD5 of
-//! `user:ref:password` (RefDb's digest); for SCRAM-SHA-256, the SASLprep'd password.
-//! Channel binding is not offered, as in RefDb.
+//! SCRAM-SHA-1 and SCRAM-SHA-256 (RFC 5802, RFC 7677) as the reference server uses them (013
+//! FR-008, FR-013, FR-032): the stored credentials, the server and client sides of the exchange,
+//! and the passwords each mechanism hashes: for SCRAM-SHA-1, the hex MD5 of
+//! `user:<middle>:password` (the reference server's digest, `<middle>` being
+//! [`teseladb_names::SCRAM_SHA1_DIGEST_MIDDLE`]); for SCRAM-SHA-256, the SASLprep'd password.
+//! Channel binding is not offered, as in the reference server.
 
 use teseladb_crypto::pbkdf2::pbkdf2;
 use teseladb_crypto::{HashAlgorithm, Sha1, Sha256, ct};
@@ -48,7 +49,8 @@ impl Mechanism {
         }
     }
 
-    /// RefDb's default iteration count (`scramIterationCount`, `scramSHA256IterationCount`).
+    /// The reference server's default iteration count (`scramIterationCount`,
+    /// `scramSHA256IterationCount`).
     pub fn default_iterations(self) -> u32 {
         match self {
             Mechanism::ScramSha1 => 10_000,
@@ -56,7 +58,7 @@ impl Mechanism {
         }
     }
 
-    /// The salt length RefDb uses: 16 bytes for SCRAM-SHA-1, 28 for SCRAM-SHA-256.
+    /// The salt length the reference server uses: 16 bytes for SCRAM-SHA-1, 28 for SCRAM-SHA-256.
     pub fn salt_len(self) -> usize {
         match self {
             Mechanism::ScramSha1 => 16,
@@ -72,7 +74,7 @@ impl Mechanism {
         }
     }
 
-    /// The password the mechanism derives from: the hex MD5 digest of `user:ref:password` for
+    /// The password the mechanism derives from: the hex MD5 digest of `user:<middle>:password` for
     /// SCRAM-SHA-1 (D-022, FR-032), the SASLprep'd password for SCRAM-SHA-256 (`stored` for a
     /// password being set, which refuses unassigned code points).
     pub fn prepare_password(
@@ -83,7 +85,10 @@ impl Mechanism {
     ) -> Result<Vec<u8>, ScramError> {
         match self {
             Mechanism::ScramSha1 => {
-                let digest = teseladb_crypto::md5(format!("{user}:ref:{password}").as_bytes());
+                let digest = teseladb_crypto::md5(
+                    format!("{user}:{}:{password}", teseladb_names::SCRAM_SHA1_DIGEST_MIDDLE)
+                        .as_bytes(),
+                );
                 Ok(digest.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes())
             }
             Mechanism::ScramSha256 => {
@@ -233,7 +238,8 @@ impl ClientFirst {
         if user.is_empty() || !printable_nonce(nonce) {
             return Err(ScramError::Malformed("client-first-message"));
         }
-        // RefDb takes an authorization identity only when it names the same user (measured).
+        // The reference server takes an authorization identity only when it names the same user
+        // (measured).
         if authzid.is_some_and(|a| a != user) {
             return Err(ScramError::AuthenticationFailed);
         }
@@ -293,8 +299,8 @@ impl ServerSession {
         };
         let cbind = base64_decode(cbind.as_bytes())
             .map_err(|_| ScramError::Malformed("channel binding"))?;
-        // The header the client sent first, or `n,,` or `y,,`: RefDb takes any of them as "no
-        // channel binding" (measured), whatever the first header was.
+        // The header the client sent first, or `n,,` or `y,,`: the reference server takes any of
+        // them as "no channel binding" (measured), whatever the first header was.
         if cbind != b"n,," && cbind != b"y,," && cbind != self.gs2.as_bytes() {
             return Err(ScramError::Malformed("channel binding"));
         }

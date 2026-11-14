@@ -1,5 +1,5 @@
-//! OCSP stapling: a server staples its response for a client that asks, in
-//! TLS 1.3 (with the leaf's certificate entry) and in TLS 1.2 (`CertificateStatus`), as `refnode`
+//! OCSP stapling: a server staples its response for a client that asks, in TLS 1.3 (with the leaf's
+//! certificate entry) and in TLS 1.2 (`CertificateStatus`), as the reference server
 //! 9.0.4 does (measured with `openssl s_client -status`); the client checks it and refuses a
 //! revoked certificate or an answer that does not check.
 

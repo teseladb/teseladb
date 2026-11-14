@@ -1,7 +1,7 @@
-//! Errors as RFC 9457 problems (FR-013, contract `rest-api.md`): the HTTP status of each RefDb
-//! error and the `application/problem+json` body with its code, name, message, labels and the
-//! error's other fields. Errors of HTTP itself, without a RefDb code, are `about:blank`
-//! problems titled with the status phrase of RFC 9110.
+//! Errors as RFC 9457 problems (FR-013, contract `rest-api.md`): the HTTP status of each the
+//! reference server error and the `application/problem+json` body with its code, name, message,
+//! labels and the error's other fields. Errors of HTTP itself, without a reference server code, are
+//! `about:blank` problems titled with the status phrase of RFC 9110.
 
 use teseladb_bson::{Document, Value};
 use teseladb_wire::error::{
@@ -14,12 +14,13 @@ use teseladb_wire::error::{
 
 /// Media type of the error bodies.
 pub const PROBLEM_JSON: &str = "application/problem+json";
-/// Prefix of `type` for RefDb errors.
+/// Prefix of `type` for the reference server errors.
 const TYPE_PREFIX: &str = "urn:teseladb:error:";
 /// `type` of the errors of HTTP itself (RFC 9457, section 4.2.1).
 const ABOUT_BLANK: &str = "about:blank";
 
-/// Codes RefDb's retryable writes retry, which answer `503` with or without their label.
+/// Codes the reference server's retryable writes retry, which answer `503` with or without their
+/// label.
 const RETRYABLE: [Code; 6] = [
     NOT_WRITABLE_PRIMARY,
     INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,

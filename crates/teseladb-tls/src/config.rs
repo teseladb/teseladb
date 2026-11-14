@@ -14,7 +14,7 @@ pub const MAX_TICKET_LIFETIME: u32 = 604_800;
 /// The lowest protocol version a side accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Version {
-    /// TLS 1.2 or 1.3 (what RefDb accepts from clients).
+    /// TLS 1.2 or 1.3 (what the reference server accepts from clients).
     Tls12,
     /// TLS 1.3 only (between nodes).
     Tls13,

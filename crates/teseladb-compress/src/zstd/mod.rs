@@ -1,6 +1,6 @@
 //! Zstandard, written from RFC 8878: frames, skippable frames, raw, RLE and compressed blocks,
-//! Huffman literals, FSE sequences with repeat offsets and the XXH64 content checksum.
-//! A frame that names a dictionary is refused ([`Error::Unsupported`]): RefDb's compressor never
+//! Huffman literals, FSE sequences with repeat offsets and the XXH64 content checksum. A frame that
+//! names a dictionary is refused ([`Error::Unsupported`]): the reference server's compressor never
 //! uses one. Raw content dictionaries, which frames do not name, compress the LSM's blocks (004
 //! FR-022): [`compress_with_dict`], [`decompress_with_dict`] and [`train_dict`].
 //!

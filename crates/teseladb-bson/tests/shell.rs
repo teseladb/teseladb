@@ -56,7 +56,7 @@ fn every_type_as_the_server_writes_it() {
 }
 
 #[test]
-fn doubles_read_as_refnode_writes_them() {
+fn doubles_read_as_the_reference_server_writes_them() {
     for (d, text) in [
         (2.0, "2.0"),
         (-0.0, "-0.0"),

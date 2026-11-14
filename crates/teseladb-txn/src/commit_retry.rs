@@ -25,7 +25,7 @@ pub enum CommitAnswer {
 pub fn commit_answer(outcome: &Outcome) -> CommitAnswer {
     match outcome {
         Outcome::Committed(ts) => CommitAnswer::Committed(*ts),
-        // Too large, it was aborted: as RefDb, its commit finds no transaction.
+        // Too large, it was aborted: as the reference server, its commit finds no transaction.
         Outcome::Aborted | Outcome::Failed(TxnError::NoSuchTransaction | TxnError::TooLarge) => {
             CommitAnswer::NoSuchTransaction
         }

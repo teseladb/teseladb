@@ -109,7 +109,8 @@ fn an_old_binary_whose_two_lengths_differ_gives_the_fault_of_the_specification()
 
 #[test]
 fn a_fault_of_the_message_wins_over_an_earlier_fault_of_the_specification() {
-    // A string that is not UTF-8, then an unknown element type: RefDb closes the connection.
+    // A string that is not UTF-8, then an unknown element type: the reference server closes the
+    // connection.
     let mut b = bytes(&Document::new().with("s", "ab").with("t", 1));
     let at = b.iter().position(|&c| c == b'a').expect("the string");
     b[at] = 0xff;

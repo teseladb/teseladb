@@ -1,4 +1,4 @@
-//! The YAML subset of `refnode` configuration files, read into a [`Value`]: block
+//! The YAML subset of reference server configuration files, read into a [`Value`]: block
 //! mappings and sequences, flow sequences of scalars, plain and quoted scalars with the types of
 //! the YAML 1.2 core schema, and comments. Anchors, aliases, tags, block scalars, flow mappings
 //! other than `{}`, complex keys, several documents and collections inside a sequence are errors

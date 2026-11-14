@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-unicodegen"
 version = "0.1.0"
-description = "Generator of TeselaDB's collation tables from the official Unicode and CLDR files of the version RefDb uses."
+description = "Generator of TeselaDB's collation tables from the official Unicode and CLDR files of the version the reference server uses."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

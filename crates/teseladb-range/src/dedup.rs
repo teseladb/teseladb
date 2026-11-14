@@ -2,12 +2,12 @@
 //! the record `(lsid, txnNumber, stmtId) → mark · result` at its mark, in the range's local keys,
 //! so its snapshots carry it and a split's copy keeps the mark (007). A retry finds the record and
 //! gets back the original result and mark. A session keeps in a range only the records of its
-//! newest `txnNumber` there, as a shard of RefDb keeps one per session in `config.transactions`:
-//! a statement of an older `txnNumber` without its record is too old (`TransactionTooOld`, 225).
-//! Every [`PURGE_EVERY_MS`] of cluster time the leader looks for the records [`DEDUP_TTL_MS`] old
-//! or older and those a newer `txnNumber` of their session replaced, and proposes their deletion
-//! (`PurgeDedup`): applying cannot wait for a block from the disk, so the replicas do not look
-//! for them.
+//! newest `txnNumber` there, as a shard of the reference server keeps one per session in
+//! `config.transactions`: a statement of an older `txnNumber` without its record is too old
+//! (`TransactionTooOld`, 225). Every [`PURGE_EVERY_MS`] of cluster time the leader looks for the
+//! records [`DEDUP_TTL_MS`] old or older and those a newer `txnNumber` of their session replaced,
+//! and proposes their deletion (`PurgeDedup`): applying cannot wait for a block from the disk, so
+//! the replicas do not look for them.
 
 use std::cell::RefCell;
 

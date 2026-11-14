@@ -1,5 +1,6 @@
-//! The OCSF audit log (013 T042, FR-031) against the lines RefDb Enterprise 9.0.4 wrote with
-//! `--auditSchema OCSF` (measured on 31-10-2026; time, connection and ports taken from them).
+//! The OCSF audit log (013 T042, FR-031) against the lines the reference enterprise server 9.0.4
+//! wrote with `--auditSchema OCSF` (measured on 31-10-2026; time, connection and ports taken from
+//! them).
 
 use teseladb_auth::audit::{
     AuditType, Auditor, Client, Config, Destination, Endpoint, Event, Format, Options, ProcessInfo,
@@ -56,7 +57,7 @@ fn line(atype: AuditType, param: Document, result: i32, c: &Client) -> String {
 }
 
 #[test]
-fn user_role_and_catalog_messages_match_refdb() {
+fn user_role_and_catalog_messages_match_the_reference() {
     let c = root();
     let ro = UserName::new("ro", "admin");
     let read_x = RoleName::new("read", "x");
@@ -132,7 +133,7 @@ fn user_role_and_catalog_messages_match_refdb() {
 }
 
 #[test]
-fn authentication_checks_and_process_messages_match_refdb() {
+fn authentication_checks_and_process_messages_match_the_reference() {
     let c = root();
     assert_eq!(
         line(
@@ -212,8 +213,8 @@ fn authentication_checks_and_process_messages_match_refdb() {
             head(1, 5, 5002, ROOT)
         )
     );
-    // Values inside documents are masked as in RefDb's schema (DV-054).
-    // Values inside documents are masked as in RefDb's schema (DV-054).
+    // Values inside documents are masked as in the reference server's schema (DV-054).
+    // Values inside documents are masked as in the reference server's schema (DV-054).
     let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: UUID.to_vec() });
     let with_uuid = Document::new().with("ping", 1).with("lsid", lsid);
     assert!(
@@ -227,8 +228,8 @@ fn authentication_checks_and_process_messages_match_refdb() {
     );
 }
 
-/// Every other action type TeselaDB writes, with the class and activity of RefDb's messages
-/// (measured on 9.0.4) and its own fields.
+/// Every other action type TeselaDB writes, with the class and activity of the reference server's
+/// messages (measured on 9.0.4) and its own fields.
 #[test]
 fn each_action_type_has_its_class_and_activity() {
     let c = root();
@@ -238,7 +239,7 @@ fn each_action_type_has_its_class_and_activity() {
     let privilege =
         Value::Document(Document::new().with("actions", Value::Array(vec!["find".into()])));
     let custom = Document::new().with("k", 1);
-    let meta = Document::new().with("application", Document::new().with("name", "refshell"));
+    let meta = Document::new().with("application", Document::new().with("name", "shell"));
     let cases: Vec<(AuditType, Document, &str, &str)> = vec![
         (
             AuditType::CreateUser,
@@ -328,7 +329,7 @@ fn each_action_type_has_its_class_and_activity() {
             AuditType::ClientMetadata,
             audit_param::client_metadata(&Document::new(), &meta),
             r#""activity_id":99,"category_uid":4,"class_uid":4001"#,
-            r#""unmapped":{"application":{"name":"refshell"}}"#,
+            r#""unmapped":{"application":{"name":"shell"}}"#,
         ),
         (
             AuditType::SetClusterParameter,
@@ -356,14 +357,14 @@ fn each_action_type_has_its_class_and_activity() {
     }
     // A refused check with another code, a unix socket client, a client without a user.
     let unix = Client {
-        remote: Endpoint::parse("/tmp/refdb.sock").unwrap(),
+        remote: Endpoint::parse("/tmp/teseladb.sock").unwrap(),
         users: Vec::new(),
         roles: Vec::new(),
         ..root()
     };
     let l = line(AuditType::AuthCheck, audit_param::auth_check("find", "t.c", None), 18, &unix);
     assert!(
-        l.contains(r#""src_endpoint":{"path":"/tmp/refdb.sock"}"#)
+        l.contains(r#""src_endpoint":{"path":"/tmp/teseladb.sock"}"#)
             && l.contains(r#""error":"Location18""#),
         "{l}"
     );

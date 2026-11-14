@@ -131,8 +131,8 @@ pub enum RangeError {
     /// The range stopped, or left the host while a write was proposed: whether the write was
     /// applied is unknown.
     Unavailable,
-    /// The read's mark is below the range's GC threshold: its versions may be gone (RefDb's
-    /// `SnapshotTooOld`, 239).
+    /// The read's mark is below the range's GC threshold: its versions may be gone (the reference
+    /// server's `SnapshotTooOld`, 239).
     SnapshotTooOld,
     /// A version inside the read's uncertainty window, at this mark (008 FR-008): the read goes
     /// again at or above it.
@@ -142,8 +142,8 @@ pub enum RangeError {
     },
     /// The mutation failed.
     Mutation(MutationError),
-    /// A transaction's write found a version newer than its read mark (008 FR-002): RefDb's
-    /// `WriteConflict` (112).
+    /// A transaction's write found a version newer than its read mark (008 FR-002): the reference
+    /// server's `WriteConflict` (112).
     WriteConflict,
     /// A write found another transaction's intent (008 FR-002): its owner, to push or wait for.
     IntentConflict(crate::intents::IntentOwner),
@@ -155,7 +155,8 @@ pub enum RangeError {
         /// The read's mark.
         at: Hlc,
     },
-    /// The transaction's record is aborted, or never began: RefDb's `NoSuchTransaction` (251).
+    /// The transaction's record is aborted, or never began: the reference server's
+    /// `NoSuchTransaction` (251).
     NoSuchTransaction,
     /// A write fence holds a key of the write (018 FR-002): a resharding is in its critical
     /// section, and nothing was written. The caller reads the catalog again and retries.
@@ -685,7 +686,7 @@ fn op_error(e: OpError) -> RangeError {
         OpError::ProposalDropped => RangeError::NotLeader { hint: NodeId(0) },
         OpError::Timeout => RangeError::Timeout,
         OpError::Overloaded => RangeError::Overloaded,
-        // It will never fit: retrying does not help (RefDb's `BSONObjectTooLarge`).
+        // It will never fit: retrying does not help (the reference server's `BSONObjectTooLarge`).
         OpError::TooLarge => RangeError::TooLarge,
         OpError::GroupNotFound => RangeError::OutOfRange,
         _ => RangeError::Unavailable,

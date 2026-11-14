@@ -1,8 +1,8 @@
 //! The implicit schema of a collection with encrypted fields (FR-006): every encrypted field a
 //! document has must hold a stored value of Queryable Encryption (subtypes 6, 7, 9 and 14 to 17,
-//! whatever its kind) of its configured BSON type. A `refnode` 9.0.4 reports a failure
-//! as the validator `implicitFLESchema` with one `fle2Encrypt` rule per field, nested along the
-//! paths, and refuses an array where a path needs a document (measured).
+//! whatever its kind) of its configured BSON type. A reference replica set member 9.0.4 reports a
+//! failure as the validator `implicitFLESchema` with one `fle2Encrypt` rule per field, nested along
+//! the paths, and refuses an array where a path needs a document (measured).
 
 use teseladb_bson::types as t;
 use teseladb_bson::{Document, Value};
@@ -42,8 +42,9 @@ fn reason(f: &EncryptedField, v: &Value) -> Option<&'static str> {
     let Value::Binary { subtype: t::BINARY_ENCRYPTED, bytes } = v else {
         return Some(NOT_ENCRYPTED);
     };
-    // Any stored value of Queryable Encryption, of whatever kind or version, passes on to the
-    // type check (measured: a `refnode` 9.0.4 takes subtypes 6, 7, 9 and 14 to 17 on every field).
+    // Any stored value of Queryable Encryption, of whatever kind or version, passes on to the type
+    // check (measured: a reference replica set member 9.0.4 takes subtypes 6, 7, 9 and 14 to 17 on
+    // every field).
     if !matches!(BlobSubtype::of(bytes), Some(st) if STORED.contains(&st)) {
         return Some(WRONG_TYPE);
     }

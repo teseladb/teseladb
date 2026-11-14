@@ -1,7 +1,7 @@
-//! Generator of `teseladb-tz`'s data: from the IANA tzdata files that
-//! `scripts/fetch-pinned.sh scripts/tzdata.sha256` downloads (2024a, the version RefDb 9.0.4's
-//! timelib carries), it builds `main.zi` with the `backzone` history as RefDb's database has it
-//! (`make PACKRATDATA=backzone PACKRATLIST=zone.tab main.zi`), compiles it with the system's
+//! Generator of `teseladb-tz`'s data: from the IANA tzdata files that `scripts/fetch-pinned.sh
+//! scripts/tzdata.sha256` downloads (2024a, the version the reference server 9.0.4's timelib
+//! carries), it builds `main.zi` with the `backzone` history as the reference server's database has
+//! it (`make PACKRATDATA=backzone PACKRATLIST=zone.tab main.zi`), compiles it with the system's
 //! `zic -b fat`, reads every compiled TZif file and writes `crates/teseladb-tz/src/tzdata.rs`.
 //! `--check` only compares with the file in the repository.
 //!

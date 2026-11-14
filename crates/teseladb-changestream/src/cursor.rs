@@ -1,8 +1,8 @@
 //! Where a change stream cursor is (014 FR-005, FR-006, FR-013): the mark it read up to, the event
 //! it resumed after while its mark is still below that event's, and the `postBatchResumeToken` of
 //! its last batch. A batch that leaves no event waiting gives the high-water mark of what it read,
-//! or the token of its last event when that event is at the mark (a `refrouter` 9.0.4 gives the
-//! event's token then, and a high-water mark once the stream read past it: measured on 01-11).
+//! or the token of its last event when that event is at the mark (a reference router 9.0.4 gives
+//! the event's token then, and a high-water mark once the stream read past it: measured on 01-11).
 
 use teseladb_hlc::Hlc;
 

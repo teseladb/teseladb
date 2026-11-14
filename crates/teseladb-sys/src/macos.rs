@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(favored, QOS_CLASS_USER_INTERACTIVE);
     }
 
-    /// macOS counts the task's page-ins apart, and `extra_info` shows them (RefDb's
+    /// macOS counts the task's page-ins apart, and `extra_info` shows them (the reference server's
     /// `processinfo_osx.cpp`).
     #[test]
     fn the_task_counts_its_page_ins() {
@@ -578,7 +578,7 @@ pub(crate) fn allocated() -> Option<u64> {
     u64::try_from(s.size_in_use).ok()
 }
 
-/// RefDb's names of macOS in `hostInfo`: `Mac OS X` and the kernel release.
+/// The reference server's names of macOS in `hostInfo`: `Mac OS X` and the kernel release.
 pub(crate) fn distribution() -> (String, String) {
     let release = crate::host::kernel().map(|k| k.release).unwrap_or_default();
     ("Mac OS X".to_owned(), release)

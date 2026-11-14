@@ -1,6 +1,6 @@
-//! RefDb's comparison order (FR-005 to FR-007): first the value's type class, then the value.
-//! Numbers by exact value across their four types; strings and symbols by their bytes or by a
-//! collation; documents and arrays pair by pair, the type class before the name; binaries by
+//! The reference server's comparison order (FR-005 to FR-007): first the value's type class, then
+//! the value. Numbers by exact value across their four types; strings and symbols by their bytes or
+//! by a collation; documents and arrays pair by pair, the type class before the name; binaries by
 //! stored length, subtype and bytes; `DBPointers` by size and bytes. A sort without an index orders
 //! `DBPointers` by size, `ObjectId` and namespace instead ([`compare_for_sort`]).
 
@@ -46,8 +46,9 @@ pub fn type_class(v: &RawValue<'_>) -> u8 {
     }
 }
 
-/// Which of RefDb's two orders: the one of queries and indexes, or the one of a sort without
-/// an index, which differ only for `DBPointers` (measured on a `refrouter` 9.0.4, 003 T012).
+/// Which of the reference server's two orders: the one of queries and indexes, or the one of a sort
+/// without an index, which differ only for `DBPointers` (measured on a reference router 9.0.4, 003
+/// T012).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Order {
     Query,
@@ -109,7 +110,7 @@ fn docs(a: RawDoc<'_>, b: RawDoc<'_>, collation: Option<&dyn Collator>, order: O
 /// Two values of the same type class.
 #[expect(
     clippy::many_single_char_names,
-    reason = "a and b are the two values compared, as in RefDb's comparison order"
+    reason = "a and b are the two values compared, as in the reference server's comparison order"
 )]
 fn same_class(
     a: RawValue<'_>,

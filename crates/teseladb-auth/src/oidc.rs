@@ -1,10 +1,10 @@
-//! REFDB-OIDC (013 FR-025): `oidcIdentityProviders`, the conversation of the drivers'
+//! OIDC authentication (013 FR-025): `oidcIdentityProviders`, the conversation of the drivers'
 //! authentication specification (one step with `{jwt}`, or two with `{n}` first, answered with
 //! the provider's `issuer`, `clientId` and `requestScopes`) and the validation of the access
 //! token (RFC 7519, RS256, RS384 and RS512 against the provider's JWKS), without I/O. The user
 //! is `<authNamePrefix>/<principal claim>` of `$external` and, with `useAuthorizationClaim`,
 //! each group of the authorization claim is the role `<authNamePrefix>/<group>` of `admin`.
-//! Checks and messages measured on RefDb Enterprise 9.0.4.
+//! Checks and messages measured on the reference enterprise server 9.0.4.
 
 use std::fmt;
 
@@ -349,7 +349,7 @@ impl Token {
     }
 }
 
-/// The roles of the authorization claim `claim`, sorted, as RefDb lists them.
+/// The roles of the authorization claim `claim`, sorted, as the reference server lists them.
 fn groups(claims: &Document, claim: &str, prefix: &str) -> Result<Vec<RoleName>, OidcError> {
     let Some(v) = claims.get(claim) else {
         return fail(format!("Claim '{claim}' not found on OIDC token"));

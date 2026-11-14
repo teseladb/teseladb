@@ -85,7 +85,7 @@ fn server(transient: bool) -> SocketAddr {
 }
 
 fn bench(target: SocketAddr, args: &[&str]) -> Output {
-    let uri = format!("refdb://{target}");
+    let uri = target.to_string();
     let short = ["--duration", "100ms", "--warmup", "0s", "--records", "20", "--format", "json"];
     Command::new(env!("CARGO_BIN_EXE_teseladb-bench"))
         .args(args)

@@ -1,8 +1,8 @@
 //! Queries with find payloads (FR-004): each payload of an equality, range or text query becomes
 //! the tags its value has in `__safeContent__`, read from the ESC counts, and the predicate a tag
-//! lookup. A filter with no payload is left as it is. The shapes are those of a `refnode` 9.0.4's
-//! rewrite (`explain`): `{__safeContent__: {$elemMatch: {$in: [tags]}}}` in a filter and `{$or:
-//! [{$in: [{$const: tag}, "$__safeContent__"]}, …]}` in an expression.
+//! lookup. A filter with no payload is left as it is. The shapes are those of a reference replica
+//! set member 9.0.4's rewrite (`explain`): `{__safeContent__: {$elemMatch: {$in: [tags]}}}` in a
+//! filter and `{$or: [{$in: [{$const: tag}, "$__safeContent__"]}, …]}` in an expression.
 
 use teseladb_bson::types as t;
 use teseladb_bson::{Document, Value};
@@ -304,7 +304,8 @@ impl<'a, R: EscReader> Rewriter<'a, R> {
     }
 
     /// An expression argument without its `$const`: a driver with automatic encryption sends the
-    /// payloads of an expression as `{$const: payload}` (measured with `refcryptd` 9.0.4).
+    /// payloads of an expression as `{$const: payload}` (measured with the reference query analysis
+    /// daemon 9.0.4).
     fn constant(v: &Value) -> &Value {
         match v {
             Value::Document(d) if d.len() == 1 => d.get("$const").unwrap_or(v),

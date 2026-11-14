@@ -1,8 +1,8 @@
-//! The description of pipeline updates against what a `refnode` 9.0.4 gives for them (014 FR-009,
-//! 018 FR-009; measured on 04-11-2026 on a one-member replica set): each case of
-//! `fixtures/pipeline_updates.jsonl` is the document before and after a pipeline `update`, the
-//! type of its change event and, for an `update`, its `updateDescription` and the `diff` of its
-//! oplog entry.
+//! The description of pipeline updates against what a reference replica set member 9.0.4 gives for
+//! them (014 FR-009, 018 FR-009; measured on 04-11-2026 on a one-member replica set): each case of
+//! `fixtures/pipeline_updates.jsonl` is the document before and after a pipeline `update`, the type
+//! of its change event and, for an `update`, its `updateDescription` and the `diff` of its oplog
+//! entry.
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_changestream::event::operation_type;
@@ -57,10 +57,10 @@ fn the_fixture_covers_updates_replacements_and_no_ops() {
     assert_eq!((count(Some(update)), count(Some(replace)), count(None)), (106, 42, 5));
 }
 
-/// The pipeline updates a `refnode` gives as `update` have the same diff, in the same order, and
-/// the same `updateDescription`; those it gives as `replace` have no diff.
+/// The pipeline updates a reference replica set member gives as `update` have the same diff, in the
+/// same order, and the same `updateDescription`; those it gives as `replace` have no diff.
 #[test]
-fn pipeline_updates_are_described_as_a_refnode_describes_them() {
+fn pipeline_updates_are_described_as_a_reference_server_describes_them() {
     for c in cases() {
         let got = pipeline_diff(&c.before, &c.after);
         let update = operation_type(EventKind::Update);

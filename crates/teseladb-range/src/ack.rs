@@ -1,13 +1,12 @@
-//! When a write is acknowledged to the client (FR-010, D-034, model `WriteConcernW1.tla`):
-//! `w: 1` once the entry is in the leader's log, after its `fdatasync` with `j: true`;
-//! `w: <n>` with n ≥ 2 once n replicas have it on disk, whatever `j` says (as RefDb with
+//! When a write is acknowledged to the client (FR-010, D-034, model `WriteConcernW1.tla`): `w: 1`
+//! once the entry is in the leader's log, after its `fdatasync` with `j: true`; `w: <n>` with n ≥ 2
+//! once n replicas have it on disk, whatever `j` says (as the reference server with
 //! `writeConcernMajorityJournalDefault`); `w: "majority"` once it is committed and applied on the
-//! leader; `w: 0` never. A `w` above the number of replicas fails with
-//! `UnsatisfiableWriteConcern`.
+//! leader; `w: 0` never. A `w` above the number of replicas fails with `UnsatisfiableWriteConcern`.
 
 use teseladb_raft::Status;
 
-/// RefDb's code of `UnsatisfiableWriteConcern`.
+/// The reference server's code of `UnsatisfiableWriteConcern`.
 pub const UNSATISFIABLE_WRITE_CONCERN: i32 = 100;
 
 /// The `w` of a write concern.

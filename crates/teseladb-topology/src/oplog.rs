@@ -1,14 +1,14 @@
 //! The entries of `local.oplog.rs` (018 FR-009, contract `oplog-format.md`): their encoding with
-//! RefDb's field order, their decoding for `applyOps` and `refrestore --oplogReplay`, and the
-//! `applyOps` entries of a transaction.
+//! the reference server's field order, their decoding for `applyOps` and the reference restore tool
+//! with `--oplogReplay`, and the `applyOps` entries of a transaction.
 //!
-//! Field order, measured on RefDb 9.0.4: `lsid`, `txnNumber`, `op`, `ns`, `ui`, `o`, `o2`,
-//! `needsRetryImage`, `stmtId`, the fields this module does not interpret (such as
-//! `versionContext`), `ts`, `t`, `v`, `wall`, `prevOpTime` and `multiOpType` (the `applyOps`
-//! entry of a retryable insert of several documents). A transaction's operations go inside `applyOps` entries on
-//! `admin.$cmd`; RefDb fills each one while its `o` stays within 16 MiB, marks every entry but
-//! the last with `partialTxn: true`, gives the last the total `count`, and chains them with
-//! `prevOpTime`. One operation larger than that goes alone.
+//! Field order, measured on the reference server 9.0.4: `lsid`, `txnNumber`, `op`, `ns`, `ui`, `o`,
+//! `o2`, `needsRetryImage`, `stmtId`, the fields this module does not interpret (such as
+//! `versionContext`), `ts`, `t`, `v`, `wall`, `prevOpTime` and `multiOpType` (the `applyOps` entry
+//! of a retryable insert of several documents). A transaction's operations go inside `applyOps`
+//! entries on `admin.$cmd`; the reference server fills each one while its `o` stays within 16 MiB,
+//! marks every entry but the last with `partialTxn: true`, gives the last the total `count`, and
+//! chains them with `prevOpTime`. One operation larger than that goes alone.
 
 use crate::replset::{OpTime, Timestamp};
 use teseladb_bson::{Document, Value};
@@ -21,16 +21,16 @@ pub const APPLY_OPS_NS: &str = "admin.$cmd";
 pub const MAX_APPLY_OPS_BYTES: usize = 16 * 1024 * 1024;
 /// `prevOpTime` of the first entry of a transaction: `{ts: Timestamp(0, 0), t: -1}`.
 pub const NULL_OP_TIME: OpTime = OpTime { ts: Timestamp { time: 0, increment: 0 }, term: -1 };
-/// `v` of every entry RefDb 9.0 writes.
+/// `v` of every entry the reference server 9.0 writes.
 pub const ENTRY_VERSION: i64 = 2;
 /// BSON binary subtype of a UUID (`ui`, `lsid.id`).
 const UUID_SUBTYPE: u8 = 4;
 /// Bytes of a UUID.
 const UUID_LEN: usize = 16;
 /// Message of an insert, update, delete or index build on the oplog (code 73,
-/// `InvalidNamespace`, on RefDb 9.0.4).
+/// `InvalidNamespace`, on the reference server 9.0.4).
 pub const WRITE_REFUSED: &str = "cannot write to local.oplog.rs";
-/// Code of `drop` on the oplog (`Location5255000` on RefDb 9.0.4).
+/// Code of `drop` on the oplog (`Location5255000` on the reference server 9.0.4).
 pub const DROP_REFUSED_CODE: i32 = 5_255_000;
 /// Message of `drop` on the oplog.
 pub const DROP_REFUSED: &str = "can't drop live oplog while replicating";
@@ -218,7 +218,8 @@ fn document(d: &Document, field: &'static str) -> Result<Option<Document>, Oplog
     }
 }
 
-/// An integer field written in 32 or 64 bits (null: absent, as `refrestore` writes `t`).
+/// An integer field written in 32 or 64 bits (null: absent, as the reference restore tool writes
+/// `t`).
 fn integer(d: &Document, field: &'static str) -> Result<Option<i64>, OplogError> {
     match d.get(field) {
         None | Some(Value::Null) => Ok(None),
@@ -245,7 +246,7 @@ fn op_time(d: &Document) -> Result<Option<OpTime>, OplogError> {
     Ok(Some(OpTime { ts, term }))
 }
 
-/// The term an entry has without `t`, as a `refnode` takes it.
+/// The term an entry has without `t`, as a reference replica set member takes it.
 pub const NO_TERM: i64 = -1;
 
 /// `ts` and `t` of an entry: `t` may be absent, null or a whole double ([`NO_TERM`] without it).
@@ -260,7 +261,7 @@ fn entry_op_time(d: &Document) -> Result<Option<OpTime>, OplogError> {
 }
 
 impl OplogEntry {
-    /// The entry as RefDb writes it.
+    /// The entry as the reference server writes it.
     pub fn to_document(&self) -> Document {
         let mut d = Document::new();
         if let Some(t) = &self.txn {
@@ -294,8 +295,8 @@ impl OplogEntry {
         d
     }
 
-    /// Reads an entry, as `applyOps` and `refrestore --oplogReplay` send them: `ts`, `t`,
-    /// `v` and `wall` may be absent.
+    /// Reads an entry, as `applyOps` and the reference restore tool with `--oplogReplay` send
+    /// them: `ts`, `t`, `v` and `wall` may be absent.
     pub fn from_document(d: &Document) -> Result<OplogEntry, OplogError> {
         let operation = Operation::from_document(d)?;
         let lsid = document(d, "lsid")?;
@@ -365,7 +366,7 @@ fn element_size(index: usize, doc: usize) -> usize {
     1 + index.to_string().len() + 1 + doc
 }
 
-/// Groups the operations of a transaction as RefDb does: each group's `o` within
+/// Groups the operations of a transaction as the reference server does: each group's `o` within
 /// [`MAX_APPLY_OPS_BYTES`], one operation alone if it does not fit with another. The size of
 /// `{applyOps: [...]}` grows by each element's bytes, so nothing is encoded twice.
 fn groups(ops: &[Operation]) -> Vec<Vec<Value>> {

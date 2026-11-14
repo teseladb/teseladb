@@ -1,4 +1,4 @@
-//! RefDb's comparison order: the type classes in order, numbers by
+//! The reference server's comparison order: the type classes in order, numbers by
 //! exact value across int32, int64, double and decimal128 (NaN equal to itself and first, `-0`
 //! equal to `0`), strings by bytes or by a collation, documents and arrays pair by pair with the
 //! type class before the name, and the rules of every other type.
@@ -215,7 +215,7 @@ fn sort_cmp(a: &Value, b: &Value) -> Ordering {
 
 #[test]
 fn a_sort_orders_dbpointers_by_size_id_and_namespace() {
-    // Measured on a `refrouter` 9.0.4: `$lt` and an index take the namespace before the
+    // Measured on a reference router 9.0.4: `$lt` and an index take the namespace before the
     // ObjectId, a sort without an index takes the ObjectId first.
     let p = |ns: &str, id: u8| Value::DbPointer { namespace: ns.into(), id: [id; 12] };
     let (a, b, c) = (p("db.a", 0xFF), p("db.b", 0), p("db.aa", 0));

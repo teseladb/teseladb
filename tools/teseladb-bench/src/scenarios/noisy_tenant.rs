@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_target_is_refused() {
-        let args = Args { target: Some("refdb://h:1".into()), ..Args::default() };
+        let args = Args { target: Some("h:1".into()), ..Args::default() };
         assert!(run(&args).unwrap_err().contains("no --target"));
     }
 

@@ -1,8 +1,8 @@
 //! A batch of writes outside a transaction (FR-023): `insertMany`, or a bulk write of 006, on one
-//! range. Each document is its own `Write` entry, so it gets its own mark, above the one before
-//! it in the log (with `succ`, FR-025), as each insert of RefDb gets its own optime; Raft
-//! carries many of them in one `AppendReq`, and a batch of any size spreads over as many entries
-//! as it has documents.
+//! range. Each document is its own `Write` entry, so it gets its own mark, above the one before it
+//! in the log (with `succ`, FR-025), as each insert of the reference server gets its own optime;
+//! Raft carries many of them in one `AppendReq`, and a batch of any size spreads over as many
+//! entries as it has documents.
 //!
 //! An unordered batch keeps up to [`BATCH_WINDOW`] documents in flight and goes on after a
 //! failure. An ordered one proposes a document only once every document before it in flight is
@@ -45,7 +45,7 @@ pub struct BatchWrite {
     pub dedup: Option<DedupKey>,
 }
 
-/// The semantics of a batch (RefDb's `ordered`).
+/// The semantics of a batch (the reference server's `ordered`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Order {
     /// In order, stopping at the first failure.

@@ -1,9 +1,10 @@
 //! Fuzzing of the parsers of the federated mechanisms (013 T010, FR-025, SC-003): the GSS-API
-//! `AP-REQ` and MIT keytabs of Kerberos, the JWT, JWKS, discovery document and messages of
-//! REFDB-OIDC, and the messages and STS answers of REFDB-AWS. Real inputs, made as the tests of
-//! each mechanism make them, are mutated (bit flips, cuts, insertions, spliced bytes) and fed to
-//! the parsers, which must answer or fail and never panic. A mutated Kerberos token or JWT that is
-//! still accepted names the same user as the original: a mutation never forges an identity.
+//! `AP-REQ` and MIT keytabs of Kerberos, the JWT, JWKS, discovery document and messages of OIDC
+//! authentication, and the messages and STS answers of AWS IAM authentication. Real inputs, made as
+//! the tests of each mechanism make them, are mutated (bit flips, cuts, insertions, spliced bytes)
+//! and fed to the parsers, which must answer or fail and never panic. A mutated Kerberos token or
+//! JWT that is still accepted names the same user as the original: a mutation never forges an
+//! identity.
 //!
 //! By default a few seconds run with fixed seeds; `TESELADB_FUZZ_SECS=<n>` runs `n` seconds with
 //! seeds that change every round (the 24-hour run of SC-003), and `TESELADB_FUZZ_SEED` replays one

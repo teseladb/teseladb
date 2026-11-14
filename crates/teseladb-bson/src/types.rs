@@ -10,7 +10,7 @@ pub const DOCUMENT: u8 = 0x03;
 pub const ARRAY: u8 = 0x04;
 /// Binary data.
 pub const BINARY: u8 = 0x05;
-/// Undefined (deprecated, still stored by RefDb).
+/// Undefined (deprecated, still stored by the reference server).
 pub const UNDEFINED: u8 = 0x06;
 /// `ObjectId`.
 pub const OBJECT_ID: u8 = 0x07;

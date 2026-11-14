@@ -1,0 +1,30 @@
+{
+  "comment": "The calls each SDK client makes, in order, on database `{db}` (one per run and revision): every tool of contract mcp-server.md. `{conn}` is the connectionId that list-connections gives and `{db}` the run's database.",
+  "calls": [
+    {"tool": "list-connections", "arguments": {}},
+    {"tool": "connect", "arguments": {"connectionString": "teseladb://local"}},
+    {"tool": "list-databases", "arguments": {"connectionId": "{conn}"}},
+    {"tool": "create-collection", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c"}},
+    {"tool": "insert-many", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "documents": [{"_id": 1, "a": 1}, {"_id": 2, "a": 2}, {"_id": 3, "a": 3}]}},
+    {"tool": "find", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "filter": {"a": {"$gte": 2}}, "sort": {"a": 1}, "limit": 10}},
+    {"tool": "count", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "query": {}}},
+    {"tool": "aggregate", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "pipeline": [{"$group": {"_id": null, "n": {"$sum": "$a"}}}]}},
+    {"tool": "aggregate-db", "arguments": {"connectionId": "{conn}", "database": "{db}", "pipeline": [{"$documents": [{"x": 1}]}]}},
+    {"tool": "update-many", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "filter": {"a": 1}, "update": {"$set": {"b": true}}}},
+    {"tool": "create-index", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "name": "a_1", "definition": [{"type": "classic", "keys": {"a": 1}}]}},
+    {"tool": "collection-indexes", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c"}},
+    {"tool": "collection-schema", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "sampleSize": 10}},
+    {"tool": "collection-storage-size", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c"}},
+    {"tool": "db-stats", "arguments": {"connectionId": "{conn}", "database": "{db}"}},
+    {"tool": "list-collections", "arguments": {"connectionId": "{conn}", "database": "{db}"}},
+    {"tool": "explain", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "method": [{"name": "find", "arguments": {"filter": {"a": 1}}}], "verbosity": "queryPlanner"}},
+    {"tool": "export", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "exportTitle": "sdk-{db}", "exportTarget": [{"name": "find", "arguments": {"filter": {}}}], "jsonExportFormat": "relaxed"}},
+    {"tool": "${name:MCP_TOOL_LOGS}", "arguments": {"connectionId": "{conn}", "type": "global", "limit": 5}},
+    {"tool": "drop-index", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "indexName": "a_1", "type": "classic"}},
+    {"tool": "delete-many", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "filter": {"a": 3}}},
+    {"tool": "rename-collection", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "c", "newName": "d", "dropTarget": false}},
+    {"tool": "drop-collection", "arguments": {"connectionId": "{conn}", "database": "{db}", "collection": "d"}},
+    {"tool": "drop-database", "arguments": {"connectionId": "{conn}", "database": "{db}"}},
+    {"tool": "disconnect", "arguments": {"connectionId": "{conn}"}}
+  ]
+}

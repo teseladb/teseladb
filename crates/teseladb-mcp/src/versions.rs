@@ -1,6 +1,6 @@
 //! MCP revisions (contract `mcp-server.md`): 2026-07-28 without sessions, its version in the
 //! `_meta` of each request and `server/discover`; and the revisions with `initialize` that
-//! RefDb MCP Server 3.2.2 accepts, negotiated as it negotiates them.
+//! the reference MCP server 3.2.2 accepts, negotiated as it negotiates them.
 
 use teseladb_json::{Number, Object, Value};
 

@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-fle"
 version = "0.1.0"
-description = "The server side of RefDb's Queryable Encryption and CSFLE: payload formats, encrypted field configurations, metadata collections, query rewriting and compaction."
+description = "The server side of the reference server's Queryable Encryption and CSFLE: payload formats, encrypted field configurations, metadata collections, query rewriting and compaction."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

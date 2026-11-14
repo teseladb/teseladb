@@ -1,5 +1,5 @@
 //! MCP revisions (019 FR-019, contract `mcp-server.md`, T024): negotiation in `initialize` as
-//! RefDb MCP Server 3.2.2 answers it, the version of each 2026-07-28 request and
+//! the reference MCP server 3.2.2 answers it, the version of each 2026-07-28 request and
 //! `server/discover`.
 
 use teseladb_json::{Object, Value, parse, to_string};
@@ -32,10 +32,10 @@ fn revisions_by_name_and_their_form() {
     assert_eq!(LATEST_SESSION_REVISION, Revision::R2025_11_25);
 }
 
-/// RefDb MCP Server 3.2.2 keeps each of its four revisions and answers 2025-11-25 to any
+/// The reference MCP server 3.2.2 keeps each of its four revisions and answers 2025-11-25 to any
 /// other, 2026-07-28 included.
 #[test]
-fn initialize_negotiates_like_refdb_mcp_server() {
+fn initialize_negotiates_like_the_reference_mcp_server() {
     for r in
         [Revision::R2025_11_25, Revision::R2025_06_18, Revision::R2025_03_26, Revision::R2024_11_05]
     {

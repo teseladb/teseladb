@@ -6,7 +6,7 @@ use std::fmt;
 
 use teseladb_types::NodeId;
 
-/// Smallest `maxStalenessSeconds` RefDb accepts.
+/// Smallest `maxStalenessSeconds` the reference server accepts.
 pub const MIN_MAX_STALENESS_S: u64 = 90;
 
 /// A read preference's mode.
@@ -24,9 +24,9 @@ pub enum Mode {
     Nearest,
 }
 
-/// A tag set: name and value pairs a replica's tags must all have. `None` matches no replica (RefDb
-/// takes a tag set that is not a document, or a tag whose value is not a string, and no node's
-/// tags, which are strings, have it).
+/// A tag set: name and value pairs a replica's tags must all have. `None` matches no replica (the
+/// reference server takes a tag set that is not a document, or a tag whose value is not a string, and
+/// no node's tags, which are strings, have it).
 pub type TagSet = Option<Vec<(String, String)>>;
 
 /// A read preference.
@@ -40,11 +40,11 @@ pub struct ReadPreference {
     pub tag_sets: Vec<TagSet>,
 }
 
-/// Why a read preference is refused, as a refrouter 9.0.4 refuses it (measured), in the order it
-/// checks.
+/// Why a read preference is refused, as a reference router 9.0.4 refuses it (measured), in the
+/// order it checks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadPrefError {
-    /// A mode RefDb does not have (`BadValue`).
+    /// A mode the reference server does not have (`BadValue`).
     UnknownMode(String),
     /// A negative `maxStalenessSeconds` (`BadValue`).
     StalenessNegative,
@@ -60,15 +60,15 @@ pub enum ReadPrefError {
     PrimaryWithStaleness,
 }
 
-/// RefDb's `BadValue`.
+/// The reference server's `BadValue`.
 const BAD_VALUE: i32 = 2;
-/// RefDb's `InvalidOptions`.
+/// The reference server's `InvalidOptions`.
 const INVALID_OPTIONS: i32 = 72;
-/// RefDb's `MaxStalenessOutOfRange`.
+/// The reference server's `MaxStalenessOutOfRange`.
 const MAX_STALENESS_OUT_OF_RANGE: i32 = 160;
 
 impl ReadPrefError {
-    /// RefDb's code for it.
+    /// The reference server's code for it.
     pub fn code(&self) -> i32 {
         match self {
             ReadPrefError::StalenessTooSmall => MAX_STALENESS_OUT_OF_RANGE,
@@ -155,8 +155,9 @@ impl ReadPreference {
 }
 
 impl ReadPreference {
-    /// The preference as a refrouter 9.0.4 writes it in `FailedToSatisfyReadPreference` (measured):
-    /// its mode, its tag sets if any and its `maxStalenessSeconds` in whole seconds if any.
+    /// The preference as a reference router 9.0.4 writes it in `FailedToSatisfyReadPreference`
+    /// (measured): its mode, its tag sets if any and its `maxStalenessSeconds` in whole seconds if
+    /// any.
     pub fn describe(&self) -> String {
         let mode = match self.mode {
             Mode::Primary => "primary",

@@ -5,7 +5,7 @@
 //! - [`parse`] with configurable depth (128) and size (64 MiB) limits ([`Limits`]) and errors
 //!   carrying offset, line and column ([`Error`]). Duplicate keys are rejected.
 //! - [`to_string`] writes compact JSON that reads back identically.
-//! - [`parse_yaml`] reads the YAML subset of `refnode` configuration files into a [`Value`].
+//! - [`parse_yaml`] reads the YAML subset of reference server configuration files into a [`Value`].
 //!
 //! ```
 //! use teseladb_json::{Value, parse, to_string};

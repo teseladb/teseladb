@@ -1,6 +1,6 @@
 //! The Unicode and CLDR tables collation needs, and their binary form (FR-018). The generator
-//! (`tools/teseladb-unicodegen`) builds them from the official files of the version RefDb uses
-//! (D-043) and writes `data/uca.bin`; the crate reads that file back once.
+//! (`tools/teseladb-unicodegen`) builds them from the official files of the version the reference
+//! server uses (D-043) and writes `data/uca.bin`; the crate reads that file back once.
 //!
 //! The weights are ICU's, from CLDR's `FractionalUCA.txt`: a primary of up to four bytes, a
 //! secondary and a tertiary of up to two, left-aligned, with the common weight `05`. The two top

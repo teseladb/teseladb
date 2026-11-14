@@ -112,7 +112,8 @@ const SHORT_NAMES: &[(&[u8], &str)] = &[
     (oid::SERIAL_NUMBER, "serialNumber"),
 ];
 
-/// OpenSSL's short names, as RefDb prints X.509 user names (measured with RefDb 9.0.4).
+/// OpenSSL's short names, as the reference server prints X.509 user names (measured with the
+/// reference server 9.0.4).
 const OPENSSL_NAMES: &[(&[u8], &str)] = &[
     (oid::COMMON_NAME, "CN"),
     (&[0x55, 0x04, 0x04], "SN"),
@@ -138,10 +139,9 @@ const OPENSSL_NAMES: &[(&[u8], &str)] = &[
     (oid::EMAIL_ADDRESS, "emailAddress"),
 ];
 
-/// RFC 2253 escaping as OpenSSL writes it for RefDb: the special characters, a leading `#` or
-/// space and a trailing space with a backslash, and control characters and every byte above 0x7F
-/// of the UTF-8 form as
-/// `\XX`.
+/// RFC 2253 escaping as OpenSSL writes it for the reference server: the special characters, a
+/// leading `#` or space and a trailing space with a backslash, and control characters and every
+/// byte above 0x7F of the UTF-8 form as `\XX`.
 fn escape_openssl(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = String::with_capacity(bytes.len());
@@ -278,9 +278,9 @@ impl Name {
             && prefix.rdns.iter().zip(&self.rdns).all(|(a, b)| rdn_eq(a, b))
     }
 
-    /// The REFDB-X509 user name of a certificate with this subject: the RFC 2253 form that
-    /// OpenSSL prints and RefDb uses, with every attribute in reverse order (also inside a
-    /// multi-valued RDN), OpenSSL's short names and non-ASCII bytes escaped.
+    /// The X.509 user name of a certificate with this subject: the RFC 2253 form
+    /// that OpenSSL prints and the reference server uses, with every attribute in reverse order
+    /// (also inside a multi-valued RDN), OpenSSL's short names and non-ASCII bytes escaped.
     #[must_use]
     pub fn x509_user_name(&self) -> String {
         let mut out = String::new();

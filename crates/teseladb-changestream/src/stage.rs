@@ -1,5 +1,5 @@
 //! The `$changeStream` stage (014 FR-001): its options and the stages that may follow it, with
-//! the errors of a `refrouter` 9.0.4 (measured on 01-11).
+//! the errors of a reference router 9.0.4 (measured on 01-11).
 
 use teseladb_bson::Value;
 use teseladb_hlc::{Hlc, from_timestamp};
@@ -20,7 +20,7 @@ const ALL_FOR_CLUSTER: &str = "allChangesForCluster";
 const EXPANDED: &str = "showExpandedEvents";
 const DATA: &str = "_data";
 
-/// Codes of the errors (`code`, as a `refrouter` 9.0.4 answers).
+/// Codes of the errors (`code`, as a reference router 9.0.4 answers).
 pub mod codes {
     /// `BadValue`.
     pub const BAD_VALUE: i32 = 2;

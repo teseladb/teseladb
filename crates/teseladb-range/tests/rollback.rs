@@ -1,7 +1,7 @@
 //! `w: 1` and its loss (005 T033, FR-010, D-034, model `WriteConcernW1.tla`): `w: 1` answers once
 //! the entry is in the leader's log (after its `fdatasync` with `j: true`) without waiting for the
 //! majority; if the leader loses its term before the majority has the entry, the write is lost
-//! and the replica that drops it hands it to its rollback files, as RefDb writes
+//! and the replica that drops it hands it to its rollback files, as the reference server writes
 //! `<dbpath>/rollback/…/removed.<timestamp>.bson`.
 
 mod common;

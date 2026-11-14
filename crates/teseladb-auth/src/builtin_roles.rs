@@ -1,6 +1,6 @@
-//! The privileges of RefDb 9.0.4's built-in roles (013 FR-010), as `rolesInfo` shows them
-//! with `showPrivileges` (measured). Written by `scripts/gen-builtin-roles.py` from
-//! `tests/fixtures/refdb/`; do not edit. A database role names its own database as
+//! The privileges of the reference server 9.0.4's built-in roles (013 FR-010), as `rolesInfo` shows
+//! them with `showPrivileges` (measured). Written by `scripts/gen-builtin-roles.py` from
+//! the recorded answers of the reference server; do not edit. A database role names its own database as
 //! [`ROLE_DB`].
 
 use crate::actions::ActionType as A;
@@ -9,7 +9,7 @@ use crate::privileges::Res;
 /// Stands for the database of a database role.
 pub const ROLE_DB: &str = "$db";
 
-/// A built-in role's privileges, in RefDb's order.
+/// A built-in role's privileges, in the reference server's order.
 pub type Privileges = &'static [(Res, &'static [A])];
 
 /// The privileges of the built-in role `name` (of any database for a database role).

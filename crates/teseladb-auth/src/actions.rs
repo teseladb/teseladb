@@ -1,5 +1,6 @@
-//! The privilege actions of RefDb 9.0.4 (013 FR-010), in the order RefDb lists them.
-//! Written by `scripts/gen-builtin-roles.py` from `tests/fixtures/refdb/`; do not edit.
+//! The privilege actions of the reference server 9.0.4 (013 FR-010), in the order the reference
+//! server lists them. Written by `scripts/gen-builtin-roles.py` from the recorded
+//! answers of the reference server; do not edit.
 
 /// A privilege action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -315,7 +316,7 @@ pub enum ActionType {
 }
 
 impl ActionType {
-    /// Every action, in RefDb's order.
+    /// Every action, in the reference server's order.
     pub const ALL: [ActionType; 154] = [
         ActionType::AddShard,
         ActionType::Analyze,

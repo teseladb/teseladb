@@ -1,8 +1,8 @@
-//! REFDB-AWS (013 T036, FR-025): AWS Signature Version 4 against AWS's published examples
-//! (the `aws-signing-test-suite` of `awslabs/aws-c-auth`, cases `get-vanilla`, `post-vanilla`,
-//! `post-x-www-form-urlencoded` and `get-vanilla-query-order-key-case`, and the IAM example of
-//! the SigV4 documentation), and the server's side of the conversation as RefDb Enterprise
-//! 9.0.4 answers it (measured with a test STS behind `awsSTSUrl`).
+//! AWS IAM authentication (013 T036, FR-025): AWS Signature Version 4 against AWS's published
+//! examples (the `aws-signing-test-suite` of `awslabs/aws-c-auth`, cases `get-vanilla`,
+//! `post-vanilla`, `post-x-www-form-urlencoded` and `get-vanilla-query-order-key-case`, and the IAM
+//! example of the SigV4 documentation), and the server's side of the conversation as the reference
+//! enterprise server 9.0.4 answers it (measured with a test STS behind `awsSTSUrl`).
 
 use teseladb_auth::aws::{self, AwsError, Server, SigV4};
 use teseladb_bson::{Document, Value};
@@ -214,7 +214,7 @@ fn the_sts_answer_names_the_user() {
     };
     let user = "arn:aws:iam::123456789012:user/alice";
     assert_eq!(aws::caller(200, ok(user).as_bytes()).unwrap(), user);
-    // An assumed role is the role with any session, as RefDb names it.
+    // An assumed role is the role with any session, as the reference server names it.
     let role = "arn:aws:sts::123456789012:assumed-role/reader/session1";
     assert_eq!(
         aws::caller(200, ok(role).as_bytes()).unwrap(),

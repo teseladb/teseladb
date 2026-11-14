@@ -28,7 +28,8 @@ pub struct Args {
     pub compare: Option<PathBuf>,
     /// Output on stdout: text or JSON (`--format`).
     pub format: Format,
-    /// Server of the network scenarios (`refdb://host:port`); a local cluster without it.
+    /// Server of the network scenarios (`host:port`); a local cluster
+    /// without it.
     pub target: Option<String>,
     /// Workers of the network scenarios.
     pub concurrency: usize,
@@ -88,7 +89,7 @@ pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recove
                          search-phrase|search-fuzzy|search-visibility|vector-search|vector|cores-curve|disk-usage|\
                          ycsb-a..ycsb-f [--data dir] [--json file] \
                          [--duration 3s] [--warmup 10s] [--records N] [--groups N] [--format text|json] \
-                         [--target refdb://host:port] [--concurrency N] [--rate ops/s] [--max-cores N] [--skip-load] \
+                         [--target host:port] [--concurrency N] [--rate ops/s] [--max-cores N] [--skip-load] \
                          [--baseline file] [--save-baseline file]\n       \
                          teseladb-bench --compare report.json --baseline file";
 

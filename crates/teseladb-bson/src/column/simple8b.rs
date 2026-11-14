@@ -1,4 +1,4 @@
-//! Simple-8b blocks of a BSON column, as a `refrouter` 9.0.4 reads them (measured, 003 T029).
+//! Simple-8b blocks of a BSON column, as a reference router 9.0.4 reads them (measured, 003 T029).
 //!
 //! The low four bits of a block are its selector:
 //! - `1` to `14`: as many slots as fit the other 60 bits (60 of 1 bit, 30 of 2, …, 1 of 60);
@@ -12,7 +12,7 @@
 //! - `0` and any other extension: refused.
 //!
 //! A slot with all its bits set has no value. The others are zigzag deltas, shifted back first;
-//! a shift past the width wraps around it, as RefDb's shifts do.
+//! a shift past the width wraps around it, as the reference server's shifts do.
 
 use super::ColumnError;
 
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_selectors_have_the_slots_refdb_reads() {
+    fn plain_selectors_have_the_slots_the_reference_reads() {
         for (selector, count) in SLOTS.iter().enumerate().skip(1) {
             let zeros = vec![Some(0); *count as usize];
             assert_eq!(block(selector as u64, 64), Ok(Block::Slots(zeros)), "{selector}");
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn extended_selectors_shift_their_values() {
         // Selector 7, extension 7: three slots of 18 bits, 14 of value over 4 of shift (measured
-        // on a column of a `refrouter` 9.0.4 holding 1 000 000 steps).
+        // on a column of a reference router 9.0.4 holding 1 000 000 steps).
         assert_eq!(block(0x3D09_7F42_5FD0_9777, 64), Ok(Block::Slots(vec![Some(2_000_000); 3])));
         // A shift of 16 nibbles wraps around 64 bits, not around 128.
         let word = 8 | 10 << 4 | ((1 << 5) | 16) << 8;

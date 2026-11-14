@@ -1,7 +1,7 @@
 //! `Idempotency-Key` against a recorded executor (019 FR-010): the record of each key in
-//! `config.httpIdempotency`, the session the write runs in, the transaction of the writes that
-//! RefDb does not retry, and every way a retry ends (the answer kept, `422`, a pending write
-//! run again, a transaction committed whose answer was lost, an expired key).
+//! `config.httpIdempotency`, the session the write runs in, the transaction of the writes that the
+//! reference server does not retry, and every way a retry ends (the answer kept, `422`, a pending
+//! write run again, a transaction committed whose answer was lost, an expired key).
 
 use std::collections::HashMap;
 

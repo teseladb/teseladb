@@ -730,7 +730,7 @@ impl RawNode {
         // A vote request reaches this point with this node's term: `step` adopted a higher one and
         // answered a lower one.
         // A pre-vote is for the next term: for this node's own term it would let a second
-        // candidate stand in a term this node already voted in, and split the vote (as anotherproduct).
+        // candidate stand in a term this node already voted in, and split the vote (as other Raft implementations do).
         let fresh = pre && m.term > self.term;
         let grant = !booting && up_to_date && !self.in_lease_guard(m.ctx) && (fresh || can_vote);
         let mut r = self.msg(vote_resp(m.ty), m.from);

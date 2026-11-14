@@ -1,11 +1,11 @@
-//! Signing and checking `$clusterTime` (013 FR-014), as RefDb 9.0.4 does it (measured on a
-//! `refrouter` with `--keyFile`, 30-10-2026, `scripts/authz-probe/ct_probe.py`): the signature is
-//! HMAC-SHA-1 with a 20-byte key over the cluster time as a little-endian 64-bit number
-//! (`seconds << 32 | increment`) with its low 16 bits set, so that one signature covers 65 536
-//! increments. A key is named by the cluster time at which it was made and signs the times before
-//! its `expiresAt`; there are always two, the current one and the next, each valid 90 days after
-//! the one before. A time a client sends that is not past the node's own is taken as is; a later
-//! one needs a valid signature.
+//! Signing and checking `$clusterTime` (013 FR-014), as the reference server 9.0.4 does it
+//! (measured on a reference router with `--keyFile`, 30-10-2026,
+//! `scripts/authz-probe/ct_probe.py`): the signature is HMAC-SHA-1 with a 20-byte key over the
+//! cluster time as a little-endian 64-bit number (`seconds << 32 | increment`) with its low 16 bits
+//! set, so that one signature covers 65 536 increments. A key is named by the cluster time at which
+//! it was made and signs the times before its `expiresAt`; there are always two, the current one
+//! and the next, each valid 90 days after the one before. A time a client sends that is not past
+//! the node's own is taken as is; a later one needs a valid signature.
 //!
 //! The keys live in Group 0 sealed with the cluster's master key (D-030): AES-256-GCM under a
 //! key that HKDF-SHA-256 draws from the master key for this use alone, with the key's id and
@@ -43,7 +43,7 @@ pub struct Time {
 }
 
 impl Time {
-    /// The time as RefDb's 64-bit number.
+    /// The time as the reference server's 64-bit number.
     pub fn as_u64(self) -> u64 {
         (u64::from(self.secs) << 32) | u64::from(self.inc)
     }
@@ -80,7 +80,7 @@ pub fn sign(key: &[u8; KEY_LEN], t: Time) -> [u8; KEY_LEN] {
 }
 
 /// The 20-byte hash of a signature a client sent; another length is `UnsupportedFormat`, which
-/// RefDb answers when it reads the signature, before it compares the times.
+/// the reference server answers when it reads the signature, before it compares the times.
 pub fn hash(bytes: &[u8]) -> Result<[u8; KEY_LEN], ClusterTimeError> {
     bytes.try_into().map_err(|_| ClusterTimeError::HashLength(bytes.len()))
 }
@@ -97,7 +97,7 @@ pub enum ClusterTimeError {
 }
 
 impl ClusterTimeError {
-    /// RefDb's message.
+    /// The reference server's message.
     pub fn message(&self) -> String {
         match self {
             ClusterTimeError::HashLength(n) => format!("Unsupported SHA1Block hash length: {n}"),
@@ -129,7 +129,7 @@ impl KeyRing {
     }
 
     /// `t` signed: the hash and the key id, or none without a key for it (a node without keys
-    /// signs with zeros and id 0, as RefDb without authentication).
+    /// signs with zeros and id 0, as the reference server without authentication).
     pub fn signature(&self, t: Time) -> Option<([u8; KEY_LEN], i64)> {
         self.signing_key(t).map(|k| (sign(&k.key, t), k.id))
     }

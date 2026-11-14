@@ -107,8 +107,8 @@ pub fn automerge(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> bool {
 }
 
 /// The size at which the ranges of a collection without its own split, in bytes, when
-/// `config.settings` has a `chunksize` (018 FR-004: the chunk size of a `refrouter`, in MiB, from 1
-/// to 1024 as its validator takes it).
+/// `config.settings` has a `chunksize` (018 FR-004: the chunk size of a reference router, in MiB,
+/// from 1 to 1024 as its validator takes it).
 pub fn chunk_size_bytes(settings: &BTreeMap<Vec<u8>, Vec<u8>>) -> Option<u64> {
     let mb = match doc(settings, CHUNK_SIZE_KEY)?.get("value")? {
         RawValue::Int32(v) => u64::try_from(v).ok()?,

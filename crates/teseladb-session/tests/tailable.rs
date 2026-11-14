@@ -1,5 +1,5 @@
 //! Tailable cursors (015 T008, FR-004): when the first batch keeps one open, how long a `getMore`
-//! waits, and the messages of a lost position, as a `refrouter` 9.0.4 gives them.
+//! waits, and the messages of a lost position, as a reference router 9.0.4 gives them.
 
 use teseladb_session::tailable::{DEFAULT_AWAIT_MS, Tail, lost_message};
 

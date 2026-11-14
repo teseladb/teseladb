@@ -1,7 +1,7 @@
-//! The legacy strict JSON that RefDb writes in its audit log: `{ "k" : v }` with
+//! The legacy strict JSON that the reference server writes in its audit log: `{ "k" : v }` with
 //! spaces, 32-bit integers and doubles as plain numbers, `$numberLong`, `$binary` with `$type`,
 //! `$regex` with `$options`, and dates as `+00:00` ISO text from 1970 to 9999. Measured on
-//! RefDb Enterprise 9.0.4's `--auditFormat JSON`.
+//! the reference enterprise server 9.0.4's `--auditFormat JSON`.
 
 use super::{base64, date};
 use crate::raw::{RawDoc, RawValue};
@@ -92,9 +92,9 @@ fn wrapped(out: &mut String, key: &str, inner: impl FnOnce(&mut String)) {
     out.push_str(" }");
 }
 
-/// A double as RefDb writes it there: the shorter of its shortest plain and scientific forms
-/// (the plain one on a tie), the exponent with a sign and at least two digits: `0.05`, `2`,
-/// `-0`, `1e+300`, `1.5e-07`; `NaN`, `Infinity` and `-Infinity` bare.
+/// A double as the reference server writes it there: the shorter of its shortest plain and
+/// scientific forms (the plain one on a tie), the exponent with a sign and at least two digits:
+/// `0.05`, `2`, `-0`, `1e+300`, `1.5e-07`; `NaN`, `Infinity` and `-Infinity` bare.
 pub(crate) fn double(x: f64) -> String {
     if x.is_nan() {
         return "NaN".to_owned();

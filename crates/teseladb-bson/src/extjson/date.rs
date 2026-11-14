@@ -20,7 +20,7 @@ pub(crate) fn to_iso(ms: i64) -> Option<String> {
     Some(if milli == 0 { format!("{base}Z") } else { format!("{base}.{milli:03}Z") })
 }
 
-/// `ms` as RefDb writes dates in its diagnostics (`currentOp`, `getLog`):
+/// `ms` as the reference server writes dates in its diagnostics (`currentOp`, `getLog`):
 /// `YYYY-MM-DDTHH:MM:SS.mmm+00:00`, always with the milliseconds; `None` outside the years 1970
 /// to 9999.
 #[must_use]

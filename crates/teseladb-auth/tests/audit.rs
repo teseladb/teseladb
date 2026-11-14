@@ -1,7 +1,7 @@
-//! The audit log (013 FR-016, T028) against what RefDb Enterprise 9.0.4 wrote with
-//! `--auditDestination file --auditFormat JSON` and `--auditFilter`, and against its errors for
-//! bad options. The arguments of `authCheck` keep no document values (a DV of FR-016: RefDb
-//! writes them even with `redactClientLogData`).
+//! The audit log (013 FR-016, T028) against what the reference enterprise server 9.0.4 wrote with
+//! `--auditDestination file --auditFormat JSON` and `--auditFilter`, and against its errors for bad
+//! options. The arguments of `authCheck` keep no document values (a DV of FR-016: the reference
+//! server writes them even with `redactClientLogData`).
 
 use teseladb_auth::audit::{
     AuditError, AuditType, Auditor, Client, Config, Destination, Endpoint, Event, Format, Options,
@@ -194,7 +194,7 @@ fn denied_commands_keep_no_password_and_no_document_value() {
         r#""$db" : "ventas" } }, "result" : 13 }"#
     )));
     assert!(!got.contains("valor-documento-123"));
-    // `createUser` with a password, as RefDb masks it; the namespace is `db.<user>`.
+    // `createUser` with a password, as the reference server masks it; the namespace is `db.<user>`.
     let create = Document::new()
         .with("createUser", "x")
         .with("pwd", "pw-secret-999")
@@ -288,7 +288,7 @@ fn the_filter_is_a_query_on_the_message() {
 }
 
 #[test]
-fn bad_options_stop_with_refdbs_messages() {
+fn bad_options_stop_with_the_reference_servers_messages() {
     let o = |destination, format, path, filter| Options {
         destination,
         format,
@@ -416,8 +416,8 @@ fn endpoints_and_types_read_back() {
         Some(Endpoint::Address { ip: "::1".into(), port: 27017 })
     );
     assert_eq!(
-        Endpoint::parse("/tmp/refdb-27017.sock"),
-        Some(Endpoint::Unix("/tmp/refdb-27017.sock".into()))
+        Endpoint::parse("/tmp/teseladb-27017.sock"),
+        Some(Endpoint::Unix("/tmp/teseladb-27017.sock".into()))
     );
     for bad in ["127.0.0.1", "h:x", ":1", "[]:1"] {
         assert_eq!(Endpoint::parse(bad), None, "{bad}");
@@ -444,7 +444,7 @@ fn endpoints_and_types_read_back() {
 }
 
 #[test]
-fn filters_read_like_refdb_reads_them() {
+fn filters_read_like_the_reference_reads_them() {
     let doc = |f: &str| file_json(Some(f)).config().filter_doc.clone().unwrap();
     assert_eq!(
         doc(r#"{ atype : 'auth"Check', 'param.db': "it's", n: true, $or: [{a: 1}, {b: 'x\'y'}] }"#),

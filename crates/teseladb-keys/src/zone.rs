@@ -2,9 +2,10 @@
 //! writes and reads zone maps and the executor that decides from them whether a block may hold a
 //! document its filter accepts.
 //!
-//! The bounds are encodings of [`crate::encode_value`] in ascending order, without collation:
-//! their bytes compare as RefDb compares the values across types, so a block whose interval
-//! leaves a literal out holds no document whose value equals it or is on the far side of it.
+//! The bounds are encodings of [`crate::encode_value`] in ascending order, without collation: their
+//! bytes compare as the reference server compares the values across types, so a block whose
+//! interval leaves a literal out holds no document whose value equals it or is on the far side of
+//! it.
 
 /// What a block's zone map says of a top-level field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

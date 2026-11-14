@@ -1,5 +1,5 @@
-//! The encrypted audit log (013 T042, FR-031) against files RefDb Enterprise 9.0.4 wrote with
-//! `--auditLocalKeyFile` and a test key (`tests/fixtures/audit_encrypted/`, measured on
+//! The encrypted audit log (013 T042, FR-031) against files the reference enterprise server 9.0.4
+//! wrote with `--auditLocalKeyFile` and a test key (`tests/fixtures/audit_encrypted/`, measured on
 //! 31-10-2026): TeselaDB writes their header and their messages byte for byte from the same keys.
 
 use std::path::Path;
@@ -60,7 +60,7 @@ fn open(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn refdbs_encrypted_logs_open_and_are_rewritten_byte_for_byte() {
+fn the_reference_servers_encrypted_logs_open_and_are_rewritten_byte_for_byte() {
     for (file, compression) in [("none.json", Compression::None), ("zstd.json", Compression::Zstd)]
     {
         let text = fixture(file);
@@ -176,7 +176,7 @@ fn the_options_and_the_auditor_encrypt_only_a_file() {
 /// The header of a log whose key a KMIP server wrapped (measured with a responder that gave the
 /// data back without an IV).
 #[test]
-fn a_kmip_wrapped_key_goes_in_the_header_as_refdb_writes_it() {
+fn a_kmip_wrapped_key_goes_in_the_header_as_the_reference_writes_it() {
     let enc = AuditEncryption::with_kmip(
         [9; 32],
         "1",

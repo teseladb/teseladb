@@ -1,11 +1,11 @@
 //! What a document's version keeps for its event (014 FR-002, FR-005, FR-009, D-114): the
-//! description of an update by operators, the transaction that wrote it (`lsid`, `txnNumber`),
-//! its position in the write or the transaction and, inside a transaction, the type of each write
-//! and the document it left. It is stored next to the document, at key `document · 00 · position`
-//! and at the same mark, as a version that only serves the history
-//! (`teseladb_lsm::HISTORY_VALUE`): written in the same entry or the same intents as the document,
-//! it goes wherever the document goes, and the GC drops it once it leaves the retention window. A
-//! transaction that writes a document several times leaves one meta per write, as a `refrouter`
+//! description of an update by operators, the transaction that wrote it (`lsid`, `txnNumber`), its
+//! position in the write or the transaction and, inside a transaction, the type of each write and
+//! the document it left. It is stored next to the document, at key `document · 00 · position` and
+//! at the same mark, as a version that only serves the history (`teseladb_lsm::HISTORY_VALUE`):
+//! written in the same entry or the same intents as the document, it goes wherever the document
+//! goes, and the GC drops it once it leaves the retention window. A transaction that writes a
+//! document several times leaves one meta per write, as a reference router
 //! 9.0.4 gives one event per write (measured on 01-11).
 //!
 //! Its bytes: format (2, or 3 with a retryable write), flags (bit 0 transaction, bit 1 description, bit 2 replacement, bit 3
@@ -17,8 +17,8 @@
 //! document that moved here, the length (4, big-endian) and the bytes of the key it left; with a
 //! document, the document's bytes to the end.
 //!
-//! A document moves when an update changes its shard key (018 FR-001): its key is the shard key
-//! and its `_id`, so the write deletes it at the old key and puts it at the new one. A `refrouter`
+//! A document moves when an update changes its shard key (018 FR-001): its key is the shard key and
+//! its `_id`, so the write deletes it at the old key and puts it at the new one. A reference router
 //! 9.0.4 gives one `update` (or `replace`) event for it, keyed by the document before the change
 //! (measured on 02-11-2026): the meta at the new key says where it came from, and the meta of the
 //! deletion at the old key that it gives no event.
@@ -72,7 +72,7 @@ pub struct TxnInfo {
 
 /// The retryable write that wrote a document outside a transaction (018 FR-009): what its oplog
 /// entry carries (`lsid`, `txnNumber`, `stmtId`, `prevOpTime`, `needsRetryImage`), as a replica
-/// set member of RefDb 9.0.4 writes it (measured on 02-11-2026).
+/// set member of the reference server 9.0.4 writes it (measured on 02-11-2026).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetryInfo {
     /// `lsid.id`.
@@ -166,8 +166,8 @@ pub enum Moved {
     Away,
     /// `shardCollection` keyed it again by the new shard key: the deletion at the old key and the
     /// insert at the new one are changes of the document's key for the indexes that follow the
-    /// versions (011), and no change stream or oplog entry, as a `refrouter` 9.0.4 gives only the
-    /// `shardCollection` event (measured on 02-11-2026).
+    /// versions (011), and no change stream or oplog entry, as a reference router 9.0.4 gives only
+    /// the `shardCollection` event (measured on 02-11-2026).
     Internal,
 }
 
@@ -366,7 +366,8 @@ pub fn history_with(
     out
 }
 
-/// The `lsid` of an event (measured on a `refrouter` 9.0.4 on 01-11): `{id: UUID, uid: BinData(0)}`.
+/// The `lsid` of an event (measured on a reference router 9.0.4 on 01-11): `{id: UUID, uid:
+/// BinData(0)}`.
 pub fn lsid_document(lsid: u128, uid: &[u8; 32]) -> Document {
     Document::new()
         .with("id", Value::Binary { subtype: UUID_SUBTYPE, bytes: lsid.to_be_bytes().to_vec() })

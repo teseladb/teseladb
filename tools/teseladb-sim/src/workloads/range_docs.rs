@@ -73,7 +73,7 @@ const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
 const MAJORITY: WriteConcern = WriteConcern { w: W::Majority, j: true };
 /// `w: 1` with the journal (D-034): acknowledged once on the leader's disk, before the majority has
 /// it, so a new leader may roll it back; it then has to be in a rollback file (FR-010). Without the
-/// journal a crash before the leader's fsync loses it with no file, in RefDb too.
+/// journal a crash before the leader's fsync loses it with no file, in the reference server too.
 const W1: WriteConcern = WriteConcern { w: W::Nodes(1), j: true };
 /// Share of the writes that go to the document their client last read.
 const READ_THEN_WRITE: f64 = 0.5;
@@ -107,13 +107,13 @@ const INCOMING_FILES: u32 = 1 << 20;
 /// Least and greatest wait, in ms, before a write whose answer was lost goes again; the retry
 /// leaves at the client's first turn after it.
 const RETRY_DELAY_MS: (u64, u64) = (5, 40);
-/// How long a retry looks for the leader. A retry refused with `NotLeader` was refused before
-/// any proposal, so that attempt did nothing: sending it on, to the leader the refusal names or,
-/// with none known yet, again a little later, is the driver's server selection waiting for a
-/// primary (RefDb retries a write once, but only sends it to a primary, waiting up to
-/// `serverSelectionTimeoutMS`), not another retry. Without it most retries land on a follower
-/// while the range elects the leader that replaces the one that lost the answer, and say
-/// nothing. Two seconds cover several elections and fit in the simulated run.
+/// How long a retry looks for the leader. A retry refused with `NotLeader` was refused before any
+/// proposal, so that attempt did nothing: sending it on, to the leader the refusal names or, with
+/// none known yet, again a little later, is the driver's server selection waiting for a primary
+/// (the reference server retries a write once, but only sends it to a primary, waiting up to
+/// `serverSelectionTimeoutMS`), not another retry. Without it most retries land on a follower while
+/// the range elects the leader that replaces the one that lost the answer, and say nothing. Two
+/// seconds cover several elections and fit in the simulated run.
 const RETRY_SELECTION: Nanos = Nanos::from_secs(2);
 
 /// How often the workload asks the leader for a checksum (FR-014, on demand): the periodic one

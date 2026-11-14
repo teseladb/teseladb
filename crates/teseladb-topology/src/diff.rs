@@ -1,10 +1,10 @@
 //! The `o` of an update by operators in `local.oplog.rs` (018 FR-009): `{$v: 2, diff}`, built
 //! from the document before the write and the description change streams keep of it (D-114).
 //!
-//! Measured on RefDb 9.0.4 (02-11-2026): a document's diff has the sections `d` (removed
-//! fields, each `false`), `u` (fields that existed), `i` (new fields) and then one `s<field>`
-//! subdiff per changed document or array, each section in field name order. An array's subdiff
-//! is `{a: true}`, then `l` with the new length of a truncated array, then `u<pos>` and
+//! Measured on the reference server 9.0.4 (02-11-2026): a document's diff has the sections `d`
+//! (removed fields, each `false`), `u` (fields that existed), `i` (new fields) and then one
+//! `s<field>` subdiff per changed document or array, each section in field name order. An array's
+//! subdiff is `{a: true}`, then `l` with the new length of a truncated array, then `u<pos>` and
 //! `s<pos>` in position order. A path whose parent does not exist inserts that parent whole.
 
 use std::collections::BTreeMap;
@@ -226,10 +226,11 @@ pub fn pipeline_entry(before: &Document, after: &Document) -> Document {
     }
 }
 
-/// Why a diff does not apply, as RefDb 9.0.4 tells (measured on 03-11-2026).
+/// Why a diff does not apply, as the reference server 9.0.4 tells (measured on 03-11-2026).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffError {
-    /// A key that is no section RefDb writes: «Unexpected section: {key} in document diff».
+    /// A key that is no section the reference server writes: «Unexpected section: {key} in document
+    /// diff».
     Unexpected(String),
     /// Section `d`, `u`, `i` or `s` (any subdiff) that is not a document: «Expected {section}
     /// section to be type object».
@@ -245,7 +246,7 @@ fn section(diff: &Document, name: &'static str) -> Result<Option<Document>, Diff
 }
 
 /// `doc` changed by object diff `diff` (`d`, `u`, `i` and `s<field>`), as an update entry of
-/// `local.oplog.rs` describes it (`applyOps`, `refrestore --oplogReplay`).
+/// `local.oplog.rs` describes it (`applyOps`, the reference restore tool with `--oplogReplay`).
 pub fn apply(doc: &Document, diff: &Document) -> Result<Document, DiffError> {
     let mut out = doc.clone();
     for (k, _) in section(diff, "d")?.unwrap_or_default().iter() {
@@ -280,7 +281,7 @@ fn slot(items: &mut Vec<Value>, i: usize) -> &mut Value {
 }
 
 /// The value a subdiff leaves of field `current`: an array subdiff on a value that is not an
-/// array leaves null, as RefDb 9.0.4 does.
+/// array leaves null, as the reference server 9.0.4 does.
 fn apply_sub(current: Option<&Value>, sub: &Document) -> Result<Value, DiffError> {
     if sub.get("a") != Some(&Value::Boolean(true)) {
         let base = match current {

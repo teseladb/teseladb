@@ -1,6 +1,6 @@
 //! The kinds of collection the catalog keeps (015 T001, FR-001, FR-003, FR-006, FR-009): a
 //! collection's stored options say whether it is a view, capped, a time series or clustered, with
-//! the options of each, as `create` stored them on a `refrouter` 9.0.4 (measured 30-10-2026).
+//! the options of each, as `create` stored them on a reference router 9.0.4 (measured 30-10-2026).
 
 use teseladb_bson::{Document, Value};
 use teseladb_meta::collection_types::{CollectionKind, Granularity, TimeSeries};

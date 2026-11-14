@@ -31,9 +31,9 @@ pub struct RaftConfig {
     pub pre_vote: bool,
     /// `CheckQuorum` enabled (required by the lease).
     pub check_quorum: bool,
-    /// Ticks without hearing from a quorum after which a leader steps down, as a RefDb primary
-    /// does after `electionTimeoutMillis` (10 s by default). Until then it takes writes, which a
-    /// later leader may roll back, but it serves no lease read and lets others vote.
+    /// Ticks without hearing from a quorum after which a leader steps down, as a reference server
+    /// primary does after `electionTimeoutMillis` (10 s by default). Until then it takes writes,
+    /// which a later leader may roll back, but it serves no lease read and lets others vote.
     pub step_down_ticks: u32,
     /// Idle ticks before quiescing.
     pub quiesce_after_ticks: u32,

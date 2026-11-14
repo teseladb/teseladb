@@ -1,12 +1,12 @@
 //! The replica set presentation (018 FR-007, contract `topology-modes.md`): the configuration
 //! Group 0 keeps for it, the `hello` of each member and the designation of the primary.
 //!
-//! The reply follows a member of a RefDb 9.0.4 replica set field by field: `compression` and
-//! `helloOk` first, then the set, the member's attributes (`passive`, `hidden`, `tags`) before
+//! The reply follows a member of a reference server 9.0.4 replica set field by field: `compression`
+//! and `helloOk` first, then the set, the member's attributes (`passive`, `hidden`, `tags`) before
 //! `me`, `electionId` only on the primary, `lastWrite`, the limits, `minWireVersion` before
 //! `maxWireVersion` and `readOnly`. Hidden members are in neither `hosts` nor `passives`, and
-//! members with priority 0 go to `passives`. `loadBalanced` adds nothing, as on a `refnode` that
-//! is not behind a load balancer.
+//! members with priority 0 go to `passives`. `loadBalanced` adds nothing, as on a reference replica
+//! set member that is not behind a load balancer.
 
 use teseladb_bson::{Document, Value};
 
@@ -14,7 +14,7 @@ use teseladb_bson::{Document, Value};
 const MAX_PRIORITY: f64 = 1000.0;
 /// First bytes of an `electionId`: the term follows as a big-endian 64-bit integer.
 const ELECTION_ID_PREFIX: [u8; 4] = [0x7f, 0xff, 0xff, 0xff];
-/// `settings.heartbeatIntervalMillis` (RefDb's default).
+/// `settings.heartbeatIntervalMillis` (the reference server's default).
 const HEARTBEAT_INTERVAL_MS: i32 = 2000;
 /// `settings.heartbeatTimeoutSecs`.
 const HEARTBEAT_TIMEOUT_SECS: i32 = 10;
@@ -23,14 +23,14 @@ const ELECTION_TIMEOUT_MS: i32 = 10_000;
 /// `settings.catchUpTakeoverDelayMillis`.
 const CATCH_UP_TAKEOVER_DELAY_MS: i32 = 30_000;
 
-/// A whole number as RefDb writes a configuration's version: an int when it fits in 32 bits,
-/// a long otherwise.
+/// A whole number as the reference server writes a configuration's version: an int when it fits in
+/// 32 bits, a long otherwise.
 pub fn whole_number(n: i64) -> Value {
     i32::try_from(n).map_or(Value::Int64(n), Value::Int32)
 }
 
-/// A priority as RefDb writes it: a whole number as a 32-bit integer (a member's priority is
-/// within 0 and [`MAX_PRIORITY`], checked when the set is made).
+/// A priority as the reference server writes it: a whole number as a 32-bit integer (a member's
+/// priority is within 0 and [`MAX_PRIORITY`], checked when the set is made).
 fn priority_value(p: f64) -> Value {
     if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
 }
@@ -88,9 +88,9 @@ pub struct HelloContext {
 /// How the cluster shows itself to the drivers (`topologyPresentation.mode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PresentationMode {
-    /// As a `refrouter` (D-006), the default.
+    /// As a reference router (D-006), the default.
     #[default]
-    RefRouter,
+    Router,
     /// As a replica set (D-031).
     ReplicaSet,
 }
@@ -99,14 +99,14 @@ impl PresentationMode {
     /// The name in `setClusterParameter` and `teseladb admin topology set`.
     pub fn name(self) -> &'static str {
         match self {
-            PresentationMode::RefRouter => teseladb_names::ROUTER,
+            PresentationMode::Router => teseladb_names::ROUTER,
             PresentationMode::ReplicaSet => "replicaset",
         }
     }
 
     /// The mode called `name`.
     pub fn from_name(name: &str) -> Option<PresentationMode> {
-        [PresentationMode::RefRouter, PresentationMode::ReplicaSet]
+        [PresentationMode::Router, PresentationMode::ReplicaSet]
             .into_iter()
             .find(|m| m.name() == name)
     }
@@ -123,7 +123,7 @@ pub struct Member {
 }
 
 impl Member {
-    /// A voting member with priority 1, as RefDb's defaults.
+    /// A voting member with priority 1, as the reference server's defaults.
     pub fn new(host: impl Into<String>) -> Member {
         Member { host: host.into(), priority: 1.0, votes: 1, hidden: false, tags: Vec::new() }
     }
@@ -369,7 +369,7 @@ impl ReplicaSet {
         Ok(i)
     }
 
-    /// `electionId`: `7fffffff` and the term, as RefDb builds it.
+    /// `electionId`: `7fffffff` and the term, as the reference server builds it.
     pub fn election_id(&self) -> [u8; 12] {
         let mut id = [0u8; 12];
         id[..4].copy_from_slice(&ELECTION_ID_PREFIX);
@@ -409,10 +409,10 @@ impl ReplicaSet {
         Some(self.with_primary(next, self.set_version + 1))
     }
 
-    /// Priority takeover (as a member of RefDb calls an election when it has a higher priority
-    /// than the primary and is caught up, measured on 9.0.4 on 02-11-2026): the live electable
-    /// member with the highest priority, above the primary's, becomes primary with a new term;
-    /// `None` if there is none.
+    /// Priority takeover (as a member of the reference server calls an election when it has a
+    /// higher priority than the primary and is caught up, measured on 9.0.4 on 02-11-2026): the
+    /// live electable member with the highest priority, above the primary's, becomes primary with a
+    /// new term; `None` if there is none.
     pub fn takeover(&self, alive: &dyn Fn(&str) -> bool) -> Option<ReplicaSet> {
         let current = self.primary?;
         let best = self.candidate(alive, Some(current))?;
@@ -441,8 +441,9 @@ impl ReplicaSet {
             .collect()
     }
 
-    /// The configuration as `replSetGetConfig` and `local.system.replset` give it (measured on
-    /// RefDb 9.0.4): the settings of RefDb's defaults, `replicaSetId` the cluster's.
+    /// The configuration as `replSetGetConfig` and `local.system.replset` give it (measured on the
+    /// reference server 9.0.4): the settings of the reference server's defaults, `replicaSetId` the
+    /// cluster's.
     pub fn config_document(&self, replica_set_id: [u8; 12]) -> Document {
         let members: Vec<Value> = self
             .members
@@ -507,8 +508,8 @@ impl ReplicaSet {
             d.push("passives", passives);
         }
         d.push("setName", self.set_name.as_str());
-        // RefDb 9.0.4 gives `hello` the version's low 32 bits as an int (measured with version
-        // 5000000000, which `hello` shows as 705032704).
+        // The reference server 9.0.4 gives `hello` the version's low 32 bits as an int (measured
+        // with version 5000000000, which `hello` shows as 705032704).
         d.push("setVersion", self.set_version as i32);
         d.push(if ctx.legacy { "ismaster" } else { "isWritablePrimary" }, is_primary);
         d.push("secondary", !is_primary && !self.recovering.contains(&me.0));

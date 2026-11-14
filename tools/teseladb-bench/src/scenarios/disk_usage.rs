@@ -1,8 +1,8 @@
-//! `disk-usage` (012 FR-009): bytes on disk per document against BSON, an encoding that carries
-//! the name and type of every field in every document (what RefDb keeps per document before its
-//! block compression). A node of one core on the real disk (`FileDisk`, in `--data` or a temporary
-//! folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire protocol, with
-//! small memtables so that the documents reach the LSM's files. It reports:
+//! `disk-usage` (012 FR-009): bytes on disk per document against BSON, an encoding that carries the
+//! name and type of every field in every document (what the reference server keeps per document
+//! before its block compression). A node of one core on the real disk (`FileDisk`, in `--data` or a
+//! temporary folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire
+//! protocol, with small memtables so that the documents reach the LSM's files. It reports:
 //! - `disk_usage.bson_per_doc`: BSON bytes per document;
 //! - `disk_usage.sst_per_doc`: bytes of the LSM's files per document;
 //! - `disk_usage.total_per_doc`: bytes of the whole data directory (log included) per document;

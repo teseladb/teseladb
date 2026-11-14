@@ -204,7 +204,7 @@ fn reads_of_the_node_become_their_tools_answers() {
     let out = ok_call(vec![("getLog", logs)], teseladb_names::MCP_TOOL_LOGS, r#"{"limit":2}"#);
     let shown = format!("{:?}", out.structured);
     assert!(shown.contains("\"three\"") && !shown.contains("\"one\""), "{shown}");
-    let out = ok_call(vec![("getLog", d(r#"{"ok":1.0}"#))], "refdb-logs", "{}");
+    let out = ok_call(vec![("getLog", d(r#"{"ok":1.0}"#))], teseladb_names::MCP_TOOL_LOGS, "{}");
     assert!(out.summary.contains('0'), "{}", out.summary);
     // `collection-indexes` keeps the classic ones when `$listSearchIndexes` fails.
     let fail = d(r#"{"ok":0.0,"errmsg":"no search"}"#);

@@ -1,5 +1,5 @@
 //! Read preferences (007 FR-013): the five modes, `maxStalenessSeconds`, tag sets and `hedge`, with
-//! the codes, messages and order of checks of a refrouter 9.0.4 (measured with `find` and
+//! the codes, messages and order of checks of a reference router 9.0.4 (measured with `find` and
 //! `$readPreference`), and the order in which a read tries the replicas of its range.
 
 use teseladb_router::read_pref::{
@@ -61,7 +61,8 @@ fn the_first_tag_set_that_matches_a_replica_chooses() {
     // No set matches: none of those replicas, but the leader still for `secondaryPreferred`.
     let none = new("secondaryPreferred", None, vec![set(&[("dc", "x")])]).unwrap();
     assert_eq!(order(&none), [1]);
-    // Every pair of a set has to match; a set RefDb takes but no node's tags can have matches none.
+    // Every pair of a set has to match; a set the reference server takes but no node's tags can have
+    // matches none.
     let both = new("secondary", None, vec![set(&[("dc", "east"), ("rack", "r1")])]).unwrap();
     assert_eq!(order(&both), Vec::<u64>::new());
     let never = new("nearest", None, vec![None, set(&[("dc", "west")])]).unwrap();
@@ -69,7 +70,7 @@ fn the_first_tag_set_that_matches_a_replica_chooses() {
 }
 
 #[test]
-fn bad_preferences_get_the_refrouter_codes_and_messages_in_its_order() {
+fn bad_preferences_get_the_reference_router_codes_and_messages_in_its_order() {
     let p = new("secondary", Some(90.5), Vec::new()).unwrap();
     assert_eq!(p.max_staleness_ms, Some(90_500));
     // 0 is no limit; a negative value is refused, -1 too.
@@ -115,7 +116,7 @@ fn bad_preferences_get_the_refrouter_codes_and_messages_in_its_order() {
 }
 
 #[test]
-fn a_preference_is_described_as_a_refrouter_writes_it() {
+fn a_preference_is_described_as_a_reference_router_writes_it() {
     let plain = new("secondary", None, Vec::new()).unwrap();
     assert_eq!(plain.describe(), r#"{ mode: "secondary" }"#);
     let full = new("nearest", Some(90.5), vec![set(&[("dc", "x"), ("r", "1")]), set(&[])]).unwrap();

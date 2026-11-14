@@ -79,9 +79,9 @@ pub const TXN_RECOVERY: &str = "txn_recovery";
 const RECOVERY_RACE: f64 = 0.1;
 /// How often the reaper reads the records (008 FR-007 and record GC), in the run's time.
 const REAP_EVERY: Nanos = Nanos::from_millis(500);
-/// How long a client transaction's record stays after its last activity: RefDb's 30 minutes
-/// would outlast a run, so the reaper also removes records by age within it; most go earlier,
-/// once their session's next transaction exists. The checkers run with them gone.
+/// How long a client transaction's record stays after its last activity: the reference server's 30
+/// minutes would outlast a run, so the reaper also removes records by age within it; most go
+/// earlier, once their session's next transaction exists. The checkers run with them gone.
 const RECORD_TTL_MS: u64 = 10_000;
 /// How far the reaper's clock may be from the run's real time when it judges a record's age: the
 /// heavy plan jumps clocks by up to 2 s.
@@ -272,7 +272,7 @@ pub struct TxnDriver {
     reaper: Reaper,
     next_reap: Option<Nanos>,
     /// Transactions whose records the reaper removed: a recovery after that finds none and
-    /// answers as for a number the session never began, as a `refrouter` does once the session
+    /// answers as for a number the session never began, as a reference router does once the session
     /// expired, so the checker leaves those recoveries out.
     forgotten: std::collections::BTreeSet<teseladb_range::intents::TxnId>,
     /// When each transaction began and, if it did, ended; and each session's last number.
@@ -1113,7 +1113,7 @@ impl TxnDriver {
                 let owner = *owner;
                 self.recoveries.remove(&id);
                 // A record removed by a rule that allows it is found by no recovery after: it
-                // answers «unknown», as a `refrouter` does once the session expired.
+                // answers «unknown», as a reference router does once the session expired.
                 let gone = self.forgotten.contains(&client_txn_id(owner.0, owner.1));
                 if !(gone && d == Decision::Unknown) {
                     self.recovered.insert(owner, d);

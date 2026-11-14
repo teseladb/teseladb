@@ -17,8 +17,8 @@ pub fn current(node: Hlc, gossip: Option<Hlc>) -> Hlc {
     gossip.map_or(node, |g| node.max(g))
 }
 
-/// Whether a time a client asks for is ahead of the cluster time `current`: RefDb refuses it
-/// with `InvalidOptions` (measured on a `refrouter` 9.0.4).
+/// Whether a time a client asks for is ahead of the cluster time `current`: the reference server
+/// refuses it with `InvalidOptions` (measured on a reference router 9.0.4).
 pub fn ahead(asked: Hlc, current: Hlc) -> bool {
     asked > current
 }

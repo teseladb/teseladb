@@ -1,5 +1,5 @@
-//! Capped collections on a range (015 T007, FR-003): RefDb's limits, the state in its key, an
-//! insert that deletes the oldest documents in the same write.
+//! Capped collections on a range (015 T007, FR-003): the reference server's limits, the state in
+//! its key, an insert that deletes the oldest documents in the same write.
 
 use teseladb_range::capped::{
     BAD_SIZE_CODE, CappedError, CappedLimits, CappedState, ID_INDEX, MAX_CAPPED_SIZE, STATE_INDEX,
@@ -12,7 +12,7 @@ fn limits(size: u64, max: Option<u64>) -> CappedLimits {
 
 #[test]
 fn size_is_used_as_given_and_max_of_zero_or_less_is_no_limit() {
-    // Measured on refnode 7.0.45 and 9.0.4: `size` is used as given, without rounding.
+    // Measured on the reference server 7.0.45 and 9.0.4: `size` is used as given, without rounding.
     assert_eq!(CappedLimits::new(1, 0), Ok(limits(1, None)));
     assert_eq!(CappedLimits::new(257, -3), Ok(limits(257, None)));
     assert_eq!(CappedLimits::new(100_000, 500), Ok(limits(100_000, Some(500))));
@@ -110,8 +110,8 @@ fn too_few_oldest_documents_are_refused() {
 
 #[test]
 fn an_update_may_shrink_or_grow_and_the_next_insert_evicts_the_excess() {
-    // Measured on refnode 7.0.45: an update that makes a document larger is accepted even past
-    // `size`, and the next insert evicts the oldest documents until the collection fits.
+    // Measured on the reference server 7.0.45: an update that makes a document larger is accepted
+    // even past `size`, and the next insert evicts the oldest documents until the collection fits.
     let s = CappedState { bytes: 300, docs: 3, next: 3 };
     assert_eq!(plan_update(s, 100, 60).bytes, 260);
     let grown = plan_update(s, 100, 400);

@@ -3,8 +3,8 @@
 //! it is proposed. A read at t waits for the latches of the keys it covers with a mark at or below
 //! t, so no version shows up later below a mark already read; a `local` or `available` read waits
 //! for every latch of its keys (DV-010), unless it chose its own mark and no write of its keys was
-//! answered before being applied (`w: 1` and `w: <n>`, D-034): then it reads just below the
-//! lowest mark in flight, where everything is applied, as a RefDb primary reads past a write it
+//! answered before being applied (`w: 1` and `w: <n>`, D-034): then it reads just below the lowest
+//! mark in flight, where everything is applied, as a reference server primary reads past a write it
 //! has not applied yet. A latch without a mark yet does not hold a read back: the read enters the
 //! read cache when it checks the latches, so that write is proposed above it.
 //!
