@@ -15,3 +15,5 @@ __pycache__/
 /cdk/cdk.context.json
 # Temporary files of a merge driver
 .merge_file_*
+# Build folders of separate lint and test runs
+/target-*/
