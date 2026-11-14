@@ -1,7 +1,7 @@
-//! Encoding that keeps RefDb's order in the bytes (FR-008 to FR-010): a class byte per type class
-//! and a content whose byte order is the order of FR-005 to FR-007. Every encoding is
-//! self-delimiting, so several fields concatenate without ambiguity and a descending field is its
-//! bytes inverted.
+//! Encoding that keeps the reference server's order in the bytes (FR-008 to FR-010): a class byte
+//! per type class and a content whose byte order is the order of FR-005 to FR-007. Every encoding
+//! is self-delimiting, so several fields concatenate without ambiguity and a descending field is
+//! its bytes inverted.
 //!
 //! - Numbers, one class for the four types: a sub-class (NaN, −∞, negative, zero, positive, +∞)
 //!   and, for the finite ones, the decimal exponent and the exact digits two per byte, ending in

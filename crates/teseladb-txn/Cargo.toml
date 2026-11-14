@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-txn"
 version = "0.1.0"
-description = "TeselaDB's distributed transactions: the coordinator of a transaction over its ranges, RefDb's transaction semantics and the reaper of abandoned transactions."
+description = "TeselaDB's distributed transactions: the coordinator of a transaction over its ranges, the reference server's transaction semantics and the reaper of abandoned transactions."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

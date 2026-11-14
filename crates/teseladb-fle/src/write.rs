@@ -1,6 +1,6 @@
-//! Writes with Queryable Encryption payloads (FR-003): each insert and update payload of an
-//! indexed field becomes the indexed value the collection keeps, one new ESC position and one ECOC
-//! entry per tag, and its tags in `__safeContent__` (measured on a `refnode` 9.0.4).
+//! Writes with Queryable Encryption payloads (FR-003): each insert and update payload of an indexed
+//! field becomes the indexed value the collection keeps, one new ESC position and one ECOC entry
+//! per tag, and its tags in `__safeContent__` (measured on a reference replica set member 9.0.4).
 
 use teseladb_bson::types as t;
 use teseladb_bson::{Document, Value};
@@ -58,7 +58,7 @@ impl<F: FnMut() -> [u8; 16]> Ivs for F {
     }
 }
 
-/// A UUID as RefDb writes it in messages.
+/// A UUID as the reference server writes it in messages.
 pub fn uuid_text(b: &[u8; 16]) -> String {
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])

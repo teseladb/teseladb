@@ -1,10 +1,10 @@
-//! The catalog events of a stream (014 FR-002, FR-014): where they go in the merge, which of
-//! them a stream shows, which end it (`invalidate`) and what `collMod` of an index describes. The
-//! catalog changes come from Group 0 with the mark of their entry and their position in it; a
-//! `refrouter` 9.0.4 shows `drop`, `rename` and `dropDatabase` to every stream and the other types
-//! only with `showExpandedEvents`; the `drop` or `rename` of a watched collection and the
-//! `dropDatabase` of a watched database are followed by an `invalidate` that closes the cursor,
-//! with the same place in the merge (measured on 01-11).
+//! The catalog events of a stream (014 FR-002, FR-014): where they go in the merge, which of them a
+//! stream shows, which end it (`invalidate`) and what `collMod` of an index describes. The catalog
+//! changes come from Group 0 with the mark of their entry and their position in it; a reference
+//! router 9.0.4 shows `drop`, `rename` and `dropDatabase` to every stream and the other types only
+//! with `showExpandedEvents`; the `drop` or `rename` of a watched collection and the `dropDatabase`
+//! of a watched database are followed by an `invalidate` that closes the cursor, with the same
+//! place in the merge (measured on 01-11).
 
 use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;

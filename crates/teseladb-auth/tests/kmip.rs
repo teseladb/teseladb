@@ -1,7 +1,7 @@
-//! KMIP messages (013 FR-028) against the bytes RefDb Enterprise 9.0.4 and a KMIP server
-//! exchanged on 31-10-2026 (`tests/fixtures/kmip/`): the requests come out byte for byte as
-//! `refnode` sends them, the answers read as the server gave them, and damaged messages are
-//! refused.
+//! KMIP messages (013 FR-028) against the bytes the reference enterprise server 9.0.4 and a KMIP
+//! server exchanged on 31-10-2026 (`tests/fixtures/kmip/`): the requests come out byte for byte as
+//! the reference server sends them, the answers read as the server gave them, and damaged messages
+//! are refused.
 
 use teseladb_auth::kmip::{
     ACTIVE, Answer, HEADER_LEN, Item, KmipError, Request, V1_0, V1_2, Value, message_len, tag,
@@ -18,7 +18,7 @@ fn fixture(name: &str) -> Vec<u8> {
 const KEY_ID: &str = "1";
 
 #[test]
-fn requests_are_the_bytes_refnode_sends() {
+fn requests_are_the_bytes_the_reference_server_sends() {
     let id = KEY_ID.to_owned();
     assert_eq!(Request::CreateKey.encode(V1_2), fixture("create-request"));
     assert_eq!(Request::Get(id.clone()).encode(V1_2), fixture("get-request"));
@@ -236,9 +236,10 @@ fn every_type_round_trips_and_damage_is_refused() {
 }
 
 /// The audit log's key wrapped by the KMIP server (013 T042): Encrypt with the identifier and the
-/// data alone, as `refnode` 9.0.4 sent it (measured with a responder that logs the request).
+/// data alone, as the reference server 9.0.4 sent it (measured with a responder that logs the
+/// request).
 #[test]
-fn the_audit_key_goes_to_encrypt_as_refnode_sends_it() {
+fn the_audit_key_goes_to_encrypt_as_the_reference_server_sends_it() {
     let req = fixture("encrypt-request");
     let (msg, _) = Item::decode(&req).unwrap();
     let payload = msg.child(tag::BATCH_ITEM).unwrap().child(tag::REQUEST_PAYLOAD).unwrap();

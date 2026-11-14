@@ -1,9 +1,9 @@
 //! `compactStructuredEncryptionData` and `cleanupStructuredEncryptionData` (FR-005): the ECOC
-//! entries name, encrypted with each field's ECOC token, the values written since the last run;
-//! for each one compaction replaces its new ESC positions with one anchor, and cleanup replaces
-//! its positions and anchors with the null anchor. Range fields get padding anchors so that the
-//! number of anchors does not tell how many edges the values shared. Measured on a `refnode` 9.0.4
-//! with known keys.
+//! entries name, encrypted with each field's ECOC token, the values written since the last run; for
+//! each one compaction replaces its new ESC positions with one anchor, and cleanup replaces its
+//! positions and anchors with the null anchor. Range fields get padding anchors so that the number
+//! of anchors does not tell how many edges the values shared. Measured on a reference replica set
+//! member 9.0.4 with known keys.
 
 use teseladb_bson::types as t;
 use teseladb_bson::{RawDoc, RawValue};
@@ -17,7 +17,8 @@ use crate::tokens::{self, Token};
 
 /// The anchor padding factor of a command that gives none.
 pub const DEFAULT_PADDING_FACTOR: f64 = 1.0;
-/// The default trim factor of a range field (librefcrypt's `mc_FLERangeTrimFactorDefault`).
+/// The default trim factor of a range field (the reference encryption library's
+/// `mc_FLERangeTrimFactorDefault`).
 const DEFAULT_TRIM_FACTOR: i64 = 6;
 
 /// The compaction tokens of one field.
@@ -132,7 +133,8 @@ pub struct EcocEntry<'a> {
 }
 
 /// The edges each value of range field `path` has: the root (without trimming), the leaf and the
-/// prefixes at the levels the sparsity keeps from the trim factor (librefcrypt's `mc_edges_new`).
+/// prefixes at the levels the sparsity keeps from the trim factor (the reference encryption
+/// library's `mc_edges_new`).
 fn edges_per_value(config: &EncryptedFieldConfig, path: &str) -> Option<u64> {
     let q = config.field(path)?.query().filter(|q| q.kind == QueryType::Range)?;
     let ty = config.field(path)?.bson_type.as_ref()?.0;

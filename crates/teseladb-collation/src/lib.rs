@@ -1,7 +1,7 @@
 //! TeselaDB's collation (003 FR-016 to FR-018): the Unicode Collation Algorithm (UTS #10) with the
-//! CLDR root collation of ICU 57.1, the version RefDb 9.0 bundles (D-043): NFD, collation elements
-//! with contractions, contexts and implicit weights, the tailorings of the locales RefDb accepts,
-//! and sort keys whose bytes compare as the strings do.
+//! CLDR root collation of ICU 57.1, the version the reference server 9.0 bundles (D-043): NFD,
+//! collation elements with contractions, contexts and implicit weights, the tailorings of the
+//! locales the reference server accepts, and sort keys whose bytes compare as the strings do.
 //!
 //! ```
 //! use teseladb_collation::{Collation, Strength};
@@ -46,7 +46,7 @@ pub use spec::{CollationSpec, ICU_VERSION, ParsedCollation, SpecError, parse_col
 pub use tailored::Tailored;
 pub use tailoring::{LocaleError, TailoringId, locale_model};
 
-/// A collation: RefDb's options and the locale's tailoring.
+/// A collation: the reference server's options and the locale's tailoring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Collation {
     /// Levels compared (`strength`).
@@ -70,7 +70,7 @@ pub struct Collation {
 }
 
 impl Default for Collation {
-    /// RefDb's defaults for the root collation.
+    /// The reference server's defaults for the root collation.
     fn default() -> Collation {
         Collation {
             strength: Strength::Tertiary,
@@ -87,7 +87,8 @@ impl Default for Collation {
 }
 
 impl Collation {
-    /// The collation of a `locale` RefDb accepts, with the defaults its tailoring sets.
+    /// The collation of a `locale` the reference server accepts, with the defaults its tailoring
+    /// sets.
     pub fn for_locale(locale: &str) -> Result<Collation, LocaleError> {
         let tailoring = tailoring::tailoring_for(locale)?;
         let mut c = Collation { tailoring, ..Collation::default() };

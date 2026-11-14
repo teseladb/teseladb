@@ -1,6 +1,6 @@
 //! Privileges (FR-010): a resource and the actions allowed on it, read from and written to the
-//! documents of `createRole`, `rolesInfo` and `admin.system.roles`, with RefDb 9.0.4's checks
-//! and messages (measured), and the privileges of the built-in roles of a database.
+//! documents of `createRole`, `rolesInfo` and `admin.system.roles`, with the reference server
+//! 9.0.4's checks and messages (measured), and the privileges of the built-in roles of a database.
 
 use teseladb_bson::{Document, Value};
 
@@ -45,7 +45,7 @@ pub enum Resource {
     },
 }
 
-/// A resource and its actions, in RefDb's order and without repeats.
+/// A resource and its actions, in the reference server's order and without repeats.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Privilege {
     /// What it applies to.
@@ -133,7 +133,7 @@ impl Resource {
     /// its own database.
     fn allowed_for(&self, db: &str) -> bool {
         // A `system_buckets` resource only in `admin`, also on the role's own database
-        // (measured on a `refnode` 9.0.4 on 02-11-2026: 49).
+        // (measured on a reference replica set member 9.0.4 on 02-11-2026: 49).
         db == ADMIN_DB || matches!(self, Resource::Ns { db: d, .. } if d == db)
     }
 }
@@ -224,8 +224,8 @@ pub fn of_tenant(privs: Vec<Privilege>) -> Vec<Privilege> {
         .collect()
 }
 
-/// Adds `more` to `set`, merging the actions of privileges on the same resource, as RefDb
-/// merges them when it lists inherited privileges.
+/// Adds `more` to `set`, merging the actions of privileges on the same resource, as the reference
+/// server merges them when it lists inherited privileges.
 pub fn merge(set: &mut Vec<Privilege>, more: &[Privilege]) {
     for p in more {
         match set.iter_mut().find(|q| q.resource == p.resource) {

@@ -1,9 +1,9 @@
-//! RefDb's collation document (FR-017): read as its IDL `Collation` struct reads it (strict,
-//! fields in document order, `null` and `undefined` as absent but in `backwards`), then as
-//! `CollatorFactoryICU::makeFromBSON`: `simple` is the binary order, the `locale` must be one
-//! RefDb accepts, each absent option takes the locale's default, the version must be ICU's,
-//! and two combinations are refused (`backwards` at strength 1; `caseFirst` without `caseLevel`
-//! at strength 1 or 2). Errors carry RefDb's codes.
+//! The reference server's collation document (FR-017): read as its IDL `Collation` struct reads it
+//! (strict, fields in document order, `null` and `undefined` as absent but in `backwards`), then as
+//! `CollatorFactoryICU::makeFromBSON`: `simple` is the binary order, the `locale` must be one the
+//! reference server accepts, each absent option takes the locale's default, the version must be
+//! ICU's, and two combinations are refused (`backwards` at strength 1; `caseFirst` without
+//! `caseLevel` at strength 1 or 2). Errors carry the reference server's codes.
 
 use teseladb_bson::{Document, NumberParts, RawDoc, RawValue, number_parts};
 
@@ -11,13 +11,13 @@ use crate::options::{CaseFirst, MaxVariable};
 use crate::sortkey::{Alternate, Strength};
 use crate::{Collation, LocaleError};
 
-/// The ICU version RefDb 9.0 reports in `version` (D-043).
+/// The ICU version the reference server 9.0 reports in `version` (D-043).
 pub const ICU_VERSION: &str = "57.1";
 
-/// A collation document RefDb refuses: its error code, code name and message.
+/// A collation document the reference server refuses: its error code, code name and message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecError {
-    /// RefDb's error code.
+    /// The reference server's error code.
     pub code: i32,
     /// Its name.
     pub code_name: &'static str,
@@ -41,7 +41,8 @@ fn bad_value(message: String) -> SpecError {
     error(2, "BadValue", message)
 }
 
-/// A complete collation, as RefDb reports it (`listIndexes`, `listCollections`, `explain`).
+/// A complete collation, as the reference server reports it (`listIndexes`, `listCollections`,
+/// `explain`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollationSpec {
     /// `locale`
@@ -76,7 +77,7 @@ pub enum ParsedCollation {
 }
 
 impl CollationSpec {
-    /// The document RefDb reports, fields in its order.
+    /// The document the reference server reports, fields in its order.
     pub fn to_document(&self) -> Document {
         let case_first = match self.case_first {
             CaseFirst::Off => "off",
@@ -120,7 +121,7 @@ struct Fields {
     version: Option<String>,
 }
 
-/// RefDb's name of a BSON type, for messages.
+/// The reference server's name of a BSON type, for messages.
 fn type_name(v: &RawValue<'_>) -> &'static str {
     match v {
         RawValue::Double(_) => "double",
@@ -273,10 +274,11 @@ fn strength(n: i32) -> Option<Strength> {
     })
 }
 
-/// Reads a collation document as RefDb does.
+/// Reads a collation document as the reference server does.
 pub fn parse_collation(doc: RawDoc<'_>) -> Result<ParsedCollation, SpecError> {
     let f = fields(doc)?;
-    // As RefDb writes the specification in its messages (measured on a `refrouter` 9.0.4).
+    // As the reference server writes the specification in its messages (measured on a reference
+    // router 9.0.4).
     let spec_text = || teseladb_bson::shell::shell_doc(doc);
     let Some(locale) = f.locale else {
         let message = "BSON field 'collation.locale' is missing but a required field".into();
@@ -294,7 +296,8 @@ pub fn parse_collation(doc: RawDoc<'_>) -> Result<ParsedCollation, SpecError> {
         let mean = suggestion.map(|s| format!(". Did you mean '{s}'?")).unwrap_or_default();
         bad_value(format!("Field 'locale' is invalid in: {}{mean}", spec_text()))
     })?;
-    // RefDb lets strength 0 through its parser and then cannot use it (DV): refused here.
+    // The reference server lets strength 0 through its parser and then cannot use it (DV): refused
+    // here.
     let strength = match f.strength {
         None => base.strength,
         Some(n) => strength(n)

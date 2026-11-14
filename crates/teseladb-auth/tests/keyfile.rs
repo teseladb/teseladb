@@ -1,4 +1,4 @@
-//! Key files as `refnode` 9.0.4 reads them (013 T046, FR-034; measured on 31-10-2026).
+//! Key files as the reference server 9.0.4 reads them (013 T046, FR-034; measured on 31-10-2026).
 
 use teseladb_auth::keyfile::{KeyFileError, parse};
 

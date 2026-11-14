@@ -203,9 +203,9 @@ fn a_p521_root_with_ecdsa_sha512_validates_and_its_key_reads() {
     assert_eq!(again.expect("the value is present").public_key(), root.public_key);
 }
 
-/// A certificate signed with SHA-1 is refused as OpenSSL 3 refuses it at security level 1
-/// (`CA signature digest algorithm too weak`, measured on the `ref:9.0.4` image), unless the caller
-/// allows weak digests (the NIST PKITS vectors are signed with SHA-1).
+/// A certificate signed with SHA-1 is refused as OpenSSL 3 refuses it at security level 1 (`CA
+/// signature digest algorithm too weak`, measured on the 9.0.4 image of the reference server), unless
+/// the caller allows weak digests (the NIST PKITS vectors are signed with SHA-1).
 #[test]
 fn a_certificate_signed_with_sha1_is_refused() {
     let leaf = cert("sha1-leaf.pem");

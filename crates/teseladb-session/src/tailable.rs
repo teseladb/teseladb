@@ -1,11 +1,11 @@
-//! Tailable cursors of capped collections (015 FR-004, T008), as a `refrouter` 9.0.4 answers them
-//! (measured on 31-10-2026): the cursor keeps the key of the last document it read and, on each
-//! `getMore`, reads on from there. RefDb reads a document only when the batch needs it, so the
-//! cursor's position is the last document it returned, or past the documents the filter left
-//! out once it reached the newest one, never a document read ahead into its buffer; it stays open with an empty batch when nothing new came, and
-//! with `awaitData` the `getMore` waits for new documents up to its `maxTimeMS` (one second
-//! without it). When the document it last read is gone, the cursor dies with
-//! `CappedPositionLost`.
+//! Tailable cursors of capped collections (015 FR-004, T008), as a reference router 9.0.4 answers
+//! them (measured on 31-10-2026): the cursor keeps the key of the last document it read and, on
+//! each `getMore`, reads on from there. The reference server reads a document only when the batch
+//! needs it, so the cursor's position is the last document it returned, or past the documents the
+//! filter left out once it reached the newest one, never a document read ahead into its buffer; it
+//! stays open with an empty batch when nothing new came, and with `awaitData` the `getMore` waits
+//! for new documents up to its `maxTimeMS` (one second without it). When the document it last read
+//! is gone, the cursor dies with `CappedPositionLost`.
 
 /// How long a `getMore` of an `awaitData` cursor waits without `maxTimeMS`, in milliseconds
 /// (measured: 1 007 ms).
@@ -74,8 +74,8 @@ impl Tail {
 }
 
 /// The message of a `CappedPositionLost` for the document at record `record` (1 for the first
-/// document of the collection, as RefDb numbers its records): `newest` when it was the newest
-/// document (a deletion took it), otherwise an insert evicted it.
+/// document of the collection, as the reference server numbers its records): `newest` when it was
+/// the newest document (a deletion took it), otherwise an insert evicted it.
 pub fn lost_message(newest: bool, record: u64) -> String {
     match newest {
         true => format!(

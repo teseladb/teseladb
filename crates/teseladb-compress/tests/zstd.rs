@@ -125,7 +125,7 @@ fn frame_header_errors() {
     let mut s = hello.clone();
     s[4] |= 0x08;
     assert!(matches!(zstd::decompress(&s, LIMIT), Err(Error::Corrupt(_))));
-    // A dictionary id: RefDb never sends one.
+    // A dictionary id: the reference server never sends one.
     let s = [0x28, 0xb5, 0x2f, 0xfd, 0x21, 7, 5, 1, 0, 0];
     assert!(matches!(zstd::decompress(&s, LIMIT), Err(Error::Unsupported(_))));
     // Reserved block type.

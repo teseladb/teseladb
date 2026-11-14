@@ -1,9 +1,10 @@
-//! The client of the ranges (FR-017, contract `range-client-api.md`), sans-I/O: it starts from
-//! the range's descriptor in Group 0 (its replicas and leader hint, [`RangeClient::learn_range`]),
+//! The client of the ranges (FR-017, contract `range-client-api.md`), sans-I/O: it starts from the
+//! range's descriptor in Group 0 (its replicas and leader hint, [`RangeClient::learn_range`]),
 //! sends each request to the leader it knows for the range, follows the hint of a `NotLeader` or
-//! tries the range's next replica, and gives up after its attempts. A read is retried always; a write only when it is
-//! retryable (it carries its idempotence record, FR-011), because an answer after its proposal
-//! does not say whether the new leader committed the entry, as in RefDb's retryable writes.
+//! tries the range's next replica, and gives up after its attempts. A read is retried always; a
+//! write only when it is retryable (it carries its idempotence record, FR-011), because an answer
+//! after its proposal does not say whether the new leader committed the entry, as in the reference
+//! server's retryable writes.
 
 use std::collections::BTreeMap;
 

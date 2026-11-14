@@ -1,5 +1,5 @@
 //! LDAP search filters as text (RFC 4515), written as the BER of a `Filter` (RFC 4511, section
-//! 4.5.1), and the LDAP queries of RefDb's configuration (`userToDNMapping` and
+//! 4.5.1), and the LDAP queries of the reference server's configuration (`userToDNMapping` and
 //! `authz.queryTemplate`): `<base DN>?<attributes>?<scope>?<filter>`, the query part of an LDAP
 //! URL (RFC 4516), percent-encoded.
 
@@ -192,7 +192,7 @@ impl Scope {
     }
 }
 
-/// A search from RefDb's configuration.
+/// A search from the reference server's configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Query {
     /// Base DN.

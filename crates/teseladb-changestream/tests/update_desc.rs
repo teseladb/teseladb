@@ -1,5 +1,5 @@
-//! `updateDescription` (014 FR-009): the shape a `refrouter` 9.0.4 gives (measured on 31-10), and the
-//! bytes kept with the version read back.
+//! `updateDescription` (014 FR-009): the shape a reference router 9.0.4 gives (measured on 31-10),
+//! and the bytes kept with the version read back.
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::update_desc::{DescError, PathPart, UpdateDescription};
@@ -28,7 +28,7 @@ fn measured() -> UpdateDescription {
 }
 
 #[test]
-fn the_description_has_refdb_s_fields_and_the_paths_only_with_expanded_events() {
+fn the_description_has_the_reference_fields_and_the_paths_only_with_expanded_events() {
     let d = measured().to_document(true);
     assert_eq!(
         keys(&d),
@@ -42,7 +42,7 @@ fn the_description_has_refdb_s_fields_and_the_paths_only_with_expanded_events() 
     assert_eq!(t.get("newSize"), Some(&Value::Int32(2)));
     let Some(Value::Document(p)) = d.get("disambiguatedPaths") else { panic!("{d:?}") };
     assert_eq!(keys(p), ["o.0.x"]);
-    // With nothing ambiguous the paths are an empty document, as RefDb writes them.
+    // With nothing ambiguous the paths are an empty document, as the reference server writes them.
     let empty = UpdateDescription::default().to_document(true);
     assert_eq!(empty.get("disambiguatedPaths"), Some(&Value::Document(Document::new())));
 }

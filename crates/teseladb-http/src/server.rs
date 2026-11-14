@@ -46,7 +46,7 @@ pub struct Response {
 }
 
 impl Response {
-    /// The problem document of a status without a RefDb error (RFC 9457, section 4.2.1).
+    /// The problem document of a status without a reference server error (RFC 9457, section 4.2.1).
     #[must_use]
     pub fn problem(status: u16) -> Response {
         let body = format!(

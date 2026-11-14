@@ -1,6 +1,6 @@
 //! `ycsb-a` to `ycsb-f` (002 FR-018, FR-019): the YCSB workloads over the wire protocol against
-//! `--target` (TeselaDB or RefDb, with the same client) or against a local cluster. The load
-//! phase inserts `--records` records of ten fields of 100 bytes; the timed phase runs the
+//! `--target` (TeselaDB or the reference server, with the same client) or against a local cluster.
+//! The load phase inserts `--records` records of ten fields of 100 bytes; the timed phase runs the
 //! workload's mix with `--concurrency` connections, in a closed loop or at `--rate`.
 
 use teseladb_bson::{Document, Value};

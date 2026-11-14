@@ -1,6 +1,7 @@
-//! The tailorings of ICU 57.1 as RefDb 9.0 packages them: every bundle reads, every rule parses,
-//! every import points at a collation that exists, and a locale is accepted exactly when ICU's
-//! valid locale is the requested one (the cases of RefDb's `collator_factory_icu_test.cpp`).
+//! The tailorings of ICU 57.1 as the reference server 9.0 packages them: every bundle reads, every
+//! rule parses, every import points at a collation that exists, and a locale is accepted exactly
+//! when ICU's valid locale is the requested one (the cases of the reference server's
+//! `collator_factory_icu_test.cpp`).
 
 use std::path::Path;
 
@@ -14,8 +15,8 @@ fn icu() -> IcuCollations {
         .expect("ICU 57.1 data: run scripts/fetch-pinned.sh scripts/icu-coll.sha256")
 }
 
-/// The 109 locales of RefDb's `languages.txt`, the ones its locales test opens.
-const REFDB_LOCALES: &str = "af am ar as az be bg bn bo bs bs_Cyrl ca chr cs cy da de de_AT dsb dz ee el en \
+/// The 109 locales of the reference server's `languages.txt`, the ones its locales test opens.
+const REFERENCE_LOCALES: &str = "af am ar as az be bg bn bo bs bs_Cyrl ca chr cs cy da de de_AT dsb dz ee el en \
     en_US en_US_POSIX eo es et fa fa_AF fi fil fo fr fr_CA ga gl gu ha haw he hi hr hsb hu hy id ig is it ja ka \
     kk kl km kn ko kok ky lb lkt ln lo lt lv mk ml mn mr ms mt my nb ne nl nn om or pa pl ps pt ro ru se si sk sl \
     smn sq sr sr_Latn sv sw ta te th to tr ug uk ur vi wae yi yo zh zh_Hant zu";
@@ -49,10 +50,10 @@ fn every_tailoring_parses_and_its_imports_exist() {
 }
 
 #[test]
-fn the_locales_refdb_accepts() {
+fn the_locales_the_reference_accepts() {
     let icu = icu();
     let accepted = icu.accepted();
-    for base in REFDB_LOCALES.split_whitespace() {
+    for base in REFERENCE_LOCALES.split_whitespace() {
         assert!(accepted.iter().any(|a| a == base), "{base}");
     }
     for ok in [
@@ -71,7 +72,7 @@ fn the_locales_refdb_accepts() {
 }
 
 #[test]
-fn the_locales_refdb_refuses() {
+fn the_locales_the_reference_refuses() {
     let icu = icu();
     for bad in [
         "",
@@ -146,7 +147,7 @@ fn what_each_locale_opens() {
 }
 
 #[test]
-fn every_tailoring_refdb_accepts_builds() {
+fn every_tailoring_the_reference_accepts_builds() {
     use std::collections::BTreeSet;
     use teseladb_unicodegen::builder::Builder;
     use teseladb_unicodegen::root_elements::RootElements;

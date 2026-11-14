@@ -1,7 +1,7 @@
-//! Runtime audit configuration and the audit schema (013 T042, FR-031), against RefDb
-//! Enterprise 9.0.4 (measured on 31-10-2026): `auditLog.runtimeConfiguration` and its option
-//! errors, `auditLog.schema`, a filter and `auditAuthorizationSuccess` changed while the node
-//! runs, and `auditConfigure`, which every filter lets through.
+//! Runtime audit configuration and the audit schema (013 T042, FR-031), against the reference
+//! server Enterprise 9.0.4 (measured on 31-10-2026): `auditLog.runtimeConfiguration` and its option
+//! errors, `auditLog.schema`, a filter and `auditAuthorizationSuccess` changed while the node runs,
+//! and `auditConfigure`, which every filter lets through.
 
 use teseladb_auth::audit::{
     AuditError, AuditType, Auditor, Client, Config, Destination, Endpoint, Event, Options, Schema,
@@ -32,7 +32,7 @@ fn recorded(a: &Auditor, atype: AuditType) -> bool {
 }
 
 #[test]
-fn runtime_configuration_and_schema_options_follow_refdb() {
+fn runtime_configuration_and_schema_options_follow_the_reference() {
     let msg = |r: Result<Option<Config>, AuditError>| r.unwrap_err().0;
     // Without a destination, and with what the runtime configuration replaces.
     let none = Options { runtime_configuration: true, ..Options::default() };
@@ -55,15 +55,15 @@ fn runtime_configuration_and_schema_options_follow_refdb() {
         "setParameter.auditAuthorizationSuccess must not be configured when runtime audit configuration is enabled"
     );
     let on = console(|o| o.runtime_configuration = true).unwrap().unwrap();
-    assert!(on.runtime && on.schema == Schema::Ref);
-    // The schema: `ref` or `OCSF`, written exactly so.
+    assert!(on.runtime && on.schema == Schema::Native);
+    // The schema: the native name or `OCSF`, written exactly so.
     for bad in ["ocsf", "xyz"] {
         assert_eq!(msg(console(|o| o.schema = Some(bad))), teseladb_names::AUDIT_SCHEMA_ERROR);
     }
     assert_eq!(console(|o| o.schema = Some("OCSF")).unwrap().unwrap().schema, Schema::Ocsf);
     assert_eq!(
         console(|o| o.schema = Some(teseladb_names::AUDIT_SCHEMA_NATIVE)).unwrap().unwrap().schema,
-        Schema::Ref
+        Schema::Native
     );
     let schema_alone = Options { schema: Some("OCSF"), ..Options::default() };
     assert_eq!(
@@ -87,7 +87,7 @@ fn a_runtime_filter_replaces_the_old_one_and_lets_audit_configure_through() {
     assert!(recorded(&a, AuditType::AuditConfigure));
     assert!(a.records_auth_check(0));
     assert_eq!(a.config().filter_doc, Some(filter.clone()));
-    // A filter RefDb cannot use as an audit filter leaves the old one.
+    // A filter the reference server cannot use as an audit filter leaves the old one.
     let bad = Document::new().with("$where", "1");
     assert_eq!(
         a.configure(&bad, false, (6, 1)).unwrap_err().0,

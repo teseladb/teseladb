@@ -1,6 +1,6 @@
-//! Roles (FR-010): the built-in roles of RefDb 9.0 and the databases each one exists on, and
-//! the custom roles with the document `admin.system.roles` keeps for them (FR-030)
-//! (`rolesInfo` with `showBuiltinRoles` on a `refrouter` 9.0.4, measured on `admin`, `config`,
+//! Roles (FR-010): the built-in roles of the reference server 9.0 and the databases each one exists
+//! on, and the custom roles with the document `admin.system.roles` keeps for them (FR-030)
+//! (`rolesInfo` with `showBuiltinRoles` on a reference router 9.0.4, measured on `admin`, `config`,
 //! `test` and `$external`).
 
 use teseladb_bson::{Document, Value};
@@ -64,7 +64,7 @@ pub struct Role {
     pub restrictions: Option<Vec<Value>>,
 }
 
-/// A stored role document that RefDb would not use.
+/// A stored role document that the reference server would not use.
 pub type BadRoleDocument = crate::users::BadDocument;
 
 impl Role {
@@ -102,10 +102,10 @@ impl Role {
         d
     }
 
-    /// Reads a stored role as RefDb 9.0.4 does when it resolves the roles of a user
+    /// Reads a stored role as the reference server 9.0.4 does when it resolves the roles of a user
     /// (measured): missing `privileges` or `roles` are empty, a role name may be the string
-    /// `db.role`, unknown actions are left out; a field in the wrong form is the error RefDb
-    /// answers.
+    /// `db.role`, unknown actions are left out; a field in the wrong form is the error the
+    /// reference server answers.
     pub fn from_document(d: &Document) -> Result<Role, BadRoleDocument> {
         use crate::users::{BAD_VALUE, BadDocument, MISSING_FIELD, UNSUPPORTED_FORMAT};
         let text = |f: &str| match d.get(f) {
@@ -187,8 +187,8 @@ impl Role {
     }
 }
 
-/// A stored privilege without the actions RefDb does not know, which it leaves out when it
-/// resolves a role (measured: a privilege of only unknown actions is then empty).
+/// A stored privilege without the actions the reference server does not know, which it leaves out
+/// when it resolves a role (measured: a privilege of only unknown actions is then empty).
 fn known_actions(p: &Value) -> Value {
     let Value::Document(d) = p else { return p.clone() };
     let mut out = Document::new();

@@ -1,12 +1,12 @@
-//! The `param` document of each audit action type (013 FR-016), with the fields and order that
-//! RefDb Enterprise 9.0.4 writes (measured), and the arguments of an authorization check
+//! The `param` document of each audit action type (013 FR-016), with the fields and order that the
+//! reference enterprise server 9.0.4 writes (measured), and the arguments of an authorization check
 //! without passwords or document values.
 
 use teseladb_bson::{Document, Value};
 
 use crate::users::{RoleName, UserName};
 
-/// What RefDb writes in place of a password.
+/// What the reference server writes in place of a password.
 pub const PASSWORD_MASK: &str = "xxx";
 /// What TeselaDB writes in place of a value of the client's data (DV of 013 FR-016).
 pub const VALUE_MASK: &str = "###";
@@ -117,8 +117,8 @@ pub fn auth_check(command: &str, ns: &str, args: Option<&Document>) -> Document 
     }
 }
 
-/// The namespace RefDb names in `authCheck`: `db.<first value>` when the command's first value
-/// is a non-empty string, else the database.
+/// The namespace the reference server names in `authCheck`: `db.<first value>` when the command's
+/// first value is a non-empty string, else the database.
 pub fn auth_check_ns(db: &str, cmd: &Document) -> String {
     match cmd.iter().next() {
         Some((_, Value::String(s))) if !s.is_empty() => format!("{db}.{s}"),
@@ -265,7 +265,7 @@ pub fn database(db: &str) -> Document {
     Document::new().with("db", db)
 }
 
-/// Why a `logout` happened, as RefDb words it.
+/// Why a `logout` happened, as the reference server words it.
 pub const DISCONNECTED: &str = "Client has disconnected";
 
 /// `logout`: why, the users before and after, and when they logged in.

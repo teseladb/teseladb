@@ -1,5 +1,5 @@
-//! The five profiles of 002 FR-037, which TeselaDB and RefDb run the same way on the same
-//! machine, every write with `{w: "majority", j: true}` (FR-038): A (`profile-a`, YCSB A, half
+//! The five profiles of 002 FR-037, which TeselaDB and the reference server run the same way on the
+//! same machine, every write with `{w: "majority", j: true}` (FR-038): A (`profile-a`, YCSB A, half
 //! reads and half updates by `_id`), B (`profile-b`, YCSB B, 95 % reads), C (`profile-c`, inserts
 //! only, one in two alone and the rest in batches), D (`profile-d`, `$match`, `$group`, `$sort` and
 //! `$project` over `--records` documents, 100 million for the comparison) and E (`profile-e`, YCSB

@@ -165,9 +165,9 @@ fn a_damaged_meta_stops_the_stream() {
 }
 
 /// A transaction that writes a document several times gives one change per write, in their order,
-/// each with the document that write left (measured on a `refrouter` 9.0.4 on 01-11: insert, update
-/// and replace of one document, two updates of another and the deletion of the first, six events
-/// in the order of the statements).
+/// each with the document that write left (measured on a reference router 9.0.4 on 01-11: insert,
+/// update and replace of one document, two updates of another and the deletion of the first, six
+/// events in the order of the statements).
 #[test]
 fn a_transaction_gives_one_change_per_write_of_a_document() {
     let txn = TxnInfo { id: 5, lsid: 9, uid: [0; 32], txn_number: 3 };

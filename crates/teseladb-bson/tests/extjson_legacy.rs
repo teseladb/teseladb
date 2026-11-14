@@ -1,5 +1,6 @@
-//! The legacy strict JSON of RefDb's audit log, against what RefDb Enterprise
-//! 9.0.4 wrote with `--auditFormat JSON` for a `find` whose filter held one value of each type.
+//! The legacy strict JSON of the reference server's audit log, against what the reference
+//! enterprise server 9.0.4 wrote with `--auditFormat JSON` for a `find` whose filter held one value
+//! of each type.
 
 use teseladb_bson::{Decimal128, Document, RawDoc, Value, extjson};
 

@@ -1,6 +1,6 @@
-//! RefDb's collation document and options (003 FR-017, T026): the cases of RefDb's
-//! `collator_factory_icu_test.cpp` (branch `v9.0`) with their error codes, the defaults a locale
-//! brings, and what each option does to the order.
+//! The reference server's collation document and options (003 FR-017, T026): the cases of the
+//! reference server's `collator_factory_icu_test.cpp` (branch `v9.0`) with their error codes, the
+//! defaults a locale brings, and what each option does to the order.
 
 use std::cmp::Ordering::{Equal, Greater, Less};
 
@@ -119,7 +119,7 @@ fn every_option_and_strength_parses() {
 }
 
 #[test]
-fn documents_refdb_refuses_with_its_codes() {
+fn documents_the_reference_refuses_with_its_codes() {
     let s = |x: &str| Value::String(x.into());
     for (fields, expected) in [
         (vec![("caseLevel", s("garbage"))], 14),
@@ -159,7 +159,8 @@ fn documents_refdb_refuses_with_its_codes() {
     assert_eq!(code(&Document::new().with("locale", "en_US\0")), 2);
     let err = parse(&Document::new().with("locale", "sv_SE")).unwrap_err();
     assert!(err.message.ends_with("Did you mean 'sv'?"), "{}", err.message);
-    // The specification as RefDb writes it in its messages (measured on a `refrouter` 9.0.4).
+    // The specification as the reference server writes it in its messages (measured on a reference
+    // router 9.0.4).
     let shown = parse(&Document::new().with("locale", "xx").with("strength", 2)).unwrap_err();
     assert_eq!(shown.message, "Field 'locale' is invalid in: { locale: \"xx\", strength: 2 }");
     let bound = parse(&Document::new().with("locale", "es").with("strength", 9)).unwrap_err();
@@ -171,7 +172,7 @@ fn documents_refdb_refuses_with_its_codes() {
             .message
             .contains("Did you mean")
     );
-    // Combinations RefDb accepts.
+    // Combinations the reference server accepts.
     for fields in [
         vec![("backwards", true.into()), ("strength", 2.into())],
         vec![("caseFirst", s("lower")), ("strength", 3.into())],
@@ -188,7 +189,7 @@ fn cmp(fields: &[(&str, Value)], a: &str, b: &str) -> std::cmp::Ordering {
 
 #[test]
 fn what_each_option_does() {
-    // RefDb's comparison tests, one by one.
+    // The reference server's comparison tests, one by one.
     assert_eq!(cmp(&[("strength", 1.into())], "a", "á"), Equal);
     assert_eq!(cmp(&[("strength", 1.into())], "a", "A"), Equal);
     assert_eq!(cmp(&[("strength", 2.into())], "a", "A"), Equal);

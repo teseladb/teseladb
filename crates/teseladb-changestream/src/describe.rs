@@ -1,5 +1,6 @@
 //! The description of an operator update (014 FR-009), from what each operator touched and the
-//! document before and after: the shape a `refnode` 9.0.4 logs for it (measured on 31-10).
+//! document before and after: the shape a reference replica set member 9.0.4 logs for it (measured
+//! on 31-10).
 
 use teseladb_bson::{Document, Value};
 

@@ -1,6 +1,6 @@
-//! OCSP (RFC 6960) for stapling and for checking a stapled response: the responder
-//! URL of a certificate's `authorityInfoAccess`, the request for one certificate with a SHA-1
-//! `CertID` (what `refnode` 9.0.4 staples, measured), and the Basic OCSP response read and checked
+//! OCSP (RFC 6960) for stapling and for checking a stapled response: the responder URL of a
+//! certificate's `authorityInfoAccess`, the request for one certificate with a SHA-1 `CertID` (what
+//! the reference server 9.0.4 staples, measured), and the Basic OCSP response read and checked
 //! against the issuer: its signature (by the issuer, or by a responder certificate the issuer
 //! signed for OCSP signing), the certificate it speaks of, its times and its status.
 

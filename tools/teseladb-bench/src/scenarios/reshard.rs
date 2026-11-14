@@ -29,7 +29,7 @@ const PAYLOAD: usize = 1024;
 const LOAD_BATCH: u64 = 500;
 /// SC-002: the cutover under 2 s.
 const CUTOVER_MS: f64 = 2_000.0;
-/// The chunks a resharding asks for with enough documents (a `refrouter` asks 90).
+/// The chunks a resharding asks for with enough documents (a reference router asks 90).
 const CHUNKS: u64 = 90;
 /// Documents per chunk the cardinality check of a resharding needs.
 const DOCS_PER_CHUNK: u64 = 10;

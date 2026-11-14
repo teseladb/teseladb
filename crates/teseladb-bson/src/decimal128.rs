@@ -1,6 +1,6 @@
-//! Decimal128 (IEEE 754-2008, BID encoding; FR-001, FR-006): the 16 bytes BSON stores, their
-//! value, the canonical text of RefDb's specification and parsing without rounding, and exact
-//! comparison.
+//! Decimal128 (IEEE 754-2008, BID encoding; FR-001, FR-006): the 16 bytes BSON stores, their value,
+//! the canonical text of the reference server's specification and parsing without rounding, and
+//! exact comparison.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -132,7 +132,7 @@ impl Decimal128 {
 }
 
 impl fmt::Display for Decimal128 {
-    /// The canonical text of RefDb's decimal128 specification.
+    /// The canonical text of the reference server's decimal128 specification.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (negative, coefficient, exponent) = match self.classify() {
             Decimal::NaN => return f.write_str("NaN"),
@@ -177,9 +177,9 @@ impl fmt::Display for Decimal128 {
 impl FromStr for Decimal128 {
     type Err = ParseDecimalError;
 
-    /// Reads a number as RefDb's specification does: optional sign, digits with at most one
-    /// point, optional exponent, or `Infinity`, `Inf` and `NaN` in any case. A value that would
-    /// need rounding is refused.
+    /// Reads a number as the reference server's specification does: optional sign, digits with at
+    /// most one point, optional exponent, or `Infinity`, `Inf` and `NaN` in any case. A value that
+    /// would need rounding is refused.
     fn from_str(s: &str) -> Result<Decimal128, ParseDecimalError> {
         let (negative, rest) = match s.as_bytes().first() {
             Some(b'-') => (true, &s[1..]),

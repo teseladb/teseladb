@@ -77,9 +77,9 @@ impl TxnStatus {
 pub struct TxnRecord {
     /// The transaction.
     pub txn: TxnId,
-    /// RefDb's logical session id (0 for an internal transaction).
+    /// The reference server's logical session id (0 for an internal transaction).
     pub lsid: u128,
-    /// RefDb's `txnNumber`.
+    /// The reference server's `txnNumber`.
     pub txn_number: i64,
     /// Its state.
     pub status: TxnStatus,
@@ -272,7 +272,8 @@ pub struct Latest {
 /// Why `PutIntents` cannot write a key (FR-002).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Conflict {
-    /// A version newer than the transaction's read mark: RefDb's `WriteConflict` (112).
+    /// A version newer than the transaction's read mark: the reference server's `WriteConflict`
+    /// (112).
     Newer(Hlc),
     /// An intent of another transaction: the caller gets `WriteConflict`, or pushes it if it is
     /// abandoned and tries again.
@@ -306,9 +307,9 @@ pub fn check_put(
 pub enum RecordOp {
     /// Creates the record `Pending`, or adopts the one a push created.
     Begin {
-        /// RefDb's session.
+        /// The reference server's session.
         lsid: u128,
-        /// RefDb's `txnNumber`.
+        /// The reference server's `txnNumber`.
         txn_number: i64,
         /// The transaction's read mark.
         read_ts: Hlc,
@@ -328,9 +329,9 @@ pub enum RecordOp {
     /// Aborts. It carries the session, as `Begin` does: a push may have created the record
     /// before the `Begin` landed, and a `Begin` that never lands leaves it without one.
     Abort {
-        /// RefDb's session (0 for an internal transaction).
+        /// The reference server's session (0 for an internal transaction).
         lsid: u128,
-        /// RefDb's `txnNumber`.
+        /// The reference server's `txnNumber`.
         txn_number: i64,
         /// Intervals with intents.
         spans: Vec<(Vec<u8>, Vec<u8>)>,
@@ -344,7 +345,7 @@ pub enum RecordOp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordError {
     /// The record is aborted (by a push, the reaper or the coordinator), or it never existed when
-    /// the coordinator commits: RefDb's `NoSuchTransaction` (251).
+    /// the coordinator commits: the reference server's `NoSuchTransaction` (251).
     NoSuchTransaction,
     /// The stored record does not decode: the range is corrupt.
     Corrupt,
@@ -474,9 +475,9 @@ pub enum Push {
         intent_ts: Hlc,
     },
     /// A recovery of a client transaction's commit on another node (008): a running record aborts
-    /// at once, as a shard of a `refrouter` 9.0.4 aborts an open transaction whose decision another
-    /// router recovers (measured); one that does not exist is created aborted, which stops its
-    /// coordinator's `Begin` or `Commit` arriving after. That record carries the transaction's
+    /// at once, as a shard of a reference router 9.0.4 aborts an open transaction whose decision
+    /// another router recovers (measured); one that does not exist is created aborted, which stops
+    /// its coordinator's `Begin` or `Commit` arriving after. That record carries the transaction's
     /// session and number, so that it lives as long as a client transaction's record does.
     Abort {
         /// The transaction's session.

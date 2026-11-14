@@ -1,7 +1,7 @@
-//! TeselaDB's keys: values encoded so that their bytes keep RefDb's order (FR-008 to FR-010),
-//! with the types the key does not keep in [`TypeBits`] (FR-009), and [`decode`] back to the
-//! exact values; the key spaces, buckets and version suffixes of every key (FR-011 to FR-013); the key intervals of a filter's bounds
-//! (FR-014).
+//! TeselaDB's keys: values encoded so that their bytes keep the reference server's order (FR-008 to
+//! FR-010), with the types the key does not keep in [`TypeBits`] (FR-009), and [`decode`] back to
+//! the exact values; the key spaces, buckets and version suffixes of every key (FR-011 to FR-013);
+//! the key intervals of a filter's bounds (FR-014).
 //!
 //! ```
 //! use teseladb_bson::{Document, RawDoc};

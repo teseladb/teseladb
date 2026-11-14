@@ -1,5 +1,5 @@
-//! Errors of reading and writing BSON, with the code RefDb answers for each one (contract
-//! `bson-api.md`).
+//! Errors of reading and writing BSON, with the code the reference server answers for each one
+//! (contract `bson-api.md`).
 
 use std::fmt;
 
@@ -30,7 +30,7 @@ pub enum BsonError {
         /// Offset of the document past the limit (in the bytes written so far, when writing).
         offset: usize,
         /// Dotted names from the top document to the element whose value is past the limit,
-        /// array positions included (`documents.0.a`), as RefDb names it.
+        /// array positions included (`documents.0.a`), as the reference server names it.
         path: String,
     },
     /// A BSON column (binary subtype 7) whose bytes do not follow the column layout, at `offset`.
@@ -43,7 +43,7 @@ pub enum BsonError {
 }
 
 impl BsonError {
-    /// RefDb's error code and name for this error.
+    /// The reference server's error code and name for this error.
     #[must_use]
     pub fn code(&self) -> (i32, &'static str) {
         match self {
@@ -65,12 +65,13 @@ impl fmt::Display for BsonError {
             BsonError::TooLarge { size, max } => {
                 write!(f, "object of {size} bytes, over the maximum of {max}")
             }
-            // RefDb's words for a document past its nesting limit (a `refrouter` 9.0.4).
+            // The reference server's words for a document past its nesting limit (a reference
+            // router 9.0.4).
             BsonError::TooDeep { path, .. } => write!(
                 f,
                 "BSONObj exceeds maximum nested object depth in element with field name '{path}'"
             ),
-            // A `refrouter` 9.0.4's words (measured, 003 T029).
+            // A reference router 9.0.4's words (measured, 003 T029).
             BsonError::InvalidColumn { path, .. } => {
                 write!(f, "Invalid BSON column in element with field name '{path}'")
             }

@@ -1,8 +1,10 @@
-//! The errors of this crate: a RefDb code, its name and the message a `refnode` 9.0.4 gives.
+//! The errors of this crate: a reference server code, its name and the message a reference replica
+//! set member 9.0.4 gives.
 
 use std::fmt;
 
-/// An error with RefDb's code and name (`Location<code>` for the codes without a name).
+/// An error with the reference server's code and name (`Location<code>` for the codes without a
+/// name).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FleError {
     /// Number.

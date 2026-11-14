@@ -1,7 +1,7 @@
-//! REFDB-OIDC (013 T036, FR-025): `oidcIdentityProviders`, the JWKS, the validation of the
-//! access token and the two-step answer, with the checks and messages RefDb Enterprise 9.0.4
-//! gives (measured with a test provider; `tests/fixtures/oidc/rsa2048.pem` is a key made for
-//! these tests).
+//! OIDC authentication (013 T036, FR-025): `oidcIdentityProviders`, the JWKS, the validation of the
+//! access token and the two-step answer, with the checks and messages the reference enterprise
+//! server 9.0.4 gives (measured with a test provider; `tests/fixtures/oidc/rsa2048.pem` is a key
+//! made for these tests).
 
 use teseladb_auth::oidc::{self, First, KeySet, OidcError, Providers, Token};
 use teseladb_auth::users::{RoleName, UserName};
@@ -123,7 +123,7 @@ fn a_valid_token_names_the_user_and_its_groups() {
 }
 
 #[test]
-fn bad_tokens_fail_with_refdbs_messages() {
+fn bad_tokens_fail_with_the_reference_servers_messages() {
     let err = |jwt: &str| verify(jwt).unwrap_err().0;
     let g = r#""groups":["r"]"#;
     let at = |exp: i64, extra: &str| {

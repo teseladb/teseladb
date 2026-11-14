@@ -1,9 +1,9 @@
 //! `Idempotency-Key` (FR-010): a write sent with the header runs in a server session of its own,
-//! whose `lsid` is the SHA-256 of the user and the key: as a retryable write of 006 when RefDb
-//! retries it (`txnNumber` 1, so the node gives the first result back instead of applying it
-//! again), and as a transaction of 008 in that session when it does not (`updateMany`,
-//! `deleteMany`, a `bulkWrite` of several operations). The ObjectIds of inserted documents
-//! without `_id` come from the session, the same on each retry.
+//! whose `lsid` is the SHA-256 of the user and the key: as a retryable write of 006 when the
+//! reference server retries it (`txnNumber` 1, so the node gives the first result back instead of
+//! applying it again), and as a transaction of 008 in that session when it does not (`updateMany`,
+//! `deleteMany`, a `bulkWrite` of several operations). The ObjectIds of inserted documents without
+//! `_id` come from the session, the same on each retry.
 //!
 //! `config.httpIdempotency` keeps, for 30 minutes, the SHA-256 of each key's request (method,
 //! target and body) and the answer once there is one: the same request again gets that answer,

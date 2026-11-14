@@ -1,6 +1,7 @@
-//! The collation bundles of RefDb's ICU data (root and the locales of its `languages.txt`) read
-//! from ICU 57.1's `coll/*.txt`: the resolution of locale IDs (`teseladb_collation::LocaleModel`,
-//! ICU's `CollationLoader`) and the rules text of each bundle's collation types.
+//! The collation bundles of the reference server's ICU data (root and the locales of its
+//! `languages.txt`) read from ICU 57.1's `coll/*.txt`: the resolution of locale IDs
+//! (`teseladb_collation::LocaleModel`, ICU's `CollationLoader`) and the rules text of each bundle's
+//! collation types.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,7 +33,9 @@ pub struct IcuCollations {
 /// A bundle from its resource table.
 fn bundle(res: &Res) -> Result<Bundle, String> {
     if res.get("%%ALIAS").is_some() {
-        return Err("an alias bundle, which RefDb's ICU data does not include".into());
+        return Err(
+            "an alias bundle, which the reference server's ICU data does not include".into()
+        );
     }
     let Some(Res::Table(entries)) = res.get("collations") else {
         return Ok(Bundle::default());
@@ -102,12 +105,12 @@ impl IcuCollations {
         self.model.resolve(requested)
     }
 
-    /// Whether RefDb accepts `requested`.
+    /// Whether the reference server accepts `requested`.
     pub fn accepts(&self, requested: &str) -> bool {
         self.model.accepts(requested)
     }
 
-    /// Every locale ID RefDb accepts.
+    /// Every locale ID the reference server accepts.
     pub fn accepted(&self) -> Vec<String> {
         self.model.accepted()
     }

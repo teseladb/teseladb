@@ -150,7 +150,7 @@ fn failures() {
 }
 
 #[test]
-fn mechanisms_and_refdb_passwords() {
+fn mechanisms_and_the_reference_passwords() {
     for m in [Mechanism::ScramSha1, Mechanism::ScramSha256] {
         assert_eq!(Mechanism::from_name(m.name()), Some(m));
     }
@@ -160,10 +160,14 @@ fn mechanisms_and_refdb_passwords() {
         (10_000, 15_000)
     );
     assert_eq!((Mechanism::ScramSha1.salt_len(), Mechanism::ScramSha256.salt_len()), (16, 28));
-    // SCRAM-SHA-1 hashes the hex MD5 of `user:ref:password` (MD5 of RFC 1321, checked there).
+    // SCRAM-SHA-1 hashes the hex MD5 of `user:<middle>:password` (MD5 of RFC 1321, checked there).
     let p = Mechanism::ScramSha1.prepare_password("user", "pencil", true).unwrap();
-    let want: String =
-        teseladb_crypto::md5(b"user:ref:pencil").iter().map(|b| format!("{b:02x}")).collect();
+    let want: String = teseladb_crypto::md5(
+        format!("user:{}:pencil", teseladb_names::SCRAM_SHA1_DIGEST_MIDDLE).as_bytes(),
+    )
+    .iter()
+    .map(|b| format!("{b:02x}"))
+    .collect();
     assert_eq!(p, want.into_bytes());
     // SCRAM-SHA-256 SASLpreps.
     assert_eq!(Mechanism::ScramSha256.prepare_password("u", "I\u{00AD}X", true).unwrap(), b"IX");
@@ -173,8 +177,8 @@ fn mechanisms_and_refdb_passwords() {
 }
 
 /// Found by the 24-hour fuzzing (T010): a proof with a form feed inside its Base64 decoded to the
-/// same bytes and logged in. RefDb 9.0.4 refuses a proof, salt, verifier or channel binding
-/// with any character outside Base64 (measured: `invalid base64`, answered as
+/// same bytes and logged in. The reference server 9.0.4 refuses a proof, salt, verifier or channel
+/// binding with any character outside Base64 (measured: `invalid base64`, answered as
 /// `AuthenticationFailed`), and so does RFC 5802.
 #[test]
 fn base64_with_whitespace_inside_is_refused() {

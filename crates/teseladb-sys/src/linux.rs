@@ -471,7 +471,7 @@ pub(crate) fn release_free_memory() -> Option<bool> {
     Some(malloc_trim(0) == 1)
 }
 
-/// `NAME` and `VERSION_ID` of `/etc/os-release`, as RefDb shows them in `hostInfo`.
+/// `NAME` and `VERSION_ID` of `/etc/os-release`, as the reference server shows them in `hostInfo`.
 pub(crate) fn distribution() -> (String, String) {
     let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     let field = |key: &str| {

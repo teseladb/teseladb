@@ -1,7 +1,7 @@
 //! Users (FR-008, FR-009, FR-013): a name in its database, the SCRAM credentials of each
 //! mechanism (never a password), the roles granted to it, its `customData` and
 //! `authenticationRestrictions`; and the document `admin.system.users` keeps for it (FR-030),
-//! the form Group 0 stores, with RefDb 9.0.4's field order (measured).
+//! the form Group 0 stores, with the reference server 9.0.4's field order (measured).
 
 use std::fmt;
 
@@ -10,7 +10,7 @@ use teseladb_x509::pem::{base64_decode, base64_encode};
 
 use crate::scram::{Credentials, Mechanism};
 
-/// The database of the users that authenticate outside TeselaDB (REFDB-X509).
+/// The database of the users that authenticate outside TeselaDB (X.509 authentication).
 pub const EXTERNAL_DB: &str = "$external";
 
 /// A user's name: the user and the database it was created in.
@@ -73,8 +73,8 @@ impl RoleName {
         }
     }
 
-    /// Reads a role name of a stored user or role as RefDb 9.0.4 does (measured): `{role, db}`
-    /// with any other fields, or the string `db.role`.
+    /// Reads a role name of a stored user or role as the reference server 9.0.4 does (measured):
+    /// `{role, db}` with any other fields, or the string `db.role`.
     pub fn parse_stored(v: &Value) -> Result<RoleName, BadDocument> {
         let bad = |m: String| BadDocument::new(BAD_VALUE, m);
         match v {
@@ -99,9 +99,9 @@ impl RoleName {
     }
 }
 
-/// A stored user or role document RefDb 9.0.4 would not use, with the code and message it
-/// answers (measured on a `refnode` with direct writes to `admin.system.users` and
-/// `admin.system.roles`).
+/// A stored user or role document the reference server 9.0.4 would not use, with the code and
+/// message it answers (measured on a reference replica set member with direct writes to
+/// `admin.system.users` and `admin.system.roles`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BadDocument {
     /// The error code.
@@ -171,7 +171,7 @@ pub struct User {
 /// `teseladb_meta::tenants::TENANT_FIELD` names too).
 pub const TENANT_FIELD: &str = "tenantId";
 
-/// A stored user document that RefDb would not use.
+/// A stored user document that the reference server would not use.
 pub type BadUserDocument = BadDocument;
 
 impl User {
@@ -250,9 +250,9 @@ impl User {
         d
     }
 
-    /// Reads a stored user as RefDb 9.0.4 does when it loads one to log in (measured): a
-    /// missing `userId`, a `customData` that is not a document and fields it does not know are
-    /// fine; a field it needs in the wrong form is the error RefDb answers.
+    /// Reads a stored user as the reference server 9.0.4 does when it loads one to log in
+    /// (measured): a missing `userId`, a `customData` that is not a document and fields it does not
+    /// know are fine; a field it needs in the wrong form is the error the reference server answers.
     pub fn from_document(d: &Document) -> Result<User, BadUserDocument> {
         let text = |f: &str| match d.get(f) {
             Some(Value::String(s)) => Ok(s.clone()),
@@ -375,8 +375,8 @@ fn number(v: &Value) -> Option<f64> {
     }
 }
 
-/// The `roles` of a stored user as RefDb 9.0.4 reads them (measured): an array of `{role, db}`
-/// documents, which may have more fields.
+/// The `roles` of a stored user as the reference server 9.0.4 reads them (measured): an array of
+/// `{role, db}` documents, which may have more fields.
 pub fn parse_roles(d: &Document) -> Result<Vec<RoleName>, BadDocument> {
     let roles = match d.get("roles") {
         Some(Value::Array(a)) => a,
@@ -405,8 +405,8 @@ pub fn parse_roles(d: &Document) -> Result<Vec<RoleName>, BadDocument> {
 /// The fields of an entry of `authenticationRestrictions`.
 const RESTRICTION_FIELDS: [&str; 2] = ["clientSource", "serverAddress"];
 
-/// Each restriction of a stored user is a document of the fields RefDb knows, each an array
-/// (measured).
+/// Each restriction of a stored user is a document of the fields the reference server knows, each
+/// an array (measured).
 fn check_restrictions(list: &[Value]) -> Result<(), BadDocument> {
     for r in list {
         let Value::Document(r) = r else {
@@ -436,12 +436,12 @@ fn check_restrictions(list: &[Value]) -> Result<(), BadDocument> {
     Ok(())
 }
 
-/// The mechanisms `hello` lists in `saslSupportedMechs` for `name`: REFDB-X509 for a user of
-/// `$external`; the SCRAM mechanisms the user has credentials for; both for a user that does not
+/// The mechanisms `hello` lists in `saslSupportedMechs` for `name`: the X.509 mechanism for a user
+/// of `$external`; the SCRAM mechanisms the user has credentials for; both for a user that does not
 /// exist, so the answer does not say which users exist; of those, only the ones `enabled` takes
-/// (`authenticationMechanisms`, empty for the default). RefDb 9.0.4 gives them in an order that
-/// changes from one process to the next (measured on three restarts of a `refrouter`); TeselaDB
-/// gives the order of the stored credentials.
+/// (`authenticationMechanisms`, empty for the default). The reference server 9.0.4 gives them in an
+/// order that changes from one process to the next (measured on three restarts of a reference
+/// router); TeselaDB gives the order of the stored credentials.
 pub fn advertised_mechanisms(
     name: &UserName,
     user: Option<&User>,

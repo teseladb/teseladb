@@ -1,4 +1,4 @@
-//! BSON columns written by this crate: every column `encode` writes passes RefDb's
+//! BSON columns written by this crate: every column `encode` writes passes the reference server's
 //! layout check and reads back, row by row, the values it was given.
 
 use teseladb_bson::column::{Cell, decode, encode, validate};

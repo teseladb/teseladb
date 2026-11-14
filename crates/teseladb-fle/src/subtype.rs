@@ -1,10 +1,10 @@
 //! The first byte of a binary of subtype 6: what kind of encrypted value or payload follows
-//! (librefcrypt's `mc_fle_blob_subtype_t`).
+//! (the reference encryption library's `mc_fle_blob_subtype_t`).
 
 /// The kinds of subtype 6 binaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobSubtype {
-    /// A placeholder `refcryptd` leaves for the driver (CSFLE).
+    /// A placeholder the reference query analysis daemon leaves for the driver (CSFLE).
     Fle1Placeholder = 0,
     /// A CSFLE value encrypted deterministically.
     Fle1Deterministic = 1,

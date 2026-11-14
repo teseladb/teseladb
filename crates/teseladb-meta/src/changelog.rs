@@ -1,13 +1,14 @@
 //! The history of the ranges (007 FR-017, `config.changelog`): each split, merge, replica change
 //! and core change that a holder of descriptors (Group 0 or a `Meta2` range) completes, with the
 //! mark of the entry that completed it. The history is bounded by its bytes: it keeps the last
-//! changes that fit in [`MAX_BYTES`], the size of a `refrouter`'s capped `config.changelog`.
+//! changes that fit in [`MAX_BYTES`], the size of a reference router's capped
+//! `config.changelog`.
 
 use std::collections::VecDeque;
 
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, NodeId};
 
-/// Bytes of changes a holder keeps, the size of a `refrouter`'s capped `config.changelog`
+/// Bytes of changes a holder keeps, the size of a reference router's capped `config.changelog`
 /// (209 715 200, measured on 9.0.4).
 pub const MAX_BYTES: u64 = 200 * 1024 * 1024;
 

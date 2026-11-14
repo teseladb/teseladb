@@ -1,6 +1,6 @@
-//! The description of operator updates against what a `refnode` 9.0.4 logs for them (measured on
-//! 31-10-2026 through a change stream with `showExpandedEvents`): each case is the document before,
-//! the operators' touches, and the `updateDescription` of its event.
+//! The description of operator updates against what a reference replica set member 9.0.4 logs for
+//! them (measured on 31-10-2026 through a change stream with `showExpandedEvents`): each case is
+//! the document before, the operators' touches, and the `updateDescription` of its event.
 
 use teseladb_bson::{Document, extjson};
 use teseladb_changestream::describe::{Touch, describe};

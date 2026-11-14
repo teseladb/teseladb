@@ -19,12 +19,13 @@ const DATA: &[u8] = include_bytes!("../data/locales.bin");
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TailoringId(usize);
 
-/// A `locale` RefDb does not accept.
+/// A `locale` the reference server does not accept.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocaleError {
     /// What was asked for.
     pub requested: String,
-    /// The locale ID ICU would use instead, if it is not the root (RefDb's «Did you mean»).
+    /// The locale ID ICU would use instead, if it is not the root (the reference server's «Did you
+    /// mean»).
     pub suggestion: Option<String>,
 }
 
@@ -70,8 +71,8 @@ pub fn locale_model() -> &'static LocaleModel {
     &locales().model
 }
 
-/// The tailoring a locale ID RefDb accepts opens (`None` for the root collation itself), or why
-/// it is refused.
+/// The tailoring a locale ID the reference server accepts opens (`None` for the root collation
+/// itself), or why it is refused.
 pub(crate) fn tailoring_for(requested: &str) -> Result<Option<TailoringId>, LocaleError> {
     let l = locales();
     let r = l.model.resolve(requested);

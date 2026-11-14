@@ -1,8 +1,9 @@
-//! BSON columns: binary subtype 7, the compressed columns of RefDb's time series buckets
+//! BSON columns: binary subtype 7, the compressed columns of the reference server's time series
+//! buckets
 //!.
 //!
-//! Everything here comes from measuring a `refrouter` 9.0.4: the columns it writes into its own
-//! buckets, the values `$_internalUnpackBucket` reads back from columns made by hand, and which
+//! Everything here comes from measuring a reference router 9.0.4: the columns it writes into its
+//! own buckets, the values `$_internalUnpackBucket` reads back from columns made by hand, and which
 //! binaries it refuses with 378 `NonConformantBSON` on a message.
 //!
 //! A column is a run of control bytes ended by `00`:
@@ -14,10 +15,10 @@
 //! - interleaved mode (`F0`, `F1`, `F2`): a reference document whose scalars become streams that
 //!   take blocks in turn until a `00` (`interleaved`).
 //!
-//! [`validate`] is the check RefDb makes on every message: only the layout (literals as
-//! elements, whole blocks, a reference document, the final `00`), never the values. [`decode`]
-//! reads the values as RefDb's unpacking does, and fails where it fails; [`encode`] writes a
-//! column that reads back the same values (015).
+//! [`validate`] is the check the reference server makes on every message: only the layout (literals
+//! as elements, whole blocks, a reference document, the final `00`), never the values. [`decode`]
+//! reads the values as the reference server's unpacking does, and fails where it fails; [`encode`]
+//! writes a column that reads back the same values (015).
 
 mod encode;
 mod interleaved;
@@ -33,7 +34,7 @@ pub use encode::encode;
 use stream::Stream;
 
 /// Nested levels a literal or a reference document of a column may have, itself the first: a
-/// `refrouter` 9.0.4 takes 201 and refuses 202 wherever the column is (measured, 003 T029).
+/// reference router 9.0.4 takes 201 and refuses 202 wherever the column is (measured, 003 T029).
 pub const MAX_DEPTH: usize = 201;
 
 /// Control byte that ends a column, or interleaved mode.
@@ -59,7 +60,7 @@ pub struct Cell {
     pub bytes: Vec<u8>,
 }
 
-/// Why a column cannot be read; the texts are a `refrouter` 9.0.4's where it gives one.
+/// Why a column cannot be read; the texts are a reference router 9.0.4's where it gives one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnError(pub &'static str);
 
@@ -92,14 +93,14 @@ fn control(c: u8) -> Control {
     }
 }
 
-/// The mode literals and reference documents are checked with: RefDb's checks of a message,
-/// a column inside them refused.
+/// The mode literals and reference documents are checked with: the reference server's checks of a
+/// message, a column inside them refused.
 fn inner_mode() -> Mode<'static> {
     Mode::Check { depth: 1, max: MAX_DEPTH, spec: false, column: true, notes: None, array: false }
 }
 
 /// The low 64 bits of a slot or an integer: the 64-bit types keep their deltas in them, and the
-/// arithmetic on them wraps as RefDb's decoder does.
+/// arithmetic on them wraps as the reference server's decoder does.
 pub(super) fn low64(v: u128) -> u64 {
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = v.to_le_bytes();
     u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
@@ -107,7 +108,7 @@ pub(super) fn low64(v: u128) -> u64 {
 
 const LAYOUT: ColumnError = ColumnError("Invalid BSON column");
 
-/// Checks the layout of column `b` as RefDb checks it on every message.
+/// Checks the layout of column `b` as the reference server checks it on every message.
 ///
 /// # Errors
 ///
@@ -162,13 +163,13 @@ fn words(b: &[u8], p: usize) -> impl Iterator<Item = u64> + '_ {
         .map(|w| u64::from_le_bytes(*w))
 }
 
-/// The values of column `b`, one per row (`None` for a row without value), as RefDb unpacks
-/// them; more than `max_rows` rows is an error.
+/// The values of column `b`, one per row (`None` for a row without value), as the reference server
+/// unpacks them; more than `max_rows` rows is an error.
 ///
 /// # Errors
 ///
-/// A [`ColumnError`] for a layout the validation refuses, a block or control RefDb's decoder refuses,
-/// or more rows than `max_rows`.
+/// A [`ColumnError`] for a layout the validation refuses, a block or control the reference server's
+/// decoder refuses, or more rows than `max_rows`.
 pub fn decode(b: &[u8], max_rows: usize) -> Result<Vec<Option<Cell>>, ColumnError> {
     validate(b)?;
     let mut rows = Rows { out: Vec::new(), max: max_rows };

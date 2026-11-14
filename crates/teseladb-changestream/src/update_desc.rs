@@ -1,9 +1,10 @@
 //! The description of an update (014 FR-009): what the leader computes while it applies the
 //! operators, kept with the version, and the `updateDescription` of the event. Its shape is the one
-//! a `refrouter` 9.0.4 gives (measured on 31-10): `updatedFields`, `removedFields`, `truncatedArrays`
-//! as `{field, newSize}` and, with `showExpandedEvents` only, `disambiguatedPaths`, present even
-//! when empty, with each path whose dotted form is ambiguous (a field named like a number) split
-//! into its parts: field names as strings and array positions as integers.
+//! A reference router 9.0.4 gives (measured on 31-10): `updatedFields`, `removedFields`,
+//! `truncatedArrays` as `{field, newSize}` and, with `showExpandedEvents` only,
+//! `disambiguatedPaths`, present even when empty, with each path whose dotted form is ambiguous (a
+//! field named like a number) split into its parts: field names as strings and array positions as
+//! integers.
 
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
 

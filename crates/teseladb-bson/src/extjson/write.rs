@@ -11,7 +11,7 @@ pub(crate) enum Mode {
     Canonical,
     Relaxed,
     /// Relaxed, with a UUID (binary subtype 4 of 16 bytes) as `{"$uuid": "8-4-4-4-12"}`, as
-    /// RefDb writes the OCSF audit log.
+    /// the reference server writes the OCSF audit log.
     RelaxedUuid,
 }
 

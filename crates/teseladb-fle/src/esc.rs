@@ -1,5 +1,5 @@
 //! The encrypted state collection (ESC): how many times each value of a field was written, kept
-//! without saying which value (measured on a `refnode` 9.0.4 with known keys).
+//! without saying which value (measured on a reference replica set member 9.0.4 with known keys).
 //!
 //! For a value and contention factor, with `tag = ESCTwiceDerivedTagToken` and `value =
 //! ESCTwiceDerivedValueToken`:

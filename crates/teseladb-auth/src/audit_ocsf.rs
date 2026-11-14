@@ -1,7 +1,7 @@
-//! The audit log in the Open Cybersecurity Schema Framework (`auditLog.schema: OCSF`, 013
-//! FR-031), with the classes, activities and fields RefDb Enterprise 9.0.4 writes for each
+//! The audit log in the Open Cybersecurity Schema Framework (`auditLog.schema: OCSF`, 013 FR-031),
+//! with the classes, activities and fields the reference enterprise server 9.0.4 writes for each
 //! action type (measured on 31-10-2026): the message of [`crate::audit::Event`] rebuilt from its
-//! parameters, which keep RefDb's own schema.
+//! parameters, which keep the reference server's own schema.
 
 use teseladb_bson::{Document, Value, extjson};
 

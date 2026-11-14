@@ -63,7 +63,7 @@ fn value(v: &Json) -> Result<Value, ExtJsonError> {
 /// A plain JSON number: int32 or int64 if it is an integer that fits, a double otherwise.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "an integer above i64::MAX becomes the nearest double, as RefDb reads it"
+    reason = "an integer above i64::MAX becomes the nearest double, as the reference server reads it"
 )]
 fn number(n: &Number) -> Value {
     match n {

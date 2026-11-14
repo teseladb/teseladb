@@ -1,5 +1,5 @@
 //! The `$changeStream` stage's options and the stages after it (014 FR-001), with the errors of a
-//! `refrouter` 9.0.4 (measured on 01-11).
+//! the reference router 9.0.4 (measured on 01-11).
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::stage::{
@@ -51,7 +51,7 @@ fn the_options_are_read() {
 }
 
 #[test]
-fn bad_options_fail_as_on_a_refrouter() {
+fn bad_options_fail_as_on_a_reference_router() {
     let cases = [
         (
             Document::new().with("bogus", 1),

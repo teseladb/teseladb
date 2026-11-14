@@ -87,7 +87,8 @@ pub fn base64_decode(text: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Decodes padded Base64 with nothing but its alphabet and padding, as SCRAM messages, SASL
-/// payloads and tokens carry it (RFC 5802; RefDb refuses a space or a line break inside).
+/// payloads and tokens carry it (RFC 5802; the reference server refuses a space or a line break
+/// inside).
 ///
 /// # Errors
 ///

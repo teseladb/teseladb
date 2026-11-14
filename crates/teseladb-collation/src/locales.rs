@@ -1,6 +1,7 @@
 //! Locale IDs as ICU 57.1's `CollationLoader` (`ucol_res.cpp`) resolves them over the collation
-//! bundles RefDb packages (root and the locales of its `languages.txt`), and which of them
-//! RefDb accepts: those whose valid locale is the requested string (`validateLocaleID`).
+//! bundles the reference server packages (root and the locales of its `languages.txt`), and which
+//! of them the reference server accepts: those whose valid locale is the requested string
+//! (`validateLocaleID`).
 //!
 //! The bundle is the first that exists cutting the requested base name at its last `_` (down to
 //! the root); it is the valid locale. The `collations` table, its `default` type and the requested
@@ -25,7 +26,7 @@ pub struct BundleInfo {
 /// What a requested locale opens.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    /// ICU's valid locale: RefDb accepts the request only if it is this.
+    /// ICU's valid locale: the reference server accepts the request only if it is this.
     pub valid: String,
     /// The bundle whose rules apply.
     pub locale: String,
@@ -120,14 +121,14 @@ impl LocaleModel {
         Resolved { valid, locale: found, collation }
     }
 
-    /// Whether RefDb accepts `requested` (`validateLocaleID`): not empty, and ICU's valid
-    /// locale for it is the same string.
+    /// Whether the reference server accepts `requested` (`validateLocaleID`): not empty, and ICU's
+    /// valid locale for it is the same string.
     pub fn accepts(&self, requested: &str) -> bool {
         !requested.is_empty() && self.resolve(requested).valid == requested
     }
 
-    /// Every locale ID RefDb accepts: each bundle but the root, alone and with each collation
-    /// type it reaches other than its default.
+    /// Every locale ID the reference server accepts: each bundle but the root, alone and with each
+    /// collation type it reaches other than its default.
     pub fn accepted(&self) -> Vec<String> {
         let mut out = Vec::new();
         for name in self.bundles.keys().filter(|n| *n != "root") {

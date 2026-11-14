@@ -4,7 +4,7 @@
 //! host name check of a server certificate (RFC 6125).
 //!
 //! The trust anchor's own `pathLenConstraint`, `keyUsage` and `nameConstraints` apply to the
-//! path and its validity dates are checked, as OpenSSL (and so RefDb) does.
+//! path and its validity dates are checked, as OpenSSL (and so the reference server) does.
 
 use crate::Error;
 use crate::cert::Certificate;
@@ -57,8 +57,9 @@ pub struct VerifyOptions<'a> {
     pub policy: PolicySettings,
     /// Longest path, certificates included.
     pub max_depth: usize,
-    /// Whether signatures with SHA-1 are accepted. OpenSSL 3, which RefDb 9.0.4 uses, refuses
-    /// them from security level 1 on (measured); old test suites such as PKITS need them.
+    /// Whether signatures with SHA-1 are accepted. OpenSSL 3, which the reference server 9.0.4
+    /// uses, refuses them from security level 1 on (measured); old test suites such as PKITS need
+    /// them.
     pub weak_digests: bool,
 }
 

@@ -1,6 +1,6 @@
-//! Offsets of zones against those a `refrouter` 9.0.4 gave on 31-10-2026 through `$dateToString`
-//! (010 FR-007, T006): the history of `backzone`, the changes of 2024a and not later ones, the
-//! POSIX rules after the last transition, and daylight saving changes.
+//! Offsets of zones against those a reference router 9.0.4 gave on 31-10-2026 through
+//! `$dateToString` (010 FR-007, T006): the history of `backzone`, the changes of 2024a and not
+//! later ones, the POSIX rules after the last transition, and daylight saving changes.
 
 use teseladb_tz::Zone;
 
@@ -77,7 +77,8 @@ fn daylight_saving_changes_happen_at_their_instant() {
     assert_eq!(madrid.at(back).offset, 3600);
     // Local 02:30 that night does not exist: read with the offset before (01:30Z, 03:30 local).
     assert_eq!(madrid.utc_of(at(2026, 3, 29, 2) + 1800), at(2026, 3, 29, 1) + 1800);
-    // Local 02:30 in October happens twice: the later instant (01:30Z), as RefDb resolves it.
+    // Local 02:30 in October happens twice: the later instant (01:30Z), as the reference server
+    // resolves it.
     assert_eq!(madrid.utc_of(at(2026, 10, 25, 2) + 1800), at(2026, 10, 25, 1) + 1800);
     // Local 01:30 and 03:30 that night happen once.
     assert_eq!(madrid.utc_of(at(2026, 10, 25, 1) + 1800), at(2026, 10, 24, 23) + 1800);

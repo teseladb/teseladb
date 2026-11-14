@@ -1,7 +1,8 @@
-//! The server side of RefDb's SASL conversations (FR-008), without BSON: which mechanisms
-//! exist, the SCRAM conversation of `saslStart` and `saslContinue` with its optional empty last
-//! step, REFDB-X509 against the client certificate, and the errors with RefDb 9.0.4's
-//! messages (measured on a `refrouter` with `--keyFile` and on a `refnode` with TLS).
+//! The server side of the reference server's SASL conversations (FR-008), without BSON: which
+//! mechanisms exist, the SCRAM conversation of `saslStart` and `saslContinue` with its optional
+//! empty last step, X.509 authentication against the client certificate, and the errors with the
+//! reference server 9.0.4's messages (measured on a reference router with `--keyFile` and on a
+//! reference replica set member with TLS).
 
 use std::fmt;
 
@@ -10,27 +11,28 @@ use teseladb_x509::pem::base64_encode;
 use crate::scram::{ClientFirst, Mechanism, ScramError, ServerSession};
 use crate::users::{EXTERNAL_DB, User, UserName};
 
-/// The only conversation a connection holds: RefDb numbers it 1 (measured).
+/// The only conversation a connection holds: the reference server numbers it 1 (measured).
 pub const CONVERSATION_ID: i32 = 1;
-/// Random bytes of the server's part of the SCRAM nonce: RefDb sends 32 Base64 characters.
+/// Random bytes of the server's part of the SCRAM nonce: the reference server sends 32 Base64
+/// characters.
 pub const SERVER_NONCE_BYTES: usize = 24;
 
-/// A SASL mechanism RefDb knows.
+/// A SASL mechanism the reference server knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SaslMechanism {
     /// SCRAM-SHA-1.
     ScramSha1,
     /// SCRAM-SHA-256.
     ScramSha256,
-    /// REFDB-X509.
+    /// X.509 authentication.
     X509,
     /// PLAIN (LDAP, FR-025).
     Plain,
     /// GSSAPI (Kerberos, FR-025).
     Gssapi,
-    /// REFDB-AWS (FR-025).
+    /// AWS IAM authentication (FR-025).
     Aws,
-    /// REFDB-OIDC (FR-025).
+    /// OIDC authentication (FR-025).
     Oidc,
     /// An API key of the HTTP API (019 FR-015); no command of the wire protocol takes it, so it
     /// is not in [`SaslMechanism::ALL`].
@@ -49,7 +51,7 @@ impl SaslMechanism {
         SaslMechanism::Oidc,
     ];
 
-    /// The name clients send (case matters, as in RefDb).
+    /// The name clients send (case matters, as in the reference server).
     pub fn name(self) -> &'static str {
         match self {
             SaslMechanism::ScramSha1 => Mechanism::ScramSha1.name(),
@@ -68,8 +70,8 @@ impl SaslMechanism {
         SaslMechanism::ALL.into_iter().find(|m| m.name() == name)
     }
 
-    /// Whether the node takes it by default: the default `authenticationMechanisms` of RefDb
-    /// 9.0 (SCRAM-SHA-1, SCRAM-SHA-256 and REFDB-X509).
+    /// Whether the node takes it by default: the default `authenticationMechanisms` of the
+    /// reference server 9.0 (SCRAM-SHA-1, SCRAM-SHA-256 and X.509 authentication).
     pub fn enabled(self) -> bool {
         matches!(self, SaslMechanism::ScramSha1 | SaslMechanism::ScramSha256 | SaslMechanism::X509)
     }
@@ -89,10 +91,10 @@ impl SaslMechanism {
     }
 }
 
-/// Why authentication failed; [`fmt::Display`] gives RefDb's message.
+/// Why authentication failed; [`fmt::Display`] gives the reference server's message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SaslError {
-    /// A name RefDb does not know (`MechanismUnavailable`).
+    /// A name the reference server does not know (`MechanismUnavailable`).
     UnknownMechanism(String),
     /// A mechanism the node does not take (`MechanismUnavailable`).
     NotEnabled(SaslMechanism),
@@ -107,7 +109,8 @@ pub enum SaslError {
     AuthenticationFailed,
     /// `saslContinue` without that conversation (`ProtocolError`).
     NoConversation,
-    /// `authenticate` with REFDB-X509 for a certificate without its user (`UserNotFound`).
+    /// `authenticate` with the X.509 mechanism for a certificate without its user
+    /// (`UserNotFound`).
     UserNotFound(UserName),
 }
 
@@ -250,13 +253,14 @@ impl Conversation {
                 self.state = State::Final(user);
                 Ok(Step::Continue(last))
             }
-            // RefDb ends it whatever the client sends (measured with an empty payload).
+            // The reference server ends it whatever the client sends (measured with an empty
+            // payload).
             State::Final(user) => Ok(Step::Done { payload: Vec::new(), user: user.clone() }),
         }
     }
 }
 
-/// REFDB-X509 (`authenticate`, or `saslStart`) on database `db`: the user of the client
+/// X.509 authentication (`authenticate`, or `saslStart`) on database `db`: the user of the client
 /// certificate `peer` (its RFC 2253 name), which must equal `requested` when the client names
 /// one. [`x509_found`] then checks that the user exists.
 pub fn x509_user(
@@ -274,7 +278,7 @@ pub fn x509_user(
     Ok(UserName::new(peer, EXTERNAL_DB))
 }
 
-/// The end of REFDB-X509 for `name`, whose user exists or not: through `saslStart`
+/// The end of X.509 authentication for `name`, whose user exists or not: through `saslStart`
 /// (`via_sasl`) a missing user is `AuthenticationFailed`, through `authenticate` `UserNotFound`
 /// (measured).
 pub fn x509_found(name: UserName, exists: bool, via_sasl: bool) -> Result<UserName, SaslError> {

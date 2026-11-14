@@ -1,7 +1,7 @@
-//! Authentication against LDAP (013 FR-025; RFC 4511): the messages a client sends and reads,
-//! RefDb's `security.ldap.userToDNMapping` (each rule a regular expression on the user name
-//! with a DN `substitution` or an `ldapQuery` whose capture groups fill `{0}`, `{1}`...), and the
-//! conversation of a PLAIN login without I/O: optionally bind as the query user and search the
+//! Authentication against LDAP (013 FR-025; RFC 4511): the messages a client sends and reads, the
+//! reference server's `security.ldap.userToDNMapping` (each rule a regular expression on the user
+//! name with a DN `substitution` or an `ldapQuery` whose capture groups fill `{0}`, `{1}`...), and
+//! the conversation of a PLAIN login without I/O: optionally bind as the query user and search the
 //! user's DN, then bind as the user with the password. The connection, with TLS, is the server's.
 
 use std::fmt;
@@ -423,7 +423,7 @@ impl Login {
         Ok((login, first))
     }
 
-    /// Starts the search of the groups of `user`, who logged in another way (REFDB-X509,
+    /// Starts the search of the groups of `user`, who logged in another way (X.509 authentication,
     /// 013 FR-033): its DN from the mapping, then its groups with `template`, as the query user
     /// when there is one; the user never binds.
     pub fn groups_of(

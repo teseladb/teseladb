@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-tzgen"
 version = "0.1.0"
-description = "Generator of teseladb-tz's data from the IANA time zone files of the version RefDb carries."
+description = "Generator of teseladb-tz's data from the IANA time zone files of the version the reference server carries."
 edition.workspace = true
 rust-version.workspace = true
 publish = false

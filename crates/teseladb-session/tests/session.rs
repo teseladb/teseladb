@@ -45,7 +45,7 @@ fn a_cursor_is_taken_by_its_namespace_and_session_only() {
     t.put(5, cursor("db.c", Some(1), false));
     t.put(8, cursor("db.c", None, false));
     assert_eq!(t.take(6, "db.c", Some(1), 1).err(), Some(CursorError::NotFound));
-    // The namespace is checked before the session, as a `refrouter` 9.0 does.
+    // The namespace is checked before the session, as a reference router 9.0 does.
     assert_eq!(t.take(5, "db.d", Some(2), 1).err(), Some(CursorError::OtherNamespace));
     assert_eq!(t.take(5, "db.c", None, 1).err(), Some(CursorError::SessionRequired));
     assert_eq!(t.take(5, "db.c", Some(2), 1).err(), Some(CursorError::OtherSession));
@@ -158,8 +158,9 @@ fn the_sessions_used_since_a_time_are_listed_with_their_last_use() {
     assert!(s.used_since(301).is_empty());
 }
 
-/// `endSessions` only marks the sessions: the next refresh of the record ends them and kills
-/// their cursors (measured in `refrouter` 9.0.4: a `getMore` right after `endSessions` still works).
+/// `endSessions` only marks the sessions: the next refresh of the record ends them and kills their
+/// cursors (measured in the reference router 9.0.4: a `getMore` right after `endSessions` still
+/// works).
 #[test]
 fn ended_sessions_wait_for_the_refresh() {
     let mut t = SessionTable::new();
@@ -190,7 +191,7 @@ fn the_table_lists_and_changes_its_cursors() {
 }
 
 /// A session belongs to the user who started it: a later use by another user does not change
-/// its owner (RefDb keeps the `uid` in the session's identifier).
+/// its owner (the reference server keeps the `uid` in the session's identifier).
 #[test]
 fn a_session_keeps_the_owner_that_started_it() {
     let mut s = SessionTable::new();
@@ -200,7 +201,7 @@ fn a_session_keeps_the_owner_that_started_it() {
 }
 
 /// A kill reaches every session of an owner, or one session when it names its `lsid` too, as
-/// `killAllSessionsByPattern` with `uid` or `lsid` does on a `refrouter` 9.0.4 (measured on
+/// `killAllSessionsByPattern` with `uid` or `lsid` does on a reference router 9.0.4 (measured on
 /// 03-11-2026).
 #[test]
 fn kills_reach_the_sessions_of_their_owner() {

@@ -1,6 +1,6 @@
 //! The kinds of collection (015 FR-001, FR-003, FR-006, FR-009, data model): a view, a capped
 //! collection, a time series or a clustered collection, read from the options the catalog keeps
-//! for it (`create` checked and normalized them, as a `refrouter` 9.0.4 stores them).
+//! for it (`create` checked and normalized them, as a reference router 9.0.4 stores them).
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -53,7 +53,7 @@ impl Granularity {
         Granularity::ALL.into_iter().find(|g| g.name() == name)
     }
 
-    /// The `bucketMaxSpanSeconds` it gives (measured on a `refrouter` 9.0.4).
+    /// The `bucketMaxSpanSeconds` it gives (measured on a reference router 9.0.4).
     pub fn max_span_seconds(self) -> i64 {
         match self {
             Granularity::Seconds => 3_600,

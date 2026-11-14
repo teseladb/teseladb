@@ -1,5 +1,5 @@
-//! Snappy, raw format (the one RefDb's `OP_COMPRESSED` carries, without the framing format),
-//! written from Google's public format description (`format_description.txt`).
+//! Snappy, raw format (the one the reference server's `OP_COMPRESSED` carries, without the framing
+//! format), written from Google's public format description (`format_description.txt`).
 //!
 //! A stream is the uncompressed length as a varint followed by elements. Each element starts with
 //! a tag whose two low bits give its kind: a literal (`00`), or a copy of earlier output with a

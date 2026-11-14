@@ -213,6 +213,10 @@ pub const HELP_SHUTDOWN: &str = "Shuts down the mongos. Must be run against the 
 pub const HELP_UPDATE_SEARCH_INDEX: &str =
     "Command to update a search index. Only supported with Atlas.";
 
+// d170-l5
+/// The middle part of the text whose hex MD5 digest SCRAM-SHA-1 derives from: `user:<this>:password`.
+pub const SCRAM_SHA1_DIGEST_MIDDLE: &str = "mongo";
+
 /// Every constant with its name, for [`expand`].
 pub const ALL: &[(&str, &str)] = &[
     ("ROUTER", ROUTER),
@@ -281,6 +285,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("HELP_SET_PARAMETER", HELP_SET_PARAMETER),
     ("HELP_SHUTDOWN", HELP_SHUTDOWN),
     ("HELP_UPDATE_SEARCH_INDEX", HELP_UPDATE_SEARCH_INDEX),
+    // d170-l5
+    ("SCRAM_SHA1_DIGEST_MIDDLE", SCRAM_SHA1_DIGEST_MIDDLE),
 ];
 
 /// A mark `${name:X}` whose `X` is not a constant of this crate.

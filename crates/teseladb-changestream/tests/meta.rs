@@ -119,7 +119,8 @@ fn a_write_keeps_a_meta_only_for_the_documents_it_says_something_of() {
     );
 }
 
-/// The `lsid` of an event (measured on a `refrouter` 9.0.4 on 01-11): `{id: UUID, uid: BinData(0)}`.
+/// The `lsid` of an event (measured on a reference router 9.0.4 on 01-11): `{id: UUID, uid:
+/// BinData(0)}`.
 #[test]
 fn the_lsid_of_an_event_has_its_id_and_uid() {
     let d = lsid_document(0x0102, &[7; 32]);

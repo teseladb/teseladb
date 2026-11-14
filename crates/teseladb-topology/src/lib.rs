@@ -1,4 +1,4 @@
-//! RefDb's topologies over TeselaDB's ranges (specification 018), without I/O.
+//! The reference server's topologies over TeselaDB's ranges (specification 018), without I/O.
 //!
 //! - [`replset`]: the replica set presentation, its `hello` and the designation of the primary
 //!   (FR-007).

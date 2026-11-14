@@ -1,7 +1,7 @@
 //! A mutation that changes nothing (005 FR-026): the leader answers it without proposing an entry,
-//! as RefDb 9.0.4 answers a write without effect without writing to its oplog, once it confirms
-//! it still leads; a retry whose statement has a stored result gets that result, and a write
-//! concern the shortcut does not cover goes through Raft as before.
+//! as the reference server 9.0.4 answers a write without effect without writing to its oplog, once
+//! it confirms it still leads; a retry whose statement has a stored result gets that result, and a
+//! write concern the shortcut does not cover goes through Raft as before.
 
 mod common;
 
@@ -83,7 +83,7 @@ fn a_retryable_statement_without_a_stored_result_takes_the_shortcut() {
     c.ticks(2);
 
     assert_eq!(result(c.reply(l, id)), vec![9]);
-    assert_eq!(last_index(&c, l), before, "no entry and no record, as RefDb");
+    assert_eq!(last_index(&c, l), before, "no entry and no record, as the reference server");
 }
 
 #[test]

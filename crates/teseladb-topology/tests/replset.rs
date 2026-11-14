@@ -1,6 +1,6 @@
-//! `hello` in the replica set presentation and the designation of its primary (018 FR-007,
-//! T010, T019). The expected replies are those of a three-member replica set of RefDb 9.0.4
-//! (`ref:9.0`), field by field and in their order.
+//! `hello` in the replica set presentation and the designation of its primary (018 FR-007, T010,
+//! T019). The expected replies are those of a three-member replica set of the reference server
+//! 9.0.4 (its 9.0 image), field by field and in their order.
 
 use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{
@@ -72,7 +72,7 @@ fn last_write_doc() -> Document {
 }
 
 #[test]
-fn primary_answers_like_a_refnode_primary() {
+fn primary_answers_like_a_reference_server_primary() {
     let d = hello(&three(), H1);
     let tv = Document::new().with("processId", Value::ObjectId(PROCESS)).with("counter", 6i64);
     let mut eid = [0u8; 12];
@@ -271,10 +271,10 @@ fn invalid_configurations_are_refused() {
 
 #[test]
 fn presentation_modes_by_name() {
-    for m in [PresentationMode::RefRouter, PresentationMode::ReplicaSet] {
+    for m in [PresentationMode::Router, PresentationMode::ReplicaSet] {
         assert_eq!(PresentationMode::from_name(m.name()), Some(m));
     }
-    assert_eq!(PresentationMode::default(), PresentationMode::RefRouter);
+    assert_eq!(PresentationMode::default(), PresentationMode::Router);
     assert_eq!(PresentationMode::from_name("standalone"), None);
 }
 
@@ -287,9 +287,9 @@ fn accessors() {
     assert!(rs.member("x:1").is_none());
 }
 
-/// A member in maintenance mode answers `hello` with `secondary: false`, as a `RECOVERING`
-/// member of RefDb 9.0.4 does (measured on 02-11-2026, `f1.js`); the primary never is, and a
-/// member designated primary leaves it.
+/// A member in maintenance mode answers `hello` with `secondary: false`, as a `RECOVERING` member
+/// of the reference server 9.0.4 does (measured on 02-11-2026, `f1.js`); the primary never is, and
+/// a member designated primary leaves it.
 #[test]
 fn a_member_in_maintenance_is_not_secondary() {
     let rs = three().with_recovering(&[H2, H1]);
@@ -305,8 +305,8 @@ fn a_member_in_maintenance_is_not_secondary() {
 }
 
 /// A live member with a higher priority than the primary's takes over with a new term, as a
-/// priority takeover on RefDb 9.0.4 (measured on 02-11-2026, `s2.js`); equal priorities or a
-/// held member change nothing.
+/// priority takeover on the reference server 9.0.4 (measured on 02-11-2026, `s2.js`); equal
+/// priorities or a held member change nothing.
 #[test]
 fn priority_takeover() {
     assert_eq!(three().takeover(&|_| true), None, "equal priorities");
@@ -348,9 +348,9 @@ fn configuration_document_and_member_attributes() {
     assert_eq!(only.get("priority"), Some(&Value::Double(1.5)));
 }
 
-/// A `setVersion` past 32 bits (measured on RefDb 9.0.4 on 03-11-2026, version 5000000000):
-/// the configuration keeps it as a long, `hello` gives its low 32 bits as an int, and a version
-/// that fits stays an int.
+/// A `setVersion` past 32 bits (measured on the reference server 9.0.4 on 03-11-2026, version
+/// 5000000000): the configuration keeps it as a long, `hello` gives its low 32 bits as an int, and
+/// a version that fits stays an int.
 #[test]
 fn a_set_version_past_32_bits() {
     let big = 5_000_000_000i64;

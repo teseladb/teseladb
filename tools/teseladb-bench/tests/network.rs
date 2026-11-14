@@ -70,11 +70,11 @@ fn search_scenarios_run_against_a_local_cluster() {
 }
 
 #[test]
-fn a_target_that_is_not_there_or_not_refdb_is_an_error() {
+fn a_target_that_is_not_there_or_not_a_server_is_an_error() {
     for (target, want) in [
-        ("http://x", "refdb://host:port"),
-        ("refdb://127.0.0.1:1", "127.0.0.1:1"),
-        ("refdb://nohost.invalid:1", "nohost.invalid"),
+        ("http://x", "is host:port"),
+        ("127.0.0.1:1", "127.0.0.1:1"),
+        ("nohost.invalid:1", "nohost.invalid"),
     ] {
         let out = bench(&[
             "--scenario",
@@ -167,7 +167,7 @@ fn tls_handshake_and_scram_run_against_a_secure_node() {
     assert!(scram.contains("login.p50"), "{scram}");
     assert!(scram.contains("\"round_trips\",\"unit\":\"count\",\"value\":2"), "{scram}");
     for scenario in ["tls-handshake", "scram"] {
-        let out = bench(&["--scenario", scenario, "--target", "refdb://127.0.0.1:1"]);
+        let out = bench(&["--scenario", scenario, "--target", "127.0.0.1:1"]);
         assert_eq!(out.status.code(), Some(2), "{scenario}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("takes no --target"));
     }

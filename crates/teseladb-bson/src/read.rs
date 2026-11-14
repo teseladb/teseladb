@@ -3,11 +3,12 @@
 //! FR-002, FR-003) or, over a document already validated, only follows the lengths. Offsets in
 //! errors are from the start of the bytes given to [`crate::RawDoc::from_bytes`].
 //!
-//! A `refrouter` 9.0.4 checks less (measured, 003 T009): it takes strings and names that are not
-//! UTF-8 and an old binary whose two lengths differ. It also checks something the specification
+//! A reference router 9.0.4 checks less (measured, 003 T009): it takes strings and names that are
+//! not UTF-8 and an old binary whose two lengths differ. It also checks something the specification
 //! leaves open: the layout of each BSON column (binary subtype 7, [`crate::column`], 003 T029).
-//! [`validate_message`] checks what RefDb checks, in the same order, so that a server answers a
-//! message as RefDb does before it applies the rules of the specification.
+//! [`validate_message`] checks what the reference server checks, in the same order, so that a
+//! server answers a message as the reference server does before it applies the rules of the
+//! specification.
 
 use std::cell::{Cell, OnceCell};
 
@@ -44,10 +45,10 @@ pub(crate) struct Notes {
 #[derive(Clone, Copy)]
 pub(crate) enum Mode<'n> {
     /// Validating, at `depth` of at most `max`; `spec` adds the checks of the BSON specification
-    /// RefDb does not make (UTF-8, the old binary's inner length); `column` is set inside the
-    /// values of a BSON column, where another column is refused. Without `spec`, `notes` takes
-    /// what those checks would refuse and what is not canonical, without stopping; `array` is set
-    /// for the document of an array, whose names have to be its positions to be canonical.
+    /// the reference server does not make (UTF-8, the old binary's inner length); `column` is set
+    /// inside the values of a BSON column, where another column is refused. Without `spec`, `notes`
+    /// takes what those checks would refuse and what is not canonical, without stopping; `array` is
+    /// set for the document of an array, whose names have to be its positions to be canonical.
     Check {
         depth: usize,
         max: usize,
@@ -75,11 +76,11 @@ pub(crate) fn validate(bytes: &[u8], limits: Limits) -> Result<(), BsonError> {
     whole(bytes, limits, true)
 }
 
-/// Validates `bytes` as RefDb validates each document of a message: lengths, terminators,
-/// types, booleans, `limits` and bytes left over, stopping at the first fault in document order;
-/// strings and names that are not UTF-8 and an old binary whose two lengths differ pass, as a
-/// `refrouter` 9.0.4 lets them pass, and a BSON column has to follow the column layout
-/// ([`crate::column::validate`], [`BsonError::InvalidColumn`], 003 T029).
+/// Validates `bytes` as the reference server validates each document of a message: lengths,
+/// terminators, types, booleans, `limits` and bytes left over, stopping at the first fault in
+/// document order; strings and names that are not UTF-8 and an old binary whose two lengths differ
+/// pass, as a reference router 9.0.4 lets them pass, and a BSON column has to follow the column
+/// layout ([`crate::column::validate`], [`BsonError::InvalidColumn`], 003 T029).
 ///
 /// # Errors
 ///
@@ -110,12 +111,12 @@ pub fn first_element(bytes: &[u8], limits: Limits) -> Option<(&str, RawValue<'_>
     element(b, 4, mode).ok().map(|(key, value, _)| (key, value))
 }
 
-/// Reads a document of a message in one pass: [`validate_message`]'s fault if it has one (RefDb
-/// closes the connection or answers for it), else the first fault of the specification's rules
-/// that [`crate::RawDoc::from_bytes_with`] would give after it, else the document. A canonical
-/// document keeps its bytes and reads its fields only when they are asked for
-/// ([`Document::from_canonical`]); another one is read into its fields, as [`Document::from`]
-/// reads it.
+/// Reads a document of a message in one pass: [`validate_message`]'s fault if it has one (the
+/// reference server closes the connection or answers for it), else the first fault of the
+/// specification's rules that [`crate::RawDoc::from_bytes_with`] would give after it, else the
+/// document. A canonical document keeps its bytes and reads its fields only when they are asked for
+/// ([`Document::from_canonical`]); another one is read into its fields, as [`Document::from`] reads
+/// it.
 ///
 /// # Errors
 ///
@@ -371,7 +372,7 @@ fn string<'a>(b: &'a [u8], p: &mut usize, mode: Mode<'_>) -> Result<&'a str, Bso
 }
 
 /// Binary data: `i32` length, subtype and bytes; subtype 2 repeats the length inside. UUIDs and
-/// MD5 digests take any length, as a `refrouter` 9.0.4 stores them (measured, 003 T009).
+/// MD5 digests take any length, as a reference router 9.0.4 stores them (measured, 003 T009).
 fn binary<'a>(b: &'a [u8], p: &mut usize, mode: Mode<'_>) -> Result<RawValue<'a>, BsonError> {
     let at = *p;
     let len = length(b, at, 0)?;
@@ -382,8 +383,8 @@ fn binary<'a>(b: &'a [u8], p: &mut usize, mode: Mode<'_>) -> Result<RawValue<'a>
     let subtype = b[at + 4];
     let mut bytes = &b[start..start + len];
     if let (types::BINARY_COLUMN, Mode::Check { spec: false, column, .. }) = (subtype, mode) {
-        // A `refrouter` 9.0.4 checks the layout of every column of a message and refuses a column
-        // inside another one (measured, 003 T029); the BSON specification takes any bytes.
+        // A reference router 9.0.4 checks the layout of every column of a message and refuses a
+        // column inside another one (measured, 003 T029); the BSON specification takes any bytes.
         if column || crate::column::validate(bytes).is_err() {
             return Err(BsonError::InvalidColumn { offset: at, path: String::new() });
         }

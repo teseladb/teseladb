@@ -1,5 +1,6 @@
-//! Collations by `locale` (003 FR-016): the IDs RefDb accepts open their tailoring, the others
-//! are refused with the ID ICU would use, and a few tailorings sort as their languages do.
+//! Collations by `locale` (003 FR-016): the IDs the reference server accepts open their tailoring,
+//! the others are refused with the ID ICU would use, and a few tailorings sort as their languages
+//! do.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -25,7 +26,7 @@ fn tailorings_sort_as_their_languages() {
     let de = Collation::for_locale("de@collation=phonebook").unwrap();
     assert_eq!(de.compare("ä", "ae").then(Ordering::Equal), Ordering::Greater);
     assert_eq!(Collation { strength: Strength::Primary, ..de }.compare("ä", "ae"), Ordering::Equal);
-    // The root locales of RefDb: English uses the root collation itself.
+    // The root locales of the reference server: English uses the root collation itself.
     let en = Collation::for_locale("en").unwrap();
     assert_eq!(en, Collation::default());
     assert_eq!(en.settings(), Settings::default());
@@ -43,7 +44,7 @@ fn settings_of_a_tailoring_apply() {
 }
 
 #[test]
-fn locales_refdb_refuses() {
+fn locales_the_reference_refuses() {
     for (bad, suggestion) in [
         ("", None),
         ("root", None),

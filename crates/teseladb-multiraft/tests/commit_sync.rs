@@ -1,8 +1,9 @@
 //! A hard state that only moves the commit index needs no sync of its own: Raft keeps the commit
-//! index as volatile state (only the term, the vote and the log are persistent), so it goes to
-//! disk with the next batch. Before, each write of a single-voter group took two syncs, one for
-//! its entry and one for its commit, and the next write waited for the second: 7,1 ms an insert
-//! with `w: "majority"` against 5,3 ms in a `refnode` 9.0.4 (H-008 of the native tests).
+//! index as volatile state (only the term, the vote and the log are persistent), so it goes to disk
+//! with the next batch. Before, each write of a single-voter group took two syncs, one for its
+//! entry and one for its commit, and the next write waited for the second: 7,1 ms an insert with
+//! `w: "majority"` against 5,3 ms in a reference replica set member 9.0.4 (H-008 of the native
+//! tests).
 
 use teseladb_multiraft::{
     ApplyCtx, ApplyError, CoreConfig, Done, GroupDesc, MultiRaftCore, OpError, OpId, RestoreError,

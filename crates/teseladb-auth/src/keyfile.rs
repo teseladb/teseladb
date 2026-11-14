@@ -1,7 +1,7 @@
-//! The contents of a `--keyFile` (013 FR-034), read as `refnode` 9.0.4 reads it (measured): a YAML
-//! string, or a YAML sequence of strings for a change of key, each with its whitespace removed,
-//! made of base64 characters and from 6 to 1024 of them long. The keys are secrets: no error
-//! names them.
+//! The contents of a `--keyFile` (013 FR-034), read as the reference server 9.0.4 reads it
+//! (measured): a YAML string, or a YAML sequence of strings for a change of key, each with its
+//! whitespace removed, made of base64 characters and from 6 to 1024 of them long. The keys are
+//! secrets: no error names them.
 
 /// The shortest key.
 pub const MIN_KEY_LEN: usize = 6;
@@ -20,7 +20,8 @@ pub enum KeyFileError {
 }
 
 impl KeyFileError {
-    /// RefDb's message for file `path`, without the key that `refnode` prints along.
+    /// The reference server's message for file `path`, without the key that the reference server
+    /// prints along.
     pub fn message(&self, path: &str) -> String {
         match self {
             KeyFileError::Format => {

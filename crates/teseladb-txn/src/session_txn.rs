@@ -1,7 +1,7 @@
-//! A session's transactions as RefDb 9.0 numbers them (008 FR-009): `txnNumber`,
+//! A session's transactions as the reference server 9.0 numbers them (008 FR-009): `txnNumber`,
 //! `startTransaction` with `autocommit: false`, the statements that continue a transaction, and
 //! `commitTransaction` and `abortTransaction`, with the errors 9.0.4 gives for each misuse
-//! (measured through `refrouter`).
+//! (measured through the reference router).
 
 /// What a command of the session asks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,15 +45,15 @@ pub enum SessionError {
     },
     /// `startTransaction` again with the running number (117, `ConflictingOperationInProgress`).
     AlreadyStarted(i64),
-    /// No running transaction with that number (251, `NoSuchTransaction`); RefDb's message names
-    /// the session's last transaction number, `last` (none before the first).
+    /// No running transaction with that number (251, `NoSuchTransaction`); the reference server's
+    /// message names the session's last transaction number, `last` (none before the first).
     NoSuchTransaction {
         /// The session's last transaction number.
         last: Option<i64>,
     },
-    /// `commitTransaction` of a number the session has no record of: a `refrouter` 9.0.4 recovers its
-    /// decision with the `recoveryToken` (measured). The number becomes the session's last, and
-    /// `last` is the one before it.
+    /// `commitTransaction` of a number the session has no record of: a reference router 9.0.4
+    /// recovers its decision with the `recoveryToken` (measured). The number becomes the session's
+    /// last, and `last` is the one before it.
     Unrecorded {
         /// The number asked.
         asked: i64,
@@ -162,7 +162,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn numbers_follow_refdb() {
+    fn numbers_follow_the_reference() {
         let mut s = SessionTxn::default();
         assert_eq!(
             s.check(5, Some(true), Ask::Start),

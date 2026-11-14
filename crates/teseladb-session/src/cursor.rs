@@ -1,10 +1,9 @@
-//! The cursors of a node (FR-017, data model §3): each one lives in the node that opened it,
-//! whose number goes in the 10 high bits of its identifier so that any node knows where a
-//! `getMore` goes (019). A cursor outside any session that nobody used for
-//! [`CURSOR_TIMEOUT_MS`] expires unless it was opened with `noCursorTimeout`; a session's cursor
-//! lives as long as its session (RefDb's `cursorTimeoutMillis` only reaps cursors without a
-//! session, measured on 9.0.4). While a command uses a cursor, it is out of the table and cannot
-//! expire.
+//! The cursors of a node (FR-017, data model §3): each one lives in the node that opened it, whose
+//! number goes in the 10 high bits of its identifier so that any node knows where a `getMore` goes
+//! (019). A cursor outside any session that nobody used for [`CURSOR_TIMEOUT_MS`] expires unless it
+//! was opened with `noCursorTimeout`; a session's cursor lives as long as its session (the
+//! reference server's `cursorTimeoutMillis` only reaps cursors without a session, measured on
+//! 9.0.4). While a command uses a cursor, it is out of the table and cannot expire.
 
 use std::collections::BTreeMap;
 
@@ -53,7 +52,7 @@ pub struct Cursor<S> {
 pub enum CursorError {
     /// It does not exist: never opened, exhausted, killed or expired (`CursorNotFound`).
     NotFound,
-    /// It reads another namespace (`Unauthorized`, as RefDb answers).
+    /// It reads another namespace (`Unauthorized`, as the reference server answers).
     OtherNamespace,
     /// It was opened outside any session and the command has one (50799).
     NotInSession,
@@ -156,8 +155,8 @@ impl<S> CursorTable<S> {
         Ok(c)
     }
 
-    /// Kills cursor `id` whatever it reads (`killCursors` on a `refrouter` 9.0 does not check the
-    /// namespace, measured); whether it was open.
+    /// Kills cursor `id` whatever it reads (`killCursors` on a reference router 9.0 does not check
+    /// the namespace, measured); whether it was open.
     pub fn remove(&mut self, id: i64) -> bool {
         self.cursors.remove(&id).is_some()
     }

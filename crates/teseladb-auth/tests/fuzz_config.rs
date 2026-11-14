@@ -40,7 +40,7 @@ const TEXTS: [&str; 13] = [
     "{$or: [{users: {$elemMatch: {user: 'u', db: 'test'}}}, {roles: []}]}",
     "127.0.0.1:27017",
     "[::1]:27017",
-    "/tmp/refdb-27017.sock",
+    "/tmp/teseladb-27017.sock",
     "10.0.0.0/8",
     "fe80::1:2:3/64",
     "https://sts.amazonaws.com:443/path",

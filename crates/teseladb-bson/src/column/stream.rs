@@ -1,5 +1,5 @@
-//! One stream of values of a BSON column: the reference value, the integer its deltas move and
-//! how each type turns that integer back into a value (measured on a `refrouter` 9.0.4, 003 T029).
+//! One stream of values of a BSON column: the reference value, the integer its deltas move and how
+//! each type turns that integer back into a value (measured on a reference router 9.0.4, 003 T029).
 //!
 //! - 64-bit integers: `int32` (wrapping in 32 bits), `int64`, `bool` (any integer but 0 is
 //!   true), `double` (its bits, or its value times 1, 10, 100, 10 000 or 10⁸ as the control byte
@@ -19,7 +19,7 @@ use crate::types;
 const SCALES: [f64; 5] = [1.0, 10.0, 100.0, 10_000.0, 100_000_000.0];
 /// Control byte of plain blocks, the only one most types take.
 const PLAIN: u8 = 0x80;
-/// Largest scaled double RefDb keeps: 2⁵³.
+/// Largest scaled double the reference server keeps: 2⁵³.
 const MAX_SCALED: f64 = 9_007_199_254_740_992.0;
 /// Bytes of a value a 128-bit integer can hold.
 const WIDE_BYTES: usize = 16;
@@ -121,7 +121,7 @@ impl Stream {
     /// Moves a double to scale `scale`; it has to come back the same.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "a scaled double is an integer below 2^53 that RefDb's encoder checked comes back the same"
+        reason = "a scaled double is an integer below 2^53 that the reference server's encoder checked comes back the same"
     )]
     fn rescale(&mut self, scale: Option<usize>) -> Result<(), ColumnError> {
         let bits = self.int.map(super::low64).ok_or(BAD_DOUBLE)?;
@@ -172,7 +172,7 @@ impl Stream {
     }
 }
 
-/// `d` times `m` as RefDb keeps a scaled double, if it comes back as `d`.
+/// `d` times `m` as the reference server keeps a scaled double, if it comes back as `d`.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,

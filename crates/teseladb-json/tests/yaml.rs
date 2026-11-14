@@ -1,4 +1,4 @@
-//! The YAML subset of `refnode` configuration files: block mappings and sequences,
+//! The YAML subset of reference server configuration files: block mappings and sequences,
 //! flow sequences of scalars, plain and quoted scalars with the YAML 1.2 core types, and comments;
 //! everything else is an error with its line and column.
 
@@ -17,9 +17,9 @@ fn error(yaml: &str) -> (YamlErrorKind, usize, usize) {
 }
 
 #[test]
-fn a_refnode_configuration_file() {
+fn a_reference_server_configuration_file() {
     let yaml = "\
-# refnode.conf
+# teseladb.conf
 storage:
   dbPath: /var/lib/teseladb   # data
 net:

@@ -1,9 +1,9 @@
 //! `follower-read` scenario (007 FR-024, SC-004): a document read on a follower of a range of three
-//! replicas in this process, at the follower's closed mark, without the leader. `follower-read`
-//! is the time of one read on the machine's clock, under 100 µs at p50; `follower-read.staleness`
-//! is how far behind the cluster's clock the mark of each read was, never past
-//! `maxStalenessSeconds` (90 s, RefDb's smallest). The cluster's time is logical: the replicas
-//! run in ticks of 10 ms, and the reads are timed apart from the ticks.
+//! replicas in this process, at the follower's closed mark, without the leader. `follower-read` is
+//! the time of one read on the machine's clock, under 100 µs at p50; `follower-read.staleness` is
+//! how far behind the cluster's clock the mark of each read was, never past `maxStalenessSeconds`
+//! (90 s, the reference server's smallest). The cluster's time is logical: the replicas run in
+//! ticks of 10 ms, and the reads are timed apart from the ticks.
 
 use std::time::Instant;
 
@@ -24,7 +24,8 @@ const READS: u64 = 10_000;
 const SETTLE_TICKS: u32 = 1_000;
 /// p50 of a read (SC-004), in nanoseconds.
 const P50_NS: f64 = 100_000.0;
-/// Most staleness of a read's mark (RefDb's smallest `maxStalenessSeconds`), in milliseconds.
+/// Most staleness of a read's mark (the reference server's smallest `maxStalenessSeconds`), in
+/// milliseconds.
 const MAX_STALENESS_MS: f64 = 90_000.0;
 
 /// Runs the scenario.

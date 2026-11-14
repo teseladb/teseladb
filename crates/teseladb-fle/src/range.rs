@@ -1,5 +1,5 @@
-//! The domain of a range field: how many bits its values take once encoded (librefcrypt's
-//! `mc_getNumberOfBits`), which bounds the trim factor.
+//! The domain of a range field: how many bits its values take once encoded (the reference
+//! encryption library's `mc_getNumberOfBits`), which bounds the trim factor.
 
 use teseladb_bson::Value;
 use teseladb_bson::types as t;
@@ -103,8 +103,8 @@ fn fits_precision(v: &Value, precision: i32) -> bool {
     }
 }
 
-/// Checks the bounds of a floating range field with a precision: no more decimals than it
-/// allows, and scaled within what the encoding takes (measured on a `refnode` 9.0.4).
+/// Checks the bounds of a floating range field with a precision: no more decimals than it allows,
+/// and scaled within what the encoding takes (measured on a reference replica set member 9.0.4).
 pub fn check_precision(
     ty: u8,
     (min, max): (&Value, &Value),

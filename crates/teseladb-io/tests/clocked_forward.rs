@@ -1,10 +1,10 @@
 //! A forwarded request or answer carries its sender's HLC (005 FR-003, protocol 7): the receiver's
 //! clock moves past it before the request runs, so a write a node forwards to a range's leader
 //! commits above every mark the node already gave its clients. Before, a change stream opened on a
-//! node that does not lead the range answered a resume token from the node's clock, the insert
-//! that followed committed at the leader's lower clock, and the stream resumed past it (PyRef's
-//! `change-streams-resume-allowlist`, e2e of 04-11-2026). To a node of an older protocol the frame
-//! goes as before, without the clock.
+//! node that does not lead the range answered a resume token from the node's clock, the insert that
+//! followed committed at the leader's lower clock, and the stream resumed past it (the reference
+//! Python driver's `change-streams-resume-allowlist`, e2e of 04-11-2026). To a node of an older
+//! protocol the frame goes as before, without the clock.
 
 use teseladb_io::peer::{
     CLOCKED_FORWARD_VERSION, FORWARD_CHUNK_VERSION, HEADER_LEN, PROTOCOL_VERSION, PeerMsg,

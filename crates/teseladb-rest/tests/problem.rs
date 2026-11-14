@@ -1,5 +1,5 @@
 //! Errors as RFC 9457 problems (019 FR-013, contract `rest-api.md`, T012): the HTTP status of
-//! each RefDb error and the body with its code, name, message and labels.
+//! each the reference server error and the body with its code, name, message and labels.
 
 use teseladb_bson::{Document, Value};
 use teseladb_rest::problem::{PROBLEM_JSON, http_problem, problem, status, write_status};
@@ -54,7 +54,7 @@ fn problem_body() {
 }
 
 #[test]
-fn http_problems_without_a_refdb_code() {
+fn http_problems_without_a_reference_code() {
     let body = http_problem(415);
     let expected = Document::new()
         .with("type", "about:blank")

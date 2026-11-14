@@ -1,6 +1,7 @@
-//! The event documents (014 FR-002): the fields of each type in the order a `refrouter` 9.0.4 returns
-//! them, measured on 31-10 with `watch()` from `refshell` (with and without `showExpandedEvents`,
-//! `fullDocument: "updateLookup"`, `fullDocumentBeforeChange: "whenAvailable"` and a transaction).
+//! The event documents (014 FR-002): the fields of each type in the order a reference router 9.0.4
+//! returns them, measured on 31-10 with `watch()` from the reference shell (with and without
+//! `showExpandedEvents`, `fullDocument: "updateLookup"`, `fullDocumentBeforeChange:
+//! "whenAvailable"` and a transaction).
 
 use teseladb_bson::{Document, Value};
 use teseladb_changestream::event::{ChangeEvent, Namespace, operation_type};
@@ -124,7 +125,7 @@ fn a_deletion_and_a_database_event_carry_what_they_have() {
 }
 
 #[test]
-fn every_type_has_refdb_s_operation_type() {
+fn every_type_has_the_reference_operation_type() {
     let names = [
         (EventKind::Insert, "insert"),
         (EventKind::Update, "update"),
@@ -199,7 +200,7 @@ fn an_event_comes_from_its_change() {
 }
 
 #[test]
-fn catalog_events_have_the_fields_of_refrouter_in_its_order() {
+fn catalog_events_have_the_fields_of_the_reference_router_in_its_order() {
     use teseladb_changestream::event::Namespace as Ns;
     let ts = Hlc { physical: 1_730_198_400_123, logical: 2 };
     let token = |kind| ResumeToken::new(EventKey { ts, txn: 0, op: 1, key: Vec::new() }, kind);

@@ -1,8 +1,8 @@
-//! A bounded spin before a thread sleeps (H-013 of the native tests against RefDb). A message
-//! between two threads that sleep in `kevent` took 9,3 µs to go and come back on the test
+//! A bounded spin before a thread sleeps (H-013 of the native tests against the reference server).
+//! A message between two threads that sleep in `kevent` took 9,3 µs to go and come back on the test
 //! machine, against 0,75 µs while they spun; a read crosses threads more than once. Thread-per-core
-//! systems keep polling for this reason, and adaptive locks spin about a context switch
-//! round trip before they park: a thread that is about to wait spins this long first.
+//! systems keep polling for this reason, and adaptive locks spin about a context switch round trip
+//! before they park: a thread that is about to wait spins this long first.
 
 use std::time::{Duration, Instant};
 

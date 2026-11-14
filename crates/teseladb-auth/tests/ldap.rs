@@ -1,7 +1,7 @@
-//! LDAP for PLAIN logins (013 T036, FR-025): the BER of RFC 4511, the filters of RFC 4515 with
-//! its examples, RefDb's queries and `userToDNMapping`, and the conversation of a login against
-//! a server written here from RFC 4511: direct bind, search with and without the query user, and
-//! each failure.
+//! LDAP for PLAIN logins (013 T036, FR-025): the BER of RFC 4511, the filters of RFC 4515 with its
+//! examples, the reference server's queries and `userToDNMapping`, and the conversation of a login
+//! against a server written here from RFC 4511: direct bind, search with and without the query
+//! user, and each failure.
 
 use teseladb_auth::ldap::{
     self, AuthzTemplate, INVALID_CREDENTIALS, LdapError, Login, Mapping, Message, Op, Step, Target,
@@ -104,7 +104,7 @@ fn filters_of_rfc_4515() {
 }
 
 #[test]
-fn queries_of_refdbs_configuration() {
+fn queries_of_the_reference_servers_configuration() {
     let q = Query::parse("ou=Users,dc=example,dc=com??one?(uid=jane)").unwrap();
     assert_eq!(q.base, "ou=Users,dc=example,dc=com");
     assert_eq!((q.scope, q.filter.as_str(), q.attributes.len()), (Scope::One, "(uid=jane)", 0));
@@ -430,9 +430,10 @@ fn failures_of_the_group_search() {
     assert!(matches!(l.receive(&msg(2, &result_op(0x61, 0, ""))), Err(LdapError::Protocol(_))));
 }
 
-/// The groups of a user that logged in another way (REFDB-X509, 013 T045): no bind of the
+/// The groups of a user that logged in another way (X.509 authentication, 013 T045): no bind of the
 /// user; the groups searched as the query user, or anonymously without one; with a mapping that
-/// searches, the entry it finds is the user's DN (measured on RefDb Enterprise 9.0.4).
+/// searches, the entry it finds is the user's DN (measured on the reference enterprise server
+/// 9.0.4).
 #[test]
 fn groups_of_a_user_without_a_password() {
     let template = AuthzTemplate::parse(GROUPS).unwrap();

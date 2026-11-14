@@ -1,11 +1,11 @@
 //! The decision on a client transaction found from another node (008): a `commitTransaction` that
-//! reaches a node without the transaction, with its `recoveryToken`, as a second `refrouter` gets it
-//! from the shard. A client transaction's identifier comes from its session and number
-//! ([`client_txn_id`]), so any node finds its record, which Raft keeps in its range. The recovery
-//! pushes the record with [`Push::Abort`]: a committed one answers committed, a running one
-//! aborts, as a shard of a `refrouter` 9.0.4 aborts it (measured), and one that does not exist is
-//! created aborted, so that the transaction's coordinator, if it is still alive, cannot begin or
-//! commit it after the answer.
+//! reaches a node without the transaction, with its `recoveryToken`, as a second reference
+//! router gets it from the shard. A client transaction's identifier comes from its session and
+//! number ([`client_txn_id`]), so any node finds its record, which Raft keeps in its range. The
+//! recovery pushes the record with [`Push::Abort`]: a committed one answers committed, a running
+//! one aborts, as a shard of a reference router 9.0.4 aborts it (measured), and one that does not
+//! exist is created aborted, so that the transaction's coordinator, if it is still alive, cannot
+//! begin or commit it after the answer.
 //!
 //! A transaction that held its writes until the commit and committed them in one phase has no
 //! record (008 FR-022): its decision is the idempotence record that commit left in its range. So

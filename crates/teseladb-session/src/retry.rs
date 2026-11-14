@@ -1,7 +1,7 @@
 //! Retryable writes (FR-018): a write with `lsid` and `txnNumber` outside a transaction is
 //! retryable; each of its statements has a key (`lsid`, `txnNumber`, `stmtId`) that the range
 //! keeps with the result (005 FR-011), so a retry gets that result instead of writing again.
-//! A `txnNumber` below the session's highest is too old, as in RefDb.
+//! A `txnNumber` below the session's highest is too old, as in the reference server.
 
 use crate::session::Session;
 
@@ -43,7 +43,7 @@ pub fn check_txn_number(session: &mut Session, txn_number: i64) -> TxnCheck {
 }
 
 /// The statement ids of a write of `n` statements that starts at `first` (`stmtId` 0 when the
-/// driver gives none, as RefDb numbers them in order).
+/// driver gives none, as the reference server numbers them in order).
 pub fn statement_keys(lsid: u128, txn_number: i64, first: u32, n: usize) -> Vec<StatementKey> {
     (0..n)
         .map(|i| StatementKey { lsid, txn_number, stmt_id: first.wrapping_add(i as u32) })

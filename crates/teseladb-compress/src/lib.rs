@@ -1,5 +1,5 @@
-//! Snappy and Zstandard without dependencies, as RefDb's wire protocol carries them in
-//! `OP_COMPRESSED`: [`snappy`] (raw format, compressor id 1) and [`zstd`] (RFC 8878, compressor
+//! Snappy and Zstandard without dependencies, as the reference server's wire protocol carries them
+//! in `OP_COMPRESSED`: [`snappy`] (raw format, compressor id 1) and [`zstd`] (RFC 8878, compressor
 //! id 3). zlib (id 2) is `teseladb-deflate`'s.
 //!
 //! Both decoders take the most bytes they may produce and never allocate more, so a hostile

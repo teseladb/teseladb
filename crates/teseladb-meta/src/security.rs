@@ -1,14 +1,15 @@
 //! Users and roles of the cluster in Group 0 (013 FR-009, FR-013, FR-030, contract `catalog.md`):
-//! the documents of `admin.system.users` and `admin.system.roles` exactly as they were written,
-//! by the user commands or by a direct write to those collections, kept in the order they were
+//! the documents of `admin.system.users` and `admin.system.roles` exactly as they were written, by
+//! the user commands or by a direct write to those collections, kept in the order they were
 //! inserted (an update keeps the place, a delete and a new insert go to the end), with the two
-//! indexes RefDb 9.0.4 has on them: `_id` and the unique `user_1_db_1` or `role_1_db_1`, where
-//! a missing field counts as `null` and an array gives one key per element (measured on a
-//! `refrouter`). A change is one atomic batch of puts and deletes, each addressing a document by
-//! its `_id` with what it expects to find there, so that the commands that read, change and
-//! write back (`updateUser`, `dropRole` taking the role from every user) lose nothing to a
-//! concurrent change: a batch whose expectations fail changes nothing. Every applied batch moves
-//! [`Security::version`], which the nodes compare to know their copy is current. Group 0 kind 43.
+//! indexes the reference server 9.0.4 has on them: `_id` and the unique `user_1_db_1` or
+//! `role_1_db_1`, where a missing field counts as `null` and an array gives one key per element
+//! (measured on a reference router). A change is one atomic batch of puts and deletes, each
+//! addressing a document by its `_id` with what it expects to find there, so that the commands that
+//! read, change and write back (`updateUser`, `dropRole` taking the role from every user) lose
+//! nothing to a concurrent change: a batch whose expectations fail changes nothing. Every applied
+//! batch moves [`Security::version`], which the nodes compare to know their copy is current. Group
+//! 0 kind 43.
 
 use std::collections::BTreeMap;
 
@@ -126,7 +127,7 @@ pub enum KeyError {
     Bson,
     /// It has no `_id`.
     NoId,
-    /// Both fields of the unique index are arrays (RefDb's 171).
+    /// Both fields of the unique index are arrays (the reference server's 171).
     ParallelArrays,
 }
 
@@ -164,8 +165,8 @@ pub struct UniqueKey {
     pub values: [Value; 2],
 }
 
-/// The keys of the unique index of `kind` for `doc`: a missing field is `null`, an array gives
-/// one key per element and an empty array the key `undefined`, as RefDb indexes them.
+/// The keys of the unique index of `kind` for `doc`: a missing field is `null`, an array gives one
+/// key per element and an empty array the key `undefined`, as the reference server indexes them.
 pub fn unique_keys(kind: Principal, doc: &[u8]) -> Result<Vec<UniqueKey>, KeyError> {
     let raw = RawDoc::from_bytes(doc).map_err(|_| KeyError::Bson)?;
     let spread = |field: &str| match raw.get(field) {

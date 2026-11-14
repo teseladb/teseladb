@@ -1,7 +1,7 @@
 //! HLC marks as BSON timestamps (FR-024): `t` is the seconds of the physical part and `i` the
 //! milliseconds within the second times 2²² plus the logical counter. The conversion is injective
-//! and its inverse exact; a timestamp it never makes (`i` from 1 000 × 2²² up, as RefDb writes
-//! them) maps to the greatest mark not above it.
+//! and its inverse exact; a timestamp it never makes (`i` from 1 000 × 2²² up, as the reference
+//! server writes them) maps to the greatest mark not above it.
 
 use teseladb_keys::Hlc;
 

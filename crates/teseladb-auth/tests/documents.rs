@@ -151,8 +151,9 @@ fn users_read_back_and_bad_fields_are_named() {
     for (doc, code, msg) in cases {
         assert_eq!(User::from_document(&doc), Err(BadDocument::new(code, msg)), "{doc:?}");
     }
-    // What RefDb lets through: no `userId` or one of another form, any `customData`, numbers
-    // of other types as the iteration count, fields it does not know, `{role, db}` with more.
+    // What the reference server lets through: no `userId` or one of another form, any `customData`,
+    // numbers of other types as the iteration count, fields it does not know, `{role, db}` with
+    // more.
     let mut lenient = without(&d, "userId");
     lenient = with(&lenient, "customData", Value::from("x"));
     lenient = with(&lenient, "extra", Value::from(1));

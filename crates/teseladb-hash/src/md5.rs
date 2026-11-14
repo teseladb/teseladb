@@ -1,5 +1,5 @@
-//! MD5 (RFC 1321). Not for security: only for formats that require it, such as the keys of RefDb's
-//! hashed indexes.
+//! MD5 (RFC 1321). Not for security: only for formats that require it, such as the keys of the
+//! reference server's hashed indexes.
 
 /// Per-round shift amounts (RFC 1321, §3.4).
 const SHIFTS: [u32; 64] = [

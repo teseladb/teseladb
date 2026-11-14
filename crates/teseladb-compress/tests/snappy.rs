@@ -1,5 +1,5 @@
-//! Snappy (raw format, as RefDb's `OP_COMPRESSED` with compressor id 1 carries it): vectors
-//! written by hand from the format description, round trips and corrupt streams.
+//! Snappy (raw format, as the reference server's `OP_COMPRESSED` with compressor id 1 carries it):
+//! vectors written by hand from the format description, round trips and corrupt streams.
 
 use teseladb_compress::{Error, snappy};
 use teseladb_types::Rng;

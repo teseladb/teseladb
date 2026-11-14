@@ -1,4 +1,4 @@
-//! RefDb's limits and the errors' offsets, as a `refrouter` 9.0.4 answers
+//! The reference server's limits and the errors' offsets, as a reference router 9.0.4 answers
 //! them: 16 MiB exactly is accepted and one byte more is not, a stored document takes
 //! 180 levels and not 181, reading and writing alike, and every error says where.
 
@@ -55,7 +55,8 @@ fn sixteen_mebibytes_exactly_and_not_one_byte_more() {
 
 #[test]
 fn a_stored_document_takes_180_levels_and_not_one_more() {
-    // A `refrouter` 9.0.4 stores 180 levels and refuses 181 ("object exceeds 180 levels of nesting").
+    // A reference router 9.0.4 stores 180 levels and refuses 181 ("object exceeds 180 levels of
+    // nesting").
     assert_eq!(MAX_DEPTH, 180);
     let ok = nested(MAX_DEPTH).to_bytes().expect("to_bytes succeeds");
     RawDoc::from_bytes(&ok).expect("from_bytes succeeds");
@@ -105,9 +106,9 @@ fn by_hand(elements: &[&[u8]]) -> Vec<u8> {
 }
 
 #[test]
-fn a_message_is_checked_as_refdb_checks_it() {
-    // A `refrouter` 9.0.4 takes a string or a name that is not UTF-8 and an old binary whose two
-    // lengths differ; reading refuses them (the BSON corpus has them as decode errors).
+fn a_message_is_checked_as_the_reference_checks_it() {
+    // A reference router 9.0.4 takes a string or a name that is not UTF-8 and an old binary whose
+    // two lengths differ; reading refuses them (the BSON corpus has them as decode errors).
     let bad_string: &[u8] = &[types::STRING, b's', 0, 3, 0, 0, 0, 0xFF, b'b', 0];
     let bad_name: &[u8] = &[types::INT32, 0xFF, b'k', 0, 1, 0, 0, 0];
     let old_binary: &[u8] =
@@ -117,7 +118,8 @@ fn a_message_is_checked_as_refdb_checks_it() {
         assert_eq!(validate_message(&doc, Limits::default()), Ok(()));
         assert!(RawDoc::from_bytes(&doc).is_err());
     }
-    // What RefDb refuses, the message check refuses too, at the first fault in document order.
+    // What the reference server refuses, the message check refuses too, at the first fault in
+    // document order.
     let boolean: &[u8] = &[types::BOOLEAN, b'b', 0, 2];
     let e = validate_message(&by_hand(&[bad_string, boolean]), Limits::default())
         .expect_err("validate_message fails");
@@ -127,7 +129,7 @@ fn a_message_is_checked_as_refdb_checks_it() {
         validate_message(&by_hand(&[unknown]), Limits::default()),
         Err(BsonError::InvalidBson { offset: 4, .. })
     ));
-    // Too deep before a fault further on: the depth is what RefDb answers.
+    // Too deep before a fault further on: the depth is what the reference server answers.
     let deep = nested(4).to_bytes().expect("to_bytes succeeds");
     let mut element = vec![types::DOCUMENT, b'f', 0];
     element.extend(&deep);
@@ -220,7 +222,8 @@ fn every_error_says_where() {
 
 #[test]
 fn uuids_and_md5_take_any_length_and_the_old_binary_keeps_its_own() {
-    // A `refrouter` 9.0.4 stores a UUID of 15 bytes and an MD5 of 3 and reads them back as they are.
+    // A reference router 9.0.4 stores a UUID of 15 bytes and an MD5 of 3 and reads them back as
+    // they are.
     for subtype in [types::BINARY_UUID_OLD, types::BINARY_UUID, types::BINARY_MD5] {
         for len in [0, 3, 15, 16, 17] {
             let d = Document::new().with("u", Value::Binary { subtype, bytes: vec![1; len] });

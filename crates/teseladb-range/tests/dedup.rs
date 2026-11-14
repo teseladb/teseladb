@@ -176,8 +176,8 @@ fn a_purge_keeps_newer_records_and_a_later_round_skips_the_deleted_ones() {
     let again = inc(&mut c, l, Some(NEWER));
     c.ticks(2);
     assert_eq!(mutated(c.reply(l, again)).1, vec![1], "the newer record stays");
-    // The older one went, and its session has a newer `txnNumber` here: too old, as RefDb
-    // answers it.
+    // The older one went, and its session has a newer `txnNumber` here: too old, as the reference
+    // server answers it.
     let late = inc(&mut c, l, Some(K));
     c.ticks(2);
     assert_too_old(c.reply(l, late), 7, 8);
@@ -199,8 +199,9 @@ fn assert_too_old(r: Option<Result<Reply, RangeError>>, txn: i64, newest: i64) {
 
 #[test]
 fn a_session_keeps_the_records_of_its_newest_txn_number_only() {
-    // As a shard of RefDb keeps one record per session (`config.transactions`): a purge round
-    // drops the records a newer `txnNumber` of their session replaced, long before 30 minutes.
+    // As a shard of the reference server keeps one record per session (`config.transactions`): a
+    // purge round drops the records a newer `txnNumber` of their session replaced, long before 30
+    // minutes.
     const NEWER: DedupKey = DedupKey { lsid: 0xabcd, txn_number: 8, stmt_id: 0 };
     const OTHER: DedupKey = DedupKey { lsid: 0x1234, txn_number: 3, stmt_id: 0 };
     let mut c = Cluster::standard();

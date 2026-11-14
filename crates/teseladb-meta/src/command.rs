@@ -98,7 +98,7 @@ pub struct NodeAddrs {
     pub peer_addr: Vec<u8>,
     /// HTTP (administration) address.
     pub http_addr: Vec<u8>,
-    /// Address of the RefDb protocol.
+    /// Address of the reference server protocol.
     pub native_addr: Vec<u8>,
     /// Cores.
     pub cores: u16,

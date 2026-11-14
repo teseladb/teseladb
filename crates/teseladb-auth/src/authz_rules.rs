@@ -1,7 +1,7 @@
-//! What each command needs (013 FR-011): the table of `contracts/privileges.md`, measured on
-//! RefDb 9.0.4. A command missing from it needs `anyAction` on any resource, so that a command
-//! added without its row is refused rather than open; a test of `teseladb-wire` checks that every
-//! command the node runs has its row.
+//! What each command needs (013 FR-011): the table of `contracts/privileges.md`, measured on the
+//! reference server 9.0.4. A command missing from it needs `anyAction` on any resource, so that a
+//! command added without its row is refused rather than open; a test of `teseladb-wire` checks that
+//! every command the node runs has its row.
 
 use teseladb_bson::{Document, Value};
 
@@ -106,7 +106,8 @@ const ROWS: &[Row] = &[
     ("configureCollectionBalancing", On::FullNs, &[A::SplitChunk]),
     ("clearJumboFlag", On::FullNs, &[A::ClearJumboFlag]),
     ("moveCollection", On::FullNs, &[A::MoveCollection]),
-    // An internal privilege on the cluster, and `moveChunk` on `admin` (RefDb r9.0.4).
+    // An internal privilege on the cluster, and `moveChunk` on `admin` (the reference server
+    // r9.0.4).
     ("untrackUnshardedCollection", On::Cluster, &[A::Internal]),
     ("resetPlacementHistory", On::Db, &[A::MoveChunk]),
     ("abortMoveCollection", On::FullNs, &[A::MoveCollection]),
@@ -303,7 +304,7 @@ fn first(cmd: &Document) -> &Value {
     cmd.iter().next().map_or(&Value::Null, |(_, v)| v)
 }
 
-/// Whether field `f` is set to a true value, as RefDb reads `upsert` and the like.
+/// Whether field `f` is set to a true value, as the reference server reads `upsert` and the like.
 fn truthy(cmd: &Document, f: &str) -> bool {
     match cmd.get(f) {
         Some(Value::Boolean(b)) => *b,
@@ -388,8 +389,8 @@ fn explain(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {
     }
 }
 
-/// `applyOps` (018 FR-011), as measured on RefDb 9.0.4: a command whose `applyOps` is not an
-/// array of documents with `op` needs nothing (it fails on its own); an empty array needs
+/// `applyOps` (018 FR-011), as measured on the reference server 9.0.4: a command whose `applyOps`
+/// is not an array of documents with `op` needs nothing (it fails on its own); an empty array needs
 /// everything; otherwise `applyOps` on the cluster and, entry by entry until the first one that
 /// does not parse (the command fails there), what the entry does.
 fn apply_ops(db: &str, cmd: &Document, who: &Subject<'_>) -> Check {

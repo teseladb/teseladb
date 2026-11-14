@@ -1,10 +1,10 @@
-//! BSON columns (binary subtype 7) against a `refrouter` 9.0.4.
+//! BSON columns (binary subtype 7) against a reference router 9.0.4.
 //!
-//! `data/bson-columns.txt` holds columns measured on a `refrouter` 9.0.4 (the columns of its own time
-//! series buckets, columns made by hand, random ones and mutations of the others): whether a
-//! message carrying the column is accepted or answered with 378 `NonConformantBSON`, and the rows
-//! `$_internalUnpackBucket` reads from it, or `!` where unpacking fails. Line:
-//! `<1|0> <column hex> <rows>`, rows as `-` (no value) or `<type>:<value hex>` separated by `,`.
+//! `data/bson-columns.txt` holds columns measured on a reference router 9.0.4 (the columns of its
+//! own time series buckets, columns made by hand, random ones and mutations of the others): whether
+//! a message carrying the column is accepted or answered with 378 `NonConformantBSON`, and the rows
+//! `$_internalUnpackBucket` reads from it, or `!` where unpacking fails. Line: `<1|0> <column hex>
+//! <rows>`, rows as `-` (no value) or `<type>:<value hex>` separated by `,`.
 
 mod common;
 
@@ -59,7 +59,7 @@ fn holder(column: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn messages_are_refused_where_refdb_refuses_them() {
+fn messages_are_refused_where_the_reference_refuses_them() {
     let all = measured();
     assert!(all.len() > 600, "{}", all.len());
     let refused = all.iter().filter(|m| !m.accepted).count();
@@ -85,7 +85,7 @@ fn messages_are_refused_where_refdb_refuses_them() {
 }
 
 #[test]
-fn columns_decode_as_refdb_unpacks_them() {
+fn columns_decode_as_the_reference_unpacks_them() {
     let (mut rows, mut failures) = (0, 0);
     for m in measured().iter().filter(|m| m.accepted) {
         let h = m.bytes.iter().fold(String::new(), |mut out, b| {
@@ -188,8 +188,8 @@ fn decoding_stops_at_the_rows_it_is_given() {
 
 #[test]
 fn binaries_past_16_bytes_take_no_deltas() {
-    // A `refrouter` 9.0.4 repeats a binary of 17 bytes on a zero delta and refuses any other delta
-    // (measured).
+    // A reference router 9.0.4 repeats a binary of 17 bytes on a zero delta and refuses any other
+    // delta (measured).
     let literal = format!("0500110000000041{}", "00".repeat(16));
     let repeat = hex(&format!("{literal}800e0000000000000000"));
     let rows = column::decode(&repeat, 4).expect("decode succeeds");

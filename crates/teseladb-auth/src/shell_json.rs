@@ -1,4 +1,4 @@
-//! JSON as RefDb reads it from its options and configuration (`--auditFilter`,
+//! JSON as the reference server reads it from its options and configuration (`--auditFilter`,
 //! `security.ldap.userToDNMapping`): keys without quotes and strings in single quotes, as the shell
 //! writes them, turned into strict JSON for the Extended JSON reader.
 

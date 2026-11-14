@@ -1,8 +1,8 @@
 //! The messages of a KMIP client (013 FR-028): the TTLV encoding of the OASIS KMIP Specification
-//! (v1.2, §9.1) and the four requests a node sends for its master key, as RefDb Enterprise 9.0.4
-//! sends them (measured against a KMIP server on 31-10-2026): `Create` of an AES-256 key for
-//! encryption and decryption, `Get` of its bytes, `Activate`, and `Get Attributes` of its `State`.
-//! Each request is one batch item; the connection and TLS are the caller's.
+//! (v1.2, §9.1) and the four requests a node sends for its master key, as the reference enterprise
+//! server 9.0.4 sends them (measured against a KMIP server on 31-10-2026): `Create` of an AES-256
+//! key for encryption and decryption, `Get` of its bytes, `Activate`, and `Get Attributes` of its
+//! `State`. Each request is one batch item; the connection and TLS are the caller's.
 
 use std::fmt;
 
@@ -118,7 +118,7 @@ pub struct Version {
     pub minor: i32,
 }
 
-/// KMIP 1.2, RefDb's default.
+/// KMIP 1.2, the reference server's default.
 pub const V1_2: Version = Version { major: 1, minor: 2 };
 /// KMIP 1.0, with `--kmipUseLegacyProtocol`.
 pub const V1_0: Version = Version { major: 1, minor: 0 };

@@ -1,7 +1,7 @@
 //! The payloads drivers send (FR-001): the insert and update payload of an indexed field (subtype
 //! 11) and the find payloads of equality (12), range (13) and text (18) queries. Each is one byte
 //! of subtype followed by a BSON document whose fields are single letters
-//! (librefcrypt's `mc-fle2-*-payload-*`).
+//! (the reference encryption library's `mc-fle2-*-payload-*`).
 
 use teseladb_bson::types as t;
 use teseladb_bson::{RawDoc, RawValue, Value};

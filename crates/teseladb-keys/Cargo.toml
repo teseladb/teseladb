@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-keys"
 version = "0.1.0"
-description = "TeselaDB's keys: values encoded so that their bytes keep RefDb's order, type bits, key spaces, buckets and versions."
+description = "TeselaDB's keys: values encoded so that their bytes keep the reference server's order, type bits, key spaces, buckets and versions."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

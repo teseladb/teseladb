@@ -152,8 +152,8 @@ impl SessionTable {
         self.end(&dead)
     }
 
-    /// Marks sessions to end at the next refresh (`endSessions`): RefDb ends them and kills
-    /// their cursors when its session cache refreshes, not at once.
+    /// Marks sessions to end at the next refresh (`endSessions`): the reference server ends them
+    /// and kills their cursors when its session cache refreshes, not at once.
     pub fn mark_ending(&mut self, matches: &[SessionMatch]) {
         self.ending.extend(matches.iter().copied());
     }

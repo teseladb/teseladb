@@ -1,6 +1,6 @@
-//! Reading the BSON of a payload or an option the way RefDb's IDL parser does, with its
-//! messages (measured on a `refnode` 9.0.4): an unknown field fails where it is, a missing
-//! required field after the walk, a field of the wrong type with its alias.
+//! Reading the BSON of a payload or an option the way the reference server's IDL parser does, with
+//! its messages (measured on a reference replica set member 9.0.4): an unknown field fails where it
+//! is, a missing required field after the walk, a field of the wrong type with its alias.
 
 use teseladb_bson::types as t;
 use teseladb_bson::{RawDoc, RawValue};
@@ -9,7 +9,7 @@ use teseladb_mql::types::name_of;
 use crate::error::{FleError, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD, TYPE_MISMATCH, err};
 use crate::tokens::Token;
 
-/// RefDb's name of a binary subtype in its messages.
+/// The reference server's name of a binary subtype in its messages.
 pub fn subtype_name(subtype: u8) -> &'static str {
     match subtype {
         t::BINARY_GENERIC => "general",

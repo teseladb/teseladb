@@ -1,10 +1,11 @@
-//! Small helpers over BSON values: comparison in RefDb's order and integral decimals.
+//! Small helpers over BSON values: comparison in the reference server's order and integral
+//! decimals.
 
 use std::cmp::Ordering;
 
 use teseladb_bson::{Decimal, Decimal128, Document, RawDoc, Value};
 
-/// Compares two values in RefDb's order (binary comparison of strings).
+/// Compares two values in the reference server's order (binary comparison of strings).
 pub fn compare(a: &Value, b: &Value) -> Ordering {
     // Two values in one document; one that cannot be written compares equal.
     let doc = Document::new().with("a", a.clone()).with("b", b.clone());

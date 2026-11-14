@@ -1,7 +1,7 @@
 //! Authorization (013 FR-011): what a privilege's resource covers, what each command needs and
-//! whether a set of privileges gives it. The rules are those measured on RefDb 9.0.4
-//! (`contracts/privileges.md`, fixtures in `tests/fixtures/refdb/authz_*.json`); the table of
-//! commands is in [`crate::authz_rules`].
+//! whether a set of privileges gives it. The rules are those measured on the reference server 9.0.4
+//! (`contracts/privileges.md`, with the recorded answers of the reference server); the
+//! table of commands is in [`crate::authz_rules`].
 
 use crate::actions::ActionType;
 use crate::privileges::{Privilege, Resource};

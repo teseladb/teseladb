@@ -12,7 +12,7 @@ use teseladb_multiraft::ReadMode;
 use crate::latch::{Latches, ReadWait, WaitFor};
 use crate::tscache::TsCache;
 
-/// RefDb's read concern of a read outside a transaction.
+/// The reference server's read concern of a read outside a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadConcern {
     /// `majority`.
@@ -63,11 +63,11 @@ pub fn admit_read(
     wait
 }
 
-/// Admits a read of `[start, end)` at a mark `ts` the node chose: what it waits for and the mark
-/// it reads at. A `local` or `available` read meets no wait when no write in flight on its keys
-/// was answered yet, and reads just below the lowest of them (H-010 of the native tests: it
-/// waited for each update of a hot key, 15,8 ms at p99 against 0,5 ms in a `refnode` 9.0.4); any
-/// other read is [`admit_read`] at `ts`.
+/// Admits a read of `[start, end)` at a mark `ts` the node chose: what it waits for and the mark it
+/// reads at. A `local` or `available` read meets no wait when no write in flight on its keys was
+/// answered yet, and reads just below the lowest of them (H-010 of the native tests: it waited for
+/// each update of a hot key, 15,8 ms at p99 against 0,5 ms in a reference replica set member
+/// 9.0.4); any other read is [`admit_read`] at `ts`.
 pub fn admit_own_read(
     latches: &Latches,
     cache: &mut TsCache,
