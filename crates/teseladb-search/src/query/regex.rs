@@ -671,8 +671,8 @@ mod tests {
 
     #[test]
     fn documented_operators_match_whole_terms() {
-        assert!(full("ref.b", "refdb"));
-        assert!(!full("ref", "refdb"));
+        assert!(full("ref.b", teseladb_names::KERBEROS_SERVICE));
+        assert!(!full(teseladb_names::AUDIT_SCHEMA_NATIVE, teseladb_names::KERBEROS_SERVICE));
         assert!(full("colou?r", "color") && full("colou?r", "colour"));
         assert!(full("ab+c", "abbbc") && !full("ab+c", "ac"));
         assert!(full("ab*c", "ac") && full("ab*c", "abbc"));
@@ -706,7 +706,11 @@ mod tests {
     #[test]
     fn quotes_and_any_string() {
         assert!(full("\"a.b*\"", "a.b*") && !full("\"a.b*\"", "axb"));
-        assert!(full("mon@", "refdb") && full("@db", "refdb") && full("@", ""));
+        assert!(
+            full("mon@", teseladb_names::KERBEROS_SERVICE)
+                && full("@db", teseladb_names::KERBEROS_SERVICE)
+                && full("@", "")
+        );
         assert!(full("\"\"x", "x"));
     }
 
@@ -790,7 +794,11 @@ mod tests {
     #[test]
     fn wildcard_patterns() {
         let w = |p: &str, t: &str| Regex::wildcard(p).unwrap().is_full_match(t);
-        assert!(w("mon*", "refdb") && w("*db", "refdb") && w("m?ngo*", "mango"));
+        assert!(
+            w("mon*", teseladb_names::KERBEROS_SERVICE)
+                && w("*db", teseladb_names::KERBEROS_SERVICE)
+                && w("m?ngo*", "mango")
+        );
         assert!(!w("m?ngo", "mngo") && w("a\\*b", "a*b") && !w("a\\*b", "axb"));
         assert!(w("", "") && !w("", "x"));
         assert_eq!(Regex::wildcard("a\\").unwrap_err(), RegexError::UnexpectedEnd);
@@ -885,7 +893,16 @@ mod tests {
 
     #[test]
     fn regex_over_the_dictionary_matches_a_scan() {
-        let mut terms = ["refdb", "ref", "mango", "anotherproduct", "m1", "m22", "m300", "ñandú"];
+        let mut terms = [
+            teseladb_names::KERBEROS_SERVICE,
+            teseladb_names::AUDIT_SCHEMA_NATIVE,
+            "mango",
+            "anotherproduct",
+            "m1",
+            "m22",
+            "m300",
+            "ñandú",
+        ];
         terms.sort_unstable();
         let mut b = Builder::new();
         for (i, t) in terms.iter().enumerate() {

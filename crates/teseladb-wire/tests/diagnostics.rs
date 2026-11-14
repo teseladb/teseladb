@@ -155,7 +155,7 @@ fn server_status_counts_and_hides_the_sections_asked() {
     m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(vec![d(&[]), d(&[])]))]));
     let r = m.run("admin", doc(&[("serverStatus", 1.into())]));
     assert_eq!(field(&r, "host"), &s("h1:27018"));
-    assert_eq!(field(&r, "process"), &s("refrouter"));
+    assert_eq!(field(&r, "process"), &s(teseladb_names::ROUTER));
     assert_eq!(field(&r, "pid"), &Value::Int64(42));
     assert_eq!(field(&r, "uptime"), &Value::Double(7.0));
     assert_eq!(field(&r, "uptimeMillis"), &Value::Int64(7361));
@@ -463,9 +463,9 @@ fn repl_set_get_status_answers_as_a_refrouter() {
     assert_eq!(
         r,
         doc(&[
-            ("info", s("refrouter")),
+            ("info", s(teseladb_names::ROUTER)),
             ("ok", Value::Double(0.0)),
-            ("errmsg", s("replSetGetStatus is not supported through refrouter")),
+            ("errmsg", s(teseladb_names::ERR_REPLSET_STATUS_THROUGH_ROUTER)),
         ])
     );
     let r = m.run("db", doc(&[("replSetGetStatus", 1.into())]));
@@ -565,7 +565,7 @@ fn status_counters_fill_their_sections() {
     c.sasl_supported_mechs = 2;
     c.authentication_attempt("SCRAM-SHA-256", false);
     c.authentication_succeeded("SCRAM-SHA-256", false);
-    c.authentication_attempt("REFDB-X509", true);
+    c.authentication_attempt(teseladb_names::SASL_X509, true);
     c.authentication_time(250);
     c.txn.open = 3;
     c.txn.active = 1;

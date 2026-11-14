@@ -22,7 +22,7 @@ use crate::expr::values::display;
 use crate::expr::{Ctx, Expr, Scope};
 
 /// RefDb's message for a geospatial sort inside `$match`.
-const NEAR_MESSAGE: &str = "$geoNear, $near, and $nearSphere are not allowed in this context, as these operators require sorting geospatial data. If you do not need sort, consider using $geoWithin instead. Check out https://dochub.refdb.org/core/near-sort-operation and https://dochub.refdb.org/core/nearSphere-sort-operationfor more details.";
+const NEAR_MESSAGE: &str = teseladb_names::ERR_NEAR_NOT_ALLOWED;
 
 use super::scoped::matches;
 

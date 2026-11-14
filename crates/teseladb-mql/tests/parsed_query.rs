@@ -14,7 +14,10 @@ fn canonical(d: &Document) -> String {
 #[test]
 fn parsed_queries_match_refdb() {
     let mut wrong = Vec::new();
-    for line in include_str!("parsed/explain.out").lines().filter(|l| !l.is_empty()) {
+    for line in teseladb_names::expand_static(include_str!("parsed/explain.out"))
+        .lines()
+        .filter(|l| !l.is_empty())
+    {
         let (filter, want) = line.split_once('\t').expect("a filter and its parsed form");
         let bytes = extjson::parse(filter).expect("a filter").to_bytes().expect("small");
         let parsed =

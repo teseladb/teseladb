@@ -25,7 +25,7 @@
 {"find":"a","filter":{},"tailable":true}	!! 168	InvalidPipelineOperator	Tailable cursors are not supported in aggregation.
 {"find":"a","min":{"_id":1},"hint":{"_id":1}}	!! 168	InvalidPipelineOperator	Option min not supported in aggregation.
 {"find":"a","filter":{"$where":"true"}}	!! 2	BadValue	$where is not allowed in this context
-{"find":"a","filter":{"qty":{"$near":[0,0]}}}	!! 5626500	Location5626500	$geoNear, $near, and $nearSphere are not allowed in this context, as these operators require sorting geospatial data. If you do not need sort, consider using $geoWithin instead. Check out https://dochub.refdb.org/core/near-sort-operation and https://dochub.refdb.org/core/nearSphere-sort-operationfor more details.
+{"find":"a","filter":{"qty":{"$near":[0,0]}}}	!! 5626500	Location5626500	${name:ERR_NEAR_NOT_ALLOWED}
 {"find":"nothere_view_x","filter":{}}	=> {"cursor":{"firstBatch":[],"id":{"$numberLong":"0"},"ns":"xa.nothere_view_x"},"ok":{"$numberDouble":"1.0"}}
 {"find":"a","filter":{"_id":{"$lt":3}},"sort":{"$natural":1}}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"status":"A","qty":{"$numberInt":"0"},"item":"x0"},{"_id":{"$numberInt":"2"},"status":"A","qty":{"$numberInt":"6"},"item":"x2"}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}
 {"find":"a","projection":{"qty":{"$add":["$qty",1]}},"sort":{"_id":1},"limit":1}	=> {"cursor":{"firstBatch":[{"_id":{"$numberInt":"0"},"qty":{"$numberInt":"1"}}],"id":{"$numberLong":"0"},"ns":"xa.a"},"ok":{"$numberDouble":"1.0"}}

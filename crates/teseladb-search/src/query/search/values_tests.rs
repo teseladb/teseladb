@@ -1528,7 +1528,7 @@ fn autocomplete_grams_follow_the_field_options() {
         .with("maxGrams", 3)
         .with("tokenization", "nGram")
         .with("foldDiacritics", false)
-        .with("analyzer", "reflib.whitespace");
+        .with("analyzer", teseladb_names::ANALYZER_WHITESPACE);
     let def = Document::new().with(
         "mappings",
         Document::new().with("dynamic", false).with("fields", Document::new().with("a", a)),

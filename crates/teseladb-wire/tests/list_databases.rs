@@ -129,7 +129,7 @@ fn sizes_read_large_collections_in_chunks() {
 fn local_admin_and_config_follow_the_rules_of_a_refrouter() {
     use teseladb_wire::commands::local_db::{LOCAL_DB, check_reachable};
     let e = check_reachable(LOCAL_DB, "find", Some("c")).expect_err("local");
-    assert_eq!((e.code.code, e.errmsg.as_str()), (20, "Can't use 'local' database through refrouter"));
+    assert_eq!((e.code.code, e.errmsg.as_str()), (20, teseladb_names::ERR_LOCAL_THROUGH_ROUTER));
     let e = check_reachable(LOCAL_DB, "ping", None).expect_err("local");
     assert_eq!(e.code.code, 20);
     assert!(check_reachable("db", "find", Some("c")).is_ok());

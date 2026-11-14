@@ -58,13 +58,13 @@ fn runtime_configuration_and_schema_options_follow_refdb() {
     assert!(on.runtime && on.schema == Schema::Ref);
     // The schema: `ref` or `OCSF`, written exactly so.
     for bad in ["ocsf", "xyz"] {
-        assert_eq!(
-            msg(console(|o| o.schema = Some(bad))),
-            "auditSchema must be one of 'ref' or 'OCSF'"
-        );
+        assert_eq!(msg(console(|o| o.schema = Some(bad))), teseladb_names::AUDIT_SCHEMA_ERROR);
     }
     assert_eq!(console(|o| o.schema = Some("OCSF")).unwrap().unwrap().schema, Schema::Ocsf);
-    assert_eq!(console(|o| o.schema = Some("ref")).unwrap().unwrap().schema, Schema::Ref);
+    assert_eq!(
+        console(|o| o.schema = Some(teseladb_names::AUDIT_SCHEMA_NATIVE)).unwrap().unwrap().schema,
+        Schema::Ref
+    );
     let schema_alone = Options { schema: Some("OCSF"), ..Options::default() };
     assert_eq!(
         Config::from_options(&schema_alone).unwrap_err().0,

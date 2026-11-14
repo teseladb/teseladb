@@ -26,7 +26,8 @@ fn names(v: Option<&Value>) -> Vec<String> {
 #[test]
 fn every_tool_matches_the_pinned_refdb_mcp_server() {
     let reference_names = {
-        let Ok(Value::Array(all)) = teseladb_json::parse(teseladb_mcp::tools::REFERENCE.as_bytes())
+        let Ok(Value::Array(all)) =
+            teseladb_json::parse(teseladb_mcp::tools::reference_text().as_bytes())
         else {
             panic!("reference_tools.json does not read")
         };

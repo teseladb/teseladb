@@ -314,7 +314,7 @@ pub struct Definition {
 }
 
 /// The analyzer used when an index names none.
-pub const DEFAULT_ANALYZER: &str = "reflib.standard";
+pub const DEFAULT_ANALYZER: &str = teseladb_names::ANALYZER_STANDARD;
 
 impl Definition {
     /// Reads and checks a `search` definition. Fields `refsearch` does not know at the top are

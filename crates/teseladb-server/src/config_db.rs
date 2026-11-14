@@ -62,7 +62,7 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
         "shards" => shards(sm),
         "databases" => databases(sm),
         COLLECTIONS => sharded_collections(sm),
-        "refrouter" => routers(sm),
+        teseladb_names::ROUTER => routers(sm),
         teseladb_wire::commands::query_analysis::QUERY_ANALYZERS => {
             teseladb_wire::commands::query_analysis::of_settings(&sm.settings)
         }
@@ -400,7 +400,7 @@ fn routers(sm: &Group0Sm) -> Vec<Document> {
             Document::new()
                 .with("_id", text(&n.addrs.native_addr))
                 .with("advisoryHostFQDNs", Value::Array(Vec::new()))
-                .with("refVersion", ANNOUNCED_VERSION)
+                .with(teseladb_names::FIELD_ROUTER_VERSION, ANNOUNCED_VERSION)
                 .with("ping", Value::DateTime(now))
                 .with("waiting", true)
         })
@@ -671,9 +671,12 @@ mod tests {
         assert_eq!(dbs.len(), 1);
         assert_eq!(dbs[0].get("_id"), Some(&Value::from("app")));
         assert_eq!(dbs[0].get("primary"), Some(&Value::from("node1")));
-        let routers = documents(&sm, "refrouter");
+        let routers = documents(&sm, teseladb_names::ROUTER);
         assert_eq!(routers.len(), 2);
-        assert_eq!(routers[1].get("refVersion"), Some(&Value::from(ANNOUNCED_VERSION)));
+        assert_eq!(
+            routers[1].get(teseladb_names::FIELD_ROUTER_VERSION),
+            Some(&Value::from(ANNOUNCED_VERSION))
+        );
         let v = documents(&sm, "version");
         assert_eq!(v[0].get("clusterId"), Some(&Value::ObjectId([9; 12])));
         for none in [COLLECTIONS, "chunks", "tags", "changelog", SETTINGS] {

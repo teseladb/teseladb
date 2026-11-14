@@ -213,7 +213,7 @@ impl Schema {
     /// Its name in `auditLog.schema`.
     pub fn name(self) -> &'static str {
         match self {
-            Schema::Ref => "ref",
+            Schema::Ref => teseladb_names::AUDIT_SCHEMA_NATIVE,
             Schema::Ocsf => "OCSF",
         }
     }
@@ -344,7 +344,7 @@ impl Config {
             Some(name) => Schema::ALL
                 .into_iter()
                 .find(|s| s.name() == name)
-                .ok_or_else(|| bad("auditSchema must be one of 'ref' or 'OCSF'"))?,
+                .ok_or_else(|| bad(teseladb_names::AUDIT_SCHEMA_ERROR))?,
         };
         let (filter_doc, filter) = match o.filter {
             None => (None, None),

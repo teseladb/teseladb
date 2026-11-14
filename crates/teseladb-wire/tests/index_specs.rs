@@ -194,7 +194,10 @@ fn specifications_are_stored_in_refdb_order_with_their_booleans() {
     let reversed = spec(Document::new().with("o", 1), "o")
         .with("prepareUnique", true)
         .with("collation", fr.clone())
-        .with("storageEngine", Document::new().with("refengine", Document::new()))
+        .with(
+            "storageEngine",
+            Document::new().with(teseladb_names::STORAGE_ENGINE, Document::new()),
+        )
         .with("expireAfterSeconds", 5)
         .with("sparse", 1)
         .with("background", 1)

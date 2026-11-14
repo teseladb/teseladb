@@ -1795,8 +1795,8 @@
   {
    "err": 510,
    "msg": "Could not extract geo keys at path 'loc' for document with _id 1: Strict winding order CRS is only supported by polygon",
-   "loc": "{\"v\":{\"type\":\"Point\",\"coordinates\":[{\"$numberInt\":\"1\"},{\"$numberInt\":\"2\"}],\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
-   "info": "{\"failingPath\": \"loc\", \"underlyingCode\": {\"$numberInt\": \"2\"}, \"underlyingReason\": \"Strict winding order CRS is only supported by polygon\", \"failingElement\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}"
+   "loc": "{\"v\":{\"type\":\"Point\",\"coordinates\":[{\"$numberInt\":\"1\"},{\"$numberInt\":\"2\"}],\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"${name:GEO_CRS_STRICT_WINDING}\"}}}}",
+   "info": "{\"failingPath\": \"loc\", \"underlyingCode\": {\"$numberInt\": \"2\"}, \"underlyingReason\": \"Strict winding order CRS is only supported by polygon\", \"failingElement\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"${name:GEO_CRS_STRICT_WINDING}\"}}}}"
   },
   {
    "err": 510,
@@ -2055,8 +2055,8 @@
   {
    "err": 510,
    "msg": "Could not extract geo keys at path 'loc' for document with _id 1: can't index geometry with strict winding order",
-   "loc": "{\"v\":{\"type\":\"Polygon\",\"coordinates\":[[[{\"$numberInt\":\"30\"},{\"$numberInt\":\"10\"}],[{\"$numberInt\":\"31\"},{\"$numberInt\":\"10\"}],[{\"$numberInt\":\"31\"},{\"$numberInt\":\"11\"}],[{\"$numberInt\":\"30\"},{\"$numberInt\":\"10\"}]]],\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
-   "info": "{\"failingPath\": \"loc\", \"underlyingCode\": {\"$numberInt\": \"2\"}, \"underlyingReason\": \"can't index geometry with strict winding order\", \"failingElement\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"30\"}, {\"$numberInt\": \"10\"}], [{\"$numberInt\": \"31\"}, {\"$numberInt\": \"10\"}], [{\"$numberInt\": \"31\"}, {\"$numberInt\": \"11\"}], [{\"$numberInt\": \"30\"}, {\"$numberInt\": \"10\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}"
+   "loc": "{\"v\":{\"type\":\"Polygon\",\"coordinates\":[[[{\"$numberInt\":\"30\"},{\"$numberInt\":\"10\"}],[{\"$numberInt\":\"31\"},{\"$numberInt\":\"10\"}],[{\"$numberInt\":\"31\"},{\"$numberInt\":\"11\"}],[{\"$numberInt\":\"30\"},{\"$numberInt\":\"10\"}]]],\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"${name:GEO_CRS_STRICT_WINDING}\"}}}}",
+   "info": "{\"failingPath\": \"loc\", \"underlyingCode\": {\"$numberInt\": \"2\"}, \"underlyingReason\": \"can't index geometry with strict winding order\", \"failingElement\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"30\"}, {\"$numberInt\": \"10\"}], [{\"$numberInt\": \"31\"}, {\"$numberInt\": \"10\"}], [{\"$numberInt\": \"31\"}, {\"$numberInt\": \"11\"}], [{\"$numberInt\": \"30\"}, {\"$numberInt\": \"10\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"${name:GEO_CRS_STRICT_WINDING}\"}}}}"
   }
  ]
 }

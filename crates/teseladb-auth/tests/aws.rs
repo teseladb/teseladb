@@ -102,8 +102,8 @@ fn second(server_nonce: &[u8], token: Option<&str>, drop: &str) -> Document {
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Host", HOST),
         ("X-Amz-Date", date),
-        ("X-RefDb-GS2-CB-Flag", "n"),
-        ("X-RefDb-Server-Nonce", nonce.as_str()),
+        (teseladb_names::AWS_HEADER_CHANNEL_BINDING, "n"),
+        (teseladb_names::AWS_HEADER_SERVER_NONCE, nonce.as_str()),
     ];
     if let Some(t) = token {
         headers.push(("X-Amz-Security-Token", t));
@@ -137,17 +137,20 @@ fn the_conversation_builds_the_sts_request() {
     assert_eq!(header("Authorization").map(Value::from).as_ref(), msg.get("a"));
     assert_eq!(header("X-Amz-Date"), Some("20261030T215406Z"));
     assert_eq!(
-        header("X-RefDb-Server-Nonce"),
+        header(teseladb_names::AWS_HEADER_SERVER_NONCE),
         Some(teseladb_x509::pem::base64_encode(&nonce).as_str())
     );
-    assert_eq!(header("X-RefDb-GS2-CB-Flag"), Some("n"));
+    assert_eq!(header(teseladb_names::AWS_HEADER_CHANNEL_BINDING), Some("n"));
     assert_eq!(header("X-Amz-Security-Token"), None);
     assert_eq!(req.body, aws::STS_BODY);
     // A session token, and the flag `y`.
     let (server, nonce) = started(i32::from(b'y'));
     let req = server.request(&bson(&second(&nonce, Some("tok"), ""))).unwrap();
     assert!(req.headers.contains(&("X-Amz-Security-Token".to_owned(), "tok".to_owned())));
-    assert!(req.headers.contains(&("X-RefDb-GS2-CB-Flag".to_owned(), "y".to_owned())));
+    assert!(
+        req.headers
+            .contains(&(teseladb_names::AWS_HEADER_CHANNEL_BINDING.to_owned(), "y".to_owned()))
+    );
 }
 
 #[test]
@@ -180,8 +183,8 @@ fn bad_messages_fail_before_the_sts() {
         ),
         ("extra", bson(&Document::new().with("a", a.clone()).with("d", d.clone()).with("z", "1"))),
         ("a garbage", bson(&Document::new().with("a", "garbage").with("d", d.clone()))),
-        ("no nonce header", bson(&second(&nonce, None, "X-RefDb-Server-Nonce"))),
-        ("no flag header", bson(&second(&nonce, None, "X-RefDb-GS2-CB-Flag"))),
+        ("no nonce header", bson(&second(&nonce, None, teseladb_names::AWS_HEADER_SERVER_NONCE))),
+        ("no flag header", bson(&second(&nonce, None, teseladb_names::AWS_HEADER_CHANNEL_BINDING))),
         ("not BSON", b"x".to_vec()),
     ] {
         assert!(server.request(&msg).is_err(), "{label}");

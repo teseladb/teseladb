@@ -26,7 +26,8 @@ const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// `gs2-cb-flag` values a client may send: `n` and `y` (`p` is refused, measured).
 const FLAGS: [u8; 2] = *b"ny";
 /// Headers the client must have signed (measured: without them RefDb refuses before the STS).
-const REQUIRED_SIGNED: [&str; 2] = ["x-refdb-server-nonce", "x-refdb-gs2-cb-flag"];
+const REQUIRED_SIGNED: [&str; 2] =
+    [teseladb_names::AWS_SIGNED_SERVER_NONCE, teseladb_names::AWS_SIGNED_CHANNEL_BINDING];
 
 /// Why a REFDB-AWS step failed; the client only learns `Authentication failed.`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,8 +209,11 @@ impl Server {
         let mut headers = vec![
             ("Authorization".to_owned(), auth),
             ("X-Amz-Date".to_owned(), date),
-            ("X-RefDb-Server-Nonce".to_owned(), base64_encode(&self.nonce)),
-            ("X-RefDb-GS2-CB-Flag".to_owned(), char::from(self.flag).to_string()),
+            (teseladb_names::AWS_HEADER_SERVER_NONCE.to_owned(), base64_encode(&self.nonce)),
+            (
+                teseladb_names::AWS_HEADER_CHANNEL_BINDING.to_owned(),
+                char::from(self.flag).to_string(),
+            ),
         ];
         if let Some(t) = token {
             headers.push(("X-Amz-Security-Token".to_owned(), t));

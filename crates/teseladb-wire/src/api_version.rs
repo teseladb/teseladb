@@ -20,7 +20,7 @@ pub const API_DEPRECATION_ERRORS: &str = "apiDeprecationErrors";
 /// The only version there is.
 const VERSION_1: &str = "1";
 /// Where a refused command sends the client.
-const DOC_HUB: &str = "https://dochub.refdb.org/core/manual-versioned-api";
+const DOC_HUB: &str = teseladb_names::DOC_VERSIONED_API;
 
 /// The API parameters of a command, as it gave them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

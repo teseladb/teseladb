@@ -130,7 +130,7 @@ pub fn authenticate(
                 let bytes = payload.to_bytes().map_err(|_| unauthenticated(true))?;
                 let command = teseladb_bson::Document::new()
                     .with("saslStart", 1)
-                    .with("mechanism", "REFDB-OIDC")
+                    .with("mechanism", teseladb_names::SASL_OIDC)
                     .with("payload", teseladb_bson::Value::Binary { subtype: 0, bytes });
                 ok_reply(&exec.run(EXTERNAL_DB, command)).map(|()| None)
             }
@@ -139,8 +139,9 @@ pub fn authenticate(
     }
     let Some(user) = &who.x509_user else { return Err(unauthenticated(false)) };
     exec.conn.auth.peer_user = Some(user.clone());
-    let command =
-        teseladb_bson::Document::new().with("authenticate", 1).with("mechanism", "REFDB-X509");
+    let command = teseladb_bson::Document::new()
+        .with("authenticate", 1)
+        .with("mechanism", teseladb_names::SASL_X509);
     ok_reply(&exec.run(EXTERNAL_DB, command)).map(|()| None)
 }
 

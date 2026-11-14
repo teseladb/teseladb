@@ -160,8 +160,11 @@ fn first_doc(r: &Document) -> Document {
 fn coll_stats_has_refdb_shape() {
     let mut m = Mem::new();
     load(&mut m, "c", C);
-    let skipped = ["shard", "refengine", "indexDetails", "indexBuilds"];
-    for line in include_str!("aggregate/collstats.out").lines().filter(|l| !l.is_empty()) {
+    let skipped = ["shard", teseladb_names::STORAGE_ENGINE, "indexDetails", "indexBuilds"];
+    for line in teseladb_names::expand_static(include_str!("aggregate/collstats.out"))
+        .lines()
+        .filter(|l| !l.is_empty())
+    {
         let (cmd, want) = line.split_once('\t').expect("a command and its reply");
         if !cmd.starts_with("{\"aggregate\"") {
             let r = m.run(DB, extjson::parse(cmd).expect("command"));
@@ -366,7 +369,10 @@ fn unsharded(want: &str) -> String {
 /// aggregation refuses and the view's collation.
 #[test]
 fn reads_on_views_answer_as_refdb() {
-    check_files(&[include_str!("aggregate/views.out"), include_str!("aggregate/views2.out")]);
+    check_files(&[
+        teseladb_names::expand_static(include_str!("aggregate/views.out")),
+        include_str!("aggregate/views2.out"),
+    ]);
 }
 
 /// Collation in `aggregate` against a `refrouter` 9.0.4 (010 FR-014): the commands of

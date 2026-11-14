@@ -116,7 +116,7 @@ fn root(m: &mut Mem, shared: &Mutex<NodeSessions>) -> Connection {
         0,
         &doc(&[
             (AUTHENTICATE, 1.into()),
-            ("mechanism", "REFDB-X509".into()),
+            ("mechanism", teseladb_names::SASL_X509.into()),
             ("$db", EXTERNAL_DB.into()),
         ])
         .to_bytes()

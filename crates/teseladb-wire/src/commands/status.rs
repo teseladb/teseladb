@@ -178,9 +178,9 @@ pub const COMMIT_TYPES: [&str; 6] = [
 /// node takes them from clients (the others only appear as `egress`).
 pub const MECHANISMS: [(&str, bool); 7] = [
     ("GSSAPI", false),
-    ("REFDB-AWS", false),
-    ("REFDB-OIDC", false),
-    ("REFDB-X509", true),
+    (teseladb_names::SASL_AWS, false),
+    (teseladb_names::SASL_OIDC, false),
+    (teseladb_names::SASL_X509, true),
     ("PLAIN", false),
     ("SCRAM-SHA-1", true),
     ("SCRAM-SHA-256", true),

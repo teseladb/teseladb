@@ -1,0 +1,11 @@
+[package]
+name = "teseladb-names"
+version = "0.1.0"
+description = "The literals clients send or receive as they are, and the expansion of their marks in test data (D-170)."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

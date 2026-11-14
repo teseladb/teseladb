@@ -5,13 +5,6 @@ target/
 /.tools/
 # TLC state dumps (scripts/tlc.sh)
 /states/
-# Compatibility battery: report, client packages and the Python environment (tests/compat/run.sh)
-/tests/compat/out/
-/tests/compat/native/out/
-/tests/compat/native/out-ycsb/
-/tests/compat/native/out-tpcc/
-/tests/compat/.venv/
-/tests/compat/runners/*/node_modules/
 
 # Python bytecode
 __pycache__/
@@ -22,6 +15,5 @@ __pycache__/
 # Synth output of the downloads CDK (cdk/)
 /cdk/cdk.out/
 /cdk/cdk.context.json
-/tests/compat/native/diff/out/
 # Temporary files of a merge driver
 .merge_file_*

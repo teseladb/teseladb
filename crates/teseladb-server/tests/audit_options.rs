@@ -65,7 +65,7 @@ fn runtime_configuration_schema_and_authorization_success() {
     );
     assert_eq!(
         bad("start --auditDestination console --auditSchema ocsf"),
-        "auditSchema must be one of 'ref' or 'OCSF'"
+        teseladb_names::AUDIT_SCHEMA_ERROR
     );
     // The encrypted file: a key file, and zstd only with it (013 FR-031).
     let o = start(

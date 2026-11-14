@@ -331,7 +331,7 @@ fn resources_and_exports() {
         )
     };
     let uris = [
-        "debug://refdb",
+        teseladb_names::MCP_RESOURCE_DEBUG,
         "teseladb://cluster/status",
         "teseladb://db/c/indexes",
         "teseladb://db/c/other",

@@ -83,7 +83,7 @@ fn corpus() -> Mem {
     insert(&mut m, "syn", synonyms);
     let mapping = Document::new()
         .with("name", "sy")
-        .with("analyzer", "reflib.standard")
+        .with("analyzer", teseladb_names::ANALYZER_STANDARD)
         .with("source", Document::new().with("collection", "syn"));
     let definition = Document::new()
         .with("mappings", Document::new().with("dynamic", true))

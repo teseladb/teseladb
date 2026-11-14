@@ -15,4 +15,5 @@ teseladb-keys = { path = "../teseladb-keys" }
 teseladb-bson = { workspace = true }
 
 [dev-dependencies]
+teseladb-names = { workspace = true }
 teseladb-collation = { path = "../teseladb-collation" }

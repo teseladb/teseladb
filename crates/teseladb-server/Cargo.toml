@@ -20,6 +20,7 @@ name = "cluster_local"
 harness = false
 
 [dependencies]
+teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
 teseladb-types = { workspace = true }
 teseladb-hlc = { path = "../teseladb-hlc" }

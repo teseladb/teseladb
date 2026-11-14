@@ -684,7 +684,7 @@ fn the_replica_set_port_opens_and_closes_without_a_restart() {
     admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     let set = |admin: &mut TcpStream, id: i32, port: i32| {
         let value = Document::new()
-            .with("mode", "refrouter")
+            .with("mode", teseladb_names::ROUTER)
             .with("setName", "rs0")
             .with("replicaSetPort", port);
         let cmd = Document::new()
@@ -762,7 +762,7 @@ fn a_replica_set_port_that_is_taken_waits_for_another() {
     let mut id = 0;
     let mut set = |admin: &mut TcpStream, port: u16| {
         let value = Document::new()
-            .with("mode", "refrouter")
+            .with("mode", teseladb_names::ROUTER)
             .with("setName", "rs0")
             .with("replicaSetPort", i32::from(port));
         let cmd = Document::new()

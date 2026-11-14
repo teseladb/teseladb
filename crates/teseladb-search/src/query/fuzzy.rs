@@ -369,7 +369,12 @@ mod tests {
 
     #[test]
     fn story_one_finds_refdb_from_mongdb() {
-        let bytes = dict(&["refdb", "ref", "anotherproduct", "mango"]);
+        let bytes = dict(&[
+            teseladb_names::KERBEROS_SERVICE,
+            teseladb_names::AUDIT_SCHEMA_NATIVE,
+            "anotherproduct",
+            "mango",
+        ]);
         let fst = Fst::new(&bytes).unwrap();
         let options = FuzzyOptions::new(1, 0, 50).unwrap();
         let found = fuzzy_terms(&fst, "mongdb", options);
@@ -380,13 +385,16 @@ mod tests {
 
     #[test]
     fn a_swap_of_adjacent_characters_is_one_edit() {
-        let lev = Levenshtein::new("refdb", 1, 0);
+        let lev = Levenshtein::new(teseladb_names::KERBEROS_SERVICE, 1, 0);
         assert_eq!(lev.distance("mongdob"), Some(1));
         assert_eq!(lev.distance("omngodb"), Some(1));
-        assert_eq!(lev.distance("refdb"), Some(0));
+        assert_eq!(lev.distance(teseladb_names::KERBEROS_SERVICE), Some(0));
         // Two swaps are two edits.
         assert_eq!(lev.distance("omngdob"), None);
-        assert_eq!(Levenshtein::new("refdb", 2, 0).distance("omngdob"), Some(2));
+        assert_eq!(
+            Levenshtein::new(teseladb_names::KERBEROS_SERVICE, 2, 0).distance("omngdob"),
+            Some(2)
+        );
         // A swapped pair is not edited again: "ca" → "abc" is 3 in this distance.
         assert_eq!(Levenshtein::new("ca", 2, 0).distance("abc"), None);
     }
@@ -443,7 +451,7 @@ mod tests {
 
     #[test]
     fn the_prefix_must_match_exactly() {
-        let lev = Levenshtein::new("refdb", 2, 3);
+        let lev = Levenshtein::new(teseladb_names::KERBEROS_SERVICE, 2, 3);
         assert_eq!(lev.distance("mangodb"), None);
         assert_eq!(lev.distance("mongdb"), Some(1));
         // A prefix longer than the term leaves only insertions after the whole term.

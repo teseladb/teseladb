@@ -62,9 +62,9 @@ pub fn repl_set_get_status<B: Backend + ?Sized>(
         return super::replset::get_status(ctx);
     }
     Ok(Document::new()
-        .with("info", "refrouter")
+        .with("info", teseladb_names::ROUTER)
         .with("ok", 0.0)
-        .with("errmsg", "replSetGetStatus is not supported through refrouter"))
+        .with("errmsg", teseladb_names::ERR_REPLSET_STATUS_THROUGH_ROUTER))
 }
 
 /// `Unauthorized` for a command run outside `admin`.

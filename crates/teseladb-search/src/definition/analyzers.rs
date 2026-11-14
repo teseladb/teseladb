@@ -31,7 +31,8 @@ pub struct CustomAnalyzer {
 }
 
 /// The prefixes reserved for the built-in analyzers.
-const RESERVED: &[&str] = &["reflib.", "builtin.", "refdb."];
+const RESERVED: &[&str] =
+    &[teseladb_names::ANALYZER_PREFIX, "builtin.", teseladb_names::ANALYZER_RESERVED_PREFIX];
 
 /// The longest `maxTokenLength`.
 const MAX_TOKEN_LENGTH: i64 = 1_048_576;

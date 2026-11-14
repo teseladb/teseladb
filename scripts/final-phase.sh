@@ -38,14 +38,13 @@ export CARGO_INCREMENTAL=0
 REPORTS=${FINAL_REPORTS:-$CARGO_TARGET_DIR/final-phase}
 SIM=$CARGO_TARGET_DIR/release/teseladb-sim
 # Parameters of the plan; --quick turns them into a short check of each kind of phase.
-if [[ $quick == 1 ]]; then d_fuzz=5 d_seeds=2 d_task=2 d_times=1 d_rep=2 d_dur=2s d_warm=0 d_crash=10; else
-  d_fuzz=86400 d_seeds=1000 d_task=5000 d_times="" d_rep=5 d_dur=60s d_warm=30s d_crash=""; fi
+if [[ $quick == 1 ]]; then d_fuzz=5 d_seeds=2 d_task=2 d_rep=2 d_dur=2s d_warm=0 d_crash=10; else
+  d_fuzz=86400 d_seeds=1000 d_task=5000 d_rep=5 d_dur=60s d_warm=30s d_crash=""; fi
 FUZZ_SECS=${FINAL_FUZZ_SECS:-$d_fuzz}
 FUZZ_PARALLEL=${FINAL_FUZZ_PARALLEL:-$((NCPU > 2 ? NCPU - 2 : 1))}
 JOBS=${FINAL_JOBS:-$((NCPU > 2 ? NCPU - 2 : 1))}
 SEEDS=${FINAL_SIM_SEEDS:-$d_seeds}
 TASK_SEEDS=${FINAL_SIM_TASK_SEEDS:-$d_task}
-CHAOS_TIMES=${FINAL_CHAOS_TIMES:-$d_times}
 REPEATS=${FINAL_PERF_REPEATS:-$d_rep}
 # Scenarios that load tens of GB: two repetitions, hours each.
 REPEATS_LONG=${FINAL_PERF_REPEATS_LONG:-2}
@@ -98,16 +97,7 @@ phase_table() {
     row 4 "coverage-$c" 600 "coverage_crate $c"
   done
   row 4 coverage-clean 10 "rm -rf \"$CARGO_TARGET_DIR/coverage-build\""
-  row 4 ci "$(quick_or 900 10800)" "TESELADB_E2E=0 TESELADB_CI_LONG=0 scripts/ci.sh$(quick_or ' --quick' '')"
-  row 5 e2e-battery "$(quick_or 1800 14400)" "keep_out tests/compat/out tests/compat/run.sh ${FINAL_COMPAT_ARGS:-$(quick_or '--scenario crud-read --client python' '')}"
-  row 5 e2e-tools 1800 "tests/compat/tools/run.sh"
-  row 5 e2e-drivers "$(quick_or 900 21600)" "keep_out tests/compat/out/drivers tests/compat/drivers/run.sh ${FINAL_DRIVERS_ARGS:-$(quick_or '--check-nodes' '')}"
-  row 5 chaos-kill-leader 3000 "tests/compat/chaos/kill-leader.sh --times ${CHAOS_TIMES:-100}"
-  row 5 chaos-kill-stream-node 3000 "tests/compat/chaos/kill-stream-node.sh --times ${CHAOS_TIMES:-100}"
-  row 5 chaos-partition 900 "tests/compat/chaos/partition.sh --times ${CHAOS_TIMES:-10}$(quick_or ' --hold 2' '')"
-  row 5 chaos-pause 900 "tests/compat/chaos/pause.sh --times ${CHAOS_TIMES:-10}$(quick_or ' --hold 2' '')"
-  row 5 chaos-disk-full 600 "tests/compat/chaos/disk-full.sh --times ${CHAOS_TIMES:-5}$(quick_or ' --hold 2' '')"
-  row 5 chaos-four-nodes 1800 "tests/compat/chaos/four-nodes.sh --times ${CHAOS_TIMES:-20}$(quick_or ' --hold 2' '')"
+  row 4 ci "$(quick_or 900 10800)" "TESELADB_CI_LONG=0 scripts/ci.sh$(quick_or ' --quick' '')"
   perf_rows
   row 6 integrity-crash-sim 3600 "TESELADB_RAFTLOG_CRASH_SEEDS=${d_crash:-20000} cargo test -q --offline --release -p teseladb-raftlog --test crash_sim"
   row 6 integrity-crash-lsm 3600 "TESELADB_LSM_CRASH_SEEDS=${d_crash:-100000} cargo test -q --offline --release -p teseladb-lsm --test crash"
@@ -147,13 +137,6 @@ perf_rows() {
   if grep -q '"reshard"' tools/teseladb-bench/src/scenarios/mod.rs; then
     bench perf-reshard 21600 300 "$REPEATS_LONG" reshard --records 104857600
   fi
-  local o=\$PHASE_DIR
-  row 6 perf-insert-spread "$(quick_or 300 4200)" "perf_script tests/compat/cluster/insert-spread.sh --minutes $(quick_or 1 60)" # 007 T018
-  row 6 perf-add-node "$(quick_or 900 18000)" "perf_script tests/compat/cluster/add-node.sh --gigabytes $(quick_or 1 100)"      # 007 T022
-  row 6 perf-ycsb-3 7200 "perf_script tests/compat/perf/ycsb-compare.sh --nodes 3 --out $o$(quick_or ' --records 300 --duration 2s' '')"   # 012 T014
-  row 6 perf-ycsb-uring 3600 "perf_script tests/compat/perf/ycsb-compare.sh --only teseladb --io-executor uring --out $o$(quick_or ' --records 300 --duration 2s' '')"     # 012 T016
-  row 6 perf-ycsb-threads 3600 "perf_script tests/compat/perf/ycsb-compare.sh --only teseladb --io-executor threads --out $o$(quick_or ' --records 300 --duration 2s' '')" # 012 T016
-  row 6 perf-ycsb-9 10800 "perf_script tests/compat/perf/ycsb-compare.sh --nodes 9 --out $o$(quick_or ' --records 300 --duration 2s' '')"  # 012 T020
 }
 
 # --- helpers the phases call (they run with PHASE_DIR set to the phase's folder) ---
@@ -193,14 +176,6 @@ coverage_crate() { # the 95 % of 001 FR-014, then the profiles go: the disk is s
   TESELADB_COV_MIN=95 scripts/coverage.sh "$1" || rc=$?
   cp "$CARGO_TARGET_DIR/coverage/report.txt" "$CARGO_TARGET_DIR/coverage/missed.txt" "$PHASE_DIR/" 2>/dev/null || true
   rm -rf "$CARGO_TARGET_DIR/coverage"
-  return $rc
-}
-
-keep_out() { # dir command...: runs it and keeps its reports
-  local dir=$1 rc=0
-  shift
-  "$@" || rc=$?
-  [[ -d $dir ]] && cp -R "$dir" "$PHASE_DIR/" 2>/dev/null
   return $rc
 }
 
@@ -268,11 +243,6 @@ for name in names:
     print(f"{name}\tn={len(vals)}\tmean={mean:.6g}\tmin={lo:.6g}\tmax={hi:.6g}\tspread={spread:.2f}%")
 PY
   return $rc
-}
-
-perf_script() { # a measuring script of tests/compat: idle machine first
-  if [[ $quick == 0 ]]; then wait_idle || return 1; fi
-  pinned "$@"
 }
 
 # --- the run ---

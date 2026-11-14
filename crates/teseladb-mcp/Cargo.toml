@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+teseladb-names = { workspace = true }
 teseladb-bson = { workspace = true }
 teseladb-http = { workspace = true }
 teseladb-json = { workspace = true }

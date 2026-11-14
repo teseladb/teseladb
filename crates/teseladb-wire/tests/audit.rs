@@ -24,7 +24,7 @@ const ADMIN: &str = "admin";
 const VENTAS: &str = "ventas";
 const PASSWORD: &str = "secret1";
 const CERT_USER: &str = "CN=client,OU=KernelUser,O=RefDb,L=New York City,ST=New York,C=US";
-const X509: &str = "REFDB-X509";
+const X509: &str = teseladb_names::SASL_X509;
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -142,7 +142,8 @@ fn logins_and_their_failures_are_recorded() {
     assert_eq!(
         tails(&lines),
         [format!(
-            r#""users" : [ {user} ], "roles" : [ {{ "role" : "root", "db" : "admin" }} ], "param" : {{ "user" : "{CERT_USER}", "db" : "$external", "mechanism" : "REFDB-X509" }}, "result" : 0 }}"#
+            r#""users" : [ {user} ], "roles" : [ {{ "role" : "root", "db" : "admin" }} ], "param" : {{ "user" : "{CERT_USER}", "db" : "$external", "mechanism" : "{}" }}, "result" : 0 }}"#,
+            teseladb_names::SASL_X509
         )]
     );
     // A wrong password: the user and mechanism it tried, with the code the client got.
@@ -328,7 +329,10 @@ fn speculative_logins_are_recorded() {
     );
     let lines = cap.lines();
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains(r#""mechanism" : "REFDB-X509" }, "result" : 0 }"#));
+    assert!(lines[0].contains(&format!(
+        r#""mechanism" : "{}" }}, "result" : 0 }}"#,
+        teseladb_names::SASL_X509
+    )));
     // Without a certificate the speculative step fails and the field stays out of the reply.
     let mut c = conn();
     c.auth.peer_user = None;

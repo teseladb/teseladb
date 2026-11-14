@@ -99,7 +99,7 @@ impl PresentationMode {
     /// The name in `setClusterParameter` and `teseladb admin topology set`.
     pub fn name(self) -> &'static str {
         match self {
-            PresentationMode::RefRouter => "refrouter",
+            PresentationMode::RefRouter => teseladb_names::ROUTER,
             PresentationMode::ReplicaSet => "replicaset",
         }
     }

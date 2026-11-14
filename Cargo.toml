@@ -19,6 +19,7 @@ teseladb-http = { path = "crates/teseladb-http" }
 teseladb-tz = { path = "crates/teseladb-tz" }
 teseladb-raft = { path = "crates/teseladb-raft" }
 teseladb-raftlog = { path = "crates/teseladb-raftlog" }
+teseladb-names = { path = "crates/teseladb-names" }
 
 [workspace.package]
 edition = "2024"

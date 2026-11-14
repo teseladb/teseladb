@@ -300,7 +300,7 @@ fn split_vector_is_refused_as_through_a_refrouter() {
     fails(
         &admin(&mut m, r#"{"splitVector":"z.k","keyPattern":{"a":1},"maxChunkSizeBytes":100}"#),
         20,
-        "Performing splitVector across dbs isn't supported via refrouter",
+        teseladb_names::ERR_SPLIT_VECTOR_ACROSS_DBS,
     );
     fails(
         &m.run("z", json(r#"{"splitVector":"z.k","keyPattern":{"a":1}}"#)),

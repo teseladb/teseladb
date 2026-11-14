@@ -419,7 +419,15 @@ pub fn parsed_options(o: &StartOpts) -> Document {
             cli::AUDIT_LOCAL_KEY_FILE => vec![(vec!["auditLog", "localAuditKeyFile"], text())],
             cli::AUDIT_COMPRESSION_MODE => vec![(vec!["auditLog", "compressionMode"], text())],
             cli::BLOCK_COMPRESSOR => {
-                vec![(vec!["storage", "refengine", "collectionConfig", "blockCompressor"], text())]
+                vec![(
+                    vec![
+                        "storage",
+                        teseladb_names::STORAGE_ENGINE,
+                        "collectionConfig",
+                        "blockCompressor",
+                    ],
+                    text(),
+                )]
             }
             cli::AUDIT_ENCRYPTION_KEY_UID => {
                 vec![(vec!["auditLog", "auditEncryptionKeyIdentifier"], text())]
@@ -997,7 +1005,7 @@ mod tests {
     /// A keytab of MIT's format with one entry of `etype`.
     fn keytab_bytes(etype: u16) -> Vec<u8> {
         let mut e = 1u16.to_be_bytes().to_vec();
-        for t in ["TESELA.TEST", "refdb"] {
+        for t in ["TESELA.TEST", teseladb_names::KERBEROS_SERVICE] {
             e.extend_from_slice(&u16::try_from(t.len()).unwrap().to_be_bytes());
             e.extend_from_slice(t.as_bytes());
         }

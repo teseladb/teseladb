@@ -167,7 +167,7 @@ pub const TLS_MODE: &str = "tlsMode";
 pub const HTTP_PORT: &str = "http-port";
 /// `--refengineCollectionBlockCompressor` (004 FR-023): the codec of the new blocks, with
 /// RefDb's name.
-pub const BLOCK_COMPRESSOR: &str = "refengineCollectionBlockCompressor";
+pub const BLOCK_COMPRESSOR: &str = teseladb_names::OPTION_BLOCK_COMPRESSOR;
 /// `--http-bind`.
 pub const HTTP_BIND: &str = "http-bind";
 /// `--tlsCertificateKeyFile`.

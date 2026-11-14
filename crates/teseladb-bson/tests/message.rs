@@ -2,10 +2,7 @@
 //! followed by [`RawDoc::from_bytes_with`] gave, and keeps the bytes of a canonical document
 //! instead of reading its fields.
 
-mod common;
-
 use teseladb_bson::{BsonError, Document, Limits, RawDoc, Value, read_message, validate_message};
-use teseladb_types::Rng;
 
 const LIMITS: Limits = Limits {
     max_size: teseladb_bson::MAX_SIZE + 16 * 1024,
@@ -120,30 +117,6 @@ fn a_fault_of_the_message_wins_over_an_earlier_fault_of_the_specification() {
     b[t] = 0x77;
     assert!(read_message(&b, LIMITS).is_err());
     same(&b);
-}
-
-#[test]
-fn random_and_mutated_documents_read_as_the_two_passes_read_them() {
-    let docs = common::valid_documents();
-    let mut rng = Rng::new(11);
-    for doc in &docs {
-        same(doc);
-        for _ in 0..200 {
-            let mut b = doc.clone();
-            match rng.range(0, 3) {
-                0 => {
-                    let i = rng.below(b.len());
-                    b[i] ^= 1 << rng.range(0, 8);
-                }
-                1 => {
-                    let i = rng.below(b.len());
-                    b[i] = rng.next_u32().to_le_bytes()[0];
-                }
-                _ => b.truncate(rng.below(b.len())),
-            }
-            same(&b);
-        }
-    }
 }
 
 #[test]

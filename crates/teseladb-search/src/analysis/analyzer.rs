@@ -26,20 +26,22 @@ impl Analyzer {
     pub fn builtin(name: &str) -> Option<Analyzer> {
         let max_token_length = DEFAULT_MAX_TOKEN_LENGTH;
         let (char_filters, tokenizer, token_filters) = match name {
-            "reflib.standard" => {
+            teseladb_names::ANALYZER_STANDARD => {
                 (vec![], Tokenizer::Standard { max_token_length }, vec![TokenFilter::Lowercase])
             }
-            "reflib.simple" => {
+            teseladb_names::ANALYZER_SIMPLE => {
                 (vec![], Tokenizer::Letter { max_token_length }, vec![TokenFilter::Lowercase])
             }
-            "reflib.whitespace" => (vec![], Tokenizer::Whitespace { max_token_length }, vec![]),
-            "reflib.keyword" => (vec![], Tokenizer::Keyword, vec![]),
-            "reflib.morfologik" => (
+            teseladb_names::ANALYZER_WHITESPACE => {
+                (vec![], Tokenizer::Whitespace { max_token_length }, vec![])
+            }
+            teseladb_names::ANALYZER_KEYWORD => (vec![], Tokenizer::Keyword, vec![]),
+            teseladb_names::ANALYZER_MORFOLOGIK => (
                 vec![],
                 Tokenizer::Standard { max_token_length },
                 vec![TokenFilter::Morfologik { language: Language::Polish }],
             ),
-            _ => language(name.strip_prefix("reflib.")?)?,
+            _ => language(name.strip_prefix(teseladb_names::ANALYZER_PREFIX)?)?,
         };
         Some(Analyzer { char_filters, tokenizer, token_filters })
     }
@@ -193,12 +195,20 @@ mod tests {
             "日本語のテキスト 한국어 ไทย 😀👍🏽 🇪🇸",
             "lower case only, nothing to change here at all",
         ];
-        let mut analyzers: Vec<Analyzer> =
-            ["reflib.standard", "reflib.simple", "reflib.whitespace"]
-                .into_iter()
-                .chain(["reflib.keyword", "reflib.english", "reflib.spanish", "reflib.cjk"])
-                .map(|n| Analyzer::builtin(n).unwrap())
-                .collect();
+        let mut analyzers: Vec<Analyzer> = [
+            teseladb_names::ANALYZER_STANDARD,
+            teseladb_names::ANALYZER_SIMPLE,
+            teseladb_names::ANALYZER_WHITESPACE,
+        ]
+        .into_iter()
+        .chain([
+            teseladb_names::ANALYZER_KEYWORD,
+            teseladb_names::ANALYZER_ENGLISH,
+            teseladb_names::ANALYZER_SPANISH,
+            teseladb_names::ANALYZER_CJK,
+        ])
+        .map(|n| Analyzer::builtin(n).unwrap())
+        .collect();
         analyzers.push(Analyzer {
             char_filters: vec![],
             tokenizer: Tokenizer::Whitespace { max_token_length: 3 },
@@ -218,7 +228,7 @@ mod tests {
 
     #[test]
     fn unchanged_terms_are_pieces_of_the_text() {
-        let a = Analyzer::builtin("reflib.standard").unwrap();
+        let a = Analyzer::builtin(teseladb_names::ANALYZER_STANDARD).unwrap();
         let text = "plain words here";
         let mut buffer = TermBuffer::default();
         let range = text.as_bytes().as_ptr_range();

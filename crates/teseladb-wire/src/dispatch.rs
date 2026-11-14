@@ -36,7 +36,7 @@ use teseladb_auth::privileges::Privilege;
 /// `ping`.
 pub const PING: &str = "ping";
 /// Link RefDb's messages about the removed opcodes give.
-const LEGACY_OPCODE_DOC: &str = "https://dochub.refdb.org/core/legacy-opcode-removal";
+const LEGACY_OPCODE_DOC: &str = teseladb_names::DOC_LEGACY_OPCODES;
 
 /// What the server does with a request.
 #[derive(Clone, Debug, PartialEq)]

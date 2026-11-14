@@ -13,7 +13,7 @@ use crate::versions::Revision;
 /// The options in force.
 pub const CONFIG: &str = "config://config";
 /// The connection the server fixed.
-pub const DEBUG: &str = "debug://refdb";
+pub const DEBUG: &str = teseladb_names::MCP_RESOURCE_DEBUG;
 /// The cluster's status.
 pub const CLUSTER_STATUS: &str = "teseladb://cluster/status";
 /// The prefix of an export.
@@ -32,7 +32,7 @@ fn entry(uri: &str, name: &str, description: &str) -> Value {
 pub fn list<'a>(exports: impl Iterator<Item = &'a String>) -> Object {
     let mut all = vec![
         entry(CONFIG, "config", "The MCP options in force and the protocol revision"),
-        entry(DEBUG, "debug-refdb", "The connection the server fixed"),
+        entry(DEBUG, teseladb_names::MCP_RESOURCE_DEBUG_NAME, "The connection the server fixed"),
         entry(CLUSTER_STATUS, "cluster-status", "The cluster's nodes and health"),
     ];
     all.extend(exports.map(|e| entry(&format!("{EXPORT_PREFIX}{e}"), e, "Exported data")));

@@ -83,7 +83,7 @@ fn the_authentication_commands_and_build_info_run_from_an_op_query() {
         .with("saslContinue", 1)
         .with("conversationId", 1)
         .with("payload", Value::Binary { subtype: 0, bytes: Vec::new() });
-    let auth = Document::new().with("authenticate", 1).with("mechanism", "REFDB-X509");
+    let auth = Document::new().with("authenticate", 1).with("mechanism", teseladb_names::SASL_X509);
     for cmd in [start, cont, auth] {
         let r = run(&mut m, cmd.clone());
         assert_ne!(code(&r), Some(&Value::Int32(352)), "{cmd:?}: {r:?}");

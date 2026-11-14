@@ -107,7 +107,7 @@ fn the_facts_come_from_the_host_and_the_port() {
     assert!(none.kerberos().is_empty());
     let mut keytab = vec![0x05, 0x02];
     let mut entry = 1u16.to_be_bytes().to_vec();
-    for t in ["TESELA.TEST", "refdb"] {
+    for t in ["TESELA.TEST", teseladb_names::KERBEROS_SERVICE] {
         entry.extend_from_slice(&u16::try_from(t.len()).unwrap().to_be_bytes());
         entry.extend_from_slice(t.as_bytes());
     }

@@ -5,7 +5,7 @@
 /// Largest number a `commitQuorum` may be (measured on 9.0.4).
 pub const MAX_COMMIT_QUORUM: u32 = 50;
 /// `desc` of an index build in `currentOp`, followed by the build's number (measured on 9.0.4).
-pub const BUILD_DESC: &str = "IndexBuildsCoordinatorRefNode-";
+pub const BUILD_DESC: &str = teseladb_names::INDEX_BUILD_DESC_PREFIX;
 /// What `currentOp` says a build is doing while it scans the collection (measured on 9.0.4).
 const SCANNING: &str = "Index Build: scanning collection";
 

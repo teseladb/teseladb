@@ -6,7 +6,10 @@ use teseladb_bson::{RawDoc, Value, extjson};
 use teseladb_index::geo::geojson::parse;
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, key_values};
 
-const CASES: &str = include_str!("data/geo-reading.json");
+/// The file with its name marks expanded.
+fn cases_text() -> &'static str {
+    teseladb_names::expand_static(include_str!("data/geo-reading.json"))
+}
 
 /// The measured reason, or `None` when the server accepted the value.
 fn measured(case: &teseladb_bson::Document, field: &str) -> Option<String> {
@@ -22,7 +25,7 @@ fn measured(case: &teseladb_bson::Document, field: &str) -> Option<String> {
 
 #[test]
 fn every_measured_value_is_read_as_refdb_reads_it() {
-    let file = extjson::parse(CASES).unwrap();
+    let file = extjson::parse(cases_text()).unwrap();
     let Some(Value::Array(cases)) = file.get("cases") else { panic!("no cases") };
     let index = IndexDef {
         fields: vec![IndexField::special("loc", FieldKind::Sphere)],

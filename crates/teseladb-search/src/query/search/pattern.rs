@@ -12,7 +12,7 @@ use crate::index::MemIndex;
 use crate::query::regex::Regex;
 
 /// The analyzer whose fields take patterns as they are.
-const KEYWORD: &str = "reflib.keyword";
+const KEYWORD: &str = teseladb_names::ANALYZER_KEYWORD;
 
 /// A `wildcard` or `regex` operator.
 #[derive(Clone, Debug, PartialEq)]

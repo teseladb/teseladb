@@ -243,7 +243,7 @@ fn presentation_parameter() {
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     let rs = replica_set(&mut m).expect("read").expect("a set").0;
     assert_eq!(rs.primary(), Some(N1), "the first electable member");
-    let r = present(&mut m, Document::new().with("mode", "refrouter"));
+    let r = present(&mut m, Document::new().with("mode", teseladb_names::ROUTER));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     assert!(replica_set(&mut m).expect("read").is_none());
     let r = present(&mut m, Document::new().with("other", 1));
@@ -358,7 +358,7 @@ fn config_names(m: &mut Mem) -> Vec<String> {
 fn config_lists_what_a_member_has() {
     let mut m = node();
     let refrouter = config_names(&mut m);
-    for name in ["changelog", "refrouter", "settings"] {
+    for name in ["changelog", teseladb_names::ROUTER, "settings"] {
         assert!(refrouter.iter().any(|n| n == name), "{refrouter:?}");
     }
     replica(&mut m, N2);
@@ -569,7 +569,10 @@ fn replica_set_port_parameter() {
     use teseladb_wire::commands::presentation::{port_host, stored};
     let mut m = node();
     let refrouter = |port: Value| {
-        Document::new().with("mode", "refrouter").with("setName", "rs0").with("replicaSetPort", port)
+        Document::new()
+            .with("mode", teseladb_names::ROUTER)
+            .with("setName", "rs0")
+            .with("replicaSetPort", port)
     };
     let r = present(&mut m, refrouter(Value::Int32(27100)));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
@@ -595,7 +598,10 @@ fn replica_set_port_parameter() {
     assert_eq!(code(&r).0, 14, "{r:?}");
     let r = present(
         &mut m,
-        Document::new().with("mode", "refrouter").with("setName", "").with("replicaSetPort", 27100),
+        Document::new()
+            .with("mode", teseladb_names::ROUTER)
+            .with("setName", "")
+            .with("replicaSetPort", 27100),
     );
     assert_eq!(code(&r), (2, "replicaSetPort needs a setName".into()));
     assert_eq!(port_host("a:1", 2), "a:2");

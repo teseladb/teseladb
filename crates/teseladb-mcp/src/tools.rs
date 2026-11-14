@@ -10,13 +10,16 @@ use teseladb_json::{Number, Object, Value};
 
 /// The shape of each tool of RefDb MCP Server 3.2.2: name, annotations, `inputSchema` and
 /// `outputSchema` without descriptions.
-pub const REFERENCE: &str = include_str!("reference_tools.json");
+/// The file with its name marks expanded.
+pub fn reference_text() -> &'static str {
+    teseladb_names::expand_static(include_str!("reference_tools.json"))
+}
 
-/// The entry of `name` in [`REFERENCE`].
+/// The entry of `name` in [`reference_text()`].
 #[must_use]
 pub fn reference(name: &str) -> Option<&'static Object> {
     static PARSED: OnceLock<Vec<Object>> = OnceLock::new();
-    let all = PARSED.get_or_init(|| match teseladb_json::parse(REFERENCE.as_bytes()) {
+    let all = PARSED.get_or_init(|| match teseladb_json::parse(reference_text().as_bytes()) {
         Ok(Value::Array(items)) => items
             .into_iter()
             .filter_map(|v| match v {
@@ -204,7 +207,7 @@ pub const TOOLS: &[Tool] = &[
         &[],
     ),
     read(
-        "refdb-logs",
+        teseladb_names::MCP_TOOL_LOGS,
         "Show the recent lines of the server's log.",
         &[opt("type", Kind::Enum(&["global", "startupWarnings"])), opt("limit", Kind::Int(50))],
         &["logs", "totalLinesWritten", "shownCount"],

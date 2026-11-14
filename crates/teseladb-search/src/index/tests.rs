@@ -130,7 +130,7 @@ fn mappings_decide_which_strings_are_indexed() {
         Document::new().with(
             "fields",
             Document::new()
-                .with("t", ty("string").with("analyzer", "reflib.keyword"))
+                .with("t", ty("string").with("analyzer", teseladb_names::ANALYZER_KEYWORD))
                 .with("s", ty("document").with("dynamic", true)),
         ),
     );

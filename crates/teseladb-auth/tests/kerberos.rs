@@ -125,7 +125,7 @@ fn every_malformed_part_of_an_ap_req_is_refused() {
     // Another service key: the ticket does not open.
     let mut other = vec![0x05, 0x02];
     other.extend_from_slice(&krb::keytab_entry(
-        &["refdb", "db.test"],
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
         "TESELA.TEST",
         18,
         &[1; 32],
@@ -174,7 +174,13 @@ fn optional_parts_and_other_times_are_accepted() {
 
 #[test]
 fn keytab_entries_with_an_old_version_or_bad_names() {
-    let entry = krb::keytab_entry(&["refdb", "db.test"], "TESELA.TEST", 18, &[7; 32], 0);
+    let entry = krb::keytab_entry(
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
+        "TESELA.TEST",
+        18,
+        &[7; 32],
+        0,
+    );
     // A 32-bit version of zero, and none at all: the 8-bit one counts.
     let mut data = vec![0x05, 0x02];
     data.extend_from_slice(&entry);

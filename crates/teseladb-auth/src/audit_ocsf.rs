@@ -8,7 +8,7 @@ use teseladb_bson::{Document, Value, extjson};
 use crate::audit::{AuditType, Client, Endpoint, Event, ProcessInfo};
 
 /// `metadata.product`.
-const PRODUCT: &str = "RefDb Server";
+const PRODUCT: &str = teseladb_names::OCSF_PRODUCT;
 /// `metadata.version`.
 const VERSION: &str = "1.0.0";
 /// `severity_id` of every message TeselaDB writes (informational).

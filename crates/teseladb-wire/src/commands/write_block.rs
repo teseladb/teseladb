@@ -43,7 +43,7 @@ pub const BLOCKED_WRITE: &str = "User writes blocked, reason: Unspecified";
 /// What a blocked change of the catalog answers (measured on `drop`).
 pub const BLOCKED_DDL: &str = "User writes blocked";
 const LOCKED_INFO: &str = "now locked against writes, use db.fsyncUnlock() to unlock";
-const SEE_ALSO: &str = "http://dochub.refdb.org/core/fsynccommand";
+const SEE_ALSO: &str = teseladb_names::DOC_FSYNC;
 const UNLOCKED_INFO: &str = "fsyncUnlock completed";
 const NOT_LOCKED: &str = "fsyncUnlock called when not locked";
 

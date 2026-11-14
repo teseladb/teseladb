@@ -20,7 +20,7 @@ pub const GENERATED: [&str; 9] = [
     "chunks",
     COLLECTIONS,
     "databases",
-    "refrouter",
+    teseladb_names::ROUTER,
     super::query_analysis::QUERY_ANALYZERS,
     SHARDS,
     "tags",
@@ -37,7 +37,7 @@ pub const LISTED: [&str; 9] = [
     "chunks",
     COLLECTIONS,
     "databases",
-    "refrouter",
+    teseladb_names::ROUTER,
     super::config_settings::SETTINGS,
     SHARDS,
     "tags",
@@ -47,7 +47,8 @@ pub const LISTED: [&str; 9] = [
 /// The listed collections of `config` that a member of a replica set does not have (measured on
 /// a replica set of `ref:9.0.4`, 02-11-2026): the replica set presentation (018) leaves them
 /// out of `listCollections`.
-pub const NOT_ON_A_MEMBER: [&str; 3] = ["changelog", "refrouter", super::config_settings::SETTINGS];
+pub const NOT_ON_A_MEMBER: [&str; 3] =
+    ["changelog", teseladb_names::ROUTER, super::config_settings::SETTINGS];
 
 /// Whether `ns` is one of the generated collections of `config`.
 pub fn generated(ns: &Namespace) -> bool {

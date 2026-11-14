@@ -44,7 +44,7 @@ const MULTI_LINE_STRING: &str = "MultiLineString";
 const MULTI_POLYGON: &str = "MultiPolygon";
 const GEOMETRY_COLLECTION: &str = "GeometryCollection";
 /// The reference system that keeps a polygon's winding (only for polygons).
-const STRICT_WINDING_CRS: &str = "urn:x-refdb:crs:strictwinding:EPSG:4326";
+const STRICT_WINDING_CRS: &str = teseladb_names::GEO_CRS_STRICT_WINDING;
 /// Decimal places of the edge locations of a crossing.
 const LOCATION_DECIMALS: usize = 7;
 /// Significant digits of a coordinate in a reason (C++ stream default).

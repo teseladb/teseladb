@@ -102,7 +102,7 @@ mod tests {
         let sts = Sts::with_https(&format!("https://localhost:{port}"), https.clone()).unwrap();
         assert_eq!(sts, sts.clone());
         let req = StsRequest {
-            headers: vec![("X-RefDb-GS2-CB-Flag".into(), "n".into())],
+            headers: vec![(teseladb_names::AWS_HEADER_CHANNEL_BINDING.into(), "n".into())],
             body: STS_BODY,
         };
         let (status, body) = sts.send(&req).unwrap();

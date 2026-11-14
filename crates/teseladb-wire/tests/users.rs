@@ -718,7 +718,7 @@ fn users_info_with_an_authenticated_mechanism() {
     let mut m = Mem::new();
     create(&mut m, "u1", &[("pwd", s("p")), ("roles", arr(&[s("read")]))]);
     let plain = m.run(TEST, doc(&[("usersInfo", s("u1"))]));
-    for mech in ["REFDB-X509", "PLAIN", "SCRAM-SHA-256", "GSSAPI"] {
+    for mech in [teseladb_names::SASL_X509, "PLAIN", "SCRAM-SHA-256", "GSSAPI"] {
         let r = m.run(TEST, doc(&[("usersInfo", s("u1")), ("authenticatedMechanism", s(mech))]));
         assert_eq!(r, plain, "{mech}");
     }

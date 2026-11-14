@@ -1,7 +1,7 @@
-[{"$search":{"text":{"query":"x","path":"a"}}}]	!! 31082	Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an RefCloud local deployment to enable.For more information on how to connect, see https://dochub.refdb.org/core/atlas-cli-deploy-local-reqs.
-[{"$searchMeta":{"text":{"query":"x","path":"a"}}}]	!! 31082	Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an RefCloud local deployment to enable.For more information on how to connect, see https://dochub.refdb.org/core/atlas-cli-deploy-local-reqs.
-[{"$vectorSearch":{"index":"i","path":"v","queryVector":[1],"numCandidates":1,"limit":1}}]	!! 31082	Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an RefCloud local deployment to enable.For more information on how to connect, see https://dochub.refdb.org/core/atlas-cli-deploy-local-reqs.
-[{"$search":{}}]	!! 31082	Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an RefCloud local deployment to enable.For more information on how to connect, see https://dochub.refdb.org/core/atlas-cli-deploy-local-reqs.
+[{"$search":{"text":{"query":"x","path":"a"}}}]	!! 31082	${name:ERR_SEARCH_NOT_CONFIGURED}
+[{"$searchMeta":{"text":{"query":"x","path":"a"}}}]	!! 31082	${name:ERR_SEARCH_NOT_CONFIGURED}
+[{"$vectorSearch":{"index":"i","path":"v","queryVector":[1],"numCandidates":1,"limit":1}}]	!! 31082	${name:ERR_SEARCH_NOT_CONFIGURED}
+[{"$search":{}}]	!! 31082	${name:ERR_SEARCH_NOT_CONFIGURED}
 [{"$search":"x"}]	!! 9	$search value must be an object. Found: string
 [{"$searchMeta":"x"}]	!! 9	$searchMeta value must be an object. Found: string
 [{"$vectorSearch":"x"}]	!! 9	$vectorSearch value must be an object. Found: string

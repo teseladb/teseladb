@@ -45,14 +45,20 @@ pub fn keytab_entry(
 pub fn keytab() -> Vec<ServiceKey> {
     let mut data = vec![0x05, 0x02];
     data.extend_from_slice(&keytab_entry(
-        &["refdb", "db.test"],
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
         "TESELA.TEST",
         18,
         &SERVICE_KEY,
         3,
     ));
     // An entry of another type, and a deleted one: left out.
-    data.extend_from_slice(&keytab_entry(&["refdb", "db.test"], "TESELA.TEST", 23, &[1; 16], 3));
+    data.extend_from_slice(&keytab_entry(
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
+        "TESELA.TEST",
+        23,
+        &[1; 16],
+        3,
+    ));
     data.extend_from_slice(&(-4i32).to_be_bytes());
     data.extend_from_slice(&[0; 4]);
     kerberos::parse_keytab(&data).unwrap()
@@ -186,7 +192,7 @@ pub fn ap_req(o: &Options) -> Vec<u8> {
         &der::sequence(&[
             &ctx(0, &int(5)),
             &ctx(1, &gstr("TESELA.TEST")),
-            &ctx(2, &name(&["refdb", "db.test"])),
+            &ctx(2, &name(&[teseladb_names::KERBEROS_SERVICE, "db.test"])),
             &ctx(3, &enc_part),
         ]),
     );

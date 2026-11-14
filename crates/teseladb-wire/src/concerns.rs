@@ -200,9 +200,7 @@ impl ReadConcernArgs {
             return Err(invalid("Can not specify both afterClusterTime and afterOpTime"));
         }
         if self.after_cluster_time.is_some() && self.at_cluster_time.is_some() {
-            return Err(invalid(
-                "Specifying a timestamp for readConcern snapshot in a causally consistent session is not allowed. See https://docs.refdb.com/manual/core/read-isolation-consistency-recency/#causal-consistency",
-            ));
+            return Err(invalid(teseladb_names::ERR_SNAPSHOT_TIMESTAMP_IN_CAUSAL_SESSION));
         }
         let level = self.level.unwrap_or(Level::Local);
         if let Some(t) = self.after_cluster_time {

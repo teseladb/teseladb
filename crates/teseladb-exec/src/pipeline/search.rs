@@ -29,10 +29,7 @@ pub struct Scored {
 
 /// The error of a deployment without search, whatever the stage.
 pub fn not_enabled() -> MqlError {
-    error(
-        SEARCH_NOT_ENABLED,
-        "Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an RefCloud local deployment to enable.For more information on how to connect, see https://dochub.refdb.org/core/atlas-cli-deploy-local-reqs.",
-    )
+    error(SEARCH_NOT_ENABLED, teseladb_names::ERR_SEARCH_NOT_CONFIGURED)
 }
 
 /// RefDb's error when a field of a stage has the wrong type.
@@ -108,5 +105,5 @@ pub fn parse_vector(arg: RawValue<'_>) -> Result<Document, MqlError> {
 /// The stage name RefDb gives when a search stage is not first: `$search` runs as
 /// `$_internalSearchRefSearchRemote`.
 pub fn first_stage_name(name: &str) -> &str {
-    if name == "$search" { "$_internalSearchRefSearchRemote" } else { name }
+    if name == "$search" { teseladb_names::STAGE_INTERNAL_SEARCH_REMOTE } else { name }
 }

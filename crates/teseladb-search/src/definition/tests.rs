@@ -47,7 +47,7 @@ fn mappings_get_their_defaults() {
     assert_eq!(normalized(&t), normalized_fields(Document::new().with("t", string_defaults())));
     let english = Document::new()
         .with("type", "string")
-        .with("analyzer", "reflib.english")
+        .with("analyzer", teseladb_names::ANALYZER_ENGLISH)
         .with("indexOptions", "offsets")
         .with("store", true)
         .with("norms", "include");
@@ -55,7 +55,8 @@ fn mappings_get_their_defaults() {
         "t",
         ty("string").with(
             "multi",
-            Document::new().with("en", ty("string").with("analyzer", "reflib.english")),
+            Document::new()
+                .with("en", ty("string").with("analyzer", teseladb_names::ANALYZER_ENGLISH)),
         ),
     );
     let want = string_defaults().with("multi", Document::new().with("en", english));
@@ -104,13 +105,13 @@ fn each_type_shows_its_defaults() {
                 .with("tokenization", "edgeGram"),
         ),
         (
-            ty("autocomplete").with("analyzer", "reflib.english"),
+            ty("autocomplete").with("analyzer", teseladb_names::ANALYZER_ENGLISH),
             ty("autocomplete")
                 .with("minGrams", 2)
                 .with("maxGrams", 15)
                 .with("foldDiacritics", true)
                 .with("tokenization", "edgeGram")
-                .with("analyzer", "reflib.english"),
+                .with("analyzer", teseladb_names::ANALYZER_ENGLISH),
         ),
         (ty("geo").with("indexShapes", true), ty("geo").with("indexShapes", true)),
         (
@@ -130,13 +131,13 @@ fn each_type_shows_its_defaults() {
         ),
         (
             ty("string")
-                .with("searchAnalyzer", "reflib.simple")
+                .with("searchAnalyzer", teseladb_names::ANALYZER_SIMPLE)
                 .with("indexOptions", "docs")
                 .with("store", false)
                 .with("norms", "omit")
                 .with("ignoreAbove", 10),
             ty("string")
-                .with("searchAnalyzer", "reflib.simple")
+                .with("searchAnalyzer", teseladb_names::ANALYZER_SIMPLE)
                 .with("ignoreAbove", 10)
                 .with("indexOptions", "docs")
                 .with("store", false)
@@ -175,7 +176,7 @@ fn the_top_options_are_kept_and_unknown_ones_dropped() {
     assert_eq!(normalized(&def).get("analyzers"), Some(&Value::Array(vec![custom.into()])));
     let synonyms = Document::new()
         .with("name", "syn")
-        .with("analyzer", "reflib.standard")
+        .with("analyzer", teseladb_names::ANALYZER_STANDARD)
         .with("source", Document::new().with("collection", "syncoll"));
     let def = Document::new()
         .with("mappings", Document::new().with("dynamic", true))
@@ -183,7 +184,7 @@ fn the_top_options_are_kept_and_unknown_ones_dropped() {
     let want = Document::new()
         .with("name", "syn")
         .with("source", Document::new().with("collection", "syncoll"))
-        .with("analyzer", "reflib.standard");
+        .with("analyzer", teseladb_names::ANALYZER_STANDARD);
     assert_eq!(normalized(&def).get("synonyms"), Some(&Value::Array(vec![want.into()])));
     let def = Document::new()
         .with("mappings", Document::new().with("dynamic", Document::new().with("typeSet", "ts")))
@@ -228,7 +229,7 @@ fn errors_name_the_path_as_refsearch_does() {
             format!("{p}mappings.fields\" must be a document"),
         ),
         (
-            one("t", Document::new().with("analyzer", "reflib.standard")),
+            one("t", Document::new().with("analyzer", teseladb_names::ANALYZER_STANDARD)),
             format!("{p}mappings.fields.t.type\" is required"),
         ),
         (
@@ -416,7 +417,7 @@ fn synonyms_type_sets_and_stored_source_errors_as_refsearch_gives_them() {
             d.insert("name", "x");
         }
         if a {
-            d.insert("analyzer", "reflib.standard");
+            d.insert("analyzer", teseladb_names::ANALYZER_STANDARD);
         }
         d
     };

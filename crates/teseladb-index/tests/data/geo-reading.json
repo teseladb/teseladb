@@ -2309,7 +2309,7 @@
    "query": null
   },
   {
-   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
+   "v": "{\"v\": {\"type\": \"Point\", \"coordinates\": [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"2\"}], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"${name:GEO_CRS_STRICT_WINDING}\"}}}}",
    "index": [
     510,
     "Strict winding order CRS is only supported by polygon"
@@ -2320,7 +2320,7 @@
    ]
   },
   {
-   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}}",
+   "v": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"0\"}], [{\"$numberInt\": \"1\"}, {\"$numberInt\": \"1\"}], [{\"$numberInt\": \"0\"}, {\"$numberInt\": \"0\"}]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"${name:GEO_CRS_STRICT_WINDING}\"}}}}",
    "index": [
     510,
     "can't index geometry with strict winding order"

@@ -12,7 +12,7 @@ use crate::index::EQUIVALENT;
 fn index() -> MemIndex {
     let mapping = Document::new()
         .with("name", "sy")
-        .with("analyzer", "reflib.standard")
+        .with("analyzer", teseladb_names::ANALYZER_STANDARD)
         .with("source", Document::new().with("collection", "syn"));
     let fields = Document::new()
         .with("k", Document::new().with("type", "token").with("normalizer", "lowercase"))

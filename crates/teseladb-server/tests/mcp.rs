@@ -191,7 +191,7 @@ fn every_tool_in_read_only_mode_writes_nothing() {
     let mut wire = Client::new(&node);
     assert!(ok(&wire.run("db", Document::new().with("insert", "c").with("documents", docs(0..5)))));
     let before = state(&mut wire);
-    let reference = parse(teseladb_mcp::tools::REFERENCE.as_bytes()).unwrap();
+    let reference = parse(teseladb_mcp::tools::reference_text().as_bytes()).unwrap();
     let tools = reference.as_array().unwrap();
     let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}"#;
     let mut r = 7u64;

@@ -37,7 +37,7 @@ fn config_shows_the_cluster_from_group0() {
     assert!(dbs.iter().any(|d| field(d, "_id") == Some(&Value::from("app"))), "{dbs:?}");
     let version = find(&mut c, "version");
     assert!(matches!(field(&version[0], "clusterId"), Some(Value::ObjectId(_))), "{version:?}");
-    assert_eq!(find(&mut c, "refrouter").len(), 1);
+    assert_eq!(find(&mut c, teseladb_names::ROUTER).len(), 1);
     assert!(find(&mut c, "chunks").is_empty());
     // A filter applies as on any collection.
     let r = c.run(
@@ -48,7 +48,9 @@ fn config_shows_the_cluster_from_group0() {
     let listed = c.run("config", Document::new().with("listCollections", 1).with("nameOnly", true));
     let names: Vec<Value> =
         batch(&listed, "firstBatch").iter().filter_map(|d| field(d, "name").cloned()).collect();
-    for name in ["shards", "databases", "collections", "chunks", "refrouter", "version", "tags"] {
+    for name in
+        ["shards", "databases", "collections", "chunks", teseladb_names::ROUTER, "version", "tags"]
+    {
         assert!(names.contains(&Value::from(name)), "{name}: {names:?}");
     }
     // Written: refused, Group 0 is what it shows.

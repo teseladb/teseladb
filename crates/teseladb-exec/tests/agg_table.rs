@@ -255,7 +255,7 @@ fn check(table: &str) {
 
 #[test]
 fn core_stages_match_refdb() {
-    check(include_str!("agg/core.out"));
+    check(teseladb_names::expand_static(include_str!("agg/core.out")));
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn an_environment_without_system_stages_refuses_them() {
 /// The search stages on a deployment without search (measured on a `refrouter` 9.0.4).
 #[test]
 fn search_stages_without_search_match_refdb() {
-    check(include_str!("agg/search.out"));
+    check(teseladb_names::expand_static(include_str!("agg/search.out")));
 }
 
 /// A search stage that is not first, as a deployment with search refuses it (measured on
@@ -393,7 +393,7 @@ fn search_stages_without_search_match_refdb() {
 #[test]
 fn search_stages_go_first() {
     for (stage, name) in [
-        ("$search", "$_internalSearchRefSearchRemote"),
+        ("$search", teseladb_names::STAGE_INTERNAL_SEARCH_REMOTE),
         ("$searchMeta", "$searchMeta"),
         ("$vectorSearch", "$vectorSearch"),
     ] {

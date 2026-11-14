@@ -2,9 +2,9 @@
 # Builds the release binaries with profile-guided optimization (012 FR-034). Runs inside the build
 # image of scripts/release/publish.sh, on the checkout at the current directory, with
 # CARGO_TARGET_DIR and TESELADB_RELEASE_VERSION set by it:
-#   1. an instrumented binary for PGO_HOST (-Cprofile-generate) serves the sustained load of 002
-#      (tests/compat/native/soak/soak.py) and the benches that drive a node (teseladb-bench
-#      ycsb-a..ycsb-f, crud, aggregate and txn with --target) for PGO_SECONDS each;
+#   1. an instrumented binary for PGO_HOST (-Cprofile-generate) serves the benches that drive a
+#      node (teseladb-bench ycsb-a..ycsb-f, crud, aggregate and txn with --target) for PGO_SECONDS
+#      each;
 #   2. llvm-profdata of the pinned toolchain (rustup's llvm-tools component, the LLVM rustc was
 #      built with) merges the profiles, and every target is built with -Cprofile-use on them: the
 #      profile is of the source, so the aarch64 and macOS builds take the x86_64 run's (functions
@@ -67,12 +67,8 @@ stop_node() {
   while kill -0 "$pid" 2>/dev/null; do sleep 1; done
 }
 
-# The load whose profile shapes the release: the sustained load of 002 and the benches that
-# drive a node.
+# The load whose profile shapes the release: the benches that drive a node (012 FR-034).
 run_load() {
-  python3 tests/compat/native/soak/soak.py --name pgo --url "refdb://127.0.0.1:$PORT" \
-    --pid-file "$WORK/node.pid" --data-dir "$WORK/data" --seconds "$PGO_SECONDS" \
-    --out "$WORK/soak.json"
   for scenario in $SCENARIOS; do
     "$CARGO_TARGET_DIR/dist/teseladb-bench" --scenario "$scenario" \
       --target "refdb://127.0.0.1:$PORT" --duration "${PGO_SECONDS}s" --warmup 1s \

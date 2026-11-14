@@ -56,7 +56,7 @@ pub fn check_reachable(db: &str, name: &str, coll: Option<&str>) -> Result<(), C
     match served {
         true => Ok(()),
         false => {
-            Err(CommandError::new(ILLEGAL_OPERATION, "Can't use 'local' database through refrouter"))
+            Err(CommandError::new(ILLEGAL_OPERATION, teseladb_names::ERR_LOCAL_THROUGH_ROUTER))
         }
     }
 }

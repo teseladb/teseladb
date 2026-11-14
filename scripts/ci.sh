@@ -4,8 +4,6 @@
 #   scripts/ci.sh            every gate
 #   scripts/ci.sh --quick    format, lints, dependencies and tests
 #   TESELADB_BENCH=1 scripts/ci.sh   also the reference benchmark (gate 8)
-#   TESELADB_E2E=0 scripts/ci.sh     every gate but the end-to-end ones (gate 6). The owner decided on
-#     30-10-2026 that the end-to-end suites run once, when every task of every specification is done.
 #   TESELADB_CI_LONG=0 scripts/ci.sh  every gate but the long runs of coverage, faulty variants and TLC,
 #     which scripts/final-phase.sh runs as phases of their own (coverage crate by crate)
 # Bash 3.2 (macOS) or later. The full run needs Docker (x86_64 tests and shellcheck).
@@ -37,15 +35,10 @@ gate() {
   echo "== $name: OK ($((SECONDS - start)) s)"
 }
 
-# A gate whose tool is not in the repository yet: it says so instead of passing silently.
-absent() {
-  echo "== gate: $1: nothing to run yet ($2)"
-}
-
 shell_scripts() {
   {
     find scripts -name '*.sh'
-    # The compatibility and chaos harnesses; not the packages their runners install.
+    # The MCP battery; not the packages its runners install.
     find tests -name '*.sh' -not -path '*/node_modules/*'
   } | sort
 }
@@ -56,21 +49,9 @@ shellcheck_all() {
   docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -x "${files[@]}"
 }
 
-diff_suite_tests() {
-  local python
-  python=$(tests/compat/native/tools/venv.sh)
-  "$python" -m unittest discover -s tests/compat/native/diff -p 'test_*.py' &&
-    "$python" -m unittest discover -s tests/compat/native/soak -p 'test_*.py'
-}
-
 # Cargo.lock only holds workspace packages (001 FR-023): every step runs offline and without a registry.
 gate "1. format" cargo fmt --all -- --check
 gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
-# The comparison of the native measures and the reading of YCSB's output (002 FR-028, FR-030).
-gate "1. tests of the native measuring tools" python3 -m unittest discover -s tests/compat/native -p 'test_*.py'
-# The pieces of the differential suite and the sustained load, without servers (002 FR-031,
-# FR-032); they need pyref.
-gate "1. tests of the differential suite and the sustained load" diff_suite_tests
 gate "2. dependencies" scripts/check-deps.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256
 gate "2. CLDR 29 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-cldr.sha256
@@ -83,7 +64,6 @@ gate "2. Unicode 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned
 gate "2. emoji 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned.sh scripts/unicode-emoji-tokenizer.sha256
 gate "2. morfologik dictionaries of the search analyzers (011)" scripts/fetch-pinned.sh scripts/morfologik.sha256
 gate "2. collation tables match their generator (D-043)" cargo run -q --offline -p teseladb-unicodegen -- --check
-gate "2. BSON corpus of the specifications (D-169)" scripts/fetch-bson-corpus.sh
 gate "2. IANA time zone database 2024a (D-169)" scripts/fetch-pinned.sh scripts/tzdata.sha256
 gate "2. time zone tables match their generator (D-169)" \
   cargo run -q --offline -p teseladb-tzgen -- .tools/tzdata/tzdata2024a.tar.gz --check
@@ -130,7 +110,9 @@ gate "1. Miri on the byte kernels of search (x86_64, AVX2)" env MIRIFLAGS=-Zmiri
 miri_arch() { # [target]
   local c
   for c in teseladb-hash teseladb-bson; do
-    MIRIFLAGS=-Zmiri-disable-isolation "${MIRI_TEST[@]}" -q -p "$c" --lib ${1:+--target "$1"} -- arch:: || return 1
+    # Interpreted x86_64 has AVX2 only when the target asks for it, as the CPUs of the releases have.
+    MIRIFLAGS=-Zmiri-disable-isolation RUSTFLAGS=${1:+-Ctarget-feature=+avx2} \
+      "${MIRI_TEST[@]}" -q -p "$c" --lib ${1:+--target "$1"} -- arch:: || return 1
   done
   # crypto's arch module has no tests of its own: its accelerated paths are compared with the portable ones there.
   # Miri has no AArch64 crypto instructions (AES, SHA, CRC32), so those run only interpreted for x86_64.
@@ -147,14 +129,10 @@ gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the check of the release images" scripts/tests/check_image_test.sh
-gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh
-gate "2. tests of the battery's secrets scan" scripts/tests/compat_secrets_test.sh
 gate "2. tests of the Docker Hub and GitHub tokens of the releases" scripts/tests/release_tokens_test.sh
 gate "2. tests of the GitHub release" scripts/tests/github_release_test.sh
 gate "2. tests of the platform check of the install script" scripts/tests/install_platform_test.sh
-gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
-gate "2. tests of the native topologies (002 FR-025)" scripts/tests/native_topology_test.sh
 gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env TESELADB_RAFTLOG_CRASH_SEEDS=2000 \
   cargo test -q --offline --release -p teseladb-raftlog --test crash_sim
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \
@@ -180,14 +158,7 @@ gate "5. tests of sim-mutants" scripts/tests/sim_mutants_test.sh
 long_gate "5. faulty variants, each caught by its checker (002 SC-002)" scripts/sim-mutants.sh
 gate "5. simulator (200 seeds of every workload)" cargo run -q --offline --release -p teseladb-sim -- \
   --seeds 200 --workload all --jobs "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
-if [[ ${TESELADB_E2E:-1} == 0 ]]; then
-  echo "== gate: 6. end-to-end: deferred until every task is done (TESELADB_E2E=0, owner 30-10-2026)"
-elif [[ -x tests/compat/run.sh ]]; then
-  gate "6. compatibility with the real drivers" tests/compat/run.sh
-  gate "6. the database tools in both directions (006 FR-025)" tests/compat/tools/run.sh
-else
-  absent "6. compatibility" "tests/compat arrives with specification 002"
-fi
+# The end-to-end battery with the real drivers and the chaos runs live in teseladb-compat (D-170).
 gate "7. tests of tlc" scripts/tests/tlc_test.sh
 long_gate "7. TLC (every model, writes spec/tla/RESULTS.md)" scripts/tlc.sh --all
 if [[ ${TESELADB_BENCH:-0} == 1 ]]; then

@@ -637,7 +637,7 @@ pub fn call<E: Executor + ?Sized>(
                 )
             })
         }
-        "refdb-logs" => {
+        teseladb_names::MCP_TOOL_LOGS => {
             let kind = args.get("type").and_then(Value::as_str).unwrap_or("global").to_owned();
             let limit = arg_int(args, "limit", 50).clamp(1, 1024) as usize;
             let r = c.run("admin", Document::new().with("getLog", kind.as_str()), false)?;

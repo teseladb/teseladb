@@ -1,66 +1,9 @@
-//! Decimal128 against the corpus's decimal files: every valid value
-//! prints its canonical text and reads back from it (and from its degenerate forms) to the same
-//! bytes, unless the corpus marks it lossy; every parse error is refused. Then exact comparison.
-
-mod common;
+//! Decimal128: exact comparison of values and their representations, and the parts and limits of a value. The
+//! decimals of the specification's corpus run in the compatibility repository (D-170).
 
 use std::cmp::Ordering;
 
 use teseladb_bson::{Decimal, Decimal128, MAX_EXPONENT, MIN_EXPONENT};
-use teseladb_json::Value as Json;
-
-/// The decimal of a corpus document `{"d": decimal}` and the text of its Extended JSON.
-fn decimal_of(bytes: &[u8]) -> Decimal128 {
-    // Length, type 0x13, "d\0", then the 16 bytes.
-    assert_eq!(&bytes[4..7], &[0x13, b'd', 0]);
-    Decimal128::from_le_bytes(bytes[7..23].try_into().expect("try_into succeeds"))
-}
-
-fn text_of(extjson: &str) -> String {
-    let j = teseladb_json::parse(extjson.as_bytes()).expect("Extended JSON");
-    j.get("d")
-        .and_then(|d| d.get("$numberDecimal"))
-        .and_then(Json::as_str)
-        .expect("$numberDecimal")
-        .to_owned()
-}
-
-fn s<'a>(case: &'a Json, key: &str) -> Option<&'a str> {
-    case.get(key).and_then(Json::as_str)
-}
-
-#[test]
-fn the_corpus_decimals_print_and_parse() {
-    let (mut valid, mut degenerate, mut errors) = (0, 0, 0);
-    for f in common::corpus().iter().filter(|f| f.name.starts_with("decimal128-")) {
-        for case in f.cases("valid") {
-            let what = format!("{}: {}", f.name, s(&case, "description").expect("s succeeds"));
-            let bytes = common::hex(s(&case, "canonical_bson").expect("s succeeds"));
-            let d = decimal_of(&bytes);
-            let text = text_of(s(&case, "canonical_extjson").expect("s succeeds"));
-            assert_eq!(d.to_string(), text, "{what}");
-            let lossy = case.get("lossy").and_then(Json::as_bool).unwrap_or(false);
-            if !lossy {
-                assert_eq!(text.parse::<Decimal128>(), Ok(d), "{what}");
-            }
-            if let Some(dj) = s(&case, "degenerate_extjson") {
-                let parsed =
-                    text_of(dj).parse::<Decimal128>().unwrap_or_else(|e| panic!("{what}: {e}"));
-                if !lossy {
-                    assert_eq!(parsed, d, "{what} (degenerate)");
-                }
-                degenerate += 1;
-            }
-            valid += 1;
-        }
-        for case in f.cases("parseErrors") {
-            let text = s(&case, "string").expect("s succeeds");
-            assert!(text.parse::<Decimal128>().is_err(), "{}: {text:?} was accepted", f.name);
-            errors += 1;
-        }
-    }
-    assert_eq!((valid, degenerate, errors), (605, 319, 131));
-}
 
 fn d(text: &str) -> Decimal128 {
     text.parse().expect("parse succeeds")

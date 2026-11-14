@@ -129,18 +129,21 @@ fn mechanisms_known_enabled_and_on_external() {
     }
     assert_eq!(SaslMechanism::from_name("scram-sha-256"), None);
     assert_eq!(start_mechanism("SCRAM-SHA-256", ADMIN, &[]), Ok(SaslMechanism::ScramSha256));
-    assert_eq!(start_mechanism("REFDB-X509", EXTERNAL_DB, &[]), Ok(SaslMechanism::X509));
+    assert_eq!(
+        start_mechanism(teseladb_names::SASL_X509, EXTERNAL_DB, &[]),
+        Ok(SaslMechanism::X509)
+    );
     let cases = [
         ("FOO", ADMIN, "Received authentication for mechanism FOO which is not known"),
         ("PLAIN", EXTERNAL_DB, "Received authentication for mechanism PLAIN which is not enabled"),
         ("GSSAPI", ADMIN, "Received authentication for mechanism GSSAPI which is not enabled"),
         (
-            "REFDB-AWS",
+            teseladb_names::SASL_AWS,
             ADMIN,
             "Received authentication for mechanism REFDB-AWS which is not enabled",
         ),
         (
-            "REFDB-OIDC",
+            teseladb_names::SASL_OIDC,
             ADMIN,
             "Received authentication for mechanism REFDB-OIDC which is not enabled",
         ),
@@ -210,7 +213,7 @@ fn advertised_mechanisms_hide_which_users_exist() {
     let nobody = UserName::new("nobody", ADMIN);
     assert_eq!(advertised_mechanisms(&nobody, None, &[]), all);
     let ext = UserName::new("CN=x", EXTERNAL_DB);
-    assert_eq!(advertised_mechanisms(&ext, None, &[]), ["REFDB-X509"]);
+    assert_eq!(advertised_mechanisms(&ext, None, &[]), [teseladb_names::SASL_X509]);
     // Only the enabled mechanisms are listed, as `refnode` 9.0.4 does with
     // `authenticationMechanisms=SCRAM-SHA-256` (measured): also in FIPS mode.
     let sha256_only = [SaslMechanism::ScramSha256, SaslMechanism::X509];

@@ -7,7 +7,10 @@ use teseladb_index::keygen::{
     FieldKind, GEO_KEY_EXTRACTION_FAILED, IndexDef, IndexField, geo2dsphere_keys, key_values,
 };
 
-const VECTORS: &str = include_str!("data/geo-vectors.json");
+/// The file with its name marks expanded.
+fn vectors_text() -> &'static str {
+    teseladb_names::expand_static(include_str!("data/geo-vectors.json"))
+}
 /// Random polygons and lines measured the same way, to choose and check the covering rules.
 const COVERINGS: &str = include_str!("data/geo-coverings.json");
 
@@ -19,7 +22,7 @@ fn vectors(file: &str) -> Vec<Value> {
 
 #[test]
 fn every_measured_geometry_gives_refdb_keys_or_error() {
-    check(VECTORS);
+    check(vectors_text());
 }
 
 #[test]

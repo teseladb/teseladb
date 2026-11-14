@@ -341,7 +341,7 @@ fn sasl_start_errors_as_refdb_gives_them() {
             ),
         ),
         // REFDB-X509 without a certificate, and on a database other than `$external`.
-        (EXTERNAL_DB, start(&[mech("REFDB-X509"), p(b"")]), failed.clone()),
+        (EXTERNAL_DB, start(&[mech(teseladb_names::SASL_X509), p(b"")]), failed.clone()),
         ("test", start(&[mech("SCRAM-SHA-256"), p(b"n,,n=both,r=abcdefgh")]), failed),
     ];
     for (db, cmd, expected) in cases {
@@ -433,10 +433,13 @@ fn one_user_per_connection() {
     // REFDB-X509 on a connection authenticated with SCRAM fails too.
     c.auth.peer_user = Some(CERT_USER.to_owned());
     let failed = error(18, "AuthenticationFailed", "Authentication failed.");
-    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, x509), failed);
-    let sasl =
-        doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-X509")), ("payload", bin(b""))]);
+    let sasl = doc(&[
+        (SASL_START, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_X509)),
+        ("payload", bin(b"")),
+    ]);
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, sasl), failed);
 }
 
@@ -449,7 +452,7 @@ fn connection_status_shows_the_user_and_its_roles() {
     cert.roles = vec![RoleName::new("read", "test")];
     m.security.users.clear();
     add_user(&mut m, &cert);
-    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     run(&mut m, &mut c, EXTERNAL_DB, x509);
     let status = |m: &mut Mem, c: &mut Connection| {
         let r = run(m, c, ADMIN, doc(&[("connectionStatus", 1.into())]));
@@ -485,7 +488,7 @@ fn user_roles_variable_lists_the_roles_by_id() {
         let r = run(m, c, "xa", cmd);
         field(&r, "cursor.firstBatch.0.r").clone()
     };
-    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     let r = run(&mut m, &mut c, EXTERNAL_DB, x509);
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     let role = |db: &str, name: &str| {
@@ -502,7 +505,7 @@ fn user_roles_variable_lists_the_roles_by_id() {
 fn x509_with_authenticate_and_sasl_start() {
     let ok = doc(&[("dbname", s(EXTERNAL_DB)), ("user", s(CERT_USER)), ("ok", 1.0.into())]);
     let auth = |user: Option<&str>| {
-        let mut d = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+        let mut d = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
         if let Some(u) = user {
             d.push("user", s(u));
         }
@@ -545,8 +548,11 @@ fn x509_with_authenticate_and_sasl_start() {
         &format!("Could not find user \"{CERT_USER}\" for db \"$external\""),
     );
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, auth(None)), not_found);
-    let sasl =
-        doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-X509")), ("payload", bin(b""))]);
+    let sasl = doc(&[
+        (SASL_START, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_X509)),
+        ("payload", bin(b"")),
+    ]);
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, sasl.clone()), failed);
     let (mut m, mut c) = (node(), conn(true));
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, sasl), conversation(true, bin(b"")));
@@ -598,8 +604,11 @@ fn speculative_authentication_in_hello() {
 
     // REFDB-X509 answers with the user, and authenticates.
     let (mut m, mut c) = (node(), conn(true));
-    let x509 =
-        doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509")), ("db", s(EXTERNAL_DB))]);
+    let x509 = doc(&[
+        (AUTHENTICATE, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_X509)),
+        ("db", s(EXTERNAL_DB)),
+    ]);
     let r = run(
         &mut m,
         &mut c,
@@ -648,7 +657,7 @@ fn sasl_supported_mechs_per_user() {
     let list = |names: &[&str]| Value::Array(names.iter().map(|n| s(n)).collect());
     assert_eq!(mechs(&mut m, &mut c, s("admin.sha1")), list(&["SCRAM-SHA-1"]));
     assert_eq!(mechs(&mut m, &mut c, s("admin.nobody")), list(&["SCRAM-SHA-1", "SCRAM-SHA-256"]));
-    assert_eq!(mechs(&mut m, &mut c, s("$external.CN=x")), list(&["REFDB-X509"]));
+    assert_eq!(mechs(&mut m, &mut c, s("$external.CN=x")), list(&[teseladb_names::SASL_X509]));
     let as_doc = Value::Document(doc(&[("user", s("sha1")), ("db", s(ADMIN))]));
     assert_eq!(mechs(&mut m, &mut c, as_doc), list(&["SCRAM-SHA-1"]));
     // Without the node (the handshake alone), the default list.
@@ -736,7 +745,7 @@ fn authentication_restrictions_apply_at_login() {
     let mut cert = User::new(UserName::new(CERT_USER, EXTERNAL_DB));
     cert.roles = vec![RoleName::new("ops", ADMIN)];
     add_user(&mut m, &cert);
-    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     for (from, ok) in [("192.168.3.4:1", true), ("10.0.0.1:1", false)] {
         let mut c = conn(true);
         c.auth.client_addr = Some(from.to_owned());
@@ -752,13 +761,20 @@ fn authentications_are_counted_for_server_status() {
     // speculative ones in `hello` and `saslSupportedMechs`.
     let (mut m, mut c) = (node(), conn(true));
     let auth = |user: &str| {
-        doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509")), ("user", s(user))])
+        doc(&[
+            (AUTHENTICATE, 1.into()),
+            ("mechanism", s(teseladb_names::SASL_X509)),
+            ("user", s(user)),
+        ])
     };
     run(&mut m, &mut c, EXTERNAL_DB, auth("CN=other"));
     run(&mut m, &mut c, EXTERNAL_DB, auth(CERT_USER));
     let mut c2 = conn(true);
-    let x509 =
-        doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509")), ("db", s(EXTERNAL_DB))]);
+    let x509 = doc(&[
+        (AUTHENTICATE, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_X509)),
+        ("db", s(EXTERNAL_DB)),
+    ]);
     let hello = doc(&[
         ("hello", 1.into()),
         ("saslSupportedMechs", s("admin.both")),
@@ -766,7 +782,7 @@ fn authentications_are_counted_for_server_status() {
     ]);
     run(&mut m, &mut c2, ADMIN, hello);
     let g = teseladb_wire::commands::lock(&m.shared);
-    let x = g.status.mechanisms.get("REFDB-X509").copied().unwrap_or_default();
+    let x = g.status.mechanisms.get(teseladb_names::SASL_X509).copied().unwrap_or_default();
     assert_eq!(x.authenticate, (2, 1));
     assert_eq!(x.speculative, (1, 1));
     assert_eq!(g.status.sasl_supported_mechs, 1);
@@ -913,8 +929,11 @@ fn refdb_aws_logs_in_through_the_sts() {
         .with("p", 110)
         .to_bytes()
         .unwrap();
-    let start =
-        doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-AWS")), ("payload", bin(&first))]);
+    let start = doc(&[
+        (SASL_START, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_AWS)),
+        ("payload", bin(&first)),
+    ]);
     // Only on `$external`.
     let mut c = conn(false);
     enable(&mut c);
@@ -940,8 +959,8 @@ fn refdb_aws_logs_in_through_the_sts() {
             ("Content-Type", aws::STS_CONTENT_TYPE),
             ("Host", "sts.test"),
             ("X-Amz-Date", date),
-            ("X-RefDb-GS2-CB-Flag", "n"),
-            ("X-RefDb-Server-Nonce", nonce64.as_str()),
+            (teseladb_names::AWS_HEADER_CHANNEL_BINDING, "n"),
+            (teseladb_names::AWS_HEADER_SERVER_NONCE, nonce64.as_str()),
         ];
         let a = aws::authorization(&SigV4 {
             method: "POST",
@@ -970,7 +989,11 @@ fn refdb_aws_logs_in_through_the_sts() {
     let me = Value::Document(doc(&[("user", s(arn)), ("db", s(EXTERNAL_DB))]));
     assert_eq!(authenticated(&mut m, &mut c), vec![me]);
     let sent = m.sts_requests.last().unwrap();
-    assert!(sent.headers.iter().any(|(k, v)| k == "X-RefDb-GS2-CB-Flag" && v == "n"));
+    assert!(
+        sent.headers
+            .iter()
+            .any(|(k, v)| k == teseladb_names::AWS_HEADER_CHANNEL_BINDING && v == "n")
+    );
     // The STS refuses, it names a user that does not exist, or it cannot be reached.
     let failed = error(18, "AuthenticationFailed", "Authentication failed.");
     for sts in [
@@ -986,8 +1009,11 @@ fn refdb_aws_logs_in_through_the_sts() {
     // A first message RefDb refuses, and a second that does not parse.
     let mut c = conn(false);
     enable(&mut c);
-    let bad =
-        doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-AWS")), ("payload", bin(b"xyz"))]);
+    let bad = doc(&[
+        (SASL_START, 1.into()),
+        ("mechanism", s(teseladb_names::SASL_AWS)),
+        ("payload", bin(b"xyz")),
+    ]);
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, bad), failed);
     let r = run(&mut m, &mut c, EXTERNAL_DB, start.clone());
     assert_eq!(r.get("done"), Some(&Value::Boolean(false)));
@@ -1051,7 +1077,11 @@ fn refdb_oidc_logs_in_with_a_token() {
     };
     let payload = |d: Document| bin(&d.to_bytes().unwrap());
     let start = |d: Document| {
-        doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-OIDC")), ("payload", payload(d))])
+        doc(&[
+            (SASL_START, 1.into()),
+            ("mechanism", s(teseladb_names::SASL_OIDC)),
+            ("payload", payload(d)),
+        ])
     };
     let enable = |c: &mut Connection| {
         c.auth.mechanisms = vec![teseladb_auth::sasl::SaslMechanism::Oidc];
@@ -1255,12 +1285,15 @@ fn x509_under_ldap_authorization_takes_the_groups() {
         assert_eq!(field(&run(&mut m, &mut admin, ADMIN, set), "ok"), &Value::Double(1.0));
         // With `authenticate` and with `saslStart`.
         let mut c = conn(true);
-        let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+        let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
         assert_eq!(field(&run(&mut m, &mut c, EXTERNAL_DB, auth), "ok"), &Value::Double(1.0));
         assert_eq!(roles(&mut m, &mut c), readers_value, "useInternalAuthzForX509 {internal}");
         let mut c = conn(true);
-        let start =
-            doc(&[(SASL_START, 1.into()), ("mechanism", s("REFDB-X509")), ("payload", bin(b""))]);
+        let start = doc(&[
+            (SASL_START, 1.into()),
+            ("mechanism", s(teseladb_names::SASL_X509)),
+            ("payload", bin(b"")),
+        ]);
         assert_eq!(field(&run(&mut m, &mut c, EXTERNAL_DB, start), "done"), &Value::Boolean(true));
         assert_eq!(roles(&mut m, &mut c), readers_value);
     }
@@ -1268,7 +1301,7 @@ fn x509_under_ldap_authorization_takes_the_groups() {
     let mut c = Connection::new(9);
     c.auth.required = true;
     c.auth.peer_user = Some("CN=nobody,OU=people,O=example".into());
-    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     assert_eq!(field(&run(&mut m, &mut c, EXTERNAL_DB, auth), "ok"), &Value::Double(1.0));
     assert_eq!(roles(&mut m, &mut c), Value::Array(Vec::new()));
     // Without LDAP authorization it needs its document, as before.
@@ -1276,7 +1309,7 @@ fn x509_under_ldap_authorization_takes_the_groups() {
     let mut c = Connection::new(9);
     c.auth.required = true;
     c.auth.peer_user = Some("CN=nobody,OU=people,O=example".into());
-    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     assert_eq!(field(&run(&mut m, &mut c, EXTERNAL_DB, auth), "code"), &Value::Int32(11));
 }
 
@@ -1321,7 +1354,7 @@ fn use_internal_authz_for_x509_is_a_server_parameter() {
 fn a_members_certificate_logs_in_as_system_with_x509_cluster_authentication() {
     use teseladb_wire::commands::server_params::ClusterAuthMode;
     let mut m = node();
-    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s("REFDB-X509"))]);
+    let auth = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
     for (mode, internal) in [
         (ClusterAuthMode::Undefined, false),
         (ClusterAuthMode::KeyFile, false),

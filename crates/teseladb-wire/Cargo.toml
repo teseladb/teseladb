@@ -11,6 +11,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+teseladb-names = { workspace = true }
 teseladb-auth = { path = "../teseladb-auth" }
 teseladb-bson = { workspace = true }
 teseladb-changestream = { path = "../teseladb-changestream" }

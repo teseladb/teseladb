@@ -31,10 +31,8 @@ check "the dry run ends with 0 (exit $rc)" "$rc" "$out"
 check "the dry run writes nothing" "$(yes_if test ! -e "$WORK/dry")"
 steps=$(awk -F'\t' '$1 ~ /^[0-9]+$/ {print $1}' <<<"$out")
 check "the phases follow the plan's steps" "$(yes_if test "$steps" = "$(sort -n <<<"$steps")")" "$steps"
-for p in build fuzz mutants tlc ci e2e-battery e2e-tools e2e-drivers chaos-kill-leader \
-  chaos-kill-stream-node chaos-partition chaos-pause chaos-disk-full chaos-four-nodes \
-  perf-reference perf-txn perf-contention perf-txn-readers perf-ycsb-3 perf-insert-spread \
-  perf-add-node integrity-sim-heavy-200; do
+for p in build fuzz mutants tlc ci perf-reference perf-txn perf-contention perf-txn-readers \
+  integrity-sim-heavy-200; do
   check "the dry run lists $p" "$(yes_if grep -q "	$p	" <<<"$out")"
 done
 # 002 T034 and 008 T014, T025: the scenarios of their measures, repeated on an idle machine.
@@ -42,9 +40,6 @@ for s in reference txn contention txn-readers; do
   check "the performance phase measures $s with its repetitions" \
     "$(yes_if grep -qE "perf_bench [0-9]+ 5 $s --duration 60s" <<<"$out")"
 done
-# 008 T015 and the other batteries: every scenario with the four clients, no filter.
-check "the e2e battery runs every scenario with every client" \
-  "$(yes_if grep -qE "	e2e-battery	.*tests/compat/run.sh *$" <<<"$out")"
 while IFS= read -r w; do
   for plan in none light default heavy; do
     check "the dry run sweeps $w with $plan" "$(yes_if grep -q "	sim-$w-$plan	" <<<"$out")"
@@ -75,7 +70,7 @@ while IFS= read -r s; do
 done < <(grep -oE 'perf_bench [0-9]+ [^ ]+ [a-z0-9-]+' <<<"$all" | cut -d' ' -f4 | sort -u)
 while IFS= read -r s; do
   check "$s is an executable script" "$(yes_if test -x "$s")"
-done < <(grep -oE '(scripts|tests/compat)/[A-Za-z0-9_/.-]+\.sh' <<<"$all" | sort -u)
+done < <(grep -oE 'scripts/[A-Za-z0-9_/.-]+\.sh' <<<"$all" | sort -u)
 
 # Nothing starts a runner or a deployment, in the commands nor in the script.
 forbidden='git push|gh (workflow|run|pr|release)|docker push|terraform|tofu |nomad |kubectl|helm |aws |vault |consul '

@@ -118,7 +118,7 @@ fn read_concern_fields_and_their_errors() {
                 ("atClusterTime", ts(1, 1)),
             ]),
             72,
-            "Specifying a timestamp for readConcern snapshot in a causally consistent session is not allowed. See https://docs.refdb.com/manual/core/read-isolation-consistency-recency/#causal-consistency",
+            teseladb_names::ERR_SNAPSHOT_TIMESTAMP_IN_CAUSAL_SESSION,
         ),
         (
             d(&[

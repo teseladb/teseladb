@@ -91,8 +91,20 @@ struct Seeds {
 fn seeds() -> Seeds {
     // Kerberos: the initiator's token, and a keytab with an entry of each kind.
     let mut tab = vec![0x05, 0x02];
-    tab.extend_from_slice(&keytab_entry(&["refdb", "db.test"], "TESELA.TEST", 18, &[7; 32], 3));
-    tab.extend_from_slice(&keytab_entry(&["refdb", "db.test"], "TESELA.TEST", 23, &[1; 16], 3));
+    tab.extend_from_slice(&keytab_entry(
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
+        "TESELA.TEST",
+        18,
+        &[7; 32],
+        3,
+    ));
+    tab.extend_from_slice(&keytab_entry(
+        &[teseladb_names::KERBEROS_SERVICE, "db.test"],
+        "TESELA.TEST",
+        23,
+        &[1; 16],
+        3,
+    ));
     tab.extend_from_slice(&(-4i32).to_be_bytes());
     tab.extend_from_slice(&[0; 4]);
     // OIDC: a token signed with the test key, its JWKS, the providers and a discovery document.
@@ -135,8 +147,8 @@ fn seeds() -> Seeds {
         ("Content-Type", "application/x-www-form-urlencoded"),
         ("Host", STS_HOST),
         ("X-Amz-Date", date),
-        ("X-RefDb-GS2-CB-Flag", "n"),
-        ("X-RefDb-Server-Nonce", nonce.as_str()),
+        (teseladb_names::AWS_HEADER_CHANNEL_BINDING, "n"),
+        (teseladb_names::AWS_HEADER_SERVER_NONCE, nonce.as_str()),
     ];
     let authorization = aws::authorization(&SigV4 {
         method: "POST",

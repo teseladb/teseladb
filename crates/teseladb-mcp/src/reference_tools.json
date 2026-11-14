@@ -778,7 +778,7 @@
         "additionalProperties": {},
         "properties": {
          "analyzer": {
-          "default": "reflib.standard",
+          "default": "${name:ANALYZER_STANDARD}",
           "type": "string"
          },
          "mappings": {
@@ -2150,7 +2150,7 @@
    ],
    "type": "object"
   },
-  "name": "refdb-logs",
+  "name": "${name:MCP_TOOL_LOGS}",
   "outputSchema": {
    "additionalProperties": false,
    "properties": {

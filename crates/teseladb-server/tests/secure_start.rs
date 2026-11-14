@@ -308,7 +308,7 @@ fn scram_sha_1_and_x509_log_in_end_to_end() {
         (oid::ORGANIZATIONAL_UNIT, "compat"),
         (oid::COMMON_NAME, "compat-x509"),
     ];
-    let x509 = Document::new().with("authenticate", 1).with("mechanism", "REFDB-X509");
+    let x509 = Document::new().with("authenticate", 1).with("mechanism", teseladb_names::SASL_X509);
     let mut c = Client::with_identity(node.port, &ca, Some(client_identity(&data, &name)));
     let r = c.command("$external", x509.clone());
     assert_eq!(r.get("user"), Some(&Value::from(subject)), "{r:?}");
@@ -612,7 +612,7 @@ fn refdb_aws_reaches_the_sts_of_aws_sts_url() {
         .unwrap();
     let start = Document::new()
         .with("saslStart", 1)
-        .with("mechanism", "REFDB-AWS")
+        .with("mechanism", teseladb_names::SASL_AWS)
         .with("payload", Value::Binary { subtype: 0, bytes: first });
     let r = c.command("$external", start);
     assert_eq!(r.get("done"), Some(&Value::Boolean(false)), "{r:?}");
@@ -659,7 +659,7 @@ fn refdb_oidc_reaches_the_provider_of_its_issuer() {
     let start = |payload: Document| {
         Document::new()
             .with("saslStart", 1)
-            .with("mechanism", "REFDB-OIDC")
+            .with("mechanism", teseladb_names::SASL_OIDC)
             .with("payload", Value::Binary { subtype: 0, bytes: payload.to_bytes().unwrap() })
     };
     let r =

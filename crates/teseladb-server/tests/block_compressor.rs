@@ -17,7 +17,7 @@ fn start(args: &[&str]) -> Result<Codec, String> {
 
 #[test]
 fn the_option_chooses_the_codec_of_the_new_blocks() {
-    assert_eq!(BLOCK_COMPRESSOR, "refengineCollectionBlockCompressor");
+    assert_eq!(BLOCK_COMPRESSOR, teseladb_names::OPTION_BLOCK_COMPRESSOR);
     assert_eq!(start(&["--refengineCollectionBlockCompressor", "zstd"]), Ok(Codec::Zstd));
     assert_eq!(start(&["--refengineCollectionBlockCompressor", "zlib"]), Ok(Codec::Zlib));
     assert_eq!(start(&["--refengineCollectionBlockCompressor=none"]), Ok(Codec::None));

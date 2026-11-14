@@ -54,11 +54,11 @@ impl SaslMechanism {
         match self {
             SaslMechanism::ScramSha1 => Mechanism::ScramSha1.name(),
             SaslMechanism::ScramSha256 => Mechanism::ScramSha256.name(),
-            SaslMechanism::X509 => "REFDB-X509",
+            SaslMechanism::X509 => teseladb_names::SASL_X509,
             SaslMechanism::Plain => "PLAIN",
             SaslMechanism::Gssapi => "GSSAPI",
-            SaslMechanism::Aws => "REFDB-AWS",
-            SaslMechanism::Oidc => "REFDB-OIDC",
+            SaslMechanism::Aws => teseladb_names::SASL_AWS,
+            SaslMechanism::Oidc => teseladb_names::SASL_OIDC,
             SaslMechanism::ApiKey => crate::apikey::MECHANISM,
         }
     }

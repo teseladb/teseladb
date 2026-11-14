@@ -65,7 +65,7 @@ const COUNT: &str = "count";
 const WRITE_CONCERN: &str = "writeConcern";
 const READ_CONCERN: &str = "readConcern";
 /// `errmsg` of `count` in a transaction.
-pub const COUNT_IN_TRANSACTION: &str = "Cannot run 'count' in a multi-document transaction. Please see http://dochub.refdb.org/core/transaction-count for a recommended alternative.";
+pub const COUNT_IN_TRANSACTION: &str = teseladb_names::ERR_COUNT_IN_TRANSACTION;
 /// `errmsg` of a statement with `writeConcern`.
 pub const WRITE_CONCERN_IN_TRANSACTION: &str =
     "writeConcern is not allowed within a multi-statement transaction";

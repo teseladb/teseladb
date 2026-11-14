@@ -11,7 +11,8 @@ use teseladb_search::query::search::SearchError;
 const LENGTHS: [usize; 11] = [100, 255, 256, 1000, 8191, 8192, 8193, 16383, 16384, 32765, 32766];
 
 fn index(definition: &str, docs: Vec<Document>) -> Indexer {
-    let def = Definition::parse(&extjson::parse(definition).expect("JSON")).expect("definition");
+    let definition = teseladb_names::expand(definition).expect("marks");
+    let def = Definition::parse(&extjson::parse(&definition).expect("JSON")).expect("definition");
     let mut ix = Indexer::new(def);
     let changes =
         docs.into_iter().enumerate().map(|(i, d)| (vec![u8::try_from(i).expect("few")], Some(d)));
@@ -54,7 +55,7 @@ fn token_values_keep_their_first_8191_characters_and_keyword_terms_their_bytes()
         .collect();
     let ix = index(
         r#"{"mappings": {"dynamic": true, "fields": {"k": {"type": "token"},
-            "t": {"type": "string", "analyzer": "reflib.keyword"}, "u": {"type": "token"}}}}"#,
+            "t": {"type": "string", "analyzer": "${name:ANALYZER_KEYWORD}"}, "u": {"type": "token"}}}}"#,
         docs,
     );
     let long: Vec<i64> = vec![8191, 8192, 8193, 16383, 16384, 32765, 32766];
@@ -100,7 +101,7 @@ fn keyword_terms_over_32766_bytes_are_not_indexed() {
     ];
     let ix = index(
         r#"{"mappings": {"dynamic": true, "fields": {"k": {"type": "token"},
-            "t": {"type": "string", "analyzer": "reflib.keyword"}}}}"#,
+            "t": {"type": "string", "analyzer": "${name:ANALYZER_KEYWORD}"}}}}"#,
         docs,
     );
     let tz = Document::new()

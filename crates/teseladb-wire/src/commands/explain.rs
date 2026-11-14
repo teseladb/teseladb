@@ -51,7 +51,7 @@ const SORT_MEM_LIMIT: i32 = 104_857_600;
 const SERVER_PARAMETERS: [(&str, i64); 3] = [
     ("internalQueryFacetMaxOutputDocSizeBytes", 104_857_600),
     ("internalLookupStageIntermediateDocumentMaxSizeBytes", 104_857_600),
-    ("internalQueryProhibitBlockingMergeOnRefRouter", 0),
+    (teseladb_names::PARAM_PROHIBIT_BLOCKING_MERGE_ON_ROUTER, 0),
 ];
 
 /// How much `explain` tells.

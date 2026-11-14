@@ -798,7 +798,7 @@ fn indexes_on_views_follow_the_view_stages() {
         "definition",
         Document::new()
             .with("mappings", Document::new().with("dynamic", true))
-            .with("analyzer", "reflib.standard"),
+            .with("analyzer", teseladb_names::ANALYZER_STANDARD),
     );
     m.run(DB, upd);
     let casa = on(&mut m, "v", text("casa"));
@@ -809,7 +809,7 @@ fn indexes_on_views_follow_the_view_stages() {
     assert!(batch(&search(&mut m, "vv", "$search", text("casa"))).is_empty());
     let listed = batch(&list(&mut m, &[]));
     let analyzer = field(&listed[0], "latestDefinition.analyzer");
-    assert_eq!(analyzer, &Value::from("reflib.standard"));
+    assert_eq!(analyzer, &Value::from(teseladb_names::ANALYZER_STANDARD));
 }
 
 /// A custom analyzer with `nGram` `minGram: 0` passes the definition and fails when it first

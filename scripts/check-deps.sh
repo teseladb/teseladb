@@ -21,7 +21,7 @@ IO_CRATES=(teseladb-io teseladb-sys teseladb-server)
 # official files and write their tables, and the battery's comparator reads the runners' output files
 # (constitution, principle II); the simulator is logic except these files (artifacts, histories
 # and child processes).
-IO_TOOLS=(teseladb-bench teseladb-unicodegen teseladb-tzgen compat-compare)
+IO_TOOLS=(teseladb-bench teseladb-unicodegen teseladb-tzgen)
 SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
 # Crates whose code runs on a core's thread for each operation (012 FR-008): no lock shared between
 # threads there.

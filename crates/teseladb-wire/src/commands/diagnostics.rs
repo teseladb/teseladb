@@ -54,7 +54,7 @@ pub const ANNOUNCED_VERSION: &str = "9.0.4";
 /// The announced version as `buildInfo`'s `versionArray`.
 const VERSION_ARRAY: [i32; 4] = [9, 0, 4, 0];
 /// What `serverStatus` calls the process: TeselaDB presents itself as a `refrouter` (D-024).
-const PROCESS_NAME: &str = "refrouter";
+const PROCESS_NAME: &str = teseladb_names::ROUTER;
 /// The port after which RefDb writes `host:port` instead of the bare host name.
 const DEFAULT_PORT: u16 = 27017;
 /// The log `getLog` names with `'*'`, as a `refrouter` 9.0.4 lists them.

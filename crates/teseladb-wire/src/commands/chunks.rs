@@ -468,7 +468,7 @@ pub fn split<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
 /// `splitVector`: a `refrouter` refuses it on `admin` and asks for a range owned by one shard.
 pub fn split_vector<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     if ctx.db == admin::ADMIN_DB {
-        let msg = "Performing splitVector across dbs isn't supported via refrouter";
+        let msg = teseladb_names::ERR_SPLIT_VECTOR_ACROSS_DBS;
         return Err(CommandError::new(ILLEGAL_OPERATION, msg));
     }
     let ns = match ctx.first() {

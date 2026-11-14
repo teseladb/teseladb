@@ -271,7 +271,7 @@ fn profiled_reads_show_their_plan() {
     run(&mut m, DB, json(r#"{"delete":"c","deletes":[{"q":{"a":3},"limit":1}]}"#));
     run(&mut m, DB, json(r#"{"profile":0}"#));
     let ours = profiled(&mut m);
-    let theirs: Vec<Document> = include_str!("profile/plans.out")
+    let theirs: Vec<Document> = teseladb_names::expand_static(include_str!("profile/plans.out"))
         .lines()
         .map(|l| extjson::parse(l).expect("a profile document"))
         .filter(|d| d.get("op") != Some(&Value::from("command")))

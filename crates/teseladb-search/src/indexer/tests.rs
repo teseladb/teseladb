@@ -229,9 +229,10 @@ fn kept_segments_stray_keys_and_unchained_files() {
 /// Every segment gets the synonym documents, read again only when they change.
 #[test]
 fn synonyms_reach_every_segment() {
-    let def = teseladb_bson::extjson::parse(
-        r#"{"mappings":{"dynamic":true},"synonyms":[{"name":"sy","analyzer":"reflib.standard","source":{"collection":"syn"}}]}"#,
-    )
+    let def = teseladb_bson::extjson::parse(&format!(
+        r#"{{"mappings":{{"dynamic":true}},"synonyms":[{{"name":"sy","analyzer":"{}","source":{{"collection":"syn"}}}}]}}"#,
+        teseladb_names::ANALYZER_STANDARD
+    ))
     .expect("JSON");
     let mut ix = Indexer::new(Definition::parse(&def).expect("valid"));
     ix.apply(changes()).expect("applied");

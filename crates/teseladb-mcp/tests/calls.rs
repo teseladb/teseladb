@@ -201,7 +201,7 @@ fn reads_of_the_node_become_their_tools_answers() {
     let out = ok_call(vec![("listDatabases", d(r#"{"ok":1}"#))], "list-databases", "{}");
     assert_eq!(out.structured.get("totalCount").and_then(Value::as_i64), Some(0));
     let logs = d(r#"{"log":["one",2,"three"],"ok":1.0}"#);
-    let out = ok_call(vec![("getLog", logs)], "refdb-logs", r#"{"limit":2}"#);
+    let out = ok_call(vec![("getLog", logs)], teseladb_names::MCP_TOOL_LOGS, r#"{"limit":2}"#);
     let shown = format!("{:?}", out.structured);
     assert!(shown.contains("\"three\"") && !shown.contains("\"one\""), "{shown}");
     let out = ok_call(vec![("getLog", d(r#"{"ok":1.0}"#))], "refdb-logs", "{}");

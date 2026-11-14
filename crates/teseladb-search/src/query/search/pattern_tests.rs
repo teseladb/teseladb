@@ -11,7 +11,8 @@ use super::*;
 use crate::definition::Definition;
 
 fn index() -> MemIndex {
-    let k = Document::new().with("type", "string").with("analyzer", "reflib.keyword");
+    let k =
+        Document::new().with("type", "string").with("analyzer", teseladb_names::ANALYZER_KEYWORD);
     let def = Document::new().with(
         "mappings",
         Document::new().with("dynamic", true).with("fields", Document::new().with("k", k)),

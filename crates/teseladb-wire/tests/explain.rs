@@ -162,14 +162,14 @@ fn shown(r: &Document) -> String {
 
 #[test]
 fn explain_answers_as_refdb() {
-    check(include_str!("explain/explain.out"));
+    check(teseladb_names::expand_static(include_str!("explain/explain.out")));
 }
 
 /// `explain` of `aggregate` (`tests/explain/aggregate.out`): the query plan of the leading
 /// stages, the slot-based engine's when a `$group` or an equality `$lookup` follows them.
 #[test]
 fn explain_of_aggregate_answers_as_refdb() {
-    check(include_str!("explain/aggregate.out"));
+    check(teseladb_names::expand_static(include_str!("explain/aggregate.out")));
 }
 
 /// Pipelines whose leading `$match` is one `_id` equality (`tests/explain/agg_express.out`,
@@ -179,7 +179,7 @@ fn explain_of_aggregate_answers_as_refdb() {
 /// pipeline after a `$cursor`, never in the slot-based engine.
 #[test]
 fn explain_of_aggregate_by_id_answers_as_refdb() {
-    check(include_str!("explain/agg_express.out"));
+    check(teseladb_names::expand_static(include_str!("explain/agg_express.out")));
 }
 
 /// `count` and `distinct` by one `_id` equality (`tests/explain/id_express.out`, recorded on a
@@ -187,14 +187,14 @@ fn explain_of_aggregate_by_id_answers_as_refdb() {
 /// `EXPRESS_IXSCAN`, without the planner, and their answers.
 #[test]
 fn count_and_distinct_by_id_answer_as_refdb() {
-    check(include_str!("explain/id_express.out"));
+    check(teseladb_names::expand_static(include_str!("explain/id_express.out")));
 }
 
 /// More pipelines (`tests/explain/aggregate2.out`): the forms of the stages after the plan and
 /// the stages RefDb moves before others.
 #[test]
 fn explain_of_more_pipelines_answers_as_refdb() {
-    check(include_str!("explain/aggregate2.out"));
+    check(teseladb_names::expand_static(include_str!("explain/aggregate2.out")));
 }
 
 /// The filters of `find` as RefDb plans them (`tests/explain/filters.out`): each `$expr`
@@ -202,7 +202,7 @@ fn explain_of_more_pipelines_answers_as_refdb() {
 /// disjunctions rewritten, `$jsonSchema` translated.
 #[test]
 fn explain_of_filters_answers_as_refdb() {
-    check(include_str!("explain/filters.out"));
+    check(teseladb_names::expand_static(include_str!("explain/filters.out")));
 }
 
 /// `explain` of reads and writes on views (`tests/explain/views.out`, 015 FR-001): the
@@ -210,14 +210,14 @@ fn explain_of_filters_answers_as_refdb() {
 /// order on one node, the views first.
 #[test]
 fn explain_on_views_answers_as_refdb() {
-    check_in(include_str!("explain/views.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/views.out")), false);
 }
 
 /// `explain` with indexes (`tests/explain/plans.out`, 010 FR-001): the plan the planner chooses,
 /// the ones it rejects and what the winner counts; the indexes come first.
 #[test]
 fn explain_of_index_plans_answers_as_refdb() {
-    check_in(include_str!("explain/plans.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plans.out")), false);
 }
 
 /// Reads that an index plan answers (`tests/explain/plan_reads.out`, 010 FR-001): the
@@ -247,7 +247,7 @@ fn writes_through_index_plans_answer_as_refdb() {
 /// one with a collation, and an index of more entries than a scan reads at once.
 #[test]
 fn more_reads_through_index_plans_answer_as_refdb() {
-    check_in(include_str!("explain/plan_more.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plan_more.out")), false);
 }
 
 /// More `explain` with indexes (`tests/explain/plans_more.out`, T018): counts with a skip and a
@@ -255,7 +255,7 @@ fn more_reads_through_index_plans_answer_as_refdb() {
 /// and uncovered projections, a collation, and writes that take one document.
 #[test]
 fn more_index_plans_answer_as_refdb() {
-    check_in(include_str!("explain/plans_more.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plans_more.out")), false);
 }
 
 /// Plans that intersect index scans (`tests/explain/hash_*.out`, 010 FR-001, T016), measured
@@ -264,9 +264,9 @@ fn more_index_plans_answer_as_refdb() {
 #[test]
 fn hash_intersection_plans_answer_as_refdb() {
     for file in [
-        include_str!("explain/hash_ix2.out"),
-        include_str!("explain/hash_ix3.out"),
-        include_str!("explain/hash_ix4.out"),
+        teseladb_names::expand_static(include_str!("explain/hash_ix2.out")),
+        teseladb_names::expand_static(include_str!("explain/hash_ix3.out")),
+        teseladb_names::expand_static(include_str!("explain/hash_ix4.out")),
     ] {
         let mut m = Mem::new();
         load(&mut m);
@@ -286,14 +286,14 @@ fn hash_intersection_plans_answer_as_refdb() {
 /// `findAndModify`, and index plans that cannot cover or count by keys alone.
 #[test]
 fn explain_edges_answer_as_refdb() {
-    check_in(include_str!("explain/edges.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/edges.out")), false);
 }
 
 /// `aggregate` whose leading `$match` reads through an index (`tests/explain/agg_index.out`,
 /// 010 FR-001): the planner's plan under the stages after it, with the plans it rejected.
 #[test]
 fn aggregate_reads_through_index_plans_as_refdb() {
-    check_in(include_str!("explain/agg_index.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/agg_index.out")), false);
 }
 
 /// The index of `_id` as one more candidate of the planner (`tests/explain/plan_id.out`, 010
@@ -301,7 +301,7 @@ fn aggregate_reads_through_index_plans_as_refdb() {
 /// and sorts on `_id` through it, in its order, and it competes with the other indexes.
 #[test]
 fn id_index_plans_answer_as_refdb() {
-    check_in(include_str!("explain/plan_id.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plan_id.out")), false);
 }
 
 /// A rooted `$or` (`tests/explain/or_*.out`, 010 FR-001, T019): its clauses on the leading field
@@ -311,9 +311,9 @@ fn id_index_plans_answer_as_refdb() {
 #[test]
 fn or_plans_answer_as_refdb() {
     for file in [
-        include_str!("explain/or_join.out"),
-        include_str!("explain/or_join2.out"),
-        include_str!("explain/or_subplan.out"),
+        teseladb_names::expand_static(include_str!("explain/or_join.out")),
+        teseladb_names::expand_static(include_str!("explain/or_join2.out")),
+        teseladb_names::expand_static(include_str!("explain/or_subplan.out")),
     ] {
         check_in(file, false);
     }
@@ -325,7 +325,7 @@ fn or_plans_answer_as_refdb() {
 /// the plan or of its sort, and a skip goes under a fetch without filter.
 #[test]
 fn distinct_and_find_and_modify_plans_answer_as_refdb() {
-    check_in(include_str!("explain/plan_distinct.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plan_distinct.out")), false);
 }
 
 /// More replies that name a `refrouter`'s shards (`tests/explain/shards2.out`, DV-031, D-102): the
@@ -373,25 +373,25 @@ fn check(file: &str) {
 #[test]
 fn explain_answers_as_refdb_on_collections_in_id_order() {
     let files = [
-        (include_str!("explain/explain.out"), true),
-        (include_str!("explain/aggregate.out"), true),
-        (include_str!("explain/agg_express.out"), true),
-        (include_str!("explain/id_express.out"), true),
-        (include_str!("explain/aggregate2.out"), true),
-        (include_str!("explain/filters.out"), true),
-        (include_str!("explain/views.out"), false),
-        (include_str!("explain/plans.out"), false),
+        (teseladb_names::expand_static(include_str!("explain/explain.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/aggregate.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/agg_express.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/id_express.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/aggregate2.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/filters.out")), true),
+        (teseladb_names::expand_static(include_str!("explain/views.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/plans.out")), false),
         (include_str!("explain/plan_reads.out"), false),
         (include_str!("explain/shards.out"), false),
         (include_str!("explain/plan_writes.out"), false),
-        (include_str!("explain/plan_more.out"), false),
-        (include_str!("explain/plans_more.out"), false),
-        (include_str!("explain/edges.out"), false),
-        (include_str!("explain/agg_index.out"), false),
-        (include_str!("explain/plan_id.out"), false),
-        (include_str!("explain/plan_distinct.out"), false),
+        (teseladb_names::expand_static(include_str!("explain/plan_more.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/plans_more.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/edges.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/agg_index.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/plan_id.out")), false),
+        (teseladb_names::expand_static(include_str!("explain/plan_distinct.out")), false),
         (include_str!("explain/shards2.out"), false),
-        (include_str!("explain/plan_checked.out"), false),
+        (teseladb_names::expand_static(include_str!("explain/plan_checked.out")), false),
     ];
     for (file, fresh) in files {
         let mut m = Mem::new();
@@ -501,7 +501,10 @@ fn cache_normal(v: &Value, entry: bool) -> Value {
 /// `$planCacheStats` lists them with their plan and trials, as a `refrouter` 9.0.4 does.
 #[test]
 fn plan_cache_answers_as_refdb() {
-    for file in [include_str!("explain/plan_cache.out"), include_str!("explain/plan_cache2.out")] {
+    for file in [
+        include_str!("explain/plan_cache.out"),
+        teseladb_names::expand_static(include_str!("explain/plan_cache2.out")),
+    ] {
         let mut m = Mem::new();
         load(&mut m);
         let mut wrong = Vec::new();
@@ -572,7 +575,7 @@ fn canonical_value(v: &Value) -> String {
 /// on is examined, the keys outside make it seek.
 #[test]
 fn scans_that_check_their_keys_answer_as_refdb() {
-    check_in(include_str!("explain/plan_checked.out"), false);
+    check_in(teseladb_names::expand_static(include_str!("explain/plan_checked.out")), false);
 }
 
 /// A `distinct` that reads one key per value reads the key after its interval when one is

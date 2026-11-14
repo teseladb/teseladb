@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "compat-compare"
-version = "0.1.0"
-dependencies = [
- "teseladb-json",
-]
-
-[[package]]
 name = "teseladb-auth"
 version = "0.1.0"
 dependencies = [
@@ -19,6 +12,7 @@ dependencies = [
  "teseladb-hash",
  "teseladb-json",
  "teseladb-mql",
+ "teseladb-names",
  "teseladb-search",
  "teseladb-types",
  "teseladb-x509",
@@ -121,6 +115,7 @@ dependencies = [
  "teseladb-index",
  "teseladb-keys",
  "teseladb-mql",
+ "teseladb-names",
  "teseladb-plan",
  "teseladb-tz",
 ]
@@ -167,6 +162,7 @@ dependencies = [
  "teseladb-bson",
  "teseladb-hash",
  "teseladb-keys",
+ "teseladb-names",
 ]
 
 [[package]]
@@ -234,6 +230,7 @@ dependencies = [
  "teseladb-bson",
  "teseladb-http",
  "teseladb-json",
+ "teseladb-names",
  "teseladb-rest",
  "teseladb-types",
 ]
@@ -258,6 +255,7 @@ dependencies = [
  "teseladb-bson",
  "teseladb-collation",
  "teseladb-keys",
+ "teseladb-names",
 ]
 
 [[package]]
@@ -271,6 +269,10 @@ dependencies = [
  "teseladb-stages",
  "teseladb-types",
 ]
+
+[[package]]
+name = "teseladb-names"
+version = "0.1.0"
 
 [[package]]
 name = "teseladb-plan"
@@ -344,6 +346,7 @@ dependencies = [
  "teseladb-hash",
  "teseladb-keys",
  "teseladb-mql",
+ "teseladb-names",
  "teseladb-types",
 ]
 
@@ -367,6 +370,7 @@ dependencies = [
  "teseladb-meta",
  "teseladb-mql",
  "teseladb-multiraft",
+ "teseladb-names",
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-range",
@@ -449,6 +453,7 @@ version = "0.1.0"
 dependencies = [
  "teseladb-bson",
  "teseladb-changestream",
+ "teseladb-names",
 ]
 
 [[package]]
@@ -505,6 +510,7 @@ dependencies = [
  "teseladb-keys",
  "teseladb-meta",
  "teseladb-mql",
+ "teseladb-names",
  "teseladb-plan",
  "teseladb-range",
  "teseladb-router",

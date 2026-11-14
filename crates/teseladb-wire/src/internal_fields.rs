@@ -106,7 +106,7 @@ pub fn check(req: &Request, name: &str) -> Result<(), CommandError> {
     match name {
         "aggregate" => check_merge(cmd),
         "insert" | "update" | "delete" if cmd.get("isTimeseriesNamespace").is_some() => {
-            let msg = "the 'isTimeseriesNamespace' parameter cannot be used on refrouter";
+            let msg = teseladb_names::ERR_IS_TIMESERIES_NAMESPACE_ON_ROUTER;
             Err(CommandError::new(TIMESERIES_NS_ON_ROUTER, msg))
         }
         _ => Ok(()),
@@ -130,7 +130,7 @@ const REMOVE_LEGACY_BUCKETING: &str = "_removeLegacyTimeseriesBucketingParameter
 
 /// The fields of an `aggregate` a router sends its shards.
 fn check_merge(cmd: &Document) -> Result<(), CommandError> {
-    if cmd.get("fromRefRouter").is_some() || cmd.get("fromRouter").is_some() {
+    if cmd.get(teseladb_names::FIELD_FROM_ROUTER).is_some() || cmd.get("fromRouter").is_some() {
         return Err(CommandError::new(BAD_VALUE, "BSON field 'fromRouter' is an unknown field"));
     }
     let set = |k: &str| cmd.get(k).and_then(crate::types::truthy) == Some(true);

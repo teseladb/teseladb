@@ -16,8 +16,9 @@ const UUID: [u8; 16] = [
 
 fn head(activity: i32, category: i32, class: i32, actor: &str) -> String {
     format!(
-        r#"{{"activity_id":{activity},"category_uid":{category},"class_uid":{class},"time":{TS},"severity_id":1,"type_uid":{},"metadata":{{"correlation_uid":"8cf14412-020e-44fa-b5c6-4851d27645ef","product":"RefDb Server","version":"1.0.0"}},"actor":{{"user":{actor}}}"#,
-        class * 100 + activity
+        r#"{{"activity_id":{activity},"category_uid":{category},"class_uid":{class},"time":{TS},"severity_id":1,"type_uid":{},"metadata":{{"correlation_uid":"8cf14412-020e-44fa-b5c6-4851d27645ef","product":"{product}","version":"1.0.0"}},"actor":{{"user":{actor}}}"#,
+        class * 100 + activity,
+        product = teseladb_names::OCSF_PRODUCT,
     )
 }
 

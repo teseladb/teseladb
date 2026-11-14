@@ -2061,8 +2061,11 @@ mod tests {
         let w = rename_warning(&stored, &rs("rs1")).expect("a warning");
         assert!(w.contains("replicaSet=rs0") && w.contains("replicaSet=rs1"), "{w}");
         assert_eq!(rename_warning(&rs("rs0"), &rs("rs0")), None, "the same name");
-        assert_eq!(rename_warning(&rs("rs0"), &Document::new().with("mode", "refrouter")), None);
-        let refrouter = Document::new().with("mode", "refrouter");
+        assert_eq!(
+            rename_warning(&rs("rs0"), &Document::new().with("mode", teseladb_names::ROUTER)),
+            None
+        );
+        let refrouter = Document::new().with("mode", teseladb_names::ROUTER);
         assert_eq!(rename_warning(&refrouter, &rs("rs1")), None, "no replica set yet");
         assert_eq!(rename_warning(&Document::new().with("mode", "replicaset"), &rs("a")), None);
         // `topology set` is `setClusterParameter` of `topologyPresentation` (018 FR-007).

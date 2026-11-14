@@ -145,7 +145,7 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "hint",
             "let",
             "exchange",
-            "fromRefRouter",
+            teseladb_names::FIELD_FROM_ROUTER,
             "fromRouter",
             "needsMerge",
             "needsSortedMerge",

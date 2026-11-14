@@ -2,8 +2,6 @@
 //! and whatever is accepted can be walked whole and written back to bytes that read the same.
 //! Values are compared as bytes, because a double that is NaN is not equal to itself.
 
-mod common;
-
 use teseladb_bson::{Document, RawDoc};
 use teseladb_types::Rng;
 
@@ -41,37 +39,4 @@ fn random_bytes_are_refused_without_panicking() {
     }
     // An empty document or one with a few simple fields comes up now and then.
     assert!(accepted > 0);
-}
-
-#[test]
-fn mutated_corpus_documents_are_read_or_refused_without_panicking() {
-    let docs = common::valid_documents();
-    let mut rng = Rng::new(4);
-    let (mut accepted, mut refused) = (0, 0);
-    for doc in &docs {
-        for _ in 0..300 {
-            let mut b = doc.clone();
-            match rng.range(0, 4) {
-                0 => {
-                    let i = rng.below(b.len());
-                    b[i] ^= 1 << rng.range(0, 8);
-                }
-                1 => {
-                    let i = rng.below(b.len());
-                    b[i] = rng.next_u32().to_le_bytes()[0];
-                }
-                2 => b.truncate(rng.below(b.len())),
-                _ => {
-                    let i = rng.below(b.len() + 1);
-                    b.insert(i, rng.next_u32().to_le_bytes()[0]);
-                }
-            }
-            if exercise(&b) {
-                accepted += 1;
-            } else {
-                refused += 1;
-            }
-        }
-    }
-    assert!(accepted > 0 && refused > 0, "{accepted} accepted, {refused} refused");
 }

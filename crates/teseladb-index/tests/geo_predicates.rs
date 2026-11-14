@@ -7,7 +7,10 @@ use teseladb_index::geo::geojson::{Geometry, number, parse, parse_indexed};
 use teseladb_index::geo::region::{Container, intersects, within};
 use teseladb_index::geo::sphere::{Cap, Point};
 
-const VECTORS: &str = include_str!("data/geo-vectors.json");
+/// The file with its name marks expanded.
+fn vectors_text() -> &'static str {
+    teseladb_names::expand_static(include_str!("data/geo-vectors.json"))
+}
 const PREDICATES: &str = include_str!("data/geo-predicates.json");
 
 fn array(v: Option<&Value>) -> &Vec<Value> {
@@ -26,7 +29,7 @@ fn string(v: Option<&Value>) -> &str {
 
 /// The geometries the server stored, by `_id` (their position in the vectors).
 fn documents() -> Vec<(i32, Geometry)> {
-    let file = extjson::parse(VECTORS).unwrap();
+    let file = extjson::parse(vectors_text()).unwrap();
     let mut out = Vec::new();
     for (id, v) in array(file.get("vectors")).iter().enumerate() {
         let Value::Document(v) = v else { panic!() };
