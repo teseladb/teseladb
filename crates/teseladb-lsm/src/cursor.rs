@@ -74,7 +74,13 @@ fn another_version(c: &BlockCursor, logical: &[u8]) -> bool {
 /// A cursor over one source.
 pub(crate) enum Cursor {
     Mem(MemCursor),
-    Table { table: Arc<Table>, pos: Pos },
+    /// A file; `data` is the data file of a history file, where the bases of its deltas may
+    /// be (FR-035).
+    Table {
+        table: Arc<Table>,
+        data: Option<Arc<Table>>,
+        pos: Pos,
+    },
 }
 
 impl Cursor {
@@ -99,14 +105,15 @@ impl Cursor {
                     .map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
                 m.set(found);
             }
-            Cursor::Table { table, pos: Pos::Ready(i, c) } => {
+            Cursor::Table { table, pos, .. } => {
+                let Pos::Ready(i, c) = pos else {
+                    unreachable!("only a cursor at an entry advances")
+                };
                 c.advance().map_err(|_| corrupt(table, *i))?;
                 if !c.valid() {
-                    let next = *i + 1;
-                    *self = Cursor::Table { table: table.clone(), pos: Pos::Block(next) };
+                    *pos = Pos::Block(*i + 1);
                 }
             }
-            Cursor::Table { .. } => unreachable!("only a cursor at an entry advances"),
         }
         Ok(())
     }
@@ -120,7 +127,7 @@ impl Cursor {
     /// the next key is there, and the index otherwise. A memtable's cursor seeks at once, since
     /// each of its steps copies a key.
     pub(crate) fn skip_versions(&mut self, logical: &[u8], stepped: usize) -> Result<(), LsmError> {
-        let Cursor::Table { table, pos } = self else {
+        let Cursor::Table { table, pos, .. } = self else {
             self.seek(entry::after_all_versions(logical));
             return Ok(());
         };
@@ -170,7 +177,7 @@ impl Cursor {
         r: &mut B,
         skip: &mut dyn FnMut(&Table, usize) -> bool,
     ) -> Result<Option<ReadToken>, LsmError> {
-        let Cursor::Table { table, pos } = self else {
+        let Cursor::Table { table, pos, .. } = self else {
             return Ok(None);
         };
         loop {
@@ -235,7 +242,9 @@ impl Cursor {
     pub(crate) fn stored(&self) -> Result<(Bytes, Option<Box<crate::read::Deferred>>), LsmError> {
         match self {
             Cursor::Mem(m) => Ok((m.value.clone(), None)),
-            Cursor::Table { table, pos: Pos::Ready(i, c) } => crate::read::stored(table, *i, c),
+            Cursor::Table { table, data, pos: Pos::Ready(i, c) } => {
+                crate::read::stored(table, data.as_ref(), *i, c)
+            }
             Cursor::Table { .. } => unreachable!("a cursor without an entry has no value"),
         }
     }

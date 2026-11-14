@@ -346,6 +346,10 @@ fn every_node_gives_the_events_of_cs_split_large() {
 
 /// The window of 1 s and a round of the threshold, which rises every second.
 const HISTORY_SETTLE: Duration = Duration::from_secs(3);
+/// Fewest bytes the collection of the old versions frees: each is a delta of a few bytes against
+/// the next one (004 FR-035), with its key and mark, some 40 bytes of the 2 000 versions' 80 KB
+/// before compression. Whole they took 2 MB.
+const HISTORY_FREED: i64 = 64 << 10;
 /// Most time the compactions may take to collect the versions.
 const HISTORY_WAIT: Duration = Duration::from_secs(20);
 
@@ -395,7 +399,7 @@ fn compact_frees_the_versions_the_history_no_longer_keeps() {
     std::thread::sleep(HISTORY_SETTLE);
     let start = Instant::now();
     let mut freed = 0i64;
-    while freed <= 1 << 20 && start.elapsed() < HISTORY_WAIT {
+    while freed <= HISTORY_FREED && start.elapsed() < HISTORY_WAIT {
         let r = c.run("app", Document::new().with("compact", "c").with("force", true));
         assert!(ok(&r), "{r:?}");
         freed += match r.get("bytesFreed") {
@@ -405,7 +409,7 @@ fn compact_frees_the_versions_the_history_no_longer_keeps() {
         };
         std::thread::sleep(Duration::from_millis(500));
     }
-    assert!(freed > 1 << 20, "ten versions of 200 documents of 1 KB went: {freed} bytes");
+    assert!(freed > HISTORY_FREED, "ten versions of 200 documents of 1 KB went: {freed} bytes");
     let r = c.run(
         "app",
         Document::new().with("count", "c").with("query", Document::new().with("v", 10)),

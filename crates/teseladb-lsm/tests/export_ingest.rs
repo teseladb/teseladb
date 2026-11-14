@@ -739,3 +739,49 @@ fn an_export_writes_the_values_of_value_files_with_their_keys() {
         assert!(got.3 == doc(i), "document {i}");
     }
 }
+
+/// A stored document of about 300 bytes at `version`, which changes in two places from one
+/// version to the next: its old versions go to the history file as deltas (FR-035).
+fn versioned_doc(i: u64, version: u64) -> Vec<u8> {
+    let mut d: Vec<u8> = (0..300u64).map(|b| ((b * 7 + i) % 251) as u8).collect();
+    d[0] = teseladb_lsm::DOCUMENT_VALUE;
+    d[40..48].copy_from_slice(&version.to_le_bytes());
+    d[200..208].copy_from_slice(&(version * 31).to_le_bytes());
+    d
+}
+
+/// FR-035: an export of part of the keys passes over the versions outside its interval without
+/// their bases. The old versions of a key past its end, or before its start, are deltas against
+/// versions the export never reads, and the export still finishes; inside it every version
+/// travels whole and reads the same after the ingestion.
+#[test]
+fn an_export_of_part_of_the_keys_passes_over_the_deltas_outside_it() {
+    let mut disk = MemDisk::new();
+    let mut a = open(&small(), &mut disk);
+    let mut index = 0;
+    for version in 1..=4u64 {
+        for i in 0..300 {
+            index += 1;
+            a.put(G, index, &key(i), ts(10 * version, 0), &versioned_doc(i, version)).unwrap();
+        }
+    }
+    a.flush();
+    a.run_io(&mut disk, Nanos::ZERO);
+    assert!(a.metrics().history_files >= 1, "{:?}", a.metrics());
+    let files = export(&mut a, &mut disk, &key(100), &key(200), ts(50, 0));
+    let mut other = MemDisk::new();
+    let sent = send(&files, &mut disk, &mut other);
+    let mut b = open(&small(), &mut other);
+    ingest(&mut b, &mut other, sent, &key(100), &key(200)).unwrap();
+    let (va, vb) = (a.view(), b.view());
+    for version in 1..=4u64 {
+        let read = ts(10 * version, 0);
+        let left = scan(&mut a, &mut disk, &va, &key(100), &key(200), read);
+        let right = scan(&mut b, &mut other, &vb, b"", b"z", read);
+        assert_eq!(right.len(), 100, "at {read:?}");
+        assert!(left == right, "at {read:?}");
+        assert!(
+            right.iter().enumerate().all(|(i, r)| r.3 == versioned_doc(100 + i as u64, version))
+        );
+    }
+}
