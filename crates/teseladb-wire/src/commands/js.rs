@@ -395,19 +395,77 @@ impl JsEngine for NodeJs {
                 "Cannot run server-side javascript without the javascript engine enabled",
             ));
         }
-        let text = code_text(body).unwrap_or_default();
-        let p = program(text).map_err(|e| compile_error(text, &e))?;
-        if !p.is_function() {
-            return Err(MqlError::new(
-                JS_INTERPRETER_FAILURE,
-                format!(
-                    "Failed to create JS function :: source = {text}: e-compile message : 'unexpected token: identifier', file : 'common:parseHelper', line : 18, column : 34\nvalue@common:parseHelper:18:34\n"
-                ),
-            ));
-        }
+        let p = function_program(body)?;
         run(&p, None, args).map_err(|e| runtime_error("Failed to invoke JS function", &e))
     }
+
+    fn call_accumulate(&self, body: &Value, args: &[Value]) -> Result<Value, MqlError> {
+        if !enabled() {
+            return self.call(body, args);
+        }
+        let p = function_program(body)?;
+        run(&p, None, args)
+            .map_err(|e| runtime_error("Failed to invoke JS function", &from_new_function(e)))
+    }
 }
+
+/// The program of a `$function` or `$accumulator` body, as the reference server builds it
+/// (measured on 9.0.4, 14-11-2026, 016 T014): a function as it is; anything else that parses,
+/// wrapped in a function that returns it when it is an expression or runs it when it is
+/// statements; a body that does not parse fails in the reference's `parseHelper`.
+fn function_program(body: &Value) -> Result<Rc<Program>, MqlError> {
+    let text = code_text(body).unwrap_or_default();
+    if text.trim_start().starts_with(FUNCTION_KEYWORD) {
+        return program(text).map_err(|e| compile_error(text, &e));
+    }
+    program(text).map_err(|e| {
+        MqlError::new(
+            JS_INTERPRETER_FAILURE,
+            format!(
+                "Failed to create JS function :: source = {text}: e-compile message : '{}', file : 'common:parseHelper', line : 18, column : 34\nvalue@common:parseHelper:18:34\n",
+                e.message()
+            ),
+        )
+    })?;
+    let wrapped = match program(&format!("({text})")) {
+        // Its leading spaces before the `return`, as the reference's columns show (` zz` fails a
+        // column after `zz`).
+        Ok(_) => {
+            let body = text.trim_start();
+            let lead = &text[..text.len() - body.len()];
+            format!("function() {{ {lead}return {body} }}")
+        }
+        Err(_) => format!("function() {{ {text} }}"),
+    };
+    program(&wrapped).map_err(|e| compile_error(text, &e))
+}
+
+/// The keyword a body that is already a function starts with.
+const FUNCTION_KEYWORD: &str = "function";
+
+/// A throw in `accumulate` as the reference server reports it: from the `newFunction` it builds
+/// `accumulate` with, called by its wrapper at column 185 (measured on 9.0.4).
+fn from_new_function(e: JsError) -> JsError {
+    match e {
+        JsError::Thrown { message, file, line, col, stack } if file == WASM_FUNCTION_FILE => {
+            let own = format!("@{WASM_FUNCTION_FILE}:");
+            let renamed = format!("@{NEW_FUNCTION_FILE}:");
+            let stack = stack.map(|s| {
+                let s = s.replacen(&own, &renamed, 1);
+                format!("{s}{ACCUMULATE_CALLER}\n")
+            });
+            JsError::Thrown { message, file: NEW_FUNCTION_FILE.to_owned(), line, col, stack }
+        }
+        other => other,
+    }
+}
+
+/// The file of a function's code in the reference server's messages.
+const WASM_FUNCTION_FILE: &str = "wasm:function";
+/// The file of `accumulate`'s code.
+const NEW_FUNCTION_FILE: &str = "wasm:newFunction";
+/// The frame of the wrapper that calls `accumulate`.
+const ACCUMULATE_CALLER: &str = "@wasm:function:1:185";
 
 fn compile_error(text: &str, e: &JsError) -> MqlError {
     if matches!(e, JsError::StackExhausted) {

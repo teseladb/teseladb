@@ -31,3 +31,10 @@ function(){ { var x; } let x; }	redeclaration of var x	1	29
 function(){ label: function f(){} return 1 }	OK	1
 function(){ return 1 + }	expected expression, got '}'	1	25
   function(){ return ) }	expected expression, got ')'	1	23
+function() { emit(this.b,	missing } after function body	1	28
+function() { return 1	unexpected token: ')'	1	23
+function() {	expected expression, got ')'	1	14
+function() { if (1) {	expected expression, got ')'	1	23
+function() { f(1,	missing } after function body	1	20
+function() { [1,	expected expression, got ')'	1	18
+function() { return (1	missing } after function body	1	25

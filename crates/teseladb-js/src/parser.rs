@@ -880,10 +880,16 @@ impl Parser {
     }
 
     fn block_rest(&mut self) -> Result<Vec<Stmt>, SyntaxError> {
+        self.statements_until_brace(MISSING_BLOCK_BRACE)
+    }
+
+    /// The statements up to the `}` that closes them; `missing` is the message when the source
+    /// ends first.
+    fn statements_until_brace(&mut self, missing: &str) -> Result<Vec<Stmt>, SyntaxError> {
         let mut out = Vec::new();
         while !self.eat("}") {
             if self.at_eof() {
-                return self.fail("missing } in compound statement".into());
+                return self.fail(missing.into());
             }
             out.push(self.statement()?);
         }
@@ -1375,7 +1381,7 @@ impl Parser {
             self.strict = true;
             self.strict_params(&seen)?;
         }
-        let body = self.block_rest();
+        let body = self.statements_until_brace(MISSING_FUNCTION_BRACE);
         let strict = self.strict || body.as_deref().is_ok_and(has_use_strict);
         let body = body?;
         if strict && !outer_strict {
@@ -2480,3 +2486,8 @@ fn is_strict_reserved(w: &str) -> bool {
             | "static"
     )
 }
+
+/// The message of a block the source ends inside.
+const MISSING_BLOCK_BRACE: &str = "missing } in compound statement";
+/// The message of a function body the source ends inside (measured on the reference engine).
+const MISSING_FUNCTION_BRACE: &str = "missing } after function body";

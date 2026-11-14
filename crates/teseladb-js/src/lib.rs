@@ -225,10 +225,21 @@ impl Program {
             if e.message == parser::STACK_EXHAUSTED {
                 return JsError::StackExhausted;
             }
-            // The reference server compiles a function inside `(` and `)`: its first line moves one
-            // column.
+            // The reference server compiles a function inside `(` and `)`: the error is that of
+            // the source between them, where the `)` may close what the source left open
+            // (measured: `function() { f(1,` misses the `}` of the body, not an expression).
             let t = source.trim_start();
             let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
+            if wrapped
+                && let Err(w) = parser::parse_script(&text::encode(&format!("({source})")))
+                && w.message != parser::STACK_EXHAUSTED
+            {
+                return JsError::Compile {
+                    message: text::to_utf8(&w.message).into_owned(),
+                    line: w.line,
+                    col: w.col,
+                };
+            }
             let shift = if wrapped && e.line == 1 { FUNCTION_PREFIX } else { 0 };
             JsError::Compile {
                 message: text::to_utf8(&e.message).into_owned(),

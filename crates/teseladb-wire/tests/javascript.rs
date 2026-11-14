@@ -366,3 +366,120 @@ fn a_command_thread_gives_the_calls_the_depth_of_the_reference_router() {
     assert_eq!(message, "too much recursion");
     assert!(n.parse::<u32>().unwrap() < 5_000, "{shallow}");
 }
+
+/// A throw in `accumulate` comes from the `newFunction` the reference router builds it with and
+/// is called from its wrapper; `init` and `finalize` throw as a `$function` (measured on 9.0.4,
+/// 14-11-2026, 016 T014).
+#[test]
+fn a_throw_in_accumulate_carries_the_frames_of_the_reference_router() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let group = |init: &str, accumulate: &str, finalize: &str| {
+        format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$group":{{"_id":null,"s":{{"$accumulator":{{"init":"{init}","accumulate":"{accumulate}","accumulateArgs":["$v"],"merge":"function(x, y) {{ return x }}","finalize":"{finalize}","lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        )
+    };
+    let ok_init = "function() { return {s: 0} }";
+    let ok_acc = "function(st, a) { return st }";
+    let ok_fin = "function(st) { return st }";
+    let throws = |what: &str| format!("function() {{ throw new Error('{what}') }}");
+    let r = run(&mut m, &group(ok_init, &throws("accumulate"), ok_fin));
+    let (code, msg) = error(&r);
+    assert_eq!(code, 139, "{msg}");
+    assert!(
+        msg.ends_with(": e-runtime message : 'accumulate', file : 'wasm:newFunction', line : 1, column : 21\n@wasm:newFunction:1:21\n@wasm:function:1:185\n"),
+        "{msg}"
+    );
+    let r = run(&mut m, &group(&throws("init"), ok_acc, ok_fin));
+    let (_, msg) = error(&r);
+    assert!(
+        msg.ends_with(": e-runtime message : 'init', file : 'wasm:function', line : 1, column : 21\n@wasm:function:1:21\n"),
+        "{msg}"
+    );
+    let r = run(&mut m, &group(ok_init, ok_acc, &throws("finalize")));
+    let (_, msg) = error(&r);
+    assert!(
+        msg.ends_with(": e-runtime message : 'finalize', file : 'wasm:function', line : 1, column : 21\n@wasm:function:1:21\n"),
+        "{msg}"
+    );
+}
+
+/// A `$function` body that is not a function runs as the reference router runs it: an expression
+/// is returned and statements are run, and a body that does not parse fails in its
+/// `parseHelper` (measured on 9.0.4, 14-11-2026, 016 T014).
+#[test]
+fn a_body_that_is_not_a_function_runs_as_on_the_reference_router() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let body = |b: &str| {
+        format!(
+            r#"{{"aggregate":"c","pipeline":[{{"$match":{{"_id":0}}}},{{"$project":{{"_id":0,"v":{{"$function":{{"body":"{b}","args":[],"lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        )
+    };
+    let mut wrong = Vec::new();
+    for (b, column) in [
+        ("zz", 15),
+        (" zz", 16),
+        ("1+zz", 24),
+        ("1 + zz", 26),
+        ("12+zz", 25),
+        ("(zz)", 15),
+        ("({a:zz})", 24),
+        ("zz;", 15),
+        ("return zz", 15),
+        ("var q = zz", 23),
+        ("zz()", 15),
+    ] {
+        let (code, msg) = error(&run(&mut m, &body(b)));
+        let tail = format!(
+            ": e-runtime message : 'zz is not defined', file : 'wasm:function', line : 1, column : {column}\n@wasm:function:1:{column}\n"
+        );
+        let invoked = msg.contains("Failed to invoke JS function :: function id = ");
+        if code != 139 || !invoked || !msg.ends_with(&tail) {
+            wrong.push(format!("{b:?} wants {column}: {msg}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    let r = run(&mut m, &body("1"));
+    assert_eq!(first(&r).get("v"), Some(&Value::Double(1.0)), "a JavaScript number: {r:?}");
+    for (b, why) in [
+        ("1+", "expected expression, got end of script"),
+        ("zz zz", "unexpected token: identifier"),
+    ] {
+        let (code, msg) = error(&run(&mut m, &body(b)));
+        assert_eq!(code, 139, "{b}: {msg}");
+        let tail = format!(
+            "Failed to create JS function :: source = {b}: e-compile message : '{why}', file : 'common:parseHelper', line : 18, column : 34\nvalue@common:parseHelper:18:34\n"
+        );
+        assert!(msg.ends_with(&tail), "{b}: {msg}");
+    }
+}
+
+/// `$function`'s `args` is an expression evaluated on each document, which has to give an array
+/// when the function runs (measured on 9.0.4, 14-11-2026, 016 T014): over no document it does not
+/// fail, and `$a` holding an array passes it.
+#[test]
+fn function_args_are_an_expression_checked_when_it_runs() {
+    let mut m = Mem::new();
+    let project = |coll: &str, args: &str| {
+        format!(
+            r#"{{"aggregate":"{coll}","pipeline":[{{"$project":{{"_id":0,"y":{{"$function":{{"body":"function(x){{ return x }}","args":{args},"lang":"js"}}}}}}}}],"cursor":{{}}}}"#
+        )
+    };
+    let r = run(&mut m, &project("none", "5"));
+    assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "no document: {r:?}");
+    load(&mut m);
+    let (code, msg) = error(&run(&mut m, &project("c", "5")));
+    assert_eq!(code, 31266, "{msg}");
+    assert_eq!(
+        msg,
+        "Executor error during aggregate command on namespace: js.c :: caused by :: The args field must be of type array"
+    );
+    let r = run(&mut m, &project("c", r#""$v""#));
+    assert_eq!(error(&r).0, 31266, "{r:?}");
+    let r = run(
+        &mut m,
+        r#"{"aggregate":"c","pipeline":[{"$match":{"_id":0}},{"$project":{"_id":0,"y":{"$function":{"body":"function(x, y){ return String(x) + y }","args":{"$literal":["a", "b"]},"lang":"js"}}}}],"cursor":{}}"#,
+    );
+    assert_eq!(first(&r).get("y"), Some(&Value::from("ab")), "{r:?}");
+}

@@ -14,6 +14,13 @@ use super::{Ctx, Expr, Scope, arguments, error};
 pub trait JsEngine: Debug {
     /// The value `body` gives for `args`.
     fn call(&self, body: &Value, args: &[Value]) -> Result<Value, MqlError>;
+
+    /// The value `$accumulator`'s `accumulate` gives for `args`: a call as [`JsEngine::call`],
+    /// whose errors an engine may word as the reference server words the wrapper it calls
+    /// `accumulate` from.
+    fn call_accumulate(&self, body: &Value, args: &[Value]) -> Result<Value, MqlError> {
+        self.call(body, args)
+    }
 }
 
 /// A location code.
@@ -48,12 +55,30 @@ const JS: &str = "js";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Function {
     body: Value,
-    args: Vec<Expr>,
+    args: Args,
+}
+
+/// `$function`'s `args`: an array of expressions, or one expression that has to give an array
+/// when the function runs (measured on 9.0.4, 14-11-2026, 016 T014).
+#[derive(Clone, Debug, PartialEq)]
+enum Args {
+    /// `[e1, e2, …]`.
+    List(Vec<Expr>),
+    /// Anything else, evaluated on each document.
+    One(Box<Expr>),
 }
 
 /// Whether `v` is a function's code: a string or `Code`.
 fn is_code(v: RawValue<'_>) -> bool {
     matches!(v, RawValue::String(_) | RawValue::JavaScript(_))
+}
+
+/// Calls `accumulate` with `args` in the engine of `scope`.
+fn call_accumulate(scope: &Scope, body: &Value, args: &[Value]) -> Result<Value, MqlError> {
+    match &scope.js {
+        Some(engine) => engine.call_accumulate(body, args),
+        None => Err(error(NO_ENGINE, "$accumulator needs an engine this node does not have")),
+    }
 }
 
 /// Calls `body` with `args` in the engine of `scope`.
@@ -93,14 +118,14 @@ impl Function {
                 }
                 "args" => match x {
                     RawValue::Array(_) => {
-                        args = Some(
+                        args = Some(Args::List(
                             arguments(x)
                                 .into_iter()
                                 .map(|a| Expr::parse_in(a, ctx))
                                 .collect::<Result<Vec<_>, _>>()?,
-                        );
+                        ));
                     }
-                    _ => return Err(error(ARGS_TYPE, "The args field must be of type array")),
+                    _ => args = Some(Args::One(Box::new(Expr::parse_in(x, ctx)?))),
                 },
                 "lang" => match x {
                     RawValue::String(JS) => lang = Some(()),
@@ -127,10 +152,19 @@ impl Function {
         doc: &teseladb_bson::Document,
         scope: &Scope,
     ) -> Result<super::Eval, MqlError> {
-        let mut args = Vec::with_capacity(self.args.len());
-        for a in &self.args {
-            args.push(a.eval(doc, scope)?.unwrap_or(Value::Undefined));
-        }
+        let args = match &self.args {
+            Args::List(list) => {
+                let mut args = Vec::with_capacity(list.len());
+                for a in list {
+                    args.push(a.eval(doc, scope)?.unwrap_or(Value::Undefined));
+                }
+                args
+            }
+            Args::One(e) => match e.eval(doc, scope)? {
+                Some(Value::Array(items)) => items,
+                _ => return Err(error(ARGS_TYPE, "The args field must be of type array")),
+            },
+        };
         call(scope, "$function", &self.body, &args).map(Some)
     }
 }
@@ -238,7 +272,7 @@ impl Accumulator {
             Some(other) => args.push(other),
             None => {}
         }
-        call(scope, "$accumulator", &self.accumulate, &args)
+        call_accumulate(scope, &self.accumulate, &args)
     }
 
     /// The state of two partial states of one group (from two ranges).
