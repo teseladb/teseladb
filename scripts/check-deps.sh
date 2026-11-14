@@ -40,7 +40,8 @@ UNSAFE_CRATES=(teseladb-sys)
 UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs
   crates/teseladb-lsm/src/art.rs
   crates/teseladb-mql/src/simd.rs
-  crates/teseladb-search/src/segment/lanes.rs)
+  crates/teseladb-search/src/segment/lanes.rs
+  crates/teseladb-search/src/byte_simd.rs)
 # Built in two halves so that this script does not contain the word itself.
 ORIGIN_WORD="raf""tree"
 

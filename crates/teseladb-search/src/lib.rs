@@ -20,11 +20,12 @@
 //!   HNSW graph of each vector field of a segment (FR-005, FR-017).
 //!
 //! `unsafe` is denied except in `segment::lanes`, the vector unpacking of the posting blocks
-//! (FR-027, D-151).
+//! (FR-027), and `byte_simd`, the byte kernels of text analysis (FR-028; D-151).
 #![deny(unsafe_code)]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod analysis;
+pub mod byte_simd;
 pub mod definition;
 pub mod index;
 pub mod indexer;

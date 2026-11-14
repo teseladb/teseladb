@@ -275,11 +275,34 @@ fn encode_doc(d: &DocEntry) -> Vec<u8> {
     v
 }
 
+/// The terms of a field the table in front of its dictionary holds (FR-029), when it has more.
+pub const FREQUENT_TERMS: usize = 256;
+
+/// The [`FREQUENT_TERMS`] terms of `field` in the most documents, with the offsets of their
+/// postings (`offsets`, in term order), ties in term order; none when the field has no more terms
+/// than that. A segment is written before the queries that will read it, so the number of
+/// documents of a term stands for how often queries reach it: a query term found in many
+/// documents is the one whose lookups and long postings a query pays for most.
+fn frequent_terms<'a>(field: &'a FieldData, offsets: &[u64]) -> Vec<(&'a [u8], u64)> {
+    if field.terms.len() <= FREQUENT_TERMS {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(usize, &'a [u8], u64)> = field
+        .terms
+        .iter()
+        .zip(offsets)
+        .map(|((term, list), &at)| (list.len(), term.as_slice(), at))
+        .collect();
+    ranked.sort_by_key(|&(docs, _, _)| std::cmp::Reverse(docs));
+    ranked.into_iter().take(FREQUENT_TERMS).map(|(_, term, at)| (term, at)).collect()
+}
+
 fn encode_field(field: &FieldData, docs: usize) -> Vec<u8> {
     assert_eq!(field.lengths.len(), docs, "one length per document");
     let norm_of: Vec<u8> = field.lengths.iter().map(|&l| norms::encode(l)).collect();
     let mut area = Vec::new();
     let mut dict = Builder::new();
+    let mut offsets = Vec::with_capacity(field.terms.len());
     for (term, list) in &field.terms {
         assert!(
             list.windows(2).all(|w| w[0].doc < w[1].doc)
@@ -288,9 +311,10 @@ fn encode_field(field: &FieldData, docs: usize) -> Vec<u8> {
             "postings by document, inside the segment, with sorted occurrences"
         );
         dict.insert(term, area.len() as u64);
+        offsets.push(area.len() as u64);
         postings::write(&mut area, list, &norm_of);
     }
-    let dict = dict.finish();
+    let dict = dict.finish_with(&frequent_terms(field, &offsets));
     let mut out = Vec::new();
     out.extend_from_slice(&(dict.len() as u64).to_le_bytes());
     out.extend_from_slice(&dict);
@@ -686,6 +710,59 @@ mod tests {
             (0..docs).map(|d| (0..d % 3).map(u64::from).collect()).collect(),
         );
         data
+    }
+
+    #[test]
+    fn the_most_frequent_terms_go_in_front_of_the_dictionary() {
+        let docs = 40_u32;
+        let mut data = SegmentData::new(GroupId(9), "default", 3);
+        for d in 0..docs {
+            data.docs.push(DocEntry {
+                key: format!("k{d:05}").into_bytes(),
+                ts: Hlc { physical: 1, logical: 0 },
+            });
+            data.stored.push(None);
+        }
+        let mut f = FieldData { lengths: vec![1; docs as usize], ..FieldData::default() };
+        let terms = FREQUENT_TERMS as u32 + 50;
+        for t in 0..terms {
+            // Term `t` is in `t % docs + 1` documents.
+            let list = (0..t % docs + 1)
+                .map(|d| PostingEntry {
+                    doc: d,
+                    occurrences: vec![Occurrence { position: 0, start: 0, end: 1 }],
+                })
+                .collect();
+            f.terms.insert(format!("w{t:04}").into_bytes(), list);
+        }
+        data.fields.insert("body".to_owned(), f.clone());
+        let bytes = build(&data);
+        let seg = Segment::open(&bytes).expect("valid");
+        let body = seg.field("body").expect("field");
+        assert_eq!(body.dictionary().frequent_terms(), FREQUENT_TERMS);
+        assert_eq!(seg.to_data(), Ok(data.clone()));
+        let offsets: Vec<u64> = f.terms.keys().map(|t| body.dictionary().get(t).unwrap()).collect();
+        let hot = frequent_terms(&f, &offsets);
+        // The table holds the terms in the most documents, and no term in fewer than them.
+        let least = hot.iter().map(|(t, _)| f.terms[*t].len()).min().unwrap();
+        assert!(f.terms.iter().all(|(t, l)| l.len() <= least || hot.iter().any(|h| h.0 == t)));
+        for (term, list) in &f.terms {
+            let at = body.dictionary().get(term).expect("term");
+            assert_eq!(
+                body.postings(term).map(<[u8]>::len),
+                body.area.len().checked_sub(at as usize)
+            );
+            assert_eq!(
+                list.len(),
+                (term[1..].iter().fold(0, |n, &b| n * 10 + u32::from(b - b'0')) % docs + 1)
+                    as usize
+            );
+        }
+        // A field with no more terms than the table has none.
+        let small = sample(5, 10);
+        let bytes = build(&small);
+        let seg = Segment::open(&bytes).expect("valid");
+        assert_eq!(seg.field("body").expect("field").dictionary().frequent_terms(), 0);
     }
 
     #[test]

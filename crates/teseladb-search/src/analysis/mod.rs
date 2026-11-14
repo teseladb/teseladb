@@ -16,6 +16,7 @@ pub mod normalize;
 pub mod props;
 pub mod smartcn;
 pub mod snowball;
+pub mod spans;
 pub mod thai;
 pub mod tokenfilters;
 pub mod tokenizers;
