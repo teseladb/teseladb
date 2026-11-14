@@ -1,7 +1,7 @@
 //! `prepareUnique` and the conversion to `unique` of `collMod` (009 FR-004, FR-007, contract
-//! `index-commands.md`), with the replies and errors measured on RefDb 9.0.4: a prepared index
-//! keeps the duplicates it has and refuses new ones; the conversion lists the groups of
-//! documents with the same values and, once there are none, leaves a unique index under the same
+//! `index-commands.md`), with the replies and errors measured on the reference server 9.0.4: a
+//! prepared index keeps the duplicates it has and refuses new ones; the conversion lists the groups
+//! of documents with the same values and, once there are none, leaves a unique index under the same
 //! name.
 
 mod common;
@@ -236,7 +236,7 @@ fn an_index_built_prepared_takes_the_duplicates_already_there() {
 }
 
 #[test]
-fn coll_mod_of_an_index_answers_its_errors_as_refdb() {
+fn coll_mod_of_an_index_answers_its_errors_as_the_reference() {
     let mut m = Mem::new();
     create(&mut m, index("a").with("expireAfterSeconds", 5));
     create(&mut m, index("b").with("hidden", true));
@@ -406,7 +406,7 @@ fn field_name(i: &Value) -> String {
 }
 
 /// An index made unique keeps its place in `listIndexes`, also after a second conversion and in
-/// a copy of the catalog taken from a snapshot (a `refrouter` 9.0.4 keeps it, measured).
+/// a copy of the catalog taken from a snapshot (the reference router 9.0.4 keeps it, measured).
 #[test]
 fn a_converted_index_keeps_its_place_in_the_list() {
     let mut m = Mem::new();
@@ -427,8 +427,8 @@ fn a_converted_index_keeps_its_place_in_the_list() {
     assert_eq!(names(&mut m), ["_id_", "b_1", "c_1", "d_1"]);
 }
 
-/// A hashed or wildcard index with duplicates answers them first, as a `refrouter` 9.0.4 does
-/// (measured): the groups of a hashed index go in the order of the hashes, those of a wildcard
+/// A hashed or wildcard index with duplicates answers them first, as the reference router 9.0.4
+/// does (measured): the groups of a hashed index go in the order of the hashes, those of a wildcard
 /// index by path and value.
 #[test]
 fn the_duplicates_come_before_the_type_of_the_index() {
@@ -620,7 +620,7 @@ fn a_duplicate_that_comes_during_the_conversion_fails_it() {
 }
 
 #[test]
-fn more_index_changes_answer_as_refdb() {
+fn more_index_changes_answer_as_the_reference() {
     let mut m = Mem::new();
     create(&mut m, index("a").with("expireAfterSeconds", 5));
     create(&mut m, index("b"));

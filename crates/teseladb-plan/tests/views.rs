@@ -1,6 +1,6 @@
-//! Views (015 T004, FR-001) against what a `refrouter` 9.0.4 answered on 31-10-2026: the checks of
-//! a definition (stages, writing and change-stream stages, also in sub-pipelines, collation of
-//! the views it reads, cycles and depth) and the resolution of a query on a view.
+//! Views (015 T004, FR-001) against what the reference router 9.0.4 answered on 31-10-2026: the
+//! checks of a definition (stages, writing and change-stream stages, also in sub-pipelines,
+//! collation of the views it reads, cycles and depth) and the resolution of a query on a view.
 
 use std::collections::BTreeMap;
 
@@ -51,7 +51,7 @@ fn the_stage_list_is_sorted_and_knows_what_writes() {
 }
 
 #[test]
-fn view_pipelines_are_checked_as_refrouter_checks_them() {
+fn view_pipelines_are_checked_as_the_reference_router_checks_them() {
     let ns = "m6.v";
     let cases: Vec<(&str, Result<(), ViewError>)> = vec![
         (r#"[{"$match":{"a":1}},{"$geoNear":{"near":[0,0],"distanceField":"d"}}]"#, Ok(())),

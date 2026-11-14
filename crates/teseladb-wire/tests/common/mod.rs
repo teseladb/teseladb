@@ -78,7 +78,7 @@ pub struct Mem {
     pub database_marks: usize,
     /// The marks of the `$clusterTime`s clients sent (`Backend::observe_mark`).
     pub observed: Vec<Hlc>,
-    /// What the STS answers to REFDB-AWS (status and body); `None`: unreachable.
+    /// What the STS answers to AWS authentication (status and body); `None`: unreachable.
     pub sts: Option<(u16, Vec<u8>)>,
     /// `oidcIdentityProviders` and the JWKS each provider gives, as JSON.
     pub oidc: Option<(String, Vec<u8>)>,

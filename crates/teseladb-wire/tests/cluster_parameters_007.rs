@@ -1,7 +1,7 @@
 //! 007 T032: TeselaDB's own cluster parameters (D-061): `teselaHistoryRetention` (FR-019, DV-016),
 //! the seconds of history every range keeps, and `teselaLoadSplitOpsPerSecond` (D-075), the
 //! operations per second that split a range by load. Both go through `setClusterParameter` and
-//! `getClusterParameter` like RefDb's own, with whole numbers of at least 1.
+//! `getClusterParameter` like the reference server's own, with whole numbers of at least 1.
 
 mod common;
 
@@ -106,11 +106,11 @@ fn values_that_are_not_whole_positive_numbers_are_refused() {
     assert_eq!(load_split_ops(Some(&int32)), 7);
 }
 
-/// `changeStreamOptions` with `preAndPostImages.expireAfterSeconds` as a `refrouter` 9.0.4 takes it
-/// (T046, FR-019; measured on 07-11-2026): `"off"` without a value, a whole number of seconds
-/// stored as a `long` (a double truncated, a decimal rounded half to even), and its errors.
+/// `changeStreamOptions` with `preAndPostImages.expireAfterSeconds` as the reference router 9.0.4
+/// takes it (T046, FR-019; measured on 07-11-2026): `"off"` without a value, a whole number of
+/// seconds stored as a `long` (a double truncated, a decimal rounded half to even), and its errors.
 #[test]
-fn change_stream_options_take_off_or_a_positive_number_as_on_a_refrouter() {
+fn change_stream_options_take_off_or_a_positive_number_as_on_the_reference_router() {
     let mut m = Mem::new();
     let images = |v: Value| {
         Document::new().with("preAndPostImages", Document::new().with("expireAfterSeconds", v))

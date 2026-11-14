@@ -1,5 +1,5 @@
 //! `explain` of `count` and `distinct` over multikey indexes, with `executionStats` (010; the
-//! stages and counters of a `refnode` 9.0.4, measured on 02-11-2026 on `mk` with
+//! stages and counters of a reference replica set member 9.0.4, measured on 02-11-2026 on `mk` with
 //! `{_id: 1, a: [1, 2], b: 1}`, `{_id: 2, a: 3, b: [4, 5]}`, `{_id: 3, a: 7, b: 2}` and indexes
 //! on `a` and `b`): a range of a multikey index fetches the documents it counts, and `distinct`
 //! of a multikey field reads them too.
@@ -120,10 +120,10 @@ fn a_multikey_scan_drops_the_repeats_of_a_document() {
     assert_eq!(ixscan(&r), (Value::Int32(4), Value::Int32(1), Value::Int32(3)));
 }
 
-/// Only btree and `2dsphere` indexes track the paths through arrays (RefDb r9.0.4
-/// `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`): the `IXSCAN` of a
-/// hashed index has no `multiKeyPaths`, a wildcard one does, and `$listCatalog` keeps
-/// `multikeyPaths` for btree indexes only (measured on the native `refrouter` 9.0.4 on 09-11-2026).
+/// Only btree and `2dsphere` indexes track the paths through arrays (the reference server r9.0.4
+/// `collection_impl.cpp`, `indexTypeSupportsPathLevelMultikeyTracking`): the `IXSCAN` of a hashed
+/// index has no `multiKeyPaths`, a wildcard one does, and `$listCatalog` keeps `multikeyPaths` for
+/// btree indexes only (measured on the native the reference router 9.0.4 on 09-11-2026).
 #[test]
 fn only_indexes_that_track_paths_through_arrays_show_them() {
     let mut m = Mem::new();

@@ -1,6 +1,6 @@
 //! The CRUD and catalog commands of 006 (FR-006 to FR-008, FR-013, FR-016 to FR-018, FR-026,
-//! FR-027) against an in-memory node, with the answers a `refrouter` gives (measured on 7.0, and
-//! on 9.0.4 where they changed).
+//! FR-027) against an in-memory node, with the answers the reference router gives (measured on 7.0,
+//! and on 9.0.4 where they changed).
 
 mod common;
 
@@ -191,7 +191,7 @@ fn get_more_and_kill_cursors_check_what_they_are_given() {
     assert_eq!(code(&r), 14);
     let r = m.run("db", doc(&[("getMore", Value::Int64(id))]));
     assert_eq!(code(&r), 40414);
-    // Another collection: refused, and the cursor stays open (`refrouter` 9.0.4).
+    // Another collection: refused, and the cursor stays open (the reference router 9.0.4).
     let r = m.run("db", doc(&[("getMore", Value::Int64(id)), ("collection", s("d"))]));
     assert_eq!(code(&r), 13);
     let r = m.run("db", doc(&[("getMore", Value::Int64(id)), ("collection", s("c"))]));
@@ -312,11 +312,11 @@ fn dec(t: &str) -> Value {
     Value::Decimal128(t.parse().unwrap())
 }
 
-/// `skip`, `limit` and `batchSize` of `find`, `getMore` and `count` read as `refrouter` 9.0.4 reads
-/// them: a double is cut toward zero and saturates, a decimal is rounded half to even, NaN is 0;
-/// `count`'s `limit` must be a whole number.
+/// `skip`, `limit` and `batchSize` of `find`, `getMore` and `count` read as the reference router
+/// 9.0.4 reads them: a double is cut toward zero and saturates, a decimal is rounded half to even,
+/// NaN is 0; `count`'s `limit` must be a whole number.
 #[test]
-fn numeric_arguments_are_read_as_refdb_reads_them() {
+fn numeric_arguments_are_read_as_the_reference_reads_them() {
     let mut m = Mem::new();
     insert(&mut m, "c", ids(0..5));
     let found = |m: &mut Mem, arg: &str, v: &Value| {
@@ -418,7 +418,7 @@ fn deletes_take_one_or_all() {
 }
 
 /// A statement the parser rejects fails the whole command before any delete runs, with the
-/// `limit` written as a C++ stream writes a double (measured in `refrouter` 9.0.4).
+/// `limit` written as a C++ stream writes a double (measured in the reference router 9.0.4).
 #[test]
 fn a_malformed_delete_statement_fails_the_command() {
     let mut m = Mem::new();
@@ -581,7 +581,7 @@ fn count_and_distinct_read_what_matches() {
     assert_eq!(field(&r, "values"), &Value::Array(vec![]));
     assert_eq!(code(&m.run("db", doc(&[("distinct", s("c"))]))), 40414);
     assert_eq!(code(&m.run("db", doc(&[("distinct", s("c")), ("key", 1.into())]))), 14);
-    // An empty key is the field named "" (measured in `refrouter` 9.0.4: `[5]`).
+    // An empty key is the field named "" (measured in the reference router 9.0.4: `[5]`).
     m.run(
         "db",
         doc(&[
@@ -598,7 +598,7 @@ fn count_and_distinct_read_what_matches() {
 }
 
 #[test]
-fn names_follow_refdb_rules() {
+fn names_follow_the_reference_rules() {
     let mut m = Mem::new();
     let r = m.run("a.b", doc(&[("insert", s("c")), ("documents", ids(0..1))]));
     assert_eq!(field(&r, "errmsg"), &s("'.' is an invalid character in a db name: a.b"));
@@ -632,7 +632,7 @@ fn names_follow_refdb_rules() {
 }
 
 #[test]
-fn the_catalog_commands_answer_as_refrouter() {
+fn the_catalog_commands_answer_as_the_reference_router() {
     let mut m = Mem::new();
     assert_eq!(field(&m.run("db", doc(&[("create", s("c"))])), "ok"), &Value::Double(1.0));
     // The same options again: fine; others: `NamespaceExists`.
@@ -730,7 +730,7 @@ fn retryable_writes_run_once() {
     let writes = m.writes;
     let again = m.run("db", cmd);
     // The same answer, which lists the statements answered from their records (measured on a
-    // `refrouter` 9.0.4).
+    // the reference router 9.0.4).
     let retried = Value::Array(vec![Value::Int32(0), Value::Int32(1)]);
     assert_eq!(first, doc(&[("n", Value::Int32(2)), ("ok", 1.0.into())]));
     assert_eq!(
@@ -837,12 +837,13 @@ fn sessions_end_with_their_cursors() {
         field(&m.run("admin", doc(&[("refreshSessions", Value::Array(vec![lsid.clone()]))])), "ok"),
         &Value::Double(1.0)
     );
-    // Without the session the cursor is not its: 50800 on a `refrouter` 9.0.4 without users
-    // (`validateLSID` in `cluster_find.cpp`, measured on the native `refrouter` on 09-11-2026).
+    // Without the session the cursor is not its: 50800 on the reference router 9.0.4 without users
+    // (`validateLSID` in `cluster_find.cpp`, measured on the native the reference router on
+    // 09-11-2026).
     let r = m.run("db", doc(&[("getMore", Value::Int64(id)), ("collection", s("c"))]));
     assert_eq!(code(&r), 50800);
     // `endSessions` leaves the cursor until the next refresh of the sessions' record, as
-    // `refrouter` 9.0.4 does; the refresh kills it.
+    // the reference router 9.0.4 does; the refresh kills it.
     m.run("admin", doc(&[("endSessions", Value::Array(vec![lsid.clone()]))]));
     let more = || {
         doc(&[
@@ -875,7 +876,7 @@ fn sessions_end_with_their_cursors() {
         code(&m.run("admin", doc(&[("endSessions", Value::Array(vec![d(&[("id", 1.into())])]))]))),
         14
     );
-    // The messages of a `refrouter` 9.0.4 (measured).
+    // The messages of the reference router 9.0.4 (measured).
     let id1 = || d(&[("id", 1.into())]);
     for (cmd, arg, code_of, msg) in [
         (
@@ -1072,9 +1073,9 @@ fn bulk_write_reports_each_operation() {
 }
 
 /// What the parser of an update statement rejects fails the command; what the statement checks
-/// when it runs is its write error (measured in `refrouter` 9.0.4).
+/// when it runs is its write error (measured in the reference router 9.0.4).
 #[test]
-fn update_statements_fail_where_refdb_fails_them() {
+fn update_statements_fail_where_the_reference_fails_them() {
     let mut m = Mem::new();
     insert(&mut m, "c", ids(0..2));
     let set = || d(&[("$set", d(&[("y", 1.into())]))]);
@@ -1151,7 +1152,7 @@ fn update_statements_fail_where_refdb_fails_them() {
     );
 }
 
-/// The conflicts of `findAndModify`'s options, with the messages of a `refrouter` 9.0.4.
+/// The conflicts of `findAndModify`'s options, with the messages of the reference router 9.0.4.
 #[test]
 fn find_and_modify_refuses_remove_with_update_upsert_or_new() {
     let mut m = Mem::new();
@@ -1175,7 +1176,7 @@ fn find_and_modify_refuses_remove_with_update_upsert_or_new() {
 }
 
 /// The validation options of `create` and `collMod` name their command in their messages, as a
-/// `refrouter` 9.0.4 does.
+/// the reference router 9.0.4 does.
 #[test]
 fn validation_options_name_their_command() {
     let mut m = Mem::new();
@@ -1251,8 +1252,8 @@ fn generated_ids_keep_the_order_of_the_inserts() {
 }
 
 /// A single `bulkWrite` update or replacement takes the first matching document in its `sort`
-/// order, and `sort` with `multi` fails that operation alone (measured on a `refrouter` 9.0.4 on
-/// 03-11-2026, and the drivers' `client-bulkWrite-*-sort` tests).
+/// order, and `sort` with `multi` fails that operation alone (measured on the reference router
+/// 9.0.4 on 03-11-2026, and the drivers' `client-bulkWrite-*-sort` tests).
 #[test]
 fn bulk_write_updates_follow_their_sort() {
     let mut m = Mem::new();

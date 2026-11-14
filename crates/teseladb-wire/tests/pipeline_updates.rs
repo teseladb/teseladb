@@ -1,8 +1,8 @@
-//! Pipeline updates over the in-memory node of `common` (014 FR-009, 018 FR-009): each case a
-//! `refnode` 9.0.4 measured (`teseladb-changestream/tests/fixtures/pipeline_updates.jsonl`, 04-11-2026)
-//! runs here with its pipeline, and its change event and oplog entry are the ones measured: an
-//! `update` with the same `updateDescription` and `{$v: 2, diff}`, or a `replace` with the whole
-//! document.
+//! Pipeline updates over the in-memory node of `common` (014 FR-009, 018 FR-009): each case a the
+//! reference replica set member 9.0.4 measured
+//! (`teseladb-changestream/tests/fixtures/pipeline_updates.jsonl`, 04-11-2026) runs here with its
+//! pipeline, and its change event and oplog entry are the ones measured: an `update` with the same
+//! `updateDescription` and `{$v: 2, diff}`, or a `replace` with the whole document.
 
 mod common;
 
@@ -68,7 +68,7 @@ fn run_case(before: &Document, pipeline: &Value) -> (Vec<Document>, Vec<Document
 }
 
 #[test]
-fn pipeline_updates_give_the_events_and_entries_a_refnode_gives() {
+fn pipeline_updates_give_the_events_and_entries_a_reference_member_gives() {
     let update = operation_type(EventKind::Update);
     let replace = operation_type(EventKind::Replace);
     for line in FIXTURE.lines() {
@@ -108,9 +108,9 @@ fn pipeline_updates_give_the_events_and_entries_a_refnode_gives() {
     }
 }
 
-/// The two updates of `cs-split-large` as the battery measured them on a `refrouter` 9.0.4 on
-/// 04-11-2026: doubling a 1 KiB string 13 times (8 MiB) replaces the document, and adding 6 MB of
-/// it as a new field to the 8 MiB document is an `update` of that field.
+/// The two updates of `cs-split-large` as the battery measured them on the reference router 9.0.4
+/// on 04-11-2026: doubling a 1 KiB string 13 times (8 MiB) replaces the document, and adding 6 MB
+/// of it as a new field to the 8 MiB document is an `update` of that field.
 #[test]
 fn the_large_updates_of_cs_split_large() {
     let s = "x".repeat(1024);

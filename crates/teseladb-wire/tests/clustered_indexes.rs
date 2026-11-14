@@ -1,6 +1,6 @@
 //! The index of a clustered collection as the index commands see it (015 FR-009): `listIndexes`,
 //! `createIndexes`, `dropIndexes`, `$indexStats`, `collStats` and the duplicate `_id`, against
-//! what a `refrouter` 9.0.4 answered on 05-11-2026 (`clustered-collections` steps 22 to 44).
+//! what the reference router 9.0.4 answered on 05-11-2026 (`clustered-collections` steps 22 to 44).
 
 mod common;
 

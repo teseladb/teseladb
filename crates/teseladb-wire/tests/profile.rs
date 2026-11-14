@@ -1,6 +1,6 @@
-//! The profiler (010 T032, FR-015): `profile`'s replies and errors against what a `refnode`
-//! 9.0.4 gave on 01-11-2026, the documents a profiled database gets in `system.profile`, and the
-//! «Slow query» lines of the log.
+//! The profiler (010 T032, FR-015): `profile`'s replies and errors against what a reference replica
+//! set member 9.0.4 gave on 01-11-2026, the documents a profiled database gets in `system.profile`,
+//! and the «Slow query» lines of the log.
 
 mod common;
 
@@ -64,8 +64,8 @@ fn json(text: &str) -> Document {
     extjson::parse(text).expect("json")
 }
 
-/// Each command of the measured sequence and the reply of a `refnode` 9.0.4 (`ok` and the
-/// numbers as the shell printed them, compared by value).
+/// Each command of the measured sequence and the reply of a reference replica set member 9.0.4
+/// (`ok` and the numbers as the shell printed them, compared by value).
 const SEQUENCE: &str = r#"{"profile":-1}	{"was":0,"slowms":100,"slowinprogms":5000,"sampleRate":1,"ok":1}
 {"profile":2}	{"was":0,"slowms":100,"slowinprogms":5000,"sampleRate":1,"ok":1}
 {"profile":-1}	{"was":2,"slowms":100,"slowinprogms":5000,"sampleRate":1,"ok":1}
@@ -121,7 +121,7 @@ fn loose(v: &Value) -> Value {
 }
 
 #[test]
-fn profile_replies_and_errors_match_a_refnode() {
+fn profile_replies_and_errors_match_a_reference_member() {
     let mut m = node();
     let mut wrong = Vec::new();
     for line in SEQUENCE.lines() {
@@ -236,8 +236,8 @@ fn a_filter_decides_what_is_profiled() {
     assert_eq!(r.get("was"), Some(&Value::Int32(0)));
 }
 
-/// The fields of a `system.profile` document that TeselaDB has no counterpart of: RefEngine's
-/// locks and queues, the classic engine's planner and the priority port (DV-038).
+/// The fields of a `system.profile` document that TeselaDB has no counterpart of: the reference
+/// storage engine's locks and queues, the classic engine's planner and the priority port (DV-038).
 const NOT_OURS: [&str; 9] = [
     "isFromPriorityPortConnection",
     // The test's connection sends no application name.
@@ -251,10 +251,11 @@ const NOT_OURS: [&str; 9] = [
     "cpuNanos",
 ];
 
-/// The plan of each read in `system.profile` (010 FR-015), against what a `refnode` 9.0.4 wrote
-/// on 01-11-2026 (`tests/profile/plans.out`): the fields in its order, the counters of what each
-/// read examined, its `planSummary` and the `execStats` of the plan as it ran. The hashes are
-/// TeselaDB's; `cpuNanos` comes from the server's thread clock, which this node in tests has not.
+/// The plan of each read in `system.profile` (010 FR-015), against what a reference replica set
+/// member 9.0.4 wrote on 01-11-2026 (`tests/profile/plans.out`): the fields in its order, the
+/// counters of what each read examined, its `planSummary` and the `execStats` of the plan as it
+/// ran. The hashes are TeselaDB's; `cpuNanos` comes from the server's thread clock, which this node
+/// in tests has not.
 #[test]
 fn profiled_reads_show_their_plan() {
     let mut m = node();
@@ -310,9 +311,9 @@ fn profiled_reads_show_their_plan() {
     }
 }
 
-/// Passwords stay out of `system.profile` and the log: a `refnode` 9.0.4 profiles no
-/// `createUser` nor `updateUser` (measured 01-11-2026 at level 2), and a slow one's log line
-/// shows `pwd` as `"xxx"`.
+/// Passwords stay out of `system.profile` and the log: a reference replica set member 9.0.4
+/// profiles no `createUser` nor `updateUser` (measured 01-11-2026 at level 2), and a slow one's log
+/// line shows `pwd` as `"xxx"`.
 #[test]
 fn passwords_are_neither_profiled_nor_logged() {
     let mut m = node();
@@ -333,9 +334,9 @@ fn passwords_are_neither_profiled_nor_logged() {
     }
 }
 
-/// What the profiler counts of each operation, as a `refnode` 9.0.4 writes it at level 2
-/// (measured 01-11-2026 with an index `a_1`): `opid`, one batch per `find` and `getMore`, the
-/// index keys each write inserted and deleted (`_id`'s among them), the documents an update
+/// What the profiler counts of each operation, as a reference replica set member 9.0.4 writes it at
+/// level 2 (measured 01-11-2026 with an index `a_1`): `opid`, one batch per `find` and `getMore`,
+/// the index keys each write inserted and deleted (`_id`'s among them), the documents an update
 /// upserted, the framework of each read and how long its planning took.
 #[test]
 fn profiled_operations_count_what_they_did() {
@@ -400,8 +401,9 @@ fn profiled_operations_count_what_they_did() {
     assert_eq!(got, want, "{docs:?}");
 }
 
-/// `system.profile` has no index of `_id` (measured on a `refnode` 9.0.4, 01-11-2026):
-/// `listIndexes` lists none, `collStats` counts none and `listCollections` shows no `idIndex`.
+/// `system.profile` has no index of `_id` (measured on a reference replica set member 9.0.4,
+/// 01-11-2026): `listIndexes` lists none, `collStats` counts none and `listCollections` shows no
+/// `idIndex`.
 #[test]
 fn system_profile_has_no_id_index() {
     let mut m = node();
@@ -420,9 +422,9 @@ fn system_profile_has_no_id_index() {
     assert!(c.get("idIndex").is_none(), "{c:?}");
 }
 
-/// `$indexStats` counts the reads and the writes whose plan scanned each index, those by one
-/// `_id` among them (measured on a `refnode` 9.0.4, 01-11-2026: `_id_` 2 and `a_1` 2 after
-/// these statements).
+/// `$indexStats` counts the reads and the writes whose plan scanned each index, those by one `_id`
+/// among them (measured on a reference replica set member 9.0.4, 01-11-2026: `_id_` 2 and `a_1` 2
+/// after these statements).
 #[test]
 fn index_stats_count_reads_and_writes() {
     let mut m = node();
@@ -445,9 +447,9 @@ fn index_stats_count_reads_and_writes() {
 }
 
 /// A `getMore` is profiled with the command that opened its cursor, that cursor's id and the
-/// framework that runs it; the command that leaves its cursor open gives the id too (measured on
-/// a `refnode` 9.0.4, 01-11-2026: a `$group` runs on the slot-based engine, a `find` on the
-/// classic one).
+/// framework that runs it; the command that leaves its cursor open gives the id too (measured on a
+/// reference replica set member 9.0.4, 01-11-2026: a `$group` runs on the slot-based engine, a
+/// `find` on the classic one).
 #[test]
 fn get_more_is_profiled_with_its_originating_command() {
     let mut m = node();
@@ -506,10 +508,10 @@ fn get_more_is_profiled_with_its_originating_command() {
     assert_eq!(docs[1].get("docsExamined"), Some(&Value::Int64(0)));
 }
 
-/// How each read's plan was chosen, as a `refnode` 9.0.4 profiled it (measured 02-11-2026): the
-/// first two reads of a shape compete (`fromMultiPlanner`), the next take the cached plan
-/// (`fromPlanCache`), each `getMore` repeats its cursor's, and a cached plan that works ten times
-/// its entry's works is dropped (`replanned` with its `replanReason`).
+/// How each read's plan was chosen, as a reference replica set member 9.0.4 profiled it (measured
+/// 02-11-2026): the first two reads of a shape compete (`fromMultiPlanner`), the next take the
+/// cached plan (`fromPlanCache`), each `getMore` repeats its cursor's, and a cached plan that works
+/// ten times its entry's works is dropped (`replanned` with its `replanReason`).
 #[test]
 fn profiled_reads_say_how_their_plan_was_chosen() {
     let mut m = node();
@@ -577,9 +579,9 @@ fn profiled_reads_say_how_their_plan_was_chosen() {
     );
 }
 
-/// A command that fails is profiled with its error and without what it would have returned; a
-/// write refused for a duplicate key with what it inserted (measured on a `refnode` 9.0.4 on
-/// 03-11-2026).
+/// A command that fails is profiled with its error and without what it would have returned; a write
+/// refused for a duplicate key with what it inserted (measured on a reference replica set member
+/// 9.0.4 on 03-11-2026).
 #[test]
 fn failed_commands_are_profiled_with_their_error() {
     let mut m = node();
@@ -604,8 +606,8 @@ fn failed_commands_are_profiled_with_their_error() {
     assert_eq!((insert.get("ok"), insert.get("keysInserted")), (None, None), "{insert:?}");
 }
 
-/// The key counts of a write that wrote no key are not shown (measured on a `refnode` 9.0.4 on
-/// 03-11-2026).
+/// The key counts of a write that wrote no key are not shown (measured on a reference replica set
+/// member 9.0.4 on 03-11-2026).
 #[test]
 fn writes_of_no_key_show_no_key_counts() {
     let mut m = node();
@@ -626,7 +628,7 @@ fn writes_of_no_key_show_no_key_counts() {
 }
 
 /// `filter: "unset"` removes the profiler's filter; another string is refused (measured on a
-/// `refnode` 9.0.4 on 03-11-2026).
+/// the reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn a_filter_is_unset_by_name() {
     let mut m = node();

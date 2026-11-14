@@ -1,7 +1,7 @@
-//! `mapReduce` (016 FR-014, T018) as a `refrouter` 9.0.4 runs it (measured on 02-11): `query`,
-//! `sort` and `limit` choose the documents, `map` emits, `reduce` runs for every key (one value
-//! too), `finalize` last, `scope` gives globals, and `out` is inline or a collection replaced,
-//! merged or reduced into.
+//! `mapReduce` (016 FR-014, T018) as the reference router 9.0.4 runs it (measured on 02-11):
+//! `query`, `sort` and `limit` choose the documents, `map` emits, `reduce` runs for every key (one
+//! value too), `finalize` last, `scope` gives globals, and `out` is inline or a collection
+//! replaced, merged or reduced into.
 
 mod common;
 
@@ -118,7 +118,7 @@ fn out_replaces_merges_or_reduces_into_a_collection() {
 }
 
 #[test]
-fn errors_are_those_of_a_refrouter() {
+fn errors_are_those_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     let r = run(&mut m, &format!(r#"{{"mapReduce":"m","map":{MAP},"reduce":{SUM}}}"#));

@@ -1,9 +1,9 @@
-//! Authentication commands as RefDb 9.0.4 answers them (013 T019, FR-008; measured on a
-//! `refrouter` with `--keyFile` and a `refnode` with TLS and client certificates, 30-10-2026):
-//! `saslStart` and `saslContinue` with SCRAM, with and without `skipEmptyExchange` and with
-//! Base64 payloads, REFDB-X509 with `authenticate` and `saslStart`, `logout` (absent, DV-014),
-//! `speculativeAuthenticate` and `saslSupportedMechs` in `hello`, and the commands refused
-//! before authenticating.
+//! Authentication commands as the reference server 9.0.4 answers them (013 T019, FR-008; measured
+//! on a the reference router with `--keyFile` and a reference replica set member with TLS and
+//! client certificates, 30-10-2026): `saslStart` and `saslContinue` with SCRAM, with and without
+//! `skipEmptyExchange` and with Base64 payloads, X.509 authentication with `authenticate` and
+//! `saslStart`, `logout` (absent, DV-014), `speculativeAuthenticate` and `saslSupportedMechs` in
+//! `hello`, and the commands refused before authenticating.
 
 mod common;
 #[path = "../../teseladb-auth/tests/support/krb_initiator.rs"]
@@ -27,7 +27,7 @@ use teseladb_x509::pem::{base64_decode, base64_encode};
 
 const ADMIN: &str = "admin";
 const PASSWORD: &str = "secret1";
-const CERT_USER: &str = "CN=client,OU=KernelUser,O=RefDb,L=New York City,ST=New York,C=US";
+const CERT_USER: &str = "CN=client,OU=KernelUser,O=TeselaDB,L=New York City,ST=New York,C=US";
 
 fn s(x: &str) -> Value {
     Value::from(x)
@@ -173,7 +173,7 @@ fn scram_with_and_without_the_empty_exchange() {
             let (mut client, r) = start(&mut m, &mut c, mech, "both", &options);
             assert_eq!(field(&r, "done"), &Value::Boolean(false));
             let server_first = payload_bytes(&r);
-            // RefDb sends 24 random bytes as the server's part of the nonce.
+            // The reference server sends 24 random bytes as the server's part of the nonce.
             let nonce_len =
                 std::str::from_utf8(&server_first).unwrap().split(',').next().unwrap().len();
             assert_eq!(nonce_len, "r=clientnonce0123".len() + 32);
@@ -234,7 +234,7 @@ fn base64_payloads_are_answered_in_base64() {
 }
 
 #[test]
-fn sasl_start_errors_as_refdb_gives_them() {
+fn sasl_start_errors_as_the_reference_gives_them() {
     let (mut m, mut c) = (node(), conn(false));
     let start = |fields: &[(&str, Value)]| {
         let mut d = doc(&[(SASL_START, 1.into())]);
@@ -340,7 +340,7 @@ fn sasl_start_errors_as_refdb_gives_them() {
                 "Unable to use SCRAM-SHA-256 based authentication for user without any SCRAM-SHA-256 credentials registered",
             ),
         ),
-        // REFDB-X509 without a certificate, and on a database other than `$external`.
+        // X.509 authentication without a certificate, and on a database other than `$external`.
         (EXTERNAL_DB, start(&[mech(teseladb_names::SASL_X509), p(b"")]), failed.clone()),
         ("test", start(&[mech("SCRAM-SHA-256"), p(b"n,,n=both,r=abcdefgh")]), failed),
     ];
@@ -350,7 +350,7 @@ fn sasl_start_errors_as_refdb_gives_them() {
 }
 
 #[test]
-fn sasl_continue_errors_as_refdb_gives_them() {
+fn sasl_continue_errors_as_the_reference_gives_them() {
     let (mut m, mut c) = (node(), conn(false));
     let cont = |fields: &[(&str, Value)]| {
         let mut d = doc(&[(SASL_CONTINUE, 1.into())]);
@@ -413,8 +413,8 @@ fn sasl_continue_errors_as_refdb_gives_them() {
     assert_eq!(garbage, error(18, "AuthenticationFailed", "Authentication failed."));
 }
 
-/// RefDb 9.0 keeps one user per connection: another user's SCRAM fails and the first stays;
-/// the same user again succeeds (measured).
+/// The reference server 9.0 keeps one user per connection: another user's SCRAM fails and the first
+/// stays; the same user again succeeds (measured).
 #[test]
 fn one_user_per_connection() {
     let (mut m, mut c) = (node(), conn(false));
@@ -430,7 +430,7 @@ fn one_user_per_connection() {
     let r = run(&mut m, &mut c, ADMIN, doc(&[("logout", 1.into())]));
     assert_eq!(r, error(59, "CommandNotFound", "no such cmd: logout"));
     assert_eq!(authenticated(&mut m, &mut c).len(), 1);
-    // REFDB-X509 on a connection authenticated with SCRAM fails too.
+    // X.509 authentication on a connection authenticated with SCRAM fails too.
     c.auth.peer_user = Some(CERT_USER.to_owned());
     let failed = error(18, "AuthenticationFailed", "Authentication failed.");
     let x509 = doc(&[(AUTHENTICATE, 1.into()), ("mechanism", s(teseladb_names::SASL_X509))]);
@@ -469,7 +469,7 @@ fn connection_status_shows_the_user_and_its_roles() {
 }
 
 /// `$$USER_ROLES` lists the user's roles as `{_id: "db.role", role, db}` in the order of their
-/// `_id` (measured on a `refrouter` 9.0.4, 010 FR-006).
+/// `_id` (measured on the reference router 9.0.4, 010 FR-006).
 #[test]
 fn user_roles_variable_lists_the_roles_by_id() {
     let (mut m, mut c) = (node(), conn(true));
@@ -602,7 +602,7 @@ fn speculative_authentication_in_hello() {
     assert_eq!(field(&r, "done"), &Value::Boolean(true));
     assert_eq!(authenticated(&mut m, &mut c).len(), 1);
 
-    // REFDB-X509 answers with the user, and authenticates.
+    // X.509 authentication answers with the user, and authenticates.
     let (mut m, mut c) = (node(), conn(true));
     let x509 = doc(&[
         (AUTHENTICATE, 1.into()),
@@ -734,7 +734,7 @@ fn authentication_restrictions_apply_at_login() {
     let (r, in_) = login(&mut m, "127.0.0.1:5000");
     assert_eq!(r, error(18, "AuthenticationFailed", "Authentication failed."));
     assert!(!in_);
-    // A role's restrictions apply too, and REFDB-X509 is checked the same way.
+    // A role's restrictions apply too, and X.509 authentication is checked the same way.
     let role = doc(&[
         ("createRole", s("ops")),
         ("privileges", Value::Array(vec![])),
@@ -788,10 +788,10 @@ fn authentications_are_counted_for_server_status() {
     assert_eq!(g.status.sasl_supported_mechs, 1);
 }
 
-/// PLAIN (013 FR-025), with `authenticationMechanisms` naming it, as RefDb Enterprise 9.0.4
-/// answers it (measured with an OpenLDAP server): on `$external` the LDAP server checks the
-/// password and the user needs its `$external` document; on another database the user's SCRAM
-/// credentials check it. Every failure is `Authentication failed.`.
+/// PLAIN (013 FR-025), with `authenticationMechanisms` naming it, as the enterprise edition of the
+/// reference server 9.0.4 answers it (measured with an OpenLDAP server): on `$external` the LDAP
+/// server checks the password and the user needs its `$external` document; on another database the
+/// user's SCRAM credentials check it. Every failure is `Authentication failed.`.
 #[test]
 fn plain_logs_in_against_ldap_or_the_local_credentials() {
     let mut m = node();
@@ -838,10 +838,11 @@ fn plain_logs_in_against_ldap_or_the_local_credentials() {
     assert_eq!(r.get("code"), Some(&Value::Int32(334)), "{r:?}");
 }
 
-/// PLAIN with LDAP authorization (013 FR-026), as RefDb Enterprise 9.0.4 answers it (measured
-/// with `--ldapAuthzQueryTemplate` against OpenLDAP): the user's groups are its roles in `admin`,
-/// listed with what they inherit even when no role of that name exists; a user in no group logs
-/// in without roles; a document in `$external` is not needed and, if there is one, not read.
+/// PLAIN with LDAP authorization (013 FR-026), as the enterprise edition of the reference server
+/// 9.0.4 answers it (measured with `--ldapAuthzQueryTemplate` against OpenLDAP): the user's groups
+/// are its roles in `admin`, listed with what they inherit even when no role of that name exists; a
+/// user in no group logs in without roles; a document in `$external` is not needed and, if there is
+/// one, not read.
 #[test]
 fn plain_with_ldap_groups_takes_the_groups_as_roles() {
     let readers = RoleName::new("cn=readers,ou=groups,dc=example,dc=com", ADMIN);
@@ -903,11 +904,12 @@ fn plain_with_ldap_groups_takes_the_groups_as_roles() {
     assert_eq!(m.invalidations, 1);
 }
 
-/// REFDB-AWS (013 FR-025), as RefDb Enterprise 9.0.4 answers it with a test STS behind
-/// `awsSTSUrl`: only on `$external`; the server nonce and the STS host first; then the signed
-/// request goes to the STS, whose ARN names the user. Every failure is `Authentication failed.`.
+/// AWS authentication (013 FR-025), as the enterprise edition of the reference server 9.0.4 answers
+/// it with a test STS behind `awsSTSUrl`: only on `$external`; the server nonce and the STS host
+/// first; then the signed request goes to the STS, whose ARN names the user. Every failure is
+/// `Authentication failed.`.
 #[test]
-fn refdb_aws_logs_in_through_the_sts() {
+fn aws_logs_in_through_the_sts() {
     use teseladb_auth::aws::{self, SigV4};
     let arn = "arn:aws:iam::123456789012:user/alice";
     let mut m = node();
@@ -943,7 +945,10 @@ fn refdb_aws_logs_in_through_the_sts() {
         error(
             334,
             "MechanismUnavailable",
-            "Unsupported mechanism 'REFDB-AWS' on authentication database 'admin'"
+            &format!(
+                "Unsupported mechanism '{}' on authentication database 'admin'",
+                teseladb_names::SASL_AWS
+            )
         )
     );
     let login = |m: &mut Mem, c: &mut Connection| {
@@ -1006,7 +1011,7 @@ fn refdb_aws_logs_in_through_the_sts() {
         enable(&mut c);
         assert_eq!(login(&mut m, &mut c), failed);
     }
-    // A first message RefDb refuses, and a second that does not parse.
+    // A first message the reference server refuses, and a second that does not parse.
     let mut c = conn(false);
     enable(&mut c);
     let bad = doc(&[
@@ -1027,19 +1032,20 @@ fn refdb_aws_logs_in_through_the_sts() {
     let r = run(&mut m, &mut c, EXTERNAL_DB, cont(2));
     assert_eq!(r.get("code"), Some(&Value::Int32(17)), "{r:?}");
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, cont(1)), failed);
-    // A client certificate does not make REFDB-AWS log in.
+    // A client certificate does not make AWS authentication log in.
     let mut c = conn(true);
     enable(&mut c);
     let r = run(&mut m, &mut c, EXTERNAL_DB, start);
     assert_eq!(r.get("done"), Some(&Value::Boolean(false)));
 }
 
-/// REFDB-OIDC (013 FR-025), as RefDb Enterprise 9.0.4 answers it with a test provider: one
-/// step with the token, or two with the provider's details first; the user is
-/// `<authNamePrefix>/<sub>` with the groups of the token as roles, without a document; a key the
-/// JWKS does not know makes the node read it again once. Every failure is `Authentication failed.`.
+/// OIDC authentication (013 FR-025), as the enterprise edition of the reference server 9.0.4
+/// answers it with a test provider: one step with the token, or two with the provider's details
+/// first; the user is `<authNamePrefix>/<sub>` with the groups of the token as roles, without a
+/// document; a key the JWKS does not know makes the node read it again once. Every failure is
+/// `Authentication failed.`.
 #[test]
-fn refdb_oidc_logs_in_with_a_token() {
+fn oidc_logs_in_with_a_token() {
     use teseladb_crypto::HashAlgorithm;
     let issuer = "https://idp.test";
     let pem = include_str!("../../teseladb-auth/tests/fixtures/oidc/rsa2048.pem");
@@ -1250,11 +1256,11 @@ fn gssapi_logs_in_with_a_kerberos_ticket() {
     assert_eq!(run(&mut m, &mut c, EXTERNAL_DB, next(b"")), no_state);
 }
 
-/// REFDB-X509 when the node authorizes by LDAP groups (013 T045, FR-026, FR-033), as RefDb
-/// Enterprise 9.0.4 answers it (measured with OpenLDAP, `--ldapAuthzQueryTemplate` and a user to
-/// DN mapping of the certificate's subject): the groups of the certificate's user are its roles,
-/// its document in `$external` is not read and not needed, and `useInternalAuthzForX509` changes
-/// none of it, also set at startup.
+/// X.509 authentication when the node authorizes by LDAP groups (013 T045, FR-026, FR-033), as the
+/// reference server Enterprise 9.0.4 answers it (measured with OpenLDAP, `--ldapAuthzQueryTemplate`
+/// and a user to DN mapping of the certificate's subject): the groups of the certificate's user are
+/// its roles, its document in `$external` is not read and not needed, and `useInternalAuthzForX509`
+/// changes none of it, also set at startup.
 #[test]
 fn x509_under_ldap_authorization_takes_the_groups() {
     let readers = RoleName::new("cn=readers,ou=groups,dc=example,dc=com", ADMIN);
@@ -1313,9 +1319,9 @@ fn x509_under_ldap_authorization_takes_the_groups() {
     assert_eq!(field(&run(&mut m, &mut c, EXTERNAL_DB, auth), "code"), &Value::Int32(11));
 }
 
-/// `useInternalAuthzForX509` (013 T045), as `refnode` 9.0.4 keeps it (measured): false by
-/// default, settable at runtime and at startup, and any value read with BSON truthiness, a
-/// string being true.
+/// `useInternalAuthzForX509` (013 T045), as the reference replica set member 9.0.4 keeps it
+/// (measured): false by default, settable at runtime and at startup, and any value read with BSON
+/// truthiness, a string being true.
 #[test]
 fn use_internal_authz_for_x509_is_a_server_parameter() {
     const P: &str = "useInternalAuthzForX509";
@@ -1347,9 +1353,9 @@ fn use_internal_authz_for_x509_is_a_server_parameter() {
     }
 }
 
-/// A member's certificate (013 T046), as `refnode` 9.0.4 takes it (measured): with
-/// `clusterAuthMode` `sendX509` or `x509` it logs in as `__system`; otherwise it is an ordinary
-/// REFDB-X509 user.
+/// A member's certificate (013 T046), as the reference replica set member 9.0.4 takes it
+/// (measured): with `clusterAuthMode` `sendX509` or `x509` it logs in as `__system`; otherwise it
+/// is an ordinary X.509 authentication user.
 #[test]
 fn a_members_certificate_logs_in_as_system_with_x509_cluster_authentication() {
     use teseladb_wire::commands::server_params::ClusterAuthMode;
@@ -1386,9 +1392,9 @@ fn a_members_certificate_logs_in_as_system_with_x509_cluster_authentication() {
     assert_eq!(field(&r, "user"), &s(CERT_USER));
 }
 
-/// `clusterAuthMode` (013 T046), as `refnode` 9.0.4 keeps it (measured): `undefined` without a
-/// key file or the option, settable only at runtime, one step at a time, and the modes past
-/// `keyFile` only with TLS.
+/// `clusterAuthMode` (013 T046), as the reference replica set member 9.0.4 keeps it (measured):
+/// `undefined` without a key file or the option, settable only at runtime, one step at a time, and
+/// the modes past `keyFile` only with TLS.
 #[test]
 fn cluster_auth_mode_moves_one_step_at_a_time() {
     const P: &str = "clusterAuthMode";

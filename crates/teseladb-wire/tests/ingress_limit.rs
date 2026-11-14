@@ -1,5 +1,6 @@
-//! The 9.0 limiter of new connections (006 FR-036), measured on a `refnode` 9.0.4 on 05-11-2026:
-//! its five parameters, their coercions and errors, and the bucket as `serverStatus` counts it.
+//! The 9.0 limiter of new connections (006 FR-036), measured on a reference replica set member
+//! 9.0.4 on 05-11-2026: its five parameters, their coercions and errors, and the bucket as
+//! `serverStatus` counts it.
 
 mod common;
 
@@ -34,7 +35,7 @@ fn ip(text: &str) -> Option<IpAddr> {
 }
 
 #[test]
-fn the_parameters_start_with_a_refnode_s_defaults_and_types() {
+fn the_parameters_start_with_the_reference_defaults_and_types() {
     let mut m = Mem::new();
     assert_eq!(get(&mut m, ENABLED), Value::Boolean(false));
     assert_eq!(get(&mut m, RATE_PER_SEC), Value::Int32(i32::MAX));
@@ -112,7 +113,7 @@ fn refusals() -> Vec<(&'static str, &'static str, i32, String)> {
 }
 
 #[test]
-fn a_value_out_of_its_type_or_bounds_is_refused_with_a_refnode_s_error() {
+fn a_value_out_of_its_type_or_bounds_is_refused_with_the_reference_error() {
     let mut m = Mem::new();
     for (name, value, code, msg) in refusals() {
         let r = set(&mut m, name, value);
@@ -124,7 +125,7 @@ fn a_value_out_of_its_type_or_bounds_is_refused_with_a_refnode_s_error() {
 }
 
 #[test]
-fn values_are_coerced_as_a_refnode_coerces_them() {
+fn values_are_coerced_as_a_reference_member_coerces_them() {
     let mut m = Mem::new();
     ok(&set(&mut m, RATE_PER_SEC, "2.5"));
     assert_eq!(get(&mut m, RATE_PER_SEC), Value::Int32(2));

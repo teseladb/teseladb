@@ -1,7 +1,7 @@
-//! 007 FR-017 (contract `config-db.md`): writes to `config.settings` as a `refrouter` 9.0.4 takes
-//! them (measured, 01-11-2026). Every new version of a document passes the collection's
-//! validator, the whole command goes to Group 0 as one change, and a change that finds another
-//! one before it starts again.
+//! 007 FR-017 (contract `config-db.md`): writes to `config.settings` as the reference router 9.0.4
+//! takes them (measured, 01-11-2026). Every new version of a document passes the collection's
+//! validator, the whole command goes to Group 0 as one change, and a change that finds another one
+//! before it starts again.
 
 mod common;
 

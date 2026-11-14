@@ -1,6 +1,7 @@
-//! Write paths measured on a `refnode` 9.0.4 on 01-11-2026: an ordered insert longer than one chunk
-//! that stops at a duplicate key in the first chunk, and an upsert with `upsertSupplied` that
-//! inserts the document of its constant `new`, and a `collMod` of an index and an option at once.
+//! Write paths measured on a reference replica set member 9.0.4 on 01-11-2026: an ordered insert
+//! longer than one chunk that stops at a duplicate key in the first chunk, and an upsert with
+//! `upsertSupplied` that inserts the document of its constant `new`, and a `collMod` of an index
+//! and an option at once.
 
 mod common;
 
@@ -77,7 +78,7 @@ fn explains_on_a_view_and_on_a_missing_collection() {
     let r = run(&mut m, r#"{"aggregate":"v","pipeline":[],"explain":true}"#);
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     assert_eq!(field(&r, "command.aggregate"), &Value::from("c"), "{r:?}");
-    // The shard's plan, as a `refrouter` 9.0.4 shows it on 01-11-2026.
+    // The shard's plan, as the reference router 9.0.4 shows it on 01-11-2026.
     for (cmd, router, inner) in [
         (r#"{"count":"missing","query":{"a":1}}"#, "SINGLE_SHARD", "COUNT"),
         (r#"{"count":"missing"}"#, "SINGLE_SHARD", "COUNT"),
@@ -112,7 +113,7 @@ fn explains_on_a_view_and_on_a_missing_collection() {
 }
 
 /// The upsert of a pipeline update reads the command's `let`, and `upsertSupplied` without a
-/// document to insert fails its statement (measured on a `refnode` 9.0.4).
+/// document to insert fails its statement (measured on a reference replica set member 9.0.4).
 #[test]
 fn upserts_read_their_variables_and_need_their_supplied_document() {
     let mut m = Mem::new();

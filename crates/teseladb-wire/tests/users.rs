@@ -1,5 +1,5 @@
-//! User commands as RefDb 9.0.4 answers them (013 T022, FR-009, FR-013; measured on a
-//! `refrouter` with `--keyFile`, 30-10-2026): `createUser`, `updateUser`, `dropUser`,
+//! User commands as the reference server 9.0.4 answers them (013 T022, FR-009, FR-013; measured on
+//! a the reference router with `--keyFile`, 30-10-2026): `createUser`, `updateUser`, `dropUser`,
 //! `dropAllUsersFromDatabase`, `grantRolesToUser`, `revokeRolesFromUser`, `usersInfo` and
 //! `invalidateUserCache`, over the users of Group 0, which keep no password.
 
@@ -100,7 +100,8 @@ fn create_stores_derived_credentials_never_the_password() {
         "roles",
     ];
     assert_eq!(keys, expected);
-    // Credentials with RefDb's iteration counts and salt lengths, no password anywhere.
+    // Credentials with the reference server's iteration counts and salt lengths, no password
+    // anywhere.
     let sha1 = u.scram_sha1.as_ref().unwrap();
     let sha256 = u.scram_sha256.as_ref().unwrap();
     assert_eq!((sha1.iterations, sha1.salt.len()), (10_000, 16));
@@ -147,7 +148,7 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 }
 
 #[test]
-fn create_errors_as_refdb_gives_them() {
+fn create_errors_as_the_reference_gives_them() {
     let mut m = Mem::new();
     let roles = || ("roles", arr(&[]));
     let pwd = || ("pwd", s("p"));
@@ -513,7 +514,7 @@ fn concurrent_changes_are_retried() {
 }
 
 #[test]
-fn users_info_as_refdb_shows_it() {
+fn users_info_as_the_reference_shows_it() {
     let mut m = Mem::new();
     create(
         &mut m,
@@ -710,9 +711,10 @@ fn update_edges() {
     assert_eq!(field(&r, "codeName"), &s("BadValue"));
 }
 
-/// `usersInfo` with `authenticatedMechanism` (013 T045, FR-033), as RefDb Enterprise 9.0.4
-/// answers it with LDAP authorization: a known mechanism gives the stored documents, as without
-/// it, also for every user; an unknown one and a value that is not a string are refused.
+/// `usersInfo` with `authenticatedMechanism` (013 T045, FR-033), as the enterprise edition of the
+/// reference server 9.0.4 answers it with LDAP authorization: a known mechanism gives the stored
+/// documents, as without it, also for every user; an unknown one and a value that is not a string
+/// are refused.
 #[test]
 fn users_info_with_an_authenticated_mechanism() {
     let mut m = Mem::new();
@@ -733,7 +735,12 @@ fn users_info_with_an_authenticated_mechanism() {
         error(
             2,
             "BadValue",
-            "Unknown authentication mechanism 'bogus'. Supported mechanisms: REFDB-X509, PLAIN, GSSAPI, SCRAM-SHA-1, SCRAM-SHA-256, REFDB-AWS, REFDB-OIDC"
+            &format!(
+                "Unknown authentication mechanism 'bogus'. Supported mechanisms: {}, PLAIN, GSSAPI, SCRAM-SHA-1, SCRAM-SHA-256, {}, {}",
+                teseladb_names::SASL_X509,
+                teseladb_names::SASL_AWS,
+                teseladb_names::SASL_OIDC
+            )
         )
     );
     let r = m.run(TEST, doc(&[("usersInfo", s("u1")), ("authenticatedMechanism", 5.into())]));

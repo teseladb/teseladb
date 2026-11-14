@@ -1,6 +1,6 @@
 //! Server-side JavaScript in the commands (016 T011, T012): `$where` in `find`, `$function` in
-//! `aggregate` and `$accumulator` in `$group`, with the results and errors of a `refrouter` 9.0.4
-//! (measured on 02-11).
+//! `aggregate` and `$accumulator` in `$group`, with the results and errors of the reference router
+//! 9.0.4 (measured on 02-11).
 
 mod common;
 
@@ -25,7 +25,7 @@ fn run(m: &mut Mem, cmd: &str) -> Document {
 }
 
 /// The `_id`s of the first batch, in order: a collection's natural order is its key order
-/// (DV-060), not RefDb's insertion order.
+/// (DV-060), not the reference server's insertion order.
 fn ids(r: &Document) -> Vec<i32> {
     let mut out: Vec<i32> = match field(r, "cursor.firstBatch") {
         Value::Array(a) => a
@@ -72,7 +72,7 @@ fn where_takes_a_string_or_a_function_and_the_document_as_this_and_obj() {
 }
 
 #[test]
-fn where_errors_are_those_of_a_refrouter() {
+fn where_errors_are_those_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     let r = run(&mut m, r#"{"find":"c","filter":{"$where":"this._id <"}}"#);
@@ -104,7 +104,7 @@ fn function_runs_in_a_pipeline_and_keeps_bson_types() {
 }
 
 #[test]
-fn function_errors_are_those_of_a_refrouter() {
+fn function_errors_are_those_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     let r = run(
@@ -122,7 +122,7 @@ fn function_errors_are_those_of_a_refrouter() {
     let (code, msg) = error(&r);
     assert_eq!(code, 16_662, "{msg}");
     assert!(
-        msg.contains("unable to convert JavaScript property to ref element __returnValue"),
+        msg.contains(&teseladb_names::JS_ELEMENT_ERROR.replace("{name}", "__returnValue")),
         "{msg}"
     );
     let r = run(
@@ -134,10 +134,10 @@ fn function_errors_are_those_of_a_refrouter() {
     assert!(msg.contains("Failed to create JS function :: source = function(){ return  1 + }: e-compile message : "), "{msg}");
 }
 
-/// A `Timestamp` whose `t` or `i` is not right cannot be written (measured on a `refrouter` 9.0.4
-/// on 02-11): `BadValue`, or a code of its own when the field is missing.
+/// A `Timestamp` whose `t` or `i` is not right cannot be written (measured on the reference router
+/// 9.0.4 on 02-11): `BadValue`, or a code of its own when the field is missing.
 #[test]
-fn a_malformed_timestamp_fails_with_the_codes_of_a_refrouter() {
+fn a_malformed_timestamp_fails_with_the_codes_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     for (body, want, text) in [
@@ -179,7 +179,7 @@ fn accumulator_groups_with_init_accumulate_merge_and_finalize() {
     assert_eq!(groups, &want);
 }
 
-/// Measured on a `refnode` 9.0.4 started with `--noscripting` on 02-11.
+/// Measured on a reference replica set member 9.0.4 started with `--noscripting` on 02-11.
 #[test]
 fn without_javascript_each_use_fails_as_on_a_node_with_noscripting() {
     let mut m = Mem::new();
@@ -212,8 +212,8 @@ fn test_clock_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: `while(true){}` with `maxTimeMS: 100` fails with 50
-/// at about 150 ms, and the node goes on serving.
+/// Measured on the reference router 9.0.4 on 02-11: `while(true){}` with `maxTimeMS: 100` fails
+/// with 50 at about 150 ms, and the node goes on serving.
 #[test]
 fn an_endless_where_stops_at_max_time_ms() {
     teseladb_wire::commands::js::set_clock(test_clock_ms);
@@ -233,8 +233,9 @@ fn test_sleep(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
-/// `sleep(ms)` in a `$where` waits on the thread, as on a `refnode` 9.0.4: drivers' tests make slow
-/// operations with it (PyRef's `delay`). With `maxTimeMS` it stops at the deadline with 50.
+/// `sleep(ms)` in a `$where` waits on the thread, as on a reference replica set member 9.0.4:
+/// drivers' tests make slow operations with it (the reference Python driver's `delay`). With
+/// `maxTimeMS` it stops at the deadline with 50.
 #[test]
 fn sleep_in_a_where_waits_and_stops_at_max_time_ms() {
     teseladb_wire::commands::js::set_clock(test_clock_ms);
@@ -252,8 +253,8 @@ fn sleep_in_a_where_waits_and_stops_at_max_time_ms() {
     assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: a function stored in `system.js` is a global of the
-/// database's JavaScript.
+/// Measured on the reference router 9.0.4 on 02-11: a function stored in `system.js` is a global of
+/// the database's JavaScript.
 #[test]
 fn functions_stored_in_system_js_are_globals() {
     let mut m = Mem::new();
@@ -273,7 +274,7 @@ fn functions_stored_in_system_js_are_globals() {
 }
 
 #[test]
-fn a_promise_job_ends_the_call_with_the_trap_of_a_refrouter() {
+fn a_promise_job_ends_the_call_with_the_trap_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     for body in [
@@ -300,7 +301,7 @@ fn a_promise_job_ends_the_call_with_the_trap_of_a_refrouter() {
 }
 
 #[test]
-fn errors_carry_the_line_column_and_stack_of_a_refrouter() {
+fn errors_carry_the_line_column_and_stack_of_the_reference_router() {
     let mut m = Mem::new();
     load(&mut m);
     let r = run(
@@ -345,10 +346,10 @@ fn depth_reached() -> String {
     }
 }
 
-/// A thread with the stack of a thread that runs commands gives the calls the depth of a
-/// `refrouter` 9.0.4 (016 A016-3-18); any other thread ends deep recursion within its 1 MiB.
+/// A thread with the stack of a thread that runs commands gives the calls the depth of a the
+/// reference router 9.0.4 (016 A016-3-18); any other thread ends deep recursion within its 1 MiB.
 #[test]
-fn a_command_thread_gives_the_calls_the_depth_of_a_refrouter() {
+fn a_command_thread_gives_the_calls_the_depth_of_the_reference_router() {
     use teseladb_wire::commands::js::{COMMAND_STACK, set_stack};
     let deep = std::thread::Builder::new()
         .stack_size(COMMAND_STACK)

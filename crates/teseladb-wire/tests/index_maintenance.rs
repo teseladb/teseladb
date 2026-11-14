@@ -1,7 +1,7 @@
 //! Index maintenance in the writes of 006 (009 T007, FR-003): every index being built or ready of
 //! the collection gets the entries of a new version and loses those of the old one, in the same
-//! write as the document; an index that refuses a document refuses its statement with RefDb's
-//! error; a dropping index and a `text` index get nothing here.
+//! write as the document; an index that refuses a document refuses its statement with the reference
+//! server's error; a dropping index and a `text` index get nothing here.
 
 mod common;
 

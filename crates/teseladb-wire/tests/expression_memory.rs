@@ -1,8 +1,9 @@
-//! `internalQueryMaxSingleExpressionMemoryUsageBytes` (010 T043, FR-010), measured on a `refnode`
-//! 9.0.4 on 02-11-2026 at 100 bytes and less: only the constants folded when the command is
-//! parsed are held to it (`$array`, `$object`, `$concat`, `$concatArrays`, `$setUnion`), each
-//! value counted as RefDb counts it (16 bytes, a string of more than 12 bytes 24 more and its
-//! bytes, an array 40 more, a document 109 more, and 64 and 32 a field when it has fields).
+//! `internalQueryMaxSingleExpressionMemoryUsageBytes` (010 T043, FR-010), measured on a reference
+//! replica set member 9.0.4 on 02-11-2026 at 100 bytes and less: only the constants folded when the
+//! command is parsed are held to it (`$array`, `$object`, `$concat`, `$concatArrays`, `$setUnion`),
+//! each value counted as the reference server counts it (16 bytes, a string of more than 12 bytes
+//! 24 more and its bytes, an array 40 more, a document 109 more, and 64 and 32 a field when it has
+//! fields).
 
 mod common;
 

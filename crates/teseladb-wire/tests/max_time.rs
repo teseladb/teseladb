@@ -1,6 +1,6 @@
 //! `maxTimeMS`, `defaultMaxTimeMS`, `killOp` and `currentOp` (FR-020, FR-023), with the errors and
-//! messages a `refrouter` 9.0.4 gives (measured on 30-10-2026, the default with a user without
-//! `bypassDefaultMaxTimeMS` on a 9.0.4 replica set with `--auth`).
+//! messages the reference router 9.0.4 gives (measured on 30-10-2026, the default with a user
+//! without `bypassDefaultMaxTimeMS` on a 9.0.4 replica set with `--auth`).
 
 mod common;
 
@@ -100,7 +100,7 @@ fn find(limit: Value) -> Document {
 }
 
 #[test]
-fn max_time_ms_reads_numbers_as_refdb_does() {
+fn max_time_ms_reads_numbers_as_the_reference_does() {
     let cmd = |v: Value| Document::new().with("find", COLL).with(MAX_TIME_MS, v);
     assert_eq!(max_time_ms(&Document::new(), "find").unwrap(), None);
     assert_eq!(max_time_ms(&cmd(Value::Null), "find").unwrap(), None);
@@ -253,7 +253,7 @@ fn writes_past_their_time_limit_fail_statement_by_statement() {
     for e in &errors {
         let Value::Document(e) = e else { panic!() };
         assert_eq!(e.get("code"), Some(&Value::Int32(50)));
-        // As a `refrouter` 9.0.4 relays it from the shard (measured on 03-11-2026).
+        // As the reference router 9.0.4 relays it from the shard (measured on 03-11-2026).
         let Some(Value::String(msg)) = e.get("errmsg") else { panic!("{e:?}") };
         assert!(msg.starts_with("cluster write results unavailable from "), "{msg}");
         assert!(msg.ends_with(":: caused by :: operation exceeded time limit"), "{msg}");
@@ -409,7 +409,7 @@ fn current_op_lists_and_filters_the_node_operations() {
             "waitingForLock"
         ]
     );
-    // As a `refrouter` names a shard's operation (measured, DV-031, D-102).
+    // As the reference router names a shard's operation (measured, DV-031, D-102).
     assert_eq!(first.get("shard"), Some(&Value::from("node1")));
     assert_eq!(first.get("opid"), Some(&Value::from(format!("node1:{id}"))));
     assert_eq!(first.get("secs_running"), Some(&Value::Int64(2)));
@@ -484,7 +484,7 @@ fn current_op_lists_the_operations_of_every_node() {
 }
 
 #[test]
-fn kill_op_reads_its_op_as_a_refrouter_does() {
+fn kill_op_reads_its_op_as_the_reference_router_does() {
     let mut m = node(0);
     let id = teseladb_wire::commands::hot::of(&m.shared).ops.begin(op(7));
     let mut conn = Connection::new(1);
@@ -550,8 +550,8 @@ fn kill_op_reads_its_op_as_a_refrouter_does() {
     );
 }
 
-/// `killOp` with a `shardid:opid` as a `refrouter` 9.0.4 reads it (measured, DV-031, D-102): the
-/// shard first (70 when no node has that name; `config` is one), then the number (9 when it is
+/// `killOp` with a `shardid:opid` as the reference router 9.0.4 reads it (measured, DV-031, D-102):
+/// the shard first (70 when no node has that name; `config` is one), then the number (9 when it is
 /// not one, 15 when it does not fit 32 bits); the reply names the shard and the number, and the
 /// operation stops on its node.
 #[test]
@@ -632,8 +632,8 @@ fn get_more_takes_no_max_time_on_a_cursor_that_is_not_tailable() {
         error(&r),
         (2, "maxTimeMS can only be used with getMore for tailable, awaitData cursors".to_owned())
     );
-    // The error killed the cursor, as in a `refrouter` 9.0.4 (measured); a `maxTimeMS` of 0 on a
-    // live cursor is no limit.
+    // The error killed the cursor, as in the reference router 9.0.4 (measured); a `maxTimeMS` of 0
+    // on a live cursor is no limit.
     assert_eq!(error(&run(&mut m, &mut conn, DB, more(0))).0, 43);
     let r = run(&mut m, &mut conn, DB, Document::new().with("find", COLL).with("batchSize", 1));
     let Value::Int64(id) = field(&r, "cursor.id").clone() else { panic!() };
@@ -646,9 +646,9 @@ fn get_more_takes_no_max_time_on_a_cursor_that_is_not_tailable() {
     assert!(ok(&r));
 }
 
-/// The `maxTimeMS` of an `awaitData` `getMore` is its wait: when the reads move the clock past
-/// it during the wait, counted from later, a `refnode` 9.0.4 answers an empty batch and keeps the
-/// cursor, never `MaxTimeMSExpired`.
+/// The `maxTimeMS` of an `awaitData` `getMore` is its wait: when the reads move the clock past it
+/// during the wait, counted from later, a reference replica set member 9.0.4 answers an empty batch
+/// and keeps the cursor, never `MaxTimeMSExpired`.
 #[test]
 fn an_await_data_get_more_that_runs_out_during_its_wait_answers_an_empty_batch() {
     let mut m = node(0);
@@ -742,7 +742,7 @@ fn max_time_param(fields: Document) -> Value {
 }
 
 #[test]
-fn cluster_parameters_are_set_and_read_as_a_refrouter_does() {
+fn cluster_parameters_are_set_and_read_as_the_reference_router_does() {
     let mut m = node(0);
     let mut conn = Connection::new(1);
     let get = |v: Value| Document::new().with("getClusterParameter", v);
@@ -811,7 +811,7 @@ fn cluster_parameters_are_set_and_read_as_a_refrouter_does() {
 }
 
 #[test]
-fn server_parameters_are_read_and_set_as_a_refrouter_does() {
+fn server_parameters_are_read_and_set_as_the_reference_router_does() {
     let mut m = node(0);
     let mut conn = Connection::new(1);
     let get = |name: &str| Document::new().with("getParameter", 1).with(name, 1);
@@ -856,7 +856,7 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     assert_eq!(r.get("localLogicalSessionTimeoutMinutes"), Some(&expect(Value::Int32(30), false)));
     assert_eq!(r.get("enableTestCommands"), Some(&expect(Value::Boolean(false), false)));
     // `internalQueryPlannerEnableHashIntersection` takes any value as true or false, as a
-    // `refrouter` 9.0.4 (measured: a string sets it, `0` clears it).
+    // the reference router 9.0.4 (measured: a string sets it, `0` clears it).
     let hash = "internalQueryPlannerEnableHashIntersection";
     let r = run(&mut m, &mut conn, "admin", get(hash));
     assert_eq!(r.get(hash), Some(&Value::Boolean(false)), "{r:?}");
@@ -868,10 +868,11 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
     assert_eq!(r.get(hash), Some(&Value::Boolean(false)), "{r:?}");
     let r = run(&mut m, &mut conn, "admin", Document::new().with("getParameter", "*"));
     let names: Vec<&str> = r.iter().map(|(k, _)| k).collect();
-    // A `refrouter` 9.0.4 lists the `internalQuery*` ones too (measured on 02-11-2026).
-    // `auditAuthorizationSuccess` is RefDb Enterprise's, the OCSP ones, `authSchemaVersion` and
-    // `maxConcurrentMultiDocumentTransactions` a refnode's (measured on 9.0.4; 013 FR-016, FR-030,
-    // FR-031; 008 FR-020); the limiter of new connections is 9.0's (006 FR-036).
+    // The reference router 9.0.4 lists the `internalQuery*` ones too (measured on 02-11-2026).
+    // `auditAuthorizationSuccess` is the enterprise edition of the reference server's, the OCSP
+    // ones, `authSchemaVersion` and `maxConcurrentMultiDocumentTransactions` a a reference replica
+    // set member's (measured on 9.0.4; 013 FR-016, FR-030, FR-031; 008 FR-020); the limiter of new
+    // connections is 9.0's (006 FR-036).
     assert_eq!(
         names,
         [
@@ -943,7 +944,8 @@ fn server_parameters_are_read_and_set_as_a_refrouter_does() {
             2,
             "Failed validating cursorTimeoutMillis: Out of bounds coercing to integral value",
         ),
-        // NaN and the infinities have their own message (measured on a `refnode` 9.0.4).
+        // NaN and the infinities have their own message (measured on a reference replica set member
+        // 9.0.4).
         (
             set("cursorTimeoutMillis", Value::Double(f64::NAN)),
             "admin",
@@ -1000,7 +1002,7 @@ fn max_time_counts_on_the_monotonic_clock_and_not_on_the_cluster_time() {
 }
 
 /// `$currentOp` (010 T033): the node's operations as `currentOp` describes them, the running
-/// `aggregate` among them (measured on a `refrouter` 9.0.4: `type: "op"`, `op: "command"`,
+/// `aggregate` among them (measured on the reference router 9.0.4: `type: "op"`, `op: "command"`,
 /// `ns: "admin.$cmd.aggregate"`, `active: true`).
 #[test]
 fn current_op_stage_lists_the_running_aggregate() {

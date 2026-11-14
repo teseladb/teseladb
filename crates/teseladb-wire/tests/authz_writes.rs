@@ -1,7 +1,8 @@
-//! 013 T043, FR-030: direct writes to `admin.system.users` and `admin.system.roles` as a `refrouter`
-//! 9.0.4 takes them (measured 31-10-2026): any document, the insertion order, the indexes `_id_`
-//! and `user_1_db_1` / `role_1_db_1` with their 11000 and 171, the usual semantics of `update`,
-//! `delete` and `findAndModify`, and `usersInfo` / `rolesInfo` showing what was written.
+//! 013 T043, FR-030: direct writes to `admin.system.users` and `admin.system.roles` as the
+//! reference router 9.0.4 takes them (measured 31-10-2026): any document, the insertion order, the
+//! indexes `_id_` and `user_1_db_1` / `role_1_db_1` with their 11000 and 171, the usual semantics
+//! of `update`, `delete` and `findAndModify`, and `usersInfo` / `rolesInfo` showing what was
+//! written.
 
 mod common;
 

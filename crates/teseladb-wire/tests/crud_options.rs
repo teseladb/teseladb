@@ -1,6 +1,7 @@
-//! Options of the write commands at their edges (001 FR-007, FR-011): an empty `sort` of an
-//! update, `upsertSupplied` without `upsert`, an empty validator, and a validator that only warns,
-//! whose failures the node logs as a `refnode` does (id 20294, «Document would fail validation»).
+//! Options of the write commands at their edges (001 FR-007, FR-011): an empty `sort` of an update,
+//! `upsertSupplied` without `upsert`, an empty validator, and a validator that only warns, whose
+//! failures the node logs as a reference replica set member does (id 20294, «Document would fail
+//! validation»).
 
 mod common;
 
@@ -84,7 +85,7 @@ fn a_validator_that_only_warns_logs_the_document_and_an_empty_one_checks_nothing
 }
 
 /// `upsertSupplied` without `upsert` is a write error of the statement, and an empty validator
-/// checks nothing (`refnode` 9.0.4, 01-11-2026).
+/// checks nothing (the reference replica set member 9.0.4, 01-11-2026).
 #[test]
 fn upsert_supplied_needs_an_upsert_and_an_empty_validator_checks_nothing() {
     let mut m = Mem::new();

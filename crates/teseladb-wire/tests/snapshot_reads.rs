@@ -1,5 +1,5 @@
-//! Snapshot and causal reads outside a transaction (008 FR-012, FR-013, T021, T022), as a
-//! `refrouter` 9.0.4 answers them (measured on 31-10-2026): a `snapshot` read is served at its
+//! Snapshot and causal reads outside a transaction (008 FR-012, FR-013, T021, T022), as a the
+//! reference router 9.0.4 answers them (measured on 31-10-2026): a `snapshot` read is served at its
 //! `atClusterTime`, or at the cluster time without one, and its cursor says which; a read with
 //! `afterClusterTime` is served at the cluster time; a time ahead of the cluster time is
 //! `InvalidOptions`; a mark below the history is `SnapshotTooOld`.
@@ -206,8 +206,8 @@ fn a_reply_gives_the_cluster_time_after_its_command() {
     assert_eq!(field(&r, "$clusterTime.clusterTime"), &ts(after.0, after.1));
 }
 
-/// A `snapshot` read at a time before its database was added is `MigrationConflict` with the
-/// time of that change, as on a `refrouter` 9.0.4 (measured on 31-10-2026); after it, the read
+/// A `snapshot` read at a time before its database was added is `MigrationConflict` with the time
+/// of that change, as on the reference router 9.0.4 (measured on 31-10-2026); after it, the read
 /// goes on.
 #[test]
 fn a_snapshot_before_its_database_is_a_migration_conflict() {

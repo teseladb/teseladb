@@ -1,7 +1,7 @@
 //! `$rand` and `$sampleRate` draw a new number for every document (010 FR-005): in `find`'s
-//! `$expr`, in an `aggregate`'s stages and in the stages after `$changeStream` (014 FR-013). A
-//! `refrouter` 9.0.4 keeps about half of 400 documents with `{$sampleRate: 0.5}` and gives each
-//! document of `$addFields: {r: {$rand: {}}}` its own number (measured on 02-11).
+//! `$expr`, in an `aggregate`'s stages and in the stages after `$changeStream` (014 FR-013). A the
+//! reference router 9.0.4 keeps about half of 400 documents with `{$sampleRate: 0.5}` and gives
+//! each document of `$addFields: {r: {$rand: {}}}` its own number (measured on 02-11).
 
 mod common;
 

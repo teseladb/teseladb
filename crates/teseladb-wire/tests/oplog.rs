@@ -1,7 +1,7 @@
 //! `local.oplog.rs` over the in-memory node of `common` (018 FR-009, T011): its entries for
-//! inserts, updates, replacements, deletes, transactions, catalog changes and notes, its
-//! tailable cursor and its refusals, with the fields and order RefDb 9.0.4 writes (measured on
-//! 02-11-2026 on a replica set of `ref:9.0`).
+//! inserts, updates, replacements, deletes, transactions, catalog changes and notes, its tailable
+//! cursor and its refusals, with the fields and order the reference server 9.0.4 writes (measured
+//! on 02-11-2026 on a replica set of the reference server 9.0).
 
 mod common;
 
@@ -213,7 +213,7 @@ fn a_transaction_is_one_apply_ops_entry() {
 /// A collection a transaction creates, and the index it builds there, are `create` and
 /// `createIndexes` entries under the collection's own name before the transaction's
 /// `applyOps`: the name the collection has until the commit and its rename never show
-/// (`refdump --oplog` refuses an oplog with renames, T013). An aborted transaction's
+/// (the reference dump tool --oplog` refuses an oplog with renames, T013). An aborted transaction's
 /// collection gives no entry.
 #[test]
 fn a_collection_a_transaction_creates() {
@@ -352,7 +352,7 @@ fn tailable_cursor_reads_on() {
     assert_eq!(field(&next[0], "o._id"), &Value::Int32(2));
 }
 
-/// Writes and `drop` on the oplog fail as on RefDb 9.0.4.
+/// Writes and `drop` on the oplog fail as on the reference server 9.0.4.
 #[test]
 fn the_oplog_is_read_only() {
     let mut m = node();
@@ -387,9 +387,10 @@ fn null_op_time() -> Document {
 }
 
 /// A retryable write leaves its `lsid`, `txnNumber`, `stmtId` and `prevOpTime` on each entry, as a
-/// replica set member of RefDb 9.0.4 does (measured on 02-11-2026, `w1.js` and `w2.js`): the
-/// statements of one `txnNumber` chained by `prevOpTime`, an insert of several documents as one
-/// `applyOps` entry with `multiOpType: 1`, and `needsRetryImage` on a `findAndModify`.
+/// replica set member of the reference server 9.0.4 does (measured on 02-11-2026, `w1.js` and
+/// `w2.js`): the statements of one `txnNumber` chained by `prevOpTime`, an insert of several
+/// documents as one `applyOps` entry with `multiOpType: 1`, and `needsRetryImage` on a
+/// `findAndModify`.
 #[test]
 fn retryable_writes_carry_their_session() {
     let mut m = node();
@@ -516,10 +517,10 @@ fn uuid_string(v: Option<&Value>) -> bool {
     parts == [8, 4, 4, 4, 12] && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
-/// The `o2` and `versionContext` of the catalog entries, as a member of RefDb 9.0.4 writes them
-/// (measured on 02-11-2026, `c1.js` and `c2.js`): `create` with the collection's catalog number
-/// and its idents, `createIndexes` with the index's ident, `collMod` with the options before
-/// (and the index's options before), and a time series' `create` and `drop` with
+/// The `o2` and `versionContext` of the catalog entries, as a member of the reference server 9.0.4
+/// writes them (measured on 02-11-2026, `c1.js` and `c2.js`): `create` with the collection's
+/// catalog number and its idents, `createIndexes` with the index's ident, `collMod` with the
+/// options before (and the index's options before), and a time series' `create` and `drop` with
 /// `isTimeseries`.
 #[test]
 fn catalog_entries_carry_their_o2() {
@@ -587,7 +588,7 @@ fn catalog_entries_carry_their_o2() {
 /// An insert of several documents that is not a retryable write is one `applyOps` entry on
 /// `admin.$cmd` with the inserts, without session, `stmtId` nor `multiOpType`; one document is a
 /// plain `i` entry, and an update of several documents stays one `u` entry each (measured on a
-/// replica set of `ref:9.0.4`, 03-11-2026).
+/// replica set of the reference server 9.0.4, 03-11-2026).
 #[test]
 fn an_insert_of_several_documents_is_one_apply_ops_entry() {
     let mut m = node();

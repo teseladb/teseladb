@@ -1,5 +1,5 @@
 //! `$clusterTime` signed in every reply and checked when a client sends it (013 T025, FR-014),
-//! as a `refrouter` 9.0.4 does with and without `--keyFile` (measured 30-10-2026,
+//! as the reference router 9.0.4 does with and without `--keyFile` (measured 30-10-2026,
 //! `scripts/authz-probe/ct_probe.py`): the reading errors, the order against the other checks
 //! (unknown command, authentication, generic arguments, then `$clusterTime`, then authorization),
 //! and the signatures of a node with keys.
@@ -155,7 +155,7 @@ fn a_later_time_needs_a_valid_signature_on_a_node_with_keys() {
 }
 
 #[test]
-fn key_ids_are_read_as_refdb_reads_them() {
+fn key_ids_are_read_as_the_reference_reads_them() {
     let later = ts(NOW.time + 10, 1);
     let cases = [
         (Value::Double(5.9), 5),
@@ -176,7 +176,7 @@ fn key_ids_are_read_as_refdb_reads_them() {
 }
 
 #[test]
-fn malformed_times_get_refdb_errors() {
+fn malformed_times_get_the_reference_errors() {
     let p = "ping.$clusterTime";
     let t = ts(1, 1);
     let missing = |f: &str| {
@@ -429,10 +429,10 @@ fn a_restamp_changes_only_the_parts_that_are_there() {
     assert_eq!(partial, Document::new().with("$clusterTime", bare).with("operationTime", ts));
 }
 
-/// The `operationTime` of a write is its commit's mark, as a `refrouter` 9.0.4 answers the optime of
-/// a write: a change stream that starts at it includes the write. `$clusterTime` goes on with
-/// the node's clock, which may be ahead (found by the battery's `cs-start-at-operation-time` on
-/// 04-11-2026: the node answered a later mark and the stream missed the write).
+/// The `operationTime` of a write is its commit's mark, as the reference router 9.0.4 answers the
+/// optime of a write: a change stream that starts at it includes the write. `$clusterTime` goes on
+/// with the node's clock, which may be ahead (found by the battery's `cs-start-at-operation-time`
+/// on 04-11-2026: the node answered a later mark and the stream missed the write).
 #[test]
 fn the_operation_time_of_a_write_is_its_commit() {
     let mut m = Mem::new();
@@ -479,8 +479,8 @@ fn ping_on(m: &mut Mem, t: Value) -> Document {
 }
 
 /// A client's `$clusterTime` ahead of the node's clock moves the node's HLC up to it before the
-/// command runs, as a `refrouter` 9.0.4 does (008 FR-013, measured 04-11-2026): a write that follows
-/// lands above what the client saw, even on another node.
+/// command runs, as the reference router 9.0.4 does (008 FR-013, measured 04-11-2026): a write that
+/// follows lands above what the client saw, even on another node.
 #[test]
 fn a_clients_cluster_time_moves_the_nodes_clock() {
     let mut m = Mem::new();
@@ -510,8 +510,8 @@ fn a_cluster_time_the_node_gave_passes_when_its_clock_runs_ahead_of_the_wall() {
     assert_eq!(code(&r).0, 205, "{r:?}");
 }
 
-/// One more than 1 s ahead of the node's wall clock fails with 205 and the message of a `refrouter`
-/// 9.0.4, which allows 365 days (DV-101): the HLC's bound on disk would keep the node from
+/// One more than 1 s ahead of the node's wall clock fails with 205 and the message of the reference
+/// router 9.0.4, which allows 365 days (DV-101): the HLC's bound on disk would keep the node from
 /// starting again until its wall clock passed it.
 #[test]
 fn a_cluster_time_too_far_ahead_fails_with_205() {

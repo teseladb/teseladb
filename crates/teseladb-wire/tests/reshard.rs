@@ -1,7 +1,7 @@
 //! 018 T005: `reshardCollection`, `refineCollectionShardKey` and `abortReshardCollection`
 //! (FR-002) over the in-memory node of `common`: the copy at the clone mark, the double write,
 //! the critical section, the rename, the abort and the events, with the replies and messages of
-//! a `refrouter` 9.0.4 of two shards (measured on 02-11-2026).
+//! the reference router 9.0.4 of two shards (measured on 02-11-2026).
 
 mod common;
 
@@ -94,7 +94,7 @@ fn started(m: &mut Mem, cmd: &str) -> (Resharding, Shared) {
 }
 
 #[test]
-fn its_arguments_fail_as_on_a_refrouter() {
+fn its_arguments_fail_as_on_the_reference_router() {
     let mut m = sharded(&docs(3));
     fails(
         &admin(&mut m, r#"{"reshardCollection":"rs.c","key":{"b":1},"performVerification":true}"#),
@@ -767,9 +767,9 @@ fn the_copy_cuts_its_batches_by_bytes() {
     assert_eq!(field(&r, "n"), &Value::Int32(12), "{r:?}");
 }
 
-/// A client's own `system.resharding.` collection (measured on a `refrouter` 9.0.4, 03-11-2026):
-/// it is created, renamed and dropped as any other and its documents are deleted, but a write
-/// that would store a document in it fails, since no resharding owns it. Its rename over a
+/// A client's own `system.resharding.` collection (measured on the reference router 9.0.4,
+/// 03-11-2026): it is created, renamed and dropped as any other and its documents are deleted, but
+/// a write that would store a document in it fails, since no resharding owns it. Its rename over a
 /// collection is a plain rename.
 #[test]
 fn a_client_collection_named_as_a_copy_is_no_resharding() {

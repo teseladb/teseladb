@@ -1,5 +1,5 @@
 //! 007 T042 (FR-029): `fsync` with `lock`, `fsyncUnlock` and `setUserWriteBlockMode` for the whole
-//! cluster, with the answers and errors of a `refrouter` 9.0.4 (measured on 01-11-2026).
+//! cluster, with the answers and errors of the reference router 9.0.4 (measured on 01-11-2026).
 
 mod common;
 
@@ -37,7 +37,7 @@ fn locks_count_and_each_unlock_takes_one_away() {
     let not_locked = Value::from("fsyncUnlock called when not locked");
     let r = m.run("admin", unlock());
     assert_eq!(err(&r), (Some(&Value::Int32(20)), Some(&not_locked)));
-    // In the order of a `refrouter` 9.0.4's answer (measured on 03-11-2026).
+    // In the order of the reference router 9.0.4's answer (measured on 03-11-2026).
     let keys: Vec<&str> =
         r.iter().map(|(k, _)| k).filter(|k| !k.starts_with('$') && *k != "operationTime").collect();
     assert_eq!(keys, ["raw", "code", "codeName", "ok", "errmsg"], "{r:?}");
@@ -71,7 +71,7 @@ fn a_write_waits_for_the_unlock_and_a_read_does_not() {
     let r = m.run("t", insert("c"));
     let (code, msg) = first_write_error(&r);
     assert_eq!(code, &Value::Int32(50));
-    // As a `refrouter` 9.0.4 relays it from the shard (measured on 03-11-2026).
+    // As the reference router 9.0.4 relays it from the shard (measured on 03-11-2026).
     let Value::String(msg) = msg else { panic!("{r:?}") };
     assert!(msg.starts_with("cluster write results unavailable from "), "{msg}");
     assert!(msg.ends_with(":: caused by :: operation exceeded time limit"), "{msg}");
@@ -160,7 +160,7 @@ fn set_user_write_block_mode_checks_its_fields() {
         let r = m.run("admin", block(true).with("reason", reason));
         assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{reason}: {r:?}");
     }
-    // The reason a refrouter 9.0.4 writes in the error stays `Unspecified` (measured).
+    // The reason the reference router 9.0.4 writes in the error stays `Unspecified` (measured).
     let r = m.run("t", insert("c"));
     let blocked = Value::from("User writes blocked, reason: Unspecified");
     assert_eq!(first_write_error(&r), (&Value::Int32(371), &blocked));
@@ -169,8 +169,8 @@ fn set_user_write_block_mode_checks_its_fields() {
 #[test]
 fn the_gates_answer_once_every_node_applies_them() {
     let mut m = Mem::new();
-    // Two answers of a node still behind: the command waits for it, as a `refrouter` waits for
-    // every shard.
+    // Two answers of a node still behind: the command waits for it, as the reference router waits
+    // for every shard.
     for cmd in [lock(), unlock(), block(true), block(false)] {
         m.gate_lagging = 2;
         m.pauses_left = 5;

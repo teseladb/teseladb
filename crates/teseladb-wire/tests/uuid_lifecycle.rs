@@ -1,7 +1,7 @@
-//! 007 T041 (FR-028): a collection's UUID as `listCollections` shows it, measured on a `refrouter`
-//! 9.0.4 on 01-11-2026: it stays through a rename inside its database, changes with a rename to
-//! another database (RefDb copies the collection then), and a collection created again gets a
-//! new one.
+//! 007 T041 (FR-028): a collection's UUID as `listCollections` shows it, measured on the reference
+//! router 9.0.4 on 01-11-2026: it stays through a rename inside its database, changes with a rename
+//! to another database (the reference server copies the collection then), and a collection created
+//! again gets a new one.
 
 mod common;
 

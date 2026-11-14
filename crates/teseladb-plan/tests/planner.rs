@@ -1,8 +1,8 @@
-//! The planner (010 FR-001, T014, T016) against the plans a `refrouter` 9.0.4 chose on 01-11-2026
-//! (`explain` of `find` with the indexes `{g: 1}`, `{n: 1}`, `{g: 1, n: 1}`, `{s: 1}`, `{t: 1}`,
-//! `{o.k: 1}`, `{x: -1}`, and the ties of `{a: 1}`, `{b: 1}`, `{a: 1, b: 1}` in each order of
-//! creation): the intervals each index scans as `explain` writes them, the clauses left for the
-//! documents, the plans made and their order, and the choice by trial.
+//! The planner (010 FR-001, T014, T016) against the plans the reference router 9.0.4 chose on
+//! 01-11-2026 (`explain` of `find` with the indexes `{g: 1}`, `{n: 1}`, `{g: 1, n: 1}`, `{s: 1}`,
+//! `{t: 1}`, `{o.k: 1}`, `{x: -1}`, and the ties of `{a: 1}`, `{b: 1}`, `{a: 1, b: 1}` in each
+//! order of creation): the intervals each index scans as `explain` writes them, the clauses left
+//! for the documents, the plans made and their order, and the choice by trial.
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_plan::cost::{Trial, ranked, score, trial_works};
@@ -107,12 +107,12 @@ fn intersections(parsed: &str, sort: &[(&str, i32)], indexes: &[IndexMeta]) -> V
         .collect()
 }
 
-/// With `internalQueryPlannerEnableHashIntersection`, a `refrouter` 9.0.4 makes one `AND_HASH` per
-/// pair of indexes on different clauses (measured on 01-11-2026 with `{g: 1}`, `{n: 1}`,
-/// `{s: 1}` and `{g: 1, s: 1}`): the later index first, last with a sort, none for a pair one
+/// With `internalQueryPlannerEnableHashIntersection`, the reference router 9.0.4 makes one
+/// `AND_HASH` per pair of indexes on different clauses (measured on 01-11-2026 with `{g: 1}`, `{n:
+/// 1}`, `{s: 1}` and `{g: 1, s: 1}`): the later index first, last with a sort, none for a pair one
 /// index takes alone, and the documents filtered by the streamed scan's clauses first.
 #[test]
-fn hash_intersections_pair_the_indexes_as_refdb() {
+fn hash_intersections_pair_the_indexes_as_the_reference() {
     let three = [index("g_1", &[("g", 1)]), index("n_1", &[("n", 1)]), index("s_1", &[("s", 1)])];
     let all = r#"{"$and":[{"g":{"$eq":"a"}},{"n":{"$eq":5}},{"s":{"$eq":"apple"}}]}"#;
     let g = r#"{"g":{"$eq":"a"}}"#;
@@ -148,7 +148,7 @@ fn hash_intersections_pair_the_indexes_as_refdb() {
 }
 
 #[test]
-fn indexes_scan_the_intervals_refdb_shows() {
+fn indexes_scan_the_intervals_the_reference_shows() {
     let c = catalog();
     assert_eq!(
         plans(r#"{"g":{"$eq":"a"}}"#, &[], &c),
@@ -243,7 +243,7 @@ fn a_hint_makes_its_index_the_plan() {
 
 /// The order of the plans when their trials tie, for each order of creation.
 #[test]
-fn tied_plans_keep_refdb_order() {
+fn tied_plans_keep_the_reference_order() {
     let single = |n: &str| index(n, &[(n, 1)]);
     let both = index("ab", &[("a", 1), ("b", 1)]);
     let names = |parsed: &str, c: &[IndexMeta]| -> Vec<String> {
@@ -270,7 +270,7 @@ fn tied_plans_keep_refdb_order() {
 }
 
 #[test]
-fn trials_choose_as_refdb_scores() {
+fn trials_choose_as_the_reference_scores() {
     let t = |works, advanced, fetches, sorts| Trial {
         works,
         advanced,
@@ -291,10 +291,10 @@ fn trials_choose_as_refdb_scores() {
 }
 
 #[test]
-fn intervals_follow_refdb() {
+fn intervals_follow_the_reference() {
     assert_eq!(intervals("$eq", &Value::Array(Vec::new())), None);
     // `$exists` scans every key of a non-sparse index, `$not: {$exists: true}` its nulls; the
-    // documents decide both (measured on a `refrouter` 9.0.4, 01-11-2026).
+    // documents decide both (measured on the reference router 9.0.4, 01-11-2026).
     let (b, exact) = intervals("$exists", &Value::Boolean(true)).expect("every key");
     assert_eq!((b, exact), (vec![Bound::all()], false));
     let missing = Value::Document(doc(r#"{"$exists":true}"#));
@@ -308,7 +308,8 @@ fn intervals_follow_refdb() {
     assert!(!exact);
     assert_eq!(b, vec![Bound::point(Value::Null)]);
     assert_eq!(intervals("$gt", &Value::Boolean(true)), None);
-    // NaN is below every other number and only equal to itself (measured on a `refrouter` 9.0.4).
+    // NaN is below every other number and only equal to itself (measured on the reference router
+    // 9.0.4).
     for nan in [Value::Double(f64::NAN), Value::Decimal128(teseladb_bson::Decimal128::nan())] {
         for op in ["$gt", "$lt"] {
             assert_eq!(intervals(op, &nan), Some((Vec::new(), true)), "{op}");
@@ -321,7 +322,7 @@ fn intervals_follow_refdb() {
     }
     // The comparisons an `$expr` implies, and those a time series' bucket filter makes on
     // `control.min` and `control.max` (015 FR-008), compare across types: they scan to the end
-    // of the index, the expression or the buckets deciding (measured on a `refrouter` 9.0.4:
+    // of the index, the expression or the buckets deciding (measured on the reference router 9.0.4:
     // `[new Date(…), MaxKey]` and `[MinKey, new Date(…))`).
     let at = Value::DateTime(5);
     let (b, exact) = intervals("$_internalExprGte", &at).expect("a $gte");
@@ -348,7 +349,7 @@ fn intervals_follow_refdb() {
     let (b, _) = intervals("$gte", &Value::String("m".to_owned())).expect("a bound");
     assert_eq!(b[0].shown(), r#"["m", {})"#);
     // A comparison with a document scans the documents, up to the arrays that follow them
-    // (measured on a `refrouter` 9.0.4 on 05-11-2026, `sharding-key-compound`: `[{}, [])`).
+    // (measured on the reference router 9.0.4 on 05-11-2026, `sharding-key-compound`: `[{}, [])`).
     let (b, exact) = intervals("$gte", &Value::Document(Document::new())).expect("a bound");
     assert_eq!(b[0].shown(), "[{}, [])");
     assert!(exact);
@@ -467,7 +468,7 @@ fn edges_of_the_rules() {
         r#"g_1: g["[\"a\", \"a\"]"] | {"$and":[{"$expr":{"$eq":["$g","a"]}},{"g":{"$exists":true}}]}"#
     );
     // On arrays, the field keeps to the intervals of one clause, `$lt` before `$gt` (measured
-    // on a `refnode` 9.0.4), and the other stays for the documents.
+    // on a reference replica set member 9.0.4), and the other stays for the documents.
     assert_eq!(
         plans(r#"{"$and":[{"t":{"$gt":"a"}},{"t":{"$lt":"m"}}]}"#, &[], &c),
         [r#"t_1: t["[\"\", \"m\")"] | {"t":{"$gt":"a"}}"#]
@@ -510,9 +511,9 @@ fn intervals_that_touch_meet_at_their_ends() {
 }
 
 /// A `$or` whose clauses are each one predicate on the leading field of the same index scans that
-/// index once, over the union of their intervals (measured on a `refrouter` 9.0.4, 01-11-2026:
-/// `{_id: {$lt: 3}}` or `{_id: "x"}` reads `_id_` over `[-inf, 3)` and `["x", "x"]`); a clause of
-/// more predicates keeps its own scan, and the scans follow the order of their indexes.
+/// index once, over the union of their intervals (measured on the reference router 9.0.4,
+/// 01-11-2026: `{_id: {$lt: 3}}` or `{_id: "x"}` reads `_id_` over `[-inf, 3)` and `["x", "x"]`); a
+/// clause of more predicates keeps its own scan, and the scans follow the order of their indexes.
 #[test]
 fn clauses_on_the_leading_field_of_one_index_join_their_intervals() {
     let c = vec![
@@ -694,15 +695,15 @@ fn more_edges_of_intervals_joins_and_intersections() {
     assert!(candidates(&request, &c).iter().any(|a| matches!(a, Access::AndHash { .. })));
 }
 
-/// A hashed index scans the hash of each value of an equality or an `$in` on its hashed field,
-/// as points, and leaves the clause to the documents (two values may share a hash); a range on
-/// the hashed field scans all of it, and the index gives no order. Measured on a `refnode` 9.0.4
-/// on 05-11-2026: `{t: 2}` over `{t: "hashed"}` scans `[848411777775835583,
+/// A hashed index scans the hash of each value of an equality or an `$in` on its hashed field, as
+/// points, and leaves the clause to the documents (two values may share a hash); a range on the
+/// hashed field scans all of it, and the index gives no order. Measured on a reference replica set
+/// member 9.0.4 on 05-11-2026: `{t: 2}` over `{t: "hashed"}` scans `[848411777775835583,
 /// 848411777775835583]` with `{t: {$eq: 2}}` on the FETCH (`sharding-key-hashed` step 4).
 #[test]
 fn a_hashed_index_scans_the_hashes_of_an_equality() {
     let hashed = vec![index("t_hashed", &[("t", 0)]), index("t_hashed_f_1", &[("t", 0), ("f", 1)])];
-    // The points keep the values, in the order of their hashes, which are RefDb's.
+    // The points keep the values, in the order of their hashes, which are the reference server's.
     assert_eq!(hashed_value(&Value::Int32(2)), 848_411_777_775_835_583);
     assert_eq!(hashed_value(&Value::Int32(5)), 4_470_791_281_878_691_347);
     assert_eq!(hashed_value(&Value::Null), 2_338_878_944_348_059_895);

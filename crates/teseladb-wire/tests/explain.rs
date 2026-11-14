@@ -1,8 +1,9 @@
-//! `explain` against a `refrouter` 9.0.4 (`tests/explain/explain.out`, 010 FR-003, T018): each
-//! command, a tab and RefDb's reply, compared without what belongs to the environment or to
-//! RefDb's own engine: the hosts and node names, the build, the timings, the plan hashes, the
-//! work counters of each stage (`works`, `advanced`, `needTime`…) and the command's session
-//! fields. A `refrouter` names its shard where TeselaDB names the node.
+//! `explain` against the reference router 9.0.4 (`tests/explain/explain.out`, 010 FR-003, T018):
+//! each command, a tab and the reference server's reply, compared without what belongs to the
+//! environment or to the reference server's own engine: the hosts and node names, the build, the
+//! timings, the plan hashes, the work counters of each stage (`works`, `advanced`, `needTime`…) and
+//! the command's session fields. The reference router names its shard where TeselaDB names the
+//! node.
 
 mod common;
 
@@ -71,7 +72,7 @@ fn normal(v: &Value) -> Value {
     normal_in(v, false)
 }
 
-/// [`normal`] inside a section of RefDb's slot-based engine (`engine`), whose
+/// [`normal`] inside a section of the reference server's slot-based engine (`engine`), whose
 /// `executionStages` are that engine's own program (a divergence in the report).
 fn normal_in(v: &Value, engine: bool) -> Value {
     match v {
@@ -85,8 +86,8 @@ fn normal_in(v: &Value, engine: bool) -> Value {
                 }
                 let x = match (k, x) {
                     ("ok", _) => Value::Double(1.0),
-                    // Plans whose trials tie keep an order of RefDb's enumerator that
-                    // TeselaDB does not reproduce (DV in the report): compared as a set.
+                    // Plans whose trials tie keep an order of the reference server's enumerator
+                    // that TeselaDB does not reproduce (DV in the report): compared as a set.
                     ("rejectedPlans", Value::Array(plans)) => {
                         let mut list: Vec<(String, Value)> = plans
                             .iter()
@@ -118,7 +119,8 @@ fn normal_in(v: &Value, engine: bool) -> Value {
                         }
                         Value::Document(one)
                     }
-                    // A `refrouter` keys its shards `sh<N>`; TeselaDB its nodes `node<N>` (D-102).
+                    // The reference router keys its shards `sh<N>`; TeselaDB its nodes `node<N>`
+                    // (D-102).
                     ("shards", Value::Document(s)) => {
                         let mut one = Document::new();
                         for (name, node) in s.iter() {
@@ -161,47 +163,47 @@ fn shown(r: &Document) -> String {
 }
 
 #[test]
-fn explain_answers_as_refdb() {
+fn explain_answers_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/explain.out")));
 }
 
 /// `explain` of `aggregate` (`tests/explain/aggregate.out`): the query plan of the leading
 /// stages, the slot-based engine's when a `$group` or an equality `$lookup` follows them.
 #[test]
-fn explain_of_aggregate_answers_as_refdb() {
+fn explain_of_aggregate_answers_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/aggregate.out")));
 }
 
 /// Pipelines whose leading `$match` is one `_id` equality (`tests/explain/agg_express.out`,
-/// recorded on a native `refrouter` 9.0.4 on 09-11-2026, H-011 of the native tests): RefDb reads
-/// them by the express path (`EXPRESS_IXSCAN`, or `IDHACK` under a projection it cannot take),
-/// with its sort and limit folded in, a simple projection in the stage and the rest of the
-/// pipeline after a `$cursor`, never in the slot-based engine.
+/// recorded on a native the reference router 9.0.4 on 09-11-2026, H-011 of the native tests): the
+/// reference server reads them by the express path (`EXPRESS_IXSCAN`, or `IDHACK` under a
+/// projection it cannot take), with its sort and limit folded in, a simple projection in the stage
+/// and the rest of the pipeline after a `$cursor`, never in the slot-based engine.
 #[test]
-fn explain_of_aggregate_by_id_answers_as_refdb() {
+fn explain_of_aggregate_by_id_answers_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/agg_express.out")));
 }
 
 /// `count` and `distinct` by one `_id` equality (`tests/explain/id_express.out`, recorded on a
-/// native `refrouter` 9.0.4 on 09-11-2026, H-011 of the native tests): `COUNT` over `IDHACK` and
-/// `EXPRESS_IXSCAN`, without the planner, and their answers.
+/// native the reference router 9.0.4 on 09-11-2026, H-011 of the native tests): `COUNT` over
+/// `IDHACK` and `EXPRESS_IXSCAN`, without the planner, and their answers.
 #[test]
-fn count_and_distinct_by_id_answer_as_refdb() {
+fn count_and_distinct_by_id_answer_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/id_express.out")));
 }
 
 /// More pipelines (`tests/explain/aggregate2.out`): the forms of the stages after the plan and
-/// the stages RefDb moves before others.
+/// the stages the reference server moves before others.
 #[test]
-fn explain_of_more_pipelines_answers_as_refdb() {
+fn explain_of_more_pipelines_answers_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/aggregate2.out")));
 }
 
-/// The filters of `find` as RefDb plans them (`tests/explain/filters.out`): each `$expr`
-/// optimised, with the clauses it implies, a constant one settling the filter, `$in` and
+/// The filters of `find` as the reference server plans them (`tests/explain/filters.out`): each
+/// `$expr` optimised, with the clauses it implies, a constant one settling the filter, `$in` and
 /// disjunctions rewritten, `$jsonSchema` translated.
 #[test]
-fn explain_of_filters_answers_as_refdb() {
+fn explain_of_filters_answers_as_the_reference() {
     check(teseladb_names::expand_static(include_str!("explain/filters.out")));
 }
 
@@ -209,28 +211,28 @@ fn explain_of_filters_answers_as_refdb() {
 /// explain of the aggregation each read becomes on the view's collection; its commands run in
 /// order on one node, the views first.
 #[test]
-fn explain_on_views_answers_as_refdb() {
+fn explain_on_views_answers_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/views.out")), false);
 }
 
 /// `explain` with indexes (`tests/explain/plans.out`, 010 FR-001): the plan the planner chooses,
 /// the ones it rejects and what the winner counts; the indexes come first.
 #[test]
-fn explain_of_index_plans_answers_as_refdb() {
+fn explain_of_index_plans_answers_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plans.out")), false);
 }
 
 /// Reads that an index plan answers (`tests/explain/plan_reads.out`, 010 FR-001): the
-/// documents in the order of the index that wins, as a `refrouter` 9.0.4 gives them.
+/// documents in the order of the index that wins, as the reference router 9.0.4 gives them.
 #[test]
-fn reads_through_index_plans_answer_as_refdb() {
+fn reads_through_index_plans_answer_as_the_reference() {
     check_in(include_str!("explain/plan_reads.out"), false);
 }
 
-/// Replies that name a `refrouter`'s shards (`tests/explain/shards.out`, DV-031, D-102): the
+/// Replies that name the reference router's shards (`tests/explain/shards.out`, DV-031, D-102): the
 /// node in their place, as `node<N>`.
 #[test]
-fn shard_named_replies_answer_as_refdb() {
+fn shard_named_replies_answer_as_the_reference() {
     check_in(include_str!("explain/shards.out"), false);
 }
 
@@ -238,7 +240,7 @@ fn shard_named_replies_answer_as_refdb() {
 /// 010 FR-001, T019): the document an update of one, a delete of one or a `findAndModify`
 /// without a sort takes is the first the winning plan gives, also with a `hint`.
 #[test]
-fn writes_through_index_plans_answer_as_refdb() {
+fn writes_through_index_plans_answer_as_the_reference() {
     check_in(include_str!("explain/plan_writes.out"), false);
 }
 
@@ -246,7 +248,7 @@ fn writes_through_index_plans_answer_as_refdb() {
 /// index left out, a `$or` whose clauses find a document twice, a limit, an update of many and
 /// one with a collation, and an index of more entries than a scan reads at once.
 #[test]
-fn more_reads_through_index_plans_answer_as_refdb() {
+fn more_reads_through_index_plans_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plan_more.out")), false);
 }
 
@@ -254,7 +256,7 @@ fn more_reads_through_index_plans_answer_as_refdb() {
 /// limit, a descending index and an `_id` that is not there, `distinct` by its index, covered
 /// and uncovered projections, a collation, and writes that take one document.
 #[test]
-fn more_index_plans_answer_as_refdb() {
+fn more_index_plans_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plans_more.out")), false);
 }
 
@@ -262,7 +264,7 @@ fn more_index_plans_answer_as_refdb() {
 /// with `internalQueryPlannerEnableHashIntersection` on the shard: each file on a node of its
 /// own with the parameter set.
 #[test]
-fn hash_intersection_plans_answer_as_refdb() {
+fn hash_intersection_plans_answer_as_the_reference() {
     for file in [
         teseladb_names::expand_static(include_str!("explain/hash_ix2.out")),
         teseladb_names::expand_static(include_str!("explain/hash_ix3.out")),
@@ -285,14 +287,14 @@ fn hash_intersection_plans_answer_as_refdb() {
 /// equalities with a skip, a collation or `multi`, a `limit` written as a double, a sort in
 /// `findAndModify`, and index plans that cannot cover or count by keys alone.
 #[test]
-fn explain_edges_answer_as_refdb() {
+fn explain_edges_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/edges.out")), false);
 }
 
 /// `aggregate` whose leading `$match` reads through an index (`tests/explain/agg_index.out`,
 /// 010 FR-001): the planner's plan under the stages after it, with the plans it rejected.
 #[test]
-fn aggregate_reads_through_index_plans_as_refdb() {
+fn aggregate_reads_through_index_plans_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/agg_index.out")), false);
 }
 
@@ -300,7 +302,7 @@ fn aggregate_reads_through_index_plans_as_refdb() {
 /// FR-001, T019): `find`, `count`, `distinct`, the writes and `aggregate` read `_id` ranges, `$in`
 /// and sorts on `_id` through it, in its order, and it competes with the other indexes.
 #[test]
-fn id_index_plans_answer_as_refdb() {
+fn id_index_plans_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plan_id.out")), false);
 }
 
@@ -309,7 +311,7 @@ fn id_index_plans_answer_as_refdb() {
 /// the key that ends each one, and the `SUBPLAN` stands over the stages of the whole read
 /// (limit, sort, projection, skip) and under `COUNT`, `UPDATE` and `DELETE`.
 #[test]
-fn or_plans_answer_as_refdb() {
+fn or_plans_answer_as_the_reference() {
     for file in [
         teseladb_names::expand_static(include_str!("explain/or_join.out")),
         teseladb_names::expand_static(include_str!("explain/or_join2.out")),
@@ -324,14 +326,15 @@ fn or_plans_answer_as_refdb() {
 /// fixes reads one key per value (`DISTINCT_SCAN`), `findAndModify` takes the first document of
 /// the plan or of its sort, and a skip goes under a fetch without filter.
 #[test]
-fn distinct_and_find_and_modify_plans_answer_as_refdb() {
+fn distinct_and_find_and_modify_plans_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plan_distinct.out")), false);
 }
 
-/// More replies that name a `refrouter`'s shards (`tests/explain/shards2.out`, DV-031, D-102): the
-/// index commands' `raw`, keyed `node<N>/host:port`, and a `writeConcernError` ` at node<N>`.
+/// More replies that name the reference router's shards (`tests/explain/shards2.out`, DV-031,
+/// D-102): the index commands' `raw`, keyed `node<N>/host:port`, and a `writeConcernError` ` at
+/// node<N>`.
 #[test]
-fn shard_named_parts_answer_as_refdb() {
+fn shard_named_parts_answer_as_the_reference() {
     check_in(include_str!("explain/shards2.out"), false);
     let mut m = Mem::new();
     load(&mut m);
@@ -345,8 +348,8 @@ fn shard_named_parts_answer_as_refdb() {
     assert_eq!(raw.iter().map(|(k, _)| k).collect::<Vec<_>>(), [name.as_str()], "{r:?}");
 }
 
-/// `text` with the host a `refrouter` names in «cluster write results unavailable from host:port»
-/// left out.
+/// `text` with the host the reference router names in «cluster write results unavailable from
+/// host:port» left out.
 fn without_host(text: &str) -> String {
     const FROM: &str = "unavailable from ";
     let mut out = String::new();
@@ -366,12 +369,12 @@ fn check(file: &str) {
     check_in(file, true);
 }
 
-/// The same replies on collections kept in `_id` order, the layout a node creates once every
-/// node reads it (D-153): RefDb's index of `_id` is in order too, so the plans and their
-/// counters are the same (H-011 of the native tests: `$in` counted fewer keys on that layout,
-/// which only the hash-bucket layout of these tests ran).
+/// The same replies on collections kept in `_id` order, the layout a node creates once every node
+/// reads it (D-153): the reference server's index of `_id` is in order too, so the plans and their
+/// counters are the same (H-011 of the native tests: `$in` counted fewer keys on that layout, which
+/// only the hash-bucket layout of these tests ran).
 #[test]
-fn explain_answers_as_refdb_on_collections_in_id_order() {
+fn explain_answers_as_the_reference_on_collections_in_id_order() {
     let files = [
         (teseladb_names::expand_static(include_str!("explain/explain.out")), true),
         (teseladb_names::expand_static(include_str!("explain/aggregate.out")), true),
@@ -401,8 +404,8 @@ fn explain_answers_as_refdb_on_collections_in_id_order() {
     }
 }
 
-/// Checks each command of `file` against RefDb's reply, each on a node of its own (`fresh`)
-/// or all on one.
+/// Checks each command of `file` against the reference server's reply, each on a node of its own
+/// (`fresh`) or all on one.
 fn check_in(file: &str, fresh: bool) {
     let mut m = Mem::new();
     load(&mut m);
@@ -426,7 +429,7 @@ fn check_on(m: &mut Mem, file: &str, fresh: bool) {
             Err(e) => shown(&e.to_document()),
             Ok(_) => shown(&m.run(DB, c)),
         };
-        // A `refrouter` names the shard that failed; TeselaDB names the node (D-102).
+        // The reference router names the shard that failed; TeselaDB names the node (D-102).
         let want = want
             .replace("on shard sh1 failed", "on shard node1 failed")
             .replace("failed on: sh1 :: ", "failed on: node1 :: ")
@@ -444,9 +447,9 @@ fn check_on(m: &mut Mem, file: &str, fresh: bool) {
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
-/// The fields of a plan cache entry that belong to the moment or to RefDb's own sizes and
-/// solution hash, and the work counters of each stage, left out of the comparison; the plan
-/// cache hashes are compared (H-028).
+/// The fields of a plan cache entry that belong to the moment or to the reference server's own
+/// sizes and solution hash, and the work counters of each stage, left out of the comparison; the
+/// plan cache hashes are compared (H-028).
 const CACHE_VOLATILE: [&str; 19] = [
     "totalDataSizeSorted",
     "timeOfCreation",
@@ -469,8 +472,8 @@ const CACHE_VOLATILE: [&str; 19] = [
     "multiKeyPaths",
 ];
 
-/// `v` without [`CACHE_VOLATILE`], except an entry's own `works`, and with a `refrouter`'s part
-/// of shard `sh1` as the node's `node1` (D-102).
+/// `v` without [`CACHE_VOLATILE`], except an entry's own `works`, and with the reference router's
+/// part of shard `sh1` as the node's `node1` (D-102).
 fn cache_normal(v: &Value, entry: bool) -> Value {
     match v {
         Value::Document(d) => {
@@ -498,9 +501,9 @@ fn cache_normal(v: &Value, entry: bool) -> Value {
 /// The plan cache (`tests/explain/plan_cache*.out`, 010 FR-002, T017): a read whose plans
 /// competed leaves an inactive entry of its shape that the next read activates, `explain`
 /// leaves none, `planCacheClear` drops one shape or all, building an index drops them, and
-/// `$planCacheStats` lists them with their plan and trials, as a `refrouter` 9.0.4 does.
+/// `$planCacheStats` lists them with their plan and trials, as the reference router 9.0.4 does.
 #[test]
-fn plan_cache_answers_as_refdb() {
+fn plan_cache_answers_as_the_reference() {
     for file in [
         include_str!("explain/plan_cache.out"),
         teseladb_names::expand_static(include_str!("explain/plan_cache2.out")),
@@ -570,17 +573,18 @@ fn canonical_value(v: &Value) -> String {
     }
 }
 
-/// Scans whose fields after a range keep their intervals, and `$exists` over a whole index,
-/// against a `refrouter` 9.0.4 (`plan_checked.out`, 010 FR-001): each key the bounds checker lands
+/// Scans whose fields after a range keep their intervals, and `$exists` over a whole index, against
+/// the reference router 9.0.4 (`plan_checked.out`, 010 FR-001): each key the bounds checker lands
 /// on is examined, the keys outside make it seek.
 #[test]
-fn scans_that_check_their_keys_answer_as_refdb() {
+fn scans_that_check_their_keys_answer_as_the_reference() {
     check_in(teseladb_names::expand_static(include_str!("explain/plan_checked.out")), false);
 }
 
-/// A `distinct` that reads one key per value reads the key after its interval when one is
-/// there, and none past the end of the index (measured on a `refnode` 9.0.4 on 02-11-2026 over
-/// `g` = "a", "b", "a", "c", 5 with an index on `g`: the values, keys read and documents read).
+/// A `distinct` that reads one key per value reads the key after its interval when one is there,
+/// and none past the end of the index (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026 over `g` = "a", "b", "a", "c", 5 with an index on `g`: the values, keys read and
+/// documents read).
 #[test]
 fn a_distinct_scan_reads_the_key_after_its_interval_only_when_there_is_one() {
     let mut m = Mem::new();
@@ -671,7 +675,7 @@ fn stages_of(v: &Value) -> String {
 
 /// An `_id` equality that finds nothing examines no key; one on a capped collection reads the
 /// index too; with a collation and strings, or a skip and a collation, it reads the collection
-/// (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn id_equalities_of_explained_finds() {
     let mut m = Mem::new();
@@ -711,8 +715,8 @@ fn id_equalities_of_explained_finds() {
 
 #[test]
 fn explain_gives_the_planning_microseconds_and_a_long_child_time() {
-    // H-028: a `refnode` 9.0.4 gives `optimizationTimeMicros` right after the milliseconds and the
-    // router's `totalChildMillis` as a long (measured on 09-11-2026).
+    // H-028: a reference replica set member 9.0.4 gives `optimizationTimeMicros` right after the
+    // milliseconds and the router's `totalChildMillis` as a long (measured on 09-11-2026).
     let mut m = Mem::new();
     let insert = extjson::parse(r#"{"insert":"c","documents":[{"_id":1}]}"#).unwrap();
     m.run(DB, insert);
@@ -729,8 +733,8 @@ fn explain_gives_the_planning_microseconds_and_a_long_child_time() {
 
 #[test]
 fn explain_echoes_the_session_and_cluster_time_it_was_sent() {
-    // H-028: a `refrouter` 9.0.4 echoes `lsid` and `$clusterTime` of `explain` after the command's own
-    // fields and before `$db`, except in an `aggregate` (measured on 09-11-2026).
+    // H-028: the reference router 9.0.4 echoes `lsid` and `$clusterTime` of `explain` after the
+    // command's own fields and before `$db`, except in an `aggregate` (measured on 09-11-2026).
     let mut m = Mem::new();
     let lsid = r#"{"id":{"$binary":{"base64":"AAAAAAAAAAAAAAAAAAAAAA==","subType":"04"}}}"#;
     let time = r#"{"clusterTime":{"$timestamp":{"t":1,"i":1}},"signature":{"hash":{"$binary":{"base64":"AAAAAAAAAAAAAAAAAAAAAAAAAAA=","subType":"00"}},"keyId":0}}"#;

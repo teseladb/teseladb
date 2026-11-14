@@ -1,8 +1,8 @@
-//! A time series lives in one namespace (015 FR-006, T022), as a `refnode` 9.0.4 answered on
-//! 02-11-2026: `listCollections` gives it with type `timeseries` and no bucket collection, a
-//! change stream on it is refused, a `2dsphere` index on the meta value refuses what is no
-//! geometry with 510, a `2d` index is refused, and it renames into another database but not into
-//! a bucket namespace.
+//! A time series lives in one namespace (015 FR-006, T022), as a reference replica set member 9.0.4
+//! answered on 02-11-2026: `listCollections` gives it with type `timeseries` and no bucket
+//! collection, a change stream on it is refused, a `2dsphere` index on the meta value refuses what
+//! is no geometry with 510, a `2d` index is refused, and it renames into another database but not
+//! into a bucket namespace.
 
 mod common;
 

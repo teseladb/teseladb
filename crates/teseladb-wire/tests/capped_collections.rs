@@ -1,7 +1,7 @@
 //! Writes of capped collections (015 T007, FR-003): insertion order, the oldest documents evicted
 //! in the same write, `_id` kept unique by its own `_id_` index, updates and deletions that move
-//! the collection's state, and the refusal inside a transaction, against what a `refrouter` 9.0.4
-//! answered on 31-10-2026.
+//! the collection's state, and the refusal inside a transaction, against what the reference router
+//! 9.0.4 answered on 31-10-2026.
 
 mod common;
 
@@ -303,7 +303,7 @@ fn convert_to_capped_evicts_what_goes_over_size() {
 }
 
 #[test]
-fn convert_to_capped_refuses_as_a_refrouter_does() {
+fn convert_to_capped_refuses_as_the_reference_router_does() {
     let mut m = Mem::new();
     run(&mut m, r#"{"create":"p"}"#);
     run(&mut m, r#"{"create":"v","viewOn":"p","pipeline":[]}"#);
@@ -359,7 +359,7 @@ fn convert_to_capped_refuses_as_a_refrouter_does() {
             "{cmd}"
         );
     }
-    // A `refrouter` 9.0.4 has no `cloneCollectionAsCapped` (measured).
+    // The reference router 9.0.4 has no `cloneCollectionAsCapped` (measured).
     let r = dispatched(&mut m, r#"{"cloneCollectionAsCapped":"p","toCollection":"q","size":100}"#);
     assert_eq!(field(&r, "code"), &Value::Int32(59), "{r:?}");
     let r = run(&mut m, r#"{"convertToCapped":1125899906842624,"size":1}"#);
@@ -381,7 +381,7 @@ fn a_dropped_capped_collection_leaves_no_key_behind() {
 }
 
 #[test]
-fn coll_stats_shows_each_kind_as_a_refrouter_does() {
+fn coll_stats_shows_each_kind_as_the_reference_router_does() {
     let mut m = Mem::new();
     run(&mut m, r#"{"create":"cap","capped":true,"size":4096,"max":10}"#);
     run(&mut m, r#"{"insert":"cap","documents":[{"_id":1},{"_id":2}]}"#);
@@ -419,7 +419,7 @@ fn coll_stats_shows_each_kind_as_a_refrouter_does() {
         ]
     );
     // `maxSize` is a `long` in the router's answer and an `int` in a shard's (measured on the
-    // native `refrouter` 9.0.4 on 09-11-2026, scenario `capped-collections`).
+    // native the reference router 9.0.4 on 09-11-2026, scenario `capped-collections`).
     assert_eq!(
         (field(&r, "capped"), field(&r, "max"), field(&r, "maxSize")),
         (&Value::Boolean(true), &Value::Int32(10), &Value::Int64(4096))

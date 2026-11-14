@@ -1,6 +1,6 @@
 //! 018 T007: `addShardToZone`, `removeShardFromZone` and `updateZoneKeyRange` (FR-003) over the
-//! in-memory node of `common`, with the replies, messages and order of the checks of a `refrouter`
-//! 9.0.4 of two shards (measured on 02-11-2026), and the intervals Group 0 keeps for the
+//! in-memory node of `common`, with the replies, messages and order of the checks of the reference
+//! router 9.0.4 of two shards (measured on 02-11-2026), and the intervals Group 0 keeps for the
 //! balancer: the shard key's keys of each bound.
 
 mod common;
@@ -108,7 +108,7 @@ fn shards_join_and_leave_zones() {
 }
 
 #[test]
-fn intervals_follow_refrouter_rules() {
+fn intervals_follow_the_reference_router_rules() {
     let mut m = cluster();
     ok(&admin(&mut m, r#"{"shardCollection":"z.k","key":{"a":1,"b":1}}"#));
     ok(&admin(&mut m, r#"{"shardCollection":"z.h","key":{"a":"hashed"}}"#));
@@ -237,8 +237,8 @@ fn intervals_take_the_keys_of_the_collection_and_follow_its_key() {
     assert_eq!(r.get("code"), Some(&Value::Int32(112)), "{r:?}");
 }
 
-/// Refusals of a `refrouter` 9.0.4 (measured on 03-11-2026), an interval with the bounds of another
-/// interval's minimum, and intervals whose bounds name no shard key of their collection.
+/// Refusals of the reference router 9.0.4 (measured on 03-11-2026), an interval with the bounds of
+/// another interval's minimum, and intervals whose bounds name no shard key of their collection.
 #[test]
 fn zone_edges() {
     let mut m = cluster();
@@ -281,9 +281,9 @@ fn zone_edges() {
     assert_eq!(of_u[0].keys, None);
 }
 
-/// A name with no database, and the same range for another zone, refused as a `refrouter` 9.0.4
-/// refuses them (measured on 03-11-2026, `z3.js`); the range then leaves its zone with
-/// `zone: null`.
+/// A name with no database, and the same range for another zone, refused as the reference router
+/// 9.0.4 refuses them (measured on 03-11-2026, `z3.js`); the range then leaves its zone with `zone:
+/// null`.
 #[test]
 fn an_empty_database_and_the_same_range_in_another_zone() {
     let mut m = cluster();

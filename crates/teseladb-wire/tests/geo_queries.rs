@@ -1,5 +1,6 @@
 //! `$geoWithin` and `$geoIntersects` in the commands without an index (009 T022, FR-012): the
-//! matcher asks 009's geometry through the node's extensions (measured on a `refnode` 9.0.4).
+//! matcher asks 009's geometry through the node's extensions (measured on a reference replica set
+//! member 9.0.4).
 
 mod common;
 
@@ -69,7 +70,7 @@ fn geographic_filters_select_without_an_index() {
 }
 
 /// `$near` and `$nearSphere` in a `find` read nearest first through a `2d` or `2dsphere`
-/// index (009 T035; measured on a `refrouter` 9.0.4, `lc12`).
+/// index (009 T035; measured on the reference router 9.0.4, `lc12`).
 #[test]
 fn near_reads_nearest_first_through_a_geo_index() {
     let mut m = Mem::new();

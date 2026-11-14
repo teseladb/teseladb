@@ -1,6 +1,6 @@
-//! The Stable API's parameters and what `apiStrict: true` refuses (006 FR-035), against what a
-//! `refrouter` 9.0.4 answered on 05-11-2026 (scenario `api-strict`) and, for the API's test
-//! commands, a `refnode` 9.0.4 with `enableTestCommands` the same day.
+//! The Stable API's parameters and what `apiStrict: true` refuses (006 FR-035), against what a the
+//! reference router 9.0.4 answered on 05-11-2026 (scenario `api-strict`) and, for the API's test
+//! commands, a reference replica set member 9.0.4 with `enableTestCommands` the same day.
 
 mod common;
 
@@ -115,10 +115,12 @@ fn a_command_outside_version_1_is_refused_only_when_strict() {
         failure(&refused),
         (
             323,
-            "Provided apiStrict:true, but the command distinct is not in API Version 1. \
-             Information on supported commands and migrations in API Version 1 can be found at \
-             https://dochub.refdb.org/core/manual-versioned-api."
-                .to_owned()
+            format!(
+                "Provided apiStrict:true, but the command distinct is not in API Version 1. \
+                 Information on supported commands and migrations in API Version 1 can be found at \
+                 {}.",
+                teseladb_names::DOC_VERSIONED_API
+            )
         )
     );
     assert!(ok(&loose) && ok(&find), "{loose:?} {find:?}");
@@ -261,10 +263,10 @@ fn the_api_test_commands_answer_their_parameters_with_enable_test_commands() {
     );
 }
 
-/// `collMod`'s `_removeLegacyTimeseriesBucketingParametersHaveChanged` is `stability: unstable`
-/// in RefDb r9.0.4 `coll_mod.idl`: with `apiStrict` it is refused with 323 before the internal
-/// privilege it needs is checked; without it, that privilege no user has refuses it with 13
-/// (measured on the native `refrouter` 9.0.4 on 09-11-2026, scenario `api-strict`).
+/// `collMod`'s `_removeLegacyTimeseriesBucketingParametersHaveChanged` is `stability: unstable` in
+/// the reference server r9.0.4 `coll_mod.idl`: with `apiStrict` it is refused with 323 before the
+/// internal privilege it needs is checked; without it, that privilege no user has refuses it with
+/// 13 (measured on the native the reference router 9.0.4 on 09-11-2026, scenario `api-strict`).
 #[test]
 fn the_internal_coll_mod_field_is_unstable_before_it_is_unauthorized() {
     let mut m = setup();

@@ -1,5 +1,5 @@
 //! `readConcern`, `writeConcern` and the generic arguments of a command (FR-019, FR-021), with
-//! the codes and messages a `refrouter` 9.0.4 gives (measured).
+//! the codes and messages the reference router 9.0.4 gives (measured).
 
 use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_range::ack::{W, WriteConcern};
@@ -323,7 +323,7 @@ fn write_concern_fields_and_their_errors() {
 }
 
 #[test]
-fn write_concerns_read_as_refdb_reads_them() {
+fn write_concerns_read_as_the_reference_reads_them() {
     let wc = |fields: &[(&str, Value)]| wc_of(Value::Document(d(fields)));
     assert_eq!(wc(&[("w", 1.5.into())]).w, Some(WArg::Nodes(1)));
     assert_eq!(wc(&[("w", 2i64.into())]).w, Some(WArg::Nodes(2)));
@@ -356,7 +356,7 @@ fn write_concerns_read_as_refdb_reads_them() {
     assert_eq!(wc(&[("w", "x".into())]).to_range(), WriteConcern { w: W::Majority, j: true });
     assert_eq!(default_write_concern().to_range(), WriteConcern { w: W::Majority, j: true });
     // Without `j`, `w: <n>` acknowledges in memory and `"majority"` on the journal, as a replica
-    // set of RefDb 9.0.4 (`writeConcernMajorityJournalDefault: true`); H-007.
+    // set of the reference server 9.0.4 (`writeConcernMajorityJournalDefault: true`); H-007.
     assert_eq!(wc(&[("w", 1.into())]).to_range(), WriteConcern { w: W::Nodes(1), j: false });
     assert_eq!(wc(&[("w", 2.into())]).to_range(), WriteConcern { w: W::Nodes(2), j: false });
     let majority = wc(&[("w", "majority".into())]).to_range();
@@ -486,8 +486,8 @@ fn generic_arguments_are_checked_in_their_order() {
 
 #[test]
 fn unknown_fields_go_first_except_in_commands_parsed_late() {
-    // Measured on a `refrouter` 9.0.4: a command parsed with its schema refuses an unknown field
-    // before it reads its generic arguments; `listCollections`, `collMod`, `dbStats`,
+    // Measured on the reference router 9.0.4: a command parsed with its schema refuses an unknown
+    // field before it reads its generic arguments; `listCollections`, `collMod`, `dbStats`,
     // `collStats`, `getLog` and `lockInfo` read them, and check that they take them, first.
     let bogus = Value::Document(d(&[("level", "bogus".into())]));
     let snapshot = Value::Document(d(&[("level", "snapshot".into())]));
@@ -553,7 +553,7 @@ fn strict_commands_reject_unknown_fields() {
         let want = format!("BSON field '{owner}.zz' is an unknown field.");
         assert_eq!(err(check_unknown_fields(&bad, name)), (40415, want));
     }
-    // The commands RefDb reads loosely take anything.
+    // The commands the reference server reads loosely take anything.
     for name in [
         "hello",
         "isMaster",

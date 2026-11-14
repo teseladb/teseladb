@@ -1,7 +1,8 @@
 //! Messages of the wire protocol (006 T003, FR-001): header, `OP_MSG` with body and document
-//! sequences, checksum, `moreToCome`, `exhaustAllowed`, `OP_QUERY`/`OP_REPLY` of the handshake
-//! and `OP_COMPRESSED`. The expected answers are the ones a `refrouter` gives (measured against
-//! RefDb 7.0, the newest that starts on the development machine; see the report of 006).
+//! sequences, checksum, `moreToCome`, `exhaustAllowed`, `OP_QUERY`/`OP_REPLY` of the handshake and
+//! `OP_COMPRESSED`. The expected answers are the ones the reference router gives (measured against
+//! the reference server 7.0, the newest that starts on the development machine; see the report of
+//! 006).
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_hash::crc32c;
@@ -105,8 +106,9 @@ fn op_msg_body_and_sequences() {
 
 #[test]
 fn canonical_documents_of_a_message_keep_their_bytes_until_a_field_is_read() {
-    // 006 FR-039: one pass checks each document as a `refrouter` checks it and with the rules of the
-    // BSON specification; a canonical document is not read into fields until the command asks.
+    // 006 FR-039: one pass checks each document as the reference router checks it and with the
+    // rules of the BSON specification; a canonical document is not read into fields until the
+    // command asks.
     let insert = Document::new().with("insert", "items").with("$db", "test");
     let docs = [
         Document::new().with("_id", 1).with("tags", vec![Value::from("a"), Value::from("b")]),
@@ -144,9 +146,9 @@ fn canonical_documents_of_a_message_keep_their_bytes_until_a_field_is_read() {
 }
 
 #[test]
-fn op_msg_errors_answered_like_refrouter() {
+fn op_msg_errors_answered_like_the_reference_router() {
     // A field both in the body and as a sequence, two bodies (also trailing bytes after the
-    // body) and no body close the connection, as a `refrouter` 9.0 does (measured).
+    // body) and no body close the connection, as the reference router 9.0 does (measured).
     let dup = Document::new()
         .with("insert", "items")
         .with("documents", Vec::<Value>::new())
@@ -253,10 +255,10 @@ fn messages_arrive_in_pieces() {
     assert!(c.next_request().unwrap().is_none());
 }
 
-/// With authentication on, a connection not yet authenticated takes messages of at most 16 KiB
-/// and closes at the header of a longer one, without an answer (measured on 04-11-2026 on a
-/// `refrouter` and a `refnode` 9.0.4: 16,384 bytes answered, 16,385 closed). Once authenticated, or
-/// with authentication off, the limit is RefDb's.
+/// With authentication on, a connection not yet authenticated takes messages of at most 16 KiB and
+/// closes at the header of a longer one, without an answer (measured on 04-11-2026 on a the
+/// reference router and a reference replica set member 9.0.4: 16,384 bytes answered, 16,385
+/// closed). Once authenticated, or with authentication off, the limit is the reference server's.
 #[test]
 fn an_unauthenticated_connection_takes_messages_of_16_kib() {
     use teseladb_wire::connection::UNAUTHENTICATED_MAX_MESSAGE;
@@ -430,9 +432,10 @@ fn deep_body(d: &Document) -> Vec<u8> {
 }
 
 #[test]
-fn nesting_is_answered_as_a_refrouter_answers_it() {
-    // A `refrouter` 9.0.4 takes objects 200 levels below the command and answers `Overflow` past
-    // them, naming the element and the command's `_id` when it comes first (measured, 003 T009).
+fn nesting_is_answered_as_the_reference_router_answers_it() {
+    // The reference router 9.0.4 takes objects 200 levels below the command and answers `Overflow`
+    // past them, naming the element and the command's `_id` when it comes first (measured, 003
+    // T009).
     let find = |filter: Document| Document::new().with("find", "c").with("filter", filter);
     let ok = OpMsg::parse(&op_msg(1, 0, &deep_body(&find(nested(200)).with("$db", "t")))).unwrap();
     assert_eq!(ok.problem, None);
@@ -491,8 +494,8 @@ fn nesting_is_answered_as_a_refrouter_answers_it() {
 
 #[test]
 fn what_the_bson_specification_refuses_is_answered() {
-    // A `refrouter` 9.0.4 stores a string that is not UTF-8; TeselaDB answers `InvalidBSON` and keeps
-    // the connection (003 T009, a divergence).
+    // The reference router 9.0.4 stores a string that is not UTF-8; TeselaDB answers `InvalidBSON`
+    // and keeps the connection (003 T009, a divergence).
     let good = Document::new().with("insert", "c").with("s", "\u{e9}").with("$db", "t");
     let mut s = body(&good);
     let at = s.iter().position(|&c| c == 0xC3).unwrap();
@@ -533,10 +536,10 @@ fn sequence_faults() {
 }
 
 #[test]
-fn bson_columns_are_answered_as_a_refrouter_answers_them() {
-    // A `refrouter` 9.0.4 answers 378 for a BSON column whose bytes do not follow the column layout,
-    // in any document of the message, naming the element and the document's `_id` (measured,
-    // 003 T029); a valid column passes.
+fn bson_columns_are_answered_as_the_reference_router_answers_them() {
+    // The reference router 9.0.4 answers 378 for a BSON column whose bytes do not follow the column
+    // layout, in any document of the message, naming the element and the document's `_id`
+    // (measured, 003 T029); a valid column passes.
     let bad = Value::Binary { subtype: 7, bytes: vec![7] };
     let good = Value::Binary { subtype: 7, bytes: vec![0x10, 0, 5, 0, 0, 0, 0] };
     let find = |v: Value| {

@@ -165,7 +165,7 @@ fn a_transaction_holds_its_writes_and_commits_them_in_one_write() {
 }
 
 #[test]
-fn the_session_rules_answer_as_refdb_does() {
+fn the_session_rules_answer_as_the_reference_does() {
     let mut m = node();
     assert!(ok(&run(&mut m, DB, stmt(insert(1), 2, 5, true))));
     let r = run(&mut m, DB, stmt(insert(2), 2, 5, true));
@@ -208,8 +208,8 @@ fn a_failed_statement_ends_the_transaction() {
     let r = run(&mut m, DB, stmt(insert(1), 3, 1, true));
     assert_eq!(code(&r), Some(&Value::Int32(112)), "{r:?}");
     assert!(has_label(&r, "TransientTransactionError"));
-    // As a `refrouter` relays the shard's error, with the node's host where it names the shard's
-    // (measured on 9.0.4, DV-031, D-102).
+    // As the reference router relays the shard's error, with the node's host where it names the
+    // shard's (measured on 9.0.4, DV-031, D-102).
     let host = format!("{}:{}", m.facts.host.hostname, m.facts.port);
     let msg = format!(
         "Encountered error from {host} during a transaction :: caused by :: cluster write results unavailable from {host} :: caused by :: Caused by :: Write conflict during plan execution and yielding is disabled. :: Please retry your operation or multi-document transaction."
@@ -248,9 +248,9 @@ fn idle_transactions_beat_between_statements() {
     assert_eq!(found(&run(&mut m, DB, find())), 1);
 }
 
-/// A command of a session whose transaction another command has waits for it (measured on
-/// 9.0.4 through `refrouter`: the second statement answers once the first ends); past its deadline it
-/// stops with `MaxTimeMSExpired`.
+/// A command of a session whose transaction another command has waits for it (measured on 9.0.4
+/// through the reference router: the second statement answers once the first ends); past its
+/// deadline it stops with `MaxTimeMSExpired`.
 #[test]
 fn a_command_waits_while_another_one_has_the_transaction() {
     use teseladb_wire::commands::txn::run_in_txn;
@@ -340,7 +340,8 @@ fn a_commit_without_an_answer_is_asked_again() {
 }
 
 /// A transaction older than `transactionLifetimeLimitSeconds` is aborted between its statements
-/// (008 FR-010); the parameter is at least one second, as a `refnode` 9.0.4 checks it (measured).
+/// (008 FR-010); the parameter is at least one second, as a reference replica set member 9.0.4
+/// checks it (measured).
 #[test]
 fn a_transaction_past_its_lifetime_is_aborted() {
     let mut m = node();
@@ -373,7 +374,8 @@ fn a_transaction_past_its_lifetime_is_aborted() {
 fn a_transaction_past_the_memory_budget_is_too_large() {
     let mut m = node();
     m.txn_budget = Some(16);
-    // A write error, as a `refnode` 9.0.4 answers past `transactionSizeLimitBytes` (measured).
+    // A write error, as a reference replica set member 9.0.4 answers past
+    // `transactionSizeLimitBytes` (measured).
     let r = run(&mut m, DB, stmt(insert(1), 9, 1, true));
     assert!(ok(&r), "{r:?}");
     assert_eq!(field(&r, "writeErrors.0.code"), &Value::Int32(257), "{r:?}");
@@ -400,10 +402,10 @@ fn ts(time: u32, increment: u32) -> Value {
     Value::Timestamp { time, increment }
 }
 
-/// The read concern of a transaction's first statement (008 FR-011, DV-012), as a `refrouter`
-/// 9.0.4 answers it (measured on 31-10-2026): `local`, `majority` and `snapshot` read one
-/// snapshot at the transaction's mark, `atClusterTime` sets that mark, and the other levels
-/// are refused.
+/// The read concern of a transaction's first statement (008 FR-011, DV-012), as the reference
+/// router 9.0.4 answers it (measured on 31-10-2026): `local`, `majority` and `snapshot` read one
+/// snapshot at the transaction's mark, `atClusterTime` sets that mark, and the other levels are
+/// refused.
 #[test]
 fn the_first_statement_s_read_concern_sets_the_snapshot() {
     let mut m = node();
@@ -425,8 +427,8 @@ fn the_first_statement_s_read_concern_sets_the_snapshot() {
     let at = level(Level::Snapshot).with("atClusterTime", ts(9_000, 3));
     assert!(ok(&run(&mut m, DB, with_concern(at, 12, 1))));
     assert_eq!(m.txn_read_at, Some(from_timestamp((9_000, 3))));
-    // After a cluster time ahead of the cluster time: the statement fails, as on a `refrouter`
-    // 9.0.4, and the transaction it started is over (measured on 03-11-2026).
+    // After a cluster time ahead of the cluster time: the statement fails, as on the reference
+    // router 9.0.4, and the transaction it started is over (measured on 03-11-2026).
     let after = level(Level::Local).with("afterClusterTime", ts(10_500, 0));
     let r = run(&mut m, DB, with_concern(after, 13, 1));
     assert_eq!(code(&r), Some(&Value::Int32(72)), "{r:?}");
@@ -519,10 +521,10 @@ fn errmsg(r: &Document) -> &str {
     }
 }
 
-/// A `createIndexes` that fails answers as a `refrouter` 9.0.4 relays its shard's error (measured on
-/// 03-11-2026): the shard's reply under `raw`, then `code`, `codeName`, `ok` and `errmsg`, and
-/// inside a transaction its `recoveryToken`, also when it is the first statement. The abort that
-/// follows is the router's answer, `errorLabels` first.
+/// A `createIndexes` that fails answers as the reference router 9.0.4 relays its shard's error
+/// (measured on 03-11-2026): the shard's reply under `raw`, then `code`, `codeName`, `ok` and
+/// `errmsg`, and inside a transaction its `recoveryToken`, also when it is the first statement. The
+/// abort that follows is the router's answer, `errorLabels` first.
 #[test]
 fn a_failed_create_indexes_answers_with_the_shard_reply_under_raw() {
     let mut m = node();
@@ -561,9 +563,9 @@ fn a_failed_create_indexes_answers_with_the_shard_reply_under_raw() {
     assert_eq!(keys(&r)[0], "errorLabels", "{r:?}");
 }
 
-/// Collections a transaction creates (008 FR-014, T019), as a `refrouter` 9.0.4 answers (measured
-/// on 31-10-2026): no other client sees them before the commit, the commit gives them their name,
-/// an abort drops them, and the database stays.
+/// Collections a transaction creates (008 FR-014, T019), as the reference router 9.0.4 answers
+/// (measured on 31-10-2026): no other client sees them before the commit, the commit gives them
+/// their name, an abort drops them, and the database stays.
 #[test]
 fn a_transaction_creates_collections_that_show_once_it_commits() {
     let mut m = node();
@@ -599,9 +601,10 @@ fn a_transaction_creates_collections_that_show_once_it_commits() {
     assert_eq!(left, 0);
 }
 
-/// The rules of RefDb 9.0.4 for `create` and `createIndexes` in a transaction (measured).
+/// The rules of the reference server 9.0.4 for `create` and `createIndexes` in a transaction
+/// (measured).
 #[test]
-fn a_transaction_creates_only_what_refdb_lets_it() {
+fn a_transaction_creates_only_what_the_reference_lets_it() {
     let mut m = node();
     let r = run(&mut m, DB, stmt(create("c"), 21, 1, true));
     assert_eq!(code(&r), Some(&Value::Int32(48)), "{r:?}");
@@ -641,9 +644,9 @@ fn a_transaction_creates_only_what_refdb_lets_it() {
     assert_eq!(listed(&mut m, "full"), 0);
 }
 
-/// The commands a transaction cannot run, with a `refrouter` 9.0.4's errors (measured).
+/// The commands a transaction cannot run, with the reference router 9.0.4's errors (measured).
 #[test]
-fn a_transaction_refuses_the_commands_refdb_refuses() {
+fn a_transaction_refuses_the_commands_the_reference_refuses() {
     let mut m = node();
     let r = run(&mut m, DB, stmt(Document::new().with("drop", "c"), 24, 1, true));
     assert_eq!(code(&r), Some(&Value::Int32(263)), "{r:?}");
@@ -658,7 +661,7 @@ fn a_transaction_refuses_the_commands_refdb_refuses() {
 }
 
 /// A name another client takes before the commit aborts the transaction with `WriteConflict`,
-/// as on a `refrouter` 9.0.4 (measured): the other client's collection stays.
+/// as on the reference router 9.0.4 (measured): the other client's collection stays.
 #[test]
 fn a_name_taken_before_the_commit_aborts_the_transaction() {
     let mut m = node();
@@ -780,9 +783,9 @@ fn run_unresolved(m: &mut Mem, db: &str, cmd: Document) -> Document {
     }
 }
 
-/// A command a transaction cannot run answers its own argument errors first, as a `refrouter` 9.0.4
-/// does (measured: `{drop: 1}` gives 73 and `{createUser: …}` without roles 40414), and does
-/// nothing when its arguments are right.
+/// A command a transaction cannot run answers its own argument errors first, as the reference
+/// router 9.0.4 does (measured: `{drop: 1}` gives 73 and `{createUser: …}` without roles 40414),
+/// and does nothing when its arguments are right.
 #[test]
 fn a_refused_command_answers_its_argument_errors_first() {
     let mut m = node();
@@ -831,10 +834,10 @@ fn a_read_in_its_uncertainty_window_restarts_or_fails() {
     assert_eq!(g.status.txn.abort_causes.get(WRITE_CONFLICT.name), Some(&1));
 }
 
-/// The `transactions` section of `serverStatus` counts as a `refrouter` 9.0.4 does (008 FR-019,
-/// measured on 31-10-2026): each abort once, by the name of the error that ended it (`abort` for
-/// `abortTransaction`, `NoSuchTransaction` at the first command of one aborted for its age), and
-/// each commit by its kind.
+/// The `transactions` section of `serverStatus` counts as the reference router 9.0.4 does (008
+/// FR-019, measured on 31-10-2026): each abort once, by the name of the error that ended it
+/// (`abort` for `abortTransaction`, `NoSuchTransaction` at the first command of one aborted for its
+/// age), and each commit by its kind.
 #[test]
 fn server_status_counts_commits_and_aborts_by_cause() {
     let mut m = node();
@@ -882,7 +885,8 @@ fn server_status_counts_commits_and_aborts_by_cause() {
     for (cause, count) in causes.map(|c| (c, 1)) {
         assert_eq!(n(&t, &format!("abortCause.{cause}")), Value::Int64(count), "{cause}: {t:?}");
     }
-    // A read-only transaction on one range is `singleShard`, as on a `refrouter` with one shard.
+    // A read-only transaction on one range is `singleShard`, as on the reference router with one
+    // shard.
     assert_eq!(n(&t, "commitTypes.singleShard.successful"), Value::Int64(2));
     assert_eq!(n(&t, "commitTypes.singleShard.initiated"), Value::Int64(2));
     assert_eq!(n(&t, "commitTypes.readOnly.successful"), Value::Int64(0));
@@ -890,9 +894,10 @@ fn server_status_counts_commits_and_aborts_by_cause() {
     assert!(matches!(n(&t, "totalRequestsTargeted"), Value::Int64(r) if r > 0), "{t:?}");
 }
 
-/// `maxConcurrentMultiDocumentTransactions` as a `refnode` 9.0.4 has it (008 FR-020, measured on
-/// 31-10-2026): 10 000 by default, 0 lifts the limit, below 0 is refused, and a transaction past
-/// it fails with 509 `TooManyOpenTransactions`, without a label, and does not start.
+/// `maxConcurrentMultiDocumentTransactions` as a reference replica set member 9.0.4 has it (008
+/// FR-020, measured on 31-10-2026): 10 000 by default, 0 lifts the limit, below 0 is refused, and a
+/// transaction past it fails with 509 `TooManyOpenTransactions`, without a label, and does not
+/// start.
 #[test]
 fn transactions_past_the_open_limit_are_refused() {
     let mut m = node();
@@ -913,7 +918,8 @@ fn transactions_past_the_open_limit_are_refused() {
     assert!(ok(&run(&mut m, DB, stmt(find(), 60, 1, true))));
     let limit = "cannot start a new multi-document transaction; there are already 1 open \
                  transactions, which meets or exceeds the limit of 1";
-    // A write answers as a refrouter does: `ok` with the error of the shard as its first write error.
+    // A write answers as the reference router does: `ok` with the error of the shard as its first
+    // write error.
     let r = run(&mut m, DB, stmt(insert(1), 61, 1, true));
     assert!(ok(&r), "{r:?}");
     assert_eq!(r.get("n"), Some(&Value::Int32(0)), "{r:?}");
@@ -941,7 +947,7 @@ fn transactions_past_the_open_limit_are_refused() {
     assert!(ok(&run(&mut m, DB, stmt(insert(3), 62, 1, true))));
 }
 
-/// Every answer inside a transaction carries `recoveryToken`, as through a `refrouter` 9.0.4
+/// Every answer inside a transaction carries `recoveryToken`, as through the reference router 9.0.4
 /// (measured on 31-10-2026): empty until the transaction writes, then the node's name as
 /// `config.shards` lists it, on errors too; nothing for a transaction that never started.
 #[test]
@@ -966,8 +972,8 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     // A commit of a transaction that never started gets none.
     let r = run(&mut m, "admin", end("commitTransaction", 71, 9));
     assert_eq!(token(&r), None, "{r:?}");
-    // A statement that fails with `ok: 0` gets none, after a write too: a `refrouter` 9.0.4 sends
-    // the shard's error as it is (measured on 03-11-2026 with 48 NamespaceExists and 2
+    // A statement that fails with `ok: 0` gets none, after a write too: the reference router 9.0.4
+    // sends the shard's error as it is (measured on 03-11-2026 with 48 NamespaceExists and 2
     // BadValue); the commit that then fails, as the router's answer, carries it.
     assert!(ok(&run(&mut m, DB, stmt(insert(5), 72, 1, true))));
     let bad = find().with("filter", doc(&[("$bad", Value::Int32(1))]));
@@ -978,8 +984,8 @@ fn answers_inside_a_transaction_carry_the_recovery_token() {
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     let shard = Value::Document(Document::new().with("recoveryShardId", shard_name(1)));
     assert_eq!(token(&r), Some(shard), "{r:?}");
-    // When the first statement fails on the shard, the commit answers as the `refrouter` router
-    // does, without a token; the abort gets the shard's answer with an empty token and its
+    // When the first statement fails on the shard, the commit answers as the reference router
+    // router does, without a token; the abort gets the shard's answer with an empty token and its
     // labels first (measured on 03-11-2026 with 48 NamespaceExists).
     let exists = || create("c");
     assert_eq!(code(&run(&mut m, DB, stmt(exists(), 73, 1, true))), Some(&Value::Int32(48)));
@@ -1034,7 +1040,7 @@ fn shard_doc() -> Value {
     Value::Document(Document::new().with("recoveryShardId", shard_name(1)))
 }
 
-/// A command with two `lsid` fields is refused before anything else, as a `refrouter` 9.0.4
+/// A command with two `lsid` fields is refused before anything else, as the reference router 9.0.4
 /// refuses it (measured on 03-11-2026).
 #[test]
 fn a_second_lsid_is_a_duplicate_field() {
@@ -1052,7 +1058,8 @@ fn a_second_lsid_is_a_duplicate_field() {
     }
 }
 
-/// How a session's transaction is named in RefDb's messages, for the session `lsid(n)`.
+/// How a session's transaction is named in the reference server's messages, for the session
+/// `lsid(n)`.
 fn session(n: u8) -> String {
     let h = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let id = [n; 16];
@@ -1067,14 +1074,14 @@ fn session(n: u8) -> String {
     format!("{uuid} - 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= -  - ")
 }
 
-/// The session fields of a command and a commit of a transaction the node has no record of, as
-/// a `refrouter` 9.0.4 answers them (measured on 01-11-2026 over the wire): a `txnNumber` without a
-/// session, `autocommit` without a `txnNumber`, a commit or an abort without a `txnNumber`, a
-/// `txnNumber` on a command that is no retryable write without `autocommit: false`, a commit
-/// outside `admin`, and a commit that would need its `recoveryToken`, which also leaves the
-/// transaction it names as the session's last.
+/// The session fields of a command and a commit of a transaction the node has no record of, as the
+/// reference router 9.0.4 answers them (measured on 01-11-2026 over the wire): a `txnNumber`
+/// without a session, `autocommit` without a `txnNumber`, a commit or an abort without a
+/// `txnNumber`, a `txnNumber` on a command that is no retryable write without `autocommit: false`,
+/// a commit outside `admin`, and a commit that would need its `recoveryToken`, which also leaves
+/// the transaction it names as the session's last.
 #[test]
-fn session_fields_and_unknown_commits_answer_as_on_a_refrouter() {
+fn session_fields_and_unknown_commits_answer_as_on_the_reference_router() {
     let mut m = node();
     let txn = |d: Document, n: i64| d.with("txnNumber", Value::Int64(n));
     let commit = || Document::new().with("commitTransaction", 1);
@@ -1160,16 +1167,15 @@ fn session_fields_and_unknown_commits_answer_as_on_a_refrouter() {
 }
 
 /// A commit of a transaction the node has no record of, with its `recoveryToken`, recovers the
-/// decision from the transaction's record, as a second `refrouter` 9.0.4 recovers it from the shard
-/// (measured on 01-11-2026 through two routers of one cluster): any node finds the record from the
-/// session and the number. Committed answers `ok`: a transaction that held its writes and
+/// decision from the transaction's record, as a second the reference router 9.0.4 recovers it from
+/// the shard (measured on 01-11-2026 through two routers of one cluster): any node finds the record
+/// from the session and the number. Committed answers `ok`: a transaction that held its writes and
 /// committed them in one phase left its decision in its range, where the recovery finds it (008
 /// FR-022). Aborted, and a running one, which the recovery aborts, answer `NoSuchTransaction`; so
 /// does a number the session never began, whose record the recovery leaves aborted. A transaction
 /// that held its writes left nothing before its commit, so its recovery reads as one never begun
-/// (DV-018). Each answer has an empty `recoveryToken`. A node `config.shards` does
-/// not list is not found, and a record that does not answer fails as a shard that cannot be
-/// reached.
+/// (DV-018). Each answer has an empty `recoveryToken`. A node `config.shards` does not list is not
+/// found, and a record that does not answer fails as a shard that cannot be reached.
 #[test]
 fn a_commit_recovers_its_decision_from_the_transactions_record() {
     let mut m = node();
@@ -1283,12 +1289,12 @@ fn a_statement_reaches_the_node_for_what_is_not_the_transactions() {
     m.shared = shared;
 }
 
-/// Which errors of a statement end its transaction, as a `refrouter` 9.0.4 decides it (measured on
-/// 01-11-2026): those it raises itself while it parses the command (field types, pipeline stage
-/// names) leave the transaction running; those the shard raises end it, and the commit, the abort
-/// or the next statement then answers that it was aborted.
+/// Which errors of a statement end its transaction, as the reference router 9.0.4 decides it
+/// (measured on 01-11-2026): those it raises itself while it parses the command (field types,
+/// pipeline stage names) leave the transaction running; those the shard raises end it, and the
+/// commit, the abort or the next statement then answers that it was aborted.
 #[test]
-fn statement_errors_end_the_transaction_as_on_a_refrouter() {
+fn statement_errors_end_the_transaction_as_on_the_reference_router() {
     let mut m = node();
     assert!(ok(&run(&mut m, DB, insert(77))));
     let index = || {
@@ -1330,11 +1336,11 @@ fn statement_errors_end_the_transaction_as_on_a_refrouter() {
     }
 }
 
-/// `configureFailPoint` inside a transaction answers as a `refrouter` 9.0.4 does (measured on
-/// 01-11-2026): as a command the router refuses in transactions when test commands are on, and
+/// `configureFailPoint` inside a transaction answers as the reference router 9.0.4 does (measured
+/// on 01-11-2026): as a command the router refuses in transactions when test commands are on, and
 /// as an unknown command when they are off.
 #[test]
-fn configure_fail_point_in_a_transaction_answers_as_on_a_refrouter() {
+fn configure_fail_point_in_a_transaction_answers_as_on_the_reference_router() {
     let mut m = node();
     let cfp = || Document::new().with("configureFailPoint", "failCommand").with("mode", "off");
     assert!(ok(&run(&mut m, DB, stmt(find(), 170, 1, true))));
@@ -1389,8 +1395,8 @@ fn transactions_wait_and_give_up_as_their_time_runs_out() {
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
 }
 
-/// What the session rules refuse before a transaction runs, as a `refrouter` 9.0.4 refuses it
-/// (measured on 01-11-2026): `startTransaction` without `autocommit`, and the router's own
+/// What the session rules refuse before a transaction runs, as the reference router 9.0.4 refuses
+/// it (measured on 01-11-2026): `startTransaction` without `autocommit`, and the router's own
 /// commands in a transaction; `killCursors` as a later statement runs.
 #[test]
 fn router_commands_and_later_kill_cursors_in_a_transaction() {
@@ -1486,11 +1492,11 @@ fn bad_index_on(coll: &str) -> Document {
     Document::new().with("createIndexes", coll).with("indexes", Value::Array(vec![spec.into()]))
 }
 
-/// What RefDb 9.0.4 answers in a transaction (measured on 01-11-2026): a second `create` of the
-/// collection it created is `NamespaceExists`, and a `createIndexes` that fails says nothing of a
-/// collection created, on a new name or on one the transaction created.
+/// What the reference server 9.0.4 answers in a transaction (measured on 01-11-2026): a second
+/// `create` of the collection it created is `NamespaceExists`, and a `createIndexes` that fails
+/// says nothing of a collection created, on a new name or on one the transaction created.
 #[test]
-fn a_failed_creation_in_a_transaction_answers_as_refdb() {
+fn a_failed_creation_in_a_transaction_answers_as_the_reference() {
     let mut m = node();
     assert!(ok(&run(&mut m, DB, stmt(create("k9"), 199, 1, true))));
     let r = run(&mut m, DB, stmt(create("k9"), 199, 1, false));
@@ -1568,8 +1574,8 @@ fn a_transaction_s_catalog_write_keeps_the_backend_contract() {
 }
 
 /// Each document a transaction writes keeps, next to its version, its transaction and its position
-/// in it, and the description of an update by operators (014 FR-002, FR-005, FR-009), as a
-/// `refrouter` 9.0.4 gives its events `lsid`, `txnNumber` and their order (measured on 01-11).
+/// in it, and the description of an update by operators (014 FR-002, FR-005, FR-009), as a the
+/// reference router 9.0.4 gives its events `lsid`, `txnNumber` and their order (measured on 01-11).
 #[test]
 fn a_transaction_leaves_its_session_and_order_next_to_each_document() {
     use teseladb_changestream::meta::ChangeMeta;
@@ -1598,10 +1604,10 @@ fn a_transaction_leaves_its_session_and_order_next_to_each_document() {
     }
 }
 
-/// A transaction that writes a document several times leaves one meta per write, with its type
-/// and the document it left, as a `refrouter` 9.0.4 gives one event per write (measured on 01-11:
-/// insert, update and replace of `_id: 1`, two updates of `_id: 0` and the deletion of `_id: 1`
-/// give six events in that order).
+/// A transaction that writes a document several times leaves one meta per write, with its type and
+/// the document it left, as the reference router 9.0.4 gives one event per write (measured on
+/// 01-11: insert, update and replace of `_id: 1`, two updates of `_id: 0` and the deletion of `_id:
+/// 1` give six events in that order).
 #[test]
 fn each_write_of_a_document_in_a_transaction_keeps_its_own_meta() {
     use teseladb_changestream::meta::ChangeMeta;
@@ -1667,8 +1673,8 @@ fn each_write_of_a_document_in_a_transaction_keeps_its_own_meta() {
     assert_eq!(got, want);
 }
 
-/// An update in a transaction that changes the shard key moves the document at the commit,
-/// and a multi-update that changes it fails (measured on a `refrouter` 9.0.4 on 02-11-2026; 018
+/// An update in a transaction that changes the shard key moves the document at the commit, and a
+/// multi-update that changes it fails (measured on the reference router 9.0.4 on 02-11-2026; 018
 /// FR-001).
 #[test]
 fn an_update_in_a_transaction_moves_its_document_to_its_new_shard_key() {
@@ -1701,9 +1707,9 @@ fn an_update_in_a_transaction_moves_its_document_to_its_new_shard_key() {
 }
 
 /// A transaction that writes a key twice gives a change stream both events, the second with the
-/// document the first left as its pre-image (014 FR-006; a `refrouter` 9.0.4 gives the `insert`
-/// and the `update` of the same transaction, the second with `{_id: 1}` before it, measured on
-/// 02-11).
+/// document the first left as its pre-image (014 FR-006; the reference router 9.0.4 gives the
+/// `insert` and the `update` of the same transaction, the second with `{_id: 1}` before it,
+/// measured on 02-11).
 #[test]
 fn a_change_stream_sees_each_write_of_a_key_in_a_transaction() {
     let mut m = node();
@@ -1751,9 +1757,9 @@ fn a_change_stream_sees_each_write_of_a_key_in_a_transaction() {
     assert_eq!(field(second, "fullDocumentBeforeChange._id"), &Value::Int32(1), "{second:?}");
 }
 
-/// The first statement of a transaction carries the transaction's `readConcern` whatever command
-/// it is, as the drivers send it: an `insert` with `snapshot` starts the transaction (RefDb
-/// checks the level against the transaction, not the command; 019 FR-009).
+/// The first statement of a transaction carries the transaction's `readConcern` whatever command it
+/// is, as the drivers send it: an `insert` with `snapshot` starts the transaction (the reference
+/// server checks the level against the transaction, not the command; 019 FR-009).
 #[test]
 fn a_first_write_statement_takes_the_transaction_read_concern() {
     let mut m = node();
@@ -1773,7 +1779,7 @@ fn a_first_write_statement_takes_the_transaction_read_concern() {
 }
 
 /// A commit with a `w` above the voters stays committed and answers `UnsatisfiableWriteConcern`
-/// as a `writeConcernError` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// as a `writeConcernError` (measured on the reference router 9.0.4 on 05-11-2026).
 #[test]
 fn a_commit_with_too_many_nodes_asked_answers_a_write_concern_error() {
     let mut m = node();
@@ -1799,7 +1805,8 @@ fn a_commit_with_too_many_nodes_asked_answers_a_write_concern_error() {
 }
 
 /// The drivers send the transaction's write concern with the abort too: it is taken, as with the
-/// commit (PyRef's `retryable-abort-errorLabels` against a `refrouter` 9.0.4).
+/// commit (the reference Python driver's `retryable-abort-errorLabels` against the reference router
+/// 9.0.4).
 #[test]
 fn an_abort_takes_the_write_concern_of_the_transaction() {
     let mut m = node();
@@ -1813,8 +1820,9 @@ fn an_abort_takes_the_write_concern_of_the_transaction() {
 }
 
 /// A higher number on the same session ends the transaction still in progress, as when a failed
-/// commit leaves it and the driver starts it again (PyRef's `commit-transienttransactionerror`
-/// against a `refrouter` 9.0.4): the new one writes the same document without a conflict.
+/// commit leaves it and the driver starts it again (the reference Python driver's
+/// `commit-transienttransactionerror` against the reference router 9.0.4): the new one writes the
+/// same document without a conflict.
 #[test]
 fn a_higher_number_ends_the_transaction_still_in_progress() {
     let mut m = node();

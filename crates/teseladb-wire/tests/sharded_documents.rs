@@ -1,6 +1,6 @@
 //! Documents of a collection with a shard key (018 FR-001, T004): each one keyed by its shard
 //! key and its `_id` (`enc(shard key) · enc(_id)`), with `_id` unique across the collection in
-//! an index of its own, as a `refrouter` 9.0.4 of one shard answered on 02-11-2026.
+//! an index of its own, as the reference router 9.0.4 of one shard answered on 02-11-2026.
 
 mod common;
 
@@ -247,7 +247,7 @@ fn found(m: &mut Mem) -> Vec<Value> {
 }
 
 /// A retryable write moves the document to the key of its new shard key values, and a retry
-/// answers from the first send (measured on a `refrouter` 9.0.4 on 02-11-2026).
+/// answers from the first send (measured on the reference router 9.0.4 on 02-11-2026).
 #[test]
 fn a_retryable_update_moves_its_document_to_its_new_shard_key() {
     let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5,"x":1},{"_id":2,"a":7}]"#);
@@ -284,8 +284,9 @@ fn a_retryable_update_moves_its_document_to_its_new_shard_key() {
     assert_eq!(batch(&r).len(), 2);
 }
 
-/// A multi-update cannot change the shard key, and a retryable write cannot be a multi-update
-/// or a delete of many (measured on a `refrouter` and a `refnode` 9.0.4 on 02-11-2026).
+/// A multi-update cannot change the shard key, and a retryable write cannot be a multi-update or a
+/// delete of many (measured on the reference router and a reference replica set member 9.0.4 on
+/// 02-11-2026).
 #[test]
 fn multi_writes_and_the_shard_key() {
     let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5}]"#);
@@ -317,8 +318,9 @@ fn multi_writes_and_the_shard_key() {
     assert_eq!(found(&mut m), vec![Value::Document(json(r#"{"_id":1,"a":5,"y":1}"#))]);
 }
 
-/// A moved document gives one `update` event keyed by the document before the change, as a
-/// `refrouter` 9.0.4 of one shard gives it (measured on 02-11-2026); a replacement, a `replace`.
+/// A moved document gives one `update` event keyed by the document before the change, as a the
+/// reference router 9.0.4 of one shard gives it (measured on 02-11-2026); a replacement, a
+/// `replace`.
 #[test]
 fn a_moved_document_gives_one_event_keyed_by_its_old_values() {
     let mut m = sharded(r#"{"a":1}"#, r#"[{"_id":1,"a":5,"x":1},{"_id":2,"a":7}]"#);

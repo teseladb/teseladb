@@ -1,6 +1,6 @@
-//! `retriedStmtIds` (FR-017, 006 audit pass 1): a retryable write sent again with the same
-//! `lsid` and `txnNumber` gets the stored result of each statement, and the reply lists those
-//! statements as a `refrouter` 9.0.4 does (measured on 30-10-2026): `insert`, `update` and `delete`
+//! `retriedStmtIds` (FR-017, 006 audit pass 1): a retryable write sent again with the same `lsid`
+//! and `txnNumber` gets the stored result of each statement, and the reply lists those statements
+//! as the reference router 9.0.4 does (measured on 30-10-2026): `insert`, `update` and `delete`
 //! when there are any, `bulkWrite` always.
 
 mod common;

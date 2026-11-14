@@ -1,5 +1,5 @@
-//! 018 T020: `setAllowMigrations` and `mergeAllChunksOnShard` (FR-017) over the in-memory node
-//! of `common`, with the replies and messages of a `refrouter` 9.0.4 of two shards (measured on
+//! 018 T020: `setAllowMigrations` and `mergeAllChunksOnShard` (FR-017) over the in-memory node of
+//! `common`, with the replies and messages of the reference router 9.0.4 of two shards (measured on
 //! 02-11-2026, `t4.js` and `t13.js` in the lane's notes).
 
 mod common;
@@ -10,8 +10,8 @@ use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::generic::parse;
 
-/// `minSnapshotHistoryWindowInSeconds` of the shards of a `refrouter` 9.0.4 by default (measured
-/// 03-11-2026), in milliseconds.
+/// `minSnapshotHistoryWindowInSeconds` of the shards of the reference router 9.0.4 by default
+/// (measured 03-11-2026), in milliseconds.
 const WINDOW_MS: u64 = 300_000;
 
 fn json(text: &str) -> Document {
@@ -63,7 +63,7 @@ fn entry(m: &mut Mem) -> Document {
 }
 
 #[test]
-fn set_allow_migrations_fails_as_on_a_refrouter() {
+fn set_allow_migrations_fails_as_on_the_reference_router() {
     let mut m = cluster();
     let cases: [(&str, &str, i32, &str); 7] = [
         (
@@ -138,7 +138,7 @@ fn blocked_migrations_refuse_moves_until_allowed() {
 }
 
 #[test]
-fn merge_all_chunks_on_shard_fails_as_on_a_refrouter() {
+fn merge_all_chunks_on_shard_fails_as_on_the_reference_router() {
     let mut m = cluster();
     let cases: [(&str, &str, i32, &str); 8] = [
         (
@@ -229,7 +229,7 @@ fn merge_all_chunks_on_shard_joins_the_neighbours_of_the_shard() {
 
 #[test]
 fn merge_all_chunks_on_shard_leaves_out_what_was_split_or_moved_within_the_window() {
-    // A `refrouter` 9.0.4 does not merge a chunk split or moved in the last
+    // The reference router 9.0.4 does not merge a chunk split or moved in the last
     // `minSnapshotHistoryWindowInSeconds` (300 s by default): fresh splits stay apart at 130 s
     // and merge after 25 minutes (measured 02/03-11-2026, `g1.js`-`g4.js`, `w1.js`, `w2.js`).
     let mut m = cluster();

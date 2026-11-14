@@ -1,5 +1,5 @@
 //! `collectionUUID` of the commands that take it and the words of the errors raised while an
-//! update runs, as a `refrouter` 9.0.4 gives them (measured).
+//! update runs, as the reference router 9.0.4 gives them (measured).
 
 mod common;
 

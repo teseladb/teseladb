@@ -1,5 +1,6 @@
-//! The commands a `refrouter` or `refnode` 9.0.4 runs from an OP_QUERY (measured on 05-11-2026):
-//! the handshake's (`hello`, `isMaster`, `ismaster`), `buildInfo`/`buildinfo` and the
+//! The commands the reference router or a reference replica set member 9.0.4 runs from an
+//! OP_QUERY (measured on 05-11-2026): the handshake's (`hello`, `isMaster`, `ismaster`),
+//! `buildInfo`/`buildinfo` and the
 //! authentication ones (`saslStart`, `saslContinue`, `authenticate`); any other one fails with
 //! 352. The .NET driver authenticates through OP_QUERY, because its connection has no description
 //! until it has logged in: TeselaDB refused its `saslContinue` and every test of its runner failed

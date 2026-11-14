@@ -1,7 +1,7 @@
 //! 014 T017: the catalog events of `$changeStream` over the in-memory node of `common` (FR-002,
 //! FR-014): `create`, `createIndexes`, `modify`, `dropIndexes`, `rename`, `drop`,
 //! `dropDatabase` and `invalidate`, merged with the documents' events by their mark, as a
-//! `refrouter` 9.0.4 gives them (measured on 01-11).
+//! the reference router 9.0.4 gives them (measured on 01-11).
 
 mod common;
 
@@ -60,7 +60,7 @@ fn types(events: &[Document]) -> Vec<String> {
 }
 
 /// The batch with the `invalidate` keeps the cursor open; the next `getMore` closes it with an
-/// empty batch (measured on a `refrouter` 9.0.4 on 02-11).
+/// empty batch (measured on the reference router 9.0.4 on 02-11).
 fn closes_next(m: &mut Mem, db: &str, r: &Document, id: i64, coll: &str) {
     assert_ne!(id_of(r), 0, "{r:?}");
     let last = get_more(m, db, id, coll);
@@ -362,8 +362,8 @@ fn a_database_stream_follows_a_renamed_collection_and_leaves_out_other_databases
     assert_eq!(field(&got[2], "ns.coll"), &Value::from("r"));
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: a time-series collection's `create` and `drop` show
-/// no event, a `collMod` that changes nothing is a `modify` with an empty description, and the
+/// Measured on the reference router 9.0.4 on 02-11: a time-series collection's `create` and `drop`
+/// show no event, a `collMod` that changes nothing is a `modify` with an empty description, and the
 /// catalog changes of another database are not a collection stream's.
 #[test]
 fn time_series_catalog_changes_show_nothing_and_an_empty_coll_mod_is_a_modify() {
@@ -385,7 +385,7 @@ fn time_series_catalog_changes_show_nothing_and_an_empty_coll_mod_is_a_modify() 
     assert!(batch(&get_more(&mut m, DB, coll_stream, "c")).is_empty());
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: `shardCollection` of a collection is a
+/// Measured on the reference router 9.0.4 on 02-11: `shardCollection` of a collection is a
 /// `shardCollection` event with the key and the options, seen with expanded events only.
 #[test]
 fn sharding_a_collection_is_a_shard_collection_event() {

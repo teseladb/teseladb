@@ -1,6 +1,7 @@
 //! 007 T040 (FR-027): `setFeatureCompatibilityVersion` and `getParameter` of
-//! `featureCompatibilityVersion`, with the answers and errors of RefDb 9.0.4 (measured on
-//! 01-11-2026: the command on a `refrouter`, the parameter on its shard, since a `refrouter` has none).
+//! `featureCompatibilityVersion`, with the answers and errors of the reference server 9.0.4
+//! (measured on 01-11-2026: the command on the reference router, the parameter on its shard, since
+//! the reference router has none).
 
 mod common;
 
@@ -21,7 +22,7 @@ fn version(m: &mut Mem) -> Value {
 }
 
 #[test]
-fn get_parameter_has_no_feature_compatibility_version_as_on_a_refrouter() {
+fn get_parameter_has_no_feature_compatibility_version_as_on_the_reference_router() {
     let mut m = Mem::new();
     let r = m.run(
         "admin",
@@ -40,7 +41,7 @@ fn err(r: &Document) -> (Option<&Value>, Option<&Value>) {
 const YES: Option<Value> = Some(Value::Boolean(true));
 
 #[test]
-fn the_version_starts_at_the_latest_and_moves_as_refdb_allows() {
+fn the_version_starts_at_the_latest_and_moves_as_the_reference_allows() {
     let mut m = Mem::new();
     assert_eq!(version(&mut m), Value::from("9.0"));
     let r = m.run("admin", set(Value::from("8.0"), YES));
@@ -68,7 +69,8 @@ fn set_feature_compatibility_version_checks_its_fields() {
     let mut m = Mem::new();
     let invalid = |v: &str| {
         format!(
-            "Invalid feature compatibility version value '{v}'. Expected one of the following versions: ''9.0', '8.3', '8.0'. See https://docs.refdb.com/master/release-notes/8.0-compatibility/#feature-compatibility."
+            "Invalid feature compatibility version value '{v}'. Expected one of the following versions: ''9.0', '8.3', '8.0'. See {}8.0-compatibility/#feature-compatibility.",
+            teseladb_names::DOC_FCV_RELEASE_NOTES
         )
     };
     let cases = [
@@ -111,11 +113,12 @@ fn a_version_above_what_a_node_runs_is_refused() {
     assert_eq!(version(&mut m), Value::from("8.0"));
 }
 
-/// A downgrade finds the collections whose options the target version lacks, as RefDb r9.0.4
-/// does in `userCollectionsUassertsForDowngrade` (`legacy_fcv_step.cpp`): `validationAction:
-/// "errorAndLog"` exists from 8.1 and the level `constraint` and `prepareConstraintValidationLevel`
-/// from 9.0. It refuses with 332 `CannotDowngrade` naming the first such collection, after the
-/// confirmation, and leaves the version (measured on the native `refrouter` 9.0.4 on 09-11-2026).
+/// A downgrade finds the collections whose options the target version lacks, as the reference
+/// server r9.0.4 does in `userCollectionsUassertsForDowngrade` (`legacy_fcv_step.cpp`):
+/// `validationAction: "errorAndLog"` exists from 8.1 and the level `constraint` and
+/// `prepareConstraintValidationLevel` from 9.0. It refuses with 332 `CannotDowngrade` naming the
+/// first such collection, after the confirmation, and leaves the version (measured on the native
+/// the reference router 9.0.4 on 09-11-2026).
 #[test]
 fn a_downgrade_refuses_collections_with_options_of_newer_versions() {
     let mut m = Mem::new();

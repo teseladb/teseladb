@@ -1,6 +1,6 @@
-//! `min` and `max` of `find` (006 FR-008) against what a `refrouter` 9.0.4 answered on 05-11-2026
-//! (scenario `find-min-max`): five documents `{_id: i, x: 10 i, y: "a" or "b"}` and the indexes
-//! `x_1`, `x_1_y_1` and `x_-1`.
+//! `min` and `max` of `find` (006 FR-008) against what the reference router 9.0.4 answered on
+//! 05-11-2026 (scenario `find-min-max`): five documents `{_id: i, x: 10 i, y: "a" or "b"}` and the
+//! indexes `x_1`, `x_1_y_1` and `x_-1`.
 
 mod common;
 

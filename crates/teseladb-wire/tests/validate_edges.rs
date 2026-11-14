@@ -1,6 +1,7 @@
-//! `validate` beyond the replies of `tests/validate/*.out` (010 FR-017), measured on a `refnode`
-//! 9.0.4 replica set on 02-11-2026: `background: true` alone and with `metadata`, a descending
-//! multikey index and a wildcard one, a capped collection and a time series collection.
+//! `validate` beyond the replies of `tests/validate/*.out` (010 FR-017), measured on a reference
+//! replica set member 9.0.4 replica set on 02-11-2026: `background: true` alone and with
+//! `metadata`, a descending multikey index and a wildcard one, a capped collection and a time
+//! series collection.
 
 mod common;
 
@@ -65,8 +66,9 @@ fn metadata_refuses_background() {
     assert!(r.get("readTimestamp").is_none(), "{r:?}");
 }
 
-/// A capped collection validates with its `_id` index: one key per document, and no entry
-/// reported missing or extra (its `_id_` entries are written unique, as a `refnode` keeps them).
+/// A capped collection validates with its `_id` index: one key per document, and no entry reported
+/// missing or extra (its `_id_` entries are written unique, as a reference replica set member keeps
+/// them).
 #[test]
 fn capped_collection_validates() {
     let mut m = Mem::new();
@@ -92,7 +94,8 @@ fn time_series_validates_without_id_index() {
 }
 
 /// A time series is validated through its buckets with their index and no `_id_`; a clustered
-/// collection has no index to check (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// collection has no index to check (measured on a reference replica set member 9.0.4 on
+/// 03-11-2026).
 #[test]
 fn time_series_and_clustered_collections_validate_without_an_id_index() {
     let mut m = Mem::new();

@@ -1,6 +1,6 @@
-//! `createSearchIndexes`, `listSearchIndexes`, `updateSearchIndex` and `dropSearchIndex`
-//! (011 FR-008, T038): the answers and errors of a 9.0.4 replica set with `refsearch` 1.70.6
-//! (measured 01-11-2026).
+//! `createSearchIndexes`, `listSearchIndexes`, `updateSearchIndex` and `dropSearchIndex` (011
+//! FR-008, T038): the answers and errors of a 9.0.4 replica set with the reference search server
+//! 1.70.6 (measured 01-11-2026).
 
 mod common;
 
@@ -136,7 +136,7 @@ fn a_create_with_one_wrong_index_creates_none() {
 }
 
 #[test]
-fn create_refuses_what_refsearch_refuses() {
+fn create_refuses_what_the_reference_search_refuses() {
     let mut m = with_collection();
     let cases: Vec<(Document, i32, &str)> = vec![
         (
@@ -508,7 +508,7 @@ fn insert(m: &mut Mem, docs: Vec<Document>) {
 /// The measured run of 01-11-2026: documents `{_id: 1, t: "hola mundo"}` and
 /// `{_id: 2, t: "adios mundo cruel"}`, index `default` `{mappings: {dynamic: true}}`.
 #[test]
-fn search_serves_the_index_with_refsearch_scores_and_follows_the_writes() {
+fn search_serves_the_index_with_the_reference_search_scores_and_follows_the_writes() {
     let mut m = with_collection();
     insert(&mut m, vec![doc(&[("_id", 2.into()), ("t", "adios mundo cruel".into())])]);
     // Before the index exists a query finds nothing and `$searchMeta` counts no document.
@@ -520,7 +520,8 @@ fn search_serves_the_index_with_refsearch_scores_and_follows_the_writes() {
     let got = batch(&agg(&mut m, "c".into(), pipeline.clone()));
     let want = |id: i32, s: f64| doc(&[("_id", id.into()), ("s", Value::Double(s))]);
     assert_eq!(got, vec![want(1, 0.09025818854570389), want(2, 0.07660569995641708)]);
-    // A write is seen by the next query (FR-020), with the scores `refsearch` gives once it has it.
+    // A write is seen by the next query (FR-020), with the scores the reference search server gives
+    // once it has it.
     insert(&mut m, vec![doc(&[("_id", 3.into()), ("t", "mundo mundo".into())])]);
     let got = batch(&agg(&mut m, "c".into(), pipeline.clone()));
     assert_eq!(
@@ -590,7 +591,7 @@ fn vector_query(index: &str, v: &[f64]) -> Document {
 /// The measured run of 01-11-2026 (`lane3g/v2.js`): a `vectorSearch` index `ve` with `v`
 /// (3 dimensions, `euclidean`) and the filter `g`.
 #[test]
-fn vector_search_serves_the_index_with_refsearch_scores() {
+fn vector_search_serves_the_index_with_the_reference_search_scores() {
     let mut m = with_collection();
     let row =
         |id: i32, v: &[f64], g: &str| doc(&[("_id", id.into()), ("v", floats(v)), ("g", g.into())]);
@@ -635,7 +636,8 @@ fn vector_search_serves_the_index_with_refsearch_scores() {
         run(&mut m, filtered),
         vec![want(14, 0.40816324949264526), want(12, 0.37735846638679504)]
     );
-    // `refsearch`'s errors carry the executor's prefix; `refnode`'s come first and do not.
+    // The reference search server's errors carry the executor's prefix; a reference replica set
+    // member's come first and do not.
     let unfiltered = q.clone().with("filter", Document::new().with("z", 1));
     let r = agg(&mut m, "c".into(), vec![Document::new().with("$vectorSearch", unfiltered)]);
     assert_eq!(error(&r), (8, format!("{EXECUTOR}Path 'z' needs to be indexed as filter")));
@@ -745,7 +747,7 @@ fn indexes_on_views_follow_the_view_stages() {
     view(&mut m, "vl", "c", vec![Document::new().with("$limit", 5)]);
     view(&mut m, "vm", "c", vec![Document::new().with("$match", Document::new().with("n", 1))]);
     let r = create(&mut m, "vl", vec![index("default", dynamic(true))]);
-    let incompatible = "Cannot perform a search operation as the view definition is incompatible with RefCloud: ";
+    let incompatible = teseladb_names::ERR_SEARCH_VIEW_INCOMPATIBLE;
     assert_eq!(error(&r), (10_623_000, format!("{incompatible}$limit is not allowed")));
     let r = create(&mut m, "vm", vec![index("default", dynamic(true))]);
     assert_eq!(
@@ -1192,8 +1194,9 @@ fn sort_and_sequence_tokens_are_served() {
     assert_eq!(ids, vec![Value::from(2), 1.into()]);
 }
 
-/// `scoreDetails`: the explanation as metadata, and the type checks of `refnode` (`$search`) and
-/// `refsearch` (`$searchMeta`), measured on 9.0.4 (011 T025).
+/// `scoreDetails`: the explanation as metadata, and the type checks of the reference replica set
+/// member (`$search`) and the reference search server (`$searchMeta`), measured on 9.0.4 (011
+/// T025).
 #[test]
 fn score_details_are_served_and_checked() {
     let mut m = with_collection();
@@ -1312,9 +1315,9 @@ fn many_changed_documents_write_the_index_file() {
     assert!(store.files.lock().unwrap().contains_key(&id));
 }
 
-/// A `vectorSearch` index made on a view serves that view and its collection (as it stores
-/// them), and nothing through another view of the collection (measured 03-11-2026 on `refsearch`
-/// 1.70.6, `scratchpad/lane3s/m95.js` and `m96.js`).
+/// A `vectorSearch` index made on a view serves that view and its collection (as it stores them),
+/// and nothing through another view of the collection (measured 03-11-2026 on the reference search
+/// server 1.70.6, `scratchpad/lane3s/m95.js` and `m96.js`).
 #[test]
 fn a_vector_index_on_a_view_serves_its_view_and_collection_only() {
     let mut m = with_collection();

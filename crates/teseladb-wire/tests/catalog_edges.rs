@@ -1,6 +1,6 @@
-//! Catalog commands at the edges a `refrouter` 9.0.4 refuses or lists (001 FR-006, 007 FR-017):
-//! renames into `config`, a `dropTarget` UUID of another binary subtype, a `create` that asks for
-//! other options than the collection has, and the filter of `listCollections` on `config`.
+//! Catalog commands at the edges the reference router 9.0.4 refuses or lists (001 FR-006, 007
+//! FR-017): renames into `config`, a `dropTarget` UUID of another binary subtype, a `create` that
+//! asks for other options than the collection has, and the filter of `listCollections` on `config`.
 
 mod common;
 
@@ -85,7 +85,7 @@ fn named(name: &str) -> Value {
 }
 
 /// The filter of `listCollections` on `local` and on the generated collections of `admin`
-/// (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn list_collections_filters_local_and_the_generated_collections_of_admin() {
     let mut m = Mem::new();
@@ -97,8 +97,9 @@ fn list_collections_filters_local_and_the_generated_collections_of_admin() {
     assert_eq!(listed(&mut m, "admin", r#"{"name":"system.version"}"#), [named("system.version")]);
 }
 
-/// `validationLevel: "constraint"` on a collection with no validator, then again (measured on a
-/// `refnode` 9.0.4 on 03-11-2026): both succeed, the options show the level and the action.
+/// `validationLevel: "constraint"` on a collection with no validator, then again (measured on a the
+/// reference replica set member 9.0.4 on 03-11-2026): both succeed, the options show the level and
+/// the action.
 #[test]
 fn constraint_without_a_validator_and_twice() {
     let mut m = Mem::new();
@@ -120,7 +121,7 @@ fn constraint_without_a_validator_and_twice() {
 }
 
 /// A collection name with a null character is refused by `create`, `insert` and
-/// `renameCollection` (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// `renameCollection` (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn namespaces_with_a_null_character_are_refused() {
     let mut m = Mem::new();

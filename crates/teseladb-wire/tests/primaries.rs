@@ -1,6 +1,6 @@
 //! 018 T008: `movePrimary` and `enableSharding`'s `primaryShard` (FR-005) over the in-memory node
-//! of `common`, with the messages and order of the checks of a `refrouter` 9.0.4 of two shards
-//! (measured on 02-11-2026): the primary is a Group 0 setting.
+//! of `common`, with the messages and order of the checks of the reference router 9.0.4 of two
+//! shards (measured on 02-11-2026): the primary is a Group 0 setting.
 
 mod common;
 
@@ -57,7 +57,7 @@ fn move_primary_records_the_new_primary_with_a_new_version() {
 }
 
 #[test]
-fn move_primary_refuses_what_a_refrouter_refuses() {
+fn move_primary_refuses_what_the_reference_router_refuses() {
     let mut m = cluster();
     ok(&admin(&mut m, r#"{"enableSharding":"newdb"}"#));
     fails(
@@ -137,10 +137,10 @@ fn enable_sharding_takes_a_primary_shard() {
     assert_eq!(Primary::decode(&p.encode()), Some(p));
 }
 
-/// A cluster of one shard moves no data: a `refrouter` 9.0.4 refuses `movePrimary` with 20 after the
-/// checks of the database and before it looks for the target shard (`assertDataMovementAllowed`
-/// of `shardsvr_move_primary_command.cpp`, r9.0.4; measured on the native `refrouter` of one shard on
-/// 09-11-2026, scenario `sharding-moves`).
+/// A cluster of one shard moves no data: the reference router 9.0.4 refuses `movePrimary` with 20
+/// after the checks of the database and before it looks for the target shard
+/// (`assertDataMovementAllowed` of `shardsvr_move_primary_command.cpp`, r9.0.4; measured on the
+/// native the reference router of one shard on 09-11-2026, scenario `sharding-moves`).
 #[test]
 fn move_primary_needs_a_second_shard() {
     let mut m = Mem::new();
@@ -159,13 +159,13 @@ fn move_primary_needs_a_second_shard() {
     );
 }
 
-/// `untrackUnshardedCollection` and `resetPlacementHistory` as a `refrouter` 9.0.4 answers them
-/// (measured on the native `refrouter` on 09-11-2026, scenario `sharding-moves`): the first forgets
-/// the tracking of a collection without shard key, accepts one it does not track or that does not
-/// exist, refuses a sharded one; the second has no log of placements to reset here. Both take
-/// fields they do not know and run only against `admin`.
+/// `untrackUnshardedCollection` and `resetPlacementHistory` as the reference router 9.0.4 answers
+/// them (measured on the native the reference router on 09-11-2026, scenario `sharding-moves`): the
+/// first forgets the tracking of a collection without shard key, accepts one it does not track or
+/// that does not exist, refuses a sharded one; the second has no log of placements to reset here.
+/// Both take fields they do not know and run only against `admin`.
 #[test]
-fn untrack_and_reset_placement_history_answer_as_a_refrouter() {
+fn untrack_and_reset_placement_history_answer_as_the_reference_router() {
     let mut m = cluster();
     ok(&m.run("u", json(r#"{"insert":"c","documents":[{"a":1}]}"#)));
     ok(&m.run("u", json(r#"{"insert":"k","documents":[{"a":1}]}"#)));

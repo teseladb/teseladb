@@ -1,7 +1,7 @@
 //! The replica set presentation over the in-memory node of `common` (018 FR-007, FR-008, T010,
-//! T016): `topologyPresentation`, the `replSet*` commands, `local.system.replset` and what a
-//! member refuses, with the replies of a three-member replica set of RefDb 9.0.4 (measured on
-//! 02-11-2026).
+//! T016): `topologyPresentation`, the `replSet*` commands, `local.system.replset` and what a member
+//! refuses, with the replies of a three-member replica set of the reference server 9.0.4 (measured
+//! on 02-11-2026).
 
 mod common;
 
@@ -53,8 +53,8 @@ fn admin(m: &mut Mem, cmd: Document) -> Document {
     m.run("admin", d)
 }
 
-/// The node answers as a `refrouter` until the presentation changes; then `replSetGetConfig` and
-/// `local.system.replset` give the configuration over the cluster's nodes.
+/// The node answers as the reference router until the presentation changes; then `replSetGetConfig`
+/// and `local.system.replset` give the configuration over the cluster's nodes.
 #[test]
 fn configuration_over_the_nodes() {
     let mut m = node();
@@ -95,7 +95,7 @@ fn status() {
     assert_eq!(field(&r, "members.1.stateStr"), &Value::from("PRIMARY"));
 }
 
-/// The commands of a secondary and of the primary, as RefDb 9.0.4 answers them.
+/// The commands of a secondary and of the primary, as the reference server 9.0.4 answers them.
 #[test]
 fn member_commands() {
     let mut m = node();
@@ -162,7 +162,7 @@ fn reconfig(m: &mut Mem, id: &str, version: i32, second: Document) -> Document {
     admin(m, Document::new().with("replSetReconfig", conf))
 }
 
-/// `replSetReconfig` with the rules and messages of RefDb 9.0.4.
+/// `replSetReconfig` with the rules and messages of the reference server 9.0.4.
 #[test]
 fn reconfig_rules() {
     let mut m = node();
@@ -314,7 +314,8 @@ fn a_member_answers_as_one() {
     assert_eq!(r.get("primary"), Some(&Value::from(N2)));
     assert_eq!(r.get("me"), Some(&Value::from(N1)));
     assert!(r.get("msg").is_none());
-    // On the primary, a config server's command is refused as on a `refnode` that is not one.
+    // On the primary, a config server's command is refused as on a reference replica set member
+    // that is not one.
     replica(&mut m, N1);
     let (set, _) = replica_set(&mut m).expect("read").expect("a set");
     let me = set.member(N1).expect("member");
@@ -350,16 +351,17 @@ fn config_names(m: &mut Mem) -> Vec<String> {
     }
 }
 
-/// A member of a replica set has no `config.changelog`, `config.refrouter` nor `config.settings`
-/// (measured on a replica set of `ref:9.0.4`, 02-11-2026): `refdump` of the whole member
-/// does not copy them, and `refrestore` into a `refnode` does not meet the validator of
-/// `config.settings`, which a `refnode` refuses on a collection of `config` (T013).
+/// A member of a replica set has no `config.changelog`, `config.the reference router` nor
+/// `config.settings` (measured on a replica set of the reference server 9.0.4, 02-11-2026): the
+/// reference dump tool of the whole member does not copy them, and the reference restore tool into
+/// a reference replica set member does not meet the validator of `config.settings`, which a
+/// reference replica set member refuses on a collection of `config` (T013).
 #[test]
 fn config_lists_what_a_member_has() {
     let mut m = node();
-    let refrouter = config_names(&mut m);
+    let router = config_names(&mut m);
     for name in ["changelog", teseladb_names::ROUTER, "settings"] {
-        assert!(refrouter.iter().any(|n| n == name), "{refrouter:?}");
+        assert!(router.iter().any(|n| n == name), "{router:?}");
     }
     replica(&mut m, N2);
     assert_eq!(
@@ -368,10 +370,11 @@ fn config_lists_what_a_member_has() {
     );
 }
 
-/// The collections of `config` that show the cluster are empty on a member and a member drops
-/// them (measured on a replica set of `ref:9.0.4`, 02-11-2026): `refdump` copies nothing of
-/// the cluster's topology into a `refnode` and `refrestore --drop` of a member's dump into
-/// TeselaDB goes through (T013), which drops and creates them again.
+/// The collections of `config` that show the cluster are empty on a member and a member drops them
+/// (measured on a replica set of the reference server 9.0.4, 02-11-2026): the reference dump tool
+/// copies nothing of the cluster's topology into a reference replica set member and the reference
+/// restore tool --drop` of a member's dump into TeselaDB goes through (T013), which drops and
+/// creates them again.
 #[test]
 fn config_of_a_member_is_empty_and_droppable() {
     let mut m = node();
@@ -405,9 +408,10 @@ fn status_of(m: &mut Mem) -> Document {
     admin(m, Document::new().with("replSetGetStatus", 1))
 }
 
-/// `replSetMaintenance` takes this secondary in and out of maintenance mode by levels, as on
-/// RefDb 9.0.4 (measured on 02-11-2026, `f1.js`): `RECOVERING` in `replSetGetStatus` while it
-/// is in, any value but `false`, 0 or null enters, and leaving it past the last level is 96.
+/// `replSetMaintenance` takes this secondary in and out of maintenance mode by levels, as on the
+/// reference server 9.0.4 (measured on 02-11-2026, `f1.js`): `RECOVERING` in `replSetGetStatus`
+/// while it is in, any value but `false`, 0 or null enters, and leaving it past the last level is
+/// 96.
 #[test]
 fn maintenance_mode_is_recovering() {
     let mut m = node();
@@ -429,8 +433,8 @@ fn maintenance_mode_is_recovering() {
 }
 
 /// `replSetFreeze` keeps this secondary from being designated for that many seconds, and the
-/// primary that steps down may not come back for `stepDownSecs`; the answers are RefDb
-/// 9.0.4's (`f1.js`, `f2.js`).
+/// primary that steps down may not come back for `stepDownSecs`; the answers are the reference
+/// server 9.0.4's (`f1.js`, `f2.js`).
 #[test]
 fn freeze_holds_a_member_back() {
     let mut m = node();
@@ -464,7 +468,7 @@ fn freeze_holds_a_member_back() {
 }
 
 /// The status of the primary carries its election (the designation) and that of a secondary its
-/// sync source and its vote, with the fields and order of RefDb 9.0.4 (`s2.js`).
+/// sync source and its vote, with the fields and order of the reference server 9.0.4 (`s2.js`).
 #[test]
 fn status_with_the_election() {
     let mut m = node();
@@ -549,8 +553,8 @@ fn status_with_the_election() {
     assert_eq!(me.frozen_until_ms, m.now + 10_000);
 }
 
-/// `replSetSyncFrom` answers as RefDb 9.0.4 for a host outside the set and a value that is not
-/// one (`f1.js`).
+/// `replSetSyncFrom` answers as the reference server 9.0.4 for a host outside the set and a value
+/// that is not one (`f1.js`).
 #[test]
 fn sync_from_refusals() {
     let mut m = node();
@@ -568,13 +572,13 @@ fn sync_from_refusals() {
 fn replica_set_port_parameter() {
     use teseladb_wire::commands::presentation::{port_host, stored};
     let mut m = node();
-    let refrouter = |port: Value| {
+    let router = |port: Value| {
         Document::new()
             .with("mode", teseladb_names::ROUTER)
             .with("setName", "rs0")
             .with("replicaSetPort", port)
     };
-    let r = present(&mut m, refrouter(Value::Int32(27100)));
+    let r = present(&mut m, router(Value::Int32(27100)));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     let p = stored(&mut m).expect("stored");
     assert_eq!(p.replica_set_port, Some(27100));
@@ -588,13 +592,13 @@ fn replica_set_port_parameter() {
     let p = stored(&mut m).expect("stored");
     assert_eq!(p.replica_set_port, Some(27100));
     assert_eq!(p.on_port(&hosts).expect("set").primary(), Some(port_host(N2, 27100).as_str()));
-    let r = present(&mut m, refrouter(Value::Int32(0)));
+    let r = present(&mut m, router(Value::Int32(0)));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
     assert_eq!(stored(&mut m).expect("stored").replica_set_port, None);
     // Refusals.
-    let r = present(&mut m, refrouter(Value::Int32(70_000)));
+    let r = present(&mut m, router(Value::Int32(70_000)));
     assert_eq!(code(&r).0, 2, "{r:?}");
-    let r = present(&mut m, refrouter(Value::from("x")));
+    let r = present(&mut m, router(Value::from("x")));
     assert_eq!(code(&r).0, 14, "{r:?}");
     let r = present(
         &mut m,
@@ -610,7 +614,8 @@ fn replica_set_port_parameter() {
 
 /// The primary's replies to `insert`, `update` and `delete` carry `electionId` and `opTime` after
 /// `n`, and `update` gives `writeErrors`, `upserted` and `nModified` after them, in a member's
-/// order (measured on a replica set of `ref:9.0.4`, 03-11-2026); a `refrouter` has neither.
+/// order (measured on a replica set of the reference server 9.0.4, 03-11-2026); the reference
+/// router has neither.
 #[test]
 fn a_primary_write_reply_has_its_election_and_op_time() {
     let mut m = node();
@@ -656,8 +661,9 @@ fn a_primary_write_reply_has_its_election_and_op_time() {
     assert!(r.get("electionId").is_none() && r.get("opTime").is_none(), "{r:?}");
 }
 
-/// A member's answers inside a transaction carry no `recoveryToken`, which only a `refrouter`
-/// adds (measured on a replica set of `ref:9.0.4`, 03-11-2026, in `txn-lifetime`).
+/// A member's answers inside a transaction carry no `recoveryToken`, which only the reference
+/// router adds (measured on a replica set of the reference server 9.0.4, 03-11-2026, in
+/// `txn-lifetime`).
 #[test]
 fn a_member_answers_a_transaction_without_a_recovery_token() {
     let mut m = node();
@@ -690,11 +696,11 @@ fn a_member_answers_a_transaction_without_a_recovery_token() {
     assert!(r.get("recoveryToken").is_none(), "an error too: {r:?}");
 }
 
-/// A member's answers to a transaction it does not run, as a replica set of `ref:9.0.4` gives
-/// them (measured on 03-11-2026): a start past `maxConcurrentMultiDocumentTransactions` leaves the
-/// session as it was, so the number can start again later; `NoSuchTransaction` names the number
-/// asked and the session's active one, or says that the transaction was aborted; and an error's
-/// `errorLabels` come first.
+/// A member's answers to a transaction it does not run, as a replica set of the reference server
+/// 9.0.4 gives them (measured on 03-11-2026): a start past `maxConcurrentMultiDocumentTransactions`
+/// leaves the session as it was, so the number can start again later; `NoSuchTransaction` names the
+/// number asked and the session's active one, or says that the transaction was aborted; and an
+/// error's `errorLabels` come first.
 #[test]
 fn a_member_answers_transactions_it_does_not_run() {
     let mut m = node();
@@ -755,7 +761,7 @@ fn a_member_answers_transactions_it_does_not_run() {
 }
 
 /// A member's `drop` gives `nIndexesWas` and `ns` for a collection, `ns` for a view and nothing
-/// for what does not exist (measured on a replica set of `ref:9.0.4`, 03-11-2026).
+/// for what does not exist (measured on a replica set of the reference server 9.0.4, 03-11-2026).
 #[test]
 fn a_member_drop_reply() {
     let mut m = node();

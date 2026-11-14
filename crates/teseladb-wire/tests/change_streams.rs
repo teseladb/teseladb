@@ -1,6 +1,6 @@
 //! `$changeStream` over the in-memory node of `common` (014 FR-001, FR-002, FR-013): the open, the
 //! `getMore`s with their events and `postBatchResumeToken`, the scopes and the errors, as a
-//! `refrouter` 9.0.4 answers them (measured on 01-11).
+//! the reference router 9.0.4 answers them (measured on 01-11).
 
 mod common;
 
@@ -168,7 +168,7 @@ fn a_small_batch_leaves_events_waiting_and_resuming_goes_on_after_a_token() {
 
 /// A stream resumed after an event its own `$match` leaves out cannot find where to resume: its
 /// first `getMore` fails with 280 and kills the cursor; one that keeps the event resumes (measured
-/// on a `refrouter` 9.0.4 by the battery's `cs-resume-after`, 04-11-2026).
+/// on the reference router 9.0.4 by the battery's `cs-resume-after`, 04-11-2026).
 #[test]
 fn resuming_after_an_event_the_stages_leave_out_is_fatal() {
     let mut m = Mem::new();
@@ -189,7 +189,7 @@ fn resuming_after_an_event_the_stages_leave_out_is_fatal() {
     let want =
         format!("cannot resume stream; the resume token was not found. {{_data: \"{hex}\"}}");
     assert_eq!(msg, &want);
-    // A driver does not resume after it (measured: the label of a `refrouter` 9.0.4).
+    // A driver does not resume after it (measured: the label of the reference router 9.0.4).
     let label = Value::Array(vec![Value::from("NonResumableChangeStreamError")]);
     assert_eq!(r.get("errorLabels"), Some(&label));
     assert_eq!(code(&get_more(&mut m, DB, id_of(&lost), "c", Document::new())), 43);
@@ -257,7 +257,7 @@ fn a_database_stream_sees_its_collections_and_update_lookup_reads_the_document()
 }
 
 #[test]
-fn opens_on_internal_namespaces_views_and_time_series_fail_as_on_a_refrouter() {
+fn opens_on_internal_namespaces_views_and_time_series_fail_as_on_the_reference_router() {
     let mut m = Mem::new();
     m.run(
         DB,
@@ -455,8 +455,8 @@ fn a_cursor_that_falls_behind_the_retention_or_a_failed_read_ends_resumable() {
 
 #[test]
 fn a_get_more_returns_every_event_written_before_it_started() {
-    // The resolved mark goes 200 ms behind the clock (014 FR-004); a `refrouter` returns every event
-    // written before the `getMore`, so the batch waits until the mark passes its start.
+    // The resolved mark goes 200 ms behind the clock (014 FR-004); the reference router returns
+    // every event written before the `getMore`, so the batch waits until the mark passes its start.
     let mut m = Mem::new();
     m.resolved_lag_ms = 200;
     m.pause_ms = 50;
@@ -596,10 +596,10 @@ fn errmsg(r: &Document) -> String {
     }
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: an expression that fails on an event fails the
+/// Measured on the reference router 9.0.4 on 02-11: an expression that fails on an event fails the
 /// `getMore`, a long `_id` is cut in the message, and `$rand` gives a number.
 #[test]
-fn the_stages_errors_and_numbers_are_those_of_a_refrouter() {
+fn the_stages_errors_and_numbers_are_those_of_the_reference_router() {
     let mut m = Mem::new();
     create(&mut m, "c");
     let mut open_with = |stage: Document| {
@@ -637,7 +637,7 @@ fn the_stages_errors_and_numbers_are_those_of_a_refrouter() {
     assert!(matches!(field(&got[0], "r"), Value::Double(x) if (0.0..1.0).contains(x)), "{got:?}");
 }
 
-/// Measured on a `refrouter` 9.0.4 on 02-11: `$changeStreamSplitLargeEvent` takes only `{}`.
+/// Measured on the reference router 9.0.4 on 02-11: `$changeStreamSplitLargeEvent` takes only `{}`.
 #[test]
 fn the_split_stage_takes_an_empty_object_only() {
     let mut m = Mem::new();
@@ -649,7 +649,7 @@ fn the_split_stage_takes_an_empty_object_only() {
 }
 
 /// A `$match` on a geometry after `$changeStream` goes through the node's geometry, as a
-/// `refrouter` 9.0.4 filters `fullDocument` with `$geoWithin`.
+/// the reference router 9.0.4 filters `fullDocument` with `$geoWithin`.
 #[test]
 fn a_geometry_filter_after_the_stream_keeps_the_events_inside() {
     let mut m = Mem::new();
@@ -710,8 +710,8 @@ fn a_stream_opened_before_a_rename_to_another_database_sees_the_old_name_s_event
     assert_eq!(inserted, [&Value::Int32(1)], "{got:?}");
 }
 
-/// An event larger than a reply's 16 MiB goes alone in its batch, as a `refrouter` 9.0.4 returns
-/// an event of up to 16 MiB and 16 KiB (measured on 01-11).
+/// An event larger than a reply's 16 MiB goes alone in its batch, as the reference router 9.0.4
+/// returns an event of up to 16 MiB and 16 KiB (measured on 01-11).
 #[test]
 fn an_event_over_the_reply_s_bytes_goes_alone() {
     let mut m = Mem::new();
@@ -740,8 +740,8 @@ fn a_drop_read_one_event_at_a_time_ends_with_the_invalidate() {
     assert_eq!(field(&batch(&first)[0], "operationType"), &Value::from("drop"));
     let second = get_more(&mut m, DB, id, "c", one);
     assert_eq!(field(&batch(&second)[0], "operationType"), &Value::from("invalidate"));
-    // Measured on a `refrouter` 9.0.4 on 02-11: the batch with the `invalidate` keeps the cursor
-    // open, and the next `getMore` closes it with an empty batch.
+    // Measured on the reference router 9.0.4 on 02-11: the batch with the `invalidate` keeps the
+    // cursor open, and the next `getMore` closes it with an empty batch.
     assert_ne!(field(&second, "cursor.id"), &Value::Int64(0));
     let last = get_more(&mut m, DB, id, "c", Document::new());
     assert!(batch(&last).is_empty());
@@ -749,8 +749,8 @@ fn a_drop_read_one_event_at_a_time_ends_with_the_invalidate() {
 }
 
 /// `startAtOperationTime` at the `operationTime` of a write, which is its event's `clusterTime`,
-/// includes that write (measured on a `refrouter` 9.0.4 by the battery's `cs-start-at-operation-time`
-/// on 04-11-2026).
+/// includes that write (measured on the reference router 9.0.4 by the battery's
+/// `cs-start-at-operation-time` on 04-11-2026).
 #[test]
 fn start_at_the_operation_time_of_a_write_includes_it() {
     let mut m = Mem::new();
@@ -767,8 +767,8 @@ fn start_at_the_operation_time_of_a_write_includes_it() {
     assert_eq!(keys, [&Value::Int32(1), &Value::Int32(2)]);
 }
 
-/// `$changeStreamSplitLargeEvent` outside a change stream fails with 20, as on a `refrouter` 9.0.4
-/// (`cs-split-large` step 18, measured on 04-11-2026). Before, 2 «not supported».
+/// `$changeStreamSplitLargeEvent` outside a change stream fails with 20, as on the reference router
+/// 9.0.4 (`cs-split-large` step 18, measured on 04-11-2026). Before, 2 «not supported».
 #[test]
 fn the_split_stage_outside_a_stream_is_an_illegal_operation() {
     let mut m = Mem::new();

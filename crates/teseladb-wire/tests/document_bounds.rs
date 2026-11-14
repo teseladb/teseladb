@@ -1,7 +1,7 @@
-//! A comparison with a document scans the index between the documents' ends (`[{}, [])` for
-//! `$gte: {}` on a `refrouter` 9.0.4, measured on 05-11-2026) and the index decides it alone: the
-//! scan finds what reading the collection finds. Before, the planner scanned the whole index
-//! and filtered the documents (battery's `sharding-key-compound`).
+//! A comparison with a document scans the index between the documents' ends (`[{}, [])` for `$gte:
+//! {}` on the reference router 9.0.4, measured on 05-11-2026) and the index decides it alone: the
+//! scan finds what reading the collection finds. Before, the planner scanned the whole index and
+//! filtered the documents (battery's `sharding-key-compound`).
 
 mod common;
 
@@ -76,8 +76,8 @@ fn a_comparison_with_a_document_scans_the_documents_of_the_index() {
 }
 
 /// An equality or an `$in` on a hashed field reads the hashed index by the values' hashes and
-/// filters the documents, as a `refnode` 9.0.4 does (measured on 05-11-2026): the same documents
-/// as reading the collection, and `explain` gives the hash as the bound.
+/// filters the documents, as a reference replica set member 9.0.4 does (measured on 05-11-2026):
+/// the same documents as reading the collection, and `explain` gives the hash as the bound.
 #[test]
 fn an_equality_on_a_hashed_field_scans_the_hashed_index() {
     let mut m = Mem::new();

@@ -1,6 +1,7 @@
-//! The aggregation stages of RefDb 9.0 (010 `contracts/stages.md`) and what a pipeline checks of
-//! them before it runs: a stage is a document with exactly one field, the stage's name, and some
-//! stages may not appear where the pipeline is going (a view definition, a sub-pipeline).
+//! The aggregation stages of the reference server 9.0 (010 `contracts/stages.md`) and what a
+//! pipeline checks of them before it runs: a stage is a document with exactly one field, the
+//! stage's name, and some stages may not appear where the pipeline is going (a view definition, a
+//! sub-pipeline).
 
 /// How a stage reaches outside the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,11 +12,12 @@ pub enum Reach {
     Writes,
     /// It opens a change stream (014).
     ChangeStream,
-    /// RefDb keeps it for its own pipelines between nodes: a user's pipeline may not name it.
+    /// The reference server keeps it for its own pipelines between nodes: a user's pipeline may not
+    /// name it.
     Internal,
 }
 
-/// A stage RefDb knows.
+/// A stage the reference server knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stage {
     /// Its name, with the `$`.
@@ -24,8 +26,8 @@ pub struct Stage {
     pub reach: Reach,
 }
 
-/// Every stage, in byte order: the stage list of the 9.0 manual and the names a `refrouter` 9.0.4
-/// recognizes (measured 31-10-2026: every other name is `Unrecognized pipeline stage name`).
+/// Every stage, in byte order: the stage list of the 9.0 manual and the names the reference router
+/// 9.0.4 recognizes (measured 31-10-2026: every other name is `Unrecognized pipeline stage name`).
 pub const STAGES: &[Stage] = &[
     Stage { name: "$_internalInhibitOptimization", reach: Reach::Reads },
     Stage { name: "$_internalUnpackBucket", reach: Reach::Reads },
@@ -93,21 +95,21 @@ pub fn stage(name: &str) -> Option<&'static Stage> {
     STAGES.binary_search_by(|s| s.name.cmp(name)).ok().map(|i| &STAGES[i])
 }
 
-/// Why a stage specification is refused, with RefDb's code and message (measured on a
-/// `refrouter` 9.0.4).
+/// Why a stage specification is refused, with the reference server's code and message (measured on
+/// a the reference router 9.0.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageError {
-    /// RefDb's code.
+    /// The reference server's code.
     pub code: i32,
-    /// RefDb's message.
+    /// The reference server's message.
     pub message: String,
 }
 
 /// A stage with more or fewer than one field.
 pub const STAGE_ONE_FIELD: i32 = 40_323;
-/// A stage name RefDb does not know.
+/// A stage name the reference server does not know.
 pub const UNRECOGNIZED_STAGE: i32 = 40_324;
-/// A stage RefDb keeps for its own pipelines.
+/// A stage the reference server keeps for its own pipelines.
 pub const INTERNAL_STAGE: i32 = 5_491_300;
 
 /// The stage of specification `fields` (the names of the document's fields).
@@ -120,7 +122,7 @@ pub fn named<'a>(fields: &[&'a str]) -> Result<(&'a str, &'static Stage), StageE
         });
     };
     match stage(name) {
-        // The quote after the name is RefDb's (measured).
+        // The quote after the name is the reference server's (measured).
         Some(s) if s.reach == Reach::Internal => Err(StageError {
             code: INTERNAL_STAGE,
             message: format!("{name}' is not allowed in user requests"),

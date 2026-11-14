@@ -1,9 +1,10 @@
-//! Query shapes and `queryShapeHash` (010 T040, FR-023) against a `refrouter` 9.0.4: each command
-//! of `query_shape/hashes.out` (the aggregation and expression batteries, run on database `xs`)
-//! with the `queryShapeHash` that `explain` gave it, and the debug shapes `$queryStats` showed
-//! in `query_shape/debug.out`. The commands of `query_shape/divergent.out` are the shapes
-//! TeselaDB does not reproduce yet (a divergence in `divergencias-refdb.md`): the test fails
-//! when one of them starts to match, so that the list only shrinks, and when any other differs.
+//! Query shapes and `queryShapeHash` (010 T040, FR-023) against the reference router 9.0.4: each
+//! command of `query_shape/hashes.out` (the aggregation and expression batteries, run on database
+//! `xs`) with the `queryShapeHash` that `explain` gave it, and the debug shapes `$queryStats`
+//! showed in `query_shape/debug.out`. The commands of `query_shape/divergent.out` are the shapes
+//! TeselaDB does not reproduce yet (a divergence in `divergencias-the reference server.md`): the
+//! test fails when one of them starts to match, so that the list only shrinks, and when any other
+//! differs.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +23,7 @@ fn canonical(d: &teseladb_bson::Document) -> String {
 }
 
 #[test]
-fn query_shape_hashes_match_refdb() {
+fn query_shape_hashes_match_the_reference() {
     let debug: BTreeMap<&str, &str> = lines(include_str!("query_shape/debug.out")).collect();
     let divergent: BTreeMap<&str, &str> =
         lines(include_str!("query_shape/divergent.out")).collect();
@@ -58,8 +59,8 @@ fn query_shape_hashes_match_refdb() {
     );
 }
 
-/// A command that is not one RefDb would run has no shape: a stage that is no document, an
-/// `aggregate` without its pipeline, a `$facet` branch that is no pipeline.
+/// A command that is not one the reference server would run has no shape: a stage that is no
+/// document, an `aggregate` without its pipeline, a `$facet` branch that is no pipeline.
 #[test]
 fn malformed_commands_have_no_shape() {
     for cmd in [

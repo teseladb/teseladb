@@ -1,5 +1,5 @@
-//! Diagnostic commands (FR-023): the shapes, types and messages a `refrouter` 9.0.4 gives (measured
-//! on 30-10-2026), with the data the node reports.
+//! Diagnostic commands (FR-023): the shapes, types and messages the reference router 9.0.4 gives
+//! (measured on 30-10-2026), with the data the node reports.
 
 mod common;
 
@@ -166,7 +166,7 @@ fn server_status_counts_and_hides_the_sections_asked() {
     assert_eq!(field(&r, "extra_info.threads"), &Value::Int64(44));
     // `run` of the tests skips the dispatch, which counts; the counters come from the table.
     assert_eq!(field(&r, "opcounters.insert"), &Value::Int64(0));
-    // The sections in a `refrouter` 9.0.4's order, without those of DV-038.
+    // The sections in the reference router 9.0.4's order, without those of DV-038.
     assert_eq!(
         keys(&Value::Document(r.clone())),
         [
@@ -369,7 +369,8 @@ fn list_commands_names_what_the_node_answers() {
     let mut m = node();
     let r = m.run("db", doc(&[("listCommands", 1.into())]));
     let names = keys(field(&r, "commands"));
-    // Every command the dispatch takes and no other, in byte order as a `refrouter` lists them.
+    // Every command the dispatch takes and no other, in byte order as the reference router lists
+    // them.
     let mut want: Vec<String> = command_names(false).into_iter().map(str::to_owned).collect();
     want.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     assert_eq!(names, want);
@@ -457,7 +458,7 @@ fn whatsmyuri_answers_the_client_address_and_the_dispatch_counts() {
 }
 
 #[test]
-fn repl_set_get_status_answers_as_a_refrouter() {
+fn repl_set_get_status_answers_as_the_reference_router() {
     let mut m = node();
     let r = m.run("admin", doc(&[("replSetGetStatus", 1.into())]));
     assert_eq!(
@@ -474,7 +475,7 @@ fn repl_set_get_status_answers_as_a_refrouter() {
 }
 
 #[test]
-fn commands_answer_to_refdbs_other_names() {
+fn commands_answer_to_the_other_names_of_the_reference() {
     let mut m = node();
     m.run(
         "db",
@@ -491,7 +492,7 @@ fn commands_answer_to_refdbs_other_names() {
         field(&r, "errmsg"),
         &s("BSON field 'dataSize.datasize' is the wrong type 'int', expected type 'string'")
     );
-    // `setParameter` may run on a secondary, as RefDb lists it.
+    // `setParameter` may run on a secondary, as the reference server lists it.
     let r = m.run("admin", doc(&[("listCommands", 1.into())]));
     assert_eq!(field(&r, "commands.setParameter.secondaryOk"), &Value::Boolean(true));
     assert!(is_data_command("buildinfo") && !is_data_command("BUILDINFO"));
@@ -544,9 +545,10 @@ fn server_status_counts_what_the_dispatch_ran() {
     assert_eq!(field(&r, "opLatencies.writes.ops"), &Value::Int64(2));
     assert_eq!(field(&r, "opLatencies.commands.ops"), &Value::Int64(2));
     assert_eq!(field(&r, "opWorkingTime.reads.ops"), &Value::Int64(2));
-    // Only the update read the collection, and a `refnode` 9.0.4 counts the scan of a statement
-    // that ends (the pipeline's), not of one that fails while it updates (the `arrayFilters`
-    // one, on documents without `b`; measured): both `find`s ran before the insert created it.
+    // Only the update read the collection, and a reference replica set member 9.0.4 counts the scan
+    // of a statement that ends (the pipeline's), not of one that fails while it updates (the
+    // `arrayFilters` one, on documents without `b`; measured): both `find`s ran before the insert
+    // created it.
     assert_eq!(field(&r, "metrics.queryExecutor.collectionScans.total"), &Value::Int64(1));
     assert_eq!(field(&r, "logicalSessionRecordCache.activeSessionsCount"), &Value::Int32(0));
 }
@@ -583,8 +585,11 @@ fn status_counters_fill_their_sections() {
     let sec = Value::Document(c.security());
     let scram = "authentication.mechanisms.SCRAM-SHA-256.ingress.authenticate";
     assert_eq!(field_of(&sec, &format!("{scram}.successful")), &Value::Int64(1));
-    let x509 = "authentication.mechanisms.REFDB-X509.ingress.speculativeAuthenticate.total";
-    assert_eq!(field_of(&sec, x509), &Value::Int64(1));
+    let x509 = format!(
+        "authentication.mechanisms.{}.ingress.speculativeAuthenticate.total",
+        teseladb_names::SASL_X509
+    );
+    assert_eq!(field_of(&sec, &x509), &Value::Int64(1));
     assert_eq!(
         field_of(&sec, "authentication.totalIngressAuthenticationTimeMicros"),
         &Value::Int64(250)
@@ -648,9 +653,9 @@ fn only_commands_that_never_wait_stay_on_the_client_worker() {
     }
 }
 
-/// `getDiagnosticData` gives the node's sample on `admin` (010 FR-024, T041): `start`, the
-/// parts of a `refnode` 9.0.4 TeselaDB has, each with its own `start` and `end`, and `end`; on
-/// another database it is 13, as on a `refrouter` 9.0.4 (measured 01-11-2026).
+/// `getDiagnosticData` gives the node's sample on `admin` (010 FR-024, T041): `start`, the parts of
+/// a reference replica set member 9.0.4 TeselaDB has, each with its own `start` and `end`, and
+/// `end`; on another database it is 13, as on the reference router 9.0.4 (measured 01-11-2026).
 #[test]
 fn get_diagnostic_data_samples_the_node() {
     let mut m = node();
@@ -676,9 +681,9 @@ fn get_diagnostic_data_samples_the_node() {
     );
 }
 
-/// A node with TLS names its certificate in `security`, and the average TLS handshake goes first
-/// in `metrics.network`; without handshakes there is no average (measured on a `refrouter` 9.0.4
-/// with `--tlsMode allowTLS` on 03-11-2026).
+/// A node with TLS names its certificate in `security`, and the average TLS handshake goes first in
+/// `metrics.network`; without handshakes there is no average (measured on the reference router
+/// 9.0.4 with `--tlsMode allowTLS` on 03-11-2026).
 #[test]
 fn server_status_shows_the_server_certificate_and_the_tls_handshakes() {
     let cert = ServerCertificate { subject: "CN=localhost".into(), expires_ms: 1_793_976_060_000 };
@@ -716,10 +721,10 @@ fn server_status_shows_the_server_certificate_and_the_tls_handshakes() {
     assert!(net.get("averageTimeToCompletedTLSHandshakeMicros").is_none(), "{net:?}");
 }
 
-/// The table of `listCommands` and the dispatch name the same commands: each one the dispatch
-/// takes has its entry, and each entry is one the dispatch takes, `configureFailPoint` with
-/// `enableTestCommands`; the table goes in byte order of the names, as a `refrouter` 9.0.4 lists
-/// them.
+/// The table of `listCommands` and the dispatch name the same commands: each one the dispatch takes
+/// has its entry, and each entry is one the dispatch takes, `configureFailPoint` with
+/// `enableTestCommands`; the table goes in byte order of the names, as the reference router 9.0.4
+/// lists them.
 #[test]
 fn list_commands_names_what_the_dispatch_takes() {
     let table: Vec<&str> = listed_names().collect();
@@ -735,9 +740,10 @@ fn list_commands_names_what_the_dispatch_takes() {
     assert!(!table.contains(&"findandmodify") && !table.contains(&"ismaster"));
 }
 
-/// `extra_info` varies by platform as RefDb 9.0.4's does: on macOS (`processinfo_osx.cpp`) it
-/// has the note and the task's page-ins as `page_faults`, an `int`; on Linux the counters of
-/// `getrusage(2)` and the threads (measured on the native `refrouter` on 09-11-2026).
+/// `extra_info` varies by platform as the reference server 9.0.4's does: on macOS
+/// (`processinfo_osx.cpp`) it has the note and the task's page-ins as `page_faults`, an `int`; on
+/// Linux the counters of `getrusage(2)` and the threads (measured on the native the reference
+/// router on 09-11-2026).
 #[test]
 fn extra_info_has_the_fields_of_the_platform() {
     let mut m = node();
@@ -750,10 +756,11 @@ fn extra_info_has_the_fields_of_the_platform() {
     assert_eq!(field(&r, "extra_info.note"), &s("fields vary by platform"));
 }
 
-/// `collStats` as a `refrouter` 9.0.4 answers it (010 FR-018, T055; measured on the native `refrouter`
-/// on 09-11-2026): `sharded` from the shard key, `primary` after it for a collection without one,
-/// `maxSize` a `long`, and after `nchunks` a document per shard that holds the collection, here a
-/// node; a collection that does not exist in a database that does gets the short one.
+/// `collStats` as the reference router 9.0.4 answers it (010 FR-018, T055; measured on the native
+/// the reference router on 09-11-2026): `sharded` from the shard key, `primary` after it for a
+/// collection without one, `maxSize` a `long`, and after `nchunks` a document per shard that holds
+/// the collection, here a node; a collection that does not exist in a database that does gets the
+/// short one.
 #[test]
 fn coll_stats_names_the_primary_and_each_shard() {
     let mut m = node();

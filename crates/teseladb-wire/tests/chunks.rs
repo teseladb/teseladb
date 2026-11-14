@@ -1,7 +1,7 @@
-//! 018 T008: the chunks of a collection with a shard key and `split`, `splitVector`,
-//! `moveChunk`, `moveRange`, `mergeChunks` and `clearJumboFlag` (FR-004, FR-006) over the
-//! in-memory node of `common`, whose router knows ranges that the commands' Group 0 orders change
-//! at once; replies and messages of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026).
+//! 018 T008: the chunks of a collection with a shard key and `split`, `splitVector`, `moveChunk`,
+//! `moveRange`, `mergeChunks` and `clearJumboFlag` (FR-004, FR-006) over the in-memory node of
+//! `common`, whose router knows ranges that the commands' Group 0 orders change at once; replies
+//! and messages of the reference router 9.0.4 of two shards (measured on 02-11-2026).
 
 mod common;
 
@@ -31,7 +31,7 @@ fn fails(r: &Document, code: i32, msg: &str) {
     assert_eq!(field(r, "errmsg"), &Value::from(msg), "{r:?}");
 }
 
-/// The answer of a `refrouter` without a code: `ok: 0` and `errmsg` alone.
+/// The answer of the reference router without a code: `ok: 0` and `errmsg` alone.
 fn fails_uncoded(r: &Document, msg: &str) {
     assert_eq!(r, &doc(&[("ok", Value::Double(0.0)), ("errmsg", Value::from(msg))]), "{r:?}");
 }
@@ -104,10 +104,10 @@ fn a_split_at_middle_cuts_the_range_at_the_shard_key_value() {
     assert_eq!(m.range_orders.len(), orders + 1);
 }
 
-/// `split`'s checks of `find` and `bounds`, as a `refrouter` 9.0.4 makes them (measured on
+/// `split`'s checks of `find` and `bounds`, as the reference router 9.0.4 makes them (measured on
 /// 03-11-2026, `q.js` in the lane's notes).
 #[test]
-fn split_checks_find_and_bounds_as_a_refrouter() {
+fn split_checks_find_and_bounds_as_the_reference_router() {
     let mut m = cluster();
     let split = |m: &mut Mem, rest: &str| admin(m, &format!(r#"{{"split":"z.k",{rest}}}"#));
     fails_uncoded(
@@ -195,7 +195,7 @@ fn move_range_and_merge_wait_for_orders_not_applied() {
     }
 }
 
-/// The bounds of a hashed shard key are `NumberLong`s, as a `refrouter` 9.0.4 lists them.
+/// The bounds of a hashed shard key are `NumberLong`s, as the reference router 9.0.4 lists them.
 #[test]
 fn chunks_of_a_hashed_shard_key_have_long_bounds() {
     let mut m = cluster();
@@ -246,7 +246,7 @@ fn config_chunks_of_odd_ranges() {
 }
 
 #[test]
-fn split_refuses_what_a_refrouter_refuses() {
+fn split_refuses_what_the_reference_router_refuses() {
     let mut m = cluster();
     fails_uncoded(
         &admin(&mut m, r#"{"split":"z.k","bounds":[{"a":12},{"a":{"$maxKey":1}}]}"#),
@@ -295,7 +295,7 @@ fn split_refuses_what_a_refrouter_refuses() {
 }
 
 #[test]
-fn split_vector_is_refused_as_through_a_refrouter() {
+fn split_vector_is_refused_as_through_the_reference_router() {
     let mut m = cluster();
     fails(
         &admin(&mut m, r#"{"splitVector":"z.k","keyPattern":{"a":1},"maxChunkSizeBytes":100}"#),
@@ -532,9 +532,9 @@ fn config_chunks_shows_each_chunk_in_shard_key_values() {
 }
 
 /// The `bounds` of `moveChunk`, `clearJumboFlag` and `mergeChunks` as their parsers check them,
-/// with the messages of a `refrouter` 9.0.4 (measured on 03-11-2026).
+/// with the messages of the reference router 9.0.4 (measured on 03-11-2026).
 #[test]
-fn bounds_are_checked_as_a_refrouter_checks_them() {
+fn bounds_are_checked_as_the_reference_router_checks_them() {
     let mut m = cluster();
     for (name, extra) in [("moveChunk", r#","to":"node2""#), ("clearJumboFlag", "")] {
         let run =
@@ -584,10 +584,10 @@ fn bounds_are_checked_as_a_refrouter_checks_them() {
     );
 }
 
-/// `moveRange` checks its arguments in the order of a `refrouter` 9.0.4: the bounds given, the
-/// shard, the collection and then the bounds against the shard key (measured on 03-11-2026).
+/// `moveRange` checks its arguments in the order of the reference router 9.0.4: the bounds given,
+/// the shard, the collection and then the bounds against the shard key (measured on 03-11-2026).
 #[test]
-fn move_range_checks_in_the_order_of_a_refrouter() {
+fn move_range_checks_in_the_order_of_the_reference_router() {
     let mut m = cluster();
     let run = |m: &mut Mem, rest: &str| admin(m, &format!(r#"{{"moveRange":{rest}}}"#));
     fails(
@@ -612,10 +612,10 @@ fn move_range_checks_in_the_order_of_a_refrouter() {
     assert_eq!(m.range_orders.len(), orders);
 }
 
-/// Bounds whose first is a value of the shard key and second is not are refused like the
-/// opposite (measured on a `refrouter` 9.0.4 on 03-11-2026, `ch1.js`); a `moveRange` from a bound
-/// of a chunk moves that chunk without a cut; and a key no range holds, as the ranges read while
-/// they change, asks the client to retry.
+/// Bounds whose first is a value of the shard key and second is not are refused like the opposite
+/// (measured on the reference router 9.0.4 on 03-11-2026, `ch1.js`); a `moveRange` from a bound of
+/// a chunk moves that chunk without a cut; and a key no range holds, as the ranges read while they
+/// change, asks the client to retry.
 #[test]
 fn second_bounds_chunk_bounds_and_a_moving_table() {
     let mut m = cluster();

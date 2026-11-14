@@ -1,7 +1,7 @@
-//! Authorization of each command (013 T023, FR-011) as RefDb 9.0.4 answers it on a `refrouter`
-//! (measured 30-10-2026): `Unauthorized` with the command quoted as it came in the body of the
-//! message, the cursors of other users, the filtered listings, the default time limit and a node
-//! started with `--insecure`, which does not authorize.
+//! Authorization of each command (013 T023, FR-011) as the reference server 9.0.4 answers it on the
+//! reference router (measured 30-10-2026): `Unauthorized` with the command quoted as it came in the
+//! body of the message, the cursors of other users, the filtered listings, the default time limit
+//! and a node started with `--insecure`, which does not authorize.
 
 mod common;
 
@@ -47,8 +47,8 @@ fn store(m: &mut Mem, kind: Principal, db: &str, name: &str, doc: Document) {
 fn add_user(m: &mut Mem, name: &str, roles: &[(&str, &str)]) {
     let mut u = User::new(UserName::new(name, ADMIN));
     u.roles = roles.iter().map(|(r, d)| RoleName::new(*r, *d)).collect();
-    // A stored user of a database other than `$external` has credentials, or RefDb does not
-    // use it (measured).
+    // A stored user of a database other than `$external` has credentials, or the reference server
+    // does not use it (measured).
     let m256 = Mechanism::ScramSha256;
     u.scram_sha256 = Some(Credentials::derive(m256, b"pw", &vec![1; m256.salt_len()], 4096));
     store(m, Principal::User, ADMIN, name, u.to_document());
@@ -548,9 +548,10 @@ fn an_operation_sees_the_lease_of_its_node() {
     assert!(Guarded::new(&mut m, &shared, 1).authorization_lease());
 }
 
-/// 013 FR-030: who may write `admin.system.users` and `admin.system.roles` directly, as RefDb
-/// 9.0.4 decides it (measured on a `refnode` with `--auth`): `root` and `restore` write the users
-/// but not the roles, `userAdminAnyDatabase` and `backup` only read both, the others neither.
+/// 013 FR-030: who may write `admin.system.users` and `admin.system.roles` directly, as the
+/// reference server 9.0.4 decides it (measured on a reference replica set member with `--auth`):
+/// `root` and `restore` write the users but not the roles, `userAdminAnyDatabase` and `backup` only
+/// read both, the others neither.
 #[test]
 fn direct_writes_to_users_and_roles_need_their_privileges() {
     let mut m = node();
@@ -594,10 +595,11 @@ fn direct_writes_to_users_and_roles_need_their_privileges() {
     }
 }
 
-/// 013 FR-030: a stored user or role RefDb would not use: `hello` with `saslSupportedMechs`
-/// names the fault, `saslStart` answers `Authentication failed.` (measured on RefDb 9.0.4).
+/// 013 FR-030: a stored user or role the reference server would not use: `hello` with
+/// `saslSupportedMechs` names the fault, `saslStart` answers `Authentication failed.` (measured on
+/// the reference server 9.0.4).
 #[test]
-fn malformed_stored_users_fail_the_login_as_refdb_does() {
+fn malformed_stored_users_fail_the_login_as_the_reference_does() {
     let mut m = node();
     let json = |t: &str| teseladb_bson::extjson::parse(t).unwrap();
     let mut u = User::new(UserName::new("strrole", ADMIN));
@@ -624,9 +626,9 @@ fn malformed_stored_users_fail_the_login_as_refdb_does() {
     assert_eq!(code(&r), Some(18), "{r:?}");
 }
 
-/// A time series lives in one namespace (015 FR-006, T022): a privilege on the collection reads
-/// its measurements, one on its `system_buckets` does not, and neither reads its buckets with
-/// `rawData` without `performRawDataOperations` (measured on a `refnode` 9.0.4 with
+/// A time series lives in one namespace (015 FR-006, T022): a privilege on the collection reads its
+/// measurements, one on its `system_buckets` does not, and neither reads its buckets with `rawData`
+/// without `performRawDataOperations` (measured on a reference replica set member 9.0.4 with
 /// authentication on 02-11-2026: code 13).
 #[test]
 fn a_time_series_is_read_with_privileges_on_its_own_namespace() {
@@ -716,12 +718,13 @@ fn bypass_write_blocking_mode_lets_its_user_write_while_user_writes_are_blocked(
     assert_eq!(refusal(&run(&mut m, &mut writer, TEST, insert())), Some(BLOCKED));
     let drop_d = || Document::new().with("drop", "d");
     assert_eq!(refusal(&run(&mut m, &mut writer, TEST, drop_d())), Some(BLOCKED));
-    // A node that does not authorize (`--insecure`) blocks everyone, as a RefDb without `--auth`
-    // (measured on a `refnode` 9.0.4 on 03-11-2026).
+    // A node that does not authorize (`--insecure`) blocks everyone, as the reference server
+    // without `--auth` (measured on a reference replica set member 9.0.4 on 03-11-2026).
     let mut open = conn("root");
     open.auth.required = false;
     assert_eq!(refusal(&run(&mut m, &mut open, TEST, insert())), Some(BLOCKED));
-    // With it, as `root` has through `restore` (measured on a `refrouter` 9.0.4 on 03-11-2026).
+    // With it, as `root` has through `restore` (measured on the reference router 9.0.4 on
+    // 03-11-2026).
     let mut unblocked = conn("unblocked");
     assert_eq!(refusal(&run(&mut m, &mut unblocked, TEST, insert())), None);
     assert_eq!(refusal(&run(&mut m, &mut root, TEST, insert())), None);
@@ -738,8 +741,8 @@ fn bypass_write_blocking_mode_lets_its_user_write_while_user_writes_are_blocked(
 }
 
 /// `connectionStatus` with `showPrivileges` lists the privileges of the user's roles, merged by
-/// resource, as a `refrouter` 9.0.4 does (measured on 03-11-2026; its order changes from one start
-/// to the next, and the battery compares them as a multiset).
+/// resource, as the reference router 9.0.4 does (measured on 03-11-2026; its order changes from one
+/// start to the next, and the battery compares them as a multiset).
 #[test]
 fn connection_status_shows_the_users_privileges() {
     let mut m = node();
@@ -851,9 +854,9 @@ fn lsid_of(n: u8, user: &str) -> Document {
 }
 
 /// Each session belongs to the user who started it, and the kills reach the sessions of their
-/// owners as on a `refrouter` 9.0.4 with authentication (measured on 03-11-2026): a `uid` reaches
-/// every session of its user, an `lsid` the one session with its `id` and `uid`, a `uid` next to
-/// an `lsid` wins, and `users` and `roles` choose nothing.
+/// owners as on the reference router 9.0.4 with authentication (measured on 03-11-2026): a `uid`
+/// reaches every session of its user, an `lsid` the one session with its `id` and `uid`, a `uid`
+/// next to an `lsid` wins, and `users` and `roles` choose nothing.
 #[test]
 fn kill_all_sessions_by_pattern_reaches_the_owners_sessions() {
     let uid = |user: &str| Document::new().with("uid", uid_of(user));
@@ -903,7 +906,7 @@ fn kill_sessions_and_kill_all_sessions_reach_the_owners_sessions() {
 }
 
 /// `$listLocalSessions` gives each session with its owner's `uid` and name, by default those of
-/// the user who runs it (measured on a `refrouter` 9.0.4 on 03-11-2026).
+/// the user who runs it (measured on the reference router 9.0.4 on 03-11-2026).
 #[test]
 fn local_sessions_carry_their_owner() {
     let mut m = node();
@@ -930,7 +933,7 @@ fn local_sessions_carry_their_owner() {
 }
 
 /// The record of a session in `config.system.sessions` carries its owner's `uid` and, with a
-/// user, `user: {name: "user@db"}` (measured on a `refrouter` 9.0.4 on 03-11-2026).
+/// user, `user: {name: "user@db"}` (measured on the reference router 9.0.4 on 03-11-2026).
 #[test]
 fn the_sessions_record_carries_the_owner() {
     use teseladb_wire::commands::registry::{SESSIONS_COLL, SESSIONS_DB, refresh};

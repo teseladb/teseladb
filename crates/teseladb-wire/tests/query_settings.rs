@@ -1,4 +1,4 @@
-//! Query settings and `$queryStats` (010 T040, FR-023) as a `refrouter` 9.0.4 answers them
+//! Query settings and `$queryStats` (010 T040, FR-023) as the reference router 9.0.4 answers them
 //! (measured on 01-11-2026 with `setQuerySettings`, `removeQuerySettings`, `$querySettings` and
 //! `$queryStats` on database `qsh`).
 
@@ -45,7 +45,7 @@ fn seeded() -> Mem {
 }
 
 #[test]
-fn set_query_settings_refuses_what_refdb_refuses() {
+fn set_query_settings_refuses_what_the_reference_refuses() {
     let mut m = seeded();
     let cases: [(&str, &str, i32, &str); 9] = [
         (
@@ -268,9 +268,9 @@ fn index_ops(m: &mut Mem, coll: &str) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// Index hints name one collection: a `$lookup` of the shape still reads the other one with its
-/// own indexes (measured on a `refnode` 9.0.4 on 02-11-2026: `b_1` of `c` and `a_1` of `d` read
-/// once each, `a_1` of `c` never).
+/// Index hints name one collection: a `$lookup` of the shape still reads the other one with its own
+/// indexes (measured on a reference replica set member 9.0.4 on 02-11-2026: `b_1` of `c` and `a_1`
+/// of `d` read once each, `a_1` of `c` never).
 #[test]
 fn index_hints_leave_the_indexes_of_other_collections_alone() {
     let mut m = Mem::new();
@@ -305,11 +305,11 @@ fn json_of(text: &str) -> Value {
     cmd(&format!(r#"{{"v":{text}}}"#)).get("v").cloned().expect("a value")
 }
 
-/// The fields of `settings` as a `refrouter` 9.0.4 reads them (measured on 02-11-2026): index
-/// hints one by one or in an array, `maxTimeMS` as a "safe" 64-bit integer up to the largest
+/// The fields of `settings` as the reference router 9.0.4 reads them (measured on 02-11-2026):
+/// index hints one by one or in an array, `maxTimeMS` as a "safe" 64-bit integer up to the largest
 /// `int`, and a null `queryFramework` or `maxTimeMS` as an absent one.
 #[test]
-fn set_query_settings_reads_each_field_as_refdb_does() {
+fn set_query_settings_reads_each_field_as_the_reference_does() {
     let mut m = seeded();
     let ns = r#""ns":{"db":"qsh","coll":"c"}"#;
     let refused: [(&str, String, i32, &str); 16] = [
@@ -456,9 +456,9 @@ fn set_query_settings_reads_each_field_as_refdb_does() {
 /// A target given by its hash alone keeps no representative query; removing settings that do
 /// not exist answers `ok`; the `$querySettings` stage refuses what is not a document (7746800),
 /// a `showDebugQueryShape` that is not a boolean (14) and other fields (40415). Measured on a
-/// `refnode` 9.0.4 replica set on 02-11-2026.
+/// the reference replica set member 9.0.4 replica set on 02-11-2026.
 #[test]
-fn settings_by_hash_removal_and_the_stage_answer_as_refdb() {
+fn settings_by_hash_removal_and_the_stage_answer_as_the_reference() {
     let mut m = seeded();
     let hash = format!(r#""{}""#, EMPTY_HASH.to_lowercase());
     let r = set(&mut m, &hash, r#"{"reject":true}"#);
@@ -508,7 +508,7 @@ fn settings_time_limit_and_hints_of_other_namespaces() {
 }
 
 /// `$queryStats` with a specification that is not a document fails with 9 (measured on a
-/// `refnode` 9.0.4 replica set on 02-11-2026).
+/// the reference replica set member 9.0.4 replica set on 02-11-2026).
 #[test]
 fn query_stats_stage_needs_an_object() {
     let mut m = seeded();

@@ -1,7 +1,7 @@
-//! The audit log of the commands (013 FR-016, T028): the events that logins, refused commands,
-//! user and role commands, catalog changes, the handshake and a closed connection give, with
-//! the fields RefDb Enterprise 9.0.4 writes (measured with `--auditDestination file
-//! --auditFormat JSON`), recorded through a sink that keeps the lines.
+//! The audit log of the commands (013 FR-016, T028): the events that logins, refused commands, user
+//! and role commands, catalog changes, the handshake and a closed connection give, with the fields
+//! the enterprise edition of the reference server 9.0.4 writes (measured with `--auditDestination
+//! file --auditFormat JSON`), recorded through a sink that keeps the lines.
 
 mod common;
 
@@ -23,7 +23,7 @@ use teseladb_wire::msg::OpMsg;
 const ADMIN: &str = "admin";
 const VENTAS: &str = "ventas";
 const PASSWORD: &str = "secret1";
-const CERT_USER: &str = "CN=client,OU=KernelUser,O=RefDb,L=New York City,ST=New York,C=US";
+const CERT_USER: &str = "CN=client,OU=KernelUser,O=TeselaDB,L=New York City,ST=New York,C=US";
 const X509: &str = teseladb_names::SASL_X509;
 
 #[derive(Clone, Default)]
@@ -603,9 +603,9 @@ fn run_txn(m: &mut Mem, c: &mut Connection, db: &str, cmd: Document) -> Document
     r
 }
 
-/// Measured on RefDb Enterprise 9.0.4 (replica set, 31-10-2026): a collection a transaction
-/// creates is recorded with its own name when the statement creates it, whether the transaction
-/// commits or aborts; neither the commit nor the abort adds anything.
+/// Measured on the enterprise edition of the reference server 9.0.4 (replica set, 31-10-2026): a
+/// collection a transaction creates is recorded with its own name when the statement creates it,
+/// whether the transaction commits or aborts; neither the commit nor the abort adds anything.
 #[test]
 fn collections_a_transaction_creates_are_recorded_under_their_own_name() {
     let (mut m, cap) = node(None);
@@ -664,8 +664,8 @@ fn collections_a_transaction_creates_are_recorded_under_their_own_name() {
 }
 
 /// 013 FR-030: a direct write to the users or roles is one `directAuthMutation` per command that
-/// changed something, as RefDb Enterprise 9.0.4 writes it (measured): the first document
-/// inserted or updated, the last one removed.
+/// changed something, as the enterprise edition of the reference server 9.0.4 writes it (measured):
+/// the first document inserted or updated, the last one removed.
 #[test]
 fn direct_writes_to_users_and_roles_are_recorded_once_per_command() {
     let (mut m, cap) = node(None);

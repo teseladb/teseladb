@@ -1,7 +1,7 @@
-//! Pipeline-style updates under the collation of the command (010): RefDb 9.0.4 evaluates the
-//! expressions of an update's pipeline with the collator of the operation, the command's or else
-//! the collection's default, in `update`, in `findAndModify` and in the document an upsert
-//! inserts; `{$eq: ["$s", "abc"]}` with `{locale: "en", strength: 2}` is true for "ABC".
+//! Pipeline-style updates under the collation of the command (010): the reference server 9.0.4
+//! evaluates the expressions of an update's pipeline with the collator of the operation, the
+//! command's or else the collection's default, in `update`, in `findAndModify` and in the document
+//! an upsert inserts; `{$eq: ["$s", "abc"]}` with `{locale: "en", strength: 2}` is true for "ABC".
 
 mod common;
 
