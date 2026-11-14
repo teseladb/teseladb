@@ -459,6 +459,8 @@ pub(crate) struct CompactJob {
     chunk: usize,
     block_bytes: usize,
     codec: crate::config::Codec,
+    /// Whether its outputs pack documents (003 FR-024).
+    pack: bool,
     /// What it learns of the collections it writes, with [`Codec::ZstdDict`](crate::Codec).
     training: Option<Training>,
     /// The bytes written per collection since its dictionary, after its edit.
@@ -475,8 +477,9 @@ pub(crate) struct CompactJob {
     /// A reference that points nowhere it says, found while taking a version.
     broken: Option<LsmError>,
     /// The logical key the inputs are at and the values of its `Put`s passed so far, by
-    /// timestamp: the bases of the history's deltas that name one (FR-035).
-    bases: (Vec<u8>, Vec<(Hlc, Bytes)>),
+    /// timestamp, with the number of the input each came from: the bases of the history's
+    /// deltas that name one (FR-035).
+    bases: (Vec<u8>, Vec<(Hlc, Bytes, u64)>),
 }
 
 impl CompactJob {
@@ -519,6 +522,7 @@ impl CompactJob {
             chunk: cfg.io_chunk_bytes,
             block_bytes: cfg.block_bytes,
             codec: cfg.codec,
+            pack: cfg.pack_documents,
             training: None,
             dict_written: None,
             encryption: cfg.encryption.clone(),
@@ -637,7 +641,7 @@ impl CompactJob {
     /// A writer for a new output, with a new data key when the files are encrypted.
     fn writer(&self) -> TableWriter {
         let ring = self.encryption.as_ref().map(|e| &*e.0);
-        let w = TableWriter::new(self.block_bytes, self.codec);
+        let w = crate::jobs::packing(TableWriter::new(self.block_bytes, self.codec), self.pack);
         let w = match &self.training {
             Some(t) => w.with_dicts(t.current.clone()),
             None => w,
@@ -805,6 +809,13 @@ impl CompactJob {
     /// elsewhere, one of its key the inputs passed already, and keeps its value when it may be
     /// the base of one after it (FR-035).
     fn give_base(&mut self, i: usize) -> Result<(), LsmError> {
+        let number = self.lanes[i].table.number;
+        // The data file whose history file the lane reads, if it does.
+        let owner = self
+            .lanes
+            .iter()
+            .find(|l| l.table.history.as_ref().is_some_and(|h| h.number == number))
+            .map(|l| l.table.number);
         let lane = &mut self.lanes[i];
         let c = lane.cur.as_mut().expect("has an entry");
         let (logical, ts) = entry::split(c.key());
@@ -812,10 +823,18 @@ impl CompactJob {
             self.bases.0 = logical.to_vec();
             self.bases.1.clear();
         }
-        // Versions of a key come newest first, so the base of a delta came before it.
+        // Versions of a key come newest first, so the base of a delta came before it. It is the
+        // version of its own history file or of that file's data file: another input may hold
+        // the same internal key with another value, an intent resolved at its own timestamp,
+        // which shadows the one the delta was written against.
         if let Some(base) = c.base() {
             let at = entry::split(&base).1;
-            let found = self.bases.1.iter().rev().find(|(t, _)| *t == at);
+            let found = self
+                .bases
+                .1
+                .iter()
+                .rev()
+                .find(|(t, _, from)| *t == at && (*from == number || Some(*from) == owner));
             let value = found.ok_or_else(|| corrupt(&lane.table, 0))?.1.clone();
             c.resolve(&value).map_err(|_| corrupt(&lane.table, 0))?;
         }
@@ -823,7 +842,7 @@ impl CompactJob {
             return Err(corrupt(&lane.table, 0));
         }
         if c.kind() == Kind::Put && !c.is_ref() {
-            self.bases.1.push((ts, c.value()));
+            self.bases.1.push((ts, c.value(), number));
         }
         Ok(())
     }

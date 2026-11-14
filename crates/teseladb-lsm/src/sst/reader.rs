@@ -9,7 +9,7 @@ use std::sync::Arc;
 use teseladb_crypto::at_rest::{FileKey, KeyRing};
 use teseladb_types::Bytes;
 
-use super::block::{Block, BlockCursor, unframe_with};
+use super::block::{Block, BlockCursor, unframe_with, unpack};
 use super::elias_fano::EliasFano;
 use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
@@ -272,7 +272,8 @@ impl Table {
         self.pgm.is_some()
     }
 
-    /// The checked payload of data block `i` from the bytes read at its offset (aligned length).
+    /// The checked payload of data block `i` from the bytes read at its offset (aligned length),
+    /// its packed documents whole (003 FR-024).
     pub(crate) fn payload(&self, i: usize, read: &Bytes) -> Result<Bytes, Bad> {
         let h = self.handle(i);
         if read.len() < h.len as usize {
@@ -280,8 +281,11 @@ impl Table {
         }
         let key = self.key.as_deref().map(|k| (k, h.offset));
         let payload = unframe_with(&read.slice(..h.len as usize), key, self.dict.as_deref())?;
-        Block::parse(payload.clone())?;
-        Ok(payload)
+        if self.props.shapes.is_empty() {
+            Block::parse(payload.clone())?;
+            return Ok(payload);
+        }
+        unpack(payload, &self.props.shapes)
     }
 
     /// Data block `i` from the bytes read at its offset (aligned length).
@@ -500,6 +504,7 @@ mod tests {
             dictionary: 0,
             values: Vec::new(),
             zones: None,
+            shapes: Vec::new(),
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);

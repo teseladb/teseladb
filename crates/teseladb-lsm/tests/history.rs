@@ -452,3 +452,35 @@ fn the_first_old_version_of_a_key_is_a_delta_against_its_file() {
     every_version_reads_whole(&cfg, &mut lsm, &mut disk, 3..=5);
     assert!(lsm.metrics().history_bytes < before.history_bytes);
 }
+
+/// FR-035: an old version that is a delta against the next version in its own data file reads
+/// whole after a compaction whose inputs hold that same internal key with another value in an
+/// older file (an intent resolved at its own timestamp writes one). Before, the compaction took
+/// the base from the version of the input it met last, the older file's, and called the history
+/// file corrupt (seed 64 of the `lsm` workload once its values were documents).
+#[test]
+fn a_delta_takes_its_base_from_its_own_file_when_another_holds_the_same_version() {
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut index = 0;
+    let mut put = |lsm: &mut Lsm, at: u64, value: &[u8]| {
+        index += 1;
+        lsm.put(G, index, &key(1), ts(at, 0), value).unwrap();
+    };
+    // The older file: version 20 with a value unlike the documents.
+    put(&mut lsm, 20, &[9; 40]);
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    // The newer file: version 20 again, and version 10 under it as a delta against it.
+    put(&mut lsm, 20, &document(1, 20));
+    put(&mut lsm, 10, &document(1, 10));
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    compact(&mut lsm, &mut disk);
+    let view = lsm.view();
+    for (at, want) in [(20, document(1, 20)), (10, document(1, 10))] {
+        let found = get(&mut lsm, &mut disk, &view, &key(1), ts(at, 0)).expect("a version");
+        assert_eq!((found.1, found.3), (ts(at, 0), want), "at {at}");
+    }
+}
