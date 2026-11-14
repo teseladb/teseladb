@@ -55,6 +55,7 @@ pub mod liveness;
 pub mod local_zone;
 pub mod log;
 pub mod logic;
+pub mod lookup;
 pub mod mcp_stdio;
 pub mod memory;
 pub mod merges;

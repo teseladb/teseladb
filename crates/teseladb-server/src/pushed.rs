@@ -83,23 +83,28 @@ pub enum Fallback {
     Fold,
     /// A part of a filtered scan ([`Work::Filter`]): the node reads the part and filters it.
     Filter,
+    /// A batch of an index scan's document keys (010 FR-027): each key is read on its own, or
+    /// the documents come back for the filter to be evaluated here.
+    Lookup,
 }
 
 impl Fallback {
     /// Every kind, in the order of [`fallbacks`].
-    pub const ALL: [Fallback; 2] = [Fallback::Fold, Fallback::Filter];
+    pub const ALL: [Fallback; 3] = [Fallback::Fold, Fallback::Filter, Fallback::Lookup];
 
     /// Its label in `/metrics`.
     pub fn label(self) -> &'static str {
         match self {
             Fallback::Fold => "fold",
             Fallback::Filter => "filter",
+            Fallback::Lookup => "lookup",
         }
     }
 }
 
 /// Work that went back to the usual path, by [`Fallback`].
-static FELL_BACK: [AtomicU64; Fallback::ALL.len()] = [AtomicU64::new(0), AtomicU64::new(0)];
+static FELL_BACK: [AtomicU64; Fallback::ALL.len()] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
 /// Times work sent to the leaders went back to the usual path since the process started, in the
 /// order of [`Fallback::ALL`].
@@ -141,6 +146,26 @@ pub fn metrics(out: &mut String) {
             "teseladb_pushed_ran_for_other_nodes_total",
             "Parts this node ran as leader for a request of another node.",
             ran_for_other_nodes(),
+        ),
+        (
+            "teseladb_pushed_lookup_batches_sent_total",
+            "Batches of an index scan's document keys sent to the core of their range.",
+            crate::backend::lookup_batches_sent(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_sent_total",
+            "Document keys those batches carried.",
+            crate::backend::lookup_keys_sent(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_filtered_total",
+            "Document keys sent with the residual filter for the leader to evaluate.",
+            crate::backend::lookup_keys_filtered(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_here_total",
+            "Document keys of index scans read on this node outside the cores.",
+            crate::backend::lookup_keys_here(),
         ),
     ];
     for (name, help, n) in counters {
