@@ -1,6 +1,7 @@
-//! `Date` (ECMA-262 §21.4) with the local time zone fixed at UTC, as RefDb 9.0 evaluates it
-//! (016 FR-010): `new Date(3600000).toString()` is `Thu Jan 01 1970 01:00:00 GMT+0000 (UTC)`
-//! on a `refrouter` 9.0.4. `Date.now()` reads the cluster time the runtime gives the invocation.
+//! `Date` (ECMA-262 §21.4) with the local time zone fixed at UTC, as the reference server 9.0
+//! evaluates it (016 FR-010): `new Date(3600000).toString()` is `Thu Jan 01 1970 01:00:00 GMT+0000
+//! (UTC)` on a reference router 9.0.4. `Date.now()` reads the cluster time the runtime gives the
+//! invocation.
 
 use crate::builtins::method;
 use crate::interp::{Interp, R};
@@ -167,7 +168,7 @@ fn parse_iso(s: &str) -> Option<f64> {
         Some(c @ (b'+' | b'-')) => {
             let h = num(i + 1, 2)?;
             let m = if b.get(i + 3) == Some(&b':') { num(i + 4, 2)? } else { num(i + 3, 2)? };
-            // Measured on a `refrouter` 9.0.4 on 02-11: `+24:00` is no offset.
+            // Measured on a reference router 9.0.4 on 02-11: `+24:00` is no offset.
             if h > 23.0 || m > 59.0 {
                 return None;
             }
@@ -206,8 +207,8 @@ const ZONES: [(&str, f64); 11] = [
 ];
 
 /// `s` without its comments: a `(` that starts a word opens one, which ends at its matching `)`
-/// or at the end (measured on a `refrouter` 9.0.4 on 03-11: `Jan 2 2020 (a (b) c) 10:00` is a date,
-/// `Jan(a)2 2020` is not).
+/// or at the end (measured on a reference router 9.0.4 on 03-11: `Jan 2 2020 (a (b) c) 10:00` is a
+/// date, `Jan(a)2 2020` is not).
 fn without_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0usize;
@@ -248,8 +249,8 @@ fn parse_text(s: &str) -> Option<f64> {
     let mut numeric = false;
     let s = without_comments(s);
     for tok in s.split([' ', ',']).filter(|t| !t.is_empty()) {
-        // Measured on a `refrouter` 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are dates
-        // (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
+        // Measured on a reference router 9.0.4 on 02-11: `1/2/2020`, `2020/1/2` and `2020-1-1` are
+        // dates (month first unless the year is), `AM`/`PM` move the hour, and the zones of North
         // America have their offsets.
         // `2020.01.02` too, when the token is no time.
         let parts: Vec<&str> =
@@ -312,7 +313,7 @@ fn parse_text(s: &str) -> Option<f64> {
         (Some(m), [a, b]) => (m, *a, *b),
         // Three numbers are the year first when it cannot be a month or a day, else month, day
         // and year; one number is a month of 2001, or a year when it cannot be a day (measured
-        // on a `refrouter` 9.0.4 on 03-11: `5 1 2` is May 1 2002 and `5` May 1 2001).
+        // on a reference router 9.0.4 on 03-11: `5 1 2` is May 1 2002 and `5` May 1 2001).
         (None, [y, m, d]) if *y > 31.0 => (*m - 1.0, *d, *y),
         (None, [m, d, y]) => (*m - 1.0, *d, *y),
         (None, [m]) if (1.0..=12.0).contains(m) => (*m - 1.0, 1.0, 2001.0),
@@ -525,8 +526,8 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     Ok(())
 }
 
-/// What the locale methods write: the engine of the `refrouter` 9.0.4 has no ICU and uses the C
-/// locale (measured on 02-11): `Thu Jan  1 00:00:00 1970`, `01/01/1970`, `00:00:00`, and
+/// What the locale methods write: the engine of the reference router 9.0.4 has no ICU and uses the
+/// C locale (measured on 02-11): `Thu Jan  1 00:00:00 1970`, `01/01/1970`, `00:00:00`, and
 /// `InvalidDate` for an invalid date.
 enum LocalPart {
     Both,

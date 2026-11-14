@@ -1,7 +1,8 @@
-//! What RefDb adds beside an `$expr` before it plans (010 FR-003, T018), measured on a
-//! `refrouter` 9.0.4 on 01-11-2026 (`parsedQuery` and the filter of the scan in `explain`): the
-//! clauses an optimised expression implies on its paths, and the scan's filter without the
-//! `$_internalExpr…` ones. The optimised expressions are given here as RefDb wrote them.
+//! What the reference server adds beside an `$expr` before it plans (010 FR-003, T018), measured on
+//! a reference router 9.0.4 on 01-11-2026 (`parsedQuery` and the filter of the scan in `explain`):
+//! the clauses an optimised expression implies on its paths, and the scan's filter without the
+//! `$_internalExpr…` ones. The optimised expressions are given here as the reference server wrote
+//! them.
 
 use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_mql::{
@@ -139,10 +140,10 @@ fn a_lone_always_true_filters_nothing() {
     assert_eq!(canonical(&scan_filter(&doc(r#"{"$alwaysTrue":1}"#))), "{}");
 }
 
-/// `$_internalExprEq` and the other comparisons an `$expr` implies, where RefDb evaluates them
-/// (measured on 9.0.4): under `$nor` and in an index's partial filter they compare the whole
-/// value, an array on the path matches, a missing value equals nothing and sorts before every
-/// value; at the top of a query they filter nothing.
+/// `$_internalExprEq` and the other comparisons an `$expr` implies, where the reference server
+/// evaluates them (measured on 9.0.4): under `$nor` and in an index's partial filter they compare
+/// the whole value, an array on the path matches, a missing value equals nothing and sorts before
+/// every value; at the top of a query they filter nothing.
 #[test]
 fn internal_comparisons_match_as_measured() {
     let ctx = MatchContext { collation: None, ext: &NoExtensions, vars: None };

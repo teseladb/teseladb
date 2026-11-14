@@ -52,7 +52,7 @@ fn huge_allocations_run_out_of_memory() {
     assert_eq!(e, JsError::OutOfMemory);
     assert_eq!(e.message(), "uncaught exception: out of memory");
     // A string that keeps doubling passes the longest string SpiderMonkey makes: a catchable
-    // error, as on a `refrouter` 9.0.4 (measured on 02-11).
+    // error, as on a reference router 9.0.4 (measured on 02-11).
     let e = run("function(){ var s = 'x'; while(true){ s = s + s } }").unwrap_err();
     assert_eq!(e.message(), "allocation size overflow");
     let caught = run(
@@ -105,7 +105,7 @@ fn nothing_outside_the_arguments_is_reachable() {
 #[test]
 fn a_symbol_cannot_be_returned() {
     let e = run("function(){ return Symbol('a') }").unwrap_err();
-    assert_eq!(e.message(), "unable to convert JavaScript property to ref element __returnValue");
+    assert_eq!(e.message(), teseladb_names::JS_ELEMENT_ERROR.replace("{name}", "__returnValue"));
 }
 
 #[test]
@@ -117,8 +117,8 @@ fn deeply_nested_source_is_refused_without_overflowing() {
 }
 
 /// Recursion whose frames take much native stack (`for…in`, a shell function per level) ends as
-/// `too much recursion` before the thread's stack runs out (measured on a `refrouter` 9.0.4 on 02-11
-/// with `Object.extend` over an object that contains itself).
+/// `too much recursion` before the thread's stack runs out (measured on a reference router 9.0.4 on
+/// 02-11 with `Object.extend` over an object that contains itself).
 #[test]
 fn deep_recursion_through_heavy_frames_is_too_much_recursion() {
     let e = run(
@@ -189,7 +189,7 @@ fn errors_made_while_the_heap_is_full_end_the_call_out_of_memory() {
 const BIG_STACK: usize = 300 << 20;
 
 /// `src`'s value on a thread with [`BIG_STACK`], as a function called inside a program function
-/// like the probes of the `refrouter` (`function(){ … (expression) … }`).
+/// like the probes of the reference router (`function(){ … (expression) … }`).
 fn on_big_stack(srcs: &'static [(&'static str, &'static str)]) {
     std::thread::Builder::new()
         .stack_size(BIG_STACK)
@@ -207,11 +207,11 @@ fn on_big_stack(srcs: &'static [(&'static str, &'static str)]) {
         .unwrap();
 }
 
-/// With the stack of a thread that runs commands, recursion goes as deep as on a `refrouter` 9.0.4
-/// (016 A016-3-18, measured on 02-11): 51 000 frames, the self-hosted builtins included, and
+/// With the stack of a thread that runs commands, recursion goes as deep as on a reference router
+/// 9.0.4 (016 A016-3-18, measured on 02-11): 51 000 frames, the self-hosted builtins included, and
 /// about 350 calls back from the engine's own code.
 #[test]
-fn recursion_on_a_large_stack_goes_as_deep_as_on_a_refrouter() {
+fn recursion_on_a_large_stack_goes_as_deep_as_on_the_reference() {
     const CASES: &[(&str, &str)] = &[
         (
             "(function(){ let n=0; function f(){ n++; f(); } try { f() } catch(e) { return n + ' ' + e.message } })()",
@@ -250,9 +250,9 @@ fn recursion_on_a_large_stack_goes_as_deep_as_on_a_refrouter() {
 }
 
 /// Calls back from the engine's own code take its native stack: a getter or a conversion about
-/// 349 times, through `f.call` 175, through two natives 117 (measured on a `refrouter` 9.0.4).
+/// 349 times, through `f.call` 175, through two natives 117 (measured on a reference router 9.0.4).
 #[test]
-fn calls_back_from_the_engine_end_as_on_a_refrouter() {
+fn calls_back_from_the_engine_end_as_on_the_reference() {
     const CASES: &[(&str, &str)] = &[
         (
             "(function(){ let n=0; function f(){ n++; return +{valueOf: f}; } try { f() } catch(e) { return n + ' ' + e.message } })()",
@@ -319,10 +319,10 @@ fn calls_back_from_the_engine_end_as_on_a_refrouter() {
 }
 
 /// The depth of a value `JSON.stringify` writes, of an array converted to a string, of the groups
-/// of a regular expression and of the constructs an `eval` parses ends where a `refrouter` 9.0.4
-/// ends it (measured on 02-11); an array that is JSON the engine reads without that limit.
+/// of a regular expression and of the constructs an `eval` parses ends where a reference router
+/// 9.0.4 ends it (measured on 02-11); an array that is JSON the engine reads without that limit.
 #[test]
-fn nesting_in_values_patterns_and_eval_ends_as_on_a_refrouter() {
+fn nesting_in_values_patterns_and_eval_ends_as_on_the_reference() {
     const CASES: &[(&str, &str)] = &[
         (
             "(function(){ const t = (d) => { let a = []; for (let i = 0; i < d; i++) a = [a]; try { return JSON.stringify(a).length } catch (e) { return e.message } }; return t(346) + ' ' + t(347) })()",
@@ -349,8 +349,8 @@ fn nesting_in_values_patterns_and_eval_ends_as_on_a_refrouter() {
 }
 
 /// A program nested deeper than the engine parses fails to compile with `too much recursion` and
-/// no place; arrow functions, which it does not check, exhaust its stack (measured on a `refrouter`
-/// 9.0.4 on 02-11).
+/// no place; arrow functions, which it does not check, exhaust its stack (measured on a reference
+/// router 9.0.4 on 02-11).
 #[test]
 fn a_program_nested_too_deep_does_not_compile() {
     let program = |d: usize| format!("function(){{ return {}1{} }}", "(".repeat(d), ")".repeat(d));
@@ -393,7 +393,7 @@ fn a_small_stack_ends_deep_parses_as_too_much_recursion() {
     }
 }
 
-/// What `src` gives with a heap of `heap` bytes of the `refrouter` heap.
+/// What `src` gives with a heap of `heap` bytes of the reference router heap.
 fn run_in_heap(src: &str, heap: usize) -> Result<Value, JsError> {
     let mut ctx = JsCtx { limits: Limits { heap, ..Limits::default() }, ..JsCtx::default() };
     run_with(src, &mut ctx)
@@ -413,8 +413,8 @@ fn fits(make: &str, n: usize, heap: usize) -> String {
 const OOM: &str = "string:out of memory";
 
 /// A full heap throws the string `"out of memory"`, which `try` catches and after which the
-/// call goes on, as on a `refrouter` 9.0.4 (A016-3-22, measured on 03-11); uncaught it ends the
-/// call as `uncaught exception: out of memory` without a place in the code.
+/// call goes on, as on a reference router 9.0.4 (A016-3-22, measured on 03-11); uncaught it ends
+/// the call as `uncaught exception: out of memory` without a place in the code.
 #[test]
 fn a_full_heap_throws_out_of_memory_that_try_catches() {
     let src = "function(){ let r; try { let a = []; for (;;) a = [a]; } catch (e) { r = typeof e + ':' + e } return r + ':' + [1, 2, 3].length }";
@@ -437,19 +437,20 @@ fn the_memory_of_the_process_ends_the_call_even_in_a_try() {
 }
 
 /// The heap a call has by default is the 100 MiB of `getJSHeapLimitMB()`: 2 000 000 nested
-/// one-element arrays fit in it and 2 400 000 do not, as on a `refrouter` 9.0.4 (measured on 03-11).
+/// one-element arrays fit in it and 2 400 000 do not, as on a reference router 9.0.4 (measured on
+/// 03-11).
 #[test]
-fn the_default_heap_holds_what_a_refrouter_holds() {
+fn the_default_heap_holds_what_the_reference_holds() {
     assert_eq!(run("function(){ return getJSHeapLimitMB() }"), Ok(Value::Double(100.0)));
     let nested = "n => { let a = []; for (let i = 0; i < n; i++) a = [a]; return a }";
     assert_eq!(fits(nested, 2_000_000, teseladb_js::HEAP), "ok");
     assert_eq!(fits(nested, 2_400_000, teseladb_js::HEAP), OOM);
 }
 
-/// Each kind of value costs what it costs on a `refrouter` 9.0.4: its measured capacities (03-11),
-/// a tenth of them in a tenth of its heap.
+/// Each kind of value costs what it costs on a reference router 9.0.4: its measured capacities
+/// (03-11), a tenth of them in a tenth of its heap.
 #[test]
-fn each_kind_of_value_costs_what_it_costs_on_a_refrouter() {
+fn each_kind_of_value_costs_what_it_costs_on_the_reference() {
     let heap = teseladb_js::HEAP / 10;
     for (make, fit, over) in [
         ("n => { let a = []; for (let i = 0; i < n; i++) a = [a]; return a }", 200_000, 240_000),
@@ -492,7 +493,8 @@ fn each_kind_of_value_costs_what_it_costs_on_a_refrouter() {
 }
 
 /// What a value took goes back to the heap when nothing holds it: strings made in a loop, as
-/// objects, never fill it (on a `refrouter` 9.0.4 `x = 's' + i` ten million times gives `s9999999`).
+/// objects, never fill it (on a reference router 9.0.4 `x = 's' + i` ten million times gives
+/// `s9999999`).
 #[test]
 fn dead_strings_give_back_their_heap() {
     let src = "function(){ let x; for (let i = 0; i < 1e6; i++) x = 's' + i; return x }";

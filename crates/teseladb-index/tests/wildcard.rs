@@ -1,8 +1,8 @@
 //! Wildcard indexes (009 T024, FR-013): every case of `tests/data/wildcard-keys.json`, measured on
-//! refnode 9.0.4, is refused with RefDb's code and reason or gives RefDb's keys. The keys a
-//! query can reach were read one by one, so each one has to be among ours; the server's count of
-//! entries (keys plus one entry per multikey path) has to equal ours, which covers the keys no
-//! query reaches.
+//! the reference server 9.0.4, is refused with the reference server's code and reason or gives the
+//! reference server's keys. The keys a query can reach were read one by one, so each one has to be
+//! among ours; the server's count of entries (keys plus one entry per multikey path) has to equal
+//! ours, which covers the keys no query reaches.
 
 use std::cmp::Ordering;
 
@@ -39,7 +39,7 @@ fn direction(v: &Value) -> Option<Direction> {
     }
 }
 
-/// The definition of `key` with `options`, or the reason RefDb refuses it.
+/// The definition of `key` with `options`, or the reason the reference server refuses it.
 fn define(key: &Document, options: &Document) -> Result<IndexDef, SpecError> {
     let flag = |name: &str| matches!(options.get(name), Some(Value::Boolean(true)));
     let projection_bytes = match options.get("wildcardProjection") {
@@ -109,7 +109,7 @@ fn type_list(v: RawValue<'_>) -> Vec<u8> {
 }
 
 #[test]
-fn every_measured_wildcard_case_matches_refdb() {
+fn every_measured_wildcard_case_matches_the_reference() {
     let file = extjson::parse(CASES).unwrap();
     let Some(Value::Array(cases)) = file.get("cases") else { panic!("no cases") };
     let mut wrong = Vec::new();

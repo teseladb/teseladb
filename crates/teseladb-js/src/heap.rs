@@ -1,6 +1,6 @@
 //! The heap of an invocation (016 FR-007, A016-3-22): what its live values take, counted twice.
 //!
-//! In units of the heap of a `refrouter` 9.0.4, whose limit is the 100 MB `getJSHeapLimitMB()`
+//! In units of the heap of a reference router 9.0.4, whose limit is the 100 MB `getJSHeapLimitMB()`
 //! gives: each kind of value costs what probes of growing size measured there (03-11), so that
 //! the same programs fit. Passing that limit throws the string `"out of memory"`, which `try`
 //! catches, as there. And in bytes of this process, against a limit of its own that protects
@@ -13,12 +13,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// The units of the heap in a byte of the `refrouter`: costs are sixteenths of a byte.
+/// The units of the heap in a byte of the reference router: costs are sixteenths of a byte.
 pub const UNITS_PER_BYTE: usize = 16;
 
-// The costs, measured on a `refrouter` 9.0.4 on 03-11 with `getJSHeapLimitMB()` at 100 (MiB), where
-// a value that goes past the limit is `"out of memory"`: 2 000 000 nested one-element arrays fit
-// and 2 400 000 do not, as with empty objects in an array; 1 800 000 objects of four properties
+// The costs, measured on a reference router 9.0.4 on 03-11 with `getJSHeapLimitMB()` at 100 (MiB),
+// where a value that goes past the limit is `"out of memory"`: 2 000 000 nested one-element arrays
+// fit and 2 400 000 do not, as with empty objects in an array; 1 800 000 objects of four properties
 // fit; 1 000 000 of eight fit and 1 400 000 do not; 600 000 of sixteen fit and 800 000 do not;
 // 68 000 000 numbers pushed into an array fit and `new Array(8e7).fill(1)` does not; 10 000 000
 // entries of a `Map` fit; 5 000 000 short strings in an array fit and 8 500 000 do not; a string
@@ -55,7 +55,7 @@ pub const STRING_BYTES: usize = 32;
 /// What a value takes, in both counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cost {
-    /// Units of the `refrouter` heap ([`UNITS_PER_BYTE`] to a byte).
+    /// Units of the reference router heap ([`UNITS_PER_BYTE`] to a byte).
     pub units: usize,
     /// Bytes of this process.
     pub bytes: usize,
@@ -128,7 +128,7 @@ impl Cost {
 /// Which limit a charge passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exhausted {
-    /// The `refrouter` heap: `"out of memory"`, which `try` catches.
+    /// The reference router heap: `"out of memory"`, which `try` catches.
     Heap,
     /// The bytes of this process: the call ends.
     Memory,
@@ -163,7 +163,7 @@ pub struct Budget {
 }
 
 impl Budget {
-    /// A budget of `heap` bytes of the `refrouter` heap and `memory` bytes of this process.
+    /// A budget of `heap` bytes of the reference router heap and `memory` bytes of this process.
     pub fn new(heap: usize, memory: usize) -> Budget {
         Budget {
             used: Cell::new(Cost::ZERO),

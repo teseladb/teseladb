@@ -27,7 +27,7 @@ use crate::planner_api::BAD_VALUE;
 use crate::shell::{shell_doc, shell_value};
 use wildcard::{WILDCARD_COMPOUND_ARRAY, WildcardProjection};
 
-/// RefDb's code of `CannotIndexParallelArrays`.
+/// The reference server's code of `CannotIndexParallelArrays`.
 pub const CANNOT_INDEX_PARALLEL_ARRAYS: i32 = 171;
 
 /// What an index field stores for a value.
@@ -110,18 +110,19 @@ impl IndexDef {
     }
 }
 
-/// RefDb's code of a geometry a `2dsphere` index cannot take (`GeoKeyExtractionFailed`, measured
-/// on refnode 9.0.4; 7.0.45 answered 16755).
+/// The reference server's code of a geometry a `2dsphere` index cannot take
+/// (`GeoKeyExtractionFailed`, measured on the reference server 9.0.4; 7.0.45 answered 16755).
 pub const GEO_KEY_EXTRACTION_FAILED: i32 = 510;
-/// The same for a time series bucket (`GeoKeyExtractionFailedTimeseries`, RefDb 9.0).
+/// The same for a time series bucket (`GeoKeyExtractionFailedTimeseries`, the reference server
+/// 9.0).
 pub const GEO_KEY_EXTRACTION_FAILED_TIMESERIES: i32 = 511;
-/// RefDb's code of an array under a hashed field.
+/// The reference server's code of an array under a hashed field.
 pub const HASHED_ARRAY: i32 = 16766;
 
 /// Why a document has no keys in an index.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeygenError {
-    /// Two fields of a compound index go through different arrays (RefDb's
+    /// Two fields of a compound index go through different arrays (the reference server's
     /// `CannotIndexParallelArrays`): the arrays' paths.
     ParallelArrays {
         /// Path of one array.
@@ -149,7 +150,7 @@ pub enum KeygenError {
 }
 
 impl KeygenError {
-    /// RefDb's error code.
+    /// The reference server's error code.
     pub fn code(&self) -> i32 {
         match self {
             KeygenError::ParallelArrays { .. } => CANNOT_INDEX_PARALLEL_ARRAYS,
@@ -161,12 +162,12 @@ impl KeygenError {
         }
     }
 
-    /// RefDb's message for document `doc`.
+    /// The reference server's message for document `doc`.
     pub fn message(&self, doc: RawDoc<'_>) -> String {
         match self {
             KeygenError::ParallelArrays { first, second } => {
-                // Measured on refnode 7.0.45 and 9.0.4: the last name of each array's path, second
-                // first.
+                // Measured on the reference server 7.0.45 and 9.0.4: the last name of each array's
+                // path, second first.
                 let last = |p: &str| p.rsplit('.').next().unwrap_or(p).to_string();
                 format!("cannot index parallel arrays [{}] [{}]", last(second), last(first))
             }
@@ -191,9 +192,9 @@ impl KeygenError {
         }
     }
 
-    /// The `errInfo` RefDb adds to the error, if any: for a geometry, the path, the code and
-    /// reason of the underlying error and the value (a document as it is, any other value under
-    /// `element`), measured on refnode 9.0.4.
+    /// The `errInfo` the reference server adds to the error, if any: for a geometry, the path, the
+    /// code and reason of the underlying error and the value (a document as it is, any other value
+    /// under `element`), measured on the reference server 9.0.4.
     pub fn err_info(&self) -> Option<Document> {
         let KeygenError::Geo { path, element, reason, .. } = self else { return None };
         let failing = match element {

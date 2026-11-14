@@ -263,7 +263,8 @@ fn scram_sha_1_and_x509_log_in_end_to_end() {
     let d = dir("mechanisms");
     let data = d.0.join("data");
     let log = d.0.join("node.log");
-    // Client certificates of the cluster's CA, asked for with `--tlsCAFile` as in RefDb.
+    // Client certificates of the cluster's CA, asked for with `--tlsCAFile` as in the reference
+    // server.
     drop(start(&data, &log));
     let ca_file = data.join(CA_CERT);
     let tls_ca =
@@ -299,10 +300,12 @@ fn scram_sha_1_and_x509_log_in_end_to_end() {
     );
     assert!(ok(&login_with(&mut c, Mechanism::ScramSha1, "old", "old-pw")));
     assert!(ok(&c.command("test", Document::new().with("find", "c"))));
-    // A mechanism the user has no credentials for: `MechanismUnavailable`, as in RefDb.
+    // A mechanism the user has no credentials for: `MechanismUnavailable`, as in the reference
+    // server.
     let r = login_with(&mut Client::new(node.port, &ca), Mechanism::ScramSha256, "old", "old-pw");
     assert_eq!(r.get("code"), Some(&Value::Int32(334)));
-    // REFDB-X509 with the certificate of the TLS handshake, by `authenticate` and in `hello`.
+    // X.509 authentication with the certificate of the TLS handshake, by `authenticate` and in
+    // `hello`.
     let name: [(&[u8], &str); 3] = [
         (oid::ORGANIZATION, "teseladb"),
         (oid::ORGANIZATIONAL_UNIT, "compat"),
@@ -332,7 +335,8 @@ fn scram_sha_1_and_x509_log_in_end_to_end() {
 
 /// The audit log (013 FR-016): a file created with permissions 0600 that records the startup,
 /// the logins, the user commands without their passwords, the refused commands, the logouts and
-/// the shutdown, as RefDb Enterprise 9.0.4 does with `--auditDestination file`.
+/// the shutdown, as the reference server's enterprise edition 9.0.4 does with `--auditDestination
+/// file`.
 #[test]
 fn the_audit_log_records_logins_users_and_refusals_without_secrets() {
     let d = dir("audit");
@@ -392,7 +396,7 @@ fn the_audit_log_records_logins_users_and_refusals_without_secrets() {
     assert!(text.contains(r#"{ "atype" : "logout""#), "{text}");
 }
 
-/// Bad audit options stop the start with RefDb's message.
+/// Bad audit options stop the start with the reference server's message.
 #[test]
 fn bad_audit_options_stop_the_start() {
     let (code, err) = run_once(&["start", "--auditDestination", "file", "--auditFormat", "JSON"]);
@@ -584,22 +588,18 @@ fn ldap_groups_are_the_roles_of_a_plain_login() {
     drop(node);
 }
 
-/// REFDB-AWS end to end (013 FR-025) up to the STS: on `$external` the node answers with its
-/// nonce and the STS host of `awsSTSUrl`; an STS that does not answer fails the login with
+/// AWS IAM authentication end to end (013 FR-025) up to the STS: on `$external` the node answers
+/// with its nonce and the STS host of `awsSTSUrl`; an STS that does not answer fails the login with
 /// `Authentication failed.`. `awsSTSUrl` must be HTTPS.
 #[test]
-fn refdb_aws_reaches_the_sts_of_aws_sts_url() {
+fn aws_iam_reaches_the_sts_of_aws_sts_url() {
     let d = dir("aws");
     let data = d.0.join("data");
     let log = d.0.join("node.log");
     let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let sts = format!("awsSTSUrl=https://127.0.0.1:{dead}");
-    let args = [
-        "--setParameter",
-        "authenticationMechanisms=REFDB-AWS,SCRAM-SHA-256",
-        "--setParameter",
-        sts.as_str(),
-    ];
+    let mechanisms = format!("authenticationMechanisms={},SCRAM-SHA-256", teseladb_names::SASL_AWS);
+    let args = ["--setParameter", mechanisms.as_str(), "--setParameter", sts.as_str()];
     let node = start_with(&data, &log, &args);
     let ca = Certificate::from_pem_all(&std::fs::read_to_string(data.join(CA_CERT)).unwrap())
         .unwrap()
@@ -619,8 +619,13 @@ fn refdb_aws_reaches_the_sts_of_aws_sts_url() {
     let Some(Value::Binary { bytes, .. }) = r.get("payload") else { panic!("{r:?}") };
     let reply = Document::from(RawDoc::from_bytes(bytes).unwrap());
     assert_eq!(reply.get("h"), Some(&Value::from("127.0.0.1")));
-    let auth = "AWS4-HMAC-SHA256 Credential=AKID/20261030/us-east-1/sts/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-refdb-gs2-cb-flag;x-refdb-server-nonce, Signature=00";
-    let second = Document::new().with("a", auth).with("d", "20261030T000000Z").to_bytes().unwrap();
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential=AKID/20261030/us-east-1/sts/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;{};{}, Signature=00",
+        teseladb_names::AWS_SIGNED_CHANNEL_BINDING,
+        teseladb_names::AWS_SIGNED_SERVER_NONCE
+    );
+    let second =
+        Document::new().with("a", auth.as_str()).with("d", "20261030T000000Z").to_bytes().unwrap();
     let cont = Document::new()
         .with("saslContinue", 1)
         .with("conversationId", 1)
@@ -633,11 +638,11 @@ fn refdb_aws_reaches_the_sts_of_aws_sts_url() {
     assert!(err.contains("STS URL must start with https://"), "{err}");
 }
 
-/// REFDB-OIDC end to end (013 FR-025) up to the provider: the two-step answer names the
+/// OIDC authentication end to end (013 FR-025) up to the provider: the two-step answer names the
 /// provider of `oidcIdentityProviders`; a token whose provider cannot be reached fails the login
 /// with `Authentication failed.`. A parameter that does not read stops the start.
 #[test]
-fn refdb_oidc_reaches_the_provider_of_its_issuer() {
+fn oidc_reaches_the_provider_of_its_issuer() {
     let d = dir("oidc");
     let data = d.0.join("data");
     let log = d.0.join("node.log");
@@ -646,12 +651,9 @@ fn refdb_oidc_reaches_the_provider_of_its_issuer() {
     let providers = format!(
         r#"oidcIdentityProviders=[{{"issuer": "{issuer}", "audience": "tdb", "authNamePrefix": "idp", "clientId": "cid", "authorizationClaim": "groups"}}]"#
     );
-    let args = [
-        "--setParameter",
-        "authenticationMechanisms=REFDB-OIDC,SCRAM-SHA-256",
-        "--setParameter",
-        providers.as_str(),
-    ];
+    let mechanisms =
+        format!("authenticationMechanisms={},SCRAM-SHA-256", teseladb_names::SASL_OIDC);
+    let args = ["--setParameter", mechanisms.as_str(), "--setParameter", providers.as_str()];
     let node = start_with(&data, &log, &args);
     let ca = Certificate::from_pem_all(&std::fs::read_to_string(data.join(CA_CERT)).unwrap())
         .unwrap()

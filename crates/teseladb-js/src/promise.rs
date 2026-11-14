@@ -1,8 +1,8 @@
-//! Promises and async functions as the engine of RefDb 9.0 runs them: a promise can be made,
-//! resolved and rejected, but anything that queues a job (`then`, `catch`, `finally`, `await`,
-//! resolving with a thenable, `Promise.all` and its kin over a value, `Array.fromAsync`) stops
-//! the call with the trap of its WebAssembly build (measured on a `refrouter` 9.0.4 on 02-11). An
-//! async function runs until its first `await`.
+//! Promises and async functions as the engine of the reference server 9.0 runs them: a promise can
+//! be made, resolved and rejected, but anything that queues a job (`then`, `catch`, `finally`,
+//! `await`, resolving with a thenable, `Promise.all` and its kin over a value, `Array.fromAsync`)
+//! stops the call with the trap of its WebAssembly build (measured on a reference router 9.0.4 on
+//! 02-11). An async function runs until its first `await`.
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -1,7 +1,7 @@
 # test262 at commit 91c70759363c46557b694792bf34a2551a7af5ba of tc39/test262 (main on 02-11-2026,
-# BSD-3-Clause, LICENSE below): the harness and the tests of the subset that the engine of a refrouter
-# 9.0.4 passes (crates/teseladb-js/tests/test262/subset.tsv), read by crates/teseladb-js/tests/test262.rs;
-# not copied into the repository. Pinned on 02-11-2026.
+# BSD-3-Clause, LICENSE below): the harness and the tests of the subset that the engine of a
+# reference router 9.0.4 passes (crates/teseladb-js/tests/test262/subset.tsv), read by
+# crates/teseladb-js/tests/test262.rs; not copied into the repository. Pinned on 02-11-2026.
 # source https://raw.githubusercontent.com/tc39/test262/91c70759363c46557b694792bf34a2551a7af5ba
 # dest .tools/test262/91c70759363c
 4dd9244dfe8197c75348c4b24ab53d29d3b1cfad143ac76b5a3d8942aa354ce0  LICENSE

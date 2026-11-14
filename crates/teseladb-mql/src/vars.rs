@@ -1,8 +1,8 @@
-//! The `let` of a command (006 FR-032): its variable names are checked with RefDb's rules for
-//! user variables and its values are resolved before any document is read. A literal stays as it
-//! is; an operator or a variable reference goes to the expression engine of 010 through
+//! The `let` of a command (006 FR-032): its variable names are checked with the reference server's
+//! rules for user variables and its values are resolved before any document is read. A literal
+//! stays as it is; an operator or a variable reference goes to the expression engine of 010 through
 //! [`Extensions::eval`], with the variables defined before it. Messages and codes measured on a
-//! `refrouter` 9.0.4 (30-10-2026).
+//! reference router 9.0.4 (30-10-2026).
 
 use teseladb_bson::{Document, RawDoc, Value};
 
@@ -30,7 +30,7 @@ fn invalid(name: &str, why: &str) -> MqlError {
     )
 }
 
-/// Checks `name` as RefDb checks the name of a user variable it may write.
+/// Checks `name` as the reference server checks the name of a user variable it may write.
 fn check_name(name: &str) -> Result<()> {
     if INTERNAL_CONSTANTS.contains(&name) {
         return Err(MqlError::new(

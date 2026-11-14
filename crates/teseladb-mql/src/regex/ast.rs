@@ -163,7 +163,7 @@ pub(super) enum Condition {
 }
 
 /// Backtracking control verbs. The names of `(*COMMIT:n)`, `(*PRUNE:n)` and `(*THEN:n)` are only
-/// reported to the caller, which RefDb never asks for, so they are dropped.
+/// reported to the caller, which the reference server never asks for, so they are dropped.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Verb {
     /// `(*ACCEPT)`: the match, or the called group, ends successfully here.

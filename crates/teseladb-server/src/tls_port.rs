@@ -327,7 +327,7 @@ pub fn build_at_start(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
 /// or the node certificate of the PKI; with `--tlsCAFile`, client certificates required (or
 /// optional with `--tlsAllowConnectionsWithoutCertificates`); with `--tlsCRLFile`, the leaf
 /// checked against it; with `--tlsPublicCertificateKeyFile`, that chain for the clients that ask
-/// for its names. TLS 1.2 and 1.3, as `refnode` accepts from clients.
+/// for its names. TLS 1.2 and 1.3, as the reference server accepts from clients.
 pub fn build(opts: &TlsOpts, pki: &Pki) -> Result<TlsPort, String> {
     let mode = opts.mode.unwrap_or(TlsMode::RequireTls);
     if mode == TlsMode::Disabled {

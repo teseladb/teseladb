@@ -102,7 +102,7 @@ fn is_id_start(c: char) -> bool {
 
 /// `ID_Continue` (and ZWNJ, ZWJ): letters, decimal digits, combining marks and connector
 /// punctuation; a superscript or a fraction is not one (`a²` is `illegal character U+00B2` on
-/// a `refrouter` 9.0.4, measured on 02-11).
+/// a reference router 9.0.4, measured on 02-11).
 fn is_id_part(c: char) -> bool {
     if is_id_start(c) || c.is_ascii_digit() || c == '\u{200c}' || c == '\u{200d}' {
         return true;

@@ -34,8 +34,8 @@ pub fn upsert(
     Ok(id_first(doc, new_id))
 }
 
-/// Refuses a filter an upsert cannot take: one with `$expr` anywhere (measured on a `refrouter`
-/// 9.0.4, before the update runs).
+/// Refuses a filter an upsert cannot take: one with `$expr` anywhere (measured on a reference
+/// router 9.0.4, before the update runs).
 pub fn check_filter(filter: &Filter) -> Result<()> {
     fn has_expr(e: &Expr) -> bool {
         match e {

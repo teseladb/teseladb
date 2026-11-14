@@ -1,6 +1,6 @@
 //! Keys of compound and multikey indexes (009 T004, T006, FR-001, FR-005): every case of
-//! `tests/data/multikey-keys.json`, measured on refnode 9.0.4 (the same on 7.0.45), gives the same
-//! set of keys or the same error.
+//! `tests/data/multikey-keys.json`, measured on the reference server 9.0.4 (the same on 7.0.45),
+//! gives the same set of keys or the same error.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +32,7 @@ fn index(pattern: &Document) -> IndexDef {
 }
 
 #[test]
-fn every_measured_document_gives_refdb_keys_or_error() {
+fn every_measured_document_gives_the_reference_keys_or_error() {
     let file = extjson::parse(CASES).unwrap();
     let Some(Value::Array(cases)) = file.get("cases") else { panic!("no cases") };
     let mut wrong = Vec::new();

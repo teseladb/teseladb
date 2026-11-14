@@ -79,8 +79,8 @@ fn parse(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 /// A whole JSON text: its value and where each part came from.
 /// The value of an `eval` of an array that is JSON, which the engine reads as JSON, without its
-/// parser and its limit of depth (200 000 nested arrays on a `refrouter` 9.0.4); `None` for other
-/// code.
+/// parser and its limit of depth (200 000 nested arrays on a reference router 9.0.4); `None` for
+/// other code.
 pub fn eval_json(it: &mut Interp, src: &str) -> R<Option<Val>> {
     if !src.trim_start().starts_with('[') || !is_json(src) {
         return Ok(None);
@@ -623,7 +623,7 @@ fn write_nested(
 }
 
 /// Writes `holder[key]`; each value nested in another takes a slice of the engine's native stack
-/// ([`write_nested`], 346 nested arrays measured on a `refrouter` 9.0.4 on 02-11).
+/// ([`write_nested`], 346 nested arrays measured on a reference router 9.0.4 on 02-11).
 fn write(
     it: &mut Interp,
     st: &mut S,

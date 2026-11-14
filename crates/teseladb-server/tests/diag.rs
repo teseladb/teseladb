@@ -1,5 +1,5 @@
-//! What a node reports to the diagnostic commands (006 FR-023): its options under RefDb's
-//! configuration names, its in-memory logs and the facts of the host and the process.
+//! What a node reports to the diagnostic commands (006 FR-023): its options under the reference
+//! server's configuration names, its in-memory logs and the facts of the host and the process.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -19,7 +19,7 @@ fn opts(line: &str) -> teseladb_server::cli::StartOpts {
 }
 
 #[test]
-fn the_options_given_take_refdb_names() {
+fn the_options_given_take_the_reference_names() {
     let o = opts(
         "start --insecure --port 27311 --bind_ip 127.0.0.1 --dbpath /d --maxConns 10 \
          --logpath /l --logappend --quiet --networkMessageCompressors zstd \
@@ -117,5 +117,8 @@ fn the_facts_come_from_the_host_and_the_port() {
     keytab.extend_from_slice(&entry);
     let keys = teseladb_auth::kerberos::parse_keytab(&keytab).unwrap();
     let with = none.with_kerberos(Some(Arc::new(keys)));
-    assert_eq!(with.kerberos()[0].principal, "refdb@TESELA.TEST");
+    assert_eq!(
+        with.kerberos()[0].principal,
+        format!("{}@TESELA.TEST", teseladb_names::KERBEROS_SERVICE)
+    );
 }

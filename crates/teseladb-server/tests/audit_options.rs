@@ -1,7 +1,7 @@
 //! The audit options of `teseladb start` added by 013 T042 (FR-031): `--auditRuntimeConfiguration`,
 //! `--auditSchema` and `--setParameter auditAuthorizationSuccess`, their names in the
-//! configuration file and in `getCmdLineOpts`, and RefDb Enterprise 9.0.4's errors (measured on
-//! 31-10-2026).
+//! configuration file and in `getCmdLineOpts`, and the reference server's enterprise edition
+//! 9.0.4's errors (measured on 31-10-2026).
 
 use teseladb_auth::audit::Schema;
 use teseladb_server::cli::{Command, parse, parse_with};
@@ -44,7 +44,7 @@ fn runtime_configuration_schema_and_authorization_success() {
             .unwrap()
             .runtime
     );
-    // RefDb's errors.
+    // The reference server's errors.
     assert_eq!(
         bad("start --setParameter auditAuthorizationSuccess=yes"),
         "Bad value for parameter \"auditAuthorizationSuccess\": auditAuthorizationSuccess expects bool, got 'yes'"

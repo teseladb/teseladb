@@ -1,4 +1,4 @@
-//! The cell hierarchy of the sphere (FR-011), as RefDb's `2dsphere` keys number it.
+//! The cell hierarchy of the sphere (FR-011), as the reference server's `2dsphere` keys number it.
 //!
 //! Public description (s2geometry.io, «S2 Cell Hierarchy», and O. Procopiuc's talk «Geometry on
 //! the Sphere: Google's S2 Library»): a point is projected along its radius onto a cube, whose six

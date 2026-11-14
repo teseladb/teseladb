@@ -1,5 +1,5 @@
 //! Online index builds (009 T012, FR-006): the replicas a `commitQuorum` asks of a range and the
-//! progress `currentOp` shows, as a `refnode` 9.0.4 shows it.
+//! progress `currentOp` shows, as a reference replica set member 9.0.4 shows it.
 
 use teseladb_index::build::{CommitQuorum, MAX_COMMIT_QUORUM, Progress, Unsatisfiable};
 
@@ -36,7 +36,7 @@ fn a_number_above_the_voters_is_unsatisfiable() {
 }
 
 #[test]
-fn progress_reads_as_on_a_refnode() {
+fn progress_reads_as_on_the_reference() {
     // Measured on 9.0.4 halfway through 1000 documents.
     let p = Progress { done: 500, total: 1000 };
     assert_eq!(p.percent(), 50);

@@ -29,7 +29,8 @@ use crate::http_listener::Caller;
 /// The executor of one request on the node.
 pub struct NodeExecutor {
     conn: Connection,
-    /// The REFDB-X509 user of the caller's certificate, which a forwarded request carries.
+    /// The X.509 authentication user of the caller's certificate, which a forwarded request
+    /// carries.
     x509_user: Option<String>,
     backend: ServerBackend,
     shared: std::sync::Arc<Shared>,
@@ -81,7 +82,7 @@ fn unauthenticated(invalid: bool) -> Response {
 pub struct Credential {
     /// The client's address.
     pub peer: String,
-    /// The REFDB-X509 user of its certificate, if it sent one.
+    /// The X.509 authentication user of its certificate, if it sent one.
     pub x509_user: Option<String>,
 }
 
@@ -98,8 +99,8 @@ impl Credential {
 
 /// Authenticates the request of `who` on `exec`'s connection (019 FR-015): without `auth` every
 /// request runs, as on a node started with `--insecure`; with it, `Authorization: Bearer` with an
-/// API key or an OIDC access token, or else the client certificate as REFDB-X509 (013 FR-007).
-/// A request with no credential, or one that does not authenticate, gets `401` with
+/// API key or an OIDC access token, or else the client certificate as X.509 authentication (013
+/// FR-007). A request with no credential, or one that does not authenticate, gets `401` with
 /// `WWW-Authenticate`. The API key that logged in, if one did.
 pub fn authenticate(
     exec: &mut NodeExecutor,

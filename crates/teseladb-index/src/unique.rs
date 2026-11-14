@@ -3,8 +3,8 @@
 //! conflict shows as a key that holds another document's primary key. The leader reads the
 //! current version of each unique key a write puts (it joins the write's keys and latch) and
 //! [`UniqueGuard`] decides, also between the statements of one write. A `DuplicateKey` carries the
-//! index's `keyPattern` and the conflicting `keyValue`, with the message of a `refrouter` 9.0.4
-//! (measured): `E11000 duplicate key error collection: msgs.c index: b_u dup key: { b: 0 }`.
+//! index's `keyPattern` and the conflicting `keyValue`, with the message of a reference router
+//! 9.0.4 (measured): `E11000 duplicate key error collection: msgs.c index: b_u dup key: { b: 0 }`.
 
 use std::collections::BTreeMap;
 

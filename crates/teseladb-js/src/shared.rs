@@ -1,8 +1,8 @@
 //! The global objects a program's calls share (016 SC-004, D-119). Building them is most of the
 //! cost of a short call, so a program builds them once and each call gets a copy of the global
-//! object over the same constructors and prototypes. RefDb's engine freezes those, so a call
-//! cannot change them; any change that still reaches one (an internal slot, a property of an
-//! object the freeze does not cover) marks the budget as touched and the next call builds them
+//! object over the same constructors and prototypes. The reference server's engine freezes those,
+//! so a call cannot change them; any change that still reaches one (an internal slot, a property of
+//! an object the freeze does not cover) marks the budget as touched and the next call builds them
 //! again, so every call sees the globals of a fresh engine.
 
 use std::cell::RefCell;

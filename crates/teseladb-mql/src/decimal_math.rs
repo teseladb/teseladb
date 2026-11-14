@@ -1,12 +1,13 @@
 //! The decimal functions of the expressions of 010 (`$sqrt`, `$exp`, `$ln`, `$log10`, `$log`,
-//! `$pow`) to 34 digits, rounded half to even, as RefDb's decimal library gives them (measured
-//! on a `refrouter` 9.0.4: `crates/teseladb-exec/tests/expr_core.rs`).
+//! `$pow`) to 34 digits, rounded half to even, as the reference server's decimal library gives them
+//! (measured on a reference router 9.0.4: `crates/teseladb-exec/tests/expr_core.rs`).
 //!
 //! The square root is exact (an integer square root of the coefficient, scaled); the other
 //! functions work in fixed point with [`PRECISION`] decimal digits after the point, far more than
-//! the 34 kept, over a small unsigned integer of base 10⁹. An exact result keeps RefDb's short
-//! form (`$sqrt` of 4 is 2, `$log10` of 1000 is 3, `$exp` of 0 is 1, `$ln` of 1 is 0); `$pow`
-//! always gives 34 digits, as RefDb does (`2^10` is `1024.000000000000000000000000000000`).
+//! the 34 kept, over a small unsigned integer of base 10⁹. An exact result keeps the reference
+//! server's short form (`$sqrt` of 4 is 2, `$log10` of 1000 is 3, `$exp` of 0 is 1, `$ln` of 1 is
+//! 0); `$pow` always gives 34 digits, as the reference server does (`2^10` is
+//! `1024.000000000000000000000000000000`).
 
 use std::cmp::Ordering;
 
@@ -369,7 +370,7 @@ pub fn sqrt(d: Decimal128) -> Option<Decimal128> {
     let root = scaled.isqrt();
     let mut exp = (i64::from(e) - m) / 2;
     if root.mul(&root) == scaled.clone().trim() {
-        // Exact: the shortest form down to RefDb's preferred exponent ⌊e/2⌋.
+        // Exact: the shortest form down to the reference server's preferred exponent ⌊e/2⌋.
         let preferred = i64::from(e).div_euclid(2);
         let mut digits = root.digits();
         while exp < preferred && digits.len() > 1 && digits.last() == Some(&0) {
@@ -458,7 +459,8 @@ pub fn log10(d: Decimal128) -> Option<Decimal128> {
 }
 
 /// `log_b d` correctly rounded (`log(8, 2)` is `3.000000000000000000000000000000000`); for two
-/// powers of ten, the quotient of their exponents (`log(100, 10)` is 2), as RefDb writes them.
+/// powers of ten, the quotient of their exponents (`log(100, 10)` is 2), as the reference server
+/// writes them.
 pub fn log(d: Decimal128, b: Decimal128) -> Option<Decimal128> {
     let (Some((dn, dc, de)), Some((bn, bc, be))) = (parts(d), parts(b)) else {
         // NaN and infinities: as their logarithms divide.
@@ -472,7 +474,8 @@ pub fn log(d: Decimal128, b: Decimal128) -> Option<Decimal128> {
     if dn || bn || dc == 0 || bc == 0 {
         return None;
     }
-    // Powers of ten divide their exponents exactly, as RefDb writes `log(100, 10)` as 2.
+    // Powers of ten divide their exponents exactly, as the reference server writes `log(100, 10)`
+    // as 2.
     if let (Some(k), Some(j)) = (power_of_ten(dc, de), power_of_ten(bc, be)) {
         return dec_binary(
             DecOp::Div,
@@ -523,8 +526,8 @@ pub fn pow(b: Decimal128, x: Decimal128) -> Decimal128 {
 }
 
 /// The exact value of double `x` as a decimal, rounded to 34 digits half to even, in its
-/// shortest form (`1.0` is `1`, `0.1` is `0.1000000000000000055511151231257827`): how RefDb's
-/// `$sum` and `$avg` take a double into a decimal total.
+/// shortest form (`1.0` is `1`, `0.1` is `0.1000000000000000055511151231257827`): how the reference
+/// server's `$sum` and `$avg` take a double into a decimal total.
 pub fn from_f64_exact(x: f64) -> Decimal128 {
     if x.is_nan() {
         return Decimal128::nan();

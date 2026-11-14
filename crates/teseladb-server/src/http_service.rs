@@ -50,7 +50,7 @@ pub struct NodeHttp {
     options: Mutex<Option<(Instant, (HttpOptions, McpOptions))>>,
     /// MCP's sessions and exports on this node.
     mcp: std::sync::Arc<teseladb_mcp::server::Server>,
-    /// The identity providers of REFDB-OIDC, for `Authorization: Bearer` with a token.
+    /// The identity providers of OIDC authentication, for `Authorization: Bearer` with a token.
     oidc: Option<std::sync::Arc<crate::oidc_client::Oidc>>,
     /// `authenticationMechanisms` of the node.
     mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
@@ -209,7 +209,7 @@ impl NodeHttp {
     }
 
     /// The service with the node's identity providers and `authenticationMechanisms`: a Bearer
-    /// token of a provider logs in with REFDB-OIDC as on the clients' port (FR-015).
+    /// token of a provider logs in with OIDC authentication as on the clients' port (FR-015).
     #[must_use]
     pub fn with_auth(
         self,

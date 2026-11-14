@@ -1,9 +1,9 @@
 //! Indexes with `prepareUnique` (FR-004, FR-007, contract `index-commands.md`): their entries
 //! keep the format of a non-unique index, with the primary key at the end of the key, but a write
-//! cannot add an entry whose values another document already has (measured on a `refrouter` 9.0.4:
-//! the duplicates that were there stay, a new one is a `DuplicateKey`). The values without the
-//! primary key are a prefix of every entry that has them, so the layer that runs the write reads
-//! the entries under that prefix first (a [`Probe`]) and the write sees, among the keys it
+//! cannot add an entry whose values another document already has (measured on a reference router
+//! 9.0.4: the duplicates that were there stay, a new one is a `DuplicateKey`). The values without
+//! the primary key are a prefix of every entry that has them, so the layer that runs the write
+//! reads the entries under that prefix first (a [`Probe`]) and the write sees, among the keys it
 //! latches, whether one of them is alive and holds another primary key.
 //!
 //! Each value has a guard key among the guards of its index (the index number with its top bit

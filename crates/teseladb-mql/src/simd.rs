@@ -4,9 +4,10 @@
 //! Each kernel runs with NEON on AArch64 and with AVX2 on x86_64 when the CPU has it (detected
 //! once), SSE2 otherwise; the scalar kernel is the reference every vector one is tested against.
 //!
-//! The comparisons of doubles are those of IEEE 754, which are RefDb's on numbers that are not
-//! NaN: `-0.0` equals `0.0`. The callers keep NaN out of the columns they compare. The least and
-//! greatest doubles skip NaN, which the caller orders on its own (it is below every number).
+//! The comparisons of doubles are those of IEEE 754, which are the reference server's on numbers
+//! that are not NaN: `-0.0` equals `0.0`. The callers keep NaN out of the columns they compare. The
+//! least and greatest doubles skip NaN, which the caller orders on its own (it is below every
+//! number).
 //!
 //! `unsafe` here (D-151 of the architecture decisions): the vector loads read the column through
 //! a pointer, and the AVX2 kernels are called after checking the CPU has AVX2. Every block says

@@ -1,6 +1,6 @@
 //! Updates (FR-012, FR-013): operator documents, replacement documents and pipelines, applied to
-//! a document on the leader of its range (D-009). Operators run in RefDb's path order; paths
-//! that overlap are a conflict and `_id` cannot change.
+//! a document on the leader of its range (D-009). Operators run in the reference server's path
+//! order; paths that overlap are a conflict and `_id` cannot change.
 //!
 //! ```
 //! use teseladb_bson::{Document, RawDoc};
@@ -127,7 +127,7 @@ pub(crate) enum Action {
     Bit(Vec<(field::BitOp, Value)>),
 }
 
-/// The operators RefDb accepts in an update document.
+/// The operators the reference server accepts in an update document.
 const OPERATORS: [&str; 15] = [
     ops::SET,
     ops::SET_ON_INSERT,
@@ -254,13 +254,14 @@ impl Update {
             }
         };
         top_level_names(&new)?;
-        // The stored limits are the server's to apply, with RefDb's words for each write.
+        // The stored limits are the server's to apply, with the reference server's words for each
+        // write.
         let bytes = new.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
         Ok(UpdateOutcome { modified: bytes != doc.as_bytes(), doc: new })
     }
 
-    /// A pipeline's document, as a `refrouter` 9.0.4 stores it (measured): the stored `_id` first
-    /// (another one is an error), top-level names with `$` allowed (`$setField` writes them),
+    /// A pipeline's document, as a reference router 9.0.4 stores it (measured): the stored `_id`
+    /// first (another one is an error), top-level names with `$` allowed (`$setField` writes them),
     /// and a change whenever the pipeline's document differs from the stored one, before the
     /// `_id` is put back.
     fn apply_pipeline(
@@ -337,7 +338,7 @@ fn replace(r: RawDoc<'_>, old_id: Option<&Value>) -> Result<Document> {
 }
 
 /// The new document's top-level names: none starts with `$` (deeper ones may, as in 5.0 and
-/// later); checked while the update runs, as a `refrouter` 9.0.4 does (measured).
+/// later); checked while the update runs, as a reference router 9.0.4 does (measured).
 fn top_level_names(doc: &Document) -> Result<()> {
     match doc.iter().find(|(k, _)| k.starts_with('$')) {
         Some((k, _)) => Err(MqlError::new(

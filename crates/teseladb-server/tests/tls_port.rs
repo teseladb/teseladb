@@ -1,7 +1,7 @@
 //! TLS on the clients' port (013 T013, FR-007): `requireTLS` serves only TLS and closes plain
 //! connections, `allowTLS` and `preferTLS` take both, `disabled` takes only plain; client
 //! certificates required, optional or not asked for, and the peer's certificate kept for
-//! REFDB-X509.
+//! X.509 authentication.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -178,7 +178,7 @@ fn client_certificates_on_the_port() {
 }
 
 #[test]
-fn modes_parse_like_refnode() {
+fn modes_parse_like_the_reference() {
     for (text, mode) in [
         ("disabled", TlsMode::Disabled),
         ("allowTLS", TlsMode::AllowTls),

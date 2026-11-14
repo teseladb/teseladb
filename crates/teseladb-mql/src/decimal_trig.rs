@@ -3,13 +3,13 @@
 //! [`PRECISION`] digits and rounded to 34 digits half to even, the arguments of `$sin`, `$cos` and
 //! `$tan` reduced exactly with π to 6 750 digits (enough for the largest decimal).
 //!
-//! RefDb's decimal library (measured on a `refrouter` 9.0.4) computes through a binary format: its
-//! last digit is sometimes another (DV-062), and a result that rounds to 1, −1 or 0.5 without
-//! being exact comes out in that short form (`cos(1E-20)` is `1`, while `cos(0)` is
+//! The reference server's decimal library (measured on a reference router 9.0.4) computes through a
+//! binary format: its last digit is sometimes another (DV-062), and a result that rounds to 1, −1
+//! or 0.5 without being exact comes out in that short form (`cos(1E-20)` is `1`, while `cos(0)` is
 //! `1.000000000000000000000000000000000`). TeselaDB gives the correctly rounded value with
-//! RefDb's form: the short form in those cases, RefDb's exponents for a zero argument, `0E-6176`
-//! for a result that underflows, and the exact quotient `y/x` for `$atan2` of a ratio below
-//! 10^−36.
+//! the reference server's form: the short form in those cases, the reference server's exponents for
+//! a zero argument, `0E-6176` for a result that underflows, and the exact quotient `y/x` for
+//! `$atan2` of a ratio below 10^−36.
 //!
 //! An argument outside a function's domain is the caller's error: these functions give `None`.
 
@@ -33,7 +33,7 @@ const TINY_EXPONENT: i64 = -41;
 /// Digits of the reciprocal of 2π used to reduce arguments: past the largest exponent (6 111)
 /// by more than 34 + [`PRECISION`] digits.
 const REDUCTION_DIGITS: usize = 6_750;
-/// From this exponent of `y/x` down RefDb's `$atan2` gives the quotient itself.
+/// From this exponent of `y/x` down the reference server's `$atan2` gives the quotient itself.
 const ATAN2_QUOTIENT_EXPONENT: i64 = -37;
 /// Below this exponent `$sigmoid` is computed by its series, whose third term is past every
 /// fixed-point digit.
@@ -195,8 +195,8 @@ fn atan_fixed(x: &Fixed) -> Fixed {
     if x.neg { r.neg() } else { r }
 }
 
-/// A fixed-point result as a decimal, in RefDb's form: rounded to 34 digits, the short `1`,
-/// `-1` or `0.5` when it rounds to one of them without being it.
+/// A fixed-point result as a decimal, in the reference server's form: rounded to 34 digits, the
+/// short `1`, `-1` or `0.5` when it rounds to one of them without being it.
 fn result(v: &Fixed) -> Decimal128 {
     if v.mag.is_zero() {
         return integer_decimal(0);
@@ -281,7 +281,7 @@ fn zero(neg: bool, e: i32) -> Option<Decimal128> {
     Decimal128::from_parts(neg, 0, e.clamp(MIN_EXPONENT, 6111))
 }
 
-/// The value of `f` at a zero of exponent `e`, in RefDb's form.
+/// The value of `f` at a zero of exponent `e`, in the reference server's form.
 fn at_zero(f: Trig, neg: bool, e: i32, d: Decimal128) -> Option<Decimal128> {
     match f {
         Trig::Sin | Trig::Atan | Trig::Tanh => Some(d),
@@ -319,7 +319,7 @@ pub fn trig(f: Trig, d: Decimal128) -> Option<Decimal128> {
         Trig::RadiansToDegrees => return Some(times(&a, &rad())),
         _ => {}
     }
-    // RefDb writes `cosh` of an argument up to 10^−40 as 1 with 34 digits.
+    // The reference server writes `cosh` of an argument up to 10^−40 as 1 with 34 digits.
     if f == Trig::Cosh && (a.q < -40 || a.q == -40 && power_of_ten(a.c, 0).is_some()) {
         return Some(to_decimal(&fixed_one(), 0));
     }
@@ -427,7 +427,7 @@ fn huge(f: Trig, a: &Arg) -> Option<Decimal128> {
 
 /// `1 / (1 + e^−x)`, `0E-6176` when it underflows.
 fn sigmoid(x: &Fixed) -> Decimal128 {
-    // Past 20 000 the result is 1 or below the smallest decimal RefDb gives.
+    // Past 20 000 the result is 1 or below the smallest decimal the reference server gives.
     if x.mag.cmp(&Big::from_u128(20_000).shl10(PRECISION)) == Ordering::Greater {
         return if x.neg {
             zero(false, MIN_EXPONENT).unwrap_or_else(Decimal128::nan)

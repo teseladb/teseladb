@@ -69,7 +69,7 @@ pub fn to_radix(x: f64, radix: u32) -> String {
 
 /// The digits in `radix` of `frac`, the fraction of `x`: the fewest that still read back as `x`,
 /// as David Gay's conversion to any base finds them (SpiderMonkey's `js_dtobasestr`; measured on
-/// a `refrouter` 9.0.4 on 03-11: `(0.99999999999999).toString(3)` ends in `202211`).
+/// a reference router 9.0.4 on 03-11: `(0.99999999999999).toString(3)` ends in `202211`).
 fn fraction_digits(x: f64, frac: f64, radix: u32) -> Vec<u32> {
     use crate::bigint::BigInt;
     use std::cmp::Ordering;

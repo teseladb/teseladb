@@ -888,8 +888,8 @@ fn a_transaction_s_reads_across_ranges_and_their_failures() {
     assert_eq!(b.write(no_keys).unwrap_err().code.code, 1);
 }
 
-/// The node's services through the backend (013): without them each answers as RefDb does
-/// without the option, and with them their failures are refusals, with the reason in the log.
+/// The node's services through the backend (013): without them each answers as the reference server
+/// does without the option, and with them their failures are refusals, with the reason in the log.
 #[test]
 fn the_node_s_services_answer_with_or_without_them() {
     use teseladb_server::diag::Diag;

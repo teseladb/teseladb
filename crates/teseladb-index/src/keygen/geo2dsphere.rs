@@ -1,7 +1,8 @@
 //! Keys of a `2dsphere` index, version 3 (FR-011): the cell ids of a geometry as signed 64-bit
 //! integers, as `returnKey` shows them. A point (GeoJSON or a legacy pair) is its leaf cell; any
 //! other geometry, the cells of a bounded covering of each of its parts. The covering limits are
-//! the ones measured on refnode 7.0.45 and again on 9.0.4 (`tests/data/geo-vectors.json`).
+//! the ones measured on the reference server 7.0.45 and again on 9.0.4
+//! (`tests/data/geo-vectors.json`).
 
 use std::collections::BTreeSet;
 

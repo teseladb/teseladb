@@ -1,8 +1,9 @@
 //! A write outside a transaction that finds a transaction's intent (008 FR-002, T032): as in
-//! RefDb 9.0, it waits for the owner to end instead of failing (measured: an update of a
-//! document an open transaction holds waits, and with `maxTimeMS` fails with `MaxTimeMSExpired`).
-//! Each round pushes the owner as abandoned: a finished owner (aborted by the push, or committed)
-//! has the intent resolved at once and the write goes again; a live one makes it wait a pause.
+//! the reference server 9.0, it waits for the owner to end instead of failing (measured: an update
+//! of a document an open transaction holds waits, and with `maxTimeMS` fails with
+//! `MaxTimeMSExpired`). Each round pushes the owner as abandoned: a finished owner (aborted by the
+//! push, or committed) has the intent resolved at once and the write goes again; a live one makes
+//! it wait a pause.
 //!
 //! A read that finds one does not wait (008 FR-003, T013): it pushes the owner above its mark,
 //! learns its state, resolves the intent of a finished one, and reads again at the same mark

@@ -1,6 +1,6 @@
 //! The audit log of a node (013 FR-016): `--auditDestination`, `--auditFormat`, `--auditPath`
-//! and `--auditFilter`, checked with RefDb's messages, and where the messages go: a file
-//! created with permissions 0600 and appended to, the standard output, or the system log.
+//! and `--auditFilter`, checked with the reference server's messages, and where the messages go: a
+//! file created with permissions 0600 and appended to, the standard output, or the system log.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -17,7 +17,7 @@ use teseladb_auth::audit_crypt::AuditEncryption;
 use teseladb_bson::Document;
 use teseladb_wire::commands::audit::{Audit, SharedAuditor, Sink};
 
-/// Permissions of the audit file, as RefDb creates it.
+/// Permissions of the audit file, as the reference server creates it.
 const FILE_MODE: u32 = 0o600;
 /// The system log's sockets, Linux first.
 const SYSLOG_SOCKETS: [&str; 2] = ["/dev/log", "/var/run/syslog"];
@@ -70,8 +70,8 @@ impl AuditOpts {
         }
     }
 
-    /// The configuration the options describe, `None` without an audit log, or RefDb's
-    /// message.
+    /// The configuration the options describe, `None` without an audit log, or the reference
+    /// server's message.
     pub fn config(&self) -> Result<Option<Config>, String> {
         let mut config = Config::from_options(&self.options()).map_err(|e| e.0)?;
         if let Some(c) = config.as_mut() {
@@ -179,8 +179,8 @@ fn kmip_encryption(
 }
 
 /// The encryption of an audit file with `--auditLocalKeyFile`: the key file holds a 32-byte key
-/// in Base64; the log's own key and the IV that wraps it are drawn now. RefDb's messages for a
-/// file it cannot read or a key it cannot decode (measured).
+/// in Base64; the log's own key and the IV that wraps it are drawn now. The reference server's
+/// messages for a file it cannot read or a key it cannot decode (measured).
 fn encryption(config: &Config, random: Random) -> Result<Option<AuditEncryption>, String> {
     let Some(path) = &config.local_key_file else { return Ok(None) };
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -347,7 +347,7 @@ mod tests {
             "{text}"
         );
         assert!(lines[1].contains(r#""log":""#) && !text.contains("startup"), "{text}");
-        // A key file that is missing or holds no key, RefDb's messages.
+        // A key file that is missing or holds no key, the reference server's messages.
         let missing = dir.join("none.key");
         let e = AuditLog::open(&with(&missing, None)).unwrap_err();
         assert_eq!(

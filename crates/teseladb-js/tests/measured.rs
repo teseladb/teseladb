@@ -1,6 +1,6 @@
-//! The language and its objects against the engine of a `refrouter` 9.0.4 (016 FR-002): each line
-//! of `tests/measured/expressions.tsv` is an expression, a tab and what that engine gave for it
-//! inside a `$function` on 02-11: `S:` and the string it is, `J:` and `JSON.stringify` of any
+//! The language and its objects against the engine of a reference router 9.0.4 (016 FR-002): each
+//! line of `tests/measured/expressions.tsv` is an expression, a tab and what that engine gave for
+//! it inside a `$function` on 02-11: `S:` and the string it is, `J:` and `JSON.stringify` of any
 //! other value, or `E:` with the name and message of what it threw.
 
 use teseladb_bson::Value;
@@ -38,7 +38,7 @@ fn ours(expr: &str) -> String {
 }
 
 #[test]
-fn every_expression_gives_what_refdb_s_engine_gives() {
+fn every_expression_gives_what_the_reference_engine_gives() {
     let mut wrong = Vec::new();
     for line in CASES.lines().filter(|l| !l.is_empty()) {
         let (expr, want) = line.split_once('\t').expect("a tab");

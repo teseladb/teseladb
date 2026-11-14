@@ -3,14 +3,14 @@
 //! entries it holds at that time. The caller reads both with one snapshot and passes them in key
 //! order; this module only compares, so it is the same check the simulator runs (FR-017).
 //!
-//! What it reports is what `validate` shows, measured on refnode 9.0.4 with the fail points that
-//! skip index writes: per index, the entries it holds (`keysPerIndex`, which in RefDb also
-//! counts one entry per multikey path of a wildcard index), the entries a document needs and the
-//! index lacks (`missingIndexEntries`), the entries no document needs (`extraIndexEntries`), and
-//! for a wildcard index the multikey paths the catalog lacks (`Index '<name>' has one or more
-//! missing multikey metadata index keys`). An entry whose value differs from the one the document
-//! gives (other type bits, or in a unique index another document's primary key) is both missing
-//! and extra.
+//! What it reports is what `validate` shows, measured on the reference server 9.0.4 with the fail
+//! points that skip index writes: per index, the entries it holds (`keysPerIndex`, which in the
+//! reference server also counts one entry per multikey path of a wildcard index), the entries a
+//! document needs and the index lacks (`missingIndexEntries`), the entries no document needs
+//! (`extraIndexEntries`), and for a wildcard index the multikey paths the catalog lacks
+//! (`Index '<name>' has one or more missing multikey metadata index keys`). An entry whose value
+//! differs from the one the document gives (other type bits, or in a unique index another
+//! document's primary key) is both missing and extra.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +27,7 @@ pub struct MissingEntry {
     pub key: Key,
     /// Its value ([`entry_value`]).
     pub value: Vec<u8>,
-    /// The document's primary key (RefDb's `idKey`).
+    /// The document's primary key (the reference server's `idKey`).
     pub pk: PrimaryKey,
 }
 

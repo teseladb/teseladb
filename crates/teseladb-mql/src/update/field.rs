@@ -21,7 +21,7 @@ pub(crate) enum BitOp {
     Xor,
 }
 
-/// `{name: value}` in RefDb's notation.
+/// `{name: value}` in the reference server's notation.
 fn field_text(name: &str, v: RawValue<'_>) -> String {
     match OwnedDoc::new(&Document::new().with(name, Value::from(v))) {
         Ok(d) => shell_doc(d.get()),
@@ -212,7 +212,7 @@ pub(super) fn apply(
                 None => Value::Int32(0),
                 Some(v @ (Value::Int32(_) | Value::Int64(_))) => v,
                 Some(other) => {
-                    // Measured on a `refrouter` 9.0.4, words and spacing as they are.
+                    // Measured on a reference router 9.0.4, words and spacing as they are.
                     return Err(bad_value(format!(
                         "Cannot apply $bit to a value of non-integral type.{} has the field {name} of non-integer type {}",
                         id_text(original).trim_matches(['{', '}']),
@@ -250,7 +250,7 @@ fn as_i64(v: &Value) -> i64 {
     }
 }
 
-/// `(NumberLong)9223372036854775807`, as RefDb shows a number with its type.
+/// `(NumberLong)9223372036854775807`, as the reference server shows a number with its type.
 fn typed(v: &Value) -> String {
     match v {
         Value::Int32(n) => format!("(NumberInt){n}"),
@@ -310,7 +310,7 @@ fn take(root: &mut MVal, path: &[String], text: &str, id: &str) -> Result<Option
     Ok(None)
 }
 
-/// The `_id` of the document as RefDb names it in `$rename`'s messages (`_id: 1`).
+/// The `_id` of the document as the reference server names it in `$rename`'s messages (`_id: 1`).
 fn id_element(root: &MVal) -> String {
     let root = root.expanded();
     let MVal::Doc(d) = &*root else { return NO_ID.to_owned() };

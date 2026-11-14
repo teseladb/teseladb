@@ -15,7 +15,7 @@ use crate::parse::{self, Expr, FilterUse, Pred};
 use crate::value::{OwnedValue, is_number, truncate_i64, truthy};
 use crate::vm::project::Projector;
 
-/// `$meta` names RefDb accepts.
+/// `$meta` names the reference server accepts.
 pub const META_NAMES: [&str; 14] = [
     "textScore",
     "indexKey",
@@ -182,7 +182,7 @@ fn err(code: ErrorCode, message: impl Into<String>) -> MqlError {
 const FIELD_PATH_HINT: &str =
     "Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: ";
 
-/// The segments of a projection path, checked as RefDb's `FieldPath` checks them.
+/// The segments of a projection path, checked as the reference server's `FieldPath` checks them.
 fn segments(path: &str) -> Result<Vec<&str>> {
     if path.is_empty() {
         return Err(err(code::EMPTY_PATH, "FieldPath cannot be constructed with empty string"));
@@ -318,7 +318,7 @@ impl Builder {
     }
 
     /// `path: {$slice: arg}`: the `find` form, or else the expression `$slice`, which 010
-    /// evaluates; when neither reads it, RefDb's error names both.
+    /// evaluates; when neither reads it, the reference server's error names both.
     fn slice(&mut self, path: &str, segs: &[&str], arg: RawValue<'_>) -> Result<()> {
         let find = find_slice(arg).and_then(|a| self.tree.insert(segs, a, path));
         let Err(e) = find else {
@@ -476,8 +476,8 @@ impl Projection {
     }
 
     /// The error of a `$meta` the query cannot give: `text_search` and `near` say whether the
-    /// filter has `$text` and `$near`, `sorted` whether there is a sort (measured on a `refrouter`
-    /// 9.0.4, which checks the search scores first).
+    /// filter has `$text` and `$near`, `sorted` whether there is a sort (measured on a reference
+    /// router 9.0.4, which checks the search scores first).
     pub fn check_metadata(&self, text_search: bool, near: bool, sorted: bool) -> Result<()> {
         let unavailable = |what: &str| {
             let msg = format!("query requires {what} metadata, but it is not available");
@@ -667,7 +667,8 @@ impl Run<'_, '_, '_> {
                         self.root,
                         self.ctx.matcher.vars,
                     )?;
-                    // An expression that gives nothing leaves the field out, as RefDb does.
+                    // An expression that gives nothing leaves the field out, as the reference
+                    // server does.
                     if let Some(v) = v {
                         out.insert(k.as_str(), v);
                     }

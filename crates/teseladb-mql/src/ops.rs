@@ -12,7 +12,8 @@ pub const GTE: &str = "$gte";
 pub const EXPR_PREFIX: &str = "$_internalExpr";
 /// `$_internalExprGt`, of the partial filters of time series bucket indexes (015).
 pub const EXPR_GT: &str = "$_internalExprGt";
-/// `$_internalExprEq`, which RefDb adds beside an `$expr` equality of a path and a constant.
+/// `$_internalExprEq`, which the reference server adds beside an `$expr` equality of a path and a
+/// constant.
 pub const EXPR_EQ: &str = "$_internalExprEq";
 /// `$_internalExprGte`.
 pub const EXPR_GTE: &str = "$_internalExprGte";

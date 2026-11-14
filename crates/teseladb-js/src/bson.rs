@@ -1,11 +1,11 @@
-//! BSON in JavaScript (016 FR-003): the types RefDb shows with its own constructors
+//! BSON in JavaScript (016 FR-003): the types the reference server shows with its own constructors
 //! (`ObjectId`, `NumberLong`, `NumberInt`, `NumberDecimal`, `ISODate`, `BinData`, `Timestamp`,
-//! `MinKey`, `MaxKey`, `DBRef`, `DBPointer`) and the conversions both ways, as a `refrouter` 9.0.4
-//! does them (measured on 02-11): every number comes back as a double except a `NumberInt`, an
-//! `int32` argument is a plain number, `undefined` is `null`, a function is `Code` and a symbol
+//! `MinKey`, `MaxKey`, `DBRef`, `DBPointer`) and the conversions both ways, as a reference router
+//! 9.0.4 does them (measured on 02-11): every number comes back as a double except a `NumberInt`,
+//! an `int32` argument is a plain number, `undefined` is `null`, a function is `Code` and a symbol
 //! cannot be written.
 //!
-//! The prototypes hold, in the order the `refrouter` lists them, the natives of each type (not
+//! The prototypes hold, in the order the reference router lists them, the natives of each type (not
 //! enumerable); `prelude.js` then assigns the methods the shell writes in JavaScript (enumerable).
 //! Each prototype is an object of its type: `NumberLong.prototype` is `NumberLong(0)`, and the
 //! natives of `ObjectId` and `BinData` refuse theirs ("Cannot call … on prototype of …").
@@ -43,7 +43,7 @@ const NATIVE_TYPES: [&str; 5] = ["NumberLong", "NumberInt", "NumberDecimal", "Ob
 type Native = (&'static str, NativeFn, usize);
 
 /// A BSON type with a constructor: its name, the constructor, the value its prototype holds,
-/// the natives and the getters (enumerable, as the `refrouter` lists them) of the prototype.
+/// the natives and the getters (enumerable, as the reference router lists them) of the prototype.
 struct TypeSpec {
     name: &'static str,
     ctor: NativeFn,
@@ -162,8 +162,8 @@ pub(crate) fn proto_of(it: &Interp, name: &str) -> Option<ObjRef> {
     c.borrow().get_own("prototype")?.value.as_obj().cloned()
 }
 
-/// The class the `refrouter` gives a BSON object: its type, and `MinKey` or `MaxKey` for the key
-/// and the prototype of the key.
+/// The class the reference router gives a BSON object: its type, and `MinKey` or `MaxKey` for the
+/// key and the prototype of the key.
 pub(crate) fn bson_class(it: &Interp, o: &ObjRef) -> Option<&'static str> {
     if let Kind::Bson(b) = &o.borrow().kind {
         return Some(type_name(b));
@@ -183,7 +183,7 @@ pub fn make(it: &Interp, b: Bson) -> R {
     }
     let proto = proto_of(it, type_name(&b)).or_else(|| Some(it.realm.object.clone()));
     let o = it.alloc(proto, Kind::Bson(b.clone()))?;
-    // Measured on a `refrouter` 9.0.4 on 02-11: the own properties of each type.
+    // Measured on a reference router 9.0.4 on 02-11: the own properties of each type.
     let fixed = |v: Val| Prop { writable: false, ..Prop::hidden(v) };
     match b {
         Bson::Timestamp(t, i) => {
@@ -206,7 +206,7 @@ pub fn make(it: &Interp, b: Bson) -> R {
 }
 
 /// The value of `this` for the native `method` of the type `ty`, with the errors of the
-/// `refrouter` 9.0.4 (measured on 02-11).
+/// reference router 9.0.4 (measured on 02-11).
 pub(crate) fn this_of(it: &Interp, this: &Val, method: &str, ty: &str) -> R<Bson> {
     let o = match this {
         Val::Obj(o) => o,
@@ -268,7 +268,7 @@ pub(crate) fn install_pointer(it: &mut Interp, g: &ObjRef) -> R<()> {
 fn install_type(it: &mut Interp, g: &ObjRef, spec: &TypeSpec) -> R<()> {
     let proto = it.alloc(Some(it.realm.object.clone()), Kind::Bson((spec.proto)()))?;
     let c = it.native(spec.name, spec.ctor, 0)?;
-    // The `refrouter` lists `prototype` before `length` and `name`.
+    // The reference router lists `prototype` before `length` and `name`.
     let fixed =
         Prop { writable: false, configurable: false, ..Prop::hidden(Val::Obj(proto.clone())) };
     c.borrow_mut().props.insert(0, ("prototype".into(), fixed));
@@ -285,7 +285,7 @@ fn install_type(it: &mut Interp, g: &ObjRef, spec: &TypeSpec) -> R<()> {
     Ok(())
 }
 
-/// `MinKey` and `MaxKey` (measured on a `refrouter` 9.0.4 on 02-11): a frozen callable object
+/// `MinKey` and `MaxKey` (measured on a reference router 9.0.4 on 02-11): a frozen callable object
 /// without properties whose call gives itself, over a callable prototype (not frozen) with
 /// `constructor`, `tojson`, `toJSON` and `singleton`, over `Object.prototype`.
 fn install_key(
@@ -326,7 +326,7 @@ fn key_text<const MAX: bool, const TEXT: bool>(it: &mut Interp, this: &Val, _: &
     single(it, key, Val::Num(1.0))
 }
 
-/// A number made a 64-bit integer as the `refrouter` does: truncated, modulo 2⁶⁴, `NaN` is 0.
+/// A number made a 64-bit integer as the reference router does: truncated, modulo 2⁶⁴, `NaN` is 0.
 fn to_int64(n: f64) -> i64 {
     if !n.is_finite() {
         return 0;
@@ -337,7 +337,7 @@ fn to_int64(n: f64) -> i64 {
 }
 
 /// The time (`increment` false) or the increment of a `Timestamp` from `v`, with the
-/// `refrouter`'s message when it is not a number in `0..=4294967295`.
+/// reference router's message when it is not a number in `0..=4294967295`.
 fn timestamp_part(v: &Val, increment: bool) -> Result<u32, String> {
     let what = if increment { "Timestamp increment" } else { "Timestamp time (seconds)" };
     let Val::Num(n) = v else {
@@ -408,7 +408,7 @@ fn object_id(it: &mut Interp, _: &Val, a: &[Val]) -> R {
             }
             id
         }
-        // Measured on a `refrouter` 9.0.4 on 02-11: the length is checked before the digits.
+        // Measured on a reference router 9.0.4 on 02-11: the length is checked before the digits.
         Val::Str(s) if s.len() != 24 => return Err(it.error("Error", "invalid object id: length")),
         Val::Str(_) => return Err(it.error("Error", "invalid object id: not hex")),
         v => return Err(it.error("Error", &format!("invalid object id: {}", it.show(&v)))),
@@ -423,8 +423,8 @@ fn bin_data(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     make(it, Bson::BinData(sub as u8, bytes))
 }
 
-/// `Timestamp(t, i)` (measured on a `refrouter` 9.0.4 on 02-11): none or both, numbers truncated
-/// to `0..=4294967295`.
+/// `Timestamp(t, i)` (measured on a reference router 9.0.4 on 02-11): none or both, numbers
+/// truncated to `0..=4294967295`.
 fn timestamp(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let (t, i) = match a {
         [] => (0, 0),
@@ -438,8 +438,8 @@ fn timestamp(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     make(it, Bson::Timestamp(t, i))
 }
 
-/// `DBRef(collection, id, db)`: an object with `$ref`, `$id` and `$db` (measured on a `refrouter`
-/// 9.0.4 on 02-11: two or three arguments, the first and the third strings).
+/// `DBRef(collection, id, db)`: an object with `$ref`, `$id` and `$db` (measured on a reference
+/// router 9.0.4 on 02-11: two or three arguments, the first and the third strings).
 fn db_ref(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     if !(2..=3).contains(&a.len()) {
         return Err(it.error("Error", "DBRef needs 2 or 3 arguments"));
@@ -459,8 +459,8 @@ fn db_ref(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(o))
 }
 
-/// `DBPointer(ns, id)` (measured on a `refrouter` 9.0.4 on 02-11): exactly two arguments, a string
-/// and an `ObjectId`.
+/// `DBPointer(ns, id)` (measured on a reference router 9.0.4 on 02-11): exactly two arguments, a
+/// string and an `ObjectId`.
 fn db_pointer(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let [ns, id] = a else {
         return Err(it.error("Error", "DBPointer needs 2 arguments"));
@@ -664,7 +664,7 @@ pub(crate) fn base64_encode(b: &[u8]) -> String {
 }
 
 /// The bytes of `s`, base64 in groups of four with at most two `=` at the end; the errors are
-/// RefDb's (measured on a `refrouter` 9.0.4).
+/// the reference server's (measured on a reference router 9.0.4).
 fn base64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     if !s.len().is_multiple_of(4) {
         return Err("invalid base64");
@@ -732,8 +732,8 @@ pub fn from_bson(it: &mut Interp, v: &Value, depth: usize) -> R {
     })
 }
 
-/// The function `code` defines, as RefDb gives a `Code` value to JavaScript (a function
-/// stored in `system.js` is called by its name); `None` when the code is not one function.
+/// The function `code` defines, as the reference server gives a `Code` value to JavaScript (a
+/// function stored in `system.js` is called by its name); `None` when the code is not one function.
 fn function_of(it: &mut Interp, code: &str) -> R<Option<Val>> {
     let Ok(body) = crate::parser::parse_script(&crate::text::encode(code)) else {
         return Ok(None);
@@ -757,19 +757,16 @@ pub fn from_document(it: &mut Interp, d: &Document, depth: usize) -> R {
 
 /// The error of a value that has no BSON form (measured: 16662 for a symbol).
 pub fn not_convertible(name: &str) -> Ctrl {
-    convert_error(
-        NOT_CONVERTIBLE,
-        format!("unable to convert JavaScript property to ref element {name}"),
-    )
+    convert_error(NOT_CONVERTIBLE, teseladb_names::JS_ELEMENT_ERROR.replace("{name}", name))
 }
 
-/// A value BSON cannot hold: RefDb's code and message.
+/// A value BSON cannot hold: the reference server's code and message.
 fn convert_error(code: i32, message: String) -> Ctrl {
     Ctrl::Fatal(Fatal::Convert(code, message))
 }
 
-/// The BSON of a `Timestamp` object: its properties `t` and `i` (measured on a `refrouter` 9.0.4
-/// on 02-11).
+/// The BSON of a `Timestamp` object: its properties `t` and `i` (measured on a reference router
+/// 9.0.4 on 02-11).
 fn timestamp_bson(it: &mut Interp, v: &Val) -> R<Value> {
     let mut part = |key: &str, increment: bool| -> R<u32> {
         let has = matches!(v, Val::Obj(o) if o.borrow().get_own(key).is_some());
@@ -792,8 +789,8 @@ fn timestamp_bson(it: &mut Interp, v: &Val) -> R<Value> {
     Ok(Value::Timestamp { time, increment })
 }
 
-/// A `DBPointer` as the `refrouter` writes it: a reference `{$ref, $id, $db}`, the namespace split
-/// at its dot when it has one only.
+/// A `DBPointer` as the reference router writes it: a reference `{$ref, $id, $db}`, the namespace
+/// split at its dot when it has one only.
 fn pointer_bson(namespace: &str, id: [u8; 12]) -> Value {
     let mut d = Document::new();
     let (db, coll) = match namespace.split_once('.') {
@@ -824,7 +821,7 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
             let kind = o.borrow().kind.clone();
             match kind {
                 Kind::Bson(b) => bson_value(it, o, v, b, depth)?,
-                // An invalid date is the epoch (measured on a `refrouter` 9.0.4 on 02-11).
+                // An invalid date is the epoch (measured on a reference router 9.0.4 on 02-11).
                 Kind::Date(t) => Value::DateTime(if t.is_nan() { 0 } else { t as i64 }),
                 Kind::Num(n) => Value::Double(n),
                 Kind::Str(s) => Value::String(crate::text::to_utf8(&s).into_owned()),
@@ -853,8 +850,8 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
     })
 }
 
-/// An object of a BSON type as BSON (measured on a `refrouter` 9.0.4 on 02-11: the prototypes of
-/// `ObjectId`, `BinData` and `DBPointer` cannot be written; a `Timestamp` is its `t` and `i`; a
+/// An object of a BSON type as BSON (measured on a reference router 9.0.4 on 02-11: the prototypes
+/// of `ObjectId`, `BinData` and `DBPointer` cannot be written; a `Timestamp` is its `t` and `i`; a
 /// `DBRef` is its properties).
 fn bson_value(it: &mut Interp, o: &ObjRef, v: &Val, b: Bson, depth: usize) -> R<Value> {
     let is_proto = |ty: &str| proto_of(it, ty).is_some_and(|p| p.ptr_eq(o));

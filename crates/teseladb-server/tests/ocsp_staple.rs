@@ -1,7 +1,7 @@
-//! OCSP stapling of the clients' port (013 T042, FR-031), as `refnode` 9.0.4 staples (measured):
-//! the answer of the responder that the certificate names, asked over HTTP and checked; a `good`
-//! answer with `nextUpdate` is stapled and asked again halfway to it; one without `nextUpdate` is
-//! not stapled; a responder out of reach is asked again a minute later.
+//! OCSP stapling of the clients' port (013 T042, FR-031), as the reference server 9.0.4 staples
+//! (measured): the answer of the responder that the certificate names, asked over HTTP and checked;
+//! a `good` answer with `nextUpdate` is stapled and asked again halfway to it; one without
+//! `nextUpdate` is not stapled; a responder out of reach is asked again a minute later.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

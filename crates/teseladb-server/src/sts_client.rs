@@ -1,6 +1,6 @@
-//! The STS of REFDB-AWS (013 FR-025): `--setParameter awsSTSUrl` (`https://sts.amazonaws.com`
-//! by default, HTTPS only, as RefDb checks it) and the `GetCallerIdentity` request a login
-//! sends there with the client's signature.
+//! The STS of AWS IAM authentication (013 FR-025): `--setParameter awsSTSUrl`
+//! (`https://sts.amazonaws.com` by default, HTTPS only, as the reference server checks it) and the
+//! `GetCallerIdentity` request a login sends there with the client's signature.
 
 use std::time::Duration;
 
@@ -109,14 +109,15 @@ mod tests {
         assert_eq!(aws::caller(status, &body), Ok("arn:x".to_owned()));
         let text = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
         assert!(text.starts_with("POST / HTTP/1.1\r\n"), "{text}");
+        let binding = format!("{}: n", teseladb_names::AWS_HEADER_CHANNEL_BINDING);
         for line in [
-            "X-RefDb-GS2-CB-Flag: n",
+            binding.as_str(),
             "Content-Type: application/x-www-form-urlencoded",
             "Content-Length: 43",
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
-        // Only HTTPS, as RefDb, and a URL that does not parse.
+        // Only HTTPS, as the reference server, and a URL that does not parse.
         assert_eq!(
             Sts::with_https("http://localhost:1", https.clone()).unwrap_err(),
             "STS URL must start with https://"

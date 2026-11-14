@@ -1,5 +1,5 @@
 //! `Proxy`: an object whose operations go to the traps of its handler, or to its target when
-//! the handler has no trap for them, with SpiderMonkey's messages (measured on a `refrouter`
+//! the handler has no trap for them, with SpiderMonkey's messages (measured on a reference router
 //! 9.0.4 on 02-11). A revoked proxy fails every operation.
 
 use crate::builtins::{arg, ctor, method, new_target};
@@ -52,7 +52,7 @@ fn same_proto(a: &Option<ObjRef>, b: &Option<ObjRef>) -> bool {
 }
 
 /// `[[GetPrototypeOf]]` of a proxy: its `getPrototypeOf` trap, or its target's (ECMA-262
-/// §10.5.1; messages measured on a `refrouter` 9.0.4 on 02-11).
+/// §10.5.1; messages measured on a reference router 9.0.4 on 02-11).
 pub fn get_proto(it: &mut Interp, o: &ObjRef) -> R<Option<ObjRef>> {
     let (target, handler) = live(it, o)?;
     let Some(t) = trap(it, &handler, "getPrototypeOf")? else { return it.proto_of(&target) };

@@ -6,8 +6,8 @@
 //! A core's state lives on its thread: the thread recovers its log and its LSM, and only then runs
 //! its loop; the data ranges Group 0 places on the core open there as core 0 hands them over
 //! ([`crate::ranges`]). The node talks to the ranges through [`Node::put`], [`Node::get`] and
-//! [`Node::data_status`], each request sent to the core of its range (006 brings RefDb's
-//! protocol).
+//! [`Node::data_status`], each request sent to the core of its range (006 brings the reference
+//! server's protocol).
 
 use crate::authz_lease::AuthGate;
 use crate::clustertime_keys::{KeyDriver, KeySlot};
@@ -259,7 +259,7 @@ pub struct NodeConfig {
     /// The `root` user document to create while the cluster has no user (013 FR-004).
     pub root_user: Option<Vec<u8>>,
     /// Seals the `$clusterTime` signing keys with the master key; `None` signs with zeros and
-    /// takes any signature, as RefDb without authentication (013 FR-014).
+    /// takes any signature, as the reference server without authentication (013 FR-014).
     pub clustertime_sealer: Option<KeySealer>,
     /// TLS 1.3 between nodes with the node's certificate (013 FR-006); `None` in clear.
     pub peer_tls: Option<PeerTls>,

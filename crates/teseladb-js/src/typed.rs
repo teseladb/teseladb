@@ -1,5 +1,5 @@
 //! `ArrayBuffer`, the typed arrays and `DataView` (ECMA-262 §25.1, §23.2, §25.3), with the
-//! messages of SpiderMonkey measured on a `refrouter` 9.0.4 on 02-11.
+//! messages of SpiderMonkey measured on a reference router 9.0.4 on 02-11.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -263,7 +263,7 @@ pub fn validate(it: &mut Interp, this: &Val) -> R<()> {
 }
 
 /// `this` for a method of a typed array (ValidateTypedArray): a view inside its buffer, with the
-/// messages of a `refrouter` 9.0.4 (measured on 02-11).
+/// messages of a reference router 9.0.4 (measured on 02-11).
 fn live_view(it: &mut Interp, this: &Val) -> R<View> {
     let v = this_view(it, this)?;
     if v.buf.borrow().detached {
@@ -580,8 +580,8 @@ const CALLBACK_RUNS: [NativeFn; 9] = [
     crate::arrays::some,
 ];
 
-/// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the `refrouter` 9.0.4 does, then
-/// the array method.
+/// `CALLBACK_METHODS[I]` of a typed array: its callback checked as the reference router 9.0.4 does,
+/// then the array method.
 fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     live_view(it, this)?;
     let name = CALLBACK_METHODS[I];
@@ -597,7 +597,7 @@ fn with_callback<const I: usize>(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 fn callable(it: &mut Interp, f: &Val) -> R {
     if matches!(f, Val::Undef) {
-        // Measured on a `refrouter` 9.0.4 on 02-11 (`forEach` without the `%`).
+        // Measured on a reference router 9.0.4 on 02-11 (`forEach` without the `%`).
         let m = it.native.clone();
         let owner = if &*m == "forEach" { "TypedArray" } else { "%TypedArray%" };
         let msg = format!("missing argument 0 when calling function {owner}.prototype.{m}");
@@ -859,7 +859,8 @@ fn from_base64(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Obj(typed_from(it, Ty::U8, &out)?))
 }
 
-/// The string argument of `fromHex` and `fromBase64` (measured on a `refrouter` 9.0.4 on 02-11).
+/// The string argument of `fromHex` and `fromBase64` (measured on a reference router 9.0.4 on
+/// 02-11).
 fn string_arg(it: &mut Interp, a: &[Val]) -> R<Name> {
     match arg(a, 0) {
         Val::Str(s) => Ok(s),
@@ -872,7 +873,7 @@ fn string_arg(it: &mut Interp, a: &[Val]) -> R<Name> {
 
 /// The chunks of a base64 text (ECMA-262 FromBase64, with ASCII spaces anywhere and the last
 /// chunk loose): each one's bytes and the characters read up to its end, or the message of a
-/// `refrouter` 9.0.4 for what is wrong.
+/// reference router 9.0.4 for what is wrong.
 fn base64_chunks(s: &str) -> Result<Vec<(Vec<u8>, usize)>, String> {
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
@@ -950,7 +951,7 @@ fn ab_ctor(it: &mut Interp, this: &Val, a: &[Val]) -> R {
         },
         _ => None,
     };
-    // Measured on a `refrouter` 9.0.4 on 02-11.
+    // Measured on a reference router 9.0.4 on 02-11.
     if n > (1 << 30) || max.is_some_and(|m| m > (1 << 30)) {
         return Err(it.error("RangeError", "invalid array length"));
     }
@@ -1015,7 +1016,7 @@ fn ab_resize(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     }
 }
 
-/// The error of a detached buffer (measured on a `refrouter` 9.0.4 on 02-11).
+/// The error of a detached buffer (measured on a reference router 9.0.4 on 02-11).
 const DETACHED: &str = "attempting to access detached ArrayBuffer";
 /// A length over the buffer's maximum.
 const OVER_MAX: &str = "byte length is larger than maximum byte length";

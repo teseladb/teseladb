@@ -1,4 +1,4 @@
-//! The early errors of the engine of a `refrouter` 9.0.4 (016 FR-002, FR-007): each line of
+//! The early errors of the engine of a reference router 9.0.4 (016 FR-002, FR-007): each line of
 //! `tests/measured/compile.tsv` is a `$function` body, a tab and either `OK` and its result or
 //! the message, line and column of its `e-compile message` (measured on 02-11).
 
@@ -19,7 +19,7 @@ fn ours(body: &str) -> String {
 }
 
 #[test]
-fn early_errors_are_those_of_refdb_s_engine() {
+fn early_errors_are_those_of_the_reference_engine() {
     let mut wrong = Vec::new();
     for line in CASES.lines().filter(|l| !l.is_empty()) {
         let (body, want) = line.split_once('\t').expect("a tab");

@@ -169,7 +169,7 @@ fn errors_name_what_is_wrong() {
         let m = bad(cmd);
         assert!(m.contains(what), "{cmd}: {m}");
     }
-    assert_eq!(bad(""), USAGE);
+    assert_eq!(bad(""), *USAGE);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn the_binary_answers_with_the_contract_exit_codes() {
     assert_eq!(code, 0);
     assert!(out.starts_with("teseladb ") && out.contains(env!("CARGO_PKG_VERSION")), "{out}");
     let (code, out, _) = binary(&["--help"]);
-    assert_eq!((code, out.as_str()), (0, USAGE));
+    assert_eq!((code, out.as_str()), (0, *USAGE));
     let (code, _, err) = binary(&["start", "--insecure-allow-remote"]);
     assert_eq!(code, 2);
     assert!(err.contains("--insecure-allow-remote"), "{err}");
@@ -219,8 +219,8 @@ fn the_binary_answers_with_the_contract_exit_codes() {
     assert!(err.contains("usage:"), "{err}");
 }
 
-/// The transactions' parameters at startup, with a `refnode` 9.0.4's messages (008 FR-010,
-/// FR-020; measured on 31-10-2026).
+/// The transactions' parameters at startup, with a reference replica set member 9.0.4's messages
+/// (008 FR-010, FR-020; measured on 31-10-2026).
 #[test]
 fn set_parameter_takes_the_transactions_limits() {
     let o = start("start --insecure");
@@ -268,7 +268,8 @@ fn set_parameter_turns_the_test_commands_on() {
         bad("start --insecure --setParameter nope=1"),
         "Illegal --setParameter parameter: \"nope\""
     );
-    // useInternalAuthzForX509 takes the four spellings `refnode` 9.0.4 takes (013 FR-033).
+    // useInternalAuthzForX509 takes the four spellings the reference server 9.0.4 takes (013
+    // FR-033).
     assert!(!start("start --insecure").use_internal_authz_for_x509);
     for (v, on) in [("true", true), ("1", true), ("false", false), ("0", false)] {
         let o = start(&format!("start --insecure --setParameter useInternalAuthzForX509={v}"));
@@ -280,7 +281,8 @@ fn set_parameter_turns_the_test_commands_on() {
             "Bad value for parameter \"useInternalAuthzForX509\": Value is not a valid boolean"
         );
     }
-    // A parameter that exists but cannot be set at startup (measured on `refnode` 9.0.4).
+    // A parameter that exists but cannot be set at startup (measured on the reference server
+    // 9.0.4).
     assert_eq!(
         bad("start --insecure --setParameter authSchemaVersion=5"),
         "Cannot use --setParameter to set \"authSchemaVersion\" at startup"
@@ -392,8 +394,8 @@ fn set_parameter_ocsp_and_the_mechanisms_in_fips_mode() {
 }
 
 /// Every parameter `getParameter` marks as settable at startup takes `--setParameter`, with the
-/// checks of `setParameter` and the startup messages of a `refnode` 9.0.4 (006 FR-037, T067;
-/// measured on 05-11-2026); the node starts with them.
+/// checks of `setParameter` and the startup messages of a reference replica set member 9.0.4 (006
+/// FR-037, T067; measured on 05-11-2026); the node starts with them.
 #[test]
 fn set_parameter_takes_every_parameter_settable_at_startup() {
     use teseladb_wire::commands::server_params::{

@@ -1,5 +1,5 @@
 //! Spherical predicates (009 T019, FR-011, FR-012): `$geoWithin` and `$geoIntersects` over the
-//! valid geometries of `geo-vectors.json` select the documents a real RefDb server selected
+//! valid geometries of `geo-vectors.json` select the documents a real reference server selected
 //! (`tests/data/geo-predicates.json`, same with and without a `2dsphere` index).
 
 use teseladb_bson::{RawDoc, RawValue, Value, extjson};
@@ -71,27 +71,29 @@ fn predicate(query: RawDoc<'_>) -> Box<dyn Fn(&Geometry) -> bool> {
     }
 }
 
-/// Documents that only touch the query shape at a point of its boundary, where RefDb's answer
-/// depends on rounding and TeselaDB follows RefDb's definition (closed shapes: a shared point
-/// intersects, a point on the boundary is within; divergence proposed with 009 T019). Each entry:
-/// position of the query in the file, document, and TeselaDB's answer.
+/// Documents that only touch the query shape at a point of its boundary, where the reference
+/// server's answer depends on rounding and TeselaDB follows the reference server's definition
+/// (closed shapes: a shared point intersects, a point on the boundary is within; divergence
+/// proposed with 009 T019). Each entry: position of the query in the file, document, and TeselaDB's
+/// answer.
 const BOUNDARY_CONTACTS: [(usize, i32, bool); 6] = [
     // Point (−90, 0) on the edge at longitude −90 of the box from −180 to −90, and point
-    // (180, 0), the same place as (−180, 0), on its edge at −180 (RefDb keeps (−180, 0)).
+    // (180, 0), the same place as (−180, 0), on its edge at −180 (the reference server keeps (−180,
+    // 0)).
     (4, 51, true),
     (5, 51, true),
     (4, 43, true),
     (5, 43, true),
     // The line from (−180, 0) to (0, 0) along the equator starts at (180, 0) and passes
     // through (−90, 0). It ends at (0, 0), a vertex of polygon 112, which it does not meet:
-    // RefDb clips the line to the polygon and nothing of positive length is left (measured,
-    // and TeselaDB clips the same way).
+    // The reference server clips the line to the polygon and nothing of positive length is left
+    // (measured, and TeselaDB clips the same way).
     (23, 43, true),
     (23, 51, true),
 ];
 
 #[test]
-fn every_measured_query_selects_what_refdb_selected() {
+fn every_measured_query_selects_what_the_reference_selected() {
     let docs = documents();
     let file = extjson::parse(PREDICATES).unwrap();
     let mut wrong = Vec::new();

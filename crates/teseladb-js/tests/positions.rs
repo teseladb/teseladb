@@ -1,5 +1,5 @@
 //! Where errors are reported (016 T021): each line of `tests/measured/positions.tsv` is a
-//! `$function` body and what a `refrouter` 9.0.4 reported for it on 02-11 after
+//! `$function` body and what a reference router 9.0.4 reported for it on 02-11 after
 //! `e-runtime message :`: the message, the file, the line, the column and the stack (`-` for a
 //! value that is not an error).
 
@@ -38,7 +38,7 @@ fn ours(body: &str) -> String {
 }
 
 #[test]
-fn errors_are_reported_where_refdb_s_engine_reports_them() {
+fn errors_are_reported_where_the_reference_engine_reports_them() {
     let mut wrong = Vec::new();
     for line in CASES.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();

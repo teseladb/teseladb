@@ -3,9 +3,9 @@
 //!
 //! s2geometry.io publishes only what a covering is (cells that contain a region, with a cell
 //! budget and a coarsest and finest level) and that complete sets of four siblings merge into
-//! their parent. The way the cells are chosen was selected by the keys RefDb writes for 2 175
-//! measured lines and polygons (`tests/data/geo-vectors.json` and `geo-coverings.json`; 009
-//! research, R8): of the alternatives tried for each step, only this combination reproduces
+//! their parent. The way the cells are chosen was selected by the keys the reference server writes
+//! for 2 175 measured lines and polygons (`tests/data/geo-vectors.json` and `geo-coverings.json`;
+//! 009 research, R8): of the alternatives tried for each step, only this combination reproduces
 //! all of them.
 //!
 //! 1. Start from the cells around the cell corner nearest the centre of the region's bounding

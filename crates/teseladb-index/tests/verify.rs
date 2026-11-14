@@ -1,8 +1,8 @@
-//! Index-document verification for `validate` (009 T027, FR-016): the case built on refnode 9.0.4
-//! with the fail points `skipIndexNewRecords` and `skipUnindexingDocumentWhenDeleted` (a document
-//! inserted without its entries, another deleted without removing its entry from `a_1`) gives
-//! the same counts: `a_1` holds 1 entry and misses 2, the wildcard index holds none, misses 3 and
-//! misses the multikey path `a`.
+//! Index-document verification for `validate` (009 T027, FR-016): the case built on the reference
+//! server 9.0.4 with the fail points `skipIndexNewRecords` and `skipUnindexingDocumentWhenDeleted`
+//! (a document inserted without its entries, another deleted without removing its entry from `a_1`)
+//! gives the same counts: `a_1` holds 1 entry and misses 2, the wildcard index holds none, misses 3
+//! and misses the multikey path `a`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,7 +50,7 @@ fn entries(set: &IndexSet, id: u32, doc: &[u8], pk: &PrimaryKey) -> Vec<(Key, Ve
 }
 
 #[test]
-fn missing_and_extra_entries_as_refdb_counts_them() {
+fn missing_and_extra_entries_as_the_reference_counts_them() {
     let set = set();
     let one = bytes("{\"_id\": 1, \"a\": [1, 2], \"b\": {\"c\": \"x\"}}");
     let gone = bytes("{\"_id\": 2, \"a\": 5}");

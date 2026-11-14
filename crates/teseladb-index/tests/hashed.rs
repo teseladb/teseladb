@@ -1,4 +1,4 @@
-//! Hashed index keys (009 T025, FR-014): every vector measured on a real RefDb server
+//! Hashed index keys (009 T025, FR-014): every vector measured on a real reference server
 //! (`tests/data/hashed-vectors.json`, with the image digest and the date) comes out the same.
 
 use teseladb_bson::{RawDoc, RawValue, Value, extjson};
@@ -14,7 +14,7 @@ fn text(v: Option<&Value>) -> &str {
 }
 
 #[test]
-fn every_measured_value_hashes_as_refdb_does() {
+fn every_measured_value_hashes_as_the_reference_does() {
     let file = extjson::parse(VECTORS).unwrap();
     let Some(Value::Array(vectors)) = file.get("vectors") else { panic!("no vectors") };
     assert!(vectors.len() > 100);
@@ -48,8 +48,8 @@ fn numbers_hash_by_their_integer_value() {
 
 #[test]
 fn undefined_and_db_pointers_have_classes_of_their_own() {
-    // Not measured: refshell sends `undefined` as null and cannot build a DBPointer (009 research
-    // R6). They hash with their own type class, apart from null and from strings.
+    // Not measured: the reference shell sends `undefined` as null and cannot build a DBPointer (009
+    // research R6). They hash with their own type class, apart from null and from strings.
     assert_ne!(hashed_key(RawValue::Undefined), hashed_key(RawValue::Null));
     let p = RawValue::DbPointer { namespace: "db.c", id: [7; 12] };
     assert_ne!(hashed_key(p), hashed_key(RawValue::String("db.c")));

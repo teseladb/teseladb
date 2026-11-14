@@ -74,14 +74,15 @@ use crate::data_wire::{Ahead, RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
 use crate::routes::SharedRoutes;
 
-/// RefDb's identifier and message of a certificate rotation that finished (measured on 9.0.4).
+/// The reference server's identifier and message of a certificate rotation that finished (measured
+/// on 9.0.4).
 const ROTATION_LOG_ID: i32 = 4_988_500;
 const ROTATION_DONE: &str = "Certificate rotation completed successfully";
 /// Longest a command waits for the catalog or the range.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a read whose read preference no replica satisfies, without `maxTimeMS`, waits for one
-/// before `FailedToSatisfyReadPreference`: a refrouter 9.0.4's server selection limit (measured,
-/// D-093).
+/// before `FailedToSatisfyReadPreference`: a reference router 9.0.4's server selection limit
+/// (measured, D-093).
 pub const SELECTION_LIMIT: Duration = Duration::from_secs(15);
 /// Pause before trying a request again.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
@@ -141,7 +142,7 @@ pub struct ServerBackend {
     max_until: Option<Instant>,
     /// What the diagnostic commands report; `None` for a backend without a client port.
     diag: Option<Arc<crate::diag::Diag>>,
-    /// The identity providers of REFDB-OIDC of a backend without a client port (the HTTP
+    /// The identity providers of OIDC authentication of a backend without a client port (the HTTP
     /// port's); a backend with one reads them from [`Diag`](crate::diag::Diag).
     oidc: Option<Arc<crate::oidc_client::Oidc>>,
     /// The pins of the running operation's reads of the indexes (009 FR-006).
@@ -986,7 +987,7 @@ fn log_long_pin(held: Duration, collections: &[u32], late: bool) {
         return;
     }
     let thread = thread::current().name().unwrap_or("unnamed").to_owned();
-    // TeselaDB's own line: it has no RefDb identifier.
+    // TeselaDB's own line: it has no identifier of the reference server.
     crate::log::defer(crate::log::Pending {
         id: 0,
         msg: "an operation held the catalog changes of the indexes".to_owned(),
@@ -1031,7 +1032,8 @@ impl ServerBackend {
             };
             return Ok(value.map(|v| (start.to_vec(), v)).into_iter().collect());
         }
-        // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
+        // Without `maxTimeMS`, a reference router looks for a replica for its selection limit
+        // (D-093).
         self.selection = self
             .read_pref
             .as_ref()
@@ -2247,7 +2249,7 @@ impl Backend for ServerBackend {
             return Err(unreachable("no STS"));
         };
         sts.send(req).map_err(|e| {
-            // RefDb's log line when the STS does not answer (measured on 9.0.4).
+            // The reference server's log line when the STS does not answer (measured on 9.0.4).
             let attr =
                 teseladb_bson::Document::new().with("awsSTSURL", sts.url.as_str()).with("error", e);
             self.log_warning(4690900, "Failed connecting to AWS STS", &attr);
@@ -2265,8 +2267,8 @@ impl Backend for ServerBackend {
         let Some(ldap) = self.diag.as_ref().and_then(|d| d.ldap()) else {
             return Ok(LdapLogin::Refused);
         };
-        // RefDb answers `Authentication failed.` whatever the LDAP server did; the reason
-        // goes to the log.
+        // The reference server answers `Authentication failed.` whatever the LDAP server did; the
+        // reason goes to the log.
         ldap.login(user, password).or_else(|e| {
             self.log_warning(
                 24055,
@@ -2328,8 +2330,8 @@ impl Backend for ServerBackend {
     }
 
     fn thread_cpu_nanos(&mut self) -> Option<u64> {
-        // As RefDb 9.0.4, whose operation CPU timers exist on Linux alone: elsewhere no
-        // operation reports `cpuNanos`, and none pays the system calls that read a thread's CPU
+        // As the reference server 9.0.4, whose operation CPU timers exist on Linux alone: elsewhere
+        // no operation reports `cpuNanos`, and none pays the system calls that read a thread's CPU
         // time (four per operation, H-013 of the native tests on macOS).
         if cfg!(target_os = "linux") { teseladb_sys::host::thread_cpu_nanos().ok() } else { None }
     }
@@ -2349,7 +2351,7 @@ impl Backend for ServerBackend {
         certs
             .reload()
             .map_err(|e| CommandError::new(teseladb_wire::error::INVALID_SSL_CONFIGURATION, e))?;
-        // RefDb's line, with the operator's note.
+        // The reference server's line, with the operator's note.
         let attr = match message {
             Some(m) => {
                 let mut text = String::from("{\"message\":");

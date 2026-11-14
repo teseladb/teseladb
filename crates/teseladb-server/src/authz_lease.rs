@@ -404,7 +404,7 @@ impl AuthLeaseDriver {
         });
         let last_change = |c: u32| changes.get(&c).copied();
         for s in pins.stalled_with(applied(core), &last_change) {
-            // TeselaDB's own line: it has no RefDb identifier.
+            // TeselaDB's own line: it has no identifier of the reference server.
             crate::log::defer(crate::log::Pending {
                 id: 0,
                 msg: "a running operation holds the catalog changes of the indexes".to_owned(),

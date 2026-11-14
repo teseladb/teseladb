@@ -124,7 +124,7 @@ fn start_errors_have_exit_code_1_or_2() {
 fn version_help_and_the_development_cluster() {
     assert_eq!(run_args(&["--version"]), (0, version_text(), String::new()));
     assert_eq!(version_text(), format!("teseladb {}\n", teseladb_server::VERSION));
-    assert_eq!(run_args(&["--help"]), (0, USAGE.to_owned(), String::new()));
+    assert_eq!(run_args(&["--help"]), (0, (*USAGE).to_owned(), String::new()));
     // On ports the system chooses: a node of this machine may already hold the default ones.
     let (code, out, _) = run_args(&["dev", "--nodes", "2", "--port", "0"]);
     assert_eq!(code, 0);

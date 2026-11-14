@@ -183,7 +183,8 @@ fn fips_mode_limits_every_port_and_refuses_scram_sha_1() {
     // The option, its name in the configuration file and in getCmdLineOpts.
     let Command::Start(o) = parse(&args("start --tlsFIPSMode")).unwrap() else { panic!() };
     assert!(o.tls.fips_mode);
-    // SCRAM-SHA-1 leaves the default mechanisms (RefDb 8.3 and later in FIPS mode) ...
+    // SCRAM-SHA-1 leaves the default mechanisms (the reference server 8.3 and later in FIPS mode)
+    // ...
     assert_eq!(o.mechanisms, [SaslMechanism::ScramSha256, SaslMechanism::X509]);
     assert!(o.ldap.fips && o.at_rest.kmip.is_none());
     let yaml = "net:\n  tls:\n    FIPSMode: true\n";
@@ -196,7 +197,8 @@ fn fips_mode_limits_every_port_and_refuses_scram_sha_1() {
     let mut shown = *from_file;
     shown.given.push(("tlsFIPSMode".into(), String::new()));
     assert!(format!("{:?}", teseladb_server::parsed_options(&shown)).contains("FIPSMode"));
-    // ... and naming it refuses to start with RefDb 9.0.4's message (measured, exit code 2).
+    // ... and naming it refuses to start with the reference server 9.0.4's message (measured, exit
+    // code 2).
     for list in ["SCRAM-SHA-1", "SCRAM-SHA-256,SCRAM-SHA-1"] {
         let line = format!("start --tlsFIPSMode --setParameter authenticationMechanisms={list}");
         assert_eq!(bad(&line), "SCRAM-SHA-1 is not allowed in FIPS mode.");

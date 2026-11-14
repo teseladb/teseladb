@@ -1,7 +1,7 @@
 //! The `$clusterTime` signing keys of the node (013 FR-014, D-030): core 0 opens the keys Group 0
 //! keeps sealed with the master key and publishes them in a [`KeySlot`] the client workers sign
 //! and check with; while it leads Group 0 it keeps two keys ahead, each valid 90 days after the
-//! one before as a `refrouter` 9.0.4 does, and drops a key 90 days after it expired.
+//! one before as a reference router 9.0.4 does, and drops a key 90 days after it expired.
 
 use std::sync::{Arc, PoisonError, RwLock};
 

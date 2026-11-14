@@ -1,10 +1,10 @@
 //! `$geoWithin` and `$geoIntersects` on documents without an index (FR-012, T022), as the matcher
 //! of 006 asks them through its extensions. The shapes and the values a field holds are read as a
-//! `refnode` 9.0.4 reads them (measured, `tests/geo_query.rs`): `$geometry` is on the sphere,
-//! `$centerSphere` is a cap on the sphere, `$box`, `$polygon` and `$center` are on the plane and
-//! take legacy pairs and GeoJSON points. A field holds a legacy pair (an array or a document whose
-//! first two values are numbers; more values are ignored), a GeoJSON object, or an array of them;
-//! anything else matches no shape.
+//! reference replica set member 9.0.4 reads them (measured, `tests/geo_query.rs`): `$geometry` is
+//! on the sphere, `$centerSphere` is a cap on the sphere, `$box`, `$polygon` and `$center` are on
+//! the plane and take legacy pairs and GeoJSON points. A field holds a legacy pair (an array or a
+//! document whose first two values are numbers; more values are ignored), a GeoJSON object, or an
+//! array of them; anything else matches no shape.
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -14,7 +14,7 @@ use super::region::{Container, intersects, within};
 use super::sphere::{Cap, Point};
 use crate::shell::shell_value;
 
-/// RefDb's `BadValue`, the code of every error of a geographic query's shape.
+/// The reference server's `BadValue`, the code of every error of a geographic query's shape.
 pub const BAD_VALUE: i32 = 2;
 
 /// The geographic operator of a query.
@@ -37,7 +37,7 @@ impl GeoOperator {
     }
 }
 
-/// How a missing radius shows in its error (the end-of-object marker of a `refrouter` 9.0.4,
+/// How a missing radius shows in its error (the end-of-object marker of a reference router 9.0.4,
 /// measured).
 const MISSING: &str = "EOO";
 
@@ -56,7 +56,7 @@ pub enum Shape {
     Polygon(Vec<XY>),
 }
 
-/// Why a query's shape is refused: RefDb's code and message.
+/// Why a query's shape is refused: the reference server's code and message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryError {
     /// Code.
@@ -76,7 +76,7 @@ fn name(op: GeoOperator) -> &'static str {
     }
 }
 
-/// A legacy pair of a shape, with the errors of a `refnode` 9.0.4.
+/// A legacy pair of a shape, with the errors of a reference replica set member 9.0.4.
 fn pair(v: Option<RawValue<'_>>) -> Result<XY, QueryError> {
     coordinates(v).map_err(|e| bad(e.0))
 }
@@ -112,7 +112,7 @@ pub fn parse_query(op: GeoOperator, spec: RawValue<'_>) -> Result<Shape, QueryEr
             super::geojson::parse(arg).map(Shape::Intersects).map_err(|e| bad(e.0))
         }
         // A legacy shape is read first, so its errors come before the refusal; a spherical cap
-        // is accepted and selects nothing (measured on a `refrouter` 9.0.4).
+        // is accepted and selects nothing (measured on a reference router 9.0.4).
         (GeoOperator::Intersects, _) => match parse_query(GeoOperator::Within, spec)? {
             Shape::Within(Container::Cap(_)) => Ok(Shape::Within(Container::Polygons(Vec::new()))),
             _ => {

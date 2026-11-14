@@ -1,6 +1,6 @@
 //! Online index builds (FR-006): how many replicas of a range must hold the backfill before the
 //! index is ready (`commitQuorum`), and the progress of the backfill as `currentOp` shows it
-//! (measured on a `refnode` 9.0.4).
+//! (measured on a reference replica set member 9.0.4).
 
 /// Largest number a `commitQuorum` may be (measured on 9.0.4).
 pub const MAX_COMMIT_QUORUM: u32 = 50;
@@ -13,7 +13,7 @@ const SCANNING: &str = "Index Build: scanning collection";
 /// before the index becomes ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitQuorum {
-    /// `"votingMembers"`: every voter (RefDb's default).
+    /// `"votingMembers"`: every voter (the reference server's default).
     VotingMembers,
     /// `"majority"`.
     Majority,

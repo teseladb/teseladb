@@ -1,9 +1,9 @@
 {
  "source": {
-  "server": "refnode 9.0.4",
-  "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+  "server": "reference server 9.0.4",
+  "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
   "date": "2026-10-30",
-  "method": "convertShardKeyToHashed(<v>) in refshell, one value per vector; v as canonical Extended JSON",
+  "method": "convertShardKeyToHashed(<v>) in the reference shell, one value per vector; v as canonical Extended JSON",
   "note": "Regular expressions measured with BSONRegExp(pattern, options): a JavaScript /…/s literal reaches the server without its s flag. Binary subtype 2 hashes with its inner length.",
   "remeasured": "first measured with convertShardKeyToHashed on 7.0.45; re-measured on 9.0.4 with $toHashedIndexKey, same hashes"
  },

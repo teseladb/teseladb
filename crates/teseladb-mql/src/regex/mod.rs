@@ -1,6 +1,6 @@
-//! TeselaDB's regular expressions (FR-015): the PCRE2 syntax that RefDb's `$regex` accepts,
-//! always in UTF mode, with the options `i`, `m`, `x`, `s` and `u`, compiled to a backtracking
-//! machine with a limit of steps.
+//! TeselaDB's regular expressions (FR-015): the PCRE2 syntax that the reference server's `$regex`
+//! accepts, always in UTF mode, with the options `i`, `m`, `x`, `s` and `u`, compiled to a
+//! backtracking machine with a limit of steps.
 //!
 //! ```
 //! use teseladb_mql::regex::Regex;
@@ -26,7 +26,7 @@ use parse::Flags;
 use start::StartInfo;
 use vm::{Machine, MatchError};
 
-/// Longest pattern RefDb accepts, in bytes.
+/// Longest pattern the reference server accepts, in bytes.
 pub const MAX_PATTERN_LEN: usize = 32 * 1024;
 
 /// The options `$regex` and `$options` accept.
@@ -79,9 +79,9 @@ impl Regex {
         Regex::build(pattern, options, flags)
     }
 
-    /// Compiles `pattern` without options and without RefDb's limit on its length, for patterns
-    /// written by a translation from another syntax (the Java patterns of the search analyzers,
-    /// whose classes can become long lists of ranges).
+    /// Compiles `pattern` without options and without the reference server's limit on its length,
+    /// for patterns written by a translation from another syntax (the Java patterns of the search
+    /// analyzers, whose classes can become long lists of ranges).
     pub fn without_length_limit(pattern: &str) -> Result<Regex> {
         if pattern.contains('\0') {
             return Err(bad_value("Regular expression cannot contain an embedded null byte"));
@@ -152,7 +152,7 @@ impl Regex {
     }
 }
 
-/// `Regular expression is invalid: <reason>`, RefDb's compile error.
+/// `Regular expression is invalid: <reason>`, the reference server's compile error.
 fn invalid(reason: &str) -> MqlError {
     MqlError::new(codes::REGEX_INVALID, format!("Regular expression is invalid: {reason}"))
 }

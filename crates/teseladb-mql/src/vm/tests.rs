@@ -1,6 +1,6 @@
 //! The register machine against the tree evaluator (010 FR-031): a table of filters on the edges
-//! of RefDb's semantics (mixed numbers, NaN, `null` and missing fields, arrays on the path,
-//! collation), then a seeded fuzz of filters and documents. Every filter gives, on every
+//! of the reference server's semantics (mixed numbers, NaN, `null` and missing fields, arrays on
+//! the path, collation), then a seeded fuzz of filters and documents. Every filter gives, on every
 //! document, the tree evaluator's answer one document at a time and in batches of 64.
 
 use teseladb_bson::{Decimal128, Document, RawDoc, Value};

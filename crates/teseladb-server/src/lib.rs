@@ -204,9 +204,9 @@ fn log_output(o: &StartOpts) -> io::Result<Box<dyn Write + Send>> {
     Ok(Box::new(file))
 }
 
-/// The codec of the new blocks of a node started without `--refengineCollectionBlockCompressor`
-/// (004 FR-023, T037, D-164): zlib, which in the sustained load of 002 left the disk at a quarter
-/// and gave more operations a second than no compression and than zstd.
+/// The codec of the new blocks of a node started without the block compressor option
+/// ([`cli::BLOCK_COMPRESSOR`], 004 FR-023, T037, D-164): zlib, which in the sustained load of 002
+/// left the disk at a quarter and gave more operations a second than no compression and than zstd.
 pub const DEFAULT_BLOCK_CODEC: teseladb_lsm::Codec = teseladb_lsm::Codec::Zlib;
 
 /// Node configuration of `teseladb start`.
@@ -315,8 +315,8 @@ pub fn client_config(o: &StartOpts) -> ClientConfig {
     }
 }
 
-/// The arguments with the value of `--tlsCertificateKeyFilePassword` hidden, as `refnode` shows
-/// them in `getCmdLineOpts`.
+/// The arguments with the value of `--tlsCertificateKeyFilePassword` hidden, as the reference
+/// server shows them in `getCmdLineOpts`.
 pub fn redact_password(args: &[String]) -> Vec<String> {
     let flags = [cli::TLS_CERTIFICATE_KEY_FILE_PASSWORD, cli::LDAP_QUERY_PASSWORD]
         .map(|f| format!("--{f}"));
@@ -342,8 +342,9 @@ pub fn redact_password(args: &[String]) -> Vec<String> {
 /// The program's name in `getCmdLineOpts`' `argv`.
 const PROGRAM: &str = "teseladb";
 
-/// The options given to `teseladb start`, under RefDb's configuration names where RefDb has
-/// the option (`net.port`, `storage.dbPath`, …) and under `teseladb` the ones of TeselaDB alone.
+/// The options given to `teseladb start`, under the reference server's configuration names where
+/// the reference server has the option (`net.port`, `storage.dbPath`, …) and under `teseladb` the
+/// ones of TeselaDB alone.
 pub fn parsed_options(o: &StartOpts) -> Document {
     let mut out = Document::new();
     for (name, raw) in &o.given {
@@ -488,7 +489,8 @@ fn js_clock_ms() -> u64 {
     u64::try_from(backend::process_start().elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The wait of `sleep(ms)` in a JavaScript call: its thread sleeps, as on a `refnode`.
+/// The wait of `sleep(ms)` in a JavaScript call: its thread sleeps, as on a reference replica set
+/// member.
 fn js_sleep(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
 }
@@ -502,7 +504,7 @@ pub(crate) fn install_js_host() {
 
 /// The user id of `root`.
 const ROOT_UID: u32 = 0;
-/// RefDb's startup warning for a process run as `root`, and its identifier.
+/// The reference server's startup warning for a process run as `root`, and its identifier.
 pub const RUNNING_AS_ROOT: &str =
     "You are running this process as the root user, which is not recommended";
 const RUNNING_AS_ROOT_ID: i32 = 22138;
@@ -525,12 +527,13 @@ pub fn start(
     if o.insecure {
         log.warn("insecure mode: no TLS nor authentication", &[]);
     }
-    // As `refnode` and `refrouter` 9.0.4 warn at start (measured on 03-11-2026, `getLog`
-    // `startupWarnings`).
+    // As the reference server and the reference router 9.0.4 warn at start (measured on 03-11-2026,
+    // `getLog` `startupWarnings`).
     if teseladb_sys::effective_uid() == ROOT_UID {
         log.warn(RUNNING_AS_ROOT, &[("id", &RUNNING_AS_ROOT_ID)]);
     }
-    // `--keyFile` and `--clusterAuthMode`, checked as `refnode` checks them (013 FR-034).
+    // `--keyFile` and `--clusterAuthMode`, checked as the reference server checks them (013
+    // FR-034).
     if let Err(e) = cluster_auth::mode(o) {
         let _ = writeln!(err, "teseladb: {e}");
         return 1;
@@ -545,7 +548,8 @@ pub fn start(
             return 1;
         }
     };
-    // The master key from the KMIP server (013 FR-028); a rotation stops here, as in `refnode`.
+    // The master key from the KMIP server (013 FR-028); a rotation stops here, as in the reference
+    // server.
     let kmip = match o.at_rest.kmip.as_ref() {
         None => None,
         Some(k) => match kmip::master_key(k, &o.dbpath, &mut |b| teseladb_sys::fill_random(b)) {
@@ -599,7 +603,7 @@ pub fn start(
             return 1;
         }
     };
-    // The STS only when REFDB-AWS is on: the system's authorities are read then.
+    // The STS only when AWS IAM authentication is on: the system's authorities are read then.
     let sts = if o.mechanisms.contains(&teseladb_auth::sasl::SaslMechanism::Aws) {
         match sts_client::Sts::from_url(o.aws_sts_url.as_deref(), o.tls.fips_mode) {
             Ok(s) => Some(std::sync::Arc::new(s)),
@@ -705,7 +709,7 @@ pub fn start(
 /// The prefix of the KMIP options, `--kmip<Name>` for `security.kmip.<name>`.
 const KMIP_PREFIX: &str = "kmip";
 
-/// `security.kmip.<name>` of `--kmip<Name>`, as `refnode` names them.
+/// `security.kmip.<name>` of `--kmip<Name>`, as the reference server names them.
 fn kmip_key(option: &str) -> &str {
     match option {
         cli::KMIP_SERVER_NAME => "serverName",
@@ -830,11 +834,11 @@ pub(crate) fn error_debug<E: std::fmt::Debug>(e: E) -> String {
     format!("{e:?}")
 }
 
-/// The keytab MIT Kerberos and `refnode` read without `KRB5_KTNAME`.
+/// The keytab MIT Kerberos and the reference server read without `KRB5_KTNAME`.
 const DEFAULT_KEYTAB: &str = "/etc/krb5.keytab";
 
 /// The keytab of GSSAPI (013 FR-025) named `name` (`KRB5_KTNAME`, with or without `FILE:`, else
-/// [`DEFAULT_KEYTAB`]), as MIT Kerberos and `refnode` read it; at least one AES key.
+/// [`DEFAULT_KEYTAB`]), as MIT Kerberos and the reference server read it; at least one AES key.
 fn keytab(name: &str) -> Result<Vec<teseladb_auth::kerberos::ServiceKey>, String> {
     let path = name.strip_prefix("FILE:").unwrap_or(name);
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
@@ -1026,7 +1030,10 @@ mod tests {
         let path = dir.join("k.keytab");
         let p = path.to_str().unwrap();
         std::fs::write(&path, keytab_bytes(17)).unwrap();
-        assert_eq!(keytab(p).unwrap()[0].principal, "refdb@TESELA.TEST");
+        assert_eq!(
+            keytab(p).unwrap()[0].principal,
+            format!("{}@TESELA.TEST", teseladb_names::KERBEROS_SERVICE)
+        );
         assert_eq!(keytab(&format!("FILE:{p}")).unwrap().len(), 1);
         std::fs::write(&path, keytab_bytes(23)).unwrap();
         assert_eq!(keytab(p).unwrap_err(), format!("{p}: no AES key"));

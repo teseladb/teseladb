@@ -72,7 +72,7 @@ fn items(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
 
 /// The elements of `this` with its holes ([`Val::Hole`]): the indices an array-like object does
 /// not have are holes too (ECMA-262 §23.1.3: `forEach`, `map`, `filter`, `reduce`, `indexOf`…
-/// skip them; measured on a `refrouter` 9.0.4 on 02-11).
+/// skip them; measured on a reference router 9.0.4 on 02-11).
 fn elements(it: &mut Interp, this: &Val) -> R<Vec<Val>> {
     match own_elements(this) {
         Some(v) => Ok(v),
@@ -326,9 +326,9 @@ fn slice(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// ArraySpeciesCreate (ECMA-262 §10.4.2.3): what `constructor[Symbol.species]` of an array
 /// makes with `len`, or `None` for a plain array (a value that is not an array, a constructor
-/// without species, or `Array` itself). Measured on a `refrouter` 9.0.4 on 02-11: `map`, `filter`,
-/// `slice`, `splice`, `concat`, `flat` and `flatMap` read `constructor`, and a subclass of `Array`
-/// gets its own instances.
+/// without species, or `Array` itself). Measured on a reference router 9.0.4 on 02-11: `map`,
+/// `filter`, `slice`, `splice`, `concat`, `flat` and `flatMap` read `constructor`, and a subclass
+/// of `Array` gets its own instances.
 pub(crate) fn species(it: &mut Interp, this: &Val, len: usize) -> R<Option<ObjRef>> {
     if !crate::proxy::is_array(it, this)? {
         return Ok(None);
@@ -494,7 +494,8 @@ fn to_locale_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         if !x.is_nullish() {
             let f = it.get(x, "toLocaleString")?;
             if !f.is_callable() {
-                // The names of SpiderMonkey's self-hosted code (measured on a `refrouter` 9.0.4).
+                // The names of SpiderMonkey's self-hosted code (measured on a reference router
+                // 9.0.4).
                 let which = if i == 0 { "firstElement" } else { "nextElement" };
                 return it.type_error(&format!("{which}.toLocaleString is not a function"));
             }
@@ -598,8 +599,8 @@ pub(crate) fn not_a_function(it: &mut Interp, f: &Val) -> crate::interp::Ctrl {
 
 /// The error of a callback `a[0]` that is not a function. Without arguments the self-hosted
 /// methods say which one is missing, under the name of the function that checks it (measured on
-/// a `refrouter` 9.0.4 on 03-11: `findIndex` is checked by `find` and `reduceRight` by `reduce`),
-/// and `flatMap` says `undefined is not a function`.
+/// a reference router 9.0.4 on 03-11: `findIndex` is checked by `find` and `reduceRight` by
+/// `reduce`), and `flatMap` says `undefined is not a function`.
 pub(crate) fn bad_callback(it: &mut Interp, a: &[Val]) -> crate::interp::Ctrl {
     let Some(f) = a.first() else {
         let name = it.native.clone();
@@ -931,7 +932,7 @@ fn flat_map(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 /// A relative index argument, named as SpiderMonkey's self-hosted code names it when it cannot
-/// be converted (`can't convert start to number`; measured on a `refrouter` 9.0.4 on 02-11).
+/// be converted (`can't convert start to number`; measured on a reference router 9.0.4 on 02-11).
 fn named_relative(it: &mut Interp, v: &Val, len: usize, default: usize, name: &str) -> R<usize> {
     let r = relative(it, v, len, default);
     it.operand_named(r, name)

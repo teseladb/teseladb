@@ -5,9 +5,9 @@
 //!   node that joins through them proves. A `SIGTERM` stops a node cleanly.
 //! - Three processes of this test's own binary in node mode ([`CHILD`]: the options of
 //!   `teseladb start`, and the node's handle for the data range on standard input, since the
-//!   RefDb protocol arrives with 006): the first creates the cluster and the data range, the
-//!   other two join with `--join` and receive replicas; after a `SIGKILL` of the range's leader a
-//!   write is confirmed again in less than 1 s.
+//!   reference server protocol arrives with 006): the first creates the cluster and the data range,
+//!   the other two join with `--join` and receive replicas; after a `SIGKILL` of the range's leader
+//!   a write is confirmed again in less than 1 s.
 //!
 //! The test runs its own `main` (`harness = false` in `Cargo.toml`) so that the same binary can
 //! be a node.

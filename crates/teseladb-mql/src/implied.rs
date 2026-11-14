@@ -1,8 +1,8 @@
-//! The `$_internalExpr…` comparisons of a query, which RefDb only uses to bound an index:
-//! measured on a `refrouter` 9.0.4, a query leaves them out of what it evaluates where they sit in
-//! a conjunction (the top of the filter, `$and`, the operators of a path), drops a whole `$or`
-//! that holds one, and keeps them under `$nor`, `$not` and `$elemMatch`. The partial filters of
-//! indexes evaluate them ([`crate::FilterUse::Index`]).
+//! The `$_internalExpr…` comparisons of a query, which the reference server only uses to bound an
+//! index: measured on a reference router 9.0.4, a query leaves them out of what it evaluates where
+//! they sit in a conjunction (the top of the filter, `$and`, the operators of a path), drops a
+//! whole `$or` that holds one, and keeps them under `$nor`, `$not` and `$elemMatch`. The partial
+//! filters of indexes evaluate them ([`crate::FilterUse::Index`]).
 
 use crate::parse::{Expr, Pred};
 

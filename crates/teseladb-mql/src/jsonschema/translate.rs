@@ -1,9 +1,9 @@
-//! A schema as the filter RefDb translates it into (`parsedQuery` of `explain`, measured on a
-//! `refrouter` 9.0.4 on 01-11-2026): each keyword a clause of RefDb's internal operators on the
-//! path it constrains. A keyword for one kind of value (a bound for numbers, a length for
-//! strings, a count for arrays, the keywords of an object) holds only for values of that kind,
-//! unless the schema's own type says every value is of it; a property that is not required may
-//! be missing; a subschema of the elements or of other properties names them `i`.
+//! A schema as the filter the reference server translates it into (`parsedQuery` of `explain`,
+//! measured on a reference router 9.0.4 on 01-11-2026): each keyword a clause of the reference
+//! server's internal operators on the path it constrains. A keyword for one kind of value (a bound
+//! for numbers, a length for strings, a count for arrays, the keywords of an object) holds only for
+//! values of that kind, unless the schema's own type says every value is of it; a property that is
+//! not required may be missing; a subschema of the elements or of other properties names them `i`.
 
 use teseladb_bson::{Document, Value};
 
@@ -53,7 +53,7 @@ impl Class {
 }
 
 impl Schema {
-    /// The schema as the filter RefDb translates it into.
+    /// The schema as the filter the reference server translates it into.
     pub(crate) fn translated(&self) -> Clause {
         self.at(None)
     }

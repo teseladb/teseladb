@@ -1,7 +1,8 @@
-//! What `refdump --oplog` and `refrestore --oplogReplay` need of a running node (018 FR-009,
-//! FR-012, T013): the development cluster presents itself as a replica set over the clients'
-//! port it was given, a `find` on `local.oplog.rs` gives every entry of the history window
-//! however long ago it was written, and the newest entry is the last write already acknowledged.
+//! What the reference dump tool's `--oplog` and the reference restore tool's `--oplogReplay` need
+//! of a running node (018 FR-009, FR-012, T013): the development cluster presents itself as a
+//! replica set over the clients' port it was given, a `find` on `local.oplog.rs` gives every entry
+//! of the history window however long ago it was written, and the newest entry is the last write
+//! already acknowledged.
 
 mod common;
 
@@ -220,7 +221,7 @@ fn write_while_copying(node: &Node<MemDisk>) {
     }
 }
 
-/// The newest entry's `ts`, as `refdump --oplog` reads it.
+/// The newest entry's `ts`, as the reference dump tool's `--oplog` reads it.
 fn newest_ts(c: &mut Client) -> Value {
     let cmd = Document::new()
         .with("find", "oplog.rs")
@@ -248,10 +249,10 @@ fn all_of(c: &mut Client, coll: &str, at: Option<&Value>) -> Vec<Value> {
     batch(&r, "firstBatch")
 }
 
-/// One entry as `refrestore --oplogReplay` gives it to `applyOps` (captured on 02-11-2026
-/// from refrestore 100.20.0): without `ui`, and the operations of a transaction one by one
-/// with `ts: Timestamp(0, 0)`, `t: null` and `v: 0`.
-fn as_refrestore_gives_it(entry: &Document) -> Vec<Document> {
+/// One entry as the reference restore tool's `--oplogReplay` gives it to `applyOps` (captured on
+/// 02-11-2026 from the reference restore tool 100.20.0): without `ui`, and the operations of a
+/// transaction one by one with `ts: Timestamp(0, 0)`, `t: null` and `v: 0`.
+fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
     let without_ui = |d: &Document| {
         d.iter().filter(|(k, _)| *k != "ui").fold(Document::new(), |o, (k, v)| o.with(k, v.clone()))
     };
@@ -277,12 +278,12 @@ fn as_refrestore_gives_it(entry: &Document) -> Vec<Document> {
         .collect()
 }
 
-/// What `refdump --oplog` and `refrestore --oplogReplay` do, over the wire, between two
-/// clusters while a client writes to the first (FR-012, SC-004): the newest entry, a copy of
-/// every collection, the newest entry again, the entries between both, and each of them given
-/// to `applyOps` on the second cluster. The second cluster ends with the first one's data at
-/// the last entry. The real tools in both directions with `refnode` 9.0.4 run in
-/// `tests/compat/tools/run.sh`.
+/// What the reference dump tool's `--oplog` and the reference restore tool's `--oplogReplay` do,
+/// over the wire, between two clusters while a client writes to the first (FR-012, SC-004): the
+/// newest entry, a copy of every collection, the newest entry again, the entries between both, and
+/// each of them given to `applyOps` on the second cluster. The second cluster ends with the first
+/// one's data at the last entry. The real tools in both directions with the reference server 9.0.4
+/// run in `tests/compat/tools/run.sh`.
 #[test]
 fn a_copy_with_the_oplog_replays_into_the_same_data() {
     let source = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
@@ -324,7 +325,7 @@ fn a_copy_with_the_oplog_replays_into_the_same_data() {
         let entries = oplog(&mut s, Document::new().with("ts", range));
         assert!(entries.len() > 10, "{entries:?}");
         for entry in &entries {
-            for op in as_refrestore_gives_it(entry) {
+            for op in as_the_restore_tool_gives_it(entry) {
                 let cmd = Document::new().with("applyOps", vec![Value::Document(op)]);
                 let r = t.run("admin", cmd);
                 assert!(ok(&r), "{entry:?}: {r:?}");

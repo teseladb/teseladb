@@ -1,7 +1,7 @@
 //! The `parsedQuery` of `explain` (010 FR-003): each filter of `tests/parsed/explain.out`, a tab
-//! and what a `refrouter` 9.0.4 wrote back for it on 01-11-2026, in canonical extended JSON: the
-//! clauses RefDb settles or joins, `$in` in order, and `$jsonSchema` in RefDb's internal
-//! operators.
+//! and what a reference router 9.0.4 wrote back for it on 01-11-2026, in canonical extended JSON:
+//! the clauses the reference server settles or joins, `$in` in order, and `$jsonSchema` in the
+//! reference server's internal operators.
 
 use teseladb_bson::{Document, RawDoc, extjson};
 use teseladb_mql::{Filter, FilterUse};
@@ -12,7 +12,7 @@ fn canonical(d: &Document) -> String {
 }
 
 #[test]
-fn parsed_queries_match_refdb() {
+fn parsed_queries_match_the_reference() {
     let mut wrong = Vec::new();
     for line in teseladb_names::expand_static(include_str!("parsed/explain.out"))
         .lines()
@@ -32,7 +32,7 @@ fn parsed_queries_match_refdb() {
     assert!(wrong.is_empty(), "{} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
-/// Clauses RefDb joins or translates beyond the measured filters.
+/// Clauses the reference server joins or translates beyond the measured filters.
 #[test]
 fn joined_and_translated_clauses() {
     for (filter, want) in [

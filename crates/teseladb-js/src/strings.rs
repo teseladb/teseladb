@@ -67,7 +67,7 @@ pub fn install(it: &mut Interp, g: &ObjRef) -> R<()> {
     Ok(())
 }
 
-/// The HTML methods of Annex B (measured on a `refrouter` 9.0.4 on 02-11).
+/// The HTML methods of Annex B (measured on a reference router 9.0.4 on 02-11).
 const HTML_METHODS: [(&str, NativeFn, usize); 13] = [
     ("anchor", |it, t, a| html(it, t, "a", Some(("name", a))), 1),
     ("big", |it, t, _| html(it, t, "big", None), 0),
@@ -151,7 +151,8 @@ fn raw(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     for i in 0..len {
         let part = it.get(&strings, &i.to_string())?;
         let part = it.str_of(&part);
-        // The names of SpiderMonkey's self-hosted `String.raw` (measured on a `refrouter` 9.0.4).
+        // The names of SpiderMonkey's self-hosted `String.raw` (measured on a reference router
+        // 9.0.4).
         out.push_str(&it.operand_named(part, if i == 0 { "raw[0]" } else { "raw[nextIndex]" })?);
         if i + 1 < len
             && let Some(sub) = a.get(i + 1)
@@ -187,8 +188,8 @@ pub fn this_str(it: &mut Interp, this: &Val) -> R<Name> {
 }
 
 /// `this` as a string for a method SpiderMonkey writes in JavaScript, which names it `this` when
-/// it cannot be converted (measured on a `refrouter` 9.0.4 on 02-11: `concat`, `padStart`, `slice`,
-/// `split`, `replace`, the HTML methods…).
+/// it cannot be converted (measured on a reference router 9.0.4 on 02-11: `concat`, `padStart`,
+/// `slice`, `split`, `replace`, the HTML methods…).
 pub fn this_text(it: &mut Interp, this: &Val) -> R<Name> {
     let r = this_str(it, this);
     it.operand_named(r, "this")
@@ -355,7 +356,7 @@ fn upper(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 
 fn lower(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let s = this_str(it, this)?;
-    // Each character on its own: no final sigma (measured on a `refrouter` 9.0.4 on 02-11).
+    // Each character on its own: no final sigma (measured on a reference router 9.0.4 on 02-11).
     it.string(s.chars().flat_map(char::to_lowercase).collect())
 }
 
@@ -637,7 +638,8 @@ fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     match this {
         Val::Str(s) => Ok(Val::Str(s.clone())),
         Val::Obj(o) if let Kind::Str(s) = &o.borrow().kind => Ok(Val::Str(s.clone())),
-        // Measured on a `refrouter` 9.0.4 on 02-11: `valueOf method called on incompatible number`.
+        // Measured on a reference router 9.0.4 on 02-11: `valueOf method called on incompatible
+        // number`.
         v => {
             let (class, name) = (crate::builtins::class_name(v), it.native.clone());
             Err(it.error("TypeError", &format!("{name} method called on incompatible {class}")))
@@ -648,8 +650,8 @@ fn value_of(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 fn locale_compare(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let s = this_str(it, this)?;
     let t = it.str_of(&arg(a, 0))?;
-    // The engine of RefDb 9.0.4 has no ICU: the difference of the first UTF-16 units that
-    // differ, else of the lengths (measured: `"Abc".localeCompare("abc")` is -32).
+    // The engine of the reference server 9.0.4 has no ICU: the difference of the first UTF-16 units
+    // that differ, else of the lengths (measured: `"Abc".localeCompare("abc")` is -32).
     let (x, y) = (units(&s), units(&t));
     let d = x
         .iter()

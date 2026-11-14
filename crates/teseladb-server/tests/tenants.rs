@@ -252,7 +252,7 @@ fn a_merged_role_or_user_whose_name_another_tenant_holds_is_refused_at_once() {
         .with("credentials", Document::new())
         .with("roles", Value::Array(Vec::new()));
     let fill = |c: &mut Client, coll: &str, docs: Vec<Document>| {
-        // A `refrouter` refuses to drop a collection of `admin`: its documents go instead.
+        // A reference router refuses to drop a collection of `admin`: its documents go instead.
         let all = Document::new().with("q", Document::new()).with("limit", 0);
         let delete = Document::new()
             .with("delete", coll)

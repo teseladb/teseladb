@@ -1,6 +1,6 @@
 //! The set methods of `Set.prototype` (`union`, `intersection`…) and `Map.groupBy`, which the
-//! engine of a `refrouter` 9.0.4 has (measured on 02-11), as ECMA-262 §24.2.4 and §24.1.2.1 write
-//! them: the other set is read through its `size`, `has` and `keys`.
+//! engine of a reference router 9.0.4 has (measured on 02-11), as ECMA-262 §24.2.4 and §24.1.2.1
+//! write them: the other set is read through its `size`, `has` and `keys`.
 
 use crate::builtins::method;
 use crate::interp::{Interp, R};

@@ -117,7 +117,7 @@ impl Client {
         Client::with_identity(port, ca, None)
     }
 
-    /// A connection that shows the client certificate `identity` (REFDB-X509).
+    /// A connection that shows the client certificate `identity` (X.509 authentication).
     pub fn with_identity(
         port: u16,
         ca: &Certificate,

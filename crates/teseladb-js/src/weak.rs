@@ -1,7 +1,8 @@
 //! `WeakMap`, `WeakSet`, `WeakRef` and `FinalizationRegistry`. An invocation frees its objects
 //! when it ends, so a weak reference keeps its target as long as the call: nothing can observe
 //! the difference inside one call. Building a `FinalizationRegistry` stops the engine of
-//! RefDb 9.0 with a trap (measured on a `refrouter` 9.0.4 on 02-11), and so it does here.
+//! the reference server 9.0 with a trap (measured on a reference router 9.0.4 on 02-11), and so it
+//! does here.
 
 use crate::builtins::{arg, ctor, method, new_target};
 use crate::interp::{Ctrl, Fatal, Interp, R};
@@ -154,7 +155,7 @@ fn fr_ctor(_: &mut Interp, _: &Val, _: &[Val]) -> R {
 }
 
 /// `register` and `unregister`: no object can be a `FinalizationRegistry` (making one traps), so
-/// every receiver is refused (measured on a `refrouter` 9.0.4 on 02-11).
+/// every receiver is refused (measured on a reference router 9.0.4 on 02-11).
 fn fr_register(it: &mut Interp, _: &Val, _: &[Val]) -> R {
     it.type_error("Receiver of FinalizationRegistry.register call is not a FinalizationRegistry")
 }

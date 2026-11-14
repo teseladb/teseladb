@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Lines `getLog` keeps of each log, as RefDb's in-memory logs do.
+/// Lines `getLog` keeps of each log, as the reference server's in-memory logs do.
 pub const RAM_LOG_LINES: usize = 1024;
 
 /// The last lines of a log and how many it wrote.
@@ -57,11 +57,11 @@ pub fn startup_warnings() -> (i64, Vec<String>) {
     STARTUP.lock().unwrap_or_else(PoisonError::into_inner).read()
 }
 
-/// A warning a command made where no logger is at hand: RefDb's identifier, its message and
-/// its attributes as relaxed Extended JSON.
+/// A warning a command made where no logger is at hand: the reference server's identifier, its
+/// message and its attributes as relaxed Extended JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pending {
-    /// RefDb's identifier of the line (`id`).
+    /// The reference server's identifier of the line (`id`).
     pub id: i32,
     /// The message.
     pub msg: String,

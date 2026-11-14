@@ -1,5 +1,5 @@
-//! `teseladb start --config <file.yaml>` (001 FR-021): the keys of the `refnode` file and the
-//! `teseladb.*` section, the command line over the file, and unknown keys as usage errors.
+//! `teseladb start --config <file.yaml>` (001 FR-021): the keys of the reference server file and
+//! the `teseladb.*` section, the command line over the file, and unknown keys as usage errors.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -137,7 +137,8 @@ fn set_parameter_in_the_file() {
 }
 
 /// The security file of the battery's `enterprise-auth` and `enterprise-ldap-authz` (013 T036,
-/// T037; `tests/compat/tools/external_auth.sh`), the same one RefDb Enterprise reads.
+/// T037; `tests/compat/tools/external_auth.sh`), the same one the reference server's enterprise
+/// edition reads.
 const EXTERNAL_AUTH: &str = r#"security:
   ldap:
     servers: ldap:389
@@ -150,7 +151,7 @@ const EXTERNAL_AUTH: &str = r#"security:
     authz:
       queryTemplate: "ou=groups,dc=tesela,dc=test??sub?(&(objectClass=groupOfNames)(member={USER}))"
 setParameter:
-  authenticationMechanisms: PLAIN,GSSAPI,REFDB-AWS,REFDB-OIDC,SCRAM-SHA-256
+  authenticationMechanisms: PLAIN,GSSAPI,${name:SASL_AWS},${name:SASL_OIDC},SCRAM-SHA-256
   awsSTSUrl: https://sts:8443
   oidcIdentityProviders: '[{"issuer": "https://idp:8443", "audience": "teseladb", "authNamePrefix": "idp", "clientId": "teseladb-compat", "useAuthorizationClaim": true, "authorizationClaim": "groups", "supportsHumanFlows": false}]'
 "#;
@@ -158,7 +159,8 @@ setParameter:
 #[test]
 fn the_security_file_of_the_external_identities() {
     use teseladb_auth::sasl::SaslMechanism;
-    let o = with_file("start --config c.yaml", EXTERNAL_AUTH).unwrap();
+    let o =
+        with_file("start --config c.yaml", teseladb_names::expand_static(EXTERNAL_AUTH)).unwrap();
     assert_eq!(o.ldap.servers.as_deref(), Some("ldap:389"));
     assert_eq!(o.ldap.transport.as_deref(), Some("none"));
     assert_eq!(o.ldap.bind_method.as_deref(), Some("simple"));
@@ -195,8 +197,8 @@ fn redaction_from_the_file_or_the_command_line() {
 }
 
 /// `--noscripting` and `security.javascriptEnabled: false` turn JavaScript off, and
-/// `getCmdLineOpts` shows `security.javascriptEnabled: false` for both (measured on a `refnode`
-/// 9.0.4 started with `--noscripting` on 02-11; 016 FR-009).
+/// `getCmdLineOpts` shows `security.javascriptEnabled: false` for both (measured on a reference
+/// replica set member 9.0.4 started with `--noscripting` on 02-11; 016 FR-009).
 #[test]
 fn javascript_is_turned_off_from_the_file_or_the_command_line() {
     let file = "security:\n  javascriptEnabled: false\n";

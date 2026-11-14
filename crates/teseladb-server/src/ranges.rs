@@ -71,8 +71,8 @@ pub struct Ranges {
     pub merges: BTreeMap<GroupId, (GroupId, u64)>,
     /// The last range number Group 0 gave: a lower one it no longer has was merged away.
     pub last_group: u64,
-    /// RefDb's UUID of each collection of the catalog, by its identifier (the rollback files
-    /// are named after it, 005 FR-010).
+    /// The reference server's UUID of each collection of the catalog, by its identifier (the
+    /// rollback files are named after it, 005 FR-010).
     pub collections: BTreeMap<u32, [u8; 16]>,
     /// The core changes recorded (007 FR-011): the target core and the intent, by range.
     pub relocations: BTreeMap<GroupId, (u16, u64)>,

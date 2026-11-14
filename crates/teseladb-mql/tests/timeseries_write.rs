@@ -1,5 +1,5 @@
 //! Time series buckets (015 T012, FR-006): measurements packed into a bucket with compressed
-//! columns, its `control` as a `refrouter` 9.0.4 writes it (measured with `rawData: true` on
+//! columns, its `control` as a reference router 9.0.4 writes it (measured with `rawData: true` on
 //! 31-10-2026), and unpacked again.
 
 use teseladb_bson::{Document, RawDoc, Value};
@@ -46,7 +46,7 @@ fn fill(n: i32) -> Document {
 }
 
 #[test]
-fn a_bucket_has_the_control_refdb_writes() {
+fn a_bucket_has_the_control_the_reference_writes() {
     let b = fill(10);
     let control = |k: &str| match b.get("control") {
         Some(Value::Document(c)) => c.get(k).cloned(),
@@ -131,7 +131,7 @@ fn a_full_bucket_or_a_measurement_without_time_is_refused() {
     let raw = RawDoc::from_bytes(&full).expect("a bucket");
     assert_eq!(s.append(id, Some(raw), &one), Err(TsError::Full(Full::Count)));
     // A large measurement keeps its bucket open past its size while it has few measurements
-    // (RefDb's `numBucketsKeptOpenDueToLargeMeasurements`).
+    // (the reference server's `numBucketsKeptOpenDueToLargeMeasurements`).
     let big = Document::new().with("t", Value::DateTime(T0)).with("p", "x".repeat(130_000));
     let first = s.append(id, None, &big).expect("alone it fits").to_bytes().expect("a bucket");
     let raw = RawDoc::from_bytes(&first).expect("a bucket");
@@ -227,9 +227,10 @@ fn a_bucket_without_columns_unpacks_its_meta_alone() {
 }
 
 /// A meta value is kept with the fields of its documents sorted, also inside arrays, so that
-/// the same value in another field order goes to the same bucket (measured on a `refnode` 9.0.4
-/// on 02-11-2026: `{b: 1, a: {d: 1, c: 2}}` and `{a: {c: 2, d: 1}, b: 1}` share one bucket,
-/// whose `meta` is `{a: {c: 2, d: 1}, b: 1}`; `[{b: 1, a: 2}, 3]` comes back `[{a: 2, b: 1}, 3]`).
+/// the same value in another field order goes to the same bucket (measured on a reference replica
+/// set member 9.0.4 on 02-11-2026: `{b: 1, a: {d: 1, c: 2}}` and `{a: {c: 2, d: 1}, b: 1}` share
+/// one bucket, whose `meta` is `{a: {c: 2, d: 1}, b: 1}`; `[{b: 1, a: 2}, 3]` comes back `[{a: 2,
+/// b: 1}, 3]`).
 #[test]
 fn a_meta_value_is_kept_with_its_fields_sorted() {
     let s = spec();

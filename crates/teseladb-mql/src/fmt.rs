@@ -1,8 +1,8 @@
-//! Values written as RefDb writes them in error messages: `{a: 1, b: { c: "x" }}`.
+//! Values written as the reference server writes them in error messages: `{a: 1, b: { c: "x" }}`.
 
 use teseladb_bson::{RawDoc, RawValue};
 
-/// A value as RefDb writes an element in its messages (`BSONElement::toString`):
+/// A value as the reference server writes an element in its messages (`BSONElement::toString`):
 /// `{ a: [ 1, "x" ] }`, `1.0`, `ObjectId('…')`, strings in quotes without escapes.
 pub fn shell(v: RawValue<'_>) -> String {
     match v {
@@ -54,7 +54,8 @@ fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A document as RefDb writes an object element: `{ a: 1, b: "x" }`, `{}` when empty.
+/// A document as the reference server writes an object element: `{ a: 1, b: "x" }`, `{}` when
+/// empty.
 fn object(d: RawDoc<'_>) -> String {
     spaced('{', d.iter().map(|(k, v)| format!("{k}: {}", shell(v))).collect(), '}')
 }
@@ -67,7 +68,8 @@ fn spaced(open: char, items: Vec<String>, close: char) -> String {
     format!("{open} {} {close}", items.join(", "))
 }
 
-/// A document as RefDb's update messages write it around its elements: `{_id: 1, a: "x"}`.
+/// A document as the reference server's update messages write it around its elements: `{_id: 1, a:
+/// "x"}`.
 pub(crate) fn shell_doc(d: RawDoc<'_>) -> String {
     let fields: Vec<String> = d.iter().map(|(k, v)| format!("{k}: {}", shell(v))).collect();
     format!("{{{}}}", fields.join(", "))
@@ -80,8 +82,8 @@ const STREAM_DIGITS: usize = 6;
 /// Below `1e-4` C's `%g` switches to the exponent form.
 const SMALLEST_FIXED_EXPONENT: i32 = -4;
 
-/// A double as RefDb writes a value in messages: C's `%.16g`, with `.0` added when that
-/// leaves a bare integer (`1.0`, `-0.0`, `1e+20`, `1e-05`, `nan`, `inf`).
+/// A double as the reference server writes a value in messages: C's `%.16g`, with `.0` added when
+/// that leaves a bare integer (`1.0`, `-0.0`, `1e+20`, `1e-05`, `nan`, `inf`).
 pub fn double(x: f64) -> String {
     if x.is_nan() {
         // A `BSONElement` writes every NaN alike, whatever its sign.
@@ -92,7 +94,7 @@ pub fn double(x: f64) -> String {
     if bare { format!("{shown}.0") } else { shown }
 }
 
-/// A double as RefDb writes a plain number into a message stream: C's `%g`
+/// A double as the reference server writes a plain number into a message stream: C's `%g`
 /// (`2`, `1.23457e+06`, `0.000123457`, `-nan`).
 pub fn stream_double(x: f64) -> String {
     g(x, STREAM_DIGITS)
@@ -137,10 +139,10 @@ mod tests {
         shell(doc.get("v").unwrap())
     }
 
-    /// Every pair measured in RefDb 9.0.4's `Expected a number in: a: …` and
+    /// Every pair measured in the reference server 9.0.4's `Expected a number in: a: …` and
     /// `Cannot apply $inc …` messages.
     #[test]
-    fn values_are_written_as_refdb_writes_an_element() {
+    fn values_are_written_as_the_reference_writes_an_element() {
         let d = |pairs: &[(&str, Value)]| {
             let mut doc = Document::new();
             for (k, v) in pairs {
@@ -196,16 +198,17 @@ mod tests {
         ] {
             assert_eq!(text(v.clone()), shown, "{v:?}");
         }
-        // Around a document RefDb's update messages write `{_id: …}`; inside it, elements.
+        // Around a document the reference server's update messages write `{_id: …}`; inside it,
+        // elements.
         let doc = Document::new().with("_id", Document::new().with("x", 1.5)).with("a", "x");
         let bytes = doc.to_bytes().unwrap();
         assert_eq!(shell_doc(RawDoc::from_bytes(&bytes).unwrap()), r#"{_id: { x: 1.5 }, a: "x"}"#);
     }
 
-    /// Every pair measured in RefDb 9.0.4's messages (duplicate key, `$push` on a
+    /// Every pair measured in the reference server 9.0.4's messages (duplicate key, `$push` on a
     /// non-array, `maxTimeMS`, `killOp` and `create` with other options all agree).
     #[test]
-    fn doubles_are_written_as_refdb_writes_them() {
+    fn doubles_are_written_as_the_reference_writes_them() {
         let nan_with_sign = f64::from_bits(0xfff8_0000_0000_0000);
         for (x, shown) in [
             (0.0, "0.0"),
@@ -252,9 +255,10 @@ mod tests {
         }
     }
 
-    /// Measured in RefDb 9.0.4's `The limit field in delete objects must be 0 or 1. Got …`.
+    /// Measured in the reference server 9.0.4's `The limit field in delete objects must be 0 or 1.
+    /// Got …`.
     #[test]
-    fn stream_doubles_are_written_as_refdb_writes_them() {
+    fn stream_doubles_are_written_as_the_reference_writes_them() {
         let nan_with_sign = f64::from_bits(0xfff8_0000_0000_0000);
         for (x, shown) in [
             (2.0, "2"),

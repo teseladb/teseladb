@@ -1,6 +1,6 @@
 //! `BigInt` in the language: the operators on two `BigInt`s, comparisons with other primitives,
 //! and the `BigInt` function with its prototype, with SpiderMonkey's messages (measured on a
-//! `refrouter` 9.0.4 on 02-11).
+//! reference router 9.0.4 on 02-11).
 
 use std::cmp::Ordering;
 use std::rc::Rc;

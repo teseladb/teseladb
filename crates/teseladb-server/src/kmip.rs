@@ -1,11 +1,11 @@
-//! The master key of encryption at rest from a KMIP server (013 FR-028), as RefDb Enterprise
-//! 9.0.4 uses one: on the first start the node asks the server for a new AES-256 key (or takes
-//! `--kmipKeyIdentifier`), activates it, gets its bytes and seals with them a random key of its
-//! own, the one that wraps the data keys of its files. The data directory keeps that sealed key and
-//! the KMIP key's identifier in [`KEYSTORE`]; each start gets the KMIP key again and opens it.
-//! `--kmipRotateMasterKey` seals it under a new KMIP key and stops, as `refnode` does, and every
-//! `--kmipKeyStatePollingSeconds` the node checks that its key is still active: a key that is not
-//! stops the node.
+//! The master key of encryption at rest from a KMIP server (013 FR-028), as the reference server's
+//! enterprise edition 9.0.4 uses one: on the first start the node asks the server for a new AES-256
+//! key (or takes `--kmipKeyIdentifier`), activates it, gets its bytes and seals with them a random
+//! key of its own, the one that wraps the data keys of its files. The data directory keeps that
+//! sealed key and the KMIP key's identifier in [`KEYSTORE`]; each start gets the KMIP key again and
+//! opens it. `--kmipRotateMasterKey` seals it under a new KMIP key and stops, as the reference
+//! server does, and every `--kmipKeyStatePollingSeconds` the node checks that its key is still
+//! active: a key that is not stops the node.
 //!
 //! ```text
 //! kmip.keystore := "key=" id "\n" "sealed=" base64(nonce(12) · AES-256-GCM(kmip key, own key) · tag(16)) "\n"
@@ -115,7 +115,7 @@ impl KmipOpts {
             }
             None => crate::https::system_trust()?,
         };
-        // TLS 1.2 or 1.3, as `refnode` reaches a KMIP server through OpenSSL.
+        // TLS 1.2 or 1.3, as the reference server reaches a KMIP server through OpenSSL.
         let mut config =
             ClientConfig { min_version: teseladb_tls::Version::Tls12, ..ClientConfig::new(trust) };
         if let Some(path) = &self.client_certificate_file {
@@ -142,7 +142,7 @@ pub struct Session {
 
 impl Session {
     /// Connects to the first server of `o` that answers, trying each `--kmipConnectRetries` more
-    /// times; RefDb's message when none does.
+    /// times; the reference server's message when none does.
     pub fn connect(o: &KmipOpts) -> Result<Session, String> {
         let tls = o.tls()?;
         let mut last = "no --kmipServerName".to_owned();
@@ -151,7 +151,7 @@ impl Session {
                 last = format!("Could not resolve KMIP server {name}:{}", o.port);
                 continue;
             };
-            // IPv4 first, as `refnode` names the address it could not reach.
+            // IPv4 first, as the reference server names the address it could not reach.
             let mut addrs: Vec<SocketAddr> = found.collect();
             addrs.sort_by_key(SocketAddr::is_ipv6);
             let mut first = None;
@@ -279,7 +279,7 @@ fn kmip_key(s: &mut Session, o: &KmipOpts, id: &str) -> Result<[u8; KEY_LEN], St
     }
 }
 
-/// Whether KMIP key `id` is active; RefDb's message when it is not.
+/// Whether KMIP key `id` is active; the reference server's message when it is not.
 fn check_active(s: &mut Session, id: &str) -> Result<(), String> {
     match s.ask(&Request::State(id.to_owned())) {
         Ok(Answer::State(ACTIVE)) => Ok(()),

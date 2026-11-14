@@ -1,12 +1,13 @@
-// TeselaDB's code for the globals that the JavaScript engine of RefDb 9.0 defines in JavaScript
-// (tojson, assert, hex_md5, ISODate and the additions to Object, Array, String, Number, Date, Map
-// and Set). Written from what those functions do on a refrouter 9.0.4, measured on 02-11 by calling
-// them with many arguments and recording results, errors and the properties they read; nothing
-// here comes from RefDb's code. The script runs once, in sloppy mode as the originals do, when
-// the globals are built; `__teseladbShellHost` carries the native helpers and is removed after.
+// TeselaDB's code for the globals that the JavaScript engine of the reference server 9.0 defines in
+// JavaScript (tojson, assert, hex_md5, ISODate and the additions to Object, Array, String, Number,
+// Date, Map and Set). Written from what those functions do on a reference router 9.0.4, measured on
+// 02-11 by calling them with many arguments and recording results, errors and the properties they
+// read; nothing here comes from the reference server's code. The script runs once, in sloppy mode
+// as the originals do, when the globals are built; `__teseladbShellHost` carries the native helpers
+// and is removed after.
 (function (host) {
     // The built-ins are captured now: a program that replaces a global must not change how these
-    // functions behave, as on the refrouter, where they live in a realm of their own.
+    // functions behave, as on the reference router, where they live in a realm of their own.
     var global = globalThis;
     var nativePrint = global.print;
     var stringify = JSON.stringify;
@@ -47,7 +48,8 @@
     var WeakSetCtor = WeakSet;
     var ObjectIdCtor = ObjectId;
 
-    // `fixed`: the refrouter declares the global (it cannot be deleted) instead of assigning it.
+    // `fixed`: the reference router declares the global (it cannot be deleted) instead of assigning
+    // it.
     function shellGlobal(name, value, fixed) {
         defineProperty(global, name, { value: value, writable: true, enumerable: true, configurable: !fixed });
     }
@@ -330,8 +332,9 @@
         return host.md5(units);
     };
 
-    // The dates that `ISODate` made: `ObjectId.fromDate` only takes those, because on the refrouter
-    // they are the only ones of the shell's realm (any other date fails its `instanceof Date`).
+    // The dates that `ISODate` made: `ObjectId.fromDate` only takes those, because on the reference
+    // router they are the only ones of the shell's realm (any other date fails its
+    // `instanceof Date`).
     var shellDates = new WeakSetCtor();
 
     var ISODate = function ISODate(isoDateStr) {
@@ -503,7 +506,8 @@
     };
 
     // The BSON types: what the shell writes in JavaScript after the natives of each prototype,
-    // in the order in which the refrouter lists them (measured on a refrouter 9.0.4 on 02-11).
+    // in the order in which the reference router lists them (measured on a reference router 9.0.4
+    // on 02-11).
 
     // The shell's own global object, where `db` is never defined: `fetch` reads it there.
     var shellRealm = (function () {
@@ -523,7 +527,7 @@
     NumberDecimal.prototype.tojson = function () {
         return this.toString();
     };
-    // `numberDecimalsEqual` is not defined on the refrouter: `equals` always fails there.
+    // `numberDecimalsEqual` is not defined on the reference router: `equals` always fails there.
     NumberDecimal.prototype.equals = function (other) {
         return numberDecimalsEqual(this, other);
     };
@@ -613,7 +617,7 @@
         return "DBPointer(" + tojson(this.ns) + ", " + tojson(this.id) + ")";
     };
 
-    // The global functions, in the order in which the refrouter lists them.
+    // The global functions, in the order in which the reference router lists them.
     shellGlobal("hex_md5", hex_md5);
     shellGlobal("ISODate", ISODate);
     shellGlobal("tojsononeline", tojsononeline);

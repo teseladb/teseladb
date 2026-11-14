@@ -1,10 +1,10 @@
 //! Encryption at rest of a node (013 FR-015, D-030): `--enableEncryption` seals the log, the
 //! snapshots, the SST files and their manifests with data keys wrapped by a master key. The master
 //! key is the one in `--encryptionKeyFile` (32 bytes in Base64, readable only by its owner, as
-//! RefDb's keyfile) or, without it, one derived with HKDF-SHA-256 from the cluster's master key
-//! of the PKI, the same on every node, so that files copied between nodes open everywhere.
-//! `--encryptionCipherMode` chooses AES256-CBC (the default) or AES256-GCM for new files; a file
-//! keeps the mode it was written with.
+//! the reference server's keyfile) or, without it, one derived with HKDF-SHA-256 from the cluster's
+//! master key of the PKI, the same on every node, so that files copied between nodes open
+//! everywhere. `--encryptionCipherMode` chooses AES256-CBC (the default) or AES256-GCM for new
+//! files; a file keeps the mode it was written with.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

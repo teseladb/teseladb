@@ -1,6 +1,7 @@
-//! `$jsonSchema` (FR-009, FR-022): the draft 4 keywords RefDb accepts, plus `bsonType`,
-//! `encrypt` and `encryptMetadata`, without `$ref`, `$schema`, `default`, `definitions`, `format`
-//! or `id`. A failed validation explains each rule not satisfied as RefDb's `errInfo` does.
+//! `$jsonSchema` (FR-009, FR-022): the draft 4 keywords the reference server accepts, plus
+//! `bsonType`, `encrypt` and `encryptMetadata`, without `$ref`, `$schema`, `default`,
+//! `definitions`, `format` or `id`. A failed validation explains each rule not satisfied as the
+//! reference server's `errInfo` does.
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value, types as t};
 
@@ -47,12 +48,12 @@ mod kw {
     pub const DESCRIPTION: &str = "description";
     pub const ENCRYPT: &str = "encrypt";
     pub const ENCRYPT_METADATA: &str = "encryptMetadata";
-    /// Keywords of JSON Schema that RefDb does not support.
+    /// Keywords of JSON Schema that the reference server does not support.
     pub const UNSUPPORTED: [&str; 6] =
         ["$ref", "$schema", "default", "definitions", "format", "id"];
 }
 
-/// JSON Schema's `type` values that RefDb accepts.
+/// JSON Schema's `type` values that the reference server accepts.
 const JSON_TYPES: [(&str, &[u8]); 6] = [
     ("object", &[t::DOCUMENT]),
     ("array", &[t::ARRAY]),
@@ -353,7 +354,8 @@ impl Schema {
             }
             schema.rules.push(Rule { name, spec: OwnedValue::new(Value::Document(spec))?, kind });
         }
-        // The order RefDb checks the keywords in (measured on a `refrouter` 9.0.4).
+        // The order the reference server checks the keywords in (measured on a reference router
+        // 9.0.4).
         schema
             .rules
             .sort_by_key(|r| ORDER.iter().position(|k| *k == r.name).unwrap_or(ORDER.len()));
@@ -384,10 +386,10 @@ impl Schema {
     }
 
     /// The rules `v` does not satisfy, explained.
-    /// What RefDb's explanation of a failed document says of a missing property whose schema
-    /// has `oneOf` with several sub-schemas: every one of them unsatisfied, with no details,
-    /// although the missing property does not make the document fail (measured on a `refrouter`
-    /// 9.0.4).
+    /// What the reference server's explanation of a failed document says of a missing property
+    /// whose schema has `oneOf` with several sub-schemas: every one of them unsatisfied, with no
+    /// details, although the missing property does not make the document fail (measured on a
+    /// reference router 9.0.4).
     fn missing_one_of(&self, name: &str) -> Option<Document> {
         let rule = self.rules.iter().find(|r| matches!(&r.kind, Kind::OneOf(l) if l.len() > 1))?;
         let Kind::OneOf(list) = &rule.kind else { return None };
@@ -410,7 +412,7 @@ impl Schema {
         )
     }
 
-    /// The rules `v` breaks; `explaining` adds what RefDb's explanation adds (see
+    /// The rules `v` breaks; `explaining` adds what the reference server's explanation adds (see
     /// [`Rule::check`]).
     fn failures(&self, v: RawValue<'_>, explaining: bool) -> Result<Vec<Document>> {
         let mut out = Vec::new();

@@ -1,5 +1,6 @@
 //! Sparse indexes (009 T016, FR-008): every case of `tests/data/sparse-entries.json`, measured on
-//! refnode 9.0.4, gives as many entries as RefDb with and without `sparse`.
+//! the reference server 9.0.4, gives as many entries as the reference server with and without
+//! `sparse`.
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, index_entries};
@@ -35,7 +36,7 @@ fn index(key: &Document, sparse: bool) -> IndexDef {
 }
 
 #[test]
-fn every_measured_document_has_refdb_entry_count() {
+fn every_measured_document_has_the_reference_entry_count() {
     let file = extjson::parse(CASES).unwrap();
     let Some(Value::Array(cases)) = file.get("cases") else { panic!("no cases") };
     let mut wrong = Vec::new();

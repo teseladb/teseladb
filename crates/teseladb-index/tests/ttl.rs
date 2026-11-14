@@ -1,6 +1,6 @@
 //! TTL indexes (009 T017, FR-010): which index is one, and which value of its field is expired at
-//! a cluster time, as RefDb's TTL monitor decides (a date, or the earliest date of an array,
-//! plus `expireAfterSeconds`, at or before now; any other value never expires).
+//! a cluster time, as the reference server's TTL monitor decides (a date, or the earliest date of
+//! an array, plus `expireAfterSeconds`, at or before now; any other value never expires).
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::ttl::{Ttl, expired};

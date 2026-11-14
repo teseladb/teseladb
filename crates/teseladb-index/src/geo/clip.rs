@@ -1,10 +1,10 @@
-//! Whether a line meets a polygon the way RefDb answers `$geoIntersects` for them (FR-012): it
-//! clips the line to the polygon with the sphere library's `IntersectWithPolyline` and asks
-//! whether some piece is left. A piece must have positive length, a point on the boundary falls
-//! on the side the symbolic perturbation of the orientation test gives it, and an edge the line
-//! shares with the polygon counts only when both run the same way (measured on a `refrouter` 9.0.4:
-//! the whole bottom side of a square meets it, part of that side does not, nor does the left
-//! side walked against the polygon's direction).
+//! Whether a line meets a polygon the way the reference server answers `$geoIntersects` for them
+//! (FR-012): it clips the line to the polygon with the sphere library's `IntersectWithPolyline` and
+//! asks whether some piece is left. A piece must have positive length, a point on the boundary
+//! falls on the side the symbolic perturbation of the orientation test gives it, and an edge the
+//! line shares with the polygon counts only when both run the same way (measured on a reference
+//! router 9.0.4: the whole bottom side of a square meets it, part of that side does not, nor does
+//! the left side walked against the polygon's direction).
 
 use std::cmp::Ordering;
 

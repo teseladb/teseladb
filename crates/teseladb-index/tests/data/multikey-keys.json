@@ -1,6 +1,6 @@
 {
  "server": "9.0.4",
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "date": "2026-10-30",
  "method": "insert {_id: 1, ...doc} into a collection with the index pattern plus {_id: 1}; every key read with find hint + min + returnKey, limit 1, as raw BSON so that undefined stays undefined; keys in index order; numbers as relaxed JSON",
  "cases": [

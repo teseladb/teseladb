@@ -61,17 +61,17 @@ use crate::value::{Kind, Val};
 
 pub use crate::interp::Limits;
 
-/// The frames a call may hold before `too much recursion`, as a `refrouter` 9.0.4 counts them (the
-/// program's function and every function it calls, a builtin included; measured on 02-11).
+/// The frames a call may hold before `too much recursion`, as a reference router 9.0.4 counts them
+/// (the program's function and every function it calls, a builtin included; measured on 02-11).
 pub const MAX_FRAMES: usize = 51_000;
 /// The native stack a call takes by default: well inside the 2 MiB of a spawned thread.
 pub const DEFAULT_STACK: usize = 1 << 20;
 /// The steps a call may run: a loop that fills the heap one element at a time (two steps a turn,
-/// 73 million turns) reaches `out of memory` before them, as on a `refrouter` 9.0.4, which has no
-/// limit of steps and stops a loop that never ends after about a minute.
+/// 73 million turns) reaches `out of memory` before them, as on a reference router 9.0.4, which has
+/// no limit of steps and stops a loop that never ends after about a minute.
 pub const STEPS: u64 = 200_000_000;
-/// The heap of a call: the 100 MiB `getJSHeapLimitMB()` gives on a `refrouter` 9.0.4, at the costs
-/// measured there (A016-3-22).
+/// The heap of a call: the 100 MiB `getJSHeapLimitMB()` gives on a reference router 9.0.4, at the
+/// costs measured there (A016-3-22).
 pub const HEAP: usize = 100 << 20;
 /// The bytes of this process a call may take: room for the largest values that fit in [`HEAP`]
 /// (68 million numbers in an array, a string of 2^30 - 2 characters) with what this interpreter
@@ -79,9 +79,9 @@ pub const HEAP: usize = 100 << 20;
 pub const MEMORY: usize = 2 << 30;
 
 impl Default for Limits {
-    /// 200 million steps ([`STEPS`]), the heap of a `refrouter` 9.0.4 ([`HEAP`]) within 2 GiB of this
-    /// process ([`MEMORY`]), its frames and 1 MiB of native stack, well inside the 2 MiB of a
-    /// spawned thread (016 data model).
+    /// 200 million steps ([`STEPS`]), the heap of a reference router 9.0.4 ([`HEAP`]) within 2 GiB
+    /// of this process ([`MEMORY`]), its frames and 1 MiB of native stack, well inside the 2 MiB of
+    /// a spawned thread (016 data model).
     fn default() -> Limits {
         Limits { steps: STEPS, heap: HEAP, memory: MEMORY, depth: MAX_FRAMES, stack: DEFAULT_STACK }
     }
@@ -101,7 +101,7 @@ pub enum JsError {
     },
     /// The code threw: the exception's message (an error's `message`, or `uncaught exception:`
     /// and the value as text), where SpiderMonkey reports it (where an error was made, or where
-    /// the `throw` left the evaluation) in RefDb's columns, and an error's stack.
+    /// the `throw` left the evaluation) in the reference server's columns, and an error's stack.
     Thrown {
         /// The message.
         message: String,
@@ -109,7 +109,8 @@ pub enum JsError {
         file: String,
         /// The line, from 1.
         line: u32,
-        /// The column, from 1, with what RefDb puts before the code on the first line.
+        /// The column, from 1, with what the reference server puts before the code on the first
+        /// line.
         col: u32,
         /// An error's stack, one `name@file:line:column` line per call; `None` for a value that
         /// is not an error.
@@ -121,29 +122,29 @@ pub enum JsError {
     Steps,
     /// The caller's deadline passed.
     Deadline,
-    /// The result has a value BSON cannot hold: RefDb's code (16662 for a symbol, 2 for a
-    /// malformed `Timestamp`…) and message.
+    /// The result has a value BSON cannot hold: the reference server's code (16662 for a symbol, 2
+    /// for a malformed `Timestamp`…) and message.
     NotConvertible {
-        /// RefDb's error code.
+        /// The reference server's error code.
         code: i32,
         /// What is wrong.
         message: String,
     },
-    /// The engine of RefDb 9.0 stops with a trap (`wasm trap: uninitialized element`): a
-    /// promise job or a `FinalizationRegistry`.
+    /// The engine of the reference server 9.0 stops with a trap (`wasm trap: uninitialized
+    /// element`): a promise job or a `FinalizationRegistry`.
     Trap,
-    /// The engine of RefDb 9.0 stops with `wasm trap: wasm \`unreachable\` instruction
-    /// executed`: a shell function it declares and cannot run (`version()`).
+    /// The engine of the reference server 9.0 stops with `wasm trap: wasm \`unreachable\`
+    /// instruction executed`: a shell function it declares and cannot run (`version()`).
     Unreachable,
     /// A function program was expected and the source is something else.
     NotAFunction,
-    /// The engine of RefDb 9.0 stops with `wasm trap: call stack exhausted`: code whose
-    /// parse nests more arrow functions than its stack holds.
+    /// The engine of the reference server 9.0 stops with `wasm trap: call stack exhausted`: code
+    /// whose parse nests more arrow functions than its stack holds.
     StackExhausted,
 }
 
 impl JsError {
-    /// The message RefDb shows after `message : '…'`.
+    /// The message the reference server shows after `message : '…'`.
     pub fn message(&self) -> String {
         match self {
             JsError::Compile { message, .. }
@@ -166,10 +167,10 @@ impl fmt::Display for JsError {
     }
 }
 
-/// What RefDb puts before a function's code on its first line: `(`.
+/// What the reference server puts before a function's code on its first line: `(`.
 const FUNCTION_PREFIX: u32 = 1;
-/// What RefDb puts before a `$where` expression on its first line (measured: an error at the
-/// start of `this.a.b.c` is at column 15).
+/// What the reference server puts before a `$where` expression on its first line (measured: an
+/// error at the start of `this.a.b.c` is at column 15).
 const WHERE_PREFIX: u32 = 14;
 
 /// What a call reads from the runtime.
@@ -224,7 +225,8 @@ impl Program {
             if e.message == parser::STACK_EXHAUSTED {
                 return JsError::StackExhausted;
             }
-            // RefDb compiles a function inside `(` and `)`: its first line moves one column.
+            // The reference server compiles a function inside `(` and `)`: its first line moves one
+            // column.
             let t = source.trim_start();
             let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
             let shift = if wrapped && e.line == 1 { FUNCTION_PREFIX } else { 0 };

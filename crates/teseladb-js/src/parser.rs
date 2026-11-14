@@ -7,8 +7,8 @@ use crate::ast::*;
 use crate::early::{Decl, ScopeKind, Scopes};
 use crate::lexer::{SyntaxError, Tok, Token, tokenize};
 
-/// Parses a whole program as RefDb gives it: an anonymous function may stand as a whole
-/// statement (`function(){ … }`), as RefDb reads a function's source.
+/// Parses a whole program as the reference server gives it: an anonymous function may stand as a
+/// whole statement (`function(){ … }`), as the reference server reads a function's source.
 pub fn parse_script(src: &str) -> Result<Vec<Stmt>, SyntaxError> {
     parse(src, &[], (false, false), true, Room::top()).map(|(body, _)| body)
 }
@@ -33,7 +33,7 @@ pub fn parse_script_in(
     parse(src, privates, supers, false, room)
 }
 
-/// What a parse may take before the engine of a `refrouter` 9.0.4 stops it
+/// What a parse may take before the engine of a reference router 9.0.4 stops it
 /// ([`crate::recursion`]): its native stack, the arrow functions nested in one another, and ours.
 #[derive(Clone, Copy, Debug)]
 pub struct Room {
@@ -235,7 +235,7 @@ fn deletes_private(e: &Expr) -> bool {
     }
 }
 
-/// The error of a parse the engine stops for its depth: no place, as RefDb shows it.
+/// The error of a parse the engine stops for its depth: no place, as the reference server shows it.
 fn recursion() -> SyntaxError {
     SyntaxError { message: TOO_MUCH_RECURSION.into(), line: 0, col: 1 }
 }
@@ -738,7 +738,8 @@ impl Parser {
                 self.i += 1;
                 if self.in_async && self.eat_word("await") {
                     // `for await` reads its first value through a promise job: the engine of
-                    // RefDb 9.0 stops there (`await`), after evaluating what it iterates.
+                    // the reference server 9.0 stops there (`await`), after evaluating what it
+                    // iterates.
                     return match self.for_rest()? {
                         Stmt::ForIn { obj, .. } => Ok(Stmt::Block(vec![
                             Stmt::Expr(obj),
@@ -830,8 +831,8 @@ impl Parser {
 
     /// A call of a name with arguments that is a whole statement or a whole initializer is
     /// reported at its `(`, as SpiderMonkey does (`f(1);` and `let e = Error('m')`: the `(`;
-    /// `var q = f()`, `x = Error('m')` and `throw Error('m')`: the name; measured on a `refrouter`
-    /// 9.0.4 on 02-11).
+    /// `var q = f()`, `x = Error('m')` and `throw Error('m')`: the name; measured on a reference
+    /// router 9.0.4 on 02-11).
     fn paren_call(&self, e: Expr) -> Expr {
         match e {
             Expr::Call { callee, args, optional, pos }
@@ -1506,7 +1507,7 @@ impl Parser {
     }
 
     /// A use of the private name `n` at `pos`, checked when its class ends (measured on a
-    /// `refrouter` 9.0.4 on 02-11: a name no class around declares is a `SyntaxError`).
+    /// reference router 9.0.4 on 02-11: a name no class around declares is a `SyntaxError`).
     fn private_ref(&mut self, n: Name, pos: Pos) -> Result<(), SyntaxError> {
         match self.privates.last_mut() {
             Some(scope) => {
@@ -1530,7 +1531,8 @@ impl Parser {
     }
 
     /// A private name a class declares: a name once, or a getter and a setter both static or
-    /// both not (measured on a `refrouter` 9.0.4 on 02-11, with its message for any other repeat).
+    /// both not (measured on a reference router 9.0.4 on 02-11, with its message for any other
+    /// repeat).
     fn declare_private(
         &mut self,
         n: &Name,
@@ -1574,7 +1576,7 @@ impl Parser {
         Ok(())
     }
 
-    /// The early errors of a class member (measured on a `refrouter` 9.0.4 on 02-11): a
+    /// The early errors of a class member (measured on a reference router 9.0.4 on 02-11): a
     /// `constructor` that is not a plain method or comes twice, and a static `prototype`.
     #[allow(clippy::too_many_arguments)]
     fn class_member_rules(
@@ -2269,7 +2271,7 @@ impl Parser {
                     return self.fail_at(pos, format!("{w} is a reserved identifier"));
                 }
                 // `yield 1` outside a generator: an operand right after it on the same line
-                // (measured on a `refrouter` 9.0.4 on 03-11).
+                // (measured on a reference router 9.0.4 on 03-11).
                 "yield" if self.operand_follows() => {
                     return self
                         .fail_at(pos, "yield expression is only valid in generators".into());

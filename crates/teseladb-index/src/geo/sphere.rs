@@ -67,7 +67,8 @@ impl Point {
 /// Degrees in a radian.
 const DEGREES_PER_RADIAN: f64 = 180.0 / PI;
 
-/// Conversion of an angle in degrees the way the sphere library RefDb follows does it.
+/// Conversion of an angle in degrees the way the sphere library the reference server follows does
+/// it.
 trait Radians {
     fn to_radians_s2(self) -> f64;
 }

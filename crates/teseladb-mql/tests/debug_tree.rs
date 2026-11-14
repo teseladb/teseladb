@@ -1,6 +1,6 @@
-//! The tree of a parsed query as RefDb prints it in a planner error (`Tree: …`): each
-//! `parsedQuery` (`explain` on a `refrouter` 9.0.4, 02-11-2026) beside the tree of the error of a
-//! `find` with a hint to an index that does not exist.
+//! The tree of a parsed query as the reference server prints it in a planner error (`Tree: …`):
+//! each `parsedQuery` (`explain` on a reference router 9.0.4, 02-11-2026) beside the tree of the
+//! error of a `find` with a hint to an index that does not exist.
 
 use teseladb_bson::extjson;
 use teseladb_mql::debug_tree;
@@ -21,7 +21,7 @@ const CASES: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn the_tree_of_a_parsed_query_is_refdbs() {
+fn the_tree_of_a_parsed_query_is_the_reference_one() {
     for (parsed, tree) in CASES {
         let parsed = extjson::parse(parsed).expect("a parsed query");
         assert_eq!(debug_tree(&parsed), *tree);

@@ -257,11 +257,12 @@ fn increments_from_several_connections_all_count() {
     assert_eq!(field(&batch(&r, "firstBatch")[0], "n"), Some(Value::Int32(4 * EACH)));
 }
 
-/// `$in` of `_id`s examines, as RefDb, each value's key and the key after it that ends its
-/// interval (`totalKeysExamined`, measured on a `refnode` 9.0.4): the reads of the stretches
-/// between the values find those keys also when they are served outside the core.
+/// `$in` of `_id`s examines, as the reference server, each value's key and the key after it that
+/// ends its interval (`totalKeysExamined`, measured on a reference replica set member 9.0.4): the
+/// reads of the stretches between the values find those keys also when they are served outside the
+/// core.
 #[test]
-fn an_in_of_ids_examines_the_keys_refdb_examines() {
+fn an_in_of_ids_examines_the_keys_the_reference_examines() {
     let node =
         Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));

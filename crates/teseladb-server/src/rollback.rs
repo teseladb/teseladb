@@ -1,9 +1,10 @@
 //! Rollback files on disk (005 FR-010, D-034): the entries of a range that a replica drops from its
 //! log because a later leader's entries took their indexes (`MultiRaftCore::take_rolled_back`)
-//! become files under `<data>/rollback/`, as RefDb writes the documents a rollback takes back
-//! ([`ref_layout`]): `rollback/<collectionUUID>/removed.<time>.<term>.<index>.bson` holds, as
-//! BSON documents one after another, the documents the lost writes left in that collection, which
-//! is what an operator and `refrestore` read. Deletions are not written, as in RefDb. What
+//! become files under `<data>/rollback/`, as the reference server writes the documents a rollback
+//! takes back ([`reference_layout`]):
+//! `rollback/<collectionUUID>/removed.<time>.<term>.<index>.bson` holds, as BSON documents one
+//! after another, the documents the lost writes left in that collection, which is what an operator
+//! and the reference restore tool read. Deletions are not written, as in the reference server. What
 //! has no collection (index entries, an entry that does not decode, a collection dropped since)
 //! keeps the range's own records (`teseladb_range::rollback`) under
 //! `rollback/teseladb-internal/range-<group>/`.
@@ -28,7 +29,7 @@ use teseladb_wire::commands::mutation::DOCUMENT;
 /// Directory, under `rollback/`, of the range's records that belong to no collection.
 pub const INTERNAL_DIR: &str = "teseladb-internal";
 
-/// RefDb's text of a collection UUID: lowercase hexadecimal in groups of 8-4-4-4-12.
+/// The reference server's text of a collection UUID: lowercase hexadecimal in groups of 8-4-4-4-12.
 pub fn uuid_text(u: &[u8; 16]) -> String {
     let mut out = String::with_capacity(36);
     for (i, b) in u.iter().enumerate() {
@@ -48,11 +49,11 @@ fn collection_of(key: &[u8]) -> Option<u32> {
     }
 }
 
-/// RefDb's layout for the range's rollback files `internal` (each
+/// The reference server's layout for the range's rollback files `internal` (each
 /// `rollback/range-<group>/<name>`): one file `rollback/<uuid>/<name>` per collection with the
 /// documents its lost writes left, from `uuids` (collection identifier to UUID), and the records
 /// that belong to no collection kept at `rollback/teseladb-internal/range-<group>/<name>`.
-pub fn ref_layout(
+pub fn reference_layout(
     internal: Vec<RollbackFile>,
     uuids: &BTreeMap<u32, [u8; 16]>,
 ) -> Vec<RollbackFile> {
@@ -362,13 +363,14 @@ mod tests {
             LogEntry { index: 12, term: 3, kind: EntryKind::Normal, data: Bytes::from_vec(data) };
         let internal = rollback_files(&[(GroupId(1), e)], 1_793_363_696_789);
         let uuids = BTreeMap::from([(7, uuid)]);
-        let files = ref_layout(internal, &uuids);
+        let files = reference_layout(internal, &uuids);
         let name = "removed.2026-10-30T12-34-56.3.12.bson";
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        let ref = format!("rollback/12345678-9abc-def0-0102-030405060708/{name}");
+        let reference = format!("rollback/12345678-9abc-def0-0102-030405060708/{name}");
         let kept = format!("rollback/teseladb-internal/range-1/{name}");
-        assert_eq!(paths, [ref.as_str(), kept.as_str()]);
-        // RefDb's file: the two documents, one after the other, as `bsondump` reads them.
+        assert_eq!(paths, [reference.as_str(), kept.as_str()]);
+        // The reference server's file: the two documents, one after the other, as `bsondump` reads
+        // them.
         assert_eq!(files[0].bytes, [doc(1), doc(2)].concat());
         let rest = read_rollback_file(&files[1].bytes).expect("the range's records");
         assert_eq!(rest.len(), 2, "the dropped collection's document and the index entry");
@@ -384,7 +386,7 @@ mod tests {
         let data = envelope::encode(ts, &only_docs.encode());
         let e =
             LogEntry { index: 20, term: 4, kind: EntryKind::Normal, data: Bytes::from_vec(data) };
-        let files = ref_layout(rollback_files(&[(GroupId(1), e)], 1_793_363_696_789), &uuids);
+        let files = reference_layout(rollback_files(&[(GroupId(1), e)], 1_793_363_696_789), &uuids);
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].bytes, doc(5));
         assert!(files[1].path.contains(INTERNAL_DIR));
@@ -404,11 +406,11 @@ mod tests {
                 .encode(),
             )),
         };
-        let files = ref_layout(rollback_files(&[(GroupId(1), e)], 1_793_363_696_789), &uuids);
+        let files = reference_layout(rollback_files(&[(GroupId(1), e)], 1_793_363_696_789), &uuids);
         assert_eq!(files.len(), 1, "nothing internal");
         // A file that does not read is kept whole.
         let bad = RollbackFile { path: "rollback/range-2/removed.x.bson".into(), bytes: vec![1] };
-        let kept = ref_layout(vec![bad], &uuids);
+        let kept = reference_layout(vec![bad], &uuids);
         assert_eq!(kept[0].path, "rollback/teseladb-internal/range-2/removed.x.bson");
     }
 }

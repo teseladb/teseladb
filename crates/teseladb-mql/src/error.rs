@@ -1,9 +1,9 @@
-//! Errors of parsing and evaluating MQL, each with RefDb's code and code name (contract
-//! `error-codes.md` of 006).
+//! Errors of parsing and evaluating MQL, each with the reference server's code and code name
+//! (contract `error-codes.md` of 006).
 
 use std::fmt;
 
-/// A RefDb error code with its name.
+/// A reference server error code with its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorCode {
     /// Number.
@@ -84,7 +84,7 @@ pub mod codes {
         ErrorCode { code: 31254, name: "Location31254" };
 }
 
-/// An MQL error: RefDb's code and its message.
+/// An MQL error: the reference server's code and its message.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MqlError {
     /// Code and code name.

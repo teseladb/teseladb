@@ -53,7 +53,7 @@ use crate::node::FOUNDER;
 use crate::ranges::Ranges;
 use crate::relocations::RelocateMsg;
 use crate::rollback::RollbackWriter;
-use crate::rollback::ref_layout;
+use crate::rollback::reference_layout;
 use crate::routes::SharedRoutes;
 use crate::sessions_ops::{AnswersSender, KillSender, NodeQueries, SessionOps};
 use teseladb_meta::drain::DrainError;
@@ -633,7 +633,7 @@ impl NodeLogic {
         if let Some(sm) = self.group0().filter(|sm| sm.bootstrapped()) {
             let unopened = driver.publish(&sm.clustertime_keys);
             if unopened > 0 {
-                // TeselaDB's own line: it has no RefDb identifier.
+                // TeselaDB's own line: it has no identifier of the reference server.
                 crate::log::defer(crate::log::Pending {
                     id: 0,
                     msg: "$clusterTime signing keys that this node's master key does not open"
@@ -861,8 +861,8 @@ impl NodeLogic {
 
     /// Group 0's leader designates another primary of the replica set presentation when the
     /// designated one's node stops being alive in its heartbeat table (018 FR-007, T019,
-    /// `PrimaryReassign.tla`): `Suspect` already, as a member of RefDb calls an election after
-    /// `electionTimeoutMillis` without hearing from the primary.
+    /// `PrimaryReassign.tla`): `Suspect` already, as a member of the reference server calls an
+    /// election after `electionTimeoutMillis` without hearing from the primary.
     fn reassign_primary(&mut self) {
         if !self.is_leader() || self.reassign_op.is_some() {
             return;
@@ -1632,7 +1632,7 @@ impl NodeLogic {
         let internal = rollback_files(&ranges, self.wall_ms);
         let empty = BTreeMap::new();
         let uuids = self.data.as_ref().map_or(&empty, DataCore::collections);
-        self.rollback.add(ref_layout(internal, uuids));
+        self.rollback.add(reference_layout(internal, uuids));
     }
 
     /// An operation of the core ended.

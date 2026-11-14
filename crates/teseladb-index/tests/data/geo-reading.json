@@ -1,6 +1,6 @@
 {
  "server": "9.0.4",
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "date": "2026-10-30",
  "method": "index: insert {_id: 1, loc: v} into a collection with {loc: \"2dsphere\"}, the errInfo's underlyingReason (null: accepted); query: find({loc: {$geoIntersects: {$geometry: v}}}) on a collection without an index, the code and errmsg (null: accepted)",
  "cases": [

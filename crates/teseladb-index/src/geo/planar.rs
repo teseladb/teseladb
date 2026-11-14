@@ -1,9 +1,9 @@
 //! Geometry in the plane for `2d` indexes and the legacy shapes `$box`, `$center` and `$polygon`
 //! (FR-011): the geohash of a pair and point-in-shape tests with the boundary included.
 //!
-//! The geohash, measured on refnode 7.0.45 (`tests/geo2d.rs`): each coordinate scaled from
-//! `[min, max]` to 32 bits (truncated, `max` itself to the last value), its top `bits` bits kept,
-//! and the two interleaved with x first, aligned to the top of 64 bits.
+//! The geohash, measured on the reference server 7.0.45 (`tests/geo2d.rs`): each coordinate scaled
+//! from `[min, max]` to 32 bits (truncated, `max` itself to the last value), its top `bits` bits
+//! kept, and the two interleaved with x first, aligned to the top of 64 bits.
 
 /// A `2d` index's grid.
 #[derive(Clone, Copy, Debug, PartialEq)]

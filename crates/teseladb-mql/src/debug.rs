@@ -1,6 +1,6 @@
-//! A parsed filter as RefDb prints its tree in a planner error (`Tree: …`, measured on a
-//! `refrouter` 9.0.4): one node per line, each level four spaces in, a conjunction or disjunction
-//! by its name over its clauses, a clause as its path, its operator and its value.
+//! A parsed filter as the reference server prints its tree in a planner error (`Tree: …`, measured
+//! on a reference router 9.0.4): one node per line, each level four spaces in, a conjunction or
+//! disjunction by its name over its clauses, a clause as its path, its operator and its value.
 
 use teseladb_bson::{Document, Value};
 
@@ -98,7 +98,7 @@ fn predicate(path: &str, p: &Document, level: usize, out: &mut String) {
     }
 }
 
-/// A value as RefDb prints a BSON element.
+/// A value as the reference server prints a BSON element.
 fn value(v: &Value) -> String {
     let holder = Document::new().with("v", v.clone());
     match holder.to_bytes() {
@@ -110,7 +110,8 @@ fn value(v: &Value) -> String {
     }
 }
 
-/// An expression as RefDb prints its value: documents and arrays without inner padding.
+/// An expression as the reference server prints its value: documents and arrays without inner
+/// padding.
 fn expression(v: &Value) -> String {
     match v {
         Value::Document(d) => {

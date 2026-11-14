@@ -325,8 +325,8 @@ fn a_command_that_waits_does_not_hold_up_the_other_connections() {
 }
 
 /// A write outside a transaction that finds a transaction's intent (008 T032, FR-002) waits for
-/// its owner, as RefDb 9.0 does: with `maxTimeMS` it ends with `MaxTimeMSExpired` (50) in
-/// `writeErrors`, and once the owner is resolved the same update goes through.
+/// its owner, as the reference server 9.0 does: with `maxTimeMS` it ends with `MaxTimeMSExpired`
+/// (50) in `writeErrors`, and once the owner is resolved the same update goes through.
 #[test]
 fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
     use teseladb_meta::bootstrap::DATA_RANGE;
@@ -559,7 +559,7 @@ fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
 
 /// A read that meets the intent of a live transaction (008 FR-003, T013) does not wait: it pushes
 /// the transaction above its mark and reads the version below the intent, as a read outside a
-/// transaction in RefDb 9.0 sees the last committed document.
+/// transaction in the reference server 9.0 sees the last committed document.
 #[test]
 fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     use std::time::Instant;
@@ -838,7 +838,7 @@ fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
 }
 
 /// The reads of users and roles of a command see what any node wrote before them (013 T058, FR-009), as
-/// a `refrouter` reads them from the config servers.
+/// a reference router reads them from the config servers.
 /// Rounds of a write on one node and reads on the others: the copies of Group 0 apply each entry within
 /// milliseconds, so one round rarely shows a stale read and a few dozen do.
 const PRINCIPAL_ROUNDS: usize = 40;

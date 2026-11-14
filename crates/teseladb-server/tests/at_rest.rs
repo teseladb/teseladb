@@ -198,7 +198,8 @@ fn the_command_line_and_the_configuration_file_take_the_options() {
     ] {
         assert!(parse(&args(bad)).is_err(), "{bad}");
     }
-    // KMIP: its options, its defaults, and a key file with it refused as `refnode` refuses it.
+    // KMIP: its options, its defaults, and a key file with it refused as the reference server
+    // refuses it.
     let o = start(
         "start --enableEncryption --kmipServerName a,b --kmipPort 5697 --kmipServerCAFile /ca \
          --kmipClientCertificateFile /c --kmipClientCertificatePassword pw --kmipKeyIdentifier 7 \
@@ -223,7 +224,8 @@ fn the_command_line_and_the_configuration_file_take_the_options() {
         d,
         teseladb_server::kmip::KmipOpts { servers: vec!["a".into()], ..Default::default() }
     );
-    // Without --enableEncryption the KMIP options are taken and not used, as in `refnode`.
+    // Without --enableEncryption the KMIP options are taken and not used, as in the reference
+    // server.
     assert!(start("start --kmipServerName a").at_rest.kmip.is_none());
     for bad in [
         "start --enableEncryption --encryptionKeyFile /k --kmipServerName a",
@@ -255,7 +257,7 @@ fn the_command_line_and_the_configuration_file_take_the_options() {
         panic!()
     };
     assert_eq!((o.at_rest.enable, o.at_rest.mode), (true, CipherMode::Gcm));
-    // getCmdLineOpts names them as `refnode` does.
+    // getCmdLineOpts names them as the reference server does.
     let mut o = start("start --insecure");
     for (k, v) in [
         ("enableEncryption", ""),

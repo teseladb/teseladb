@@ -1,7 +1,7 @@
 //! OIDC access tokens on the HTTP port end to end (019 T020, T031; FR-015, FR-027, FR-028), with
 //! a test identity provider of its own: an HTTPS server with the discovery document and the
-//! JWKS, under a CA the node trusts. A token issued for the audience of REFDB-OIDC opens the
-//! REST API; a token for `/mcp` carries the resource's URI as audience (RFC 8707), and each is
+//! JWKS, under a CA the node trusts. A token issued for the audience of OIDC authentication opens
+//! the REST API; a token for `/mcp` carries the resource's URI as audience (RFC 8707), and each is
 //! refused where the other is taken. The metadata of `/mcp` name the provider and the resource.
 //! The resource's URI never comes from the `Host` the client sends: it is `mcpOptions.resourceUri`
 //! or, without it, the address the HTTP port listens on; a node listening only on wildcard
@@ -31,7 +31,7 @@ use teseladb_x509::PrivateKey;
 use teseladb_x509::ext::GeneralName;
 
 const READY: Duration = Duration::from_secs(30);
-/// The audience of REFDB-OIDC, for the REST API.
+/// The audience of OIDC authentication, for the REST API.
 const AUDIENCE: &str = "teseladb-rest";
 /// The `Host` the tests send, which the node must not take as the URI of `/mcp`.
 const HOST: &str = "db.test:27080";
@@ -152,8 +152,8 @@ fn root_user() -> Vec<u8> {
     doc
 }
 
-/// A node that requires credentials, with REFDB-OIDC and the provider of `issuer`, which it
-/// reaches trusting `ca`, and its HTTP port on `http`.
+/// A node that requires credentials, with OIDC authentication and the provider of `issuer`, which
+/// it reaches trusting `ca`, and its HTTP port on `http`.
 fn start(
     issuer: &str,
     ca: teseladb_x509::Certificate,
@@ -338,7 +338,7 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     let scopes = Bson::Array(vec![Bson::from("db.read")]);
     assert_eq!(meta.get("scopes_supported"), Some(&scopes));
 
-    // A token for the audience of REFDB-OIDC reads through REST, and not through MCP.
+    // A token for the audience of OIDC authentication reads through REST, and not through MCP.
     let rest_token = token(&issuer, AUDIENCE, "alice", r#"["readers"]"#);
     let find = r#"{"filter":{}}"#;
     let (st, d) = call(at, &rest_token, "POST", "/v1/databases/app/collections/c/find", find);
@@ -533,8 +533,8 @@ fn call_tls(
 }
 
 /// 019 FR-015 with 013 FR-007: on an HTTP port with TLS, a request without `Authorization` that
-/// shows a client certificate of a trusted CA logs in as the REFDB-X509 user of `$external`
-/// named after its subject, for REST and for `teseladb mcp --tlsCertificateKeyFile`; a
+/// shows a client certificate of a trusted CA logs in as the X.509 authentication user of
+/// `$external` named after its subject, for REST and for `teseladb mcp --tlsCertificateKeyFile`; a
 /// certificate whose subject is no user, and a request with neither, get `401`.
 #[test]
 fn a_client_certificate_logs_in_as_its_x509_user_on_the_http_port() {

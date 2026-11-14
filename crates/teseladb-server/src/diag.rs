@@ -18,7 +18,7 @@ use crate::log;
 pub struct ProcessConfig {
     /// The command line.
     pub argv: Vec<String>,
-    /// The options in RefDb's configuration names, as a BSON document.
+    /// The options in the reference server's configuration names, as a BSON document.
     pub parsed: Vec<u8>,
     /// The data directory (`dbStats`' file system sizes).
     pub dbpath: Option<PathBuf>,
@@ -66,7 +66,8 @@ pub struct Diag {
     open: Arc<AtomicUsize>,
     max_connections: usize,
     port: u16,
-    /// `host:port`, read once at the start (RefDb caches its host name the same way).
+    /// `host:port`, read once at the start (the reference server caches its host name the same
+    /// way).
     host_port: String,
     start_ms: u64,
     process: ProcessConfig,
@@ -123,7 +124,7 @@ impl Diag {
         Diag { sts, ..self }
     }
 
-    /// The node's STS, if REFDB-AWS is on.
+    /// The node's STS, if AWS IAM authentication is on.
     pub fn sts(&self) -> Option<&crate::sts_client::Sts> {
         self.sts.as_deref()
     }
@@ -133,7 +134,7 @@ impl Diag {
         Diag { oidc, ..self }
     }
 
-    /// The node's identity providers, if REFDB-OIDC is on.
+    /// The node's identity providers, if OIDC authentication is on.
     pub fn oidc(&self) -> Option<&crate::oidc_client::Oidc> {
         self.oidc.as_deref()
     }
