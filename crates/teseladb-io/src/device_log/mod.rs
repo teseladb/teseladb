@@ -1,0 +1,14 @@
+//! The Raft log shared by every core of a node on its device (012 FR-035, D-154). Each core keeps
+//! its own WAL segments, records tagged with their group, and its own recovery; what changes is
+//! where they are written. A core's WAL operations go to its [`LogPort`], which queues them without
+//! a lock towards the log's writer; the writer puts what every core queued in one record of the
+//! log's files and makes it durable with one sync, then answers each core's syncs. On start the log
+//! is read once and each core recovers its segments from it through [`LogPort::disk`].
+
+pub mod format;
+mod port;
+pub mod state;
+mod writer;
+
+pub use port::{LogPort, PortDisk};
+pub use writer::{DeviceLog, DeviceLogConfig, Sink};

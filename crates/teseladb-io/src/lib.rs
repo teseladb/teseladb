@@ -8,6 +8,7 @@ pub mod admission;
 pub mod bandwidth;
 pub mod buffers;
 pub mod counters;
+pub mod device_log;
 pub mod disk_thread;
 mod drive_flush;
 mod file_disk;

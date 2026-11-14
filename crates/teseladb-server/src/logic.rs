@@ -1794,11 +1794,11 @@ impl CoreLogic for NodeLogic {
             self.core.rollback_durable();
         }
         if let Some(op) = self.core.poll_io(now) {
-            self.io.push_back((IoSlot::Log, apart(&op)));
+            self.io.push_back((IoSlot::Log, Some(op.without_data())));
             return Some((op, IoClass::Log));
         }
         if let Some(op) = self.rollback.poll_io() {
-            self.io.push_back((IoSlot::Rollback, apart(&op)));
+            self.io.push_back((IoSlot::Rollback, Some(op.without_data())));
             return Some((op, IoClass::Log));
         }
         let data = self.data.as_mut()?;
@@ -2036,17 +2036,30 @@ impl CoreLogic for NodeLogic {
 /// each takes its own slot; anything else takes the oldest other one, as the disk thread answers it
 /// in order.
 fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone, class: IoClass) -> IoSlot {
-    let synced = match done {
-        IoDone::Ok(op) | IoDone::Err { op, .. } if answered_apart(op) => Some(op.clone()),
-        _ => None,
+    let at = match class {
+        // The log's operations are matched by their value: the device log answers the WAL's
+        // apart from the disk, which answers the snapshots' and the rollback's (012 FR-035).
+        IoClass::Log => io.iter().position(|(slot, s)| {
+            slot.class() == IoClass::Log && s.as_ref().is_some_and(|op| answers(op, done))
+        }),
+        // The data's by order, which the executor keeps (012 FR-023), but those answered apart.
+        IoClass::Data => {
+            let synced = match done {
+                IoDone::Ok(op) | IoDone::Err { op, .. } if answered_apart(op) => Some(op.clone()),
+                _ => None,
+            };
+            io.iter().position(|(slot, s)| slot.class() == class && *s == synced)
+        }
     };
-    // An operation answered apart is matched by its value; the rest by order within its class,
-    // which the executor keeps (012 FR-023).
-    let at = io
-        .iter()
-        .position(|(slot, s)| *s == synced && (synced.is_some() || slot.class() == class))
-        .expect("a disk operation in flight");
-    io.remove(at).expect("found above").0
+    io.remove(at.expect("a disk operation in flight")).expect("found above").0
+}
+
+/// Whether `done` is the result of `op`.
+fn answers(op: &IoOp, done: &IoDone) -> bool {
+    match done {
+        IoDone::Ok(o) | IoDone::Err { op: o, .. } => o == op,
+        IoDone::Read { token, .. } => matches!(op, IoOp::ReadAt { token: t, .. } if t == token),
+    }
 }
 
 /// The operation a slot keeps to be matched by, when its answer may come apart from the order
@@ -3623,69 +3636,56 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_sync_takes_its_own_slot_and_the_rest_the_oldest_other() {
-        // 012 FR-014: a log batch's sync may answer after later operations of the disk thread.
+    fn a_log_result_takes_the_slot_of_its_operation() {
+        // 012 FR-014, FR-035: a WAL sync answers after later operations, the device log answers
+        // the WAL's operations apart from the disk's, and the rollback's go to the disk thread.
         use teseladb_raftlog::FileId;
         let (file, data) = (FileId(1), teseladb_types::Bytes::new());
         let write = |offset| IoOp::WriteAt { file, offset, data: data.clone(), batch: 1 };
         let sync = IoOp::Sync { file, batch: 1 };
+        let rollback = IoOp::WriteAt { file: FileId(7), offset: 0, data: data.clone(), batch: 0 };
+        let read = IoOp::ReadAt { file: FileId(3), offset: 0, len: 4, token: 9 };
         let mut io = VecDeque::from([
-            (IoSlot::Log, None),
+            (IoSlot::Log, Some(write(0))),
             (IoSlot::Log, Some(sync.clone())),
-            (IoSlot::Rollback, None),
-            (IoSlot::Log, None),
+            (IoSlot::Rollback, Some(rollback.clone())),
+            (IoSlot::Log, Some(read)),
+            (IoSlot::Data(IoOwner::Lsm), None),
         ]);
-        // The write after the sync answers first; then the rollback's, then the sync.
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(0)), IoClass::Log), IoSlot::Log);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(4)), IoClass::Log), IoSlot::Rollback);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync.clone()), IoClass::Log), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(rollback), IoClass::Log), IoSlot::Rollback);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync), IoClass::Log), IoSlot::Log);
+        let got = IoDone::Read { token: 9, data: Ok(teseladb_types::Bytes::new()) };
+        assert_eq!(take_slot(&mut io, &got, IoClass::Log), IoSlot::Log);
+        let failed = IoDone::Err { op: write(0), errno: teseladb_raftlog::IoErrno::Io };
+        assert_eq!(take_slot(&mut io, &failed, IoClass::Log), IoSlot::Log);
         assert_eq!(io.len(), 1);
-        let failed =
-            IoDone::Err { op: IoOp::Sync { file, batch: 0 }, errno: teseladb_raftlog::IoErrno::Io };
-        assert_eq!(
-            take_slot(&mut io, &failed, IoClass::Log),
-            IoSlot::Log,
-            "a sync outside a batch keeps its place"
-        );
-        assert!(io.is_empty());
+        assert!(answers(&IoOp::Close { file }, &IoDone::Ok(IoOp::Close { file })));
+        assert!(!answers(&IoOp::Close { file }, &IoDone::Read { token: 1, data: Ok(data) }));
     }
 
     #[test]
-    fn a_result_takes_the_oldest_slot_of_its_class() {
-        // 012 FR-023: the executor answers each class in its order, not across classes, so a data
-        // result that comes before an older log result goes to the data's slot.
+    fn a_data_result_takes_the_oldest_slot_of_its_class() {
+        // 012 FR-023: the executor answers each class in its order; one answered apart takes its
+        // own slot.
         use teseladb_raftlog::FileId;
         let data = teseladb_types::Bytes::new();
         let write =
             |f, offset| IoOp::WriteAt { file: FileId(f), offset, data: data.clone(), batch: 0 };
         let owner = IoSlot::Data(IoOwner::Lsm);
-        let mut io = VecDeque::from([(IoSlot::Log, None), (owner, None), (IoSlot::Rollback, None)]);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(9, 0)), IoClass::Data), owner);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(1, 0)), IoClass::Log), IoSlot::Log);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(2, 0)), IoClass::Log), IoSlot::Rollback);
-        assert!(io.is_empty());
-    }
-
-    #[test]
-    fn a_log_chore_takes_its_own_slot_whoever_asked_for_it() {
-        // H-049: a log's maintenance runs on the chores thread and may answer after later
-        // operations of the disk thread.
-        use teseladb_raftlog::FileId;
-        let sync_dir = IoOp::SyncDir { path: "core-02/wal".into() };
-        let close = IoOp::Close { file: FileId(1) };
-        assert_eq!(apart(&sync_dir), Some(sync_dir.clone()));
-        assert_eq!(apart(&close), None);
+        let sync_dir = IoOp::SyncDir { path: "core-02/snap".into() };
         let mut io = VecDeque::from([
-            (IoSlot::Log, apart(&sync_dir)),
-            (IoSlot::Rollback, apart(&close)),
-            (IoSlot::Log, None),
+            (IoSlot::Log, Some(write(1, 0))),
+            (owner, None),
+            (IoSlot::Data(IoOwner::Transfer), apart(&sync_dir)),
+            (owner, None),
         ]);
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(close), IoClass::Log), IoSlot::Rollback);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(9, 0)), IoClass::Data), owner);
         assert_eq!(
-            take_slot(&mut io, &IoDone::Ok(IoOp::Close { file: FileId(2) }), IoClass::Log),
-            IoSlot::Log
+            take_slot(&mut io, &IoDone::Ok(sync_dir), IoClass::Data),
+            IoSlot::Data(IoOwner::Transfer)
         );
-        assert_eq!(take_slot(&mut io, &IoDone::Ok(sync_dir), IoClass::Log), IoSlot::Log);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(9, 4)), IoClass::Data), owner);
+        assert_eq!(take_slot(&mut io, &IoDone::Ok(write(1, 0)), IoClass::Log), IoSlot::Log);
         assert!(io.is_empty());
     }
 }

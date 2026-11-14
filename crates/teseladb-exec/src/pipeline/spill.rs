@@ -99,8 +99,8 @@ impl Drop for Runs<'_> {
 /// Writes `docs`, sorted by `cmp` over their keys `keys`, as one run.
 fn write_run<K>(
     docs: Vec<Document>,
-    keys: &impl Fn(&Document) -> Result<K, MqlError>,
-    cmp: &impl Fn(&K, &K) -> Result<Ordering, MqlError>,
+    keys: &dyn Fn(&Document) -> Result<K, MqlError>,
+    cmp: &dyn Fn(&K, &K) -> Result<Ordering, MqlError>,
     store: &dyn SpillStore,
 ) -> Result<u64, MqlError> {
     let mut keyed = Vec::with_capacity(docs.len());
@@ -118,6 +118,87 @@ fn write_run<K>(
     Ok(id)
 }
 
+/// How a [`Sorter`] reads the key of a document.
+pub(crate) type KeyOf<'s, K> = Box<dyn Fn(&Document) -> Result<K, MqlError> + 's>;
+
+/// How a [`Sorter`] orders two keys.
+pub(crate) type OrderOf<'s, K> = Box<dyn Fn(&K, &K) -> Result<Ordering, MqlError> + 's>;
+
+/// An external sort that takes its input a document at a time, as the stage before it gives
+/// it (010 FR-028): the documents wait in memory until the next one would pass `limit` bytes;
+/// then those waiting go to the store as one sorted run. [`Sorter::finish`] merges the runs,
+/// equal keys in input order.
+pub(crate) struct Sorter<'s, K> {
+    keys: KeyOf<'s, K>,
+    cmp: OrderOf<'s, K>,
+    limit: usize,
+    runs: Runs<'s>,
+    run: Vec<Document>,
+    held: usize,
+}
+
+impl<'s, K> Sorter<'s, K> {
+    /// A sort by `keys` in the order of `cmp`, in runs of at most `limit` bytes in `store`.
+    pub(crate) fn new(
+        keys: KeyOf<'s, K>,
+        cmp: OrderOf<'s, K>,
+        (limit, store): (usize, &'s dyn SpillStore),
+    ) -> Sorter<'s, K> {
+        Sorter { keys, cmp, limit, runs: Runs { store, ids: Vec::new() }, run: Vec::new(), held: 0 }
+    }
+
+    /// Takes document `d`, after those before it; the documents waiting go to the store first
+    /// when `d` would take them past the limit.
+    pub(crate) fn push(&mut self, d: Document) -> Result<(), MqlError> {
+        let size = document_size(&d);
+        if self.held + size > self.limit && !self.run.is_empty() {
+            let run = std::mem::take(&mut self.run);
+            self.runs.ids.push(write_run(run, &self.keys, &self.cmp, self.runs.store)?);
+            self.held = 0;
+        }
+        self.held += size;
+        self.run.push(d);
+        Ok(())
+    }
+
+    /// Gives `emit` every document it took, in order, through the store.
+    pub(crate) fn finish(
+        mut self,
+        mut emit: impl FnMut(K, Document) -> Result<(), MqlError>,
+    ) -> Result<(), MqlError> {
+        let store = self.runs.store;
+        if !self.run.is_empty() {
+            let run = std::mem::take(&mut self.run);
+            self.runs.ids.push(write_run(run, &self.keys, &self.cmp, store)?);
+        }
+        let mut readers: Vec<Reader<'_>> = self
+            .runs
+            .ids
+            .iter()
+            .map(|&id| Reader { store, run: id, offset: 0, buf: Vec::new(), at: 0, done: false })
+            .collect();
+        let keys = &self.keys;
+        let next = |r: &mut Reader<'_>| -> Result<Option<(K, Document)>, MqlError> {
+            r.next_doc()?.map(|d| Ok((keys(&d)?, d))).transpose()
+        };
+        // The next document of each run that has one, with its run, in the order of the runs.
+        let mut heads: Vec<(usize, K, Document)> = Vec::with_capacity(readers.len());
+        for (i, r) in readers.iter_mut().enumerate() {
+            if let Some((k, d)) = next(r)? {
+                heads.push((i, k, d));
+            }
+        }
+        while let Some(pos) = smallest(&heads, &self.cmp)? {
+            let (run, k, d) = heads.remove(pos);
+            if let Some((nk, nd)) = next(&mut readers[run])? {
+                heads.insert(pos, (run, nk, nd));
+            }
+            emit(k, d)?;
+        }
+        Ok(())
+    }
+}
+
 /// Gives `emit` the documents of `docs` in the order `cmp` sets over their keys `keys`, equal
 /// keys in input order, through runs of at most `limit` bytes in `store`.
 pub(crate) fn external_sort<K>(
@@ -125,46 +206,13 @@ pub(crate) fn external_sort<K>(
     keys: impl Fn(&Document) -> Result<K, MqlError>,
     cmp: impl Fn(&K, &K) -> Result<Ordering, MqlError>,
     (limit, store): (usize, &dyn SpillStore),
-    mut emit: impl FnMut(K, Document) -> Result<(), MqlError>,
+    emit: impl FnMut(K, Document) -> Result<(), MqlError>,
 ) -> Result<(), MqlError> {
-    let mut runs = Runs { store, ids: Vec::new() };
-    let mut run = Vec::new();
-    let mut held = 0usize;
+    let mut sorter = Sorter::new(Box::new(keys), Box::new(cmp), (limit, store));
     for d in docs {
-        let size = document_size(&d);
-        if held + size > limit && !run.is_empty() {
-            runs.ids.push(write_run(std::mem::take(&mut run), &keys, &cmp, store)?);
-            held = 0;
-        }
-        held += size;
-        run.push(d);
+        sorter.push(d)?;
     }
-    if !run.is_empty() {
-        runs.ids.push(write_run(run, &keys, &cmp, store)?);
-    }
-    let mut readers: Vec<Reader<'_>> = runs
-        .ids
-        .iter()
-        .map(|&id| Reader { store, run: id, offset: 0, buf: Vec::new(), at: 0, done: false })
-        .collect();
-    let next = |r: &mut Reader<'_>| -> Result<Option<(K, Document)>, MqlError> {
-        r.next_doc()?.map(|d| Ok((keys(&d)?, d))).transpose()
-    };
-    // The next document of each run that has one, with its run, in the order of the runs.
-    let mut heads: Vec<(usize, K, Document)> = Vec::with_capacity(readers.len());
-    for (i, r) in readers.iter_mut().enumerate() {
-        if let Some((k, d)) = next(r)? {
-            heads.push((i, k, d));
-        }
-    }
-    while let Some(pos) = smallest(&heads, &cmp)? {
-        let (run, k, d) = heads.remove(pos);
-        if let Some((nk, nd)) = next(&mut readers[run])? {
-            heads.insert(pos, (run, nk, nd));
-        }
-        emit(k, d)?;
-    }
-    Ok(())
+    sorter.finish(emit)
 }
 
 /// `docs` sorted by `spec` through runs of at most `limit` bytes in `store`, strings in
@@ -193,7 +241,7 @@ pub fn sort_runs(
 /// The place in `heads` of the document that comes first; the earlier run on a tie.
 fn smallest<K>(
     heads: &[(usize, K, Document)],
-    cmp: &impl Fn(&K, &K) -> Result<Ordering, MqlError>,
+    cmp: &dyn Fn(&K, &K) -> Result<Ordering, MqlError>,
 ) -> Result<Option<usize>, MqlError> {
     let mut best: Option<(usize, &K)> = None;
     for (i, (_, k, _)) in heads.iter().enumerate() {
