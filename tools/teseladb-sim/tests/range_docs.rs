@@ -94,13 +94,22 @@ fn a_retried_write_acknowledged_with_w1_names_no_predecessor() {
     assert_eq!(total.w1_blind_named, 0, "{total:?}");
 }
 
+/// Seeds `lost_writes_are_retried_with_their_key` may take to reach every kind of retry: about
+/// one seed in six gets an answer from the record of an applied original, and which ones moves
+/// with every change to what the nodes do.
+const RETRY_SEEDS: u64 = 64;
+
 /// FR-011: writes whose answer is lost go again with the same key; some retries get a definite
 /// answer, and some of those come from the record of an original that was applied, while every
 /// checker still passes (a write applied twice would break the history).
 #[test]
 fn lost_writes_are_retried_with_their_key() {
     let mut total = RetryStats::default();
-    for seed in 1..=6 {
+    let reached = |t: &RetryStats| t.retried > 0 && t.definite > 0 && t.from_record > 0;
+    for seed in 1..=RETRY_SEEDS {
+        if reached(&total) {
+            break;
+        }
         let stats = Rc::new(Cell::new(RetryStats::default()));
         let wl = RangeDocsWorkload::counting(3, 2, Rc::clone(&stats));
         let r = run_workload(&cfg(FaultPlan::Heavy), seed, wl);
@@ -116,7 +125,7 @@ fn lost_writes_are_retried_with_their_key() {
         total.definite += s.definite;
         total.from_record += s.from_record;
     }
-    assert!(total.retried > 0 && total.definite > 0 && total.from_record > 0, "{total:?}");
+    assert!(reached(&total), "{total:?}");
 }
 
 /// Seeds chosen by coverage (01-11-2026): each takes the workload through a guard of the
