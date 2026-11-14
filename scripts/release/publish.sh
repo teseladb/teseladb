@@ -36,15 +36,14 @@ trap 'docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true' EXIT
 tar -cf - --exclude=./target --exclude=./.git . | docker run --rm -i -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" sh -c 'mkdir -p /work/repo/src && tar -xf - -C /work/repo/src'
 # Cargo downloads the viuzi-* crates of Cargo.lock from the private registry with the JWT of the run.
 # The binary carries the release's full version (0.1.0-dev.N in development), which test-install.sh checks.
-# Every binary is built with PGO from the load of 002 and the benches, and the x86_64 Linux one is
-# laid out with BOLT from a perf profile (012 FR-034, scripts/release/pgo-bolt.sh): perf samples
-# the node from the container, which needs CAP_PERFMON (and CAP_SYS_ADMIN on kernels before 5.8).
+# Every binary is built with PGO from the load of 002 and the benches (012 FR-034,
+# scripts/release/pgo.sh), with llvm-profdata of the pinned toolchain's llvm-tools.
 docker run --rm -v "$VOLUME:/work" -w /work/repo/src -e CARGO_TARGET_DIR=/work/target -e CARGO_PROFILE_DIST_STRIP=debuginfo \
   -e CARGO_REGISTRIES_VIUZI_TOKEN -e TESELADB_RELEASE_VERSION="$VERSION" -e PGO_SECONDS \
-  --cap-add PERFMON --cap-add SYS_ADMIN "$ZIGBUILD_IMAGE" sh -c '
+  "$ZIGBUILD_IMAGE" sh -c '
   set -e
   rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
-  scripts/release/pgo-bolt.sh'
+  scripts/release/pgo.sh'
 mkdir -p target-release
 docker run --rm -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" tar -cf - -C /work/out . | tar -xf - -C target-release
 for triple in "${TRIPLES[@]}"; do [[ -x target-release/$triple/dist/teseladb ]] || { echo "publish: $triple is missing" >&2; exit 1; }; done

@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 
 pub mod aligned;
 pub mod alloc_count;
+pub mod arena;
 pub mod handoff;
 pub mod host;
 pub mod huge_pool;

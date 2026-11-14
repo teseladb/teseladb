@@ -301,37 +301,9 @@ pub fn decode_response(b: &[u8]) -> Result<Response, DecodeError> {
 }
 
 impl Executor for NodeExecutor {
-    fn run(&mut self, db: &str, mut command: teseladb_bson::Document) -> teseladb_bson::Document {
-        command.push("$db", db);
-        let req = WireRequest {
-            header: Header { length: 0, request_id: 1, response_to: 0, op_code: opcode::OP_MSG },
-            kind: Kind::Msg,
-            compressor: None,
-            flags: 0,
-            db: db.to_owned(),
-            command,
-            sequences: Vec::new(),
-            problem: None,
-        };
-        loop {
-            let info = self.state.info();
-            let action = dispatch_with(
-                &mut self.conn,
-                &req,
-                &info,
-                Some((&mut self.backend, &*self.shared)),
-            );
-            teseladb_wire::commands::txn::resolve_queued(&mut self.backend, &self.shared);
-            match action {
-                Action::Reply(d) => return d,
-                // `failCommand` with `blockConnection`: hold the request, then run it again.
-                Action::Delay { ms } => thread::sleep(Duration::from_millis(ms)),
-                Action::Close | Action::Await { .. } => {
-                    return CommandError::new(INTERNAL_ERROR, "the command closed the request")
-                        .to_document();
-                }
-            }
-        }
+    /// The command's working memory comes from this thread's arena (012 FR-027).
+    fn run(&mut self, db: &str, command: teseladb_bson::Document) -> teseladb_bson::Document {
+        teseladb_sys::arena::request(|| self.run_in_arena(db, command))
     }
 
     fn node(&self) -> u64 {
@@ -389,6 +361,46 @@ impl Executor for NodeExecutor {
         let body = Forwarded { who, request: request.clone(), resource }.encode();
         let answer = self.backend.forward_http(node, body)?;
         decode_response(&answer).ok()
+    }
+}
+
+impl NodeExecutor {
+    /// [`Executor::run`] inside its request's arena.
+    fn run_in_arena(
+        &mut self,
+        db: &str,
+        mut command: teseladb_bson::Document,
+    ) -> teseladb_bson::Document {
+        command.push("$db", db);
+        let req = WireRequest {
+            header: Header { length: 0, request_id: 1, response_to: 0, op_code: opcode::OP_MSG },
+            kind: Kind::Msg,
+            compressor: None,
+            flags: 0,
+            db: db.to_owned(),
+            command,
+            sequences: Vec::new(),
+            problem: None,
+        };
+        loop {
+            let info = self.state.info();
+            let action = dispatch_with(
+                &mut self.conn,
+                &req,
+                &info,
+                Some((&mut self.backend, &*self.shared)),
+            );
+            teseladb_wire::commands::txn::resolve_queued(&mut self.backend, &self.shared);
+            match action {
+                Action::Reply(d) => return d,
+                // `failCommand` with `blockConnection`: hold the request, then run it again.
+                Action::Delay { ms } => thread::sleep(Duration::from_millis(ms)),
+                Action::Close | Action::Await { .. } => {
+                    return CommandError::new(INTERNAL_ERROR, "the command closed the request")
+                        .to_document();
+                }
+            }
+        }
     }
 }
 

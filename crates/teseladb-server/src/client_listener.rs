@@ -1199,7 +1199,19 @@ impl Client {
     /// when no node is behind the port, and queues its action. A connection that just signed in
     /// counts for its tenant, and past its limit closes without its answer (007 FR-032); one whose
     /// tenant is suspended closes once answered. `false` if the connection must close.
+    /// The request's working memory comes from this thread's arena, emptied once its answer is
+    /// queued (012 FR-027).
     fn handle(
+        &mut self,
+        conn: Connection,
+        req: Request,
+        info: &NodeInfo,
+        cmds: &mut Cmds<'_>,
+    ) -> bool {
+        teseladb_sys::arena::request(|| self.handle_in_arena(conn, req, info, cmds))
+    }
+
+    fn handle_in_arena(
         &mut self,
         mut conn: Connection,
         req: Request,
