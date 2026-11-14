@@ -106,6 +106,7 @@ pub fn start_clock<D: Disk + Send + 'static>(
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicU64;
     use std::time::Instant;
 
     use super::*;
@@ -148,6 +149,62 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         what()
+    }
+
+    /// A disk that counts the syncs and renames it is asked for.
+    struct Counting {
+        inner: MemDisk,
+        syncs: Arc<AtomicU64>,
+        renames: Arc<AtomicU64>,
+    }
+
+    impl Disk for Counting {
+        fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
+            self.inner.list(dir)
+        }
+
+        fn read_all(&mut self, path: &Path) -> Result<Vec<u8>, IoErrno> {
+            self.inner.read_all(path)
+        }
+
+        fn execute(&mut self, op: IoOp) -> IoDone {
+            match op {
+                IoOp::Sync { .. } | IoOp::SyncDir { .. } => {
+                    self.syncs.fetch_add(1, Ordering::Relaxed)
+                }
+                IoOp::Rename { .. } => self.renames.fetch_add(1, Ordering::Relaxed),
+                _ => 0,
+            };
+            self.inner.execute(op)
+        }
+    }
+
+    #[test]
+    fn an_idle_node_syncs_the_bound_once_per_renewal() {
+        // D-158: in an idle node the marks follow the wall clock (leases, heartbeats), so the
+        // bound is renewed every RENEW_MS, each renewal one write in place and one sync, with no
+        // rename of `node.meta` and no sync of the directory.
+        let mut inner = MemDisk::new();
+        let mut meta = open_node(&mut inner, 1, [1; 16], wall_ms()).unwrap();
+        meta.node_id = 1;
+        let (syncs, renames) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let disk = Counting { inner, syncs: syncs.clone(), renames: renames.clone() };
+        let (clock, keeper) = start_clock(disk, meta).unwrap();
+        let (base_syncs, base_renames) =
+            (syncs.load(Ordering::Relaxed), renames.load(Ordering::Relaxed));
+        let window = Duration::from_millis(2_000);
+        let end = Instant::now() + window;
+        while Instant::now() < end {
+            let _ = clock.0.now(wall_ms());
+            thread::sleep(Duration::from_millis(10));
+        }
+        let renewals = syncs.load(Ordering::Relaxed) - base_syncs;
+        assert_eq!(renames.load(Ordering::Relaxed), base_renames, "no renewal renames a file");
+        // At most one renewal per RENEW_MS of the window, plus the first one when the first
+        // mark reaches the bound written on start.
+        let most = window.as_millis() as u64 / teseladb_hlc::RENEW_MS + 2;
+        assert!((1..=most).contains(&renewals), "{renewals} syncs in {window:?}, at most {most}");
+        keeper.stop();
     }
 
     #[test]
