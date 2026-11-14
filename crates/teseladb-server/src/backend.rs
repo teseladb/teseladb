@@ -18,6 +18,16 @@ mod txn_reaper;
 pub use lookups::{lookup_batches_sent, lookup_keys_filtered, lookup_keys_here, lookup_keys_sent};
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
 pub use pushed_scan::{filtered_parts_sent, parts_taken_ahead};
+
+/// Spans of collections whose documents and bytes the counts of their ranges gave
+/// (`collStats`, 007 FR-039).
+static TALLIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Spans of collections whose documents and bytes the counts of their ranges gave since the
+/// process started, instead of a read of their documents.
+pub fn tallied_from_counts() -> u64 {
+    TALLIED.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub use scatter::{scattered_groups, scattered_parts_sent_away};
 pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
@@ -317,6 +327,7 @@ impl ServerBackend {
                     | RemoteReply::Fenced { .. }
                     | RemoteReply::Live { .. }
                     | RemoteReply::DocCount { .. }
+                    | RemoteReply::DocTally { .. }
                     | RemoteReply::Pushed(_)
                     | RemoteReply::Looked(_),
                 ) => {
@@ -1278,6 +1289,7 @@ impl Backend for ServerBackend {
             | RemoteReply::Fenced { .. }
             | RemoteReply::Live { .. }
             | RemoteReply::DocCount { .. }
+            | RemoteReply::DocTally { .. }
             | RemoteReply::Pushed(_)
             | RemoteReply::Looked(_) => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
@@ -1872,6 +1884,37 @@ impl Backend for ServerBackend {
                 }
             }
         }
+        Ok(Some(total))
+    }
+
+    fn doc_tally(
+        &mut self,
+        (tenant, collection): (u32, u32),
+        (start, end): (&[u8], &[u8]),
+    ) -> Result<Option<(u64, u64, u64)>, CommandError> {
+        // As `doc_count`: at the latest mark on the leaders, each range of the span from its
+        // leader's counts and their bytes (007 FR-039). A range that cannot say, or a node of the
+        // version before that does not read the request, sends `collStats` to the documents.
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        if self.read_mark.is_some() || !primary {
+            return Ok(None);
+        }
+        let mut total = (0u64, 0u64, 0u64);
+        let mut from = start.to_vec();
+        while from.as_slice() < end {
+            let req = |_: &RouteEntry, _| RemoteReq::DocTally { tenant, collection };
+            let Ok((e, RemoteReply::DocTally { t: Some((n, bytes, keys)) })) =
+                self.data(&from, true, req)
+            else {
+                return Ok(None);
+            };
+            total = (total.0 + n, total.1 + bytes, total.2 + keys);
+            if e.end.is_empty() || e.end.as_slice() >= end {
+                break;
+            }
+            from = e.end;
+        }
+        TALLIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Some(total))
     }
 

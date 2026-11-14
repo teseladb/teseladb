@@ -638,6 +638,9 @@ pub struct RangeHost {
     /// Whether every node reads the writes whose records keep their greatest key (FR-022).
     reaching_records: bool,
     counted_resolutions: bool,
+    /// Whether every node reads the changes of documents that carry their bytes
+    /// ([`crate::command::FORMAT_SIZED`]): the leaders write them, and recount the bytes too.
+    sized_counts: bool,
     wall_ms: u64,
     /// Monotonic time of the last call.
     now: Nanos,
@@ -731,6 +734,7 @@ impl RangeHost {
             moving: BTreeSet::new(),
             counted_writes: false,
             reaching_records: false,
+            sized_counts: false,
             counted_resolutions: false,
             wall_ms: 0,
             now: Nanos::ZERO,
@@ -872,6 +876,13 @@ impl RangeHost {
     /// ([`crate::command::KIND_RESOLVE_INTENTS_COUNTED`]): only once every node reads that format.
     pub fn set_counted_resolutions(&mut self, on: bool) {
         self.counted_resolutions = on;
+    }
+
+    /// Whether every node reads the changes of documents that carry their bytes of BSON and of
+    /// keys ([`crate::command::KIND_WRITE_SIZED`], 007 FR-039): only then does a leader write
+    /// them and recount the bytes.
+    pub fn set_sized_counts(&mut self, on: bool) {
+        self.sized_counts = on;
     }
 
     /// Whether range `g` is on its way to another core.

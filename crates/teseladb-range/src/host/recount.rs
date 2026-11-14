@@ -2,7 +2,8 @@
 //! leads are estimated, the leader counts the documents of each collection at the entry it has
 //! applied and proposes `AdjustCounts`, at most once every [`RECOUNT_EVERY`]. Each replica adds
 //! the counted writes that followed and takes the counts as exact only if nothing after that
-//! entry left them estimated.
+//! entry left them estimated. With every node reading them, it counts the bytes of BSON and of
+//! keys of the documents too, and recounts while only those are estimated.
 
 use super::*;
 use crate::doc_count::{DocScan, Recount};
@@ -30,7 +31,11 @@ impl RangeHost {
         g: GroupId,
         now: Nanos,
     ) -> bool {
-        let dirty = core.state_machine(g).is_some_and(RangeState::counts_dirty);
+        // With every node reading them, bytes that are estimated are recounted too.
+        let sized = self.sized_counts;
+        let dirty = core.state_machine(g).is_some_and(|sm| {
+            sm.counts_dirty() || (sized && sm.shared_counts().is_some_and(|c| !c.sized()))
+        });
         let applied = core.state_machine(g).map_or(0, StateMachine::applied_index);
         let lsm = self.lsm.clone();
         let Some(r) = self.ranges.get_mut(&g) else { return false };
@@ -55,9 +60,10 @@ impl RangeHost {
         let base = *base;
         let Some(done) = scan.step(&lsm) else { return false };
         l.recount = RecountJob::Until(now + RECOUNT_EVERY);
-        let Recount::Counted(docs) = done else { return false };
+        let Recount::Counted(docs, sizes) = done else { return false };
         let counts = docs.into_iter().collect();
-        let payload = Command::AdjustCounts { base, counts }.encode();
+        let sizes = sized.then(|| sizes.into_iter().collect());
+        let payload = Command::AdjustCounts { base, counts, sizes }.encode();
         let zero = Hlc { physical: 0, logical: 0 };
         core.propose_at(g, zero, now, |_| Ok::<_, std::convert::Infallible>(payload)).is_ok()
     }

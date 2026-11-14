@@ -82,6 +82,7 @@ pub(super) fn pin(req: RemoteReq, pinned: Option<&(Hlc, TxnView)>) -> RemoteReq 
         | RemoteReq::Fence { .. }
         | RemoteReq::Live
         | RemoteReq::DocCount { .. }
+        | RemoteReq::DocTally { .. }
         | RemoteReq::Pushed { .. }
         | RemoteReq::Lookup { .. }) => other,
     }

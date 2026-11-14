@@ -93,8 +93,13 @@ fn a_recount_passes_its_range_a_step_at_a_time() {
     let lsm = c.nodes[&l].host.lsm().clone();
     let mut scan = DocScan::new(&lsm, START, END);
     assert_eq!(scan.step(&lsm), None, "more versions than a step passes");
-    let counted = Recount::Counted(BTreeMap::from([(COLL, docs as u64)]));
-    assert_eq!(scan.step(&lsm), Some(counted), "the next step ends it");
+    let Some(Recount::Counted(counted, sizes)) = scan.step(&lsm) else {
+        panic!("the next step ends it")
+    };
+    assert_eq!(counted, BTreeMap::from([(COLL, docs as u64)]));
+    // Each document's value (one byte here) and key are counted in their bytes.
+    let key = u64::try_from(doc(b"00000").len()).unwrap();
+    assert_eq!(sizes[&COLL], (docs as u64, key * docs as u64));
 }
 
 fn counts_of(c: &Cluster, n: NodeId, g: GroupId) -> Option<BTreeMap<(u32, u32), u64>> {

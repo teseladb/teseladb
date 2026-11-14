@@ -168,6 +168,15 @@ pub enum RemoteReq {
         /// Collection.
         collection: u32,
     },
+    /// The live documents of a collection the range holds and their bytes of BSON and of keys,
+    /// from its leader's counts (007 FR-039, `collStats`). A node of the version before does not
+    /// read it, and the asker reads the documents.
+    DocTally {
+        /// Tenant.
+        tenant: u32,
+        /// Collection.
+        collection: u32,
+    },
     /// A scan of `[start, end)` of at most `limit` documents whose rows the leader runs `work`
     /// over, answering what the work gives instead of the rows (010 FR-034).
     Pushed {
@@ -284,6 +293,12 @@ pub enum RemoteReply {
         /// Documents.
         n: Option<u64>,
     },
+    /// The live documents of a collection in the range with their bytes of BSON and of keys;
+    /// `None` while its counts or their bytes are estimated.
+    DocTally {
+        /// Documents, bytes of BSON and bytes of keys.
+        t: Option<(u64, u64, u64)>,
+    },
     /// What the work of a [`RemoteReq::Pushed`] gave.
     Pushed(crate::pushed::Worked),
     /// What the leader read for each key of a [`RemoteReq::Lookup`].
@@ -309,6 +324,7 @@ const READ_WITH_BACK: u8 = 14;
 const DOC_COUNT: u8 = 15;
 const PUSHED: u8 = 16;
 const LOOKUP: u8 = 17;
+const DOC_TALLY: u8 = 18;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -487,6 +503,9 @@ impl RemoteReq {
             RemoteReq::DocCount { tenant, collection } => {
                 e.u8(DOC_COUNT).u32(*tenant).u32(*collection);
             }
+            RemoteReq::DocTally { tenant, collection } => {
+                e.u8(DOC_TALLY).u32(*tenant).u32(*collection);
+            }
             RemoteReq::Pushed { start, end, limit, concern, work } => {
                 e.u8(PUSHED).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
                 work.put(&mut e);
@@ -602,6 +621,7 @@ impl RemoteReq {
             },
             LIVE => RemoteReq::Live,
             DOC_COUNT => RemoteReq::DocCount { tenant: d.u32()?, collection: d.u32()? },
+            DOC_TALLY => RemoteReq::DocTally { tenant: d.u32()?, collection: d.u32()? },
             PUSHED => RemoteReq::Pushed {
                 start: d.bytes()?.to_vec(),
                 end: d.bytes()?.to_vec(),
@@ -640,6 +660,7 @@ const OK_LIVE: u8 = 10;
 const OK_DOC_COUNT: u8 = 11;
 const OK_PUSHED: u8 = 12;
 const OK_LOOKED: u8 = 13;
+const OK_DOC_TALLY: u8 = 14;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -772,6 +793,10 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
         Ok(RemoteReply::DocCount { n }) => {
             e.u8(OK_DOC_COUNT).bool(n.is_some()).u64(n.unwrap_or(0));
         }
+        Ok(RemoteReply::DocTally { t }) => {
+            let (n, bytes, keys) = t.unwrap_or_default();
+            e.u8(OK_DOC_TALLY).bool(t.is_some()).u64(n).u64(bytes).u64(keys);
+        }
         Ok(RemoteReply::Pushed(worked)) => {
             e.u8(OK_PUSHED);
             worked.put(&mut e);
@@ -856,6 +881,10 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
         OK_DOC_COUNT => {
             let (some, n) = (d.bool()?, d.u64()?);
             Ok(RemoteReply::DocCount { n: some.then_some(n) })
+        }
+        OK_DOC_TALLY => {
+            let (some, t) = (d.bool()?, (d.u64()?, d.u64()?, d.u64()?));
+            Ok(RemoteReply::DocTally { t: some.then_some(t) })
         }
         OK_PUSHED => Ok(RemoteReply::Pushed(crate::pushed::Worked::get(&mut d)?)),
         OK_LOOKED => Ok(RemoteReply::Looked(crate::lookup::get(&mut d)?)),

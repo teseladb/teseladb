@@ -10,6 +10,7 @@ use teseladb_hlc::Hlc;
 use teseladb_lsm::{Kind, Lookup, Lsm, LsmConfig};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
 use teseladb_range::command::{Command, IntentPut, Resolution};
+use teseladb_range::doc_count::Change;
 use teseladb_range::intents::{
     ABANDONED_AFTER_MS, Conflict, Intent, IntentOp, IntentOwner, Latest, Push, RecordError,
     RecordOp, TXN_SPACE, TxnId, TxnRecord, TxnStatus, check_put, end_txn, end_txn_above, pred,
@@ -640,7 +641,7 @@ fn a_counted_commit_keeps_the_document_counts_exact() {
     const COLL: (u32, u32) = (0x6100_0000, 4);
     let (a, b) = (doc_key(COLL, b"a"), doc_key(COLL, b"b"));
     assert!(START <= a.as_slice() && b.as_slice() < END, "keys of the test range");
-    let committed = |r: &mut Replica, base: u64, docs: Option<Vec<((u32, u32), i64)>>| {
+    let committed = |r: &mut Replica, base: u64, docs: Option<Vec<((u32, u32), Change)>>| {
         let first = Command::Write {
             puts: vec![teseladb_range::command::Put {
                 key: a.clone(),
@@ -650,7 +651,7 @@ fn a_counted_commit_keeps_the_document_counts_exact() {
             deletes: vec![],
             dedup: None,
             live_delta: 0,
-            docs: Some(vec![(COLL, 1)]),
+            docs: Some(vec![(COLL, Change::docs(1))]),
         };
         r.apply(base + 1, base + 10, &first).unwrap();
         assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 1)].into()), "a counted write");
@@ -669,17 +670,27 @@ fn a_counted_commit_keeps_the_document_counts_exact() {
             live_delta: 0,
             docs,
         };
-        assert_eq!(
-            resolve.kind(),
-            if matches!(resolve, Command::ResolveIntents { docs: Some(_), .. }) { 19 } else { 10 }
-        );
+        let kind = match &resolve {
+            Command::ResolveIntents { docs: Some(d), .. }
+                if d.iter().all(|(_, c)| c.size.is_some()) =>
+            {
+                24
+            }
+            Command::ResolveIntents { docs: Some(_), .. } => 19,
+            _ => 10,
+        };
+        assert_eq!(resolve.kind(), kind);
         let bytes = resolve.encode();
         assert_eq!(Command::decode(&bytes).unwrap(), resolve, "round trip");
         r.apply(base + 3, base + 30, &resolve).unwrap();
     };
     let mut r = Replica::new();
-    committed(&mut r, 0, Some(vec![(COLL, 1)]));
+    committed(&mut r, 0, Some(vec![(COLL, Change::docs(1))]));
     assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 2)].into()), "one more document");
+    // A commit that says the bytes of what it changes, in format 4.
+    let mut sized = Replica::new();
+    committed(&mut sized, 0, Some(vec![(COLL, Change::sized(1, 5, 9))]));
+    assert_eq!(sized.sm.doc_counts().cloned(), Some([(COLL, 2)].into()));
     let r = r.restart();
     assert_eq!(r.sm.doc_counts().cloned(), Some([(COLL, 2)].into()), "kept across a restart");
     let mut r = Replica::new();

@@ -21,7 +21,7 @@ use teseladb_raftlog::Disk;
 use teseladb_types::{DecodeError, Decoder, Encoder, GroupId, Nanos};
 
 use crate::command::{Command, DedupRecord, Put};
-use crate::doc_count::{self, Coll, Counts};
+use crate::doc_count::{self, Change, Coll, Counts};
 use crate::fence::Span;
 
 mod txn;
@@ -329,14 +329,17 @@ pub struct RangeSm {
     counts: Arc<Counts>,
     /// The changes of the counted writes applied since [`RangeSm::recent_from`], by entry: what
     /// a recount at an earlier entry adds to bring its counts up to now.
-    recent: std::collections::VecDeque<(u64, Vec<(Coll, i64)>)>,
+    recent: std::collections::VecDeque<(u64, Vec<(Coll, Change)>)>,
     /// Every counted write after this entry is in `recent`.
     recent_from: u64,
 }
 
 /// What a `Write` carries besides its versions: its idempotence record, and its change of the
 /// live bytes and of each collection's live documents.
-type WriteExtras<'a> = (Option<&'a DedupRecord>, (i64, Option<&'a [(Coll, i64)]>));
+/// The documents of each collection a leader counted, and their bytes from format 4 on.
+type KeptCounts<'a> = (&'a [(Coll, u64)], Option<&'a [(Coll, doc_count::Size)]>);
+
+type WriteExtras<'a> = (Option<&'a DedupRecord>, (i64, Option<&'a [(Coll, Change)]>));
 
 /// Most counted writes a range remembers for its recounts: a recount whose entry is older than
 /// what it remembers leaves the counts estimated, and the leader counts again.
@@ -829,7 +832,7 @@ impl RangeSm {
         // change the leader computed, or estimated from here when a write of documents lacks it.
         let mut counts = Counts::clone(&self.counts);
         match docs {
-            Some(delta) => counts.apply(delta),
+            Some(delta) => counts.apply(delta, ctx.index),
             None if doc_count::touches_documents(puts, deletes) => counts.dirty(ctx.index),
             None => {}
         }
@@ -851,7 +854,7 @@ impl RangeSm {
     }
 
     /// Keeps the change of counted write `index` for the recounts.
-    fn remember(&mut self, index: u64, delta: Vec<(Coll, i64)>) {
+    fn remember(&mut self, index: u64, delta: Vec<(Coll, Change)>) {
         self.recent.push_back((index, delta));
         while self.recent.len() > RECENT_WRITES {
             if let Some((i, _)) = self.recent.pop_front() {
@@ -868,16 +871,31 @@ impl RangeSm {
     fn apply_adjust(
         &mut self,
         base: u64,
-        counts: &[(Coll, u64)],
+        (counts, sizes): KeptCounts<'_>,
         ctx: &ApplyCtx,
     ) -> Result<(), ApplyError> {
-        if self.counts.exact() || self.counts.dirty_at > base || base < self.recent_from {
+        // Exact counts take only bytes, and only when those are what is estimated.
+        let wanted = !self.counts.exact() || (sizes.is_some() && !self.counts.sized());
+        if !wanted || self.counts.dirty_at > base || base < self.recent_from {
             return Ok(());
         }
-        let mut now =
-            Counts { docs: counts.iter().filter(|(_, n)| *n > 0).copied().collect(), dirty_at: 0 };
-        for (_, delta) in self.recent.iter().filter(|(i, _)| *i > base) {
-            now.apply(delta);
+        if sizes.is_some() && self.counts.unsized_at > base {
+            return Ok(());
+        }
+        let mut now = Counts {
+            docs: counts.iter().filter(|(_, n)| *n > 0).copied().collect(),
+            dirty_at: 0,
+            sizes: sizes
+                .unwrap_or_default()
+                .iter()
+                .filter(|(c, s)| *s != (0, 0) && counts.iter().any(|(d, n)| d == c && *n > 0))
+                .copied()
+                .collect(),
+            // Without the bytes, they stay estimated from the leader's count on.
+            unsized_at: if sizes.is_some() { 0 } else { base.max(1) },
+        };
+        for (i, delta) in self.recent.iter().filter(|(i, _)| *i > base) {
+            now.apply(delta, *i);
         }
         let (key, value) = (local_key(self.range, COUNTS), now.encode());
         let (mark_key, mark) = (last_mark_key(self.range), encode_hlc(ctx.ts));
@@ -900,10 +918,10 @@ impl RangeSm {
     fn counts_change_write(
         &mut self,
         index: u64,
-        delta: &[(Coll, i64)],
+        delta: &[(Coll, Change)],
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         let mut counts = Counts::clone(&self.counts);
-        counts.apply(delta);
+        counts.apply(delta, index);
         if !delta.is_empty() {
             self.remember(index, delta.to_vec());
         }
@@ -929,6 +947,16 @@ impl RangeSm {
     /// are estimated.
     pub fn doc_counts(&self) -> Option<&std::collections::BTreeMap<Coll, u64>> {
         self.counts.exact().then_some(&self.counts.docs)
+    }
+
+    /// The live documents of collection `coll` with their bytes of BSON and of keys, when the
+    /// counts and their bytes are exact (007 FR-039, `collStats`).
+    pub fn doc_tally(&self, coll: Coll) -> Option<(u64, u64, u64)> {
+        let c = &self.counts;
+        c.sized().then(|| {
+            let (bytes, keys) = c.sizes.get(&coll).copied().unwrap_or_default();
+            (c.docs.get(&coll).copied().unwrap_or(0), bytes, keys)
+        })
     }
 
     /// The counts with the entry that left them estimated (0: exact), for a recount.
@@ -1220,8 +1248,8 @@ impl StateMachine for RangeSm {
                 self.apply_fence(&(start, end), on, ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
-            Command::AdjustCounts { base, counts } => {
-                self.apply_adjust(base, &counts, ctx)?;
+            Command::AdjustCounts { base, counts, sizes } => {
+                self.apply_adjust(base, (&counts, sizes.as_deref()), ctx)?;
                 RangeOutput::Applied { ts: ctx.ts }
             }
             Command::SetClosedTs { closed } => {

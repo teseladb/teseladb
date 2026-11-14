@@ -574,6 +574,7 @@ impl DataCore {
         self.host.set_counted_writes(ranges.counted_writes);
         self.host.set_reaching_records(ranges.reaching_records);
         self.host.set_counted_resolutions(ranges.counted_resolutions);
+        self.host.set_sized_counts(ranges.sized_counts);
         self.collections.clone_from(&ranges.collections);
         if let Some(ms) = ranges.history_ms {
             self.host.set_gc_ttl_ms(ms);
@@ -913,6 +914,19 @@ impl DataCore {
                 let r = sm.map(|sm| RemoteReply::DocCount {
                     n: sm.doc_counts().map(|c| c.get(&(tenant, collection)).copied().unwrap_or(0)),
                 });
+                self.send_answer(core, client, r.ok_or(RangeError::NotLeader { hint }), now);
+                return;
+            }
+            // The same with the bytes of the documents, when those are exact too (`collStats`).
+            RemoteReq::DocTally { tenant, collection } => {
+                self.host.note_reads(core, g, now);
+                let st = core.status(g);
+                let leads =
+                    st.as_ref().is_some_and(|s| s.role == Role::Leader) && core.leader_ready(g);
+                let sm = core.state_machine(g).and_then(CoreSm::range).filter(|_| leads);
+                let hint = st.map_or(NodeId(0), |s| s.leader);
+                let r =
+                    sm.map(|sm| RemoteReply::DocTally { t: sm.doc_tally((tenant, collection)) });
                 self.send_answer(core, client, r.ok_or(RangeError::NotLeader { hint }), now);
                 return;
             }
