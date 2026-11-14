@@ -75,6 +75,111 @@ pub(crate) fn note_ran_for_other_node() {
     FOR_OTHERS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// The kinds of work sent to the leaders that can go back to the usual path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// A split aggregation ([`Work::Fold`]): the coordinator reads the span and runs the
+    /// pipeline.
+    Fold,
+    /// A part of a filtered scan ([`Work::Filter`]): the node reads the part and filters it.
+    Filter,
+    /// A batch of an index scan's document keys (010 FR-027): each key is read on its own, or
+    /// the documents come back for the filter to be evaluated here.
+    Lookup,
+}
+
+impl Fallback {
+    /// Every kind, in the order of [`fallbacks`].
+    pub const ALL: [Fallback; 3] = [Fallback::Fold, Fallback::Filter, Fallback::Lookup];
+
+    /// Its label in `/metrics`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Fallback::Fold => "fold",
+            Fallback::Filter => "filter",
+            Fallback::Lookup => "lookup",
+        }
+    }
+}
+
+/// Work that went back to the usual path, by [`Fallback`].
+static FELL_BACK: [AtomicU64; Fallback::ALL.len()] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Times work sent to the leaders went back to the usual path since the process started, in the
+/// order of [`Fallback::ALL`].
+pub fn fallbacks() -> [u64; Fallback::ALL.len()] {
+    FELL_BACK.each_ref().map(|n| n.load(Ordering::Relaxed))
+}
+
+/// Counts work of kind `f` that went back to the usual path.
+pub(crate) fn note_fallback(f: Fallback) {
+    FELL_BACK[f as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Writes the counters of the work sent to the leaders, and of the work this node ran for
+/// others, at the end of `out` in the text format of `/metrics` (010 FR-034).
+pub fn metrics(out: &mut String) {
+    use std::fmt::Write as _;
+    let counters = [
+        (
+            "teseladb_pushed_scattered_groups_total",
+            "Aggregations whose partial groups the cores that own the ranges gave.",
+            crate::backend::scattered_groups(),
+        ),
+        (
+            "teseladb_pushed_scattered_parts_sent_away_total",
+            "Parts of split aggregations whose program went to the leader on another node.",
+            crate::backend::scattered_parts_sent_away(),
+        ),
+        (
+            "teseladb_pushed_filtered_parts_sent_total",
+            "Parts of filtered scans sent with their filter to the leader of their range.",
+            crate::backend::filtered_parts_sent(),
+        ),
+        (
+            "teseladb_pushed_parts_taken_ahead_total",
+            "Parts of filtered scans asked for ahead that their scan took.",
+            crate::backend::parts_taken_ahead(),
+        ),
+        (
+            "teseladb_pushed_ran_for_other_nodes_total",
+            "Parts this node ran as leader for a request of another node.",
+            ran_for_other_nodes(),
+        ),
+        (
+            "teseladb_pushed_lookup_batches_sent_total",
+            "Batches of an index scan's document keys sent to the core of their range.",
+            crate::backend::lookup_batches_sent(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_sent_total",
+            "Document keys those batches carried.",
+            crate::backend::lookup_keys_sent(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_filtered_total",
+            "Document keys sent with the residual filter for the leader to evaluate.",
+            crate::backend::lookup_keys_filtered(),
+        ),
+        (
+            "teseladb_pushed_lookup_keys_here_total",
+            "Document keys of index scans read on this node outside the cores.",
+            crate::backend::lookup_keys_here(),
+        ),
+    ];
+    for (name, help, n) in counters {
+        let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");
+    }
+    let name = "teseladb_pushed_fallbacks_total";
+    let _ =
+        writeln!(out, "# HELP {name} Work sent to the leaders that went back to the usual path.");
+    let _ = writeln!(out, "# TYPE {name} counter");
+    for (f, n) in Fallback::ALL.iter().zip(fallbacks()) {
+        let _ = writeln!(out, "{name}{{work=\"{}\"}} {n}", f.label());
+    }
+}
+
 /// Where the scan of a range goes on after `rows`, a part of at most `limit` documents: after its
 /// last key when it is full.
 pub(crate) fn next_after(rows: &Rows, limit: usize) -> Option<Vec<u8>> {
@@ -225,6 +330,20 @@ mod tests {
         }
         assert!(Work::get(&mut Decoder::new(&[7])).is_err());
         assert!(Worked::get(&mut Decoder::new(&[7])).is_err());
+    }
+
+    #[test]
+    fn a_fallback_counts_under_its_kind_in_the_metrics() {
+        let before = fallbacks();
+        note_fallback(Fallback::Filter);
+        let after = fallbacks();
+        assert!(after[1] > before[1]);
+        let mut out = String::new();
+        metrics(&mut out);
+        let line = "teseladb_pushed_fallbacks_total{work=\"filter\"} ";
+        let n: u64 = out.lines().find_map(|l| l.strip_prefix(line)?.parse().ok()).unwrap();
+        assert!(n >= after[1]);
+        assert!(out.contains("teseladb_pushed_fallbacks_total{work=\"fold\"} "), "{out}");
     }
 
     #[test]

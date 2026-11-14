@@ -6,7 +6,7 @@ mod common;
 
 use common::{get, open, scan, small, ts};
 use teseladb_keys::Hlc;
-use teseladb_lsm::{FileRef, Kind, Lsm, LsmConfig};
+use teseladb_lsm::{FileRef, Kind, Lsm, LsmConfig, LsmError};
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 
@@ -326,4 +326,35 @@ fn linked_files_bring_their_value_files() {
     assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), at), want);
     compact(&mut b, &mut disk, 1);
     assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), at), want);
+}
+
+/// A linked file named without the value files its references count is refused: its references
+/// would point nowhere. A value file named twice, also as its history's, is linked once.
+#[test]
+fn a_linked_file_without_its_value_files_is_refused_and_one_named_twice_is_linked_once() {
+    let mut disk = MemDisk::new();
+    let mut a = open(&cfg(0), &mut core(&mut disk, 0));
+    for i in 0..60u64 {
+        a.put(G, i + 1, &key(i), ts(10, 0), &vec![i as u8; 6_000]).unwrap();
+    }
+    settle(&mut a, &mut disk, 0);
+    compact(&mut a, &mut disk, 0);
+    let files = export(&mut a, &mut disk, &key(0), &key(60), ts(40, 0));
+    let at = files.iter().position(|f| !f.values.is_empty()).expect("a file with value files");
+    let mut without = files.clone();
+    without[at].values.clear();
+    let mut b = open(&cfg(1), &mut core(&mut disk, 1));
+    let id = b.ingest_range(without, vec![(key(0), key(60))], (G, 7));
+    let done = b.run_io(&mut core(&mut disk, 1), Nanos::ZERO);
+    let [(got, Err(LsmError::Corrupt { .. }))] = &done.ingested[..] else {
+        panic!("{:?}", done.ingested)
+    };
+    assert_eq!(*got, id);
+    assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), ts(40, 0)), Vec::new());
+    let mut twice = files.clone();
+    twice[at].history_values = twice[at].values.clone();
+    ingest(&mut b, &mut disk, twice, &key(0), &key(60));
+    let want = rows(&mut a, &mut disk, 0, &key(0), &key(60), ts(40, 0));
+    assert_eq!(want.len(), 60);
+    assert_eq!(rows(&mut b, &mut disk, 1, &key(0), &key(60), ts(40, 0)), want);
 }

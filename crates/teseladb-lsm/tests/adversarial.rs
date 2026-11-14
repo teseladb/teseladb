@@ -253,3 +253,21 @@ fn files_that_reach_past_the_range_or_are_too_small_are_refused() {
     ));
     ingest(&mut lsm, &mut disk, files, &key(0), &key(KEYS)).unwrap();
 }
+
+#[test]
+fn tombstones_past_the_range_do_not_stop_an_ingestion() {
+    let cfg = LsmConfig { dir: "other".into(), ..small() };
+    let (mut disk, files) = exported(&small());
+    let mut lsm = open(&cfg, &mut disk);
+    // A file whose bounds span the range, with its one key before it and a tombstone after it,
+    // and a tombstone after the range in the memtable.
+    lsm.put(G, 1, b"a", ts(1, 0), b"v").unwrap();
+    lsm.delete_range(G, 2, b"x", b"y", ts(2, 0)).unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.delete_range(G, 3, b"y", b"z", ts(2, 0)).unwrap();
+    ingest(&mut lsm, &mut disk, files, &key(0), &key(KEYS)).unwrap();
+    let v = lsm.view();
+    assert_eq!(common::get(&mut lsm, &mut disk, &v, &key(7), ts(30, 0)).unwrap().3, value(7));
+    assert_eq!(common::get(&mut lsm, &mut disk, &v, b"a", ts(30, 0)).unwrap().3, b"v");
+}

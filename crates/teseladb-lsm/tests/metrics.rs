@@ -65,3 +65,22 @@ fn rejects_count_writes_made_under_the_reject_signal() {
     let m = lsm.metrics();
     assert_eq!((m.stalls_total, m.rejects_total), (1, 1));
 }
+
+#[test]
+fn the_memtable_bytes_split_the_active_memtable_from_the_frozen_ones() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    assert_eq!(lsm.memtables_bytes(), (0, 0));
+    lsm.put(G, 1, b"a", ts(1, 0), &[1; 1000]).unwrap();
+    let (all, active) = lsm.memtables_bytes();
+    assert!(active >= 1000, "{active}");
+    assert_eq!(all, active);
+    // Frozen and not yet flushed, its bytes count among all of them and no more as active.
+    lsm.flush();
+    lsm.put(G, 2, b"b", ts(2, 0), &[2; 300]).unwrap();
+    let (all, active) = lsm.memtables_bytes();
+    assert!((300..1000).contains(&active), "{active}");
+    assert!(all >= active + 1000, "{all} {active}");
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    assert_eq!(lsm.memtables_bytes(), (active, active));
+}

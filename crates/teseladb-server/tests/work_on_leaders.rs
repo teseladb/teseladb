@@ -10,13 +10,16 @@
 
 mod common;
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backend::{
-    filtered_parts_sent, parts_taken_ahead, scattered_groups, scattered_parts_sent_away,
+    filtered_parts_sent, lookup_batches_sent, lookup_keys_filtered, lookup_keys_sent,
+    parts_taken_ahead, scattered_groups, scattered_parts_sent_away,
 };
-use teseladb_server::node::Node;
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pushed::ran_for_other_nodes;
 use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
@@ -30,12 +33,17 @@ fn op(name: &str, arg: impl Into<Value>) -> Value {
 
 /// Three nodes, the first one the seed.
 fn cluster() -> Vec<Node<MemDisk>> {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    cluster_with(config)
+}
+
+/// Three nodes with the configuration `cfg` gives for their seeds, the first one the seed.
+fn cluster_with(cfg: impl Fn(Vec<String>) -> NodeConfig) -> Vec<Node<MemDisk>> {
+    let first = Node::start(cfg(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        nodes.push(Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap());
+        nodes.push(Node::start(cfg(seed.clone()), || Ok(MemDisk::new()), None).unwrap());
     }
     for n in &nodes {
         assert!(n.wait_ready(READY));
@@ -230,5 +238,157 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
     assert!(filtered_parts_sent() > sent);
     assert!(ran_for_other_nodes() > ran);
     assert!(parts_taken_ahead() > ahead);
+    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+}
+
+/// The value of the sample `line` (name and labels) in `text`.
+fn sample(text: &str, line: &str) -> Option<u64> {
+    text.lines().find_map(|l| l.strip_prefix(line)?.strip_prefix(' ')?.trim().parse().ok())
+}
+
+#[test]
+fn the_work_sent_to_the_leaders_shows_in_the_metrics() {
+    let nodes = cluster_with(|seeds| NodeConfig {
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        ..config(seeds)
+    });
+    let client = follower(&nodes);
+    let mut c = Client::new(client);
+    load(&mut c);
+    // A split aggregation and a filtered scan, both through leaders on other nodes.
+    until("a split run", || {
+        let before = scattered_groups();
+        aggregate(&mut c, &[group("$k".into())], false);
+        (scattered_groups() > before).then_some(())
+    });
+    assert_eq!(find(&mut c, Document::new().with("k", 3), false).len(), 429);
+    let at = client.admin_addr().unwrap().to_string();
+    let (status, body) = request(&at, Method::Get, "/metrics", b"").unwrap();
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).unwrap();
+    for name in [
+        "scattered_groups",
+        "scattered_parts_sent_away",
+        "filtered_parts_sent",
+        "parts_taken_ahead",
+        "ran_for_other_nodes",
+    ] {
+        let name = format!("teseladb_pushed_{name}_total");
+        assert!(text.contains(&format!("# TYPE {name} counter")), "{name} in {text}");
+        let n = sample(&text, &name).unwrap_or_else(|| panic!("{name} in {text}"));
+        assert!(n > 0, "{name} is {n}");
+    }
+    for work in ["fold", "filter"] {
+        let line = format!("teseladb_pushed_fallbacks_total{{work=\"{work}\"}}");
+        assert!(sample(&text, &line).is_some(), "{line} in {text}");
+    }
+    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+}
+
+/// The `_id`s of `docs`, sorted.
+fn sorted_ids(docs: &[Value]) -> Vec<i32> {
+    let mut ids: Vec<i32> = docs
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => match d.get("_id") {
+                Some(Value::Int32(i)) => *i,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// A find of `filter` that reads the collection (`hint: {$natural: 1}`) or plans, with a
+/// collation when asked.
+fn find_by(c: &mut Client, filter: &Document, (scan, collation): (bool, bool)) -> Vec<i32> {
+    let mut cmd =
+        Document::new().with("find", "c").with("filter", filter.clone()).with("batchSize", 10_000);
+    if scan {
+        cmd.insert("hint", Document::new().with("$natural", 1));
+    }
+    if collation {
+        cmd.insert("collation", Document::new().with("locale", "en"));
+    }
+    let r = c.run("app", cmd);
+    assert!(ok(&r), "{r:?}");
+    sorted_ids(&batch(&r, "firstBatch"))
+}
+
+/// The lookup counters: batches, keys and keys sent with the filter.
+fn lookups() -> (u64, u64, u64) {
+    (lookup_batches_sent(), lookup_keys_sent(), lookup_keys_filtered())
+}
+
+#[test]
+fn the_documents_of_an_index_scan_go_by_batches_to_the_leaders_of_other_nodes() {
+    let nodes = cluster();
+    let mut c = Client::new(follower(&nodes));
+    load(&mut c);
+    let index = Document::new().with("key", Document::new().with("k", 1)).with("name", "k_1");
+    let create = Document::new()
+        .with("createIndexes", "c")
+        .with("indexes", Value::Array(vec![index.into()]));
+    assert!(ok(&c.run("app", create)));
+    let filter = Document::new().with("k", 3).with("v", op("$gte", 9_000));
+    let want: Vec<i32> = (900..DOCS).filter(|i| i % 7 == 3).collect();
+    assert_eq!(find_by(&mut c, &filter, (true, false)), want);
+    // A find through the index: the same documents, each batch to its leader with the filter.
+    let (before, ran) = (lookups(), ran_for_other_nodes());
+    assert_eq!(find_by(&mut c, &filter, (false, false)), want);
+    let after = lookups();
+    let batches = after.0 - before.0;
+    assert!(batches > 0, "no batch went");
+    assert!(after.1 - before.1 > batches, "batches of one key: {before:?} {after:?}");
+    assert!(after.2 > before.2, "the filter did not go: {before:?} {after:?}");
+    assert!(ran_for_other_nodes() > ran);
+    // What explain counts is what the reads one by one counted: every entry's document examined.
+    let explain = Document::new()
+        .with("explain", Document::new().with("find", "c").with("filter", filter.clone()))
+        .with("verbosity", "executionStats");
+    let r = c.run("app", explain);
+    let Some(Value::Document(stats)) = r.get("executionStats") else { panic!("{r:?}") };
+    let examined = (0..DOCS).filter(|i| i % 7 == 3).count();
+    let as_i64 = |v: Option<&Value>| match v {
+        Some(Value::Int32(n)) => i64::from(*n),
+        Some(Value::Int64(n)) => *n,
+        other => panic!("{other:?} in {r:?}"),
+    };
+    assert_eq!(as_i64(stats.get("totalDocsExamined")), i64::try_from(examined).unwrap());
+    assert_eq!(as_i64(stats.get("nReturned")), i64::try_from(want.len()).unwrap());
+    // With a collation the plan's filter never travels, and the answer is the same.
+    let before = lookups();
+    assert_eq!(find_by(&mut c, &filter, (false, true)), want);
+    assert_eq!(lookups().2, before.2, "a filter went with a collation");
+    // A residual filter that reads more than the document stays on this node.
+    let by_expr = Document::new()
+        .with("k", 3)
+        .with("$expr", op("$gte", Value::Array(vec!["$v".into(), 9_000.into()])));
+    let before = lookups();
+    assert_eq!(find_by(&mut c, &by_expr, (false, false)), want);
+    let after = lookups();
+    assert!(after.0 > before.0, "no batch went: {before:?} {after:?}");
+    assert_eq!(after.2, before.2, "an `$expr` went to the leaders");
+    // An aggregation's `$match` and an update with `multi` through the index.
+    let pipeline = vec![
+        Document::new().with("$match", filter.clone()),
+        Document::new().with("$project", Document::new().with("v", 1)),
+    ];
+    assert_eq!(sorted_ids(&aggregate(&mut c, &pipeline, false)), want);
+    let set = Document::new().with("$set", Document::new().with("w", 1));
+    let many = Document::new().with("q", filter.clone()).with("u", set).with("multi", true);
+    let update =
+        Document::new().with("update", "c").with("updates", Value::Array(vec![many.into()]));
+    let before = lookups();
+    let r = c.run("app", update);
+    assert_eq!(
+        r.get("nModified"),
+        Some(&Value::Int32(i32::try_from(want.len()).unwrap())),
+        "{r:?}"
+    );
+    assert!(lookups().0 > before.0, "the update read key by key");
+    assert_eq!(find_by(&mut c, &Document::new().with("w", 1), (true, false)), want);
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
 }

@@ -3,9 +3,9 @@
 //! errors a file system would give.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use teseladb_devlog::port::{DirectLink, PortBook};
+use teseladb_devlog::port::{DirectLink, LogLink, LogReq, PortBook};
 use teseladb_devlog::state::LogState;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::paths;
@@ -150,4 +150,113 @@ fn a_recovery_sync_on_a_full_disk_fails_as_the_disk_does() {
     assert!(matches!(disk.execute(create), IoDone::Ok(_)));
     let sync = IoOp::SyncDir { path: paths::wal_dir(0) };
     assert_eq!(disk.execute(sync.clone()), IoDone::Err { op: sync, errno: IoErrno::NoSpace });
+}
+
+/// A link to a log that is gone: nothing it is sent arrives.
+struct Gone;
+
+impl LogLink for Gone {
+    fn send(&mut self, _req: LogReq) -> bool {
+        false
+    }
+
+    fn read(&mut self, _wal: u64) -> Result<Vec<u8>, IoErrno> {
+        Err(IoErrno::Io)
+    }
+
+    fn disk_full(&self) -> bool {
+        false
+    }
+
+    fn wait_sync(&mut self, op: IoOp) -> IoDone {
+        IoDone::Err { op, errno: IoErrno::Io }
+    }
+}
+
+fn errno_of(d: Option<IoDone>) -> Option<IoErrno> {
+    match d {
+        Some(IoDone::Err { errno, .. }) => Some(errno),
+        Some(IoDone::Read { data: Err(errno), .. }) => Some(errno),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_log_that_is_gone_fails_what_it_would_have_kept() {
+    let mut book = PortBook::new(2, [5].into_iter().collect());
+    assert_eq!(book.core(), 2);
+    let mut link = Gone;
+    let fresh = IoOp::Create { file: FileId(1), path: paths::wal_segment(2, 6), prealloc: 0 };
+    assert_eq!(errno_of(book.submit(&mut link, fresh)), Some(IoErrno::Io));
+    // The creation did not count: the segment is not the core's.
+    let open_new = IoOp::Open { file: FileId(1), path: paths::wal_segment(2, 6) };
+    assert_eq!(errno_of(book.submit(&mut link, open_new)), Some(IoErrno::NotFound));
+    let open = IoOp::Open { file: FileId(2), path: paths::wal_segment(2, 5) };
+    assert_eq!(errno_of(book.submit(&mut link, open)), None);
+    let data = Bytes::from_vec(b"x".to_vec());
+    let write = IoOp::WriteAt { file: FileId(2), offset: 0, data, batch: 0 };
+    let refused = [
+        write,
+        IoOp::Truncate { file: FileId(2), len: 0 },
+        IoOp::Sync { file: FileId(2), batch: 0 },
+        IoOp::ReadAt { file: FileId(2), offset: 0, len: 1, token: 1 },
+        IoOp::Remove { path: paths::wal_segment(2, 5) },
+    ];
+    for op in refused {
+        assert_eq!(errno_of(book.submit(&mut link, op.clone())), Some(IoErrno::Io), "{op:?}");
+    }
+}
+
+#[test]
+fn a_removed_segment_takes_the_files_open_on_it_with_it() {
+    let mut log_disk = MemDisk::new();
+    let mut state = LogState::recover(&mut log_disk, 64 << 10).unwrap();
+    let mut book = PortBook::new(0, BTreeSet::new());
+    let mut link = DirectLink { state: &mut state, disk: &mut log_disk, core: 0 };
+    let (one, two) = (paths::wal_segment(0, 1), paths::wal_segment(0, 2));
+    let create = |file, path| IoOp::Create { file: FileId(file), path, prealloc: 0 };
+    assert_eq!(errno_of(book.submit(&mut link, create(1, one.clone()))), None);
+    assert_eq!(errno_of(book.submit(&mut link, create(2, two))), None);
+    let reopen = IoOp::Open { file: FileId(3), path: one.clone() };
+    assert_eq!(errno_of(book.submit(&mut link, reopen)), None);
+    assert_eq!(errno_of(book.submit(&mut link, IoOp::Remove { path: one })), None);
+    for (file, kept) in [(1, false), (3, false), (2, true)] {
+        let sync = IoOp::Sync { file: FileId(file), batch: 0 };
+        assert_eq!(book.takes(&sync), kept, "file {file}");
+    }
+    // A rename into or out of a WAL segment is the log's, which refuses it; one elsewhere is not.
+    let other = PathBuf::from("core-00/snap/1");
+    let into = IoOp::Rename { from: other.clone(), to: paths::wal_segment(0, 9) };
+    assert!(book.takes(&into));
+    assert!(!book.takes(&IoOp::Link { from: other.clone(), to: other.join("b") }));
+}
+
+#[test]
+fn the_disk_view_leaves_what_is_not_the_wal_on_the_core_disk() {
+    let mut log_disk = MemDisk::new();
+    let mut state = LogState::recover(&mut log_disk, 64 << 10).unwrap();
+    let mut book = PortBook::new(0, BTreeSet::new());
+    let mut own = MemDisk::new();
+    // A WAL segment of an earlier format, on the core's own disk.
+    let old = paths::wal_segment(0, 4);
+    assert!(matches!(
+        own.execute(IoOp::Create { file: FileId(1), path: old.clone(), prealloc: 0 }),
+        IoDone::Ok(_)
+    ));
+    let data = Bytes::from_vec(b"old".to_vec());
+    own.execute(IoOp::WriteAt { file: FileId(1), offset: 0, data, batch: 0 });
+    let mut link = DirectLink { state: &mut state, disk: &mut log_disk, core: 0 };
+    let mut disk = book.disk(&mut link, &mut own);
+    assert_eq!(disk.read_all(&old), Err(IoErrno::NotFound));
+    assert_eq!(disk.inner_read_all(&old).unwrap(), b"old");
+    let snap = PathBuf::from("core-00/snap/1");
+    let made = disk.execute(IoOp::Create { file: FileId(2), path: snap.clone(), prealloc: 0 });
+    assert!(matches!(made, IoDone::Ok(_)));
+    let data = Bytes::from_vec(b"snap".to_vec());
+    let wrote = disk.execute(IoOp::WriteAt { file: FileId(2), offset: 0, data, batch: 0 });
+    assert!(matches!(wrote, IoDone::Ok(_)));
+    assert_eq!(disk.read_all(&snap).unwrap(), b"snap");
+    assert_eq!(disk.list(Path::new("core-00/snap")).unwrap(), vec![snap.clone()]);
+    // What the view wrote outside the WAL is on the core's own disk.
+    assert_eq!(own.read_all(&snap).unwrap(), b"snap");
 }

@@ -236,4 +236,18 @@ mod tests {
         assert!(compress_block(&doc).len() * 4 < doc.len());
         assert!(compress_block(&vec![7; 100_000]).len() < 500);
     }
+
+    #[test]
+    fn a_repeat_farther_back_than_an_offset_reaches_stays_in_literals() {
+        // The same 16 bytes twice, with a run of zeros between them longer than the farthest
+        // offset: the run is one match, and the second copy cannot point at the first.
+        let marker: Vec<u8> = (1..=16).collect();
+        let input =
+            [&marker[..], &vec![0; MAX_OFFSET + 100][..], &marker[..], &[9; 8][..]].concat();
+        let block = compress_block(&input);
+        assert_eq!(decompress_block(&block, input.len()).unwrap(), input);
+        assert!(block.len() < 400, "{}", block.len());
+        // The second copy is in the block as it is.
+        assert_eq!(block.windows(marker.len()).filter(|w| *w == &marker[..]).count(), 2);
+    }
 }

@@ -112,3 +112,39 @@ fn a_clear_lsm_keeps_its_files_readable_by_a_node_with_a_ring() {
         assert!(!contains(&bytes, b"sealed value"), "{name}");
     }
 }
+
+/// Large values go to value files sealed like the rest, and an export ingested by another LSM
+/// with the same master key reads back there, with nothing in clear on either side.
+#[test]
+fn value_files_and_ingested_files_are_sealed_too() {
+    let big = |i: u64| [SECRET_VALUE, &vec![i as u8; 6_000]].concat();
+    let key = |i: u64| [SECRET_KEY, format!("-{i:04}").as_bytes()].concat();
+    let cfg = encrypted(CipherMode::Gcm, [7; 32]);
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    for i in 0..40u64 {
+        lsm.put(G, i + 1, &key(i), ts(10, 0), &big(i)).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    assert!(lsm.metrics().value_files > 0);
+    let id = lsm.export_linked(&key(0), &key(40), ts(20, 0), "lsm/out".into());
+    let (got, exported) = lsm.run_io(&mut disk, Nanos::ZERO).exported.remove(0);
+    assert_eq!(got, id);
+    let other = LsmConfig { dir: "other".into(), ..cfg.clone() };
+    let mut b = open(&other, &mut disk);
+    let id = b.ingest(exported, &key(0), &key(40));
+    assert_eq!(b.run_io(&mut disk, Nanos::ZERO).ingested, vec![(id, Ok(()))]);
+    for dir in [&cfg, &other] {
+        for (name, bytes) in &files(dir, &mut disk) {
+            assert!(!contains(bytes, SECRET_KEY), "a key in clear in {name}");
+            assert!(!contains(bytes, SECRET_VALUE), "a value in clear in {name}");
+        }
+    }
+    let v = b.view();
+    for i in [0, 17, 39] {
+        assert_eq!(get(&mut b, &mut disk, &v, &key(i), ts(30, 0)).unwrap().3, big(i));
+    }
+}

@@ -70,6 +70,9 @@ fn only_the_files_that_overlap_the_interval_are_opened() {
         rows.iter()
             .all(|r| r.0.as_slice() >= b"k010".as_slice() && r.0.as_slice() < b"k020".as_slice())
     );
+    // Keys below every file: no file is opened.
+    let (rows, sources) = by_time(&mut lsm, &mut disk, &v, b"a", b"k000", ts(0, 0), ts(2000, 0));
+    assert_eq!((rows.len(), sources), (0, 0));
 }
 
 #[test]

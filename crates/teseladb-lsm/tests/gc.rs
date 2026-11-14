@@ -430,3 +430,21 @@ fn a_compaction_asked_for_flushes_and_collects_everything_the_thresholds_allow()
         assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 20)));
     }
 }
+
+#[test]
+fn a_table_knows_its_lowest_and_highest_threshold_and_the_threshold_of_each_key() {
+    assert_eq!(GcTable::default().lowest(), None);
+    assert_eq!(GcTable::default().highest(), None);
+    let table = GcTable::new(vec![
+        (b"m".to_vec(), b"p".to_vec(), ts(40, 0)),
+        (b"a".to_vec(), b"f".to_vec(), ts(25, 0)),
+        (b"f".to_vec(), b"k".to_vec(), ts(70, 1)),
+    ]);
+    assert_eq!(table.lowest(), Some(ts(25, 0)));
+    assert_eq!(table.highest(), Some(ts(70, 1)));
+    assert_eq!(table.threshold(b"b"), Some(ts(25, 0)));
+    assert_eq!(table.threshold(b"f"), Some(ts(70, 1)));
+    assert_eq!(table.threshold(b"l"), None, "between two ranges");
+    assert_eq!(table.threshold_over(b"c", b"h"), Some(ts(25, 0)));
+    assert_eq!(table.threshold_over(b"c", b"n"), None, "a gap in the middle");
+}

@@ -352,3 +352,205 @@ fn a_damaged_header_stops_the_log_and_a_creation_cut_short_does_not() {
         }
     }
 }
+
+/// A disk whose reads of whole files, opens or reads at an offset go wrong as `fault` says.
+struct Faulty {
+    disk: MemDisk,
+    fault: Fault,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    None,
+    ReadAll,
+    Open,
+    ShortRead,
+    WriteNoSpace,
+}
+
+impl Disk for Faulty {
+    fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
+        self.disk.list(dir)
+    }
+
+    fn read_all(&mut self, path: &Path) -> Result<Vec<u8>, IoErrno> {
+        if self.fault == Fault::ReadAll {
+            return Err(IoErrno::Io);
+        }
+        self.disk.read_all(path)
+    }
+
+    fn execute(&mut self, op: IoOp) -> IoDone {
+        match (self.fault, &op) {
+            (Fault::Open, IoOp::Open { .. }) => {
+                IoDone::Err { op: op.without_data(), errno: IoErrno::Io }
+            }
+            (Fault::WriteNoSpace, IoOp::WriteAt { offset, .. }) if *offset > 0 => {
+                IoDone::Err { op: op.without_data(), errno: IoErrno::NoSpace }
+            }
+            (Fault::ShortRead, IoOp::ReadAt { .. }) => match self.disk.execute(op) {
+                IoDone::Read { token, data: Ok(d) } => {
+                    let short = teseladb_types::Bytes::from_vec(d[..d.len() / 2].to_vec());
+                    IoDone::Read { token, data: Ok(short) }
+                }
+                other => other,
+            },
+            _ => self.disk.execute(op),
+        }
+    }
+}
+
+/// A log on a memory disk with one record per segment: segment 1 of core 0 holds `one`, and
+/// segment 2 of core 0, in a second record, holds `two`.
+fn two_records() -> MemDisk {
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    for (wal, data) in [(1u64, b"one"), (2, b"two")] {
+        s.create(0, wal, 0);
+        s.write(0, wal, 0, data);
+        s.sync(0, sync_op(wal));
+        assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Ok(_))]));
+    }
+    disk
+}
+
+/// Puts `bytes` at `offset` of the first file of the log on `disk`.
+fn overwrite(disk: &mut MemDisk, offset: u64, bytes: Vec<u8>) {
+    let path = files(disk)[0].clone();
+    assert!(matches!(disk.execute(IoOp::Open { file: FileId(900), path }), IoDone::Ok(_)));
+    let data = teseladb_types::Bytes::from_vec(bytes);
+    let wrote = disk.execute(IoOp::WriteAt { file: FileId(900), offset, data, batch: 0 });
+    assert!(matches!(wrote, IoDone::Ok(_)));
+}
+
+/// Where the second record of the first file starts, and its body.
+fn second_record(disk: &mut MemDisk) -> (u64, Vec<u8>) {
+    use teseladb_devlog::format::{BLOCK, read_record};
+    let path = files(disk)[0].clone();
+    let data = disk.read_all(&path).unwrap();
+    let first = read_record(&data[BLOCK as usize..]).unwrap();
+    assert_eq!(first.flush, 1);
+    let at = BLOCK as usize + first.len;
+    let second = read_record(&data[at..]).unwrap();
+    assert_eq!(second.flush, 2);
+    (at as u64, second.body.to_vec())
+}
+
+#[test]
+fn recovery_ends_at_a_record_out_of_order_of_another_version_or_with_broken_frames() {
+    use teseladb_devlog::format::record;
+    let mut whole = two_records();
+    let s = LogState::recover(&mut whole, 1 << 20).unwrap();
+    assert_eq!(s.segments_of(0), vec![1, 2]);
+    let (at, body) = second_record(&mut whole);
+    let mut newer = record(2, &body);
+    newer[4] = 2;
+    // A record whose flush is not the next one (a stale record of an earlier flush), one of a
+    // version this build does not read, and one whose frames do not parse: the log ends before it.
+    for damaged in [record(7, &body), newer, record(2, &[0xEE; 40])] {
+        let mut disk = two_records();
+        overwrite(&mut disk, at, damaged);
+        let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+        assert_eq!(s.segments_of(0), vec![1]);
+        assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"one");
+        assert_eq!(s.read(&mut disk, 0, 2), Err(IoErrno::NotFound));
+        // The next flush goes on from the last record read.
+        s.create(0, 3, 0);
+        s.sync(0, sync_op(3));
+        assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Ok(_))]));
+        assert_eq!(LogState::recover(&mut disk, 1 << 20).unwrap().segments_of(0), vec![1, 3]);
+    }
+}
+
+#[test]
+fn recovery_fails_with_the_disk_error_of_a_read_or_an_open() {
+    for (fault, op) in [(Fault::ReadAll, "read"), (Fault::Open, "open")] {
+        let mut disk = Faulty { disk: two_records(), fault };
+        match LogState::recover(&mut disk, 1 << 20) {
+            Err(StorageError::Io { op: got, errno: IoErrno::Io }) => assert_eq!(got, op),
+            other => panic!("{op}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_short_read_of_the_log_is_an_error() {
+    let mut disk = Faulty { disk: two_records(), fault: Fault::None };
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 2).unwrap(), b"two");
+    disk.fault = Fault::ShortRead;
+    assert_eq!(s.read(&mut disk, 0, 2), Err(IoErrno::Io));
+}
+
+#[test]
+fn no_space_for_a_record_in_a_file_already_made_fails_the_log() {
+    let mut disk = Faulty { disk: two_records(), fault: Fault::WriteNoSpace };
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    s.write(0, 1, 3, b"more");
+    s.sync(0, sync_op(4));
+    // The disk did not refuse a new file: the log stops, as with any other error.
+    assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Err { errno: IoErrno::NoSpace, .. })]));
+    assert!(!s.disk_full());
+    assert_eq!(s.failed(), Some(IoErrno::NoSpace));
+    s.sync(0, sync_op(5));
+    assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Err { errno: IoErrno::NoSpace, .. })]));
+}
+
+#[test]
+fn an_empty_write_lengthens_the_segment_with_zeros() {
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    s.create(0, 1, 0);
+    s.write(0, 1, 0, b"ab");
+    s.write(0, 1, 6, &[]);
+    s.sync(0, sync_op(1));
+    assert_eq!(s.flush(&mut disk).len(), 1);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"ab\0\0\0\0");
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"ab\0\0\0\0");
+}
+
+#[test]
+fn writes_nobody_syncs_wait_until_enough_bytes_wait_or_a_flush() {
+    use teseladb_devlog::state::WRITE_AHEAD;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 4 << 20).unwrap();
+    let mut ops = Vec::new();
+    s.create(0, 1, 0);
+    s.write(0, 1, 0, b"small");
+    assert!(s.buffered() > 0);
+    assert!(!s.has_waiting());
+    // Below the bytes written ahead, nothing goes to the disk.
+    assert!(s.next(&mut disk, &mut ops).is_empty());
+    assert!(ops.is_empty());
+    s.write(0, 1, 5, &vec![7; WRITE_AHEAD]);
+    assert!(s.next(&mut disk, &mut ops).is_empty());
+    assert!(matches!(ops[..], [IoOp::WriteAt { .. }]));
+    assert_eq!(s.buffered(), 0);
+    assert!(!s.syncing());
+    for op in ops.drain(..) {
+        let done = disk.execute(op);
+        assert!(s.on_done(&done).is_empty());
+    }
+    // A flush writes what waits even when no sync asks for it.
+    s.write(0, 1, 5 + WRITE_AHEAD as u64, b"tail");
+    assert!(s.flush(&mut disk).is_empty());
+    assert_eq!(s.buffered(), 0);
+    // A sync asked now is handed out and runs until its result comes back.
+    s.sync(0, sync_op(1));
+    assert!(s.has_waiting());
+    assert!(s.next(&mut disk, &mut ops).is_empty());
+    assert!(s.syncing());
+    let mut answers = Vec::new();
+    for op in ops.drain(..) {
+        let done = disk.execute(op);
+        answers.extend(s.on_done(&done));
+    }
+    assert!(matches!(answers[..], [(0, IoDone::Ok(IoOp::Sync { .. }))]));
+    assert!(!s.syncing());
+    let mut s = LogState::recover(&mut disk, 4 << 20).unwrap();
+    let got = s.read(&mut disk, 0, 1).unwrap();
+    assert_eq!(got.len(), 9 + WRITE_AHEAD);
+    assert_eq!(&got[..5], b"small");
+    assert_eq!(&got[got.len() - 4..], b"tail");
+}

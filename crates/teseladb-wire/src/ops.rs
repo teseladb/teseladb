@@ -1107,6 +1107,21 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(found)
     }
 
+    fn fetch_documents(
+        &mut self,
+        keys: &[Vec<u8>],
+        filter: Option<&[u8]>,
+        concern: ReadConcern,
+    ) -> Result<Option<Vec<crate::commands::Fetched>>, CommandError> {
+        let found = self.call(|b| b.fetch_documents(keys, filter, concern))?;
+        self.check()?;
+        // Every document read counts, also those the filter refused on the leader.
+        let read = found.iter().flatten();
+        let docs = read.filter(|f| !matches!(f, crate::commands::Fetched::Missing)).count();
+        self.report.docs += docs as u64;
+        Ok(found)
+    }
+
     fn doc_count(&mut self, tenant: u32, collection: u32) -> Result<Option<u64>, CommandError> {
         let n = self.call(|b| b.doc_count(tenant, collection))?;
         self.check()?;

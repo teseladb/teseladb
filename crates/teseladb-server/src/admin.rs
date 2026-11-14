@@ -851,6 +851,7 @@ impl AdminBackend for NodeAdmin {
             })
             .collect();
         lsm_metrics(&mut out, &lsm);
+        crate::pushed::metrics(&mut out);
         crate::tenant_limits::metrics(&self.handle.routes, &mut out);
         machine_metrics(&mut out, self.data_dir.as_deref());
         if let Some(h) = &self.http_metrics {

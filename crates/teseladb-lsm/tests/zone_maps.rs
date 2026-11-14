@@ -200,3 +200,58 @@ fn a_block_with_an_intent_is_read() {
         }
     }
 }
+
+/// The scan of the collection from another thread's side: over the published view, with the
+/// blocks it misses read from `disk` and given to the shared cache.
+fn shared_scan(lsm: &Lsm, disk: &mut MemDisk, pruned: bool) -> (Vec<(Vec<u8>, i32)>, u64) {
+    use teseladb_lsm::SharedStep;
+    let shared = lsm.shared();
+    let view = shared.view();
+    let start = KeyBuilder::collection_start(1, 7);
+    let end = KeyBuilder::collection_end(1, 7);
+    let mut s = view.scan(start.as_bytes(), end.as_bytes(), ts(9, 0));
+    let mut rows = Vec::new();
+    loop {
+        let step = match pruned {
+            true => s.next_pruned(&shared, &may_match),
+            false => s.next(&shared),
+        };
+        match step {
+            SharedStep::Item(i) => rows.push((i.key, a_of(&i.value))),
+            SharedStep::Need(need) => {
+                let all = teseladb_raftlog::Disk::read_all(disk, std::path::Path::new(&need.path));
+                let all = all.unwrap();
+                let at = need.offset as usize;
+                let bytes = &all[at..at + need.len as usize];
+                // A block that is not the one asked for is refused and the cache keeps nothing.
+                let mut damaged = bytes.to_vec();
+                damaged[10] ^= 0xFF;
+                assert!(shared.supply(&need, &damaged).is_err());
+                shared.supply(&need, bytes).unwrap();
+            }
+            SharedStep::Done => return (rows, s.skipped_blocks()),
+            SharedStep::Failed(e) => panic!("{e}"),
+        }
+    }
+}
+
+#[test]
+fn a_filtered_scan_from_another_thread_passes_over_the_same_blocks() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg(), &mut disk);
+    let mut keys: Vec<Vec<u8>> = (0..DOCS).map(key).collect();
+    keys.sort();
+    for (rank, k) in keys.iter().enumerate() {
+        lsm.put(G, rank as u64 + 1, k, ts(5, 0), &doc(rank as i32 / 2)).unwrap();
+    }
+    flush(&mut lsm, &mut disk);
+    lsm.publish();
+    let (all, none_skipped) = shared_scan(&lsm, &mut disk, false);
+    assert_eq!(all.len(), DOCS as usize);
+    assert_eq!(none_skipped, 0);
+    let (pruned, skipped) = shared_scan(&lsm, &mut disk, true);
+    let (_, skipped_by_the_core) = scan(&mut lsm, &mut disk, 9, true);
+    assert_eq!(skipped, skipped_by_the_core);
+    assert!(skipped >= 3, "{skipped} blocks passed over");
+    assert_eq!(kept(&pruned), kept(&all));
+}

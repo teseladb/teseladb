@@ -26,6 +26,7 @@ use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::index_maintenance::MULTIKEY_MARKS;
 use super::mutation::from_mql;
+use super::plan_fetch::{Fetched, Fetcher};
 use super::{Backend, Span, query};
 use crate::error::{CommandError, INTERNAL_ERROR};
 
@@ -880,6 +881,20 @@ fn run_reading<B: Backend + ?Sized>(
             entries(backend, (coll.tenant, coll.id), index, s, (read.concern, decode), most)?;
         ran.seeks += scanned.seeks;
         let more = scanned.more;
+        // The documents of the entries go by batches, with the residual filter when the leaders
+        // may evaluate it (010 FR-027); a plan's residual never runs with a collation.
+        let sent = match (&s.residual, &residual) {
+            (Some(doc), Some(parsed)) => super::pushed_filter::sendable(doc, parsed, None)?,
+            _ => None,
+        };
+        let pending: Vec<Vec<u8>> = scanned
+            .entries
+            .iter()
+            .flatten()
+            .filter(|e| e.doc.is_none())
+            .map(|e| e.pk.clone())
+            .collect();
+        let mut fetcher = Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit));
         // A multikey scan drops the other entries of a document it gave before fetching it
         // again (`dupsDropped` of its `IXSCAN`, measured on a `refnode` 9.0.4).
         let mut own: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
@@ -898,6 +913,7 @@ fn run_reading<B: Backend + ?Sized>(
             };
             if index.meta.multikey && !own.insert(pk.clone()) {
                 ran.child_dups[child] += 1;
+                fetcher.skip(&pk);
                 continue;
             }
             // A scan without filter gives its entries to the `OR`, which drops those it has
@@ -906,18 +922,35 @@ fn run_reading<B: Backend + ?Sized>(
             if residual.is_none() {
                 ran.child_given[child] += 1;
                 if seen_before {
+                    fetcher.skip(&pk);
                     continue;
                 }
             }
-            let Some((dk, bytes)) = fetched(backend, (coll, unbucketed), (&pk, doc), read.concern)?
-            else {
-                continue;
+            let (dk, found) = match doc {
+                Some((dk, bytes)) => (dk, Fetched::Doc(bytes)),
+                None => {
+                    // What is left of a trial's budget caps the batch asked for now.
+                    let most = budget
+                        .map(|b| usize::try_from(b.saturating_sub(ran.keys)).unwrap_or(usize::MAX));
+                    fetcher.fetch(backend, &pk, most)?
+                }
+            };
+            let (bytes, decided) = match found {
+                Fetched::Missing => continue,
+                Fetched::Doc(bytes) => (Some(bytes), None),
+                Fetched::Kept(bytes) => (Some(bytes), Some(true)),
+                Fetched::Refused => (None, Some(false)),
             };
             ran.docs += 1;
             ran.docs_at.push(ran.keys);
-            let keep = match &residual {
-                Some(f) => f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?,
-                None => true,
+            // A document the leader's filter refused was examined and is not kept.
+            let Some(bytes) = bytes else { continue };
+            let keep = match (decided, &residual) {
+                (Some(kept), _) => kept,
+                (None, Some(f)) => {
+                    f.matches(RawDoc::from_stored(&bytes)?, &ctx).map_err(from_mql)?
+                }
+                (None, None) => true,
             };
             if keep && residual.is_some() {
                 ran.child_given[child] += 1;
@@ -986,12 +1019,9 @@ fn indexed_document<B: Backend + ?Sized>(
     pk: &[u8],
     concern: ReadConcern,
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>, CommandError> {
-    let key = match unbucketed {
-        true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
-        false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),
-    };
-    let next = [key.as_bytes(), &[0]].concat();
-    Ok(backend.scan(key.as_bytes(), &next, 1, concern)?.into_iter().next())
+    let key = super::plan_fetch::document_key(coll, unbucketed, pk);
+    let next = [key.as_slice(), &[0]].concat();
+    Ok(backend.scan(&key, &next, 1, concern)?.into_iter().next())
 }
 
 /// Whether the document keys of `coll` carry no hash bucket: the buckets of a time series are
