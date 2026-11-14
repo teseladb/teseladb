@@ -357,6 +357,9 @@ pub struct Program {
     pool: Vec<Literal>,
     /// The dotted paths of the loads, split.
     paths: Vec<Vec<String>>,
+    /// The key of each segment of [`Program::paths`] for the tables of stored documents: its
+    /// number in the collection's dictionary once [`Program::bind_fields`] gave it (003 FR-022).
+    keys: Vec<Vec<teseladb_keys::stored::FieldKey>>,
     leaves: Vec<Leaf>,
     /// The subtrees of the `Tree` instructions.
     trees: Vec<Address>,
@@ -369,6 +372,22 @@ impl Program {
     /// Its instructions.
     pub fn code(&self) -> &[Insn] {
         &self.code
+    }
+
+    /// Gives the segments of its paths their numbers in the dictionary `numbers` of the
+    /// collection it runs on (003 FR-022); the segments without one compare names.
+    pub fn bind_fields(&mut self, numbers: &teseladb_keys::fields::FieldNumbers) {
+        use teseladb_keys::stored::FieldKey;
+        self.keys = self
+            .paths
+            .iter()
+            .map(|p| p.iter().map(|s| FieldKey::in_dictionary(s.as_bytes(), numbers)).collect())
+            .collect();
+    }
+
+    /// The segments of the paths it reads.
+    pub fn path_segments(&self) -> impl Iterator<Item = &str> {
+        self.paths.iter().flatten().map(String::as_str)
     }
 
     /// The instructions as text, one per line (`LoadField r1 r0 0 #0`).

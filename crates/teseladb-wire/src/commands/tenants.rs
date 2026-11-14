@@ -145,6 +145,8 @@ pub fn qualified_command(tenant: u32, cmd: &CatalogCommand) -> CatalogCommand {
             CatalogCommand::CreateDatabase { db: qualified_db(tenant, db) }
         }
         CatalogCommand::Purged { id } => CatalogCommand::Purged { id: *id },
+        // A collection's identifier is the same in every tenant.
+        c @ CatalogCommand::AddFieldNames { .. } => c.clone(),
     }
 }
 

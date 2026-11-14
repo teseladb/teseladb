@@ -7,10 +7,14 @@
 //! answer only the documents it accepts, the next parts asked for ahead (FR-027); a `find`, an
 //! `update` with `multi` and an aggregation's `$match` give what the same filter evaluated on
 //! this node gives.
+//!
+//! The counters are the process's: the tests of this binary run one at a time ([`serial`]), so
+//! that what one measures between two reads is its own work.
 
 mod common;
 
 use std::net::SocketAddr;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
@@ -26,6 +30,12 @@ use teseladb_raft::Role;
 use teseladb_raftlog::MemDisk;
 
 const DOCS: i32 = 3000;
+
+/// Held by each test while it runs: the counters it reads are the whole process's.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn op(name: &str, arg: impl Into<Value>) -> Value {
     Value::Document(Document::new().with(name, arg.into()))
@@ -123,6 +133,7 @@ fn group(id: Value) -> Document {
 
 #[test]
 fn an_aggregation_runs_its_partial_group_on_the_leaders_of_other_nodes() {
+    let _serial = serial();
     let nodes = cluster();
     let mut c = Client::new(follower(&nodes));
     load(&mut c);
@@ -187,16 +198,79 @@ fn as_expr(field: &str, value: i32) -> Document {
     Document::new().with("$expr", eq)
 }
 
+/// The ranges of collection `app.c` in key order, from the administration port of `at`.
+fn ranges_of_c(at: &str) -> Vec<teseladb_types::GroupId> {
+    let (status, body) = request(at, Method::Get, "/admin/ranges?collection=app.c", b"").unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let d = teseladb_rest::media::decode(&body, teseladb_rest::media::Format::Relaxed).unwrap();
+    let Some(Value::Array(ranges)) = d.get("ranges") else { panic!("{d:?}") };
+    let mut out: Vec<(String, u64)> = ranges
+        .iter()
+        .map(|r| {
+            let Value::Document(r) = r else { panic!("{r:?}") };
+            let id = match r.get("_id") {
+                Some(Value::Int64(n)) => u64::try_from(*n).unwrap(),
+                Some(Value::Int32(n)) => u64::try_from(*n).unwrap(),
+                other => panic!("{other:?}"),
+            };
+            let Some(Value::String(start)) = r.get("start") else { panic!("{r:?}") };
+            (start.clone(), id)
+        })
+        .collect();
+    // The starts are hexadecimal, two digits a byte: their order is the keys'.
+    out.sort();
+    out.into_iter().map(|(_, g)| teseladb_types::GroupId(g)).collect()
+}
+
+/// The leader of range `g`, as every node that has a replica of it says, when they agree.
+fn leader_of(nodes: &[Node<MemDisk>], g: teseladb_types::GroupId) -> Option<teseladb_types::NodeId> {
+    let said: Vec<teseladb_types::NodeId> = nodes
+        .iter()
+        .filter_map(|n| n.range_status(g, Duration::from_secs(2)))
+        .filter(|s| s.role.is_some())
+        .map(|s| s.leader)
+        .collect();
+    let first = *said.first()?;
+    (first.0 != 0 && said.iter().all(|l| *l == first)).then_some(first)
+}
+
+/// Documents added past the five ranges' last cut, all in the last range: a scan reads that
+/// range in several parts of at most `SCAN_CHUNK` documents.
+const TAIL: std::ops::Range<i32> = DOCS..DOCS + 4000;
+
 #[test]
 fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
-    let nodes = cluster();
-    let mut c = Client::new(follower(&nodes));
+    let _serial = serial();
+    let nodes = cluster_with(|seeds| NodeConfig {
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        ..config(seeds)
+    });
+    let mut c = Client::new(&nodes[0]);
     load(&mut c);
+    for at in TAIL.step_by(500) {
+        let insert = Document::new().with("insert", "c").with("documents", docs(at..at + 500));
+        assert!(ok(&c.run("app", insert)));
+    }
+    // No leader moves by the balancer while the test counts.
+    assert!(ok(&c.run("admin", Document::new().with("balancerStop", 1))));
+    let at = nodes[0].admin_addr().unwrap().to_string();
+    // The last range holds every document from 2300 on: more than two parts of a scan.
+    let tail_docs = usize::try_from(DOCS + 4000 - 2300).unwrap();
+    assert!(tail_docs > 2 * teseladb_wire::commands::query::SCAN_CHUNK);
+    let last = || {
+        let ranges = ranges_of_c(&at);
+        assert_eq!(ranges.len(), 5, "the four cuts and no other: {ranges:?}");
+        *ranges.last().unwrap()
+    };
+    // The client goes to a node that does not lead the last range.
+    let (g, leader) = until("a leader of the last range", || {
+        let g = last();
+        leader_of(&nodes, g).map(|l| (g, l))
+    });
+    let client = nodes.iter().find(|n| n.node_id() != leader).unwrap();
+    let mut c = Client::new(client);
     let by_k = || Document::new().with("k", 3);
     let want: Vec<i32> = (0..DOCS).filter(|i| i % 7 == 3).collect();
-    let (sent, ran, ahead) = (filtered_parts_sent(), ran_for_other_nodes(), parts_taken_ahead());
-    // A find: the same documents as the filter evaluated here, and with a collation (never sent).
-    let here = find(&mut c, as_expr("k", 3), false);
     let ids = |docs: &[Value]| -> Vec<i32> {
         docs.iter()
             .map(|d| match d {
@@ -208,10 +282,14 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
             })
             .collect()
     };
+    // A find gives the same documents as the filter evaluated here, also with a collation.
+    let here = find(&mut c, as_expr("k", 3), false);
     assert_eq!(ids(&here), want);
     assert_eq!(find(&mut c, by_k(), false), here);
     assert_eq!(find(&mut c, by_k(), true), here);
-    // An aggregation whose `$match` the scan takes, not split (no `$group`).
+    // An aggregation whose `$match` the scan takes, not split (no `$group`), counted only while
+    // the last range kept its leader on another node: its filter went with each part to the
+    // leaders, and the parts of the last range after its first were asked for ahead and taken.
     let pipeline = |m: Document| {
         vec![
             Document::new().with("$match", m),
@@ -219,8 +297,22 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
         ]
     };
     let agg_here = aggregate(&mut c, &pipeline(as_expr("k", 3)), false);
-    assert_eq!(aggregate(&mut c, &pipeline(by_k()), false), agg_here);
     assert_eq!(agg_here.len(), want.len());
+    let (sent, ran, ahead) = until("an aggregation while the leaders stay", || {
+        let still = |g| leader_of(&nodes, g) == Some(leader) && last() == g;
+        if !still(g) {
+            return None;
+        }
+        let before = (filtered_parts_sent(), ran_for_other_nodes(), parts_taken_ahead());
+        assert_eq!(aggregate(&mut c, &pipeline(by_k()), false), agg_here);
+        let after = (filtered_parts_sent(), ran_for_other_nodes(), parts_taken_ahead());
+        still(g).then_some((after.0 - before.0, after.1 - before.1, after.2 - before.2))
+    });
+    let tail_parts =
+        u64::try_from(tail_docs.div_ceil(teseladb_wire::commands::query::SCAN_CHUNK)).unwrap();
+    assert!(sent >= tail_parts, "{sent} parts sent, {tail_parts} in the last range alone");
+    assert!(ran >= tail_parts, "{ran} parts ran for this node");
+    assert!(ahead > 0, "no part asked for ahead was taken: {sent} sent");
     // An update of every document the filter keeps.
     let set = Document::new().with("$set", Document::new().with("u", 1));
     let many = Document::new().with("q", by_k()).with("u", set).with("multi", true);
@@ -233,11 +325,6 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
         "{r:?}"
     );
     assert_eq!(ids(&find(&mut c, as_expr("u", 1), false)), want);
-    // The filter went to leaders on other nodes, which ran it for this one, and parts asked for
-    // ahead served the scans.
-    assert!(filtered_parts_sent() > sent);
-    assert!(ran_for_other_nodes() > ran);
-    assert!(parts_taken_ahead() > ahead);
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
 }
 
@@ -248,6 +335,7 @@ fn sample(text: &str, line: &str) -> Option<u64> {
 
 #[test]
 fn the_work_sent_to_the_leaders_shows_in_the_metrics() {
+    let _serial = serial();
     let nodes = cluster_with(|seeds| NodeConfig {
         admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
         ..config(seeds)
@@ -324,6 +412,7 @@ fn lookups() -> (u64, u64, u64) {
 
 #[test]
 fn the_documents_of_an_index_scan_go_by_batches_to_the_leaders_of_other_nodes() {
+    let _serial = serial();
     let nodes = cluster();
     let mut c = Client::new(follower(&nodes));
     load(&mut c);

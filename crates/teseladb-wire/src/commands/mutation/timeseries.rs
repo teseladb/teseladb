@@ -119,7 +119,7 @@ pub(super) fn insert(
     let new = bucket.to_bytes()?;
     // The bucket's own indexes (on the meta value and the time, 015 FR-008) follow it.
     let (mut puts, deletes) = checker.entries_at(Some(key), old, Some(&new), lookup)?;
-    puts.push(put(key, new));
+    puts.push(put(key, new, checker, lookup(key).map(|(_, v)| v)));
     Ok((puts, deletes, r))
 }
 

@@ -6,6 +6,7 @@ use teseladb_bson::{RawDoc, RawValue};
 
 use super::run::load;
 use super::value::Tag;
+use teseladb_keys::stored::FieldKey;
 
 /// What a path holds in one document.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,10 +28,11 @@ pub enum Cell<'d> {
 /// The cells of dotted path `path` in each of `docs`, in their order, into `out` (cleared first).
 pub fn load_column<'d>(docs: &[RawDoc<'d>], path: &str, out: &mut Vec<Cell<'d>>) {
     let segs: Vec<String> = path.split('.').map(str::to_owned).collect();
+    let keys: Vec<FieldKey> = segs.iter().map(|s| FieldKey::of(s.as_bytes())).collect();
     out.clear();
     out.extend(docs.iter().map(|d| {
         let bytes = d.as_bytes();
-        let r = load(&teseladb_keys::stored::Stored::plain(*d), &segs);
+        let r = load(&teseladb_keys::stored::Stored::plain(*d), &segs, &keys);
         match r.tag {
             Tag::Missing => Cell::Missing,
             Tag::ThroughArray => Cell::ThroughArray,

@@ -13,6 +13,7 @@ use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::update_desc::UpdateDescription;
 use teseladb_collation::{ParsedCollation, parse_collation};
 use teseladb_hlc::{Hlc, to_timestamp};
+use teseladb_keys::fields::FieldNumbers;
 use teseladb_mql::update::{Now, PathChange, Update, UpdateContext, UpdateOutcome};
 use teseladb_mql::validation::{ValidationAction, ValidationLevel, Validator, Verdict};
 use teseladb_mql::{Filter, FilterUse, MatchContext, MqlError};
@@ -68,6 +69,7 @@ mod f {
     pub const MOVES: &str = "moves";
     pub const REKEYS: &str = "rekeys";
     pub const CLUSTERED: &str = "clustered";
+    pub const FIELDS: &str = "fields";
     pub const RETRY: &str = "retry";
     pub const MARK: &str = "mark";
     pub const PROBES: &str = "probes";
@@ -184,6 +186,9 @@ pub struct Rules {
     pub retry: Option<teseladb_changestream::meta::RetryInfo>,
     /// The collection is clustered by `_id` (015 FR-009): a duplicate `_id` fails as there.
     pub clustered: bool,
+    /// The numbers of the names the write carries in the collection's dictionary of field names
+    /// (003 FR-022), which the tables of the versions it stores use.
+    pub fields: FieldNumbers,
 }
 
 /// The buckets of a time series and the one an insert goes to.
@@ -297,7 +302,11 @@ pub struct MutationResult {
 }
 
 fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
-    let Send { attempt, retry } = send;
+    let Send { attempt, retry, fields } = send;
+    let fields = fields.unwrap_or(&r.fields);
+    if !fields.is_empty() {
+        d.push(f::FIELDS, Value::Binary { subtype: 0, bytes: fields.to_bytes() });
+    }
     d.push(f::NS, r.ns.as_str());
     if let Some((spec, level, action)) = &r.validator {
         d.push(f::VALIDATOR, spec.clone());
@@ -549,6 +558,13 @@ fn read_rules(d: &Fields<'_>) -> Result<Rules, CommandError> {
         moves: get_bool(d, f::MOVES),
         rekeys: get_bool(d, f::REKEYS),
         clustered: get_bool(d, f::CLUSTERED),
+        fields: match d.get(f::FIELDS) {
+            Some(RawValue::Binary { bytes, .. }) => {
+                FieldNumbers::from_bytes(bytes).ok_or_else(bad_rules)?
+            }
+            None => FieldNumbers::default(),
+            Some(_) => return Err(bad_rules()),
+        },
         retry: match d.get(f::RETRY) {
             Some(RawValue::Binary { bytes, .. }) => {
                 let mut b = bytes;
@@ -573,7 +589,7 @@ impl DocMutation {
 
     /// Its encoding with `attempt` in its rules in place of theirs (when not 0).
     pub fn encode_with_attempt(&self, attempt: i64) -> Result<Vec<u8>, CommandError> {
-        self.encode_for(Send { attempt, retry: None })
+        self.encode_for(Send { attempt, retry: None, fields: None })
     }
 
     /// Its encoding for send `send`: its attempt and retryable write in place of the rules'.
@@ -762,6 +778,8 @@ pub struct Send<'a> {
     pub attempt: i64,
     /// The retryable write (`None` keeps the rules').
     pub retry: Option<&'a teseladb_changestream::meta::RetryInfo>,
+    /// The numbers of the names the write carries (`None` keeps the rules', 003 FR-022).
+    pub fields: Option<&'a FieldNumbers>,
 }
 
 fn read_error(e: RawDoc<'_>) -> Option<WriteError> {
@@ -907,6 +925,8 @@ struct Checker {
     /// The description of each document the write updated with operators, by its key (005
     /// FR-008, 014 FR-009).
     changes: std::cell::RefCell<Vec<(Vec<u8>, UpdateDescription)>>,
+    /// The numbers of the names the write carries ([`Rules::fields`]).
+    fields: FieldNumbers,
 }
 
 /// The collator of the collation `spec` of a write (the command's, or else the collection's
@@ -957,6 +977,7 @@ impl Checker {
             moves: r.moves.then_some((r.tenant, r.collection)),
             moved: std::cell::RefCell::default(),
             changes: std::cell::RefCell::default(),
+            fields: r.fields.clone(),
         })
     }
 
@@ -1084,9 +1105,13 @@ fn id_of(doc: &Document) -> Value {
     doc.get("_id").cloned().unwrap_or(Value::Null)
 }
 
-/// The put of a document's new version, stored with its table of field offsets (003 FR-021).
-fn put(key: &[u8], bytes: Vec<u8>) -> Put {
-    Put { key: key.to_vec(), value_type: DOCUMENT, value: teseladb_keys::stored::encode(bytes) }
+/// The put of a document's new version, stored with its table of field offsets (003 FR-021)
+/// tagged by the numbers of the write's names and those of the table of `old`, the stored version
+/// it replaces (FR-022).
+fn put(key: &[u8], bytes: Vec<u8>, checker: &Checker, old: Option<&[u8]>) -> Put {
+    let old = old.and_then(|o| teseladb_keys::stored::split(o).ok());
+    let value = teseladb_keys::stored::encode_numbered(bytes, &checker.fields, old.as_ref());
+    Put { key: key.to_vec(), value_type: DOCUMENT, value }
 }
 
 /// A [`DocMutation`] bound to the keys of its write, ready for the range.
@@ -1106,7 +1131,7 @@ impl Bound {
 
     /// Its encoding with `attempt` for this send of a retryable write ([`Rules::attempt`]).
     pub fn encode_with_attempt(&self, attempt: i64) -> Result<Vec<u8>, CommandError> {
-        self.encode_for(Send { attempt, retry: None })
+        self.encode_for(Send { attempt, retry: None, fields: None })
     }
 
     /// Its encoding for send `send` ([`DocMutation::encode_for`]).
@@ -1649,7 +1674,7 @@ fn insert(
         };
         match outcome {
             Ok((bytes, (entries, gone))) => {
-                puts.push(put(key, bytes));
+                puts.push(put(key, bytes, checker, None));
                 puts.extend(entries);
                 deletes.extend(gone);
                 r.n += 1;
@@ -1840,7 +1865,7 @@ fn modify(
                         Some(_) => moved_entries(checker, (key, &at), (doc, &new), lookup),
                     };
                     let (entries, gone) = written.map_err(&during)?;
-                    puts.push(put(&at, new));
+                    puts.push(put(&at, new, checker, Some(bytes)));
                     puts.extend(entries);
                     deletes.extend(gone);
                     r.n_modified += 1;
@@ -1868,7 +1893,7 @@ fn modify(
         checker.check(&new, None).map_err(&during)?;
         let (entries, gone) =
             checker.entries_at(Some(key), None, Some(&new), lookup).map_err(&during)?;
-        puts.push(put(key, new));
+        puts.push(put(key, new, checker, None));
         puts.extend(entries);
         deletes.extend(gone);
         r.upserted = Some(id_of(doc));

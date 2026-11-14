@@ -14,7 +14,7 @@ use crate::matcher::{Eval, MatchContext, array_index, compare, eq};
 use crate::parse::{CmpOp, Expr, Pred};
 use crate::simd::{self, Cmp};
 use crate::value::{bson_error, cmp};
-use teseladb_keys::stored::Stored;
+use teseladb_keys::stored::{FieldKey, Stored};
 
 /// What the instructions read besides their registers.
 struct Env<'p, 'c, 'a> {
@@ -38,11 +38,11 @@ impl Literal {
 /// The value at `path`, read through documents: through the stored document's table of offsets
 /// where it has one (003 FR-021), else walked on the bytes.
 #[inline(always)]
-pub(super) fn load<'d>(doc: &Stored<'d>, path: &[String]) -> ValueRef<'d> {
+pub(super) fn load<'d>(doc: &Stored<'d>, path: &[String], keys: &[FieldKey]) -> ValueRef<'d> {
     let mut cur = root(doc.bson());
-    for seg in path {
+    for (seg, key) in path.iter().zip(keys) {
         cur = match cur.tag {
-            Tag::Doc => stored_field(doc, cur, seg.as_bytes()),
+            Tag::Doc => stored_field(doc, cur, seg.as_bytes(), *key),
             Tag::Array => return ValueRef::new(Tag::ThroughArray, 0, 0),
             _ => return ValueRef::MISSING,
         };
@@ -444,7 +444,9 @@ impl Program {
             steps += 1;
             let mut next_pc = pc + 1;
             match i.op() {
-                Op::LoadField => regs[i.dst()] = load(&stored, &self.paths[i.index()]),
+                Op::LoadField => {
+                    regs[i.dst()] = load(&stored, &self.paths[i.index()], &self.keys[i.index()])
+                }
                 Op::Tree => {
                     regs[i.dst()] = ValueRef::boolean(env.tree(&self.trees[i.index()], doc)?);
                 }
@@ -557,9 +559,9 @@ impl<'d, 'b> VectorVm<'d, 'b> {
             let mut jump = 0u64;
             match i.op() {
                 Op::LoadField => {
-                    let path = &p.paths[i.index()];
+                    let (path, keys) = (&p.paths[i.index()], &p.keys[i.index()]);
                     for l in lanes(m) {
-                        self.regs[i.dst()][l] = load(&self.docs[l], path);
+                        self.regs[i.dst()][l] = load(&self.docs[l], path, keys);
                     }
                 }
                 Op::Tree => {

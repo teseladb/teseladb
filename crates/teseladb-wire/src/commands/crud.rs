@@ -230,9 +230,12 @@ impl Writer {
         // runs again with them (009 FR-004).
         let mut probed: Option<Bound> = None;
         let mut rounds = 0;
+        // The numbers of its names in the collection's dictionary of field names (003 FR-022).
+        let numbered = super::field_names::numbers_for(backend, bound);
         let (op, written) = loop {
             let b = probed.as_ref().unwrap_or(bound);
-            let mutation = b.encode_for(Send { attempt, retry: session.as_ref() })?;
+            let send = Send { attempt, retry: session.as_ref(), fields: numbered.as_ref() };
+            let mutation = b.encode_for(send)?;
             let op = WriteOp { keys: b.latch_keys(), mutation, dedup, wc };
             // A write whose index entries are in another range goes as a transaction across
             // ranges (009 FR-003); a retryable one that went that way left its result there.
@@ -443,6 +446,7 @@ pub fn rules_of(
         rekeys: false,
         retry: None,
         clustered: matches!(super::kinds::kind_of(coll)?, CollectionKind::Clustered { .. }),
+        fields: teseladb_keys::fields::FieldNumbers::default(),
     })
 }
 

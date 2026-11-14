@@ -458,6 +458,13 @@ pub fn collection_of(key: &[u8]) -> Option<&[u8]> {
     key.get(..COLLECTION_PREFIX_LEN).filter(|p| p[0] == DATA)
 }
 
+/// The identifier of the collection of data key `key`.
+#[must_use]
+pub fn collection_id_of(key: &[u8]) -> Option<u32> {
+    let p = collection_of(key)?;
+    Some(u32::from_be_bytes(p[5..9].try_into().ok()?))
+}
+
 /// `01 · tenant · collection`.
 fn collection_prefix(tenant: u32, collection: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(KEY_CAPACITY);

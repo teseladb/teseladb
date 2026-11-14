@@ -1724,6 +1724,13 @@ pub fn tick_idle(backend: &mut dyn Backend, shared: &Shared) {
 }
 
 impl Backend for TxnBackend<'_> {
+    fn field_numbers(
+        &mut self,
+        collection: u32,
+    ) -> Option<std::sync::Arc<teseladb_keys::fields::FieldNumbers>> {
+        self.inner.field_numbers(collection)
+    }
+
     fn collection(&mut self, ns: &Namespace) -> Result<Option<CollectionEntry>, CommandError> {
         match txn_ddl::find(&self.run.created, ns) {
             Some(c) => Ok(Some(c.entry.clone())),
@@ -1747,6 +1754,10 @@ impl Backend for TxnBackend<'_> {
         &mut self,
         cmd: CatalogCommand,
     ) -> Result<Option<CollectionEntry>, CommandError> {
+        // The names of a dictionary of field names are no change of the transaction (003 FR-022).
+        if matches!(cmd, CatalogCommand::AddFieldNames { .. }) {
+            return self.inner.catalog_write(cmd);
+        }
         let txn = self.run.coord.txn();
         txn_ddl::catalog_write(self.inner, self.shared, (txn, &mut self.run.created), cmd)
     }

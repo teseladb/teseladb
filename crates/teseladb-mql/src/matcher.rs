@@ -4,6 +4,8 @@
 
 use std::cell::Cell;
 use std::cmp::Ordering;
+use std::sync::Arc;
+use teseladb_keys::fields::FieldNumbers;
 use teseladb_keys::stored::Stored;
 
 use teseladb_bson::types::BINARY_OLD;
@@ -38,6 +40,9 @@ pub struct Filter {
     run: Option<Expr>,
     /// The tree a query evaluates, compiled for the register machine (010 FR-031).
     program: Box<crate::vm::Program>,
+    /// The dictionary of field names of the collection it reads, whose numbers its program
+    /// compares (003 FR-022).
+    fields: Option<Arc<FieldNumbers>>,
 }
 
 impl Filter {
@@ -62,7 +67,7 @@ impl Filter {
             &crate::vm::DefaultSelectivity,
             0,
         ));
-        Ok(Filter { expr, ordered, run, program })
+        Ok(Filter { expr, ordered, run, program, fields: None })
     }
 
     /// The filter with the conditions of its `$and`s and `$or`s ordered by `sel`, the range's
@@ -73,7 +78,27 @@ impl Filter {
     pub fn with_selectivity(mut self, sel: &dyn crate::vm::Selectivity, epoch: u64) -> Filter {
         self.program =
             Box::new(crate::vm::Program::compile_cached(self.run_tree(), sel, epoch.max(1)));
+        if let Some(f) = &self.fields {
+            self.program.bind_fields(f);
+        }
         self
+    }
+
+    /// The filter reading the stored documents of a collection with dictionary `fields` (003
+    /// FR-022): its program compares the numbers of the names it reads.
+    #[must_use]
+    pub fn with_fields(mut self, fields: Option<Arc<FieldNumbers>>) -> Filter {
+        if let Some(f) = &fields {
+            self.program.bind_fields(f);
+        }
+        self.fields = fields;
+        self
+    }
+
+    /// The numbers of the names its program reads, out of `fields`.
+    #[must_use]
+    pub fn fields_read(&self, fields: &FieldNumbers) -> FieldNumbers {
+        fields.subset(self.program.path_segments().map(str::as_bytes))
     }
 
     /// The compiled program of the filter.

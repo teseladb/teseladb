@@ -151,6 +151,13 @@ impl Program {
             code: c.code,
             leaf_of: c.leaf_of,
             pool: c.pool,
+            keys: c
+                .paths
+                .iter()
+                .map(|p| {
+                    p.iter().map(|s| teseladb_keys::stored::FieldKey::of(s.as_bytes())).collect()
+                })
+                .collect(),
             paths: c.paths,
             leaves: c.leaves,
             trees: c.trees,

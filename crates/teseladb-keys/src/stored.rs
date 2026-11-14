@@ -9,19 +9,30 @@
 //! ```text
 //! entries    7 bytes each: name tag (u16), element type (u8), element offset (u32)
 //! directory  10 bytes per table: document offset (u32), first entry (u32), entries (u16)
+//! dictionary version 2 only: the identifier of the collection's dictionary (u32)
 //! trailer    tables (u16), version (u8), mark (u8)
 //! ```
 //!
 //! Integers are little-endian. A table lists the fields of one document in their order; the
 //! document offset is where that document starts in the BSON (0 for the whole document) and the
 //! directory goes in increasing document offset. An element offset is where the element starts
-//! (its type byte) in the BSON. The name tag is a 16-bit hash of the field's name: a lookup
-//! compares tags and then the name itself, so two names with the same tag never mix.
+//! (its type byte) in the BSON.
+//!
+//! In version 1 the name tag is a 16-bit hash of the field's name: a lookup compares tags and then
+//! the name itself, so two names with the same tag never mix. In version 2 (FR-022) it is the
+//! name's number in the collection's dictionary ([`crate::fields`]), or [`UNNUMBERED`] for a name
+//! that had none when the document was written. A reader that has the name's number in the
+//! table's dictionary compares tags, and the names of the unnumbered fields; any other reader
+//! compares the name of each field. A number names one field for as long as its dictionary
+//! exists, so a tag equal to the number is that field.
 
+use crate::fields::{FieldNumbers, UNNUMBERED};
 use teseladb_bson::{BsonError, RawDoc};
 
-/// The version of the layout this module writes and reads.
+/// The version of the layout whose tags hash the names.
 pub const TABLE_VERSION: u8 = 1;
+/// The version of the layout whose tags are the names' numbers in the collection's dictionary.
+pub const TABLE_VERSION_NUMBERED: u8 = 2;
 /// The last byte of a stored value that has a table.
 const TABLE_MARK: u8 = 0xD7;
 /// A document (the whole one or an embedded one) gets a table from this many fields: with fewer,
@@ -30,6 +41,7 @@ pub const MIN_TABLE_FIELDS: usize = 8;
 const ENTRY_LEN: usize = 7;
 const DIRECTORY_LEN: usize = 10;
 const TRAILER_LEN: usize = 4;
+const DICTIONARY_LEN: usize = 4;
 const DOCUMENT: u8 = 0x03;
 
 /// A stored document: its BSON and, when it was stored with one, its table.
@@ -44,6 +56,38 @@ pub struct Stored<'a> {
 pub struct Table<'a> {
     entries: &'a [u8],
     directory: &'a [u8],
+    /// The identifier of the dictionary of its tags; `None` in version 1, whose tags hash names.
+    dictionary: Option<u32>,
+}
+
+/// A field name as a lookup through a table takes it: its hash, for the tables of version 1, and
+/// its number in a dictionary, for those of version 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldKey {
+    tag: u16,
+    number: u16,
+    dictionary: u32,
+}
+
+impl FieldKey {
+    /// The key of `name` without a number.
+    #[must_use]
+    pub fn of(name: &[u8]) -> FieldKey {
+        FieldKey { tag: name_tag(name), number: UNNUMBERED, dictionary: 0 }
+    }
+
+    /// The key of `name` with its number in `numbers`, if it has one.
+    #[must_use]
+    pub fn in_dictionary(name: &[u8], numbers: &FieldNumbers) -> FieldKey {
+        let number = numbers.get(name).unwrap_or(UNNUMBERED);
+        FieldKey { tag: name_tag(name), number, dictionary: numbers.dictionary() }
+    }
+
+    /// Its number in a dictionary, if it has one.
+    #[must_use]
+    pub fn number(&self) -> Option<(u32, u16)> {
+        (self.number != UNNUMBERED).then_some((self.dictionary, self.number))
+    }
 }
 
 /// What a table says about a field of one document.
@@ -120,17 +164,27 @@ pub fn split(stored: &[u8]) -> Result<Stored<'_>, BsonError> {
     let rest = &stored[n..];
     let bad = |reason| broken(n, reason);
     let t = rest.len().checked_sub(TRAILER_LEN).ok_or_else(|| bad("table without its trailer"))?;
-    if rest[t + 2] != TABLE_VERSION || rest[t + 3] != TABLE_MARK {
+    let known = matches!(rest[t + 2], TABLE_VERSION | TABLE_VERSION_NUMBERED);
+    if !known || rest[t + 3] != TABLE_MARK {
         return Err(bad("table of an unknown version"));
     }
-    let tables = usize::from(le_u16(rest, t).unwrap_or(0));
+    let (t, dictionary) = match rest[t + 2] {
+        TABLE_VERSION => (t, None),
+        _ => {
+            let d =
+                t.checked_sub(DICTIONARY_LEN).ok_or_else(|| bad("table without its trailer"))?;
+            let id = u32::from_le_bytes(rest[d..t].try_into().unwrap_or_default());
+            (d, Some(id))
+        }
+    };
+    let tables = usize::from(le_u16(rest, rest.len() - TRAILER_LEN).unwrap_or(0));
     let dir_at = t
         .checked_sub(tables * DIRECTORY_LEN)
         .ok_or_else(|| bad("table directory past its start"))?;
     if tables == 0 || dir_at % ENTRY_LEN != 0 {
         return Err(bad("table entries of a broken length"));
     }
-    let table = Table { entries: &rest[..dir_at], directory: &rest[dir_at..t] };
+    let table = Table { entries: &rest[..dir_at], directory: &rest[dir_at..t], dictionary };
     table.check(n)?;
     Ok(Stored { doc, table: Some(table) })
 }
@@ -226,7 +280,14 @@ impl<'a> Stored<'a> {
     /// through the table.
     #[must_use]
     pub fn lookup(&self, doc_at: usize, name: &[u8]) -> Lookup {
-        self.table.map_or(Lookup::NoTable, |t| t.lookup(self.bson(), doc_at, name))
+        self.lookup_key(doc_at, name, FieldKey::of(name))
+    }
+
+    /// [`Stored::lookup`] with the name's key, worked out once for many lookups.
+    #[inline]
+    #[must_use]
+    pub fn lookup_key(&self, doc_at: usize, name: &[u8], key: FieldKey) -> Lookup {
+        self.table.map_or(Lookup::NoTable, |t| t.lookup_key(self.bson(), doc_at, name, key))
     }
 }
 
@@ -296,15 +357,50 @@ impl<'a> Table<'a> {
     /// The first field named `name` of the document at `doc_at` of `bson`.
     #[must_use]
     pub fn lookup(&self, bson: &[u8], doc_at: usize, name: &[u8]) -> Lookup {
+        self.lookup_key(bson, doc_at, name, FieldKey::of(name))
+    }
+
+    /// [`Table::lookup`] with the name's key: by its hash in version 1; in version 2 by its number
+    /// when the key has one in the table's dictionary, else by the name of each field.
+    #[must_use]
+    pub fn lookup_key(&self, bson: &[u8], doc_at: usize, name: &[u8], key: FieldKey) -> Lookup {
         let Some((first, count)) = self.find_row(doc_at) else { return Lookup::NoTable };
-        let tag = name_tag(name);
-        for i in first..first + count {
-            let (t, ty, at) = self.entry(i);
-            if t == tag && names_at(bson, at, ty, name) {
-                return Lookup::At(at);
+        let entries = first..first + count;
+        let found = match (self.dictionary, key.number()) {
+            (None, _) => entries
+                .map(|i| self.entry(i))
+                .find(|&(t, ty, at)| t == key.tag && names_at(bson, at, ty, name)),
+            (Some(d), Some((kd, number))) if d == kd => {
+                entries.map(|i| self.entry(i)).find(|&(t, ty, at)| {
+                    (t == number && bson.get(at) == Some(&ty))
+                        || (t == UNNUMBERED && names_at(bson, at, ty, name))
+                })
+            }
+            (Some(_), _) => {
+                entries.map(|i| self.entry(i)).find(|&(_, ty, at)| names_at(bson, at, ty, name))
+            }
+        };
+        found.map_or(Lookup::Missing, |(_, _, at)| Lookup::At(at))
+    }
+
+    /// The identifier of the dictionary of its tags (version 2).
+    #[must_use]
+    pub fn dictionary(&self) -> Option<u32> {
+        self.dictionary
+    }
+
+    /// The numbered names of its fields in `bson`, with their numbers: what a table of version 2
+    /// says of the dictionary it was written with.
+    fn numbers_into(&self, bson: &[u8], out: &mut FieldNumbers) {
+        for i in 0..self.entries.len() / ENTRY_LEN {
+            let (t, _, at) = self.entry(i);
+            if t == UNNUMBERED {
+                continue;
+            }
+            if let Some(name) = cstring_end(bson, at + 1).and_then(|e| bson.get(at + 1..e)) {
+                out.insert(name, t);
             }
         }
-        Lookup::Missing
     }
 }
 
@@ -364,10 +460,51 @@ pub fn element(doc: &[u8], pos: usize) -> Option<Element> {
 /// of the documents embedded in it through documents has [`MIN_TABLE_FIELDS`] fields or more;
 /// otherwise its BSON alone.
 #[must_use]
-pub fn encode(mut bson: Vec<u8>) -> Vec<u8> {
+pub fn encode(bson: Vec<u8>) -> Vec<u8> {
+    build(bson, &|name| name_tag(name), None)
+}
+
+/// [`encode`] with the tags of version 2 (FR-022): the numbers of `numbers`, and those the table
+/// of `old` (the version the document replaces) gives when it is of the same dictionary. A
+/// collection without a dictionary yet (`numbers` empty, `old` without one) gets version 1.
+#[must_use]
+pub fn encode_numbered(bson: Vec<u8>, numbers: &FieldNumbers, old: Option<&Stored<'_>>) -> Vec<u8> {
+    let old = old.and_then(|o| o.table.and_then(|t| t.dictionary.map(|d| (o.bson(), t, d))));
+    let dictionary = match old {
+        _ if !numbers.is_empty() => numbers.dictionary(),
+        Some((_, _, d)) => d,
+        None => return encode(bson),
+    };
+    let mut merged = std::borrow::Cow::Borrowed(numbers);
+    if let Some((old_bson, t, d)) = old
+        && d == dictionary
+    {
+        let m = merged.to_mut();
+        if m.is_empty() {
+            *m = FieldNumbers::new(d);
+        }
+        t.numbers_into(old_bson, m);
+    }
+    let tag = |name: &[u8]| merged.get(name).unwrap_or(UNNUMBERED);
+    build(bson, &tag, Some(dictionary))
+}
+
+/// The numbered names a stored document's tables of version 2 give, under their dictionary;
+/// `None` for a document without such a table.
+#[must_use]
+pub fn numbers_of(stored: &Stored<'_>) -> Option<FieldNumbers> {
+    let t = stored.table?;
+    let mut out = FieldNumbers::new(t.dictionary?);
+    t.numbers_into(stored.bson(), &mut out);
+    Some(out)
+}
+
+/// The value to store: `bson` and, when a document of it has enough fields, its table with the
+/// tags `tag` gives, in version 2 with `dictionary`'s identifier or else in version 1.
+fn build(mut bson: Vec<u8>, tag: &dyn Fn(&[u8]) -> u16, dictionary: Option<u32>) -> Vec<u8> {
     let mut entries = Vec::new();
     let mut directory: Vec<(usize, usize, usize)> = Vec::new();
-    collect(&bson, 0, &mut entries, &mut directory);
+    collect(&bson, 0, (&mut entries, &mut directory), tag);
     let fits = |v: usize| u32::try_from(v).is_ok();
     if directory.is_empty()
         || !fits(bson.len())
@@ -377,7 +514,9 @@ pub fn encode(mut bson: Vec<u8>) -> Vec<u8> {
         return bson;
     }
     directory.sort_unstable_by_key(|&(at, _, _)| at);
-    bson.reserve(entries.len() * ENTRY_LEN + directory.len() * DIRECTORY_LEN + TRAILER_LEN);
+    bson.reserve(
+        entries.len() * ENTRY_LEN + directory.len() * DIRECTORY_LEN + DICTIONARY_LEN + TRAILER_LEN,
+    );
     for (tag, ty, at) in entries {
         bson.extend_from_slice(&tag.to_le_bytes());
         bson.push(ty);
@@ -388,8 +527,11 @@ pub fn encode(mut bson: Vec<u8>) -> Vec<u8> {
         bson.extend_from_slice(&(first as u32).to_le_bytes());
         bson.extend_from_slice(&(count as u16).to_le_bytes());
     }
+    if let Some(d) = dictionary {
+        bson.extend_from_slice(&d.to_le_bytes());
+    }
     bson.extend_from_slice(&(directory.len() as u16).to_le_bytes());
-    bson.push(TABLE_VERSION);
+    bson.push(if dictionary.is_some() { TABLE_VERSION_NUMBERED } else { TABLE_VERSION });
     bson.push(TABLE_MARK);
     bson
 }
@@ -397,11 +539,13 @@ pub fn encode(mut bson: Vec<u8>) -> Vec<u8> {
 /// The fields of the document at `doc_at` (and of the documents embedded in it), into `entries`
 /// and `directory` when they have enough fields. Embedded documents are reached through
 /// documents only: an element of an array is reached through its array.
+type Collected<'c> = (&'c mut Vec<(u16, u8, usize)>, &'c mut Vec<(usize, usize, usize)>);
+
 fn collect(
     bson: &[u8],
     doc_at: usize,
-    entries: &mut Vec<(u16, u8, usize)>,
-    directory: &mut Vec<(usize, usize, usize)>,
+    (entries, directory): Collected<'_>,
+    tag: &dyn Fn(&[u8]) -> u16,
 ) {
     let Some(len) = le_i32(bson, doc_at) else { return };
     let end = doc_at + len - 1;
@@ -409,7 +553,7 @@ fn collect(
     let mut pos = doc_at + 4;
     while pos < end {
         let Some(e) = element(bson, pos) else { return };
-        fields.push((name_tag(&bson[pos + 1..e.name_end]), e.ty, pos, e.value));
+        fields.push((tag(&bson[pos + 1..e.name_end]), e.ty, pos, e.value));
         pos = e.end();
     }
     if fields.len() >= MIN_TABLE_FIELDS {
@@ -418,7 +562,7 @@ fn collect(
     }
     for &(_, ty, _, value) in &fields {
         if ty == DOCUMENT {
-            collect(bson, value, entries, directory);
+            collect(bson, value, (&mut *entries, &mut *directory), tag);
         }
     }
 }
