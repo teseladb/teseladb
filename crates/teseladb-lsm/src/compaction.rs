@@ -41,7 +41,7 @@ use crate::sst::block::{Block, BlockCursor};
 use crate::sst::reader::Table;
 use crate::sst::value::ValueRef;
 use crate::sst::writer::{Split, TableWriter};
-use crate::sst::{align_up, file_id, file_name};
+use crate::sst::{file_id, file_name};
 use crate::version::Version;
 
 /// Token of the reads of the job (block reads of views use small numbers).
@@ -316,17 +316,17 @@ impl Lane {
     /// A read of whole blocks from the next one, up to `chunk` bytes (at least one block).
     fn read_op(&self, chunk: usize) -> (IoOp, usize) {
         let t = &self.table;
-        let first = t.handle(self.next_block).offset;
+        let first = t.pages(self.next_block).0;
         let mut upto = self.next_block + 1;
         while upto < t.blocks() {
-            let h = t.handle(upto);
-            if h.offset + align_up(h.len) - first > chunk as u64 {
+            let (offset, len) = t.pages(upto);
+            if offset + len - first > chunk as u64 {
                 break;
             }
             upto += 1;
         }
-        let last = t.handle(upto - 1);
-        let len = last.offset + align_up(last.len) - first;
+        let (offset, len) = t.pages(upto - 1);
+        let len = offset + len - first;
         (
             IoOp::ReadAt {
                 file: file_id(t.number),
@@ -339,9 +339,9 @@ impl Lane {
     }
 
     fn on_read(&mut self, data: &Bytes, upto: usize) -> Result<(), LsmError> {
-        let base = self.table.handle(self.next_block).offset;
+        let base = self.table.pages(self.next_block).0;
         for b in self.next_block..upto {
-            let at = (self.table.handle(b).offset - base) as usize;
+            let at = (self.table.pages(b).0 - base) as usize;
             let block =
                 data.get(at..).map(|_| data.slice(at..)).ok_or_else(|| corrupt(&self.table, b))?;
             self.blocks
@@ -863,10 +863,11 @@ impl CompactJob {
                 return;
             }
         };
+        let (offset, len) = file.pages(block);
         self.queued.push_back(IoOp::ReadAt {
             file: file_id(file.number),
-            offset: r.offset,
-            len: align_up(r.len) as u32,
+            offset,
+            len: len as u32,
             token: JOB_TOKEN,
         });
         self.reading = Some(Reading::Value(at, file.clone(), block, ikey, *r));

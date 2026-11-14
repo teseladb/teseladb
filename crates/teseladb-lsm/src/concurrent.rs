@@ -21,8 +21,8 @@ use crate::read::{self, Blocks, Fetch, Found, Item, Lookup, ReadToken, Scan, Ste
 use crate::read_back::BackScan;
 use crate::shared::{Published, TryCell};
 use crate::sst::block::Block;
+use crate::sst::file_name;
 use crate::sst::reader::Table;
-use crate::sst::{align_up, file_name};
 use crate::version::{Version, View};
 
 /// Shards of the shared block cache.
@@ -46,7 +46,8 @@ impl std::fmt::Debug for SharedLsm {
     }
 }
 
-/// A block a read misses: the bytes of `len` at `offset` of the file at `path`.
+/// A block a read misses: the bytes of `len` at `offset` of the file at `path`, the aligned pages
+/// that hold it.
 #[derive(Clone)]
 pub struct BlockNeed {
     /// The file's path, as the core's disk names it.
@@ -231,11 +232,11 @@ impl Blocks for Source<'_> {
             return Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i));
         }
         if self.need.is_none() {
-            let h = table.handle(i);
+            let (offset, len) = table.pages(i);
             self.need = Some(BlockNeed {
                 path: self.inner.dir.join(file_name(table.number)).display().to_string(),
-                offset: h.offset,
-                len: align_up(h.len),
+                offset,
+                len,
                 table: table.clone(),
                 block: i,
             });

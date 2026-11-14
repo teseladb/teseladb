@@ -84,3 +84,42 @@ fn the_memtable_bytes_split_the_active_memtable_from_the_frozen_ones() {
     lsm.run_io(&mut disk, Nanos::ZERO);
     assert_eq!(lsm.memtables_bytes(), (active, active));
 }
+
+/// FR-019, FR-043: the space of the files by kind adds up to the bytes of the levels and of the
+/// value files, and the data blocks of a file follow one another, so only its last page has room
+/// left.
+#[test]
+fn the_space_of_the_files_adds_up_and_their_data_blocks_leave_no_pages_half_empty() {
+    let cfg =
+        LsmConfig { codec: teseladb_lsm::Codec::Zlib, value_separation_bytes: 2_000, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    assert_eq!(lsm.space(), teseladb_lsm::SpaceUse::default());
+    let mut index = 0;
+    for round in 1..=3u64 {
+        for i in 0..300u32 {
+            index += 1;
+            let key = format!("k{i:05}");
+            let value = format!("{round}-{i}-").repeat(if i % 50 == 0 { 400 } else { 20 });
+            lsm.put(G, index, key.as_bytes(), ts(round, i), value.as_bytes()).unwrap();
+        }
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    lsm.compact_all();
+    for _ in 0..1_000 {
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    let (s, m) = (lsm.space(), lsm.metrics());
+    assert!(s.data.files > 0 && s.history.files > 0 && s.values.files > 0, "{s:?}");
+    assert_eq!(s.data.files + s.history.files, m.files + m.history_files);
+    assert_eq!(s.data.bytes() + s.history.bytes(), m.level_bytes.iter().sum::<u64>());
+    assert_eq!(s.values.bytes(), m.value_bytes);
+    let page = teseladb_lsm::sst::ALIGN as u64;
+    for kind in [s.data, s.history, s.values] {
+        assert!(kind.blocks >= kind.files as u64 && kind.meta >= 2 * page * kind.files as u64);
+        assert!(kind.stored < kind.raw, "zlib shrinks repeated text: {kind:?}");
+        assert!(kind.pages - kind.stored < page * kind.files as u64, "{kind:?}");
+    }
+    assert!(s.data.blocks > 2 * s.data.files as u64, "{s:?}");
+}
