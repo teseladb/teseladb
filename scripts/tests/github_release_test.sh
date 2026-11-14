@@ -87,6 +87,12 @@ if grep -qF -- '- Faster reads.' "$WORK/notes-sent.md" && grep -qF 'docker pull 
 else
   failed=$((failed + 1)); echo "FAIL the notes lack the changes or the image" >&2; cat "$WORK/notes-sent.md" >&2 || true
 fi
+if grep -qF 'Business Source License 1.1' "$WORK/notes-sent.md" &&
+  grep -qF 'https://teseladb.com/docs/get-started/quickstart-single-node' "$WORK/notes-sent.md"; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL the notes lack the license or the quick start of the website" >&2
+fi
 check "an existing release" 0 "gh release upload v0.2.0 --repo teseladb/teseladb --clobber" GH_RELEASE_EXISTS=yes
 check "the notes of an existing release" 0 "gh release edit v0.2.0 --repo teseladb/teseladb --title TeselaDB 0.2.0" GH_RELEASE_EXISTS=yes
 check "the login of GHCR" 0 "token gh-token"

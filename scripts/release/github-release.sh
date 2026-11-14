@@ -55,7 +55,7 @@ docker pull $IMAGE:$VERSION
 docker pull $GHCR:$VERSION
 \`\`\`
 
-The [quick start](https://github.com/$REPO/blob/main/docs/quickstart.md) takes you from here to a running node with a
+The [quick start](https://teseladb.com/docs/get-started/quickstart-single-node) takes you from here to a running node with a
 shell session on it in about five minutes.
 
 ## Files
@@ -67,7 +67,8 @@ shell session on it in about five minutes.
 | \`teseladb-$VERSION-macos-aarch64.tar.gz\` | macOS on Apple Silicon |
 
 Each file has its \`.sha256\`. To check a download, run \`shasum -a 256 -c <file>.sha256\` in the folder where you
-saved both files. TeselaDB is distributed under the [TeselaDB License](https://github.com/$REPO/blob/main/LICENSE).
+saved both files. TeselaDB is source-available under the
+[Business Source License 1.1](https://github.com/$REPO/blob/main/LICENSE).
 EOF
 }
 

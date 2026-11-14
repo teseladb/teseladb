@@ -1,152 +1,145 @@
-TeselaDB License
-Version 1.0, 4 November 2026
+Business Source License 1.1
 
-Copyright (c) 2026 VIUZI ESP S.L. All rights reserved.
+Parameters
 
-This license is an agreement between VIUZI ESP S.L. ("the Licensor") and you, the
-person or organization that installs, copies or runs the Software ("You"). By doing
-any of those things You accept it. If You do not accept it, do not install, copy or
-run the Software.
+Licensor:             VIUZI ESP S.L.
 
-1. The Software
+Licensed Work:        TeselaDB, version 0.1.13 and the versions the Licensor publishes
+                      with this License. The Licensed Work is (c) 2026 VIUZI ESP S.L.
 
-"The Software" means TeselaDB in object code: the teseladb binary, the Docker
-images that contain it, the install script, and their documentation, in every
-version the Licensor publishes. The Software is distributed only in object code.
-This license gives no right to its source code.
+Additional Use Grant: You may make production use of the Licensed Work, free of charge and
+                      for any purpose including commercial purposes, provided that all of
+                      the following conditions are met:
 
-2. Use without production
+                      (a) The instances of the Licensed Work that Your Organization runs in
+                          production at the same time, in every cluster, use in total no more
+                          than 64 GB of RAM;
 
-You may install and run the Software, at no cost, to develop, test, evaluate,
-study and demonstrate it, and in continuous integration, provided that it holds
-no data of a production system.
+                      (b) those instances use in total no more than 16 vCPUs;
 
-"Production" means any use of the Software that stores, processes or serves data
-of a real business, service, organization or person, or that backs a system that
-real users rely on. Development, testing, evaluation, demonstration and continuous
-integration with data made for those purposes are not production.
+                      (c) the total revenue of Your Organization in its last completed fiscal
+                          year was less than EUR 1,000,000 (one million euros) or its
+                          equivalent in other currencies; and
 
-3. Free production use, including commercial use
+                      (d) You do not offer the Licensed Work to third parties as a Database
+                          Service.
 
-You may run the Software in production, at no cost and for any purpose,
-including commercial purposes, when all of these conditions hold:
+                      Definitions for this grant:
 
-  (a) the nodes of the Software that Your organization runs in production at the
-      same time, in every cluster, use 32 GB of RAM or less in total; and
+                      "Your Organization" means You together with every entity that
+                      controls You, is controlled by You, or is under common control with
+                      You.
 
-  (b) the total revenue of Your organization in its last completed fiscal year was
-      less than EUR 1,000,000 (one million euros) or its equivalent in other
-      currencies; and
+                      The RAM of an instance is the memory available to its process: the
+                      limit of its container or control group when there is one, or the
+                      total memory of its machine otherwise, rounded up to the whole
+                      gigabyte.
 
-  (c) You do not offer the Software to third parties as a hosted or managed
-      service (section 5).
+                      The vCPUs of an instance are the logical processors available to its
+                      process: the CPU quota of its container or control group when there
+                      is one, rounded up to the whole processor, or the number of online
+                      logical processors of its machine otherwise. Each hardware thread
+                      counts as one vCPU.
 
-"Your organization" includes every entity that controls, is controlled by, or is
-under common control with You.
+                      A "Database Service" is a commercial offering that allows third
+                      parties (other than Your Organization) to access the functionality
+                      of the Licensed Work by creating databases, collections or clusters
+                      whose schemas or data they control, such as a database as a service,
+                      a database platform or a managed cluster. Running the Licensed Work
+                      as the database of Your own applications, even when Your customers
+                      use those applications, is not a Database Service.
 
-The RAM of a node is the memory available to its process: the limit of its
-container or control group (cgroup) when there is one, or the total memory of the
-machine otherwise, rounded up to the whole gigabyte. The total is the sum of the
-RAM of the nodes.
+                      Offering the Licensed Work as a Database Service is never covered by
+                      this grant, whatever the RAM, vCPUs or revenue of Your Organization,
+                      and always requires a commercial license from the Licensor that grants
+                      it expressly. Production use beyond conditions (a) to (c) also requires
+                      a commercial license (https://teseladb.com/pricing).
 
-At the written request of the Licensor, at most once a year, You will state in
-writing the total RAM of Your nodes in production and the revenue of Your
-organization that make Your use free under this section.
+Change Date:          For each version of the Licensed Work, four years from the date that
+                      version is first publicly distributed by the Licensor; for version
+                      0.1.13, 2030-11-13.
 
-4. Commercial license
+Change License:       Apache License, Version 2.0
 
-A separate commercial license from the Licensor is required for any production
-use when the nodes of Your organization use more than 32 GB of RAM in total, or
-when the revenue of Your organization was EUR 1,000,000 or more in its last
-completed fiscal year, in every case and whatever the purpose of the use. It is
-also required for the uses of sections 5 and 6(e). See COMMERCIAL.md or
-https://teseladb.com/pricing.
+For information about alternative licensing arrangements for the Licensed Work, please
+contact VIUZI ESP S.L. through https://teseladb.com/pricing.
 
-5. Hosted or managed services
+Notice
 
-Offering the Software as a hosted or managed service means making its
-functionality available to third parties who do not run it themselves, such as
-selling a database service, a database platform or a managed cluster built on the
-Software. It is not allowed under sections 2 and 3, whatever the size of Your
-organization, and needs a commercial license that grants it expressly. Running the
-Software as the database of Your own applications, even when Your customers use
-those applications, is not a hosted or managed service.
+The Business Source License (this document, or the "License") is not an Open Source
+license. However, the Licensed Work will eventually be made available under an Open
+Source License, as stated in this License.
 
-6. Restrictions
+-----------------------------------------------------------------------------
 
-Except as expressly allowed by this license or by section 7, You may not:
+Business Source License 1.1
 
-  (a) modify, adapt, translate or create derivative works of the Software;
+License text copyright © 2017 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
 
-  (b) reverse engineer, decompile or disassemble the Software, or otherwise try to
-      obtain its source code;
+Terms
 
-  (c) remove, alter or hide any notice of copyright, trademark or license in the
-      Software, or disable or bypass any limit or check of its license;
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
 
-  (d) sell, rent, lease, lend, sublicense or otherwise transfer the Software or
-      this license to third parties;
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
 
-  (e) distribute the Software to third parties, or include it in a product or
-      service that You distribute to third parties, without a commercial license.
-      Copying the unmodified Software inside Your organization, and pulling the
-      official images from their public registry, is allowed.
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliated entities, or authorized
+resellers, or you must refrain from using the Licensed Work.
 
-7. Rights the law grants
+All copies of the original and modified Licensed Work, and derivative works
+of the Licensed Work, are subject to this License. This License applies
+separately for each version of the Licensed Work and the Change Date may vary
+for each version of the Licensed Work released by Licensor.
 
-Nothing in this license limits the rights that the law grants to a lawful user of
-a computer program and that a contract cannot exclude, including those of
-Articles 5(2), 5(3) and 6 of Directive 2009/24/EC and of Article 100 of the
-Spanish Intellectual Property Law (Real Decreto Legislativo 1/1996): making a
-back-up copy, observing, studying or testing how the Software works while running
-it, and decompiling it when indispensable to achieve the interoperability of an
-independently created program, under the conditions of those provisions.
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or
+modified form from a third party, the terms and conditions set forth in this
+License apply to your use of that work.
 
-8. Your data
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other
+versions of the Licensed Work.
 
-The data You store in the Software belongs to You. This license gives the
-Licensor no right over it.
+This License does not grant you any right in any trademark or logo of
+Licensor or its affiliates (provided that you may use a trademark or logo of
+Licensor as expressly required by this License).
 
-9. Ownership
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
+AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
+TITLE.
 
-The Software is licensed, not sold. The Licensor keeps every right, title and
-interest in the Software, including all intellectual and industrial property
-rights. TeselaDB and its logo are trademarks of the Licensor; this license grants
-no right to use them except to refer to the Software truthfully.
+MariaDB hereby grants you permission to use this License’s text to license
+your works, and to refer to it using the trademark “Business Source License”,
+as long as you comply with the Covenants of Licensor below.
 
-10. Termination
+Covenants of Licensor
 
-This license ends automatically if You breach it. If the breach can be cured and
-You cure it within 30 days of becoming aware of it, the license is restored. When
-the license ends You must stop using the Software and delete every copy of it.
-Sections 6 to 13 survive the end of the license.
+In consideration of the right to use this License’s text and the “Business
+Source License” name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
 
-11. No warranty
+1. To specify as the Change License the GPL Version 2.0 or any later version,
+   or a license that is compatible with GPL Version 2.0 or a later version,
+   where “compatible” means that software provided under the Change License can
+   be included in a program with software provided under GPL Version 2.0 or a
+   later version. Licensor may specify additional Change Licenses without
+   limitation.
 
-The Software is provided "as is", without warranty of any kind, express or
-implied, including the warranties of merchantability, fitness for a particular
-purpose and non-infringement, to the extent the applicable law allows. You are
-responsible for keeping back-ups of Your data.
+2. To either: (a) specify an additional grant of rights to use that does not
+   impose any additional restriction on the right granted in this License, as
+   the Additional Use Grant; or (b) insert the text “None”.
 
-12. Limitation of liability
+3. To specify a Change Date.
 
-To the extent the applicable law allows, the Licensor is not liable for any
-indirect, incidental, special or consequential damages, nor for any loss of data,
-profits, revenue or business, arising from this license or from the use of the
-Software or the inability to use it, even if it was advised of their possibility.
-For use under sections 2 and 3, which is free of charge, the total liability of
-the Licensor is limited to EUR 100. Nothing in this license limits liability that
-cannot be limited by law, such as for fraud or wilful misconduct.
-
-13. Law and jurisdiction
-
-This license is governed by the laws of Spain. The courts of the domicile of the
-Licensor have jurisdiction over any dispute arising from it, unless a mandatory
-rule gives jurisdiction to other courts, such as those of the domicile of a
-consumer.
-
-14. Changes
-
-The Licensor may publish new versions of this license. A new version applies to
-the versions of the Software published with it; the versions already published
-keep the license they came with.
+4. Not to modify this License in any other way.

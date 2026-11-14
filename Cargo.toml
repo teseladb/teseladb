@@ -25,7 +25,7 @@ teseladb-names = { path = "crates/teseladb-names" }
 edition = "2024"
 rust-version = "1.98"
 publish = false
-license = "LicenseRef-TeselaDB"
+license = "BUSL-1.1"
 
 [workspace.lints.rust]
 # Logic crates add `#![forbid(unsafe_code)]`; teseladb-sys allows it locally and documents every block with
