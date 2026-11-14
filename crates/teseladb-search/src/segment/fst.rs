@@ -8,11 +8,23 @@
 //! summed along the path and pushed towards the root, so terms that share a prefix share its
 //! output.
 //!
-//! Encoding: each node is written after the nodes it points to, as a flag byte (bit 0: final),
-//! the final output if final, the number of arcs and, per arc in label order, the label byte, the
-//! output and the target's address, as LEB128. The trailer is the root's address and the number
-//! of terms, eight bytes each in little endian. Every target lies before its node, so a file
-//! cannot hold a cycle; [`Fst::new`] checks every node once, and lookups then never fail.
+//! Encoding: each node is written after the nodes it points to, as a flag byte (bit 0: final, bit
+//! 1: dense), the final output if final and the number of arcs, as LEB128. A node of fewer than
+//! [`DENSE_ARCS`] arcs then has, per arc in label order, the label byte, the output and the
+//! target's address, as LEB128. A dense node has its labels in order, one byte each, then the
+//! width in bytes of its numbers and, per arc, the output and the target in that width, little
+//! endian: a lookup finds the label with one SIMD comparison per 32 labels and goes straight to
+//! its arc (FR-029). The trailer is the root's address and the number of terms, eight bytes each
+//! in little endian. Every target lies before its node, so a file cannot hold a cycle;
+//! [`Fst::new`] checks every node once, and lookups then never fail.
+//!
+//! A dictionary can carry a table of its most frequent terms in front of the transducer (FR-029):
+//! [`Builder::finish_with`] writes it after the nodes, the trailer then starts with the table's
+//! address and the number of terms has [`HOT`] set. The table is open addressing with linear
+//! probing on the FNV-1a hash of the term: the number of slots (a power of two, at least twice the
+//! terms), the number of terms, a `u32` per slot (the term's index plus one, 0 when empty) and per
+//! term its value, offset and length, then the bytes of the terms. [`Fst::get`] looks there before
+//! walking the transducer.
 
 use std::collections::HashMap;
 
@@ -20,7 +32,35 @@ use crate::segment::Corrupt;
 use crate::segment::varint;
 
 const FINAL: u8 = 1;
+const DENSE: u8 = 2;
 const TRAILER: usize = 16;
+/// The arcs from which a node is written dense.
+pub const DENSE_ARCS: usize = 16;
+/// The bit of the number of terms that says the dictionary has a table of frequent terms.
+pub const HOT: u64 = 1 << 63;
+/// Bytes of the table's head and of each of its terms.
+const HOT_HEAD: usize = 8;
+const HOT_ENTRY: usize = 16;
+/// A table of frequent terms that does not hold together.
+const BAD_TABLE: Corrupt = Corrupt("fst: table of frequent terms");
+
+/// The FNV-1a hash of `term`.
+fn hash(term: &[u8]) -> u64 {
+    term.iter()
+        .fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
+
+/// The bytes a number of a dense node takes.
+fn width_of(v: u64) -> usize {
+    (64 - v.leading_zeros() as usize).div_ceil(8).max(1)
+}
+
+/// The `width` bytes at `at` as a little-endian number.
+fn number(bytes: &[u8], at: usize, width: usize) -> Option<u64> {
+    let mut buf = [0u8; 8];
+    buf[..width].copy_from_slice(bytes.get(at..at + width)?);
+    Some(u64::from_le_bytes(buf))
+}
 
 /// An arc of a node still being built: label, output and the target once written.
 #[derive(Clone, Debug, Default)]
@@ -103,12 +143,25 @@ impl Builder {
     }
 
     /// Writes the dictionary and returns its bytes.
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(self) -> Vec<u8> {
+        self.finish_with(&[])
+    }
+
+    /// Writes the dictionary with `hot`, terms it holds and their values, in a table in front of
+    /// the transducer; with none it is the dictionary of [`Builder::finish`].
+    pub fn finish_with(mut self, hot: &[(&[u8], u64)]) -> Vec<u8> {
         self.close_to(0);
         let root = self.open.pop().expect("the root stays open");
         let root = self.write(&root);
+        let mut len = self.len;
+        if !hot.is_empty() {
+            let table = self.bytes.len() as u64;
+            write_table(&mut self.bytes, hot);
+            self.bytes.extend_from_slice(&table.to_le_bytes());
+            len |= HOT;
+        }
         self.bytes.extend_from_slice(&root.to_le_bytes());
-        self.bytes.extend_from_slice(&self.len.to_le_bytes());
+        self.bytes.extend_from_slice(&len.to_le_bytes());
         self.bytes
     }
 
@@ -123,16 +176,28 @@ impl Builder {
     }
 
     fn write(&mut self, node: &OpenNode) -> u64 {
+        let dense = node.arcs.len() >= DENSE_ARCS;
         let mut enc = Vec::with_capacity(2 + node.arcs.len() * 4);
-        enc.push(if node.is_final { FINAL } else { 0 });
+        enc.push(if node.is_final { FINAL } else { 0 } | if dense { DENSE } else { 0 });
         if node.is_final {
             varint::put(&mut enc, node.final_output);
         }
         varint::put(&mut enc, node.arcs.len() as u64);
-        for a in &node.arcs {
-            enc.push(a.label);
-            varint::put(&mut enc, a.output);
-            varint::put(&mut enc, a.target);
+        if dense {
+            let width =
+                node.arcs.iter().map(|a| width_of(a.output.max(a.target))).max().unwrap_or(1);
+            enc.extend(node.arcs.iter().map(|a| a.label));
+            enc.push(width as u8);
+            for a in &node.arcs {
+                enc.extend_from_slice(&a.output.to_le_bytes()[..width]);
+                enc.extend_from_slice(&a.target.to_le_bytes()[..width]);
+            }
+        } else {
+            for a in &node.arcs {
+                enc.push(a.label);
+                varint::put(&mut enc, a.output);
+                varint::put(&mut enc, a.target);
+            }
         }
         if let Some(&address) = self.written.get(&enc) {
             return address;
@@ -141,6 +206,120 @@ impl Builder {
         self.bytes.extend_from_slice(&enc);
         self.written.insert(enc, address);
         address
+    }
+}
+
+/// Appends the table of frequent terms `hot` to `out`.
+fn write_table(out: &mut Vec<u8>, hot: &[(&[u8], u64)]) {
+    let slots = (hot.len() * 2).next_power_of_two();
+    let mut table = vec![0u32; slots];
+    for (i, (term, _)) in hot.iter().enumerate() {
+        let mut at = hash(term) as usize & (slots - 1);
+        while table[at] != 0 {
+            at = (at + 1) & (slots - 1);
+        }
+        table[at] = i as u32 + 1;
+    }
+    out.extend_from_slice(&(slots as u32).to_le_bytes());
+    out.extend_from_slice(&(hot.len() as u32).to_le_bytes());
+    for slot in table {
+        out.extend_from_slice(&slot.to_le_bytes());
+    }
+    let mut offset = 0u32;
+    for (term, value) in hot {
+        out.extend_from_slice(&value.to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&(term.len() as u32).to_le_bytes());
+        offset += term.len() as u32;
+    }
+    for (term, _) in hot {
+        out.extend_from_slice(term);
+    }
+}
+
+/// The table of frequent terms of a dictionary.
+#[derive(Clone, Copy, Debug)]
+struct Hot<'a> {
+    bytes: &'a [u8],
+    slots: usize,
+    terms: usize,
+}
+
+impl<'a> Hot<'a> {
+    /// The table in `bytes`, its sizes checked.
+    fn new(bytes: &'a [u8]) -> Result<Hot<'a>, Corrupt> {
+        let word = |at: usize| {
+            bytes.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+        };
+        let (slots, terms) =
+            (word(0).ok_or(BAD_TABLE)? as usize, word(4).ok_or(BAD_TABLE)? as usize);
+        if !slots.is_power_of_two() || slots < terms * 2 || terms == 0 {
+            return Err(BAD_TABLE);
+        }
+        let hot = Hot { bytes, slots, terms };
+        let text = hot.text_at();
+        let mut total = 0usize;
+        for i in 0..terms {
+            let (_, offset, len) = hot.entry(i).ok_or(BAD_TABLE)?;
+            if offset != total {
+                return Err(BAD_TABLE);
+            }
+            total += len;
+        }
+        if text.checked_add(total) != Some(bytes.len()) {
+            return Err(BAD_TABLE);
+        }
+        let mut used = 0;
+        for slot in 0..slots {
+            let index = word(HOT_HEAD + slot * 4).ok_or(BAD_TABLE)? as usize;
+            if index > terms {
+                return Err(BAD_TABLE);
+            }
+            used += usize::from(index != 0);
+        }
+        if used != terms {
+            return Err(BAD_TABLE);
+        }
+        Ok(hot)
+    }
+
+    /// Where the bytes of the terms start.
+    fn text_at(&self) -> usize {
+        HOT_HEAD + self.slots * 4 + self.terms * HOT_ENTRY
+    }
+
+    /// The value, offset and length of term `i`.
+    fn entry(&self, i: usize) -> Option<(u64, usize, usize)> {
+        let at = HOT_HEAD + self.slots * 4 + i * HOT_ENTRY;
+        let b = self.bytes.get(at..at + HOT_ENTRY)?;
+        let value = u64::from_le_bytes(b[..8].try_into().expect("8 bytes"));
+        let offset = u32::from_le_bytes(b[8..12].try_into().expect("4 bytes")) as usize;
+        let len = u32::from_le_bytes(b[12..].try_into().expect("4 bytes")) as usize;
+        Some((value, offset, len))
+    }
+
+    /// The term `i`.
+    fn term(&self, i: usize) -> Option<&'a [u8]> {
+        let (_, offset, len) = self.entry(i)?;
+        let at = self.text_at() + offset;
+        self.bytes.get(at..at + len)
+    }
+
+    /// The value of `term` if the table has it. The probes end at an empty slot: there are at
+    /// least twice as many slots as terms.
+    fn get(&self, term: &[u8]) -> Option<u64> {
+        let mut at = hash(term) as usize & (self.slots - 1);
+        loop {
+            let b = self.bytes.get(HOT_HEAD + at * 4..HOT_HEAD + at * 4 + 4)?;
+            let slot = u32::from_le_bytes(b.try_into().expect("4 bytes")) as usize;
+            if slot == 0 {
+                return None;
+            }
+            if self.term(slot - 1)? == term {
+                return Some(self.entry(slot - 1)?.0);
+            }
+            at = (at + 1) & (self.slots - 1);
+        }
     }
 }
 
@@ -158,18 +337,30 @@ pub struct Fst<'a> {
     bytes: &'a [u8],
     root: usize,
     len: u64,
+    hot: Option<Hot<'a>>,
 }
 
 impl<'a> Fst<'a> {
     /// Opens a dictionary, checking every node it holds.
     pub fn new(bytes: &'a [u8]) -> Result<Fst<'a>, Corrupt> {
-        let body = bytes.len().checked_sub(TRAILER).ok_or(Corrupt("fst: no trailer"))?;
+        let end = bytes.len().checked_sub(TRAILER).ok_or(Corrupt("fst: no trailer"))?;
         let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
-        let root = usize::try_from(word(body)).map_err(|_| Corrupt("fst: root"))?;
+        let len = word(end + 8);
+        let (body, hot) = if len & HOT != 0 {
+            let at = end.checked_sub(8).ok_or(Corrupt("fst: no trailer"))?;
+            let table = usize::try_from(word(at)).map_err(|_| Corrupt("fst: table"))?;
+            if table > at {
+                return Err(Corrupt("fst: table"));
+            }
+            (table, Some(Hot::new(&bytes[table..at])?))
+        } else {
+            (end, None)
+        };
+        let root = usize::try_from(word(end)).map_err(|_| Corrupt("fst: root"))?;
         if root >= body {
             return Err(Corrupt("fst: root out of bounds"));
         }
-        let fst = Fst { bytes: &bytes[..body], root, len: word(body + 8) };
+        let fst = Fst { bytes: &bytes[..body], root, len: len & !HOT, hot: None };
         // Every node from its encoding, in address order: each target must be a node already seen.
         let mut nodes = vec![false; body];
         let mut at = 0;
@@ -187,7 +378,21 @@ impl<'a> Fst<'a> {
         if !nodes[root] {
             return Err(Corrupt("fst: root is not a node"));
         }
-        Ok(fst)
+        // Every frequent term has the value the transducer gives it.
+        if let Some(h) = hot {
+            for i in 0..h.terms {
+                let term = h.term(i).ok_or(BAD_TABLE)?;
+                if fst.walk_get(term) != h.entry(i).map(|e| e.0) || h.get(term).is_none() {
+                    return Err(BAD_TABLE);
+                }
+            }
+        }
+        Ok(Fst { hot, ..fst })
+    }
+
+    /// Number of terms in the table of frequent terms.
+    pub fn frequent_terms(&self) -> usize {
+        self.hot.map_or(0, |h| h.terms)
     }
 
     /// Number of terms.
@@ -200,16 +405,62 @@ impl<'a> Fst<'a> {
         self.len == 0
     }
 
-    /// The value of `term`.
+    /// The value of `term`: from the table of frequent terms when it is there, else by walking
+    /// the transducer.
     pub fn get(&self, term: &[u8]) -> Option<u64> {
-        let mut node = self.node(self.root);
+        if let Some(v) = self.hot.and_then(|h| h.get(term)) {
+            return Some(v);
+        }
+        self.walk_get(term)
+    }
+
+    /// The value of `term` by walking the transducer, without decoding its nodes.
+    fn walk_get(&self, term: &[u8]) -> Option<u64> {
+        let mut at = self.root;
         let mut sum = 0_u64;
         for &b in term {
-            let &(_, out, target) = node.arcs.iter().find(|a| a.0 == b)?;
+            let (out, target) = self.arc(at, b)?;
             sum = sum.wrapping_add(out);
-            node = self.node(target);
+            at = target;
         }
-        node.final_output.map(|f| sum.wrapping_add(f))
+        let b = self.bytes;
+        if b.get(at)? & FINAL == 0 {
+            return None;
+        }
+        let mut pos = at + 1;
+        varint::get(b, &mut pos).map(|f| sum.wrapping_add(f))
+    }
+
+    /// The output and target of the arc labelled `label` of the node at `at`.
+    fn arc(&self, at: usize, label: u8) -> Option<(u64, usize)> {
+        let b = self.bytes;
+        let flags = *b.get(at)?;
+        let mut pos = at + 1;
+        if flags & FINAL != 0 {
+            varint::get(b, &mut pos)?;
+        }
+        let count = usize::try_from(varint::get(b, &mut pos)?).ok()?;
+        if flags & DENSE != 0 {
+            let labels = b.get(pos..pos + count)?;
+            let i = crate::byte_simd::find(labels, label)?;
+            let width = usize::from(*b.get(pos + count)?);
+            let arc = pos + count + 1 + i * 2 * width;
+            let target = usize::try_from(number(b, arc + width, width)?).ok()?;
+            return Some((number(b, arc, width)?, target));
+        }
+        for _ in 0..count {
+            let l = *b.get(pos)?;
+            pos += 1;
+            let output = varint::get(b, &mut pos)?;
+            let target = varint::get(b, &mut pos)?;
+            if l == label {
+                return Some((output, usize::try_from(target).ok()?));
+            }
+            if l > label {
+                return None;
+            }
+        }
+        None
     }
 
     /// Every term and its value, in order.
@@ -259,7 +510,7 @@ impl<'a> Fst<'a> {
     fn decode(&self, at: usize) -> Option<(Node, usize)> {
         let b = self.bytes;
         let flags = *b.get(at)?;
-        if flags & !FINAL != 0 {
+        if flags & !(FINAL | DENSE) != 0 {
             return None;
         }
         let mut pos = at + 1;
@@ -269,6 +520,22 @@ impl<'a> Fst<'a> {
             return None;
         }
         let mut arcs = Vec::with_capacity(count as usize);
+        if flags & DENSE != 0 {
+            let count = count as usize;
+            let labels = b.get(pos..pos + count)?;
+            let width = usize::from(*b.get(pos + count)?);
+            if !(1..=8).contains(&width) {
+                return None;
+            }
+            let mut arc = pos + count + 1;
+            for &label in labels {
+                let output = number(b, arc, width)?;
+                let target = usize::try_from(number(b, arc + width, width)?).ok()?;
+                arcs.push((label, output, target));
+                arc += 2 * width;
+            }
+            return Some((Node { final_output, arcs }, arc));
+        }
         for _ in 0..count {
             let label = *b.get(pos)?;
             pos += 1;
@@ -370,6 +637,124 @@ mod tests {
                 assert_eq!(fst.get(&probe), want);
             }
         }
+    }
+
+    fn build_hot(entries: &[(Vec<u8>, u64)], every: usize) -> Vec<u8> {
+        let mut b = Builder::new();
+        for (t, v) in entries {
+            b.insert(t, *v);
+        }
+        let hot: Vec<(&[u8], u64)> =
+            entries.iter().step_by(every).map(|(t, v)| (t.as_slice(), *v)).collect();
+        b.finish_with(&hot)
+    }
+
+    #[test]
+    fn dense_nodes_and_frequent_terms_answer_like_the_terms() {
+        use crate::query::fuzzy::{FuzzyOptions, Levenshtein, fuzzy_terms, prefix_terms};
+        use crate::query::regex::Regex;
+        let mut rng = Rng(0x0dd_ba11_cafe_f00d);
+        for round in 0..40 {
+            // 40 letters make nodes of 16 arcs and more, written dense.
+            // Moved from `a` up to `0` up, so that every byte is ASCII and every term text.
+            let entries: Vec<(Vec<u8>, u64)> = random_entries(&mut rng, 50 + round * 40, 40, 5)
+                .into_iter()
+                .map(|(t, v)| (t.into_iter().map(|b| b - (b'a' - b'0')).collect(), v))
+                .collect();
+            let bytes = build_hot(&entries, 1 + round % 5);
+            let fst = Fst::new(&bytes).expect("valid");
+            assert!(fst.frequent_terms() > 0);
+            assert_eq!(fst.len(), entries.len() as u64);
+            assert_eq!(fst.entries(), entries);
+            for (t, v) in &entries {
+                assert_eq!(fst.get(t), Some(*v));
+                assert_eq!(fst.walk_get(t), Some(*v));
+            }
+            for _ in 0..30 {
+                let probe: Vec<u8> =
+                    (0..rng.below(6)).map(|_| b'0' + rng.below(42) as u8).collect();
+                let want = entries.iter().find(|(t, _)| *t == probe).map(|e| e.1);
+                assert_eq!(fst.get(&probe), want, "{probe:?}");
+                let text = String::from_utf8(probe).expect("ASCII");
+                let prefixed: Vec<_> = entries
+                    .iter()
+                    .filter(|(t, _)| t.starts_with(text.as_bytes()))
+                    .cloned()
+                    .collect();
+                assert_eq!(prefix_terms(&fst, &text), prefixed);
+                let lev = Levenshtein::new(&text, 1, 0);
+                let near: Vec<&[u8]> = entries
+                    .iter()
+                    .filter(|(t, _)| lev.distance(std::str::from_utf8(t).expect("ASCII")).is_some())
+                    .map(|(t, _)| t.as_slice())
+                    .collect();
+                let options =
+                    FuzzyOptions { max_edits: 1, prefix_length: 0, max_expansions: 1 << 20 };
+                let mut got: Vec<Vec<u8>> =
+                    fuzzy_terms(&fst, &text, options).into_iter().map(|e| e.term).collect();
+                got.sort();
+                assert_eq!(got, near);
+            }
+            let regex = Regex::new("[0-9].*[A-Z]").expect("pattern");
+            let matching: Vec<Vec<u8>> = entries
+                .iter()
+                .filter(|(t, _)| regex.is_full_match(std::str::from_utf8(t).expect("ASCII")))
+                .map(|(t, _)| t.clone())
+                .collect();
+            let got: Vec<Vec<u8>> = fst
+                .search(&crate::query::fuzzy::Utf8(&regex))
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect();
+            assert_eq!(got, matching);
+        }
+    }
+
+    #[test]
+    fn dense_nodes_are_written_from_sixteen_arcs() {
+        let entries: Vec<(Vec<u8>, u64)> =
+            (0..DENSE_ARCS as u8).map(|i| (vec![b'a' + i], u64::from(i) * 300)).collect();
+        let bytes = build(&entries);
+        let fst = Fst::new(&bytes).expect("valid");
+        assert_eq!(bytes[fst.root] & DENSE, DENSE);
+        assert_eq!(fst.entries(), entries);
+        let sparse = build(&entries[1..]);
+        let fst = Fst::new(&sparse).expect("valid");
+        assert_eq!(sparse[fst.root] & DENSE, 0);
+        assert_eq!(width_of(0), 1);
+        assert_eq!(width_of(255), 1);
+        assert_eq!(width_of(256), 2);
+        assert_eq!(width_of(u64::MAX), 8);
+    }
+
+    #[test]
+    fn damaged_tables_of_frequent_terms_are_rejected() {
+        let mut rng = Rng(7);
+        let entries = random_entries(&mut rng, 400, 30, 5);
+        let bytes = build_hot(&entries, 3);
+        assert!(Fst::new(&bytes).is_ok());
+        let fst = Fst::new(&bytes).unwrap();
+        let table = fst.bytes.len();
+        let end = bytes.len() - TRAILER - 8;
+        for at in table..end {
+            for bit in [0, 3, 7] {
+                let mut bad = bytes.clone();
+                bad[at] ^= 1 << bit;
+                if let Ok(f) = Fst::new(&bad) {
+                    // Accepted bytes still give every term its value.
+                    for (t, v) in &entries {
+                        assert_eq!(f.get(t), Some(*v));
+                    }
+                }
+            }
+        }
+        let mut bad = bytes.clone();
+        bad[end..end + 8].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+        assert_eq!(Fst::new(&bad).unwrap_err(), Corrupt("fst: table"));
+        let mut short = bytes[end..].to_vec();
+        short[..8].copy_from_slice(&0u64.to_le_bytes());
+        assert!(Fst::new(&short).is_err());
+        assert!(Fst::new(&bytes[bytes.len() - 16..]).is_err());
     }
 
     #[test]

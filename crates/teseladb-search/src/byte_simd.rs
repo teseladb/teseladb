@@ -1,5 +1,7 @@
-//! Byte kernels of text analysis (011 FR-028): the classes of the bytes of a 32-byte window of
-//! text as bit masks (bit `i` for byte `i`), and the ASCII lowercase of a window. Each kernel runs
+//! Byte kernels of text analysis and of the term dictionary (011 FR-028, FR-029): the classes of
+//! the bytes of a 32-byte window of text as bit masks (bit `i` for byte `i`), the ASCII lowercase
+//! of a window, and the bytes of a window equal to one byte, which finds the arc of a dense node
+//! of the dictionary. Each kernel runs
 //! with NEON on AArch64 and with AVX2 on x86_64 when the CPU has it (detected once), SSE2
 //! otherwise; the scalar kernel is the reference every vector one is tested against.
 //!
@@ -101,6 +103,43 @@ pub fn lowercase(w: &Window) -> Window {
     }
 }
 
+/// The bytes of `w` equal to `b`.
+pub fn equal(w: &Window, b: u8) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is part of every AArch64 target.
+        unsafe { neon::equal(w, b) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            // SAFETY: the CPU has AVX2, checked just above.
+            unsafe { x86::equal_avx2(w, b) }
+        } else {
+            // SAFETY: SSE2 is part of every x86_64 CPU.
+            unsafe { x86::equal_sse2(w, b) }
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        scalar::equal(w, b)
+    }
+}
+
+/// The index of the first byte of `bytes` equal to `b`, 32 bytes at a time.
+pub fn find(bytes: &[u8], b: u8) -> Option<usize> {
+    let mut at = 0;
+    while at < bytes.len() {
+        let (w, valid) = window(bytes, at);
+        let hits = equal(&w, b) & valid;
+        if hits != 0 {
+            return Some(at + hits.trailing_zeros() as usize);
+        }
+        at += WINDOW;
+    }
+    None
+}
+
 /// Whether the CPU has AVX2, asked once.
 #[cfg(target_arch = "x86_64")]
 fn has_avx2() -> bool {
@@ -138,6 +177,10 @@ mod scalar {
 
     pub(super) fn lowercase(w: &Window) -> Window {
         w.map(|b| b.to_ascii_lowercase())
+    }
+
+    pub(super) fn equal(w: &Window, b: u8) -> u32 {
+        w.iter().enumerate().filter(|&(_, &x)| x == b).fold(0, |m, (i, _)| m | (1 << i))
     }
 }
 
@@ -197,6 +240,12 @@ mod neon {
             c.space |= bits(space) << shift;
         }
         c
+    }
+
+    #[target_feature(enable = "neon")]
+    pub(super) fn equal(w: &Window, b: u8) -> u32 {
+        let k = vdupq_n_u8(b);
+        bits(vceqq_u8(load(w, 0), k)) | (bits(vceqq_u8(load(w, 1), k)) << 16)
     }
 
     #[target_feature(enable = "neon")]
@@ -270,6 +319,12 @@ mod x86 {
     }
 
     #[target_feature(enable = "sse2")]
+    pub(super) fn equal_sse2(w: &Window, b: u8) -> u32 {
+        let k = _mm_set1_epi8(b as i8);
+        bits16(_mm_cmpeq_epi8(load16(w, 0), k)) | (bits16(_mm_cmpeq_epi8(load16(w, 1), k)) << 16)
+    }
+
+    #[target_feature(enable = "sse2")]
     pub(super) fn lowercase_sse2(w: &Window) -> Window {
         let mut out = [0u8; WINDOW];
         for half in 0..2 {
@@ -329,6 +384,11 @@ mod x86 {
     }
 
     #[target_feature(enable = "avx2")]
+    pub(super) fn equal_avx2(w: &Window, b: u8) -> u32 {
+        bits32(_mm256_cmpeq_epi8(load32(w), _mm256_set1_epi8(b as i8)))
+    }
+
+    #[target_feature(enable = "avx2")]
     pub(super) fn lowercase_avx2(w: &Window) -> Window {
         let v = load32(w);
         let add = _mm256_and_si256(within32(v, b'A', b'Z'), _mm256_set1_epi8(0x20));
@@ -382,6 +442,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn equal_matches_the_scalar_kernel() {
+        for w in windows() {
+            for b in [0, 1, b'a', 0x7F, 0x80, 0xFF, w[0], w[31]] {
+                assert_eq!(equal(&w, b), scalar::equal(&w, b), "{w:?} {b}");
+            }
+        }
+        let bytes: Vec<u8> = (0..100).collect();
+        assert_eq!(find(&bytes, 0), Some(0));
+        assert_eq!(find(&bytes, 31), Some(31));
+        assert_eq!(find(&bytes, 99), Some(99));
+        assert_eq!(find(&bytes, 100), None);
+        assert_eq!(find(&bytes[..3], 0), Some(0));
+        assert_eq!(find(&[1, 2], 0), None);
+        assert_eq!(find(&[], 0), None);
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn sse2_kernels_match_the_scalar_kernel() {
@@ -390,6 +467,8 @@ mod tests {
             let (c, l) = unsafe { (x86::classify_sse2(&w), x86::lowercase_sse2(&w)) };
             assert_eq!(c, scalar::classify(&w));
             assert_eq!(l, scalar::lowercase(&w));
+            // SAFETY: as above.
+            assert_eq!(unsafe { x86::equal_sse2(&w, w[5]) }, scalar::equal(&w, w[5]));
         }
     }
 
