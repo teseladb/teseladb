@@ -270,6 +270,15 @@ impl Plan {
         }
     }
 
+    /// A row of the node's storage that this plan's filter accepted, projected: without a
+    /// projection its bytes go out as they are, and the filter does not run again.
+    fn taken_row(&self, bytes: Vec<u8>) -> Result<Document, CommandError> {
+        match &self.projection {
+            None => Ok(Document::from_stored(teseladb_keys::stored::into_bson(bytes)?)?),
+            Some(_) => self.matched_row(bytes, None),
+        }
+    }
+
     /// [`Plan::apply_row`] on a row this plan's filter already matched.
     fn matched_row(
         &self,
@@ -403,67 +412,12 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     concern: ReadConcern,
     mut each: impl FnMut(Vec<u8>, Vec<u8>) -> Result<bool, CommandError>,
 ) -> Result<u64, CommandError> {
-    let mut plan = Plan::new(filter, None, collation)?.with_vars(vars);
-    // The collection's dictionary of field names, whose numbers the filter compares (003 FR-022).
-    let fields =
-        teseladb_keys::space::collection_id_of(&start).and_then(|c| backend.field_numbers(c));
-    // The filter as it can go to the leaders of the ranges on other nodes (010 FR-027).
-    let sent = super::pushed_filter::sendable(filter, &plan.filter, collation, fields.as_deref())?;
-    plan.filter = by_statistics_of_key(plan.filter, &start).with_fields(fields);
-    let ctx = plan.ctx();
+    let (plan, sent) = scan_plan(backend, &start, (filter, None), collation, vars)?;
     let mut next = start;
     let mut examined = 0u64;
     loop {
-        // The filter runs where the documents are read, a batch at a time on the register
-        // machine, and only those it accepts are copied (010 FR-027, FR-028). Only the frame of
-        // a stored document is checked, as in [`Plan::apply_row`]: one whose frame does not
-        // hold is a fault, not a miss, and it stops the scan. The fault is the first one the
-        // documents give in order: the filter's on those before it, or the frame's.
-        let mut fault: Option<CommandError> = None;
-        let mut keep = |batch: &[&[u8]]| {
-            if fault.is_some() {
-                return 0;
-            }
-            let mut docs = Vec::with_capacity(batch.len());
-            let mut frame = None;
-            for bytes in batch {
-                match teseladb_keys::stored::split(bytes) {
-                    Ok(doc) => docs.push(doc),
-                    Err(e) => {
-                        frame = Some(CommandError::from(e));
-                        break;
-                    }
-                }
-            }
-            match plan.filter.matches_batch(&docs, &ctx) {
-                Ok(kept) => {
-                    fault = frame;
-                    kept
-                }
-                Err(e) => {
-                    fault = Some(from_mql(e));
-                    0
-                }
-            }
-        };
-        // The storage passes over the blocks whose zone maps the filter rules out, unread
-        // and unexamined (004 FR-039). A collation orders strings otherwise than the zones.
-        let collated = ctx.collation.is_some();
-        let block = |z: &dyn teseladb_keys::zone::Zones| {
-            teseladb_exec::zone::block_may_match(plan.filter.expr(), collated, z)
-        };
-        let found = backend.scan_matching(
-            &next,
-            &end,
-            SCAN_CHUNK,
-            concern,
-            &mut keep,
-            &block,
-            sent.as_deref(),
-        )?;
-        if let Some(e) = fault {
-            return Err(e);
-        }
+        let found =
+            read_matching(backend, (&plan, sent.as_deref()), (&next, &end), SCAN_CHUNK, concern)?;
         // The filter read the documents through their tables; what it accepted goes on as BSON.
         for ((key, bytes), seen) in found.rows.into_iter().zip(found.seen) {
             if !each(key, teseladb_keys::stored::strip(bytes))? {
@@ -475,6 +429,79 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
             Some(from) => next = from,
             None => return Ok(examined),
         }
+    }
+}
+
+/// The plan of a scan of the collection key `start` is in, with `filter` and `projection`: its
+/// filter ordered by the collection's statistics and comparing the numbers of its dictionary of
+/// field names (003 FR-022), and the filter as it can go to the leaders of the ranges on other
+/// nodes (010 FR-027).
+fn scan_plan<B: Backend + ?Sized>(
+    backend: &mut B,
+    start: &[u8],
+    (filter, projection): (&Document, Option<&Document>),
+    collation: Option<&Document>,
+    vars: Option<&Document>,
+) -> Result<(Plan, Option<Vec<u8>>), CommandError> {
+    let mut plan = Plan::new(filter, projection, collation)?.with_vars(vars);
+    let fields =
+        teseladb_keys::space::collection_id_of(start).and_then(|c| backend.field_numbers(c));
+    let sent = super::pushed_filter::sendable(filter, &plan.filter, collation, fields.as_deref())?;
+    plan.filter = by_statistics_of_key(plan.filter, start).with_fields(fields);
+    Ok((plan, sent))
+}
+
+/// At most `examine` documents of `[start, end)` examined with the filter of `plan`, which runs
+/// where the documents are read, a batch at a time on the register machine, so that only those
+/// it accepts are copied (010 FR-027, FR-028); `sent` goes to the leaders of the ranges on other
+/// nodes. Only the frame of a stored document is checked, as in [`Plan::apply_row`]: one whose
+/// frame does not hold is a fault, not a miss, and it stops the scan. The fault is the first one
+/// the documents give in order: the filter's on those before it, or the frame's.
+fn read_matching<B: Backend + ?Sized>(
+    backend: &mut B,
+    (plan, sent): (&Plan, Option<&[u8]>),
+    (start, end): (&[u8], &[u8]),
+    examine: usize,
+    concern: ReadConcern,
+) -> Result<super::Matching, CommandError> {
+    let ctx = plan.ctx();
+    let mut fault: Option<CommandError> = None;
+    let mut keep = |batch: &[&[u8]]| {
+        if fault.is_some() {
+            return 0;
+        }
+        let mut docs = Vec::with_capacity(batch.len());
+        let mut frame = None;
+        for bytes in batch {
+            match teseladb_keys::stored::split(bytes) {
+                Ok(doc) => docs.push(doc),
+                Err(e) => {
+                    frame = Some(CommandError::from(e));
+                    break;
+                }
+            }
+        }
+        match plan.filter.matches_batch(&docs, &ctx) {
+            Ok(kept) => {
+                fault = frame;
+                kept
+            }
+            Err(e) => {
+                fault = Some(from_mql(e));
+                0
+            }
+        }
+    };
+    // The storage passes over the blocks whose zone maps the filter rules out, unread and
+    // unexamined (004 FR-039). A collation orders strings otherwise than the zones.
+    let collated = ctx.collation.is_some();
+    let block = |z: &dyn teseladb_keys::zone::Zones| {
+        teseladb_exec::zone::block_may_match(plan.filter.expr(), collated, z)
+    };
+    let found = backend.scan_matching(start, end, examine, concern, &mut keep, &block, sent)?;
+    match fault {
+        Some(e) => Err(e),
+        None => Ok(found),
     }
 }
 
@@ -710,6 +737,42 @@ impl QueryCursor {
             }
             Source::Done | Source::Spilled { .. } | Source::Oplog { .. } => return Ok(()),
         };
+        // A scan that is not tailable filters where its documents are read (010 FR-027); a
+        // tailable one notes every key it reads.
+        if self.tail.is_none() {
+            let (plan, sent) = scan_plan(
+                backend,
+                next,
+                (filter, projection.as_ref()),
+                collation.as_ref(),
+                vars.as_ref(),
+            )?;
+            let found =
+                read_matching(backend, (&plan, sent.as_deref()), (next, end), size, *concern)?;
+            let mut goes_on = found.next;
+            for ((key, bytes), seen) in found.rows.into_iter().zip(found.seen) {
+                if self.skip > 0 {
+                    self.skip -= 1;
+                } else {
+                    self.buffered.push_back(plan.taken_row(bytes)?);
+                }
+                // The limit is reached: the rest of the read is left for no one, as a `COLLSCAN`
+                // stops at its limit, and its `docsExamined` stops there too.
+                if self.left.is_some_and(|l| self.buffered.len() as u64 >= l) {
+                    if seen < found.examined {
+                        backend
+                            .not_examined(u64::try_from(found.examined - seen).unwrap_or(u64::MAX));
+                        goes_on = Some(after(&key));
+                    }
+                    break;
+                }
+            }
+            match goes_on {
+                Some(from) => *next = from,
+                None => self.source = Source::Done,
+            }
+            return Ok(());
+        }
         let plan =
             Plan::new(filter, projection.as_ref(), collation.as_ref())?.with_vars(vars.as_ref());
         let rows = backend.scan(next, end, size, *concern)?;
