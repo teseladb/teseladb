@@ -1,5 +1,7 @@
 //! A sorted map of byte keys with one writer at a time and readers on any thread without a lock
-//! (004 FR-026, H-013): a skiplist. A writer links a node only after it
+//! (004 FR-026, H-013): a skiplist, the memtable's before the adaptive radix tree of
+//! [`crate::art`] (FR-038), kept for the tests that check the tree gives the same answers. A
+//! writer links a node only after it
 //! is complete, storing each level's pointer with `Release`; a reader loads them with `Acquire`,
 //! so it sees a node whole or not at all. Nodes and replaced values are freed only when the list
 //! is dropped, so a reader holding the list (through the `Arc` of its memtable) never meets a
@@ -18,10 +20,11 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::UnsafeCell;
 use std::cmp::Ordering as Cmp;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+use crate::art::WriterCell;
 
 /// Most levels of a node.
 const MAX_HEIGHT: usize = 12;
@@ -39,43 +42,6 @@ impl<V> Node<V> {
     fn alloc(key: Box<[u8]>, value: *mut V, height: usize) -> *mut Node<V> {
         let next = (0..height).map(|_| AtomicPtr::new(ptr::null_mut())).collect();
         Box::into_raw(Box::new(Node { key, value: AtomicPtr::new(value), next }))
-    }
-}
-
-/// State that only the writer touches, behind a flag that makes a second writer at the same
-/// time fail at once instead of waiting: the core is the only writer of its memtables, so the
-/// flag never sees a contender, and a hot-path crate holds no lock (constitution).
-pub(crate) struct WriterCell<T> {
-    busy: AtomicBool,
-    state: UnsafeCell<T>,
-}
-
-// SAFETY: the state is only reached through `with`, which the `busy` flag makes exclusive across
-// threads; moving the cell moves the state, which must be `Send`.
-unsafe impl<T: Send> Send for WriterCell<T> {}
-// SAFETY: `&WriterCell` gives no access to the state except through `with`, exclusive by the
-// `busy` flag (an `Acquire` swap that a second caller sees set, and a `Release` store at the
-// end), so sharing the cell never shares the state.
-unsafe impl<T: Send> Sync for WriterCell<T> {}
-
-impl<T> WriterCell<T> {
-    pub(crate) fn new(state: T) -> WriterCell<T> {
-        WriterCell { busy: AtomicBool::new(false), state: UnsafeCell::new(state) }
-    }
-
-    /// Runs `f` on the state; a second writer at the same time is a bug and panics.
-    pub(crate) fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        assert!(!self.busy.swap(true, Ordering::Acquire), "two writers of one memtable");
-        // SAFETY: the swap above found the flag clear and set it, so no other `with` runs until
-        // the store below: this is the only reference to the state.
-        let out = f(unsafe { &mut *self.state.get() });
-        self.busy.store(false, Ordering::Release);
-        out
-    }
-
-    /// The state, with the cell owned.
-    pub(crate) fn get_mut(&mut self) -> &mut T {
-        self.state.get_mut()
     }
 }
 
@@ -386,13 +352,6 @@ mod tests {
             r.join().expect("a reader");
         }
         assert_eq!(l.len() as u64, n);
-    }
-
-    #[test]
-    #[should_panic(expected = "two writers")]
-    fn a_second_writer_at_the_same_time_fails_at_once() {
-        let cell = WriterCell::new(0u32);
-        cell.with(|_| cell.with(|_| ()));
     }
 
     #[test]

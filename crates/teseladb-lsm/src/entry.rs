@@ -83,6 +83,23 @@ pub fn compare(a: &[u8], b: &[u8]) -> Ordering {
     la.cmp(lb).then_with(|| sa.cmp(sb))
 }
 
+/// Appends the bytes of internal key `ikey` in an order its bytes keep (FR-038): the logical key
+/// with a 0xFF after each zero byte, two zero bytes, then the version suffix. As bytes these sort
+/// as [`compare`] sorts the internal keys, and none is the start of another, which the
+/// memtable's radix tree needs.
+pub(crate) fn byte_order(ikey: &[u8], out: &mut Vec<u8>) {
+    let (logical, version) = ikey.split_at(ikey.len() - VERSION_LEN);
+    out.reserve(logical.len() + 2 + VERSION_LEN);
+    for &b in logical {
+        out.push(b);
+        if b == 0 {
+            out.push(0xFF);
+        }
+    }
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(version);
+}
+
 /// The smallest internal key after every version of `logical`.
 pub fn after_all_versions(logical: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(logical.len() + 1 + VERSION_LEN);
