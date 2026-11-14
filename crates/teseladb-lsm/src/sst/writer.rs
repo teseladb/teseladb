@@ -220,6 +220,18 @@ impl TableWriter {
         self.note(ikey);
     }
 
+    /// Adds an old version to a history file, whose next newer version `newer` (internal key and
+    /// value) is a `Put` with its value in line: it goes as a delta against it when that is
+    /// smaller (FR-035).
+    pub(crate) fn add_old(&mut self, ikey: &[u8], kind: Kind, value: &[u8], newer: (&[u8], &[u8])) {
+        self.open_block(ikey, value.len());
+        if let Some(z) = &mut self.zones {
+            z.add(ikey, kind, Some(value));
+        }
+        self.data.add_old(ikey, kind, value, newer);
+        self.note(ikey);
+    }
+
     /// Adds a version whose value is in value file `file` at `r` (FR-034); the reference's slot
     /// is the file's place among those this file refers to.
     pub(crate) fn add_ref(&mut self, ikey: &[u8], kind: Kind, file: u64, r: &ValueRef) {

@@ -350,3 +350,105 @@ fn old_versions_take_the_bytes_of_their_changes() {
         assert!(rows.iter().enumerate().all(|(i, r)| r.3 == document(i as u64, at)), "at {at}");
     }
 }
+
+/// A stored document of about 300 bytes at `version` ([`document`] with the tag of a document,
+/// which the threshold treats as a value, not as a record of history).
+fn stored_doc(i: u64, version: u64) -> Vec<u8> {
+    let mut d = document(i, version);
+    d[0] = teseladb_lsm::DOCUMENT_VALUE;
+    d
+}
+
+/// The versions of every key between two marks, newest first, with their values.
+fn between(lsm: &mut Lsm, disk: &mut MemDisk, (from, to): (u64, u64)) -> Vec<(Vec<u8>, u64)> {
+    let view = lsm.view();
+    let mut s = view.scan_time(b"k", b"l", ts(from, 0), ts(to, 0));
+    let mut seen = Vec::new();
+    loop {
+        match s.next(lsm) {
+            Step::Item(i) => seen.push((i.value.to_vec(), i.ts.physical)),
+            Step::Miss(_) => {
+                lsm.run_io(disk, Nanos::ZERO);
+            }
+            Step::Done => return seen,
+            Step::Failed(e) => panic!("{e}"),
+        }
+    }
+}
+
+/// Every version of `versions` reads whole at its mark: by key, forward, backward, between
+/// marks and on a cold cache.
+fn every_version_reads_whole(
+    cfg: &LsmConfig,
+    lsm: &mut Lsm,
+    disk: &mut MemDisk,
+    versions: std::ops::RangeInclusive<u64>,
+) {
+    let view = lsm.view();
+    for at in versions.clone() {
+        let rows = scan(lsm, disk, &view, b"k", b"l", ts(at, 0));
+        assert_eq!(rows.len() as u64, KEYS, "at {at}");
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!((r.1, &r.3), (ts(at, 0), &stored_doc(i as u64, at)), "at {at}");
+        }
+        let back = scan_back(lsm, disk, &view, b"k", b"l", ts(at, 0));
+        assert_eq!(back[0].3, stored_doc(KEYS - 1, at), "backward at {at}");
+        let one = get(lsm, disk, &view, &key(7), ts(at, 0)).expect("a version");
+        assert_eq!((one.1, one.3), (ts(at, 0), stored_doc(7, at)));
+        let (cold, _) = cold_scan(cfg, disk, at);
+        assert!(cold.iter().enumerate().all(|(i, r)| r.3 == stored_doc(i as u64, at)), "at {at}");
+    }
+    let (from, to) = (*versions.start(), *versions.end());
+    let seen = between(lsm, disk, (from - 1, to));
+    let want: Vec<(Vec<u8>, u64)> =
+        (0..KEYS).flat_map(|i| (from..=to).rev().map(move |v| (stored_doc(i, v), v))).collect();
+    assert_eq!(seen, want);
+}
+
+/// FR-035: the first old version of each key, whose next newer version is in the data file, is
+/// a delta against it too. It reads whole after the flush, after a compaction that rewrites the
+/// pair, after a restart and after the threshold frees the oldest versions.
+#[test]
+fn the_first_old_version_of_a_key_is_a_delta_against_its_file() {
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut index = 0;
+    let mut write = |lsm: &mut Lsm, disk: &mut MemDisk, versions: std::ops::RangeInclusive<u64>| {
+        for version in versions {
+            for i in 0..KEYS {
+                index += 1;
+                lsm.put(G, index, &key(i), ts(version, 0), &stored_doc(i, version)).unwrap();
+            }
+        }
+        lsm.flush();
+        lsm.run_io(disk, Nanos::ZERO);
+    };
+    // One old version per key: before, each went whole.
+    write(&mut lsm, &mut disk, 1..=2);
+    compact(&mut lsm, &mut disk);
+    let m = lsm.metrics();
+    assert!(m.history_files >= 1, "{m:?}");
+    // Whole, the old versions alone would take this, besides the file's filter, properties,
+    // index and footer pages.
+    let whole = KEYS * 300;
+    assert!(m.history_bytes < whole, "{} bytes of history for {whole}", m.history_bytes);
+    every_version_reads_whole(&cfg, &mut lsm, &mut disk, 1..=2);
+    // Newer versions in a flush with its own history, then a compaction of both pairs.
+    write(&mut lsm, &mut disk, 3..=5);
+    every_version_reads_whole(&cfg, &mut lsm, &mut disk, 1..=5);
+    compact(&mut lsm, &mut disk);
+    every_version_reads_whole(&cfg, &mut lsm, &mut disk, 1..=5);
+    let before = lsm.metrics();
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    assert_eq!(lsm.metrics().history_bytes, before.history_bytes);
+    every_version_reads_whole(&cfg, &mut lsm, &mut disk, 1..=5);
+    // The threshold frees the versions below 3: the rest keep their bases.
+    lsm.set_gc_thresholds(GcTable::new(vec![(b"k".to_vec(), b"l".to_vec(), ts(3, 0))]));
+    compact(&mut lsm, &mut disk);
+    lsm.publish();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    every_version_reads_whole(&cfg, &mut lsm, &mut disk, 3..=5);
+    assert!(lsm.metrics().history_bytes < before.history_bytes);
+}

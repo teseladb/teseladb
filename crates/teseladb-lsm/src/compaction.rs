@@ -402,6 +402,19 @@ enum Val {
     Ref(Arc<Table>, ValueRef),
 }
 
+/// Where the entry an export takes is from its interval and timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outside {
+    /// In the interval, at or below the timestamp: it travels.
+    In,
+    /// Before the interval's start.
+    Before,
+    /// At or past the interval's end: nothing after it in its file travels.
+    Past,
+    /// In the interval, past the timestamp.
+    Later,
+}
+
 /// What the read in flight is for.
 #[derive(Debug)]
 enum Reading {
@@ -461,6 +474,9 @@ pub(crate) struct CompactJob {
     for_ingest: bool,
     /// A reference that points nowhere it says, found while taking a version.
     broken: Option<LsmError>,
+    /// The logical key the inputs are at and the values of its `Put`s passed so far, by
+    /// timestamp: the bases of the history's deltas that name one (FR-035).
+    bases: (Vec<u8>, Vec<(Hlc, Bytes)>),
 }
 
 impl CompactJob {
@@ -515,6 +531,7 @@ impl CompactJob {
             passed_cuts: 0,
             for_ingest: false,
             broken: None,
+            bases: (Vec::new(), Vec::new()),
         }
     }
 
@@ -701,6 +718,9 @@ impl CompactJob {
         };
         let versions = std::mem::take(&mut self.versions);
         let mut first = true;
+        // The version written just before, when it is a `Put` with its value in line: the base
+        // of the next one's delta in the history file (FR-035).
+        let mut newer: Option<(Vec<u8>, Bytes)> = None;
         for ((c, value), stays) in versions.into_iter().zip(keep) {
             if !stays {
                 continue;
@@ -746,11 +766,18 @@ impl CompactJob {
                 Some((_, h)) if apart => h,
                 _ => &mut o.writer,
             };
-            match (&stored, &value) {
-                (Some((file, r)), _) => w.add_ref(&ikey, c.kind, *file, r),
-                (None, Val::Inline(v)) => w.add(&ikey, c.kind, v),
-                (None, Val::Ref(..)) => unreachable!("a reference is stored as one"),
+            match (&stored, &value, &newer) {
+                (Some((file, r)), _, _) => w.add_ref(&ikey, c.kind, *file, r),
+                (None, Val::Inline(v), Some((nkey, nvalue))) if apart => {
+                    w.add_old(&ikey, c.kind, v, (nkey, nvalue));
+                }
+                (None, Val::Inline(v), _) => w.add(&ikey, c.kind, v),
+                (None, Val::Ref(..), _) => unreachable!("a reference is stored as one"),
             }
+            newer = match (&stored, &value) {
+                (None, Val::Inline(v)) if c.kind == Kind::Put => Some((ikey.clone(), v.clone())),
+                _ => None,
+            };
             if let (Some(t), Val::Inline(v), None) = (&mut self.training, &value, &stored) {
                 t.note(&key, v);
             }
@@ -772,6 +799,33 @@ impl CompactJob {
     /// Whether the output in hand sends a version of `kind` with `value` to its value file.
     fn out_wants(&self, kind: Kind, value: &[u8]) -> bool {
         crate::sst::value::separates(self.separation, kind, value)
+    }
+
+    /// Gives the entry lane `i` is at its base when its value is a delta against a version
+    /// elsewhere, one of its key the inputs passed already, and keeps its value when it may be
+    /// the base of one after it (FR-035).
+    fn give_base(&mut self, i: usize) -> Result<(), LsmError> {
+        let lane = &mut self.lanes[i];
+        let c = lane.cur.as_mut().expect("has an entry");
+        let (logical, ts) = entry::split(c.key());
+        if self.bases.0 != logical {
+            self.bases.0 = logical.to_vec();
+            self.bases.1.clear();
+        }
+        // Versions of a key come newest first, so the base of a delta came before it.
+        if let Some(base) = c.base() {
+            let at = entry::split(&base).1;
+            let found = self.bases.1.iter().rev().find(|(t, _)| *t == at);
+            let value = found.ok_or_else(|| corrupt(&lane.table, 0))?.1.clone();
+            c.resolve(&value).map_err(|_| corrupt(&lane.table, 0))?;
+        }
+        if c.pending().is_some() {
+            return Err(corrupt(&lane.table, 0));
+        }
+        if c.kind() == Kind::Put && !c.is_ref() {
+            self.bases.1.push((ts, c.value()));
+        }
+        Ok(())
     }
 
     /// Queues the read of the value of the version just taken, internal key `ikey`, when it is
@@ -848,20 +902,34 @@ impl CompactJob {
                 self.stage = Stage::Edit;
                 return Ok(());
             };
-            if let Some(spec) = &self.export {
+            // An export passes over what is outside its interval before giving bases: a version
+            // there may be a delta against one it never reads, the lane of its data file closed
+            // at the end or opened after the start (FR-035). A version past its timestamp is
+            // passed over too, after it, since it is the base of older ones that travel.
+            let outside = self.export.as_ref().map(|spec| {
                 let c = self.lanes[i].cur.as_ref().expect("has an entry");
                 let (logical, ts) = entry::split(c.key());
-                if logical >= spec.end.as_slice() {
-                    let lane = &mut self.lanes[i];
-                    (lane.cur, lane.next_block) = (None, lane.table.blocks());
-                    lane.blocks.clear();
-                    continue;
+                match (logical >= spec.end.as_slice(), logical < spec.start.as_slice()) {
+                    (true, _) => Outside::Past,
+                    (_, true) => Outside::Before,
+                    _ if ts > spec.ts => Outside::Later,
+                    _ => Outside::In,
                 }
-                if logical < spec.start.as_slice() || ts > spec.ts {
-                    taken += c.key().len() + c.value().len();
-                    self.lanes[i].advance()?;
-                    continue;
-                }
+            });
+            if outside == Some(Outside::Past) {
+                let lane = &mut self.lanes[i];
+                (lane.cur, lane.next_block) = (None, lane.table.blocks());
+                lane.blocks.clear();
+                continue;
+            }
+            if outside != Some(Outside::Before) {
+                self.give_base(i)?;
+            }
+            if matches!(outside, Some(Outside::Before | Outside::Later)) {
+                let c = self.lanes[i].cur.as_ref().expect("has an entry");
+                taken += c.key().len() + c.value_slice().len();
+                self.lanes[i].advance()?;
+                continue;
             }
             let c = self.lanes[i].cur.as_ref().expect("has an entry");
             let (logical, ts) = entry::split(c.key());
