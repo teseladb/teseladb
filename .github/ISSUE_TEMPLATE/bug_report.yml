@@ -1,0 +1,34 @@
+name: Bug report
+description: TeselaDB answers, stores or behaves differently from what its documentation says.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `teseladb --version`.
+      placeholder: teseladb 0.1.13
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, CPU architecture, and binary or Docker image.
+      placeholder: Ubuntu 24.04, x86_64, Docker image
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands, the driver and its version, and the data needed to see the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+      description: Paste the answer or the log lines you got, and what the documentation says.
+    validations:
+      required: true

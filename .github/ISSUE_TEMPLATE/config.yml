@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/teseladb/teseladb/security/advisories/new
+    about: Report security problems privately, never in a public issue.
+  - name: Documentation
+    url: https://teseladb.com/docs
+    about: Installation, configuration and the differences with the protocol you already know.
