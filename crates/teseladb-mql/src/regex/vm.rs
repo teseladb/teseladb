@@ -50,16 +50,37 @@ struct Frame {
 }
 
 enum Entry {
-    Choice { pc: usize, pos: usize, alt: Option<usize> },
-    Slot { slot: usize, old: Option<usize> },
-    Counter { slot: usize, count: u32, start: usize },
-    Counters { counters: Vec<u32>, starts: Vec<usize> },
+    Choice {
+        pc: usize,
+        pos: usize,
+        alt: Option<usize>,
+    },
+    Slot {
+        slot: usize,
+        old: Option<usize>,
+    },
+    Counter {
+        slot: usize,
+        count: u32,
+        start: usize,
+    },
+    Counters {
+        counters: Vec<u32>,
+        starts: Vec<usize>,
+    },
     Barrier,
     AltStart(usize),
-    Verb { pc: usize, pos: usize, depth: usize },
+    Verb {
+        pc: usize,
+        pos: usize,
+        depth: usize,
+    },
     Mark,
-    CallPushed { depth: usize },
-    CallPopped(Box<Frame>),
+    CallPushed {
+        depth: usize,
+    },
+    /// A call that returned: its frame is the last of [`Thread::popped`].
+    CallPopped,
 }
 
 /// The state shared by a match and its lookarounds.
@@ -70,6 +91,7 @@ pub(super) struct Machine<'a> {
     search_start: usize,
 }
 
+#[derive(Default)]
 struct Thread {
     slots: Vec<Option<usize>>,
     counters: Vec<u32>,
@@ -80,6 +102,119 @@ struct Thread {
     marks: Vec<(usize, usize)>,
     /// Inside a lookaround, which `(*THEN)` cannot reach beyond.
     in_look: bool,
+    /// The records [`drop_choices`] keeps, while it drops the others.
+    kept: Vec<Entry>,
+    /// The frames of the calls that returned, one per [`Entry::CallPopped`] of the stack, in
+    /// the same order: records leave the stack last first, as undo needs them.
+    popped: Vec<Frame>,
+}
+
+/// The vectors a thread of the program keeps from match to match, so that matching again
+/// allocates nothing once they have grown (the analyzers of 011 FR-028 match every token).
+#[derive(Default)]
+struct Spare {
+    threads: Vec<Thread>,
+    slots: Vec<Vec<Option<usize>>>,
+    counters: Vec<Vec<u32>>,
+    starts: Vec<Vec<usize>>,
+}
+
+/// The most vectors of each kind kept; a match rarely holds more at once.
+const SPARE: usize = 64;
+
+thread_local! {
+    static SPARES: std::cell::RefCell<Spare> = std::cell::RefCell::new(Spare::default());
+}
+
+/// Runs `f` on the spare vectors of this thread; `None` once the thread has dropped them.
+fn spare<R>(f: impl FnOnce(&mut Spare) -> R) -> Option<R> {
+    SPARES.try_with(|s| f(&mut s.borrow_mut())).ok()
+}
+
+/// Takes a spare vector of `list`, emptied, or a new one.
+fn take<T>(list: impl FnOnce(&mut Spare) -> &mut Vec<Vec<T>>) -> Vec<T> {
+    let mut v = spare(|s| list(s).pop()).flatten().unwrap_or_default();
+    v.clear();
+    v
+}
+
+/// Gives `v` back to `list`.
+fn give<T>(v: Vec<T>, list: impl FnOnce(&mut Spare) -> &mut Vec<Vec<T>>) {
+    if v.capacity() == 0 {
+        return;
+    }
+    spare(|s| {
+        let l = list(s);
+        if l.len() < SPARE {
+            l.push(v);
+        }
+    });
+}
+
+/// A spare vector of capture slots.
+pub(super) fn take_slots() -> Vec<Option<usize>> {
+    take(|s| &mut s.slots)
+}
+
+/// Gives a vector of capture slots back.
+pub(super) fn give_slots(v: Vec<Option<usize>>) {
+    give(v, |s| &mut s.slots);
+}
+
+/// A copy of `items` in a spare vector of `list`.
+fn copy<T: Copy>(items: &[T], list: impl FnOnce(&mut Spare) -> &mut Vec<Vec<T>>) -> Vec<T> {
+    let mut v = take(list);
+    v.extend_from_slice(items);
+    v
+}
+
+/// Gives back the vectors of `frame`.
+fn give_frame(frame: Frame) {
+    give(frame.slots, |s| &mut s.slots);
+    give(frame.counters, |s| &mut s.counters);
+    give(frame.starts, |s| &mut s.starts);
+}
+
+/// Gives back the vectors a record holds.
+fn give_entry(e: Entry) {
+    if let Entry::Counters { counters, starts } = e {
+        give(counters, |s| &mut s.counters);
+        give(starts, |s| &mut s.starts);
+    }
+}
+
+impl Thread {
+    /// A spare thread with `slots` and `counters` counters at zero.
+    fn take(slots: &[Option<usize>], counters: usize, in_look: bool) -> Thread {
+        let mut t = spare(|s| s.threads.pop()).flatten().unwrap_or_default();
+        if t.slots.capacity() == 0 {
+            t.slots = take_slots();
+        }
+        t.slots.clear();
+        t.slots.extend_from_slice(slots);
+        t.counters.clear();
+        t.counters.resize(counters, 0);
+        t.starts.clear();
+        t.starts.resize(counters, 0);
+        t.in_look = in_look;
+        t
+    }
+
+    /// Gives the thread and the vectors its records and calls hold back.
+    fn give(mut self) {
+        for e in self.stack.drain(..) {
+            give_entry(e);
+        }
+        for f in self.calls.drain(..).chain(self.popped.drain(..)) {
+            give_frame(f);
+        }
+        self.marks.clear();
+        spare(|s| {
+            if s.threads.len() < SPARE {
+                s.threads.push(self);
+            }
+        });
+    }
 }
 
 /// What backtracking found.
@@ -108,78 +243,97 @@ impl<'a> Machine<'a> {
         Machine { prog, text, steps: 0, search_start: 0 }
     }
 
-    /// The first match at or after `from` whose start `may_start` accepts: the capture slots,
-    /// 0 and 1 being the whole match.
+    /// The first match at or after `from` whose start `may_start` accepts: whether there is
+    /// one, with its capture slots in `out`, 0 and 1 being the whole match.
     pub(super) fn search(
         &mut self,
         from: usize,
         groups: usize,
         anchored: bool,
         may_start: impl Fn(usize) -> bool,
-    ) -> Run<Option<Vec<Option<usize>>>> {
+        out: &mut Vec<Option<usize>>,
+    ) -> Run<bool> {
         let mut start = from;
         self.search_start = from;
-        loop {
+        let mut slots = take_slots();
+        let found = loop {
             let mut next = None;
             if may_start(start) {
-                let mut slots = vec![None; self.prog.slots];
+                slots.clear();
+                slots.resize(self.prog.slots, None);
                 slots[0] = Some(start);
-                match self.run(0, start, slots, None, false)? {
-                    RunEnd::Matched(mut slots, end) => {
-                        slots[1] = Some(end);
-                        slots.truncate(2 * (groups + 1));
-                        return Ok(Some(slots));
+                match self.run(0, start, &slots, None, false) {
+                    Err(e) => {
+                        give_slots(slots);
+                        return Err(e);
                     }
-                    RunEnd::Aborted(Abort::Commit) => return Ok(None),
-                    RunEnd::Aborted(Abort::Skip(to)) if to > start => next = Some(to),
-                    RunEnd::Failed | RunEnd::Aborted(_) => {}
+                    Ok(RunEnd::Matched(found, end)) => {
+                        out.clear();
+                        out.extend_from_slice(&found);
+                        give_slots(found);
+                        out[1] = Some(end);
+                        out.truncate(2 * (groups + 1));
+                        break true;
+                    }
+                    Ok(RunEnd::Aborted(Abort::Commit)) => break false,
+                    Ok(RunEnd::Aborted(Abort::Skip(to))) if to > start => next = Some(to),
+                    Ok(RunEnd::Failed | RunEnd::Aborted(_)) => {}
                 }
             }
             if anchored {
-                return Ok(None);
+                break false;
             }
             start = match (next, self.text[start..].chars().next()) {
                 (Some(to), _) => to,
                 (None, Some(c)) => start + c.len_utf8(),
-                (None, None) => return Ok(None),
+                (None, None) => break false,
             };
-        }
+        };
+        give_slots(slots);
+        Ok(found)
     }
 
-    /// Runs from `pc` at `pos`; at [`Inst::Match`] or at a [`Inst::LookEnd`] (ending at
-    /// `look_end` when given) returns the slots and the position.
+    /// Runs from `pc` at `pos` with `slots`; at [`Inst::Match`] or at a [`Inst::LookEnd`]
+    /// (ending at `look_end` when given) returns the slots, in a vector to give back with
+    /// [`give_slots`], and the position.
     fn run(
         &mut self,
         pc: usize,
         pos: usize,
-        slots: Vec<Option<usize>>,
+        slots: &[Option<usize>],
         look_end: Option<usize>,
         in_look: bool,
     ) -> Run<RunEnd> {
-        let n = self.prog.counters;
-        let mut t = Thread {
-            slots,
-            counters: vec![0; n],
-            starts: vec![0; n],
-            stack: Vec::new(),
-            calls: Vec::new(),
-            marks: Vec::new(),
-            in_look,
-        };
+        let mut t = Thread::take(slots, self.prog.counters, in_look);
+        let end = self.run_thread(&mut t, pc, pos, look_end);
+        t.give();
+        end
+    }
+
+    /// [`Machine::run`] on thread `t`.
+    fn run_thread(
+        &mut self,
+        t: &mut Thread,
+        pc: usize,
+        pos: usize,
+        look_end: Option<usize>,
+    ) -> Run<RunEnd> {
         let (mut pc, mut pos) = (pc, pos);
         loop {
             self.steps += 1;
             if self.steps > MAX_STEPS || t.stack.len() > MAX_STACK {
                 return Err(MatchError::Limit);
             }
-            let back = match self.step(&mut t, pc, pos, look_end)? {
+            let back = match self.step(t, pc, pos, look_end)? {
                 Step::Go(npc, npos) => Back::Resume(npc, npos),
-                Step::Fail => self.backtrack(&mut t),
-                Step::Done(end) => return Ok(RunEnd::Matched(t.slots, end)),
+                Step::Fail => self.backtrack(t),
+                Step::Done(end) => {
+                    return Ok(RunEnd::Matched(copy(&t.slots, |s| &mut s.slots), end));
+                }
                 // A verb that acts from inside an assertion only fails the call it is in.
                 Step::Aborted(_) if !t.calls.is_empty() => {
-                    fail_call(&mut t);
-                    self.backtrack(&mut t)
+                    fail_call(t);
+                    self.backtrack(t)
                 }
                 Step::Aborted(a) => Back::Aborted(a),
             };
@@ -287,13 +441,14 @@ impl<'a> Machine<'a> {
             ),
             Inst::CondFixed { holds, no } => go(*holds, *no),
             Inst::Call { group, target } => {
-                t.calls.push(Frame {
+                let frame = Frame {
                     group: *group,
                     ret: pc + 1,
-                    slots: t.slots.clone(),
-                    counters: t.counters.clone(),
-                    starts: t.starts.clone(),
-                });
+                    slots: copy(&t.slots, |s| &mut s.slots),
+                    counters: copy(&t.counters, |s| &mut s.counters),
+                    starts: copy(&t.starts, |s| &mut s.starts),
+                };
+                t.calls.push(frame);
                 t.stack.push(Entry::CallPushed { depth: t.calls.len() });
                 Step::Go(*target, pos)
             }
@@ -338,18 +493,21 @@ impl<'a> Machine<'a> {
             Inst::LookRestore(slot) => Step::Go(pc + 1, t.slots[*slot].unwrap_or(pos)),
             Inst::BehindStart { slot, min, max } => {
                 set_slot(t, *slot, Some(pos));
-                let starts: Vec<usize> = char_starts_before(text, pos, *max)
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(len, _)| len >= min)
-                    .map(|(_, s)| s)
-                    .collect();
+                let starts = char_starts_before(text, pos, *max);
+                let kept = starts.iter().enumerate().filter(|(len, _)| len >= min).count();
                 // The longest body first, as PCRE2 does.
-                for &s in starts.iter().rev().skip(1).rev() {
+                let mut pushed = 0;
+                for (_, &s) in starts.iter().enumerate().filter(|(len, _)| len >= min) {
+                    pushed += 1;
+                    if pushed == kept {
+                        break;
+                    }
                     t.stack.push(Entry::Choice { pc: pc + 1, pos: s, alt: None });
                 }
-                match starts.last() {
-                    Some(&s) => Step::Go(pc + 1, s),
+                let last = starts.iter().enumerate().rfind(|(len, _)| len >= min).map(|(_, &s)| s);
+                give(starts, |s| &mut s.starts);
+                match last {
+                    Some(s) => Step::Go(pc + 1, s),
                     None => Step::Fail,
                 }
             }
@@ -577,41 +735,54 @@ impl<'a> Machine<'a> {
         if look.behind {
             let starts = char_starts_before(self.text, pos, look.max);
             // The longest body first, as PCRE2 does.
-            for (len, start) in starts.into_iter().enumerate().rev() {
+            for (len, &start) in starts.iter().enumerate().rev() {
                 if len < look.min {
                     continue;
                 }
-                found = self.run(look.body, start, t.slots.clone(), Some(pos), true)?;
+                found = match self.run(look.body, start, &t.slots, Some(pos), true) {
+                    Ok(found) => found,
+                    Err(e) => {
+                        give(starts, |s| &mut s.starts);
+                        return Err(e);
+                    }
+                };
                 if !matches!(found, RunEnd::Failed) {
                     break;
                 }
             }
+            give(starts, |s| &mut s.starts);
         } else {
-            found = self.run(look.body, pos, t.slots.clone(), None, true)?;
+            found = self.run(look.body, pos, &t.slots, None, true)?;
         }
         Ok(match (found, look.negate) {
             (RunEnd::Matched(slots, _), false) => {
-                for (i, v) in slots.into_iter().enumerate() {
-                    if i > 1 && t.slots[i] != v {
-                        set_slot(t, i, v);
-                    }
-                }
+                keep_captures(t, slots);
                 Holds::Yes
             }
             (RunEnd::Aborted(a), false) if !condition => Holds::Aborted(a),
             // A negative condition that fails keeps what its assertion captured.
             (RunEnd::Matched(slots, _), true) if condition => {
-                for (i, v) in slots.into_iter().enumerate() {
-                    if i > 1 && t.slots[i] != v {
-                        set_slot(t, i, v);
-                    }
-                }
+                keep_captures(t, slots);
                 Holds::No
             }
             (RunEnd::Failed | RunEnd::Aborted(_), true) => Holds::Yes,
+            (RunEnd::Matched(slots, _), _) => {
+                give_slots(slots);
+                Holds::No
+            }
             _ => Holds::No,
         })
     }
+}
+
+/// Sets the captures of a lookaround that holds, and gives its slots back.
+fn keep_captures(t: &mut Thread, slots: Vec<Option<usize>>) {
+    for (i, &v) in slots.iter().enumerate() {
+        if i > 1 && t.slots[i] != v {
+            set_slot(t, i, v);
+        }
+    }
+    give_slots(slots);
 }
 
 fn set_slot(t: &mut Thread, slot: usize, v: Option<usize>) {
@@ -638,11 +809,12 @@ fn ret(t: &mut Thread) -> usize {
             set_slot(t, i, frame.slots[i]);
         }
     }
-    let counters = std::mem::replace(&mut t.counters, frame.counters.clone());
-    let starts = std::mem::replace(&mut t.starts, frame.starts.clone());
+    let counters = std::mem::replace(&mut t.counters, copy(&frame.counters, |s| &mut s.counters));
+    let starts = std::mem::replace(&mut t.starts, copy(&frame.starts, |s| &mut s.starts));
     t.stack.push(Entry::Counters { counters, starts });
     let to = frame.ret;
-    t.stack.push(Entry::CallPopped(Box::new(frame)));
+    t.popped.push(frame);
+    t.stack.push(Entry::CallPopped);
     to
 }
 
@@ -667,16 +839,22 @@ fn undo(t: &mut Thread, e: Entry) {
             t.starts[slot] = start;
         }
         Entry::Counters { counters, starts } => {
-            t.counters = counters;
-            t.starts = starts;
+            give(std::mem::replace(&mut t.counters, counters), |s| &mut s.counters);
+            give(std::mem::replace(&mut t.starts, starts), |s| &mut s.starts);
         }
         Entry::Mark => {
             t.marks.pop();
         }
         Entry::CallPushed { .. } => {
-            t.calls.pop();
+            if let Some(f) = t.calls.pop() {
+                give_frame(f);
+            }
         }
-        Entry::CallPopped(frame) => t.calls.push(*frame),
+        Entry::CallPopped => {
+            if let Some(frame) = t.popped.pop() {
+                t.calls.push(frame);
+            }
+        }
         Entry::Choice { .. } | Entry::Verb { .. } | Entry::Barrier | Entry::AltStart(_) => {}
     }
 }
@@ -698,23 +876,25 @@ fn cut_to(t: &mut Thread, marker: impl Fn(&Entry) -> bool) {
 
 /// Drops the choices, verbs and marks from `at` on; undo records stay.
 fn drop_choices(t: &mut Thread, at: usize) {
-    let mut kept = Vec::new();
+    let Thread { stack, kept, marks: path, .. } = t;
+    kept.clear();
     let mut marks = 0;
-    for e in t.stack.drain(at..) {
+    for e in stack.drain(at..) {
         match e {
             Entry::Choice { .. } | Entry::Verb { .. } => {}
             Entry::Mark => marks += 1,
             e => kept.push(e),
         }
     }
-    let n = t.marks.len().saturating_sub(marks);
-    t.marks.truncate(n);
-    t.stack.extend(kept);
+    let n = path.len().saturating_sub(marks);
+    path.truncate(n);
+    stack.append(kept);
 }
 
 /// Byte positions of the `0..=max` characters before `pos`, nearest first.
 fn char_starts_before(text: &str, pos: usize, max: usize) -> Vec<usize> {
-    let mut out = vec![pos];
+    let mut out = take(|s| &mut s.starts);
+    out.push(pos);
     let mut p = pos;
     for c in text[..pos].chars().rev().take(max) {
         p -= c.len_utf8();

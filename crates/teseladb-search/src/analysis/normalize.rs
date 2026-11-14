@@ -146,6 +146,13 @@ pub fn normalize_char(c: char, form: Form, out: &mut Vec<char>) {
 
 /// NFKC_Casefold: each character mapped by its NFKC_Casefold value, then NFC.
 pub fn nfkc_casefold(text: &str) -> String {
+    let mut out = String::new();
+    nfkc_casefold_into(text, &mut out);
+    out
+}
+
+/// Appends [`nfkc_casefold`] of `text` to `out`.
+pub fn nfkc_casefold_into(text: &str, out: &mut String) {
     let mut mapped = Chars::new();
     for c in text.chars() {
         match casefold(c) {
@@ -157,7 +164,7 @@ pub fn nfkc_casefold(text: &str) -> String {
     decompose(mapped.iter().copied(), false, &mut decomposed);
     let mut composed = Chars::new();
     recompose(&decomposed, &mut composed);
-    composed.iter().collect()
+    out.extend(composed.iter());
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::analysis::props;
+use crate::analysis::scratch::{Pooled, Text};
 use crate::analysis::unicode::is_han;
 
 /// The cost of a character that starts no dictionary word.
@@ -43,19 +44,22 @@ impl Words {
 }
 
 /// The ends of the cheapest cut of `run` into dictionary words and single characters.
-fn cut(run: &[char], words: &Words) -> Vec<usize> {
+fn cut(run: &[char], words: &Words) -> Pooled<usize> {
     let n = run.len();
-    let mut best = vec![u32::MAX; n + 1];
-    let mut back = vec![0; n + 1];
+    let mut best: Pooled<u32> = Pooled::new();
+    best.resize(n + 1, u32::MAX);
+    let mut back: Pooled<usize> = Pooled::new();
+    back.resize(n + 1, 0);
     best[0] = 0;
+    let mut word = Text::new();
     for i in 0..n {
         if best[i] == u32::MAX {
             continue;
         }
-        let mut word = String::new();
+        word.clear();
         for j in i + 1..=n.min(i + words.longest) {
             word.push(run[j - 1]);
-            let cost = match words.cost.get(&word) {
+            let cost = match words.cost.get(word.as_str()) {
                 Some(&c) => c,
                 None if j == i + 1 => UNKNOWN_COST,
                 None => continue,
@@ -66,7 +70,7 @@ fn cut(run: &[char], words: &Words) -> Vec<usize> {
             }
         }
     }
-    let mut ends = Vec::new();
+    let mut ends: Pooled<usize> = Pooled::new();
     let mut j = n;
     while j > 0 {
         ends.push(j);
@@ -87,11 +91,10 @@ fn digit(c: char) -> bool {
 }
 
 /// The byte ranges of the tokens of `text`.
-pub fn smartcn_words(text: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+pub fn smartcn_words(text: &str, out: &mut impl FnMut(usize, usize)) {
+    let chars = Pooled::collect(text.char_indices());
     let at = |i: usize| chars.get(i).map_or(text.len(), |&(b, _)| b);
     let words = Words::get();
-    let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i].1;
@@ -110,17 +113,16 @@ pub fn smartcn_words(text: &str) -> Vec<(usize, usize)> {
             i += 1;
         }
         if is_han(c) {
-            let run: Vec<char> = chars[start..i].iter().map(|&(_, c)| c).collect();
+            let run = Pooled::collect(chars[start..i].iter().map(|&(_, c)| c));
             let mut from = 0;
-            for end in cut(&run, words) {
-                out.push((at(start + from), at(start + end)));
+            for &end in cut(&run, words).iter() {
+                out(at(start + from), at(start + end));
                 from = end;
             }
         } else {
-            out.push((at(start), at(i)));
+            out(at(start), at(i));
         }
     }
-    out
 }
 
 #[cfg(test)]
@@ -128,7 +130,9 @@ mod tests {
     use super::*;
 
     fn tokens(text: &str) -> Vec<&str> {
-        smartcn_words(text).into_iter().map(|(a, b)| &text[a..b]).collect()
+        let mut out = Vec::new();
+        smartcn_words(text, &mut |a, b| out.push(&text[a..b]));
+        out
     }
 
     #[test]

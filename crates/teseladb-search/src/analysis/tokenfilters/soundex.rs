@@ -16,6 +16,8 @@
 //! Each branch gives six digits, cut or padded with zeros; the filter emits each distinct code
 //! once.
 
+use crate::analysis::scratch::{Chars, Pooled};
+
 /// Codes of one chart entry: at the start, before a vowel, elsewhere. Each holds one or two
 /// alternatives; an empty string is "not coded".
 type Codes = [&'static [&'static str]; 3];
@@ -202,30 +204,53 @@ const CODE_LENGTH: usize = 6;
 /// Most branches followed for one token, so a long token of two-way letters stays bounded.
 const MAX_BRANCHES: usize = 1 << 10;
 
-/// One branch: the code so far and the last code read, empty after a letter not coded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One branch: where its code so far is in the codes of its generation, and the last code
+/// read, empty after a letter not coded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Branch {
-    code: String,
+    from: usize,
+    to: usize,
     last: &'static str,
 }
 
-/// The letters the coder reads, in uppercase and folded by [`FOLD`]; other characters are
-/// dropped.
-fn letters(text: &str) -> Vec<char> {
-    let mut out = Vec::with_capacity(text.len());
-    let upper = text.chars().flat_map(|c| match c {
-        // One `S`, not the two of its uppercase; the dotless `ı` is not an `I`.
-        'ß' => vec!['S'],
-        'ı' => vec!['ı'],
-        c => c.to_uppercase().collect(),
-    });
-    for c in upper.filter(|c| c.is_alphabetic()) {
+/// The branches of one step, with their codes written one after another in `codes`.
+#[derive(Default)]
+struct Generation {
+    branches: Pooled<Branch>,
+    codes: Pooled<u8>,
+}
+
+impl Generation {
+    fn code(&self, b: &Branch) -> &[u8] {
+        &self.codes[b.from..b.to]
+    }
+
+    fn clear(&mut self) {
+        self.branches.clear();
+        self.codes.clear();
+    }
+}
+
+/// Appends the letters the coder reads to `out`, in uppercase and folded by [`FOLD`]; other
+/// characters are dropped.
+fn letters(text: &str, out: &mut Vec<char>) {
+    let mut take = |c: char| {
+        if !c.is_alphabetic() {
+            return;
+        }
         match FOLD.iter().find(|&&(f, _)| f == c) {
             Some((_, to)) => out.extend(to.chars()),
             None => out.push(c),
         }
+    };
+    for c in text.chars() {
+        match c {
+            // One `S`, not the two of its uppercase; the dotless `ı` is not an `I`.
+            'ß' => take('S'),
+            'ı' => take('ı'),
+            c => c.to_uppercase().for_each(&mut take),
+        }
     }
-    out
 }
 
 /// The longest chart entry at the start of `rest`.
@@ -236,10 +261,14 @@ fn entry(rest: &[char]) -> Option<(usize, &'static Codes)> {
     })
 }
 
-/// The Daitch-Mokotoff codes of `text`.
-pub(super) fn daitch_mokotoff(text: &str) -> Vec<String> {
-    let letters = letters(text);
-    let mut branches = vec![Branch { code: String::new(), last: "" }];
+/// Gives `emit` each distinct Daitch-Mokotoff code of `text`, in order.
+pub(super) fn daitch_mokotoff_into(text: &str, emit: &mut impl FnMut(&str)) {
+    let mut letters_of = Chars::new();
+    letters(text, &mut letters_of);
+    let letters = &letters_of;
+    let mut branches = Generation::default();
+    branches.branches.push(Branch { from: 0, to: 0, last: "" });
+    let mut next = Generation::default();
     // The last letter of the previous chart entry: skipped letters do not change it.
     let mut previous: Option<char> = None;
     let mut i = 0;
@@ -256,35 +285,57 @@ pub(super) fn daitch_mokotoff(text: &str) -> Vec<String> {
             2
         };
         let alternatives = codes[place];
-        let mut next = Vec::with_capacity(branches.len() * alternatives.len());
-        for b in &branches {
-            for &code in alternatives.iter().take(MAX_BRANCHES / branches.len().max(1)) {
+        next.clear();
+        let count = branches.branches.len();
+        for b in branches.branches.iter() {
+            for &code in alternatives.iter().take(MAX_BRANCHES / count.max(1)) {
                 let separate = matches!(&letters[i..i + n], ['M', 'N'] | ['N', 'M'])
                     || matches!((previous, letters[i]), (Some('M'), 'N') | (Some('N'), 'M'));
-                let mut branch = Branch { code: b.code.clone(), last: code };
+                let from = next.codes.len();
+                next.codes.extend_from_slice(branches.code(b));
                 if separate || !b.last.ends_with(code) {
-                    branch.code.push_str(code);
+                    next.codes.extend_from_slice(code.as_bytes());
                 }
-                if !next.contains(&branch) {
-                    next.push(branch);
+                let branch = Branch { from, to: next.codes.len(), last: code };
+                let seen = next
+                    .branches
+                    .iter()
+                    .any(|o| o.last == branch.last && next.code(o) == next.code(&branch));
+                if seen {
+                    next.codes.truncate(from);
+                } else {
+                    next.branches.push(branch);
                 }
             }
         }
-        branches = next;
+        std::mem::swap(&mut branches, &mut next);
         previous = Some(letters[i + n - 1]);
         i += n;
     }
-    let mut out: Vec<String> = Vec::new();
-    for b in branches {
-        let mut code: String = b.code.chars().take(CODE_LENGTH).collect();
-        while code.len() < CODE_LENGTH {
-            code.push('0');
+    let mut emitted: Pooled<[u8; CODE_LENGTH]> = Pooled::new();
+    for b in branches.branches.iter() {
+        let mut code = [b'0'; CODE_LENGTH];
+        for (to, &from) in code.iter_mut().zip(branches.code(b)) {
+            *to = from;
         }
-        if !out.contains(&code) {
-            out.push(code);
+        if !emitted.contains(&code) {
+            emitted.push(code);
+            emit(std::str::from_utf8(&code).unwrap_or_default());
         }
     }
+}
+
+/// The Daitch-Mokotoff codes of `text`.
+#[cfg(test)]
+fn daitch_mokotoff(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    daitch_mokotoff_into(text, &mut |c| out.push(c.to_owned()));
     out
+}
+
+crate::analysis::scratch::pools! {
+    BRANCHES: Branch;
+    CODES: [u8; CODE_LENGTH];
 }
 
 #[cfg(test)]

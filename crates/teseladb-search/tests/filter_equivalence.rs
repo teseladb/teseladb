@@ -8,10 +8,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use teseladb_search::analysis::analyzer::{Analyzer, TermBuffer};
+use teseladb_search::analysis::morfologik::Language;
 use teseladb_search::analysis::normalize::Form;
 use teseladb_search::analysis::snowball::STEMMERS;
-use teseladb_search::analysis::tokenfilters::{Original, TokenFilter};
-use teseladb_search::analysis::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Tokenizer};
+use teseladb_search::analysis::tokenfilters::{DelimiterOptions, Matches, Original, TokenFilter};
+use teseladb_search::analysis::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Pattern, Tokenizer};
 
 const FINGERPRINTS: &str = include_str!("data/filter_fingerprints.txt");
 
@@ -380,4 +381,163 @@ fn every_stemmer_gives_the_stems_it_gave() {
 fn every_analyzer_cuts_sentences_as_it_did() {
     let texts: Vec<String> = SENTENCES.lines().map(str::to_owned).collect();
     compare(&fingerprints(&texts), SENTENCE_FINGERPRINTS);
+}
+
+/// The fingerprints of the tokenizers and filters that are not term by term, recorded as
+/// `FINGERPRINTS` were.
+const TOKEN_PATH_FINGERPRINTS: &str = include_str!("data/token_path_fingerprints.txt");
+
+/// Texts with addresses, URLs, hyphenated and camel-case words, digits and repeated tokens.
+const MIXED: &[&str] = &[
+    "Write to ana.lopez@example.com or see https://www.example.org/a/b?c=d#e and ftp://10.0.0.1:21/x",
+    "XMLHttpRequest wi-fi O'Neil's PowerShot500 SD500 3's 1,234.56 ab_cd foo--bar Straße's's",
+    "the the quick quick brown brown fox fox jumps over over the lazy dog dog",
+    "Schwarzenegger Moskowitz Peters Auerbach Lipshitz Kleinman Mintz Haber Topf Ohrbach",
+    "pociągów kobiety dziewczynami Warszawy ludziom людей києва книгами Москвы",
+    "日本語のテキスト 한국어 문장 中文分词 カタカナ ﾊﾝｶｸ ＦＵＬＬ　ＷＩＤＴＨ",
+    "x.y.com y.comx 192.168.1.255 mailto:x@y.z user@host. user@localhost visit example.com today",
+];
+
+/// The analyzers of the tokenizers and filters that are not term by term, by a name of their own.
+fn token_path_analyzers() -> Vec<(String, Analyzer)> {
+    let pattern = |p: &str| Pattern::new(p).unwrap();
+    let all_options = DelimiterOptions {
+        generate_word_parts: true,
+        generate_number_parts: true,
+        concatenate_words: true,
+        concatenate_numbers: true,
+        concatenate_all: true,
+        preserve_original: true,
+        split_on_case_change: true,
+        split_on_numerics: true,
+        stem_english_possessive: true,
+        ignore_keywords: true,
+    };
+    let tokenizers: Vec<(&str, Tokenizer)> = vec![
+        ("nGram", Tokenizer::NGram { min: 1, max: 3 }),
+        ("edgeGram", Tokenizer::EdgeGram { min: 2, max: 5 }),
+        ("uaxUrlEmail", Tokenizer::UaxUrlEmail { max_token_length: DEFAULT_MAX_TOKEN_LENGTH }),
+        ("uaxUrlEmail10", Tokenizer::UaxUrlEmail { max_token_length: 10 }),
+        ("regexSplit", Tokenizer::RegexSplit { pattern: pattern(r"[\s,.]+") }),
+        (
+            "regexCaptureGroup",
+            Tokenizer::RegexCaptureGroup { pattern: pattern(r"(\p{L}+)(?=\s|$)|(\d+)"), group: 1 },
+        ),
+        (
+            "regexCaptureWhole",
+            Tokenizer::RegexCaptureGroup { pattern: pattern(r"(?<=\s)\w{2,4}\b"), group: 0 },
+        ),
+        ("regexEmptyMatches", Tokenizer::RegexSplit { pattern: pattern(r"x*") }),
+    ];
+    let mut out: Vec<(String, Analyzer)> = tokenizers
+        .into_iter()
+        .map(|(name, tokenizer)| {
+            let a = Analyzer { char_filters: vec![], tokenizer, token_filters: vec![] };
+            (format!("tokenizer-{name}"), a)
+        })
+        .collect();
+    let filters: Vec<(&str, Vec<TokenFilter>)> = vec![
+        ("asciiFoldingInclude", vec![TokenFilter::AsciiFolding { original: Original::Include }]),
+        (
+            "soundexInclude",
+            vec![TokenFilter::DaitchMokotoffSoundex { original: Original::Include }],
+        ),
+        ("soundexOmit", vec![TokenFilter::DaitchMokotoffSoundex { original: Original::Omit }]),
+        (
+            "edgeGramInclude",
+            vec![TokenFilter::EdgeGram { min: 2, max: 4, out_of_bounds: Original::Include }],
+        ),
+        ("nGramOmit", vec![TokenFilter::NGram { min: 1, max: 2, out_of_bounds: Original::Omit }]),
+        (
+            "nGramInclude",
+            vec![TokenFilter::NGram { min: 2, max: 3, out_of_bounds: Original::Include }],
+        ),
+        ("keywordRepeat", vec![TokenFilter::KeywordRepeat]),
+        ("limitTokenCount", vec![TokenFilter::LimitTokenCount { max: 7 }]),
+        ("morfologikPolish", vec![TokenFilter::Morfologik { language: Language::Polish }]),
+        ("morfologikUkrainian", vec![TokenFilter::Morfologik { language: Language::Ukrainian }]),
+        ("cjkBigram", vec![TokenFilter::CjkWidth, TokenFilter::CjkBigram]),
+        ("removeDuplicates", vec![TokenFilter::KeywordRepeat, TokenFilter::RemoveDuplicates]),
+        ("shingle", vec![TokenFilter::Shingle { min: 2, max: 3 }]),
+        (
+            "shingleGaps",
+            vec![
+                TokenFilter::Stopword {
+                    tokens: ["the", "over"].iter().map(|s| s.to_string()).collect(),
+                    ignore_case: true,
+                },
+                TokenFilter::EdgeGram { min: 1, max: 2, out_of_bounds: Original::Omit },
+                TokenFilter::Shingle { min: 2, max: 4 },
+            ],
+        ),
+        (
+            "wordDelimiterGraph",
+            vec![TokenFilter::WordDelimiterGraph {
+                options: DelimiterOptions::default(),
+                protected: BTreeSet::new(),
+                protected_ignore_case: false,
+            }],
+        ),
+        (
+            "wordDelimiterGraphAll",
+            vec![
+                TokenFilter::KeywordRepeat,
+                TokenFilter::WordDelimiterGraph {
+                    options: all_options,
+                    protected: ["wi-fi"].iter().map(|s| s.to_string()).collect(),
+                    protected_ignore_case: true,
+                },
+            ],
+        ),
+        (
+            "regexAll",
+            vec![TokenFilter::Regex {
+                pattern: pattern(r"(\w)(\w)?"),
+                replacement: "$2<$1>".to_string(),
+                matches: Matches::All,
+            }],
+        ),
+        (
+            "regexFirst",
+            vec![TokenFilter::Regex {
+                pattern: pattern(r"(?<v>[aeiou])(?!\k<v>)"),
+                replacement: r"\$${v}".to_string(),
+                matches: Matches::First,
+            }],
+        ),
+    ];
+    for (name, token_filters) in filters {
+        let a = whitespace(token_filters.clone());
+        out.push((format!("filter-{name}"), a));
+        let a = Analyzer {
+            char_filters: vec![],
+            tokenizer: Tokenizer::Standard { max_token_length: DEFAULT_MAX_TOKEN_LENGTH },
+            token_filters,
+        };
+        out.push((format!("filter-{name}/standard"), a));
+    }
+    out
+}
+
+/// The fingerprints of [`token_path_analyzers`], tokens and terms, over `texts`.
+fn token_path_fingerprints(texts: &[String]) -> Vec<(String, u64)> {
+    let mut found = Vec::new();
+    for (name, a) in token_path_analyzers() {
+        found.push((name.clone(), tokens(&a, texts)));
+        found.push((format!("{name}/terms"), terms(&a, texts)));
+    }
+    for (name, hash) in &found {
+        println!("{name}\t{hash:016x}");
+    }
+    found
+}
+
+#[test]
+fn every_tokenizer_and_filter_off_the_term_path_gives_the_tokens_it_gave() {
+    let words = corpus();
+    let mut texts: Vec<String> =
+        words.chunks(WORDS_PER_TEXT).take(4).map(|c| c.join(" ")).collect();
+    texts.extend(SENTENCES.lines().map(str::to_owned));
+    texts.extend(MIXED.iter().map(|s| s.to_string()));
+    compare(&token_path_fingerprints(&texts), TOKEN_PATH_FINGERPRINTS);
 }

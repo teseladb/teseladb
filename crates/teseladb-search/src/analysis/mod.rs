@@ -21,6 +21,7 @@ pub mod spans;
 pub mod thai;
 pub mod tokenfilters;
 pub mod tokenizers;
+pub mod tokens;
 pub mod uax29;
 pub mod unicode;
 pub mod urlemail;

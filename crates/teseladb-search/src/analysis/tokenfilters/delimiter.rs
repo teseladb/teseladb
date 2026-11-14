@@ -18,10 +18,9 @@
 //! when there are more, parts not generated (`generateWordParts`, `generateNumberParts`) leave no
 //! position. The tokens after a split one move along by the positions it took.
 
-use std::collections::BTreeMap;
-
 use crate::analysis::props::category;
-use crate::analysis::tokenizers::Token;
+use crate::analysis::scratch::Pooled;
+use crate::analysis::tokens::{Meta, Tokens};
 
 /// The `delimiterOptions` of `wordDelimiterGraph`, with the documented defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,8 +112,7 @@ fn is_possessive(text: &str, parts: &[Part], i: usize) -> bool {
 }
 
 /// Cuts `text` into parts.
-fn parts(text: &str, options: &DelimiterOptions) -> Vec<Part> {
-    let mut out = Vec::new();
+fn parts(text: &str, options: &DelimiterOptions, out: &mut Vec<Part>) {
     let mut current: Option<(usize, Class, bool)> = None;
     for (at, c) in text.char_indices().chain([(text.len(), ' ')]) {
         let k = if at == text.len() { Class::Delimiter } else { class(c) };
@@ -131,15 +129,39 @@ fn parts(text: &str, options: &DelimiterOptions) -> Vec<Part> {
         }
         current = (k != Class::Delimiter).then_some((at, k, letter));
     }
-    out
 }
 
-/// The tokens `wordDelimiterGraph` makes of one token, by part index: `(text, first part, parts
-/// spanned)`.
-fn split(text: &str, options: &DelimiterOptions) -> Vec<(String, usize, usize)> {
-    let all = parts(text, options);
+/// The text of a token `wordDelimiterGraph` makes of one token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Text {
+    /// The parts `from..to`, joined.
+    Parts(usize, usize),
+    /// The whole token.
+    Whole,
+}
+
+/// A token `wordDelimiterGraph` makes of token `token` of the input: its text, its first part
+/// and the parts it spans, and then its first node and the nodes it spans.
+#[derive(Clone, Copy, Debug)]
+struct Made {
+    token: usize,
+    text: Text,
+    first: usize,
+    count: usize,
+}
+
+/// Appends to `out` the tokens `wordDelimiterGraph` makes of `text`, with its parts in `parts`.
+fn split(
+    text: &str,
+    token: usize,
+    options: &DelimiterOptions,
+    parts: &mut Vec<Part>,
+    out: &mut Vec<Made>,
+) {
+    let mut all: Pooled<Part> = Pooled::new();
+    self::parts(text, options, &mut all);
     // An `s` right after a dropped one is not a possessive (`straße's's` keeps the last `s`).
-    let mut parts: Vec<Part> = Vec::with_capacity(all.len());
+    parts.clear();
     let mut dropped = false;
     for i in 0..all.len() {
         dropped = !dropped && options.stem_english_possessive && is_possessive(text, &all, i);
@@ -147,26 +169,22 @@ fn split(text: &str, options: &DelimiterOptions) -> Vec<(String, usize, usize)> 
             parts.push(all[i]);
         }
     }
-    let stripped = text;
-    let mut out = Vec::new();
+    let made = |text: Text, first: usize, count: usize| Made { token, text, first, count };
     let generated = |p: &Part| {
         if p.word { options.generate_word_parts } else { options.generate_number_parts }
     };
     for (i, p) in parts.iter().enumerate() {
         if generated(p) || parts.len() == 1 {
-            out.push((stripped[p.from..p.to].to_string(), i, 1));
+            out.push(made(Text::Parts(i, i + 1), i, 1));
         }
     }
-    let join = |from: usize, to: usize| -> String {
-        parts[from..to].iter().map(|p| &stripped[p.from..p.to]).collect()
-    };
     let mut i = 0;
     while i < parts.len() {
         let word = parts[i].word;
         let end = parts[i..].iter().position(|p| p.word != word).map_or(parts.len(), |n| i + n);
         let wanted = if word { options.concatenate_words } else { options.concatenate_numbers };
         if wanted && end - i > 1 {
-            out.push((join(i, end), i, end - i));
+            out.push(made(Text::Parts(i, end), i, end - i));
         }
         i = end;
     }
@@ -175,60 +193,86 @@ fn split(text: &str, options: &DelimiterOptions) -> Vec<(String, usize, usize)> 
     let joined_already =
         (all_words && options.concatenate_words) || (all_numbers && options.concatenate_numbers);
     if options.concatenate_all && parts.len() > 1 && !joined_already {
-        out.push((join(0, parts.len()), 0, parts.len()));
+        out.push(made(Text::Parts(0, parts.len()), 0, parts.len()));
     }
-    let single = parts.len() == 1 && stripped[parts[0].from..parts[0].to] == *text;
+    let single = parts.len() == 1 && text[parts[0].from..parts[0].to] == *text;
     if options.preserve_original && !single {
-        out.push((text.to_string(), 0, parts.len().max(1)));
+        out.push(made(Text::Whole, 0, parts.len().max(1)));
     }
-    out
 }
 
-/// Applies the filter; `protected` says whether a token is in `protectedWords`.
+/// Writes the filter's tokens of `input` into `out`; `protected` says whether a token is in
+/// `protectedWords`.
 pub(super) fn apply(
-    tokens: Vec<Token>,
-    end: &mut u32,
+    input: &Tokens,
+    out: &mut Tokens,
     options: &DelimiterOptions,
-    protected: impl Fn(&str) -> bool,
-) -> Vec<Token> {
-    let mut out = Vec::with_capacity(tokens.len());
-    // Positions each input position moved by, and positions it took.
-    let mut taken: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut emitted: Vec<(u32, Vec<(Token, usize, usize)>)> = Vec::new();
-    for t in tokens {
-        let whole = protected(&t.text) || (options.ignore_keywords && t.keyword);
-        let pieces = if whole { vec![(t.text.clone(), 0, 1)] } else { split(&t.text, options) };
+    mut protected: impl FnMut(&str) -> bool,
+) {
+    // Positions each input position took, by position.
+    let mut taken: Pooled<(u32, u32)> = Pooled::new();
+    let mut made: Pooled<Made> = Pooled::new();
+    let mut nodes: Pooled<usize> = Pooled::new();
+    let mut parts: Pooled<Part> = Pooled::new();
+    // The parts of each token, one after another, and where each token's start.
+    let mut all_parts: Pooled<Part> = Pooled::new();
+    let mut parts_at: Pooled<usize> = Pooled::new();
+    for i in 0..input.len() {
+        let (text, t) = (input.text(i), input.meta(i));
+        let whole = protected(text) || (options.ignore_keywords && t.keyword);
+        let from = made.len();
+        parts.clear();
+        if whole {
+            made.push(Made { token: i, text: Text::Whole, first: 0, count: 1 });
+        } else {
+            split(text, i, options, &mut parts, &mut made);
+        }
+        parts_at.push(all_parts.len());
+        all_parts.extend_from_slice(&parts);
         // Part indexes that start or end an emitted token become positions.
-        let mut nodes: Vec<usize> = pieces.iter().flat_map(|&(_, f, n)| [f, f + n]).collect();
+        nodes.clear();
+        nodes.extend(made[from..].iter().flat_map(|m| [m.first, m.first + m.count]));
         nodes.sort_unstable();
         nodes.dedup();
         let span = nodes.len().saturating_sub(1).max(1) as u32;
-        let entry = taken.entry(t.position).or_insert(span);
-        *entry = (*entry).max(span);
-        let made = pieces
-            .into_iter()
-            .map(|(text, from, n)| {
-                let first = nodes.partition_point(|&x| x < from);
-                let last = nodes.partition_point(|&x| x < from + n);
-                (Token { text, ..t.clone() }, first, last - first)
-            })
-            .collect();
-        emitted.push((t.position, made));
-    }
-    let mut shift: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut extra = 0;
-    for (&position, &span) in &taken {
-        shift.insert(position, extra);
-        extra += span - 1;
-    }
-    *end += extra;
-    for (position, made) in emitted {
-        let base = position + shift.get(&position).copied().unwrap_or(0);
-        for (token, first, n) in made {
-            out.push(Token { position: base + first as u32, length: n as u32, ..token });
+        match taken.binary_search_by_key(&t.position, |&(p, _)| p) {
+            Ok(k) => taken[k].1 = taken[k].1.max(span),
+            Err(k) => taken.insert(k, (t.position, span)),
+        }
+        for m in made[from..].iter_mut() {
+            let first = nodes.partition_point(|&x| x < m.first);
+            let last = nodes.partition_point(|&x| x < m.first + m.count);
+            (m.first, m.count) = (first, last - first);
         }
     }
-    out
+    parts_at.push(all_parts.len());
+    // How far each input position moves: the positions the ones before it took past one.
+    let mut extra = 0;
+    for entry in taken.iter_mut() {
+        let span = entry.1;
+        entry.1 = extra;
+        extra += span - 1;
+    }
+    out.end += extra;
+    for m in made.iter() {
+        let (text, t) = (input.text(m.token), input.meta(m.token));
+        let shift = taken.binary_search_by_key(&t.position, |&(p, _)| p).map_or(0, |k| taken[k].1);
+        let meta =
+            Meta { position: t.position + shift + m.first as u32, length: m.count as u32, ..t };
+        let own = &all_parts[parts_at[m.token]..parts_at[m.token + 1]];
+        out.push_with(meta, |o| match m.text {
+            Text::Whole => o.push_str(text),
+            Text::Parts(from, to) => {
+                own[from..to].iter().for_each(|p| o.push_str(&text[p.from..p.to]))
+            }
+        });
+    }
+}
+
+crate::analysis::scratch::pools! {
+    PARTS: Part;
+    MADE: Made;
+    TAKEN: (u32, u32);
 }
 
 #[cfg(test)]

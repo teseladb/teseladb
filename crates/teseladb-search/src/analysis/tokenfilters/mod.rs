@@ -61,8 +61,10 @@ use super::jregex::RegexError;
 use super::morfologik::{Dictionary, Language};
 use super::normalize::{Form, normalize_into};
 use super::props::category;
+use super::scratch::Text;
 use super::snowball::{Stemmer, porter_stemming_into};
 use super::tokenizers::{Pattern, Token};
+use super::tokens::{Meta, Tokens};
 use super::unicode::lowercase;
 use crate::byte_simd;
 
@@ -394,11 +396,6 @@ fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
 }
 
-/// `token` with another text.
-fn with_text(token: &Token, text: String) -> Token {
-    Token { text, ..token.clone() }
-}
-
 /// `text` without its final `ー` when it is all Katakana (U+30A0 to U+30FF) and has at least 4
 /// UTF-16 units.
 fn katakana_stem(text: &str, out: &mut String) {
@@ -504,23 +501,37 @@ fn elide(text: &str, articles: &BTreeSet<String>, out: &mut String) {
     }
 }
 
-/// The tokens with each word form of `language`'s dictionary replaced by its lemmas at its
-/// position; a form the dictionary lacks, also in lowercase, stays.
-fn lemmatize(tokens: Vec<Token>, language: Language) -> Vec<Token> {
-    let Some(dictionary) = Dictionary::get(language) else { return tokens };
-    let mut out = Vec::with_capacity(tokens.len());
-    for t in tokens {
-        let mut lemmas = dictionary.lemmas(&t.text);
-        if lemmas.is_empty() {
-            lemmas = dictionary.lemmas(&lower(&t.text));
-        }
-        if t.keyword || lemmas.is_empty() {
-            out.push(t);
+/// Writes into `out` the tokens of `input` with each word form of `language`'s dictionary
+/// replaced by its lemmas at its position; a form the dictionary lacks, also in lowercase, stays.
+fn lemmatize(input: &Tokens, out: &mut Tokens, language: Language) {
+    let Some(dictionary) = Dictionary::get(language) else {
+        copy(input, out);
+        return;
+    };
+    let mut lowered = Text::new();
+    for i in 0..input.len() {
+        let (text, meta) = (input.text(i), input.meta(i));
+        if meta.keyword {
+            out.push(text, meta);
             continue;
         }
-        out.extend(lemmas.into_iter().map(|text| with_text(&t, text)));
+        let mut emit = |lemma: &str| out.push(lemma, meta);
+        if dictionary.for_each_lemma(text, &mut emit) > 0 {
+            continue;
+        }
+        lowered.clear();
+        lower_into(text, &mut lowered);
+        if dictionary.for_each_lemma(&lowered, &mut emit) == 0 {
+            out.push(text, meta);
+        }
     }
-    out
+}
+
+/// Appends the tokens of `input` to `out`.
+fn copy(input: &Tokens, out: &mut Tokens) {
+    for i in 0..input.len() {
+        out.push_from(input, i);
+    }
 }
 
 /// `text` lowercased with the Turkish `I` → `ı` and `İ` → `i`.
@@ -532,19 +543,24 @@ fn turkish_lower(text: &str, out: &mut String) {
     }));
 }
 
-/// Replaces each token with the texts `f` gives at its position, followed by the token itself
-/// when `original` is `Include` and it is not among them.
-fn expand(tokens: Vec<Token>, original: Original, f: impl Fn(&str) -> Vec<String>) -> Vec<Token> {
-    let mut out = Vec::with_capacity(tokens.len());
-    for t in tokens {
-        let texts = f(&t.text);
-        let keep = original == Original::Include && !texts.contains(&t.text);
-        out.extend(texts.into_iter().map(|text| with_text(&t, text)));
+/// Writes into `out` each token of `input` replaced with the texts `f` pushes at its position,
+/// followed by the token itself when `original` is `Include` and it is not among them.
+fn expand(
+    input: &Tokens,
+    out: &mut Tokens,
+    original: Original,
+    f: impl Fn(&str, Meta, &mut Tokens),
+) {
+    for i in 0..input.len() {
+        let (text, meta) = (input.text(i), input.meta(i));
+        let first = out.len();
+        f(text, meta, out);
+        let keep =
+            original == Original::Include && !(first..out.len()).any(|j| out.text(j) == text);
         if keep {
-            out.push(t);
+            out.push(text, meta);
         }
     }
-    out
 }
 
 /// Java's `Character.isWhitespace`: white space that is not a non-breaking space.
@@ -613,9 +629,11 @@ impl TokenFilter {
     /// Applies the filter to the tokens of one text. Only `regex` fails, when a match runs out
     /// of the engine's steps.
     pub fn apply(&self, stream: Stream) -> Result<Stream, RegexError> {
-        let Stream { tokens, mut end } = stream;
-        let tokens = self.filter(tokens, &mut end)?;
-        Ok(Stream { tokens, end })
+        let mut input = Tokens::of(&stream.tokens);
+        input.end = stream.end;
+        let mut out = Tokens::default();
+        self.apply_into(&input, &mut out)?;
+        Ok(Stream { tokens: out.to_tokens(), end: out.end })
     }
 
     /// Whether the filter reads each token on its own and keeps at most one in its place, so
@@ -715,7 +733,7 @@ impl TokenFilter {
             TokenFilter::SoraniStemming => stem(text, kw, true, out, sorani_stem),
             TokenFilter::Regex { pattern, replacement, matches } => {
                 let all = *matches == Matches::All;
-                out.push_str(&pattern.regex().replace(text, replacement, all)?);
+                pattern.regex().replace_into(text, replacement, all, out)?;
                 Step::Written
             }
             TokenFilter::Reverse => stem(text, kw, false, out, |t, o| o.extend(t.chars().rev())),
@@ -757,69 +775,86 @@ impl TokenFilter {
     }
 
     /// Runs a [`TokenFilter::term_wise`] filter token by token.
-    fn each_term(&self, tokens: Vec<Token>) -> Result<Vec<Token>, RegexError> {
-        let mut out = Vec::with_capacity(tokens.len());
-        for t in tokens {
-            let mut text = String::new();
-            let mut keyword = t.keyword;
-            match self.term(&t.text, &mut keyword, &mut text)? {
-                Step::Same => out.push(Token { keyword, ..t }),
-                Step::Written => out.push(Token { text, keyword, ..t }),
+    fn each_term(&self, input: &Tokens, out: &mut Tokens) -> Result<(), RegexError> {
+        let mut text = Text::new();
+        for i in 0..input.len() {
+            let mut meta = input.meta(i);
+            text.clear();
+            match self.term(input.text(i), &mut meta.keyword, &mut text)? {
+                Step::Same => out.push(input.text(i), meta),
+                Step::Written => out.push(&text, meta),
                 Step::Dropped => {}
             }
         }
-        Ok(out)
+        Ok(())
     }
 
-    /// Applies the filter to `tokens`, moving `end` when positions are added.
-    fn filter(&self, tokens: Vec<Token>, end: &mut u32) -> Result<Vec<Token>, RegexError> {
-        Ok(match self {
+    /// Writes the filter's tokens of `input` into `out`, emptied first, with the end position
+    /// moved when positions are added. Once `out` and the thread's buffers have grown for a
+    /// text, the same text allocates nothing (FR-028).
+    pub fn apply_into(&self, input: &Tokens, out: &mut Tokens) -> Result<(), RegexError> {
+        out.clear();
+        out.end = input.end;
+        match self {
             &TokenFilter::AsciiFolding { original: Original::Include } => {
-                expand(tokens, Original::Include, |t| vec![folding::ascii(t)])
+                expand(input, out, Original::Include, |t, m, o| {
+                    o.push_with(m, |s| folding::ascii_into(t, s));
+                });
             }
             &TokenFilter::DaitchMokotoffSoundex { original } => {
-                expand(tokens, original, soundex::daitch_mokotoff)
+                expand(input, out, original, |t, m, o| {
+                    soundex::daitch_mokotoff_into(t, &mut |code| o.push(code, m));
+                });
             }
             &TokenFilter::EdgeGram { min, max, out_of_bounds } => {
-                grams::grams(tokens, min, max, out_of_bounds, true)
+                grams::grams(input, out, min, max, out_of_bounds, true);
             }
             &TokenFilter::NGram { min, max, out_of_bounds } => {
-                grams::grams(tokens, min, max, out_of_bounds, false)
+                grams::grams(input, out, min, max, out_of_bounds, false);
             }
             TokenFilter::KeywordRepeat => {
-                let mut out = Vec::with_capacity(tokens.len() * 2);
-                for t in tokens {
-                    out.push(Token { keyword: true, ..t.clone() });
-                    out.push(t);
+                for i in 0..input.len() {
+                    let meta = input.meta(i);
+                    out.push(input.text(i), Meta { keyword: true, ..meta });
+                    out.push(input.text(i), meta);
                 }
-                out
             }
-            &TokenFilter::LimitTokenCount { max } => tokens.into_iter().take(max).collect(),
-            &TokenFilter::Morfologik { language } => lemmatize(tokens, language),
-            TokenFilter::CjkBigram => cjk_bigrams(tokens),
+            &TokenFilter::LimitTokenCount { max } => {
+                for i in 0..input.len().min(max) {
+                    out.push_from(input, i);
+                }
+            }
+            &TokenFilter::Morfologik { language } => lemmatize(input, out, language),
+            TokenFilter::CjkBigram => cjk_bigrams(input, out),
             TokenFilter::RemoveDuplicates => {
-                let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
-                for t in tokens {
-                    let seen = out
-                        .iter()
+                for i in 0..input.len() {
+                    let (text, position) = (input.text(i), input.meta(i).position);
+                    let seen = (0..out.len())
                         .rev()
-                        .take_while(|o| o.position == t.position)
-                        .any(|o| o.text == t.text);
+                        .take_while(|&j| out.meta(j).position == position)
+                        .any(|j| out.text(j) == text);
                     if !seen {
-                        out.push(t);
+                        out.push_from(input, i);
                     }
                 }
-                out
             }
-            &TokenFilter::Shingle { min, max } => grams::shingles(&tokens, min, max, *end),
+            &TokenFilter::Shingle { min, max } => grams::shingles(input, out, min, max),
             TokenFilter::WordDelimiterGraph { options, protected, protected_ignore_case } => {
-                delimiter::apply(tokens, end, options, |t| {
-                    let key = if *protected_ignore_case { lower(t) } else { t.to_string() };
-                    protected.contains(&key)
-                })
+                let mut key = Text::new();
+                delimiter::apply(input, out, options, |t| match protected_ignore_case {
+                    true => {
+                        key.clear();
+                        for c in t.chars() {
+                            key.push(lowercase(c));
+                        }
+                        protected.contains(key.as_str())
+                    }
+                    false => protected.contains(t),
+                });
             }
-            _ => self.each_term(tokens)?,
-        })
+            _ => self.each_term(input, out)?,
+        }
+        Ok(())
     }
 }
 

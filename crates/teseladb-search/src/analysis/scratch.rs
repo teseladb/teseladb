@@ -12,7 +12,7 @@ use super::unicode::WordBreak;
 const POOLED: usize = 32;
 
 /// The pool of a thread for vectors of one element type.
-type Pool<T> = RefCell<Vec<Vec<T>>>;
+pub type Pool<T> = RefCell<Vec<Vec<T>>>;
 
 /// An element type with a pool of vectors in each thread.
 pub trait Poolable: Sized + 'static {
@@ -20,20 +20,25 @@ pub trait Poolable: Sized + 'static {
     fn with_pool<R>(f: impl FnOnce(&Pool<Self>) -> R) -> Option<R>;
 }
 
+/// Declares a pool in each thread for vectors of each type listed, `NAME: Type;`.
 macro_rules! pools {
     ($($name:ident: $t:ty;)*) => {
         thread_local! {
-            $(static $name: Pool<$t> = const { RefCell::new(Vec::new()) };)*
+            $(static $name: $crate::analysis::scratch::Pool<$t> =
+                const { ::std::cell::RefCell::new(Vec::new()) };)*
         }
         $(
-            impl Poolable for $t {
-                fn with_pool<R>(f: impl FnOnce(&Pool<$t>) -> R) -> Option<R> {
+            impl $crate::analysis::scratch::Poolable for $t {
+                fn with_pool<R>(
+                    f: impl FnOnce(&$crate::analysis::scratch::Pool<$t>) -> R,
+                ) -> Option<R> {
                     $name.try_with(f).ok()
                 }
             }
         )*
     };
 }
+pub(crate) use pools;
 
 pools! {
     CHARS: char;
@@ -41,6 +46,11 @@ pools! {
     OFFSETS: usize;
     INDEXED: (usize, char);
     SPANS: (usize, usize);
+    UNITS: u16;
+    BYTES: u8;
+    CHAR_AT: (char, usize);
+    CHAR_SPANS: (char, usize, usize);
+    COUNTS: u32;
 }
 
 /// A vector taken from its thread's pool.
@@ -167,6 +177,56 @@ impl<T: Poolable> DerefMut for Pooled<T> {
     }
 }
 
+thread_local! {
+    static STRINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A string taken from its thread's pool, which gets it back, emptied, when dropped.
+#[derive(Debug)]
+pub struct Text(String);
+
+impl Text {
+    /// An empty string, with the capacity a former term left in it.
+    pub fn new() -> Text {
+        let pooled = STRINGS.try_with(|p| p.borrow_mut().pop()).ok().flatten();
+        Text(pooled.unwrap_or_default())
+    }
+}
+
+impl Default for Text {
+    fn default() -> Text {
+        Text::new()
+    }
+}
+
+impl Drop for Text {
+    fn drop(&mut self) {
+        let mut s = std::mem::take(&mut self.0);
+        s.clear();
+        // A thread that is ending drops its pool first; the string is then just freed.
+        let _ = STRINGS.try_with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < POOLED {
+                p.push(s);
+            }
+        });
+    }
+}
+
+impl Deref for Text {
+    type Target = String;
+
+    fn deref(&self) -> &String {
+        &self.0
+    }
+}
+
+impl DerefMut for Text {
+    fn deref_mut(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
 /// Runs `f` with a cleared string and gives what it wrote: the `String` form of a function that
 /// writes a term into a buffer.
 pub fn written(f: impl FnOnce(&mut String)) -> String {
@@ -209,6 +269,20 @@ mod tests {
         e.splice(..1, ['q', 'r']);
         e.resize(e.len() + 1, '!');
         assert_eq!(e.iter().collect::<String>(), "qrbcdz!");
+    }
+
+    #[test]
+    fn a_dropped_string_serves_the_next_one() {
+        let mut first = Text::default();
+        first.push_str("abcdefgh");
+        let at = first.as_ptr();
+        drop(first);
+        let second = Text::new();
+        assert!(second.is_empty());
+        assert_eq!(second.as_ptr(), at);
+        let many: Vec<Text> = (0..POOLED + 4).map(|_| Text::new()).collect();
+        drop(many);
+        assert_eq!(STRINGS.with(|p| p.borrow().len()), POOLED);
     }
 
     #[test]

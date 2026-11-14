@@ -13,6 +13,8 @@
 
 use std::sync::OnceLock;
 
+use crate::analysis::scratch::Pooled;
+
 /// Arc flag: a path ends with this arc.
 const FINAL: u8 = 1;
 /// Arc flag: the last arc of its node.
@@ -41,14 +43,6 @@ pub enum Language {
     Polish,
     /// dict_uk, from morfologik-ukrainian-search 4.9.1.
     Ukrainian,
-}
-
-/// A step of the walk that lists the paths below a node.
-enum Step {
-    /// The paths below a node, after the given bytes.
-    Node(usize, Vec<u8>),
-    /// A path that ends.
-    Emit(Vec<u8>),
 }
 
 /// One arc read from the automaton.
@@ -106,82 +100,119 @@ impl Dictionary {
         Some(Arc { label, flags, target: Some(target), end: at + 6 })
     }
 
-    /// The arcs of the node at `at`.
-    fn arcs(&self, mut at: usize) -> Vec<Arc> {
-        let mut out = Vec::new();
+    /// The arc of the node at `at` labelled `label`.
+    fn find(&self, mut at: usize, label: u8) -> Option<Arc> {
         while let Some(arc) = self.arc(at) {
-            at = arc.end;
-            let last = arc.flags & LAST != 0;
-            out.push(arc);
-            if last {
-                break;
+            if arc.label == label {
+                return Some(arc);
             }
+            if arc.flags & LAST != 0 {
+                return None;
+            }
+            at = arc.end;
         }
-        out
+        None
     }
 
     /// The node `bytes` lead to from the root.
-    fn walk(&self, bytes: &[u8]) -> Option<usize> {
+    fn walk(&self, bytes: impl IntoIterator<Item = u8>) -> Option<usize> {
         let mut node = self.root;
-        for &b in bytes {
-            node = self.arcs(node).into_iter().find(|a| a.label == b)?.target?;
+        for b in bytes {
+            node = self.find(node, b)?.target?;
         }
         Some(node)
     }
 
-    /// The encoded lemmas of `form`, in byte order.
-    fn encodings(&self, form: &str) -> Vec<Vec<u8>> {
-        let mut key = form.as_bytes().to_vec();
-        key.push(self.separator);
-        let Some(start) = self.walk(&key) else { return Vec::new() };
-        // Depth first in label order: a path that ends is listed before the longer ones.
-        let mut out = Vec::new();
-        let mut work = vec![Step::Node(start, Vec::new())];
-        while let Some(step) = work.pop() {
-            let (node, prefix) = match step {
-                Step::Emit(path) => {
-                    out.push(path);
-                    continue;
-                }
-                Step::Node(node, prefix) => (node, prefix),
+    /// Gives `found` the encoded lemmas of `form`, in byte order: depth first in label order,
+    /// a path that ends before the longer ones.
+    fn encodings(&self, form: &str, mut found: impl FnMut(&[u8])) {
+        let key = form.as_bytes().iter().copied().chain([self.separator]);
+        let Some(start) = self.walk(key) else { return };
+        let mut path: Pooled<u8> = Pooled::new();
+        // Each node being listed: its next arc and the length of the path before it.
+        let mut work: Pooled<(usize, usize)> = Pooled::new();
+        work.push((start, 0));
+        while let Some(&(at, depth)) = work.last() {
+            let Some(arc) = self.arc(at) else {
+                work.pop();
+                continue;
             };
-            for arc in self.arcs(node).into_iter().rev() {
-                let mut path = prefix.clone();
-                path.push(arc.label);
-                if let Some(target) = arc.target {
-                    work.push(Step::Node(target, path.clone()));
-                }
-                if arc.flags & FINAL != 0 {
-                    work.push(Step::Emit(path));
-                }
+            if arc.flags & LAST != 0 {
+                work.pop();
+            } else if let Some(top) = work.last_mut() {
+                top.0 = arc.end;
+            }
+            path.truncate(depth);
+            path.push(arc.label);
+            if arc.flags & FINAL != 0 {
+                found(&path);
+            }
+            if let Some(target) = arc.target {
+                work.push((target, depth + 1));
             }
         }
-        out
+    }
+
+    /// Appends the lemma `code` encodes for `form` to `out`; whether it is one.
+    fn decode_into(&self, form: &str, code: &[u8], out: &mut Vec<u8>) -> bool {
+        let f = form.as_bytes();
+        let count = |b: &u8| b.checked_sub(b'A').map(usize::from);
+        let parts = if self.keeps_slice {
+            code.first().and_then(count).zip(code.get(1).and_then(count)).zip(code.get(2..))
+        } else {
+            code.first().and_then(count).map(|cut| (0, cut)).zip(code.get(1..))
+        };
+        let Some(((start, cut), rest)) = parts else { return false };
+        let Some(kept) = f.len().checked_sub(cut).and_then(|end| f.get(start..end)) else {
+            return false;
+        };
+        let from = out.len();
+        out.extend_from_slice(kept);
+        out.extend_from_slice(rest);
+        let valid = std::str::from_utf8(&out[from..]).is_ok();
+        if !valid {
+            out.truncate(from);
+        }
+        valid
     }
 
     /// The lemma `code` encodes for `form`.
+    #[cfg(test)]
     fn decode(&self, form: &str, code: &[u8]) -> Option<String> {
-        let f = form.as_bytes();
-        let count = |b: &u8| b.checked_sub(b'A').map(usize::from);
-        let (start, cut, rest) = if self.keeps_slice {
-            (count(code.first()?)?, count(code.get(1)?)?, code.get(2..)?)
-        } else {
-            (0, count(code.first()?)?, code.get(1..)?)
-        };
-        let kept = f.get(start..f.len().checked_sub(cut)?)?;
-        String::from_utf8([kept, rest].concat()).ok()
+        let mut out = Vec::new();
+        self.decode_into(form, code, &mut out).then(|| String::from_utf8(out).ok()).flatten()
+    }
+
+    /// Gives `emit` the distinct lemmas of `form` in the dictionary's order, none when it is
+    /// not a form; returns how many.
+    pub fn for_each_lemma(&self, form: &str, mut emit: impl FnMut(&str)) -> usize {
+        let mut lemmas: Pooled<u8> = Pooled::new();
+        let mut ends: Pooled<usize> = Pooled::new();
+        self.encodings(form, |code| {
+            let from = lemmas.len();
+            if !self.decode_into(form, code, &mut lemmas) {
+                return;
+            }
+            let mut start = 0;
+            let seen = ends.iter().any(|&end| {
+                let same = lemmas[start..end] == lemmas[from..];
+                start = end;
+                same
+            });
+            if seen {
+                lemmas.truncate(from);
+                return;
+            }
+            ends.push(lemmas.len());
+            emit(std::str::from_utf8(&lemmas[from..]).unwrap_or_default());
+        });
+        ends.len()
     }
 
     /// The distinct lemmas of `form` in the dictionary's order, none when it is not a form.
     pub fn lemmas(&self, form: &str) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for code in self.encodings(form) {
-            if let Some(lemma) = self.decode(form, &code)
-                && !out.contains(&lemma)
-            {
-                out.push(lemma);
-            }
-        }
+        let mut out = Vec::new();
+        self.for_each_lemma(form, |l| out.push(l.to_owned()));
         out
     }
 }

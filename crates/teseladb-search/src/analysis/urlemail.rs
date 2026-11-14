@@ -15,6 +15,8 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::analysis::scratch::{Pooled, Text};
+
 const TLDS: &str = include_str!("../../data/tlds-alpha-by-domain.txt");
 
 /// Whether `label` is a top-level domain of the IANA list (case-insensitive).
@@ -26,7 +28,10 @@ pub fn is_tld(label: &str) -> bool {
             .map(|l| l.trim().to_ascii_lowercase())
             .collect()
     });
-    set.contains(&label.to_ascii_lowercase())
+    let mut lower = Text::new();
+    lower.push_str(label);
+    lower.make_ascii_lowercase();
+    set.contains(lower.as_str())
 }
 
 /// Characters of an unquoted local part: RFC 5322 `atext`, `.` anywhere and, as measured, `,`.
@@ -44,8 +49,8 @@ fn label(s: &[u8]) -> usize {
 }
 
 /// The labels at the start of `s`: the end of each, while a `.` and another label follow.
-fn labels(s: &[u8]) -> Vec<usize> {
-    let mut ends = Vec::new();
+fn labels(s: &[u8]) -> Pooled<usize> {
+    let mut ends = Pooled::new();
     let mut at = 0;
     loop {
         let len = label(&s[at..]);
@@ -80,8 +85,7 @@ fn tld_end(s: &[u8]) -> Option<usize> {
 fn named_host(s: &[u8]) -> Option<usize> {
     let ends = labels(s);
     let ipv4 = ends.len() >= 4 && {
-        let parts: Vec<&[u8]> = s[..ends[3]].split(|&b| b == b'.').collect();
-        parts.iter().all(|p| {
+        s[..ends[3]].split(|&b| b == b'.').all(|p| {
             !p.is_empty()
                 && p.len() <= 3
                 && std::str::from_utf8(p).ok().and_then(|t| t.parse::<u8>().ok()).is_some()

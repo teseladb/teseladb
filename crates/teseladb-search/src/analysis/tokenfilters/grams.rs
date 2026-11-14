@@ -9,91 +9,102 @@
 //! of `h he hel` has the paths `h he` `he hel` and `h he hel`), so every later position moves by
 //! the tokens stacked before it.
 
-use super::{Original, with_text};
-use crate::analysis::tokenizers::Token;
+use super::Original;
+use crate::analysis::scratch::Pooled;
+use crate::analysis::tokens::{Meta, Tokens};
 
 /// The text that stands for an empty position inside a shingle.
 const FILLER: &str = "_";
 
-/// The grams of each token.
+/// Writes the grams of each token of `input` into `out`.
 pub(super) fn grams(
-    tokens: Vec<Token>,
+    input: &Tokens,
+    out: &mut Tokens,
     min: usize,
     max: usize,
     out_of_bounds: Original,
     edge: bool,
-) -> Vec<Token> {
-    let mut out = Vec::new();
-    for t in tokens {
-        let bounds: Vec<usize> =
-            t.text.char_indices().map(|(i, _)| i).chain([t.text.len()]).collect();
+) {
+    let mut bounds: Pooled<usize> = Pooled::new();
+    for i in 0..input.len() {
+        let (text, meta) = (input.text(i), input.meta(i));
+        bounds.clear();
+        bounds.extend(text.char_indices().map(|(i, _)| i).chain([text.len()]));
         let count = bounds.len() - 1;
         let starts = if edge { count.min(1) } else { count };
         for start in 0..starts {
             for len in min..=max.min(count - start) {
-                out.push(with_text(&t, t.text[bounds[start]..bounds[start + len]].to_string()));
+                out.push(&text[bounds[start]..bounds[start + len]], meta);
             }
         }
         if out_of_bounds == Original::Include && !(min..=max).contains(&count) {
-            out.push(t);
+            out.push(text, meta);
         }
     }
-    out
 }
 
-/// The shingles of `min..=max` tokens.
-pub(super) fn shingles(tokens: &[Token], min: usize, max: usize, end: u32) -> Vec<Token> {
-    let mut line: Vec<Token> = Vec::with_capacity(tokens.len());
+/// A token of the line shingles are cut from: the index of a token of the input, or a filler,
+/// with its meta.
+#[derive(Clone, Copy, Debug)]
+struct Cell {
+    token: Option<usize>,
+    meta: Meta,
+}
+
+/// Writes the shingles of `min..=max` tokens of `input` into `out`.
+pub(super) fn shingles(input: &Tokens, out: &mut Tokens, min: usize, max: usize) {
+    let end = input.end;
+    let mut line: Pooled<Cell> = Pooled::new();
     let mut next = 0;
     let mut stacked = 0;
     let mut before: Option<u32> = None;
-    for t in tokens {
-        if before == Some(t.position) {
+    for i in 0..input.len() {
+        let m = input.meta(i);
+        if before == Some(m.position) {
             stacked += 1;
         }
-        before = Some(t.position);
-        let t = &Token { position: t.position + stacked, ..t.clone() };
-        for position in (next..t.position).take(max - 1) {
-            line.push(Token {
-                text: FILLER.to_string(),
-                start: t.start,
-                end: t.start,
-                position,
-                ..t.clone()
-            });
+        before = Some(m.position);
+        let m = Meta { position: m.position + stacked, ..m };
+        for position in (next..m.position).take(max - 1) {
+            let meta = Meta { end: m.start, position, ..m };
+            line.push(Cell { token: None, meta });
         }
-        next = next.max(t.position + 1);
-        line.push(t.clone());
+        next = next.max(m.position + 1);
+        line.push(Cell { token: Some(i), meta: m });
     }
-    if let Some(last) = tokens.last() {
+    if let Some(last) = input.last_meta() {
         for position in (next..end + stacked).take(max - 1) {
-            line.push(Token {
-                text: FILLER.to_string(),
-                start: last.end,
-                end: last.end,
-                position,
-                ..last.clone()
-            });
+            let meta = Meta { start: last.end, end: last.end, position, ..last };
+            line.push(Cell { token: None, meta });
         }
     }
-    let filler = |t: &Token| t.text == FILLER && t.start == t.end;
-    let mut out = Vec::new();
+    let text = |c: &Cell| c.token.map_or(FILLER, |i| input.text(i));
+    let filler = |c: &Cell| text(c) == FILLER && c.meta.start == c.meta.end;
     for (i, first) in line.iter().enumerate() {
         for n in min..=max.min(line.len() - i) {
             let run = &line[i..i + n];
             if run.iter().all(filler) {
                 continue;
             }
-            let text: Vec<&str> = run.iter().map(|t| t.text.as_str()).collect();
-            out.push(Token {
-                text: text.join(" "),
-                start: first.start,
-                end: run[n - 1].end,
-                position: first.position,
-                length: run[n - 1].position - first.position,
+            let meta = Meta {
+                start: first.meta.start,
+                end: run[n - 1].meta.end,
+                position: first.meta.position,
+                length: run[n - 1].meta.position - first.meta.position,
                 keyword: false,
+            };
+            out.push_with(meta, |o| {
+                for (k, c) in run.iter().enumerate() {
+                    if k > 0 {
+                        o.push(' ');
+                    }
+                    o.push_str(text(c));
+                }
             });
         }
     }
-    out
+}
+
+crate::analysis::scratch::pools! {
+    CELLS: Cell;
 }

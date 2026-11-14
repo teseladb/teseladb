@@ -5,10 +5,11 @@
 
 use std::collections::BTreeSet;
 
-use super::normalize::nfkc_casefold;
+use super::normalize::nfkc_casefold_into;
+use super::scratch::Text;
 
 /// Text after character filters, with the way back to the original offsets.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filtered {
     /// The filtered text.
     pub text: String,
@@ -19,7 +20,17 @@ pub struct Filtered {
 impl Filtered {
     /// The unfiltered `text`.
     pub fn new(text: &str) -> Filtered {
-        Filtered { text: text.to_string(), origin: (0..=text.len()).collect() }
+        let mut out = Filtered::default();
+        out.reset(text);
+        out
+    }
+
+    /// Makes this the unfiltered `text`, keeping the capacity of its buffers (FR-028).
+    pub fn reset(&mut self, text: &str) {
+        self.text.clear();
+        self.text.push_str(text);
+        self.origin.clear();
+        self.origin.extend(0..=text.len());
     }
 
     /// The offset in the original text of byte `at` of the filtered text.
@@ -27,16 +38,18 @@ impl Filtered {
         self.origin[at]
     }
 
-    /// Builds the output of a filter piece by piece.
-    fn builder(&self) -> Rewriter<'_> {
-        Rewriter { input: self, text: String::new(), origin: Vec::new() }
+    /// Builds the output of a filter piece by piece into `out`, emptied first.
+    fn builder<'a>(&'a self, out: &'a mut Filtered) -> Rewriter<'a> {
+        out.text.clear();
+        out.origin.clear();
+        Rewriter { input: self, text: &mut out.text, origin: &mut out.origin }
     }
 }
 
 struct Rewriter<'a> {
     input: &'a Filtered,
-    text: String,
-    origin: Vec<usize>,
+    text: &'a mut String,
+    origin: &'a mut Vec<usize>,
 }
 
 impl Rewriter<'_> {
@@ -56,9 +69,8 @@ impl Rewriter<'_> {
         self.origin.extend(&self.input.origin[from..to]);
     }
 
-    fn finish(mut self) -> Filtered {
+    fn finish(self) {
         self.origin.push(self.input.origin[self.input.text.len()]);
-        Filtered { text: self.text, origin: self.origin }
     }
 }
 
@@ -139,12 +151,20 @@ const ENTITIES: &[(&str, char)] =
 impl CharFilter {
     /// Applies the filter.
     pub fn apply(&self, input: &Filtered) -> Filtered {
+        let mut out = Filtered::default();
+        self.apply_into(input, &mut out);
+        out
+    }
+
+    /// Writes the filtered text of `input` into `out`, keeping the capacity of its buffers, so
+    /// that filtering a text again allocates nothing (FR-028).
+    pub fn apply_into(&self, input: &Filtered, out: &mut Filtered) {
         match self {
-            CharFilter::HtmlStrip { ignored_tags } => html_strip(input, ignored_tags),
-            CharFilter::IcuNormalize => icu_normalize(input),
-            CharFilter::Mapping { mappings } => mapping(input, mappings),
+            CharFilter::HtmlStrip { ignored_tags } => html_strip(input, ignored_tags, out),
+            CharFilter::IcuNormalize => icu_normalize(input, out),
+            CharFilter::Mapping { mappings } => mapping(input, mappings, out),
             CharFilter::Persian => {
-                let mut out = input.builder();
+                let mut out = input.builder(out);
                 for (at, c) in input.text.char_indices() {
                     if c == '\u{200C}' {
                         out.emit(" ", at, at + c.len_utf8());
@@ -160,9 +180,10 @@ impl CharFilter {
 
 /// NFKC_Casefold per run of a starter and the characters that combine with it, so offsets stay
 /// at character boundaries of the original.
-fn icu_normalize(input: &Filtered) -> Filtered {
-    let mut out = input.builder();
+fn icu_normalize(input: &Filtered, out: &mut Filtered) {
+    let mut out = input.builder(out);
     let text = &input.text;
+    let mut folded = Text::new();
     let mut start = 0;
     let boundaries = text.char_indices().map(|(i, _)| i).skip(1).chain([text.len()]);
     for end in boundaries {
@@ -178,14 +199,16 @@ fn icu_normalize(input: &Filtered) -> Filtered {
         if next.is_some_and(joins) {
             continue;
         }
-        out.emit(&nfkc_casefold(&text[start..end]), start, end);
+        folded.clear();
+        nfkc_casefold_into(&text[start..end], &mut folded);
+        out.emit(&folded, start, end);
         start = end;
     }
     out.finish()
 }
 
-fn mapping(input: &Filtered, mappings: &[(String, String)]) -> Filtered {
-    let mut out = input.builder();
+fn mapping(input: &Filtered, mappings: &[(String, String)], out: &mut Filtered) {
+    let mut out = input.builder(out);
     let text = &input.text;
     let mut at = 0;
     while at < text.len() {
@@ -208,22 +231,29 @@ fn mapping(input: &Filtered, mappings: &[(String, String)]) -> Filtered {
     out.finish()
 }
 
-/// The lowercase name of the tag that starts at `<` and whether it closes.
-fn tag_name(tag: &str) -> (String, bool) {
+/// Writes the lowercase name of the tag that starts at `<` into `name`; whether it closes.
+fn tag_name(tag: &str, name: &mut String) -> bool {
     let body = tag.trim_start_matches('<');
     let closing = body.starts_with('/');
-    let name = body
-        .trim_start_matches('/')
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    (name, closing)
+    name.clear();
+    name.extend(body.trim_start_matches('/').chars().take_while(|c| c.is_ascii_alphanumeric()));
+    name.make_ascii_lowercase();
+    closing
 }
 
-fn html_strip(input: &Filtered, ignored: &BTreeSet<String>) -> Filtered {
-    let mut out = input.builder();
+/// Where `</name` (ASCII letters in any case) starts in `text`.
+fn find_closer(text: &str, name: &str) -> Option<usize> {
+    let (bytes, name) = (text.as_bytes(), name.as_bytes());
+    let len = name.len() + 2;
+    (0..bytes.len().checked_sub(len - 1)?).find(|&i| {
+        bytes[i] == b'<' && bytes[i + 1] == b'/' && bytes[i + 2..i + len].eq_ignore_ascii_case(name)
+    })
+}
+
+fn html_strip(input: &Filtered, ignored: &BTreeSet<String>, out: &mut Filtered) {
+    let mut out = input.builder(out);
     let text = &input.text;
+    let mut name = Text::new();
     let mut at = 0;
     while at < text.len() {
         let rest = &text[at..];
@@ -236,18 +266,15 @@ fn html_strip(input: &Filtered, ignored: &BTreeSet<String>) -> Filtered {
             && let Some(close) = rest.find('>')
         {
             let end = at + close + 1;
-            let (name, closing) = tag_name(&rest[..=close]);
-            if ignored.contains(&name) {
+            let closing = tag_name(&rest[..=close], &mut name);
+            if ignored.contains(name.as_str()) {
                 out.copy(at, end);
                 at = end;
                 continue;
             }
             let mut end_all = end;
             if RAW_TAGS.contains(&name.as_str()) && !closing {
-                let closer = format!("</{name}");
-                end_all = text[end..]
-                    .to_ascii_lowercase()
-                    .find(&closer)
+                end_all = find_closer(&text[end..], &name)
                     .and_then(|i| text[end + i..].find('>').map(|j| end + i + j + 1))
                     .unwrap_or(text.len());
             }

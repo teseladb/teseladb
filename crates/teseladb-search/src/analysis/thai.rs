@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::analysis::props;
+use crate::analysis::scratch::Pooled;
 
 /// A node of the word trie.
 #[derive(Default)]
@@ -100,13 +101,14 @@ fn outside(c: char) -> bool {
 /// The ends of the words of a run of Thai letters, the last one at `text.len()`. A format
 /// character or combining mark right after a whole word ends the walk: the rest of the run joins
 /// that word.
-fn breaks(text: &[char], trie: &Trie) -> Vec<usize> {
+fn breaks(text: &[char], trie: &Trie) -> Pooled<usize> {
     let end = text.len();
-    let mut current: Vec<usize> = Vec::new();
-    let mut possible: Vec<usize> = Vec::new();
-    let mut wrong: Vec<usize> = Vec::new();
+    let mut current: Pooled<usize> = Pooled::new();
+    let mut possible: Pooled<usize> = Pooled::new();
+    let mut wrong: Pooled<usize> = Pooled::new();
     let mut farthest = 0;
-    let mut best: Option<Vec<usize>> = None;
+    let mut best: Pooled<usize> = Pooled::new();
+    let mut has_best = false;
     let mut i = 0;
     let mut node = 0;
     loop {
@@ -128,15 +130,18 @@ fn breaks(text: &[char], trie: &Trie) -> Vec<usize> {
         }
         if i > farthest {
             farthest = i;
-            best = Some(current.clone());
+            best.clear();
+            best.extend_from_slice(&current);
+            has_best = true;
         }
         while possible.last().is_some_and(|p| wrong.contains(p)) {
             possible.pop();
         }
         match possible.pop() {
-            None => match &best {
-                Some(b) => {
-                    current = b.clone();
+            None => match has_best {
+                true => {
+                    current.clear();
+                    current.extend_from_slice(&best);
                     if farthest < end {
                         i = farthest + 1;
                     } else {
@@ -144,7 +149,7 @@ fn breaks(text: &[char], trie: &Trie) -> Vec<usize> {
                         break;
                     }
                 }
-                None => {
+                false => {
                     if current.last() != Some(&i) && i != 0 {
                         current.push(i);
                     }
@@ -248,28 +253,27 @@ const NUMBER_SIGNS: [char; 7] =
 /// The byte ranges of the tokens of `text`: Thai runs cut into words, and the other words by the
 /// Java word rules the reference search server follows here (letters joined by one `-`, `.` or `'`, digits joined by
 /// one `.` or `,`); a piece that starts with punctuation, such as `.5` after a letter, is no token.
-pub fn thai_words(text: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+pub fn thai_words(text: &str, out: &mut impl FnMut(usize, usize)) {
+    let chars = Pooled::collect(text.char_indices());
     let at = |i: usize| chars.get(i).map_or(text.len(), |&(b, _)| b);
     let trie = Trie::get();
-    let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i].1;
         if dictionary(c) || (c == PAIYANNOI && etc(&chars, i)) {
             let start = i;
             i = segment_end(&chars, i);
-            let run: Vec<char> = chars[start..i].iter().map(|&(_, c)| c).collect();
+            let run = Pooled::collect(chars[start..i].iter().map(|&(_, c)| c));
             // Java divides a segment with the dictionary only when its rules looked up two
             // dictionary characters or more: `ปฯ,` stays whole, `ปฯ พ` does not.
             let pieces = match looked_up(&chars, start, i) {
-                0 | 1 => vec![run.len()],
+                0 | 1 => Pooled::collect([run.len()]),
                 _ => breaks(&run, trie),
             };
             let mut from = 0;
-            for b in pieces {
+            for &b in pieces.iter() {
                 if b > from && letter_or_digit(run[from]) {
-                    out.push((at(start + from), at(start + b)));
+                    out(at(start + from), at(start + b));
                 }
                 from = from.max(b);
             }
@@ -286,9 +290,8 @@ pub fn thai_words(text: &str) -> Vec<(usize, usize)> {
         }
         let start = i;
         i = word_end(&chars, i);
-        out.push((at(start), at(i)));
+        out(at(start), at(i));
     }
-    out
 }
 
 /// The end of the word that starts with the letter or digit at `i`; format characters and
@@ -330,7 +333,9 @@ mod tests {
     use super::*;
 
     fn cut(text: &str) -> Vec<&str> {
-        thai_words(text).into_iter().map(|(a, b)| &text[a..b]).collect()
+        let mut out = Vec::new();
+        thai_words(text, &mut |a, b| out.push(&text[a..b]));
+        out
     }
 
     #[test]

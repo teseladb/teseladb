@@ -20,6 +20,8 @@ pub mod set;
 
 use teseladb_mql::regex::Regex;
 
+use crate::analysis::scratch::{Chars, Pooled, Text};
+
 pub use parse::{ErrorKind, SyntaxError};
 
 /// Why a pattern does not compile or a match or a replacement fails.
@@ -178,10 +180,15 @@ pub struct JavaRegex {
 
 /// One match: the byte range of the whole match and of each group (`None` when the group did not
 /// take part).
-pub type Groups = Vec<Option<(usize, usize)>>;
+pub type Groups = Vec<Group>;
 
+/// The byte range of a group of a match, `None` when the group did not take part.
+pub type Group = Option<(usize, usize)>;
+
+#[derive(Clone, Copy, Debug)]
 enum Piece {
-    Text(String),
+    /// Bytes `from..to` of the literal text of the replacement.
+    Text(usize, usize),
     Group(usize),
 }
 
@@ -203,26 +210,44 @@ impl JavaRegex {
     /// search starts where the previous match ended, one character later after an empty match.
     pub fn find_all(&self, text: &str) -> Result<Vec<Groups>, RegexError> {
         let mut out = Vec::new();
+        self.for_each_match(text, &mut |groups| out.push(groups.to_vec()))?;
+        Ok(out)
+    }
+
+    /// Gives `found` the groups of every match of [`JavaRegex::find_all`], in a buffer of the
+    /// thread that is reused from match to match (FR-028).
+    pub fn for_each_match(
+        &self,
+        text: &str,
+        found: &mut dyn FnMut(&[Group]),
+    ) -> Result<(), RegexError> {
+        let mut groups: Pooled<Option<(usize, usize)>> = Pooled::new();
         let mut at = 0;
         while at <= text.len() {
-            let Some(m) = self.regex.find_at(text, at).map_err(|_| RegexError::Limit)? else {
+            let matched =
+                self.regex.find_at_into(text, at, &mut groups).map_err(|_| RegexError::Limit)?;
+            if !matched {
                 break;
-            };
-            let (start, end) = m.groups.first().copied().flatten().unwrap_or((at, at));
+            }
+            let (start, end) = groups.first().copied().flatten().unwrap_or((at, at));
             at = if end > start {
                 end
             } else {
                 end + text[end..].chars().next().map_or(1, char::len_utf8)
             };
-            out.push(m.groups);
+            found(&groups);
         }
-        Ok(out)
+        Ok(())
     }
 
-    fn pieces(&self, replacement: &str) -> Result<Vec<Piece>, RegexError> {
-        let chars: Vec<char> = replacement.chars().collect();
-        let mut out = Vec::new();
-        let mut text = String::new();
+    fn pieces(
+        &self,
+        replacement: &str,
+        text: &mut String,
+        out: &mut Vec<Piece>,
+    ) -> Result<(), RegexError> {
+        let chars = Chars::of(replacement);
+        let mut from = text.len();
         let mut i = 0;
         while i < chars.len() {
             match chars[i] {
@@ -235,19 +260,24 @@ impl JavaRegex {
                     i += 2;
                 }
                 '$' => {
-                    out.push(Piece::Text(std::mem::take(&mut text)));
+                    out.push(Piece::Text(from, text.len()));
+                    from = text.len();
                     i += 1;
                     let group = if chars.get(i) == Some(&'{') {
                         let end = chars[i..].iter().position(|&c| c == '}').ok_or_else(|| {
                             bad_replacement("named capturing group is missing trailing '}'")
                         })? + i;
-                        let name: String = chars[i + 1..end].iter().collect();
+                        let name: &[char] = &chars[i + 1..end];
                         if name.is_empty() {
                             return Err(bad_replacement("named capturing group has 0 length name"));
                         }
                         i = end + 1;
-                        self.names.iter().find(|(n, _)| *n == name).map(|&(_, g)| g).ok_or_else(
-                            || bad_replacement(&format!("No group with name {{{name}}}")),
+                        let same = |n: &str| n.chars().eq(name.iter().copied());
+                        self.names.iter().find(|(n, _)| same(n)).map(|&(_, g)| g).ok_or_else(
+                            || {
+                                let name: String = name.iter().collect();
+                                bad_replacement(&format!("No group with name {{{name}}}"))
+                            },
                         )?
                     } else {
                         let first = match chars.get(i) {
@@ -282,37 +312,58 @@ impl JavaRegex {
                 }
             }
         }
-        out.push(Piece::Text(text));
-        Ok(out)
+        out.push(Piece::Text(from, text.len()));
+        Ok(())
     }
 
     /// Checks a replacement before any match: a `\` or `$` at its end, a `$` without a group or
     /// a group the pattern does not have.
     pub fn check_replacement(&self, replacement: &str) -> Result<(), RegexError> {
-        self.pieces(replacement).map(|_| ())
+        self.pieces(replacement, &mut String::new(), &mut Vec::new())
     }
 
     /// `Matcher.replaceAll` (`all`) or `Matcher.replaceFirst`. The replacement is checked only
     /// when there is a match, as Java does.
     pub fn replace(&self, text: &str, replacement: &str, all: bool) -> Result<String, RegexError> {
-        let mut matches = self.find_all(text)?;
+        let mut out = String::new();
+        self.replace_into(text, replacement, all, &mut out)?;
+        Ok(out)
+    }
+
+    /// [`JavaRegex::replace`] appended to `out`, with buffers of the thread reused from call to
+    /// call (FR-028).
+    pub fn replace_into(
+        &self,
+        text: &str,
+        replacement: &str,
+        all: bool,
+        out: &mut String,
+    ) -> Result<(), RegexError> {
+        // Every match first: a match that runs out of steps fails before the replacement.
+        let stride = self.groups + 1;
+        let mut matches: Pooled<Option<(usize, usize)>> = Pooled::new();
+        self.for_each_match(text, &mut |groups| {
+            matches.extend(groups.iter().copied().chain(std::iter::repeat(None)).take(stride));
+        })?;
         if matches.is_empty() {
-            return Ok(text.to_string());
+            out.push_str(text);
+            return Ok(());
         }
         if !all {
-            matches.truncate(1);
+            matches.truncate(stride);
         }
-        let pieces = self.pieces(replacement)?;
-        let mut out = String::with_capacity(text.len());
+        let mut literal = Text::new();
+        let mut pieces: Pooled<Piece> = Pooled::new();
+        self.pieces(replacement, &mut literal, &mut pieces)?;
         let mut copied = 0;
-        for groups in &matches {
+        for groups in matches.chunks(stride) {
             let Some((start, end)) = groups.first().copied().flatten() else { continue };
             out.push_str(&text[copied..start]);
-            for piece in &pieces {
-                match piece {
-                    Piece::Text(t) => out.push_str(t),
+            for piece in pieces.iter() {
+                match *piece {
+                    Piece::Text(from, to) => out.push_str(&literal[from..to]),
                     Piece::Group(g) => {
-                        if let Some(&Some((s, e))) = groups.get(*g) {
+                        if let Some(&Some((s, e))) = groups.get(g) {
                             out.push_str(&text[s..e]);
                         }
                     }
@@ -321,8 +372,13 @@ impl JavaRegex {
             copied = end;
         }
         out.push_str(&text[copied..]);
-        Ok(out)
+        Ok(())
     }
+}
+
+crate::analysis::scratch::pools! {
+    GROUPS: Option<(usize, usize)>;
+    PIECES: Piece;
 }
 
 #[cfg(test)]

@@ -134,21 +134,45 @@ impl Regex {
 
     /// The first match at or after the byte offset `start` (a character boundary of `text`).
     pub fn find_at(&self, text: &str, start: usize) -> Result<Option<Match>> {
+        let mut groups = Vec::new();
+        let found = self.find_at_into(text, start, &mut groups)?;
+        Ok(found.then_some(Match { groups }))
+    }
+
+    /// [`Regex::find_at`] into `groups`, emptied first: whether there is a match. The machine
+    /// reuses the vectors of its thread from match to match, so once they have grown a match
+    /// allocates nothing.
+    pub fn find_at_into(
+        &self,
+        text: &str,
+        start: usize,
+        groups: &mut Vec<Option<(usize, usize)>>,
+    ) -> Result<bool> {
+        groups.clear();
         if start > text.len() || !text.is_char_boundary(start) {
-            return Ok(None);
+            return Ok(false);
         }
         if !self.start.possible(text, start) {
-            return Ok(None);
+            return Ok(false);
         }
         let mut machine = Machine::new(&self.program, text);
+        let mut slots = vm::take_slots();
         let found = machine
-            .search(start, self.groups, self.anchored && start == 0, |at| {
-                self.start.may_start(text, at)
-            })
+            .search(
+                start,
+                self.groups,
+                self.anchored && start == 0,
+                |at| self.start.may_start(text, at),
+                &mut slots,
+            )
             .map_err(|MatchError::Limit| {
                 bad_value("regular expression match exceeded its limit of steps")
-            })?;
-        Ok(found.map(|slots| Match { groups: slots.chunks(2).map(|p| p[0].zip(p[1])).collect() }))
+            });
+        if let Ok(true) = found {
+            groups.extend(slots.chunks(2).map(|p| p[0].zip(p[1])));
+        }
+        vm::give_slots(slots);
+        found
     }
 }
 

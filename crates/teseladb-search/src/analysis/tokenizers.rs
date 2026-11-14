@@ -25,6 +25,7 @@ use super::charfilters::Filtered;
 use super::jregex::{JavaRegex, RegexError};
 use super::morph;
 use super::scratch::Pooled;
+use super::tokens::{Meta, Tokens};
 use super::uax29::boundaries_into;
 use super::unicode::{
     WordBreak, is_complex_context, is_han, is_hiragana, is_pictographic, word_break,
@@ -177,7 +178,7 @@ pub fn check(tokenizer: Tokenizer) -> Result<Tokenizer, TokenizerError> {
 
 struct Emitter<'a> {
     input: &'a Filtered,
-    out: Vec<Token>,
+    out: &'a mut Tokens,
 }
 
 impl Emitter<'_> {
@@ -202,14 +203,10 @@ impl Emitter<'_> {
 
     /// Emits the tokens a dictionary tokenizer gives for `chars` (each with the byte offset of
     /// the filtered text it comes from); a dropped token keeps its position.
-    fn emit_morph(
-        &mut self,
-        chars: Vec<(char, usize)>,
-        tokenize: impl Fn(&[u16]) -> Vec<Option<morph::MorphToken>>,
-    ) {
-        let mut units = Vec::with_capacity(chars.len());
-        let mut offsets = Vec::with_capacity(chars.len() + 1);
-        for &(c, at) in &chars {
+    fn emit_morph(&mut self, chars: &[(char, usize)], tokenize: morph::Tokenize) {
+        let mut units: Pooled<u16> = Pooled::new();
+        let mut offsets: Pooled<usize> = Pooled::new();
+        for &(c, at) in chars {
             let mut buf = [0u16; 2];
             for &u in c.encode_utf16(&mut buf).iter() {
                 units.push(u);
@@ -217,30 +214,42 @@ impl Emitter<'_> {
             }
         }
         offsets.push(self.input.text.len());
-        for (position, token) in tokenize(&units).into_iter().enumerate() {
-            let Some(t) = token else { continue };
-            self.out.push(Token {
-                text: t.text,
-                start: self.input.original(offsets[t.start]),
-                end: self.input.original(offsets[t.end]),
-                position: position as u32,
+        let (input, out) = (self.input, &mut *self.out);
+        let mut position = 0u32;
+        tokenize(&units, &mut |piece| {
+            let at = position;
+            position += 1;
+            let Some(p) = piece else { return };
+            let meta = Meta {
+                start: input.original(offsets[p.start]),
+                end: input.original(offsets[p.end]),
+                position: at,
                 length: 1,
                 keyword: false,
-            });
-        }
+            };
+            match p.text {
+                morph::Spelling::Str(t) => out.push(t, meta),
+                morph::Spelling::Units(u) => out.push_with(meta, |o| {
+                    o.extend(
+                        char::decode_utf16(u.iter().copied())
+                            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)),
+                    )
+                }),
+            }
+        });
     }
 
     /// Emits filtered bytes `from..to`.
     fn emit(&mut self, from: usize, to: usize) {
         let position = self.out.len() as u32;
-        self.out.push(Token {
-            text: self.input.text[from..to].to_string(),
+        let meta = Meta {
             start: self.input.original(from),
             end: self.input.original(to),
             position,
             length: 1,
             keyword: false,
-        });
+        };
+        self.out.push(&self.input.text[from..to], meta);
     }
 
     /// Emits `from..to` cut into pieces: a piece ends once it holds `max` UTF-16 code units or
@@ -266,7 +275,8 @@ impl Emitter<'_> {
     fn emit_url_email(&mut self, max: usize) {
         let text = &self.input.text;
         let mut base = 0;
-        let mut segments = words(text);
+        let mut segments: Pooled<(usize, usize)> = Pooled::new();
+        words_into(text, &mut segments);
         let mut next = 0;
         let mut at = 0;
         while at < text.len() {
@@ -276,7 +286,7 @@ impl Emitter<'_> {
             let word = segments
                 .get(next)
                 .filter(|(start, _)| base + start == at)
-                .map_or(0, |(_, w)| w.len());
+                .map_or(0, |(start, end)| end - start);
             let rest = &text.as_bytes()[at..];
             let whole = email(rest).max(url(rest)).unwrap_or(0);
             if whole > 0 && whole >= word {
@@ -292,7 +302,8 @@ impl Emitter<'_> {
                     }
                 }
                 base = at;
-                segments = words(&text[at..]);
+                segments.clear();
+                words_into(&text[at..], &mut segments);
                 next = 0;
                 continue;
             }
@@ -312,8 +323,10 @@ impl Emitter<'_> {
             self.emit(at, at + len);
             return;
         };
-        for (piece_at, piece) in words(&text[at..at + cut]) {
-            self.emit(at + piece_at, at + piece_at + piece.len());
+        let mut pieces: Pooled<(usize, usize)> = Pooled::new();
+        words_into(&text[at..at + cut], &mut pieces);
+        for &(from, to) in pieces.iter() {
+            self.emit(at + from, at + to);
         }
         self.emit_words_range(at + cut, at + len, max);
     }
@@ -321,8 +334,10 @@ impl Emitter<'_> {
     /// Emits the words of `from..to`, segmented as a text of their own.
     fn emit_words_range(&mut self, from: usize, to: usize, max: usize) {
         let text = &self.input.text;
-        for (piece_at, piece) in words(&text[from..to]) {
-            self.emit_words_once(from + piece_at, piece.len(), max);
+        let mut pieces: Pooled<(usize, usize)> = Pooled::new();
+        words_into(&text[from..to], &mut pieces);
+        for &(a, b) in pieces.iter() {
+            self.emit_words_once(from + a, b - a, max);
         }
     }
 
@@ -394,7 +409,17 @@ impl Tokenizer {
     /// The tokens of filtered text. Only the regular-expression tokenizers fail, when a match
     /// runs out of the engine's steps.
     pub fn tokenize(&self, input: &Filtered) -> Result<Vec<Token>, RegexError> {
-        let mut e = Emitter { input, out: Vec::new() };
+        let mut out = Tokens::default();
+        self.tokenize_into(input, &mut out)?;
+        Ok(out.to_tokens())
+    }
+
+    /// Writes the tokens of filtered text into `out`, emptied first, with its end position;
+    /// once `out` and the thread's buffers have grown for a text, the same text allocates
+    /// nothing (FR-028).
+    pub fn tokenize_into(&self, input: &Filtered, out: &mut Tokens) -> Result<(), RegexError> {
+        out.clear();
+        let mut e = Emitter { input, out };
         let text = &input.text;
         match self {
             Tokenizer::Standard { .. }
@@ -406,42 +431,38 @@ impl Tokenizer {
             &Tokenizer::UaxUrlEmail { max_token_length } => e.emit_url_email(max_token_length),
             Tokenizer::RegexSplit { pattern } => {
                 let mut from = 0;
-                for groups in pattern.regex().find_all(text)? {
+                pattern.regex().for_each_match(text, &mut |groups| {
                     let (start, end) = groups[0].unwrap_or((from, from));
                     if start > from {
                         e.emit(from, start);
                     }
                     from = from.max(end);
-                }
+                })?;
                 if text.len() > from {
                     e.emit(from, text.len());
                 }
             }
             Tokenizer::RegexCaptureGroup { pattern, group } => {
-                for groups in pattern.regex().find_all(text)? {
+                pattern.regex().for_each_match(text, &mut |groups| {
                     if let Some(&Some((start, end))) = groups.get(*group)
                         && end > start
                     {
                         e.emit(start, end);
                     }
-                }
+                })?;
             }
-            Tokenizer::Kuromoji => e.emit_morph(
-                crate::analysis::tokenfilters::cjk_width_offsets(text),
-                morph::kuromoji,
-            ),
+            Tokenizer::Kuromoji => {
+                let mut chars: Pooled<(char, usize)> = Pooled::new();
+                crate::analysis::tokenfilters::cjk_width_offsets(text, &mut chars);
+                e.emit_morph(&chars, morph::kuromoji);
+            }
             Tokenizer::Nori => {
-                e.emit_morph(text.char_indices().map(|(i, c)| (c, i)).collect(), morph::nori)
+                let chars = Pooled::collect(text.char_indices().map(|(i, c)| (c, i)));
+                e.emit_morph(&chars, morph::nori);
             }
-            Tokenizer::Thai => {
-                for (from, to) in super::thai::thai_words(text) {
-                    e.emit(from, to);
-                }
-            }
+            Tokenizer::Thai => super::thai::thai_words(text, &mut |from, to| e.emit(from, to)),
             Tokenizer::SmartCn => {
-                for (from, to) in super::smartcn::smartcn_words(text) {
-                    e.emit(from, to);
-                }
+                super::smartcn::smartcn_words(text, &mut |from, to| e.emit(from, to));
             }
             &Tokenizer::NGram { min, max } => {
                 e.grams(text.char_indices().map(|(i, _)| i), min, max);
@@ -452,7 +473,8 @@ impl Tokenizer {
                 }
             }
         }
-        Ok(e.out)
+        e.out.end = e.out.span_end();
+        Ok(())
     }
 }
 
@@ -564,6 +586,7 @@ fn text_presentation_pieces(w: &str, mut piece: impl FnMut(usize, &str)) {
 
 /// The UAX #29 segments of `text` that are tokens, with each run of segments of
 /// characters of Line_Break=SA (Thai, Lao, Myanmar, Khmer and others) joined into one.
+#[cfg(test)]
 pub(super) fn words(text: &str) -> Vec<(usize, &str)> {
     let mut spans = Pooled::new();
     words_into(text, &mut spans);
@@ -689,7 +712,8 @@ mod tests {
     /// The tokens the tokenizers gave before their spans came from byte classes.
     fn reference(t: &Tokenizer, text: &str) -> Vec<Token> {
         let input = Filtered::new(text);
-        let mut e = Emitter { input: &input, out: Vec::new() };
+        let mut out = Tokens::default();
+        let mut e = Emitter { input: &input, out: &mut out };
         match *t {
             Tokenizer::Standard { max_token_length } => e.emit_words(0, max_token_length),
             Tokenizer::Whitespace { max_token_length } => e.emit_runs(
@@ -701,7 +725,7 @@ mod tests {
             }
             _ => unreachable!("not a tokenizer of spans"),
         }
-        e.out
+        out.to_tokens()
     }
 
     #[test]

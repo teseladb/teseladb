@@ -334,17 +334,50 @@ pub struct Word {
 struct Lattice<'a> {
     dict: &'a Dictionary,
     text: &'a [u16],
-    positions: Vec<Vec<Arrival>>,
-    forwards: Vec<Vec<Forward>>,
+    b: Buffers,
     next: usize,
     last: usize,
+}
+
+impl Drop for Lattice<'_> {
+    fn drop(&mut self) {
+        let b = std::mem::take(&mut self.b);
+        // A thread that is ending drops its buffers first; these are then just freed.
+        let _ = BUFFERS.try_with(|slot| *slot.borrow_mut() = Some(b));
+    }
+}
+
+/// The vectors of a [`Lattice`], kept by each thread from text to text (FR-028).
+#[derive(Default)]
+struct Buffers {
+    positions: Vec<Vec<Arrival>>,
+    forwards: Vec<Vec<Forward>>,
     out: Vec<Word>,
+    words: Vec<Word>,
+    known: Vec<(usize, usize)>,
+}
+
+thread_local! {
+    static BUFFERS: std::cell::RefCell<Option<Buffers>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `rows` with its first `n` rows empty, keeping the capacity of each.
+fn reset<T>(rows: &mut Vec<Vec<T>>, n: usize) {
+    for row in rows.iter_mut().take(n) {
+        row.clear();
+    }
+    while rows.len() < n {
+        rows.push(Vec::new());
+    }
 }
 
 impl<'a> Lattice<'a> {
     fn new(dict: &'a Dictionary, text: &'a [u16]) -> Lattice<'a> {
-        let mut positions = vec![Vec::new(); text.len() + 1];
-        positions[0].push(Arrival {
+        let mut b = BUFFERS.try_with(|b| b.borrow_mut().take()).ok().flatten().unwrap_or_default();
+        reset(&mut b.positions, text.len() + 1);
+        reset(&mut b.forwards, text.len() + 1);
+        b.out.clear();
+        b.positions[0].push(Arrival {
             cost: 0,
             right: 0,
             back: 0,
@@ -353,15 +386,7 @@ impl<'a> Lattice<'a> {
             entry: Entry { left: 0, right: 0, cost: 0, tag: 0, extra: 0 },
             source: Source::Known,
         });
-        Lattice {
-            dict,
-            text,
-            positions,
-            forwards: vec![Vec::new(); text.len() + 1],
-            next: 1,
-            last: 0,
-            out: Vec::new(),
-        }
+        Lattice { dict, text, b, next: 1, last: 0 }
     }
 
     /// Marks position `p` as reached, as the reference search library's position array does on each access.
@@ -382,7 +407,7 @@ impl<'a> Lattice<'a> {
         extra: impl Fn(&Arrival) -> i32,
     ) {
         let mut least: Option<(i32, usize)> = None;
-        for (i, a) in self.positions[from].iter().enumerate() {
+        for (i, a) in self.b.positions[from].iter().enumerate() {
             let cost = a.cost + self.dict.connection(a.right, entry.left) + extra(a);
             if least.is_none_or(|(c, _)| cost < c) {
                 least = Some((cost, i));
@@ -390,7 +415,7 @@ impl<'a> Lattice<'a> {
         }
         let Some((cost, index)) = least else { return };
         self.touch(end);
-        self.positions[end].push(Arrival {
+        self.b.positions[end].push(Arrival {
             cost: cost + i32::from(entry.cost) + penalty,
             right: entry.right,
             back: from,
@@ -422,7 +447,7 @@ impl<'a> Lattice<'a> {
     /// The cheapest arrival at the end of the text, with the connection to the end.
     fn final_index(&self) -> usize {
         let mut least: Option<(i32, usize)> = None;
-        for (i, a) in self.positions[self.text.len()].iter().enumerate() {
+        for (i, a) in self.b.positions[self.text.len()].iter().enumerate() {
             let cost = a.cost + self.dict.connection(a.right, 0);
             if least.is_none_or(|(c, _)| cost < c) {
                 least = Some((cost, i));
@@ -468,28 +493,37 @@ impl Lattice<'_> {
     /// arrival `best_start` at `start`.
     fn rescore(&mut self, start: usize, end: usize, best_start: usize) {
         for p in (start + 1..=end).rev() {
-            let arrivals = std::mem::take(&mut self.positions[p]);
+            let mut arrivals = std::mem::take(&mut self.b.positions[p]);
             for a in &arrivals {
                 if a.back >= start {
-                    self.forwards[a.back].push(Forward { to: p, entry: a.entry, source: a.source });
+                    self.b.forwards[a.back].push(Forward {
+                        to: p,
+                        entry: a.entry,
+                        source: a.source,
+                    });
                 }
             }
+            // The row stays empty, with its capacity.
+            arrivals.clear();
+            self.b.positions[p] = arrivals;
         }
         for p in start..end {
-            let forwards = std::mem::take(&mut self.forwards[p]);
-            if self.positions[p].is_empty() {
+            let mut forwards = std::mem::take(&mut self.b.forwards[p]);
+            if self.b.positions[p].is_empty() {
+                forwards.clear();
+                self.b.forwards[p] = forwards;
                 continue;
             }
             if p == start {
-                let from = self.positions[p][best_start];
+                let from = self.b.positions[p][best_start];
                 let right = if start == 0 { 0 } else { from.entry.right };
-                for f in forwards {
+                for &f in &forwards {
                     let cost = from.cost
                         + i32::from(f.entry.cost)
                         + self.dict.connection(right, f.entry.left)
                         + self.penalty(p, f.to - p);
                     self.touch(f.to);
-                    self.positions[f.to].push(Arrival {
+                    self.b.positions[f.to].push(Arrival {
                         cost,
                         right: f.entry.right,
                         back: p,
@@ -500,11 +534,13 @@ impl Lattice<'_> {
                     });
                 }
             } else {
-                for f in forwards {
+                for &f in &forwards {
                     let pen = self.penalty(p, f.to - p);
                     self.add(p, p, f.to, f.entry, f.source, pen, |_| 0);
                 }
             }
+            forwards.clear();
+            self.b.forwards[p] = forwards;
         }
     }
 
@@ -518,9 +554,10 @@ impl Lattice<'_> {
         // Where the compound replaced by its parts starts, while the path is inside it.
         let mut alt: Option<usize> = None;
         let mut last_left: Option<u16> = None;
-        let mut words = Vec::new();
+        let mut words = std::mem::take(&mut self.b.words);
+        words.clear();
         while pos > self.last {
-            let mut a = self.positions[pos][best];
+            let mut a = self.b.positions[pos][best];
             if alt.is_none() {
                 let pen = self.penalty(a.back, pos - a.back);
                 if pen > 0 {
@@ -530,7 +567,7 @@ impl Lattice<'_> {
                     }
                     self.rescore(a.back, pos, a.back_index);
                     let mut least: Option<(i32, usize)> = None;
-                    for (i, b) in self.positions[pos].iter().enumerate() {
+                    for (i, b) in self.b.positions[pos].iter().enumerate() {
                         let cost = b.cost
                             + last_left.map_or(0, |l| self.dict.connection(b.entry.right, l));
                         if least.is_none_or(|(c, _)| cost < c) {
@@ -539,10 +576,10 @@ impl Lattice<'_> {
                     }
                     if let Some((cost, i)) = least
                         && cost <= max
-                        && self.positions[pos][i].back != a.back
+                        && self.b.positions[pos][i].back != a.back
                     {
                         alt = Some(a.back);
-                        a = self.positions[pos][i];
+                        a = self.b.positions[pos][i];
                     }
                 }
             }
@@ -558,40 +595,42 @@ impl Lattice<'_> {
         }
         self.last = end;
         words.reverse();
-        self.out.extend(words);
+        self.b.out.extend_from_slice(&words);
+        self.b.words = words;
     }
 }
 
 impl Lattice<'_> {
     /// Japanese: the words of the best path in search mode.
-    fn run_ja(mut self) -> Vec<Word> {
+    fn run_ja(&mut self) {
         let n = self.text.len();
         let mut pos = 0;
         while pos < n {
             self.touch(pos);
             let frontier = self.next == pos + 1;
-            if self.positions[pos].is_empty() {
+            if self.b.positions[pos].is_empty() {
                 pos += 1;
                 continue;
             }
-            if pos > self.last && self.positions[pos].len() == 1 && frontier {
+            if pos > self.last && self.b.positions[pos].len() == 1 && frontier {
                 self.backtrace_ja(pos, 0);
-                self.positions[pos][0].cost = 0;
+                self.b.positions[pos][0].cost = 0;
             }
-            let mut known = Vec::new();
-            self.dict.words_at(self.text, pos, |end, surface| known.push((end, surface)));
+            let dict = self.dict;
+            let mut known = std::mem::take(&mut self.b.known);
+            known.clear();
+            dict.words_at(self.text, pos, |end, surface| known.push((end, surface)));
             let any = !known.is_empty();
-            for (end, surface) in known {
-                let entries: Vec<Entry> = self.dict.entries_of(surface).collect();
-                for e in entries {
+            for &(end, surface) in &known {
+                for e in dict.entries_of(surface) {
                     self.add(pos, pos, end, e, Source::Known, 0, |_| 0);
                 }
             }
-            let class = self.dict.class(self.text[pos]);
-            if !any || self.dict.invokes(class) {
+            self.b.known = known;
+            let class = dict.class(self.text[pos]);
+            if !any || dict.invokes(class) {
                 let len = self.unknown_length_ja(pos, class);
-                let entries: Vec<Entry> = self.dict.unknown_of(class).collect();
-                for e in entries {
+                for e in dict.unknown_of(class) {
                     self.add(pos, pos, pos + len, e, Source::Unknown, 0, |_| 0);
                 }
             }
@@ -602,7 +641,6 @@ impl Lattice<'_> {
             let index = self.final_index();
             self.backtrace_ja(n, index);
         }
-        self.out
     }
 }
 
@@ -667,19 +705,19 @@ impl Lattice<'_> {
     }
 
     /// Korean: the words of the best path, with where each starts after a skipped space.
-    fn run_ko(mut self) -> Vec<Word> {
+    fn run_ko(&mut self) {
         let n = self.text.len();
         let mut pos = 0;
         while pos < n {
             self.touch(pos);
             let frontier = self.next == pos + 1;
-            if self.positions[pos].is_empty() {
+            if self.b.positions[pos].is_empty() {
                 pos += 1;
                 continue;
             }
-            if pos > self.last && self.positions[pos].len() == 1 && frontier {
+            if pos > self.last && self.b.positions[pos].len() == 1 && frontier {
                 self.backtrace_ko(pos, 0);
-                self.positions[pos][0].cost = 0;
+                self.b.positions[pos][0].cost = 0;
             }
             let from = pos;
             if unit_category(self.text[pos]) == SPACE_SEPARATOR && pos + 1 < n {
@@ -694,15 +732,17 @@ impl Lattice<'_> {
                     0
                 }
             };
-            let mut known = Vec::new();
+            let mut known = std::mem::take(&mut self.b.known);
+            known.clear();
             dict.words_at(self.text, pos, |end, surface| known.push((end, surface)));
             let any = !known.is_empty();
-            for (end, surface) in known {
+            for &(end, surface) in &known {
                 for e in dict.entries_of(surface) {
                     let p = penalty(&e);
                     self.add(from, pos, end, e, Source::Known, 0, |_| p);
                 }
             }
+            self.b.known = known;
             let class = dict.class(self.text[pos]);
             if !any || dict.invokes(class) {
                 let (len, class) = self.unknown_length_ko(pos, class);
@@ -718,7 +758,6 @@ impl Lattice<'_> {
             let index = self.final_index();
             self.backtrace_ko(n, index);
         }
-        self.out
     }
 
     /// Follows the best path back from `index` at `end` to the last backtrace.
@@ -728,16 +767,18 @@ impl Lattice<'_> {
         }
         let mut pos = end;
         let mut best = index;
-        let mut words = Vec::new();
+        let mut words = std::mem::take(&mut self.b.words);
+        words.clear();
         while pos > self.last {
-            let a = self.positions[pos][best];
+            let a = self.b.positions[pos][best];
             words.push(Word { start: a.word_start, end: pos, entry: a.entry });
             pos = a.back;
             best = a.back_index;
         }
         self.last = end;
         words.reverse();
-        self.out.extend(words);
+        self.b.out.extend_from_slice(&words);
+        self.b.words = words;
     }
 }
 
@@ -746,11 +787,27 @@ const NON_SPACING_MARK: usize = 6;
 const DIGIT: usize = 9;
 const SPACE_SEPARATOR: usize = 23;
 
+/// The text of a token of the dictionary tokenizers: a string of the dictionary or the
+/// UTF-16 units of the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spelling<'a> {
+    /// A string.
+    Str(&'a str),
+    /// UTF-16 code units, decoded with U+FFFD for lone surrogates.
+    Units(&'a [u16]),
+}
+
+/// Where a dictionary tokenizer gives its tokens, `None` for a dropped one.
+pub type Emit<'e> = dyn FnMut(Option<Piece<'_>>) + 'e;
+
+/// A dictionary tokenizer: [`kuromoji`] or [`nori`].
+pub type Tokenize = fn(&[u16], &mut Emit<'_>);
+
 /// A token of the dictionary tokenizers: its text and UTF-16 range.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MorphToken {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Piece<'a> {
     /// The text.
-    pub text: String,
+    pub text: Spelling<'a>,
     /// First code unit.
     pub start: usize,
     /// End code unit.
@@ -790,55 +847,55 @@ pub const KOREAN_STOP_TAGS: &[&str] = &[
     "XSA", "XSN", "XSV",
 ];
 
-/// Japanese: for each word of `text` (already width-folded, in UTF-16 units), its base form (or
-/// its surface) and range, with `None` for words whose tag is a stop tag (they keep their
-/// position).
-pub fn kuromoji(text: &[u16]) -> Vec<Option<MorphToken>> {
+/// Japanese: gives `emit`, for each word of `text` (already width-folded, in UTF-16 units), its
+/// base form (or its surface) and range, with `None` for words whose tag is a stop tag (they
+/// keep their position).
+pub fn kuromoji(text: &[u16], emit: &mut Emit<'_>) {
     let dict = Dictionary::japanese();
-    Lattice::new(dict, text)
-        .run_ja()
-        .into_iter()
-        .map(|w| {
-            if JAPANESE_STOP_TAGS.contains(&dict.string(w.entry.tag)) {
-                return None;
-            }
-            let text = if w.entry.extra == 0 {
-                String::from_utf16_lossy(&text[w.start..w.end])
-            } else {
-                dict.string(w.entry.extra).to_string()
-            };
-            Some(MorphToken { text, start: w.start, end: w.end })
-        })
-        .collect()
+    let mut lattice = Lattice::new(dict, text);
+    lattice.run_ja();
+    for w in &lattice.b.out {
+        if JAPANESE_STOP_TAGS.contains(&dict.string(w.entry.tag)) {
+            emit(None);
+            continue;
+        }
+        let spelling = if w.entry.extra == 0 {
+            Spelling::Units(&text[w.start..w.end])
+        } else {
+            Spelling::Str(dict.string(w.entry.extra))
+        };
+        emit(Some(Piece { text: spelling, start: w.start, end: w.end }));
+    }
 }
 
-/// Korean: the tokens of `text` (UTF-16 units) with compound, inflected and pre-analysed words
-/// split into their morphemes, each one's reading when it has one, and `None` for tokens whose
-/// tag is a stop tag.
-pub fn nori(text: &[u16]) -> Vec<Option<MorphToken>> {
+/// Korean: gives `emit` the tokens of `text` (UTF-16 units) with compound, inflected and
+/// pre-analysed words split into their morphemes, each one's reading when it has one, and `None`
+/// for tokens whose tag is a stop tag.
+pub fn nori(text: &[u16], emit: &mut Emit<'_>) {
     let dict = Dictionary::korean();
-    let mut out = Vec::new();
-    for w in Lattice::new(dict, text).run_ko() {
+    let mut lattice = Lattice::new(dict, text);
+    lattice.run_ko();
+    for w in &lattice.b.out {
         let tag = dict.string(w.entry.tag);
         let extra = dict.string(w.entry.extra);
         let mut fields = extra.split('\u{1}');
         let kind = fields.next().unwrap_or("M");
         let reading = fields.next().unwrap_or("");
-        let morphemes: Vec<&str> = fields.collect();
-        if kind == "M" || kind.is_empty() || morphemes.is_empty() {
+        let morphemes = fields;
+        if kind == "M" || kind.is_empty() || morphemes.clone().next().is_none() {
             if punctuation_ko(text[w.start]) {
                 continue;
             }
             if KOREAN_STOP_TAGS.contains(&tag) {
-                out.push(None);
+                emit(None);
                 continue;
             }
-            let text = if reading.is_empty() {
-                String::from_utf16_lossy(&text[w.start..w.end])
+            let spelling = if reading.is_empty() {
+                Spelling::Units(&text[w.start..w.end])
             } else {
-                reading.to_string()
+                Spelling::Str(reading)
             };
-            out.push(Some(MorphToken { text, start: w.start, end: w.end }));
+            emit(Some(Piece { text: spelling, start: w.start, end: w.end }));
             continue;
         }
         let mut offset = w.start;
@@ -854,13 +911,12 @@ pub fn nori(text: &[u16]) -> Vec<Option<MorphToken>> {
                 (w.start, w.end)
             };
             if KOREAN_STOP_TAGS.contains(&mtag) {
-                out.push(None);
+                emit(None);
             } else {
-                out.push(Some(MorphToken { text: surface.to_string(), start, end }));
+                emit(Some(Piece { text: Spelling::Str(surface), start, end }));
             }
         }
     }
-    out
 }
 
 #[cfg(test)]

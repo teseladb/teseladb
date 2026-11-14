@@ -5,8 +5,9 @@ use super::charfilters::{CharFilter, Filtered};
 use super::jregex::RegexError;
 use super::language::language;
 use super::morfologik::Language;
-use super::tokenfilters::{Step, Stream, TokenFilter};
+use super::tokenfilters::{Step, TokenFilter};
 use super::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Token, Tokenizer};
+use super::tokens::Tokens;
 
 /// An analyzer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,15 +48,49 @@ impl Analyzer {
     /// The tokens of `text`. Only the regular-expression components fail, when a match runs out
     /// of the engine's steps.
     pub fn analyze(&self, text: &str) -> Result<Vec<Token>, RegexError> {
-        let mut filtered = Filtered::new(text);
+        let mut buffer = TermBuffer::default();
+        let at = self.tokens(text, &mut buffer)?;
+        Ok(buffer.lists[at].to_tokens())
+    }
+
+    /// Runs the character filters on `text`, each one reading the last text written of
+    /// `filtered` and writing the other; the filtered text, or `None` without character filters.
+    fn filter<'a>(&self, text: &str, filtered: &'a mut [Filtered; 2]) -> Option<&'a Filtered> {
+        if self.char_filters.is_empty() {
+            return None;
+        }
+        filtered[0].reset(text);
+        let mut at = 0;
         for filter in &self.char_filters {
-            filtered = filter.apply(&filtered);
+            let [a, b] = filtered;
+            let (input, output) = if at == 0 { (&*a, b) } else { (&*b, a) };
+            filter.apply_into(input, output);
+            at = 1 - at;
         }
-        let mut stream = Stream::new(self.tokenizer.tokenize(&filtered)?);
+        Some(&filtered[at])
+    }
+
+    /// Runs the analyzer on `text` with the two token lists of `buffer` in turn: the tokenizer
+    /// writes one and each filter reads the last one written and writes the other. Returns which
+    /// holds the tokens.
+    fn tokens(&self, text: &str, buffer: &mut TermBuffer) -> Result<usize, RegexError> {
+        let TermBuffer { filtered, lists, .. } = buffer;
+        let filtered = match self.filter(text, filtered) {
+            Some(f) => f,
+            None => {
+                filtered[0].reset(text);
+                &filtered[0]
+            }
+        };
+        self.tokenizer.tokenize_into(filtered, &mut lists[0])?;
+        let mut at = 0;
         for filter in &self.token_filters {
-            stream = filter.apply(stream)?;
+            let [a, b] = lists;
+            let (input, output) = if at == 0 { (&*a, b) } else { (&*b, a) };
+            filter.apply_into(input, output)?;
+            at = 1 - at;
         }
-        Ok(stream.tokens)
+        Ok(at)
     }
 
     /// Whether [`Analyzer::for_each_term`] cuts the terms out of the text without building
@@ -70,7 +105,8 @@ impl Analyzer {
     /// A [`Analyzer::term_wise`] analyzer builds no token: each term is a piece of the text
     /// (after the character filters, which run once per text) or what its filters wrote into
     /// `buffer`, whose two strings keep their capacity from term to term. Any other analyzer
-    /// runs [`Analyzer::analyze`].
+    /// writes its tokens into the two token lists of `buffer`, which keep their capacity from
+    /// text to text.
     pub fn for_each_term(
         &self,
         text: &str,
@@ -78,18 +114,24 @@ impl Analyzer {
         mut f: impl FnMut(Term<'_>),
     ) -> Result<(), RegexError> {
         if !self.term_wise() {
-            return self.terms_of_tokens(text, f);
-        }
-        let filtered = (!self.char_filters.is_empty()).then(|| {
-            let mut filtered = Filtered::new(text);
-            for filter in &self.char_filters {
-                filtered = filter.apply(&filtered);
+            let at = self.tokens(text, buffer)?;
+            let list = &buffer.lists[at];
+            for i in 0..list.len() {
+                let m = list.meta(i);
+                f(Term {
+                    text: list.text(i),
+                    start: m.start,
+                    end: m.end,
+                    position: m.position,
+                    length: m.length,
+                });
             }
-            filtered
-        });
-        let source = filtered.as_ref().map_or(text, |t| t.text.as_str());
-        let original = |at: usize| filtered.as_ref().map_or(at, |t| t.original(at));
-        let TermBuffer { a, b } = buffer;
+            return Ok(());
+        }
+        let TermBuffer { a, b, filtered, .. } = buffer;
+        let filtered = self.filter(text, filtered);
+        let source = filtered.map_or(text, |t| t.text.as_str());
+        let original = |at: usize| filtered.map_or(at, |t| t.original(at));
         let mut position = 0;
         let mut failed = None;
         self.tokenizer.spans(source, &mut |start, end| {
@@ -130,20 +172,6 @@ impl Analyzer {
         });
         failed.map_or(Ok(()), Err)
     }
-
-    /// [`Analyzer::for_each_term`] through the tokens of [`Analyzer::analyze`].
-    fn terms_of_tokens(&self, text: &str, mut f: impl FnMut(Term<'_>)) -> Result<(), RegexError> {
-        for t in self.analyze(text)? {
-            f(Term {
-                text: &t.text,
-                start: t.start,
-                end: t.end,
-                position: t.position,
-                length: t.length,
-            });
-        }
-        Ok(())
-    }
 }
 
 /// A term of [`Analyzer::for_each_term`]: a [`Token`] whose text is borrowed.
@@ -167,6 +195,8 @@ pub struct Term<'a> {
 pub struct TermBuffer {
     a: String,
     b: String,
+    lists: [Tokens; 2],
+    filtered: [Filtered; 2],
 }
 
 #[cfg(test)]
