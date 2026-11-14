@@ -1,7 +1,7 @@
 target/
 *.profraw
 /teseladb-data/
-/.sim-artifacts/
+.sim-artifacts/
 /.tools/
 # TLC state dumps (scripts/tlc.sh)
 /states/

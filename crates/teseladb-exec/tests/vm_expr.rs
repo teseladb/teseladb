@@ -106,7 +106,9 @@ fn expr_comparisons_give_the_engine_s_answers() {
             let one = filter.matches(*r, ctx).expect("no error");
             assert_eq!(one, tree[k], "{f:?} on {:?}", Document::from(*r));
         }
-        for (c, chunk) in raws.chunks(64).enumerate() {
+        let stored: Vec<teseladb_keys::stored::Stored<'_>> =
+            raws.iter().map(|r| (*r).into()).collect();
+        for (c, chunk) in stored.chunks(64).enumerate() {
             let mask = filter.matches_batch(chunk, ctx).expect("no error");
             for l in 0..chunk.len() {
                 assert_eq!(mask >> l & 1 == 1, tree[c * 64 + l], "batch {f:?}");

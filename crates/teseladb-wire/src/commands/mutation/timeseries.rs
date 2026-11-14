@@ -5,7 +5,7 @@
 
 use teseladb_hlc::Hlc;
 use teseladb_mql::timeseries_write::{BucketSpec, Full, TsError};
-use teseladb_bson::{Document, RawDoc};
+use teseladb_bson::Document;
 
 use super::{
     Checker, Evaluated, Lookup, MutationResult, Stored, WriteError, fill_timestamps, put,
@@ -77,7 +77,7 @@ pub(super) fn insert(
 ) -> Result<Evaluated, CommandError> {
     // A time series write is bound to its one bucket.
     let key = keys.first().map(Vec::as_slice).unwrap_or_default();
-    let old = lookup(key).map(|(_, v)| RawDoc::from_bytes(v)).transpose()?;
+    let old = lookup(key).map(|(_, v)| teseladb_keys::stored::raw(v)).transpose()?;
     // A measurement the bucket's indexes refuse (a geometry, 511) is found alone: its own
     // bucket's entries are checked before it goes in.
     let alone = |doc: &Document| -> Result<(), CommandError> {

@@ -115,7 +115,7 @@ fn what_depends_on_the_mark_of_the_write_is_not_prepared() {
     assert!(b.prepare(&b.keys, current.clone()).is_none());
     let sent = Sent::new(b.encode().unwrap(), None);
     let got = sent.eval_with(&b.keys, &seen(&current), at(7_000)).unwrap();
-    let doc = Document::from(teseladb_bson::RawDoc::from_bytes(&got.puts[0].value).unwrap());
+    let doc = Document::from(teseladb_keys::stored::raw(&got.puts[0].value).unwrap());
     assert_eq!(doc.get("t"), Some(&Value::DateTime(7_000)));
     // An empty timestamp the server fills, in an insert and in a replacement.
     let b = insert(vec![Document::new().with("_id", 1).with("t", z.clone())], Rules::default());

@@ -1028,7 +1028,9 @@ pub(crate) fn previous<B: Backend + ?Sized>(
     let Some(at) = below(ts) else { return Ok(None) };
     let view = teseladb_range::push::TxnView::default();
     match backend.txn_get(key, at, &view, None)? {
-        Some((teseladb_changestream::DOCUMENT_VALUE, bytes)) => Ok(Some(bytes)),
+        Some((teseladb_changestream::DOCUMENT_VALUE, bytes)) => {
+            Ok(Some(teseladb_keys::stored::strip(bytes)))
+        }
         _ => Ok(None),
     }
 }
@@ -1039,7 +1041,9 @@ fn current<B: Backend + ?Sized>(backend: &mut B, key: &[u8]) -> Result<Value, Co
     end.push(0);
     let rows = backend.scan(key, &end, 1, ReadConcern::Majority)?;
     match rows.into_iter().find(|(k, _)| k == key) {
-        Some((_, bytes)) => Ok(Value::Document(Document::from(RawDoc::from_bytes(&bytes)?))),
+        Some((_, bytes)) => Ok(Value::Document(Document::from(RawDoc::from_bytes(
+            teseladb_keys::stored::bson(&bytes)?,
+        )?))),
         None => Ok(Value::Null),
     }
 }

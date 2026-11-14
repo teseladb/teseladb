@@ -414,7 +414,12 @@ fn verify<B: Backend + ?Sized>(
     checked: &[Checked],
 ) -> Result<(VerifyReport, Ids), CommandError> {
     let (start, end) = documents_of(c);
-    let docs = rows(backend, &start, &end)?;
+    // Each document is checked as its BSON: a table of offsets that does not hold leaves the
+    // value as it is, and the BSON check refuses it.
+    let docs: Vec<_> = rows(backend, &start, &end)?
+        .into_iter()
+        .map(|(key, doc)| (key, teseladb_keys::stored::strip(doc)))
+        .collect();
     let capped = matches!(kind, CollectionKind::Capped { .. });
     let pks: Vec<PrimaryKey> =
         docs.iter().map(|(key, doc)| primary_key(c, capped, key, doc)).collect::<Result<_, _>>()?;

@@ -28,7 +28,7 @@ use crate::memtable::Memtable;
 use crate::sst::block::{Block, BlockCursor};
 use crate::sst::reader::Table;
 use crate::sst::value::{self, ValueRef};
-use crate::sst::{align_up, file_id, filter};
+use crate::sst::{file_id, filter};
 use crate::version::{Version, View};
 
 /// Identifies a read waiting for the disk.
@@ -377,11 +377,11 @@ impl Reader {
         }
         let token = self.next_token;
         self.next_token += 1;
-        let h = table.handle(i);
+        let (offset, len) = table.pages(i);
         self.queue.push_back(IoOp::ReadAt {
             file: file_id(table.number),
-            offset: h.offset,
-            len: align_up(h.len) as u32,
+            offset,
+            len: len as u32,
             token,
         });
         self.waiting.insert(token, (table.clone(), i));

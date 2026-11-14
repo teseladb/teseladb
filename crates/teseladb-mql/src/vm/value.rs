@@ -4,6 +4,7 @@
 
 use std::marker::PhantomData;
 
+use teseladb_keys::stored::{Lookup, Stored};
 use teseladb_bson::{Decimal128, RawDoc, RawValue};
 
 /// What a register holds.
@@ -170,11 +171,6 @@ fn offset_in(base: &[u8], inner: &[u8]) -> Option<usize> {
     (i >= b && i + inner.len() <= b + base.len()).then(|| i - b)
 }
 
-fn le_i32(doc: &[u8], at: usize) -> Option<usize> {
-    let b: [u8; 4] = doc.get(at..at + 4)?.try_into().ok()?;
-    usize::try_from(i32::from_le_bytes(b)).ok()
-}
-
 fn le_u64(doc: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(doc.get(at..at + 8)?.try_into().ok()?))
 }
@@ -188,26 +184,7 @@ fn cstring_end(doc: &[u8], at: usize) -> Option<usize> {
 /// The element at `pos`: its type, where its value starts and how long the value is.
 #[inline(always)]
 pub(crate) fn element(doc: &[u8], pos: usize) -> Option<(u8, usize, usize)> {
-    let ty = *doc.get(pos)?;
-    let v = cstring_end(doc, pos + 1)? + 1;
-    let len = match ty {
-        0x01 | 0x09 | 0x11 | 0x12 => 8,
-        0x02 | 0x0D | 0x0E => 4 + le_i32(doc, v)?,
-        0x03 | 0x04 | 0x0F => le_i32(doc, v)?,
-        0x05 => 5 + le_i32(doc, v)?,
-        0x06 | 0x0A | 0xFF | 0x7F => 0,
-        0x07 => 12,
-        0x08 => 1,
-        0x0B => {
-            let p = cstring_end(doc, v)?;
-            cstring_end(doc, p + 1)? + 1 - v
-        }
-        0x0C => 4 + le_i32(doc, v)? + 12,
-        0x10 => 4,
-        0x13 => 16,
-        _ => return None,
-    };
-    Some((ty, v, len))
+    teseladb_keys::stored::element(doc, pos).map(|e| (e.ty, e.value, e.len))
 }
 
 /// The register of the element at `pos` whose name ends at its value `v`.
@@ -276,6 +253,20 @@ fn find<'d>(doc: &'d [u8], at: usize, len: usize, name: &[u8]) -> Option<ValueRe
         pos = v + vlen;
     }
     None
+}
+
+/// The first field named `name` of document `d`, through the stored document's table of
+/// offsets when `d` has one (003 FR-021), else walked on the bytes as [`field`] walks it.
+#[inline(always)]
+pub(crate) fn stored_field<'d>(stored: &Stored<'d>, d: ValueRef<'d>, name: &[u8]) -> ValueRef<'d> {
+    let doc = stored.bson();
+    match stored.lookup(d.at(), name) {
+        Lookup::NoTable => field(doc, d, name),
+        Lookup::Missing => ValueRef::MISSING,
+        Lookup::At(pos) => element(doc, pos)
+            .and_then(|(ty, v, len)| value_ref(doc, ty, v, len))
+            .unwrap_or(ValueRef::MISSING),
+    }
 }
 
 /// The register of the whole document.

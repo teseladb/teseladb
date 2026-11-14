@@ -15,7 +15,7 @@ use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::pgm::{self, Pgm};
 use super::zone::ZoneMap;
-use super::{ALIGN, Bad, get_varint};
+use super::{ALIGN, Bad, align_down, align_up, get_varint};
 use crate::entry;
 
 /// An open SST.
@@ -144,7 +144,6 @@ impl Table {
             if at != v.len()
                 || !ordered
                 || cursor.key().len() < teseladb_keys::VERSION_LEN
-                || !h.offset.is_multiple_of(ALIGN as u64)
                 || h.offset < next_free
                 || end > meta_start
             {
@@ -188,7 +187,7 @@ impl Table {
     pub(crate) fn data_bytes(&self) -> u64 {
         match self.blocks() {
             0 => 0,
-            n => super::align_up(self.bounds.get(2 * n - 1)),
+            n => align_up(self.bounds.get(2 * n - 1)),
         }
     }
 
@@ -272,15 +271,25 @@ impl Table {
         self.pgm.is_some()
     }
 
-    /// The checked payload of data block `i` from the bytes read at its offset (aligned length),
-    /// its packed documents whole (003 FR-024).
+    /// The aligned pages that hold data block `i`, as `(offset, len)`: what a read of it takes
+    /// (FR-043).
+    pub(crate) fn pages(&self, i: usize) -> (u64, u64) {
+        let h = self.handle(i);
+        let start = align_down(h.offset);
+        (start, align_up(h.offset + h.len) - start)
+    }
+
+    /// The checked payload of data block `i` from bytes read from the start of its first page
+    /// ([`Table::pages`]), its packed documents whole (003 FR-024).
     pub(crate) fn payload(&self, i: usize, read: &Bytes) -> Result<Bytes, Bad> {
         let h = self.handle(i);
-        if read.len() < h.len as usize {
+        let skip = (h.offset - align_down(h.offset)) as usize;
+        let end = skip + h.len as usize;
+        if read.len() < end {
             return Err(Bad);
         }
         let key = self.key.as_deref().map(|k| (k, h.offset));
-        let payload = unframe_with(&read.slice(..h.len as usize), key, self.dict.as_deref())?;
+        let payload = unframe_with(&read.slice(skip..end), key, self.dict.as_deref())?;
         if self.props.shapes.is_empty() {
             Block::parse(payload.clone())?;
             return Ok(payload);
@@ -288,7 +297,7 @@ impl Table {
         unpack(payload, &self.props.shapes)
     }
 
-    /// Data block `i` from the bytes read at its offset (aligned length).
+    /// Data block `i` from bytes read from the start of its first page.
     pub(crate) fn block(&self, i: usize, read: &Bytes) -> Result<Block, Bad> {
         Block::parse(self.payload(i, read)?)
     }
@@ -368,7 +377,8 @@ mod tests {
         let mut end = 0;
         for i in 0..t.blocks() {
             let h = t.handle(i);
-            assert!(h.offset >= end && h.offset.is_multiple_of(ALIGN as u64) && h.len > 0);
+            // FR-043: each block starts where the one before ends.
+            assert!(h.offset == end && h.len > 0);
             end = h.offset + h.len;
         }
         for i in (0..20_010u64).map(|i| i * 1000).chain([1, 999, 7_777_777]) {
@@ -408,8 +418,8 @@ mod tests {
                     Hlc { physical: u64::from(i), logical: 0 },
                 );
                 let b = t.find_block(&key).unwrap();
-                let h = t.handle(b);
-                let read = Bytes::from_vec(bytes[h.offset as usize..].to_vec());
+                let (start, _) = t.pages(b);
+                let read = Bytes::from_vec(bytes[start as usize..].to_vec());
                 let block = t.block(b, &read).unwrap();
                 let c = BlockCursor::seek(block, &key, entry::compare).unwrap();
                 assert_eq!(c.key(), &key[..]);
@@ -517,6 +527,33 @@ mod tests {
         (meta_start + out.len() as u64, Bytes::from_vec(out))
     }
 
+    /// FR-043: a file written before it, whose data blocks each start a page, reads the same.
+    #[test]
+    fn a_file_whose_data_blocks_start_pages_reads_back() {
+        use crate::sst::block::{BlockBuilder, Method, frame};
+        let mut data = Vec::new();
+        let mut entries = Vec::new();
+        for k in [&b"b"[..], b"m"] {
+            let mut b = BlockBuilder::new(16);
+            b.add(&ikey(k), Kind::Put, k);
+            let framed = frame(&b.finish(), Method::None);
+            entries.push((ikey(k), handle(data.len() as u64, framed.len() as u64)));
+            data.extend_from_slice(&framed);
+            crate::sst::pad(&mut data);
+        }
+        let start = data.len() as u64;
+        let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
+        let (size, meta) = crafted(start, &entries, ok);
+        let t = Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).unwrap();
+        for (i, k) in [&b"b"[..], b"m"].into_iter().enumerate() {
+            let (offset, len) = t.pages(i);
+            assert_eq!((offset, len), (i as u64 * ALIGN as u64, ALIGN as u64));
+            let read = Bytes::from_vec(data[offset as usize..(offset + len) as usize].to_vec());
+            let c = BlockCursor::first(t.block(i, &read).unwrap()).unwrap();
+            assert_eq!(c.value_slice(), k);
+        }
+    }
+
     fn handle(offset: u64, len: u64) -> Vec<u8> {
         let mut v = Vec::new();
         crate::sst::put_varint(&mut v, offset);
@@ -563,13 +600,16 @@ mod tests {
                 "footer {n}"
             );
         }
+        // FR-043: a data block may start anywhere after the one before it.
+        let unaligned = vec![(ikey(b"c"), handle(0, 100)), (ikey(b"m"), handle(100, 100))];
+        let (size, meta) = crafted(start, &unaligned, ok);
+        assert!(Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).is_ok());
         let mut trailing = handle(0, 100);
         trailing.push(0);
         let indexes = [
             vec![(ikey(b"m"), trailing)],
             vec![(ikey(b"m"), handle(0, 100)), (ikey(b"c"), handle(4096, 100))],
             vec![(b"short".to_vec(), handle(0, 100))],
-            vec![(ikey(b"m"), handle(10, 100))],
             vec![(ikey(b"c"), handle(0, 5000)), (ikey(b"m"), handle(4096, 100))],
             vec![(ikey(b"m"), handle(4096, 5000))],
         ];

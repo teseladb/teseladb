@@ -2,6 +2,7 @@
 //! documents in a map, and every write evaluated as the range's leader evaluates it.
 
 use std::collections::BTreeMap;
+use teseladb_keys::stored;
 
 use teseladb_auth::users::{RoleName, UserName};
 use teseladb_hlc::Hlc;
@@ -427,6 +428,142 @@ impl Mem {
             pairs.take(limit).map(|(k, v)| (k.clone(), v.clone())).collect();
         self.scanned_rows += rows.len();
         Ok(rows)
+    }
+}
+
+/// The reads of documents as stored, under the trait's methods that hand the commands their
+/// BSON (003 FR-021), as the server's backend does.
+impl Mem {
+    fn scan_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        _: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        self.scan_dir(start, end, limit, false)
+    }
+
+    fn scan_back_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        _: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        self.scan_dir(start, end, limit, true)
+    }
+
+    fn scan_spans_stored(
+        &mut self,
+        spans: &[teseladb_wire::commands::Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
+        self.span_reads += 1;
+        self.spans_batched += spans.len();
+        spans
+            .iter()
+            .map(|s| match s.backward {
+                true => self.scan_back(&s.start, &s.end, s.limit, concern),
+                false => self.scan(&s.start, &s.end, s.limit, concern),
+            })
+            .collect()
+    }
+
+    fn txn_get_stored(
+        &mut self,
+        key: &[u8],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
+        use teseladb_range::intents::IntentOp;
+        self.txn_rounds += 1;
+        self.txn_read(at, uncertain_to)?;
+        let own = view.own.and_then(|t| self.intents.get(&t.0));
+        if let Some((_, w)) = own.and_then(|o| o.iter().find(|(k, _)| k.as_slice() == key)) {
+            return Ok(match w {
+                IntentOp::Put { value_type, value } => Some((*value_type, value.clone())),
+                IntentOp::Delete => None,
+            });
+        }
+        let type_of = self.types.get(key).copied().unwrap_or(1);
+        // A version written after `at` hides the current one: the read goes to the history.
+        let newer = self.history.iter().any(|v| v.key.as_slice() == key && v.ts > at);
+        if let Some(v) = self.data.get(key).filter(|_| !newer) {
+            return Ok(Some((type_of, v.clone())));
+        }
+        // A document gone or changed since: its version at `at`, as a range's MVCC keeps it.
+        Ok(self
+            .history
+            .iter()
+            .rev()
+            .find(|v| v.key.as_slice() == key && v.ts <= at)
+            .and_then(|v| v.value.clone()))
+    }
+
+    fn txn_scan_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        use teseladb_range::intents::IntentOp;
+        self.txn_rounds += 1;
+        self.txn_read(at, uncertain_to)?;
+        // As a range's scan: the versions that only serve the history are no documents.
+        let history = teseladb_range::HISTORY_VALUE;
+        let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = self
+            .data
+            .range(start.to_vec()..end.to_vec())
+            .filter(|(k, _)| self.types.get(*k) != Some(&history))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let own = view.own.and_then(|t| self.intents.get(&t.0)).cloned().unwrap_or_default();
+        for (k, w) in own.into_iter().filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end) {
+            match w {
+                IntentOp::Put { value_type, .. } if value_type == history => None,
+                IntentOp::Put { value, .. } => rows.insert(k, value),
+                IntentOp::Delete => rows.remove(&k),
+            };
+        }
+        Ok(rows.into_iter().take(limit).collect())
+    }
+
+    fn txn_gets_stored(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        let rounds = self.txn_rounds;
+        let out = keys
+            .iter()
+            .map(|k| self.txn_get(k, at, view, uncertain_to))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.txn_rounds = rounds + 1;
+        Ok(out)
+    }
+
+    fn txn_points_stored(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &teseladb_range::push::TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        let rounds = self.txn_rounds;
+        let mut out = Vec::new();
+        for k in keys {
+            let end = teseladb_wire::commands::point_end(k);
+            out.push(self.txn_scan(k, &end, 1, at, view, uncertain_to)?.pop().map(|(_, v)| v));
+        }
+        self.txn_rounds = rounds + 1;
+        Ok(out)
     }
 }
 
@@ -871,29 +1008,8 @@ impl Backend for Mem {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
-        use teseladb_range::intents::IntentOp;
-        self.txn_rounds += 1;
-        self.txn_read(at, uncertain_to)?;
-        let own = view.own.and_then(|t| self.intents.get(&t.0));
-        if let Some((_, w)) = own.and_then(|o| o.iter().find(|(k, _)| k.as_slice() == key)) {
-            return Ok(match w {
-                IntentOp::Put { value_type, value } => Some((*value_type, value.clone())),
-                IntentOp::Delete => None,
-            });
-        }
-        let type_of = self.types.get(key).copied().unwrap_or(1);
-        // A version written after `at` hides the current one: the read goes to the history.
-        let newer = self.history.iter().any(|v| v.key.as_slice() == key && v.ts > at);
-        if let Some(v) = self.data.get(key).filter(|_| !newer) {
-            return Ok(Some((type_of, v.clone())));
-        }
-        // A document gone or changed since: its version at `at`, as a range's MVCC keeps it.
-        Ok(self
-            .history
-            .iter()
-            .rev()
-            .find(|v| v.key.as_slice() == key && v.ts <= at)
-            .and_then(|v| v.value.clone()))
+        self.txn_get_stored(key, at, view, uncertain_to)
+            .map(|found| found.map(|(t, v)| (t, stored::document_value(key, v))))
     }
 
     fn txn_points(
@@ -903,14 +1019,9 @@ impl Backend for Mem {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
-        let rounds = self.txn_rounds;
-        let mut out = Vec::new();
-        for k in keys {
-            let end = teseladb_wire::commands::point_end(k);
-            out.push(self.txn_scan(k, &end, 1, at, view, uncertain_to)?.pop().map(|(_, v)| v));
-        }
-        self.txn_rounds = rounds + 1;
-        Ok(out)
+        self.txn_points_stored(keys, at, view, uncertain_to).map(|found| {
+            keys.iter().zip(found).map(|(k, v)| v.map(|v| stored::document_value(k, v))).collect()
+        })
     }
 
     fn txn_gets(
@@ -920,13 +1031,12 @@ impl Backend for Mem {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
-        let rounds = self.txn_rounds;
-        let out = keys
-            .iter()
-            .map(|k| self.txn_get(k, at, view, uncertain_to))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.txn_rounds = rounds + 1;
-        Ok(out)
+        self.txn_gets_stored(keys, at, view, uncertain_to).map(|found| {
+            keys.iter()
+                .zip(found)
+                .map(|(k, v)| v.map(|(t, v)| (t, stored::document_value(k, v))))
+                .collect()
+        })
     }
 
     fn txn_scan(
@@ -938,26 +1048,7 @@ impl Backend for Mem {
         view: &teseladb_range::push::TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        use teseladb_range::intents::IntentOp;
-        self.txn_rounds += 1;
-        self.txn_read(at, uncertain_to)?;
-        // As a range's scan: the versions that only serve the history are no documents.
-        let history = teseladb_range::HISTORY_VALUE;
-        let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = self
-            .data
-            .range(start.to_vec()..end.to_vec())
-            .filter(|(k, _)| self.types.get(*k) != Some(&history))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let own = view.own.and_then(|t| self.intents.get(&t.0)).cloned().unwrap_or_default();
-        for (k, w) in own.into_iter().filter(|(k, _)| start <= k.as_slice() && k.as_slice() < end) {
-            match w {
-                IntentOp::Put { value_type, .. } if value_type == history => None,
-                IntentOp::Put { value, .. } => rows.insert(k, value),
-                IntentOp::Delete => rows.remove(&k),
-            };
-        }
-        Ok(rows.into_iter().take(limit).collect())
+        self.txn_scan_stored(start, end, limit, at, view, uncertain_to).map(stored::document_rows)
     }
 
     fn read_versions(
@@ -1151,15 +1242,8 @@ impl Backend for Mem {
         spans: &[teseladb_wire::commands::Span],
         concern: ReadConcern,
     ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
-        self.span_reads += 1;
-        self.spans_batched += spans.len();
-        spans
-            .iter()
-            .map(|s| match s.backward {
-                true => self.scan_back(&s.start, &s.end, s.limit, concern),
-                false => self.scan(&s.start, &s.end, s.limit, concern),
-            })
-            .collect()
+        self.scan_spans_stored(spans, concern)
+            .map(|all| all.into_iter().map(stored::document_rows).collect())
     }
 
     fn scan(
@@ -1167,9 +1251,9 @@ impl Backend for Mem {
         start: &[u8],
         end: &[u8],
         limit: usize,
-        _: ReadConcern,
+        concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        self.scan_dir(start, end, limit, false)
+        self.scan_stored(start, end, limit, concern).map(stored::document_rows)
     }
 
     fn scan_back(
@@ -1177,9 +1261,9 @@ impl Backend for Mem {
         start: &[u8],
         end: &[u8],
         limit: usize,
-        _: ReadConcern,
+        concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        self.scan_dir(start, end, limit, true)
+        self.scan_back_stored(start, end, limit, concern).map(stored::document_rows)
     }
 
     fn scan_matching(

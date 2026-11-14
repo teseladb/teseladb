@@ -8,7 +8,8 @@ use teseladb_bson::{Decimal128, Document, RawDoc, Value};
 use super::{DefaultSelectivity, Program, Selectivity};
 use crate::ext::NoExtensions;
 use crate::matcher::{Eval, Filter, MatchContext};
-use crate::parse::{FilterUse, Pred};
+use crate::parse::{Expr, FilterUse, Pred};
+use teseladb_keys::stored::Stored;
 
 /// The tree evaluator's, the machine's and the batch machine's answers for each document.
 fn answers(
@@ -27,12 +28,33 @@ fn answers(
         raws.iter().map(|d| Eval::new(ctx, false).expr(root, *d).expect("no error")).collect();
     let one: Vec<bool> =
         raws.iter().map(|d| program.run(root, *d, ctx).expect("no error")).collect();
+    let plain: Vec<Stored<'_>> = raws.iter().map(|d| Stored::plain(*d)).collect();
+    let batch = batches(&program, root, &plain, ctx);
+    // The same documents stored with their tables of offsets (003 FR-021) give the same answers.
+    let kept: Vec<Vec<u8>> =
+        docs.iter().map(|d| teseladb_keys::stored::encode(d.clone())).collect();
+    let tabled: Vec<Stored<'_>> =
+        kept.iter().map(|k| teseladb_keys::stored::split(k).expect("stored")).collect();
+    let one_tabled: Vec<bool> =
+        tabled.iter().map(|d| program.run(root, *d, ctx).expect("no error")).collect();
+    assert_eq!(one_tabled, one, "one by one, with and without tables");
+    assert_eq!(batches(&program, root, &tabled, ctx), batch, "in batches, with and without tables");
+    Some((tree, one, batch))
+}
+
+/// The answers of `program` on `docs` run in batches.
+fn batches(
+    program: &Program,
+    root: &Expr,
+    docs: &[Stored<'_>],
+    ctx: &MatchContext<'_>,
+) -> Vec<bool> {
     let mut batch = Vec::new();
-    for chunk in raws.chunks(super::BATCH) {
+    for chunk in docs.chunks(super::BATCH) {
         let mask = program.run_batch(root, chunk, ctx).expect("no error");
         batch.extend((0..chunk.len()).map(|l| mask >> l & 1 == 1));
     }
-    Some((tree, one, batch))
+    batch
 }
 
 fn check(filter: &Document, docs: &[Vec<u8>], ctx: &MatchContext<'_>) {
@@ -431,7 +453,8 @@ fn an_error_in_a_batch_is_the_first_document_s() {
     let ext = NoExtensions;
     let ctx = MatchContext { collation: None, ext: &ext, vars: None };
     let tree = Eval::new(&ctx, false).expr(filter.run_tree(), raw).expect_err("no engine");
-    let batch = p.run_batch(filter.run_tree(), &[raw, raw], &ctx).expect_err("no engine");
+    let batch =
+        p.run_batch(filter.run_tree(), &[raw.into(), raw.into()], &ctx).expect_err("no engine");
     assert_eq!(batch.code, tree.code);
 }
 
@@ -528,7 +551,8 @@ fn expr_comparisons_compile_to_register_comparisons() {
         let b = doc.to_bytes().expect("small");
         let raw = RawDoc::from_bytes(&b).expect("valid");
         assert_eq!(p.run(filter.run_tree(), raw, &ctx).expect("no error"), want, "{doc:?}");
-        let mask = p.run_batch(filter.run_tree(), &[raw, raw], &ctx).expect("no error");
+        let mask =
+            p.run_batch(filter.run_tree(), &[raw.into(), raw.into()], &ctx).expect("no error");
         assert_eq!(mask, if want { 3 } else { 0 }, "{doc:?}");
     }
 }
@@ -657,5 +681,37 @@ fn vector_comparisons_match_the_tree() {
         for name in ["$eq", "$gt", "$gte", "$lt", "$lte"] {
             check(&d().with("n", op(name, k.clone())), &docs, &ctx);
         }
+    }
+}
+
+/// `src` with enough fields to be stored with a table of offsets (003 FR-021), as are the documents
+/// embedded in it through documents, and a repeated name at the end: the lookup through the
+/// table finds the first one, as the walk does.
+fn widen(src: &Document) -> Document {
+    let mut out = d();
+    for (k, v) in src.iter() {
+        let v = match v {
+            Value::Document(inner) => Value::Document(widen(inner)),
+            other => other.clone(),
+        };
+        out.push(k, v);
+    }
+    for i in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+        out.push(format!("pad{i}"), Value::Int32(i as i32));
+    }
+    out.push("a", "a repeated name");
+    out
+}
+
+#[test]
+fn seeded_fuzz_on_stored_tables_matches_the_tree() {
+    let mut rng = Rng(0x7AB1_E0FF_5E75);
+    let docs: Vec<Vec<u8>> =
+        (0..130).map(|_| widen(&doc(&mut rng, 0)).to_bytes().expect("small")).collect();
+    assert!(docs.iter().all(|b| teseladb_keys::stored::encode(b.clone()).len() > b.len()));
+    let ext = NoExtensions;
+    let plain = MatchContext { collation: None, ext: &ext, vars: None };
+    for _ in 0..1500 {
+        check(&filter(&mut rng, 0), &docs, &plain);
     }
 }

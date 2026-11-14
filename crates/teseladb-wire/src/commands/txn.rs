@@ -647,8 +647,11 @@ impl TxnBackend<'_> {
             .map(|(key, op)| {
                 let update = updates.iter().find(|(u, _)| u == key).map(|(_, d)| d.clone());
                 let replace = update.is_none() && replaced.contains(key);
+                // The meta keeps the document's BSON, without its table (003 FR-021).
                 let doc = match op {
-                    IntentOp::Put { value, .. } => Some(value.clone()),
+                    IntentOp::Put { value, .. } => {
+                        Some(teseladb_keys::stored::strip(value.clone()))
+                    }
                     IntentOp::Delete => None,
                 };
                 let delete = doc.is_none();
@@ -1900,7 +1903,12 @@ impl Backend for TxnBackend<'_> {
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
         self.contact(key);
         let value = self.inner.txn_get(key, at, view, uncertain_to)?;
-        Ok(self.over_values(&[key.to_vec()], vec![value]).pop().flatten())
+        let value = self.over_values(&[key.to_vec()], vec![value]).pop().flatten();
+        // Its own intents are stored documents too: read as their BSON (003 FR-021).
+        Ok(value.map(|(t, v)| match t == super::mutation::DOCUMENT {
+            true => (t, teseladb_keys::stored::document_value(key, v)),
+            false => (t, v),
+        }))
     }
 
     fn txn_scan(
@@ -1914,6 +1922,7 @@ impl Backend for TxnBackend<'_> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         self.contact(start);
         self.scan_over((start, end), limit, (at, view, uncertain_to), false)
+            .map(teseladb_keys::stored::document_rows)
     }
 
     fn txn_scan_back(
@@ -1927,6 +1936,7 @@ impl Backend for TxnBackend<'_> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
         self.contact(start);
         self.scan_over((start, end), limit, (at, view, uncertain_to), true)
+            .map(teseladb_keys::stored::document_rows)
     }
 
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError> {
@@ -2009,6 +2019,7 @@ impl Backend for TxnBackend<'_> {
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
         self.scan_over((start, end), limit, (at, &view, window), false)
+            .map(teseladb_keys::stored::document_rows)
             .map_err(|e| self.run.note_uncertain(e))
     }
 
@@ -2023,6 +2034,7 @@ impl Backend for TxnBackend<'_> {
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
         self.scan_over((start, end), limit, (at, &view, window), true)
+            .map(teseladb_keys::stored::document_rows)
             .map_err(|e| self.run.note_uncertain(e))
     }
 
@@ -2040,10 +2052,15 @@ impl Backend for TxnBackend<'_> {
             .inner
             .txn_points(keys, at, &view, window)
             .map_err(|e| self.run.note_uncertain(e))?;
-        Ok(match &self.run.buffer {
+        let docs = match &self.run.buffer {
             Some(buffer) => buffer.over_points(keys, docs),
             None => docs,
-        })
+        };
+        Ok(keys
+            .iter()
+            .zip(docs)
+            .map(|(k, v)| v.map(|v| teseladb_keys::stored::document_value(k, v)))
+            .collect())
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {

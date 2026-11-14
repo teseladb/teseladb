@@ -224,8 +224,9 @@ fn shared_scan(lsm: &Lsm, disk: &mut MemDisk, pruned: bool) -> (Vec<(Vec<u8>, i3
                 let at = need.offset as usize;
                 let bytes = &all[at..at + need.len as usize];
                 // A block that is not the one asked for is refused and the cache keeps nothing.
-                let mut damaged = bytes.to_vec();
-                damaged[10] ^= 0xFF;
+                // The pages also hold the ends of the blocks next to it (FR-043): every byte
+                // changes.
+                let damaged: Vec<u8> = bytes.iter().map(|b| b ^ 0xFF).collect();
                 assert!(shared.supply(&need, &damaged).is_err());
                 shared.supply(&need, bytes).unwrap();
             }
