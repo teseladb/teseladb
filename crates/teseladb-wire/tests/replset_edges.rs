@@ -173,6 +173,15 @@ fn member_command_refusals() {
     assert_eq!(resize(&mut m, Value::Double(0.5)).get("ok"), Some(&Value::Double(1.0)));
     assert_eq!(resize(&mut m, Value::Int64(0)).get("ok"), Some(&Value::Double(1.0)));
     assert_eq!(code(&resize(&mut m, Value::from("x"))), 14);
+    // A catch-up given longer than the step-down is refused before anything else; an equal one is
+    // not (measured on a reference primary 9.0.4, 14-11-2026, 002 T050).
+    let longer = Document::new().with("replSetStepDown", 5).with("secondaryCatchUpPeriodSecs", 6);
+    let r = admin(&mut m, longer);
+    assert_eq!(code(&r), 2, "{r:?}");
+    assert_eq!(
+        r.get("errmsg"),
+        Some(&Value::from("stepdown period must be longer than secondaryCatchUpPeriodSecs"))
+    );
     // Every other member held back: no one to step down to.
     for h in [N2, N3] {
         let hold = Hold { maintenance: 1, ..Hold::default() };

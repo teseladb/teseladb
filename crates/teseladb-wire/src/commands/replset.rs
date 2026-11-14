@@ -245,6 +245,17 @@ pub fn get_config<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
 /// as an election does.
 pub fn step_down<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     super::admin::admin_only(REPL_SET_STEP_DOWN, ctx.db)?;
+    // A catch-up given longer than the step-down is refused first (measured on a reference
+    // primary 9.0.4, 14-11-2026, 002 T050).
+    let step_secs = seconds(ctx.first()).unwrap_or(STEP_DOWN_SECS);
+    if let Some(catch_up) = ctx.cmd.get("secondaryCatchUpPeriodSecs").and_then(seconds)
+        && catch_up > step_secs
+    {
+        return Err(CommandError::new(
+            crate::error::BAD_VALUE,
+            "stepdown period must be longer than secondaryCatchUpPeriodSecs",
+        ));
+    }
     let (rs, me, p, _) = member_view(ctx.backend, REPL_SET_STEP_DOWN)?;
     if !is_primary(&rs, me) {
         return Err(CommandError::new(NOT_WRITABLE_PRIMARY, "not primary so can't step down"));
@@ -260,7 +271,7 @@ pub fn step_down<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     };
     // The old primary may not be designated again for `stepDownSecs`, as the reference server
     // freezes it.
-    let secs = seconds(ctx.first()).unwrap_or(STEP_DOWN_SECS).max(0);
+    let secs = step_secs.max(0);
     let me_host = rs.members()[member_index(&rs, me)].host().to_owned();
     let hold = held.iter().find(|(h, _)| *h == me_host).map(|(_, x)| *x).unwrap_or_default();
     let until = now.saturating_add(u64::try_from(secs.saturating_mul(MS_PER_SECOND)).unwrap_or(0));
