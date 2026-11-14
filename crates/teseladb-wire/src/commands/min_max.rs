@@ -1,7 +1,7 @@
 //! `min` and `max` of `find` (006 FR-008): the keys of the hinted index from `min`, included, to
-//! `max`, excluded, in that index's order. Measured on a `refrouter` 9.0.4 on 05-11-2026 (scenario
-//! `find-min-max`): both need a `hint` (291), name the fields of the hinted index in its order
-//! (51174), and `min` must come before `max` (51175); an empty one bounds nothing.
+//! `max`, excluded, in that index's order. Measured on the reference router 9.0.4 on 05-11-2026
+//! (scenario `find-min-max`): both need a `hint` (291), name the fields of the hinted index in its
+//! order (51174), and `min` must come before `max` (51175); an empty one bounds nothing.
 
 use std::cmp::Ordering;
 

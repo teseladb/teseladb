@@ -1,13 +1,13 @@
 //! `find`, `getMore`, `killCursors`, `count` and `distinct` (FR-006, FR-008, FR-017). Without
 //! indexes (009) and the planner (010) a query walks the collection's documents in key order, in
 //! chunks, filtering, skipping and projecting as it goes; with a `sort` it reads the whole
-//! collection, sorts in memory (100 MiB without `allowDiskUse`, as RefDb) and serves the result
-//! from the cursor.
+//! collection, sorts in memory (100 MiB without `allowDiskUse`, as the reference server) and serves
+//! the result from the cursor.
 //!
 //! A batch ends at its `batchSize` (101 documents by default in the first batch, none in later
-//! ones) or at 16 MiB; the cursor closes when a batch comes back shorter than its size, as a
-//! `refrouter` 7.0 answers (measured): a batch that fills up exactly leaves the cursor open and the
-//! next one comes back empty with id 0.
+//! ones) or at 16 MiB; the cursor closes when a batch comes back shorter than its size, as
+//! the reference router 7.0 answers (measured): a batch that fills up exactly leaves the cursor
+//! open and the next one comes back empty with id 0.
 
 use std::collections::VecDeque;
 
@@ -844,15 +844,15 @@ impl QueryCursor {
 }
 
 /// A `find` on `local.oplog.rs` (018 FR-009): a tailable one reads on from the newest entry on
-/// each `getMore`; `oplogReplay` is accepted and ignored, as on RefDb 9.0.
+/// each `getMore`; `oplogReplay` is accepted and ignored, as on the reference server 9.0.
 fn oplog_find<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
     a: &FindArgs,
 ) -> Result<Document, CommandError> {
     if a.tailable.is_none() {
-        // `$natural: -1` with a limit (`refdump --oplog`'s first and last entry) reads back
-        // from the newest entry only as far as it needs.
+        // `$natural: -1` with a limit (the first and last entry the reference dump tool reads with
+        // `--oplog`) reads back from the newest entry only as far as it needs.
         let newest = match (a.natural, &a.sort) {
             (Some(false), None) if a.filter.is_empty() => a.limit.map(|l| {
                 let skip = usize::try_from(a.skip).unwrap_or(usize::MAX);
@@ -938,7 +938,7 @@ pub(crate) fn command_let<B: Backend + ?Sized>(
 }
 
 /// `$$USER_ROLES`: the user's roles, direct and inherited, as `{_id: "db.role", role, db}` in the
-/// order of their `_id` (measured on a `refrouter` 9.0.4).
+/// order of their `_id` (measured on the reference router 9.0.4).
 fn user_roles<B: Backend + ?Sized>(backend: &mut B) -> Result<Value, CommandError> {
     let mut roles: Vec<(String, Document)> = super::diagnostics::authenticated_roles(backend)?
         .into_iter()
@@ -965,7 +965,7 @@ fn non_negative(v: Option<i64>, field: &str) -> Result<Option<u64>, CommandError
 }
 
 /// The direction of a `$natural` sort (`true` forward), `None` without one; `$natural` with
-/// another value, or with other fields, is `BadValue` (measured on a `refrouter` 9.0.4).
+/// another value, or with other fields, is `BadValue` (measured on the reference router 9.0.4).
 fn natural_sort(sort: Option<&Value>) -> Result<Option<bool>, CommandError> {
     let Some(Value::Document(s)) = sort else { return Ok(None) };
     let Some(v) = s.get(NATURAL) else { return Ok(None) };
@@ -985,8 +985,8 @@ fn natural_sort(sort: Option<&Value>) -> Result<Option<bool>, CommandError> {
     }
 }
 
-/// `returnKey` of `find`: a boolean (measured on a `refrouter` 9.0.4 on 05-11-2026: `returnKey: 1`
-/// is 14 «Field 'returnKey' should be a boolean value, but found: int»).
+/// `returnKey` of `find`: a boolean (measured on the reference router 9.0.4 on 05-11-2026:
+/// `returnKey: 1` is 14 «Field 'returnKey' should be a boolean value, but found: int»).
 fn return_key(cmd: &Document) -> Result<bool, CommandError> {
     match cmd.get("returnKey") {
         None => Ok(false),
@@ -1007,7 +1007,7 @@ fn find_object(cmd: &Document, field: &str) -> Result<Option<Document>, CommandE
     match cmd.get(field) {
         None => Ok(None),
         Some(Value::Document(d)) => Ok(Some(d.clone())),
-        // The router's parse of the command (008, as a `refrouter` 9.0.4 raises it).
+        // The router's parse of the command (008, as the reference router 9.0.4 raises it).
         Some(_) => Err(CommandError::new(
             crate::error::TYPE_MISMATCH,
             format!("Expected field {field} to be of type object"),
@@ -1057,7 +1057,7 @@ pub(crate) fn find_args<B: Backend + ?Sized>(
     }
     let skip = non_negative(args::int(cmd, FIND, "skip")?, "skip")?.unwrap_or(0);
     let single_batch = args::boolean(cmd, FIND, "singleBatch")?.unwrap_or(false);
-    // Measured on a `refrouter` 9.0.4.
+    // Measured on the reference router 9.0.4.
     if tailable && (sort.is_some() || natural == Some(false)) {
         let msg = "cannot use tailable option with a sort other than {$natural: 1}";
         return Err(CommandError::new(BAD_VALUE, msg));
@@ -1080,7 +1080,8 @@ pub(crate) fn find_args<B: Backend + ?Sized>(
         tailable: tailable.then_some(await_data),
         natural,
         no_timeout: args::boolean(cmd, FIND, "noCursorTimeout")?.unwrap_or(false),
-        // True by default since 6.0 (measured on a `refrouter` 9.0.4: 110 MiB sort without it).
+        // True by default since 6.0 (measured on the reference router 9.0.4: 110 MiB sort without
+        // it).
         allow_disk_use: args::boolean(cmd, FIND, "allowDiskUse")?.unwrap_or(true),
         collation: find_object(cmd, "collation")?,
         concern: args::read_concern(cmd, FIND)?,
@@ -1181,8 +1182,8 @@ pub(crate) fn count_scan(shared: &super::Shared, ns: &Namespace) {
 pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
     let mut a = find_args(ctx.backend, ctx.cmd)?;
-    // `returnKey` gives the index key of each document and drops the projection (measured on a
-    // `refrouter` 9.0.4 on 05-11-2026).
+    // `returnKey` gives the index key of each document and drops the projection (measured on
+    // the reference router 9.0.4 on 05-11-2026).
     if a.return_key {
         // An `_id` equality reads its document's key alone, through the index of `_id`.
         if a.collation.is_none() && super::crud::id_equality(&a.filter).is_some() {
@@ -1218,7 +1219,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         return buffered_reply(ctx, &ns_text, &a, docs, ends);
     }
     let Some(coll) = ctx.backend.collection(&ns)? else {
-        // Validate the filter even when there is nothing to read, as RefDb does.
+        // Validate the filter even when there is nothing to read, as the reference server does.
         Plan::new(&a.filter, a.projection.as_ref(), a.collation.as_ref())
             .map_err(CommandError::query_parse)?;
         if super::views::has_text(&a.filter) {
@@ -1234,8 +1235,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     }
     let collation = a.collation.clone().or_else(|| options_collation(&coll));
     // Its errors come before the statement joins a transaction (008, measured on 03-11-2026).
-    // The filter is parsed once, here, for the checks and the planner, as RefDb builds one
-    // canonical query from the command.
+    // The filter is parsed once, here, for the checks and the planner, as the reference server
+    // builds one canonical query from the command.
     let first = Plan::new(&a.filter, a.projection.as_ref(), collation.as_ref())
         .map_err(CommandError::query_parse)?;
     first.check_metadata(a.sort.as_ref())?;
@@ -1284,7 +1285,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         None => documents_of(&coll),
     };
     // Only a read of the whole collection is a collection scan: an `_id` equality reads its
-    // document alone, with a sort or without one (a `refnode` 9.0.4 counts none then, measured).
+    // document alone, with a sort or without one (a reference replica set member 9.0.4 counts none
+    // then, measured).
     if range == documents_of(&coll) {
         count_scan(ctx.shared, &ns);
     }
@@ -1389,7 +1391,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         // A plan whose index reads in the sort's order gives its documents sorted, as an
         // `IXSCAN` with no `SORT` stage above it: they are not sorted again unless the
         // projection shows their sort key. Past the sort's memory limit without `allowDiskUse`
-        // they go through the sort, which refuses them as before (measured on a `refrouter` 9.0.4).
+        // they go through the sort, which refuses them as before (measured on the reference router
+        // 9.0.4).
         Some(_)
             if planned.as_ref().is_some_and(|p| {
                 p.2 && (a.allow_disk_use
@@ -1407,8 +1410,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     // The mark the first batch read at, which a read in its uncertainty window raised (FR-008):
     // the batches that follow read there.
     state.read_mark = ctx.backend.read_mark();
-    // A `refrouter` 9.0 closes the cursor once the limit is reached (measured); a tailable one
-    // stays open unless the collection had no document at all.
+    // The reference router 9.0 closes the cursor once the limit is reached (measured); a tailable
+    // one stays open unless the collection had no document at all.
     let exhausted = match &state.tail {
         Some(t) => !t.stays_open(),
         None => short || a.single_batch || state.left == Some(0),
@@ -1426,9 +1429,9 @@ const EXPRESS_PROJECTION: ProjectionContext<'static> = ProjectionContext {
     index_key: None,
 };
 
-/// A `find` of one `_id` by equality, answered without the planner as RefDb's express path
-/// answers it (the conditions are in H-013 of the native tests' findings), which TeselaDB's
-/// `explain` already shows as `EXPRESS_IXSCAN`. The filter is the
+/// A `find` of one `_id` by equality, answered without the planner as the reference server's
+/// express path answers it (the conditions are in H-013 of the native tests' findings), which
+/// TeselaDB's `explain` already shows as `EXPRESS_IXSCAN`. The filter is the
 /// `_id` alone; a simple projection or none ([`super::explain::simple_projection`]); no `skip`, `hint`, `min`, `max`, `returnKey`, `batchSize`,
 /// `showRecordId` or tailable cursor; a sort only of fields in either direction (one document
 /// is in any order); no collation, the command's or the collection's; not a time series. The
@@ -1481,10 +1484,10 @@ fn express_find<B: Backend + ?Sized>(
     Ok(Some(cursor_reply(0, ns_text, "firstBatch", docs)))
 }
 
-/// The `_id` a `count` or `distinct` reads by RefDb's express path (`IDHACK` or
-/// `EXPRESS_IXSCAN`, measured on a `refrouter` 9.0.4, H-011 of the native tests): its query is that
-/// `_id` equality alone, with no collation (the command's or the collection's, `collation`), no
-/// `hint`, on a collection that is not a time series.
+/// The `_id` a `count` or `distinct` reads by the reference server's express path (`IDHACK` or
+/// `EXPRESS_IXSCAN`, measured on the reference router 9.0.4, H-011 of the native tests): its query
+/// is that `_id` equality alone, with no collation (the command's or the collection's,
+/// `collation`), no `hint`, on a collection that is not a time series.
 pub(crate) fn express_id(
     coll: &CollectionEntry,
     query: &Document,
@@ -1501,9 +1504,9 @@ pub(crate) fn express_id(
     Ok(super::crud::id_equality(query))
 }
 
-/// The stored document of `_id` `id` in `coll`, read at its key as RefDb's express path
-/// reads it, with the same note of the index of `_id` (`$indexStats` counts it); none when it is
-/// not there.
+/// The stored document of `_id` `id` in `coll`, read at its key as the reference server's express
+/// path reads it, with the same note of the index of `_id` (`$indexStats` counts it); none when it
+/// is not there.
 pub(crate) fn read_by_id<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -1565,7 +1568,7 @@ fn text_find<B: Backend + ?Sized>(
     super::aggregate::aggregate_from(&mut inner, true)
 }
 
-/// Refuses a tailable `find` on a collection that is not capped, as a `refrouter` 9.0.4 does
+/// Refuses a tailable `find` on a collection that is not capped, as the reference router 9.0.4 does
 /// (measured): a view or a time series cannot be tailed, and any other collection answers with
 /// the query it was given.
 fn check_tailable(
@@ -1595,8 +1598,8 @@ fn check_tailable(
     }
 }
 
-/// A filter as RefDb writes its query tree in a message: each condition `path $op value`, and
-/// `$and` over them, indented by four spaces, when there are several or none.
+/// A filter as the reference server writes its query tree in a message: each condition `path $op
+/// value`, and `$and` over them, indented by four spaces, when there are several or none.
 pub(super) fn query_tree(filter: &Document) -> String {
     let mut leaves = Vec::new();
     for (path, cond) in filter.iter() {
@@ -1805,10 +1808,10 @@ fn buffered_reply<B: Backend + ?Sized>(
     Ok(cursor_reply(id, ns_text, "firstBatch", first))
 }
 
-/// An error found while command `command` (`find`, `count`, `distinct`) reads `ns`, as RefDb
-/// words it once the command was parsed (measured on a `refrouter` 9.0.4); a time limit, an
-/// interruption and a read preference no replica satisfies (the router's own error, measured
-/// 01-11-2026 on `find`, `count` and `distinct`) keep their own message.
+/// An error found while command `command` (`find`, `count`, `distinct`) reads `ns`, as the
+/// reference server words it once the command was parsed (measured on the reference router 9.0.4);
+/// a time limit, an interruption and a read preference no replica satisfies (the router's own
+/// error, measured 01-11-2026 on `find`, `count` and `distinct`) keep their own message.
 fn executor_error(command: &str, ns: &str, mut e: CommandError) -> CommandError {
     if outside_executor(&e) {
         return e;
@@ -1844,8 +1847,8 @@ pub(crate) fn check_projection_shape(projection: &Document) -> Result<(), Comman
 /// The operators of a `find` projection that are no expression.
 const PROJECTION_OPERATORS: [&str; 3] = ["$slice", "$elemMatch", "$meta"];
 
-/// Checks the computed fields of a `find` projection before any document is read, as RefDb
-/// parses them with the command (an unknown operator is 31325 there).
+/// Checks the computed fields of a `find` projection before any document is read, as the reference
+/// server parses them with the command (an unknown operator is 31325 there).
 pub(crate) fn check_projection(
     projection: &Document,
     vars: Option<&Document>,
@@ -1878,16 +1881,16 @@ fn check_computed(fields: RawDoc<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<
     Ok(())
 }
 
-/// A computed field of a projection as RefDb optimises it when it parses it: a constant that
-/// fails fails the command with its own message.
+/// A computed field of a projection as the reference server optimises it when it parses it: a
+/// constant that fails fails the command with its own message.
 fn optimized(v: RawValue<'_>, ctx: &teseladb_exec::expr::Ctx) -> Result<(), CommandError> {
     let scope = teseladb_exec::expr::Scope::default();
     teseladb_exec::expr::optimize::optimize(&Value::from(v), ctx, &scope).map_err(from_mql)?;
     Ok(())
 }
 
-/// Checks the filter of a read before any document is read, as RefDb parses it with the
-/// command: its operators, the expressions of its `$expr`s with the variables `vars`, and
+/// Checks the filter of a read before any document is read, as the reference server parses it with
+/// the command: its operators, the expressions of its `$expr`s with the variables `vars`, and
 /// their constants.
 pub(crate) fn check_filter(
     filter: &Document,
@@ -1925,7 +1928,7 @@ fn has_expr(d: &Document) -> bool {
     d.iter().any(|(k, v)| k == "$expr" || in_value(v))
 }
 
-/// Checks the filter of a read as RefDb parses it, before it optimises its `$expr`s.
+/// Checks the filter of a read as the reference server parses it, before it optimises its `$expr`s.
 pub(crate) fn check_filter_syntax(
     filter: &Document,
     collation: Option<&Document>,
@@ -2030,8 +2033,8 @@ fn sorted<B: Backend + ?Sized>(
 }
 
 /// Whether `filter` reads one `_id` by equality to a value that is not a document, an array or
-/// a regular expression, which RefDb answers without the planner (`EXPRESS`): it gives no
-/// index key then (measured).
+/// a regular expression, which the reference server answers without the planner (`EXPRESS`): it
+/// gives no index key then (measured).
 pub(crate) fn id_point(filter: &Document) -> bool {
     let mut fields = filter.iter();
     match (fields.next(), fields.next()) {
@@ -2103,7 +2106,8 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
         .filter(|&n| n > 0);
     let max_time = crate::ops::max_time_ms(ctx.cmd, GET_MORE)?.filter(|ms| *ms > 0);
-    // `term` is a `long`, checked before the cursor (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    // `term` is a `long`, checked before the cursor (measured on the reference router 9.0.4 on
+    // 05-11-2026).
     if let Some(v) = ctx.cmd.get("term").filter(|v| !matches!(v, Value::Int64(_))) {
         return Err(crate::types::wrong_type("getMore.term", v, "long"));
     }
@@ -2134,7 +2138,7 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         }
     };
     // `failGetMoreAfterCursorCheckout` (FR-034): the cursor was taken, and the error kills it as
-    // on a `refrouter` 9.0.4 (measured).
+    // on the reference router 9.0.4 (measured).
     let stream = c.state.stream.is_some();
     let fault = lock(ctx.shared).failpoint.as_mut().and_then(|fp| fp.get_more_error(stream));
     if let Some(e) = fault {
@@ -2149,7 +2153,7 @@ fn next_batch<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         ctx.backend.note_plan(plan);
     }
     // `maxTimeMS` of a `getMore` is only the wait of a tailable `awaitData` cursor. The cursor
-    // was taken: like a `refrouter` 9.0.4, the error kills it (measured).
+    // was taken: like the reference router 9.0.4, the error kills it (measured).
     let awaits = c.state.stream.is_some() || c.state.tail.as_ref().is_some_and(|t| t.await_data);
     if max_time.is_some() && !awaits {
         let msg = "maxTimeMS can only be used with getMore for tailable, awaitData cursors";
@@ -2225,7 +2229,7 @@ fn tail_more<B: Backend + ?Sized>(
                 .ok_or_else(|| {
                     CommandError::new(crate::error::INTERNAL_ERROR, "a capped key without seq")
                 })?;
-            // RefDb numbers the records of a collection from 1.
+            // The reference server numbers the records of a collection from 1.
             let record = u64::from_be_bytes(seq).saturating_add(1);
             let msg = lost_message(newer.is_empty(), record);
             return Err(CommandError::new(crate::error::CAPPED_POSITION_LOST, msg));
@@ -2238,7 +2242,8 @@ fn tail_more<B: Backend + ?Sized>(
         let (docs, _) = match state.batch(backend, batch) {
             Ok(read) => read,
             // The `maxTimeMS` of the `getMore` ran out during the wait, while it read again: like
-            // a `refnode` 9.0.4, an `awaitData` cursor answers an empty batch and stays open.
+            // a reference replica set member 9.0.4, an `awaitData` cursor answers an empty batch
+            // and stays open.
             Err(e) if wait > 0 && e.code.code == crate::error::MAX_TIME_MS_EXPIRED.code => {
                 return Ok(Vec::new());
             }
@@ -2250,9 +2255,9 @@ fn tail_more<B: Backend + ?Sized>(
     }
 }
 
-/// Whether the session check of RefDb's `AuthorizationSessionImpl` applies to the running
-/// command's user: the node authorizes commands and the user has no `impersonate` on the cluster
-/// (`__system`). The caller has checked that a user is authenticated.
+/// Whether the session check of the reference server's `AuthorizationSessionImpl` applies to the
+/// running command's user: the node authorizes commands and the user has no `impersonate` on the
+/// cluster (`__system`). The caller has checked that a user is authenticated.
 fn checks_cursor_sessions<B: Backend + ?Sized>(backend: &B) -> bool {
     backend.privileges().is_some_and(|p| {
         !teseladb_auth::authz::allows(
@@ -2272,11 +2277,11 @@ struct Refuser<'a> {
 }
 
 /// The error of a `getMore` on `ns` in session `lsid` that cursor `id`, of namespace and session
-/// `owner`, refused with `e`, as RefDb 9.0.4 gives it. With an authenticated user on a node
-/// that authorizes, a session mismatch is 13 `Unauthorized` naming both sessions
-/// (`AuthorizationSessionImpl::checkCursorSessionPrivilege`); otherwise a `refrouter` answers 50799,
-/// 50800 or 50801 (`validateLSID` in `cluster_find.cpp`) and a member of a replica set 50736,
-/// 50737 or 50738. Sessions are named with the user's `uid`.
+/// `owner`, refused with `e`, as the reference server 9.0.4 gives it. With an authenticated user on
+/// a node that authorizes, a session mismatch is 13 `Unauthorized` naming both sessions
+/// (`AuthorizationSessionImpl::checkCursorSessionPrivilege`); otherwise the reference router
+/// answers 50799, 50800 or 50801 (`validateLSID` in `cluster_find.cpp`) and a member of a replica
+/// set 50736, 50737 or 50738. Sessions are named with the user's `uid`.
 fn get_more_refused(
     (id, ns, lsid): (i64, &str, Option<u128>),
     e: CursorError,
@@ -2350,11 +2355,11 @@ fn get_more_refused(
     }
 }
 
-/// How a `refrouter` names a missing session in its messages.
+/// How the reference router names a missing session in its messages.
 const NO_SESSION: &str = "none";
 
-/// `killCursors`: the namespace is validated but, as on a `refrouter` 9.0.4 (measured), it does
-/// not have to be the cursor's.
+/// `killCursors`: the namespace is validated but, as on the reference router 9.0.4 (measured), it
+/// does not have to be the cursor's.
 pub fn kill_cursors<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     target(ctx)?;
     let ids = args::array(ctx.cmd, KILL_CURSORS, "cursors")?
@@ -2402,8 +2407,8 @@ pub fn count<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
     let concern = args::read_concern(ctx.cmd, COUNT)?;
     let collation = args::doc(ctx.cmd, COUNT, "collation")?.cloned();
     super::hints::check_hint_type(ctx.cmd)?;
-    // A `refrouter` parses the filter and the collation itself; what fails after that fails on its
-    // shard and comes back after the shard's name, here the node's (D-102).
+    // The reference router parses the filter and the collation itself; what fails after that fails
+    // on its shard and comes back after the shard's name, here the node's (D-102).
     check_filter_syntax(&filter, collation.as_ref(), None)?;
     let node = ctx.backend.node();
     let asked = CountArgs { filter, skip, limit, concern, collation };
@@ -2428,8 +2433,8 @@ fn count_on_node<B: Backend + ?Sized>(
 ) -> Result<Document, CommandError> {
     let CountArgs { filter, skip, limit, concern, collation } = a;
     let node = ctx.backend.node();
-    // A `refrouter` asks its shard for `skip + limit` documents and skips them itself: the shard's
-    // count is the matches up to that bound.
+    // The reference router asks its shard for `skip + limit` documents and skips them itself: the
+    // shard's count is the matches up to that bound.
     let bound = limit.map(|l| l.saturating_add(skip));
     if let Some(view) = super::views::resolve(ctx.backend, ns)? {
         super::views::check_collation(&view, collation.as_ref())?;
@@ -2438,7 +2443,7 @@ fn count_on_node<B: Backend + ?Sized>(
             stages.push(Document::new().with("$limit", i64::try_from(b).unwrap_or(i64::MAX)));
         }
         // The view's pipeline fails as it parses with its own error, and as it runs as the
-        // aggregation a `refrouter` makes of the count (measured).
+        // aggregation the reference router makes of the count (measured).
         let (docs, _) = super::aggregate::read_through_staged(
             ctx.backend,
             ctx.shared,
@@ -2486,7 +2491,8 @@ fn count_on_node<B: Backend + ?Sized>(
             {
                 return Ok(counted(node, bound.map_or(n, |b| n.min(b)), skip, limit));
             }
-            // One `_id` counts its document without the planner (`IDHACK`, as RefDb).
+            // One `_id` counts its document without the planner (`IDHACK`, as the reference
+            // server).
             if let Some(id) = express_id(&c, &filter, collation.as_ref(), ctx.cmd)? {
                 let n =
                     u64::try_from(read_by_id(ctx.backend, &c, &id, concern)?.len()).unwrap_or(0);
@@ -2520,7 +2526,7 @@ fn count_on_node<B: Backend + ?Sized>(
 }
 
 /// The reply of `count`: `n` after the skip and the limit, and the node's own count of
-/// `matched` under `shards`, as a `refrouter` gives its shard's.
+/// `matched` under `shards`, as the reference router gives its shard's.
 fn counted(node: u64, matched: u64, skip: u64, limit: Option<u64>) -> Document {
     let left = matched.saturating_sub(skip);
     let n = limit.map_or(left, |l| left.min(l));
@@ -2642,7 +2648,8 @@ pub fn distinct<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
                 super::hints::Hinted { filter: &filter, sort: None, projection: None, vars: None };
             super::hints::check_hint(ctx.backend, (&ns, &c), ctx.cmd, &hinted)?;
             let ns_text = full(&ns);
-            // One `_id` reads its document without the planner, as RefDb's express path.
+            // One `_id` reads its document without the planner, as the reference server's express
+            // path.
             if let Some(id) = express_id(&c, &filter, collation_doc.as_ref(), ctx.cmd)? {
                 for bytes in read_by_id(ctx.backend, &c, &id, concern)? {
                     add_distinct(&mut found, &bytes, &key, &spec, col)?;

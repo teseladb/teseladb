@@ -2,9 +2,9 @@
 //! FR-018). Each write becomes range mutations ([`super::mutation`]) over the keys of the
 //! documents it may touch: an insert's own keys, the key of an `_id` equality, or the documents
 //! a scan finds matching, which the leader checks again. A batch reports `n`, `nModified`,
-//! `upserted`, `writeErrors` and `writeConcernError` as a `refrouter` 7.0 does (measured).
+//! `upserted`, `writeErrors` and `writeConcernError` as the reference router 7.0 does (measured).
 //!
-//! A collection that does not exist is created by the first write, as in RefDb.
+//! A collection that does not exist is created by the first write, as in the reference server.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::meta::RetryInfo;
@@ -58,7 +58,7 @@ pub const INSERT_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// Keys one update or delete mutation checks at most.
 pub const MODIFY_CHUNK_KEYS: usize = 1000;
 
-/// The command's write concern as RefDb describes it in a `writeConcernError`:
+/// The command's write concern as the reference server describes it in a `writeConcernError`:
 /// `{ writeConcern: { w: 5, j: true, wtimeout: 0, provenance: "clientSupplied" } }`.
 /// The field of a write's reply that lists the statements answered from an earlier send.
 const RETRIED_STMT_IDS: &str = "retriedStmtIds";
@@ -77,8 +77,8 @@ pub struct Writer {
     pub retried: Vec<i32>,
     /// `redactClientLogData` when the command began (013 FR-027).
     redact: bool,
-    /// What follows the message of a `writeConcernError`: the node it came from, as a `refrouter`
-    /// names the shard (D-102).
+    /// What follows the message of a `writeConcernError`: the node it came from, as the reference
+    /// router names the shard (D-102).
     relayed: String,
     /// `lsid.uid` of a retryable write: SHA-256 of the authenticated user (018 FR-009).
     uid: [u8; 32],
@@ -109,7 +109,7 @@ impl Writer {
     /// Reads the write concern and the retryable-write fields of `cmd`.
     pub fn new<B: Backend + ?Sized>(ctx: &Ctx<'_, B>, name: &str) -> Result<Writer, CommandError> {
         // An unknown mode or tag set does not stop the write: the reply carries the error, as a
-        // shard's (measured in `refrouter` 9.0.4).
+        // shard's (measured in the reference router 9.0.4).
         let wc_args = args::write_concern(ctx.cmd, name)?;
         let wc = wc_args.to_range();
         // `findAndModify` adds its own empty details (measured).
@@ -320,8 +320,8 @@ impl Writer {
         Value::Array(self.retried.iter().map(|&s| Value::Int32(s)).collect())
     }
 
-    /// Adds `retriedStmtIds` when statements were retried (measured on a `refrouter` 9.0.4) and
-    /// `writeConcernError` to a reply; with `w: 0` the reply is only `{ok: 1}`.
+    /// Adds `retriedStmtIds` when statements were retried (measured on the reference router 9.0.4)
+    /// and `writeConcernError` to a reply; with `w: 0` the reply is only `{ok: 1}`.
     pub fn finish(&self, mut reply: Document) -> Document {
         if self.wc.w == W::Zero {
             return Document::new().with("ok", 1.0);
@@ -365,14 +365,14 @@ pub fn ensure_collection<B: Backend + ?Sized>(
     })
 }
 
-/// Whether `e` fails a whole write command instead of one of its statements: a `refrouter`
+/// Whether `e` fails a whole write command instead of one of its statements: the reference router
 /// creates the database before it runs any statement (13297, measured on 9.0.4).
 fn fails_command(e: &CommandError) -> bool {
     e.code == crate::error::DATABASE_DIFFER_CASE
 }
 
-/// The error of `findAndModify` and `bulkWrite` when the database cannot be created: a
-/// `refrouter` 9.0.4 names the step that failed (measured).
+/// The error of `findAndModify` and `bulkWrite` when the database cannot be created:
+/// the reference router 9.0.4 names the step that failed (measured).
 fn routing_error(e: CommandError) -> CommandError {
     if !fails_command(&e) {
         return e;
@@ -534,7 +534,7 @@ fn run<B: Backend + ?Sized>(
     }
 }
 
-/// Checks an `_id` as RefDb does for stored documents.
+/// Checks an `_id` as the reference server does for stored documents.
 fn check_id(id: &Value) -> Result<(), CommandError> {
     let bad_type = |t: &str| {
         CommandError::new(INVALID_ID_FIELD, format!("The '_id' value cannot be of type {t}"))
@@ -548,8 +548,8 @@ fn check_id(id: &Value) -> Result<(), CommandError> {
     }
 }
 
-/// An `_id` document has no `$` name at any depth but those of a DBRef (measured on a `refrouter`
-/// and a `refnode` 9.0.4, the DBRef on 14-11-2026).
+/// An `_id` document has no `$` name at any depth but those of a DBRef (measured on the reference
+/// router and a reference replica set member 9.0.4, the DBRef on 14-11-2026).
 fn dollar_free_id(d: &Document) -> Result<(), CommandError> {
     let fields: Vec<(&str, &Value)> = d.iter().collect();
     for (at, &(k, v)) in fields.iter().enumerate() {
@@ -605,8 +605,8 @@ pub(crate) fn with_id<B: Backend + ?Sized>(
     Ok(out)
 }
 
-/// The write errors of a write outside a transaction as a `refrouter` 9.0.4 relays them: one whose
-/// time limit ran out failed the shard's whole command, and its message starts with «cluster
+/// The write errors of a write outside a transaction as the reference router 9.0.4 relays them: one
+/// whose time limit ran out failed the shard's whole command, and its message starts with «cluster
 /// write results unavailable from <host:port> :: caused by ::» (measured on 03-11-2026 with an
 /// insert, an update and a delete that wait for a transaction's intent).
 fn relayed<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>, errors: Vec<Value>) -> Vec<Value> {
@@ -675,7 +675,7 @@ fn stmt_id(cmd: &Document, i: usize) -> u32 {
     }
 }
 
-/// A count as RefDb answers it: an `int`.
+/// A count as the reference server answers it: an `int`.
 pub fn count(n: i64) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
@@ -813,8 +813,8 @@ pub fn insert<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
 }
 
 /// Inserts `docs` in `ns` for the node itself (the profiler's `system.profile`, which no
-/// client command writes) as they are, without an `_id` (a `refnode` 9.0.4 writes its profile
-/// documents without one, measured): the first write error is the result.
+/// client command writes) as they are, without an `_id` (a reference replica set member 9.0.4
+/// writes its profile documents without one, measured): the first write error is the result.
 pub(crate) fn insert_internal<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
@@ -969,8 +969,8 @@ fn candidates<B: Backend + ?Sized>(
     Ok(keys)
 }
 
-/// Writes the validation lines the write made (`warn` and `errorAndLog`), as a `refrouter` 9.0.4's
-/// shard does (measured: `{"namespace", "document", "errInfo"}`).
+/// Writes the validation lines the write made (`warn` and `errorAndLog`), as the reference router
+/// 9.0.4's shard does (measured: `{"namespace", "document", "errInfo"}`).
 /// With `redact`, the document and `errInfo` go redacted (`redactClientLogData`, 013 FR-027).
 fn log_validation<B: Backend + ?Sized>(
     backend: &mut B,
@@ -1149,7 +1149,7 @@ fn modify_once<B: Backend + ?Sized>(
             .map_err(from_mql)?;
     }
     // A retryable write outside a transaction changes one document per statement (measured on
-    // a `refnode` and a `refrouter` 9.0.4 on 02-11-2026).
+    // a reference replica set member and the reference router 9.0.4 on 02-11-2026).
     let in_txn = ctx.cmd.get("autocommit").is_some();
     if m.multi && w.retry.is_some() && !in_txn {
         let what = if m.update.is_some() { "multi=true" } else { "limit=0" };
@@ -1190,7 +1190,8 @@ fn modify_once<B: Backend + ?Sized>(
     // it is read by its key, as without a sort (before, the sort read every document).
     let id_point = id_equality(&m.filter).is_some() && rules.collation.is_none();
     let sort = m.sort.as_ref().filter(|_| !id_point);
-    // A scan counts once the statement ends without an error (measured on a `refnode` 9.0.4).
+    // A scan counts once the statement ends without an error (measured on a reference replica set
+    // member 9.0.4).
     let scans = sort.is_some() || id_equality(&m.filter).is_none();
     let mut keys = match sort {
         Some(sort) => sorted_first(ctx.backend, &coll, m, rules.collation.as_ref(), sort)?,
@@ -1220,7 +1221,8 @@ fn modify_once<B: Backend + ?Sized>(
             chunk.push(insert_key(&coll, d)?);
         }
         // Nothing matched: the write still goes to the collection's range, which applies nothing
-        // and answers with the write concern, as RefDb does (a write needs a key to be routed).
+        // and answers with the write concern, as the reference server does (a write needs a key to
+        // be routed).
         if chunk.is_empty() && !capped {
             chunk.push(documents_of(&coll).0);
         }
@@ -1293,7 +1295,8 @@ fn sorted_first<B: Backend + ?Sized>(
     Ok(best.map(|(_, k)| vec![k]).unwrap_or_default())
 }
 
-/// The fields of a statement in `updates` (`UpdateOpEntry`, measured in `refrouter` 9.0.4).
+/// The fields of a statement in `updates` (`UpdateOpEntry`, measured in the reference router
+/// 9.0.4).
 const UPDATE_STATEMENT_FIELDS: [&str; 11] = [
     "q",
     "u",
@@ -1421,7 +1424,7 @@ fn statement_vars(vars: Option<&Document>, flags: &UpdateFlags) -> Option<Docume
     }
 }
 
-/// A `refrouter` 9.0 refuses the whole command when an update is neither a document nor a
+/// The reference router 9.0 refuses the whole command when an update is neither a document nor a
 /// pipeline (measured).
 fn check_updates(items: &[Value]) -> Result<(), CommandError> {
     let bad = items.iter().any(|i| {
@@ -1520,7 +1523,8 @@ fn stop<B: Backend + ?Sized>(backend: &mut B, w: &mut Writer, e: CommandError) -
     e
 }
 
-/// The fields of a statement in `deletes` (`DeleteOpEntry`, measured in `refrouter` 9.0.4).
+/// The fields of a statement in `deletes` (`DeleteOpEntry`, measured in the reference router
+/// 9.0.4).
 const DELETE_STATEMENT_FIELDS: [&str; 5] = ["q", "limit", "collation", "hint", "sampleId"];
 
 pub(crate) fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandError> {
@@ -1531,7 +1535,7 @@ pub(crate) fn delete_statement(v: &Value, i: usize) -> Result<Modify, CommandErr
     unknown_field(d, name, &DELETE_STATEMENT_FIELDS)?;
     let filter = args::doc(d, name, "q")?.cloned().ok_or_else(|| missing(name, "q"))?;
     let limit = d.get("limit").ok_or_else(|| missing(name, "limit"))?;
-    // RefDb reads the limit as a double, and any other type as 0.
+    // The reference server reads the limit as a double, and any other type as 0.
     let limit = crate::types::number(limit).unwrap_or(0.0);
     if limit != 0.0 && limit != 1.0 {
         return Err(CommandError::new(
@@ -1729,7 +1733,7 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     let bypass = args::safe_bool(ctx.cmd, name, "bypassDocumentValidation", &BULK_SAFE_BOOL_TYPES)?
         .unwrap_or(false);
     // The fields of `nsInfo` parse first, then the number of operations, then the namespaces
-    // (measured on a `refrouter` 9.0.4 on 14-11-2026).
+    // (measured on the reference router 9.0.4 on 14-11-2026).
     let mut full_names = Vec::new();
     for (i, v) in ns_info.iter().enumerate() {
         let Value::Document(d) = v else {
@@ -1812,7 +1816,7 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             Err(e) => {
                 n_errors += 1;
                 // The error's code, message and details, then `n`, without `codeName` (measured
-                // on a `refrouter` 9.0.4 on 05-11-2026 with a duplicate key).
+                // on the reference router 9.0.4 on 05-11-2026 with a duplicate key).
                 let mut res = Document::new()
                     .with("ok", 0.0)
                     .with("idx", idx as i32)
@@ -1822,7 +1826,8 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
                     res.push(k, v.clone());
                 }
                 res.push("n", 0);
-                // A failed update modified nothing (measured on a `refrouter` 9.0.4 on 14-11-2026).
+                // A failed update modified nothing (measured on the reference router 9.0.4 on
+                // 14-11-2026).
                 if parsed[idx].0 == BulkKind::Update {
                     res.push("nModified", 0);
                 }
@@ -1845,7 +1850,7 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         .with("nModified", n_modified as i32)
         .with("nUpserted", n_upserted as i32)
         .with("nDeleted", n_deleted as i32)
-        // Always, also empty (measured on a `refrouter` 9.0.4).
+        // Always, also empty (measured on the reference router 9.0.4).
         .with(RETRIED_STMT_IDS, w.retried_value());
     w.settle(ctx.backend)?;
     Ok(w.finish(reply))
@@ -1858,7 +1863,7 @@ enum BulkKind {
     Delete,
 }
 
-/// The fields each kind of `bulkWrite` operation takes (measured in `refrouter` 9.0.4).
+/// The fields each kind of `bulkWrite` operation takes (measured in the reference router 9.0.4).
 const BULK_INSERT_FIELDS: [&str; 2] = ["insert", "document"];
 const BULK_UPDATE_FIELDS: [&str; 12] = [
     "update",
@@ -1876,7 +1881,7 @@ const BULK_UPDATE_FIELDS: [&str; 12] = [
 ];
 const BULK_DELETE_FIELDS: [&str; 6] =
     ["delete", "filter", "multi", "hint", "collation", "sampleId"];
-/// The numeric types of an operation's `nsInfo` index, in a `refrouter` 9.0.4's order.
+/// The numeric types of an operation's `nsInfo` index, in the reference router 9.0.4's order.
 const BULK_INDEX_TYPES: [&str; 4] = ["int", "double", "long", "decimal"];
 
 /// A `bulkWrite` operation once the parser has read it.
@@ -1997,7 +2002,7 @@ fn bulk_op<B: Backend + ?Sized>(
                 }
             }
         }
-        // Fails this operation alone, as a `refrouter` 9.0.4 does (measured).
+        // Fails this operation alone, as the reference router 9.0.4 does (measured).
         BulkBody::Modify(m) if m.multi && m.sort.is_some() => {
             Err(CommandError::new(FAILED_TO_PARSE, "Cannot specify sort with multi=true"))
         }

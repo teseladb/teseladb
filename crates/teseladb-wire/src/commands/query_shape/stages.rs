@@ -1,6 +1,6 @@
-//! The stages of a pipeline in a query shape (010 FR-023, measured on a `refrouter` 9.0.4,
-//! 01-11-2026): each as RefDb writes it after parsing it, with the stages that are others in
-//! disguise as those others (`$documents` as a `$queue` and three stages that unwind it,
+//! The stages of a pipeline in a query shape (010 FR-023, measured on the reference router 9.0.4,
+//! 01-11-2026): each as the reference server writes it after parsing it, with the stages that are
+//! others in disguise as those others (`$documents` as a `$queue` and three stages that unwind it,
 //! `$count` and `$sortByCount` as a `$group` and what follows it, `$unset` as a `$project`,
 //! `$replaceWith` as `$replaceRoot`, `$setWindowFields` and `$densify` after the `$sort` they
 //! need), and literals by policy.
@@ -383,8 +383,8 @@ fn densify(dn: &Document, p: Policy) -> Vec<Document> {
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
     };
-    // The partitions sort first, unless the bounds are the whole range (measured on a `refrouter`
-    // and a `refnode` 9.0.4).
+    // The partitions sort first, unless the bounds are the whole range (measured on the reference
+    // router and a reference replica set member 9.0.4).
     let full = matches!(dn.get("range"), Some(Value::Document(r)) if r.get("bounds") == Some(&Value::from("full")));
     let mut sort_key = Document::new();
     for part in parts.iter().filter(|_| !full).filter_map(|v| match v {

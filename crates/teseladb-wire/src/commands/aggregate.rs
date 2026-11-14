@@ -1,8 +1,8 @@
 //! `aggregate` (010 FR-004, FR-011): parses the pipeline with 010's engine
 //! (`teseladb_exec::pipeline`), reads the collection — through the definitions of the views it
 //! stands on — runs the pipeline over the documents and returns them through a cursor that
-//! `getMore` continues, with the arguments, replies and errors of a `refrouter` 9.0.4 (measured
-//! 31-10-2026).
+//! `getMore` continues, with the arguments, replies and errors of the reference router 9.0.4
+//! (measured 31-10-2026).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -82,8 +82,8 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
                 let mut d = Document::new()
                     .with("_id", super::registry::record_id(lsid, &owner.uid))
                     .with("lastUse", Value::DateTime(i64::try_from(last).unwrap_or(i64::MAX)));
-                // The user's name, as `$listLocalSessions` of a `refrouter` 9.0.4 gives it (measured
-                // on 03-11-2026).
+                // The user's name, as `$listLocalSessions` of the reference router 9.0.4 gives it
+                // (measured on 03-11-2026).
                 if let Some(user) = owner.user {
                     d.push("user", user);
                 }
@@ -102,7 +102,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
         let mut backend = self.backend.borrow_mut();
         let mut out = Vec::new();
         let Some(coll) = backend.collection(ns)? else {
-            // Measured on a `refnode` 9.0.4 on 03-11-2026.
+            // Measured on a reference replica set member 9.0.4 on 03-11-2026.
             let msg = format!(
                 "$geoNear needs a collection to run, but {} does not exist",
                 names::full(ns)
@@ -137,7 +137,7 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     /// `$listCatalog`: the catalog entry of the aggregated collection, or of every collection
     /// with `aggregate: 1` on `admin`.
     /// On a view (whose stages are none, or the command is refused) it is the entry of the
-    /// collection under it (measured on a `refnode` 9.0.4).
+    /// collection under it (measured on a reference replica set member 9.0.4).
     fn list_catalog(&self, (_, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let base = super::views::resolve(&mut **backend, ns)?.map(|v| v.collection);
@@ -148,15 +148,15 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
 
     /// `$listClusterCatalog`: every collection and view of the command's database (of every
     /// database on `admin`), as `listCollections` writes them with their namespace and database,
-    /// none sharded; `shards` names the node and `tracked` says none is (measured on a `refrouter`
-    /// 9.0.4).
+    /// none sharded; `shards` names the node and `tracked` says none is (measured on the reference
+    /// router 9.0.4).
     fn cluster_catalog(&self, spec: &Document) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let node = super::shard_name(backend.node());
         let mut found = backend.collections()?;
         found.retain(|(ns, _)| self.db == super::admin::ADMIN_DB || ns.db == self.db);
-        // Views first, as RefDb lists them; the collections in namespace order (RefDb's own
-        // follows its catalog's hash table).
+        // Views first, as the reference server lists them; the collections in namespace order (the
+        // reference server's own follows its catalog's hash table).
         let is_view = |c: &teseladb_meta::catalog::CollectionEntry| {
             matches!(super::kinds::kind_of(c), Ok(CollectionKind::View { .. }))
         };
@@ -248,14 +248,15 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     }
 
     /// `$indexStats`: each index of the aggregated collection with how many reads and writes
-    /// its plans scanned it and since when, as a `refrouter` 9.0.4 lists them (measured in
+    /// its plans scanned it and since when, as the reference router 9.0.4 lists them (measured in
     /// `tests/aggregate/index_stats.out`); nothing for a collection that does not exist.
     fn index_stats(&self, (shared, ns): Node<'_>) -> Result<Vec<Document>, CommandError> {
         let mut backend = self.backend.borrow_mut();
         let Some(coll) = backend.collection(ns)? else { return Ok(Vec::new()) };
         // A time series lists its buckets' indexes alone, as `listIndexes` shows them (measured
-        // on a `refnode` and a `refrouter` 9.0.4 on 03-11-2026); a clustered collection's index is
-        // not listed (measured on a `refrouter` 9.0.4 on 05-11-2026).
+        // on a reference replica set member and the reference router 9.0.4 on 03-11-2026); a
+        // clustered collection's index is not listed (measured on the reference router 9.0.4 on
+        // 05-11-2026).
         let series = super::timeseries::spec_of(&coll)?;
         let clustered = super::catalog::is_clustered(&coll)?;
         let mut specs = match super::catalog::has_id_index(ns) && series.is_none() && !clustered {
@@ -336,7 +337,8 @@ impl<B: Backend + ?Sized> WireEnv<'_, B> {
     }
 
     /// `$collStats` of the aggregated collection (015 FR-010), with the sections `spec` asks
-    /// for in RefDb's order. TeselaDB has no shards: the document has no `shard` (DV-038).
+    /// for in the reference server's order. TeselaDB has no shards: the document has no `shard`
+    /// (DV-038).
     fn coll_stats(
         &self,
         (shared, ns): Node<'_>,
@@ -578,8 +580,8 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
-        // Only `$search` asks `refsearch` while the pipeline is planned (measured on 9.0.4: the
-        // errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
+        // Only `$search` asks the reference search server while the pipeline is planned (measured
+        // on 9.0.4: the errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
         if stage != "$search" {
             return Ok(());
         }
@@ -646,7 +648,7 @@ fn read<B: Backend + ?Sized>(
     read_engine(backend, shared, ns, concern).map(|(docs, _)| docs)
 }
 
-/// [`read`], and whether the stages of the views it read through all run in RefDb's
+/// [`read`], and whether the stages of the views it read through all run in the reference server's
 /// slot-based engine (the stages that follow them may then run there too).
 fn read_engine<B: Backend + ?Sized>(
     backend: &mut B,
@@ -820,7 +822,7 @@ struct AggregateArgs {
 /// Reads the `cursor` document: `batchSize` only.
 fn cursor_batch_size(cmd: &Document) -> Result<Option<usize>, CommandError> {
     let c = match cmd.get("cursor") {
-        // `explain: true` needs no cursor (measured on a `refnode` 9.0.4).
+        // `explain: true` needs no cursor (measured on a reference replica set member 9.0.4).
         None if matches!(cmd.get(super::explain::EXPLAIN), Some(Value::Boolean(true))) => {
             return Ok(None);
         }
@@ -924,8 +926,8 @@ fn is_one(v: &Value) -> bool {
 /// The stages that write a pipeline's documents to a collection.
 const WRITE_STAGES: [&str; 2] = ["$out", "$merge"];
 
-/// A pipeline that ends writing (`$out`, `$merge`) refuses a `linearizable` read concern, as a
-/// `refrouter` 9.0.4 does (measured on 03-11-2026).
+/// A pipeline that ends writing (`$out`, `$merge`) refuses a `linearizable` read concern, as
+/// the reference router 9.0.4 does (measured on 03-11-2026).
 fn check_write_stage_concern(cmd: &Document, stages: &[RawValue<'_>]) -> Result<(), CommandError> {
     let last = match stages.last() {
         Some(RawValue::Document(d)) => d.iter().next().map(|(k, _)| k),
@@ -1035,8 +1037,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         let operation = usize::try_from(shared.params.operation_memory).unwrap_or(usize::MAX);
         shared.spill.stage_limit().min(operation)
     };
-    // The `$sort` of the query plan holds only the fields the rest uses, as RefDb's does
-    // (010 FR-010).
+    // The `$sort` of the query plan holds only the fields the rest uses, as the reference server's
+    // does (010 FR-010).
     if on_collection && pipeline.reads_collection() {
         pipeline.narrow_sort_input(&stage_docs);
     }
@@ -1123,8 +1125,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
     let vars = env.vars.clone();
     drop(env);
     // A classic stage at the end writes each document it gives as BSON, which may not pass
-    // 16 MiB and 16 KiB; the slot-based engine hands its documents on as they are (measured on a
-    // `refnode` 9.0.4, 02-11-2026).
+    // 16 MiB and 16 KiB; the slot-based engine hands its documents on as they are (measured on
+    // a reference replica set member 9.0.4, 02-11-2026).
     if pipeline.write().is_none() && !(sbe && pipeline.runs_in_sbe()) {
         for d in &results {
             check_output_size(d).map_err(executor)?;
@@ -1154,9 +1156,9 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
     let batch: Vec<Value> = batch.into_iter().map(Value::Document).collect();
     // The fields of the cursor come in this order on a collection, and the other way for
     // `aggregate: 1` (measured).
-    // The stages a `refrouter` sends to a shard or the config server answer in the order of a
-    // collection's cursor (measured).
-    // `$currentOp` with `localOps` answers on the `refrouter` itself (measured).
+    // The stages the reference router sends to a shard or the config server answer in the order of
+    // a collection's cursor (measured).
+    // `$currentOp` with `localOps` answers on the reference router itself (measured).
     let local_ops = matches!(
         stages.first(),
         Some(RawValue::Document(d)) if matches!(
@@ -1170,10 +1172,11 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         Some("$currentOp") => !local_ops,
         _ => false,
     };
-    // A `refrouter` 9.0.4 answers `id`, `ns`, `firstBatch` for a collection; a `refnode`, which the
-    // replica set presentation (018) is, `firstBatch`, `id`, `ns` (measured on 04-11-2026).
-    let as_refrouter = forwarded || (on_collection && !super::config_db::as_member(ctx.backend)?);
-    let cursor = if as_refrouter {
+    // The reference router 9.0.4 answers `id`, `ns`, `firstBatch` for a collection; a reference
+    // replica set member, which the replica set presentation (018) is, `firstBatch`, `id`, `ns`
+    // (measured on 04-11-2026).
+    let as_router = forwarded || (on_collection && !super::config_db::as_member(ctx.backend)?);
+    let cursor = if as_router {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {
         Document::new().with("firstBatch", batch).with("id", id).with("ns", ns_text)
@@ -1181,7 +1184,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))
 }
 
-/// RefDb's code for a `$match` with `$text` that is not the first stage.
+/// The reference server's code for a `$match` with `$text` that is not the first stage.
 const TEXT_NOT_FIRST: crate::error::Code =
     crate::error::Code { code: 17_313, name: "Location17313" };
 
@@ -1207,7 +1210,7 @@ fn resolves_with_stages<B: Backend + ?Sized>(
     Ok(super::views::resolve(backend, ns)?.is_some_and(|v| !v.pipeline.is_empty()))
 }
 
-/// RefDb's error for a `$match` with `$text` that is not the first stage.
+/// The reference server's error for a `$match` with `$text` that is not the first stage.
 fn text_not_first() -> CommandError {
     CommandError::new(
         TEXT_NOT_FIRST,
@@ -1372,9 +1375,10 @@ fn plan_read<B: Backend + ?Sized>(
     if filter.is_empty() && sort.is_none() {
         return Ok(plain.then_some(Read::Scan(coll)));
     }
-    // An `_id` equality alone reads by RefDb's express path, without the planner and with no
-    // index key (H-011 of the native tests; measured on a `refnode` 9.0.4). The caller runs
-    // with no collation, and the pipeline applies its stages to what this reads.
+    // An `_id` equality alone reads by the reference server's express path, without the planner and
+    // with no index key (H-011 of the native tests; measured on a reference replica set member
+    // 9.0.4). The caller runs with no collation, and the pipeline applies its stages to what this
+    // reads.
     let express = match filter.len() {
         1 => super::crud::id_equality(&filter),
         _ => None,
@@ -1506,7 +1510,7 @@ fn filter_of_leading_matches(stages: &[Document], filter: &Document) -> usize {
     if n > 0 && &merged == filter { n } else { 0 }
 }
 
-/// RefDb's code for a `$shardedDataDistribution` outside `admin`.
+/// The reference server's code for a `$shardedDataDistribution` outside `admin`.
 const SHARDED_DATA_DISTRIBUTION_NOT_ADMIN: crate::error::Code =
     crate::error::Code { code: 6_789_102, name: "Location6789102" };
 
@@ -1515,9 +1519,9 @@ const SHARDED_DATA_DISTRIBUTION_NOT_ADMIN: crate::error::Code =
 /// (the documents already passed them).
 type PlannedRead = (Vec<Document>, Option<Vec<Meta>>, usize);
 
-/// Refuses a stage the node answers itself on a namespace it does not run on (measured on a
-/// `refrouter` 9.0.4): `$listLocalSessions` only with `aggregate: 1`, `$listSessions` only on
-/// `config.system.sessions`.
+/// Refuses a stage the node answers itself on a namespace it does not run on (measured on
+/// the reference router 9.0.4): `$listLocalSessions` only with `aggregate: 1`, `$listSessions` only
+/// on `config.system.sessions`.
 fn check_system_namespace(
     pipeline: &Pipeline,
     ns: &Namespace,

@@ -1,7 +1,7 @@
 //! `readConcern` and `writeConcern` as a command receives them (FR-019): their fields and errors
-//! as RefDb's IDL (`read_concern.idl`, `write_concern.idl`) reads them, the commands that take
-//! each one, and the write concern as its errors describe it. Every rule here was measured in a
-//! `refrouter` 9.0.4.
+//! as the reference server's IDL (`read_concern.idl`, `write_concern.idl`) reads them, the commands
+//! that take each one, and the write concern as its errors describe it. Every rule here was
+//! measured in the reference router 9.0.4.
 
 use teseladb_bson::{Document, Value};
 use teseladb_range::ack::{W, WriteConcern};
@@ -21,7 +21,7 @@ pub const WRITE_CONCERN: &str = "writeConcern";
 pub const CLIENT_SUPPLIED: &str = "clientSupplied";
 /// `w: "majority"`.
 pub const MAJORITY: &str = "majority";
-/// The provenances RefDb knows; only [`CLIENT_SUPPLIED`] may come from a client.
+/// The provenances the reference server knows; only [`CLIENT_SUPPLIED`] may come from a client.
 const PROVENANCES: [&str; 5] = [
     CLIENT_SUPPLIED,
     "implicitDefault",
@@ -33,12 +33,12 @@ const PROVENANCES: [&str; 5] = [
 const IMPLICIT_DEFAULT: &str = "implicitDefault";
 /// The provenance of the cluster's default write concern.
 const CUSTOM_DEFAULT: &str = "customDefault";
-/// The types of the `safeBool` fields of a write concern (`j`, `fsync`), in a `refrouter` 9.0's
-/// order (measured).
+/// The types of the `safeBool` fields of a write concern (`j`, `fsync`), in the reference router
+/// 9.0's order (measured).
 const WC_SAFE_BOOL_TYPES: [&str; 5] = ["decimal", "int", "bool", "long", "double"];
 /// Largest `w` a write concern may name.
 const MAX_W: i64 = 50;
-/// The write concern fields RefDb reads and ignores.
+/// The write concern fields the reference server reads and ignores.
 const IGNORED_WC_FIELDS: [&str; 3] = ["wElectionId", "wOpTime", "getLastError"];
 /// The internal read concern flags (booleans).
 const INTERNAL_RC_FLAGS: [&str; 2] =
@@ -234,7 +234,7 @@ impl ReadConcernArgs {
         self.level.unwrap_or(Level::Local).to_range()
     }
 
-    /// The read concern as RefDb's messages print it.
+    /// The read concern as the reference server's messages print it.
     fn describe(&self) -> String {
         let mut fields = Vec::new();
         // Only a level other than `local` is refused, so there is always one to print.
@@ -296,7 +296,8 @@ pub struct WriteConcernArgs {
     pub custom: bool,
 }
 
-/// Truncation of a number to an integer, saturating, as RefDb reads `w` and tag counts.
+/// Truncation of a number to an integer, saturating, as the reference server reads `w` and tag
+/// counts.
 fn truncated(x: f64) -> i64 {
     if x >= i64::MAX as f64 {
         i64::MAX
@@ -415,7 +416,7 @@ impl WriteConcernArgs {
     /// The range's write concern: an unknown mode or tag set writes as `"majority"`, and
     /// `w: 0` keeps [`W::Zero`] (D-034; `j: false` does not lower `"majority"` nor `w: <n>`).
     /// Without `j`, `w: <n>` acknowledges in memory and `"majority"` on disk, as a replica set of
-    /// RefDb with `writeConcernMajorityJournalDefault: true`, its default (H-007).
+    /// the reference server with `writeConcernMajorityJournalDefault: true`, its default (H-007).
     pub fn to_range(&self) -> WriteConcern {
         let w = match &self.w {
             Some(WArg::Nodes(0)) => W::Zero,
@@ -432,8 +433,8 @@ impl WriteConcernArgs {
 
     /// The error the reply carries after the write: a mode or tag set the configuration does not
     /// have. A negative `wtimeout` gives none: the write answers once the replicas it asked for
-    /// have it, so its concern is met when the check runs (a `refnode` checks before its
-    /// majority commit point moves and times out on some runs, measured).
+    /// have it, so its concern is met when the check runs (a reference replica set member checks
+    /// before its majority commit point moves and times out on some runs, measured).
     pub fn error_after_write(&self) -> Option<CommandError> {
         match &self.w {
             Some(WArg::Mode(m)) => Some(CommandError::new(
@@ -452,7 +453,8 @@ impl WriteConcernArgs {
     }
 
     /// The write concern as `$queryStats` keys show it (`{w: 1, wtimeout: 0, provenance:
-    /// "clientSupplied"}`, measured on a `refrouter` 9.0.4): the fields of [`Self::describe`].
+    /// "clientSupplied"}`, measured on the reference router 9.0.4): the fields of
+    /// [`Self::describe`].
     pub fn to_document(&self) -> Document {
         let majority = matches!(self.w, None | Some(WArg::Majority));
         let w = match &self.w {
@@ -530,7 +532,7 @@ pub fn default_write_concern() -> WriteConcernArgs {
 
 /// The read concern of a command without `readConcern` as `$queryStats` keys show it: the
 /// cluster's default level with `provenance: "customDefault"`, else `local` with
-/// `"implicitDefault"` (measured on a `refrouter` 9.0.4).
+/// `"implicitDefault"` (measured on the reference router 9.0.4).
 pub fn default_read_concern() -> Document {
     let custom = DEFAULTS.with(|d| d.borrow().0);
     let provenance = if custom.is_some() { CUSTOM_DEFAULT } else { IMPLICIT_DEFAULT };
@@ -571,8 +573,8 @@ pub fn with_defaults<T>(
     f()
 }
 
-/// The `writeConcernError` of `e` for write concern `wc`, as a `refrouter` relays its shard's: the
-/// code's name first and `relayed` after (` at node<N>`, D-102; measured on 9.0.4).
+/// The `writeConcernError` of `e` for write concern `wc`, as the reference router relays its
+/// shard's: the code's name first and `relayed` after (` at node<N>`, D-102; measured on 9.0.4).
 pub fn write_concern_error(e: &CommandError, wc: &WriteConcernArgs, relayed: &str) -> Document {
     let details = format!("{{ writeConcern: {} }}", wc.describe());
     Document::new()
@@ -600,8 +602,8 @@ const WRITE_CONCERN_COMMANDS: [&str; 32] = [
     "setDefaultRWConcern",
     "bulkWrite",
     "commitTransaction",
-    // The drivers send the transaction's concern with the abort too (PyRef's
-    // `retryable-abort-errorLabels` against a `refrouter` 9.0.4).
+    // The drivers send the transaction's concern with the abort too (the reference Python driver's
+    // `retryable-abort-errorLabels` against the reference router 9.0.4).
     "abortTransaction",
     "createUser",
     "updateUser",
@@ -639,9 +641,9 @@ fn read_support(name: &str) -> ReadSupport {
     }
 }
 
-/// The name of command `name` in RefDb's messages: the other names a `refrouter` 9.0.4 takes for
-/// a command (measured: `buildinfo`, `collstats`, `datasize`, `dbstats`, `findandmodify`,
-/// `ismaster`) give its own.
+/// The name of command `name` in the reference server's messages: the other names the reference
+/// router 9.0.4 takes for a command (measured: `buildinfo`, `collstats`, `datasize`, `dbstats`,
+/// `findandmodify`, `ismaster`) give its own.
 pub fn canonical(name: &str) -> &str {
     match name {
         "findandmodify" => "findAndModify",

@@ -1,10 +1,10 @@
 //! `configureFailPoint` with `failCommand` (FR-034, DV-025): with `enableTestCommands` a test
-//! makes the node fail the commands it names, as the drivers' unified tests do against a
-//! `refrouter`. The failpoint answers with an error and its labels, closes the connection, holds it
-//! for `blockTimeMS` before running the command, or adds a `writeConcernError` to its reply.
-//! Replies and messages are those of a `refrouter` 9.0.4 started with `enableTestCommands=1`
-//! (measured). `data` is read when a command arrives, so a fault in it makes the failpoint do
-//! nothing instead of failing `configureFailPoint`, as there.
+//! makes the node fail the commands it names, as the drivers' unified tests do against
+//! the reference router. The failpoint answers with an error and its labels, closes the connection,
+//! holds it for `blockTimeMS` before running the command, or adds a `writeConcernError` to its
+//! reply. Replies and messages are those of the reference router 9.0.4 started with
+//! `enableTestCommands=1` (measured). `data` is read when a command arrives, so a fault in it makes
+//! the failpoint do nothing instead of failing `configureFailPoint`, as there.
 
 use teseladb_bson::{Document, Value};
 
@@ -61,18 +61,18 @@ pub struct Fault {
     pub labels: Option<Value>,
 }
 
-/// The codes whose error a `refrouter` 9.0.4 labels `TransientTransactionError` in a statement of a
-/// transaction (measured on 05-11-2026 with `failCommand` on the router): the retryable ones,
-/// `LockTimeout`, `WriteConflict`, `SnapshotUnavailable`, `NoSuchTransaction` and
+/// The codes whose error the reference router 9.0.4 labels `TransientTransactionError` in a
+/// statement of a transaction (measured on 05-11-2026 with `failCommand` on the router): the
+/// retryable ones, `LockTimeout`, `WriteConflict`, `SnapshotUnavailable`, `NoSuchTransaction` and
 /// `PreparedTransactionInProgress`.
 const TRANSIENT_IN_TRANSACTION: [i32; 17] =
     [6, 7, 24, 89, 91, 112, 189, 246, 251, 262, 267, 9001, 10107, 11600, 11602, 13435, 13436];
 /// The codes it labels so in `commitTransaction` and `abortTransaction`.
 const TRANSIENT_AT_END: [i32; 5] = [24, 112, 246, 251, 267];
 
-/// Error reply `reply` of command `name` with the `TransientTransactionError` a `refrouter` 9.0.4
-/// adds when the command is a statement of a transaction (`autocommit: false`); outside one it
-/// adds no label.
+/// Error reply `reply` of command `name` with the `TransientTransactionError` the reference router
+/// 9.0.4 adds when the command is a statement of a transaction (`autocommit: false`); outside one
+/// it adds no label.
 pub fn in_transaction(mut reply: Document, name: &str, cmd: &Document) -> Document {
     if cmd.get("autocommit") != Some(&Value::Boolean(false)) {
         return reply;
@@ -155,8 +155,9 @@ fn mode(v: &Value) -> Result<Mode, CommandError> {
     }
 }
 
-/// The error reply of code `n` with the labels the test named: a `refrouter` 9.0.4 adds none of
-/// its own, not even `RetryableWriteError` on a retryable write (measured with pyref).
+/// The error reply of code `n` with the labels the test named: the reference router 9.0.4 adds none
+/// of its own, not even `RetryableWriteError` on a retryable write (measured with the reference
+/// Python driver).
 fn error_reply(n: i32, labels: Option<&Value>) -> Document {
     let name = code(n).map_or_else(|| format!("Location{n}"), |c: Code| c.name.to_owned());
     let mut d = Document::new()
@@ -231,9 +232,9 @@ impl FailPoint {
     }
 
     /// The error of a `getMore` whose cursor was taken, when `failGetMoreAfterCursorCheckout`
-    /// fires; `stream` tells a change stream's cursor. As a `refrouter` 9.0.4 relays it (measured
-    /// on 05-11-2026): a shard's not-primary and shutdown codes become `HostUnreachable`, a
-    /// change stream labels the resumable ones `ResumableChangeStreamError`,
+    /// fires; `stream` tells a change stream's cursor. As the reference router 9.0.4 relays it
+    /// (measured on 05-11-2026): a shard's not-primary and shutdown codes become `HostUnreachable`,
+    /// a change stream labels the resumable ones `ResumableChangeStreamError`,
     /// `ChangeStreamFatalError` is `NonResumableChangeStreamError` on any cursor, and the test's
     /// `errorLabels` go unused.
     pub fn get_more_error(&mut self, stream: bool) -> Option<CommandError> {
@@ -340,7 +341,7 @@ fn fires(mode: &mut Mode, rng: &mut u64) -> bool {
     }
 }
 
-/// The codes a `refrouter` 9.0.4 relays as `HostUnreachable` from a shard's `getMore`.
+/// The codes the reference router 9.0.4 relays as `HostUnreachable` from a shard's `getMore`.
 const BECOMES_HOST_UNREACHABLE: [i32; 7] = [91, 189, 10107, 11600, 11602, 13435, 13436];
 /// The codes it labels `ResumableChangeStreamError` on a change stream's `getMore`.
 const RESUMABLE_IN_STREAM: [i32; 8] = [6, 7, 89, 133, 150, 234, 262, 9001];

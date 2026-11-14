@@ -2,7 +2,8 @@
 //! `encryptedFields`, the filters with find payloads of `find`, `count`, `distinct`, `aggregate`,
 //! `delete`, `update` and `findAndModify`, and the writes with insert payloads, which keep the
 //! document, its `__safeContent__` tags and the ESC and ECOC entries in one transaction (FR-003).
-//! A command is only processed when it carries `encryptionInformation`, as a `refnode` 9.0.4 does.
+//! A command is only processed when it carries `encryptionInformation`, as a reference replica set
+//! member 9.0.4 does.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_fle::FleError;
@@ -78,7 +79,7 @@ fn has_encrypt_keyword(v: &Value) -> bool {
 }
 
 /// Checks the `encryptedFields` of `create` on `coll` and replaces it with what the catalog
-/// keeps (FR-002), with the conflicts a `refnode` 9.0.4 refuses (measured).
+/// keeps (FR-002), with the conflicts a reference replica set member 9.0.4 refuses (measured).
 pub fn check_create(coll: &str, options: &mut Document) -> Result<(), CommandError> {
     let Some(given) = options.get(ENCRYPTED_FIELDS) else { return Ok(()) };
     let Value::Document(given) = given else {
@@ -143,8 +144,8 @@ impl<'c, 'a, B: Backend + ?Sized> CtxEsc<'c, 'a, B> {
     }
 
     /// The ESC's entry if its documents are read by key: `Ok(None)` without an ESC, `Err(None)`
-    /// when only `find` reads them as RefDb does (a view, a collation, a time series or capped
-    /// collection, a sharded one).
+    /// when only `find` reads them as the reference server does (a view, a collation, a time series
+    /// or capped collection, a sharded one).
     fn by_key_entry(&mut self) -> Result<Option<CollectionEntry>, Option<CommandError>> {
         let Some(coll) = self.entry()? else { return Ok(None) };
         let plain = matches!(
@@ -328,10 +329,11 @@ pub fn rewrite_command<B: Backend + ?Sized>(
     Ok(out)
 }
 
-/// The fields of `encryptionInformation` (measured on a `refnode` 9.0.4).
+/// The fields of `encryptionInformation` (measured on a reference replica set member 9.0.4).
 const INFORMATION_FIELDS: [&str; 3] = ["type", "schema", "crudProcessed"];
 
-/// Reads `encryptionInformation` with the IDL rules of a `refnode` 9.0.4 (FR-006).
+/// Reads `encryptionInformation` with the IDL rules of a reference replica set member 9.0.4
+/// (FR-006).
 fn check_information(name: &str, v: &Value) -> Result<(), CommandError> {
     let path = format!("{name}.{ENCRYPTION_INFORMATION}");
     let Value::Document(d) = v else { return Err(crate::types::wrong_type(&path, v, "object")) };
@@ -453,10 +455,10 @@ fn merge(total: &mut Document, part: &Document, at: usize) {
 }
 
 /// Runs a write command on a collection with encrypted fields outside a client transaction, each
-/// statement in a transaction of the node (FR-003), as a `refnode` 9.0.4 runs each in an internal
-/// transaction: a statement with a write error is not committed. `statement` runs a command inside
-/// the transaction. `None` if the command is not one: no write, or a collection without encrypted
-/// fields.
+/// statement in a transaction of the node (FR-003), as a reference replica set member 9.0.4 runs
+/// each in an internal transaction: a statement with a write error is not committed. `statement`
+/// runs a command inside the transaction. `None` if the command is not one: no write, or a
+/// collection without encrypted fields.
 pub fn in_internal_txn(
     backend: &mut dyn Backend,
     shared: &super::Shared,
@@ -488,9 +490,9 @@ pub fn in_internal_txn(
     let mut rest = cmd.clone();
     rest.remove(field);
     for (i, item) in items.iter().enumerate() {
-        // Each statement reads what the previous one committed: its intents go first, as a
-        // `refnode` commits a statement's transaction before the next, instead of each read of the
-        // next one pushing a transaction that already committed (017 SC-002).
+        // Each statement reads what the previous one committed: its intents go first, as
+        // a reference replica set member commits a statement's transaction before the next, instead
+        // of each read of the next one pushing a transaction that already committed (017 SC-002).
         if i > 0 {
             super::txn::resolve_queued(backend, shared);
         }

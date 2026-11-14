@@ -1,6 +1,6 @@
-//! The parts of a `$match` that RefDb runs before the stage ahead of it (measured on a
-//! `refrouter` 9.0.4, 01-11-2026): the filter splits into the clauses of its conjunction (the
-//! fields of the top and the items of `$and`), and each clause that reads only what the stage
+//! The parts of a `$match` that the reference server runs before the stage ahead of it (measured on
+//! the reference router 9.0.4, 01-11-2026): the filter splits into the clauses of its conjunction
+//! (the fields of the top and the items of `$and`), and each clause that reads only what the stage
 //! passes on goes before it, with the fields a projection renames (`z: "$n"`) read under their
 //! old names. Past an `$unwind` go the clauses that do not read the unwound path; past a
 //! projection, those that read kept fields; past `$addFields`, those that read no field it sets.
@@ -48,8 +48,8 @@ fn new_root(st: &Step) -> Option<String> {
     }
 }
 
-/// Filter `m` after a new root at `root`, as RefDb runs it before: its fields under `root`, or
-/// a `root` that is no document (which fails the stage) (measured).
+/// Filter `m` after a new root at `root`, as the reference server runs it before: its fields under
+/// `root`, or a `root` that is no document (which fails the stage) (measured).
 fn under_root(root: &str, m: &Document) -> Option<Document> {
     teseladb_exec::pipeline::deps::needed(&[
         Document::new().with("$match", m.clone()),
@@ -69,7 +69,8 @@ fn under_root(root: &str, m: &Document) -> Option<Document> {
 const OBJECT_TYPE: i32 = 3;
 const ARRAY_TYPE: i32 = 4;
 
-/// Filter `m` with each field under `root`; `None` for a clause of its own RefDb does not move.
+/// Filter `m` with each field under `root`; `None` for a clause of its own the reference server
+/// does not move.
 fn prefixed(m: &Document, root: &str) -> Option<Document> {
     let mut out = Document::new();
     for (k, v) in m.iter() {
@@ -136,8 +137,8 @@ fn moved_clause(st: &Step, c: &Document) -> Option<Document> {
             through_exclusion(&dropped, f)
         }
         Kind::AddFields(p) => through_set(&flat(p), f),
-        // A `$sort` changes no document: a `$match` after it runs before it (RefDb's
-        // `$sort` + `$match` sequence optimization, measured on a `refrouter` 9.0.4).
+        // A `$sort` changes no document: a `$match` after it runs before it (the reference server's
+        // `$sort` + `$match` sequence optimization, measured on the reference router 9.0.4).
         Kind::Sort(_) => Passing::Same,
         _ => Passing::Changed,
     };

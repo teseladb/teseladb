@@ -1,9 +1,9 @@
 //! The handshake (FR-003, FR-004; contract `hello-response.md`): `hello`, `isMaster` and
-//! `ismaster` answered as a `refrouter` answers them, with the compression negotiation, the client
-//! metadata rules, the awaitable `hello` of the topology monitors and `loadBalanced`.
+//! `ismaster` answered as the reference router answers them, with the compression negotiation, the
+//! client metadata rules, the awaitable `hello` of the topology monitors and `loadBalanced`.
 //!
-//! Field order and messages are those of a `refrouter` (measured against RefDb 7.0's; the version
-//! fields are 9.0's, D-024).
+//! Field order and messages are those of the reference router (measured against the reference
+//! server 7.0's; the version fields are 9.0's, D-024).
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub const IS_MASTER: &str = "isMaster";
 /// Legacy name in lower case.
 pub const IS_MASTER_LOWER: &str = "ismaster";
 
-/// `msg` of a `refrouter`.
+/// `msg` of the reference router.
 pub const ISDBGRID: &str = "isdbgrid";
 /// Largest client metadata document.
 const MAX_METADATA: usize = 512;
@@ -79,7 +79,7 @@ pub struct NodeInfo {
     /// authentication; `None` signs with zeros and takes any signature (013 FR-014).
     pub keys: Option<Arc<KeyRing>>,
     /// The replica set this node is a member of, in the replica set presentation (018 FR-007);
-    /// `None`: the node answers as a `refrouter`.
+    /// `None`: the node answers as the reference router.
     pub replica_set: Option<Arc<ReplicaView>>,
 }
 
@@ -140,11 +140,11 @@ pub enum Next {
     Wait(u64),
 }
 
-/// Shortest wait of an awaitable `hello`: a `refrouter` 9.0 answers after at least 500 ms
+/// Shortest wait of an awaitable `hello`: the reference router 9.0 answers after at least 500 ms
 /// whatever `maxAwaitTimeMS` says (measured: 100 and 300 wait 0.5 s, 700 waits 0.7 s).
 pub const MIN_AWAIT_MS: u64 = 500;
 
-/// The SASL mechanisms a `refrouter` 9.0 lists in `saslSupportedMechs` (measured).
+/// The SASL mechanisms the reference router 9.0 lists in `saslSupportedMechs` (measured).
 pub const SASL_MECHANISMS: [&str; 2] = ["SCRAM-SHA-1", "SCRAM-SHA-256"];
 
 fn field(name: &str) -> String {
@@ -176,7 +176,7 @@ fn topology_version(v: &Value) -> Result<([u8; 12], i64), CommandError> {
             }
         }
     }
-    // A `refrouter` 9.0 reports a missing `counter` first (measured).
+    // The reference router 9.0 reports a missing `counter` first (measured).
     let counter = counter.ok_or_else(|| missing(&format!("{path}.counter")))?;
     let pid = pid.ok_or_else(|| missing(&format!("{path}.processId")))?;
     Ok((pid, counter))
@@ -415,8 +415,9 @@ impl HelloRequest {
                 if pid == topology.process_id && counter > topology.counter =>
             {
                 let msg = format!(
-                    "Received a topology version with counter: {counter} which is greater than the refrouter topology version counter: {}",
-                    topology.counter
+                    "Received a topology version with counter: {counter} which is greater than the {router} topology version counter: {}",
+                    topology.counter,
+                    router = teseladb_names::ROUTER
                 );
                 return Err(CommandError::new(TOPOLOGY_COUNTER_AHEAD, msg));
             }
@@ -469,7 +470,7 @@ impl HelloRequest {
         d.push("connectionId", connection_id);
         d.push("maxWireVersion", MAX_WIRE_VERSION);
         d.push("minWireVersion", MIN_WIRE_VERSION);
-        // A `refrouter` 9.0 names its mechanisms for any user, also one that does not exist
+        // The reference router 9.0 names its mechanisms for any user, also one that does not exist
         // (measured), so the answer says nothing about which users exist.
         if self.sasl.is_some() {
             let mechs = self.mechanisms.as_deref().unwrap_or(&SASL_MECHANISMS);
@@ -484,7 +485,8 @@ impl HelloRequest {
     }
 
     /// The reply of a member of the replica set presentation (contract `topology-modes.md`):
-    /// `loadBalanced` adds no `serviceId`, as on a `refnode` that is not behind a balancer.
+    /// `loadBalanced` adds no `serviceId`, as on a reference replica set member that is not behind
+    /// a balancer.
     fn member_response(
         &self,
         state: &HelloState,
@@ -514,8 +516,8 @@ impl HelloRequest {
     }
 }
 
-/// `$clusterTime` and `operationTime` appended to a reply, as every reply of a `refrouter` has them:
-/// signed with the node's key for that time, or with zeros and key 0 without one.
+/// `$clusterTime` and `operationTime` appended to a reply, as every reply of the reference router
+/// has them: signed with the node's key for that time, or with zeros and key 0 without one.
 pub fn with_cluster_time(mut d: Document, node: &NodeInfo) -> Document {
     let t = node.cluster_time;
     let ts = Value::Timestamp { time: t.time, increment: t.increment };

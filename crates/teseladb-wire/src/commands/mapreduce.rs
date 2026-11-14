@@ -1,6 +1,6 @@
-//! `mapReduce` (016 FR-014, D-036, DV-021), as a `refrouter` 9.0.4 runs it (measured on 02-11):
-//! `query`, `sort` and `limit` choose the documents, `map` emits pairs with each document as
-//! `this`, `reduce` runs on the values of every key (one value too), `finalize` gets each key's
+//! `mapReduce` (016 FR-014, D-036, DV-021), as the reference router 9.0.4 runs it (measured on
+//! 02-11): `query`, `sort` and `limit` choose the documents, `map` emits pairs with each document
+//! as `this`, `reduce` runs on the values of every key (one value too), `finalize` gets each key's
 //! result, `scope` gives the functions globals, and `out` is `{inline: 1}` or a collection the
 //! results replace, merge into (by `_id`) or reduce into (with the value already there).
 //! `jsMode`, `verbose`, `collation`, `bypassDocumentValidation` and `writeConcern` are read and
@@ -59,7 +59,7 @@ fn out_of(db: &str, v: &Value) -> Result<Out, CommandError> {
     }
 }
 
-/// The error of a function that failed, as a `refrouter` words it.
+/// The error of a function that failed, as the reference router words it.
 fn js_error(ns: &Namespace, e: teseladb_mql::MqlError) -> CommandError {
     let mut c = super::mutation::from_mql(e);
     if c.code.code == super::js::JS_DISABLED.code {

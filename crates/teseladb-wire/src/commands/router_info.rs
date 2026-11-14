@@ -1,11 +1,11 @@
-//! What a `refrouter` answers about its routing (018 FR-017, T022): `getShardMap`,
+//! What the reference router answers about its routing (018 FR-017, T022): `getShardMap`,
 //! `getShardVersion`, `flushRouterConfig`, `checkMetadataConsistency`, `appendOplogNote` and
 //! `transitionToDedicatedConfigServer`. Every node routes with Group 0's copy it applied, so there
 //! is no router cache to flush nor metadata of the shards to disagree with it; the config server
-//! is Group 0 itself, named `config` as `refrouter` names a dedicated one.
+//! is Group 0 itself, named `config` as the reference router names a dedicated one.
 //!
-//! The replies, messages and codes are those of a `refrouter` 9.0.4 of two shards (measured on
-//! 02-11-2026, `g1.js` and `g2.js` in the lane's notes).
+//! The replies, messages and codes are those of the reference router 9.0.4 of two shards (measured
+//! on 02-11-2026, `g1.js` and `g2.js` in the lane's notes).
 
 use teseladb_bson::{Document, Value};
 
@@ -159,8 +159,8 @@ pub fn check_metadata_consistency<B: Backend + ?Sized>(
     Ok(super::query::cursor_reply(0, &ns, "firstBatch", Vec::new()).with("ok", 1.0))
 }
 
-/// `appendOplogNote`: each shard answers; a `refrouter` adds the shards' answers under `raw` and,
-/// when they fail, their error with an empty `errmsg`.
+/// `appendOplogNote`: each shard answers; the reference router adds the shards' answers under `raw`
+/// and, when they fail, their error with an empty `errmsg`.
 pub fn append_oplog_note<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {

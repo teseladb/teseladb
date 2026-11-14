@@ -1,7 +1,7 @@
 //! `$shardedDataDistribution` (018 FR-017): for each collection with a shard key, the documents
 //! and bytes each shard owns, the shard of a chunk being the node that leads its range
 //! ([`super::chunks`]). A range here holds no orphaned documents, so their counts are 0. The
-//! bytes are the shard's documents times their average size in whole bytes, as a `refrouter`
+//! bytes are the shard's documents times their average size in whole bytes, as the reference router
 //! 9.0.4 gives them (measured on 02-11-2026, `t13.js` in the lane's notes).
 
 use std::collections::BTreeMap;

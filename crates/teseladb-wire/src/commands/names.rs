@@ -1,6 +1,6 @@
-//! Database and collection names (FR-026), with the messages a `refrouter` 9.0.4 gives (measured).
-//! Some faults fail the whole command and others only the writes to that namespace, which get
-//! them as `writeErrors`.
+//! Database and collection names (FR-026), with the messages the reference router 9.0.4 gives
+//! (measured). Some faults fail the whole command and others only the writes to that namespace,
+//! which get them as `writeErrors`.
 
 use teseladb_meta::catalog::Namespace;
 
@@ -10,9 +10,9 @@ use crate::error::{BAD_VALUE, CommandError, ILLEGAL_OPERATION, INVALID_NAMESPACE
 pub const MAX_DB_NAME: usize = 63;
 /// Longest `db.collection`, in bytes.
 pub const MAX_NAMESPACE: usize = 255;
-/// Characters a database name cannot have (Unix rules, as RefDb on Linux).
+/// Characters a database name cannot have (Unix rules, as the reference server on Linux).
 pub const DB_FORBIDDEN: [char; 5] = ['/', '\\', ' ', '"', '\0'];
-/// Prefix of the collections RefDb reserves.
+/// Prefix of the collections the reference server reserves.
 const SYSTEM_PREFIX: &str = "system.";
 
 /// Faults of `db.coll` that fail the whole command.
@@ -52,7 +52,7 @@ pub fn check(ns: &Namespace) -> Result<(), CommandError> {
 }
 
 /// Faults of `db.coll` that fail `create`: those of the writes, but a client may create
-/// `system.profile` to size the profiler's collection (measured on a `refrouter` 9.0.4).
+/// `system.profile` to size the profiler's collection (measured on the reference router 9.0.4).
 pub fn check_creatable(ns: &Namespace) -> Result<(), CommandError> {
     check_name(ns, ns.coll != SYSTEM_PROFILE)
 }
@@ -63,7 +63,7 @@ pub fn check_writable(ns: &Namespace) -> Result<(), CommandError> {
 }
 
 /// The collection of a database's stored JavaScript functions, which clients write (016,
-/// measured on a `refrouter` 9.0.4 on 02-11).
+/// measured on the reference router 9.0.4 on 02-11).
 pub const SYSTEM_JS: &str = "system.js";
 
 /// Faults of `db.coll`'s name; a `system.` collection other than `system.js` and the
@@ -75,10 +75,10 @@ fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
         let msg = format!("Invalid collection name: {}", ns.coll);
         return Err(CommandError::new(INVALID_NAMESPACE, msg));
     }
-    // A client may name a collection as a resharding's copy (measured on a `refrouter` 9.0.4,
-    // 03-11-2026): it is no copy of any resharding, and its documents cannot be written.
+    // A client may name a collection as a resharding's copy (measured on the reference router
+    // 9.0.4, 03-11-2026): it is no copy of any resharding, and its documents cannot be written.
     // `config.system.sessions` holds the cluster's record of sessions (006 FR-016), so it is no
-    // longer refused (DV-042): its TTL index is created as in RefDb (FR-038).
+    // longer refused (DV-042): its TTL index is created as in the reference server (FR-038).
     let sessions =
         ns.db == super::registry::SESSIONS_DB && ns.coll == super::registry::SESSIONS_COLL;
     let allowed =
@@ -111,8 +111,8 @@ fn check_name(ns: &Namespace, system: bool) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// The collections no command writes (`system.views`, `system.profile`): RefDb's refusal, as a
-/// `refrouter` relays it from the shard at `host` (measured on 9.0.4).
+/// The collections no command writes (`system.views`, `system.profile`): the reference server's
+/// refusal, as the reference router relays it from the shard at `host` (measured on 9.0.4).
 pub fn cannot_write(ns: &Namespace, host: &str) -> Option<CommandError> {
     [super::kinds::SYSTEM_VIEWS, SYSTEM_PROFILE].contains(&ns.coll.as_str()).then(|| {
         CommandError::new(
@@ -144,9 +144,9 @@ pub fn full(ns: &Namespace) -> String {
     format!("{}.{}", ns.db, ns.coll)
 }
 
-/// The database a `refrouter` does not let clients use.
+/// The database the reference router does not let clients use.
 pub const LOCAL_DB: &str = "local";
-/// The databases whose collections a `refrouter` does not let clients drop.
+/// The databases whose collections the reference router does not let clients drop.
 const UNDROPPABLE_DBS: [&str; 2] = ["admin", "config"];
 
 /// `IllegalOperation` for dropping a collection of `admin` or `config`.

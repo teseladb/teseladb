@@ -1,5 +1,6 @@
-//! Index specifications as a `refrouter` 9.0.4 checks them (measured): the checks of any index, then
-//! those of the `_id` index that `create` takes in `idIndex` (what `refrestore` sends).
+//! Index specifications as the reference router 9.0.4 checks them (measured): the checks of any
+//! index, then those of the `_id` index that `create` takes in `idIndex` (what the reference
+//! restore tool sends).
 
 use teseladb_bson::{Document, Value};
 
@@ -24,7 +25,8 @@ const PARTIAL: &str = "partialFilterExpression";
 const PREPARE_UNIQUE: &str = "prepareUnique";
 /// The hash buckets of an index, TeselaDB's own option (D-008, DV-008).
 pub const BUCKETS: &str = "teselaBuckets";
-/// The options read as booleans: `true`, `false` or a number (measured on a `refrouter` 9.0.4).
+/// The options read as booleans: `true`, `false` or a number (measured on the reference router
+/// 9.0.4).
 const BOOLEANS: [&str; 4] = ["background", UNIQUE, "sparse", PREPARE_UNIQUE];
 
 /// The version of an index without `v`.
@@ -70,7 +72,7 @@ const FIELDS: [&str; 29] = [
 /// The fields of an `_id` index specification.
 const ID_FIELDS: [&str; 5] = [KEY, NAME, "ns", VERSION, COLLATION];
 
-/// The type a field must have, as RefDb names it in the message.
+/// The type a field must have, as the reference server names it in the message.
 #[derive(Clone, Copy)]
 enum Kind {
     Object,
@@ -123,7 +125,8 @@ fn spec_text(spec: &Document) -> String {
     display(&Value::Document(spec.clone()))
 }
 
-/// The specification with its version, as RefDb shows it once it has added the default one.
+/// The specification with its version, as the reference server shows it once it has added the
+/// default one.
 fn with_version(spec: &Document) -> String {
     let mut shown = spec.clone();
     if shown.get(VERSION).is_none() {
@@ -222,7 +225,7 @@ fn wildcard_rules(
 }
 
 /// The rules of a wildcard index (key, `wildcardProjection` and the options it does not take),
-/// checked with the specification as RefDb does, before any build.
+/// checked with the specification as the reference server does, before any build.
 fn check_wildcard(spec: &Document, version: i32) -> Result<(), CommandError> {
     let wildcard = match spec.get(KEY) {
         Some(Value::Document(k)) => k.iter().any(|(f, _)| f == "$**" || f.ends_with(".$**")),
@@ -258,7 +261,7 @@ fn check_options(spec: &Document, version: i32) -> Result<(), CommandError> {
         );
         return Err(CommandError::new(CANNOT_CREATE_INDEX, msg));
     }
-    // Measured on a `refrouter` 9.0.4 on 05-11-2026.
+    // Measured on the reference router 9.0.4 on 05-11-2026.
     if matches!(spec.get(STORAGE_ENGINE), Some(Value::Document(d)) if d.is_empty()) {
         let msg = format!(
             "Error in specification {} :: caused by :: Empty \"storageEngine\" options are invalid. \
@@ -325,8 +328,8 @@ fn check_key_pattern(key: &Document) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// The filter of a partial index (009 FR-008), with the errors of a `refrouter` 9.0.4 (measured):
-/// a parse error shows the specification as given, the others with its version.
+/// The filter of a partial index (009 FR-008), with the errors of the reference router 9.0.4
+/// (measured): a parse error shows the specification as given, the others with its version.
 fn check_partial(spec: &Document, filter: &Document) -> Result<(), CommandError> {
     let wrapped = |e: CommandError, shown: String| CommandError {
         errmsg: format!("Error in specification {shown} :: caused by :: {}", e.errmsg),
@@ -381,7 +384,7 @@ fn check_version(spec: &Document, v: &Value) -> Result<i32, CommandError> {
 }
 
 /// Checks that a specification of the `_id` index (key `{_id: 1}`) has only the fields such an
-/// index takes (measured on a `refrouter` 9.0.4: `unique: false` is refused with 197).
+/// index takes (measured on the reference router 9.0.4: `unique: false` is refused with 197).
 pub fn check_id_fields(spec: &Document) -> Result<(), CommandError> {
     if let Some((field, _)) = spec.iter().find(|(k, _)| !ID_FIELDS.contains(k)) {
         let msg = format!(

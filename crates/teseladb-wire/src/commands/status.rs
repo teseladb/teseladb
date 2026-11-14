@@ -2,8 +2,8 @@
 //! kind of operation, each command's totals, cursors, write concern waits, operations stopped by
 //! their time limit, collection scans, API versions by application, the jobs of the sessions'
 //! cache, authentications by mechanism and the transactions of 008. Shapes and BSON types are
-//! those of a `refrouter` 9.0.4 (measured on 30-10-2026); what a section cannot have in TeselaDB is in
-//! DV-038.
+//! those of the reference router 9.0.4 (measured on 30-10-2026); what a section cannot have in
+//! TeselaDB is in DV-038.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,8 +66,9 @@ pub struct CollectionCounters {
     pub collection_scans: i64,
 }
 
-/// The lower bound of the bucket of a latency of `micros`, as RefDb's histograms have them:
-/// powers of two below 1024 µs, then each power of two split in two (`2^k` and `1.5 × 2^k`).
+/// The lower bound of the bucket of a latency of `micros`, as the reference server's histograms
+/// have them: powers of two below 1024 µs, then each power of two split in two (`2^k` and `1.5 ×
+/// 2^k`).
 pub fn latency_bucket(micros: i64) -> i64 {
     if micros < 2 {
         return 0;
@@ -143,7 +144,7 @@ pub struct TxnCounts {
     /// Aborted.
     pub aborted: i64,
     /// Aborted, by cause: the name of the error that ended each one, `abort` for an
-    /// `abortTransaction` (measured through a `refrouter` 9.0.4).
+    /// `abortTransaction` (measured through the reference router 9.0.4).
     pub abort_causes: BTreeMap<String, i64>,
     /// Transactions pushed by readers and writers that met their intents (008 FR-019).
     pub pushes: i64,
@@ -589,7 +590,8 @@ impl StatusCounters {
     }
 
     /// `metrics.operation`: the counters TeselaDB has, and zeros for what it never does
-    /// (prepared transactions, RefEngine's write conflicts, range deletions, egress pools).
+    /// (prepared transactions, the reference storage engine's write conflicts, range deletions,
+    /// egress pools).
     pub fn operation_section(&self) -> Document {
         let mut d = Document::new()
             .with("insertFailedDueToDuplicateKeyError", long(self.duplicate_inserts))

@@ -1,7 +1,7 @@
-//! `$queryStats` (010 FR-023, measured on a `refrouter` 9.0.4, 01-11-2026 and 02-11-2026): what the
-//! node counted of the queries it sampled, by query shape and the options that are not part of
-//! the shape. An entry's `key` holds the debug shape, `comment`, the read concern, the write
-//! concern of an `aggregate`, the client's metadata, `maxTimeMS` and the batch size, in that
+//! `$queryStats` (010 FR-023, measured on the reference router 9.0.4, 01-11-2026 and 02-11-2026):
+//! what the node counted of the queries it sampled, by query shape and the options that are not
+//! part of the shape. An entry's `key` holds the debug shape, `comment`, the read concern, the
+//! write concern of an `aggregate`, the client's metadata, `maxTimeMS` and the batch size, in that
 //! order; its `keyHash` is the base64 SHA-256 of the key's representative form, and
 //! `queryShapeHash` the shape's. A query counts once its cursor ends (exhausted or killed), with
 //! all its batches: the runs, their times, CPU time, the documents returned and the index keys
@@ -91,7 +91,8 @@ const WRITE_COUNTERS: [&str; 9] = [
     "keysDeleted",
 ];
 
-/// The ways RefDb's cost-based ranker estimates, which TeselaDB's planner does not use.
+/// The ways the reference server's cost-based ranker estimates, which TeselaDB's planner does not
+/// use.
 const ESTIMATION_METHODS: [&str; 6] =
     ["Histogram", "Sampling", "Heuristics", "Mixed", "Metadata", "Code"];
 
@@ -188,8 +189,8 @@ struct Entry {
 }
 
 impl Entry {
-    /// `metrics.queryPlanner`: what the planner did, without the plan shapes RefDb counts
-    /// (DV-080).
+    /// `metrics.queryPlanner`: what the planner did, without the plan shapes the reference server
+    /// counts (DV-080).
     fn planner(&self) -> Document {
         let mut methods = Document::new();
         for m in ESTIMATION_METHODS {
@@ -256,7 +257,7 @@ fn write_concern(cmd: &Document) -> Option<Value> {
 }
 
 /// The options of command `cmd` that are part of an entry's key, under policy `p`, in the
-/// order of a `refrouter` 9.0.4 (measured).
+/// order of the reference router 9.0.4 (measured).
 fn options(cmd: &Document, client: Option<&Document>, p: Policy) -> Vec<(&'static str, Value)> {
     let mut out = Vec::new();
     if let Some(c) = cmd.get("comment") {

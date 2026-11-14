@@ -1,12 +1,12 @@
 //! What the node counts of its client transactions (008 FR-019) for `serverStatus.transactions`
-//! and the admin port's metrics. As a `refrouter` 9.0.4 counts them (measured on 31-10-2026): a
-//! transaction counts as aborted once, when the client gets the error that ends it, whose name is
-//! its cause (`abort` for an `abortTransaction`); one the node aborted for its age counts when its
-//! next command fails with `NoSuchTransaction`. Ranges stand for a `refrouter`'s shards. A commit
-//! counts by its kind: `noShards` with no range contacted, `singleShard` with one (whether it wrote
-//! or not, as `refrouter` counts a read-only transaction on one shard), and with several,
-//! `readOnly` with nothing written, `singleWriteShard` with one range written and
-//! `twoPhaseCommit` otherwise.
+//! and the admin port's metrics. As the reference router 9.0.4 counts them (measured on
+//! 31-10-2026): a transaction counts as aborted once, when the client gets the error that ends it,
+//! whose name is its cause (`abort` for an `abortTransaction`); one the node aborted for its age
+//! counts when its next command fails with `NoSuchTransaction`. Ranges stand for the reference
+//! router's shards. A commit counts by its kind: `noShards` with no range contacted, `singleShard`
+//! with one (whether it wrote or not, as the reference router counts a read-only transaction on one
+//! shard), and with several, `readOnly` with nothing written, `singleWriteShard` with one range
+//! written and `twoPhaseCommit` otherwise.
 
 use std::collections::BTreeSet;
 
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn commits_take_the_kind_refrouter_gives_them() {
+    fn commits_take_the_kind_the_reference_router_gives_them() {
         assert_eq!(commit_kind(&set(&[]), &set(&[])), NO_SHARDS);
         assert_eq!(commit_kind(&set(&[1]), &set(&[])), SINGLE_SHARD);
         assert_eq!(commit_kind(&set(&[1]), &set(&[1])), SINGLE_SHARD);

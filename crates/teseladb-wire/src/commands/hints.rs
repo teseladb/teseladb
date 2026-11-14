@@ -1,6 +1,6 @@
 //! The `hint` of a read (010 FR-001): an index name or key pattern that no index of the
-//! collection has fails as RefDb's planner fails (measured on a `refrouter` 9.0.4), with the
-//! query's tree, its sort and its projection in the message.
+//! collection has fails as the reference server's planner fails (measured on the reference router
+//! 9.0.4), with the query's tree, its sort and its projection in the message.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -24,7 +24,7 @@ pub(crate) struct Hinted<'a> {
     pub vars: Option<&'a Document>,
 }
 
-/// Refuses a `hint` that is neither a name nor a key pattern, as a `refrouter` parses it.
+/// Refuses a `hint` that is neither a name nor a key pattern, as the reference router parses it.
 pub(crate) fn check_hint_type(cmd: &Document) -> Result<(), CommandError> {
     match cmd.get("hint") {
         None | Some(Value::String(_) | Value::Document(_)) => Ok(()),
@@ -62,8 +62,8 @@ pub(crate) fn check_hint<B: Backend + ?Sized>(
     )?)
 }
 
-/// An error of RefDb's planner for read `read` of `ns`: the query's tree, its sort and its
-/// projection, then `reason` (measured on a `refrouter` 9.0.4).
+/// An error of the reference server's planner for read `read` of `ns`: the query's tree, its sort
+/// and its projection, then `reason` (measured on the reference router 9.0.4).
 pub(crate) fn planner_error(
     ns: &Namespace,
     read: &Hinted<'_>,

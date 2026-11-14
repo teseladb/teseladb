@@ -1,9 +1,9 @@
-//! The arguments every command takes besides its own (RefDb 9.0.4's `generic_argument.idl`),
-//! the unknown-field check of the commands whose IDL is strict, and the order a `refrouter` 9.0.4
-//! checks them in (measured): `maxTimeMS`, `readConcern`, `writeConcern`, `$readPreference` and
-//! the command's unknown fields in the order they come (a few commands, [`PARSED_LATE`], check
-//! their unknown fields at the end), then whether the command takes the write concern and the
-//! read level it was given.
+//! The arguments every command takes besides its own (the reference server 9.0.4's
+//! `generic_argument.idl`), the unknown-field check of the commands whose IDL is strict, and the
+//! order the reference router 9.0.4 checks them in (measured): `maxTimeMS`, `readConcern`,
+//! `writeConcern`, `$readPreference` and the command's unknown fields in the order they come (a few
+//! commands, [`PARSED_LATE`], check their unknown fields at the end), then whether the command
+//! takes the write concern and the read level it was given.
 
 use teseladb_bson::{Document, Value};
 use teseladb_router::read_pref::{ReadPrefError, ReadPreference, TagSet};
@@ -18,7 +18,7 @@ use crate::error::{
 use crate::ops::{MAX_TIME_MS, max_time_ms};
 use crate::types::{number, wrong_type, wrong_types};
 
-/// The generic arguments of RefDb 9.0.4, which any command takes (`$db` included).
+/// The generic arguments of the reference server 9.0.4, which any command takes (`$db` included).
 pub const GENERIC_ARGUMENTS: [&str; 47] = [
     "$db",
     "apiVersion",
@@ -229,8 +229,8 @@ fn own_fields(name: &str) -> Option<&'static [&'static str]> {
             "includeQueryStatsMetrics",
             "originalQueryShapeHash",
         ],
-        // `includeQueryStatsMetrics` is `insert`'s alone of the three (measured on a `refrouter`
-        // 9.0.4 on 05-11-2026).
+        // `includeQueryStatsMetrics` is `insert`'s alone of the three (measured on the reference
+        // router 9.0.4 on 05-11-2026).
         "insert" => &["documents", "includeQueryStatsMetrics"],
         "update" => &["updates", "let", "runtimeConstants"],
         "delete" => &["deletes", "let", "runtimeConstants"],
@@ -401,10 +401,10 @@ pub struct Generic {
 /// The read preference argument.
 const READ_PREFERENCE: &str = "$readPreference";
 
-/// The numeric types of `maxStalenessSeconds`, in the order a `refrouter` 9.0.4 names them.
+/// The numeric types of `maxStalenessSeconds`, in the order the reference router 9.0.4 names them.
 const STALENESS_TYPES: [&str; 4] = ["int", "long", "double", "decimal"];
 
-/// `$readPreference` of command `name`, with the codes and messages of a `refrouter` 9.0.4
+/// `$readPreference` of command `name`, with the codes and messages of the reference router 9.0.4
 /// (measured): its fields' types first, then the rules of [`ReadPreference::new`]. Other fields
 /// are taken and ignored, as there.
 pub fn read_preference(cmd: &Document, name: &str) -> Result<Option<ReadPreference>, CommandError> {
@@ -471,14 +471,14 @@ const START_TRANSACTION: &str = "startTransaction";
 /// The session of a command.
 const LSID: &str = "lsid";
 
-/// The commands a `refrouter` 9.0.4 parses after reading their generic arguments and checking that
-/// they take the concerns they were given: an unknown field of theirs comes after those errors
-/// (measured). The others refuse an unknown field first.
+/// The commands the reference router 9.0.4 parses after reading their generic arguments and
+/// checking that they take the concerns they were given: an unknown field of theirs comes after
+/// those errors (measured). The others refuse an unknown field first.
 const PARSED_LATE: [&str; 6] =
     ["listCollections", "collMod", "dbStats", "collStats", "getLog", "lockInfo"];
 
 /// Reads the generic arguments of command `name` in the order they come, checks its fields and
-/// whether it takes the concerns it was given, in the order of a `refrouter` 9.0.4.
+/// whether it takes the concerns it was given, in the order of the reference router 9.0.4.
 pub fn parse(cmd: &Document, name: &str) -> Result<Generic, CommandError> {
     let late = PARSED_LATE.contains(&canonical(name));
     let mut g = Generic::default();
@@ -487,7 +487,7 @@ pub fn parse(cmd: &Document, name: &str) -> Result<Generic, CommandError> {
     // parsed early, is checked where it comes (measured with `find`).
     for (k, _) in cmd.iter().skip(1) {
         match k {
-            // A second session (measured on a `refrouter` 9.0.4 on 03-11-2026 with `find`,
+            // A second session (measured on the reference router 9.0.4 on 03-11-2026 with `find`,
             // `commitTransaction` and `abortTransaction`).
             LSID if lsid_seen => {
                 let msg = format!("BSON field '{name}.{LSID}' is a duplicate field");
@@ -503,7 +503,7 @@ pub fn parse(cmd: &Document, name: &str) -> Result<Generic, CommandError> {
         }
     }
     // The first statement of a transaction carries the transaction's read concern, which
-    // RefDb checks against the transaction and not against the command (008 FR-009).
+    // the reference server checks against the transaction and not against the command (008 FR-009).
     let read = if cmd.get(START_TRANSACTION).is_some() { None } else { g.read.as_ref() };
     check_support(name, read, g.write.as_ref())?;
     if late {

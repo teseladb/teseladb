@@ -15,11 +15,12 @@ use super::mutation::{Bound, DocMutation, MutationResult, TimeSeriesRule, WriteE
 use crate::error::{BAD_VALUE, CommandError, INTERNAL_ERROR, INVALID_OPTIONS, WRITE_CONFLICT};
 use teseladb_range::read::ReadConcern;
 
-/// Prefix of the bucket namespaces RefDb used before 9.0.
+/// Prefix of the bucket namespaces the reference server used before 9.0.
 const LEGACY_BUCKETS: &str = "system.buckets.";
 
-/// Refuses a command on a `system.buckets.*` namespace, as a `refrouter` 9.0.4 does (measured): the
-/// buckets live in the time series' own namespace; `create` is named as the shard's command.
+/// Refuses a command on a `system.buckets.*` namespace, as the reference router 9.0.4 does
+/// (measured): the buckets live in the time series' own namespace; `create` is named as the shard's
+/// command.
 pub fn legacy_buckets(db: &str, coll: &str, command: &str) -> Result<(), CommandError> {
     if !coll.starts_with(LEGACY_BUCKETS) {
         return Ok(());
@@ -44,7 +45,7 @@ fn window_meta(id: [u8; 12]) -> [u8; 9] {
 /// Most buckets of one window and meta value an insert tries before it gives up.
 const MAX_BUCKETS: u32 = 1 << 20;
 
-/// `bucketRoundingSeconds` of a granularity (RefDb's documentation of time series
+/// `bucketRoundingSeconds` of a granularity (the reference server's documentation of time series
 /// granularity: one minute, one hour, one day).
 pub(crate) fn rounding_of(g: Granularity) -> i64 {
     match g {
@@ -114,13 +115,14 @@ pub fn scan_range(
 }
 
 /// Runs an insert of measurements `docs` into time series `coll`: those of one window and meta
-/// value go together, the windows of a meta value in time order as a `refnode` 9.0.4 writes a
-/// batch, each into its buckets from the one the catalog routes it to ([`TsStats::route`]). A
-/// measurement without a date in the time field is a write error; an ordered insert takes
-/// nothing after it. An ordered insert with a measurement the collection refuses is tried whole
-/// and aborted, then retried one measurement at a time up to the refused one, which fails
-/// alone (measured on a `refnode` 9.0.4 on 02-11-2026: the lookups count twice, one commit per
-/// measurement, and the refused one's bucket leaves the catalog).
+/// value go together, the windows of a meta value in time order as a reference replica set member
+/// 9.0.4 writes a batch, each into its buckets from the one the catalog routes it to
+/// ([`TsStats::route`]). A measurement without a date in the time field is a write error; an
+/// ordered insert takes nothing after it. An ordered insert with a measurement the collection
+/// refuses is tried whole and aborted, then retried one measurement at a time up to the refused
+/// one, which fails alone (measured on a reference replica set member 9.0.4 on 02-11-2026: the
+/// lookups count twice, one commit per measurement, and the refused one's bucket leaves the
+/// catalog).
 pub fn write<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
@@ -330,8 +332,8 @@ type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 /// The buckets of `coll` a read with `filter` finds through an index of its buckets (015
 /// FR-008, T014): its conditions on the meta value and the time, as conditions on the buckets,
 /// go to the planner, which serves them with an index when one wins over reading the buckets in
-/// `_id` order (measured on a `refnode` 9.0.4 on 02-11-2026 with `$indexStats`); `None` when
-/// none does.
+/// `_id` order (measured on a reference replica set member 9.0.4 on 02-11-2026 with `$indexStats`);
+/// `None` when none does.
 pub fn indexed_buckets<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -391,9 +393,9 @@ fn index_conditions(spec: &BucketSpec, filter: &Document) -> Option<Document> {
     super::timeseries_filter::bucket_filter(spec, &kept).ok()
 }
 
-/// Notes the lookup of a bucket by an insert into `coll`: RefDb's query scans the index of the
-/// buckets on the meta value (measured on a `refnode` 9.0.4 on 02-11-2026: one access of
-/// `m_1_t_1` for each lookup).
+/// Notes the lookup of a bucket by an insert into `coll`: the reference server's query scans the
+/// index of the buckets on the meta value (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026: one access of `m_1_t_1` for each lookup).
 fn note_lookup<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
@@ -457,10 +459,10 @@ fn after<B: Backend + ?Sized>(
 /// Writes `group`, measurements of one window and meta value whose first bucket is `first`,
 /// into `total`: from the bucket the catalog routes it to, and past a full one into a new
 /// bucket, each write the measurements one bucket takes, which go in or fail together
-/// (measured on a `refnode` 9.0.4 on 02-11-2026). Unordered, a failed write fails the rest of the
-/// group with its error; ordered, the measurements before the failing one go in and it fails
-/// alone, as the update of their bucket. A bucket whose write failed leaves the catalog. Whether
-/// one failed.
+/// (measured on a reference replica set member 9.0.4 on 02-11-2026). Unordered, a failed write
+/// fails the rest of the group with its error; ordered, the measurements before the failing one go
+/// in and it fails alone, as the update of their bucket. A bucket whose write failed leaves the
+/// catalog. Whether one failed.
 fn write_group<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &super::Shared,
@@ -604,9 +606,9 @@ fn meta_only(meta: Option<&str>, filter: &Document) -> bool {
     })
 }
 
-/// The refusals of an update of time series measurements, in a `refrouter` 9.0.4's order (measured
-/// on 31-10-2026): an upsert, a single update, a filter on another field than the meta value, a
-/// replacement, a pipeline, an update of another field.
+/// The refusals of an update of time series measurements, in the reference router 9.0.4's order
+/// (measured on 31-10-2026): an upsert, a single update, a filter on another field than the meta
+/// value, a replacement, a pipeline, an update of another field.
 fn check_update(
     spec: &BucketSpec,
     m: &super::crud::Modify,
@@ -939,8 +941,8 @@ fn bucket<B: Backend + ?Sized>(
     Err(CommandError::new(WRITE_CONFLICT, "the bucket kept changing during the write"))
 }
 
-/// The default index of a time series with a meta field: `{<meta>: 1, <time>: 1}` (measured on a
-/// `refrouter` 9.0.4: `create` makes it).
+/// The default index of a time series with a meta field: `{<meta>: 1, <time>: 1}` (measured on
+/// the reference router 9.0.4: `create` makes it).
 pub fn default_index(spec: &BucketSpec) -> Option<Document> {
     let meta = spec.meta_field.as_deref()?;
     let key = Document::new().with(meta, 1).with(spec.time_field.as_str(), 1);
@@ -1020,10 +1022,10 @@ pub(super) fn meta_path_of(spec: &BucketSpec, path: &str) -> Option<String> {
     meta_path(spec, path)
 }
 
-/// The bucket specification of index `index` of time series `spec`, or RefDb's refusal
-/// (measured on a `refrouter` 9.0.4): a key on the meta value goes to `meta`, one on the time or a
-/// measurement field to its least and greatest value in `control`; one on a measurement field, or
-/// with a partial filter, keeps the index as it was asked in `originalSpec`.
+/// The bucket specification of index `index` of time series `spec`, or the reference server's
+/// refusal (measured on the reference router 9.0.4): a key on the meta value goes to `meta`, one on
+/// the time or a measurement field to its least and greatest value in `control`; one on a
+/// measurement field, or with a partial filter, keeps the index as it was asked in `originalSpec`.
 pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, CommandError> {
     if index.get("unique").and_then(crate::types::truthy) == Some(true) {
         let msg = "Unique indexes are not supported on time-series collections";
@@ -1034,7 +1036,8 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
         _ => None,
     };
     // The filter parses as a filter before it is translated to the buckets (`$in` without an
-    // array is RefDb's parse error, measured on a `refnode` 9.0.4).
+    // array is the reference server's parse error, measured on a reference replica set member
+    // 9.0.4).
     if let Some(f) = partial {
         super::partial_filter::parse_error(f)?;
     }
@@ -1044,7 +1047,8 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
         return Err(CommandError::new(INVALID_OPTIONS, msg));
     }
     // Without a key the specification goes on with an empty one, which its checks refuse; a key
-    // that is not an object is refused here (measured on a `refnode` 9.0.4 on 02-11-2026).
+    // that is not an object is refused here (measured on a reference replica set member 9.0.4 on
+    // 02-11-2026).
     let key = match index.get("key") {
         None => return Ok(index.clone().with("key", Document::new())),
         Some(Value::Document(key)) => key,
@@ -1071,7 +1075,8 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
         let msg = "Sparse indexes are not supported on time-series measurements";
         return Err(CommandError::new(INVALID_OPTIONS, msg));
     }
-    // A TTL index reads the earliest time of each bucket (measured on a `refnode` 9.0.4).
+    // A TTL index reads the earliest time of each bucket (measured on a reference replica set
+    // member 9.0.4).
     let bucket_key = match (index.get("expireAfterSeconds"), key.iter().next()) {
         (Some(_), Some((path, dir))) => {
             Document::new().with(format!("control.min.{path}"), dir.clone())
@@ -1103,7 +1108,7 @@ pub fn bucket_index(spec: &BucketSpec, index: &Document) -> Result<Document, Com
 /// Index `stored` of time series `spec` as `listIndexes` shows it without `rawData`: as it was
 /// asked (`originalSpec`), or with its key taken back to the measurements' fields; `None` when a
 /// field of its key is neither the meta value nor a measurement's least or greatest, which
-/// `listIndexes` leaves out (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// `listIndexes` leaves out (measured on a reference replica set member 9.0.4 on 02-11-2026).
 pub fn user_index(spec: &BucketSpec, stored: &Document) -> Option<Document> {
     if let Some(Value::Document(original)) = stored.get("originalSpec") {
         let mut out =
@@ -1118,7 +1123,8 @@ pub fn user_index(spec: &BucketSpec, stored: &Document) -> Option<Document> {
                 out.push(k, v.clone());
             }
         }
-        // Shown in the order RefDb stores an index's fields, as `listIndexes` gives it.
+        // Shown in the order the reference server stores an index's fields, as `listIndexes` gives
+        // it.
         return Some(super::indexes::in_stored_order(&out));
     }
     let mut out = Document::new();

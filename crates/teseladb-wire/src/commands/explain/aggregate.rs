@@ -1,14 +1,15 @@
-//! `explain` of `aggregate` (010 FR-003, T018), in the shape a `refrouter` 9.0.4 gives it (measured
-//! 01-11-2026): the leading stages a query plan runs, and the others after it under `stages`.
+//! `explain` of `aggregate` (010 FR-003, T018), in the shape the reference router 9.0.4 gives it
+//! (measured 01-11-2026): the leading stages a query plan runs, and the others after it under
+//! `stages`.
 //!
 //! The query plan takes the leading `$match`es as its filter, then `$sort`, `$skip`, `$limit`
 //! and the projections. When the stage after them is a `$group` or an equality `$lookup` that
-//! RefDb's slot-based engine runs (and every stage before it), the plan is that engine's
-//! (`explainVersion` "2"): it takes the `$group`s, `$lookup`s and projections that follow, and
-//! numbers its stages (`planNodeId`). Under the plan go only the fields the rest of the pipeline
-//! uses (RefDb's dependency analysis): a projection, below a sort that it covers and above one
-//! it does not; the engine shows no projection of fields right under a `$group`, though it keeps
-//! its number.
+//! the reference server's slot-based engine runs (and every stage before it), the plan is that
+//! engine's (`explainVersion` "2"): it takes the `$group`s, `$lookup`s and projections that follow,
+//! and numbers its stages (`planNodeId`). Under the plan go only the fields the rest of the
+//! pipeline uses (the reference server's dependency analysis): a projection, below a sort that it
+//! covers and above one it does not; the engine shows no projection of fields right under a
+//! `$group`, though it keeps its number.
 //!
 //! The pipeline is checked first and then read into [`Step`]s, which the plan is built from.
 
@@ -125,8 +126,8 @@ struct Run {
     matched: u64,
 }
 
-/// The numbers of an engine plan's stages, as RefDb gives them: in the order it makes them,
-/// with the projections it hides counted.
+/// The numbers of an engine plan's stages, as the reference server gives them: in the order it
+/// makes them, with the projections it hides counted.
 struct Ids {
     next: Option<u32>,
 }
@@ -149,8 +150,8 @@ fn numbered(mut stage: Stage, id: Option<u32>, input: Option<Stage>) -> Stage {
 }
 
 /// `aggregate`: the query plan of its leading stages, the others after it under `stages` (a
-/// `$cursor` first), in the shape of a `refrouter` (`splitPipeline: null` and one section per
-/// node).
+/// `$cursor` first), in the shape of the reference router (`splitPipeline: null` and one section
+/// per node).
 pub(super) fn aggregate<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     ns: &Namespace,
@@ -186,7 +187,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     let classic_from = query_part(&steps, false);
     let express = express_id(coll.as_ref(), &filter, &steps[i..classic_from], inner)?;
     let engine_from = query_part(&steps, true);
-    // The express path keeps the slot-based engine out (measured on a `refrouter` 9.0.4).
+    // The express path keeps the slot-based engine out (measured on the reference router 9.0.4).
     let engine = express.is_none() && engine_runs(&pipeline, &steps, engine_from);
     let first = if engine { engine_from } else { classic_from };
     let run = verbosity >= Verbosity::ExecutionStats;
@@ -297,7 +298,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     }
     planner.push("optimizationTimeMillis", 0);
     // Behind the express path, a pipeline that needs no field of the documents reads empty
-    // ones (measured on a `refrouter` 9.0.4).
+    // ones (measured on the reference router 9.0.4).
     let needs_nothing = || {
         teseladb_exec::pipeline::deps::needed(&docs(&steps[last..])).is_some_and(|f| f.is_empty())
     };
@@ -411,9 +412,10 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
     Ok(out)
 }
 
-/// The `_id` a pipeline reads by RefDb's express path: its leading filter is that `_id`
-/// equality alone, with no collation, on a collection that is not a time series, and its query
-/// part skips nothing (measured on a `refrouter` 9.0.4: a `$skip` plans an index scan).
+/// The `_id` a pipeline reads by the reference server's express path: its leading filter is that
+/// `_id` equality alone, with no collation, on a collection that is not a time series, and its
+/// query part skips nothing (measured on the reference router 9.0.4: a `$skip` plans an index
+/// scan).
 fn express_id(
     coll: Option<&CollectionEntry>,
     filter: &Document,
@@ -432,9 +434,9 @@ fn express_id(
     Ok(super::super::crud::id_equality(filter))
 }
 
-/// The classic plan over an express stage as RefDb shows it: the sort and the limit of one
-/// document folded in, a simple projection in the stage, and any other projection over
-/// `IDHACK` (measured on a `refrouter` 9.0.4).
+/// The classic plan over an express stage as the reference server shows it: the sort and the limit
+/// of one document folded in, a simple projection in the stage, and any other projection over
+/// `IDHACK` (measured on the reference router 9.0.4).
 fn folded_into_express(plan: Stage) -> Stage {
     let mut chain = Vec::new();
     let mut at = Some(plan);
@@ -587,7 +589,8 @@ fn lookup_vars(l: &Lookup, doc: Option<&Document>) -> Result<Option<Document>, C
 
 /// What a `$sort`, a `$group`, a `$bucketAuto` and a `$setWindowFields` listed after the plan
 /// count when they run, beside the documents they give (`nReturned`): their memory and what they
-/// wrote to disk (`spilled`, counted over the run, 010 T024), in the order of a `refnode` 9.0.4.
+/// wrote to disk (`spilled`, counted over the run, 010 T024), in the order of a reference replica
+/// set member 9.0.4.
 fn with_counters(d: Document, returned: u64, spilled: SpillStats) -> Document {
     let n = int64(returned);
     let used = spilled.spills > 0;
@@ -647,7 +650,7 @@ fn group_path(st: &Step) -> Option<String> {
     })
 }
 
-/// The pipeline as RefDb rewrites it before planning: a `$sort` before each
+/// The pipeline as the reference server rewrites it before planning: a `$sort` before each
 /// `$setWindowFields`, `$fill` and `$densify` that sorts, each `$sort` after an `$unwind` that
 /// it does not read moved before it, `$skip` and `$limit` before the stages that change each
 /// document on its own, each part of a `$match` that can run before the stage ahead of it moved
@@ -748,7 +751,7 @@ fn merged_exclusion(a: Document, b: Document) -> Step {
     }
 }
 
-/// A `$setWindowFields` without a partition by a constant, which RefDb drops.
+/// A `$setWindowFields` without a partition by a constant, which the reference server drops.
 fn without_constant_partition(st: Step) -> Step {
     match &st.kind {
         Kind::SetWindowFields(w) if super::forms::constant_partition(w) => {
@@ -763,7 +766,7 @@ fn without_constant_partition(st: Step) -> Step {
 }
 
 /// Whether the stages after the query's own reach a `$setWindowFields` by an expression with an
-/// order through `$unwind`s only, for which RefDb's query plan makes the sort keys
+/// order through `$unwind`s only, for which the reference server's query plan makes the sort keys
 /// (`SORT_KEY_GENERATOR`, measured).
 fn makes_sort_keys(rest: &[Step]) -> bool {
     for st in rest {
@@ -836,7 +839,8 @@ fn union_with<B: Backend + ?Sized>(
     ))
 }
 
-/// Whether a `$sort` after an `$unwind` of `path` reads none of it, so RefDb runs it before.
+/// Whether a `$sort` after an `$unwind` of `path` reads none of it, so the reference server runs it
+/// before.
 fn sort_moves_before_unwind(st: &Step, path: &str) -> bool {
     matches!(&st.kind, Kind::Sort(s) if !s.iter().any(|(k, _)| super::moves::touches(k, path)))
 }
@@ -903,7 +907,7 @@ fn engine_runs(pipeline: &Pipeline, steps: &[Step], engine_from: usize) -> bool 
 
 /// The framework that runs pipeline `stages` on a collection, as the profiler's
 /// `queryFramework` names it: `sbe` when the slot-based engine runs its query plan, `classic`
-/// otherwise (measured on a `refnode` 9.0.4, 01-11-2026).
+/// otherwise (measured on a reference replica set member 9.0.4, 01-11-2026).
 pub(crate) fn query_framework(stages: &[Document]) -> &'static str {
     let Ok(pipeline) = checked(stages) else { return "classic" };
     let steps = swapped(stages.iter().cloned().map(Step::new).collect());
@@ -1089,8 +1093,8 @@ fn number_chain(mut stage: Stage, ids: &mut Ids) -> Stage {
 /// The plan cache hashes of the query a pipeline runs (H-028): its filter, the sort it pushes
 /// down, the fields the stages after its `$match` use (the `$sort`, `$skip` and `$limit` the query
 /// takes over use none), and the key of a `$group` an index may answer as a `distinct`. Measured
-/// on a `refrouter` 9.0.4: `$sort`, `$limit` and `$project: {s: 1}` over a `$match` give the shape
-/// `eqg|as|_id-s`, and `$group` by `$g` with an index on `g` adds the key `g`.
+/// on the reference router 9.0.4: `$sort`, `$limit` and `$project: {s: 1}` over a `$match` give the
+/// shape `eqg|as|_id-s`, and `$group` by `$g` with an index on `g` adds the key `g`.
 fn pipeline_hashes<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     coll: Option<&teseladb_meta::catalog::CollectionEntry>,
@@ -1172,7 +1176,7 @@ fn dependency_projection(f: &[String], engine: bool) -> Document {
 
 /// A projection stage of the query plan: a `$project` that only keeps or drops fields as
 /// `PROJECTION_SIMPLE`, `$replaceRoot` as `REPLACE_ROOT`, the others as `PROJECTION_DEFAULT`
-/// with their expressions as RefDb optimises them.
+/// with their expressions as the reference server optimises them.
 fn projection(st: &Step, engine: bool) -> Stage {
     match &st.kind {
         Kind::Project(p) if simple_projection(p) => {

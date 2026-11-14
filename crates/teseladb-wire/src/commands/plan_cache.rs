@@ -1,4 +1,4 @@
-//! The plan cache of a node (010 FR-002, T017), as a `refrouter` 9.0.4 keeps it (measured in
+//! The plan cache of a node (010 FR-002, T017), as the reference router 9.0.4 keeps it (measured in
 //! `crates/teseladb-wire/tests/explain/plan_cache.out`): a read whose plans competed leaves an
 //! entry for its shape (the filter's fields and operators without their values, the sort, the
 //! projection and the key of `distinct`), inactive at first; the next read of that shape whose
@@ -93,7 +93,7 @@ impl PlanCache {
 
     /// The plan of the active entry of `shape` on `ns` learned with `catalog`, and the works of
     /// its trial: what a read of that shape runs without competing plans (`fromPlanCache`). The
-    /// entry becomes the newest, as in RefDb's cache of the least recently used.
+    /// entry becomes the newest, as in the reference server's cache of the least recently used.
     pub fn cached(&mut self, ns: &str, shape: &str, catalog: &str) -> Option<(Access, u64)> {
         let i = self.active(ns, shape, catalog)?;
         let entry = self.entries.remove(i);
@@ -157,8 +157,8 @@ impl PlanCache {
 }
 
 /// `planCacheClear`: drops the node's entries of the collection, or the one of `query`'s shape
-/// with its `sort`, `projection` and `collation`; the reply has the node's own part as a
-/// `refrouter` gives its shard's (measured on a `refrouter` 9.0.4).
+/// with its `sort`, `projection` and `collation`; the reply has the node's own part as
+/// the reference router gives its shard's (measured on the reference router 9.0.4).
 pub fn plan_cache_clear<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -185,9 +185,9 @@ pub fn plan_cache_clear<B: Backend + ?Sized>(
     Ok(Document::new().with("ok", 1.0).with(node, Document::new().with("ok", 1.0)))
 }
 
-/// The shape of a read as a `refnode` 9.0.4 keys its plan cache ([`super::plan_hash`]): its
-/// parsed filter (`original` as the command wrote it), its sort, its projection and the key of a
-/// `distinct`, with the simple collation the cached reads have.
+/// The shape of a read as a reference replica set member 9.0.4 keys its plan cache
+/// ([`super::plan_hash`]): its parsed filter (`original` as the command wrote it), its sort, its
+/// projection and the key of a `distinct`, with the simple collation the cached reads have.
 pub fn read_shape(
     parsed: &Document,
     original: &Document,

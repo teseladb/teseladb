@@ -1,4 +1,4 @@
-//! Reading a command's fields with RefDb's errors: a missing required field is
+//! Reading a command's fields with the reference server's errors: a missing required field is
 //! `IDLFailedToParse` (40414), a field of the wrong type `TypeMismatch` (14), and the common
 //! options (`writeConcern`, `readConcern`, `collation`, `lsid`, `txnNumber`) have their own
 //! readers.
@@ -58,7 +58,7 @@ pub fn array<'a>(
 }
 
 /// A boolean of the query commands (`find`'s `singleBatch`): only `true` or `false`, `null`
-/// included in what it refuses (measured in `refrouter` 9.0.4).
+/// included in what it refuses (measured in the reference router 9.0.4).
 pub fn boolean(cmd: &Document, _name: &str, field: &str) -> Result<Option<bool>, CommandError> {
     match cmd.get(field) {
         None => Ok(None),
@@ -83,7 +83,8 @@ pub fn bool_field(cmd: &Document, name: &str, field: &str) -> Result<Option<bool
 }
 
 /// A field of IDL type `safeBool`: a boolean or a number (non-zero is true), `null` as absent;
-/// `types` is the list RefDb writes for that command, whose order changes between commands.
+/// `types` is the list the reference server writes for that command, whose order changes between
+/// commands.
 pub fn safe_bool(
     cmd: &Document,
     name: &str,
@@ -99,7 +100,7 @@ pub fn safe_bool(
 }
 
 /// A whole number field of any numeric type ("safe int64"): a double is cut toward zero, a
-/// decimal rounded half to even, both saturate and NaN is 0, as RefDb reads them.
+/// decimal rounded half to even, both saturate and NaN is 0, as the reference server reads them.
 pub fn int(cmd: &Document, name: &str, field: &str) -> Result<Option<i64>, CommandError> {
     int_of(cmd, name, field, &NUMBER_TYPES)
 }
@@ -115,7 +116,7 @@ pub fn int_of(
         None => Ok(None),
         Some(Value::Int32(n)) => Ok(Some(i64::from(*n))),
         Some(Value::Int64(n)) => Ok(Some(*n)),
-        // `as` cuts toward zero, saturates and reads NaN as 0, as RefDb does.
+        // `as` cuts toward zero, saturates and reads NaN as 0, as the reference server does.
         Some(Value::Double(x)) => Ok(Some(*x as i64)),
         Some(Value::Decimal128(d)) => Ok(Some(teseladb_mql::decimal_saturating(*d))),
         Some(v) => Err(wrong_types(&format!("{name}.{field}"), v, types)),
@@ -130,7 +131,7 @@ pub fn long(v: &Value, path: &str) -> Result<i64, CommandError> {
     }
 }
 
-/// The command's `writeConcern`, or RefDb's default (`w: "majority"`) without one.
+/// The command's `writeConcern`, or the reference server's default (`w: "majority"`) without one.
 pub fn write_concern(cmd: &Document, name: &str) -> Result<WriteConcernArgs, CommandError> {
     Ok(WriteConcernArgs::parse(cmd, name)?.unwrap_or_else(concerns::default_write_concern))
 }

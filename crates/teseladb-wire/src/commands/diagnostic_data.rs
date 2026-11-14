@@ -1,8 +1,9 @@
 //! `getDiagnosticData` (010 FR-024, T041): the node's last diagnostic sample, the one the
-//! server also writes each second to `<data>/diagnostic.data`. Its `data` has the parts of a
-//! `refnode` 9.0.4 that TeselaDB has (measured 01-11-2026): `start`, then `serverStatus` and
-//! `connPoolStats`, each opened with its own `start` time and closed with its `end`, and the
-//! sample's `end`. A `refrouter` gives an empty `data`; TeselaDB samples the node (DV-077).
+//! server also writes each second to `<data>/diagnostic.data`. Its `data` has the parts of
+//! a reference replica set member 9.0.4 that TeselaDB has (measured 01-11-2026): `start`, then
+//! `serverStatus` and `connPoolStats`, each opened with its own `start` time and closed with its
+//! `end`, and the sample's `end`. The reference router gives an empty `data`; TeselaDB samples the
+//! node (DV-077).
 
 use teseladb_bson::{Document, Value};
 

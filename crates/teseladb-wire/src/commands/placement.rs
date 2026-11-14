@@ -1,8 +1,9 @@
-//! `untrackUnshardedCollection` and `resetPlacementHistory` (018), as a `refrouter` 9.0.4 answers
-//! them (measured on the native `refrouter` on 09-11-2026, scenario `sharding-moves`). The first
-//! forgets the tracking a `moveCollection` or an `unshardCollection` left on a collection without
-//! shard key, whose documents stay where they are; the second resets RefDb's log of namespace
-//! placements, which TeselaDB does not keep (its ranges are in Group 0), so it has nothing to do.
+//! `untrackUnshardedCollection` and `resetPlacementHistory` (018), as the reference router 9.0.4
+//! answers them (measured on the reference router on 09-11-2026, scenario `sharding-moves`). The
+//! first forgets the tracking a `moveCollection` or an `unshardCollection` left on a collection
+//! without shard key, whose documents stay where they are; the second resets the reference server's
+//! log of namespace placements, which TeselaDB does not keep (its ranges are in Group 0), so it has
+//! nothing to do.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::CatalogCommand;

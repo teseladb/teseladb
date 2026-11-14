@@ -1,8 +1,9 @@
 //! The cluster's record of sessions (FR-016, data model §2): `config.system.sessions`, a
-//! collection of the data range like any other, with RefDb's documents
+//! collection of the data range like any other, with the reference server's documents
 //! `{_id: {id: <UUID>, uid: <SHA-256 of the user>}, lastUse: <date>}`. Each node writes the
 //! sessions it used since its last refresh (`logicalSessionRefreshMillis`) and removes the
-//! records unused for the session timeout, the work of RefDb's TTL index `lsidTTLIndex`.
+//! records unused for the session timeout, the work of the reference server's TTL index
+//! `lsidTTLIndex`.
 
 use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
@@ -38,8 +39,8 @@ pub fn record_id(lsid: u128, uid: &Uid) -> Document {
 }
 
 /// What the record of a session of `owner` sets besides its last use: the user's name as
-/// `{name: "user@db"}` when there is one (measured in `config.system.sessions` of a `refrouter`
-/// 9.0.4 with authentication on 03-11-2026).
+/// `{name: "user@db"}` when there is one (measured in `config.system.sessions` of the reference
+/// router 9.0.4 with authentication on 03-11-2026).
 fn record_user(owner: &Owner) -> Option<Document> {
     owner.user.as_ref().map(|u| Document::new().with("name", u.as_str()))
 }
@@ -60,11 +61,11 @@ fn collection<B: Backend + ?Sized>(
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the sessions' record was not created"))
 }
 
-/// RefDb's TTL index of the record (006 FR-038).
+/// The reference server's TTL index of the record (006 FR-038).
 pub const TTL_INDEX: &str = "lsidTTLIndex";
 
 /// Creates the record's TTL index on `lastUse` if collection `c` lacks it, expiring records after
-/// the session timeout `timeout_ms`, as RefDb's `lsidTTLIndex` does.
+/// the session timeout `timeout_ms`, as the reference server's `lsidTTLIndex` does.
 fn ttl_index<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
@@ -139,8 +140,8 @@ fn refresh_records<B: Backend + ?Sized>(
         let ended = g.sessions.take_ending();
         (g.sessions.used_since(since_ms), g.sessions.timeout_ms(), ended)
     };
-    // The sessions `endSessions` named end now, with their cursors, as at a refresh of RefDb's
-    // session cache.
+    // The sessions `endSessions` named end now, with their cursors, as at a refresh of the
+    // reference server's session cache.
     super::session::kill_local(shared, &super::session::KillScope::Sessions(ended.clone()));
     let ended: Vec<Document> =
         ended.iter().filter_map(|m| m.lsid.map(|l| record_id(l, &m.uid))).collect();

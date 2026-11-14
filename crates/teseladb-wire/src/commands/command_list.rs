@@ -1,10 +1,11 @@
 //! The commands of `listCommands` with the fields each one has (006 FR-033). Measured on
-//! 04-11-2026: the commands a `refrouter` 9.0.4 lists as it lists them; `applyOps`, `autoCompact`,
-//! `shardingState` and the `replSet*` commands, which a `refrouter` does not have, as a `refnode`
-//! 9.0.4 lists them, and `logApplicationMessage` as RefDb Enterprise 9.0.4 does;
-//! `configureFailPoint` as a `refrouter` 9.0.4 with `enableTestCommands` lists it. The API key
-//! commands are TeselaDB's own (019 FR-016). In byte order of their names, as a `refrouter` lists
-//! them; the dispatch answers each of them and no other (test `list_commands_names_what_the_dispatch_takes`).
+//! 04-11-2026: the commands the reference router 9.0.4 lists as it lists them; `applyOps`,
+//! `autoCompact`, `shardingState` and the `replSet*` commands, which the reference router does not
+//! have, as a reference replica set member 9.0.4 lists them, and `logApplicationMessage` as the
+//! enterprise reference server 9.0.4 does; `configureFailPoint` as the reference router 9.0.4 with
+//! `enableTestCommands` lists it. The API key commands are TeselaDB's own (019 FR-016). In byte
+//! order of their names, as the reference router lists them; the dispatch answers each of them and
+//! no other (test `list_commands_names_what_the_dispatch_takes`).
 
 /// One command of `listCommands`.
 pub(super) struct CommandInfo {

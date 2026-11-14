@@ -1,4 +1,4 @@
-//! Query shapes (010 FR-023, measured on a `refrouter` 9.0.4, 01-11-2026): what a `find`,
+//! Query shapes (010 FR-023, measured on the reference router 9.0.4, 01-11-2026): what a `find`,
 //! `aggregate`, `count` or `distinct` asks once its literals are set aside. Its debug form
 //! (`cmdNs`, `collation`, `let`, `command` and the command's own parts) is the key of
 //! `$queryStats` and is shown by `$querySettings`; the SHA-256 of its representative form, in

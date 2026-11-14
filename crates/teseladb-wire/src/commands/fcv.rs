@@ -1,7 +1,7 @@
 //! The cluster's feature compatibility version (007 FR-027): `setFeatureCompatibilityVersion`
 //! keeps it in Group 0, as an internal cluster parameter, with the checks and transitions of
-//! RefDb 9.0.4 (measured), and refuses a version above the one some node runs, so that a cluster
-//! upgraded node by node turns new features on once every node has them.
+//! the reference server 9.0.4 (measured), and refuses a version above the one some node runs, so
+//! that a cluster upgraded node by node turns new features on once every node has them.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,8 @@ use crate::error::{
 
 /// `setFeatureCompatibilityVersion`.
 pub const SET_FCV: &str = "setFeatureCompatibilityVersion";
-/// The cluster parameter that holds the version (a `refrouter` 9.0.4 has no such `getParameter`).
+/// The cluster parameter that holds the version (the reference router 9.0.4 has no such
+/// `getParameter`).
 pub const FCV: &str = "featureCompatibilityVersion";
 /// The versions this binary runs, latest first: the latest, the last continuous and the last
 /// long-term release (measured on 9.0.4).
@@ -27,7 +28,7 @@ const VERSION: &str = "version";
 const CONFIRM: &str = "confirm";
 /// What a router passes along to the config server, which takes it (measured).
 const FROM_CONFIG_SERVER: &str = "fromConfigServer";
-/// The types `confirm` takes, in a `refrouter` 9.0.4's order.
+/// The types `confirm` takes, in the reference router 9.0.4's order.
 const CONFIRM_TYPES: [&str; 5] = ["int", "decimal", "bool", "double", "long"];
 
 /// The version among the cluster parameters `all`: the latest until it is set.
@@ -77,7 +78,8 @@ pub fn set_fcv<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
     let Some(to) = rank(&target) else {
         let listed = VERSIONS.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", ");
         let msg = format!(
-            "Invalid feature compatibility version value '{target}'. Expected one of the following versions: '{listed}. See https://docs.refdb.com/master/release-notes/{LAST_LTS}-compatibility/#feature-compatibility."
+            "Invalid feature compatibility version value '{target}'. Expected one of the following versions: '{listed}. See {doc}{LAST_LTS}-compatibility/#feature-compatibility.",
+            doc = teseladb_names::DOC_FCV_RELEASE_NOTES
         );
         return Err(CommandError::new(INVALID_FCV, msg));
     };
@@ -123,9 +125,9 @@ const ERROR_AND_LOG_FROM: usize = 1;
 const CONSTRAINT_FROM: usize = 0;
 
 /// Refuses a downgrade from rank `from` to rank `to` while a collection uses an option the target
-/// version lacks, naming the first one, as RefDb r9.0.4's `userCollectionsUassertsForDowngrade`
-/// (`legacy_fcv_step.cpp`) does: for each collection the action, then the level, then the
-/// preparation of the level.
+/// version lacks, naming the first one, as the reference server r9.0.4's
+/// `userCollectionsUassertsForDowngrade` (`legacy_fcv_step.cpp`) does: for each collection the
+/// action, then the level, then the preparation of the level.
 fn check_downgrade<B: Backend + ?Sized>(
     backend: &mut B,
     from: usize,

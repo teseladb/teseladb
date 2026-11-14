@@ -1,6 +1,6 @@
-//! Writes to `config.settings` (007 FR-017, contract `config-db.md`), as a `refrouter` 9.0.4 takes
-//! them (measured, 01-11-2026): `insert`, `update`, `delete` and `findAndModify` run the usual
-//! semantics on the collection's documents, which Group 0 keeps, and every new version of a
+//! Writes to `config.settings` (007 FR-017, contract `config-db.md`), as the reference router 9.0.4
+//! takes them (measured, 01-11-2026): `insert`, `update`, `delete` and `findAndModify` run the
+//! usual semantics on the collection's documents, which Group 0 keeps, and every new version of a
 //! document passes the collection's validator: `balancer` with its `mode`, `stopped`,
 //! `activeWindow` and the other fields of the balancer and nothing else, `chunksize` with a
 //! `value` from 1 to 1024 and nothing else, and `automerge`, `ReadWriteConcernDefaults` and
@@ -66,7 +66,7 @@ fn bson_type(t: &str) -> Document {
     Document::new().with("bsonType", t)
 }
 
-/// The validator of `config.settings`, as `listCollections` shows it on a `refrouter` 9.0.4.
+/// The validator of `config.settings`, as `listCollections` shows it on the reference router 9.0.4.
 pub fn validator_spec() -> Document {
     let balancer = Document::new()
         .with("_id", enum_of(&[BALANCER]))

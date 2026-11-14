@@ -4,11 +4,11 @@
 //! `$listSampledQueries` lists the samples. `analyzeShardKey` reads them
 //! ([`super::shard_key_analysis`]).
 //!
-//! A `refrouter` 9.0.4 keeps the samples in `config.sampledQueries`, a week each; here each node
-//! keeps the last [`KEPT`] it took, as long as a week, and `$listSampledQueries` lists the ones
-//! of the node it runs on, the newest first. The replies, messages and the form of each sample
-//! are those of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026, `t6.js` to `t8.js` in the
-//! lane's notes).
+//! The reference router 9.0.4 keeps the samples in `config.sampledQueries`, a week each; here each
+//! node keeps the last [`KEPT`] it took, as long as a week, and `$listSampledQueries` lists the
+//! ones of the node it runs on, the newest first. The replies, messages and the form of each sample
+//! are those of the reference router 9.0.4 of two shards (measured on 02-11-2026, `t6.js` to
+//! `t8.js` in the lane's notes).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -256,7 +256,7 @@ pub fn sample<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<(), CommandEr
     Ok(())
 }
 
-/// The `cmd` of a sample, as a `refrouter` 9.0.4 stores it: a read's filter and collation, a
+/// The `cmd` of a sample, as the reference router 9.0.4 stores it: a read's filter and collation, a
 /// write's command with its first statement and the sample's id.
 fn sampled_command(name: &str, cmd: &Document, db: &str, id: &Value) -> Document {
     let get = |k: &str| cmd.get(k).cloned();

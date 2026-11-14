@@ -2,11 +2,11 @@
 //! Group 0 marks it `Draining`, the balancer moves its replicas, leaderships and Group 0 vote to
 //! the others and removes it once it holds nothing (D-046), when `config.shards` stops listing it.
 //!
-//! The replies of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026, `s1.js` and `s2.js` in
-//! the lane's notes): a shard that does not exist is `completed` at once; the first call starts
-//! the drain (`started`) and lists the databases whose primary the shard is (`dbsToMove`, to move
-//! with `movePrimary`) and the collections to move, none in TeselaDB, whose collections live in the
-//! ranges; the next ones say `ongoing` with what remains.
+//! The replies of the reference router 9.0.4 of two shards (measured on 02-11-2026, `s1.js` and
+//! `s2.js` in the lane's notes): a shard that does not exist is `completed` at once; the first call
+//! starts the drain (`started`) and lists the databases whose primary the shard is (`dbsToMove`, to
+//! move with `movePrimary`) and the collections to move, none in TeselaDB, whose collections live
+//! in the ranges; the next ones say `ongoing` with what remains.
 
 use teseladb_bson::{Document, Value};
 use teseladb_meta::command::{Group0Command, NodeState};
@@ -19,7 +19,7 @@ use crate::types::wrong_type;
 
 /// `removeShard`.
 pub const REMOVE_SHARD: &str = "removeShard";
-/// What a `refrouter` asks the operator to do with the databases still on the shard.
+/// What the reference router asks the operator to do with the databases still on the shard.
 const NOTE: &str = "you need to call moveCollection for collectionsToMove and afterwards movePrimary for the dbsToMove";
 
 /// Whether shard document `d` says it is being drained.
@@ -222,8 +222,9 @@ pub const ADD_SHARD: &str = "addShard";
 
 /// `addShard`: a node of the cluster, named by its client address (`host:port`, or
 /// `<shard>/host:port` as a replica set's seed list), is a shard already, and the command answers
-/// with its name as a `refrouter` answers for a shard it has. Any other node joins the cluster from
-/// its side with an enrollment token (013 FR-005), which is how TeselaDB adds a shard (DV-086).
+/// with its name as the reference router answers for a shard it has. Any other node joins the
+/// cluster from its side with an enrollment token (013 FR-005), which is how TeselaDB adds a shard
+/// (DV-086).
 pub fn add_shard<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin::admin_only(ADD_SHARD, ctx.db)?;
     let given = match ctx.first() {

@@ -35,7 +35,7 @@ fn cursor_uid(owner: Option<&str>) -> Uid {
     }
 }
 
-/// A `uid` at `path`: a general binary of 32 bytes (measured on a `refrouter` 9.0.4).
+/// A `uid` at `path`: a general binary of 32 bytes (measured on the reference router 9.0.4).
 fn uid_value(v: &Value, path: &str) -> Result<Uid, CommandError> {
     match v {
         Value::Binary { subtype: 0, bytes } => <Uid>::try_from(bytes.as_slice()).map_err(|_| {
@@ -66,7 +66,7 @@ pub const START_SESSION: &str = "startSession";
 /// `killAllSessionsByPattern`.
 pub const KILL_ALL_SESSIONS_BY_PATTERN: &str = "killAllSessionsByPattern";
 
-/// How RefDb 9.0.4 names the session list of `command` in its messages (measured).
+/// How the reference server 9.0.4 names the session list of `command` in its messages (measured).
 fn list_name(command: &str) -> String {
     match command {
         KILL_SESSIONS => format!("KillSessionsCmd.{command}"),
@@ -80,8 +80,9 @@ fn lsids<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Vec<u128>, CommandErro
 }
 
 /// The sessions of the command's first field, each of the `uid` its `lsid` names or else of
-/// the user who runs the command, as RefDb completes an `lsid` (measured on a `refrouter` 9.0.4
-/// with authentication on 03-11-2026: `killSessions` of another user's `id` reaches nothing).
+/// the user who runs the command, as the reference server completes an `lsid` (measured on the
+/// reference router 9.0.4 with authentication on 03-11-2026: `killSessions` of another user's `id`
+/// reaches nothing).
 fn matches<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Vec<SessionMatch>, CommandError> {
     let own = caller(ctx.backend).uid;
     Ok(named_sessions(ctx)?
@@ -164,8 +165,8 @@ pub fn kill_local(shared: &Shared, scope: &KillScope) {
     }
 }
 
-/// Kills the sessions of `scope` on this node and then on every other node of the cluster, as a
-/// `refrouter` sends `killSessions` to every shard.
+/// Kills the sessions of `scope` on this node and then on every other node of the cluster, as
+/// the reference router sends `killSessions` to every shard.
 fn kill<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
     scope: KillScope,
@@ -176,7 +177,8 @@ fn kill<B: Backend + ?Sized>(
 }
 
 /// `endSessions`: the sessions end, with their cursors, at the node's next refresh of the
-/// sessions' record (`registry::refresh`), as RefDb ends them at its session cache's refresh.
+/// sessions' record (`registry::refresh`), as the reference server ends them at its session cache's
+/// refresh.
 pub fn end_sessions<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ending = matches(ctx)?;
     lock(ctx.shared).sessions.mark_ending(&ending);
@@ -259,8 +261,8 @@ fn session_id(v: &Value, path: &str) -> Result<u128, CommandError> {
 
 /// The sessions one pattern reaches, `None` for every session. A `uid` reaches every session
 /// of its owner, also next to an `lsid`; an `lsid` reaches the session with its `id` and `uid`;
-/// `users` and `roles` name whom the command acts for and choose no session (measured on a
-/// `refrouter` 9.0.4 with authentication on 03-11-2026).
+/// `users` and `roles` name whom the command acts for and choose no session (measured on
+/// the reference router 9.0.4 with authentication on 03-11-2026).
 fn pattern(d: &Document, list: &str) -> Result<Option<SessionMatch>, CommandError> {
     let (mut uid, mut one) = (None, None);
     for (k, v) in d.iter() {
@@ -297,8 +299,8 @@ fn pattern(d: &Document, list: &str) -> Result<Option<SessionMatch>, CommandErro
 }
 
 /// One user (`name` is `user`) or role (`role`) of a pattern, element `i` of the list at `path`:
-/// a document with a string `name` and `db`, nothing else (measured on a `refrouter` 9.0.4 on
-/// 03-11-2026; a missing `db` is named before a missing `name`).
+/// a document with a string `name` and `db`, nothing else (measured on the reference router 9.0.4
+/// on 03-11-2026; a missing `db` is named before a missing `name`).
 fn named(e: &Value, path: &str, i: usize, name: &str) -> Result<(), CommandError> {
     let Value::Document(d) = e else {
         return Err(wrong_type(&format!("{path}.{i}"), e, "object"));
@@ -324,8 +326,8 @@ fn named(e: &Value, path: &str, i: usize, name: &str) -> Result<(), CommandError
 }
 
 /// A pattern with `users` or `roles` asks for `impersonate` on the cluster, which only
-/// `__system` has; a node that does not authorize asks nothing (measured on a `refrouter` 9.0.4
-/// with `--keyFile` and a `refnode` without `--auth` on 03-11-2026).
+/// `__system` has; a node that does not authorize asks nothing (measured on the reference router
+/// 9.0.4 with `--keyFile` and a reference replica set member without `--auth` on 03-11-2026).
 fn may_impersonate<B: Backend + ?Sized>(
     backend: &B,
     patterns: &[Value],

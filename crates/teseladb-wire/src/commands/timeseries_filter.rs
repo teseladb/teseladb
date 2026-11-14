@@ -1,6 +1,6 @@
 //! The partial filter of a time series index as a filter over its buckets (015 FR-008), the way
-//! a `refrouter` 9.0.4 writes it in the bucket index's specification (measured on 31-10-2026 with
-//! `listIndexes` and `rawData: true`):
+//! the reference router 9.0.4 writes it in the bucket index's specification (measured on 31-10-2026
+//! with `listIndexes` and `rawData: true`):
 //!
 //! - a condition on the meta value goes to `meta` as it is (a bare value as `$eq`);
 //! - `$gt`/`$gte` on a measurement field compare the bucket's greatest value
@@ -10,7 +10,8 @@
 //! - `$or` keeps its branches, translated; the conditions of the top level (and of its `$and`)
 //!   come out as one document when only one of them is on a measurement, otherwise in `$and`.
 //!
-//! Anything else is RefDb's 5916301 with the condition as RefDb normalizes it.
+//! Anything else is the reference server's 5916301 with the condition as the reference server
+//! normalizes it.
 
 use teseladb_bson::{Document, Value};
 use teseladb_mql::timeseries_write::BucketSpec;
@@ -20,7 +21,7 @@ use crate::error::{CommandError, TIMESERIES_PREDICATE};
 /// One condition of the bucket filter: its path and condition, or a whole expression.
 type Cond = (String, Value);
 
-/// Why a condition cannot go to the buckets, as RefDb words it.
+/// Why a condition cannot go to the buckets, as the reference server words it.
 #[derive(Clone, Copy)]
 enum Why {
     Predicate,
@@ -45,8 +46,8 @@ fn refuse(shown: Document, why: Why) -> CommandError {
     )
 }
 
-/// The types of a `$type` as RefDb shows them: `"number"` first when asked, then the codes
-/// once each in ascending order (measured on a `refnode` 9.0.4).
+/// The types of a `$type` as the reference server shows them: `"number"` first when asked, then the
+/// codes once each in ascending order (measured on a reference replica set member 9.0.4).
 fn type_set(v: &Value) -> Value {
     use teseladb_mql::types::{TypeSpec, by_alias, by_code};
     let items = match v {
@@ -63,7 +64,7 @@ fn type_set(v: &Value) -> Value {
     for spec in specs {
         match spec {
             TypeSpec::Number => number = true,
-            // RefDb numbers the minimum key -1.
+            // The reference server numbers the minimum key -1.
             TypeSpec::Element(e) => codes.push(i32::from(i8::from_ne_bytes([e]))),
         }
     }
@@ -73,8 +74,9 @@ fn type_set(v: &Value) -> Value {
     Value::Array(number.then(|| Value::from("number")).into_iter().chain(shown).collect())
 }
 
-/// The condition of an `$elemMatch` as RefDb shows it: operators on the element as they are;
-/// conditions on its fields one predicate each, alone or in `$and` (measured on a `refnode` 9.0.4).
+/// The condition of an `$elemMatch` as the reference server shows it: operators on the element as
+/// they are; conditions on its fields one predicate each, alone or in `$and` (measured on a
+/// reference replica set member 9.0.4).
 fn elem_match_shown(inner: &Document) -> Document {
     if inner.iter().next().is_some_and(|(k, _)| k.starts_with('$')) {
         return normalized(&Value::Document(inner.clone()));
@@ -92,7 +94,7 @@ fn elem_match_shown(inner: &Document) -> Document {
     }
 }
 
-/// Condition `cond` on `path` as RefDb normalizes it in a message.
+/// Condition `cond` on `path` as the reference server normalizes it in a message.
 fn normalized(cond: &Value) -> Document {
     let Value::Document(ops) = cond else {
         return Document::new().with("$eq", cond.clone());
@@ -186,8 +188,8 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
         };
         return Ok((vec![(m, c)], true));
     }
-    // The predicate refused is shown alone, as RefDb splits a path's operators (measured on a
-    // `refnode` 9.0.4).
+    // The predicate refused is shown alone, as the reference server splits a path's operators
+    // (measured on a reference replica set member 9.0.4).
     let shown_op = |op: &str, v: &Value| {
         Document::new()
             .with(path, normalized(&Value::Document(Document::new().with(op, v.clone()))))
@@ -202,7 +204,8 @@ fn field(spec: &BucketSpec, path: &str, cond: &Value) -> Result<(Vec<Cond>, bool
     for (op, v) in &ops {
         let shown = || shown_op(op, v);
         let compares = matches!(op.as_str(), "$eq" | "$gt" | "$gte" | "$lt" | "$lte");
-        // A comparison to null is refused, shown alone (measured on a `refnode` 9.0.4).
+        // A comparison to null is refused, shown alone (measured on a reference replica set member
+        // 9.0.4).
         if compares && matches!(v, Value::Null) {
             let one = Document::new().with(path, Document::new().with(op.as_str(), Value::Null));
             return Err(refuse(one, Why::Null));
@@ -290,7 +293,8 @@ fn conditions(
     Ok(())
 }
 
-/// The bucket filter of partial filter `filter` of time series `spec`, or RefDb's refusal.
+/// The bucket filter of partial filter `filter` of time series `spec`, or the reference server's
+/// refusal.
 pub fn bucket_filter(spec: &BucketSpec, filter: &Document) -> Result<Document, CommandError> {
     let (mut meta, mut measured) = (Vec::new(), Vec::new());
     conditions(spec, filter, &mut meta, &mut measured)?;

@@ -2,8 +2,8 @@
 //! `dropAllUsersFromDatabase`, `grantRolesToUser`, `revokeRolesFromUser`, `usersInfo` and
 //! `invalidateUserCache`, over the users of Group 0. A change reads the user, computes the new
 //! document and writes it expecting the one it read, and starts again if another change came
-//! first. Fields, checks and messages are RefDb 9.0.4's (measured on a `refrouter` with
-//! `--keyFile`).
+//! first. Fields, checks and messages are the reference server 9.0.4's (measured on the reference
+//! router with `--keyFile`).
 
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::scram::{Credentials, Mechanism};
@@ -50,7 +50,7 @@ pub const NAMES: [&str; 8] = [
     INVALIDATE_USER_CACHE,
 ];
 
-/// The types the `show*` flags of `usersInfo` take, in RefDb's order.
+/// The types the `show*` flags of `usersInfo` take, in the reference server's order.
 const SHOW_TYPES: [&str; 5] = ["int", "double", "long", "decimal", "bool"];
 /// Times a change reads and writes again after a concurrent change before giving up.
 pub(super) const MAX_ATTEMPTS: usize = 16;
@@ -184,7 +184,8 @@ pub(super) fn restrictions_arg(
 /// The password of command `name`: a string, never empty.
 fn password(cmd: &Document, name: &str) -> Result<Option<String>, CommandError> {
     match args::string(cmd, name, "pwd")? {
-        // RefDb's SASLprep of an empty password fails with this ICU message (measured).
+        // The reference server's SASLprep of an empty password fails with this ICU message
+        // (measured).
         Some("") => Err(CommandError::new(
             PASSWORD_NOT_TERMINATED,
             "Error preflighting UTF-8 conversion: U_STRING_NOT_TERMINATED_WARNING",
@@ -507,8 +508,8 @@ fn wanted(v: &Value, db: &str) -> Result<Wanted, CommandError> {
     }
 }
 
-/// The mechanisms `authenticatedMechanism` of `usersInfo` takes, in the order RefDb 9.0.4 lists
-/// them (measured).
+/// The mechanisms `authenticatedMechanism` of `usersInfo` takes, in the order the reference server
+/// 9.0.4 lists them (measured).
 const AUTHENTICATED_MECHANISMS: [SaslMechanism; 7] = [
     SaslMechanism::X509,
     SaslMechanism::Plain,
@@ -519,8 +520,8 @@ const AUTHENTICATED_MECHANISMS: [SaslMechanism; 7] = [
     SaslMechanism::Oidc,
 ];
 
-/// Checks `authenticatedMechanism` (013 FR-033). With LDAP authorization RefDb 9.0.4 still
-/// answers from the stored documents for every mechanism (measured), so it only chooses what
+/// Checks `authenticatedMechanism` (013 FR-033). With LDAP authorization the reference server 9.0.4
+/// still answers from the stored documents for every mechanism (measured), so it only chooses what
 /// the command needs (`internal` on the cluster).
 fn authenticated_mechanism(cmd: &Document) -> Result<(), CommandError> {
     match cmd.get("authenticatedMechanism") {

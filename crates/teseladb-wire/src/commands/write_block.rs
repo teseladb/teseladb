@@ -1,7 +1,7 @@
 //! The cluster's write gates (007 FR-029): `fsync` with `lock` and `fsyncUnlock` count the locks
 //! that hold every write back, and `setUserWriteBlockMode` refuses the writes to user databases,
-//! as on a `refrouter` 9.0.4 (measured). Both live in Group 0 as cluster parameters that only this
-//! module reads and writes, so every node sees the same gate.
+//! as on the reference router 9.0.4 (measured). Both live in Group 0 as cluster parameters that
+//! only this module reads and writes, so every node sees the same gate.
 
 use std::collections::BTreeMap;
 
@@ -37,8 +37,8 @@ const REASON: &str = "reason";
 /// The reasons `setUserWriteBlockMode` takes (measured).
 const REASONS: [&str; 3] =
     ["Unspecified", "DiskUseThresholdExceeded", "ClusterToClusterMigrationInProgress"];
-/// What a blocked write of a document answers: a `refrouter` 9.0.4 names no other reason, whatever
-/// `reason` said (measured).
+/// What a blocked write of a document answers: the reference router 9.0.4 names no other reason,
+/// whatever `reason` said (measured).
 pub const BLOCKED_WRITE: &str = "User writes blocked, reason: Unspecified";
 /// What a blocked change of the catalog answers (measured on `drop`).
 pub const BLOCKED_DDL: &str = "User writes blocked";
@@ -101,8 +101,8 @@ fn user_db(db: &str) -> bool {
 /// Whether the running command's user may write while user writes are blocked: its privileges
 /// have `bypassWriteBlockingMode` on the cluster (`root` has it through `restore`). They are the
 /// operation's own, kept with it in the node's table for as long as it runs, also while it
-/// waits. A node that does not authorize (`--insecure`) blocks everyone, as a RefDb without
-/// `--auth` (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// waits. A node that does not authorize (`--insecure`) blocks everyone, as a reference server
+/// without `--auth` (measured on a reference replica set member 9.0.4 on 03-11-2026).
 fn bypasses<B: Backend + ?Sized>(b: &B) -> bool {
     b.privileges()
         .is_some_and(|p| authz::allows(&p, &Target::Cluster, ActionType::BypassWriteBlockingMode))
@@ -124,8 +124,8 @@ fn unlocked<B: Backend + ?Sized>(b: &mut B) -> Result<WriteGate, CommandError> {
 
 /// Lets write `bound` go: it waits for the locks, and fails if user writes are blocked, it is a
 /// write to a collection of a user database and it changes something (a delete or an update
-/// that matches nothing goes, as on a `refrouter` 9.0.4). A user with `bypassWriteBlockingMode`
-/// writes anyway ([`bypasses`]).
+/// that matches nothing goes, as on the reference router 9.0.4). A user with
+/// `bypassWriteBlockingMode` writes anyway ([`bypasses`]).
 pub fn data<B: Backend + ?Sized>(b: &mut B, bound: &Bound) -> Result<(), CommandError> {
     if !unlocked(b)?.user_writes_blocked || bypasses(b) {
         return Ok(());
@@ -155,7 +155,7 @@ pub fn ddl<B: Backend + ?Sized>(b: &mut B, db: &str) -> Result<(), CommandError>
     }
 }
 
-/// The answer of every node, as a `refrouter` gives each shard's: `raw` by `<shard>/<host>`.
+/// The answer of every node, as the reference router gives each shard's: `raw` by `<shard>/<host>`.
 fn by_node<B: Backend + ?Sized>(b: &mut B, each: &Document) -> Result<Document, CommandError> {
     Ok(super::cluster_admin::raw_names(b)?
         .into_iter()
@@ -181,7 +181,7 @@ pub fn lock<B: Backend + ?Sized>(b: &mut B) -> Result<Document, CommandError> {
 }
 
 /// `fsyncUnlock`: one lock less. Without a lock, every node's `IllegalOperation` under `raw`, in
-/// the order of a `refrouter` 9.0.4's answer (measured on 03-11-2026).
+/// the order of the reference router 9.0.4's answer (measured on 03-11-2026).
 pub fn fsync_unlock<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     admin_only(FSYNC_UNLOCK, ctx.db)?;
     let b = &mut *ctx.backend;

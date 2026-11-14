@@ -1,5 +1,6 @@
 //! The cluster parameters of the HTTP port and of MCP (019 FR-003, FR-004, FR-023, FR-025;
-//! DV-016), set with `setClusterParameter` like RefDb's own and read by every node from Group 0:
+//! DV-016), set with `setClusterParameter` like the reference server's own and read by every node
+//! from Group 0:
 //!
 //! - `httpOptions`: `cors.allowedOrigins`, the origins CORS lets in (none: CORS is off), and
 //!   `rateLimits` with `concurrentRequests` (1,000) and `requestsPerSecond` (10,000) per
@@ -45,7 +46,7 @@ const MAX_DOCUMENTS: &str = "maxDocuments";
 const MAX_BYTES: &str = "maxBytes";
 const MAX_TIME_MS: &str = "maxTimeMS";
 const RESOURCE_URI: &str = "resourceUri";
-/// The structure of RefDb's errors of a cluster parameter.
+/// The structure of the reference server's errors of a cluster parameter.
 const IDL: &str = "ClusterServerParameter";
 
 /// What `httpOptions` holds.

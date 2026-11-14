@@ -1,6 +1,6 @@
 //! The special kinds of collection in `create` and the catalog commands (015 FR-001 to FR-003,
 //! FR-006, FR-009, FR-010): views, capped collections, time series and collections clustered by
-//! `_id`. `create` checks their options and stores them as a `refrouter` 9.0.4 stores them
+//! `_id`. `create` checks their options and stores them as the reference router 9.0.4 stores them
 //! (measured 31-10-2026, `docs/` of 015, research R1): numbers truncated or rounded the same way,
 //! the defaults of a time series written out, and the options in the order `listCollections`
 //! shows them. A view's definition is checked against the other views of its database
@@ -52,7 +52,7 @@ const NAME: &str = "name";
 const VERSION: &str = "v";
 const CHANGE_STREAM_IMAGES: &str = "changeStreamPreAndPostImages";
 
-/// The options a time series refuses, in the order RefDb checks them.
+/// The options a time series refuses, in the order the reference server checks them.
 const NOT_WITH_TIMESERIES: [&str; 8] = [
     VIEW_ON,
     CAPPED,
@@ -121,11 +121,11 @@ pub enum Asked {
     },
 }
 
-/// An integral value of a numeric option as RefDb reads it: a `double` truncated, a `decimal`
-/// rounded half to even.
+/// An integral value of a numeric option as the reference server reads it: a `double` truncated, a
+/// `decimal` rounded half to even.
 pub(crate) fn integral(v: &Value) -> Option<i128> {
-    // `as` saturates at the bounds of `i64` and makes NaN 0, as RefDb reads these options
-    // (measured: `expireAfterSeconds: 1e30` is 9223372036854775807, NaN is 0).
+    // `as` saturates at the bounds of `i64` and makes NaN 0, as the reference server reads these
+    // options (measured: `expireAfterSeconds: 1e30` is 9223372036854775807, NaN is 0).
     match v {
         Value::Int32(n) => Some(i128::from(*n)),
         Value::Int64(n) => Some(i128::from(*n)),
@@ -187,8 +187,8 @@ const STORAGE_TIER: &str = "storageTier";
 /// The option that makes a collection the server's temporary one.
 const TEMP: &str = "temp";
 
-/// Checks the options of `create` of `ns` that make a special kind, in the order a `refrouter`
-/// 9.0.4 checks them.
+/// Checks the options of `create` of `ns` that make a special kind, in the order the reference
+/// router 9.0.4 checks them.
 pub fn check(ns: &Namespace, o: &Document, now_secs: i64) -> Result<Asked, CommandError> {
     let view_on = match o.get(VIEW_ON) {
         None => None,
@@ -219,8 +219,8 @@ pub fn check(ns: &Namespace, o: &Document, now_secs: i64) -> Result<Asked, Comma
         }
     }
     let timeseries = doc_of(o, TIMESERIES)?;
-    // `storageTier` is an object; `temp` is the server's own (measured on a `refrouter` 9.0.4 on
-    // 05-11-2026).
+    // `storageTier` is an object; `temp` is the server's own (measured on the reference router
+    // 9.0.4 on 05-11-2026).
     doc_of(o, STORAGE_TIER)?;
     if o.get(TEMP).is_some() {
         return Err(CommandError::new(INVALID_OPTIONS, "the 'temp' field is an invalid option"));
@@ -327,8 +327,8 @@ fn check_capped(o: &Document) -> Result<Asked, CommandError> {
 }
 
 /// `expireAfterSeconds` of a time series or a clustered collection, checked: not negative, its
-/// milliseconds within an `int64` and at most the seconds since 1970 at `now_secs` (measured on a
-/// `refnode` 9.0.4 on 02-11-2026, also by `collMod`).
+/// milliseconds within an `int64` and at most the seconds since 1970 at `now_secs` (measured on
+/// a reference replica set member 9.0.4 on 02-11-2026, also by `collMod`).
 pub(crate) fn checked_expire(
     expire: Option<i128>,
     prefix: &str,
@@ -544,7 +544,7 @@ fn check_clustered(
 }
 
 /// The options a `create` of `asked` stores, from its options `o` (collation already complete),
-/// in the order a `refrouter` 9.0.4 lists them.
+/// in the order the reference router 9.0.4 lists them.
 pub fn stored(asked: &Asked, o: &Document) -> Document {
     let collation = o.get(COLLATION).cloned();
     let mut out = Document::new();
@@ -690,8 +690,8 @@ pub fn view_documents<B: Backend + ?Sized>(
     Ok(docs)
 }
 
-/// A pipeline as RefDb shows it in the errors of a repeated `create`: a document of the
-/// stages by position.
+/// A pipeline as the reference server shows it in the errors of a repeated `create`: a document of
+/// the stages by position.
 fn pipeline_shown(p: Option<&Value>) -> String {
     let mut d = Document::new();
     if let Some(Value::Array(stages)) = p {
@@ -702,8 +702,8 @@ fn pipeline_shown(p: Option<&Value>) -> String {
     display(&Value::Document(d))
 }
 
-/// The answer to a repeated `create` of `ns` when the kinds differ or a view is involved, as a
-/// `refrouter` 9.0.4 gives it; `None` when the options are compared as a whole.
+/// The answer to a repeated `create` of `ns` when the kinds differ or a view is involved, as
+/// the reference router 9.0.4 gives it; `None` when the options are compared as a whole.
 pub fn existing(
     ns: &Namespace,
     have: &Document,

@@ -1,11 +1,11 @@
 //! The `local` database (018 FR-009, FR-010): `oplog.rs` ([`super::oplog`]), `startup_log` and,
-//! in the replica set presentation, `system.replset`, all read-only. A `refrouter` refuses the
-//! whole database; TeselaDB serves these collections in both presentations (DV-015) and refuses
-//! the rest as a `refrouter` does.
+//! in the replica set presentation, `system.replset`, all read-only. The reference router refuses
+//! the whole database; TeselaDB serves these collections in both presentations (DV-015) and refuses
+//! the rest as the reference router does.
 //!
-//! Measured on a replica set of RefDb 9.0.4 (02-11-2026): `listCollections` gives `oplog.rs`
-//! capped with `autoIndexId: false` and no `idIndex`, and `startup_log` capped with 10 MiB; a
-//! `startup_log` document has `_id` (`<hostname>-<start in ms>`), `hostname`, `startTime`,
+//! Measured on a replica set of the reference server 9.0.4 (02-11-2026): `listCollections` gives
+//! `oplog.rs` capped with `autoIndexId: false` and no `idIndex`, and `startup_log` capped with 10
+//! MiB; a `startup_log` document has `_id` (`<hostname>-<start in ms>`), `hostname`, `startTime`,
 //! `startTimeLocal` (`Mon Nov  2 15:44:32.433`), `cmdLine`, `pid` and `buildinfo`.
 
 use teseladb_bson::{Document, Value};
@@ -26,12 +26,13 @@ pub const SERVED: [&str; 3] = [super::oplog::OPLOG_COLL, STARTUP_LOG, SYSTEM_REP
 const UNNAMED: [&str; 4] = ["getMore", "killCursors", "listCollections", "dbStats"];
 /// The commands that write a collection, which the oplog refuses (measured on 9.0.4).
 const OPLOG_WRITES: [&str; 4] = ["insert", "update", "delete", "createIndexes"];
-/// Size of the capped `startup_log` (RefDb 9.0.4).
+/// Size of the capped `startup_log` (the reference server 9.0.4).
 const STARTUP_LOG_SIZE: i32 = 10 * 1024 * 1024;
-/// Size `listCollections` gives the capped oplog: the 5 % of the disk a `refnode` takes, capped
-/// at 50 GiB (RefDb's default; TeselaDB keeps its history window instead, 014).
+/// Size `listCollections` gives the capped oplog: the 5 % of the disk a reference replica set
+/// member takes, capped at 50 GiB (the reference server's default; TeselaDB keeps its history
+/// window instead, 014).
 const OPLOG_MAX_SIZE: i64 = 50 * 1024 * 1024 * 1024;
-/// Percent of the disk RefDb gives the oplog.
+/// Percent of the disk the reference server gives the oplog.
 const OPLOG_DISK_PERCENT: u64 = 5;
 
 const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
@@ -45,7 +46,8 @@ pub fn check_reachable(db: &str, name: &str, coll: Option<&str>) -> Result<(), C
     if db != LOCAL_DB {
         return Ok(());
     }
-    // RefDb 9.0.4 refuses a write to the oplog before it reads the command's documents.
+    // The reference server 9.0.4 refuses a write to the oplog before it reads the command's
+    // documents.
     if coll == Some(super::oplog::OPLOG_COLL) && OPLOG_WRITES.contains(&name) {
         return Err(super::oplog::write_refused());
     }

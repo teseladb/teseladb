@@ -1,8 +1,8 @@
-//! The maintenance commands of 006 FR-033 a `refrouter` 9.0.4 answers (measured): `dataSize`,
-//! `logRotate`, `dropConnections`, `lockInfo`, `connPoolStats` and `isdbgrid`, and
+//! The maintenance commands of 006 FR-033 the reference router 9.0.4 answers (measured):
+//! `dataSize`, `logRotate`, `dropConnections`, `lockInfo`, `connPoolStats` and `isdbgrid`, and
 //! `rotateCertificates` (013 FR-006). A node keeps no
 //! connection pool to shards nor lock table of its own, so those answer empty; `top` does not
-//! exist in a `refrouter` and is not a command here either.
+//! exist in the reference router and is not a command here either.
 
 use teseladb_bson::{Document, Value};
 
@@ -48,8 +48,8 @@ const LIMIT_TYPES: &[&str] = &["int", "decimal", "double", "long"];
 const ESTIMATE_TYPES: &[&str] = &["double", "long", "int", "bool", "decimal"];
 
 /// A `dataSize` limit (`maxSize`, `maxObjects`) as a whole number, truncated toward zero: 0 (or
-/// none) is no limit, and a negative one stops the count at the first document (measured on a
-/// `refnode` 9.0.4 on 03-11-2026).
+/// none) is no limit, and a negative one stops the count at the first document (measured on
+/// a reference replica set member 9.0.4 on 03-11-2026).
 fn limit(cmd: &Document, field: &str) -> Result<i64, CommandError> {
     match cmd.get(field) {
         None | Some(Value::Null) => Ok(0),
@@ -75,7 +75,7 @@ fn estimate(cmd: &Document) -> Result<bool, CommandError> {
 
 /// `dataSize`: bytes and documents of a collection, or of an `_id` range of it, stopping once
 /// `maxSize` bytes or more than `maxObjects` documents are counted; `estimate` and `maxReached`
-/// only from a member of a replica set (018), as a `refnode` answers.
+/// only from a member of a replica set (018), as a reference replica set member answers.
 pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let Value::String(text) = ctx.first().clone() else {
         let path = format!("{DATA_SIZE}.{}", ctx.name());
@@ -108,8 +108,8 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let started = ctx.backend.now_ms();
     let (mut size, mut objects, mut reached) = (0i64, 0i64, false);
     let coll = ctx.backend.collection(&ns)?;
-    // Only a collection that exists has indexes to look the pattern up in (measured on a `refnode`
-    // 9.0.4 on 03-11-2026): one that does not exist counts nothing.
+    // Only a collection that exists has indexes to look the pattern up in (measured on a reference
+    // replica set member 9.0.4 on 03-11-2026): one that does not exist counts nothing.
     if coll.is_some()
         && let Some(Value::Document(k)) = ctx.cmd.get("keyPattern")
         && !(k.len() == 1 && k.get("_id").is_some())
@@ -131,8 +131,8 @@ pub fn data_size<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
         .with("size", size)
         .with("numObjects", objects)
         .with("millis", i64::try_from(millis).unwrap_or(i64::MAX));
-    // A `refrouter` 9.0.4 answers without either; a `refnode` says nothing of the estimate of a
-    // collection that does not exist (measured on 03-11-2026).
+    // The reference router 9.0.4 answers without either; a reference replica set member says
+    // nothing of the estimate of a collection that does not exist (measured on 03-11-2026).
     let member = super::config_db::as_member(ctx.backend)?;
     if member && coll.is_some() {
         d.push("estimate", estimated);
@@ -222,7 +222,8 @@ fn wait_times() -> Document {
     d
 }
 
-/// `connPoolStats`, with RefDb's fields: the node keeps no pool of connections to shards.
+/// `connPoolStats`, with the reference server's fields: the node keeps no pool of connections to
+/// shards.
 pub fn conn_pool_stats<B: Backend + ?Sized>(
     _ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -242,7 +243,7 @@ pub fn conn_pool_stats<B: Backend + ?Sized>(
         "totalRejectedRequests",
         "totalPendingRequests",
     ] {
-        // 32-bit counters, then 64-bit ones (measured on a `refrouter` 9.0.4).
+        // 32-bit counters, then 64-bit ones (measured on the reference router 9.0.4).
         d.push(field, 0i32);
     }
     for field in ["totalConnectionAcquisitionRequests", "totalConnectionAcquisitionWaitTimeMillis"]
@@ -259,7 +260,7 @@ pub fn conn_pool_stats<B: Backend + ?Sized>(
     Ok(d)
 }
 
-/// `isdbgrid`: the node answers as a `refrouter` (D-006).
+/// `isdbgrid`: the node answers as the reference router (D-006).
 pub fn is_db_grid<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let host = ctx.backend.process().host.hostname;
     Ok(Document::new().with("isdbgrid", 1).with("hostname", host).with("ok", 1.0))

@@ -34,8 +34,9 @@ pub const KEPT_OPEN_LARGE: i64 = 8;
 /// See [`BUCKET_EXISTED`]: it stopped for a measurement with a field of another type.
 pub const STOPPED_BY_SCHEMA: i64 = 16;
 
-/// The message prefix of a measurement refused into a bucket that was there: RefDb writes it
-/// as an update of the bucket (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// The message prefix of a measurement refused into a bucket that was there: the reference server
+/// writes it as an update of the bucket (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026).
 pub const UPDATE_FAILED: &str = "Plan executor error during update :: caused by :: ";
 
 /// Why `e` refuses a write because its bucket is full, if it does.
@@ -66,8 +67,8 @@ fn ts_error(e: TsError) -> CommandError {
 /// Evaluates the insert of measurements `docs` into the bucket at `keys[0]`, whose `_id` is
 /// `id`, in order, until the bucket stops taking them (the result's `n` says how many it took;
 /// none at all is [`is_refusal`]). The measurements it takes go in together: when one of them
-/// fails, none does and the result carries that error at its place (measured on a `refnode`
-/// 9.0.4 on 02-11-2026).
+/// fails, none does and the result carries that error at its place (measured on a reference replica
+/// set member 9.0.4 on 02-11-2026).
 pub(super) fn insert(
     keys: &[Vec<u8>],
     docs: &[Document],

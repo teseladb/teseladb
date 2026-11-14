@@ -1,8 +1,8 @@
 //! Server-side JavaScript of the node (016): `$where` in the matcher and the engine of
 //! `$function` and `$accumulator` (the [`JsEngine`] of 010 T012), on `teseladb-js`. Programs are
 //! parsed once per text and kept per thread; each call gets the cluster time, a seed of the
-//! node's draws, and the command's deadline. The errors are those of a `refrouter` 9.0.4 (measured
-//! on 02-11).
+//! node's draws, and the command's deadline. The errors are those of the reference router 9.0.4
+//! (measured on 02-11).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -22,15 +22,15 @@ const WHERE_DISABLED: ErrorCode = ErrorCode { code: 6_108_304, name: "Location61
 /// `$function`, `$accumulator` or `mapReduce` on a node without JavaScript.
 pub const JS_DISABLED: ErrorCode = ErrorCode { code: 31_264, name: "Location31264" };
 /// A result that BSON cannot hold: a symbol, a malformed value of a BSON type (`BadValue`), a
-/// `Timestamp` without its time or its increment (measured on a `refrouter` 9.0.4 on 02-11).
+/// `Timestamp` without its time or its increment (measured on the reference router 9.0.4 on 02-11).
 const NOT_CONVERTIBLE: [ErrorCode; 4] = [
     ErrorCode { code: 16_662, name: "Location16662" },
     ErrorCode { code: 2, name: "BadValue" },
     ErrorCode { code: 6_900_900, name: "Location6900900" },
     ErrorCode { code: 6_900_901, name: "Location6900901" },
 ];
-/// The trap of the WebAssembly build of RefDb 9.0's engine (a promise job, a
-/// `FinalizationRegistry`), measured on a `refrouter` 9.0.4 on 02-11.
+/// The trap of the WebAssembly build of the reference server 9.0's engine (a promise job, a
+/// `FinalizationRegistry`), measured on the reference router 9.0.4 on 02-11.
 const WASM_TRAP: ErrorCode = ErrorCode { code: 11_542_340, name: "Location11542340" };
 const MAX_TIME_MS_EXPIRED: ErrorCode = ErrorCode { code: 50, name: "MaxTimeMSExpired" };
 const INTERRUPTED: ErrorCode = ErrorCode { code: 11_601, name: "Interrupted" };
@@ -83,8 +83,8 @@ fn uses_js(d: &Document) -> bool {
 }
 
 /// Reads the functions and values `system.js` of the command's database stores, which are
-/// globals of its JavaScript (measured on a `refrouter` 9.0.4 on 02-11), when the command may run
-/// JavaScript.
+/// globals of its JavaScript (measured on the reference router 9.0.4 on 02-11), when the command
+/// may run JavaScript.
 pub(crate) fn load_stored<B: super::Backend + ?Sized>(
     backend: &mut B,
     db: &str,
@@ -158,8 +158,9 @@ pub fn set_sleeper(sleeper: fn(u64)) {
     let _ = SLEEPER.set(sleeper);
 }
 
-/// The native stack of a thread that runs commands: room for the 51 000 nested calls of a
-/// `refrouter` 9.0.4 (016 A016-3-18). The system reserves it and only commits what a call uses.
+/// The native stack of a thread that runs commands: room for the 51 000 nested calls of
+/// the reference router 9.0.4 (016 A016-3-18). The system reserves it and only commits what a call
+/// uses.
 pub const COMMAND_STACK: usize = 256 << 20;
 /// What a thread that runs commands keeps of its stack for the frames below the calls.
 const STACK_SPARE: usize = 8 << 20;
@@ -271,8 +272,8 @@ fn run_full(
     p.call(this, args, &mut ctx)
 }
 
-/// The error of a call that failed, as RefDb words it after `what` (`Failed to invoke JS
-/// predicate`, `Failed to invoke JS function`).
+/// The error of a call that failed, as the reference server words it after `what` (`Failed to
+/// invoke JS predicate`, `Failed to invoke JS function`).
 fn runtime_error(what: &str, e: &JsError) -> MqlError {
     match e {
         JsError::Deadline if interrupted() => {
@@ -342,8 +343,9 @@ pub(crate) fn where_js(code: RawValue<'_>, doc: RawDoc<'_>) -> Result<bool, MqlE
     }
 }
 
-/// Parses the `$where`s of `filter` as RefDb does with the query, before any document is read:
-/// a code that does not parse is 6108306, and without JavaScript 6108304 (measured).
+/// Parses the `$where`s of `filter` as the reference server does with the query, before any
+/// document is read: a code that does not parse is 6108306, and without JavaScript 6108304
+/// (measured).
 pub(crate) fn check_where(filter: &teseladb_mql::Filter) -> Result<(), MqlError> {
     use teseladb_mql::Expr as F;
     fn walk(e: &F) -> Result<(), MqlError> {
@@ -487,9 +489,9 @@ mod tests {
     }
 
     /// A function nested deeper than the engine parses fails with no place, and one whose arrow
-    /// functions exhaust its stack with its trap (measured on a `refrouter` 9.0.4 on 02-11).
+    /// functions exhaust its stack with its trap (measured on the reference router 9.0.4 on 02-11).
     #[test]
-    fn a_function_nested_too_deep_fails_as_on_a_refrouter() {
+    fn a_function_nested_too_deep_fails_as_on_the_reference_router() {
         let deep = format!("function(){{ return {}1{} }}", "(".repeat(67), ")".repeat(67));
         let e = compile_error(&deep, &program(&deep).unwrap_err());
         assert_eq!(e.code.code, 139);

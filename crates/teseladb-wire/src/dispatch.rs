@@ -1,6 +1,6 @@
 //! Routing of a request to its command (FR-003, FR-021): the checks every `OP_MSG` command
 //! passes (`$db`, a known name), the `OP_QUERY` handshake, and the commands a node answers by
-//! itself. Every reply carries `$clusterTime` and `operationTime`, as a `refrouter`'s does.
+//! itself. Every reply carries `$clusterTime` and `operationTime`, as the reference router's does.
 
 use teseladb_bson::{Document, Value};
 
@@ -35,7 +35,7 @@ use teseladb_auth::privileges::Privilege;
 
 /// `ping`.
 pub const PING: &str = "ping";
-/// Link RefDb's messages about the removed opcodes give.
+/// Link the reference server's messages about the removed opcodes give.
 const LEGACY_OPCODE_DOC: &str = teseladb_names::DOC_LEGACY_OPCODES;
 
 /// What the server does with a request.
@@ -93,7 +93,7 @@ pub fn dispatch_with<B: Backend + ?Sized>(
                 .with("ok", 0.0);
             Action::Reply(d)
         }
-        // Besides the handshake, a `refrouter` 9.0.4 runs `buildInfo` and the authentication
+        // Besides the handshake, the reference router 9.0.4 runs `buildInfo` and the authentication
         // commands from an OP_QUERY (measured on 05-11-2026): the .NET driver logs in through
         // OP_QUERY, as its connection has no description until then.
         // Its database comes from the namespace, where an OP_MSG names it in `$db`.
@@ -121,7 +121,8 @@ pub fn dispatch_with<B: Backend + ?Sized>(
     }
 }
 
-/// The commands besides the handshake's that run from an OP_QUERY, as on a `refrouter` 9.0.4.
+/// The commands besides the handshake's that run from an OP_QUERY, as on the reference router
+/// 9.0.4.
 const OP_QUERY_COMMANDS: [&str; 5] =
     ["buildInfo", "buildinfo", "saslStart", "saslContinue", "authenticate"];
 
@@ -162,7 +163,7 @@ fn run_message<B: Backend + ?Sized>(
         (Action::Reply(d), Some((b, _))) => {
             let d = restamp(d, node, b.cluster_mark());
             // A command that committed writes answers the last one's mark as its
-            // `operationTime`, the optime of a write (measured on a `refrouter` 9.0.4: a
+            // `operationTime`, the optime of a write (measured on the reference router 9.0.4: a
             // change stream that starts at it includes the write).
             let wrote = b.last_commit().filter(|c| Some(*c) > committed_before);
             Action::Reply(match wrote {
@@ -387,7 +388,8 @@ fn command<B: Backend + ?Sized>(
     }
     let generic = crate::generic::parse(&req.command, name)?;
     crate::internal_fields::check(req, canonical(name))?;
-    // The API parameters after the generic arguments (006 FR-035, measured on a `refrouter` 9.0.4).
+    // The API parameters after the generic arguments (006 FR-035, measured on the reference router
+    // 9.0.4).
     let api = api_version::parse(&req.command, name)?;
     api_version::check_command(name, &api)?;
     api_version::check_strict(&req.command, name, &api)?;
@@ -396,8 +398,8 @@ fn command<B: Backend + ?Sized>(
     if let Some((backend, _)) = cmds.as_mut() {
         backend.set_read_preference(generic.read_pref);
     }
-    // A `refrouter` reads and checks `$clusterTime` after the command's arguments and before it
-    // authorizes (measured).
+    // The reference router reads and checks `$clusterTime` after the command's arguments and before
+    // it authorizes (measured).
     cluster_time::check(&req.command, name, node)?;
     if let Some((backend, _)) = cmds.as_mut() {
         cluster_time::take(&req.command, name, &mut **backend)?;
@@ -422,7 +424,7 @@ fn command<B: Backend + ?Sized>(
         _ => None,
     };
     // A command a transaction cannot run, after its arguments and its authorization (008 T019,
-    // measured on a `refrouter` 9.0.4).
+    // measured on the reference router 9.0.4).
     if let (Some(_), Some(e)) = (cmds.as_ref(), txn::refused(name, &req.command)) {
         let as_op = !(is_hello(name)
             || name == PING
@@ -597,8 +599,8 @@ fn tenant_grows(name: &str, cmd: &Document) -> bool {
     }
 }
 
-/// Reply `d` with a failpoint's `writeConcernError` and its labels before `ok`, as a `refrouter`
-/// 9.0.4 answers it (measured on 05-11-2026: `n`, `writeConcernError`, `errorLabels`, `ok`).
+/// Reply `d` with a failpoint's `writeConcernError` and its labels before `ok`, as the reference
+/// router 9.0.4 answers it (measured on 05-11-2026: `n`, `writeConcernError`, `errorLabels`, `ok`).
 fn with_write_concern_error(d: Document, (wce, labels): (Document, Option<Value>)) -> Document {
     let mut out = Document::new();
     for (k, v) in d.iter() {
@@ -684,8 +686,8 @@ fn run_command<B: Backend + ?Sized>(
         return Ok(Action::Reply(with_cluster_time(r?, node)));
     }
     if let (Some((backend, shared)), false) = (cmds, name == PING || name == WHATS_MY_URI) {
-        // A test command of the API answers the API parameters it was given (measured on a
-        // `refnode` 9.0.4 with `enableTestCommands`).
+        // A test command of the API answers the API parameters it was given (measured on
+        // a reference replica set member 9.0.4 with `enableTestCommands`).
         if api_version::is_test_command(name) {
             let api = api_version::parse(&req.command, name)?;
             return Ok(Action::Reply(with_cluster_time(api.echoed().with("ok", 1.0), node)));
@@ -857,7 +859,7 @@ fn run_op<B: Backend + ?Sized>(
     result.map(|r| r.map_err(|e| interrupted_find(e, name, &req.db, &req.command)))
 }
 
-/// A `find` that `killOp` interrupted says so as RefDb's executor does.
+/// A `find` that `killOp` interrupted says so as the reference server's executor does.
 fn interrupted_find(e: CommandError, name: &str, db: &str, cmd: &Document) -> CommandError {
     if name != FIND || e.code != INTERRUPTED {
         return e;
@@ -912,7 +914,7 @@ fn hello<B: Backend + ?Sized>(
         Next::Now => {
             let mut d = h.response(&conn.hello, conn.id(), node);
             if let Some(spec) = speculative {
-                // Before `ok`, as RefDb places it.
+                // Before `ok`, as the reference server places it.
                 d.remove("ok");
                 d.push(auth::SPECULATIVE_AUTHENTICATE, spec);
                 d.push("ok", 1.0);
@@ -922,8 +924,8 @@ fn hello<B: Backend + ?Sized>(
     }
 }
 
-/// `CommandNotFound` of `name`: as a `refrouter` names it, or as a `refnode` in the replica set
-/// presentation (measured on 9.0.4).
+/// `CommandNotFound` of `name`: as the reference router names it, or as a reference replica set
+/// member in the replica set presentation (measured on 9.0.4).
 fn not_found_in(node: &NodeInfo, name: &str) -> CommandError {
     match &node.replica_set {
         Some(view) if name.starts_with(crate::commands::replset::CONFIG_SERVER_PREFIX) => {

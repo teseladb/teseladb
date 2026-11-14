@@ -1,8 +1,8 @@
 //! Writes on a collection with encrypted fields (017 FR-003, FR-006): insert payloads become
 //! indexed values with their ESC positions, ECOC entries and `__safeContent__` tags; updates keep
 //! `__safeContent__` to the tags of the indexed values the document still has. Behaviour and
-//! messages measured on a `refnode` 9.0.4. The caller runs the command inside a transaction: the
-//! client's, or one of the node's (`dispatch`).
+//! messages measured on a reference replica set member 9.0.4. The caller runs the command inside a
+//! transaction: the client's, or one of the node's (`dispatch`).
 
 use teseladb_bson::{Document, Value};
 use teseladb_fle::esc::Overlay;
@@ -26,7 +26,8 @@ const PIPELINE_UPDATE: Code = Code { code: 6_371_517, name: "Location6371517" };
 const SAFE_CONTENT_UPDATE: Code = Code { code: 6_666_200, name: "Location6666200" };
 const FAM_NEW: Code = Code { code: 6_371_402, name: "Location6371402" };
 
-/// The words a `refnode` 9.0.4 puts before an error of the write it commits in its own transaction.
+/// The words a reference replica set member 9.0.4 puts before an error of the write it commits in
+/// its own transaction.
 pub const COMMITTING: &str = "Command error committing internal transaction :: caused by :: ";
 
 /// Runs write command `ctx`, which carries `encryptionInformation`, on `ns`. A write without it
@@ -261,7 +262,7 @@ fn committing(mut e: CommandError) -> CommandError {
 }
 
 /// The implicit schema of the encrypted fields: each one present holds a stored value of its
-/// kind and type (FR-006, measured on a `refnode` 9.0.4).
+/// kind and type (FR-006, measured on a reference replica set member 9.0.4).
 pub fn validate(config: &EncryptedFieldConfig, doc: &Document) -> Result<(), CommandError> {
     match teseladb_fle::schema::implicit_failure(config, doc) {
         None => Ok(()),

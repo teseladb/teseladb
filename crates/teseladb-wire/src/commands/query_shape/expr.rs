@@ -1,10 +1,11 @@
-//! Aggregation expressions in a query shape (010 FR-023, measured on a `refrouter` 9.0.4,
+//! Aggregation expressions in a query shape (010 FR-023, measured on the reference router 9.0.4,
 //! 01-11-2026). An expression keeps its operators and field paths; a constant becomes its
 //! literal, wrapped in `{$const: …}` in the representative shape except as an operand of an
 //! operator that takes a list (`{$add: [1, "$n"]}`), where it stays bare. The operators that
 //! take a list write a single operand as a one-element list; those that take any number of
 //! operands show a list of constants as one literal in the debug shape (`{$add: "?array<>"}`).
-//! Named arguments follow each operator's own order, with the defaults RefDb fills in.
+//! Named arguments follow each operator's own order, with the defaults the reference server fills
+//! in.
 
 use teseladb_bson::{Document, Value};
 
@@ -163,7 +164,7 @@ const CONVERSIONS: &[(&str, &str, bool)] = &[
     ("$toArray", "array", false),
     ("$toObject", "object", false),
 ];
-/// The format RefDb gives the conversions that take one.
+/// The format the reference server gives the conversions that take one.
 const AUTO_FORMAT: &str = "auto";
 /// The variable that removes a field.
 const REMOVE: &str = "$$REMOVE";
@@ -178,7 +179,7 @@ fn sole(arg: &Value) -> &Value {
     }
 }
 
-/// The expression RefDb parses operator `op` into, when it is another in disguise.
+/// The expression the reference server parses operator `op` into, when it is another in disguise.
 fn desugared(op: &str, arg: &Value) -> Option<Value> {
     let doc = |pairs: Vec<(&str, Value)>| {
         let mut d = Document::new();
@@ -382,7 +383,7 @@ fn named_arguments(op: &str, named: &Document, p: Policy) -> Document {
     out
 }
 
-/// The value RefDb gives a named argument left out.
+/// The value the reference server gives a named argument left out.
 fn default_argument(op: &str, name: &str) -> Option<Value> {
     match (op, name) {
         ("$map" | "$filter", "as") => Some(Value::String("this".to_owned())),

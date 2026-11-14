@@ -1,8 +1,8 @@
-//! A query filter in a query shape (010 FR-023, measured on a `refrouter` 9.0.4, 01-11-2026): the
-//! filter as RefDb writes it back after parsing it (`{a: 1}` is `{a: {$eq: 1}}`), with each
-//! compared value replaced by its literal and each `$expr` as an expression shape. `$type` keeps
-//! its types; a regular expression of `$regex` is `\?` with option `i` in the representative
-//! shape.
+//! A query filter in a query shape (010 FR-023, measured on the reference router 9.0.4,
+//! 01-11-2026): the filter as the reference server writes it back after parsing it (`{a: 1}` is
+//! `{a: {$eq: 1}}`), with each compared value replaced by its literal and each `$expr` as an
+//! expression shape. `$type` keeps its types; a regular expression of `$regex` is `\?` with option
+//! `i` in the representative shape.
 
 use std::collections::VecDeque;
 

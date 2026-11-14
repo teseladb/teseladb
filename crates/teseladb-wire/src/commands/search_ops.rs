@@ -6,11 +6,12 @@
 //! before it, and then runs over them with the statistics of the whole index
 //! ([`teseladb_search::indexer`]).
 //!
-//! Measured on a 9.0.4 replica set with `refsearch` 1.70.6 (01-11-2026): an index not yet built is
-//! `PENDING` with no `statusDetail`; a built one is `READY`, with one `statusDetail` per host
-//! whose `mainIndex` carries the definition version it serves and that definition completed with
-//! its defaults; a query on an index or a collection that does not exist finds nothing, and
-//! `$searchMeta` then counts `{total: 0}`; a query error is `refsearch`'s message with code 8.
+//! Measured on a 9.0.4 replica set with the reference search server 1.70.6 (01-11-2026): an index
+//! not yet built is `PENDING` with no `statusDetail`; a built one is `READY`, with one
+//! `statusDetail` per host whose `mainIndex` carries the definition version it serves and that
+//! definition completed with its defaults; a query on an index or a collection that does not exist
+//! finds nothing, and `$searchMeta` then counts `{total: 0}`; a query error is the reference search
+//! server's message with code 8.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -448,7 +449,7 @@ fn from_received(shipped: Shipped, entry: &SearchIndexEntry) -> Option<(Segments
     Some((Segments::Search(Box::new(ix)), applied))
 }
 
-/// A query error of `refsearch`: its message with code 8.
+/// A query error of the reference search server: its message with code 8.
 fn query_error(msg: String) -> CommandError {
     CommandError::new(UNKNOWN_ERROR, msg)
 }
@@ -477,8 +478,8 @@ fn definition_of(
 /// Brings the segments of `entry` on `coll` (of namespace `ns`) up to the read's mark and runs
 /// `f` over them. Without a builder (FR-014), it first builds them when this node
 /// has none for the definition version; with one, it serves what the builder built, an older
-/// definition while a new one is built, and refuses an index not built yet as `refsearch` does
-/// while in `INITIAL_SYNC` (measured 02-11-2026, `scratchpad/lane3m/m32.js`).
+/// definition while a new one is built, and refuses an index not built yet as the reference search
+/// server does while in `INITIAL_SYNC` (measured 02-11-2026, `scratchpad/lane3m/m32.js`).
 pub fn with_index<B: Backend + ?Sized, R>(
     backend: &mut B,
     shared: &Shared,
@@ -861,7 +862,8 @@ fn answer<B: Backend + ?Sized>(
     let entry = backend.search_indexes(coll.id)?.into_iter().find(|e| e.name == name);
     let entry = match entry {
         None => return Ok(missing(meta_only)),
-        // `refsearch` reads the query before it finds the index is of the other type.
+        // The reference search server reads the query before it finds the index is of the other
+        // type.
         Some(e) if e.kind == SearchIndexKind::VectorSearch => {
             let empty = MemIndex::new(dynamic_definition()?);
             teseladb_search::query::search::run(&empty, spec).map_err(|e| query_error(e.0))?;
@@ -1004,8 +1006,9 @@ fn search_definition(raw: &Document) -> Result<Definition, CommandError> {
     Definition::parse(raw).map_err(|e| query_error(e.message("")))
 }
 
-/// The documents of `$vectorSearch` on `ns` with `spec`: `refsearch` reads the query first, then
-/// a missing index or collection finds nothing and an index of type `search` refuses it.
+/// The documents of `$vectorSearch` on `ns` with `spec`: the reference search server reads the
+/// query first, then a missing index or collection finds nothing and an index of type `search`
+/// refuses it.
 fn vector_source<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
@@ -1099,8 +1102,8 @@ mod tests {
     use super::*;
     use teseladb_meta::indexes::SearchIndexStatus;
 
-    /// A definition of the catalog that no longer parses is `refsearch`'s error (code 8), for both
-    /// kinds of index.
+    /// A definition of the catalog that no longer parses is the reference search server's error
+    /// (code 8), for both kinds of index.
     #[test]
     fn a_stored_definition_that_does_not_parse_is_a_query_error() {
         for kind in [SearchIndexKind::Search, SearchIndexKind::VectorSearch] {

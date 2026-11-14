@@ -1,14 +1,14 @@
 //! `OP_QUERY` and `OP_REPLY`: only the handshake of drivers that do not know the server yet
 //! (`hello` and `isMaster` on `<db>.$cmd`, FR-001). Any other command answers
 //! `UnsupportedOpQueryCommand` and a query on a collection answers the legacy failure reply, as
-//! in RefDb 6.0 and later.
+//! in the reference server 6.0 and later.
 
 use crate::WireError;
 use crate::msg::{HEADER_LEN, Header, document, opcode};
 
 /// `OP_REPLY` flag of a failed query.
 pub const QUERY_FAILURE: i32 = 1 << 1;
-/// `OP_REPLY` flag RefDb always sets.
+/// `OP_REPLY` flag the reference server always sets.
 pub const AWAIT_CAPABLE: i32 = 1 << 3;
 
 /// Suffix of a command namespace.

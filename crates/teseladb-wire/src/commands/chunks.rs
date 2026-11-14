@@ -7,8 +7,8 @@
 //! range's leadership to the node, adding a replica there first if it has none, and a merge joins
 //! neighbouring ranges, as Group 0 orders.
 //!
-//! The replies, messages and codes are those of a `refrouter` 9.0.4 of two shards (measured on
-//! 02-11-2026, `k1.js` and `k2.js` in the lane's notes); several of `split`'s errors carry no
+//! The replies, messages and codes are those of the reference router 9.0.4 of two shards (measured
+//! on 02-11-2026, `k1.js` and `k2.js` in the lane's notes); several of `split`'s errors carry no
 //! code ([`UNCODED`]). `split` with `find` or `bounds` cuts at the shard key of the chunk's middle
 //! document (its documents in key order, the one at half their number), as the shard does.
 
@@ -227,8 +227,8 @@ fn is_key_value(key: &ShardKey, d: &Document) -> bool {
 }
 
 /// The key where a split at shard key value `value` cuts: before every document with it. A bound
-/// names its fields whole (`{"a.b": 1}`) and a hashed field by its hash, as a `refrouter` takes them.
-/// `MinKey` everywhere is where the collection's first chunk starts.
+/// names its fields whole (`{"a.b": 1}`) and a hashed field by its hash, as the reference router
+/// takes them. `MinKey` everywhere is where the collection's first chunk starts.
 fn cut_at(s: &Sharded, value: &Document) -> Result<Vec<u8>, CommandError> {
     if value.iter().all(|(_, v)| *v == Value::MinKey) {
         return Ok(documents_area(s.coll.tenant, s.coll.id).0);
@@ -284,7 +284,7 @@ fn two_bounds(name: &str, v: &Value) -> Result<(Document, Document), CommandErro
     }
 }
 
-/// The two bounds of `split`, checked as a `refrouter` 9.0.4 checks them.
+/// The two bounds of `split`, checked as the reference router 9.0.4 checks them.
 fn split_bounds(s: &Sharded, v: &Value) -> Result<(Document, Document), CommandError> {
     let Value::Array(a) = v else {
         let msg =
@@ -372,9 +372,9 @@ fn middle_cut<B: Backend + ?Sized>(
     document_key(&s.coll, &s.key.key, &at).map(Some)
 }
 
-/// Splits `chunk` at its middle document, as `split` with `find` or `bounds` does; a `refrouter`
-/// 9.0.4 refuses an empty collection, a chunk with no documents and one whose documents all have
-/// its start's shard key value.
+/// Splits `chunk` at its middle document, as `split` with `find` or `bounds` does; the reference
+/// router 9.0.4 refuses an empty collection, a chunk with no documents and one whose documents all
+/// have its start's shard key value.
 fn split_in_middle<B: Backend + ?Sized>(
     backend: &mut B,
     s: &Sharded,
@@ -465,7 +465,8 @@ pub fn split<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
     Ok(ok())
 }
 
-/// `splitVector`: a `refrouter` refuses it on `admin` and asks for a range owned by one shard.
+/// `splitVector`: the reference router refuses it on `admin` and asks for a range owned by one
+/// shard.
 pub fn split_vector<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     if ctx.db == admin::ADMIN_DB {
         let msg = teseladb_names::ERR_SPLIT_VECTOR_ACROSS_DBS;
@@ -620,7 +621,7 @@ pub fn move_range<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         let msg = format!("Could not find destination shard :: caused by :: Shard {to} not found");
         CommandError::new(SHARD_NOT_FOUND, msg)
     })?;
-    // A `refrouter` 9.0.4 names a database alone (`db` or `db.`) by the database.
+    // The reference router 9.0.4 names a database alone (`db` or `db.`) by the database.
     let not_found = |text: &str| {
         let shown = text.strip_suffix('.').unwrap_or(text);
         let msg = format!("Collection '{shown}' not found in cluster catalog");
@@ -706,14 +707,14 @@ fn merge_run<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// `minSnapshotHistoryWindowInSeconds` of the shards of a `refrouter` 9.0.4 by default (measured
-/// 03-11-2026; the `refrouter` itself has no such parameter), in milliseconds.
+/// `minSnapshotHistoryWindowInSeconds` of the shards of the reference router 9.0.4 by default
+/// (measured 03-11-2026; the reference router itself has no such parameter), in milliseconds.
 pub const MIN_SNAPSHOT_HISTORY_WINDOW_MS: u64 = 300_000;
 
 /// `mergeAllChunksOnShard`: every run of neighbouring chunks of the collection on the shard,
-/// of at most `maxNumberOfChunksToMerge` chunks, becomes one. As on a `refrouter` 9.0.4, a chunk
-/// split or moved within the last `minSnapshotHistoryWindowInSeconds` stays apart (018 FR-017):
-/// the range's mark in Group 0 ([`Chunk::moved_ms`]) is not that old yet.
+/// of at most `maxNumberOfChunksToMerge` chunks, becomes one. As on the reference router 9.0.4, a
+/// chunk split or moved within the last `minSnapshotHistoryWindowInSeconds` stays apart (018
+/// FR-017): the range's mark in Group 0 ([`Chunk::moved_ms`]) is not that old yet.
 pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,
 ) -> Result<Document, CommandError> {
@@ -729,7 +730,8 @@ pub fn merge_all_chunks_on_shard<B: Backend + ?Sized>(
         None => usize::MAX,
     };
     admin::admin_only(name, ctx.db)?;
-    // A `refrouter` 9.0.4 looks the shard up before it reads the name (measured on 03-11-2026).
+    // The reference router 9.0.4 looks the shard up before it reads the name (measured on
+    // 03-11-2026).
     let node = node_named(ctx.backend, &shard)?
         .ok_or_else(|| CommandError::new(SHARD_NOT_FOUND, format!("Shard {shard} not found")))?;
     let ns =
@@ -802,7 +804,7 @@ pub fn clear_jumbo_flag<B: Backend + ?Sized>(
 
 /// The documents of `config.chunks` of every collection with a shard key in `collections`, from
 /// the ranges of `entries` (018 FR-006): `_id`, `uuid`, `min`, `max`, `shard`, `lastmod`,
-/// `onCurrentShardSince`, `history` and `jumbo`, as a `refrouter` 9.0.4 lists them.
+/// `onCurrentShardSince`, `history` and `jumbo`, as the reference router 9.0.4 lists them.
 pub fn config_chunks<'a>(
     entries: &[RouteEntry],
     collections: impl Iterator<Item = (&'a Namespace, &'a CollectionEntry)>,

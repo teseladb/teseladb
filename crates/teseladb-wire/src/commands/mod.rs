@@ -751,8 +751,8 @@ pub trait Backend {
         Ok(None)
     }
     /// Whether every other live node of the cluster already applies write gates `want` (007
-    /// FR-029: `fsync` and `setUserWriteBlockMode` answer once every node has them, as a `refrouter`
-    /// answers once every shard did); a node alone has no other.
+    /// FR-029: `fsync` and `setUserWriteBlockMode` answer once every node has them, as the
+    /// reference router answers once every shard did); a node alone has no other.
     fn gate_everywhere(&mut self, _want: write_block::WriteGate) -> Result<bool, CommandError> {
         Ok(true)
     }
@@ -820,7 +820,7 @@ pub trait Backend {
     /// node's next mark is above it. Without a clock of its own, nothing.
     fn observe_mark(&mut self, _mark: teseladb_hlc::Hlc) {}
     /// The mark of the last write this backend committed, if any: a command that commits writes
-    /// answers it as its `operationTime`, the optime of a write in RefDb.
+    /// answers it as its `operationTime`, the optime of a write in the reference server.
     fn last_commit(&self) -> Option<teseladb_hlc::Hlc> {
         None
     }
@@ -886,7 +886,7 @@ pub trait Backend {
     fn ldap_login(&mut self, _user: &str, _password: &[u8]) -> Result<LdapLogin, CommandError> {
         Ok(LdapLogin::Refused)
     }
-    /// The LDAP groups of `user`, who logged in another way (REFDB-X509), as roles of `admin`,
+    /// The LDAP groups of `user`, who logged in another way (X.509), as roles of `admin`,
     /// when the node authorizes by LDAP groups (013 FR-026, FR-033); `None` when it does not.
     fn ldap_groups(&mut self, _user: &str) -> Result<Option<Vec<RoleName>>, CommandError> {
         Ok(None)
@@ -901,7 +901,7 @@ pub trait Backend {
     fn kerberos_keys(&self) -> Vec<teseladb_auth::kerberos::ServiceKey> {
         Vec::new()
     }
-    /// `oidcIdentityProviders` (REFDB-OIDC, 013 FR-025); none by default.
+    /// `oidcIdentityProviders` (OIDC, 013 FR-025); none by default.
     fn oidc_providers(&self) -> teseladb_auth::oidc::Providers {
         teseladb_auth::oidc::Providers::default()
     }
@@ -913,7 +913,7 @@ pub trait Backend {
     ) -> Result<teseladb_auth::oidc::KeySet, CommandError> {
         Err(CommandError::new(crate::error::OPERATION_FAILED, "no JWKS"))
     }
-    /// `awsSTSUrl`, where REFDB-AWS sends the client's request (013 FR-025).
+    /// `awsSTSUrl`, where AWS IAM sends the client's request (013 FR-025).
     fn aws_sts_url(&self) -> String {
         teseladb_auth::aws::DEFAULT_STS_URL.to_owned()
     }
@@ -937,11 +937,11 @@ pub trait Backend {
     fn privileges(&self) -> Option<Vec<Privilege>> {
         None
     }
-    /// Writes a warning line of the node's log, with RefDb's identifier `id`, its message and
-    /// its attributes (the validation lines of `warn` and `errorAndLog`).
+    /// Writes a warning line of the node's log, with the reference server's identifier `id`, its
+    /// message and its attributes (the validation lines of `warn` and `errorAndLog`).
     fn log_warning(&mut self, id: i32, msg: &str, attr: &Document);
-    /// Writes a «Slow query» line of the node's log (RefDb's identifier 51803, severity I) with
-    /// attributes `attr` (010 FR-015).
+    /// Writes a «Slow query» line of the node's log (the reference server's identifier 51803,
+    /// severity I) with attributes `attr` (010 FR-015).
     fn log_slow_query(&mut self, attr: &Document);
     /// Loads the node's certificates again (`rotateCertificates`, 013 FR-006): the new TLS
     /// settings serve the connections that come after, and on failure the old ones stay. A node
@@ -949,8 +949,9 @@ pub trait Backend {
     /// drop the call.
     fn rotate_certificates(&mut self, message: Option<&str>) -> Result<(), CommandError>;
     /// The node's `host:port`, as the replies and the errors name it. It is read on every write,
-    /// so a node keeps it from its start, as RefDb caches its host name; it has no default, so
-    /// that a wrapper cannot answer it with [`Backend::process`], which reads everything again.
+    /// so a node keeps it from its start, as the reference server caches its host name; it has no
+    /// default, so that a wrapper cannot answer it with [`Backend::process`], which reads
+    /// everything again.
     fn host_port(&mut self) -> String;
     /// What the diagnostic commands report of the process and its host; nothing by default (a
     /// node in tests).
@@ -983,8 +984,8 @@ impl Default for Timeouts {
 /// (`clientCursorMonitorFrequencySecs`, 4 on 9.0.4).
 pub const REAP_INTERVAL_MS: u64 = 4_000;
 
-/// The `uid` of a session without authentication, as RefDb writes it in messages: the
-/// base64 of the SHA-256 of the empty user name.
+/// The `uid` of a session without authentication, as the reference server writes it in messages:
+/// the base64 of the SHA-256 of the empty user name.
 pub const ANONYMOUS_UID: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
 
 /// What a node's name in `config.shards` starts with, before its number.
@@ -999,26 +1000,26 @@ pub fn point_end(key: &[u8]) -> Vec<u8> {
 }
 
 /// The name of node `node` as `config.shards` lists it (`_id`, 007 `config-db.md`): the shard a
-/// client sees in a transaction's `recoveryToken` and in the errors a write gets as through a
-/// `refrouter` (008).
+/// client sees in a transaction's `recoveryToken` and in the errors a write gets as through
+/// the reference router (008).
 pub fn shard_name(node: u64) -> String {
     format!("{SHARD_PREFIX}{node}")
 }
 
-/// The name a `refrouter` gives a shard's part of a reply (`raw`), here the node's:
+/// The name the reference router gives a shard's part of a reply (`raw`), here the node's:
 /// `node<N>/host:port` (D-102).
 pub fn raw_name<B: Backend + ?Sized>(backend: &mut B) -> String {
     format!("{}/{}", shard_name(backend.node()), backend.host_port())
 }
 
-/// The host and port of the node, as a `refrouter` names the shard whose writes it could not
+/// The host and port of the node, as the reference router names the shard whose writes it could not
 /// relay.
 pub fn host_port<B: Backend + ?Sized>(backend: &mut B) -> String {
     backend.host_port()
 }
 
-/// Error `e` of node `node` as a `refrouter` relays a shard's: «failed on: node<N> :: caused by ::»
-/// before its message (D-102).
+/// Error `e` of node `node` as the reference router relays a shard's: «failed on: node<N> :: caused
+/// by ::» before its message (D-102).
 pub fn failed_on(node: u64, mut e: crate::error::CommandError) -> crate::error::CommandError {
     e.errmsg = format!("failed on: {} :: caused by :: {}", shard_name(node), e.errmsg);
     e
@@ -1179,7 +1180,7 @@ pub struct Spill {
     /// The store, over the node's files.
     pub store: Option<std::sync::Arc<dyn teseladb_exec::pipeline::spill::SpillStore + Send + Sync>>,
     /// The memory of a stage when the node's part for aggregations (D-105) is less than
-    /// RefDb's 100 MiB.
+    /// the reference server's 100 MiB.
     pub stage_bytes: Option<usize>,
     /// The bytes the open cursors' computed results may hold in memory: the node's part for
     /// cursors (012 FR-013, D-105); `None`: no limit.
@@ -1467,8 +1468,8 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
     };
     let cmd = limited.as_ref().unwrap_or(ctx.cmd);
     let start = query_stats_start(ctx.backend);
-    // The shape's index hints limit the indexes of its collection in the run too (measured on a
-    // `refnode` 9.0.4 on 02-11-2026 with `$indexStats`).
+    // The shape's index hints limit the indexes of its collection in the run too (measured on
+    // a reference replica set member 9.0.4 on 02-11-2026 with `$indexStats`).
     let reply = with_settings_indexes(
         &mut Ctx { backend: &mut *ctx.backend, shared: ctx.shared, db: ctx.db, cmd },
         cmd,
@@ -1502,8 +1503,8 @@ fn shaped<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
 }
 
 /// Whether command `cmd`, whose read noted `plan`, sorts in memory or on disk (`hasSortStage`
-/// of `$queryStats`, measured on a `refrouter` 9.0.4): a `find` whose sort its index does not
-/// give, an `aggregate` with a `$sort`, `$sortByCount` or a window that sorts, unless its only
+/// of `$queryStats`, measured on the reference router 9.0.4): a `find` whose sort its index does
+/// not give, an `aggregate` with a `$sort`, `$sortByCount` or a window that sorts, unless its only
 /// sort leads the pipeline (after `$match`) and its index gives it.
 fn sorts_in_memory(cmd: &Document, plan: Option<&Document>) -> bool {
     let served = plan.is_some_and(|p| p.get(plan_exec::SORT_SERVED) == Some(&Value::Boolean(true)));
@@ -1813,7 +1814,7 @@ fn not_found_error(name: &str) -> CommandError {
     CommandError::new(crate::error::COMMAND_NOT_FOUND, format!("no such cmd: {name}"))
 }
 
-/// A value as RefDb writes it in messages (`1`, `"a"`, `ObjectId('…')`).
+/// A value as the reference server writes it in messages (`1`, `"a"`, `ObjectId('…')`).
 pub fn display(v: &Value) -> String {
     let d = Document::new().with("v", v.clone());
     match d.to_bytes() {
@@ -1831,7 +1832,7 @@ pub fn uuid_text(u: &[u8; 16]) -> String {
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
-/// A session as RefDb names it in messages: its id and its user's `uid`.
+/// A session as the reference server names it in messages: its id and its user's `uid`.
 pub fn session_text(lsid: u128) -> String {
     format!("{} - {ANONYMOUS_UID} -  - ", uuid_text(&lsid.to_be_bytes()))
 }

@@ -1,11 +1,11 @@
-//! Names RefDb gives BSON types in its messages (`$type` aliases), and the typed reading of a
-//! command's fields with RefDb's errors.
+//! Names the reference server gives BSON types in its messages (`$type` aliases), and the typed
+//! reading of a command's fields with the reference server's errors.
 
 use teseladb_bson::{Value, types};
 
 use crate::error::{CommandError, TYPE_MISMATCH};
 
-/// RefDb's alias of a value's type (`int`, `long`, `objectId`, …).
+/// The reference server's alias of a value's type (`int`, `long`, `objectId`, …).
 pub fn type_name(v: &Value) -> &'static str {
     match v.element_type() {
         types::DOUBLE => "double",
@@ -41,8 +41,8 @@ pub fn wrong_type(path: &str, v: &Value, expected: &str) -> CommandError {
     CommandError::new(TYPE_MISMATCH, msg).parsed()
 }
 
-/// `TypeMismatch` for field `path` holding `v` where one of `expected` was wanted, as a
-/// `refrouter` 9.0 writes it (measured).
+/// `TypeMismatch` for field `path` holding `v` where one of `expected` was wanted, as
+/// the reference router 9.0 writes it (measured).
 pub fn wrong_types(path: &str, v: &Value, expected: &[&str]) -> CommandError {
     let msg = format!(
         "BSON field '{path}' is the wrong type '{}', expected types '[{}]'",
@@ -52,7 +52,7 @@ pub fn wrong_types(path: &str, v: &Value, expected: &[&str]) -> CommandError {
     CommandError::new(TYPE_MISMATCH, msg).parsed()
 }
 
-/// The numeric types a "safe" number field takes, in RefDb's order.
+/// The numeric types a "safe" number field takes, in the reference server's order.
 pub const NUMBER_TYPES: [&str; 4] = ["long", "decimal", "double", "int"];
 /// The types of the `safeBool` fields of the write commands (`bypassDocumentValidation`, `findAndModify`'s flags).
 pub const WRITE_SAFE_BOOL_TYPES: [&str; 5] = ["long", "decimal", "bool", "int", "double"];
@@ -60,14 +60,15 @@ pub const WRITE_SAFE_BOOL_TYPES: [&str; 5] = ["long", "decimal", "bool", "int", 
 pub const BULK_SAFE_BOOL_TYPES: [&str; 5] = ["long", "decimal", "int", "bool", "double"];
 /// The types of the `safeBool` fields of `listDatabases`.
 pub const LIST_DATABASES_SAFE_BOOL_TYPES: [&str; 5] = ["decimal", "long", "int", "bool", "double"];
-/// The numeric types of `count`'s fields, in the order a `refrouter` 9.0 lists them (measured).
+/// The numeric types of `count`'s fields, in the order the reference router 9.0 lists them
+/// (measured).
 pub const COUNT_NUMBER_TYPES: [&str; 4] = ["decimal", "long", "double", "int"];
-/// The numeric types of `hello.maxAwaitTimeMS`, in a `refrouter` 9.0's order (measured).
+/// The numeric types of `hello.maxAwaitTimeMS`, in the reference router 9.0's order (measured).
 pub const AWAIT_TYPES: [&str; 4] = ["long", "int", "double", "decimal"];
-/// The types of `hello.helloOk`, in a `refrouter` 9.0's order (measured).
+/// The types of `hello.helloOk`, in the reference router 9.0's order (measured).
 pub const HELLO_OK_TYPES: [&str; 5] = ["bool", "long", "double", "decimal", "int"];
 
-/// A number as `f64`, for the fields RefDb reads as any numeric type.
+/// A number as `f64`, for the fields the reference server reads as any numeric type.
 pub fn number(v: &Value) -> Option<f64> {
     match v {
         Value::Int32(n) => Some(f64::from(*n)),
@@ -78,8 +79,8 @@ pub fn number(v: &Value) -> Option<f64> {
     }
 }
 
-/// A value's truth as BSON reads it (RefDb's `trueValue`): `false`, `null`, `undefined` and
-/// numeric zero are false, anything else true.
+/// A value's truth as BSON reads it (the reference server's `trueValue`): `false`, `null`,
+/// `undefined` and numeric zero are false, anything else true.
 pub fn bson_true(v: &Value) -> bool {
     match v {
         Value::Boolean(b) => *b,

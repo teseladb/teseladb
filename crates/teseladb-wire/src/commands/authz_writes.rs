@@ -1,12 +1,12 @@
-//! Direct writes to `admin.system.users` and `admin.system.roles` (013 FR-030), as a `refrouter`
-//! 9.0.4 takes them (measured, 31-10-2026): `insert`, `update`, `delete` and `findAndModify` run
-//! the usual semantics on the documents of Group 0 in their insertion order, any document is
+//! Direct writes to `admin.system.users` and `admin.system.roles` (013 FR-030), as the reference
+//! router 9.0.4 takes them (measured, 31-10-2026): `insert`, `update`, `delete` and `findAndModify`
+//! run the usual semantics on the documents of Group 0 in their insertion order, any document is
 //! accepted, a document without `_id` gets an ObjectId, and the indexes `_id_` and
 //! `user_1_db_1` (or `role_1_db_1`) refuse duplicates with 11000. The whole command is worked
 //! out on a copy of the documents and goes to Group 0 as one batch that expects each touched
 //! document as it was read; another change in between makes it start again. Each command that
-//! changed something leaves one `directAuthMutation` event in the audit log, as RefDb
-//! Enterprise 9.0.4 writes it: the first document inserted or updated, or the last removed.
+//! changed something leaves one `directAuthMutation` event in the audit log, as the reference
+//! server Enterprise 9.0.4 writes it: the first document inserted or updated, or the last removed.
 
 use teseladb_auth::audit::AuditType;
 use teseladb_bson::{Document, RawDoc, Value};
@@ -55,7 +55,8 @@ pub(crate) struct Entry {
 pub(crate) trait Staged {
     /// The documents, in their order.
     fn entries(&mut self) -> &mut Vec<Entry>;
-    /// The error RefDb answers if `bytes` cannot join the documents other than `skip`.
+    /// The error the reference server answers if `bytes` cannot join the documents other than
+    /// `skip`.
     fn check(&self, bytes: &[u8], skip: Option<usize>) -> Result<(), CommandError>;
     /// A document inserted, updated or removed by `operation`.
     fn note(&mut self, operation: &'static str, doc: &Document);
@@ -102,7 +103,8 @@ impl Sim {
         }
     }
 
-    /// The 11000 or 171 RefDb answers if `bytes` cannot join the documents other than `skip`.
+    /// The 11000 or 171 the reference server answers if `bytes` cannot join the documents other
+    /// than `skip`.
     fn check(&self, bytes: &[u8], skip: Option<usize>) -> Result<(), CommandError> {
         let id = id_key(bytes).map_err(key_error)?;
         let mine = unique_keys(self.kind, bytes).map_err(|e| match e {
@@ -177,9 +179,9 @@ pub const USER_FIELDS: [&str; 4] =
 /// The fields `updateRole` and the privilege and role grants write in a role.
 pub const ROLE_FIELDS: [&str; 3] = ["privileges", "roles", "authenticationRestrictions"];
 
-/// The stored document `old` with the fields `owned` taken from `new`, as RefDb's `$set` and
-/// `$unset` change them: a field it had keeps its place, a new one goes at the end, one `new`
-/// does not have goes; `_id` and every other field stay as they were.
+/// The stored document `old` with the fields `owned` taken from `new`, as the reference server's
+/// `$set` and `$unset` change them: a field it had keeps its place, a new one goes at the end, one
+/// `new` does not have goes; `_id` and every other field stay as they were.
 pub fn merged(old: &[u8], new: &Document, owned: &[&str]) -> Result<Vec<u8>, CommandError> {
     let mut out = Document::new();
     for (k, v) in RawDoc::from_bytes(old)?.iter() {

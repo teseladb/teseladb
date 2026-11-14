@@ -1,6 +1,7 @@
 //! `redactClientLogData` (013 FR-027): the documents of the clients written to the log keep their
-//! field names and the length of their arrays, and every value becomes `"###"`, as RefDb
-//! Enterprise 9.0.4 writes them (measured 31-10-2026 on the validation lines 20294 and 7488700).
+//! field names and the length of their arrays, and every value becomes `"###"`, as the reference
+//! server Enterprise 9.0.4 writes them (measured 31-10-2026 on the validation lines 20294 and
+//! 7488700).
 
 use teseladb_bson::{Document, Value};
 

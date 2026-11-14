@@ -1,7 +1,8 @@
 //! `admin.system.users`, `admin.system.roles` and `admin.system.version` (013 FR-030): collections
 //! that only read, whose documents come from Group 0, and `_mergeAuthzCollections`, with which
-//! `refrestore --restoreDbUsersAndRoles` brings back the users and roles it copied to temporary
-//! collections; as RefDb 9.0.4 answers them (measured on a `refnode` and a `refrouter`, 31-10-2026).
+//! the reference restore tool with `--restoreDbUsersAndRoles` brings back the users and roles it
+//! copied to temporary collections; as the reference server 9.0.4 answers them (measured on a
+//! reference replica set member and the reference router, 31-10-2026).
 
 use teseladb_auth::actions::ActionType;
 use teseladb_auth::privileges::{Privilege, PrivilegeError};
@@ -51,7 +52,7 @@ pub enum Generated {
 }
 
 impl Generated {
-    /// In the order `listCollections` of a `refrouter` 9.0.4 lists them.
+    /// In the order `listCollections` of the reference router 9.0.4 lists them.
     pub const ALL: [Generated; 3] = [Generated::Users, Generated::Version, Generated::Roles];
 
     /// The generated collection `ns` is, if it is one.
@@ -331,8 +332,8 @@ pub(crate) fn no_collection() -> CommandError {
     CommandError::new(crate::error::INTERNAL_ERROR, "the API keys have no collection")
 }
 
-/// `NoSuchKey` or `TypeMismatch` unless field `f` of `d` is a string, as RefDb checks a stored
-/// user or role.
+/// `NoSuchKey` or `TypeMismatch` unless field `f` of `d` is a string, as the reference server
+/// checks a stored user or role.
 fn text_field(d: &Document, f: &str) -> Result<String, CommandError> {
     match d.get(f) {
         Some(Value::String(s)) => Ok(s.clone()),
@@ -344,12 +345,13 @@ fn text_field(d: &Document, f: &str) -> Result<String, CommandError> {
     }
 }
 
-/// `Location10065`: what RefDb answers for a field that is not the object or array it reads.
+/// `Location10065`: what the reference server answers for a field that is not the object or array
+/// it reads.
 fn expected_object(what: &str) -> CommandError {
     CommandError::new(EXPECTED_OBJECT, format!("invalid parameter: expected an object ({what})"))
 }
 
-/// The error RefDb answers for a stored user or role it would not use.
+/// The error the reference server answers for a stored user or role it would not use.
 pub fn stored_error(e: teseladb_auth::users::BadDocument) -> CommandError {
     let code = crate::error::code(e.code).unwrap_or(crate::error::INTERNAL_ERROR);
     CommandError::new(code, e.message)
@@ -388,8 +390,8 @@ fn user_entry(d: &Document) -> Result<Entry, CommandError> {
         None => return Err(expected_object("")),
     }
     check_roles(d)?;
-    // RefDb stores the document as it is in the temporary collection (measured: no `userId`
-    // added, roles as given).
+    // The reference server stores the document as it is in the temporary collection (measured: no
+    // `userId` added, roles as given).
     Ok(Entry { db, name, doc: d.to_bytes()? })
 }
 

@@ -1,5 +1,5 @@
-//! The literals of a query shape (010 FR-023, measured on a `refrouter` 9.0.4, 01-11-2026): the
-//! debug shape that `$queryStats` and `$querySettings` show names a literal's type
+//! The literals of a query shape (010 FR-023, measured on the reference router 9.0.4, 01-11-2026):
+//! the debug shape that `$queryStats` and `$querySettings` show names a literal's type
 //! (`"?number"`, `"?array<?string>"`, `"[]"` for an empty array), and the representative shape
 //! whose SHA-256 is the `queryShapeHash` puts one fixed value of that type in its place
 //! (`1` for any number, `"?"` for a string, `{"?": "?"}` for a document, `[]` or a one-element

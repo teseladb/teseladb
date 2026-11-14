@@ -1,6 +1,6 @@
-//! The stages after a query plan as `explain` lists them (measured on a `refrouter` 9.0.4,
-//! 01-11-2026): each in the form RefDb keeps after parsing it, its expressions optimised
-//! (constants as `{$const: v}`), the stages that are others in disguise as those others
+//! The stages after a query plan as `explain` lists them (measured on the reference router 9.0.4,
+//! 01-11-2026): each in the form the reference server keeps after parsing it, its expressions
+//! optimised (constants as `{$const: v}`), the stages that are others in disguise as those others
 //! (`$unset` as `$project`, `$replaceWith` as `$replaceRoot`, `$count` and `$sortByCount` as a
 //! `$group` and what follows it, `$bucket` as a `$group` by a `$switch`, `$fill` of values as
 //! `$addFields`), and the defaults they take written out.
@@ -11,7 +11,7 @@ use super::aggregate::int64;
 use super::parsed;
 use super::steps::{Accumulator, Bucket, Fill, FillWith, GroupEntry, Kind, Step, Window};
 
-/// Expression `v` as RefDb optimises and writes it.
+/// Expression `v` as the reference server optimises and writes it.
 pub(super) fn optimized(v: &Value) -> Value {
     let ctx = teseladb_exec::expr::Ctx::default();
     let scope = teseladb_exec::expr::Scope::default();
@@ -57,8 +57,8 @@ fn put(d: &mut Document, path: &str, value: Value) {
     }
 }
 
-/// A `$project` as RefDb keeps it: an inclusion with `_id` first, the kept fields, then the
-/// computed ones; an exclusion with the dropped fields, then `_id`; dotted paths nested.
+/// A `$project` as the reference server keeps it: an inclusion with `_id` first, the kept fields,
+/// then the computed ones; an exclusion with the dropped fields, then `_id`; dotted paths nested.
 pub(super) fn project(p: &Document) -> Document {
     let inclusion = p.iter().filter(|(k, _)| *k != "_id").any(|(_, v)| keeps(v));
     let id_off = p.get("_id").is_some_and(off);
@@ -148,8 +148,8 @@ fn accumulator(a: &Accumulator) -> Value {
     Value::Document(Document::new().with(a.op.as_str(), arg))
 }
 
-/// The named arguments of an accumulator or window function as RefDb writes them back
-/// (measured): `n` optimised, then `$shift`'s `by` before its `output`, and `output` before
+/// The named arguments of an accumulator or window function as the reference server writes them
+/// back (measured): `n` optimised, then `$shift`'s `by` before its `output`, and `output` before
 /// `sortBy`; any other in its place.
 fn named_arguments(named: &Document) -> Document {
     const ORDER: [&str; 5] = ["n", "by", "output", "sortBy", "default"];
@@ -166,7 +166,7 @@ fn named_arguments(named: &Document) -> Document {
     out
 }
 
-/// A `$group` with its key and accumulators as RefDb keeps them.
+/// A `$group` with its key and accumulators as the reference server keeps them.
 fn group(entries: &[GroupEntry]) -> Document {
     let mut out = Document::new();
     for e in entries {
@@ -212,7 +212,7 @@ fn bucket_key(b: &Bucket) -> Value {
     optimized(&Value::Document(Document::new().with("$switch", sw)))
 }
 
-/// The output of `$bucket` and `$bucketAuto`, a count by default, as RefDb keeps it.
+/// The output of `$bucket` and `$bucketAuto`, a count by default, as the reference server keeps it.
 fn bucket_output(output: Option<&Vec<(String, Accumulator)>>) -> Vec<(String, Value)> {
     let count = [("count".to_owned(), Accumulator { op: "$sum".to_owned(), arg: Value::Int32(1) })];
     output.map_or(&count[..], |o| &o[..]).iter().map(|(k, a)| (k.clone(), accumulator(a))).collect()
@@ -472,8 +472,8 @@ pub(super) fn forms_with(st: &Step, vars: Option<&Document>) -> Vec<Document> {
 /// The collection a `$lookup` without one names: its `$documents` (measured).
 const COLLECTIONLESS: &str = "$cmd.aggregate";
 
-/// The field RefDb computes a `$setWindowFields` partition into when it partitions by an
-/// expression.
+/// The field the reference server computes a `$setWindowFields` partition into when it partitions
+/// by an expression.
 const PARTITION_KEY: &str = "__internal_setWindowFields_partition_key";
 
 /// Whether an optimised expression is a constant.
@@ -500,9 +500,9 @@ pub(super) fn constant_partition(w: &Window) -> bool {
     }
 }
 
-/// A `$setWindowFields` by an expression as RefDb runs it (measured): the partition computed
-/// into a field, a sort on it and on the window's order, the window over that field, and the
-/// field dropped.
+/// A `$setWindowFields` by an expression as the reference server runs it (measured): the partition
+/// computed into a field, a sort on it and on the window's order, the window over that field, and
+/// the field dropped.
 fn keyed_window(w: &Window, e: Value) -> Vec<Document> {
     let mut sort_key = Document::new().with(PARTITION_KEY, 1);
     for (k, v) in w.sort_by.iter().flat_map(|s| s.iter()) {
@@ -526,7 +526,8 @@ fn keyed_window(w: &Window, e: Value) -> Vec<Document> {
     ]
 }
 
-/// A `$setWindowFields` as RefDb keeps it: `$count` as a sum of ones over the whole partition.
+/// A `$setWindowFields` as the reference server keeps it: `$count` as a sum of ones over the whole
+/// partition.
 fn window_fields(w: &Window) -> Document {
     let mut out = Document::new();
     for (k, v) in w.spec.iter() {
@@ -560,8 +561,8 @@ fn whole_partition() -> Document {
     Document::new().with("documents", Value::Array(vec!["unbounded".into(), "unbounded".into()]))
 }
 
-/// A window function as RefDb keeps it: its argument optimised (named arguments as given) and
-/// an accumulator over the whole partition unless it says its window (measured).
+/// A window function as the reference server keeps it: its argument optimised (named arguments as
+/// given) and an accumulator over the whole partition unless it says its window (measured).
 fn window_function(d: &Document) -> Document {
     let mut out = Document::new();
     let mut accumulator = false;

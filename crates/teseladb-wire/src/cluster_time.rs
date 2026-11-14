@@ -1,10 +1,10 @@
-//! The `$clusterTime` a client sends (013 FR-014): read with the errors a `refrouter` 9.0.4 gives
-//! (measured 30-10-2026, with and without `--keyFile`) and, on a node with authentication,
+//! The `$clusterTime` a client sends (013 FR-014): read with the errors the reference router 9.0.4
+//! gives (measured 30-10-2026, with and without `--keyFile`) and, on a node with authentication,
 //! checked against the node's signing keys. The fields are read in the order they come; a
 //! subdocument says which of its required fields is missing when it is read; `null` counts as
 //! missing; unknown fields are ignored. A signature's hash that is not 20 bytes is refused even
 //! for a time that needs no signature. Without keys (no authentication) any signature passes, as
-//! on a `refrouter` without `--keyFile`.
+//! on the reference router without `--keyFile`.
 
 use teseladb_auth::clustertime::{self, ClusterTimeError, KEY_LEN, Time};
 use teseladb_bson::{Document, Value};
@@ -21,7 +21,7 @@ use crate::types::{wrong_type, wrong_types};
 
 /// The generic argument.
 pub const CLUSTER_TIME: &str = "$clusterTime";
-/// The types `keyId` takes, in the order of RefDb's message.
+/// The types `keyId` takes, in the order of the reference server's message.
 const KEY_ID_TYPES: [&str; 4] = ["int", "long", "decimal", "double"];
 /// The binary subtype of a hash.
 const GENERAL: u8 = 0;
@@ -40,7 +40,7 @@ fn missing(path: &str) -> CommandError {
     CommandError::new(IDL_FAILED_TO_PARSE, msg)
 }
 
-/// RefDb's name of a binary subtype in its messages (measured).
+/// The reference server's name of a binary subtype in its messages (measured).
 pub(crate) fn subtype_name(subtype: u8) -> &'static str {
     match subtype {
         0 => "general",
@@ -58,8 +58,8 @@ pub(crate) fn subtype_name(subtype: u8) -> &'static str {
     }
 }
 
-/// A number as a 64-bit integer the way RefDb reads `keyId`: a double truncated, a decimal
-/// rounded half to even, both saturated and NaN as 0 (measured).
+/// A number as a 64-bit integer the way the reference server reads `keyId`: a double truncated, a
+/// decimal rounded half to even, both saturated and NaN as 0 (measured).
 fn key_id(path: impl Fn() -> String, v: &Value) -> Result<i64, CommandError> {
     match v {
         Value::Int32(n) => Ok(i64::from(*n)),
@@ -136,7 +136,7 @@ pub fn parse(cmd: &Document, name: &str) -> Result<Option<GivenTime>, CommandErr
     Ok(Some(GivenTime { time, signature: sig }))
 }
 
-/// RefDb's error for a refused `$clusterTime`.
+/// The reference server's error for a refused `$clusterTime`.
 fn error(e: &ClusterTimeError) -> CommandError {
     let code = match e {
         ClusterTimeError::HashLength(_) => UNSUPPORTED_FORMAT,
@@ -157,10 +157,10 @@ pub fn check(cmd: &Document, name: &str, node: &NodeInfo) -> Result<(), CommandE
 }
 
 /// Takes the `$clusterTime` of command `name`, already checked, into the node's clock (008
-/// FR-013), as a `refrouter` 9.0.4 advances its clock with it: a write that follows lands above what
-/// the client saw, even on another node. One past the node's clock and more than
+/// FR-013), as the reference router 9.0.4 advances its clock with it: a write that follows lands
+/// above what the client saw, even on another node. One past the node's clock and more than
 /// [`MAX_RECEIVED_AHEAD_MS`] ahead of its wall clock fails with 205 and the node's clock is left
-/// alone (DV-101): a `refrouter` allows 365 days,
+/// alone (DV-101): the reference router allows 365 days,
 /// but the HLC's bound on disk would then keep the node from starting again until its wall clock
 /// passed it.
 pub fn take<B: Backend + ?Sized>(

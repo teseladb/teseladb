@@ -3,9 +3,10 @@
 //! reads the changes of the collections in its scope after the mark the cursor read up to, up to
 //! the lowest resolved mark of their ranges (`Backend::changes`), turns them into events in the
 //! merge order, runs the stages after `$changeStream` on each event and returns them with the
-//! `postBatchResumeToken`. The replies, waits and errors are those of a `refrouter` 9.0.4 (measured on
-//! 01-11): the first batch is always empty, an empty `getMore` waits 1 s or its `maxTimeMS`, and an
-//! event whose `_id` the stages changed kills the cursor with `ChangeStreamFatalError`.
+//! `postBatchResumeToken`. The replies, waits and errors are those of the reference router 9.0.4
+//! (measured on 01-11): the first batch is always empty, an empty `getMore` waits 1 s or its
+//! `maxTimeMS`, and an event whose `_id` the stages changed kills the cursor with
+//! `ChangeStreamFatalError`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -115,7 +116,7 @@ pub struct ChangeStream {
     /// The stream resumes after this fragment of this event.
     resume_fragment: Option<(EventKey, u32)>,
     /// The token `resumeAfter` names, until the read reaches its event: the stages must keep it,
-    /// or the stream cannot find where to resume (measured on a `refrouter` 9.0.4).
+    /// or the stream cannot find where to resume (measured on the reference router 9.0.4).
     resume_check: Option<ResumeToken>,
     /// The token of the `invalidate` that ended the stream: nothing is read after it, and the
     /// cursor closes once the events before it are returned, with it as `postBatchResumeToken`.
@@ -162,7 +163,7 @@ pub fn opens(cmd: &Document) -> bool {
     is_aggregate && opens
 }
 
-/// Refuses a read concern other than `majority`, as a `refrouter` 9.0.4 does.
+/// Refuses a read concern other than `majority`, as the reference router 9.0.4 does.
 fn check_read_concern(cmd: &Document) -> Result<(), CommandError> {
     let Some(Value::Document(rc)) = cmd.get("readConcern") else { return Ok(()) };
     match rc.get("level") {
@@ -296,7 +297,8 @@ pub fn open<B: Backend + ?Sized>(
             error::CHANGE_STREAM_FATAL,
             "To resume from a split event, the $changeStream pipeline must include a $changeStreamSplitLargeEvent stage",
         )
-        // A `refrouter` 9.0.4 marks it so that a driver does not resume (measured on 04-11-2026).
+        // The reference router 9.0.4 marks it so that a driver does not resume (measured on
+        // 04-11-2026).
         .with_label(NON_RESUMABLE_LABEL));
     }
     let resume_event = match &spec.start {
@@ -347,9 +349,9 @@ pub type StreamBatch = (Vec<Document>, Document, bool);
 
 /// The next batch of a change stream cursor and its `postBatchResumeToken`: at most `batch`
 /// events (`None`: no limit) and 16 MiB, waiting for some up to `max_time` (1 s by default).
-/// Like a `refrouter`, a batch with events holds every event written before the `getMore`: it reads
-/// on, within the same wait, until the resolved mark passes the node's clock at its start, which
-/// goes some 200 ms ahead of it (014 FR-004).
+/// Like the reference router, a batch with events holds every event written before the `getMore`:
+/// it reads on, within the same wait, until the resolved mark passes the node's clock at its start,
+/// which goes some 200 ms ahead of it (014 FR-004).
 pub fn more<B: Backend + ?Sized>(
     backend: &mut B,
     stream: &mut ChangeStream,
@@ -358,7 +360,7 @@ pub fn more<B: Backend + ?Sized>(
 ) -> Result<StreamBatch, CommandError> {
     let deadline = backend.now_ms().saturating_add(max_time.unwrap_or(DEFAULT_AWAIT_MS));
     // The `getMore` after the one that gave the `invalidate` closes the cursor with an empty
-    // batch (measured on a `refrouter` 9.0.4 on 02-11).
+    // batch (measured on the reference router 9.0.4 on 02-11).
     if let Some(end) = stream.invalidated.as_ref().filter(|_| stream.pending.is_empty()) {
         return Ok((Vec::new(), Document::new().with("_data", end.encode()), true));
     }
@@ -375,7 +377,7 @@ pub fn more<B: Backend + ?Sized>(
             match fill(backend, stream, started) {
                 Ok(()) => {}
                 // The wait ran out while the node read the ranges: an empty `getMore` answers
-                // with what it has, it does not fail (a `refrouter` never answers
+                // with what it has, it does not fail (the reference router never answers
                 // `MaxTimeMSExpired` to the `getMore` of a stream).
                 Err(e) if e.code.code == error::MAX_TIME_MS_EXPIRED.code => break,
                 // An event too large to serialize fails the shard batch being filled, and
@@ -432,7 +434,7 @@ fn event_bytes(doc: &Document) -> usize {
     teseladb_changestream::split_large::size(doc).unwrap_or(usize::MAX)
 }
 
-/// Fills the next shard batch as a shard fills one for a `refrouter` 9.0.4 (measured on
+/// Fills the next shard batch as a shard fills one for the reference router 9.0.4 (measured on
 /// 04-11-2026): the events in order, the ones left from the last batch first, until the next one
 /// does not fit in what is left of 16 MiB, which starts the batch after. It reads on while the
 /// queue holds less than 16 MiB, each read moves the stream's mark and the mark is below `until`
@@ -482,14 +484,15 @@ fn fill<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// Error `e` as a `refrouter` 9.0.4 relays it from the shard `host` that met it.
+/// Error `e` as the reference router 9.0.4 relays it from the shard `host` that met it.
 fn from_shard(host: &str, e: CommandError) -> CommandError {
     let errmsg = format!("Error on remote shard {host} :: caused by :: {}", e.errmsg);
     CommandError { errmsg, ..e }
 }
 
 /// The codes after which a driver resumes the stream (`ResumableChangeStreamError`): the node or
-/// the network failed, or a range moved, as RefDb's `isResumableChangeStreamError` lists them.
+/// the network failed, or a range moved, as the reference server's `isResumableChangeStreamError`
+/// lists them.
 const RESUMABLE: [i32; 18] = [
     6, 7, 63, 89, 91, 133, 134, 150, 189, 234, 262, 9001, 10107, 11600, 11602, 13388, 13435, 13436,
 ];
@@ -529,8 +532,8 @@ fn check_history<B: Backend + ?Sized>(
 /// The label of an error after which a driver does not resume the stream.
 pub const NON_RESUMABLE_LABEL: &str = "NonResumableChangeStreamError";
 
-/// `ChangeStreamHistoryLost` of a stream resuming at `resume`, as a `refrouter` 9.0.4 answers a
-/// `getMore` (measured on 01-11 after the oplog rolled over).
+/// `ChangeStreamHistoryLost` of a stream resuming at `resume`, as the reference router 9.0.4
+/// answers a `getMore` (measured on 01-11 after the oplog rolled over).
 fn history_lost(resume: Hlc) -> CommandError {
     let (time, increment) = teseladb_hlc::to_timestamp(resume);
     CommandError::new(
@@ -730,7 +733,7 @@ fn poll<B: Backend + ?Sized>(
     })?;
     let mut events: Vec<(ChangeEvent, bool)> = Vec::new();
     // `changeStreamOptions` (007 FR-019): past `expireAfterSeconds` an event has no images, as
-    // once RefDb removed its pre-image, from which it builds the post-image too.
+    // once the reference server removed its pre-image, from which it builds the post-image too.
     let options = backend.cluster_parameters()?;
     let expire = super::parameters::images_expire_after_ms(
         options.get(super::parameters::CHANGE_STREAM_OPTIONS).map(Vec::as_slice),
@@ -803,8 +806,8 @@ fn poll<B: Backend + ?Sized>(
 }
 
 /// The event a stream resumed after with `resumeAfter`: once its stages leave it out, the stream
-/// cannot find where to resume and fails with 280 (measured on a `refrouter` 9.0.4 on 04-11-2026,
-/// a `$match` that drops the event).
+/// cannot find where to resume and fails with 280 (measured on the reference router 9.0.4 on
+/// 04-11-2026, a `$match` that drops the event).
 fn check_resume_event(
     stream: &mut ChangeStream,
     event: &ChangeEvent,
@@ -827,7 +830,7 @@ fn check_resume_event(
 
 /// Queues event `doc` of token `token`: in fragments with `$changeStreamSplitLargeEvent`, after
 /// the fragment the stream resumed from (014 FR-011); without it, an event too large to
-/// serialize fails as on a `refrouter` 9.0.4 (measured on 01-11).
+/// serialize fails as on the reference router 9.0.4 (measured on 01-11).
 fn queue(
     stream: &mut ChangeStream,
     token: &ResumeToken,
@@ -952,8 +955,8 @@ fn event_of<B: Backend + ?Sized>(
         }
     };
     // A collection with a shard key gives the fields of it the document has (018 FR-001); a
-    // document that moved, those of the version it left, as a `refrouter` 9.0.4 keys the event
-    // (measured on 02-11-2026).
+    // document that moved, those of the version it left, as the reference router 9.0.4 keys the
+    // event (measured on 02-11-2026).
     let keyed = match (from, &earlier) {
         (Some(_), Some(before)) => before,
         _ => &doc_bytes,
@@ -998,8 +1001,8 @@ fn event_of<B: Backend + ?Sized>(
 }
 
 /// The error of a stream that requires an image its event has not (measured on 01-11).
-/// Error 47 of a required image that is not there, with the shard prefix a `refrouter` 9.0.4 puts
-/// before it (measured on 01-11): the node that read the event names itself.
+/// Error 47 of a required image that is not there, with the shard prefix the reference router 9.0.4
+/// puts before it (measured on 01-11): the node that read the event names itself.
 fn no_image<B: Backend + ?Sized>(
     backend: &mut B,
     event: &ChangeEvent,

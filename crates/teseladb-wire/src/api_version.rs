@@ -1,7 +1,7 @@
 //! The parameters of the Stable API (006 FR-035): `apiVersion`, `apiStrict` and
-//! `apiDeprecationErrors`, and what `apiStrict: true` refuses. Measured on a `refrouter` 9.0.4 on
-//! 05-11-2026 (scenario `api-strict` of the battery), and the test commands of the API on a
-//! `refnode` 9.0.4 with `enableTestCommands` the same day.
+//! `apiDeprecationErrors`, and what `apiStrict: true` refuses. Measured on the reference router
+//! 9.0.4 on 05-11-2026 (scenario `api-strict` of the battery), and the test commands of the API on
+//! a reference replica set member 9.0.4 with `enableTestCommands` the same day.
 
 use teseladb_bson::{Document, Value};
 
@@ -39,7 +39,7 @@ impl ApiParams {
         self.strict == Some(true)
     }
 
-    /// The parameters given, in RefDb's order, as the test commands answer them.
+    /// The parameters given, in the reference server's order, as the test commands answer them.
     pub fn echoed(&self) -> Document {
         let mut d = Document::new();
         if let Some(v) = &self.version {
@@ -87,7 +87,7 @@ pub fn parse(cmd: &Document, name: &str) -> Result<ApiParams, CommandError> {
 }
 
 /// A test command of the Stable API as `listCommands` lists it on a node with
-/// `enableTestCommands` (measured on a `refnode` 9.0.4 on 05-11-2026).
+/// `enableTestCommands` (measured on a reference replica set member 9.0.4 on 05-11-2026).
 pub struct TestCommand {
     /// Its name.
     pub name: &'static str,
@@ -289,8 +289,8 @@ fn field_refused(k: &str) -> CommandError {
     )
 }
 
-/// The last field of `d` among `unstable` with its type, in the order of `d`: the one a
-/// `refrouter` 9.0.4 names (measured: `{min, max}` names `max`, `{max, min}` names `min`).
+/// The last field of `d` among `unstable` with its type, in the order of `d`: the one
+/// the reference router 9.0.4 names (measured: `{min, max}` names `max`, `{max, min}` names `min`).
 fn last_unstable<'a>(d: &'a Document, unstable: &[(&str, Kind)]) -> Option<&'a str> {
     d.iter()
         .filter(|(k, v)| unstable.iter().any(|(n, kind)| n == k && kind.matches(v)))
@@ -336,8 +336,8 @@ fn check_statement_sort(cmd: &Document) -> Result<(), CommandError> {
     if sorted { Err(field_refused("sort")) } else { Ok(()) }
 }
 
-/// With `apiStrict: true` in `cmd`, a text index cannot be created: the shard refuses it, and a
-/// `refrouter` 9.0.4 relays its error with `raw` (measured on 05-11-2026).
+/// With `apiStrict: true` in `cmd`, a text index cannot be created: the shard refuses it, and
+/// the reference router 9.0.4 relays its error with `raw` (measured on 05-11-2026).
 pub fn check_text_indexes(cmd: &Document) -> Result<(), CommandError> {
     if cmd.get(API_STRICT) != Some(&Value::Boolean(true)) {
         return Ok(());

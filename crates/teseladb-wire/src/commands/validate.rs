@@ -1,9 +1,9 @@
 //! `validate` (010 FR-017, T034): the documents of a collection against the entries of each of
 //! its indexes, with the verification of 009 (`teseladb_index::verify::verify_range`), read in
-//! one pass of the collection's keys. The reply has the fields and the order of a `refrouter` 9.0.4
-//! (measured 01-11-2026, `lc12`), and the shard's own reply under `raw`; what an inconsistent
-//! index adds (`missingIndexEntries`, `extraIndexEntries`, `errors`, `advice`) was measured on a
-//! `refnode` 9.0.4 with the fail points `skipIndexNewRecords` and
+//! one pass of the collection's keys. The reply has the fields and the order of the reference
+//! router 9.0.4 (measured 01-11-2026, `lc12`), and the shard's own reply under `raw`; what an
+//! inconsistent index adds (`missingIndexEntries`, `extraIndexEntries`, `errors`, `advice`) was
+//! measured on a reference replica set member 9.0.4 with the fail points `skipIndexNewRecords` and
 //! `skipUnindexingDocumentWhenDeleted`. TeselaDB has no record ids, so the entries carry none
 //! (DV-075).
 
@@ -44,7 +44,7 @@ struct Options {
 }
 
 impl Options {
-    /// The options of `cmd`, refused as a `refrouter` 9.0.4 refuses them (measured).
+    /// The options of `cmd`, refused as the reference router 9.0.4 refuses them (measured).
     fn of(cmd: &Document) -> Result<Options, CommandError> {
         // Any value but `false`, `0` and `null` asks for the option (measured: `full: "a"`).
         let on = |k: &str| {
@@ -176,11 +176,7 @@ fn shard_reply<B: Backend + ?Sized>(
     d.push("indexDetails", details);
     if !found.index_errors.is_empty() {
         d.insert("valid", false);
-        d.push(
-            "advice",
-            "A corrupt namespace has been detected. See \
-             http://dochub.refdb.org/core/data-recovery for recovery steps.",
-        );
+        d.push("advice", teseladb_names::ADVICE_CORRUPT_NAMESPACE);
     }
     d.push("ok", 1.0);
     Ok(d)

@@ -1,7 +1,8 @@
 //! `create`, `drop`, `renameCollection`, `collMod`, `listDatabases`, `listCollections` and
-//! `dropDatabase` over the catalog in Group 0 (FR-006, FR-027), with the answers of a `refrouter`
-//! 7.0 (measured): `drop` of a missing collection and a repeated `create` with the same options
-//! succeed. Dropping a collection deletes its documents before Group 0 forgets its identifier.
+//! `dropDatabase` over the catalog in Group 0 (FR-006, FR-027), with the answers of the reference
+//! router 7.0 (measured): `drop` of a missing collection and a repeated `create` with the same
+//! options succeed. Dropping a collection deletes its documents before Group 0 forgets its
+//! identifier.
 
 use std::collections::BTreeMap;
 
@@ -133,15 +134,16 @@ fn stored_options(c: &CollectionEntry) -> Result<Document, CommandError> {
     Ok(Document::from(RawDoc::from_bytes(&c.options)?))
 }
 
-/// The version of the `_id` index that `create` was given in `idIndex.v` (what `refrestore`
-/// sends for a collection dumped with a version 1 index), kept with the options when it is not
-/// the default one. It is not a collection option: `listCollections` shows it in `idIndex`.
+/// The version of the `_id` index that `create` was given in `idIndex.v` (what the reference
+/// restore tool sends for a collection dumped with a version 1 index), kept with the options when
+/// it is not the default one. It is not a collection option: `listCollections` shows it in
+/// `idIndex`.
 const ID_INDEX_VERSION: &str = "$_idIndexVersion";
 
-/// Checks the validator options of `create` and `collMod` (`cmd`), with the messages of a
-/// `refrouter` 9.0.4 (measured).
+/// Checks the validator options of `create` and `collMod` (`cmd`), with the messages of
+/// the reference router 9.0.4 (measured).
 /// Checks `changeStreamPreAndPostImages` of `create` or `collMod` (014 FR-008): an object with a
-/// boolean `enabled` and nothing else (measured on a `refrouter` 9.0.4).
+/// boolean `enabled` and nothing else (measured on the reference router 9.0.4).
 fn check_images(o: &Document, cmd: &str) -> Result<(), CommandError> {
     const IMAGES: &str = "changeStreamPreAndPostImages";
     const ENABLED: &str = "enabled";
@@ -200,9 +202,9 @@ fn check_validation(o: &Document, cmd: &str) -> Result<(), CommandError> {
 /// The `collation` option of a collection.
 const COLLATION: &str = "collation";
 
-/// Whether collection `ns` has an index of `_id`: all but a `system.profile`, which a `refnode`
-/// 9.0.4 creates without one (measured 01-11-2026: no index in `listIndexes`, `collStats` nor
-/// `listCollections`).
+/// Whether collection `ns` has an index of `_id`: all but a `system.profile`, which a reference
+/// replica set member 9.0.4 creates without one (measured 01-11-2026: no index in `listIndexes`,
+/// `collStats` nor `listCollections`).
 pub(crate) fn has_id_index(ns: &Namespace) -> bool {
     ns.coll != super::profile::SYSTEM_PROFILE
 }
@@ -214,7 +216,7 @@ pub(crate) fn is_clustered(c: &CollectionEntry) -> Result<bool, CommandError> {
 
 /// The `_id` index of collection `c` as `listIndexes` lists it. A clustered collection's is its
 /// clustered index: its version, key and name, `unique`, the collection's `expireAfterSeconds`
-/// and collation, and `clustered` (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// and collation, and `clustered` (measured on the reference router 9.0.4 on 05-11-2026).
 pub(crate) fn listed_id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
     let CollectionKind::Clustered { expire_after_seconds, .. } = kinds::kind_of(c)? else {
         return id_index(c);
@@ -268,8 +270,8 @@ pub(crate) fn id_index(c: &CollectionEntry) -> Result<Document, CommandError> {
 /// `create`.
 pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let ns = target(ctx)?;
-    // A member of a replica set creates them again after a drop (`refrestore --drop`); they
-    // stay generated and empty there.
+    // A member of a replica set creates them again after a drop (the reference restore tool with
+    // `--drop`); they stay generated and empty there.
     if super::config_db::generated(&ns) && super::config_db::as_member(ctx.backend)? {
         return Ok(Document::new().with("ok", 1.0));
     }
@@ -284,7 +286,7 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     };
     check_validation(&options, CREATE)?;
     check_constraint_action(&options)?;
-    // An empty validator is no validator (measured on a `refrouter` 9.0.4 on 05-11-2026).
+    // An empty validator is no validator (measured on the reference router 9.0.4 on 05-11-2026).
     if matches!(options.get(VALIDATOR), Some(Value::Document(v)) if v.is_empty()) {
         options.remove(VALIDATOR);
     }
@@ -380,7 +382,7 @@ const VALIDATION_FIELDS: [&str; 4] =
 /// The words before a `collMod` error of its validation options.
 const SET_VALIDATION: &str = "Failed to set validation options";
 
-/// `constraint` refuses the action `warn` (measured on a `refrouter` 9.0.4).
+/// `constraint` refuses the action `warn` (measured on the reference router 9.0.4).
 fn check_constraint_action(options: &Document) -> Result<(), CommandError> {
     let constraint = options.get(VALIDATION_LEVEL) == Some(&Value::from(CONSTRAINT));
     if constraint
@@ -397,8 +399,8 @@ fn check_constraint_action(options: &Document) -> Result<(), CommandError> {
 /// The validation level that keeps every document of the collection valid (9.0).
 const CONSTRAINT: &str = "constraint";
 
-/// A `collMod` to `validationLevel: "constraint"` as a `refrouter` 9.0.4 checks it (measured):
-/// first every document against the validator, then that the level was `strict`.
+/// A `collMod` to `validationLevel: "constraint"` as the reference router 9.0.4 checks it
+/// (measured): first every document against the validator, then that the level was `strict`.
 fn check_constraint<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
@@ -446,7 +448,7 @@ fn check_constraint<B: Backend + ?Sized>(
 
 /// `idIndex` of `create`.
 const ID_INDEX: &str = "idIndex";
-/// A collation document read as RefDb reads it.
+/// A collation document read as the reference server reads it.
 fn parse_collation_doc(c: &Document) -> Result<ParsedCollation, CommandError> {
     let b = c.to_bytes()?;
     let raw = RawDoc::from_bytes(&b)?;
@@ -455,7 +457,8 @@ fn parse_collation_doc(c: &Document) -> Result<ParsedCollation, CommandError> {
 }
 
 /// A collation as the error of a repeated `create` shows the request: complete, without its
-/// `version`, and with `backwards` only if the client gave it (measured on a `refrouter` 9.0.4).
+/// `version`, and with `backwards` only if the client gave it (measured on the reference router
+/// 9.0.4).
 fn requested_collation(full: &Document, given: &Document) -> Document {
     let mut shown = full.clone();
     shown.remove("version");
@@ -483,7 +486,7 @@ fn same_options(
         let sep = if i == 0 { " " } else { ", " };
         asked_text.push_str(&format!("{sep}{k}: {}", super::display(v)));
     }
-    // An empty request is `{}` (measured on a `refrouter` 9.0.4).
+    // An empty request is `{}` (measured on the reference router 9.0.4).
     asked_text.push_str(if asked_shown.is_empty() { "}" } else { " }" });
     let msg = format!(
         "namespace '{}' already exists, but with different options: {shown}, requested: {asked_text}",
@@ -538,8 +541,8 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     }
     let member = super::config_db::as_member(ctx.backend)?;
     let Some(c) = ctx.backend.collection(&ns)? else {
-        // Measured on a `refrouter` 9.0.4: the database has no entry either. A member says nothing
-        // more (measured on a replica set of 9.0.4, 03-11-2026).
+        // Measured on the reference router 9.0.4: the database has no entry either. A member says
+        // nothing more (measured on a replica set of 9.0.4, 03-11-2026).
         if !member && !has_database(ctx.backend, &ns.db)? {
             return Ok(Document::new().with("info", "database does not exist").with("ok", 1.0));
         }
@@ -547,7 +550,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     };
     super::write_block::ddl(ctx.backend, &ns.db)?;
     // A member gives the indexes a collection had and its namespace; a view only the namespace
-    // (measured on a replica set of 9.0.4, 03-11-2026); a `refrouter` neither.
+    // (measured on a replica set of 9.0.4, 03-11-2026); the reference router neither.
     let mut reply = Document::new();
     if member {
         if !matches!(kinds::kind_of(&c)?, CollectionKind::View { .. }) {
@@ -566,7 +569,7 @@ pub fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
     Ok(reply.with("ok", 1.0))
 }
 
-/// Prefix of the bucket namespaces of RefDb's time series before 9.0.
+/// Prefix of the bucket namespaces of the reference server's time series before 9.0.
 const BUCKETS_PREFIX: &str = "system.buckets.";
 
 /// `renameCollection` (on `admin`).
@@ -596,8 +599,8 @@ pub fn rename<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         let msg = "Can't rename a collection in the config database";
         return Err(CommandError::new(ILLEGAL_OPERATION, msg));
     }
-    // Into a `system.` namespace a rename fails as an illegal operation (measured on a `refnode`
-    // 9.0.4, 02-11-2026), whether the source exists or not.
+    // Into a `system.` namespace a rename fails as an illegal operation (measured on a reference
+    // replica set member 9.0.4, 02-11-2026), whether the source exists or not.
     if to.coll.starts_with(BUCKETS_PREFIX) {
         let msg = format!(
             "Cannot rename non timeseries buckets collection '{from_text}' to a timeseries buckets namespace '{to_text}'."
@@ -725,7 +728,7 @@ pub fn coll_mod<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, C
         CommandError::new(BAD_VALUE, format!("{SET_VALIDATION} :: caused by :: {}", e.errmsg))
     })?;
     // A change of validation writes both its level and its action, and drops an empty
-    // validator (measured on a `refrouter` 9.0.4).
+    // validator (measured on the reference router 9.0.4).
     if VALIDATION_FIELDS.iter().any(|f| changes.get(f).is_some()) {
         if matches!(options.get(VALIDATOR), Some(Value::Document(v)) if v.is_empty()) {
             options.remove(VALIDATOR);
@@ -771,12 +774,12 @@ pub(crate) fn passes(filter: Option<&Document>, doc: &Document) -> Result<bool, 
 /// Bytes of a storage block: a collection's size is counted in whole blocks.
 pub const BLOCK_BYTES: u64 = 4096;
 
-/// Databases a `refrouter` always lists.
+/// Databases the reference router always lists.
 const ALWAYS_LISTED: [&str; 2] = [super::admin::ADMIN_DB, CONFIG_DB];
 
 /// The `sizeOnDisk` of a collection storing `stored` bytes of keys and documents: whole blocks,
 /// at least one, and one block for its `_id` index (an empty collection takes 8192 bytes in
-/// RefEngine, measured on 9.0.4).
+/// the reference storage engine, measured on 9.0.4).
 pub fn collection_size(stored: u64) -> u64 {
     stored.div_ceil(BLOCK_BYTES).max(1) * BLOCK_BYTES + BLOCK_BYTES
 }
@@ -790,8 +793,9 @@ pub(crate) fn has_database<B: Backend + ?Sized>(
 }
 
 /// The error of a command on a collection that does not exist: `msg`, or, when its database is
-/// not in the catalog either, the one a `refrouter` 9.0.4 gives (measured), which is the router's:
-/// no shard gets the command (`dropIndexes` answers it as any error, measured on 04-11-2026).
+/// not in the catalog either, the one the reference router 9.0.4 gives (measured), which is the
+/// router's: no shard gets the command (`dropIndexes` answers it as any error, measured on
+/// 04-11-2026).
 pub(crate) fn missing_namespace<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
@@ -805,10 +809,10 @@ pub(crate) fn missing_namespace<B: Backend + ?Sized>(
 }
 
 /// Runs `cmd`, which may add database `db` to the catalog. When Group 0 refuses it because
-/// another database differs from `db` only in case, the error names both, as RefDb's 13297;
-/// if that database is gone by then, Group 0's refusal goes as it is. Either way it is the
-/// router's error: a `refrouter` 9.0.4 refuses the database before any shard (`createIndexes` gives
-/// it without `raw`, measured on 04-11-2026).
+/// another database differs from `db` only in case, the error names both, as the reference server's
+/// 13297; if that database is gone by then, Group 0's refusal goes as it is. Either way it is the
+/// router's error: the reference router 9.0.4 refuses the database before any shard
+/// (`createIndexes` gives it without `raw`, measured on 04-11-2026).
 pub(crate) fn write_adding_database<B: Backend + ?Sized>(
     backend: &mut B,
     db: &str,
@@ -829,7 +833,7 @@ pub(crate) fn write_adding_database<B: Backend + ?Sized>(
     }))
 }
 
-/// Records database `db` before a write to it runs, as `refrouter` creates its entry in
+/// Records database `db` before a write to it runs, as the reference router creates its entry in
 /// `config.databases` for any write, also one that writes nothing (D-077, measured on 9.0.4).
 pub(crate) fn ensure_database<B: Backend + ?Sized>(
     backend: &mut B,
@@ -842,10 +846,10 @@ pub(crate) fn ensure_database<B: Backend + ?Sized>(
         .map(|_| ())
 }
 
-/// Whether a `refrouter` lists a database without collections under `filter` (measured on 9.0.4):
-/// with no filter, or with one that parses to a single predicate on `name` that is neither a
-/// negation (`$ne`, `$nin`, `$not`) nor a conjunction (`$and`, two operators). The predicate still
-/// has to match the entry.
+/// Whether the reference router lists a database without collections under `filter` (measured on
+/// 9.0.4): with no filter, or with one that parses to a single predicate on `name` that is neither
+/// a negation (`$ne`, `$nin`, `$not`) nor a conjunction (`$and`, two operators). The predicate
+/// still has to match the entry.
 fn lists_empty(filter: Option<&Document>) -> Result<bool, CommandError> {
     let Some(f) = filter else { return Ok(true) };
     let bytes = f.to_bytes_with(crate::msg::command_limits())?;
@@ -860,8 +864,8 @@ fn lists_empty(filter: Option<&Document>) -> Result<bool, CommandError> {
 /// `listDatabases` (on `admin`): `admin` and `config` always, and each database of the catalog
 /// with the size of its collections in blocks of stored bytes, not of compressed files; with
 /// `nameOnly` the sizes are not read. A database without collections (D-077) shows
-/// `sizeOnDisk: 0` and `empty: true`, as `refrouter` shows a database of `config.databases` that no
-/// shard reports.
+/// `sizeOnDisk: 0` and `empty: true`, as the reference router shows a database of
+/// `config.databases` that no shard reports.
 pub fn list_databases<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let name_only = args::safe_bool(
         ctx.cmd,
@@ -897,8 +901,8 @@ pub fn list_databases<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docum
     }
     let only = super::authorize::database_filter(ctx.backend, ctx.cmd);
     sizes.retain(|db, _| super::authorize::database_shown(only.as_deref(), db));
-    // With sizes `refrouter` lists in name order; with `nameOnly`, `admin` and `config` and then
-    // `config.databases` in the order its entries were added (measured on 9.0.4).
+    // With sizes the reference router lists in name order; with `nameOnly`, `admin` and `config`
+    // and then `config.databases` in the order its entries were added (measured on 9.0.4).
     let mut order: Vec<String> = Vec::new();
     if name_only {
         let added = ctx.backend.databases()?;
@@ -967,7 +971,7 @@ pub fn list_collections<B: Backend + ?Sized>(
     let db = ctx.db.to_owned();
     let only = super::authorize::collection_filter(ctx.backend, &db, ctx.cmd);
     let mut docs = Vec::new();
-    // A `refrouter` lists `config` from its config server, which does not hold the record of
+    // The reference router lists `config` from its config server, which does not hold the record of
     // sessions; a member of a replica set holds it (006 FR-038).
     let hide_sessions =
         db == super::config_db::CONFIG_DB && !super::config_db::as_member(ctx.backend)?;
@@ -983,7 +987,7 @@ pub fn list_collections<B: Backend + ?Sized>(
             d.push("options", options_of(&c)?);
             let uuid = Value::Binary { subtype: 4, bytes: c.uuid.to_vec() };
             // A view has no UUID, and only normal and capped collections an `_id` index
-            // (measured on a `refrouter` 9.0.4).
+            // (measured on the reference router 9.0.4).
             match kind {
                 CollectionKind::View { .. } => {
                     d.push("info", Document::new().with("readOnly", true))
@@ -1051,7 +1055,8 @@ pub fn list_collections<B: Backend + ?Sized>(
     let mut state = QueryCursor::buffered(docs);
     let (first, short) = state.batch(ctx.backend, batch.or(Some(usize::MAX)))?;
     let id = keep(ctx, &ns_text, state, short, false)?;
-    // `listCollections` writes the cursor's fields in this order (measured on a `refrouter` 9.0).
+    // `listCollections` writes the cursor's fields in this order (measured on the reference router
+    // 9.0).
     let docs: Vec<Value> = first.into_iter().map(Value::Document).collect();
     let cursor = Document::new().with("id", id).with("ns", ns_text).with("firstBatch", docs);
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))
@@ -1120,7 +1125,7 @@ pub fn list_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Documen
     let mut state = QueryCursor::buffered(entries);
     let (first, short) = state.batch(ctx.backend, batch.or(Some(usize::MAX)))?;
     let id = keep(ctx, &ns_text, state, short, false)?;
-    // The cursor's fields in this order (measured on a `refrouter` 9.0.4).
+    // The cursor's fields in this order (measured on the reference router 9.0.4).
     let docs: Vec<Value> = first.into_iter().map(Value::Document).collect();
     let cursor = Document::new().with("id", id).with("ns", ns_text).with("firstBatch", docs);
     Ok(Document::new().with("cursor", cursor).with("ok", 1.0))

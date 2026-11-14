@@ -1,6 +1,6 @@
 //! `createIndexes` and `dropIndexes` (009 T013, FR-006, FR-007, contract `index-commands.md`), with
-//! the replies and errors of a `refrouter` 9.0.4 (measured). The build itself, from `deleteOnly` to
-//! `ready`, is [`super::index_build`]'s.
+//! the replies and errors of the reference router 9.0.4 (measured). The build itself, from
+//! `deleteOnly` to `ready`, is [`super::index_build`]'s.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -34,7 +34,8 @@ const VERSION: &str = "v";
 const BUCKETS: &str = "teselaBuckets";
 /// `dropIndexes` of every index but `_id`.
 const ALL: &str = "*";
-/// Options RefDb fills in when it stores a specification (measured on a `refrouter` 9.0.4).
+/// Options the reference server fills in when it stores a specification (measured on the reference
+/// router 9.0.4).
 const UNIQUE: &str = "unique";
 const PREPARE_UNIQUE: &str = "prepareUnique";
 const HIDDEN: &str = "hidden";
@@ -42,7 +43,7 @@ const SPARSE: &str = "sparse";
 const BACKGROUND: &str = "background";
 const EXPIRE_AFTER_SECONDS: &str = "expireAfterSeconds";
 const COLLATION: &str = "collation";
-/// The options that make another index on the same key (measured on a `refrouter` 9.0.4).
+/// The options that make another index on the same key (measured on the reference router 9.0.4).
 const IDENTIFYING: [&str; 5] =
     [UNIQUE, SPARSE, "partialFilterExpression", COLLATION, "wildcardProjection"];
 /// The options a requested index shows before its key in a message (measured).
@@ -78,10 +79,10 @@ const SPEC_ERRORS: [i32; 5] = [
 /// The prefix of an error about one specification.
 const IN_SPECIFICATION: &str = "Error in specification";
 
-/// RefDb's code of an index with another name and the same key.
+/// The reference server's code of an index with another name and the same key.
 pub const INDEX_OPTIONS_CONFLICT: crate::error::Code =
     crate::error::Code { code: 85, name: "IndexOptionsConflict" };
-/// RefDb's code of an index with the same name and another key or options.
+/// The reference server's code of an index with the same name and another key or options.
 pub const INDEX_KEY_SPECS_CONFLICT: crate::error::Code =
     crate::error::Code { code: 86, name: "IndexKeySpecsConflict" };
 
@@ -100,9 +101,9 @@ fn named<B: Backend + ?Sized>(ctx: &Ctx<'_, B>) -> Result<Namespace, CommandErro
     }
 }
 
-/// The order a `refrouter` 9.0.4 stores the fields of a specification in, whatever order the
-/// command gave them in (measured: the order of the fields of RefDb's index specification);
-/// `teselaBuckets` (D-008) goes before `prepareUnique`, which is always last.
+/// The order the reference router 9.0.4 stores the fields of a specification in, whatever order the
+/// command gave them in (measured: the order of the fields of the reference server's index
+/// specification); `teselaBuckets` (D-008) goes before `prepareUnique`, which is always last.
 const STORED_ORDER: [&str; 29] = [
     VERSION,
     KEY,
@@ -143,8 +144,8 @@ pub(super) fn in_stored_order(spec: &Document) -> Document {
     fields.into_iter().fold(Document::new(), |d, (k, v)| d.with(k, v.clone()))
 }
 
-/// The boolean options as a `refrouter` 9.0.4 stores them (measured): `background` and `sparse` as
-/// booleans; `unique`, `hidden` and `prepareUnique` only when true.
+/// The boolean options as the reference router 9.0.4 stores them (measured): `background` and
+/// `sparse` as booleans; `unique`, `hidden` and `prepareUnique` only when true.
 fn stored_booleans(spec: &mut Document) {
     for k in [BACKGROUND, SPARSE] {
         if let Some(b) = spec.get(k).and_then(crate::types::truthy) {
@@ -164,9 +165,9 @@ fn stored_booleans(spec: &mut Document) {
     }
 }
 
-/// The specification as Group 0 keeps it and `listIndexes` shows it (measured on a `refrouter`
-/// 9.0.4): its fields in [`STORED_ORDER`], the booleans of [`stored_booleans`], a collation in
-/// full (none for `simple`), the `2dsphereIndexVersion` of a new `2dsphere` index, the bounds of
+/// The specification as Group 0 keeps it and `listIndexes` shows it (measured on the reference
+/// router 9.0.4): its fields in [`STORED_ORDER`], the booleans of [`stored_booleans`], a collation
+/// in full (none for `simple`), the `2dsphereIndexVersion` of a new `2dsphere` index, the bounds of
 /// a `2d` index as doubles, and a text index with its key `_fts`/`_ftsx`, its `weights` and its
 /// language options.
 fn stored(spec: &Document, version: i32) -> Result<Document, CommandError> {
@@ -206,8 +207,8 @@ fn stored(spec: &Document, version: i32) -> Result<Document, CommandError> {
     Ok(in_stored_order(&out))
 }
 
-/// A text index as RefDb stores it: the text fields become `_fts: "text", _ftsx: 1` in the
-/// key, each one gets weight 1 unless `weights` gives another (by field name), and the
+/// A text index as the reference server stores it: the text fields become `_fts: "text", _ftsx: 1`
+/// in the key, each one gets weight 1 unless `weights` gives another (by field name), and the
 /// language options and the version go last.
 fn text_spec(spec: Document, key: &Document) -> Document {
     let mut new_key = Document::new();
@@ -240,8 +241,8 @@ fn text_spec(spec: Document, key: &Document) -> Document {
     out
 }
 
-/// A `refrouter` 9.0.4 forwards the shard's error of `createIndexes` and `dropIndexes` with `code`
-/// and `codeName` first, then the other fields, `ok` and `errmsg` (measured).
+/// The reference router 9.0.4 forwards the shard's error of `createIndexes` and `dropIndexes` with
+/// `code` and `codeName` first, then the other fields, `ok` and `errmsg` (measured).
 fn forwarded(r: Result<Document, CommandError>) -> Result<Document, CommandError> {
     r.or_else(|e| match e.origin {
         // The router's own error goes as any error: no shard answered it.
@@ -260,7 +261,7 @@ fn code_first(e: &CommandError) -> Document {
 }
 
 /// A specification error of `createIndexes` inside «Error in specification <spec> :: caused by
-/// ::», as a `refrouter` 9.0.4 shows it (measured), unless the message already has it.
+/// ::», as the reference router 9.0.4 shows it (measured), unless the message already has it.
 fn in_specification(spec: &Document, e: CommandError) -> CommandError {
     if e.errmsg.starts_with(IN_SPECIFICATION)
         || !SPEC_ERRORS.contains(&e.code.code)
@@ -272,12 +273,12 @@ fn in_specification(spec: &Document, e: CommandError) -> CommandError {
     CommandError { errmsg: format!("{IN_SPECIFICATION} {shown} :: caused by :: {}", e.errmsg), ..e }
 }
 
-/// The cause of a build of two identical specifications (measured on a `refrouter` 9.0.4).
+/// The cause of a build of two identical specifications (measured on the reference router 9.0.4).
 const IDENTICAL_INDEXES: &str =
     "Cannot build two identical indexes. Try again without duplicate indexes.";
 
 /// «Index build failed» around `cause`, with a new build identifier and the collection's UUID
-/// (measured on a `refrouter` 9.0.4).
+/// (measured on the reference router 9.0.4).
 fn build_failed<B: Backend + ?Sized>(
     backend: &mut B,
     ns: &Namespace,
@@ -296,7 +297,7 @@ fn build_failed<B: Backend + ?Sized>(
 }
 
 /// The specification as the build shows it when it conflicts with another of the same command:
-/// `v`, then its fields as given (measured on a `refrouter` 9.0.4 on 03-11-2026).
+/// `v`, then its fields as given (measured on the reference router 9.0.4 on 03-11-2026).
 fn as_given(spec: &Document, version: i32) -> String {
     let mut out = Document::new().with(VERSION, version);
     for (k, v) in spec.iter().filter(|(k, _)| *k != VERSION) {
@@ -305,7 +306,7 @@ fn as_given(spec: &Document, version: i32) -> String {
     display(&Value::Document(out))
 }
 
-/// The specification as a `refrouter` 9.0.4 shows a requested index in its errors: `v`, the
+/// The specification as the reference router 9.0.4 shows a requested index in its errors: `v`, the
 /// options, then `key` and `name` (measured).
 fn requested(spec: &Document, version: i32) -> String {
     let mut out = Document::new().with(VERSION, version);
@@ -343,7 +344,7 @@ struct Existing {
 
 /// The number of indexes of collection `c`, as `dropIndexes` (`nIndexesWas`) and
 /// `createIndexes` (`numIndexesBefore`) count them: a clustered collection's index is not one
-/// of them (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// of them (measured on the reference router 9.0.4 on 05-11-2026).
 pub fn count<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
@@ -357,7 +358,7 @@ fn existing<B: Backend + ?Sized>(
     backend: &mut B,
     c: &CollectionEntry,
 ) -> Result<Vec<Existing>, CommandError> {
-    // A time series has no `_id_` index (measured on a `refrouter` 9.0.4).
+    // A time series has no `_id_` index (measured on the reference router 9.0.4).
     let mut out = match super::timeseries::spec_of(c)? {
         Some(_) => Vec::new(),
         None => vec![Existing { spec: super::catalog::listed_id_index(c)?, entry: None }],
@@ -421,9 +422,9 @@ pub fn create_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Docum
     }
 }
 
-/// A shard's error of `createIndexes` as a `refrouter` 9.0.4 relays it (measured on 03-11-2026): the
-/// shard's own reply under `raw`, then `code`, `codeName`, the other fields, `ok` and `errmsg`.
-/// An error of the router's parse goes as any other.
+/// A shard's error of `createIndexes` as the reference router 9.0.4 relays it (measured on
+/// 03-11-2026): the shard's own reply under `raw`, then `code`, `codeName`, the other fields, `ok`
+/// and `errmsg`. An error of the router's parse goes as any other.
 pub fn shard_error<B: Backend + ?Sized>(backend: &mut B, e: CommandError) -> Document {
     let raw = Document::new().with(super::raw_name(backend), e.to_document());
     let mut out = Document::new().with("raw", raw);
@@ -470,8 +471,9 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
         return Err(CommandError::new(BAD_VALUE, "Must specify at least one index to create"));
     }
     // A time series keeps its indexes on its buckets (015 FR-008): the bucket specifications are
-    // the ones checked, as RefDb checks them after translating them; with `rawData` they are
-    // given on the buckets already (measured on a `refnode` 9.0.4 on 02-11-2026).
+    // the ones checked, as the reference server checks them after translating them; with `rawData`
+    // they are given on the buckets already (measured on a reference replica set member 9.0.4 on
+    // 02-11-2026).
     let raw = matches!(ctx.cmd.get("rawData"), Some(Value::Boolean(true)));
     let asked_count = specs.len();
     let specs = match ctx.backend.collection(&ns)? {
@@ -504,8 +506,8 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
 
     let quorum = index_build::commit_quorum(ctx.cmd)?;
     names::check_writable(&ns)?;
-    // A `refrouter` creates the collection before it asks the shard for the index, so the shard
-    // never creates it (measured on 9.0.4: `createdCollectionAutomatically: false`).
+    // The reference router creates the collection before it asks the shard for the index, so the
+    // shard never creates it (measured on 9.0.4: `createdCollectionAutomatically: false`).
     let created = false;
     let coll = ensure_collection(ctx, &ns)?;
     index_build::check_quorum(ctx.backend, &coll, quorum.asked)?;
@@ -581,7 +583,7 @@ fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Command
 }
 
 /// Whether `spec` asks for the clustered index of `_id`: on a clustered collection it is there
-/// already, whatever its name (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// already, whatever its name (measured on the reference router 9.0.4 on 05-11-2026).
 fn is_clustered_id(spec: &Document) -> bool {
     let id_key = Value::Document(Document::new().with("_id", 1));
     spec.get("clustered").is_some() && spec.get(KEY) == Some(&id_key)
@@ -603,7 +605,8 @@ fn already_there<B: Backend + ?Sized>(
     Ok(with_raw_first(ctx.backend, reply))
 }
 
-/// Reply `reply` after the node's own under `raw`, as a `refrouter` gives its shard's (measured).
+/// Reply `reply` after the node's own under `raw`, as the reference router gives its shard's
+/// (measured).
 fn with_raw_first<B: Backend + ?Sized>(backend: &mut B, reply: Document) -> Document {
     let mut out =
         Document::new().with("raw", Document::new().with(super::raw_name(backend), reply.clone()));
@@ -743,7 +746,7 @@ pub(super) fn drop_one<B: Backend + ?Sized>(
 }
 
 /// `dropIndexes`: by name, by key, a list of names or `"*"`; a name that is not there is not an
-/// error on a `refrouter` 9.0.4 (measured).
+/// error on the reference router 9.0.4 (measured).
 pub fn drop_indexes<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     forwarded(drop(ctx))
 }
@@ -757,7 +760,7 @@ fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandEr
     let all = existing(ctx.backend, &coll)?;
     let was = count(ctx.backend, &coll)?;
     let refuse_id: fn() -> CommandError = match super::catalog::is_clustered(&coll)? {
-        // Measured on a `refrouter` 9.0.4 on 05-11-2026.
+        // Measured on the reference router 9.0.4 on 05-11-2026.
         true => {
             || CommandError::new(CLUSTERED_INDEX_DROP, "It is illegal to drop the clusteredIndex")
         }
@@ -799,7 +802,7 @@ fn drop<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandEr
     if matches!(&which, Value::String(s) if s == ALL) {
         reply.push("msg", "non-_id indexes dropped for collection");
     }
-    // A `refrouter` gives its shard's reply last, under `raw` (measured).
+    // The reference router gives its shard's reply last, under `raw` (measured).
     let reply = reply.with("ok", 1.0);
     let raw = Document::new().with(super::raw_name(ctx.backend), reply.clone());
     Ok(reply.with("raw", raw))

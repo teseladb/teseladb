@@ -1,6 +1,6 @@
 //! `collectionUUID`: the UUID a command expects its collection to have (`find`, the write
-//! commands, `drop`, `collMod`, `renameCollection`), with the errors a `refrouter` 9.0.4 gives
-//! (measured).
+//! commands, `drop`, `collMod`, `renameCollection`), with the errors the reference router 9.0.4
+//! gives (measured).
 
 use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::Namespace;

@@ -1,7 +1,7 @@
-//! The parts of `collStats` that a `refrouter` 9.0.4 adds to a shard's answer (010 FR-018, T055;
-//! measured on the native `refrouter` on 09-11-2026): the database's primary shard of a collection
-//! without a shard key, the number of chunks, and a document per shard that holds the collection.
-//! A shard here is a node (D-102): each node's document measures the ranges it serves.
+//! The parts of `collStats` that the reference router 9.0.4 adds to a shard's answer (010 FR-018,
+//! T055; measured on the reference router on 09-11-2026): the database's primary shard of a
+//! collection without a shard key, the number of chunks, and a document per shard that holds the
+//! collection. A shard here is a node (D-102): each node's document measures the ranges it serves.
 
 use std::collections::BTreeMap;
 
@@ -13,8 +13,8 @@ use teseladb_router::table::RouteEntry;
 use super::{Backend, shard_name};
 use crate::error::CommandError;
 
-/// The shard a `refrouter` names as the primary of database `db`: the `primary` of its document of
-/// `config.databases`, or the first node when the node keeps no such document.
+/// The shard the reference router names as the primary of database `db`: the `primary` of its
+/// document of `config.databases`, or the first node when the node keeps no such document.
 pub(super) fn primary_of<B: Backend + ?Sized>(
     backend: &mut B,
     db: &str,
@@ -72,9 +72,9 @@ pub(super) struct Kind {
     pub(super) series: Option<Document>,
 }
 
-/// A shard's document of an existing collection `ns` with `nindexes` indexes, in a `refrouter`
-/// 9.0.4's order (measured on 09-11-2026): its average object size a whole number and only with
-/// documents, no orphaned documents and no free storage of its own (DV-037).
+/// A shard's document of an existing collection `ns` with `nindexes` indexes, in the reference
+/// router 9.0.4's order (measured on 09-11-2026): its average object size a whole number and only
+/// with documents, no orphaned documents and no free storage of its own (DV-037).
 pub(super) fn shard_doc(ns: &str, p: &Part, kind: &Kind, nindexes: i32, scale: i64) -> Document {
     let total_index: i64 = p.index_sizes.iter().map(|(_, b)| b).sum();
     let mut sizes = Document::new();
@@ -125,7 +125,7 @@ pub(super) fn missing_shard_doc(ns: &str, scale: i64) -> Document {
         .with("ok", 1.0)
 }
 
-/// A count as RefDb writes it: an `int` when it fits.
+/// A count as the reference server writes it: an `int` when it fits.
 fn number(n: i64) -> Value {
     i32::try_from(n).map_or(Value::Int64(n), Value::Int32)
 }

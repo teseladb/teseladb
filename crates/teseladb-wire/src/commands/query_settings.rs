@@ -1,7 +1,7 @@
-//! Query settings (010 FR-023, measured on a `refrouter` 9.0.4, 01-11-2026): `setQuerySettings`
-//! fixes, for one query shape, the indexes its plans may use, its query framework, whether it
-//! is rejected, a comment and a time limit; `removeQuerySettings` drops them and the
-//! `$querySettings` stage lists them. They live in the internal cluster parameter
+//! Query settings (010 FR-023, measured on the reference router 9.0.4, 01-11-2026):
+//! `setQuerySettings` fixes, for one query shape, the indexes its plans may use, its query
+//! framework, whether it is rejected, a comment and a time limit; `removeQuerySettings` drops them
+//! and the `$querySettings` stage lists them. They live in the internal cluster parameter
 //! [`PARAMETER`], which `getClusterParameter` does not show, as a list of entries sorted by
 //! hash. A new setting merges with the ones the shape had; a setting at its default (`reject:
 //! false`, `maxTimeMS: 0`, no index hints) is dropped, and settings left empty are refused.
@@ -289,7 +289,7 @@ fn parse_settings(given: &Document) -> Result<Document, CommandError> {
     Ok(out)
 }
 
-/// The types `maxTimeMS` of a setting takes, in RefDb's order.
+/// The types `maxTimeMS` of a setting takes, in the reference server's order.
 const MAX_TIME_TYPES: [&str; 4] = ["decimal", "double", "int", "long"];
 
 /// `maxTimeMS` of a setting: a "safe" 64-bit integer (a double truncated and saturated, NaN
