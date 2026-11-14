@@ -164,6 +164,17 @@ fn history_versions_at_or_below_the_threshold_all_go() {
     assert_eq!(value(&mut lsm, &mut disk, b"k", 9), Some(b"\x01doc".to_vec()), "a document stays");
 }
 
+/// `value` as written at `round`: every byte but the first, which says what the value is,
+/// changes from one round to the next, so that an old version takes its whole bytes in the
+/// history file instead of a delta against the next one (FR-035).
+fn at_round(value: &[u8], round: u64) -> Vec<u8> {
+    let mut v = value.to_vec();
+    for (i, b) in v.iter_mut().enumerate().skip(1) {
+        *b ^= ((round * 31 + i as u64) % 251) as u8;
+    }
+    v
+}
+
 /// Bytes of every file of the LSM.
 fn files_bytes(lsm: &Lsm) -> u64 {
     lsm.metrics().level_bytes.iter().sum()
@@ -182,7 +193,7 @@ fn files_far_above_the_live_data_are_all_compacted_and_collected() {
     for round in 1..=100u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -203,7 +214,7 @@ fn files_far_above_the_live_data_are_all_compacted_and_collected() {
     let after = files_bytes(&lsm);
     assert!(after < 4 * live, "{after} bytes of files for {live} live");
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 100)));
     }
     // A second pass finds nothing to do: the space is within what the last one left.
     let compactions = lsm.metrics().compactions_total;
@@ -226,7 +237,7 @@ fn a_full_compaction_waits_for_the_threshold_to_pass_half_of_what_the_last_one_k
     for round in 1..=100u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -256,7 +267,7 @@ fn a_full_compaction_waits_for_the_threshold_to_pass_half_of_what_the_last_one_k
         m.full_after
     );
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 100)));
     }
 }
 
@@ -278,7 +289,7 @@ fn an_idle_range_with_a_low_threshold_does_not_hold_back_the_others_collection()
     for round in 1..=100u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -297,7 +308,7 @@ fn an_idle_range_with_a_low_threshold_does_not_hold_back_the_others_collection()
     let after = files_bytes(&lsm);
     assert!(after < 4 * live, "{after} bytes of files for {live} live");
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 100)));
     }
 }
 
@@ -314,7 +325,7 @@ fn a_compaction_of_everything_follows_once_the_threshold_passed_half_of_what_the
     for round in 1..=100u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -346,7 +357,7 @@ fn a_compaction_of_everything_follows_once_the_threshold_passed_half_of_what_the
     let second = files_bytes(&lsm);
     assert!(second * 10 < first * 6, "{second} bytes of files after {first}");
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 100)));
     }
 }
 
@@ -363,7 +374,7 @@ fn a_compaction_asked_for_does_not_wait_for_the_background_budget() {
     for round in 1..=10u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -374,7 +385,7 @@ fn a_compaction_asked_for_does_not_wait_for_the_background_budget() {
     assert_eq!(done, vec![id], "it ends without a second of budget");
     assert_eq!(lsm.metrics().level_files[0], 0, "every file went to the last level");
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 10)));
     }
 }
 
@@ -390,7 +401,7 @@ fn a_compaction_asked_for_flushes_and_collects_everything_the_thresholds_allow()
     for round in 1..=20u64 {
         for k in &keys {
             index += 1;
-            lsm.put(G, index, k, ts(round, 0), &value).unwrap();
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
         }
         lsm.run_io(&mut disk, Nanos::ZERO);
     }
@@ -412,6 +423,6 @@ fn a_compaction_asked_for_flushes_and_collects_everything_the_thresholds_allow()
     assert!(after < 2 * live, "{after} bytes of files after {before}, for {live} live");
     assert_eq!(lsm.metrics().memtable_bytes, 0, "the memtable went to a file first");
     for k in &keys {
-        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(value.clone()));
+        assert_eq!(get_value(&mut lsm, &mut disk, k), Some(at_round(&value, 20)));
     }
 }

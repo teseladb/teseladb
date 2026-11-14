@@ -55,18 +55,28 @@ pub(crate) struct Cand {
     deferred: Option<Box<Deferred>>,
 }
 
-/// A value still in its value file (FR-034): the file, the version's internal key and the
-/// reference.
+/// A value a read finds where it is once the version is decided.
 #[derive(Clone)]
-pub(crate) struct Deferred {
-    file: Arc<Table>,
-    ikey: Vec<u8>,
-    at: ValueRef,
+pub(crate) enum Deferred {
+    /// In a value file (FR-034): the file, the version's internal key and the reference.
+    Value { file: Arc<Table>, ikey: Vec<u8>, at: ValueRef },
+    /// An old version whose value is a delta against a version elsewhere (FR-035): the history
+    /// file, its data file, the block of the version and its internal key.
+    Based { history: Arc<Table>, data: Arc<Table>, block: usize, ikey: Vec<u8> },
+}
+
+impl Deferred {
+    fn id(&self) -> (u64, &[u8]) {
+        match self {
+            Deferred::Value { file, ikey, .. } => (file.number, ikey),
+            Deferred::Based { history, ikey, .. } => (history.number, ikey),
+        }
+    }
 }
 
 impl PartialEq for Deferred {
     fn eq(&self, other: &Deferred) -> bool {
-        (self.file.number, &self.ikey, self.at) == (other.file.number, &other.ikey, other.at)
+        self.id() == other.id()
     }
 }
 
@@ -74,36 +84,133 @@ impl Eq for Deferred {}
 
 impl std::fmt::Debug for Deferred {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Deferred").field("file", &self.file.number).field("at", &self.at).finish()
+        let (file, _) = self.id();
+        f.debug_struct("Deferred").field("file", &file).finish()
     }
 }
 
-/// The value of the entry `c` of `table` stands at: its bytes, or where they are when it is a
-/// reference to a value file (FR-034).
+/// Most bases elsewhere a value of a history file goes through: one per block its key's
+/// versions span, which a key with this many would never fill.
+const MOST_BASES: usize = 64;
+
+/// The value of the entry `c` of `table` stands at, block `i`: its bytes, or where they are when
+/// it is a reference to a value file (FR-034) or a delta against a version elsewhere, for which
+/// `data` is the data file of history file `table` (FR-035).
 pub(crate) fn stored(
-    table: &Table,
+    table: &Arc<Table>,
+    data: Option<&Arc<Table>>,
     i: usize,
     c: &BlockCursor,
 ) -> Result<(Bytes, Option<Box<Deferred>>), LsmError> {
+    if c.pending().is_some() {
+        let data = data.ok_or_else(|| corrupt(table, i))?.clone();
+        let ikey = c.key().to_vec();
+        let based = Deferred::Based { history: table.clone(), data, block: i, ikey };
+        return Ok((Bytes::new(), Some(Box::new(based))));
+    }
     if !c.is_ref() {
         return Ok((c.value(), None));
     }
     let at = ValueRef::decode(c.value_slice()).map_err(|_| corrupt(table, i))?;
     let file = table.value_file(at.slot).map_err(|_| corrupt(table, i))?.clone();
-    Ok((Bytes::new(), Some(Box::new(Deferred { file, ikey: c.key().to_vec(), at }))))
+    Ok((Bytes::new(), Some(Box::new(Deferred::Value { file, ikey: c.key().to_vec(), at }))))
 }
 
-/// Reads the value `d` points to: `Ok(Err(token))` while its block is being read.
+/// Reads the value `d` points to: `Ok(Err(token))` while a block is being read.
 pub(crate) fn fetch<B: Blocks>(
     r: &mut B,
     d: &Deferred,
 ) -> Result<Result<Bytes, ReadToken>, LsmError> {
-    let bad = |i| corrupt(&d.file, i);
-    let i = value::block_of(&d.file, &d.ikey, &d.at).map_err(|_| bad(0))?;
-    match r.block(&d.file, i)? {
-        Fetch::Wait(token) => Ok(Err(token)),
-        Fetch::Ready(block) => Ok(Ok(value::value_in(block, &d.ikey, &d.at).map_err(|_| bad(i))?)),
+    match d {
+        Deferred::Value { file, ikey, at } => {
+            let bad = |i| corrupt(file, i);
+            let i = value::block_of(file, ikey, at).map_err(|_| bad(0))?;
+            match r.block(file, i)? {
+                Fetch::Wait(token) => Ok(Err(token)),
+                Fetch::Ready(block) => {
+                    Ok(Ok(value::value_in(block, ikey, at).map_err(|_| bad(i))?))
+                }
+            }
+        }
+        Deferred::Based { history, data, block, ikey } => {
+            based(r, (history, data), *block, ikey, MOST_BASES)
+        }
     }
+}
+
+/// The value of the version `ikey` in block `i` of history file `files.0`, a delta against a
+/// version elsewhere or after one in the block: the run of deltas from the entry with the base,
+/// on the base found in the history file or in its data file `files.1` (FR-035).
+fn based<B: Blocks>(
+    r: &mut B,
+    files: (&Arc<Table>, &Arc<Table>),
+    i: usize,
+    ikey: &[u8],
+    left: usize,
+) -> Result<Result<Bytes, ReadToken>, LsmError> {
+    let history = files.0;
+    let bad = || corrupt(history, i);
+    let block = match r.block(history, i)? {
+        Fetch::Wait(token) => return Ok(Err(token)),
+        Fetch::Ready(b) => b,
+    };
+    let at = |key: &[u8]| -> Result<BlockCursor, LsmError> {
+        let c = BlockCursor::seek(block.clone(), key, entry::compare).map_err(|_| bad())?;
+        match c.valid() && c.key() == key {
+            true => Ok(c),
+            false => Err(bad()),
+        }
+    };
+    let Some(start) = at(ikey)?.pending().map(<[u8]>::to_vec) else {
+        return Ok(Ok(at(ikey)?.value()));
+    };
+    let mut c = at(&start)?;
+    let base_key = c.base().ok_or_else(bad)?;
+    let base = match version_of(r, files, &base_key, left.checked_sub(1).ok_or_else(bad)?)? {
+        Err(token) => return Ok(Err(token)),
+        Ok(v) => v,
+    };
+    c.resolve(&base).map_err(|_| bad())?;
+    while c.key() != ikey {
+        c.advance().map_err(|_| bad())?;
+        if !c.valid() {
+            return Err(bad());
+        }
+    }
+    match c.pending() {
+        None => Ok(Ok(c.value())),
+        Some(_) => Err(bad()),
+    }
+}
+
+/// The value of the version `ikey`, a `Put` with its value in line, in history file `files.0` or
+/// in its data file `files.1` (FR-035).
+fn version_of<B: Blocks>(
+    r: &mut B,
+    files: (&Arc<Table>, &Arc<Table>),
+    ikey: &[u8],
+    left: usize,
+) -> Result<Result<Bytes, ReadToken>, LsmError> {
+    for t in [files.0, files.1] {
+        let Some(i) = t.find_block(ikey) else { continue };
+        let block = match r.block(t, i)? {
+            Fetch::Wait(token) => return Ok(Err(token)),
+            Fetch::Ready(b) => b,
+        };
+        let c = BlockCursor::seek(block, ikey, entry::compare).map_err(|_| corrupt(t, i))?;
+        if !c.valid() || c.key() != ikey {
+            continue;
+        }
+        if c.kind() != Kind::Put || c.is_ref() {
+            return Err(corrupt(t, i));
+        }
+        return match c.pending() {
+            Some(_) if Arc::ptr_eq(t, files.0) => based(r, files, i, ikey, left),
+            Some(_) => Err(corrupt(t, i)),
+            None => Ok(Ok(c.value())),
+        };
+    }
+    Err(corrupt(files.0, 0))
 }
 
 /// Result of [`View::get`].
@@ -384,7 +491,7 @@ fn get_in_memtable(
 /// Walks one file for the key; `Ok(Some(token))` if a block is missing.
 fn get_in_table<B: Blocks>(
     r: &mut B,
-    t: &Arc<Table>,
+    (t, data): (&Arc<Table>, Option<&Arc<Table>>),
     key: &[u8],
     target: &[u8],
     retracted: &mut Vec<Hlc>,
@@ -412,7 +519,7 @@ fn get_in_table<B: Blocks>(
             if logical != key {
                 return Ok(None);
             }
-            if let Seen::Answer = see(ts, c.kind(), || stored(t, i, &c), retracted, best)? {
+            if let Seen::Answer = see(ts, c.kind(), || stored(t, data, i, &c), retracted, best)? {
                 return Ok(None);
             }
             // A version passed over: what the read wants is under it.
@@ -485,7 +592,8 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
                 continue;
             }
             probes += 1;
-            match get_in_table(r, f, key, &target, &mut retracted, &mut best, &mut passed) {
+            let files = (f, (!of_level).then_some(t));
+            match get_in_table(r, files, key, &target, &mut retracted, &mut best, &mut passed) {
                 Err(e) => return Lookup::Failed(e),
                 Ok(Some(token)) => {
                     waiting.get_or_insert(token);
@@ -674,7 +782,8 @@ impl Scan {
                     continue;
                 }
                 let pos = if open { Pos::Seek(first.clone()) } else { Pos::Done };
-                cursors.push(Cursor::Table { table: f.clone(), pos });
+                let data = (!Arc::ptr_eq(f, t)).then(|| t.clone());
+                cursors.push(Cursor::Table { table: f.clone(), data, pos });
                 asleep.push(None);
                 let at = cursors.len() - 1;
                 if Arc::ptr_eq(f, t) {

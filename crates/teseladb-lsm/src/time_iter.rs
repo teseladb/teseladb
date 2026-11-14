@@ -90,7 +90,11 @@ impl TimeScan {
             c.seek(first.clone());
             cursors.push(c);
         }
-        for t in v.files() {
+        // Each file, then its history file with it as its data file (FR-031, FR-035).
+        let files = v.tables().flat_map(|t| {
+            std::iter::once((t, None)).chain(t.history.as_ref().map(|h| (h, Some(t.clone()))))
+        });
+        for (t, data) in files {
             let p = &t.props;
             if !self.in_time(p.min_ts, p.max_ts)
                 || p.hi.as_slice() < self.start.as_slice()
@@ -99,7 +103,8 @@ impl TimeScan {
                 continue;
             }
             self.take_tombstones(&p.tombstones);
-            cursors.push(Cursor::Table { table: t.clone(), pos: Pos::Seek(first.clone()) });
+            let pos = Pos::Seek(first.clone());
+            cursors.push(Cursor::Table { table: t.clone(), data, pos });
         }
         cursors
     }
