@@ -204,7 +204,8 @@ fn safe_int(f: &Fields<'_>, k: &str) -> Result<Option<i64>, FleError> {
     match v {
         RawValue::Int32(n) => Ok(Some(i64::from(n))),
         RawValue::Int64(n) => Ok(Some(n)),
-        RawValue::Double(d) if d.fract() == 0.0 && d.is_finite() => Ok(Some(d as i64)),
+        // An infinity's fractional part is NaN, so a zero one means a finite integral double.
+        RawValue::Double(d) if d.fract() == 0.0 => Ok(Some(d as i64)),
         RawValue::Double(d) => fractional(format!("{d}")),
         RawValue::Decimal128(d) => match crate::values::decimal_to_i64(d) {
             Some(n) => Ok(Some(n)),
@@ -241,8 +242,10 @@ fn at_most(n: Option<i64>, k: &str, ceiling: i64) -> Result<Option<i64>, FleErro
     }
 }
 
+/// A bounded option as an `i32`: every caller passes a value checked to be at least 0, so one
+/// past the type's range is too large and saturates at `i32::MAX`.
 fn int32(n: Option<i64>) -> Option<i32> {
-    n.map(|n| i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX }))
+    n.map(|n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
 fn read_query(doc: RawDoc<'_>, ctx: &str) -> Result<Query, FleError> {
