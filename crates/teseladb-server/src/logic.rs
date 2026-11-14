@@ -2004,6 +2004,18 @@ impl CoreLogic for NodeLogic {
         out.append(&mut self.outbound);
     }
 
+    fn file_sends(&mut self, on: bool) {
+        if let Some(data) = &mut self.data {
+            data.set_file_sends(on);
+        }
+    }
+
+    fn take_file_sends(&mut self, out: &mut Vec<(NodeId, teseladb_io::file_send::FileSend)>) {
+        if let Some(data) = &mut self.data {
+            data.take_file_sends(out);
+        }
+    }
+
     fn peer_addr(&self, node: NodeId) -> Option<String> {
         match self.group0() {
             Some(sm) => {

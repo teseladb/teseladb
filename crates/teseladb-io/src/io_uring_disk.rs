@@ -24,7 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use teseladb_sys::uring::{Op, Probe, Ring, Target, opcode};
+use teseladb_sys::uring::{Op, Part, Probe, Ring, SendData, Target, opcode};
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
 use teseladb_types::Bytes;
 
@@ -32,6 +32,10 @@ use crate::bandwidth::{BandwidthSplit, cost_of};
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
 use crate::file_disk::{O_DIRECT, errno, io_errno};
 use crate::io_class::IoClass;
+
+mod file_sends;
+
+pub use file_sends::MAX_FILE_SENDS;
 
 /// Submission slots of a core's ring.
 pub const RING_ENTRIES: u32 = 128;
@@ -76,10 +80,21 @@ fn support_of(ring: io::Result<Ring>) -> Result<(), String> {
 /// `Sync`s that run at once on a core (012 FR-021).
 const MAX_SYNCS: usize = 16;
 
-// Data jobs hold a buffer each; in each of the two classes at most [`MAX_SYNCS`] `Sync`s run next
-// to them and one job alone, each with one ring operation: the jobs in flight never pass the ring's
-// slots.
-const _: () = assert!((BUFFERS_PER_CORE as u32) + 2 * (MAX_SYNCS as u32) + 2 < RING_ENTRIES);
+/// Zero-copy sends to other nodes in flight at once on a core's ring (012 FR-026).
+pub const MAX_PEER_SENDS: usize = 8;
+
+// Data jobs and the reads of file sends hold a buffer each; in each of the two classes at most
+// [`MAX_SYNCS`] `Sync`s run next to them and one job alone, each with one ring operation, and at
+// most [`MAX_PEER_SENDS`] sends to peers and [`MAX_FILE_SENDS`] sends of files: what is in flight
+// never passes the ring's slots.
+const _: () = assert!(
+    (BUFFERS_PER_CORE as u32)
+        + 2 * (MAX_SYNCS as u32)
+        + 2
+        + (MAX_PEER_SENDS as u32)
+        + (MAX_FILE_SENDS as u32)
+        < RING_ENTRIES
+);
 
 fn missing_ops(probe: &Probe) -> Result<(), String> {
     let missing: Vec<&str> =
@@ -186,6 +201,15 @@ pub struct IoUringDisk {
     buffers_ready: bool,
     /// The tokens that cap the data's bandwidth while the log waits (012 FR-028).
     split: BandwidthSplit,
+    /// Zero-copy sends to peers in flight, with the result of their first completion (012
+    /// FR-026).
+    peer_sends: HashMap<u64, Option<io::Result<u32>>>,
+    /// Sends to peers whose buffer the kernel released, with their result.
+    peer_sent: Vec<(u64, io::Result<u32>)>,
+    /// Zero-copy sends to peers that went out whole, of bytes and of files.
+    zero_copy_sends: u64,
+    /// Frames for peers whose last bytes come from a file (012 FR-026).
+    file_sends: file_sends::FileSends,
 }
 
 fn cpath(p: &Path) -> CString {
@@ -320,6 +344,10 @@ impl IoUringDisk {
             running: VecDeque::new(),
             by_ring: HashMap::new(),
             done: VecDeque::new(),
+            peer_sends: HashMap::new(),
+            peer_sent: Vec::new(),
+            zero_copy_sends: 0,
+            file_sends: file_sends::FileSends::default(),
             next_seq: 0,
             wake,
             buffers_ready: false,
@@ -360,17 +388,24 @@ impl IoUringDisk {
     }
 
     /// Whether results are waiting for [`IoUringDisk::reap`] without a completion to signal them
-    /// (an operation that failed before reaching the ring).
+    /// (an operation that failed before reaching the ring, or a file send that read nothing).
     pub fn ready(&self) -> bool {
-        !self.done.is_empty()
+        !self.done.is_empty() || self.file_sends.has_unread()
     }
 
     /// Waits for every submitted operation and drops the results (when the core stops).
     pub fn drain(&mut self) {
-        while self.queues.iter().any(|q| !q.is_empty()) || !self.running.is_empty() {
+        // The frames not started go with the connections; the ones running end first, as their
+        // buffers return to the reserve with their last completion.
+        self.file_sends.drop_queued();
+        while self.queues.iter().any(|q| !q.is_empty())
+            || !self.running.is_empty()
+            || self.file_sends.running()
+        {
             self.start_ready();
-            let wait = u32::from(self.running.iter().any(|j| j.waiting.is_some()));
-            if self.ring.submit(wait).is_err() {
+            let wait =
+                self.running.iter().any(|j| j.waiting.is_some()) || self.file_sends.running();
+            if self.ring.submit(u32::from(wait)).is_err() {
                 break;
             }
             self.collect();
@@ -410,9 +445,55 @@ impl IoUringDisk {
         Ok(())
     }
 
+    /// Sends `bytes` on socket `fd` with `IORING_OP_SEND_ZC` (012 FR-026): the kernel sends from
+    /// them without copying them to the socket. Gives them back when [`MAX_PEER_SENDS`] are in
+    /// flight or the ring is full. The result comes from [`IoUringDisk::take_sent`] once the
+    /// kernel no longer reads them; the socket's owner keeps the order (one send at a time).
+    pub fn send_zc(&mut self, fd: RawFd, bytes: Vec<u8>) -> Result<u64, Vec<u8>> {
+        if self.peer_sends.len() >= MAX_PEER_SENDS || self.ring.space() == 0 {
+            return Err(bytes);
+        }
+        let op = Op::SendZc { fd, data: SendData::Owned(Part::new(bytes)) };
+        match self.ring.push(op) {
+            Ok(id) => {
+                self.peer_sends.insert(id, None);
+                // The send goes now, not with the next turn's disk operations; a failed enter
+                // leaves it queued for that turn.
+                let _ = self.ring.submit(0);
+                Ok(id)
+            }
+            // With room in the queue and owned bytes the ring takes the send; were it refused,
+            // the bytes go back to be written by the caller.
+            Err((Op::SendZc { data: SendData::Owned(p), .. }, _)) => Err(p.bytes().to_vec()),
+            Err((op, why)) => unreachable!("the ring gave back another operation: {op:?} ({why})"),
+        }
+    }
+
+    /// Zero-copy sends to peers that went out without an error.
+    pub fn zero_copy_sends(&self) -> u64 {
+        self.zero_copy_sends
+    }
+
+    /// The sends to peers that finished since the last call, with the bytes sent or the error.
+    pub fn take_sent(&mut self) -> Vec<(u64, io::Result<u32>)> {
+        std::mem::take(&mut self.peer_sent)
+    }
+
     fn collect(&mut self) {
         while let Some(c) = self.ring.complete() {
-            // Every operation the ring completes was pushed by a job still running.
+            let Some(c) = self.file_send_completed(c) else { continue };
+            if let Some(first) = self.peer_sends.get_mut(&c.id) {
+                if !c.notification {
+                    *first = Some(c.result);
+                }
+                if !c.more {
+                    let result = self.peer_sends.remove(&c.id).flatten().unwrap_or(Ok(0));
+                    self.zero_copy_sends += u64::from(result.is_ok());
+                    self.peer_sent.push((c.id, result));
+                }
+                continue;
+            }
+            // Every other operation the ring completes was pushed by a job still running.
             let seq = self.by_ring.remove(&c.id).expect("a job's ring operation");
             let i = self.running.iter().position(|j| j.seq == seq).expect("its job is running");
             self.running[i].waiting = None;
@@ -474,6 +555,7 @@ impl IoUringDisk {
         // What the log started no longer waits in its queue.
         self.note_log_state();
         self.start_class(IoClass::Data);
+        self.start_file_sends();
         self.collect();
     }
 
@@ -507,9 +589,9 @@ impl IoUringDisk {
             let waited =
                 u64::try_from(started.duration_since(queued).as_nanos()).unwrap_or(u64::MAX);
             teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
-            if data_range(&op).is_some() && !self.buffers_ready {
-                match self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE)) {
-                    Ok(()) => self.buffers_ready = true,
+            if data_range(&op).is_some() {
+                match self.ensure_buffers() {
+                    Ok(()) => {}
                     Err(e) => {
                         // Finished at once, behind the ones still running.
                         let result = Some(fail(&op, errno(&e)));
@@ -567,6 +649,16 @@ impl IoUringDisk {
             });
             self.advance(self.running.len() - 1, None);
         }
+    }
+
+    /// Registers the reserve's buffers if they are not yet: on the first read or write, from the
+    /// core's thread (012 FR-006).
+    fn ensure_buffers(&mut self) -> io::Result<()> {
+        if !self.buffers_ready {
+            self.ring.register_buffers(BufferPool::allocate(BUFFERS_PER_CORE))?;
+            self.buffers_ready = true;
+        }
+        Ok(())
     }
 
     /// The steps of an operation that is not a read or a write. Those done without the ring
@@ -1168,5 +1260,46 @@ mod tests {
         assert!(missing_ops(&p).is_ok());
         p = Probe::with(&[opcode::READ_FIXED]);
         assert!(missing_ops(&p).unwrap_err().contains("IORING_OP_WRITE_FIXED"));
+    }
+
+    #[test]
+    fn zero_copy_sends_to_a_peer_go_out_whole_beside_the_disk() {
+        // 012 FR-026: the core's ring sends a peer's bytes without copying them to the socket,
+        // while its disk jobs go on.
+        use std::io::Read as _;
+        let dir = temp("zc");
+        let mut d = IoUringDisk::open(&dir, false).unwrap();
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (sock, _) = l.accept().unwrap();
+        let bytes: Vec<u8> = (0..(1u32 << 20)).map(|i| (i % 253) as u8).collect();
+        let reader = std::thread::spawn(move || {
+            let mut got = vec![0u8; 1 << 20];
+            peer.read_exact(&mut got).unwrap();
+            got
+        });
+        let id = d.send_zc(sock.as_raw_fd(), bytes.clone()).unwrap();
+        ok(&mut d, IoOp::SyncDir { path: dir.clone() });
+        // The disk operation above may have collected the send's completions already.
+        let mut sent = d.take_sent();
+        while sent.is_empty() {
+            d.ring.submit(1).unwrap();
+            d.reap(&mut Vec::new()).unwrap();
+            sent = d.take_sent();
+        }
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, id);
+        assert_eq!(*sent[0].1.as_ref().unwrap() as usize, bytes.len());
+        assert_eq!(reader.join().unwrap(), bytes);
+        // Past MAX_PEER_SENDS in flight the bytes come back to be written by the caller.
+        let (mut ids, mut back) = (Vec::new(), None);
+        for _ in 0..=MAX_PEER_SENDS {
+            match d.send_zc(sock.as_raw_fd(), vec![7u8; 16]) {
+                Ok(id) => ids.push(id),
+                Err(b) => back = Some(b),
+            }
+        }
+        assert_eq!((ids.len(), back), (MAX_PEER_SENDS, Some(vec![7u8; 16])));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

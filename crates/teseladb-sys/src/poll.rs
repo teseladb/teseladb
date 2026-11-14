@@ -91,6 +91,14 @@ impl Poller {
     }
 }
 
+impl std::os::fd::AsRawFd for Poller {
+    /// The selector's own descriptor: readable while it has events, so another loop (an
+    /// io_uring ring, 012 FR-024) can wait for it.
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.raw_fd()
+    }
+}
+
 impl Waker {
     /// Makes the current wait (or the next one) return with a [`WAKE_TOKEN`] event. Several
     /// wake-ups in a row may arrive as one.

@@ -15,3 +15,4 @@ pub mod reference;
 pub mod selectivity;
 pub mod timeseries_read;
 pub(crate) mod window;
+pub mod zone;

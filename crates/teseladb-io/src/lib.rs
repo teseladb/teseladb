@@ -11,12 +11,15 @@ pub mod counters;
 pub mod disk_thread;
 mod drive_flush;
 mod file_disk;
+pub mod file_send;
 pub mod handshake;
 mod io_class;
 #[cfg(target_os = "linux")]
 pub mod io_uring_disk;
 mod log_chore;
 pub mod mailbox;
+#[cfg(target_os = "linux")]
+pub mod net_ring;
 pub mod node_disk;
 pub mod peer;
 pub mod poller;

@@ -12,6 +12,11 @@
 //!   applied the snapshot's index, opens the files and answers each piece with a read. The export
 //!   goes once the last piece was read, or after [`EXPORT_IDLE`] without a request.
 //!
+//! - On a core whose runtime sends files itself (012 FR-026: an io_uring disk and plaintext
+//!   links), a piece of an exported file is not read here: the answer names the file's bytes
+//!   ([`FileSend`]) and the runtime reads them into its ring's buffers and sends them from there.
+//!   A piece it cannot read goes as "not ready".
+//!
 //! - The segment files of the search indexes over the range (011 FR-013) travel behind the SST
 //!   files, as `teseladb_range::snapshot` bundles them: the source takes them from its node when
 //!   the export starts and holds them in memory with the bundle's last file; the replica hands
@@ -31,6 +36,8 @@ use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, trailer, unbundle, write_ops};
 use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
+
+use teseladb_io::file_send::{FileSend, MAX_FILE_SEND};
 
 use crate::coresm::CoreSm;
 use crate::forward::{Fetch, FetchReply, Request};
@@ -154,6 +161,10 @@ pub struct Transfers {
     inflight: VecDeque<Tag>,
     /// The node's search indexes; without them a snapshot carries no segment files.
     segments: Option<Arc<dyn SegmentExchange>>,
+    /// Whether the runtime sends the pieces of exported files itself (012 FR-026).
+    file_sends: bool,
+    /// Answers whose piece the runtime reads and sends.
+    files_out: Vec<(NodeId, FileSend)>,
 }
 
 fn not_ready() -> Bytes {
@@ -179,7 +190,19 @@ impl Transfers {
             ops: VecDeque::new(),
             inflight: VecDeque::new(),
             segments: None,
+            file_sends: false,
+            files_out: Vec::new(),
         }
+    }
+
+    /// Whether the runtime sends the pieces of exported files itself (012 FR-026).
+    pub fn set_file_sends(&mut self, on: bool) {
+        self.file_sends = on;
+    }
+
+    /// Moves the answers whose piece the runtime reads and sends to `out`.
+    pub fn take_file_sends(&mut self, out: &mut Vec<(NodeId, FileSend)>) {
+        out.append(&mut self.files_out);
     }
 
     /// The transfers sending and receiving the segment files of `segments` with the snapshots.
@@ -507,6 +530,28 @@ impl Transfers {
             return;
         };
         let len = r.size.saturating_sub(f.offset).min(CHUNK_BYTES as u64) as u32;
+        if self.file_sends && len > 0 && len <= MAX_FILE_SEND {
+            let c = Chunk {
+                range: f.group,
+                index: f.index,
+                file: f.file,
+                files: (files.len() + source.tail.len()) as u32,
+                offset: f.offset,
+                size: r.size,
+                data: Vec::new(),
+            };
+            let send = FileSend {
+                req,
+                hlc: Some(core.answer_clock()),
+                head: FetchReply::chunk_head(&c, u64::from(len)),
+                file: *id,
+                offset: f.offset,
+                len,
+                fallback: not_ready(),
+            };
+            self.files_out.push((from, send));
+            return;
+        }
         let tag =
             Tag::Read { from, req, key, serial: source.serial, file: f.file, offset: f.offset };
         let op = IoOp::ReadAt { file: *id, offset: f.offset, len, token: req };
@@ -992,6 +1037,33 @@ mod tests {
             let lsm = from.lsm.clone();
             from.t.on_fetch(&mut from.core, &mut lsm.borrow_mut(), (f.from, f.req), fetch, now);
         }
+        // What a runtime that sends files does (012 FR-026): it reads the piece and sends it
+        // behind its head, or the fallback when the read fails.
+        let mut sends = Vec::new();
+        from.t.take_file_sends(&mut sends);
+        for (_, send) in sends {
+            moved = true;
+            let read =
+                IoOp::ReadAt { file: send.file, offset: send.offset, len: send.len, token: 0 };
+            let failed = from.fault == Fault::Read;
+            if failed {
+                from.fault = Fault::None;
+            }
+            let data = match from.run(read) {
+                IoDone::Read { data: Ok(d), .. } if !failed && d.len() == send.len as usize => {
+                    Some(d)
+                }
+                _ => None,
+            };
+            let body = data.map_or(send.fallback.clone(), |d| {
+                Bytes::from_vec([&send.head[..], d.as_ref()].concat())
+            });
+            to.core.on_peer_message(
+                me,
+                PeerFrame::ForwardResp { req: send.req, hlc: send.hlc, body },
+                now,
+            );
+        }
         for (_, frame) in acts.send {
             // Only forwards and their answers matter here, not the range's own Raft.
             if matches!(frame, PeerFrame::Forward { .. } | PeerFrame::ForwardResp { .. }) {
@@ -1033,7 +1105,19 @@ mod tests {
 
     #[test]
     fn a_snapshot_travels_in_pieces_and_is_ingested() {
+        travels_in_pieces(false);
+    }
+
+    #[test]
+    fn a_snapshot_travels_in_pieces_the_runtime_reads_and_sends() {
+        // 012 FR-026: the source hands the pieces of its files to the runtime instead of reading
+        // them, and the replica takes them as it took the ones read here.
+        travels_in_pieces(true);
+    }
+
+    fn travels_in_pieces(file_sends: bool) {
         let mut src = side(1, 1500);
+        src.t.set_file_sends(file_sends);
         let mut dst = side(2, 0);
         let index = src.applied();
         assert_eq!(index, 1500);
@@ -1368,8 +1452,18 @@ mod tests {
 
     #[test]
     fn disk_failures_start_the_transfer_again() {
+        disk_failures(false);
+    }
+
+    #[test]
+    fn a_piece_the_runtime_cannot_read_starts_the_transfer_again() {
+        disk_failures(true);
+    }
+
+    fn disk_failures(file_sends: bool) {
         for fault in [Fault::Write, Fault::Open, Fault::Read] {
             let mut src = side(1, 30);
+            src.t.set_file_sends(file_sends);
             let mut dst = side(2, 0);
             match fault {
                 Fault::Write => dst.fault = fault,

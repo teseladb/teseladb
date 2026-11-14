@@ -55,9 +55,17 @@ pub struct Chunk {
 impl Chunk {
     /// Encodes it for a frame.
     pub fn encode(&self) -> Vec<u8> {
+        let mut out = self.encode_head(self.data.len() as u64);
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    /// Its encoding up to its bytes, for `len` bytes that follow (its own `data` left out): what
+    /// goes before a piece read from a file straight into the frame (012 FR-026).
+    pub fn encode_head(&self, len: u64) -> Vec<u8> {
         let mut e = Encoder::new();
         e.u64(self.range.0).u64(self.index).u32(self.file).u32(self.files);
-        e.u64(self.offset).u64(self.size).bytes(&self.data);
+        e.u64(self.offset).u64(self.size).var(len);
         e.finish()
     }
 

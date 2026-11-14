@@ -3,9 +3,11 @@
 //! the block that holds it within [`EPSILON`] blocks, and the search reads only the index entries
 //! in that window.
 //!
-//! A key is placed on a line by its 8 bytes after the prefix every last key of the file shares,
-//! read as a big-endian number: that keeps the order of the keys, though different keys may get
-//! one number. The segments come from the shrinking cone: a segment starts at a point and takes
+//! A key is placed on a line by the 8 bytes of its logical key after the prefix the logical keys
+//! of every block's last version share, read as a big-endian number. The version is left out:
+//! internal keys sort newest version first, so the versions of one key that cross a block
+//! boundary would make numbers that go down. Logical keys sort by their bytes, and the first 8
+//! of them, padded with zeros, never go down; different keys may get one number. The segments come from the shrinking cone: a segment starts at a point and takes
 //! the next ones while one slope keeps every point within `EPSILON` of its line.
 
 /// Most blocks between where a segment puts a key and its block.
@@ -38,8 +40,9 @@ fn project(key: &[u8], prefix: usize) -> u64 {
 }
 
 impl Pgm {
-    /// The model of the index whose last keys are `keys`, in order; `None` when the keys are not
-    /// regular enough for it to pay: more than one segment per [`BLOCKS_PER_SEGMENT`] blocks.
+    /// The model of the index whose last keys have the logical keys `keys`, in order; `None` when
+    /// the keys are not regular enough for it to pay: more than one segment per
+    /// [`BLOCKS_PER_SEGMENT`] blocks.
     pub(crate) fn build<'a>(keys: impl Iterator<Item = &'a [u8]> + Clone) -> Option<Pgm> {
         let first = keys.clone().next()?;
         let prefix = keys
@@ -48,11 +51,9 @@ impl Pgm {
             .min()
             .unwrap_or(0);
         let xs: Vec<u64> = keys.map(|k| project(k, prefix)).collect();
-        // Internal keys sort by their logical key first: a logical key that is the start of the
-        // next one, with its 12 bytes of mark after it, can make a larger number than the key
-        // after it. The numbers must not go down for the segments to hold; such an index gets no
-        // model and is searched whole.
-        if xs.windows(2).any(|w| w[1] < w[0]) {
+        // Logical keys in order make numbers that never go down, which the segments need; keys
+        // out of order get no model and are searched whole.
+        if !xs.is_sorted() {
             return None;
         }
         let mut segments = Vec::new();
@@ -87,9 +88,10 @@ impl Pgm {
     }
 
     /// The window of blocks `[lo, hi)` that holds the first block whose last key is at or after
-    /// `key`, of an index of `blocks` blocks; the caller checks its edges.
-    pub(crate) fn window(&self, key: &[u8], blocks: usize) -> (usize, usize) {
-        let x = project(key, self.prefix);
+    /// a key of logical key `logical`, of an index of `blocks` blocks; the caller checks its
+    /// edges.
+    pub(crate) fn window(&self, logical: &[u8], blocks: usize) -> (usize, usize) {
+        let x = project(logical, self.prefix);
         let s = self.segments.partition_point(|s| s.start <= x).saturating_sub(1);
         let seg = self.segments[s];
         let guess = seg.first as f64 + seg.slope * x.saturating_sub(seg.start) as f64;
@@ -104,17 +106,18 @@ impl Pgm {
     }
 }
 
-/// The first position of `last_keys` (sorted under `before`) whose key is not before `key`:
-/// in the window `pgm` gives when its edges hold, else by a search of all of them.
+/// The first position of `last_keys` (sorted under `before`) whose key is not before `key`,
+/// whose logical key is `logical`: in the window `pgm` gives when its edges hold, else by a
+/// search of all of them.
 pub(crate) fn find<K: AsRef<[u8]>>(
     pgm: Option<&Pgm>,
     last_keys: &[K],
-    key: &[u8],
+    (key, logical): (&[u8], &[u8]),
     before: impl Fn(&[u8], &[u8]) -> bool,
 ) -> usize {
     let n = last_keys.len();
     if let Some(p) = pgm {
-        let (lo, hi) = p.window(key, n);
+        let (lo, hi) = p.window(logical, n);
         let at = lo + last_keys[lo..hi].partition_point(|k| before(k.as_ref(), key));
         let left_holds = lo == 0 || before(last_keys[lo - 1].as_ref(), key);
         let right_holds = hi == n || at < hi;
@@ -137,19 +140,47 @@ mod tests {
         k
     }
 
-    /// Keys whose numbers go down (a logical key followed by one it starts, each with its mark)
-    /// get no model, and the subtraction of the segments never wraps.
+    /// Keys out of order get no model, and the subtraction of the segments never wraps.
     #[test]
-    fn keys_whose_numbers_go_down_get_no_model() {
-        let mark = [0xffu8; 12];
-        let keys: Vec<Vec<u8>> = (0..200u32)
-            .flat_map(|i| {
-                let base = format!("doc{i:05}").into_bytes();
-                let longer = [base.as_slice(), b"x"].concat();
-                [[base.as_slice(), &mark].concat(), [longer.as_slice(), &mark].concat()]
-            })
-            .collect();
+    fn keys_out_of_order_get_no_model() {
+        let keys: Vec<Vec<u8>> = (0..200u64).rev().map(object_id).collect();
         assert!(Pgm::build(keys.iter().map(|k| k.as_slice())).is_none());
+    }
+
+    /// The model of an index of internal keys (FR-041): one key's versions span several blocks,
+    /// newest first, and some logical keys are the start of the next one. With the version in
+    /// the number both would go down; on the logical keys alone every key finds its block.
+    #[test]
+    fn versions_across_blocks_and_keys_that_start_others_find_their_block() {
+        use crate::entry;
+        use teseladb_keys::Hlc;
+        let at = |p: u64| Hlc { physical: p, logical: 0 };
+        let mut last_keys: Vec<Vec<u8>> = Vec::new();
+        for i in 0..4000u64 {
+            let logical = object_id(i * 3);
+            match i % 10 {
+                // Five blocks end in versions of this key, from the newest down.
+                0 => last_keys.extend((0..5).rev().map(|v| entry::internal_key(&logical, at(v)))),
+                // The key, then a key it is the start of.
+                5 => {
+                    last_keys.push(entry::internal_key(&logical, at(1)));
+                    let longer = [logical.as_slice(), b"x"].concat();
+                    last_keys.push(entry::internal_key(&longer, at(u64::MAX >> 1)));
+                }
+                _ => last_keys.push(entry::internal_key(&logical, at(1))),
+            }
+        }
+        let before = |a: &[u8], b: &[u8]| entry::compare(a, b).is_lt();
+        assert!(last_keys.windows(2).all(|w| before(&w[0], &w[1])));
+        let pgm = Pgm::build(last_keys.iter().map(|k| entry::logical(k))).expect("a model");
+        let mut probes: Vec<Vec<u8>> = last_keys.clone();
+        probes.extend((0..12_010).map(|i| entry::first_version(&object_id(i))));
+        probes.extend((0..12_010).map(|i| entry::internal_key(&object_id(i), at(2))));
+        for probe in &probes {
+            let want = last_keys.partition_point(|k| before(k, probe));
+            let got = find(Some(&pgm), &last_keys, (probe, entry::logical(probe)), before);
+            assert_eq!(got, want);
+        }
     }
 
     #[test]
@@ -160,10 +191,18 @@ mod tests {
         let before = |a: &[u8], b: &[u8]| a < b;
         for probe in (0..20_010).map(object_id).chain([b"a".to_vec(), b"z".to_vec()]) {
             let want = keys.partition_point(|k| k.as_slice() < probe.as_slice());
-            assert_eq!(find(Some(&pgm), &keys, &probe, before), want);
+            assert_eq!(find(Some(&pgm), &keys, (&probe, &probe), before), want);
             let (lo, hi) = pgm.window(&probe, keys.len());
             assert!(hi - lo <= 2 * EPSILON + 3);
         }
+    }
+
+    #[test]
+    fn keys_whose_bytes_go_down_keep_the_search() {
+        // A user key and its version, then a longer user key: in the comparator's order, not in
+        // the bytes'.
+        let keys: Vec<&[u8]> = vec![b"a\xff\x01", b"a\x00\x02", b"a\x00\x03"];
+        assert_eq!(Pgm::build(keys.into_iter()), None);
     }
 
     #[test]
@@ -193,13 +232,13 @@ mod tests {
         if let Some(p) = Pgm::build(keys.iter().map(|k| k.as_slice())) {
             for k in &keys {
                 let want = keys.partition_point(|x| x < k);
-                assert_eq!(find(Some(&p), &keys, k, |a, b| a < b), want);
+                assert_eq!(find(Some(&p), &keys, (k, k), |a, b| a < b), want);
             }
         }
         assert_eq!(Pgm::build(std::iter::empty()), None);
         let one = [b"k".to_vec()];
         let p = Pgm::build(one.iter().map(|k| k.as_slice()));
-        assert_eq!(find(p.as_ref(), &one, b"a", |a, b| a < b), 0);
-        assert_eq!(find(p.as_ref(), &one, b"z", |a, b| a < b), 1);
+        assert_eq!(find(p.as_ref(), &one, (b"a", b"a"), |a, b| a < b), 0);
+        assert_eq!(find(p.as_ref(), &one, (b"z", b"z"), |a, b| a < b), 1);
     }
 }

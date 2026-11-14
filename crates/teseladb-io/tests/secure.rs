@@ -13,66 +13,20 @@ use teseladb_io::handshake::{
 };
 use teseladb_io::mailbox::{Notify, channel};
 use teseladb_io::peer::{EnrollAccepted, EnrollRequest, Hello, JoinAccepted, PeerMsg};
-use teseladb_io::secure::{Channel, PeerTls};
-use teseladb_crypto::ec::NamedCurve;
-use teseladb_tls::{CertifiedKey, ClientAuth, ClientConfig, ServerConfig, Trust};
+use teseladb_io::secure::Channel;
+use teseladb_tls::{ClientConfig, Trust};
 use teseladb_types::NodeId;
-use teseladb_x509::ext::GeneralName;
-use teseladb_x509::generate::{self, CertificateParams};
-use teseladb_x509::{Certificate, Name, PrivateKey, oid};
 
 const CLUSTER: [u8; 16] = [7; 16];
-const YEAR: i64 = 365 * 86_400;
-
 struct Quiet;
 
 impl Notify for Quiet {
     fn notify(&self) {}
 }
 
-fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
-}
-
-fn ec(seed: u8) -> PrivateKey {
-    PrivateKey::generate_ec(NamedCurve::P256, &[seed; 40]).unwrap()
-}
-
-fn ca(seed: u8) -> (Certificate, PrivateKey) {
-    let key = ec(seed);
-    let mut p = CertificateParams::node(
-        [seed; 16],
-        Name::build(&[(oid::COMMON_NAME, "CA")]),
-        now() - 60,
-        now() + YEAR,
-    );
-    p.ca = Some(None);
-    p.ext_key_usage.clear();
-    (generate::self_signed(&p, &key).unwrap(), key)
-}
-
-fn node_identity(ca: &(Certificate, PrivateKey), seed: u8) -> CertifiedKey {
-    let key = ec(seed);
-    let mut p = CertificateParams::node(
-        [seed; 16],
-        Name::build(&[(oid::COMMON_NAME, "node")]),
-        now() - 60,
-        now() + YEAR,
-    );
-    p.alt_names = vec![GeneralName::Ip(vec![127, 0, 0, 1])];
-    let cert = generate::issue(&p, &key.public_key(), &ca.0, &ca.1).unwrap();
-    CertifiedKey { chain: vec![cert, ca.0.clone()], key }
-}
-
-fn peer_tls(ca: &(Certificate, PrivateKey), seed: u8) -> PeerTls {
-    let id = node_identity(ca, seed);
-    let mut server = ServerConfig::new(id.clone());
-    server.client_auth = ClientAuth::Optional;
-    server.trust = Trust::anchors(vec![ca.0.clone()]);
-    let mut client = ClientConfig::new(Trust::anchors(vec![ca.0.clone()]));
-    client.identity = Some(id);
-    PeerTls::new(server, client)
-}
+#[path = "common/tls.rs"]
+mod tls;
+use tls::{ca, ec, peer_tls};
 
 fn hello(node: u64) -> Hello {
     Hello {

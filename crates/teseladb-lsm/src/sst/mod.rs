@@ -4,7 +4,9 @@
 //! [data block]*   4–32 KiB each, starting on a 4 KiB boundary; a version larger than a block
 //!                 gets a block of its own of the length it needs
 //! [filter block]  Bloom filter of the logical keys
-//! [props block]   key and timestamp bounds, number of versions, range tombstones
+//! [zone block]    optional: per data block, the bounds of the fields most documents hold
+//! [props block]   key and timestamp bounds, number of versions, range tombstones,
+//!                 where the zone block is
 //! [index block]   last internal key of each data block → offset and length
 //! [footer page]   4 KiB whose last 128 bytes are the footer
 //! ```
@@ -26,6 +28,7 @@ pub(crate) mod reader;
 pub(crate) mod ribbon;
 pub(crate) mod value;
 pub(crate) mod writer;
+pub(crate) mod zone;
 
 use teseladb_raftlog::FileId;
 

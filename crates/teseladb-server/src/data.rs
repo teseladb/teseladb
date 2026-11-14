@@ -1298,6 +1298,16 @@ impl DataCore {
         self.transfers.on_fetch(core, &mut lsm.borrow_mut(), from, f, now);
     }
 
+    /// Whether the runtime sends the pieces of exported files itself (012 FR-026).
+    pub fn set_file_sends(&mut self, on: bool) {
+        self.transfers.set_file_sends(on);
+    }
+
+    /// Moves the transfers' answers whose piece the runtime reads and sends to `out`.
+    pub fn take_file_sends(&mut self, out: &mut Vec<(NodeId, teseladb_io::file_send::FileSend)>) {
+        self.transfers.take_file_sends(out);
+    }
+
     /// Next disk operation of the LSM or the transfers, with its owner.
     pub fn poll_io(
         &mut self,

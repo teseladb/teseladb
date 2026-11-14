@@ -441,7 +441,13 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
                 }
             }
         };
-        let found = backend.scan_matching(&next, &end, SCAN_CHUNK, concern, &mut keep)?;
+        // The storage passes over the blocks whose zone maps the filter rules out, unread
+        // and unexamined (004 FR-039). A collation orders strings otherwise than the zones.
+        let collated = ctx.collation.is_some();
+        let block = |z: &dyn teseladb_keys::zone::Zones| {
+            teseladb_exec::zone::block_may_match(plan.filter.expr(), collated, z)
+        };
+        let found = backend.scan_matching(&next, &end, SCAN_CHUNK, concern, &mut keep, &block)?;
         if let Some(e) = fault {
             return Err(e);
         }

@@ -3,7 +3,9 @@
 //! as learners and promotes them, and Group 0 records the change as settled. The founder's log is
 //! compacted before they join, so each one receives the range by export and ingestion from
 //! another replica. Losing the founder then leaves a range that elects a leader, keeps every
-//! document and takes writes. With two cores, Group 0 and the range are on different cores.
+//! document and takes writes. With two cores, Group 0 and the range are on different cores. On
+//! Linux the same runs on io_uring disks, where the pieces of the exported files go from the ring's
+//! registered buffers to the joining nodes (012 FR-026).
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,7 +16,7 @@ use teseladb_meta::group0::ReplicaRole;
 use teseladb_server::data::DataStatus;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
+use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::NodeId;
 
 const READY: Duration = Duration::from_secs(30);
@@ -41,8 +43,11 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
-    Node::start(config(join), || Ok(MemDisk::new()), None).expect("the node starts")
+fn start<D: Disk + Send + 'static>(
+    join: Vec<String>,
+    open: impl FnMut() -> std::io::Result<D>,
+) -> Node<D> {
+    Node::start(config(join), open, None).expect("the node starts")
 }
 
 fn key(i: u32) -> Vec<u8> {
@@ -64,26 +69,49 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn status(n: &Node<MemDisk>) -> DataStatus {
+fn status<D: Disk + Send + 'static>(n: &Node<D>) -> DataStatus {
     n.data_status(ASK).expect("the range's core answers")
 }
 
 /// Writes `i` on whichever node leads the range.
-fn put(nodes: &[&Node<MemDisk>], i: u32) {
+fn put<D: Disk + Send + 'static>(nodes: &[&Node<D>], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
 #[test]
 fn nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder() {
-    let n1 = start(Vec::new());
+    join_and_lose_the_founder(|| Ok(MemDisk::new()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use teseladb_io::NodeDisk;
+    use teseladb_io::node_disk::{DirectIo, IoExecutor, choose};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let base = std::env::temp_dir().join(format!("teseladb-replicas-uring-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
+    assert!(choice.uring, "{choice}");
+    join_and_lose_the_founder(|| {
+        NodeDisk::open(base.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string()), &choice)
+    });
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+fn join_and_lose_the_founder<D: Disk + Send + 'static>(
+    open: impl FnMut() -> std::io::Result<D> + Clone,
+) {
+    let n1 = start(Vec::new(), open.clone());
     assert!(n1.wait_ready(READY));
     until("a leader", || (status(&n1).role == Some(Role::Leader)).then_some(()));
     for i in 0..DOCS {
         put(&[&n1], i);
     }
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = start(seed.clone());
-    let n3 = start(seed);
+    let n2 = start(seed.clone(), open.clone());
+    let n3 = start(seed, open);
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let three = [NodeId(1), NodeId(2), NodeId(3)];
     for n in [&n1, &n2, &n3] {
