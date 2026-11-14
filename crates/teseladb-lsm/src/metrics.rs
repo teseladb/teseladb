@@ -123,6 +123,12 @@ fn ratio(num: u64, den: u64) -> f64 {
 }
 
 impl Lsm {
+    /// Bytes of the files no version uses any more that stay on disk until their readers let
+    /// them go, each with its history file (FR-031): what the LSM frees without compacting.
+    pub fn unused_file_bytes(&self) -> u64 {
+        self.obsolete.iter().map(|t| t.size + t.history.as_ref().map_or(0, |h| h.size)).sum()
+    }
+
     /// The current metrics.
     pub fn metrics(&self) -> LsmMetrics {
         let v = &self.version;

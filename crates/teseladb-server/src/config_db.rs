@@ -121,11 +121,15 @@ pub fn replica_port_member(
 /// `PrimaryReassign.tla`): when the designated primary's node is not alive (`alive`, from the
 /// leader's heartbeat table), the setting of `topologyPresentation` that designates the live
 /// electable member with the highest priority, not held back by `replSetFreeze` or
-/// `replSetMaintenance` at the cluster time, with a new term, `setVersion` and `electionId`; and
+/// `replSetMaintenance` at the later of the cluster time and `now_ms`, the leader's clock, with a new term, `setVersion` and `electionId`; and
 /// while the primary is alive, a live member with a higher priority takes over (a new term, as a
 /// priority takeover of the reference server). `None` if nothing changes or no member can take
 /// over.
-pub fn reassignment(sm: &Group0Sm, alive: &dyn Fn(NodeId) -> bool) -> Option<(Vec<u8>, Vec<u8>)> {
+pub fn reassignment(
+    sm: &Group0Sm,
+    now_ms: u64,
+    alive: &dyn Fn(NodeId) -> bool,
+) -> Option<(Vec<u8>, Vec<u8>)> {
     use teseladb_wire::commands::presentation::{Presentation, REASON_TAKEOVER, REASON_TIMEOUT};
     let p = presentation(sm)?;
     if p.mode != teseladb_topology::replset::PresentationMode::ReplicaSet {
@@ -135,7 +139,9 @@ pub fn reassignment(sm: &Group0Sm, alive: &dyn Fn(NodeId) -> bool) -> Option<(Ve
         live(sm).map(|n| (n.id, text(&n.addrs.native_addr))).collect();
     let hosts: Vec<String> = nodes.iter().map(|(_, h)| h.clone()).collect();
     let held = holds(sm);
-    let now = sm.cluster_time_ms;
+    // The leader's clock (`now_ms`): Group 0's cluster time only moves when it applies an entry,
+    // and a freeze has to end without one.
+    let now = sm.cluster_time_ms.max(now_ms);
     let up = |host: &str| {
         nodes.iter().any(|(id, h)| h == host && alive(*id))
             && !held.iter().any(|(h, x)| h == host && x.holds_back(now))
@@ -148,13 +154,14 @@ pub fn reassignment(sm: &Group0Sm, alive: &dyn Fn(NodeId) -> bool) -> Option<(Ve
         false => (rs.reassign(&up)?, REASON_TIMEOUT),
     };
     let mark = teseladb_hlc::Hlc { physical: now, logical: 0 };
+    let before = p.clone();
     let after = Presentation {
         primary: next.primary().map(str::to_owned),
         term: next.term(),
         set_version: next.set_version(),
         ..p
     }
-    .elected(mark, reason);
+    .elected(&before, mark, reason);
     let stored = Document::from(RawDoc::from_bytes(sm.settings.get(PRESENTATION_KEY)?).ok()?);
     let mut value = stored;
     for (k, v) in after.to_document().iter() {
@@ -507,18 +514,18 @@ mod tests {
         };
         let stored = p.to_document().with("clusterParameterTime", Value::Int64(7));
         sm.settings.insert(PRESENTATION_KEY.to_vec(), stored.to_bytes().unwrap());
-        assert_eq!(reassignment(&sm, &|_| true), None, "the primary is alive");
+        assert_eq!(reassignment(&sm, 0, &|_| true), None, "the primary is alive");
         let frozen = Hold { frozen_until_ms: u64::MAX, ..Hold::default() };
         let key = [PARAMETER_PREFIX, hold_name("n2:27017").as_bytes()].concat();
         sm.settings.insert(key, frozen.to_document().to_bytes().unwrap());
-        let (k, v) = reassignment(&sm, &|n| n != NodeId(1)).expect("a new primary");
+        let (k, v) = reassignment(&sm, 0, &|n| n != NodeId(1)).expect("a new primary");
         assert_eq!(k, PRESENTATION_KEY);
         let after = Document::from(RawDoc::from_bytes(&v).unwrap());
         assert_eq!(after.get("primary"), Some(&Value::from("n3:27017")));
         assert_eq!(after.get("term"), Some(&Value::Int64(2)));
         assert_eq!(after.get("electionReason"), Some(&Value::from("electionTimeout")));
         assert_eq!(after.get("clusterParameterTime"), Some(&Value::Int64(7)));
-        assert_eq!(reassignment(&sm, &|n| n == NodeId(2)), None, "only a frozen node is alive");
+        assert_eq!(reassignment(&sm, 0, &|n| n == NodeId(2)), None, "only a frozen node is alive");
         let maint = Hold { maintenance: 1, ..Hold::default() };
         let key = [PARAMETER_PREFIX, hold_name("n3:27017").as_bytes()].concat();
         sm.settings.insert(key, maint.to_document().to_bytes().unwrap());
@@ -542,14 +549,41 @@ mod tests {
             ..Presentation::default()
         };
         sm.settings.insert(PRESENTATION_KEY.to_vec(), p.to_document().to_bytes().unwrap());
-        let (_, v) = reassignment(&sm, &|_| true).expect("a takeover");
+        let (_, v) = reassignment(&sm, 0, &|_| true).expect("a takeover");
         let after = Document::from(RawDoc::from_bytes(&v).unwrap());
         assert_eq!(after.get("primary"), Some(&Value::from("n2:27017")));
         assert_eq!(after.get("electionReason"), Some(&Value::from("priorityTakeover")));
         let frozen = Hold { frozen_until_ms: u64::MAX, ..Hold::default() };
         let key = [PARAMETER_PREFIX, hold_name("n2:27017").as_bytes()].concat();
         sm.settings.insert(key, frozen.to_document().to_bytes().unwrap());
-        assert_eq!(reassignment(&sm, &|_| true), None, "the higher one is frozen");
+        assert_eq!(reassignment(&sm, 0, &|_| true), None, "the higher one is frozen");
+    }
+
+    /// A freeze ends at the leader's clock, not at Group 0's cluster time, which only moves when
+    /// Group 0 applies an entry: with two members frozen by step-downs and nothing else written,
+    /// the primary's death left the set without one for good (measured on 14-11-2026, 002 T050).
+    #[test]
+    fn a_freeze_ends_at_the_leaders_clock() {
+        use teseladb_wire::commands::presentation::{Hold, Presentation, hold_name};
+        let mut sm = cluster();
+        let p = Presentation {
+            mode: teseladb_topology::replset::PresentationMode::ReplicaSet,
+            set_name: "rs0".into(),
+            primary: Some("n1:27017".into()),
+            ..Presentation::default()
+        };
+        sm.settings.insert(PRESENTATION_KEY.to_vec(), p.to_document().to_bytes().unwrap());
+        sm.cluster_time_ms = 100;
+        for host in ["n2:27017", "n3:27017"] {
+            let frozen = Hold { frozen_until_ms: 10_000, ..Hold::default() };
+            let key = [PARAMETER_PREFIX, hold_name(host).as_bytes()].concat();
+            sm.settings.insert(key, frozen.to_document().to_bytes().unwrap());
+        }
+        let fallen = |n: NodeId| n != NodeId(1);
+        assert_eq!(reassignment(&sm, 5_000, &fallen), None, "both still frozen");
+        let (_, v) = reassignment(&sm, 20_000, &fallen).expect("the freezes ended");
+        let after = Document::from(RawDoc::from_bytes(&v).unwrap());
+        assert_ne!(after.get("primary"), Some(&Value::from("n1:27017")));
     }
 
     /// The replica set port's set: every member at that port (018 FR-016).

@@ -411,7 +411,7 @@ pub fn set_cluster_parameter<B: Backend + ?Sized>(
         let hosts = super::presentation::hosts(ctx.backend)?;
         let mark = ctx.backend.cluster_mark();
         parsed = super::presentation::next(&before, &parsed, &hosts)?
-            .elected(mark, super::presentation::REASON_TIMEOUT)
+            .elected(&before, mark, super::presentation::REASON_TIMEOUT)
             .to_document();
     }
     let secs = u32::try_from(ctx.backend.now_ms() / 1000).unwrap_or(u32::MAX);

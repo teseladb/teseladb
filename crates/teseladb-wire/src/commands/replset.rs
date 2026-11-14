@@ -266,8 +266,9 @@ pub fn step_down<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, 
     let until = now.saturating_add(u64::try_from(secs.saturating_mul(MS_PER_SECOND)).unwrap_or(0));
     set_hold(ctx.backend, &me_host, Hold { frozen_until_ms: until, ..hold })?;
     let mark = ctx.backend.cluster_mark();
+    let before = p.clone();
     let p = Presentation { primary: next.primary().map(str::to_owned), term: next.term(), ..p }
-        .elected(mark, REASON_STEP_UP);
+        .elected(&before, mark, REASON_STEP_UP);
     store(ctx.backend, &p)?;
     Ok(Document::new().with("ok", 1.0))
 }
@@ -741,6 +742,15 @@ pub fn get_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         let priority = rs.members()[me_index].priority();
         if Some(me_index) == primary_index {
             out.push("electionCandidateMetrics", candidate_metrics(e, &rs, majority, priority));
+            // Its vote in the designation before, as a secondary (002 T050).
+            if let Some(v) = &p.previous
+                && let Some(candidate) = rs.members().iter().position(|m| m.host() == v.primary)
+            {
+                out.push(
+                    "electionParticipantMetrics",
+                    previous_metrics(v, index(candidate), priority),
+                );
+            }
         } else {
             out.push(
                 "electionParticipantMetrics",
@@ -762,12 +772,6 @@ fn op_time_doc(mark: teseladb_hlc::Hlc, term: i64) -> Document {
 fn stable_recovery(mark: teseladb_hlc::Hlc) -> Value {
     let (time, increment) = teseladb_hlc::to_timestamp(mark);
     Value::Timestamp { time, increment }
-}
-
-/// A priority as the reference server shows it: an integer when it is whole.
-fn priority_value(p: f64) -> Value {
-    // A member's priority is within 0 and 1000, checked when the set is made.
-    if p.fract() == 0.0 { Value::Int32(p as i32) } else { Value::Double(p) }
 }
 
 /// The date of mark `at`, in milliseconds.
@@ -792,7 +796,7 @@ fn candidate_metrics(
         .with("lastSeenWrittenOpTimeAtElection", before.clone())
         .with("lastSeenOpTimeAtElection", before)
         .with("numVotesNeeded", majority)
-        .with("priorityAtElection", priority_value(priority))
+        .with("priorityAtElection", priority)
         .with("electionTimeoutMillis", ELECTION_TIMEOUT_MS)
         .with("numCatchUpOps", 0i64)
         .with("newTermStartDate", date_of(e.at))
@@ -817,9 +821,31 @@ fn participant_metrics(
         .with("maxWrittenOpTimeInSet", before.clone())
         .with("lastAppliedOpTimeAtElection", before.clone())
         .with("maxAppliedOpTimeInSet", before)
-        .with("priorityAtElection", priority_value(priority))
+        .with("priorityAtElection", priority)
         .with("newTermStartDate", date_of(e.at))
         .with("newTermAppliedDate", date_of(e.at))
+}
+
+/// `electionParticipantMetrics` of the primary: its vote in the designation before its own, as
+/// a reference primary shows the last vote it gave (measured on 14-11-2026, 002 T050). A
+/// reference primary shows no `newTermStartDate` there.
+fn previous_metrics(
+    v: &super::presentation::PreviousElection,
+    candidate: i32,
+    priority: f64,
+) -> Document {
+    let before = op_time_doc(v.at, v.term.saturating_sub(1));
+    Document::new()
+        .with("votedForCandidate", true)
+        .with("electionTerm", v.term)
+        .with("lastVoteDate", date_of(v.at))
+        .with("electionCandidateMemberId", candidate)
+        .with("voteReason", "")
+        .with("lastWrittenOpTimeAtElection", before.clone())
+        .with("maxWrittenOpTimeInSet", before.clone())
+        .with("lastAppliedOpTimeAtElection", before.clone())
+        .with("maxAppliedOpTimeInSet", before)
+        .with("priorityAtElection", priority)
 }
 
 /// The labels of an error reply.

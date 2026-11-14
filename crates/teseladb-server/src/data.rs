@@ -451,6 +451,12 @@ impl DataCore {
         self.compactions.insert(id, (before, reply));
     }
 
+    /// The bytes of the files the core's LSM no longer uses and that stay on disk until their
+    /// readers let them go, for `compact` with `dryRun` (DV-017).
+    pub fn unused_file_bytes(&self) -> u64 {
+        self.lsm.borrow().unused_file_bytes()
+    }
+
     /// Core changes with their files under `dir` and the node's table of which cores hold each
     /// range (007 FR-011); with `link`, the node's cores share one file system and a range that
     /// changes core hands over its whole files as hard links (004 FR-033).

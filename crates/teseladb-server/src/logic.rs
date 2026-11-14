@@ -181,6 +181,9 @@ pub enum NodeMsg {
     Relocate(RelocateMsg),
     /// `compact` (DV-017): the core compacts its LSM and answers the bytes of files it freed.
     Compact(Sender<u64>),
+    /// `compact` with `dryRun` (DV-017): the core answers the bytes of the files its LSM no longer
+    /// uses that stay on disk, without compacting.
+    CompactEstimate(Sender<u64>),
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
     /// range moved between cores), with the node that sent it.
     Stray(NodeId, PeerFrame),
@@ -882,7 +885,9 @@ impl NodeLogic {
         let alive = |n: NodeId| {
             table.get(n).is_some_and(|e| e.state == teseladb_meta::liveness::LiveState::Alive)
         };
-        let Some((key, value)) = crate::config_db::reassignment(sm, &alive) else { return };
+        let Some((key, value)) = crate::config_db::reassignment(sm, self.wall_ms, &alive) else {
+            return;
+        };
         self.reassign_op = self.send_group0(Group0Command::SetSetting { key, value });
     }
 
@@ -1961,6 +1966,9 @@ impl CoreLogic for NodeLogic {
                     let _ = reply.send(0);
                 }
             },
+            NodeMsg::CompactEstimate(reply) => {
+                let _ = reply.send(self.data.as_ref().map_or(0, DataCore::unused_file_bytes));
+            }
             NodeMsg::GateEverywhere(want, reply) => self.gate_everywhere(want, reply),
             NodeMsg::CurrentOps(reply) => self.current_ops(reply),
             NodeMsg::ForwardHttp(to, body, reply) => {

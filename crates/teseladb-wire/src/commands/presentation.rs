@@ -54,6 +54,26 @@ pub struct Election {
     pub reason: String,
 }
 
+/// The designation before the latest one, of another member: the vote the latest primary gave
+/// as a secondary, which a reference primary shows in `electionParticipantMetrics` (measured on
+/// 14-11-2026, 002 T050).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviousElection {
+    /// The cluster mark of that designation.
+    pub at: teseladb_hlc::Hlc,
+    /// The member it designated.
+    pub primary: String,
+    /// Its term.
+    pub term: i64,
+}
+
+/// The field with the mark of the designation before the latest one.
+pub const PREVIOUS_ELECTED_AT: &str = "previousElectedAt";
+/// The field with the member the designation before the latest one designated.
+pub const PREVIOUS_PRIMARY: &str = "previousPrimary";
+/// The field with the term of the designation before the latest one.
+pub const PREVIOUS_TERM: &str = "previousTerm";
+
 /// The stored presentation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Presentation {
@@ -71,6 +91,8 @@ pub struct Presentation {
     pub members: Vec<Member>,
     /// The latest designation of a primary.
     pub election: Option<Election>,
+    /// The designation before it, when it designated another member.
+    pub previous: Option<PreviousElection>,
     /// The replica set's own port (`replicaSetPort`), if it is open.
     pub replica_set_port: Option<u16>,
 }
@@ -85,6 +107,7 @@ impl Default for Presentation {
             term: FIRST_TERM,
             members: Vec::new(),
             election: None,
+            previous: None,
             replica_set_port: None,
         }
     }
@@ -175,6 +198,15 @@ impl Presentation {
             let at = teseladb_hlc::from_timestamp((*time, *increment));
             p.election = Some(Election { at, reason: reason.clone() });
         }
+        if let (
+            Some(Value::Timestamp { time, increment }),
+            Some(Value::String(primary)),
+            Some(Value::Int64(term)),
+        ) = (doc.get(PREVIOUS_ELECTED_AT), doc.get(PREVIOUS_PRIMARY), doc.get(PREVIOUS_TERM))
+        {
+            let at = teseladb_hlc::from_timestamp((*time, *increment));
+            p.previous = Some(PreviousElection { at, primary: primary.clone(), term: *term });
+        }
         p.replica_set_port = port_of(doc.get(REPLICA_SET_PORT));
         Ok(p)
     }
@@ -196,6 +228,12 @@ impl Presentation {
             let (time, increment) = teseladb_hlc::to_timestamp(e.at);
             d.push(ELECTED_AT, Value::Timestamp { time, increment });
             d.push(ELECTION_REASON, e.reason.as_str());
+        }
+        if let Some(v) = &self.previous {
+            let (time, increment) = teseladb_hlc::to_timestamp(v.at);
+            d.push(PREVIOUS_ELECTED_AT, Value::Timestamp { time, increment });
+            d.push(PREVIOUS_PRIMARY, v.primary.as_str());
+            d.push(PREVIOUS_TERM, v.term);
         }
         if let Some(port) = self.replica_set_port {
             d.push(REPLICA_SET_PORT, i32::from(port));
@@ -232,10 +270,22 @@ impl Presentation {
         })
     }
 
-    /// The presentation after a designation at mark `at` for `reason`.
-    pub fn elected(self, at: teseladb_hlc::Hlc, reason: &str) -> Presentation {
+    /// The presentation after a designation at mark `at` for `reason`, from `before`: a
+    /// designation of another member than `before`'s primary keeps `before`'s as the previous one.
+    pub fn elected(
+        self,
+        before: &Presentation,
+        at: teseladb_hlc::Hlc,
+        reason: &str,
+    ) -> Presentation {
         let election = self.primary.is_some().then(|| Election { at, reason: reason.to_owned() });
-        Presentation { election, ..self }
+        let previous = match (&before.election, &before.primary) {
+            (Some(e), Some(p)) if self.primary.as_ref() != Some(p) => {
+                Some(PreviousElection { at: e.at, primary: p.clone(), term: before.term })
+            }
+            _ => before.previous.clone(),
+        };
+        Presentation { election, previous, ..self }
     }
 
     /// The replica set over the cluster's nodes `hosts`, each with its stored attributes.
@@ -490,6 +540,7 @@ pub fn next(
         term: before.term.saturating_add(1),
         members: before.members.clone(),
         election: before.election.clone(),
+        previous: before.previous.clone(),
         replica_set_port: match request.get(REPLICA_SET_PORT) {
             Some(v) => port_of(Some(v)),
             None => before.replica_set_port,

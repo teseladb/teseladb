@@ -111,12 +111,12 @@ fn fsync_answers_for_each_shard_and_its_errors_too() {
 fn compact_auto_compact_and_shutdown_take_the_generic_arguments() {
     let mut m = Mem::new();
     let comment = ("comment", Value::from("c"));
-    // `compact` of a name that is no string, once forced.
+    // `compact` of a name that is no string: the name is checked first (measured, 002 T049).
     let r = m.run(
         "db",
         doc(&[("compact", Value::Int32(1)), ("force", Value::Boolean(true)), comment.clone()]),
     );
-    assert_eq!(code(&r), Some(&Value::Int32(TYPE_MISMATCH)), "{r:?}");
+    assert_eq!(code(&r), Some(&Value::Int32(73)), "{r:?}");
     let r = m.run("db", doc(&[("compact", Value::from("c")), ("dryRun", Value::Int32(1))]));
     assert_eq!(code(&r), Some(&Value::Int32(TYPE_MISMATCH)), "{r:?}");
     let r = m.run(ADMIN, doc(&[("autoCompact", Value::Boolean(true)), comment.clone()]));
@@ -127,4 +127,84 @@ fn compact_auto_compact_and_shutdown_take_the_generic_arguments() {
     // This backend cannot stop: the checks pass and the node refuses.
     let r = m.run(ADMIN, doc(&[("shutdown", Value::Int32(1)), comment]));
     assert_eq!(code(&r), Some(&Value::Int32(ILLEGAL)), "{r:?}");
+}
+
+/// `compact` checks its name, then its fields, then `force`, then the collection, and `dryRun`
+/// estimates without compacting, as a reference replica set member 9.0.4 answers (measured on
+/// 14-11-2026, 002 T049, DV-017).
+#[test]
+fn compact_checks_in_the_reference_members_order_and_dry_run_estimates() {
+    let mut m = Mem::new();
+    assert!(ok(&m.run("db", doc(&[("create", Value::from("c"))]))));
+    let force = ("force", Value::Boolean(true));
+    let run = |m: &mut Mem, fields: &[(&str, Value)]| m.run("db", doc(fields));
+    let err = |r: &Document| -> (i32, String) {
+        let Some(Value::Int32(c)) = r.get("code") else { panic!("{r:?}") };
+        let Some(Value::String(e)) = r.get("errmsg") else { panic!("{r:?}") };
+        (*c, e.clone())
+    };
+    let cases: Vec<(Vec<(&str, Value)>, i32, &str)> = vec![
+        (vec![("compact", Value::Int32(1))], 73, "Collection name has invalid type int"),
+        (
+            vec![("compact", Value::Null), force.clone()],
+            73,
+            "Collection name has invalid type null",
+        ),
+        (vec![("compact", Value::from("")), force.clone()], 73, "Invalid namespace specified 'db'"),
+        (
+            vec![("compact", Value::Int32(1)), ("bogus", Value::Int32(1))],
+            73,
+            "Collection name has invalid type int",
+        ),
+        (
+            vec![("compact", Value::from("c")), ("freeSpaceTargetMB", Value::Int32(0))],
+            BAD_VALUE,
+            "BSON field 'freeSpaceTargetMB' value must be >= 1, actual value '0'",
+        ),
+        (
+            vec![
+                ("compact", Value::from("c")),
+                force.clone(),
+                ("freeSpaceTargetMB", Value::Double(0.5)),
+            ],
+            BAD_VALUE,
+            "BSON field 'freeSpaceTargetMB' value must be >= 1, actual value '0'",
+        ),
+        (
+            vec![
+                ("compact", Value::from("c")),
+                force.clone(),
+                ("freeSpaceTargetMB", Value::Int32(-1)),
+            ],
+            BAD_VALUE,
+            "BSON field 'freeSpaceTargetMB' value must be >= 1, actual value '-1'",
+        ),
+        (
+            vec![
+                ("compact", Value::from("c")),
+                force.clone(),
+                ("freeSpaceTargetMB", Value::from("x")),
+            ],
+            TYPE_MISMATCH,
+            "BSON field 'compact.freeSpaceTargetMB' is the wrong type 'string', expected types '[int, double, decimal, long]'",
+        ),
+        (vec![("compact", Value::from("nope")), force.clone()], 26, "collection does not exist"),
+    ];
+    for (fields, want_code, want_msg) in cases {
+        let r = run(&mut m, &fields);
+        assert_eq!(err(&r), (want_code, want_msg.to_owned()), "{fields:?}");
+    }
+    let r = run(
+        &mut m,
+        &[("compact", Value::from("c")), force.clone(), ("dryRun", Value::Boolean(true))],
+    );
+    let keys: Vec<&str> =
+        r.iter().map(|(k, _)| k).filter(|k| !k.starts_with('$') && *k != "operationTime").collect();
+    assert_eq!(keys, ["estimatedBytesFreed", "ok"], "{r:?}");
+    assert_eq!(field(&r, "estimatedBytesFreed"), &Value::Int32(0));
+    let r = run(
+        &mut m,
+        &[("compact", Value::from("c")), force, ("freeSpaceTargetMB", Value::Double(1.5))],
+    );
+    assert_eq!(field(&r, "bytesFreed"), &Value::Int32(0), "{r:?}");
 }

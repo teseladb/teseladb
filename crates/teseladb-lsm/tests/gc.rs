@@ -448,3 +448,38 @@ fn a_table_knows_its_lowest_and_highest_threshold_and_the_threshold_of_each_key(
     assert_eq!(table.threshold_over(b"c", b"h"), Some(ts(25, 0)));
     assert_eq!(table.threshold_over(b"c", b"n"), None, "a gap in the middle");
 }
+
+#[test]
+fn files_a_reader_holds_after_a_compaction_count_as_unused_until_it_lets_them_go() {
+    // 002 T049, DV-017: `compact` with `dryRun` answers what the LSM no longer uses but keeps on
+    // disk: the files a compaction replaced while a reader still holds them.
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let value = vec![6u8; 1024];
+    let keys: Vec<Vec<u8>> = (0..100u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let mut index = 0;
+    for round in 1..=4u64 {
+        for k in &keys {
+            index += 1;
+            lsm.put(G, index, k, ts(round, 0), &at_round(&value, round)).unwrap();
+        }
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    assert_eq!(lsm.unused_file_bytes(), 0, "nothing was replaced yet");
+    let reader = lsm.view();
+    let held = files_bytes(&lsm);
+    let id = lsm.compact_now();
+    let mut done = Vec::new();
+    for s in 1..40 {
+        done.extend(lsm.run_io(&mut disk, Nanos::from_secs(s)).compacted);
+        if !done.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(done, vec![id]);
+    let unused = lsm.unused_file_bytes();
+    assert!(unused > 0 && unused <= held, "{unused} bytes unused of the {held} the reader holds");
+    drop(reader);
+    lsm.run_io(&mut disk, Nanos::from_secs(41));
+    assert_eq!(lsm.unused_file_bytes(), 0, "the files left once the reader let them go");
+}

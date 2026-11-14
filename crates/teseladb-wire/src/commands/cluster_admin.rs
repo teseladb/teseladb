@@ -13,7 +13,9 @@ use teseladb_bson::{Document, RawDoc, Value};
 use super::admin::admin_only;
 use super::{Backend, Ctx, lock};
 use crate::concerns::{Level, ReadConcernArgs, WArg, WriteConcernArgs};
-use crate::error::{BAD_VALUE, Code, CommandError, ILLEGAL_OPERATION, UNKNOWN_REPL_WRITE_CONCERN};
+use crate::error::{
+    BAD_VALUE, Code, CommandError, ILLEGAL_OPERATION, INVALID_NAMESPACE, UNKNOWN_REPL_WRITE_CONCERN,
+};
 use crate::types::wrong_type;
 
 /// `getDefaultRWConcern`.
@@ -380,13 +382,27 @@ pub fn fsync<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comm
 /// answers the bytes freed: what the history no longer needs stayed on disk until the space of the
 /// files asked for a compaction (H-054).
 pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
-    let mut force = false;
+    // The name first, then the fields, then `force`, then the collection (measured on a reference
+    // replica set member 9.0.4, 14-11-2026, 002 T049).
+    let coll = match ctx.first() {
+        Value::String(c) if c.is_empty() => {
+            let msg = format!("Invalid namespace specified '{}'", ctx.db);
+            return Err(CommandError::new(INVALID_NAMESPACE, msg));
+        }
+        Value::String(c) => c.clone(),
+        v => {
+            let msg = format!("Collection name has invalid type {}", crate::types::type_name(v));
+            return Err(CommandError::new(INVALID_NAMESPACE, msg));
+        }
+    };
+    let (mut force, mut dry_run) = (false, false);
     for (k, v) in ctx.cmd.iter().skip(1) {
         match (k, v) {
             ("force", Value::Boolean(b)) => force = *b,
             ("force", v) => return Err(wrong_type(&format!("{COMPACT}.force"), v, "bool")),
-            ("dryRun", Value::Boolean(_)) | ("freeSpaceTargetMB", _) => {}
+            ("dryRun", Value::Boolean(b)) => dry_run = *b,
             ("dryRun", v) => return Err(wrong_type(&format!("{COMPACT}.dryRun"), v, "bool")),
+            ("freeSpaceTargetMB", v) => free_space_target(v)?,
             (k, _) if generic(k) => {}
             (k, _) => return Err(unknown_field(COMPACT, k)),
         }
@@ -395,18 +411,41 @@ pub fn compact<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Co
         let msg = "will not run compact on an active replica set primary as this will slow down other running operations. use force:true to force";
         return Err(CommandError::new(ILLEGAL_OPERATION, msg));
     }
-    let Value::String(coll) = ctx.first() else {
-        return Err(wrong_type(&format!("{COMPACT}.{COMPACT}"), ctx.first(), "string"));
-    };
-    let ns = super::names::ns(ctx.db, coll);
+    let ns = super::names::ns(ctx.db, &coll);
     if ctx.backend.collection(&ns)?.is_none() {
-        let msg = format!("collection does not exist: {}.{}", ns.db, ns.coll);
+        let msg = "collection does not exist";
         return Err(CommandError::new(crate::error::NAMESPACE_NOT_FOUND, msg));
     }
+    // `dryRun` estimates without compacting (DV-017).
+    let (field, bytes) = match dry_run {
+        true => ("estimatedBytesFreed", ctx.backend.compact_estimate()?),
+        false => ("bytesFreed", ctx.backend.compact()?),
+    };
     // As `appendNumber` writes it: a 32-bit integer when the count fits in one.
-    let freed = i64::try_from(ctx.backend.compact()?).unwrap_or(i64::MAX);
-    let freed = i32::try_from(freed).map_or(Value::Int64(freed), Value::Int32);
-    Ok(Document::new().with("bytesFreed", freed).with("ok", 1.0))
+    let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+    let bytes = i32::try_from(bytes).map_or(Value::Int64(bytes), Value::Int32);
+    Ok(Document::new().with(field, bytes).with("ok", 1.0))
+}
+
+/// The numeric types `compact.freeSpaceTargetMB` takes, in the reference server's order.
+const FREE_SPACE_TYPES: [&str; 4] = ["int", "double", "decimal", "long"];
+
+/// `compact.freeSpaceTargetMB`: a number of at least 1 once truncated to an integer.
+fn free_space_target(v: &Value) -> Result<(), CommandError> {
+    let n = match v {
+        Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
+            crate::types::number(v).unwrap_or(0.0).trunc()
+        }
+        v => {
+            let path = format!("{COMPACT}.freeSpaceTargetMB");
+            return Err(crate::types::wrong_types(&path, v, &FREE_SPACE_TYPES));
+        }
+    };
+    if n < 1.0 {
+        let msg = format!("BSON field 'freeSpaceTargetMB' value must be >= 1, actual value '{n}'");
+        return Err(CommandError::new(BAD_VALUE, msg));
+    }
+    Ok(())
 }
 
 /// `autoCompact` (DV-017): the node's LSM always compacts in the background; the switch is

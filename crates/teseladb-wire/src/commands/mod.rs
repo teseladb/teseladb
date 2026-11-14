@@ -730,6 +730,12 @@ pub trait Backend {
     fn compact(&mut self) -> Result<u64, CommandError> {
         Ok(0)
     }
+    /// The bytes `compact` with `dryRun` estimates it would free, without compacting (DV-017):
+    /// the files the node's storage no longer uses that stay on disk; a backend that keeps no
+    /// files has none.
+    fn compact_estimate(&mut self) -> Result<u64, CommandError> {
+        Ok(0)
+    }
     /// Asks the node to stop (`shutdown`, 007 FR-018); a backend that cannot stop refuses.
     fn request_shutdown(&mut self) -> Result<(), CommandError> {
         Err(CommandError::new(crate::error::ILLEGAL_OPERATION, "this node cannot be shut down"))

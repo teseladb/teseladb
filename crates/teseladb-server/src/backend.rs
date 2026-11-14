@@ -2029,6 +2029,23 @@ impl Backend for ServerBackend {
         Ok(freed)
     }
 
+    /// Every core of the node answers what its LSM no longer uses; their sum (DV-017).
+    fn compact_estimate(&mut self) -> Result<u64, CommandError> {
+        let waits: Vec<Receiver<u64>> = self
+            .cores
+            .iter()
+            .filter_map(|core| {
+                let (tx, rx) = mpsc::channel();
+                core.send(CoreInput::App(NodeMsg::CompactEstimate(tx))).ok().map(|()| rx)
+            })
+            .collect();
+        let mut bytes = 0u64;
+        for rx in waits {
+            bytes = bytes.saturating_add(self.compacted(&rx)?);
+        }
+        Ok(bytes)
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         // Core 0 publishes its copy before it answers any change of it (H-017): every
         // `aggregate` reads the presentation from here, without a message to core 0.

@@ -2140,6 +2140,10 @@ impl Backend for TxnBackend<'_> {
         self.inner.compact()
     }
 
+    fn compact_estimate(&mut self) -> Result<u64, CommandError> {
+        self.inner.compact_estimate()
+    }
+
     fn cluster_parameters(&mut self) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
         self.inner.cluster_parameters()
     }

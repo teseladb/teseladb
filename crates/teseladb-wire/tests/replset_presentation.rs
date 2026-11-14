@@ -539,8 +539,33 @@ fn status_with_the_election() {
         &Value::from("electionTimeout")
     );
     assert_eq!(field(&r, "electionCandidateMetrics.electionTerm"), &Value::Int64(3));
-    assert_eq!(field(&r, "electionCandidateMetrics.priorityAtElection"), &Value::Int32(1));
-    assert_eq!(r.get("electionParticipantMetrics"), None);
+    // A double, as a reference primary shows it (measured on 14-11-2026, 002 T050).
+    assert_eq!(field(&r, "electionCandidateMetrics.priorityAtElection"), &Value::Double(1.0));
+    // The primary keeps the vote it gave as a secondary in the designation before its own.
+    assert_eq!(field(&r, "electionParticipantMetrics.electionCandidateMemberId"), &Value::Int32(1));
+    assert_eq!(field(&r, "electionParticipantMetrics.electionTerm"), &Value::Int64(2));
+    let vote: Vec<String> = match field(&r, "electionParticipantMetrics") {
+        Value::Document(d) => d.iter().map(|(k, _)| k.to_owned()).collect(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        vote,
+        [
+            "votedForCandidate",
+            "electionTerm",
+            "lastVoteDate",
+            "electionCandidateMemberId",
+            "voteReason",
+            "lastWrittenOpTimeAtElection",
+            "maxWrittenOpTimeInSet",
+            "lastAppliedOpTimeAtElection",
+            "maxAppliedOpTimeInSet",
+            "priorityAtElection"
+        ]
+    );
+    let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
+    let at = |k: &str| keys.iter().position(|x| *x == k).expect(k);
+    assert!(at("electionCandidateMetrics") + 1 == at("electionParticipantMetrics"));
     admin(&mut m, Document::new().with("replSetStepDown", 10));
     let r = status_of(&mut m);
     assert_eq!(
