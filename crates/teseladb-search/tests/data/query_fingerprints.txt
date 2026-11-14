@@ -1,0 +1,18 @@
+synonyms-equivalent (2 hits)	855cc24c2d1b3a43
+synonyms-explicit (1 hits)	68d5657997536e5a
+synonyms-phrase (2 hits)	1220861324a11579
+synonyms-english (3 hits)	6a99ea886abb44d7
+highlight (4 hits)	9b263034fd720681
+highlight-limits (3 hits)	e0c0da5a8f236652
+details (3 hits)	01b7304e6c77ca54
+details-compound (1 hits)	7c110c7860fabd8b
+details-synonyms (5 hits)	fa01aa77a64f6ed7
+phrase-several (2 hits)	855cc24c2d1b3a43
+span-near (1 hits)	575b96c6e80d6eba
+span-first (2 hits)	6f7ec54a243681d1
+embedded (2 hits)	142c0f749c01eba8
+equals-token (3 hits)	45ff655f62a08005
+facet-operator (8 hits)	a71d430af4d271b5
+count-total	c5afff3973d558a4
+count-bound	87d0ad1994d84a3e
+facets	9762927e7200de27

@@ -15,6 +15,14 @@ use teseladb_search::analysis::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Tokenizer}
 
 const FINGERPRINTS: &str = include_str!("data/filter_fingerprints.txt");
 
+/// The fingerprints of the stemmer corpus, recorded as `FINGERPRINTS` were.
+const STEMMER_FINGERPRINTS: &str = include_str!("data/stemmer_fingerprints.txt");
+
+/// Words made of the endings of the stemmers' tables (every word-like string literal of their
+/// sources), alone and after short stems of their script, generated once from the sources of
+/// 14-11-2026: they take the branches of the rules that the stop lists do not reach.
+const STEMMER_WORDS: &str = include_str!("data/stemmer_words.txt");
+
 /// The stop lists the corpus takes its words from.
 const STOP_LISTS: &[&str] = &[
     include_str!("../src/analysis/stopwords/arabic.txt"),
@@ -305,16 +313,15 @@ const LANGUAGES: &[&str] = &[
     "ukrainian",
 ];
 
-#[test]
-fn every_analyzer_and_filter_gives_the_terms_it_gave() {
-    let words = corpus();
-    let texts: Vec<String> = words.chunks(WORDS_PER_TEXT).map(|c| c.join(" ")).collect();
+/// The fingerprints of every filter alone and after `keywordRepeat`, and of every built-in
+/// analyzer and its terms, over `texts`.
+fn fingerprints(texts: &[String]) -> Vec<(String, u64)> {
     let mut found: Vec<(String, u64)> = Vec::new();
     for (name, filter) in filters() {
         let alone = whitespace(vec![filter.clone()]);
-        found.push((name.clone(), tokens(&alone, &texts)));
+        found.push((name.clone(), tokens(&alone, texts)));
         let repeated = whitespace(vec![TokenFilter::KeywordRepeat, filter]);
-        found.push((format!("{name}+keywordRepeat"), tokens(&repeated, &texts)));
+        found.push((format!("{name}+keywordRepeat"), tokens(&repeated, texts)));
     }
     let mut analyzers: Vec<String> = [
         teseladb_names::ANALYZER_STANDARD,
@@ -331,16 +338,35 @@ fn every_analyzer_and_filter_gives_the_terms_it_gave() {
         let a = Analyzer::builtin(&name).unwrap();
         let short = name.strip_prefix(teseladb_names::ANALYZER_PREFIX).unwrap_or(&name);
         let short = format!("analyzer-{short}");
-        found.push((short.clone(), tokens(&a, &texts)));
-        found.push((format!("{short}/terms"), terms(&a, &texts)));
+        found.push((short.clone(), tokens(&a, texts)));
+        found.push((format!("{short}/terms"), terms(&a, texts)));
     }
     for (name, hash) in &found {
         println!("{name}\t{hash:016x}");
     }
+    found
+}
+
+/// Checks `found` against the fingerprints of `recorded`.
+fn compare(found: &[(String, u64)], recorded: &str) {
     let expected: BTreeMap<&str, &str> =
-        FINGERPRINTS.lines().filter_map(|l| l.split_once('\t')).collect();
+        recorded.lines().filter_map(|l| l.split_once('\t')).collect();
     assert_eq!(expected.len(), found.len());
-    for (name, hash) in &found {
+    for (name, hash) in found {
         assert_eq!(expected.get(name.as_str()), Some(&format!("{hash:016x}").as_str()), "{name}");
     }
+}
+
+#[test]
+fn every_analyzer_and_filter_gives_the_terms_it_gave() {
+    let words = corpus();
+    let texts: Vec<String> = words.chunks(WORDS_PER_TEXT).map(|c| c.join(" ")).collect();
+    compare(&fingerprints(&texts), FINGERPRINTS);
+}
+
+#[test]
+fn every_stemmer_gives_the_stems_it_gave() {
+    let words: Vec<&str> = STEMMER_WORDS.lines().collect();
+    let texts: Vec<String> = words.chunks(WORDS_PER_TEXT).map(|c| c.join(" ")).collect();
+    compare(&fingerprints(&texts), STEMMER_FINGERPRINTS);
 }

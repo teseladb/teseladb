@@ -1,0 +1,190 @@
+//! What `$search` and `$searchMeta` give for queries with synonyms, highlights, score details,
+//! facets, counts, spans, phrases of several terms at one position and embedded documents, over
+//! two segments (011 FR-002 to FR-005, FR-015): `data/query_fingerprints.txt` holds a fingerprint
+//! of each answer, recorded with the code of 14-11-2026 before FR-032 changed the segment in
+//! memory. Each fingerprint is printed before it is compared, so a run with `--nocapture` on
+//! another version of the code writes the file anew.
+
+use std::collections::BTreeMap;
+
+use teseladb_bson::{Document, extjson};
+use teseladb_search::definition::Definition;
+use teseladb_search::indexer::Indexer;
+
+const FINGERPRINTS: &str = include_str!("data/query_fingerprints.txt");
+
+const DEFINITION: &str = r#"{
+  "mappings": {"dynamic": true, "fields": {
+    "g": {"type": "token"},
+    "n": {"type": "number"},
+    "items": {"type": "embeddedDocuments", "dynamic": true},
+    "syn": {"type": "string", "analyzer": "${name:ANALYZER_ENGLISH}"}
+  }},
+  "synonyms": [{"name": "s", "analyzer": "${name:ANALYZER_STANDARD}", "source": {"collection": "syn"}}]
+}"#;
+
+const SYNONYMS: &[&str] = &[
+    r#"{"mappingType": "equivalent", "synonyms": ["car", "automobile", "motor car"]}"#,
+    r#"{"mappingType": "explicit", "input": ["fast"], "synonyms": ["quick", "rapid"]}"#,
+    r#"{"mappingType": "explicit", "input": ["big cat"], "synonyms": ["tiger", "lion"]}"#,
+];
+
+const TEXTS: &[&str] = &[
+    "the quick brown fox jumps over the lazy dog",
+    "a fast car and a big cat",
+    "the automobile is a motor car with a quick engine",
+    "lion and tiger and big cat in the zoo",
+    "rapid rapid rapid fox",
+    "dogs and cats and cars",
+    "nothing to see here",
+    "quick brown dogs jump over lazy foxes in the quick brown night",
+];
+
+fn index() -> Indexer {
+    let names = teseladb_names::expand(DEFINITION).expect("marks");
+    let def = Definition::parse(&extjson::parse(&names).expect("JSON")).expect("definition");
+    let mut ix = Indexer::new(def);
+    ix.reshape(&[(Vec::new(), vec![4]), (vec![4], Vec::new())]).expect("segments");
+    let synonyms: Vec<Document> =
+        SYNONYMS.iter().map(|s| extjson::parse(s).expect("JSON")).collect();
+    ix.set_synonyms("s", &synonyms).expect("synonyms");
+    let docs = TEXTS.iter().enumerate().map(|(i, t)| {
+        let item =
+            |k: usize| Document::new().with("t", TEXTS[(i + k) % TEXTS.len()]).with("k", k as i32);
+        let doc = Document::new()
+            .with("_id", i as i32)
+            .with("t", *t)
+            .with("syn", *t)
+            .with("g", ["red", "green", "blue"][i % 3])
+            .with("n", (i * 7 % 30) as i32)
+            .with("items", vec![item(1).into(), item(2).into()]);
+        (vec![i as u8], Some(doc))
+    });
+    ix.apply(docs).expect("indexed");
+    ix
+}
+
+/// The `$search` specifications, by name.
+const SEARCHES: &[(&str, &str)] = &[
+    ("synonyms-equivalent", r#"{"text": {"query": "car", "path": "t", "synonyms": "s"}}"#),
+    ("synonyms-explicit", r#"{"text": {"query": "fast fox", "path": "t", "synonyms": "s"}}"#),
+    ("synonyms-phrase", r#"{"phrase": {"query": "big cat", "path": "t", "synonyms": "s"}}"#),
+    ("synonyms-english", r#"{"text": {"query": "cars", "path": "syn", "synonyms": "s"}}"#),
+    ("highlight", r#"{"text": {"query": "quick fox", "path": "t"}, "highlight": {"path": "t"}}"#),
+    (
+        "highlight-limits",
+        r#"{"text": {"query": "quick", "path": ["t", "syn"]},
+            "highlight": {"path": {"wildcard": "*"}, "maxNumPassages": 1, "maxCharsToExamine": 20}}"#,
+    ),
+    ("details", r#"{"text": {"query": "quick brown", "path": "t"}, "scoreDetails": true}"#),
+    (
+        "details-compound",
+        r#"{"compound": {"must": [{"text": {"query": "fox", "path": "t"}}],
+            "should": [{"phrase": {"query": "brown fox", "path": "t", "slop": 1}}],
+            "filter": [{"range": {"path": "n", "gte": 0, "lte": 20}}]},
+            "scoreDetails": true}"#,
+    ),
+    (
+        "details-synonyms",
+        r#"{"text": {"query": "fast", "path": "t", "synonyms": "s"}, "scoreDetails": true}"#,
+    ),
+    (
+        "phrase-several",
+        r#"{"phrase": {"query": "motor car", "path": "t", "synonyms": "s", "slop": 2}}"#,
+    ),
+    (
+        "span-near",
+        r#"{"span": {"near": {"clauses": [{"term": {"query": "quick", "path": "t"}},
+            {"term": {"query": "dogs", "path": "t"}}], "slop": 3, "inOrder": false}}}"#,
+    ),
+    (
+        "span-first",
+        r#"{"span": {"first": {"operator": {"term": {"query": "brown", "path": "t"}}, "endPositionLte": 3}}}"#,
+    ),
+    (
+        "embedded",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "zoo", "path": "items.t"}},
+            "score": {"embedded": {"aggregate": "maximum"}}}}"#,
+    ),
+    ("equals-token", r#"{"equals": {"path": "g", "value": "red"}}"#),
+    (
+        "facet-operator",
+        r#"{"facet": {"operator": {"exists": {"path": "t"}},
+            "facets": {"g": {"type": "string", "path": "g"}}}}"#,
+    ),
+];
+
+/// The `$searchMeta` specifications, by name.
+const METAS: &[(&str, &str)] = &[
+    ("count-total", r#"{"exists": {"path": "t"}, "count": {"type": "total"}}"#),
+    (
+        "count-bound",
+        r#"{"text": {"query": "quick", "path": "t"}, "count": {"type": "lowerBound", "threshold": 2}}"#,
+    ),
+    (
+        "facets",
+        r#"{"facet": {"operator": {"text": {"query": "the", "path": "t"}},
+            "facets": {"colors": {"type": "string", "path": "g", "numBuckets": 2},
+                       "numbers": {"type": "number", "path": "n", "boundaries": [0, 10, 20, 30], "default": "other"}}}}"#,
+    ),
+];
+
+fn fnv(hash: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *hash ^= u64::from(b);
+        *hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+#[test]
+fn every_feature_answers_as_it_did() {
+    let ix = index();
+    let mut found: Vec<(String, u64)> = Vec::new();
+    for (name, spec) in SEARCHES {
+        let spec = extjson::parse(spec).expect("JSON");
+        let mut h = 0xcbf2_9ce4_8422_2325;
+        let answer = match ix.search(&spec) {
+            Ok(hits) => {
+                for f in &hits {
+                    fnv(&mut h, &f.key);
+                    fnv(&mut h, &f.score.to_bits().to_le_bytes());
+                    fnv(
+                        &mut h,
+                        format!("{:?}", f.details.as_ref().map(|d| d.to_document())).as_bytes(),
+                    );
+                    fnv(&mut h, format!("{:?}", f.highlights).as_bytes());
+                }
+                format!("{name} ({} hits)", hits.len())
+            }
+            Err(e) => {
+                fnv(&mut h, e.0.as_bytes());
+                format!("{name} (error)")
+            }
+        };
+        found.push((answer, h));
+    }
+    for (name, spec) in METAS {
+        let spec = extjson::parse(spec).expect("JSON");
+        let mut h = 0xcbf2_9ce4_8422_2325;
+        let answer = match ix.meta(&spec) {
+            Ok(doc) => {
+                fnv(&mut h, format!("{doc:?}").as_bytes());
+                name.to_string()
+            }
+            Err(e) => {
+                fnv(&mut h, e.0.as_bytes());
+                format!("{name} (error)")
+            }
+        };
+        found.push((answer, h));
+    }
+    for (name, hash) in &found {
+        println!("{name}\t{hash:016x}");
+    }
+    let expected: BTreeMap<&str, &str> =
+        FINGERPRINTS.lines().filter_map(|l| l.split_once('\t')).collect();
+    assert_eq!(expected.len(), found.len());
+    for (name, hash) in &found {
+        assert_eq!(expected.get(name.as_str()), Some(&format!("{hash:016x}").as_str()), "{name}");
+    }
+}
