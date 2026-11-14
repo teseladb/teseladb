@@ -867,6 +867,8 @@ fn run_reading<B: Backend + ?Sized>(
     let mut ended = true;
     let mut cut = false;
     let mut last_past = false;
+    // The collection's dictionary of field names, whose numbers the residuals compare (003 FR-022).
+    let fields = backend.field_numbers(coll.id);
     'scans: for s in &scans {
         let index = &indexes[s.index];
         // This scan's counters: the last of each list.
@@ -876,6 +878,7 @@ fn run_reading<B: Backend + ?Sized>(
         ran.child_dups.push(0);
         ran.child_given.push(0);
         let residual = s.residual.as_ref().map(&plan_filter).transpose()?;
+        let residual = residual.map(|f| f.with_fields(fields.clone()));
         let decode = read.index_keys && !index.id_index;
         let scanned =
             entries(backend, (coll.tenant, coll.id), index, s, (read.concern, decode), most)?;
@@ -884,7 +887,9 @@ fn run_reading<B: Backend + ?Sized>(
         // The documents of the entries go by batches, with the residual filter when the leaders
         // may evaluate it (010 FR-027); a plan's residual never runs with a collation.
         let sent = match (&s.residual, &residual) {
-            (Some(doc), Some(parsed)) => super::pushed_filter::sendable(doc, parsed, None)?,
+            (Some(doc), Some(parsed)) => {
+                super::pushed_filter::sendable(doc, parsed, None, fields.as_deref())?
+            }
             _ => None,
         };
         let pending: Vec<Vec<u8>> = scanned

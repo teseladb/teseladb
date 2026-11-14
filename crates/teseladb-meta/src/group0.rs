@@ -26,7 +26,10 @@ use crate::security::{Principal, Security, SecurityError};
 use crate::tenants::Tenants;
 
 /// Version of the snapshot format (20: when each range was last split or moved, 018 FR-017).
-pub const SNAPSHOT_VERSION: u8 = 21;
+pub const SNAPSHOT_VERSION: u8 = 22;
+/// The snapshot before the dictionaries of field names (14-11-2026, 003 FR-022), still read and
+/// written while some node runs it: no collection has one.
+pub const SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES: u8 = 21;
 /// The snapshot before the limits, the access list and the suspension of each tenant (05-11-2026),
 /// still read and written while some node runs it: its tenants have none (007 FR-030).
 pub const SNAPSHOT_VERSION_WITHOUT_TENANT_STATE: u8 = 20;
@@ -653,6 +656,12 @@ impl Group0Sm {
             Group0Command::CompleteRelocate { group, core } => {
                 self.table().0.complete_relocate(*group, *core).map(|()| Group0Result::Ok)
             }
+            // A dictionary of field names only goes into a snapshot every node reads (003 FR-022).
+            Group0Command::Catalog(CatalogCommand::AddFieldNames { .. })
+                if !crate::node_versions::all_run(self, SNAPSHOT_VERSION) =>
+            {
+                Err(Group0Error::NotEveryNodeRunsIt)
+            }
             Group0Command::Catalog(c) => {
                 let ddl = crate::ddl_log::catalog_changes(&self.catalog, c);
                 if let CatalogCommand::Purged { id } = c {
@@ -843,6 +852,9 @@ impl Group0Sm {
         if version > SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES {
             self.indexes.encode_places(&mut e);
         }
+        if version > SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES {
+            self.catalog.encode_fields(&mut e);
+        }
         e.finish()
     }
 
@@ -926,6 +938,9 @@ impl Group0Sm {
         }
         if version > SNAPSHOT_VERSION_WITHOUT_INDEX_PLACES {
             sm.indexes.decode_places(&mut d)?;
+        }
+        if version > SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES {
+            Arc::make_mut(&mut sm.catalog).decode_fields(&mut d)?;
         }
         d.finish()?;
         Ok(sm)

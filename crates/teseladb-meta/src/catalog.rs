@@ -4,9 +4,13 @@
 //! applying stays deterministic. A dropped collection's identifier waits in [`Catalog::dropped`]
 //! until its documents are deleted (`Purged`). A database stays in [`Catalog::databases`] from its
 //! first collection until `dropDatabase`, also with no collection left, as `config.databases`
-//! of a `refrouter` (D-077).
+//! of a `refrouter` (D-077). Each collection may have a dictionary of field names (003 FR-022),
+//! by its identifier, which a rename keeps and a drop removes.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use teseladb_keys::fields::FieldNumbers;
 
 use teseladb_hlc::Hlc;
 use teseladb_types::{DecodeError, Decoder, Encoder};
@@ -110,6 +114,16 @@ pub enum CatalogCommand {
         /// Collection identifier.
         id: u32,
     },
+    /// Gives numbers to field names in the dictionary of a collection (003 FR-022): a
+    /// collection without one gets it with identifier `dictionary`; one that has it keeps its own.
+    AddFieldNames {
+        /// Collection identifier.
+        collection: u32,
+        /// The identifier of the dictionary, if the collection has none yet.
+        dictionary: u32,
+        /// The names, in the order they get their numbers.
+        names: Vec<Vec<u8>>,
+    },
 }
 
 const CREATE: u8 = 0;
@@ -119,6 +133,7 @@ const MODIFY: u8 = 3;
 const DROP_DATABASE: u8 = 4;
 const PURGED: u8 = 5;
 const CREATE_DATABASE: u8 = 6;
+const ADD_FIELD_NAMES: u8 = 7;
 
 pub(crate) fn put_ns(e: &mut Encoder, ns: &Namespace) {
     e.str(&ns.db).str(&ns.coll);
@@ -167,6 +182,12 @@ impl CatalogCommand {
             CatalogCommand::CreateDatabase { db } => {
                 e.u8(CREATE_DATABASE).str(db);
             }
+            CatalogCommand::AddFieldNames { collection, dictionary, names } => {
+                e.u8(ADD_FIELD_NAMES).u32(*collection).u32(*dictionary).var(names.len() as u64);
+                for n in names {
+                    e.bytes(n);
+                }
+            }
         }
     }
 
@@ -199,6 +220,14 @@ impl CatalogCommand {
             DROP_DATABASE => CatalogCommand::DropDatabase { db: d.str()?.to_owned() },
             PURGED => CatalogCommand::Purged { id: d.u32()? },
             CREATE_DATABASE => CatalogCommand::CreateDatabase { db: d.str()?.to_owned() },
+            ADD_FIELD_NAMES => {
+                let (collection, dictionary) = (d.u32()?, d.u32()?);
+                let mut names = Vec::new();
+                for _ in 0..d.var()? {
+                    names.push(d.bytes()?.to_vec());
+                }
+                CatalogCommand::AddFieldNames { collection, dictionary, names }
+            }
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         })
     }
@@ -222,6 +251,9 @@ pub struct Catalog {
     /// The mark of the entry that added each database of [`Catalog::dbs`]: a `snapshot` read at
     /// an earlier `atClusterTime` is `MigrationConflict` (008 FR-012, measured on 9.0.4).
     pub db_marks: BTreeMap<String, Hlc>,
+    /// The dictionary of field names of each collection that has one, by its identifier (003
+    /// FR-022).
+    pub fields: BTreeMap<u32, Arc<FieldNumbers>>,
 }
 
 impl Catalog {
@@ -266,6 +298,7 @@ impl Catalog {
     fn drop_ns(&mut self, ns: &Namespace) -> Option<CollectionEntry> {
         let c = self.collections.remove(ns)?;
         self.dropped.insert(c.id);
+        self.fields.remove(&c.id);
         Some(c)
     }
 
@@ -357,7 +390,53 @@ impl Catalog {
                 self.add_db(db, (index, mark));
                 Ok(None)
             }
+            CatalogCommand::AddFieldNames { collection, dictionary, names } => {
+                self.add_field_names(*collection, *dictionary, names);
+                Ok(None)
+            }
         }
+    }
+
+    /// The dictionary of field names of collection `id` (003 FR-022).
+    pub fn fields_of(&self, id: u32) -> Option<&Arc<FieldNumbers>> {
+        self.fields.get(&id)
+    }
+
+    /// `AddFieldNames`: a collection that no longer exists does not change.
+    fn add_field_names(&mut self, id: u32, dictionary: u32, names: &[Vec<u8>]) {
+        if !self.collections.values().any(|c| c.id == id) {
+            return;
+        }
+        let d = self.fields.entry(id).or_insert_with(|| Arc::new(FieldNumbers::new(dictionary)));
+        let d = Arc::make_mut(d);
+        for n in names {
+            d.add(n);
+        }
+    }
+
+    /// Writes the dictionaries of field names (Group 0's snapshot from its format 22).
+    pub fn encode_fields(&self, e: &mut Encoder) {
+        e.var(self.fields.len() as u64);
+        for (id, d) in &self.fields {
+            let names = d.by_number();
+            e.u32(*id).u32(d.dictionary()).var(names.len() as u64);
+            for (n, _) in names {
+                e.bytes(n);
+            }
+        }
+    }
+
+    /// Reads what [`Catalog::encode_fields`] wrote.
+    pub fn decode_fields(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        for _ in 0..d.var()? {
+            let (id, dictionary) = (d.u32()?, d.u32()?);
+            let mut names = Vec::new();
+            for _ in 0..d.var()? {
+                names.push(d.bytes()?);
+            }
+            self.fields.insert(id, Arc::new(FieldNumbers::from_names(dictionary, names)));
+        }
+        Ok(())
     }
 
     /// Writes the catalog into Group 0's snapshot.

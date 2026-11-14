@@ -149,7 +149,7 @@ fn admit(
     // The new document first: a unique value an evicted one holds is still a duplicate.
     let (mut puts, mut deletes) = checker.entries_at(Some(&key), None, Some(&bytes), lookup)?;
     let size = bytes.len() as u64;
-    puts.push(put(&key, bytes));
+    puts.push(put(&key, bytes, checker, None));
     let (p, d) = evict(r, state, size, checker, lookup)?;
     puts.extend(p);
     deletes.extend(d);

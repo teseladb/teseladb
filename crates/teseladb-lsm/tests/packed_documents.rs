@@ -38,7 +38,8 @@ fn document(i: u32, round: u64) -> Vec<u8> {
 }
 
 /// The stored value of document `i` of a round wide enough for its table, which goes after the
-/// BSON (003 FR-021); one in two has a nested document.
+/// BSON (003 FR-021); one in two has a nested document, and one in three has the tags of a
+/// collection's dictionary of field names, some of its names unnumbered (FR-022).
 fn tabled(i: u32, round: u64) -> Vec<u8> {
     let mut d = Document::new().with("_id", i64::from(i)).with("round", round as i64);
     for f in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
@@ -47,8 +48,14 @@ fn tabled(i: u32, round: u64) -> Vec<u8> {
     if i.is_multiple_of(2) {
         d.push("nested", Document::new().with("n", i as i32));
     }
-    let stored = teseladb_keys::stored::encode(d.to_bytes().unwrap());
-    assert!(teseladb_keys::stored::split(&stored).unwrap().table().is_some(), "a table");
+    let names = [&b"_id"[..], b"round", b"f1", b"f4"];
+    let numbers = match i % 3 {
+        0 => teseladb_keys::fields::FieldNumbers::from_names(0xD1C7, names),
+        _ => teseladb_keys::fields::FieldNumbers::default(),
+    };
+    let stored = teseladb_keys::stored::encode_numbered(d.to_bytes().unwrap(), &numbers, None);
+    let table = teseladb_keys::stored::split(&stored).unwrap().table().expect("a table");
+    assert_eq!(table.dictionary(), i.is_multiple_of(3).then_some(0xD1C7));
     [&[DOCUMENT_VALUE][..], &stored].concat()
 }
 

@@ -4,7 +4,7 @@
 
 use std::marker::PhantomData;
 
-use teseladb_keys::stored::{Lookup, Stored};
+use teseladb_keys::stored::{FieldKey, Lookup, Stored};
 use teseladb_bson::{Decimal128, RawDoc, RawValue};
 
 /// What a register holds.
@@ -258,9 +258,14 @@ fn find<'d>(doc: &'d [u8], at: usize, len: usize, name: &[u8]) -> Option<ValueRe
 /// The first field named `name` of document `d`, through the stored document's table of
 /// offsets when `d` has one (003 FR-021), else walked on the bytes as [`field`] walks it.
 #[inline(always)]
-pub(crate) fn stored_field<'d>(stored: &Stored<'d>, d: ValueRef<'d>, name: &[u8]) -> ValueRef<'d> {
+pub(crate) fn stored_field<'d>(
+    stored: &Stored<'d>,
+    d: ValueRef<'d>,
+    name: &[u8],
+    key: FieldKey,
+) -> ValueRef<'d> {
     let doc = stored.bson();
-    match stored.lookup(d.at(), name) {
+    match stored.lookup_key(d.at(), name, key) {
         Lookup::NoTable => field(doc, d, name),
         Lookup::Missing => ValueRef::MISSING,
         Lookup::At(pos) => element(doc, pos)

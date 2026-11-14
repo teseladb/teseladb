@@ -404,9 +404,12 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     mut each: impl FnMut(Vec<u8>, Vec<u8>) -> Result<bool, CommandError>,
 ) -> Result<u64, CommandError> {
     let mut plan = Plan::new(filter, None, collation)?.with_vars(vars);
+    // The collection's dictionary of field names, whose numbers the filter compares (003 FR-022).
+    let fields =
+        teseladb_keys::space::collection_id_of(&start).and_then(|c| backend.field_numbers(c));
     // The filter as it can go to the leaders of the ranges on other nodes (010 FR-027).
-    let sent = super::pushed_filter::sendable(filter, &plan.filter, collation)?;
-    plan.filter = by_statistics_of_key(plan.filter, &start);
+    let sent = super::pushed_filter::sendable(filter, &plan.filter, collation, fields.as_deref())?;
+    plan.filter = by_statistics_of_key(plan.filter, &start).with_fields(fields);
     let ctx = plan.ctx();
     let mut next = start;
     let mut examined = 0u64;

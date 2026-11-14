@@ -46,6 +46,7 @@ pub mod durations;
 pub mod engines;
 pub mod explain;
 pub mod fcv;
+mod field_names;
 pub mod fle;
 pub mod fle_write;
 pub mod hints;
@@ -292,6 +293,15 @@ pub trait Backend {
     /// The mark of the Group 0 entry that added database `db`, if the node's copy knows it
     /// (008 FR-012).
     fn database_mark(&mut self, db: &str) -> Result<Option<teseladb_hlc::Hlc>, CommandError>;
+    /// The dictionary of field names of collection `collection` (003 FR-022), as the node's copy
+    /// of Group 0 has it; `None` while it has none.
+    fn field_numbers(
+        &mut self,
+        collection: u32,
+    ) -> Option<std::sync::Arc<teseladb_keys::fields::FieldNumbers>> {
+        let _ = collection;
+        None
+    }
     /// Runs a catalog command in Group 0 and waits until this node's copy applied it.
     fn catalog_write(
         &mut self,

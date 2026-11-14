@@ -702,6 +702,13 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(self.call(|b| b.collection(&ns))?.map(|c| tenants::owned(tenant, c)))
     }
 
+    fn field_numbers(
+        &mut self,
+        collection: u32,
+    ) -> Option<std::sync::Arc<teseladb_keys::fields::FieldNumbers>> {
+        self.inner.field_numbers(collection)
+    }
+
     fn collections(&mut self) -> Result<Vec<(Namespace, CollectionEntry)>, CommandError> {
         let all = self.call(|b| b.collections())?;
         let ours = tenants::own_collections(self.tenant, all);

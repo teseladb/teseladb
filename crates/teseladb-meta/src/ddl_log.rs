@@ -383,6 +383,7 @@ pub fn catalog_changes(cat: &Catalog, c: &CatalogCommand) -> Vec<DdlChange> {
         }
         CatalogCommand::Create { .. }
         | CatalogCommand::Purged { .. }
+        | CatalogCommand::AddFieldNames { .. }
         | CatalogCommand::CreateDatabase { .. } => Vec::new(),
     }
 }

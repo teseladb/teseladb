@@ -39,7 +39,57 @@ fn answers(
         tabled.iter().map(|d| program.run(root, *d, ctx).expect("no error")).collect();
     assert_eq!(one_tabled, one, "one by one, with and without tables");
     assert_eq!(batches(&program, root, &tabled, ctx), batch, "in batches, with and without tables");
+    numbered_answers(&program, root, docs, ctx, (&one, &batch));
     Some((tree, one, batch))
+}
+
+/// Every name of `d` and of the documents in it, through documents and arrays.
+fn all_names(d: RawDoc<'_>, out: &mut Vec<Vec<u8>>) {
+    for (k, v) in d.iter() {
+        out.push(k.as_bytes().to_vec());
+        match v {
+            teseladb_bson::RawValue::Document(inner) => all_names(inner, out),
+            teseladb_bson::RawValue::Array(inner) => all_names(inner.as_doc(), out),
+            _ => {}
+        }
+    }
+}
+
+/// The documents stored with the tables of version 2 (003 FR-022) give `one` and `batch` too:
+/// written with a part of the collection's dictionary (the names numbered later have no number in
+/// them) and read by a program bound to the whole dictionary, to none, or to another one.
+fn numbered_answers(
+    program: &Program,
+    root: &Expr,
+    docs: &[Vec<u8>],
+    ctx: &MatchContext<'_>,
+    (one, batch): (&[bool], &[bool]),
+) {
+    use teseladb_keys::fields::FieldNumbers;
+    let mut names = Vec::new();
+    for d in docs {
+        all_names(RawDoc::from_bytes(d).expect("valid"), &mut names);
+    }
+    let mut whole = FieldNumbers::new(7);
+    for n in &names {
+        whole.add(n);
+    }
+    let early = whole.subset(names.iter().step_by(2).map(Vec::as_slice));
+    let kept: Vec<Vec<u8>> = docs
+        .iter()
+        .map(|d| teseladb_keys::stored::encode_numbered(d.clone(), &early, None))
+        .collect();
+    let tabled: Vec<Stored<'_>> =
+        kept.iter().map(|k| teseladb_keys::stored::split(k).expect("stored")).collect();
+    let other = FieldNumbers::from_names(8, names.iter().rev().map(Vec::as_slice));
+    for reader in [&whole, &early, &FieldNumbers::default(), &other] {
+        let mut bound = program.clone();
+        bound.bind_fields(reader);
+        let got: Vec<bool> =
+            tabled.iter().map(|d| bound.run(root, *d, ctx).expect("no error")).collect();
+        assert_eq!(got, one, "one by one, numbered tables");
+        assert_eq!(batches(&bound, root, &tabled, ctx), batch, "in batches, numbered tables");
+    }
 }
 
 /// The answers of `program` on `docs` run in batches.

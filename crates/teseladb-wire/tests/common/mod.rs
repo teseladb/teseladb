@@ -557,6 +557,13 @@ impl Backend for Mem {
         Ok(self.catalog.get(ns).cloned())
     }
 
+    fn field_numbers(
+        &mut self,
+        collection: u32,
+    ) -> Option<std::sync::Arc<teseladb_keys::fields::FieldNumbers>> {
+        self.catalog.fields_of(collection).cloned()
+    }
+
     fn collections(&mut self) -> Result<Vec<(Namespace, CollectionEntry)>, CommandError> {
         Ok(self.catalog.collections.iter().map(|(n, c)| (n.clone(), c.clone())).collect())
     }
