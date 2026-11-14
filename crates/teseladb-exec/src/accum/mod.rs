@@ -610,6 +610,56 @@ impl Accumulator {
     }
 }
 
+impl Accumulator {
+    /// Whether `part` is a state of this accumulator: what a part decoded from another node has
+    /// to be before it merges (010 FR-034).
+    pub(crate) fn holds(&self, part: &Part) -> bool {
+        match (self, part) {
+            (Accumulator::Count, Part::Count(_)) => true,
+            (Accumulator::Unary(Unary::Sum | Unary::Avg, _), Part::Total(_)) => true,
+            (Accumulator::Unary(Unary::Max, _), Part::Extreme(e)) => e.is_max(),
+            (Accumulator::Unary(Unary::Min, _), Part::Extreme(e)) => !e.is_max(),
+            (Accumulator::Unary(Unary::First | Unary::Last, _), Part::One(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The tags of the kinds of [`Part`] when one travels.
+const TOTAL: i32 = 0;
+const EXTREME: i32 = 1;
+const ONE: i32 = 2;
+const COUNT: i32 = 3;
+
+impl Part {
+    /// The part as a value that travels to another node (010 FR-034): its kind and its state.
+    pub(crate) fn to_value(&self) -> Value {
+        let (tag, state) = match self {
+            Part::Total(t) => (TOTAL, t.to_value()),
+            Part::Extreme(e) => (EXTREME, e.to_value()),
+            Part::One(v) => (ONE, crate::expr::stats::opt_to_value(v)),
+            Part::Count(c) => (COUNT, Value::Int64(*c)),
+        };
+        Value::Array(vec![Value::Int32(tag), state])
+    }
+
+    /// What [`Part::to_value`] gave; `None` for anything else.
+    pub(crate) fn from_value(v: &Value) -> Option<Part> {
+        let Value::Array(a) = v else { return None };
+        let [Value::Int32(tag), state] = a.as_slice() else { return None };
+        Some(match *tag {
+            TOTAL => Part::Total(Total::from_value(state)?),
+            EXTREME => Part::Extreme(Extreme::from_value(state)?),
+            ONE => Part::One(crate::expr::stats::opt_from_value(state)?),
+            COUNT => match state {
+                Value::Int64(c) => Part::Count(*c),
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+}
+
 impl Part {
     /// The part of state `st`; `None` for a state that does not merge.
     pub(crate) fn of(st: State) -> Option<Part> {

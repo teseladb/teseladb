@@ -14,7 +14,7 @@ mod together;
 mod txn_reaper;
 
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
-pub use scatter::scattered_groups;
+pub use scatter::{scattered_groups, scattered_parts_sent_away};
 pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
 
@@ -308,7 +308,8 @@ impl ServerBackend {
                     | RemoteReply::Changes { .. }
                     | RemoteReply::Fenced { .. }
                     | RemoteReply::Live { .. }
-                    | RemoteReply::DocCount { .. },
+                    | RemoteReply::DocCount { .. }
+                    | RemoteReply::Pushed(_),
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -1045,7 +1046,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Changes { .. }
             | RemoteReply::Fenced { .. }
             | RemoteReply::Live { .. }
-            | RemoteReply::DocCount { .. } => {
+            | RemoteReply::DocCount { .. }
+            | RemoteReply::Pushed(_) => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }
