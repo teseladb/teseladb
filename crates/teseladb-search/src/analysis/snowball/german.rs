@@ -2,6 +2,7 @@
 //! variant, which first reads `ae`, `oe` and `ue` as umlauts).
 
 use super::word::{Word, region};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'ä' | 'ö' | 'ü')
@@ -17,13 +18,13 @@ fn drop_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 fn prelude(text: &str, variant2: bool) -> Word {
-    let mut src: Vec<char> = text.chars().collect();
+    let mut src = Chars::of(text);
     for i in 1..src.len().saturating_sub(1) {
         if matches!(src[i], 'u' | 'y') && vowel(src[i - 1]) && vowel(src[i + 1]) {
             src[i] = src[i].to_ascii_uppercase();
         }
     }
-    let mut c = Vec::with_capacity(src.len());
+    let mut c = Chars::new();
     let mut i = 0;
     while i < src.len() {
         let pair = (src[i], src.get(i + 1).copied());
@@ -44,7 +45,7 @@ fn prelude(text: &str, variant2: bool) -> Word {
 }
 
 /// Stems `text`; `variant2` is `german2`.
-pub fn stem(text: &str, variant2: bool) -> String {
+pub fn stem(text: &str, variant2: bool, out: &mut String) {
     let mut w = prelude(text, variant2);
     let raw_r1 = region(&w.c, 0, vowel);
     let r1 = raw_r1.max(3.min(w.len()));
@@ -102,14 +103,12 @@ pub fn stem(text: &str, variant2: bool) -> String {
         }
         _ => {}
     }
-    w.c.iter()
-        .map(|&c| match c {
-            'U' => 'u',
-            'Y' => 'y',
-            'ä' => 'a',
-            'ö' => 'o',
-            'ü' => 'u',
-            _ => c,
-        })
-        .collect()
+    out.extend(w.c.iter().map(|&c| match c {
+        'U' => 'u',
+        'Y' => 'y',
+        'ä' => 'a',
+        'ö' => 'o',
+        'ü' => 'u',
+        _ => c,
+    }));
 }

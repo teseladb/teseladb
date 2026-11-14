@@ -2,6 +2,7 @@
 //! description does, `ã` and `õ` become `a~` and `o~` while stemming.
 
 use super::word::{Word, regions, rv};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'á' | 'é' | 'í' | 'ó' | 'ú' | 'â' | 'ê' | 'ô')
@@ -41,8 +42,8 @@ fn drop_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
-    let mut w = Word { c: Vec::new() };
+pub fn stem(text: &str, out: &mut String) {
+    let mut w = Word { c: Chars::new() };
     for c in text.chars() {
         match c {
             'ã' => w.c.extend(['a', '~']),
@@ -73,9 +74,9 @@ pub fn stem(text: &str) -> String {
     } else if w.ends("ç") {
         w.replace("ç", "c");
     }
-    let mut out = String::new();
-    for &c in &w.c {
-        match (out.chars().last(), c) {
+    let start = out.len();
+    for &c in w.c.iter() {
+        match (out[start..].chars().last(), c) {
             (Some('a'), '~') => {
                 out.pop();
                 out.push('ã');
@@ -87,13 +88,11 @@ pub fn stem(text: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
 }
 
 /// The standard suffixes; says whether one went.
 fn step1(w: &mut Word, rv: usize, r1: usize, r2: usize) -> bool {
-    let all: Vec<&str> = [STEP1_R2, STEP1_OTHER].concat();
-    let Some(s) = w.longest(&all) else { return false };
+    let Some(s) = w.longest(STEP1_R2.iter().chain(STEP1_OTHER)) else { return false };
     let start = w.start_of(s);
     let in_r2 = start >= r2;
     match s {

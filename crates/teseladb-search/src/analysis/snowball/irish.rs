@@ -3,6 +3,7 @@
 //! first (eclipsis and lenition, `h-`, `n-` and `t-`), then the endings of five steps. RV starts
 //! after the first vowel; R1 and R2 are the standard regions.
 
+use crate::analysis::scratch::Chars;
 use std::sync::OnceLock;
 
 use super::table::{Cond, Group, Step, StepDef, When, build, run_marked};
@@ -136,9 +137,10 @@ fn vowel(c: char) -> bool {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
-    let c: Vec<char> = word.chars().collect();
+pub fn stem(word: &str, out: &mut String) {
+    let mut c = Chars::of(word);
     let rv = c.iter().position(|&ch| vowel(ch)).map_or(c.len(), |i| i + 1);
     let (r1, r2) = regions(&c, vowel);
-    run_marked(c, BUILT.get_or_init(|| build(&STEPS)), [rv, r1, r2])
+    run_marked(&mut c, BUILT.get_or_init(|| build(&STEPS)), [rv, r1, r2]);
+    c.write(out);
 }

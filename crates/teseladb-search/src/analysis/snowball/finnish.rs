@@ -50,7 +50,7 @@ fn step3_condition(c: &[char], s: &str, start: usize, r1: usize) -> bool {
 const FALLBACK: &[&str] = &["siin", "den", "tten", "seen", "a", "ä"];
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let (r1, r2) = regions(&w.c, vowel);
     let particles = ["kin", "kaan", "kään", "ko", "kö", "han", "hän", "pa", "pä", "sti"];
@@ -66,10 +66,12 @@ pub fn stem(text: &str) -> String {
         }
     }
     possessives(&mut w, r1);
-    let mut candidates: Vec<&str> = STEP3.iter().copied().filter(|s| w.ends(s)).collect();
-    candidates.sort_by_key(|s| std::cmp::Reverse(s.chars().count()));
-    let chosen = candidates
-        .into_iter()
+    // The endings the word has, longest first and in the order of the table among equals.
+    let longest = STEP3.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+    let chosen = (1..=longest)
+        .rev()
+        .flat_map(|n| STEP3.iter().copied().filter(move |s| s.chars().count() == n))
+        .filter(|s| w.ends(s))
         .filter(|s| w.start_of(s) >= r1)
         .find(|s| !FALLBACK.contains(s) || step3_condition(&w.c, s, w.start_of(s), r1))
         .filter(|s| step3_condition(&w.c, s, w.start_of(s), r1));
@@ -85,8 +87,8 @@ pub fn stem(text: &str) -> String {
     }
     let after_po = ["mpi", "mpa", "mpä", "mmi", "mma", "mmä"];
     let always = ["impi", "impa", "impä", "immi", "imma", "immä", "eja", "ejä"];
-    let others: Vec<&str> = [&after_po[..], &always[..]].concat();
-    if let Some(s) = w.longest_within(&others, r2)
+    let others = after_po.iter().chain(&always);
+    if let Some(s) = w.longest_within(others, r2)
         && (always.contains(&s) || !w.c[..w.start_of(s)].ends_with(&['p', 'o']))
     {
         w.cut(s.chars().count());
@@ -104,13 +106,13 @@ pub fn stem(text: &str) -> String {
         }
     }
     tidy(&mut w, r1);
-    w.text()
+    w.write(out);
 }
 
 fn possessives(w: &mut Word, r1: usize) {
     let list = ["si", "ni", "nsa", "nsä", "mme", "nne", "an", "än", "en"];
     let Some(s) = w.longest_within(&list, r1) else { return };
-    let rest = Word { c: w.c[..w.start_of(s)].to_vec() };
+    let rest = Word::of(&w.c[..w.start_of(s)]);
     match s {
         "si" if rest.ends("k") => {}
         "ni" if rest.ends("kse") => w.replace("kseni", "ksi"),

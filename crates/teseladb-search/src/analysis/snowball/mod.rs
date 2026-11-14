@@ -46,8 +46,14 @@ macro_rules! stemmers {
         impl Stemmer {
             /// The stem of `word`.
             pub fn stem(self, word: &str) -> String {
+                crate::analysis::scratch::written(|out| self.stem_into(word, out))
+            }
+
+            /// Appends the stem of `word` to `out`, with the buffers of the analysis reused from
+            /// term to term (FR-028).
+            pub fn stem_into(self, word: &str, out: &mut String) {
                 match self {
-                    $(Stemmer::$variant => $stem(word),)*
+                    $(Stemmer::$variant => $stem(word, out),)*
                 }
             }
         }
@@ -65,14 +71,14 @@ stemmers! {
     Estonian => "estonian", estonian::stem;
     Finnish => "finnish", finnish::stem;
     French => "french", french::stem;
-    German => "german", |w| german::stem(w, true);
-    German2 => "german2", |w| german::stem(w, true);
+    German => "german", |w, out| german::stem(w, true, out);
+    German2 => "german2", |w, out| german::stem(w, true, out);
     Hungarian => "hungarian", hungarian::stem;
     Irish => "irish", irish::stem;
     Italian => "italian", italian::stem;
     Lithuanian => "lithuanian", lithuanian::stem;
     Norwegian => "norwegian", nordic::norwegian;
-    Porter => "porter", |w| porter::stem(w, porter::Variant::Snowball);
+    Porter => "porter", |w, out| porter::stem(w, porter::Variant::Snowball, out);
     Portuguese => "portuguese", portuguese::stem;
     Romanian => "romanian", romanian::stem;
     Russian => "russian", russian::stem;
@@ -95,5 +101,10 @@ impl Stemmer {
 
 /// The stem the `porterStemming` token filter gives `word`.
 pub fn porter_stemming(word: &str) -> String {
-    porter::stem(word, porter::Variant::Filter)
+    crate::analysis::scratch::written(|out| porter_stemming_into(word, out))
+}
+
+/// Appends the stem the `porterStemming` token filter gives `word` to `out`.
+pub fn porter_stemming_into(word: &str, out: &mut String) {
+    porter::stem(word, porter::Variant::Filter, out);
 }

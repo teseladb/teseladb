@@ -4,6 +4,7 @@
 //! L. Dolamic and J. Savoy, the Latvian one of K. Kreslins, and the Indonesian one of F. Tala.
 
 use super::light::{ends, replace_end};
+use crate::analysis::scratch::Chars;
 
 /// The case endings of the Czech stemmer by the letters the word must exceed, the longest first.
 const CZECH_CASES: &[(usize, &[&str])] = &[
@@ -24,8 +25,8 @@ const CZECH_CASES: &[(usize, &[&str])] = &[
 /// The Czech stem: one case ending, then a possessive `ov`, `in` or `ův`, then the stem's last
 /// consonant is normalized (`čt` → `ck`, `št` → `sk`, `c`/`č` → `k`, `z`/`ž` → `h`) or the `e`
 /// or `ů` before it goes or becomes `o`.
-pub(super) fn czech_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn czech_stem(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     let case = CZECH_CASES.iter().find_map(|&(more_than, list)| {
         let end = list.iter().find(|e| w.len() > more_than && ends(&w, e))?;
         Some(end.chars().count())
@@ -36,7 +37,7 @@ pub(super) fn czech_stem(text: &str) -> String {
     }
     let n = w.len();
     if n == 0 {
-        return String::new();
+        return;
     }
     if ends(&w, "čt") {
         replace_end(&mut w, 2, "ck");
@@ -51,7 +52,7 @@ pub(super) fn czech_stem(text: &str) -> String {
     } else if n > 2 && w[n - 2] == 'ů' {
         w[n - 2] = 'o';
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The Bulgarian article endings by the letters the word must exceed.
@@ -61,14 +62,16 @@ const BULGARIAN_ARTICLES: &[(usize, &[&str])] =
 /// The Bulgarian stem: `ища` goes from a word of six letters or more; otherwise an article, then a
 /// plural, then a final `я` and one of `а`, `о`, `е` go, `ен` becomes `н` and an `ъ` before the
 /// last letter goes. Words under four letters stay.
-pub(super) fn bulgarian_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn bulgarian_stem(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     if w.len() < 4 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     if w.len() > 5 && ends(&w, "ища") {
         w.truncate(w.len() - 3);
-        return w.into_iter().collect();
+        w.write(out);
+        return;
     }
     let article = BULGARIAN_ARTICLES.iter().find_map(|&(more_than, list)| {
         let end = list.iter().find(|e| w.len() > more_than && ends(&w, e))?;
@@ -91,7 +94,7 @@ pub(super) fn bulgarian_stem(text: &str) -> String {
     if n > 5 && w[n - 2] == 'ъ' {
         w.remove(n - 2);
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// `w` without its Bulgarian plural ending.
@@ -164,8 +167,8 @@ const LATVIAN_ENDINGS: &[(&str, usize, bool)] = &[
 
 /// The Latvian stem: the first ending of [`LATVIAN_ENDINGS`] the word has, with three letters
 /// left and enough vowels, goes.
-pub(super) fn latvian_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn latvian_stem(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     let vowels = w.iter().filter(|c| "aeiouāīēū".contains(**c)).count();
     for &(ending, more_than, palatal) in LATVIAN_ENDINGS {
         let n = ending.chars().count();
@@ -177,7 +180,7 @@ pub(super) fn latvian_stem(text: &str) -> String {
             break;
         }
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The stem's consonants as they are before a palatalizing ending, `after_u` when the ending
@@ -241,7 +244,7 @@ const INDONESIAN_FIRST: &[(&str, u8, Option<char>)] = &[
 
 /// A word being stemmed by the Indonesian stemmer, with its vowel count and removed prefixes.
 struct Indonesian {
-    w: Vec<char>,
+    w: Chars,
     syllables: usize,
     flags: u8,
 }
@@ -297,8 +300,8 @@ impl Indonesian {
     }
 
     fn second_prefix(&mut self) {
-        let word: String = self.w.iter().collect();
-        if self.starts("ber") || word == "belajar" {
+        let is = |word: &str| self.w.iter().copied().eq(word.chars());
+        if self.starts("ber") || is("belajar") {
             self.cut_start(3, BER);
         } else if self.starts("be")
             && self.w.len() > 4
@@ -307,7 +310,7 @@ impl Indonesian {
             && self.w[4] == 'r'
         {
             self.cut_start(2, BER);
-        } else if self.starts("per") || word == "pelajar" {
+        } else if self.starts("per") || is("pelajar") {
             self.cut_start(3, 0);
         } else if self.starts("pe") {
             self.cut_start(2, PE);
@@ -329,8 +332,8 @@ impl Indonesian {
 /// The Indonesian stem: inflectional particles and possessives, then the first-order prefix and,
 /// when one went, the suffix and the second-order prefix; otherwise the second-order prefix and
 /// the suffix. Each removal needs more than two vowels left.
-pub(super) fn indonesian_stem(text: &str) -> String {
-    let w: Vec<char> = text.chars().collect();
+pub(super) fn indonesian_stem(text: &str, out: &mut String) {
+    let w = Chars::of(text);
     let syllables = w.iter().filter(|c| "aeiou".contains(**c)).count();
     let mut s = Indonesian { w, syllables, flags: 0 };
     s.inflections();
@@ -354,5 +357,5 @@ pub(super) fn indonesian_stem(text: &str) -> String {
             s.suffix();
         }
     }
-    s.w.into_iter().collect()
+    s.w.write(out);
 }

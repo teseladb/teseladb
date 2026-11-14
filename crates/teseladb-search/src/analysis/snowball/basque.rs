@@ -4,6 +4,7 @@
 //! the Romance stemmers. `arabera`, `atseden` and `baditu` are kept at the end of a word, and the
 //! steps go on removing endings before them.
 
+use crate::analysis::scratch::Chars;
 use std::sync::OnceLock;
 
 use super::table::{Cond, Group, Step, StepDef, When, build, run_marked};
@@ -641,9 +642,10 @@ fn vowel(c: char) -> bool {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
-    let c: Vec<char> = word.chars().collect();
+pub fn stem(word: &str, out: &mut String) {
+    let mut c = Chars::of(word);
     let (r1, r2) = regions(&c, vowel);
     let marks = [rv(&c, vowel), r1, r2];
-    run_marked(c, BUILT.get_or_init(|| build(&STEPS)), marks)
+    run_marked(&mut c, BUILT.get_or_init(|| build(&STEPS)), marks);
+    c.write(out);
 }

@@ -3,6 +3,7 @@
 //! (recorded data, `analyzers/vocab/`) and equal to it on all of them.
 
 use crate::analysis::props::category;
+use crate::analysis::scratch::Chars;
 
 /// `c` without its acute, grave, circumflex or diaeresis accent, for the Romance light stemmers.
 fn unaccent(c: char) -> char {
@@ -18,10 +19,11 @@ fn unaccent(c: char) -> char {
 
 /// The light Spanish stem: a word of five letters or more loses its accents, then `ces` becomes
 /// `z`, or a final `o`, `a` or `e` goes, or a final `os`, `as` or `es` goes.
-pub(super) fn spanish_light(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn spanish_light(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     if w.len() < 5 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     w.iter_mut().for_each(|c| *c = unaccent(*c));
     match w.as_slice() {
@@ -35,15 +37,16 @@ pub(super) fn spanish_light(text: &str) -> String {
         [.., 'o' | 'a' | 'e', 's'] => w.truncate(w.len() - 2),
         _ => {}
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The light Italian stem: a word of six letters or more loses its accents and a final `a`, `e`,
 /// `i` or `o`; then an `i` before it goes too, or an `h` before a removed `e` or `i`.
-pub(super) fn italian_light(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn italian_light(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     if w.len() < 6 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     w.iter_mut().for_each(|c| *c = unaccent(*c));
     if let Some(&v @ ('a' | 'e' | 'i' | 'o')) = w.last() {
@@ -54,7 +57,7 @@ pub(super) fn italian_light(text: &str) -> String {
             w.pop();
         }
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The plural endings of the light Portuguese stemmer, in the order they are tried, with what
@@ -90,10 +93,11 @@ pub(super) fn ends(w: &[char], suffix: &str) -> bool {
 /// The light Portuguese stem: a word of four letters or more loses `mente` (when two letters are
 /// left) or else its plural; then `ona` becomes `ão` in a word of seven letters or more, a final
 /// `a`, `o` or `e` goes from a word of five letters or more, and the accents and cedillas go.
-pub(super) fn portuguese_light(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn portuguese_light(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     if w.len() < 4 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     if ends(&w, "mente") && w.len() >= 7 {
         w.truncate(w.len() - 5);
@@ -113,7 +117,7 @@ pub(super) fn portuguese_light(text: &str) -> String {
     if matches!(w.last(), Some('a' | 'o' | 'e')) && w.len() >= 5 {
         w.pop();
     }
-    w.into_iter().map(|c| if c == 'ç' { 'c' } else { unaccent_pt(c) }).collect()
+    out.extend(w.iter().map(|&c| if c == 'ç' { 'c' } else { unaccent_pt(c) }));
 }
 
 /// `c` without its accent, with the tilde vowels of Portuguese.
@@ -127,9 +131,8 @@ fn unaccent_pt(c: char) -> char {
 
 /// `text` with `ä`, `ö`, `ü` and `ß` as `a`, `o`, `u` and `ss`, and without the `e` that follows
 /// an `a`, `o` or `u` not preceded by a vowel or `q`.
-pub(super) fn german_normal(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+pub(super) fn german_normal(text: &str, out: &mut String) {
+    let c = Chars::of(text);
     for (i, &ch) in c.iter().enumerate() {
         let after_plain = i > 0 && matches!(c[i - 1], 'a' | 'o' | 'u');
         let before =
@@ -145,14 +148,13 @@ pub(super) fn german_normal(text: &str) -> String {
             ch => out.push(ch),
         }
     }
-    out
 }
 
 /// The light German stem of a normalized word: one inflection ending (`ern`, then `em`, `en`,
 /// `er`, `es`, then `e`, then an `s` after a consonant that may end a stem), then one more
 /// (`est`, then `er`, `en`, then `st` after such a consonant).
-pub(super) fn german_light(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn german_light(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     let s_end = |c: char| matches!(c, 'b' | 'd' | 'f' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 't');
     let n = w.len();
     let first = if n > 5 && ends(&w, "ern") {
@@ -172,7 +174,7 @@ pub(super) fn german_light(text: &str) -> String {
         if two { 2 } else { 0 }
     };
     w.truncate(n - second);
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The derivational endings of the light French stemmer, tried in order on the word without its
@@ -219,8 +221,8 @@ type FrenchEnding = (&'static str, usize, &'static str, bool);
 /// corpora", JASIS 50(10), 1999): the plural `x` or `s` goes (`aux` becomes `al` unless `eaux`
 /// precedes), then the first derivational ending of [`FRENCH_ENDINGS`] is rewritten, then
 /// [`french_normal`].
-pub(super) fn french_light(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn french_light(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     let n = w.len();
     if n > 5 && w[n - 1] == 'x' {
         if w[n - 3] == 'a' && w[n - 2] == 'u' && w[n - 4] != 'e' {
@@ -242,13 +244,13 @@ pub(super) fn french_light(text: &str) -> String {
             }
         }
     }
-    french_normal(w)
+    french_normal(w, out);
 }
 
 /// The end of the light French stem: a word of five letters or more loses its accents (but not
 /// the diaeresis) and cedillas and the second of two equal letters in a row, then an `ie`, and
 /// then a final `r`, up to two final `e` and the second of two equal final letters.
-fn french_normal(mut w: Vec<char>) -> String {
+fn french_normal(mut w: Chars, out: &mut String) {
     let letter = |c: char| (1..=5).contains(&category(c));
     if w.len() > 4 {
         w.iter_mut().for_each(|c| {
@@ -278,5 +280,5 @@ fn french_normal(mut w: Vec<char>) -> String {
             w.pop();
         }
     }
-    w.into_iter().collect()
+    w.write(out);
 }

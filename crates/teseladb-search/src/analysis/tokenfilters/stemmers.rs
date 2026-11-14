@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::analysis::scratch::{Chars, written};
+
 /// Words that end in `s` and keep it, as observed, without accents.
 const INVARIANT: &[&str] = &[
     "afueras",
@@ -79,31 +81,28 @@ const ES_CONSONANTS: &[char] = &['l', 'r', 'n', 'd', 'z', 's', 'x', 'y'];
 
 const VOWELS: &[char] = &['a', 'e', 'i', 'o', 'u'];
 
-/// The stem `englishMinimalStemming` gives `word`.
-pub(super) fn english_minimal(word: &str) -> String {
+/// Appends the stem `englishMinimalStemming` gives `word` to `out`.
+pub(super) fn english_minimal(word: &str, out: &mut String) {
     let b = word.as_bytes();
     let n = b.len();
-    if n < 3 || b[n - 1] != b's' {
-        return word.to_string();
-    }
-    if word.ends_with("ies") {
-        return if n == 3 || matches!(b[n - 4], b'e' | b'a') {
-            word.to_string()
+    let kept = if n < 3 || b[n - 1] != b's' {
+        n
+    } else if word.ends_with("ies") {
+        if n == 3 || matches!(b[n - 4], b'e' | b'a') {
+            n
         } else {
-            format!("{}y", &word[..n - 3])
-        };
-    }
-    if word.ends_with("es") {
-        return if matches!(b[n - 3], b'a' | b'e' | b'o') {
-            word.to_string()
-        } else {
-            word[..n - 1].to_string()
-        };
-    }
-    if word.ends_with("us") || word.ends_with("ss") {
-        return word.to_string();
-    }
-    word[..n - 1].to_string()
+            out.push_str(&word[..n - 3]);
+            out.push('y');
+            return;
+        }
+    } else if word.ends_with("es") {
+        if matches!(b[n - 3], b'a' | b'e' | b'o') { n } else { n - 1 }
+    } else if word.ends_with("us") || word.ends_with("ss") {
+        n
+    } else {
+        n - 1
+    };
+    out.push_str(&word[..kept]);
 }
 
 /// `c` without an acute accent or a diaeresis.
@@ -118,58 +117,58 @@ fn plain(c: char) -> char {
     }
 }
 
-/// The stem `spanishPluralStemming` gives `word`.
-pub(super) fn spanish_plural(word: &str) -> String {
-    let v: Vec<char> = word.chars().map(plain).collect();
+/// Appends the stem `spanishPluralStemming` gives `word` to `out`.
+pub(super) fn spanish_plural(word: &str, out: &mut String) {
+    let v = Chars::collect(word.chars().map(plain));
     if v.len() < 4 {
-        return word.to_string();
+        out.push_str(word);
+        return;
     }
-    let text: String = v.iter().collect();
-    if INVARIANT.contains(&text.as_str()) {
-        return text;
+    let start = out.len();
+    v.write(out);
+    let text = &out[start..];
+    if INVARIANT.contains(&text) {
+        return;
     }
     if let Some(&(_, singular)) = IRREGULAR.iter().find(|(p, _)| *p == text) {
-        return singular.to_string();
+        out.truncate(start);
+        out.push_str(singular);
+        return;
     }
     let n = v.len();
-    let keep = |k: usize| v[..n - k].iter().collect::<String>();
     let ends = |s: &str| text.ends_with(s);
     if v[n - 1] != 's' {
-        return text;
+        return;
     }
     let (before2, before3) = (v[n - 3], v[n - 4]);
-    match v[n - 2] {
-        'a' | 'o' => keep(1),
-        'e' if ends("ces") => keep(3) + "z",
-        'e' if ends("ies") => {
-            if IES_KEEP_I.contains(&before3) {
-                keep(2)
-            } else {
-                keep(1)
-            }
-        }
-        'e' if ends("ues") => {
-            if matches!(before3, 'q' | 'g') {
-                keep(1)
-            } else {
-                keep(2)
-            }
-        }
-        'e' if ES_CONSONANTS.contains(&before2) && VOWELS.contains(&before3) => keep(2),
-        'e' if ends("nses") => keep(2),
-        'i' if ends("dis") => keep(2) + "y",
+    let (cut, add) = match v[n - 2] {
+        'a' | 'o' => (1, ""),
+        'e' if ends("ces") => (3, "z"),
+        'e' if ends("ies") => (if IES_KEEP_I.contains(&before3) { 2 } else { 1 }, ""),
+        'e' if ends("ues") => (if matches!(before3, 'q' | 'g') { 1 } else { 2 }, ""),
+        'e' if ES_CONSONANTS.contains(&before2) && VOWELS.contains(&before3) => (2, ""),
+        'e' if ends("nses") => (2, ""),
+        'i' if ends("dis") => (2, "y"),
         'i' if VOWELS.contains(&before2) && !matches!((before3, before2), ('q' | 'g', 'u')) => {
-            keep(2) + "y"
+            (2, "y")
         }
-        _ => keep(1),
-    }
+        _ => (1, ""),
+    };
+    out.truncate(start);
+    out.extend(v[..n - cut].iter());
+    out.push_str(add);
 }
 
 /// A stemmer learned from the stems the reference search server gives (D-051): word endings with the rewrite each
 /// one calls for, and whole words (written `^word`) whose rewrite the endings do not give. A word
 /// takes the rewrite of its whole-word entry or else of the longest ending it has; without either
 /// it stays as it is.
-struct Rewrites(HashMap<&'static str, (usize, &'static str)>);
+struct Rewrites {
+    /// The rewrite of each ending.
+    endings: HashMap<&'static str, (usize, &'static str)>,
+    /// The rewrite of each whole word, without its `^`.
+    words: HashMap<&'static str, (usize, &'static str)>,
+}
 
 impl Rewrites {
     /// The table of `text`: one entry per line, the ending, the characters it removes from the
@@ -181,16 +180,31 @@ impl Rewrites {
             let cut = parts.next()?.parse().ok()?;
             Some((key, (cut, parts.next().unwrap_or_default())))
         };
-        Rewrites(text.lines().filter_map(entry).collect())
+        let (mut endings, mut words) = (HashMap::new(), HashMap::new());
+        for (key, rewrite) in text.lines().filter_map(entry) {
+            match key.strip_prefix('^') {
+                Some(word) => words.insert(word, rewrite),
+                None => endings.insert(key, rewrite),
+            };
+        }
+        Rewrites { endings, words }
     }
 
-    fn stem(&self, word: &str) -> String {
-        let whole = self.0.get(format!("^{word}").as_str());
-        let ending =
-            || word.char_indices().map(|(i, _)| &word[i..]).chain([""]).find_map(|e| self.0.get(e));
-        let Some(&(cut, add)) = whole.or_else(ending) else { return word.to_owned() };
+    /// Appends the stem of `word` to `out`.
+    fn stem(&self, word: &str, out: &mut String) {
+        let whole = self.words.get(word);
+        // An ending that starts with `^` is a whole-word entry, as when both were one table.
+        let entry = |e: &str| match e.strip_prefix('^') {
+            Some(w) => self.words.get(w),
+            None => self.endings.get(e),
+        };
+        let ending = || word.char_indices().map(|(i, _)| &word[i..]).chain([""]).find_map(entry);
+        let Some(&(cut, add)) = whole.or_else(ending) else {
+            out.push_str(word);
+            return;
+        };
         let keep = word.chars().count().saturating_sub(cut);
-        word.chars().take(keep).chain(add.chars()).collect()
+        out.extend(word.chars().take(keep).chain(add.chars()));
     }
 }
 
@@ -198,8 +212,13 @@ impl Rewrites {
 /// Snowball vocabulary and 200 000 words made by joining the start of one of them to the end of
 /// another, all stemmed by the reference search server 1.70.6 (`data/kStemming.tsv`).
 pub fn k_stemming(word: &str) -> String {
+    written(|out| k_stemming_into(word, out))
+}
+
+/// Appends the stem `kStemming` gives `word` to `out`.
+pub(super) fn k_stemming_into(word: &str, out: &mut String) {
     static TABLE: OnceLock<Rewrites> = OnceLock::new();
-    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/kStemming.tsv"))).stem(word)
+    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/kStemming.tsv"))).stem(word, out);
 }
 
 /// The stem `stempel` gives `word`: the table learned from the 62 576 Polish words of the fixture,
@@ -207,14 +226,33 @@ pub fn k_stemming(word: &str) -> String {
 /// start of one of them to the end of another, all stemmed by the reference search server 1.70.6
 /// (`data/stempel.tsv`).
 pub fn stempel(word: &str) -> String {
+    written(|out| stempel_into(word, out))
+}
+
+/// Appends the stem `stempel` gives `word` to `out`.
+pub(super) fn stempel_into(word: &str, out: &mut String) {
     static TABLE: OnceLock<Rewrites> = OnceLock::new();
-    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/stempel.tsv"))).stem(word)
+    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/stempel.tsv"))).stem(word, out);
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    fn english_minimal(word: &str) -> String {
+        written(|out| super::english_minimal(word, out))
+    }
+
+    fn spanish_plural(word: &str) -> String {
+        written(|out| super::spanish_plural(word, out))
+    }
+
+    impl Rewrites {
+        fn of(&self, word: &str) -> String {
+            written(|out| self.stem(word, out))
+        }
+    }
 
     #[test]
     fn examples() {
@@ -236,12 +274,15 @@ mod tests {
     #[test]
     fn rewrite_tables_skip_bad_lines_and_keep_unknown_words() {
         let table = Rewrites::parse("ing\t3\t\n^sing\t0\t\nbad\nnum\tx\t\nies\t3\ty");
-        assert_eq!(table.stem("walking"), "walk");
-        assert_eq!(table.stem("sing"), "sing");
-        assert_eq!(table.stem("ponies"), "pony");
-        assert_eq!(table.stem("bad"), "bad");
-        assert_eq!(table.stem("num"), "num");
+        assert_eq!(table.of("walking"), "walk");
+        assert_eq!(table.of("sing"), "sing");
+        assert_eq!(table.of("ponies"), "pony");
+        assert_eq!(table.of("bad"), "bad");
+        assert_eq!(table.of("num"), "num");
         let root = Rewrites::parse("\t1\t");
-        assert_eq!(root.stem("cats"), "cat");
+        assert_eq!(root.of("cats"), "cat");
+        assert_eq!(table.of("^sing"), "^sing");
+        let caret = Rewrites::parse("^sing\t1\t");
+        assert_eq!(caret.of("x^sing"), "x^sin");
     }
 }

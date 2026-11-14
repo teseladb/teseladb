@@ -1,17 +1,34 @@
 //! The word a Snowball stemmer works on: a vector of characters with the suffix tests and
 //! rewrites the algorithm descriptions of snowballstem.org are written with.
 
+use crate::analysis::scratch::Chars;
+
 /// A word being stemmed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Word {
-    /// The characters.
-    pub c: Vec<char>,
+    /// The characters, in a vector reused from term to term (FR-028).
+    pub c: Chars,
 }
 
 impl Word {
     /// The word of `text`.
     pub fn new(text: &str) -> Word {
-        Word { c: text.chars().collect() }
+        Word { c: Chars::of(text) }
+    }
+
+    /// The word of the characters `c`.
+    pub fn of(c: &[char]) -> Word {
+        Word { c: Chars::copy(c) }
+    }
+
+    /// Whether the word is `text`.
+    pub fn is(&self, text: &str) -> bool {
+        self.c.iter().copied().eq(text.chars())
+    }
+
+    /// Appends the text to `out`.
+    pub fn write(&self, out: &mut String) {
+        self.c.write(out);
     }
 
     /// The length in characters.
@@ -41,20 +58,40 @@ impl Word {
         n <= self.c.len() && self.c[..n].iter().copied().eq(prefix.chars())
     }
 
-    /// The longest of `suffixes` the word ends with.
-    pub fn longest<'a>(&self, suffixes: &[&'a str]) -> Option<&'a str> {
-        suffixes.iter().copied().filter(|s| self.ends(s)).max_by_key(|s| s.chars().count())
+    /// The longest of `suffixes` the word ends with (the last of the longest ones).
+    pub fn longest<'a, 'b>(
+        &self,
+        suffixes: impl IntoIterator<Item = &'b &'a str>,
+    ) -> Option<&'a str>
+    where
+        'a: 'b,
+    {
+        suffixes.into_iter().copied().filter(|s| self.ends(s)).max_by_key(|s| s.chars().count())
     }
 
     /// The longest of `suffixes` the word ends with whose start is at or after `from`.
-    pub fn longest_from<'a>(&self, suffixes: &[&'a str], from: usize) -> Option<&'a str> {
+    pub fn longest_from<'a, 'b>(
+        &self,
+        suffixes: impl IntoIterator<Item = &'b &'a str>,
+        from: usize,
+    ) -> Option<&'a str>
+    where
+        'a: 'b,
+    {
         self.longest(suffixes).filter(|s| self.start_of(s) >= from)
     }
 
     /// The longest of `suffixes` that lies wholly at or after `from`.
-    pub fn longest_within<'a>(&self, suffixes: &[&'a str], from: usize) -> Option<&'a str> {
+    pub fn longest_within<'a, 'b>(
+        &self,
+        suffixes: impl IntoIterator<Item = &'b &'a str>,
+        from: usize,
+    ) -> Option<&'a str>
+    where
+        'a: 'b,
+    {
         suffixes
-            .iter()
+            .into_iter()
             .copied()
             .filter(|s| self.ends(s) && self.start_of(s) >= from)
             .max_by_key(|s| s.chars().count())

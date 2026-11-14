@@ -10,6 +10,8 @@
 //! The words come lower-cased by [`greek_lowercase`]: without tonos or dialytika and with final
 //! sigma as `σ`. Words of fewer than 4 letters are kept.
 
+use crate::analysis::scratch::Chars;
+
 /// Endings after which rule 1 does not put back αδ.
 const L1: &[&str] = &["γιαγι", "εθερ", "θει", "κυρ", "μαμ", "μαν", "μπαμπ", "νταντ", "οκ", "πατερ"];
 
@@ -400,25 +402,22 @@ const VOWELS_NO_Y: &str = "αεηιοω";
 
 /// The Greek lower-case form of `text`: each letter lower-cased, the vowels without tonos or
 /// dialytika and final sigma as `σ`.
-pub(super) fn greek_lowercase(text: &str) -> String {
-    text.chars()
-        .flat_map(char::to_lowercase)
-        .map(|c| match c {
-            'ά' => 'α',
-            'έ' => 'ε',
-            'ή' => 'η',
-            'ί' | 'ϊ' | 'ΐ' => 'ι',
-            'ό' => 'ο',
-            'ύ' | 'ϋ' | 'ΰ' => 'υ',
-            'ώ' => 'ω',
-            'ς' => 'σ',
-            other => other,
-        })
-        .collect()
+pub(super) fn greek_lowercase(text: &str, out: &mut String) {
+    out.extend(text.chars().flat_map(char::to_lowercase).map(|c| match c {
+        'ά' => 'α',
+        'έ' => 'ε',
+        'ή' => 'η',
+        'ί' | 'ϊ' | 'ΐ' => 'ι',
+        'ό' => 'ο',
+        'ύ' | 'ϋ' | 'ΰ' => 'υ',
+        'ώ' => 'ω',
+        'ς' => 'σ',
+        other => other,
+    }));
 }
 
 /// A word being stemmed.
-struct Word(Vec<char>);
+struct Word(Chars);
 
 impl Word {
     fn len(&self) -> usize {
@@ -629,10 +628,11 @@ fn rule22(w: &mut Word) {
 }
 
 /// The Greek stem of a token lower-cased by [`greek_lowercase`].
-pub(super) fn greek_stem(text: &str) -> String {
-    let mut w = Word(text.chars().collect());
+pub(super) fn greek_stem(text: &str, out: &mut String) {
+    let mut w = Word(Chars::of(text));
     if w.len() < 4 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     let original = w.len();
     rule0(&mut w);
@@ -646,5 +646,5 @@ pub(super) fn greek_stem(text: &str) -> String {
         rule21(&mut w);
     }
     rule22(&mut w);
-    w.0.into_iter().collect()
+    w.0.write(out);
 }

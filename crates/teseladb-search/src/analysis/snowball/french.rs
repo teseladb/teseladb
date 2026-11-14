@@ -1,6 +1,7 @@
 //! The French stemmer of snowballstem.org (`algorithms/french/stemmer.html`).
 
 use super::word::{Word, regions};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(
@@ -96,7 +97,7 @@ fn drop_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 fn prelude(text: &str) -> Word {
-    let mut c: Vec<char> = Vec::new();
+    let mut c = Chars::new();
     for ch in text.chars() {
         match ch {
             'ë' => c.extend(['H', 'e']),
@@ -119,7 +120,7 @@ fn prelude(text: &str) -> Word {
 }
 
 fn rv(c: &[char]) -> usize {
-    let w = Word { c: c.to_vec() };
+    let w = Word::of(c);
     if c.len() >= 2 && vowel(c[0]) && vowel(c[1]) {
         return 3.min(c.len());
     }
@@ -130,7 +131,7 @@ fn rv(c: &[char]) -> usize {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = prelude(text);
     let rv = rv(&w.c);
     let (r1, r2) = regions(&w.c, vowel);
@@ -159,7 +160,6 @@ pub fn stem(text: &str) -> String {
     if i < w.len() && i > 0 && matches!(w.c[i - 1], 'é' | 'è') {
         w.c[i - 1] = 'e';
     }
-    let mut out = String::new();
     let mut i = 0;
     while i < w.len() {
         match (w.c[i], w.at(i + 1)) {
@@ -176,7 +176,6 @@ pub fn stem(text: &str) -> String {
         }
         i += 1;
     }
-    out
 }
 
 /// What step 1 did.
@@ -283,8 +282,8 @@ fn step2(w: &mut Word, rv: usize, r2: usize) -> bool {
             return true;
         }
     }
-    let all: Vec<&str> = [&["ions"], STEP2B_E, STEP2B_A].concat();
-    let Some(s) = w.longest_within(&all, rv) else { return false };
+    let all = ["ions"].iter().chain(STEP2B_E).chain(STEP2B_A);
+    let Some(s) = w.longest_within(all, rv) else { return false };
     match s {
         "ions" if w.start_of(s) < r2 => return false,
         _ => w.cut(s.chars().count()),

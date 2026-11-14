@@ -1,6 +1,7 @@
 //! The Italian stemmer of snowballstem.org (`algorithms/italian/stemmer.html`).
 
 use super::word::{Word, regions, rv};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'à' | 'è' | 'ì' | 'ò' | 'ù')
@@ -44,17 +45,14 @@ fn drop_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 fn prelude(text: &str) -> Word {
-    let mut c: Vec<char> = text
-        .chars()
-        .map(|c| match c {
-            'á' => 'à',
-            'é' => 'è',
-            'í' => 'ì',
-            'ó' => 'ò',
-            'ú' => 'ù',
-            _ => c,
-        })
-        .collect();
+    let mut c = Chars::collect(text.chars().map(|c| match c {
+        'á' => 'à',
+        'é' => 'è',
+        'í' => 'ì',
+        'ó' => 'ò',
+        'ú' => 'ù',
+        _ => c,
+    }));
     for i in 1..c.len() {
         if c[i] == 'u' && c[i - 1] == 'q' {
             c[i] = 'U';
@@ -69,7 +67,7 @@ fn prelude(text: &str) -> Word {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = prelude(text);
     // The reference search server starts RV after `divan` in the words that begin with it (`divano`, `divani` → `divan`).
     let rv = if w.starts("divan") { 5 } else { rv(&w.c, vowel) };
@@ -87,12 +85,12 @@ pub fn stem(text: &str) -> String {
     if w.longest_within(&["ch", "gh"], rv).is_some() {
         w.cut(1);
     }
-    w.c.iter().map(|c| c.to_ascii_lowercase()).collect()
+    out.extend(w.c.iter().map(|c| c.to_ascii_lowercase()));
 }
 
 fn attached_pronoun(w: &mut Word, rv: usize) {
     let Some(p) = w.longest(PRONOUNS) else { return };
-    let rest = Word { c: w.c[..w.start_of(p)].to_vec() };
+    let rest = Word::of(&w.c[..w.start_of(p)]);
     let Some(v) = rest.longest(&["ando", "endo", "ar", "er", "ir"]) else { return };
     if rest.start_of(v) < rv {
         return;
@@ -106,8 +104,9 @@ fn attached_pronoun(w: &mut Word, rv: usize) {
 
 /// The standard suffixes; says whether one went.
 fn step1(w: &mut Word, rv: usize, r1: usize, r2: usize) -> bool {
-    let all: Vec<&str> = [STEP1_R2, STEP1_IC, STEP1_OTHER].concat();
-    let Some(s) = w.longest(&all) else { return false };
+    let Some(s) = w.longest(STEP1_R2.iter().chain(STEP1_IC).chain(STEP1_OTHER)) else {
+        return false;
+    };
     let start = w.start_of(s);
     let in_r2 = start >= r2;
     match s {

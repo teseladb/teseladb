@@ -12,6 +12,7 @@
 //! holds is replaced; a suffix whose condition fails lets a shorter one be tried.
 
 use crate::analysis::props;
+use crate::analysis::scratch::Chars;
 
 /// The region a suffix must start in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +152,7 @@ fn rv(w: &[char]) -> usize {
 
 /// The word before any step and where its regions start.
 struct Marks {
-    original: Vec<char>,
+    original: Chars,
     rv: usize,
     r1: usize,
     r2: usize,
@@ -176,12 +177,15 @@ fn ends(w: &[char], suffix: &str) -> bool {
 /// Runs one step on `w`; returns whether it replaced a suffix.
 fn step(w: &mut Vec<char>, groups: &[Group], marks: &Marks) -> bool {
     for k in (1..=LONGEST.min(w.len())).rev() {
-        let tail: String = w[w.len() - k..].iter().collect();
-        let Some(group) = groups.iter().find(|g| g.suffixes.contains(&tail.as_str())) else {
+        let tail = &w[w.len() - k..];
+        let is_tail = |s: &&&str| tail.iter().copied().eq(s.chars());
+        let Some((group, suffix)) =
+            groups.iter().find_map(|g| g.suffixes.iter().find(is_tail).map(|s| (g, *s)))
+        else {
             continue;
         };
         let holds = if group.original {
-            ends(&marks.original, &tail)
+            ends(&marks.original, suffix)
                 && marks.original.len() - k + group.offset >= marks.start(group.region)
         } else {
             w.len() - k + group.offset >= marks.start(group.region)
@@ -216,15 +220,17 @@ fn fold(c: char) -> char {
 }
 
 /// The Brazilian stem of a lower-case token.
-pub(super) fn brazilian_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().map(fold).collect();
+pub(super) fn brazilian_stem(text: &str, out: &mut String) {
+    let mut w = Chars::collect(text.chars().map(fold));
     // The lengths count UTF-16 units, as Java strings do.
     let units = text.encode_utf16().count();
     if !(3..30).contains(&units) {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     if !w.iter().all(|&c| is_letter(c)) {
-        return w.into_iter().collect();
+        w.write(out);
+        return;
     }
     let r1 = region_after(&w, 0);
     let r2 = if r1 < w.len() { region_after(&w, r1) } else { w.len() };
@@ -237,5 +243,5 @@ pub(super) fn brazilian_stem(text: &str) -> String {
         step(&mut w, RESIDUAL, &marks);
     }
     step(&mut w, FINAL_E, &marks);
-    w.into_iter().collect()
+    w.write(out);
 }

@@ -5,6 +5,8 @@
 //! only inside a region: then the longest affix is the longest one that starts in the region. An
 //! affix rewritten to itself is kept: it stays at the end and the steps go on looking before it.
 
+use crate::analysis::scratch::Chars;
+
 /// When a rule applies, measured on the word as it was before any step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cond {
@@ -87,8 +89,12 @@ pub struct Step {
     protect: bool,
 }
 
+/// The most steps a table has: [`run_marked`] keeps what each one did in the bits of a `u64`.
+const MAX_STEPS: usize = 64;
+
 /// The steps of `defs`, ready to run.
 pub fn build(defs: &[StepDef]) -> Vec<Step> {
+    assert!(defs.len() <= MAX_STEPS, "a stemmer table has at most {MAX_STEPS} steps");
     defs.iter()
         .map(|d| {
             let mut rules: Vec<Rule> = d
@@ -112,36 +118,36 @@ pub fn build(defs: &[StepDef]) -> Vec<Step> {
         .collect()
 }
 
-/// The stem of `c` after `steps`, with RV, R1 and R2 starting at `marks`.
-pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String {
+/// Stems `c` in place with `steps`, with RV, R1 and R2 starting at `marks`.
+pub fn run_marked(c: &mut Vec<char>, steps: &[Step], marks: [usize; 3]) {
     let mut removed_front = 0;
     let mut changed = false;
     // Characters at the end kept by an affix rewritten to itself; the steps look before them.
     let mut kept = 0;
-    // Whether each step changed the word.
-    let mut did = Vec::with_capacity(steps.len());
-    for step in steps {
+    // Bit `i`: whether step `i` changed the word.
+    let mut did: u64 = 0;
+    let done = |did: u64, i: usize| i < MAX_STEPS && did & (1 << i) != 0;
+    for (at, step) in steps.iter().enumerate() {
         let runs = match step.when {
             When::Always => true,
-            When::Changed(i) => did.get(i).copied().unwrap_or(false),
-            When::Unchanged(i) => !did.get(i).copied().unwrap_or(false),
+            When::Changed(i) => done(did, i),
+            When::Unchanged(i) => !done(did, i),
         };
         if !runs {
-            did.push(false);
             continue;
         }
         if step.alternative && changed {
             changed = false;
-            did.push(false);
             continue;
         }
         let kept_before = kept;
-        let before = c.clone();
+        let before = Chars::copy(c);
         let mut acted = false;
         loop {
             let start = step.within.map_or(0, |r| mark(r, &marks).saturating_sub(removed_front));
             let end = if step.prefix { c.len() } else { c.len() - kept };
             let Some(rule) = longest(&c[..end], step, start) else { break };
+            let to_len = rule.to.chars().count();
             let n = rule.from.chars().count();
             let left = end - n;
             let allowed = match rule.cond {
@@ -153,7 +159,6 @@ pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String
             if !allowed {
                 break;
             }
-            let to: Vec<char> = rule.to.chars().collect();
             let identity = !step.prefix && rule.to == rule.from;
             if identity && !step.protect {
                 acted = true;
@@ -162,21 +167,22 @@ pub fn run_marked(mut c: Vec<char>, steps: &[Step], marks: [usize; 3]) -> String
             let keep = identity;
             if step.prefix {
                 removed_front += n;
-                removed_front -= to.len().min(removed_front);
-                c.splice(..n, to.iter().copied());
+                removed_front -= to_len.min(removed_front);
+                c.splice(..n, rule.to.chars());
             } else if keep {
                 kept += n;
             } else {
-                c.splice(left..end, to.iter().copied());
+                c.splice(left..end, rule.to.chars());
             }
             if !step.repeat || !(rule.to.is_empty() || keep) {
                 break;
             }
         }
-        changed = c != before || kept != kept_before || acted;
-        did.push(changed);
+        changed = **c != *before || kept != kept_before || acted;
+        if changed {
+            did |= 1 << at;
+        }
     }
-    c.into_iter().collect()
 }
 
 /// Where the region of `cond` starts (0 for the conditions that are not regions).
@@ -192,12 +198,10 @@ fn mark(cond: Cond, marks: &[usize; 3]) -> usize {
 /// The rule of `step` with the longest affix `c` has, among those that leave at least `start`
 /// characters before them.
 fn longest(c: &[char], step: &Step, start: usize) -> Option<Rule> {
-    let mut key = String::new();
     for n in (1..=step.longest.min(c.len().saturating_sub(start))).rev() {
-        key.clear();
         let part = if step.prefix { &c[..n] } else { &c[c.len() - n..] };
-        key.extend(part.iter());
-        if let Ok(i) = step.rules.binary_search_by(|r| r.from.cmp(key.as_str())) {
+        // UTF-8 keeps the order of the code points, so this is the order of the strings.
+        if let Ok(i) = step.rules.binary_search_by(|r| r.from.chars().cmp(part.iter().copied())) {
             return Some(step.rules[i]);
         }
     }
@@ -215,10 +219,11 @@ mod tests {
 
     /// `run_marked` with the standard regions of `word`.
     fn run(word: &str, steps: &[Step], vowel: impl Fn(char) -> bool + Copy) -> String {
-        let c: Vec<char> = word.chars().collect();
+        let mut c: Vec<char> = word.chars().collect();
         let (r1, r2) = regions(&c, vowel);
         let marks = [rv(&c, vowel), r1, r2];
-        run_marked(c, steps, marks)
+        run_marked(&mut c, steps, marks);
+        c.into_iter().collect()
     }
 
     const PLURAL: &[Group] = &[
@@ -338,7 +343,9 @@ mod tests {
         // A prefix rule whose condition is not a length never applies.
         let steps = build(&[StepDef { prefix: true, ..step(REGION_PREFIX) }]);
         assert_eq!(run("decode", &steps, vowel), "decode");
-        let marked = run_marked("unlocks".chars().collect(), &build(&[step(PLURAL)]), [0, 7, 7]);
+        let mut marked: Vec<char> = "unlocks".chars().collect();
+        run_marked(&mut marked, &build(&[step(PLURAL)]), [0, 7, 7]);
+        let marked: String = marked.into_iter().collect();
         assert_eq!(marked, "unlocks");
     }
 }

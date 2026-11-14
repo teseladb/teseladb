@@ -9,6 +9,7 @@
 //! other hamza carriers lose their hamza. The few words of the vocabulary the steps get wrong
 //! are listed with their stems.
 
+use crate::analysis::scratch::Chars;
 use std::sync::OnceLock;
 
 use super::table::{Cond, Group, Step, StepDef, When, build, run_marked};
@@ -431,17 +432,18 @@ fn plain(c: char) -> Option<char> {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
-    let mut c: Vec<char> = Vec::with_capacity(word.len());
+pub fn stem(word: &str, out: &mut String) {
+    let mut c = Chars::new();
     for ch in word.chars() {
         match NORMAL.binary_search_by(|(k, _)| k.cmp(&ch)) {
             Ok(i) => c.extend(NORMAL[i].1.chars()),
             Err(_) => c.push(ch),
         }
     }
-    let normal: String = c.iter().collect();
-    if let Ok(i) = EXCEPTIONS.binary_search_by(|(w, _)| (*w).cmp(normal.as_str())) {
-        return EXCEPTIONS[i].1.to_string();
+    // UTF-8 keeps the order of the code points, so this is the order of the strings.
+    if let Ok(i) = EXCEPTIONS.binary_search_by(|(w, _)| w.chars().cmp(c.iter().copied())) {
+        out.push_str(EXCEPTIONS[i].1);
+        return;
     }
     let noun =
         ["\u{627}\u{644}", "\u{644}\u{644}", "\u{628}\u{627}\u{644}", "\u{643}\u{627}\u{644}"]
@@ -450,7 +452,8 @@ pub fn stem(word: &str) -> String {
     let steps =
         if noun { NOUNS.get_or_init(|| build(&NOUN)) } else { VERBS.get_or_init(|| build(&VERB)) };
     let n = c.len();
-    let mut s: Vec<char> = run_marked(c, steps, [n, n, n]).chars().collect();
+    let mut s = c;
+    run_marked(&mut s, steps, [n, n, n]);
     if let Some(last) = s.last_mut() {
         if plain(*last).is_some() {
             *last = '\u{621}';
@@ -458,5 +461,5 @@ pub fn stem(word: &str) -> String {
             *last = '\u{64a}';
         }
     }
-    s.iter().map(|&ch| plain(ch).unwrap_or(ch)).collect()
+    out.extend(s.iter().map(|&ch| plain(ch).unwrap_or(ch)));
 }

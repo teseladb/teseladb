@@ -62,7 +62,7 @@ fn drop_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let rv = rv(&w.c, vowel);
     let (r1, r2) = regions(&w.c, vowel);
@@ -84,12 +84,12 @@ pub fn stem(text: &str) -> String {
             w.cut(1);
         }
     }
-    w.c.iter().map(|&c| unaccent(c)).collect()
+    out.extend(w.c.iter().map(|&c| unaccent(c)));
 }
 
 fn attached_pronoun(w: &mut Word, rv: usize) {
     let Some(p) = w.longest(PRONOUNS) else { return };
-    let rest = Word { c: w.c[..w.start_of(p)].to_vec() };
+    let rest = Word::of(&w.c[..w.start_of(p)]);
     let Some(v) = rest.longest(BEFORE_PRONOUN) else { return };
     let start = rest.start_of(v);
     if start < rv || (v == "yendo" && rest.c.get(start.wrapping_sub(1)) != Some(&'u')) {
@@ -103,8 +103,9 @@ fn attached_pronoun(w: &mut Word, rv: usize) {
 
 /// The standard suffixes; says whether one went.
 fn step1(w: &mut Word, r1: usize, r2: usize) -> bool {
-    let all: Vec<&str> = [STEP1_R2, STEP1_IC, STEP1_OTHER].concat();
-    let Some(s) = w.longest(&all) else { return false };
+    let Some(s) = w.longest(STEP1_R2.iter().chain(STEP1_IC).chain(STEP1_OTHER)) else {
+        return false;
+    };
     let start = w.start_of(s);
     let in_r2 = start >= r2;
     match s {
@@ -146,8 +147,7 @@ fn step1(w: &mut Word, r1: usize, r2: usize) -> bool {
 }
 
 fn step2b(w: &mut Word, rv: usize) {
-    let all: Vec<&str> = [STEP2B_GU, STEP2B].concat();
-    let Some(s) = w.longest_within(&all, rv) else { return };
+    let Some(s) = w.longest_within(STEP2B_GU.iter().chain(STEP2B), rv) else { return };
     w.cut(s.chars().count());
     if STEP2B_GU.contains(&s) && w.ends("gu") && w.len() > rv {
         w.cut(1);

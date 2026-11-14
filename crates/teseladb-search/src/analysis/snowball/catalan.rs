@@ -6,6 +6,7 @@
 //! residual suffixes), then the accents go. The words of the fixture the steps do not stem as
 //! the reference search server does are listed with their stems.
 
+use crate::analysis::scratch::Chars;
 use std::sync::OnceLock;
 
 use super::table::{Cond, Group, Step, StepDef, When, build, run_marked};
@@ -1102,13 +1103,14 @@ fn clean(c: char) -> char {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
+pub fn stem(word: &str, out: &mut String) {
     if let Ok(i) = EXCEPTIONS.binary_search_by(|(w, _)| w.cmp(&word)) {
-        return EXCEPTIONS[i].1.to_string();
+        out.push_str(EXCEPTIONS[i].1);
+        return;
     }
-    let c: Vec<char> = word.chars().collect();
+    let mut c = Chars::of(word);
     let rv = c.iter().position(|&ch| vowel(ch)).map_or(c.len(), |i| i + 1);
     let (r1, r2) = regions(&c, vowel);
-    let stem = run_marked(c, BUILT.get_or_init(|| build(&STEPS)), [rv, r1, r2]);
-    stem.chars().map(clean).collect()
+    run_marked(&mut c, BUILT.get_or_init(|| build(&STEPS)), [rv, r1, r2]);
+    out.extend(c.iter().map(|&ch| clean(ch)));
 }

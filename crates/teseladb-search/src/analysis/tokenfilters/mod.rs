@@ -59,11 +59,12 @@ pub use delimiter::DelimiterOptions;
 
 use super::jregex::RegexError;
 use super::morfologik::{Dictionary, Language};
-use super::normalize::{Form, normalize};
+use super::normalize::{Form, normalize_into};
 use super::props::category;
-use super::snowball::{Stemmer, porter_stemming};
+use super::snowball::{Stemmer, porter_stemming_into};
 use super::tokenizers::{Pattern, Token};
 use super::unicode::lowercase;
+use crate::byte_simd;
 
 /// Whether a filter also keeps the token it rewrites (`originalTokens`, `termNotInBounds`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +351,44 @@ fn lower(text: &str) -> String {
     text.chars().map(lowercase).collect()
 }
 
+/// Appends `text` lowercased as `lowercase` does to `out`; whether it changed. The ASCII goes
+/// 32 bytes at a time through [`byte_simd`].
+pub(crate) fn lower_into(text: &str, out: &mut String) -> bool {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    let mut clean = true;
+    while at < bytes.len() {
+        let (w, valid) = byte_simd::window(bytes, at);
+        let c = byte_simd::classify(&w);
+        if (c.high | c.upper) & valid != 0 {
+            clean = false;
+            break;
+        }
+        at += byte_simd::WINDOW;
+    }
+    if clean {
+        out.push_str(text);
+        return false;
+    }
+    let mut at = 0;
+    while at < bytes.len() {
+        let (w, valid) = byte_simd::window(bytes, at);
+        let c = byte_simd::classify(&w);
+        let ascii = ((c.high | !valid).trailing_zeros() as usize).min(bytes.len() - at);
+        let lowered = byte_simd::lowercase(&w);
+        // The bytes up to `ascii` are ASCII, so they are whole characters.
+        out.extend(lowered[..ascii].iter().map(|&b| char::from(b)));
+        at += ascii;
+        if ascii < byte_simd::WINDOW
+            && let Some(ch) = text[at..].chars().next()
+        {
+            out.push(lowercase(ch));
+            at += ch.len_utf8();
+        }
+    }
+    true
+}
+
 /// The length of `text` in UTF-16 code units.
 fn utf16_len(text: &str) -> usize {
     text.chars().map(char::len_utf16).sum()
@@ -360,36 +399,27 @@ fn with_text(token: &Token, text: String) -> Token {
     Token { text, ..token.clone() }
 }
 
-/// Rewrites each token's text, leaving keyword tokens alone when `skip_keywords`.
-fn rewrite(tokens: Vec<Token>, skip_keywords: bool, f: impl Fn(&str) -> String) -> Vec<Token> {
-    tokens
-        .into_iter()
-        .map(|t| if skip_keywords && t.keyword { t } else { with_text(&t, f(&t.text)) })
-        .collect()
-}
-
 /// `text` without its final `ー` when it is all Katakana (U+30A0 to U+30FF) and has at least 4
 /// UTF-16 units.
-fn katakana_stem(text: &str) -> String {
+fn katakana_stem(text: &str, out: &mut String) {
     let katakana = text.chars().all(|c| ('\u{30A0}'..='\u{30FF}').contains(&c));
     match text.strip_suffix('ー') {
-        Some(stem) if katakana && text.encode_utf16().count() >= 4 => stem.to_string(),
-        _ => text.to_string(),
+        Some(stem) if katakana && text.encode_utf16().count() >= 4 => out.push_str(stem),
+        _ => out.push_str(text),
     }
 }
 
 /// `text` with the Arabic alef variants as plain alef, `ى` as `ي`, `ة` as `ه`, and without
 /// diacritics (U+064B to U+0652) or tatweel.
-fn arabic_normal(text: &str) -> String {
-    text.chars()
-        .filter(|&c| !matches!(c, '\u{640}' | '\u{64b}'..='\u{652}'))
-        .map(|c| match c {
+fn arabic_normal(text: &str, out: &mut String) {
+    out.extend(text.chars().filter(|&c| !matches!(c, '\u{640}' | '\u{64b}'..='\u{652}')).map(
+        |c| match c {
             '\u{622}' | '\u{623}' | '\u{625}' => '\u{627}',
             '\u{649}' => '\u{64a}',
             '\u{629}' => '\u{647}',
             c => c,
-        })
-        .collect()
+        },
+    ));
 }
 
 /// The prefixes the Arabic analyzer removes (one, the first that matches) with the letters that
@@ -420,7 +450,7 @@ const ARABIC_SUFFIXES: &[&str] = &[
 ];
 
 /// The light stem of a normalized Arabic word.
-fn arabic_stem(text: &str) -> String {
+fn arabic_stem(text: &str, out: &mut String) {
     let len = |s: &str| s.chars().count();
     let mut w = text;
     if let Some(&(p, _)) =
@@ -433,37 +463,44 @@ fn arabic_stem(text: &str) -> String {
             w = &w[..w.len() - s.len()];
         }
     }
-    w.to_string()
+    out.push_str(w);
 }
 
 /// `text` with every decimal digit (general category Nd) as its ASCII digit.
-fn ascii_digits(text: &str) -> String {
+fn ascii_digits(text: &str, out: &mut String) {
     const ND: usize = 9;
-    text.chars()
-        .map(|c| {
-            if c.is_ascii_digit() || category(c) != ND {
-                return c;
-            }
-            // Decimal digits come in runs of tens that start at zero: count from the start of
-            // the run.
-            let code = u32::from(c);
-            let mut start = code;
-            while let Some(p) = start.checked_sub(1).and_then(char::from_u32)
-                && category(p) == ND
-            {
-                start -= 1;
-            }
-            let value = (code - start) % 10;
-            char::from_digit(value, 10).unwrap_or(c)
-        })
-        .collect()
+    out.extend(text.chars().map(|c| {
+        if c.is_ascii_digit() || category(c) != ND {
+            return c;
+        }
+        // Decimal digits come in runs of tens that start at zero: count from the start of
+        // the run.
+        let code = u32::from(c);
+        let mut start = code;
+        while let Some(p) = start.checked_sub(1).and_then(char::from_u32)
+            && category(p) == ND
+        {
+            start -= 1;
+        }
+        let value = (code - start) % 10;
+        char::from_digit(value, 10).unwrap_or(c)
+    }));
 }
 
 /// `text` without a leading article from `articles` and the apostrophe after it.
-fn elide(text: &str, articles: &BTreeSet<String>) -> String {
-    match text.find(['\'', '\u{2019}']) {
-        Some(at) if articles.contains(&lower(&text[..at])) => text[at..].chars().skip(1).collect(),
-        _ => text.to_string(),
+fn elide(text: &str, articles: &BTreeSet<String>, out: &mut String) {
+    let Some(at) = text.find(['\'', '\u{2019}']) else {
+        out.push_str(text);
+        return;
+    };
+    // The article lowercased goes into `out` to be looked up, then gives way to the result.
+    let start = out.len();
+    lower_into(&text[..at], out);
+    let article = articles.contains(&out[start..]);
+    out.truncate(start);
+    match article {
+        true => out.extend(text[at..].chars().skip(1)),
+        false => out.push_str(text),
     }
 }
 
@@ -487,14 +524,12 @@ fn lemmatize(tokens: Vec<Token>, language: Language) -> Vec<Token> {
 }
 
 /// `text` lowercased with the Turkish `I` → `ı` and `İ` → `i`.
-fn turkish_lower(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            'I' => 'ı',
-            '\u{130}' => 'i',
-            c => lowercase(c),
-        })
-        .collect()
+fn turkish_lower(text: &str, out: &mut String) {
+    out.extend(text.chars().map(|c| match c {
+        'I' => 'ı',
+        '\u{130}' => 'i',
+        c => lowercase(c),
+    }));
 }
 
 /// Replaces each token with the texts `f` gives at its position, followed by the token itself
@@ -548,6 +583,32 @@ impl Stream {
     }
 }
 
+/// What [`TokenFilter::term`] did with one term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// The term stays as it was.
+    Same,
+    /// The term is what the filter wrote.
+    Written,
+    /// The term goes; its position stays.
+    Dropped,
+}
+
+/// Runs `f` on `text` unless it is a keyword and the filter leaves keywords alone.
+fn stem(
+    text: &str,
+    keyword: bool,
+    skip: bool,
+    out: &mut String,
+    f: impl FnOnce(&str, &mut String),
+) -> Step {
+    if skip && keyword {
+        return Step::Same;
+    }
+    f(text, out);
+    Step::Written
+}
+
 impl TokenFilter {
     /// Applies the filter to the tokens of one text. Only `regex` fails, when a match runs out
     /// of the engine's steps.
@@ -557,11 +618,164 @@ impl TokenFilter {
         Ok(Stream { tokens, end })
     }
 
+    /// Whether the filter reads each token on its own and keeps at most one in its place, so
+    /// that [`TokenFilter::term`] runs it term by term (FR-028).
+    pub fn term_wise(&self) -> bool {
+        !matches!(
+            self,
+            TokenFilter::AsciiFolding { original: Original::Include }
+                | TokenFilter::DaitchMokotoffSoundex { .. }
+                | TokenFilter::EdgeGram { .. }
+                | TokenFilter::NGram { .. }
+                | TokenFilter::KeywordRepeat
+                | TokenFilter::LimitTokenCount { .. }
+                | TokenFilter::Morfologik { .. }
+                | TokenFilter::CjkBigram
+                | TokenFilter::RemoveDuplicates
+                | TokenFilter::Shingle { .. }
+                | TokenFilter::WordDelimiterGraph { .. }
+        )
+    }
+
+    /// Runs a filter that is [`TokenFilter::term_wise`] on one term: `out`, empty, receives
+    /// the new text when the result is [`Step::Written`], and `keyword` is the token's mark,
+    /// which `stemmerOverride` sets. Any other filter leaves the term as it is.
+    pub fn term(
+        &self,
+        text: &str,
+        keyword: &mut bool,
+        out: &mut String,
+    ) -> Result<Step, RegexError> {
+        let kw = *keyword;
+        Ok(match self {
+            TokenFilter::AsciiFolding { .. } => stem(text, kw, false, out, folding::ascii_into),
+            TokenFilter::EnglishMinimalStemming => {
+                stem(text, kw, true, out, stemmers::english_minimal)
+            }
+            TokenFilter::EnglishPossessive => {
+                stem(text, kw, false, out, |t, o| o.push_str(strip_possessive(t)))
+            }
+            TokenFilter::FlattenGraph => Step::Same,
+            TokenFilter::IcuFolding => stem(text, kw, false, out, folding::icu_into),
+            &TokenFilter::IcuNormalizer { form } => {
+                stem(text, kw, false, out, |t, o| normalize_into(t, form, o))
+            }
+            TokenFilter::KStemming => stem(text, kw, true, out, stemmers::k_stemming_into),
+            &TokenFilter::Length { min, max } => match (min..=max).contains(&utf16_len(text)) {
+                true => Step::Same,
+                false => Step::Dropped,
+            },
+            TokenFilter::Lowercase => match lower_into(text, out) {
+                true => Step::Written,
+                false => Step::Same,
+            },
+            TokenFilter::PorterStemming => stem(text, kw, true, out, porter_stemming_into),
+            TokenFilter::Apostrophe => stem(text, kw, false, out, |t, o| {
+                o.push_str(t.find(['\'', '\u{2019}']).map_or(t, |at| &t[..at]));
+            }),
+            TokenFilter::StemmerOverride { map } => match map.get(text) {
+                Some(stem) if !kw => {
+                    out.push_str(stem);
+                    *keyword = true;
+                    Step::Written
+                }
+                _ => Step::Same,
+            },
+            TokenFilter::TurkishLowercase => stem(text, kw, false, out, turkish_lower),
+            TokenFilter::ArabicNormalization => stem(text, kw, false, out, arabic_normal),
+            TokenFilter::ArabicStemming => stem(text, kw, true, out, arabic_stem),
+            TokenFilter::DecimalDigit => stem(text, kw, false, out, ascii_digits),
+            TokenFilter::Elision { articles } => {
+                stem(text, kw, false, out, |t, o| elide(t, articles, o))
+            }
+            TokenFilter::SpanishLightStemming => stem(text, kw, true, out, spanish_light),
+            TokenFilter::ItalianLightStemming => stem(text, kw, true, out, italian_light),
+            TokenFilter::PortugueseLightStemming => stem(text, kw, true, out, portuguese_light),
+            TokenFilter::GermanNormalization => stem(text, kw, false, out, german_normal),
+            TokenFilter::GermanLightStemming => stem(text, kw, true, out, german_light),
+            TokenFilter::FrenchLightStemming => stem(text, kw, true, out, french_light),
+            TokenFilter::CzechStemming => stem(text, kw, true, out, czech_stem),
+            TokenFilter::BulgarianStemming => stem(text, kw, true, out, bulgarian_stem),
+            TokenFilter::LatvianStemming => stem(text, kw, true, out, latvian_stem),
+            TokenFilter::IndonesianStemming => stem(text, kw, true, out, indonesian_stem),
+            TokenFilter::PersianNormalization => stem(text, kw, false, out, persian_normal),
+            TokenFilter::PersianStemming => stem(text, kw, true, out, persian_stem),
+            TokenFilter::CjkWidth => stem(text, kw, false, out, cjk_width),
+            TokenFilter::IndicNormalization => stem(text, kw, false, out, indic_normal),
+            TokenFilter::HindiNormalization => stem(text, kw, false, out, hindi_normal),
+            TokenFilter::HindiStemming => stem(text, kw, true, out, hindi_stem),
+            TokenFilter::BengaliNormalization => stem(text, kw, false, out, bengali_normal),
+            TokenFilter::BengaliStemming => stem(text, kw, true, out, bengali_stem),
+            TokenFilter::BrazilianStemming => stem(text, kw, true, out, brazilian_stem),
+            TokenFilter::GalicianStemming => stem(text, kw, true, out, galician_stem),
+            TokenFilter::GreekLowercase => stem(text, kw, false, out, greek_lowercase),
+            TokenFilter::GreekStemming => stem(text, kw, true, out, greek_stem),
+            TokenFilter::JapaneseKatakanaStemming => stem(text, kw, true, out, katakana_stem),
+            TokenFilter::SoraniNormalization => stem(text, kw, false, out, sorani_normal),
+            TokenFilter::SoraniStemming => stem(text, kw, true, out, sorani_stem),
+            TokenFilter::Regex { pattern, replacement, matches } => {
+                let all = *matches == Matches::All;
+                out.push_str(&pattern.regex().replace(text, replacement, all)?);
+                Step::Written
+            }
+            TokenFilter::Reverse => stem(text, kw, false, out, |t, o| o.extend(t.chars().rev())),
+            &TokenFilter::SnowballStemming(stemmer) => {
+                stem(text, kw, true, out, |t, o| stemmer.stem_into(t, o))
+            }
+            TokenFilter::SpanishPluralStemming => {
+                stem(text, kw, true, out, stemmers::spanish_plural)
+            }
+            TokenFilter::Stempel => stem(text, kw, true, out, stemmers::stempel_into),
+            TokenFilter::Stopword { tokens: words, ignore_case } => {
+                // The lowercase key, when needed, goes into `out`, which the term then ignores.
+                let key = match ignore_case {
+                    true => {
+                        lower_into(text, out);
+                        out.as_str()
+                    }
+                    false => text,
+                };
+                match words.contains(key) {
+                    true => Step::Dropped,
+                    false => Step::Same,
+                }
+            }
+            TokenFilter::Trim => {
+                stem(text, kw, false, out, |t, o| o.push_str(t.trim_matches(is_java_whitespace)))
+            }
+            TokenFilter::DaitchMokotoffSoundex { .. }
+            | TokenFilter::EdgeGram { .. }
+            | TokenFilter::NGram { .. }
+            | TokenFilter::KeywordRepeat
+            | TokenFilter::LimitTokenCount { .. }
+            | TokenFilter::Morfologik { .. }
+            | TokenFilter::CjkBigram
+            | TokenFilter::RemoveDuplicates
+            | TokenFilter::Shingle { .. }
+            | TokenFilter::WordDelimiterGraph { .. } => Step::Same,
+        })
+    }
+
+    /// Runs a [`TokenFilter::term_wise`] filter token by token.
+    fn each_term(&self, tokens: Vec<Token>) -> Result<Vec<Token>, RegexError> {
+        let mut out = Vec::with_capacity(tokens.len());
+        for t in tokens {
+            let mut text = String::new();
+            let mut keyword = t.keyword;
+            match self.term(&t.text, &mut keyword, &mut text)? {
+                Step::Same => out.push(Token { keyword, ..t }),
+                Step::Written => out.push(Token { text, keyword, ..t }),
+                Step::Dropped => {}
+            }
+        }
+        Ok(out)
+    }
+
     /// Applies the filter to `tokens`, moving `end` when positions are added.
     fn filter(&self, tokens: Vec<Token>, end: &mut u32) -> Result<Vec<Token>, RegexError> {
         Ok(match self {
-            &TokenFilter::AsciiFolding { original } => {
-                expand(tokens, original, |t| vec![folding::ascii(t)])
+            &TokenFilter::AsciiFolding { original: Original::Include } => {
+                expand(tokens, Original::Include, |t| vec![folding::ascii(t)])
             }
             &TokenFilter::DaitchMokotoffSoundex { original } => {
                 expand(tokens, original, soundex::daitch_mokotoff)
@@ -572,14 +786,6 @@ impl TokenFilter {
             &TokenFilter::NGram { min, max, out_of_bounds } => {
                 grams::grams(tokens, min, max, out_of_bounds, false)
             }
-            TokenFilter::EnglishMinimalStemming => rewrite(tokens, true, stemmers::english_minimal),
-            TokenFilter::EnglishPossessive => {
-                rewrite(tokens, false, |t| strip_possessive(t).to_string())
-            }
-            TokenFilter::FlattenGraph => tokens,
-            TokenFilter::IcuFolding => rewrite(tokens, false, folding::icu),
-            &TokenFilter::IcuNormalizer { form } => rewrite(tokens, false, |t| normalize(t, form)),
-            TokenFilter::KStemming => rewrite(tokens, true, k_stemming),
             TokenFilter::KeywordRepeat => {
                 let mut out = Vec::with_capacity(tokens.len() * 2);
                 for t in tokens {
@@ -588,65 +794,9 @@ impl TokenFilter {
                 }
                 out
             }
-            &TokenFilter::Length { min, max } => {
-                tokens.into_iter().filter(|t| (min..=max).contains(&utf16_len(&t.text))).collect()
-            }
             &TokenFilter::LimitTokenCount { max } => tokens.into_iter().take(max).collect(),
-            TokenFilter::Lowercase => rewrite(tokens, false, lower),
-            TokenFilter::PorterStemming => rewrite(tokens, true, porter_stemming),
-            TokenFilter::Apostrophe => rewrite(tokens, false, |t| {
-                t.find(['\'', '\u{2019}']).map_or(t, |at| &t[..at]).to_string()
-            }),
-            TokenFilter::StemmerOverride { map } => tokens
-                .into_iter()
-                .map(|t| match map.get(&t.text) {
-                    Some(stem) if !t.keyword => {
-                        Token { keyword: true, ..with_text(&t, stem.clone()) }
-                    }
-                    _ => t,
-                })
-                .collect(),
-            TokenFilter::TurkishLowercase => rewrite(tokens, false, turkish_lower),
-            TokenFilter::ArabicNormalization => rewrite(tokens, false, arabic_normal),
-            TokenFilter::ArabicStemming => rewrite(tokens, true, arabic_stem),
-            TokenFilter::DecimalDigit => rewrite(tokens, false, ascii_digits),
-            TokenFilter::Elision { articles } => rewrite(tokens, false, |t| elide(t, articles)),
-            TokenFilter::SpanishLightStemming => rewrite(tokens, true, spanish_light),
-            TokenFilter::ItalianLightStemming => rewrite(tokens, true, italian_light),
-            TokenFilter::PortugueseLightStemming => rewrite(tokens, true, portuguese_light),
-            TokenFilter::GermanNormalization => rewrite(tokens, false, german_normal),
-            TokenFilter::GermanLightStemming => rewrite(tokens, true, german_light),
-            TokenFilter::FrenchLightStemming => rewrite(tokens, true, french_light),
-            TokenFilter::CzechStemming => rewrite(tokens, true, czech_stem),
-            TokenFilter::BulgarianStemming => rewrite(tokens, true, bulgarian_stem),
-            TokenFilter::LatvianStemming => rewrite(tokens, true, latvian_stem),
-            TokenFilter::IndonesianStemming => rewrite(tokens, true, indonesian_stem),
-            TokenFilter::PersianNormalization => rewrite(tokens, false, persian_normal),
-            TokenFilter::PersianStemming => rewrite(tokens, true, persian_stem),
             &TokenFilter::Morfologik { language } => lemmatize(tokens, language),
-            TokenFilter::CjkWidth => rewrite(tokens, false, cjk_width),
             TokenFilter::CjkBigram => cjk_bigrams(tokens),
-            TokenFilter::IndicNormalization => rewrite(tokens, false, indic_normal),
-            TokenFilter::HindiNormalization => rewrite(tokens, false, hindi_normal),
-            TokenFilter::HindiStemming => rewrite(tokens, true, hindi_stem),
-            TokenFilter::BengaliNormalization => rewrite(tokens, false, bengali_normal),
-            TokenFilter::BengaliStemming => rewrite(tokens, true, bengali_stem),
-            TokenFilter::BrazilianStemming => rewrite(tokens, true, brazilian_stem),
-            TokenFilter::GalicianStemming => rewrite(tokens, true, galician_stem),
-            TokenFilter::GreekLowercase => rewrite(tokens, false, greek_lowercase),
-            TokenFilter::GreekStemming => rewrite(tokens, true, greek_stem),
-            TokenFilter::JapaneseKatakanaStemming => rewrite(tokens, true, katakana_stem),
-            TokenFilter::SoraniNormalization => rewrite(tokens, false, sorani_normal),
-            TokenFilter::SoraniStemming => rewrite(tokens, true, sorani_stem),
-            TokenFilter::Regex { pattern, replacement, matches } => {
-                let all = *matches == Matches::All;
-                let mut out = Vec::with_capacity(tokens.len());
-                for t in tokens {
-                    let text = pattern.regex().replace(&t.text, replacement, all)?;
-                    out.push(with_text(&t, text));
-                }
-                out
-            }
             TokenFilter::RemoveDuplicates => {
                 let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
                 for t in tokens {
@@ -661,27 +811,14 @@ impl TokenFilter {
                 }
                 out
             }
-            TokenFilter::Reverse => rewrite(tokens, false, |t| t.chars().rev().collect()),
             &TokenFilter::Shingle { min, max } => grams::shingles(&tokens, min, max, *end),
-            &TokenFilter::SnowballStemming(stemmer) => rewrite(tokens, true, |t| stemmer.stem(t)),
-            TokenFilter::SpanishPluralStemming => rewrite(tokens, true, stemmers::spanish_plural),
-            TokenFilter::Stempel => rewrite(tokens, true, stempel),
-            TokenFilter::Stopword { tokens: words, ignore_case } => tokens
-                .into_iter()
-                .filter(|t| {
-                    let key = if *ignore_case { lower(&t.text) } else { t.text.clone() };
-                    !words.contains(&key)
-                })
-                .collect(),
-            TokenFilter::Trim => {
-                rewrite(tokens, false, |t| t.trim_matches(is_java_whitespace).to_string())
-            }
             TokenFilter::WordDelimiterGraph { options, protected, protected_ignore_case } => {
                 delimiter::apply(tokens, end, options, |t| {
                     let key = if *protected_ignore_case { lower(t) } else { t.to_string() };
                     protected.contains(&key)
                 })
             }
+            _ => self.each_term(tokens)?,
         })
     }
 }

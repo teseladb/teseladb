@@ -22,14 +22,14 @@ fn r1(c: &[char]) -> usize {
         return c.iter().position(|&x| vowel(x)).map_or(c.len(), |i| i + 1);
     }
     let Some(i) = c.iter().position(|&x| !vowel(x)) else { return c.len() };
-    let rest = Word { c: c[i..].to_vec() };
+    let rest = Word::of(&c[i..]);
     DIGRAPHS.iter().find(|d| rest.starts(d)).map_or(i + 1, |d| i + d.chars().count())
 }
 
 /// Removes `suffix` and one letter of the double consonant before it, when the suffix is in R1.
 fn instrumental(w: &mut Word, suffixes: &[&str], r1: usize) {
     let Some(s) = w.longest_from(suffixes, r1) else { return };
-    let rest = Word { c: w.c[..w.start_of(s)].to_vec() };
+    let rest = Word::of(&w.c[..w.start_of(s)]);
     if rest.longest(DOUBLES).is_some() {
         w.cut(s.chars().count());
         let n = w.len();
@@ -39,8 +39,8 @@ fn instrumental(w: &mut Word, suffixes: &[&str], r1: usize) {
 
 /// Replaces the longest suffix of `table` in R1; says whether one went.
 fn rewrite(w: &mut Word, table: &[(&[&str], &str)], r1: usize) -> bool {
-    let keys: Vec<&str> = table.iter().flat_map(|(k, _)| k.iter().copied()).collect();
-    let Some(s) = w.longest_from(&keys, r1) else { return false };
+    let keys = table.iter().flat_map(|(k, _)| k.iter());
+    let Some(s) = w.longest_from(keys, r1) else { return false };
     let by = table.iter().find(|(k, _)| k.contains(&s)).map_or("", |(_, v)| v);
     w.replace(s, by);
     true
@@ -54,7 +54,7 @@ const STEP2: &[&str] = &[
 ];
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let r1 = r1(&w.c);
     instrumental(&mut w, &["al", "el"], r1);
@@ -111,5 +111,5 @@ pub fn stem(text: &str) -> String {
         r1,
     );
     rewrite(&mut w, &[(&["ák"], "a"), (&["ék"], "e"), (&["ök", "ok", "ek", "ak", "k"], "")], r1);
-    w.text()
+    w.write(out);
 }

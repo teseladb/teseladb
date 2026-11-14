@@ -4,22 +4,20 @@
 
 use super::light::ends;
 use crate::analysis::props::category;
+use crate::analysis::scratch::Chars;
 
 /// The general category `Cf` in the tables of [`category`].
 const FORMAT: usize = 27;
 
 /// `text` with the Persian letter variants as the Arabic letters: Farsi yeh and yeh barree as
 /// yeh, keheh as kaf, heh with hamza and heh goal as heh, and without the hamza above.
-pub(super) fn persian_normal(text: &str) -> String {
-    text.chars()
-        .filter(|&c| c != '\u{654}')
-        .map(|c| match c {
-            '\u{6CC}' | '\u{6D2}' => '\u{64A}',
-            '\u{6A9}' => '\u{643}',
-            '\u{6C0}' | '\u{6C1}' | '\u{6C2}' => '\u{647}',
-            c => c,
-        })
-        .collect()
+pub(super) fn persian_normal(text: &str, out: &mut String) {
+    out.extend(text.chars().filter(|&c| c != '\u{654}').map(|c| match c {
+        '\u{6CC}' | '\u{6D2}' => '\u{64A}',
+        '\u{6A9}' => '\u{643}',
+        '\u{6C0}' | '\u{6C1}' | '\u{6C2}' => '\u{647}',
+        c => c,
+    }));
 }
 
 /// The Persian endings, removed in this order from the end of the word, each at most once and
@@ -36,15 +34,15 @@ const PERSIAN_ENDINGS: &[&str] = &[
 ];
 
 /// The Persian stem of a normalized word: [`PERSIAN_ENDINGS`] removed in turn.
-pub(super) fn persian_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn persian_stem(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     for ending in PERSIAN_ENDINGS {
         let n = ending.chars().count();
         if ends(&w, ending) && w.len() >= n + 2 {
             w.truncate(w.len() - n);
         }
     }
-    w.into_iter().collect()
+    w.write(out);
 }
 
 /// The Sorani letter `ە` (ae).
@@ -54,9 +52,8 @@ const AE: char = '\u{6D5}';
 /// one before a zero-width non-joiner (which goes) as `ە`, teh marbuta as `ە`, heh doachashmee as
 /// heh, an initial reh as `ڕ`, and without fatha, damma, kasra, sukun, tatweel and format
 /// characters.
-pub(super) fn sorani_normal(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+pub(super) fn sorani_normal(text: &str, out: &mut String) {
+    let c = Chars::of(text);
     let mut i = 0;
     while i < c.len() {
         match c[i] {
@@ -76,7 +73,6 @@ pub(super) fn sorani_normal(text: &str) -> String {
         }
         i += 1;
     }
-    out
 }
 
 /// The Sorani noun endings: the ending, the letters the word must exceed and the letters removed
@@ -104,8 +100,8 @@ const SORANI_ENDINGS: &[(&str, usize, usize)] = &[
 
 /// The Sorani stem: a postposition (`دا`, the `ا` of `نا`, `ەوە`), then a possessive (`مان`,
 /// `یان`, `تان`), then the first ending of [`SORANI_ENDINGS`].
-pub(super) fn sorani_stem(text: &str) -> String {
-    let mut w: Vec<char> = text.chars().collect();
+pub(super) fn sorani_stem(text: &str, out: &mut String) {
+    let mut w = Chars::of(text);
     let n = w.len();
     if n > 5 && ends(&w, "\u{62F}\u{627}") {
         w.truncate(n - 2);
@@ -123,5 +119,5 @@ pub(super) fn sorani_stem(text: &str) -> String {
     if let Some(&(_, _, cut)) = ending {
         w.truncate(w.len() - cut);
     }
-    w.into_iter().collect()
+    w.write(out);
 }

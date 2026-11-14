@@ -11,8 +11,9 @@
 
 use crate::byte_simd::{WINDOW, classify, window};
 
+use super::scratch::Pooled;
 use super::tokenfilters::is_java_whitespace;
-use super::tokenizers::{cut_point, words};
+use super::tokenizers::{cut_point, words_into};
 
 /// A run of token characters being cut into pieces: a piece ends once it holds `max` UTF-16 code
 /// units or more, so a last supplementary character may take it one unit past `max`.
@@ -144,16 +145,21 @@ pub(crate) fn segmented(
     emit: &mut impl FnMut(usize, usize),
 ) {
     let mut base = from;
+    let mut found: Pooled<(usize, usize)> = Pooled::new();
+    let mut pieces: Pooled<(usize, usize)> = Pooled::new();
     'text: loop {
-        for (at, word) in words(&text[base..to]) {
-            let at = base + at;
-            let end = at + word.len();
+        found.clear();
+        words_into(&text[base..to], &mut found);
+        for &(start, stop) in found.iter() {
+            let (at, end) = (base + start, base + stop);
             let Some(cut) = cut_point(&text[at..end], max) else {
                 emit(at, end);
                 continue;
             };
-            for (piece_at, piece) in words(&text[at..at + cut]) {
-                emit(at + piece_at, at + piece_at + piece.len());
+            pieces.clear();
+            words_into(&text[at..at + cut], &mut pieces);
+            for &(piece_at, piece_end) in pieces.iter() {
+                emit(at + piece_at, at + piece_end);
             }
             base = at + cut;
             continue 'text;

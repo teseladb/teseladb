@@ -98,21 +98,25 @@ const STEP4: &[&str] = &[
 ];
 
 /// Replaces the longest suffix of `table` when the rest has a measure above `min`.
-fn rewrite(w: &mut Word, table: &[(&str, &str)], min: usize) {
-    let keys: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
-    if let Some(s) = w.longest(&keys)
+fn rewrite<'t>(
+    w: &mut Word,
+    table: impl Iterator<Item = &'t (&'static str, &'static str)> + Clone,
+    min: usize,
+) {
+    if let Some(s) = w.longest(table.clone().map(|(k, _)| k))
         && measure(&w.c[..w.start_of(s)]) > min
     {
-        let by = table.iter().find(|(k, _)| *k == s).map_or("", |(_, v)| v);
+        let by = table.clone().find(|(k, _)| *k == s).map_or("", |(_, v)| v);
         w.replace(s, by);
     }
 }
 
 /// Stems `text`.
-pub fn stem(text: &str, variant: Variant) -> String {
+pub fn stem(text: &str, variant: Variant, out: &mut String) {
     let mut w = Word::new(text);
     if variant == Variant::Filter && w.len() <= 2 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     match w.longest(&["sses", "ies", "ss", "s"]) {
         Some("sses" | "ies") => w.cut(2),
@@ -125,14 +129,13 @@ pub fn stem(text: &str, variant: Variant) -> String {
         w.c[n - 1] = 'i';
     }
     match variant {
-        Variant::Snowball => rewrite(&mut w, STEP2, 0),
+        Variant::Snowball => rewrite(&mut w, STEP2.iter(), 0),
         Variant::Filter => {
-            let table: Vec<(&str, &str)> =
-                STEP2.iter().filter(|(k, _)| *k != "abli").chain(STEP2_FILTER).copied().collect();
-            rewrite(&mut w, &table, 0);
+            let table = STEP2.iter().filter(|(k, _)| *k != "abli").chain(STEP2_FILTER);
+            rewrite(&mut w, table, 0);
         }
     }
-    rewrite(&mut w, STEP3, 0);
+    rewrite(&mut w, STEP3.iter(), 0);
     if let Some(s) = w.longest(STEP4) {
         let start = w.start_of(s);
         if measure(&w.c[..start]) > 1
@@ -150,7 +153,7 @@ pub fn stem(text: &str, variant: Variant) -> String {
     if w.ends("ll") && measure(&w.c) > 1 {
         w.cut(1);
     }
-    w.text()
+    w.write(out);
 }
 
 fn step1b(w: &mut Word) {

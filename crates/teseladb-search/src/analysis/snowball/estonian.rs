@@ -217,9 +217,10 @@ fn undouble_kpt(w: &mut Word, r1: usize) {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
+pub fn stem(word: &str, out: &mut String) {
     if let Some((stem, _)) = VERB_EXCEPTIONS.iter().find(|(_, forms)| forms.contains(&word)) {
-        return stem.to_string();
+        out.push_str(stem);
+        return;
     }
     let mut w = Word::new(word);
     let r1 = region(&w.c, 0, vowel);
@@ -233,5 +234,5 @@ pub fn stem(word: &str) -> String {
         nu(&mut w, r1);
     }
     undouble_kpt(&mut w, r1);
-    w.text()
+    w.write(out);
 }

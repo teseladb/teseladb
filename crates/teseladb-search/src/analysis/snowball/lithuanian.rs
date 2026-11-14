@@ -5,6 +5,7 @@
 //! remove endings found inside R1; then a final `č` becomes `t` or a final `dž` becomes `d`, and a
 //! final `gd` loses its `d`.
 
+use crate::analysis::scratch::Chars;
 use std::sync::OnceLock;
 
 use super::table::{Cond, Group, Step, StepDef, When, build, run_marked};
@@ -568,13 +569,13 @@ fn vowel(c: char) -> bool {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
-    let c: Vec<char> = word.chars().collect();
+pub fn stem(word: &str, out: &mut String) {
+    let mut s = Chars::of(word);
+    let c = &s;
     let from = usize::from(c.len() > 6 && c.first() == Some(&'a'));
-    let r1 = region(&c, from, vowel);
-    let r2 = region(&c, r1, vowel);
-    let mut s: Vec<char> =
-        run_marked(c, BUILT.get_or_init(|| build(&STEPS)), [0, r1, r2]).chars().collect();
+    let r1 = region(c, from, vowel);
+    let r2 = region(c, r1, vowel);
+    run_marked(&mut s, BUILT.get_or_init(|| build(&STEPS)), [0, r1, r2]);
     match s.as_slice() {
         [.., 'č'] => {
             s.pop();
@@ -588,5 +589,5 @@ pub fn stem(word: &str) -> String {
     if s.ends_with(&['g', 'd']) {
         s.pop();
     }
-    s.into_iter().collect()
+    s.write(out);
 }

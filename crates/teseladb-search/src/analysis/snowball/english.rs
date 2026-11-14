@@ -78,8 +78,10 @@ const STEP4: &[&str] = &[
     "iti", "ous", "ive", "ize", "ion",
 ];
 
-fn keys(table: &[(&'static str, &'static str)]) -> Vec<&'static str> {
-    table.iter().map(|(k, _)| *k).collect()
+fn keys(
+    table: &'static [(&'static str, &'static str)],
+) -> impl Iterator<Item = &'static &'static str> + Clone {
+    table.iter().map(|(k, _)| k)
 }
 
 fn lookup(table: &[(&str, &'static str)], key: &str) -> &'static str {
@@ -101,16 +103,18 @@ fn short_syllable(c: &[char], end: usize) -> bool {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     if w.len() <= 2 {
-        return text.to_string();
+        out.push_str(text);
+        return;
     }
     if w.c[0] == '\'' {
         w.c.remove(0);
     }
-    if let Some((_, by)) = EXCEPTIONS.iter().find(|(e, _)| w.text() == *e) {
-        return by.to_string();
+    if let Some((_, by)) = EXCEPTIONS.iter().find(|(e, _)| w.is(e)) {
+        out.push_str(by);
+        return;
     }
     if w.c[0] == 'y' {
         w.c[0] = 'Y';
@@ -126,13 +130,14 @@ pub fn stem(text: &str) -> String {
     };
     let r2 = region(&w.c, r1, vowel);
     step0_1a(&mut w);
-    if AFTER_1A.contains(&w.text().as_str()) {
-        return w.text();
+    if AFTER_1A.iter().any(|a| w.is(a)) {
+        w.write(out);
+        return;
     }
     step1b(&mut w, r1);
     step1c(&mut w);
     let step2 = keys(STEP2);
-    if let Some(s) = w.longest_from(&step2, r1) {
+    if let Some(s) = w.longest_from(step2, r1) {
         let ok = match s {
             "ogi" => w.back(3) == Some('l'),
             "li" => {
@@ -145,7 +150,7 @@ pub fn stem(text: &str) -> String {
         }
     }
     let step3 = keys(STEP3);
-    if let Some(s) = w.longest_from(&step3, r1)
+    if let Some(s) = w.longest_from(step3, r1)
         && (s != "ative" || w.start_of(s) >= r2)
     {
         w.replace(s, lookup(STEP3, s));
@@ -160,7 +165,7 @@ pub fn stem(text: &str) -> String {
     if final_e || (w.ends("ll") && n > r2) {
         w.cut(1);
     }
-    w.c.iter().map(|&c| if c == 'Y' { 'y' } else { c }).collect()
+    out.extend(w.c.iter().map(|&c| if c == 'Y' { 'y' } else { c }));
 }
 
 fn step0_1a(w: &mut Word) {

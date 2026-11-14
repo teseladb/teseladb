@@ -24,7 +24,8 @@ use std::sync::Arc;
 use super::charfilters::Filtered;
 use super::jregex::{JavaRegex, RegexError};
 use super::morph;
-use super::uax29::word_segments;
+use super::scratch::Pooled;
+use super::uax29::boundaries_into;
 use super::unicode::{
     WordBreak, is_complex_context, is_han, is_hiragana, is_pictographic, word_break,
 };
@@ -512,9 +513,9 @@ fn prepended_mark(c: char) -> bool {
 /// A segment as a token: without the characters before its first token character or `_`
 /// (ExtendNumLet; a ZWJ right before a pictograph also stays), and cut before a pictograph that a ZWJ joins to a word, which
 /// keeps the ZWJ.
-fn trim_and_split(at: usize, w: &str) -> Vec<(usize, &str)> {
+fn trim_and_split(at: usize, w: &str, out: &mut Vec<(usize, usize)>) {
     const ZWJ: char = '\u{200D}';
-    let chars: Vec<(usize, char)> = w.char_indices().collect();
+    let chars = Pooled::collect(w.char_indices());
     let mut first = 0;
     let starts_word = |c: char| {
         (token_character(c) && !prepended_mark(c)) || word_break(c) == WordBreak::ExtendNumLet
@@ -526,14 +527,13 @@ fn trim_and_split(at: usize, w: &str) -> Vec<(usize, &str)> {
         }
         first += 1;
     }
-    let Some(&(start, _)) = chars.get(first) else { return Vec::new() };
-    let mut out = Vec::new();
+    let Some(&(start, _)) = chars.get(first) else { return };
     let mut from = start;
     let mut word = false;
     for (i, &(offset, c)) in chars.iter().enumerate().skip(first) {
         let after_zwj = i > 0 && chars[i - 1].1 == ZWJ;
         if is_pictographic(c) && after_zwj && word {
-            out.push((at + from, &w[from..offset]));
+            out.push((at + from, at + offset));
             from = offset;
             word = false;
         }
@@ -541,43 +541,50 @@ fn trim_and_split(at: usize, w: &str) -> Vec<(usize, &str)> {
             word = true;
         }
     }
-    out.push((at + from, &w[from..]));
-    out
+    out.push((at + from, at + w.len()));
 }
 
 /// `w` cut at each text presentation selector (U+FE0E) that follows a pictograph, with the
 /// selector left out: the pictograph ends its token there and the rest is a segment of its own.
-fn text_presentation_pieces(w: &str) -> Vec<(usize, &str)> {
+fn text_presentation_pieces(w: &str, mut piece: impl FnMut(usize, &str)) {
     const TEXT_PRESENTATION: char = '\u{FE0E}';
-    let mut out = Vec::new();
     let mut from = 0;
     let mut last = None;
     for (i, c) in w.char_indices() {
         if c == TEXT_PRESENTATION && last.is_some_and(is_pictographic) {
-            out.push((from, &w[from..i]));
+            piece(from, &w[from..i]);
             from = i + c.len_utf8();
         }
         if !matches!(word_break(c), WordBreak::Extend | WordBreak::Format) {
             last = Some(c);
         }
     }
-    out.push((from, &w[from..]));
-    out
+    piece(from, &w[from..]);
 }
 
 /// The UAX #29 segments of `text` that are tokens, with each run of segments of
 /// characters of Line_Break=SA (Thai, Lao, Myanmar, Khmer and others) joined into one.
 pub(super) fn words(text: &str) -> Vec<(usize, &str)> {
-    let mut out: Vec<(usize, &str)> = Vec::new();
+    let mut spans = Pooled::new();
+    words_into(text, &mut spans);
+    spans.iter().map(|&(from, to)| (from, &text[from..to])).collect()
+}
+
+/// Appends the byte ranges of [`words`] to `out`, with buffers reused from text to text
+/// (FR-028).
+pub(super) fn words_into(text: &str, out: &mut Vec<(usize, usize)>) {
+    let mut bounds: Pooled<usize> = Pooled::new();
+    boundaries_into(text, &mut bounds);
     let mut last_asian = false;
-    for (at, w) in word_segments(text) {
+    for pair in bounds.windows(2) {
+        let (at, w) = (pair[0], &text[pair[0]..pair[1]]);
         let asian = w.chars().all(is_complex_context);
         if asian
             && last_asian
             && let Some(prev) = out.last_mut()
-            && prev.0 + prev.1.len() == at
+            && prev.1 == at
         {
-            *prev = (prev.0, &text[prev.0..at + w.len()]);
+            prev.1 = at + w.len();
             continue;
         }
         last_asian = asian;
@@ -588,14 +595,11 @@ pub(super) fn words(text: &str) -> Vec<(usize, &str)> {
                     .chars()
                     .any(|c| token_character(c) && word_break(c) != WordBreak::RegionalIndicator);
         if w.chars().any(token_character) && !lone_flag {
-            for (from, piece) in text_presentation_pieces(w) {
-                out.extend(trim_and_split(at + from, piece));
-            }
+            text_presentation_pieces(w, |from, piece| trim_and_split(at + from, piece, out));
         } else {
             last_asian = false;
         }
     }
-    out
 }
 
 #[cfg(test)]

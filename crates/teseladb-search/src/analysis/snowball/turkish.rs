@@ -9,6 +9,8 @@
 //! machine ends the stemming. At the end a final `d` or `g` takes the high vowel that agrees with
 //! the stem and a final `b`, `c` or `ğ` hardens, except in the stems `ad` and `soyad`.
 
+use crate::analysis::scratch::Chars;
+
 /// The letter an ending may take before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Buffer {
@@ -618,8 +620,8 @@ fn run(
     let mut state = None;
     let mut first = None;
     // The letters the last class removed, and the ending kept at the end of the word.
-    let mut cut: Vec<char> = Vec::new();
-    let mut kept: Vec<char> = Vec::new();
+    let mut cut = Chars::new();
+    let mut kept = Chars::new();
     loop {
         let taken = machine(state).iter().find_map(|&class| {
             if class == Class::KiBeforeDative {
@@ -637,13 +639,15 @@ fn run(
         });
         let Some((class, n)) = taken else { break };
         if class == Class::KiBeforeDative {
-            kept = std::mem::take(&mut cut);
+            std::mem::swap(&mut kept, &mut cut);
         }
-        cut = w.split_off(w.len() - n);
+        cut.clear();
+        cut.extend_from_slice(&w[w.len() - n..]);
+        w.truncate(w.len() - n);
         first = first.or(Some(class));
         state = Some(class);
     }
-    w.extend(kept);
+    w.extend_from_slice(&kept);
     (first, state)
 }
 
@@ -659,16 +663,18 @@ fn hard(c: char) -> Option<char> {
 }
 
 /// The stem of `word`.
-pub fn stem(word: &str) -> String {
-    let mut w: Vec<char> = word.chars().collect();
+pub fn stem(word: &str, out: &mut String) {
+    let mut w = Chars::of(word);
     if w.iter().filter(|&&c| is_vowel(c)).count() < 2 {
-        return word.to_string();
+        out.push_str(word);
+        return;
     }
     let (first, last) = run(&mut w, predicate);
     if first == Some(Class::Plural)
         || matches!(last, Some(Class::PluralAfterCopula | Class::FirstPersonAfterCopula))
     {
-        return w.into_iter().collect();
+        w.write(out);
+        return;
     }
     run(&mut w, noun);
     let reserved = w.iter().copied().eq("ad".chars()) || w.iter().copied().eq("soyad".chars());
@@ -685,5 +691,5 @@ pub fn stem(word: &str) -> String {
             _ => {}
         }
     }
-    w.into_iter().collect()
+    w.write(out);
 }

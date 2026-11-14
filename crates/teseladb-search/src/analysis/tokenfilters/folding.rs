@@ -7,7 +7,8 @@
 
 use std::sync::OnceLock;
 
-use crate::analysis::normalize::{Form, normalize};
+use crate::analysis::normalize::{Form, normalize_chars_into};
+use crate::analysis::scratch::Chars;
 
 /// A folding table: code points in order, each with what it becomes.
 type Table = Vec<(char, String)>;
@@ -38,26 +39,37 @@ fn icu_table() -> &'static Table {
     TABLE.get_or_init(|| parse(include_str!("../../../data/icu-folding.txt")))
 }
 
-/// `text` with each character replaced by its entry in `table`.
-fn map(text: &str, table: &Table) -> String {
-    let mut out = String::with_capacity(text.len());
+/// The characters of `text`, each replaced by its entry in `table`, given to `out`.
+fn map(text: &str, table: &Table, mut out: impl FnMut(char)) {
     for c in text.chars() {
         match table.binary_search_by_key(&c, |&(k, _)| k) {
-            Ok(i) => out.push_str(&table[i].1),
-            Err(_) => out.push(c),
+            Ok(i) => table[i].1.chars().for_each(&mut out),
+            Err(_) => out(c),
         }
     }
-    out
 }
 
 /// `text` folded by `asciiFolding`.
 pub(super) fn ascii(text: &str) -> String {
-    map(text, ascii_table())
+    crate::analysis::scratch::written(|out| ascii_into(text, out))
+}
+
+/// Appends `text` folded by `asciiFolding` to `out`.
+pub(super) fn ascii_into(text: &str, out: &mut String) {
+    map(text, ascii_table(), |c| out.push(c));
 }
 
 /// `text` folded by `icuFolding`.
-pub(super) fn icu(text: &str) -> String {
-    normalize(&map(text, icu_table()), Form::Nfc)
+#[cfg(test)]
+fn icu(text: &str) -> String {
+    crate::analysis::scratch::written(|out| icu_into(text, out))
+}
+
+/// Appends `text` folded by `icuFolding` to `out`.
+pub(super) fn icu_into(text: &str, out: &mut String) {
+    let mut mapped = Chars::new();
+    map(text, icu_table(), |c| mapped.push(c));
+    normalize_chars_into(mapped.iter().copied(), Form::Nfc, out);
 }
 
 #[cfg(test)]

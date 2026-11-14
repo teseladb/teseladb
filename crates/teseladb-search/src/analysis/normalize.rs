@@ -1,6 +1,7 @@
 //! Unicode normalization forms NFD, NFKD, NFC and NFKC (UAX #15) and NFKC_Casefold (UAX #44),
 //! from the Unicode 15.1.0 tables (FR-019). Conformance: `NormalizationTest.txt`.
 
+use super::scratch::{Chars, written};
 use super::unicode::{casefold, ccc, compose, decomposition};
 
 /// A normalization form.
@@ -46,14 +47,14 @@ fn decompose_char(c: char, compat: bool, out: &mut Vec<char>) {
     }
 }
 
-/// Full decomposition in canonical order.
-fn decompose(text: impl Iterator<Item = char>, compat: bool) -> Vec<char> {
-    let mut out = Vec::new();
+/// Full decomposition in canonical order, appended to `out`.
+fn decompose(text: impl Iterator<Item = char>, compat: bool, out: &mut Vec<char>) {
+    let from = out.len();
     for c in text {
-        decompose_char(c, compat, &mut out);
+        decompose_char(c, compat, out);
     }
     // Canonical ordering: a stable sort of every run of non-starters by combining class.
-    let mut i = 0;
+    let mut i = from;
     while i < out.len() {
         if ccc(out[i]) == 0 {
             i += 1;
@@ -65,7 +66,6 @@ fn decompose(text: impl Iterator<Item = char>, compat: bool) -> Vec<char> {
         }
         out[start..i].sort_by_key(|&c| ccc(c));
     }
-    out
 }
 
 fn compose_pair(a: char, b: char) -> Option<char> {
@@ -83,13 +83,12 @@ fn compose_pair(a: char, b: char) -> Option<char> {
     compose(a, b)
 }
 
-/// Canonical composition of a decomposed, canonically ordered sequence.
-fn recompose(chars: Vec<char>) -> Vec<char> {
-    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+/// Canonical composition of a decomposed, canonically ordered sequence, appended to `out`.
+fn recompose(chars: &[char], out: &mut Vec<char>) {
     let mut starter: Option<usize> = None;
     // Combining class of the last character kept after the starter; `None` if it is adjacent.
     let mut last: Option<u8> = None;
-    for c in chars {
+    for &c in chars {
         let class = ccc(c);
         if let Some(s) = starter
             && last.is_none_or(|l| l < class)
@@ -106,29 +105,59 @@ fn recompose(chars: Vec<char>) -> Vec<char> {
         }
         out.push(c);
     }
-    out
 }
 
 /// `text` in normalization form `form`.
 pub fn normalize(text: &str, form: Form) -> String {
+    written(|out| normalize_into(text, form, out))
+}
+
+/// Appends `text` in normalization form `form` to `out`, with buffers reused from term to term
+/// (FR-028).
+pub fn normalize_into(text: &str, form: Form, out: &mut String) {
+    normalize_chars_into(text.chars(), form, out);
+}
+
+/// Appends `chars` in normalization form `form` to `out`, as [`normalize_into`].
+pub fn normalize_chars_into(chars: impl Iterator<Item = char>, form: Form, out: &mut String) {
     let compat = matches!(form, Form::Nfkd | Form::Nfkc);
-    let decomposed = decompose(text.chars(), compat);
+    let mut decomposed = Chars::new();
+    decompose(chars, compat, &mut decomposed);
     match form {
-        Form::Nfd | Form::Nfkd => decomposed.into_iter().collect(),
-        Form::Nfc | Form::Nfkc => recompose(decomposed).into_iter().collect(),
+        Form::Nfd | Form::Nfkd => decomposed.write(out),
+        Form::Nfc | Form::Nfkc => {
+            let mut composed = Chars::new();
+            recompose(&decomposed, &mut composed);
+            composed.write(out);
+        }
+    }
+}
+
+/// Appends `c` in normalization form `form` to `out`.
+pub fn normalize_char(c: char, form: Form, out: &mut Vec<char>) {
+    let compat = matches!(form, Form::Nfkd | Form::Nfkc);
+    let mut decomposed = Chars::new();
+    decompose(std::iter::once(c), compat, &mut decomposed);
+    match form {
+        Form::Nfd | Form::Nfkd => out.extend_from_slice(&decomposed),
+        Form::Nfc | Form::Nfkc => recompose(&decomposed, out),
     }
 }
 
 /// NFKC_Casefold: each character mapped by its NFKC_Casefold value, then NFC.
 pub fn nfkc_casefold(text: &str) -> String {
-    let mut mapped = Vec::with_capacity(text.len());
+    let mut mapped = Chars::new();
     for c in text.chars() {
         match casefold(c) {
             Some(to) => mapped.extend(to),
             None => mapped.push(c),
         }
     }
-    recompose(decompose(mapped.into_iter(), false)).into_iter().collect()
+    let mut decomposed = Chars::new();
+    decompose(mapped.iter().copied(), false, &mut decomposed);
+    let mut composed = Chars::new();
+    recompose(&decomposed, &mut composed);
+    composed.iter().collect()
 }
 
 #[cfg(test)]

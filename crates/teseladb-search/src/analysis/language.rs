@@ -55,6 +55,13 @@ const STOPWORDS: &[(&str, &str)] = &[
 /// The analyzers that are the CJK bigram analyzer under another name.
 const CJK_ANALYZERS: &[&str] = &["chinese", "cjk", "japanese", "korean"];
 
+/// The languages of the analyzers [`teseladb_names::ANALYZER_PREFIX`] followed by the language.
+pub fn languages() -> impl Iterator<Item = &'static str> {
+    let lists = STOPWORDS.iter().map(|&(l, _)| l);
+    let more = CJK_ANALYZERS.iter().copied().filter(|l| *l != "cjk").chain(["nori", "smartcn"]);
+    lists.chain(more)
+}
+
 /// The stop list of `language`.
 fn stopwords(language: &str) -> Option<BTreeSet<String>> {
     let (_, text) = STOPWORDS.iter().find(|(l, _)| *l == language)?;

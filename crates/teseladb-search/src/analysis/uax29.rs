@@ -1,6 +1,7 @@
 //! Word boundaries of Unicode Standard Annex #29 (Unicode 15.1.0, rules WB1 to WB999), the base of
 //! the `standard` tokenizer (FR-019). Conformance: the annex's `WordBreakTest.txt`.
 
+use super::scratch::Pooled;
 use super::unicode::{WordBreak, is_pictographic, word_break};
 
 /// Classes WB4 attaches to the character before them.
@@ -26,7 +27,7 @@ fn mid_num_let_q(w: WordBreak) -> bool {
 }
 
 struct Classes {
-    of: Vec<WordBreak>,
+    of: Pooled<WordBreak>,
 }
 
 impl Classes {
@@ -110,16 +111,28 @@ impl Classes {
 
 /// The byte offsets of the word boundaries of `text`, from 0 to its length (none if it is empty).
 pub fn word_boundaries(text: &str) -> Vec<usize> {
-    let indexed: Vec<(usize, char)> = text.char_indices().collect();
-    if indexed.is_empty() {
-        return Vec::new();
-    }
-    let chars: Vec<char> = indexed.iter().map(|&(_, c)| c).collect();
-    let classes = Classes { of: chars.iter().map(|&c| word_break(c)).collect() };
-    let mut out = vec![0];
-    out.extend((1..chars.len()).filter(|&i| classes.breaks(&chars, i)).map(|i| indexed[i].0));
-    out.push(text.len());
+    let mut out = Vec::new();
+    boundaries_into(text, &mut out);
     out
+}
+
+/// Appends the byte offsets of [`word_boundaries`] to `out`, with buffers reused from text to
+/// text (FR-028).
+pub fn boundaries_into(text: &str, out: &mut Vec<usize>) {
+    if text.is_empty() {
+        return;
+    }
+    let chars = Pooled::collect(text.chars());
+    let classes = Classes { of: Pooled::collect(chars.iter().map(|&c| word_break(c))) };
+    out.push(0);
+    let mut at = 0;
+    for i in 1..chars.len() {
+        at += chars[i - 1].len_utf8();
+        if classes.breaks(&chars, i) {
+            out.push(at);
+        }
+    }
+    out.push(text.len());
 }
 
 /// The segments of `text` between consecutive word boundaries.

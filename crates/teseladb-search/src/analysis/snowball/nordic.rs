@@ -27,7 +27,7 @@ fn danish_consonant_pair(w: &mut Word, r1: usize) {
 }
 
 /// The Danish stemmer.
-pub fn danish(text: &str) -> String {
+pub fn danish(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let r1 = r1(&w.c, danish_vowel);
     if let Some(s) = w.longest_within(DANISH_STEP1, r1) {
@@ -77,7 +77,7 @@ pub fn danish(text: &str) -> String {
     if n >= 2 && n > r1 && w.c[n - 1] == w.c[n - 2] && !danish_vowel(w.c[n - 1]) {
         w.cut(1);
     }
-    w.text()
+    w.write(out);
 }
 
 const NORWEGIAN_STEP1: &[&str] = &[
@@ -87,7 +87,7 @@ const NORWEGIAN_STEP1: &[&str] = &[
 ];
 
 /// The Norwegian stemmer.
-pub fn norwegian(text: &str) -> String {
+pub fn norwegian(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let r1 = r1(&w.c, danish_vowel);
     if let Some(s) = w.longest_within(NORWEGIAN_STEP1, r1) {
@@ -114,7 +114,7 @@ pub fn norwegian(text: &str) -> String {
     if let Some(s) = w.longest_within(&step3, r1) {
         w.cut(s.chars().count());
     }
-    w.text()
+    w.write(out);
 }
 
 fn swedish_vowel(c: char) -> bool {
@@ -128,7 +128,7 @@ const SWEDISH_STEP1: &[&str] = &[
 ];
 
 /// The Swedish stemmer.
-pub fn swedish(text: &str) -> String {
+pub fn swedish(text: &str, out: &mut String) {
     let mut w = Word::new(text);
     let r1 = r1(&w.c, swedish_vowel);
     if let Some(s) = w.longest_within(SWEDISH_STEP1, r1)
@@ -147,5 +147,5 @@ pub fn swedish(text: &str) -> String {
         Some(s) => w.cut(s.chars().count()),
         None => {}
     }
-    w.text()
+    w.write(out);
 }

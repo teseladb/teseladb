@@ -1,6 +1,7 @@
 //! The Romanian stemmer of snowballstem.org (`algorithms/romanian/stemmer.html`).
 
 use super::word::{Word, regions, rv};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'a' | 'ă' | 'â' | 'e' | 'i' | 'î' | 'o' | 'u')
@@ -169,14 +170,11 @@ const STEP3_DELETE: &[&str] = &[
 ];
 
 fn prelude(text: &str) -> Word {
-    let mut c: Vec<char> = text
-        .chars()
-        .map(|c| match c {
-            'ş' => 'ș',
-            'ţ' => 'ț',
-            _ => c,
-        })
-        .collect();
+    let mut c = Chars::collect(text.chars().map(|c| match c {
+        'ş' => 'ș',
+        'ţ' => 'ț',
+        _ => c,
+    }));
     for i in 1..c.len().saturating_sub(1) {
         if matches!(c[i], 'u' | 'i') && vowel(c[i - 1]) && vowel(c[i + 1]) {
             c[i] = c[i].to_ascii_uppercase();
@@ -186,26 +184,25 @@ fn prelude(text: &str) -> Word {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = prelude(text);
     let rv = rv(&w.c, vowel);
     let (r1, r2) = regions(&w.c, vowel);
-    let keys0: Vec<&str> = STEP0.iter().map(|(k, _)| *k).collect();
-    if let Some(s) = w.longest_from(&keys0, r1) {
+    if let Some(s) = w.longest_from(STEP0.iter().map(|(k, _)| k), r1) {
         let by = STEP0.iter().find(|(k, _)| *k == s).map_or("", |(_, v)| v);
         if s != "ile" || !w.c[..w.start_of(s)].ends_with(&['a', 'b']) {
             w.replace(s, by);
         }
     }
-    let keys1: Vec<&str> = STEP1.iter().flat_map(|(k, _)| k.iter().copied()).collect();
+    let keys1 = || STEP1.iter().flat_map(|(k, _)| k.iter());
     let mut removed = false;
-    while let Some(s) = w.longest_from(&keys1, r1) {
+    while let Some(s) = w.longest_from(keys1(), r1) {
         let by = STEP1.iter().find(|(k, _)| k.contains(&s)).map_or("", |(_, v)| v);
         w.replace(s, by);
         removed = true;
     }
-    let keys2: Vec<&str> = [STEP2_DELETE, STEP2_IST, &["iune", "iuni"]].concat();
-    if let Some(s) = w.longest_from(&keys2, r2) {
+    let keys2 = STEP2_DELETE.iter().chain(STEP2_IST).chain(&["iune", "iuni"]);
+    if let Some(s) = w.longest_from(keys2, r2) {
         if STEP2_IST.contains(&s) {
             w.replace(s, "ist");
             removed = true;
@@ -213,13 +210,15 @@ pub fn stem(text: &str) -> String {
             w.cut(s.chars().count());
             removed = true;
         } else if w.c[..w.start_of(s)].ends_with(&['ț']) {
-            w.replace(&format!("ț{s}"), "t");
+            // `ț` and the suffix become `t`.
+            w.cut(s.chars().count() + 1);
+            w.c.push('t');
             removed = true;
         }
     }
     if !removed {
-        let keys3: Vec<&str> = [STEP3_AFTER_CONSONANT, STEP3_DELETE].concat();
-        if let Some(s) = w.longest_within(&keys3, rv) {
+        let keys3 = STEP3_AFTER_CONSONANT.iter().chain(STEP3_DELETE);
+        if let Some(s) = w.longest_within(keys3, rv) {
             let start = w.start_of(s);
             let after_consonant = start > rv && (!vowel(w.c[start - 1]) || w.c[start - 1] == 'u');
             if STEP3_DELETE.contains(&s) || after_consonant {
@@ -230,5 +229,5 @@ pub fn stem(text: &str) -> String {
     if let Some(s) = w.longest_from(&["a", "e", "i", "ie", "ă"], rv) {
         w.cut(s.chars().count());
     }
-    w.c.iter().map(|c| c.to_ascii_lowercase()).collect()
+    out.extend(w.c.iter().map(|c| c.to_ascii_lowercase()));
 }

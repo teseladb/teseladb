@@ -2,23 +2,21 @@
 //! algorithm).
 
 use super::word::{Word, region};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'è')
 }
 
 fn prelude(text: &str) -> Word {
-    let mut c: Vec<char> = text
-        .chars()
-        .map(|c| match c {
-            'ä' | 'á' => 'a',
-            'ë' | 'é' => 'e',
-            'ï' | 'í' => 'i',
-            'ö' | 'ó' => 'o',
-            'ü' | 'ú' => 'u',
-            _ => c,
-        })
-        .collect();
+    let mut c = Chars::collect(text.chars().map(|c| match c {
+        'ä' | 'á' => 'a',
+        'ë' | 'é' => 'e',
+        'ï' | 'í' => 'i',
+        'ö' | 'ó' => 'o',
+        'ü' | 'ú' => 'u',
+        _ => c,
+    }));
     if c.first() == Some(&'y') {
         c[0] = 'Y';
     }
@@ -66,7 +64,7 @@ fn e_ending(w: &mut Word, r1: usize) -> bool {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
+pub fn stem(text: &str, out: &mut String) {
     let mut w = prelude(text);
     // R2 follows R1 before R1 is moved to leave three letters before it (`ademend` → `adem`).
     let raw_r1 = region(&w.c, 0, vowel);
@@ -117,11 +115,9 @@ pub fn stem(text: &str) -> String {
             w.c.remove(n - 2);
         }
     }
-    w.c.iter()
-        .map(|&c| match c {
-            'Y' => 'y',
-            'I' => 'i',
-            _ => c,
-        })
-        .collect()
+    out.extend(w.c.iter().map(|&c| match c {
+        'Y' => 'y',
+        'I' => 'i',
+        _ => c,
+    }));
 }

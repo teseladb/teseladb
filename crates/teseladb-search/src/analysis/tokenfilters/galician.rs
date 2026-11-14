@@ -8,6 +8,8 @@
 //! ending of the vocabulary after stems of one to nine letters; the words of the fixture the steps
 //! do not stem as the reference search server does are listed with their stems.
 
+use crate::analysis::scratch::Chars;
+
 /// A suffix, the letters its stem must keep and what replaces it.
 type Rule = (&'static str, usize, &'static str);
 
@@ -1079,8 +1081,11 @@ const LONGEST: usize = 9;
 /// Runs one step on `w`.
 fn step(w: &mut Vec<char>, rules: &[Rule]) {
     for k in (1..=LONGEST.min(w.len())).rev() {
-        let tail: String = w[w.len() - k..].iter().collect();
-        let Ok(i) = rules.binary_search_by(|r| r.0.cmp(tail.as_str())) else { continue };
+        let tail = &w[w.len() - k..];
+        // UTF-8 keeps the order of the code points, so this is the order of the strings.
+        let Ok(i) = rules.binary_search_by(|r| r.0.chars().cmp(tail.iter().copied())) else {
+            continue;
+        };
         let (_, min, to) = rules[i];
         if w.len() - k >= min {
             let keep = w.len() - k;
@@ -1092,11 +1097,12 @@ fn step(w: &mut Vec<char>, rules: &[Rule]) {
 }
 
 /// The Galician stem of a lower-cased token.
-pub(super) fn galician_stem(text: &str) -> String {
+pub(super) fn galician_stem(text: &str, out: &mut String) {
     if let Ok(i) = EXCEPTIONS.binary_search_by(|(w, _)| w.cmp(&text)) {
-        return EXCEPTIONS[i].1.to_string();
+        out.push_str(EXCEPTIONS[i].1);
+        return;
     }
-    let mut w: Vec<char> = text.chars().collect();
+    let mut w = Chars::of(text);
     for rules in [PLURAL, UNIFICATION, ADVERB] {
         step(&mut w, rules);
     }
@@ -1113,14 +1119,12 @@ pub(super) fn galician_stem(text: &str) -> String {
         step(&mut w, VERB);
     }
     step(&mut w, VOWEL);
-    w.into_iter()
-        .map(|c| match c {
-            'á' => 'a',
-            'é' | 'ê' => 'e',
-            'í' => 'i',
-            'ó' => 'o',
-            'ú' => 'u',
-            other => other,
-        })
-        .collect()
+    out.extend(w.iter().map(|&c| match c {
+        'á' => 'a',
+        'é' | 'ê' => 'e',
+        'í' => 'i',
+        'ó' => 'o',
+        'ú' => 'u',
+        other => other,
+    }));
 }

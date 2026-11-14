@@ -14,6 +14,7 @@ pub mod morfologik;
 pub mod morph;
 pub mod normalize;
 pub mod props;
+pub mod scratch;
 pub mod smartcn;
 pub mod snowball;
 pub mod spans;

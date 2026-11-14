@@ -6,6 +6,7 @@
 //! their vocabularies (recorded data, `analyzers/vocab/`).
 
 use super::light::ends;
+use crate::analysis::scratch::Chars;
 
 /// The 88 pairs of Indic letters that the analyzers write as one letter: the first two
 /// become the third.
@@ -102,8 +103,8 @@ const COMPOSITIONS: &[(char, char, char)] = &[
 
 /// `text` with each pair of [`COMPOSITIONS`] as its single letter; the letter made can compose
 /// again with the next one.
-pub(super) fn indic_normal(text: &str) -> String {
-    let mut s: Vec<char> = text.chars().collect();
+pub(super) fn indic_normal(text: &str, out: &mut String) {
+    let mut s = Chars::of(text);
     let mut i = 0;
     while i + 1 < s.len() {
         match COMPOSITIONS.iter().find(|&&(a, b, _)| a == s[i] && b == s[i + 1]) {
@@ -114,15 +115,14 @@ pub(super) fn indic_normal(text: &str) -> String {
             None => i += 1,
         }
     }
-    s.into_iter().collect()
+    s.write(out);
 }
 
 /// `text` with the Hindi spelling variants folded (L. Larkey, "Hindi CLIR in thirty days"): a
 /// dead `न` as anusvara, chandrabindu as anusvara, nukta forms as their plain letters, long
 /// vowels as short ones, and without nukta, virama and zero-width joiners.
-pub(super) fn hindi_normal(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+pub(super) fn hindi_normal(text: &str, out: &mut String) {
+    let c = Chars::of(text);
     let mut i = 0;
     while i < c.len() {
         let ch = c[i];
@@ -163,7 +163,6 @@ pub(super) fn hindi_normal(text: &str) -> String {
         };
         out.push(folded);
     }
-    out
 }
 
 /// The Hindi endings (A. Ramanathan and D. Rao, "A lightweight stemmer for Hindi") by the
@@ -253,14 +252,15 @@ const HINDI_ENDINGS: &[(usize, &[&str])] = &[
 ];
 
 /// The Hindi stem of a normalized word.
-pub(super) fn hindi_stem(text: &str) -> String {
-    let w: Vec<char> = text.chars().collect();
+pub(super) fn hindi_stem(text: &str, out: &mut String) {
+    let w = Chars::of(text);
     for &(more_than, list) in HINDI_ENDINGS {
         if let Some(e) = list.iter().find(|e| w.len() > more_than && ends(&w, e)) {
-            return w[..w.len() - e.chars().count()].iter().collect();
+            out.extend(w[..w.len() - e.chars().count()].iter());
+            return;
         }
     }
-    text.to_string()
+    out.push_str(text);
 }
 
 /// The Bengali virama (hasanta).
@@ -270,8 +270,8 @@ const HASANTA: char = '\u{9CD}';
 /// `ন`, `ঙ` as anusvara, `ড়` and `ঢ়` as `র`, khanda ta as `ত`, without chandrabindu, with the
 /// ya-phala and ba-phala conjuncts reduced and the visarga doubled into the next letter or
 /// dropped at the end.
-pub(super) fn bengali_normal(text: &str) -> String {
-    let mut s: Vec<char> = text.chars().collect();
+pub(super) fn bengali_normal(text: &str, out: &mut String) {
+    let mut s = Chars::of(text);
     let mut i: isize = 0;
     while (i as usize) < s.len() {
         let at = i as usize;
@@ -302,7 +302,7 @@ pub(super) fn bengali_normal(text: &str) -> String {
         }
         i += 1;
     }
-    s.into_iter().collect()
+    s.write(out);
 }
 
 /// A `য` at `at` after a hasanta: right after the first letter it becomes the vowel sign `ে`
@@ -423,10 +423,10 @@ const BENGALI_ENDINGS: &[&str] = &[
 
 /// The Bengali stem of a normalized word: the longest ending of [`BENGALI_ENDINGS`] that leaves
 /// two letters goes.
-pub(super) fn bengali_stem(text: &str) -> String {
-    let w: Vec<char> = text.chars().collect();
+pub(super) fn bengali_stem(text: &str, out: &mut String) {
+    let w = Chars::of(text);
     match BENGALI_ENDINGS.iter().find(|e| ends(&w, e) && w.len() >= e.chars().count() + 2) {
-        Some(e) => w[..w.len() - e.chars().count()].iter().collect(),
-        None => text.to_string(),
+        Some(e) => out.extend(w[..w.len() - e.chars().count()].iter()),
+        None => out.push_str(text),
     }
 }

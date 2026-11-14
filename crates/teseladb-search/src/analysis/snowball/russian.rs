@@ -1,6 +1,7 @@
 //! The Russian stemmer of snowballstem.org (`algorithms/russian/stemmer.html`).
 
 use super::word::{Word, region};
+use crate::analysis::scratch::Chars;
 
 fn vowel(c: char) -> bool {
     matches!(c, 'а' | 'е' | 'и' | 'о' | 'у' | 'ы' | 'э' | 'ю' | 'я')
@@ -32,8 +33,7 @@ const NOUN: &[&str] = &[
 /// Removes the longest suffix of `group1` (after `а` or `я`) or `group2` that lies in RV; a
 /// match of `group1` without `а` or `я` before it removes nothing. Says whether one went.
 fn remove_grouped(w: &mut Word, group1: &[&str], group2: &[&str], rv: usize) -> bool {
-    let all: Vec<&str> = [group1, group2].concat();
-    let Some(s) = w.longest_within(&all, rv) else { return false };
+    let Some(s) = w.longest_within(group1.iter().chain(group2), rv) else { return false };
     let start = w.start_of(s);
     if group1.contains(&s) && !(start > rv && matches!(w.c[start - 1], 'а' | 'я')) {
         return false;
@@ -52,8 +52,8 @@ fn remove(w: &mut Word, list: &[&str], rv: usize) -> bool {
 }
 
 /// Stems `text`.
-pub fn stem(text: &str) -> String {
-    let mut w = Word { c: text.chars().map(|c| if c == 'ё' { 'е' } else { c }).collect() };
+pub fn stem(text: &str, out: &mut String) {
+    let mut w = Word { c: Chars::collect(text.chars().map(|c| if c == 'ё' { 'е' } else { c })) };
     let rv = w.c.iter().position(|&c| vowel(c)).map_or(w.len(), |i| i + 1);
     let r2 = region(&w.c, region(&w.c, 0, vowel), vowel);
     if !remove_grouped(&mut w, GERUND1, GERUND2, rv) {
@@ -75,5 +75,5 @@ pub fn stem(text: &str) -> String {
     } else {
         remove(&mut w, &["ь"], rv);
     }
-    w.text()
+    w.write(out);
 }

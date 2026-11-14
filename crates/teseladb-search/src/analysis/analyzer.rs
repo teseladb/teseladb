@@ -5,10 +5,8 @@ use super::charfilters::{CharFilter, Filtered};
 use super::jregex::RegexError;
 use super::language::language;
 use super::morfologik::Language;
-use super::tokenfilters::{Stream, TokenFilter};
+use super::tokenfilters::{Step, Stream, TokenFilter};
 use super::tokenizers::{DEFAULT_MAX_TOKEN_LENGTH, Token, Tokenizer};
-use super::unicode::lowercase;
-use crate::byte_simd;
 
 /// An analyzer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,33 +58,77 @@ impl Analyzer {
         Ok(stream.tokens)
     }
 
+    /// Whether [`Analyzer::for_each_term`] cuts the terms out of the text without building
+    /// tokens: the tokenizer cuts pieces of the text ([`Tokenizer::spans`]) and every token
+    /// filter keeps at most one term per token ([`TokenFilter::term_wise`]).
+    pub fn term_wise(&self) -> bool {
+        self.tokenizer.spans("", &mut |_, _| {})
+            && self.token_filters.iter().all(TokenFilter::term_wise)
+    }
+
     /// Gives `f` the terms of `text` in order, the same as [`Analyzer::analyze`] gives (FR-028).
-    /// An analyzer without character filters whose tokenizer cuts pieces of the text
-    /// ([`Tokenizer::spans`]) and whose only filter, if any, is `lowercase` builds no token: each
-    /// term is a piece of `text`, or the lowercase of one written into `buffer`, which keeps its
-    /// capacity from term to term. Any other analyzer runs [`Analyzer::analyze`].
+    /// A [`Analyzer::term_wise`] analyzer builds no token: each term is a piece of the text
+    /// (after the character filters, which run once per text) or what its filters wrote into
+    /// `buffer`, whose two strings keep their capacity from term to term. Any other analyzer
+    /// runs [`Analyzer::analyze`].
     pub fn for_each_term(
         &self,
         text: &str,
         buffer: &mut TermBuffer,
         mut f: impl FnMut(Term<'_>),
     ) -> Result<(), RegexError> {
-        let lower = match self.token_filters.as_slice() {
-            [] => false,
-            [TokenFilter::Lowercase] => true,
-            _ => return self.terms_of_tokens(text, f),
-        };
-        if !self.char_filters.is_empty() {
+        if !self.term_wise() {
             return self.terms_of_tokens(text, f);
         }
+        let filtered = (!self.char_filters.is_empty()).then(|| {
+            let mut filtered = Filtered::new(text);
+            for filter in &self.char_filters {
+                filtered = filter.apply(&filtered);
+            }
+            filtered
+        });
+        let source = filtered.as_ref().map_or(text, |t| t.text.as_str());
+        let original = |at: usize| filtered.as_ref().map_or(at, |t| t.original(at));
+        let TermBuffer { a, b } = buffer;
         let mut position = 0;
-        let direct = self.tokenizer.spans(text, &mut |start, end| {
-            let piece = &text[start..end];
-            let text = if lower { buffer.lowercase(piece) } else { piece };
-            f(Term { text, start, end, position, length: 1 });
+        let mut failed = None;
+        self.tokenizer.spans(source, &mut |start, end| {
+            if failed.is_some() {
+                return;
+            }
+            let piece = &source[start..end];
+            // Where the term is: 0 the piece, 1 `a`, 2 `b`.
+            let mut at = 0;
+            let mut keyword = false;
+            for filter in &self.token_filters {
+                let (input, output) = match at {
+                    0 => (piece, &mut *a),
+                    1 => (a.as_str(), &mut *b),
+                    _ => (b.as_str(), &mut *a),
+                };
+                output.clear();
+                match filter.term(input, &mut keyword, output) {
+                    Ok(Step::Same) => {}
+                    Ok(Step::Written) => at = if at == 1 { 2 } else { 1 },
+                    Ok(Step::Dropped) => {
+                        position += 1;
+                        return;
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                }
+            }
+            let text = match at {
+                0 => piece,
+                1 => a.as_str(),
+                _ => b.as_str(),
+            };
+            f(Term { text, start: original(start), end: original(end), position, length: 1 });
             position += 1;
         });
-        if direct { Ok(()) } else { self.terms_of_tokens(text, f) }
+        failed.map_or(Ok(()), Err)
     }
 
     /// [`Analyzer::for_each_term`] through the tokens of [`Analyzer::analyze`].
@@ -119,51 +161,12 @@ pub struct Term<'a> {
     pub length: u32,
 }
 
-/// Where [`Analyzer::for_each_term`] writes the terms it normalizes.
+/// Where [`Analyzer::for_each_term`] writes the terms its filters rewrite: each filter reads
+/// one string and writes the other.
 #[derive(Clone, Debug, Default)]
 pub struct TermBuffer {
-    text: String,
-}
-
-impl TermBuffer {
-    /// `piece` lowercased as the `lowercase` filter does: `piece` itself when it has nothing to
-    /// change, else its lowercase written into the buffer. ASCII goes 32 bytes at a time through
-    /// [`byte_simd`].
-    fn lowercase<'a>(&'a mut self, piece: &'a str) -> &'a str {
-        let bytes = piece.as_bytes();
-        let mut at = 0;
-        let mut clean = true;
-        while at < bytes.len() {
-            let (w, valid) = byte_simd::window(bytes, at);
-            let c = byte_simd::classify(&w);
-            if (c.high | c.upper) & valid != 0 {
-                clean = false;
-                break;
-            }
-            at += byte_simd::WINDOW;
-        }
-        if clean {
-            return piece;
-        }
-        self.text.clear();
-        let mut at = 0;
-        while at < bytes.len() {
-            let (w, valid) = byte_simd::window(bytes, at);
-            let c = byte_simd::classify(&w);
-            let ascii = ((c.high | !valid).trailing_zeros() as usize).min(bytes.len() - at);
-            let lowered = byte_simd::lowercase(&w);
-            // The bytes up to `ascii` are ASCII, so they are whole characters.
-            self.text.extend(lowered[..ascii].iter().map(|&b| char::from(b)));
-            at += ascii;
-            if ascii < byte_simd::WINDOW
-                && let Some(ch) = piece[at..].chars().next()
-            {
-                self.text.push(lowercase(ch));
-                at += ch.len_utf8();
-            }
-        }
-        &self.text
-    }
+    a: String,
+    b: String,
 }
 
 #[cfg(test)]
@@ -236,7 +239,8 @@ mod tests {
             assert!(range.contains(&t.text.as_ptr()), "{t:?}");
         })
         .unwrap();
-        let lowered = buffer.lowercase("ABC").as_ptr();
-        assert_eq!(lowered, buffer.text.as_ptr());
+        let mut seen = None;
+        a.for_each_term("ABC", &mut buffer, |t| seen = Some(t.text.as_ptr())).unwrap();
+        assert_eq!(seen, Some(buffer.a.as_ptr()));
     }
 }
