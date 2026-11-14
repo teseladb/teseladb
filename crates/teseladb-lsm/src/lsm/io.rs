@@ -169,6 +169,14 @@ impl Lsm {
         }
     }
 
+    /// Whether `op`, given by [`Lsm::poll_io_step`], is background work (a flush or a job such
+    /// as a compaction, with its reads) rather than a block read for a client: the executor caps
+    /// the background's bandwidth while the clients' reads wait (012 FR-028). The clients' reads
+    /// are the only operations with a token of their own; the jobs read with [`JOB_TOKEN`].
+    pub fn is_background(&self, op: &IoOp) -> bool {
+        !matches!(op, IoOp::ReadAt { token, .. } if *token != JOB_TOKEN)
+    }
+
     /// Notes operation `op` of `slot` as the one in flight and gives it.
     fn hand_out(&mut self, slot: Slot, op: IoOp) -> Polled {
         self.inflight = Some((slot, op.clone()));

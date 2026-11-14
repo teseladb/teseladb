@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use teseladb_hlc::Hlc;
+use teseladb_io::IoClass;
 use teseladb_lsm::{Completions, Lsm, Polled};
 use teseladb_meta::command::Group0Command;
 use teseladb_multiraft::{Done, MultiRaftCore, NodeClock, OpError, OpId, StateMachine};
@@ -1443,12 +1444,14 @@ impl DataCore {
         self.transfers.take_file_sends(out);
     }
 
-    /// Next disk operation of the LSM or the transfers, with its owner.
+    /// Next disk operation of the LSM or the transfers, with its owner and its class: the LSM's
+    /// flushes and compactions and the core changes go in the background's, which the executor
+    /// caps while the clients' reads wait (012 FR-028).
     pub fn poll_io(
         &mut self,
         core: &mut MultiRaftCore<CoreSm>,
         now: Nanos,
-    ) -> Option<(IoOp, IoOwner)> {
+    ) -> Option<(IoOp, IoOwner, IoClass)> {
         let (polled, done) = {
             let mut lsm = self.lsm.borrow_mut();
             // One step of its background work a turn (004 FR-030).
@@ -1460,15 +1463,20 @@ impl DataCore {
         self.tell_failure();
         self.lsm_more = matches!(polled, Polled::More);
         if let Polled::Op(op) = polled {
-            return Some((op, IoOwner::Lsm));
+            let class = if self.lsm.borrow().is_background(&op) {
+                IoClass::Background
+            } else {
+                IoClass::Data
+            };
+            return Some((op, IoOwner::Lsm, class));
         }
         if let Some(op) = self.transfers.poll_io() {
-            return Some((op, IoOwner::Transfer));
+            return Some((op, IoOwner::Transfer, IoClass::Data));
         }
         if let Some(op) = self.backups.poll_io() {
-            return Some((op, IoOwner::Backup));
+            return Some((op, IoOwner::Backup, IoClass::Data));
         }
-        self.relocations.poll_io().map(|op| (op, IoOwner::Relocate))
+        self.relocations.poll_io().map(|op| (op, IoOwner::Relocate, IoClass::Background))
     }
 
     /// The result of an operation of [`DataCore::poll_io`].
@@ -1711,7 +1719,7 @@ mod tests {
         use teseladb_raftlog::Disk;
         loop {
             match d.poll_io(core, now) {
-                Some((op, owner)) => {
+                Some((op, owner, _)) => {
                     let done = disk.execute(op);
                     d.on_io_done(core, owner, done, now);
                 }
@@ -1739,8 +1747,10 @@ mod tests {
         let (mut yields, mut ops) = (0, 0);
         loop {
             match d.poll_io(&mut core, now) {
-                Some((op, owner)) => {
+                Some((op, owner, class)) => {
                     assert!(!d.has_more(), "an operation for the disk comes first");
+                    // The flush and its compactions are the LSM's background work (012 FR-028).
+                    assert_eq!((owner, class), (IoOwner::Lsm, IoClass::Background), "{op:?}");
                     ops += 1;
                     let done = disk.execute(op);
                     d.on_io_done(&mut core, owner, done, now);

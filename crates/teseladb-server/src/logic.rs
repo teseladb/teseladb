@@ -76,6 +76,9 @@ enum IoSlot {
     Rollback,
     /// The data range's (its LSM or its transfers).
     Data(IoOwner),
+    /// The data range's background work: the LSM's flushes and compactions and the core
+    /// changes (012 FR-028).
+    Background(IoOwner),
 }
 
 impl IoSlot {
@@ -85,6 +88,7 @@ impl IoSlot {
         match self {
             IoSlot::Log | IoSlot::Rollback => IoClass::Log,
             IoSlot::Data(_) => IoClass::Data,
+            IoSlot::Background(_) => IoClass::Background,
         }
     }
 }
@@ -1817,9 +1821,13 @@ impl CoreLogic for NodeLogic {
         took(Stage::CoreLsmWork, began);
         // Completions that came with it (an export, an ingestion) may have moved the core.
         self.pump();
-        let (op, owner) = next?;
-        self.io.push_back((IoSlot::Data(owner), apart(&op)));
-        Some((op, IoClass::Data))
+        let (op, owner, class) = next?;
+        let slot = match class {
+            IoClass::Background => IoSlot::Background(owner),
+            IoClass::Log | IoClass::Data => IoSlot::Data(owner),
+        };
+        self.io.push_back((slot, apart(&op)));
+        Some((op, class))
     }
 
     fn on_io_done(&mut self, done: IoDone, class: IoClass, now: Nanos) {
@@ -1831,7 +1839,7 @@ impl CoreLogic for NodeLogic {
                 took(Stage::CoreLogDone, began);
             }
             IoSlot::Rollback => self.rollback.on_io_done(&done, now),
-            IoSlot::Data(owner) => {
+            IoSlot::Data(owner) | IoSlot::Background(owner) => {
                 let data = self.data.as_mut().expect("the owner of a data operation");
                 data.on_io_done(&mut self.core, owner, done, now);
                 took(Stage::CoreDataDone, began);
@@ -2055,8 +2063,9 @@ fn take_slot(io: &mut VecDeque<(IoSlot, Option<IoOp>)>, done: &IoDone, class: Io
         IoClass::Log => io.iter().position(|(slot, s)| {
             slot.class() == IoClass::Log && s.as_ref().is_some_and(|op| answers(op, done))
         }),
-        // The data's by order, which the executor keeps (012 FR-023), but those answered apart.
-        IoClass::Data => {
+        // The data's and the background's by order, which the executor keeps in each class (012
+        // FR-023), but those answered apart.
+        IoClass::Data | IoClass::Background => {
             let synced = match done {
                 IoDone::Ok(op) | IoDone::Err { op, .. } if answered_apart(op) => Some(op.clone()),
                 _ => None,
@@ -3700,5 +3709,29 @@ mod tests {
         assert_eq!(take_slot(&mut io, &IoDone::Ok(write(9, 4)), IoClass::Data), owner);
         assert_eq!(take_slot(&mut io, &IoDone::Ok(write(1, 0)), IoClass::Log), IoSlot::Log);
         assert!(io.is_empty());
+    }
+
+    #[test]
+    fn a_background_result_takes_the_oldest_slot_of_the_background() {
+        // 012 FR-028: the executor answers the background's class in its own order, apart from
+        // the data's.
+        use teseladb_raftlog::FileId;
+        let data = teseladb_types::Bytes::new();
+        let write =
+            |offset| IoOp::WriteAt { file: FileId(4), offset, data: data.clone(), batch: 0 };
+        let mut io = VecDeque::from([
+            (IoSlot::Data(IoOwner::Lsm), None),
+            (IoSlot::Background(IoOwner::Lsm), None),
+            (IoSlot::Background(IoOwner::Relocate), None),
+        ]);
+        let first = take_slot(&mut io, &IoDone::Ok(write(0)), IoClass::Background);
+        assert_eq!(first, IoSlot::Background(IoOwner::Lsm));
+        let second = take_slot(&mut io, &IoDone::Ok(write(8)), IoClass::Background);
+        assert_eq!(second, IoSlot::Background(IoOwner::Relocate));
+        assert_eq!(
+            take_slot(&mut io, &IoDone::Ok(write(16)), IoClass::Data),
+            IoSlot::Data(IoOwner::Lsm)
+        );
+        assert_eq!(IoSlot::Background(IoOwner::Lsm).class(), IoClass::Background);
     }
 }

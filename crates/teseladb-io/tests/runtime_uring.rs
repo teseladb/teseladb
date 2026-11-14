@@ -32,10 +32,15 @@ impl CoreLogic for Writer {
     type Msg = IoOp;
     fn tick(&mut self, _now: Nanos, _wall_ms: u64) {}
     fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
-        if self.io.is_empty() { None } else { Some((self.io.remove(0), IoClass::Data)) }
+        if self.io.is_empty() {
+            return None;
+        }
+        let op = self.io.remove(0);
+        let class = class_of(&op);
+        Some((op, class))
     }
     fn on_io_done(&mut self, done: IoDone, class: IoClass, _now: Nanos) {
-        assert_eq!(class, IoClass::Data, "each result with the class of its operation");
+        assert_eq!(class, done_class(&done), "each result with the class of its operation");
         self.done.push(done);
         self.seen.fetch_add(1, Ordering::Relaxed);
     }
@@ -437,4 +442,21 @@ fn a_file_s_pieces_go_from_the_ring_s_buffers_and_what_cannot_be_read_gets_its_f
     let mut disk = disk.unwrap();
     assert_eq!(disk.uring().unwrap().zero_copy_sends(), pieces, "each piece from the buffers");
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The class the fake core gives an operation: its writes are background work, as a compaction's
+/// (012 FR-028), the rest the data's.
+fn class_of(op: &IoOp) -> IoClass {
+    match op {
+        IoOp::WriteAt { .. } => IoClass::Background,
+        _ => IoClass::Data,
+    }
+}
+
+/// The class of the operation a result answers.
+fn done_class(done: &IoDone) -> IoClass {
+    match done {
+        IoDone::Ok(op) | IoDone::Err { op, .. } => class_of(op),
+        IoDone::Read { .. } => IoClass::Data,
+    }
 }

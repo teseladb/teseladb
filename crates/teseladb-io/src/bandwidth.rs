@@ -8,6 +8,10 @@
 //! hold the log's back, is part of it. The log presses only while it has operations queued or
 //! running; an idle log never holds the data.
 //!
+//! The executor keeps a second split inside the data's share (012 FR-028): there the data's class,
+//! whose reads serve the clients, is the one that presses, and the LSM's background writes are
+//! the ones capped.
+//!
 //! The data may start an operation as long as its balance of tokens is positive, and the balance
 //! then goes down by the operation's cost: a large operation is never held for ever, and over a
 //! run of them the data's share stays at most one operation above its [`DATA_SHARE_PERCENT`].
@@ -83,6 +87,16 @@ impl BandwidthSplit {
 
     /// Whether a data operation may start at `now`, and if so it is counted.
     pub fn try_start_data(&mut self, cost: u64, now: Instant) -> bool {
+        if !self.data_may_start(now) {
+            return false;
+        }
+        self.data_started(cost, now);
+        true
+    }
+
+    /// Whether a data operation may start at `now`, without counting it: an operation held by
+    /// two splits starts only if both let it, and is counted in both.
+    pub fn data_may_start(&mut self, now: Instant) -> bool {
         if !self.log_pressed(now) {
             self.capped = false;
             return true;
@@ -91,11 +105,14 @@ impl BandwidthSplit {
             self.capped = true;
             self.data_tokens = 0;
         }
-        if self.data_tokens <= 0 {
-            return false;
+        self.data_tokens > 0
+    }
+
+    /// Counts a data operation of `cost` that [`BandwidthSplit::data_may_start`] let start.
+    pub fn data_started(&mut self, cost: u64, now: Instant) {
+        if self.log_pressed(now) {
+            self.data_tokens -= i64::try_from(cost).unwrap_or(i64::MAX);
         }
-        self.data_tokens -= i64::try_from(cost).unwrap_or(i64::MAX);
-        true
     }
 
     /// A log operation of `cost` started: while the log presses, it earns the data its share.
@@ -223,6 +240,25 @@ mod tests {
         let mut quiet = BandwidthSplit::new();
         quiet.log_started(1 << 20, now);
         assert_eq!(quiet.data_tokens(), 0);
+    }
+
+    #[test]
+    fn asking_does_not_spend_and_starting_spends_only_while_pressed() {
+        let now = Instant::now();
+        let mut s = BandwidthSplit::new();
+        s.set_log_state(true, None);
+        s.log_completed(ms(2));
+        s.log_started(4096, now);
+        let tokens = s.data_tokens();
+        assert!(s.data_may_start(now) && s.data_may_start(now));
+        assert_eq!(s.data_tokens(), tokens, "asking twice spends nothing");
+        s.data_started(4096, now);
+        assert_eq!(s.data_tokens(), tokens - 4096);
+        // Free, a start costs nothing.
+        let mut free = BandwidthSplit::new();
+        assert!(free.data_may_start(now));
+        free.data_started(1 << 20, now);
+        assert_eq!(free.data_tokens(), 0);
     }
 
     #[test]

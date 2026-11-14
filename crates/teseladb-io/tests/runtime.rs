@@ -115,11 +115,13 @@ impl CoreLogic for Toy {
             return None;
         }
         self.in_flight += 1;
-        Some((self.io.remove(0), IoClass::Data))
+        let op = self.io.remove(0);
+        let class = class_of(&op);
+        Some((op, class))
     }
 
     fn on_io_done(&mut self, done: IoDone, class: IoClass, _now: Nanos) {
-        assert_eq!(class, IoClass::Data, "each result with the class of its operation");
+        assert_eq!(class, done_class(&done), "each result with the class of its operation");
         self.in_flight -= 1;
         self.done.push(done);
     }
@@ -789,4 +791,21 @@ fn background_requests_still_waiting_at_a_stop_are_answered() {
     a.tx.send(CoreInput::App(Cmd::Scan(7))).ok().unwrap();
     let t = stop(a);
     assert_eq!(t.served, vec![7]);
+}
+
+/// The class the fake core gives an operation: its writes are background work, as a compaction's
+/// (012 FR-028), the rest the data's.
+fn class_of(op: &IoOp) -> IoClass {
+    match op {
+        IoOp::WriteAt { .. } => IoClass::Background,
+        _ => IoClass::Data,
+    }
+}
+
+/// The class of the operation a result answers.
+fn done_class(done: &IoDone) -> IoClass {
+    match done {
+        IoDone::Ok(op) | IoDone::Err { op, .. } => class_of(op),
+        IoDone::Read { .. } => IoClass::Data,
+    }
 }

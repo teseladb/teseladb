@@ -31,7 +31,7 @@ use teseladb_types::Bytes;
 use crate::bandwidth::{BandwidthSplit, cost_of};
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE, BufferPool, is_aligned};
 use crate::file_disk::{O_DIRECT, errno, io_errno};
-use crate::io_class::IoClass;
+use crate::io_class::{CLASSES, IoClass};
 
 mod file_sends;
 
@@ -190,7 +190,7 @@ pub struct IoUringDisk {
     files: HashMap<FileId, OpenFile>,
     free_slots: Vec<u32>,
     /// The operations not started, one queue per class (012 FR-023).
-    queues: [VecDeque<(u64, IoOp, Instant)>; 2],
+    queues: [VecDeque<(u64, IoOp, Instant)>; CLASSES],
     running: VecDeque<Job>,
     by_ring: HashMap<u64, u64>,
     done: VecDeque<(u64, IoDone, IoClass)>,
@@ -201,6 +201,9 @@ pub struct IoUringDisk {
     buffers_ready: bool,
     /// The tokens that cap the data's bandwidth while the log waits (012 FR-028).
     split: BandwidthSplit,
+    /// The tokens that cap the background's part of the data's bandwidth while a read of the
+    /// data's class waits (012 FR-028): its "log" is the data's class.
+    background: BandwidthSplit,
     /// Zero-copy sends to peers in flight, with the result of their first completion (012
     /// FR-026).
     peer_sends: HashMap<u64, Option<io::Result<u32>>>,
@@ -340,7 +343,7 @@ impl IoUringDisk {
             linkat: probe.supports(opcode::LINKAT),
             files: HashMap::new(),
             free_slots: (0..file_slots).rev().collect(),
-            queues: [VecDeque::new(), VecDeque::new()],
+            queues: [VecDeque::new(), VecDeque::new(), VecDeque::new()],
             running: VecDeque::new(),
             by_ring: HashMap::new(),
             done: VecDeque::new(),
@@ -352,6 +355,7 @@ impl IoUringDisk {
             wake,
             buffers_ready: false,
             split: BandwidthSplit::new(),
+            background: BandwidthSplit::new(),
         })
     }
 
@@ -505,13 +509,17 @@ impl IoUringDisk {
             if j.result.is_some() && j.class == IoClass::Log {
                 self.split.log_completed(j.queued.elapsed());
             }
+            if j.result.is_some() && j.class == IoClass::Data && matches!(j.op, IoOp::ReadAt { .. })
+            {
+                self.background.log_completed(j.queued.elapsed());
+            }
             if j.result.is_some() && matches!(j.op, IoOp::Sync { .. }) {
                 let took = u64::try_from(j.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 teseladb_stages::record(teseladb_stages::Stage::DiskSync, took);
             }
         }
         // A finished job goes once every earlier job of its class has gone (012 FR-023).
-        let mut blocked = [false; 2];
+        let mut blocked = [false; CLASSES];
         let mut kept = VecDeque::with_capacity(self.running.len());
         for j in self.running.drain(..) {
             let c = j.class.index();
@@ -529,22 +537,54 @@ impl IoUringDisk {
         self.running = kept;
     }
 
-    /// Whether the operation at the head of the queue of `class` may start now: the classes do
-    /// not wait for each other, but the data class leaves [`LOG_BUFFERS`] buffers to the log.
+    /// Whether the operation at the head of the queue of `class` may start now: the log's class
+    /// waits for no other, the data's and the background's for what they conflict with in each
+    /// other, and both leave [`LOG_BUFFERS`] buffers to the log.
     fn can_start(&self, op: &IoOp, class: IoClass) -> bool {
         let reserved = match class {
             IoClass::Log => 0,
-            IoClass::Data => LOG_BUFFERS,
+            IoClass::Data | IoClass::Background => LOG_BUFFERS,
         };
         if data_range(op).is_some() && self.pool.available() <= reserved {
             return false;
         }
-        let same = |a: FileId, b: FileId| {
-            a == b
-                || matches!((self.files.get(&a), self.files.get(&b)), (Some(x), Some(y)) if x.inode == y.inode)
+        let same = |a: FileId, b: FileId| self.same_file(a, b);
+        // The data's class and the background's share files (012 FR-028): an operation of one
+        // also waits for what it conflicts with in the other, running or submitted before it.
+        let shared = |c: IoClass| c == class || (class != IoClass::Log && c != IoClass::Log);
+        let running = self.running.iter().filter(|j| shared(j.class)).map(|j| &j.op);
+        let seq = self.queues[class.index()].front().map_or(u64::MAX, |(s, _, _)| *s);
+        let other = match class {
+            IoClass::Log => None,
+            IoClass::Data => Some(IoClass::Background),
+            IoClass::Background => Some(IoClass::Data),
         };
-        let mine = self.running.iter().filter(|j| j.class == class).map(|j| &j.op);
-        may_start_in(mine, op, &same)
+        let earlier = other
+            .into_iter()
+            .flat_map(|c| self.queues[c.index()].iter())
+            .take_while(|(s, _, _)| *s < seq)
+            .map(|(_, o, _)| o);
+        may_start_in(running.chain(earlier), op, &same)
+    }
+
+    /// Whether `a` and `b` are the same file, by id or by inode (a file linked under two ids).
+    fn same_file(&self, a: FileId, b: FileId) -> bool {
+        a == b
+            || matches!((self.files.get(&a), self.files.get(&b)), (Some(x), Some(y)) if x.inode == y.inode)
+    }
+
+    /// Whether the operation at the head of the data's queue waits for one of the background's
+    /// submitted before it (012 FR-028): the background is then not capped, since the reads it
+    /// would yield to cannot start before it.
+    fn data_waits_for_background(&self) -> bool {
+        let Some((seq, op, _)) = self.queues[IoClass::Data.index()].front() else {
+            return false;
+        };
+        let earlier = self.queues[IoClass::Background.index()]
+            .iter()
+            .take_while(|(s, _, _)| s < seq)
+            .map(|(_, o, _)| o);
+        !may_start_in(earlier, op, &|a, b| self.same_file(a, b))
     }
 
     /// Starts what can start, the log's class first (012 FR-023), the data's within the share of
@@ -554,7 +594,10 @@ impl IoUringDisk {
         self.start_class(IoClass::Log);
         // What the log started no longer waits in its queue.
         self.note_log_state();
+        self.note_data_state();
         self.start_class(IoClass::Data);
+        self.note_data_state();
+        self.start_class(IoClass::Background);
         self.start_file_sends();
         self.collect();
     }
@@ -565,6 +608,20 @@ impl IoUringDisk {
         let busy = !self.queues[log].is_empty()
             || self.running.iter().any(|j| j.class == IoClass::Log && j.result.is_none());
         self.split.set_log_state(busy, self.queues[log].front().map(|(_, _, t)| *t));
+    }
+
+    /// Tells the background's split whether the data's class has reads waiting or running and
+    /// how long its oldest queued read waits (012 FR-028).
+    fn note_data_state(&mut self) {
+        let data = IoClass::Data.index();
+        let is_read = |op: &IoOp| matches!(op, IoOp::ReadAt { .. });
+        let oldest = self.queues[data].iter().find(|(_, op, _)| is_read(op)).map(|(_, _, t)| *t);
+        let busy = oldest.is_some()
+            || self
+                .running
+                .iter()
+                .any(|j| j.class == IoClass::Data && j.result.is_none() && is_read(&j.op));
+        self.background.set_log_state(busy, oldest);
     }
 
     fn start_class(&mut self, class: IoClass) {
@@ -580,6 +637,23 @@ impl IoUringDisk {
                 IoClass::Data => {
                     if !self.split.try_start_data(cost, started) {
                         return;
+                    }
+                    if matches!(op, IoOp::ReadAt { .. }) {
+                        self.background.log_started(cost, started);
+                    }
+                }
+                IoClass::Background => {
+                    // Within the data's share of the disk and within its own, unless the data's
+                    // next operation waits for it.
+                    let ahead = self.data_waits_for_background();
+                    if !self.split.data_may_start(started)
+                        || !(ahead || self.background.data_may_start(started))
+                    {
+                        return;
+                    }
+                    self.split.data_started(cost, started);
+                    if !ahead {
+                        self.background.data_started(cost, started);
                     }
                 }
             }
@@ -1189,6 +1263,151 @@ mod tests {
             assert_eq!(fs::metadata(root.join("data")).unwrap().len(), 16 * 4096);
             fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn a_waiting_client_read_caps_the_background_writes_that_start() {
+        // 012 FR-028: inside the data's class, with a client read waiting past its limit, the
+        // LSM's background writes start only what the reads' started bytes earn them; with the
+        // reads quick, they start all they can.
+        for pressed in [false, true] {
+            let root = temp(if pressed { "background-pressed" } else { "background-free" });
+            let mut d = IoUringDisk::open(&root, false).unwrap();
+            ok(&mut d, IoOp::Create { file: FileId(1), path: "sst".into(), prealloc: 0 });
+            ok(&mut d, IoOp::Create { file: FileId(2), path: "compacted".into(), prealloc: 0 });
+            let block = Bytes::from_vec(vec![7; 4096]);
+            ok(&mut d, IoOp::WriteAt { file: FileId(1), offset: 0, data: block, batch: 0 });
+            if pressed {
+                d.background.log_completed(std::time::Duration::from_millis(5));
+            }
+            d.submit_in(
+                IoOp::ReadAt { file: FileId(1), offset: 0, len: 4096, token: 1 },
+                IoClass::Data,
+            );
+            for i in 0..16u64 {
+                let data = Bytes::from_vec(vec![i as u8; 4096]);
+                d.submit_in(
+                    IoOp::WriteAt { file: FileId(2), offset: i * 4096, data, batch: 0 },
+                    IoClass::Background,
+                );
+            }
+            d.flush().unwrap();
+            let started = d.running.iter().filter(|j| j.class == IoClass::Background).count();
+            if pressed {
+                assert_eq!(started, 1, "one 4 KiB write on the read's 4 KiB tokens");
+            } else {
+                assert_eq!(started, 16);
+            }
+            // Every write still lands, each class in its own order.
+            let mut got = Vec::new();
+            while got.len() < 17 {
+                if d.running.iter().any(|j| j.waiting.is_some()) {
+                    d.ring.submit(1).unwrap();
+                }
+                d.reap(&mut got).unwrap();
+            }
+            let offsets: Vec<u64> = got
+                .iter()
+                .filter(|(_, c)| *c == IoClass::Background)
+                .map(|(r, _)| match r {
+                    IoDone::Ok(IoOp::WriteAt { offset, .. }) => *offset,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(offsets, (0..16).map(|i| i * 4096).collect::<Vec<_>>());
+            assert_eq!(fs::metadata(root.join("compacted")).unwrap().len(), 16 * 4096);
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_background_operation_does_not_overtake_a_read_of_its_file() {
+        // A compaction's removal of a file waits for the read of it submitted before, and a
+        // write of another file goes ahead of it.
+        let root = temp("background-order");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "old".into(), prealloc: 0 });
+        let read = IoOp::ReadAt { file: FileId(1), offset: 0, len: 8, token: 1 };
+        d.queues[IoClass::Data.index()].push_back((1, read, Instant::now()));
+        let other = IoOp::WriteAt {
+            file: FileId(2),
+            offset: 0,
+            data: Bytes::from_vec(vec![1; 8]),
+            batch: 0,
+        };
+        let same_file = IoOp::WriteAt {
+            file: FileId(1),
+            offset: 0,
+            data: Bytes::from_vec(vec![1; 8]),
+            batch: 0,
+        };
+        d.queues[IoClass::Background.index()].push_back((2, same_file.clone(), Instant::now()));
+        assert!(!d.can_start(&same_file, IoClass::Background), "it conflicts with the read");
+        assert!(!d.can_start(&IoOp::Remove { path: "old".into() }, IoClass::Background));
+        assert!(d.can_start(&other, IoClass::Background), "another file goes ahead");
+        // The read, submitted first, does not wait for the later write.
+        d.queues[IoClass::Background.index()].clear();
+        d.queues[IoClass::Background.index()].push_back((2, same_file, Instant::now()));
+        assert!(d.can_start(
+            &IoOp::ReadAt { file: FileId(1), offset: 0, len: 8, token: 1 },
+            IoClass::Data
+        ));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_read_waiting_behind_a_background_write_does_not_hold_it_back() {
+        // 012 FR-028: a client read of a file that a background write submitted before it is
+        // changing waits for that write, so the write starts uncapped, or neither would start.
+        let root = temp("background-ahead");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "sst".into(), prealloc: 0 });
+        d.background.log_completed(std::time::Duration::from_millis(5));
+        let data = Bytes::from_vec(vec![3; 4096]);
+        d.submit_in(
+            IoOp::WriteAt { file: FileId(1), offset: 0, data, batch: 0 },
+            IoClass::Background,
+        );
+        d.submit_in(
+            IoOp::ReadAt { file: FileId(1), offset: 0, len: 4096, token: 1 },
+            IoClass::Data,
+        );
+        assert!(d.data_waits_for_background());
+        d.flush().unwrap();
+        assert_eq!(d.running.iter().filter(|j| j.class == IoClass::Background).count(), 1);
+        let mut got = Vec::new();
+        while got.len() < 2 {
+            if d.running.iter().any(|j| j.waiting.is_some()) {
+                d.ring.submit(1).unwrap();
+            }
+            d.reap(&mut got).unwrap();
+            d.flush().unwrap();
+        }
+        let read = got.iter().find_map(|(r, _)| match r {
+            IoDone::Read { data: Ok(bytes), .. } => Some(bytes.to_vec()),
+            _ => None,
+        });
+        assert_eq!(read, Some(vec![3; 4096]), "the read sees the write before it");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_background_leaves_buffers_to_the_log() {
+        let root = temp("background-reserve");
+        let mut d = IoUringDisk::open(&root, false).unwrap();
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "f".into(), prealloc: 0 });
+        let write = IoOp::WriteAt {
+            file: FileId(1),
+            offset: 0,
+            data: Bytes::from_vec(vec![1; 8]),
+            batch: 0,
+        };
+        for _ in 0..(BUFFERS_PER_CORE as usize - LOG_BUFFERS) {
+            let _ = d.pool.take();
+        }
+        assert!(!d.can_start(&write, IoClass::Background));
+        assert!(d.can_start(&write, IoClass::Log));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

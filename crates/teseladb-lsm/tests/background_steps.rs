@@ -112,3 +112,40 @@ fn a_flush_takes_its_memtable_a_step_at_a_time() {
     let found = common::get(&mut lsm, &mut disk, &view, b"k000400", ts(900, 0));
     assert!(found.is_some(), "flushed and read back");
 }
+
+#[test]
+fn flushes_and_compactions_are_background_and_a_clients_read_is_not() {
+    // 012 FR-028: the executor caps the background's bandwidth while the clients' reads wait,
+    // so the LSM tells the two apart.
+    let cfg = cfg();
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    let (mut background, mut reads) = (0, 0);
+    let mut run = |lsm: &mut Lsm, disk: &mut MemDisk| loop {
+        match lsm.poll_io_step(NOW) {
+            Polled::Op(op) => {
+                if lsm.is_background(&op) {
+                    background += 1;
+                } else {
+                    reads += 1;
+                }
+                let done = disk.execute(op);
+                lsm.on_io_done(done, NOW);
+            }
+            Polled::More => {}
+            Polled::Idle => break,
+        }
+    };
+    fill(&mut lsm, &mut disk, 600, &mut run);
+    assert!(background > 0, "the flushes and the compaction wrote");
+    assert_eq!(reads, 0, "nobody read for a client");
+    // A cold read of a client asks for a block: that operation is not background work.
+    let (mut lsm, _) = Lsm::recover(&cfg, &mut disk).unwrap();
+    let view = lsm.view();
+    let key = format!("k{:06}", 7919 % 600);
+    let teseladb_lsm::Lookup::Miss(_) = view.get(&mut lsm, key.as_bytes(), ts(601, 0)) else {
+        panic!("the block of a key just recovered is on the disk");
+    };
+    let Polled::Op(op) = lsm.poll_io_step(NOW) else { panic!("the read of the missing block") };
+    assert!(!lsm.is_background(&op), "{op:?}");
+}
