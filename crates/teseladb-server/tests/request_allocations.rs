@@ -4,10 +4,10 @@
 //! field. The count of the earlier reading is measured here too, with the same calls it made, so
 //! the two stay comparable on any host.
 
+use teseladb_bson::{Document, Limits, RawDoc, Value, validate_message};
 use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 use teseladb_wire::connection::Connection;
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
-use teseladb_bson::{Document, Limits, RawDoc, Value, validate_message};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -15,7 +15,10 @@ static ALLOC: CountingAlloc = CountingAlloc;
 const DOCS: usize = 100;
 
 fn limits() -> Limits {
-    Limits { max_size: teseladb_bson::MAX_SIZE + 16 * 1024, max_depth: teseladb_bson::MAX_COMMAND_DEPTH }
+    Limits {
+        max_size: teseladb_bson::MAX_SIZE + 16 * 1024,
+        max_depth: teseladb_bson::MAX_COMMAND_DEPTH,
+    }
 }
 
 fn stored(i: usize) -> Document {

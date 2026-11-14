@@ -1,10 +1,10 @@
 //! Media types of the REST API (019 FR-006, contract `rest-api.md`, T010): bodies in relaxed
 //! and canonical Extended JSON or BSON by `Content-Type`, replies by `Accept`.
 
+use teseladb_bson::{Document, Value};
 use teseladb_rest::media::{
     BSON, CANONICAL_JSON, Format, JSON, MediaError, decode, encode, request_format, response_format,
 };
-use teseladb_bson::{Document, Value};
 
 #[test]
 fn request_format_by_content_type() {

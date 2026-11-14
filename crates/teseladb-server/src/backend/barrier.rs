@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use teseladb_range::ack::{EntryId, W, WriteConcern};
 use teseladb_range::host::RangeError;
+use teseladb_types::GroupId;
 use teseladb_wire::error::{
     CommandError, INTERNAL_ERROR, RangeContext, UNSATISFIABLE_WRITE_CONCERN, from_range,
 };
-use teseladb_types::GroupId;
 
 use super::{RETRY_PAUSE, ServerBackend};
 use crate::data::{DataReply, DataReq};

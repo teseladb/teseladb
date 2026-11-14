@@ -9,9 +9,9 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{get, open, scan, small, ts};
+use teseladb_bson::{Document, RawValue};
 use teseladb_keys::KeyBuilder;
 use teseladb_lsm::{DOCUMENT_VALUE, Kind, Lsm, LsmConfig};
-use teseladb_bson::{Document, RawValue};
 use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 

@@ -2,10 +2,10 @@
 //! `refrouter` 9.0.4 measured with 110 documents of 1 MiB (292 and its messages); with
 //! `allowDiskUse` the stages run.
 
+use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawValue, extjson};
 
 struct BigEnv {
     disk: bool,

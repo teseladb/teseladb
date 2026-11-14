@@ -36,13 +36,13 @@ use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{
     Done, Durable, ExportBase, GroupDesc, GroupImport, OpError, OpId, StateMachine,
 };
+use teseladb_raft::Role;
+use teseladb_raftlog::{Completions, Disk, FileId, IoDone};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Command;
 use teseladb_range::host::{RangeHost, ReqId, WriteReq};
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_raft::Role;
-use teseladb_raftlog::{Completions, Disk, FileId, IoDone};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::checkers::{Violation, durability, linearizable, liveness};

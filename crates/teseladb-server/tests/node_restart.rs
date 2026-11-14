@@ -8,9 +8,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_bson::{Document, Value};
 use teseladb_io::FileDisk;
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
-use teseladb_bson::{Document, Value};
 
 const DB: &str = "restart";
 

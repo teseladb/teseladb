@@ -3,12 +3,12 @@
 //! versions in force are byte for byte the same; otherwise it evaluates the mutation itself.
 //! What the range proposes is the same either way.
 
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_range::host::Mutation;
 use teseladb_wire::commands::mutation::{
     Bound, DocMutation, EvaluatedBy, Image, MutationResult, Rules, Sent, evaluated_counts,
 };
-use teseladb_bson::{Document, Value};
 
 type Version = Option<(u8, Vec<u8>)>;
 

@@ -1,8 +1,8 @@
 //! The filters of a pipeline (`$match`, `$lookup`, `restrictSearchWithMatch`) in the pipeline's
 //! environment: `$expr` sees its variables and strings compare in its collation (010 FR-014).
 
-use teseladb_mql::{Extensions, Filter, GeoQuery, MatchContext, MqlError, TextQuery};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::{Extensions, Filter, GeoQuery, MatchContext, MqlError, TextQuery};
 
 use super::Env;
 use crate::expr::{Expr, truthy};
@@ -132,8 +132,8 @@ pub(super) fn matches_raw(
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use teseladb_mql::{Extensions, Filter, FilterUse, GeoQuery, MqlError, TextQuery};
     use teseladb_bson::{Document, RawDoc, RawValue, Value};
+    use teseladb_mql::{Extensions, Filter, FilterUse, GeoQuery, MqlError, TextQuery};
 
     use super::{ScopedExtensions, matches};
     use crate::pipeline::Env;

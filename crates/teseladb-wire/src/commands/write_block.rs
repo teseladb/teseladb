@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use teseladb_auth::actions::ActionType;
 use teseladb_auth::authz::{self, Target};
-use teseladb_keys::space::KeyParts;
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_keys::space::KeyParts;
 
 use super::admin::{ADMIN_DB, admin_only};
 use super::config_db::CONFIG_DB;

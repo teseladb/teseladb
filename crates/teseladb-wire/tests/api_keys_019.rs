@@ -11,13 +11,13 @@ use teseladb_auth::apikey::{ApiKey, TOUCH_EVERY_MS};
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::scram::{Credentials, Mechanism};
 use teseladb_auth::users::{RoleName, User, UserName};
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::commands::auth::Authenticated;
 use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
-use teseladb_bson::{Document, RawDoc, Value};
 
 const ADMIN: &str = "admin";
 const TEST: &str = "test";

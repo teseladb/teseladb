@@ -2,8 +2,8 @@
 //! a cluster time, as RefDb's TTL monitor decides (a date, or the earliest date of an array,
 //! plus `expireAfterSeconds`, at or before now; any other value never expires).
 
-use teseladb_index::ttl::{Ttl, expired};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_index::ttl::{Ttl, expired};
 
 fn spec(key: Document, expire: Option<Value>) -> Vec<u8> {
     let mut d = Document::new().with("v", 2).with("key", key).with("name", "x");

@@ -5,8 +5,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_meta::catalog::Namespace;
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::catalog::Namespace;
 
 use super::hints::{Hinted, planner_error};
 use super::plan_exec::PlanIndex;

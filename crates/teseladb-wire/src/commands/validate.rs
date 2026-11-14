@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::spec::index_def;
 use teseladb_index::verify::{VerifyReport, verify_range};
@@ -16,7 +17,6 @@ use teseladb_keys::{Direction, Key, KeyBuilder, PrimaryKey, TypeBits};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::IndexState;
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::index_maintenance::{MULTIKEY_MARKS, collation_of, keygen_error};
 use super::kinds::{kind_of, not_a_view};

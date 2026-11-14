@@ -1,6 +1,7 @@
 //! `readConcern`, `writeConcern` and the generic arguments of a command (FR-019, FR-021), with
 //! the codes and messages a `refrouter` 9.0.4 gives (measured).
 
+use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::read::ReadConcern;
 use teseladb_wire::concerns::{
@@ -9,7 +10,6 @@ use teseladb_wire::concerns::{
 };
 use teseladb_wire::error::CommandError;
 use teseladb_wire::generic::{check_unknown_fields, is_generic, parse};
-use teseladb_bson::{Decimal128, Document, Value};
 
 fn d(fields: &[(&str, Value)]) -> Document {
     let mut doc = Document::new();

@@ -2,10 +2,10 @@
 //! RefDb server (`tests/data/geo-vectors.json`, with the image digest and the date) gives the
 //! same keys or the same error.
 
+use teseladb_bson::{RawDoc, Value, extjson};
 use teseladb_index::keygen::{
     FieldKind, GEO_KEY_EXTRACTION_FAILED, IndexDef, IndexField, geo2dsphere_keys, key_values,
 };
-use teseladb_bson::{RawDoc, Value, extjson};
 
 const VECTORS: &str = include_str!("data/geo-vectors.json");
 /// Random polygons and lines measured the same way, to choose and check the covering rules.

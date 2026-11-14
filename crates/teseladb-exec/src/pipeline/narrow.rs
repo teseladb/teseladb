@@ -8,8 +8,8 @@
 //! collection projects the documents the same way before its `$sort` takes them. The output does
 //! not change: the stages after it read no other field.
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::MqlError;
 
 use super::shape::Projection;
 use super::{Pipeline, Stage, deps};

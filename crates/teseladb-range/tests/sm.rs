@@ -8,11 +8,11 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lookup, Lsm, LsmConfig, Step};
 use teseladb_multiraft::{ApplyCtx, StateMachine};
+use teseladb_raftlog::{IoErrno, MemDisk};
 use teseladb_range::command::{Command, DedupRecord, Put};
 use teseladb_range::sm::{
     RangeOutput, RangeSm, dedup_key, last_mark_key, parse_record_value, record_value, split_value,
 };
-use teseladb_raftlog::{IoErrno, MemDisk};
 use teseladb_types::{GroupId, Nanos, Rng};
 
 const G: GroupId = GroupId(7);

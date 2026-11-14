@@ -12,10 +12,10 @@
 //!
 //! The pipeline is checked first and then read into [`Step`]s, which the plan is built from.
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::pipeline::Pipeline;
 use teseladb_exec::pipeline::spill::{Counting, SpillStats, SpillStore};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::super::mutation::from_mql;
 use super::super::query::check_filter;

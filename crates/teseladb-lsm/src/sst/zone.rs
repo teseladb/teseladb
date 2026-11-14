@@ -18,9 +18,9 @@
 //! summarised, nor is a field whose value is an array or encodes to more than [`MAX_VALUE`]
 //! bytes in that block.
 
+use teseladb_bson::{RawDoc, RawValue};
 use teseladb_keys::zone::{Bounds, Zones};
 use teseladb_keys::{Direction, TypeBits, encode_value, space};
-use teseladb_bson::{RawDoc, RawValue};
 
 use super::{Bad, get_bytes, get_varint, put_bytes, put_varint};
 use crate::entry::{self, Kind};
@@ -311,8 +311,8 @@ impl Zones for BlockZones<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
-    use teseladb_keys::{Hlc, KeyBuilder};
     use teseladb_bson::Document;
+    use teseladb_keys::{Hlc, KeyBuilder};
 
     use super::*;
 

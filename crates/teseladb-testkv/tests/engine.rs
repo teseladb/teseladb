@@ -2,8 +2,8 @@
 //! their outputs.
 
 use teseladb_multiraft::{CoreConfig, Done, GroupDesc, MultiRaftCore, OpId};
-use teseladb_testkv::{Command, KvOutput, TestKv};
 use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
+use teseladb_testkv::{Command, KvOutput, TestKv};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 fn run(core: &mut MultiRaftCore<TestKv>, disk: &mut MemDisk, out: &mut Vec<(OpId, KvOutput)>) {

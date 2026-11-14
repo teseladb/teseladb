@@ -5,10 +5,10 @@
 
 use std::cell::Cell;
 
+use teseladb_bson::{Document, RawValue, Value, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{ErrorCode, Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawValue, Value, extjson};
 
 /// RefDb's code of a command past its `maxTimeMS`.
 const MAX_TIME_MS_EXPIRED: i32 = 50;

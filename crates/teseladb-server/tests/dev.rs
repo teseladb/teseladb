@@ -4,10 +4,10 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+use teseladb_raft::Role;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::dev;
 use teseladb_server::logic::Group0View;
-use teseladb_raft::Role;
 use teseladb_types::NodeId;
 
 const ASK: Duration = Duration::from_secs(1);
@@ -96,8 +96,8 @@ fn one_node_is_a_cluster_of_its_own() {
 #[test]
 fn the_nodes_announce_their_clients_address() {
     use std::io::{Read, Write};
-    use teseladb_wire::msg::{HEADER_LEN, OpMsg};
     use teseladb_bson::{Document, RawDoc, Value};
+    use teseladb_wire::msg::{HEADER_LEN, OpMsg};
     let _ports = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let (base, busy) = two_ports();
     drop(busy);

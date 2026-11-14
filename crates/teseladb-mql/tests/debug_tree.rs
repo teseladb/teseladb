@@ -2,8 +2,8 @@
 //! `parsedQuery` (`explain` on a `refrouter` 9.0.4, 02-11-2026) beside the tree of the error of a
 //! `find` with a hint to an index that does not exist.
 
-use teseladb_mql::debug_tree;
 use teseladb_bson::extjson;
+use teseladb_mql::debug_tree;
 
 const CASES: &[(&str, &str)] = &[
     (

@@ -9,8 +9,8 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::{Mem, doc, field};
-use teseladb_plan::stats::{FieldStats, RangeStats};
 use teseladb_bson::{Document, Value, extjson};
+use teseladb_plan::stats::{FieldStats, RangeStats};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

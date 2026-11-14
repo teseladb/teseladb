@@ -21,6 +21,8 @@ use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock, Observation};
+use teseladb_raft::Role;
+use teseladb_raftlog::{CoreStore, Disk, StorageConfig};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Put;
 use teseladb_range::host::{
@@ -29,8 +31,6 @@ use teseladb_range::host::{
 use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
-use teseladb_raft::Role;
-use teseladb_raftlog::{CoreStore, Disk, StorageConfig};
 use teseladb_types::{GroupId, Histogram, Nanos, NodeId};
 
 use super::{DataDir, at, keep_going, msg, warm_up};

@@ -102,7 +102,8 @@ fn list_collections_filters_local_and_the_generated_collections_of_admin() {
 #[test]
 fn constraint_without_a_validator_and_twice() {
     let mut m = Mem::new();
-    let run = |m: &mut Mem, cmd: &str| m.run("db", teseladb_bson::extjson::parse(cmd).expect("cmd"));
+    let run =
+        |m: &mut Mem, cmd: &str| m.run("db", teseladb_bson::extjson::parse(cmd).expect("cmd"));
     assert!(ok(&run(&mut m, r#"{"create":"k","validationLevel":"strict"}"#)));
     run(&mut m, r#"{"insert":"k","documents":[{"a":1}]}"#);
     assert!(ok(&run(&mut m, r#"{"collMod":"k","prepareConstraintValidationLevel":true}"#)));

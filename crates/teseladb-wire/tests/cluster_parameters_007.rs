@@ -6,11 +6,11 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::parameters::{
     CHANGE_STREAM_OPTIONS, DEFAULT_HISTORY_SECONDS, DEFAULT_LOAD_SPLIT_OPS, HISTORY_RETENTION,
     LOAD_SPLIT_OPS, history_retention_ms, images_expire_after_ms, load_split_ops,
 };
-use teseladb_bson::{Document, Value};
 
 fn set(name: &str, value: Document) -> Document {
     Document::new().with("setClusterParameter", Document::new().with(name, value))

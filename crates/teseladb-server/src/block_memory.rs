@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use teseladb_lsm::BlockMemory;
 use teseladb_sys::huge_pool::HugePool;
-use teseladb_wire::connection::RequestArena;
 use teseladb_types::Bytes;
+use teseladb_wire::connection::RequestArena;
 
 /// Blocks copied into a pool of huge pages.
 #[derive(Debug)]

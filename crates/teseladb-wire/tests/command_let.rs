@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_wire::commands::mutation::{DocMutation, Image, Rules};
 use teseladb_bson::{Document, Value};
+use teseladb_wire::commands::mutation::{DocMutation, Image, Rules};
 
 fn s(x: &str) -> Value {
     Value::from(x)

@@ -1,0 +1,30 @@
+[package]
+name = "teseladb-deflate"
+version = "0.1.0"
+description = "Streaming DEFLATE (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952)."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints.rust]
+# The lint set these crates came with (D-169): stricter than the workspace one, with `clippy::pedantic` and
+# `clippy::unwrap_used`, and the code carries the `#[expect]` attributes that set asks for.
+unsafe_code = "deny"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(teseladb_bug, values(any()))'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+teseladb-hash.workspace = true
+
+[dev-dependencies]
+teseladb-types.workspace = true

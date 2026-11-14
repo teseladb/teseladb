@@ -497,7 +497,8 @@ pub fn startup(name: &str, text: &str) -> Result<Startup, String> {
         }
         _ => {
             let wrapped = format!("{{\"v\": {text}}}");
-            let doc = teseladb_bson::extjson::parse(&wrapped).map_err(|e| bad(&format!("{e:?}")))?;
+            let doc =
+                teseladb_bson::extjson::parse(&wrapped).map_err(|e| bad(&format!("{e:?}")))?;
             doc.get("v").cloned().unwrap_or(Value::Null)
         }
     };

@@ -2,10 +2,10 @@
 //! an operation of the document and the document has no other, and the table holds the routes of
 //! contract `rest-api.md` that the server serves.
 
-use teseladb_rest::openapi::{OPENAPI_VERSION, document, operation_id};
-use teseladb_rest::routes::{BASE, ROUTES};
 use teseladb_http::http1::Request;
 use teseladb_json::{Value, parse};
+use teseladb_rest::openapi::{OPENAPI_VERSION, document, operation_id};
+use teseladb_rest::routes::{BASE, ROUTES};
 
 fn doc() -> Value {
     parse(document().as_bytes()).expect("the document is JSON")

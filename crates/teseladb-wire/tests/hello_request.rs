@@ -1,9 +1,9 @@
 //! The fields of a `hello` as `HelloRequest::parse` reads them (001 FR-004): what the reply
 //! needs from the request, and a `topologyVersion` without its process.
 
+use teseladb_bson::{Document, Value};
 use teseladb_wire::connection::HelloState;
 use teseladb_wire::hello::HelloRequest;
-use teseladb_bson::{Document, Value};
 
 #[test]
 fn the_request_keeps_hello_ok_and_the_user_of_sasl_supported_mechs() {

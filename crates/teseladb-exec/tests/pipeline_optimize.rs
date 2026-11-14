@@ -3,9 +3,9 @@
 //! «Failed to optimize pipeline»; and the fields of the documents read that the stages use
 //! (the projection `explain` shows under its query plan).
 
+use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_exec::pipeline::deps::needed;
 use teseladb_exec::pipeline::optimize::optimize_stages;
-use teseladb_bson::{Document, RawDoc, Value, extjson};
 
 fn stages(text: &str) -> Vec<Document> {
     let holder = extjson::parse(&format!(r#"{{"p":{text}}}"#)).expect("a pipeline");

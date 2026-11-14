@@ -2,8 +2,8 @@
 //! `tests/measured/compile.tsv` is a `$function` body, a tab and either `OK` and its result or
 //! the message, line and column of its `e-compile message` (measured on 02-11).
 
-use teseladb_js::{JsCtx, JsError, Program};
 use teseladb_bson::Value;
+use teseladb_js::{JsCtx, JsError, Program};
 
 const CASES: &str = include_str!("measured/compile.tsv");
 

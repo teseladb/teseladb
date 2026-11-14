@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use teseladb_hlc::Hlc;
+use teseladb_raft::Role;
 use teseladb_range::intents::TxnRecord;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::table::RouteEntry;
 use teseladb_txn::reaper::Reaper;
 use teseladb_txn::record::HEARTBEAT_EVERY_MS;
-use teseladb_raft::Role;
 use teseladb_types::GroupId;
 
 use super::ServerBackend;

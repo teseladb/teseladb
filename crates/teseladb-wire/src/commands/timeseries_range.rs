@@ -8,9 +8,9 @@
 //! under [`EXTENDED_RANGE`], which `listCollections` and `collMod` never show and whose catalog
 //! change gives no change event.
 
+use teseladb_bson::{Document, RawDoc};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry};
 use teseladb_mql::timeseries_write::BucketSpec;
-use teseladb_bson::{Document, RawDoc};
 
 use super::Backend;
 use crate::error::{CommandError, NAMESPACE_NOT_FOUND};

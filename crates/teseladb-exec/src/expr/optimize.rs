@@ -8,8 +8,8 @@
 
 use std::cell::Cell;
 
-use teseladb_mql::{ErrorCode, MqlError, codes};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_mql::{ErrorCode, MqlError, codes};
 
 use super::{Ctx, Eval, Expr, Scope, truthy};
 

@@ -14,8 +14,8 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use teseladb_sys::aligned::AlignedBuf;
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
+use teseladb_sys::aligned::AlignedBuf;
 use teseladb_types::Bytes;
 
 use crate::buffers::is_aligned;

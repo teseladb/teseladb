@@ -1,5 +1,5 @@
-//! Faulty variants (002 FR-011): the names the code declares with `cfg(teseladb_bug = "...")` (and
-//! the viuzi-* crates of Raft and its log with `cfg(teseladb_bug = "...")`, 001 FR-023), and
+//! Faulty variants (002 FR-011): the names the code declares with `cfg(teseladb_bug = "...")`, Raft
+//! and its log included (001 FR-023), and
 //! the one this binary was built with, with the checker that must catch each one, its plan and its
 //! seeds (002 T013). `scripts/sim-mutants.sh` goes through the list and builds one binary per
 //! variant.
@@ -277,7 +277,7 @@ fn check_built(built: Option<&str>, wanted: &str) -> Result<(), String> {
         Some(b) => Err(format!("this binary was built with variant {b}, not {wanted}")),
         None => Err(format!(
             "this binary was built without a faulty variant; build it with \
-             RUSTFLAGS='--cfg teseladb_bug=\"{wanted}\" --cfg teseladb_bug=\"{wanted}\"' \
+             RUSTFLAGS='--cfg teseladb_bug=\"{wanted}\"' \
              (scripts/sim-mutants.sh does it)"
         )),
     }

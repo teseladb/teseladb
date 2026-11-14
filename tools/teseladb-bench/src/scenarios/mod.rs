@@ -45,8 +45,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_server::node::Node;
 use teseladb_raftlog::Disk;
+use teseladb_server::node::Node;
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn a_node_not_ready_in_time_is_stopped_with_the_error() {
-        use teseladb_server::node::NodeConfig;
         use teseladb_raftlog::MemDisk;
+        use teseladb_server::node::NodeConfig;
         let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
         let start = || Node::start(cfg.clone(), || Ok(MemDisk::new()), None).unwrap();
         // No time at all: `wait_ready` gives up before asking.

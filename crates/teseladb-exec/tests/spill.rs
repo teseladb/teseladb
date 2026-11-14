@@ -5,11 +5,11 @@
 //! documents, and without `allowDiskUse` they fail with 292 as soon as they hold more than their
 //! limit, before the stages before them read the rest of the input, as in RefDb.
 
+use teseladb_bson::{Document, RawValue, Value, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::spill::{Counting, MemorySpill, SpillStore};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawValue, Value, extjson};
 
 /// The documents of the input: more than three batches.
 const DOCS: i32 = 3_500;

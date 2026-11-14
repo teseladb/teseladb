@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use teseladb_keys::fields::FieldNumbers;
 
-use teseladb_mql::{Filter, FilterUse, MatchContext};
 use teseladb_bson::{Document, RawDoc};
+use teseladb_mql::{Filter, FilterUse, MatchContext};
 
 use super::Rows;
 use super::engines::CollatedExtensions;

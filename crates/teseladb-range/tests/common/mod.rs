@@ -9,6 +9,8 @@ pub use std::rc::Rc;
 pub use teseladb_hlc::Hlc;
 pub use teseladb_lsm::{Lsm, LsmConfig};
 pub use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
+pub use teseladb_raft::Role;
+pub use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
 pub use teseladb_range::ack::{W, WriteConcern};
 pub use teseladb_range::command::{DedupKey, Put};
 pub use teseladb_range::host::{
@@ -17,8 +19,6 @@ pub use teseladb_range::host::{
 pub use teseladb_range::mutate::Outcome;
 pub use teseladb_range::read::ReadConcern;
 pub use teseladb_range::sm::RangeSm;
-pub use teseladb_raft::Role;
-pub use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
 pub use teseladb_types::{GroupId, Nanos, NodeId};
 
 pub const G: GroupId = GroupId(7);

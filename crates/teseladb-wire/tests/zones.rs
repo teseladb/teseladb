@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_meta::zones::Zones;
 use teseladb_bson::{Document, Value, extjson};
+use teseladb_meta::zones::Zones;
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

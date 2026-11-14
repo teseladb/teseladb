@@ -206,10 +206,12 @@ fn wildcard_rules(
     let fields: Vec<(&str, bool)> = key.iter().map(|(f, _)| (f, is_wildcard(f))).collect();
     let plugin = key.iter().any(|(_, v)| matches!(v, Value::String(_)));
     let projection = match raw.get("wildcardProjection") {
-        Some(teseladb_bson::RawValue::Document(p)) => match WildcardProjection::parse(p, &|_| false) {
-            Ok(p) => Some(p),
-            Err(e) => return Ok(Err(e)),
-        },
+        Some(teseladb_bson::RawValue::Document(p)) => {
+            match WildcardProjection::parse(p, &|_| false) {
+                Ok(p) => Some(p),
+                Err(e) => return Ok(Err(e)),
+            }
+        }
         _ => None,
     };
     if let Err(e) = check_key(&fields, plugin, projection.as_ref()) {

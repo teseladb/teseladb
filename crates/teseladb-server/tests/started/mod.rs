@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
+use teseladb_bson::{Document, Value};
 use teseladb_server::pki::ROOT_CREDENTIALS;
 use teseladb_server::run;
-use teseladb_wire::msg::{HEADER_LEN, OpMsg};
-use teseladb_bson::{Document, Value};
 use teseladb_tls::{Connection, ENTROPY_LEN, Trust};
+use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::Certificate;
 
 pub const READY_WAIT: Duration = Duration::from_secs(60);

@@ -6,11 +6,11 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 
-use teseladb_rest::api::Executor;
-use teseladb_rest::txn::{MAX_OPERATIONS, RETRY_BUDGET_MS, parse, run};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
+use teseladb_rest::api::Executor;
+use teseladb_rest::txn::{MAX_OPERATIONS, RETRY_BUDGET_MS, parse, run};
 
 /// Answers each command with the next scripted reply of its name, or `ok: 1`; records them.
 #[derive(Default)]

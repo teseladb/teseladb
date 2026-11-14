@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Gate of the constitution's principles II and V (001 FR-012), one message per finding:
-#  - Cargo.lock only holds workspace packages and the viuzi-* crates of the private registry viuzi
-#    (no crates.io, no other registry and no git), the workspace takes every viuzi-* crate at a
-#    published version of that registry and never by path, and every member takes it from the
-#    workspace's dependencies (001 FR-023, constitution 3.0.0, principle V; owner, 06-11-2026);
+#  - Cargo.lock only holds workspace packages (no registry, the private one included, and no git), and
+#    no manifest takes a dependency by a path outside the repository: the generic crates are members
+#    in crates/teseladb-* (001 FR-023, D-169, constitution 3.4.0, principle V; owner, 14-11-2026);
 #  - logic crates do not depend on the I/O crates nor use the network, files, threads, the system
 #    clock, the process, the environment or the standard input and output;
 #  - the Multi-Raft engine has no Git types and no crate links the test state machine;
@@ -19,20 +18,18 @@ cd "$(dirname "$0")/.."
 
 # Crates whose job is I/O. Every other crate of `crates/` is a logic crate.
 IO_CRATES=(teseladb-io teseladb-sys teseladb-server)
-# Tools: the benchmark measures the real system, the Unicode generator reads the official files
-# and writes the collation tables, and the battery's comparator reads the runners' output files
+# Tools: the benchmark measures the real system, the Unicode and time zone generators read the
+# official files and write their tables, and the battery's comparator reads the runners' output files
 # (constitution, principle II); the simulator is logic except these files (artifacts, histories
 # and child processes).
-IO_TOOLS=(teseladb-bench teseladb-unicodegen compat-compare)
+IO_TOOLS=(teseladb-bench teseladb-unicodegen teseladb-tzgen compat-compare)
 SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
 # Crates whose code runs on a core's thread for each operation (012 FR-008): no lock shared between
 # threads there.
+# Cryptography runs on every authenticated or encrypted operation (D-090), and Raft and its log on
+# every write.
 HOT_CRATES=(teseladb-sys teseladb-io teseladb-devlog teseladb-multiraft teseladb-lsm teseladb-range teseladb-hlc
-  teseladb-txn teseladb-index teseladb-meta teseladb-search)
-# The viuzi-* crates of the hot path (cryptography runs on every authenticated or encrypted
-# operation, D-090), read from the source of the registry that the build uses: $TESELADB_ANOTHERPRODUCT, or
-# the folder of scripts/teseladb-src.sh.
-HOT_VIUZI=(teseladb-raft teseladb-raftlog teseladb-crypto)
+  teseladb-txn teseladb-index teseladb-meta teseladb-search teseladb-crypto teseladb-raft teseladb-raftlog)
 # Crates that may use unsafe code: system calls and CPU intrinsics.
 UNSAFE_CRATES=(teseladb-sys)
 # Modules that D-151 admits with unsafe code for a measured performance gain: their crate denies
@@ -41,7 +38,8 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   crates/teseladb-lsm/src/art.rs
   crates/teseladb-mql/src/simd.rs
   crates/teseladb-search/src/segment/lanes.rs
-  crates/teseladb-search/src/byte_simd.rs)
+  crates/teseladb-search/src/byte_simd.rs
+  crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs)
 # Built in two halves so that this script does not contain the word itself.
 ORIGIN_WORD="raf""tree"
 
@@ -69,20 +67,14 @@ contains() {
   return 1
 }
 
-# The source of the private registry of viuzi as Cargo.lock writes it.
-VIUZI_SOURCE="sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-
 check_lock() {
   [[ -f Cargo.lock ]] || cargo metadata --offline --format-version 1 >/dev/null
   while IFS= read -r name; do
     finding "Cargo.lock: external package: $name"
-  done < <(awk -v viuzi="$VIUZI_SOURCE" '
+  done < <(awk '
     /^\[\[package\]\]/ { name = "" }
     /^name = / { name = $3; gsub(/"/, "", name) }
-    /^source = / {
-      source = $3; gsub(/"/, "", source)
-      if (!(name ~ /^viuzi-/ && source == viuzi)) print name
-    }
+    /^source = / { print name }
   ' Cargo.lock)
   local members=() m name
   for m in crates/*/Cargo.toml tools/*/Cargo.toml; do
@@ -97,24 +89,33 @@ check_lock() {
     /^source = / { src = 1 }
     END { if (name != "" && !src) print name }
   ' Cargo.lock)
-  check_viuzi_paths
+  check_paths
 }
 
-# Each viuzi-* crate comes from the registry viuzi at a version, through the workspace's dependencies.
-check_viuzi_paths() {
-  local line name m
-  if [[ -f Cargo.toml ]]; then
-    while IFS= read -r line; do
-      name=${line%% =*}
-      [[ $line =~ ^viuzi-[a-z0-9-]+\ =\ \{\ version\ =\ \"[0-9]+\.[0-9]+\.[0-9]+\",\ registry\ =\ \"viuzi\"(,.*)?\ \}$ ]] ||
-        finding "Cargo.toml: $name: not a version of the registry viuzi ($line)"
-    done < <(grep -E '^viuzi-[a-z0-9-]+ = ' Cargo.toml)
-  fi
-  for m in crates/*/Cargo.toml tools/*/Cargo.toml; do
+# Prints the path `$1/$2` relative to the repository with its `.` and `..` resolved in the text, so
+# a path that leaves the repository starts with `..`.
+normalize() {
+  awk -v p="$1/$2" 'BEGIN {
+    n = split(p, part, "/"); k = 0
+    for (i = 1; i <= n; i++) {
+      if (part[i] == "" || part[i] == ".") continue
+      if (part[i] == ".." && k > 0 && out[k] != "..") { k--; continue }
+      out[++k] = part[i]
+    }
+    s = ""; for (i = 1; i <= k; i++) s = s (i > 1 ? "/" : "") out[i]
+    print s
+  }'
+}
+
+# Every dependency by path, in the workspace's manifest or in a member's, points inside the repository.
+check_paths() {
+  local m name path
+  for m in Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml; do
     [[ -f $m ]] || continue
-    while IFS= read -r name; do
-      finding "$m: $name: not from the workspace's dependencies"
-    done < <(sed -nE '/^viuzi-[a-z0-9-]+ = /{/workspace = true/!s/^(viuzi-[a-z0-9-]+) = .*/\1/p;}' "$m")
+    while IFS=$'\t' read -r name path; do
+      [[ $path != /* && $(normalize "$(dirname "$m")" "$path") != ..* ]] ||
+        finding "$m: $name: path outside the workspace ($path)"
+    done < <(sed -nE 's/^([A-Za-z0-9_-]+) = \{.*path = "([^"]+)".*/\1\t\2/p' "$m")
   done
 }
 
@@ -273,14 +274,6 @@ check_hot_path_locks() {
   for crate in "${HOT_CRATES[@]}"; do
     [[ -d crates/$crate/src ]] || continue
     while IFS= read -r f; do files+=("$f"); done < <(find "crates/$crate/src" -name '*.rs' | sort)
-  done
-  local viuzi=${TESELADB_ANOTHERPRODUCT:-}
-  if [[ -z $viuzi ]] && grep -q "^source = \"$VIUZI_SOURCE\"" Cargo.lock 2>/dev/null; then
-    viuzi=$(scripts/teseladb-src.sh) || { finding "scripts/teseladb-src.sh: the source of the viuzi-* crates is not there"; return 0; }
-  fi
-  for crate in "${HOT_VIUZI[@]}"; do
-    [[ -d $viuzi/$crate/src ]] || continue
-    while IFS= read -r f; do files+=("$f"); done < <(find "$viuzi/$crate/src" -name '*.rs' | sort)
   done
   [[ ${#files[@]} -gt 0 ]] || return 0
   # The code of each line without its comment.

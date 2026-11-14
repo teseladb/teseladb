@@ -3,8 +3,8 @@
 //! the same documents built in memory, for keys and inputs of every type, missing fields and
 //! paths through arrays.
 
-use teseladb_exec::reference::Reference;
 use teseladb_bson::{Decimal128, Document, RawDoc, Value};
+use teseladb_exec::reference::Reference;
 
 fn d() -> Document {
     Document::new()

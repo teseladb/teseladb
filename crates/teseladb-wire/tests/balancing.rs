@@ -6,9 +6,9 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::commands::balancing::max_chunk_bytes;
 use teseladb_wire::generic::check_unknown_fields;
-use teseladb_bson::{Document, Value, extjson};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

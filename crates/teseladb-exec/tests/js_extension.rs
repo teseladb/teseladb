@@ -5,11 +5,11 @@
 
 use std::rc::Rc;
 
+use teseladb_bson::{Document, RawValue, Value, extjson};
 use teseladb_exec::expr::js::JsEngine;
 use teseladb_exec::expr::{Ctx, Scope};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawValue, Value, extjson};
 
 /// The functions of the measured pipelines, as JavaScript's numbers (doubles).
 #[derive(Debug)]

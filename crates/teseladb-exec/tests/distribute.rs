@@ -3,9 +3,9 @@
 //! seeded sequence, gives what the reference gives over all of them (as sets where RefDb
 //! leaves the order open).
 
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_exec::distribute::{Merge, run_distributed, shuffle, split};
 use teseladb_exec::reference::Reference;
-use teseladb_bson::{Document, Value, extjson};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

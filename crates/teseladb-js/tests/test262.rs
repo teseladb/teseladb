@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use teseladb_js::{JsCtx, JsError, Program};
 use teseladb_bson::Value;
+use teseladb_js::{JsCtx, JsError, Program};
 
 const SUBSET: &str = include_str!("test262/subset.tsv");
 

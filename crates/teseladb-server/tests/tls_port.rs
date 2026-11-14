@@ -8,13 +8,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use teseladb_server::client_listener::{ClientConfig, ClientListener, NodeState};
-use teseladb_server::tls_port::{TlsMode, TlsPort};
-use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
-use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_bson::Document;
 use teseladb_crypto::ec::NamedCurve;
+use teseladb_server::client_listener::{ClientConfig, ClientListener, NodeState};
+use teseladb_server::tls_port::{TlsMode, TlsPort};
 use teseladb_tls::{CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, Error, ServerConfig, Trust};
+use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
+use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::ext::GeneralName;
 use teseladb_x509::generate::{self, CertificateParams};
 use teseladb_x509::{Certificate, Name, PrivateKey, oid};

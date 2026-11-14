@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use teseladb_crypto::at_rest::CipherMode;
 use teseladb_io::FileDisk;
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::DATA_START;
+use teseladb_raft::Role;
 use teseladb_server::at_rest::{self, AtRestOpts};
 use teseladb_server::node::{Node, NodeConfig, NodeError, lock_dir};
-use teseladb_crypto::at_rest::CipherMode;
-use teseladb_raft::Role;
 
 const READY: Duration = Duration::from_secs(20);
 const ASK: Duration = Duration::from_secs(5);

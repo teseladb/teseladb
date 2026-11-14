@@ -5,8 +5,8 @@
 mod common;
 
 use common::{pool, raw};
-use teseladb_keys::stored::{self, Lookup, MIN_TABLE_FIELDS};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_keys::stored::{self, Lookup, MIN_TABLE_FIELDS};
 
 /// A document of `n` fields whose values come from the pool of every type, with an embedded
 /// document of `n` fields and an array of documents.

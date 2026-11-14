@@ -5,8 +5,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, RawValue, Value, compare};
+use teseladb_mql::MqlError;
 
 use super::{Ctx, Eval, Expr, Op, Scope, arguments, codes, count, error};
 

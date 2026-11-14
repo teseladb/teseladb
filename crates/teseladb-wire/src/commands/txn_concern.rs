@@ -4,10 +4,10 @@
 //! reply, and the errors of a read below the history, as a `refrouter` 9.0.4 answers them (measured
 //! on 31-10-2026).
 
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::{Hlc, from_timestamp, to_timestamp};
 use teseladb_txn::causal;
 use teseladb_txn::uncertainty::window_end;
-use teseladb_bson::{Document, Value};
 
 use super::Backend;
 use super::txn::{READ_CONCERN_LEVEL_IN_TRANSACTION, session_name};

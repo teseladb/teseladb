@@ -14,8 +14,8 @@ use teseladb_auth::audit::{
     AuditType, Auditor, Client, Config, Destination, Event, Options, ProcessInfo,
 };
 use teseladb_auth::audit_crypt::AuditEncryption;
-use teseladb_wire::commands::audit::{Audit, SharedAuditor, Sink};
 use teseladb_bson::Document;
+use teseladb_wire::commands::audit::{Audit, SharedAuditor, Sink};
 
 /// Permissions of the audit file, as RefDb creates it.
 const FILE_MODE: u32 = 0o600;

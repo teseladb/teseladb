@@ -16,8 +16,8 @@ use teseladb_range::intents::{
 };
 use teseladb_range::push::{Known, TxnView};
 use teseladb_range::read::ReadConcern;
-use txn_node::*;
 use teseladb_types::GroupId;
+use txn_node::*;
 
 const C: &[u8] = b"\x01c";
 const D: &[u8] = b"\x01d";

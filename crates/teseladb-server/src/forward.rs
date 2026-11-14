@@ -8,10 +8,10 @@
 use teseladb_meta::command::Group0Command;
 use teseladb_range::checksum::Report;
 use teseladb_range::snapshot::Chunk;
+use teseladb_types::{DecodeError, Decoder, Encoder, GroupId};
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::session::{SessionMatch, Uid};
 use teseladb_wire::commands::write_block::WriteGate;
-use teseladb_types::{DecodeError, Decoder, Encoder, GroupId};
 
 /// Bytes of a session owner's `uid`.
 const UID_LEN: usize = std::mem::size_of::<Uid>();

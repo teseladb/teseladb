@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_keys::KeyBuilder;
 use teseladb_bson::{Document, Value};
+use teseladb_keys::KeyBuilder;
 
 const DB: &str = "t";
 

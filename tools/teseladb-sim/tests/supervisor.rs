@@ -3,13 +3,13 @@
 //! snapshot it cannot install), and then its core may have nothing more for its disk.
 
 use teseladb_multiraft::{ApplyCtx, ApplyError, GroupDesc, RestoreError};
+use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::node::{RegisteredSm, SmKind};
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
-use teseladb_raftlog::Completions;
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 /// The group, alone on core 1 of each node.

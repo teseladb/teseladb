@@ -2,12 +2,12 @@
 //! frozen since they left, and the check after the heal with a node down; and whole seeds under
 //! the fault plans.
 
+use teseladb_raftlog::Completions;
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::workloads::authz_fence::AuthzFence;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_seed};
-use teseladb_raftlog::Completions;
 use teseladb_types::Nanos;
 
 /// The first client number that carries a message (the admin and one turn per node come first).

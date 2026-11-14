@@ -6,6 +6,7 @@
 //! ([`convert_to_capped`]). `cloneCollectionAsCapped` is not a command of a `refrouter` 9.0.4
 //! (measured: 59), and TeselaDB answers it the same.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::spec::index_def;
 use teseladb_keys::PrimaryKey;
@@ -14,7 +15,6 @@ use teseladb_meta::catalog::CollectionEntry;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_range::capped::{self as cap, CappedError, CappedLimits, ID_INDEX};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::catalog::write_adding_database;
 use super::crud::{Writer, index_rules, rules_of};

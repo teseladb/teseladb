@@ -4,11 +4,11 @@
 
 use std::cmp::Ordering::{Equal, Greater, Less};
 
+use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_collation::{
     Alternate, CaseFirst, Collation, CollationSpec, ICU_VERSION, MaxVariable, ParsedCollation,
     Strength, parse_collation,
 };
-use teseladb_bson::{Decimal128, Document, Value};
 
 /// The document `{locale: "en_US", …}` with `fields` after the locale.
 fn en_us(fields: &[(&str, Value)]) -> Document {

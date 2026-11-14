@@ -1,0 +1,6 @@
+# IANA time zone database 2024a, the version RefDb 9.0.4's timelib carries (measured: Almaty at
+# +05 in 2025, Asuncion at -04 in July 2025, no America/Coyhaique); public domain. Not copied into
+# the repository: teseladb-tzgen reads it and writes crates/teseladb-tz/src/tzdata.rs.
+# source https://data.iana.org/time-zones/releases
+# dest .tools/tzdata
+0d0434459acbd2059a7a8da1f3304a84a86591f6ed69c6248fffa502b6edffe3  tzdata2024a.tar.gz

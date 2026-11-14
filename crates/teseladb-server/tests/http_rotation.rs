@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use started::{dir, now_ms, ok, root_client, run_once, start_with};
-use teseladb_server::pki::{CA_CERT, NODE_CERT, renew_node};
 use teseladb_bson::Document;
+use teseladb_server::pki::{CA_CERT, NODE_CERT, renew_node};
 use teseladb_tls::{Connection, ENTROPY_LEN, Trust};
 use teseladb_x509::Certificate;
 use teseladb_x509::ext::GeneralName;

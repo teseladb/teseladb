@@ -10,12 +10,12 @@
 
 use std::time::{Duration, Instant};
 
-use teseladb_rest::api::{AFTER_CLUSTER_TIME, Executor, handle};
-use teseladb_rest::media::{BSON, CANONICAL_JSON, Format, JSON, decode, encode};
-use teseladb_rest::routes::ROUTES;
 use teseladb_bson::{Document, Value};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
+use teseladb_rest::api::{AFTER_CLUSTER_TIME, Executor, handle};
+use teseladb_rest::media::{BSON, CANONICAL_JSON, Format, JSON, decode, encode};
+use teseladb_rest::routes::ROUTES;
 use teseladb_types::Rng;
 
 const DEFAULT_ROUNDS: u64 = 20_000;

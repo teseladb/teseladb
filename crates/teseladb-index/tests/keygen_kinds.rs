@@ -2,13 +2,13 @@
 //! behaviour measured on refnode 7.0.45 and again on 9.0.4 (30-10-2026): which documents get no entries, which are
 //! refused and with what message.
 
+use teseladb_bson::{RawDoc, RawValue, extjson};
 use teseladb_index::geo::planar::DEFAULT_GRID;
 use teseladb_index::keygen::{
     FieldKind, GEO_KEY_EXTRACTION_FAILED, HASHED_ARRAY, IndexDef, IndexField, KeyValue,
     KeygenError, LOCATION_NOT_PAIR, OUT_OF_GRID, hashed_key, index_entries, key_values,
 };
 use teseladb_keys::{Direction, PrimaryKey};
-use teseladb_bson::{RawDoc, RawValue, extjson};
 
 fn doc(text: &str) -> Vec<u8> {
     extjson::parse(text).unwrap().to_bytes().unwrap()

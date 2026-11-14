@@ -4,9 +4,9 @@
 use std::net::SocketAddr;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::{Node, NodeConfig};
 
 use crate::common::{Client, READY, config, ok};
 

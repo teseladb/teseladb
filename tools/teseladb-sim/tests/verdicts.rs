@@ -1,12 +1,12 @@
 //! How a seed's verdict is reached: a violation found while the events run, one found by the
 //! final restart of every node, and a run whose events end before the simulated time does.
 
+use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
-use teseladb_raftlog::Completions;
 
 /// A workload with no work: node 1 is down from the start, a restart of a live node is asked for,
 /// and the client (if any) reports a violation.

@@ -3,10 +3,10 @@
 //! and writes again with them. A full bucket refuses the write with [`is_refusal`], and the
 //! command sends it to the next bucket of the window.
 
+use teseladb_bson::Document;
 use teseladb_hlc::Hlc;
 use teseladb_keys::local_id::NO_LOCAL_ID;
 use teseladb_mql::timeseries_write::{BucketSpec, Full, TsError};
-use teseladb_bson::Document;
 
 use super::{
     Checker, Evaluated, Lookup, MutationResult, Stored, WriteError, fill_timestamps, put,

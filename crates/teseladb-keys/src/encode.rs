@@ -114,7 +114,8 @@ fn content(out: &mut Vec<u8>, v: RawValue<'_>, bits: &mut TypeBits, c: Option<&d
             out.push(0);
         }
         V::Binary { subtype, bytes } => {
-            let stored = bytes.len() + if subtype == teseladb_bson::types::BINARY_OLD { 4 } else { 0 };
+            let stored =
+                bytes.len() + if subtype == teseladb_bson::types::BINARY_OLD { 4 } else { 0 };
             out.extend_from_slice(&(stored as u32).to_be_bytes());
             out.push(subtype);
             out.extend_from_slice(bytes);

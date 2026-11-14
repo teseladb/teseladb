@@ -5,8 +5,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::{Document, Value};
+use teseladb_mql::{ErrorCode, MqlError};
 
 use super::arith::type_name_of;
 use super::values::{display, int32_of, is_number};

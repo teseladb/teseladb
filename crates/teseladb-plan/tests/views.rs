@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_plan::stages::{self, Reach, STAGES};
 use teseladb_plan::views::{
@@ -11,7 +12,6 @@ use teseladb_plan::views::{
     Resolved, UNION_WITH_WRITES, VIEW_DEPTH_LIMIT_EXCEEDED, ViewError, check_definition,
     check_pipeline, resolve,
 };
-use teseladb_bson::{Document, Value, extjson};
 
 fn stages_of(json: &str) -> Vec<Vec<u8>> {
     let d = extjson::parse(&format!("{{\"p\":{json}}}")).expect("json");

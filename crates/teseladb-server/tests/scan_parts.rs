@@ -8,9 +8,9 @@
 mod common;
 
 use common::{Client, READY, batch, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 /// Documents in the collection: several of the core's parts.
 const DOCS: i32 = 2600;

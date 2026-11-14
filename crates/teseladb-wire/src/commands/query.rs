@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_collation::{Collation, ParsedCollation, parse_collation};
 use teseladb_keys::{DOCUMENTS, KeyBuilder};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
@@ -20,7 +21,6 @@ use teseladb_mql::{Filter, FilterUse, MatchContext};
 use teseladb_range::read::ReadConcern;
 use teseladb_session::cursor::{Cursor, CursorError, cursor_id};
 use teseladb_session::tailable::{Tail, lost_message};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::args::{self, missing};
 use super::mutation::from_mql;

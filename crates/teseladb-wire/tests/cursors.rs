@@ -7,9 +7,9 @@ mod common;
 use std::sync::Mutex;
 
 use common::{Mem, doc, field};
-use teseladb_wire::commands::{ANONYMOUS_UID, NodeSessions, Reaped, Timeouts, lock, reap};
 use teseladb_bson::{Document, Value};
 use teseladb_hash::sha256;
+use teseladb_wire::commands::{ANONYMOUS_UID, NodeSessions, Reaped, Timeouts, lock, reap};
 
 fn s(x: &str) -> Value {
     Value::from(x)

@@ -6,8 +6,8 @@
 
 use std::collections::VecDeque;
 
-use teseladb_mql::{Filter, FilterUse};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_mql::{Filter, FilterUse};
 
 use super::expr::expression;
 use super::literal::{Policy, literal};

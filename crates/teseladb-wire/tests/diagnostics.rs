@@ -4,6 +4,7 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::diagnostics::{
     ANNOUNCED_VERSION, ConnectionCounts, HostFacts, LogTail, NetworkCounts, OpCounters,
     ProcessFacts, ResourceUse, ServerCertificate, listed_names,
@@ -14,7 +15,6 @@ use teseladb_wire::dispatch::{
     Action, ClusterTime, NodeInfo, Topology, accepts, command_names, dispatch_with,
 };
 use teseladb_wire::msg::OpMsg;
-use teseladb_bson::{Document, Value};
 
 fn s(x: &str) -> Value {
     Value::from(x)

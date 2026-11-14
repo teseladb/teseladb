@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use teseladb_bson::{Document, RawDoc};
 use teseladb_wire::commands::diagnostics::{
     ConnectionCounts, HostFacts, NetworkCounts, ProcessFacts, ResourceUse, ServerCertificate,
 };
-use teseladb_bson::{Document, RawDoc};
 
 use crate::log;
 

@@ -9,8 +9,8 @@ use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::scram::{Credentials, Mechanism};
 use teseladb_auth::users::{EXTERNAL_DB, RoleName, User, UserName};
 use teseladb_auth::{restrictions, roles};
-use teseladb_meta::security::{Expect, Principal, SecurityError, SecurityOp};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::security::{Expect, Principal, SecurityError, SecurityOp};
 
 use super::args::{self, missing};
 use super::authz_writes::{USER_FIELDS, key_error};

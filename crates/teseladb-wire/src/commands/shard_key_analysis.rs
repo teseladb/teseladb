@@ -19,9 +19,9 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_plan::logical::intervals;
-use teseladb_bson::{Document, Value};
 
 use super::query_analysis::{READS, WRITES, analyzed_ns, no_namespace, samples_of};
 use super::sharding::{ShardKey, document_key, shard_key_of, shard_values};

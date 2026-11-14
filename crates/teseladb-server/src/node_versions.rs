@@ -4,10 +4,10 @@
 //! `setFeatureCompatibilityVersion` cannot go past it, so new features turn on once every node
 //! has them.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::command::NodeState;
 use teseladb_meta::group0::Group0Sm;
 use teseladb_wire::commands::fcv::VERSIONS;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use teseladb_meta::node_versions::FORMAT;
 pub use teseladb_meta::node_versions::{PREFIX, key};

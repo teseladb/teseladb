@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_keys::Hlc;
 use teseladb_bson::{Document, RawDoc};
+use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
 
 use super::{MemIndex, TextField};

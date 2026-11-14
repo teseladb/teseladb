@@ -9,8 +9,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_exec::pipeline::Program;
-use teseladb_wire::commands::pushed_filter::SentFilter;
 use teseladb_types::{DecodeError, Decoder, Encoder};
+use teseladb_wire::commands::pushed_filter::SentFilter;
 
 /// The rows of a scan, key and stored document.
 type Rows = Vec<(Vec<u8>, Vec<u8>)>;

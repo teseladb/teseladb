@@ -4,21 +4,21 @@ resolver = "3"
 members = ["crates/*", "tools/*"]
 
 [workspace.dependencies]
-# The generic crates copied to shared-crates (D-137, constitution 3.0.0, principle V), from the private Cargo registry viuzi
-# at the version they were published with (owner, 06-11-2026).
-teseladb-types = { version = "0.1.1", registry = "viuzi" }
-teseladb-hash = { version = "0.1.0", registry = "viuzi" }
-teseladb-json = { version = "0.1.0", registry = "viuzi" }
-teseladb-crypto = { version = "0.1.0", registry = "viuzi" }
-teseladb-x509 = { version = "0.1.0", registry = "viuzi" }
-teseladb-tls = { version = "0.2.0", registry = "viuzi" }
-teseladb-bson = { version = "0.4.1", registry = "viuzi" }
-teseladb-compress = { version = "0.1.0", registry = "viuzi" }
-teseladb-deflate = { version = "0.1.0", registry = "viuzi" }
-teseladb-http = { version = "0.1.0", registry = "viuzi" }
-teseladb-tz = { version = "0.1.0", registry = "viuzi" }
-teseladb-raft = { version = "0.1.1", registry = "viuzi" }
-teseladb-raftlog = { version = "0.4.0", registry = "viuzi" }
+# The generic crates (types, hashes, JSON, cryptography, X.509, TLS, BSON, compression, DEFLATE, HTTP, time zones, Raft
+# and its log), members of this workspace since 14-11-2026 (D-169, constitution 3.4.0, principle V; ORIGIN.md).
+teseladb-types = { path = "crates/teseladb-types" }
+teseladb-hash = { path = "crates/teseladb-hash" }
+teseladb-json = { path = "crates/teseladb-json" }
+teseladb-crypto = { path = "crates/teseladb-crypto" }
+teseladb-x509 = { path = "crates/teseladb-x509" }
+teseladb-tls = { path = "crates/teseladb-tls" }
+teseladb-bson = { path = "crates/teseladb-bson" }
+teseladb-compress = { path = "crates/teseladb-compress" }
+teseladb-deflate = { path = "crates/teseladb-deflate" }
+teseladb-http = { path = "crates/teseladb-http" }
+teseladb-tz = { path = "crates/teseladb-tz" }
+teseladb-raft = { path = "crates/teseladb-raft" }
+teseladb-raftlog = { path = "crates/teseladb-raftlog" }
 
 [workspace.package]
 edition = "2024"
@@ -46,7 +46,7 @@ unimplemented = "deny"
 opt-level = 1
 
 [profile.dev.package.teseladb-crypto]
-# teseladb-crypto is optimized in the tests too, as in shared-crates (013 T005): the key derivations of
+# teseladb-crypto is optimized in the tests too, as the crate always was (013 T005): the key derivations of
 # SCRAM and the at-rest encryption run on every authenticated or encrypted operation of the tests.
 opt-level = 3
 

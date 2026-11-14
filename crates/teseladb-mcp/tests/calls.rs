@@ -4,12 +4,12 @@
 
 use std::collections::VecDeque;
 
-use teseladb_mcp::calls::{Ctx, Limits, Output, call, is_ok};
-use teseladb_rest::api::Executor;
 use teseladb_bson::{Document, extjson};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
 use teseladb_json::{Object, Value, parse};
+use teseladb_mcp::calls::{Ctx, Limits, Output, call, is_ok};
+use teseladb_rest::api::Executor;
 
 /// Answers each command with the next scripted reply of its name, or `ok: 1`; records them.
 #[derive(Default)]

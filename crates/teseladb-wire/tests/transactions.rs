@@ -9,6 +9,7 @@ mod common;
 use std::sync::Mutex;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::{Hlc, from_timestamp};
 use teseladb_range::host::RangeError;
 use teseladb_wire::commands::txn::{
@@ -28,7 +29,6 @@ use teseladb_wire::error::{
     CommandError, DUPLICATE_KEY, ILLEGAL_OPERATION, NO_SUCH_TRANSACTION, WRITE_CONFLICT,
 };
 use teseladb_wire::msg::OpMsg;
-use teseladb_bson::{Document, Value};
 
 const DB: &str = "t";
 
@@ -1642,8 +1642,10 @@ fn each_write_of_a_document_in_a_transaction_keeps_its_own_meta() {
     let got: Vec<(u32, bool, bool, bool, Option<Document>)> = metas
         .iter()
         .map(|x| {
-            let d =
-                x.doc.as_ref().map(|b| Document::from(teseladb_bson::RawDoc::from_bytes(b).unwrap()));
+            let d = x
+                .doc
+                .as_ref()
+                .map(|b| Document::from(teseladb_bson::RawDoc::from_bytes(b).unwrap()));
             (x.op, x.update.is_some(), x.replace, x.delete, d)
         })
         .collect();

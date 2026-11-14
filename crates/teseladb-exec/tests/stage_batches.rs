@@ -3,8 +3,8 @@
 //! one after the other; and `$sort` followed by `$limit` gives the first documents of the whole
 //! sort, ties in their order.
 
-use teseladb_exec::reference::Reference;
 use teseladb_bson::{Document, Value};
+use teseladb_exec::reference::Reference;
 
 fn d() -> Document {
     Document::new()

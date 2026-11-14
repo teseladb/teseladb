@@ -13,8 +13,8 @@
 
 use std::collections::BTreeSet;
 
-use teseladb_collation::{Alternate, CaseFirst, CollationSpec, MaxVariable};
 use teseladb_bson::{Document, Value};
+use teseladb_collation::{Alternate, CaseFirst, CollationSpec, MaxVariable};
 
 /// What a read's shape is made of.
 #[derive(Clone, Copy, Debug, Default)]

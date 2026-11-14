@@ -16,13 +16,13 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::Mechanism;
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::pki::{
     CA_CERT, CA_KEY, MASTER_KEY, NODE_CERT, NODE_KEY, ROOT_CREDENTIALS, renew_node,
 };
 use teseladb_server::run;
-use teseladb_wire::msg::{HEADER_LEN, OpMsg};
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_tls::Trust;
+use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::Certificate;
 use teseladb_x509::ext::GeneralName;
 

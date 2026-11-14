@@ -12,8 +12,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 
 use super::errors::{FAILED_TO_PARSE, error, missing_field, unknown_field, wrong_type};
 use super::sort::check_path;

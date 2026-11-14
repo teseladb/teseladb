@@ -6,8 +6,7 @@
 # main, pushes the images to Docker Hub, joined under the version and :latest; development builds and runs them locally.
 #   scripts/release/publish.sh <version> <stage dev|prd>
 # PGO_SECONDS (default 120) sets how long each workload of the profiles runs.
-# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER, AWS_ACCOUNT_ID and CARGO_REGISTRIES_VIUZI_TOKEN (the JWT of the run that
-# reads the viuzi-* crates of the private registry) from the workflow, and DOCKERHUB_TOKEN in production,
+# Reads ZIGBUILD_IMAGE, IMAGE, DOCKERHUB_USER and AWS_ACCOUNT_ID from the workflow, and DOCKERHUB_TOKEN in production,
 # which the workflow reads from Vault (scripts/ci/release-tokens.sh).
 set -euo pipefail
 
@@ -17,7 +16,7 @@ if [[ $# -ne 2 ]]; then
 fi
 VERSION=$1
 STAGE=$2
-: "${ZIGBUILD_IMAGE:?}" "${IMAGE:?}" "${DOCKERHUB_USER:?}" "${AWS_ACCOUNT_ID:?}" "${CARGO_REGISTRIES_VIUZI_TOKEN:?}"
+: "${ZIGBUILD_IMAGE:?}" "${IMAGE:?}" "${DOCKERHUB_USER:?}" "${AWS_ACCOUNT_ID:?}"
 case "$STAGE" in
   prd) HOST=downloads.teseladb.com ;;
   dev) HOST=downloads.teseladb.dev.atbionapps.com ;;
@@ -34,12 +33,11 @@ step "cross-compile"
 docker volume create "$VOLUME" >/dev/null
 trap 'docker volume rm -f "$VOLUME" >/dev/null 2>&1 || true' EXIT
 tar -cf - --exclude=./target --exclude=./.git . | docker run --rm -i -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" sh -c 'mkdir -p /work/repo/src && tar -xf - -C /work/repo/src'
-# Cargo downloads the viuzi-* crates of Cargo.lock from the private registry with the JWT of the run.
 # The binary carries the release's full version (0.1.0-dev.N in development), which test-install.sh checks.
 # Every binary is built with PGO from the load of 002 and the benches (012 FR-034,
 # scripts/release/pgo.sh), with llvm-profdata of the pinned toolchain's llvm-tools.
 docker run --rm -v "$VOLUME:/work" -w /work/repo/src -e CARGO_TARGET_DIR=/work/target -e CARGO_PROFILE_DIST_STRIP=debuginfo \
-  -e CARGO_REGISTRIES_VIUZI_TOKEN -e TESELADB_RELEASE_VERSION="$VERSION" -e PGO_SECONDS \
+  -e TESELADB_RELEASE_VERSION="$VERSION" -e PGO_SECONDS \
   "$ZIGBUILD_IMAGE" sh -c '
   set -e
   rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin

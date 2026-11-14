@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use teseladb_auth::users::{User, UserName};
+use teseladb_bson::{Document, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::command::SettingChange;
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
@@ -19,7 +20,6 @@ use teseladb_wire::commands::{Backend, LdapLogin, Versions, WriteOp};
 use teseladb_wire::error::{
     AUTHENTICATION_FAILED, CommandError, ILLEGAL_OPERATION, INTERNAL_ERROR, OPERATION_FAILED,
 };
-use teseladb_bson::{Document, Value};
 
 const NOW_MS: u64 = 1_700_000_000_000;
 

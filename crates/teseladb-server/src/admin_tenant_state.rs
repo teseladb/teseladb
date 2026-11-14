@@ -5,9 +5,9 @@
 //! proposes nothing.
 
 use teseladb_auth::restrictions::cidr;
+use teseladb_bson::{Document, Value};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::tenants::{ServiceUser, TenantLimits, TenantState};
-use teseladb_bson::{Document, Value};
 
 use crate::admin::{AdminError, Answer, NodeAdmin};
 use crate::admin_http::Method;

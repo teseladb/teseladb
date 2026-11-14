@@ -12,10 +12,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_server::client_listener::ClientConfig;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::client_listener::ClientConfig;
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::Histogram;
 
 use super::{DataDir, at, ready};

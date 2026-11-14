@@ -10,8 +10,8 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
 
-use teseladb_mql::{MqlError, codes};
 use teseladb_bson::{Collator, Document, RawDoc, Value};
+use teseladb_mql::{MqlError, codes};
 
 use super::errors::{self, document_size};
 use super::sort::SortSpec;

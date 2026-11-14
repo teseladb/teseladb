@@ -9,13 +9,13 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::client_listener::{
     ClientConfig, ClientListener, DEFAULT_MAX_CONNECTIONS, NodeState,
 };
 use teseladb_server::tls_port::{TlsMode, TlsPort};
 use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg, flags, opcode};
-use teseladb_bson::{Document, RawDoc, Value};
 
 const PID: [u8; 12] = [9; 12];
 

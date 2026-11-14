@@ -32,9 +32,9 @@ use std::sync::Arc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId};
+use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, trailer, unbundle, write_ops};
-use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 use teseladb_io::file_send::{FileSend, MAX_FILE_SEND};
@@ -835,9 +835,9 @@ mod tests {
     use teseladb_lsm::{EntryWrite, Kind, Lookup, LsmConfig};
     use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
     use teseladb_multiraft::{ApplyCtx, CoreConfig, GroupDesc, PeerFrame, StateMachine};
+    use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
     use teseladb_range::command::Command;
     use teseladb_range::sm::RangeSm;
-    use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
 
     use super::*;
     use crate::coresm::CoreOutput;

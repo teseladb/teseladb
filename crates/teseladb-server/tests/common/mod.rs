@@ -5,11 +5,11 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_raftlog::Disk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
-use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::Disk;
 
 pub const READY: Duration = Duration::from_secs(30);
 

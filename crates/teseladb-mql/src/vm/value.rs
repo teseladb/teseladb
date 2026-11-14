@@ -4,8 +4,8 @@
 
 use std::marker::PhantomData;
 
-use teseladb_keys::stored::{FieldKey, Lookup, Stored};
 use teseladb_bson::{Decimal128, RawDoc, RawValue};
+use teseladb_keys::stored::{FieldKey, Lookup, Stored};
 
 /// What a register holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

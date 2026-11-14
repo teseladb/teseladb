@@ -14,7 +14,9 @@
 //! document keeps the bytes it came in: its fields are read only when the command asks for them,
 //! and a stored one is written by copying those bytes.
 
-use teseladb_bson::{BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message_in};
+use teseladb_bson::{
+    BsonError, Document, Fragments, Limits, RawDoc, first_element, read_message_in,
+};
 use teseladb_hash::{Crc32c, crc32c};
 use teseladb_types::Bytes;
 
@@ -133,7 +135,8 @@ pub struct OpMsg {
 }
 
 fn cstring(b: &[u8], at: usize) -> Result<(&str, usize), WireError> {
-    let len = teseladb_bson::find_nul(&b[at..]).ok_or(WireError::Malformed("unterminated string"))?;
+    let len =
+        teseladb_bson::find_nul(&b[at..]).ok_or(WireError::Malformed("unterminated string"))?;
     let s =
         std::str::from_utf8(&b[at..at + len]).map_err(|_| WireError::Malformed("invalid UTF-8"))?;
     Ok((s, at + len + 1))

@@ -7,9 +7,9 @@
 //! on a `refrouter` without `--keyFile`.
 
 use teseladb_auth::clustertime::{self, ClusterTimeError, KEY_LEN, Time};
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::MAX_RECEIVED_AHEAD_MS;
 use teseladb_mql::decimal_saturating;
-use teseladb_bson::{Document, Value};
 
 use crate::commands::Backend;
 use crate::error::{

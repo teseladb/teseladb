@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use teseladb_keys::{Hlc, VERSION_LEN};
 use teseladb_crypto::at_rest::{KeyRing, TRAILER_LEN, WRAPPED_KEY_LEN};
 use teseladb_hash::crc32c;
+use teseladb_keys::{Hlc, VERSION_LEN};
 use teseladb_types::GroupId;
 
 use crate::sst::{ALIGN, Bad, PAD, get_bytes, get_varint, pad, put_bytes, put_varint};

@@ -8,8 +8,8 @@ mod common;
 use std::sync::Arc;
 
 use common::{get, open, small, ts};
-use teseladb_lsm::{Encryption, Lsm, LsmConfig};
 use teseladb_crypto::at_rest::{CipherMode, KeyRing};
+use teseladb_lsm::{Encryption, Lsm, LsmConfig};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos};
 

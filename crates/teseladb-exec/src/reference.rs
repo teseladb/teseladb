@@ -6,8 +6,8 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use teseladb_mql::{Extensions, GeoQuery, MqlError, NoExtensions, TextQuery};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::{Extensions, GeoQuery, MqlError, NoExtensions, TextQuery};
 
 use crate::expr::{Ctx, Expr, Scope, truthy};
 use crate::pipeline::{Env, Pipeline};

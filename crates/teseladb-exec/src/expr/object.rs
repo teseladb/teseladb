@@ -3,8 +3,8 @@
 //! where it first appeared and skips `null` and missing inputs; given one array it merges its
 //! elements. `$unsetField` is `$setField` with `$$REMOVE`, and says so in its errors.
 
-use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::{ErrorCode, MqlError};
 
 use super::arith::type_name_of;
 use super::values::display;

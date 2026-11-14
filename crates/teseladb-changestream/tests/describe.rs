@@ -2,8 +2,8 @@
 //! 31-10-2026 through a change stream with `showExpandedEvents`): each case is the document before,
 //! the operators' touches, and the `updateDescription` of its event.
 
-use teseladb_changestream::describe::{Touch, describe};
 use teseladb_bson::{Document, extjson};
+use teseladb_changestream::describe::{Touch, describe};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap()

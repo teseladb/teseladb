@@ -48,6 +48,7 @@ use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::read_pref::{Mode, ReadPreference, Replica, candidates};
 use teseladb_router::table::RouteEntry;
+use teseladb_types::NodeId;
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::{Backend, LdapLogin, Shared, WriteOp, lock, txn_stats};
 use teseladb_wire::error::{
@@ -56,7 +57,6 @@ use teseladb_wire::error::{
     NAMESPACE_NOT_FOUND, NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT, NETWORK_TIMEOUT,
     NOT_WRITABLE_PRIMARY, RangeContext, from_range,
 };
-use teseladb_types::NodeId;
 
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::data::{DataReply, DataReq};
@@ -1803,7 +1803,10 @@ impl Backend for ServerBackend {
         }
     }
 
-    fn config_documents(&mut self, coll: &str) -> Result<Vec<teseladb_bson::Document>, CommandError> {
+    fn config_documents(
+        &mut self,
+        coll: &str,
+    ) -> Result<Vec<teseladb_bson::Document>, CommandError> {
         let until = self.until();
         loop {
             let req = CatalogReq::Config(coll.to_owned());

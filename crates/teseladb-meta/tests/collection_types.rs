@@ -2,8 +2,8 @@
 //! collection's stored options say whether it is a view, capped, a time series or clustered, with
 //! the options of each, as `create` stored them on a `refrouter` 9.0.4 (measured 30-10-2026).
 
-use teseladb_meta::collection_types::{CollectionKind, Granularity, TimeSeries};
 use teseladb_bson::{Document, Value};
+use teseladb_meta::collection_types::{CollectionKind, Granularity, TimeSeries};
 
 fn kind(options: Document) -> CollectionKind {
     CollectionKind::of(&options.to_bytes().expect("bytes")).expect("valid options")

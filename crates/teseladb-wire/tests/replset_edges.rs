@@ -6,10 +6,10 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::presentation::{
     Hold, Presentation, member_of, next, parse, port_host,
 };
-use teseladb_bson::{Document, Value};
 
 const N1: &str = "node1.cluster:27018";
 const N2: &str = "node2.cluster:27018";

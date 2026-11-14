@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::Document;
 use teseladb_meta::config_settings::{
     AUTOMERGE_KEY, BALANCER_KEY, CHUNK_SIZE_KEY, automerge, balancing, chunk_size_bytes,
 };
-use teseladb_bson::Document;
 
 fn with(key: &[u8], doc: Document) -> BTreeMap<Vec<u8>, Vec<u8>> {
     BTreeMap::from([(key.to_vec(), doc.to_bytes().unwrap())])

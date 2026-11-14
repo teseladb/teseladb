@@ -7,21 +7,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use teseladb_http::http1::Request;
+use teseladb_http::server::Response;
 use teseladb_wire::commands::Backend;
 use teseladb_wire::commands::http_parameters::{
     HTTP_OPTIONS, HttpOptions, MCP_OPTIONS, McpOptions, http_options, mcp_options,
 };
-use teseladb_http::http1::Request;
-use teseladb_http::server::Response;
 
 use crate::backend::{NodeHandle, ServerBackend};
 use crate::client_listener::NodeState;
 use crate::http_listener::{Caller, HttpService, Reply};
 use teseladb_auth::audit_param::{Transport, http_request};
 use teseladb_auth::bearer::Bearer;
+use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
 use teseladb_mcp::server::SESSION_HEADER;
 use teseladb_rest::changestream::HEARTBEAT_MS;
-use teseladb_http::sse::{EVENT_STREAM, HEARTBEAT};
 
 use crate::rest_executor::{
     Credential, Forwarded, NodeExecutor, Surface, authenticate, encode_response, tenant_switch,
@@ -342,7 +342,8 @@ impl OpenStream {
             loop {
                 if cancelled.load(Ordering::Relaxed) || id == 0 {
                     if id != 0 {
-                        let ids = teseladb_bson::Value::Array(vec![teseladb_bson::Value::Int64(id)]);
+                        let ids =
+                            teseladb_bson::Value::Array(vec![teseladb_bson::Value::Int64(id)]);
                         let kill = teseladb_bson::Document::new()
                             .with("killCursors", coll.as_str())
                             .with("cursors", ids);
@@ -393,8 +394,9 @@ fn unknown_resource(status: u16) -> Response {
     problem.insert("title", if status == 401 { "Unauthorized" } else { "Not Found" });
     problem.insert("status", i64::from(status));
     problem.insert("detail", UNKNOWN_RESOURCE);
-    r.body =
-        teseladb_json::to_string(&teseladb_json::Value::Object(problem)).unwrap_or_default().into_bytes();
+    r.body = teseladb_json::to_string(&teseladb_json::Value::Object(problem))
+        .unwrap_or_default()
+        .into_bytes();
     if status == 401 {
         let challenge = format!(
             "{}, error_description=\"{UNKNOWN_RESOURCE}\"",

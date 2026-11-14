@@ -10,11 +10,11 @@
 
 use std::cmp::Ordering;
 
+use teseladb_bson::{Document, RawDoc, Value, compare_docs};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::command::SettingChange;
 use teseladb_meta::zones::{ZoneRange, Zones, shard_key};
-use teseladb_bson::{Document, RawDoc, Value, compare_docs};
 use teseladb_types::NodeId;
 
 use super::names::parse_full;

@@ -2,10 +2,10 @@
 //! (`scratchpad/lane3p/m51.js` to `m53.js`): enormous texts and values, queries that expand into
 //! many terms and option values out of bounds.
 
+use teseladb_bson::{Document, extjson};
 use teseladb_search::definition::Definition;
 use teseladb_search::indexer::Indexer;
 use teseladb_search::query::search::SearchError;
-use teseladb_bson::{Document, extjson};
 
 /// Value lengths of the measured documents, around the limits of `refsearch`.
 const LENGTHS: [usize; 11] = [100, 255, 256, 1000, 8191, 8192, 8193, 16383, 16384, 32765, 32766];

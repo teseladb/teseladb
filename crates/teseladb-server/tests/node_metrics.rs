@@ -8,10 +8,10 @@ mod common;
 use std::net::SocketAddr;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::admin_http::{Method, request};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::Document;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::admin_http::{Method, request};
+use teseladb_server::node::{Node, NodeConfig};
 
 /// The value of the sample `name` (without labels) in `text`.
 fn sample(text: &str, name: &str) -> Option<f64> {

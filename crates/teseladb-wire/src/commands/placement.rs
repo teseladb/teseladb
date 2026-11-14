@@ -4,8 +4,8 @@
 //! shard key, whose documents stay where they are; the second resets RefDb's log of namespace
 //! placements, which TeselaDB does not keep (its ranges are in Group 0), so it has nothing to do.
 
-use teseladb_meta::catalog::CatalogCommand;
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::catalog::CatalogCommand;
 
 use super::admin::admin_only;
 use super::move_collection::unsplittable_by;

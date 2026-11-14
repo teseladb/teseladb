@@ -13,10 +13,10 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, docs, ok, until};
-use teseladb_server::node::Node;
-use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 use teseladb_bson::Document;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
+use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;

@@ -6,11 +6,11 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::search::Scored;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 /// What the environment was asked for: the index read and the collection it belongs to.
 #[derive(Clone, Debug, PartialEq)]

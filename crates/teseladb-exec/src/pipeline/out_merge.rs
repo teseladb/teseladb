@@ -4,8 +4,8 @@
 //! document with the same `on` fields. The node writes (the stage holds no I/O): `$out` into a
 //! collection that replaces the target at the end, `$merge` document by document.
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::MqlError;
 
 use super::errors::{self, TYPE_MISMATCH, error, missing_field, unknown_field, wrong_type};
 use super::{Env, Pipeline, Stage};

@@ -6,8 +6,8 @@
 
 use std::cmp::Ordering;
 
-use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::{Document, RawValue, Value, compare};
+use teseladb_mql::{ErrorCode, MqlError};
 
 use super::array::eval_type;
 use super::values::{sorted, with_raw};
@@ -274,7 +274,11 @@ fn equals(vals: Vec<Eval>, col: Option<&dyn teseladb_bson::Collator>) -> Result<
     Ok(Some(Value::Boolean(same)))
 }
 
-fn is_subset(a: &Eval, b: &Eval, col: Option<&dyn teseladb_bson::Collator>) -> Result<Eval, MqlError> {
+fn is_subset(
+    a: &Eval,
+    b: &Eval,
+    col: Option<&dyn teseladb_bson::Collator>,
+) -> Result<Eval, MqlError> {
     let wrong = |which: &str, code, v: &Eval| {
         error(
             code,

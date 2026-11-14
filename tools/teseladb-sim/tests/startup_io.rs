@@ -6,13 +6,13 @@
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{EntryWrite, Kind};
+use teseladb_raftlog::{Completions, Disk, IoErrno, IoOp};
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::registry::Registry;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
-use teseladb_raftlog::{Completions, Disk, IoErrno, IoOp};
 use teseladb_types::{GroupId, Nanos};
 
 /// When node 0 goes down with sync errors waiting on its disks.

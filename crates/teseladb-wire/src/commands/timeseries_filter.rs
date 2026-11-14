@@ -12,8 +12,8 @@
 //!
 //! Anything else is RefDb's 5916301 with the condition as RefDb normalizes it.
 
-use teseladb_mql::timeseries_write::BucketSpec;
 use teseladb_bson::{Document, Value};
+use teseladb_mql::timeseries_write::BucketSpec;
 
 use crate::error::{CommandError, TIMESERIES_PREDICATE};
 

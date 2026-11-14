@@ -19,11 +19,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use teseladb_bson::Value;
+use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::data::{DataReply, DataReq};
 use teseladb_server::node::{Node, NodeConfig};
-use teseladb_bson::Value;
-use teseladb_raftlog::MemDisk;
 use teseladb_types::Histogram;
 
 use crate::cli::Args;

@@ -1,16 +1,16 @@
 //! Errors (006 FR-021, contract `error-codes.md`): the reply document of an error, labels, the
 //! translation of every error of the range (005) and the round trip of a mutation's error.
 
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_range::host::{MutationError, RangeError};
 use teseladb_range::intents::{IntentOwner, TxnId};
+use teseladb_types::NodeId;
 use teseladb_wire::WireError;
 use teseladb_wire::error::{
     self, CommandError, RETRYABLE_WRITE_ERROR, RangeContext, TRANSIENT_TRANSACTION_ERROR,
     from_range,
 };
-use teseladb_bson::{Document, Value};
-use teseladb_types::NodeId;
 
 #[test]
 fn error_document_order_and_labels() {

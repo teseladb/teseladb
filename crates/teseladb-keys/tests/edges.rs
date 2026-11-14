@@ -3,8 +3,8 @@
 //! space, the two levels of the meta-ranges, and the insertion order of capped collections and
 //! the `_id` order of clustered ones (T031).
 
-use teseladb_keys::{Direction, KeyBuilder, KeyParts, KeyRange, TypeBits, decode, encode};
 use teseladb_bson::{Decimal128, Document, RawDoc, Value};
+use teseladb_keys::{Direction, KeyBuilder, KeyParts, KeyRange, TypeBits, decode, encode};
 
 #[test]
 fn a_decimal_with_a_coefficient_past_34_digits_comes_back_byte_for_byte() {
@@ -82,8 +82,8 @@ fn capped_and_clustered_documents_keep_their_order() {
 /// of the same value as a decimal, which goes through the general one.
 #[test]
 fn whole_numbers_encode_as_their_decimal() {
-    use teseladb_keys::{Direction, TypeBits, encode_value};
     use teseladb_bson::{Decimal128, RawValue};
+    use teseladb_keys::{Direction, TypeBits, encode_value};
     let enc = |v: RawValue<'_>| {
         let mut out = Vec::new();
         encode_value(&mut out, v, Direction::Ascending, &mut TypeBits::default());

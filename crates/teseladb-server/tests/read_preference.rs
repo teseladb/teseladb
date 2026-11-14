@@ -8,9 +8,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 fn secondary() -> Document {
     Document::new().with("mode", "secondary")

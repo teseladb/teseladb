@@ -1,9 +1,9 @@
 //! Sparse indexes (009 T016, FR-008): every case of `tests/data/sparse-entries.json`, measured on
 //! refnode 9.0.4, gives as many entries as RefDb with and without `sparse`.
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, index_entries};
 use teseladb_keys::{Direction, PrimaryKey};
-use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 
 const CASES: &str = include_str!("data/sparse-entries.json");
 const HASHED: &str = "hashed";

@@ -14,8 +14,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
 
 use crate::definition::{VectorDefinition, VectorField};
 use crate::indexer::Found;

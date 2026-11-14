@@ -174,8 +174,8 @@ fn a_merge_drops_deletions_below_the_threshold_and_the_manifest_records_it() {
 
 #[test]
 fn a_sealed_segment_hides_its_text_and_opens_with_its_master_key() {
-    use teseladb_search::segment::file::{build_sealed, open_sealed};
     use teseladb_crypto::at_rest::{CipherMode, KeyRing};
+    use teseladb_search::segment::file::{build_sealed, open_sealed};
     let data = segment("secret-key-", &["confidential salary figures", "more private words"], 9);
     for mode in [CipherMode::Cbc, CipherMode::Gcm] {
         let ring = KeyRing::new(

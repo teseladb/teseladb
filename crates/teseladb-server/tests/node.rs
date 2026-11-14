@@ -14,11 +14,11 @@ use teseladb_io::FileDisk;
 use teseladb_io::handshake::{Acceptor, Inbound, JoinHandler, JoinRequest};
 use teseladb_io::mailbox::{Notify, channel};
 use teseladb_io::peer::Hello;
+use teseladb_raft::Role;
 use teseladb_server::logic::Group0View;
 use teseladb_server::node::{
     FOUNDER, JOIN_DEADLINE, JOIN_VOTERS, Node, NodeConfig, NodeError, join_cluster, lock_dir,
 };
-use teseladb_raft::Role;
 use teseladb_types::NodeId;
 
 const READY: Duration = Duration::from_secs(10);

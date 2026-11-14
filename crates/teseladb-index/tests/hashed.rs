@@ -1,8 +1,8 @@
 //! Hashed index keys (009 T025, FR-014): every vector measured on a real RefDb server
 //! (`tests/data/hashed-vectors.json`, with the image digest and the date) comes out the same.
 
-use teseladb_index::keygen::hashed_key;
 use teseladb_bson::{RawDoc, RawValue, Value, extjson};
+use teseladb_index::keygen::hashed_key;
 
 const VECTORS: &str = include_str!("data/hashed-vectors.json");
 

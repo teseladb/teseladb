@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::changes::{Versioned, changes};
 use teseladb_exec::pipeline::search::Scored;
 use teseladb_hlc::Hlc;
@@ -27,7 +28,6 @@ use teseladb_search::indexer::{Found, Indexer, SegmentFile};
 use teseladb_search::query::search::SearchError;
 use teseladb_search::query::vector_search::{self, VectorQuery};
 use teseladb_search::vector_indexer::VectorIndexer;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::query::documents_of;
 use super::search_indexes::{IndexView, check_view_stages, split_definition};

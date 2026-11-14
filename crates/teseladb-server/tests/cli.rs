@@ -534,7 +534,10 @@ fn the_tenant_subcommands_take_every_option_as_text_and_json() {
         assert!(usage.lines().any(|l| l.starts_with(&format!("{field}\t"))), "{field}: {usage}");
     }
     let json = admin_ok(&at, &["tenant", "usage", "acme", "--format", "json"]);
-    assert!(teseladb_bson::extjson::parse(json.trim()).unwrap().get("opsTotal").is_some(), "{json}");
+    assert!(
+        teseladb_bson::extjson::parse(json.trim()).unwrap().get("opsTotal").is_some(),
+        "{json}"
+    );
     // A tenant that does not exist: an error with its name.
     let (code, _, err) = admin(&at, &["tenant", "limits", "nobody"]);
     assert_eq!(code, 1);

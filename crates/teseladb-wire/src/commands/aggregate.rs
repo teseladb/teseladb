@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::Ctx as ExprCtx;
 use teseladb_exec::pipeline::meta::{INDEX_KEY, Meta};
@@ -16,7 +17,6 @@ use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_mql::{Extensions, MqlError};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::engines::NodeExtensions;
 use super::mutation::from_mql;

@@ -6,8 +6,8 @@
 //! `planCacheClear` drop its entries; `explain` leaves none. `$planCacheStats` lists them, the
 //! newest first.
 
-use teseladb_plan::rules::Access;
 use teseladb_bson::{Document, Value};
+use teseladb_plan::rules::Access;
 
 use super::{Backend, Ctx, args, lock, names};
 use crate::error::{BAD_VALUE, CommandError};

@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 
-use teseladb_mql::timeseries_write::{BucketSpec, Full};
 use teseladb_bson::{RawDoc, Value};
+use teseladb_mql::timeseries_write::{BucketSpec, Full};
 
 /// The start of a window, the first four bytes of a bucket's `_id`.
 type Window = [u8; 4];

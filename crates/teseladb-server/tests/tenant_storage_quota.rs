@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 const OUT_OF_DISK_SPACE: i32 = 14031;
 

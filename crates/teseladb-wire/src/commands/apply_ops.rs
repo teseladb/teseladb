@@ -11,9 +11,9 @@
 //! - an insert or update into a namespace that does not exist fails the command with 26;
 //!   `preCondition` is refused (`Location6711600`) and an unknown `op` is `BadValue`.
 
+use teseladb_bson::{Document, Value};
 use teseladb_topology::diff::DiffError;
 use teseladb_topology::oplog::{OpType, Operation};
-use teseladb_bson::{Document, Value};
 
 use super::{Backend, Ctx};
 use crate::error::{

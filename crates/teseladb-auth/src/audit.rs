@@ -8,8 +8,8 @@
 
 use std::fmt;
 
-use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
 use teseladb_bson::{Document, RawDoc, Value, extjson};
+use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
 
 use crate::users::{RoleName, UserName};
 

@@ -3,8 +3,8 @@
 //! `NumberInt`, `int32` arguments are plain numbers, `undefined` is `null` and a function is
 //! `Code`.
 
-use teseladb_js::{JsCtx, Program};
 use teseladb_bson::{Decimal128, Document, Value};
+use teseladb_js::{JsCtx, Program};
 
 fn call(src: &str, args: &[Value]) -> Value {
     Program::compile(src)

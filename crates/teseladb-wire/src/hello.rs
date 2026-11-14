@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use teseladb_auth::clustertime::{KEY_LEN, KeyRing, Time};
 use teseladb_auth::users::UserName;
-use teseladb_topology::replset::{HelloContext, LastWrite, Limits, MemberId, ReplicaSet};
 use teseladb_bson::{Document, Value};
+use teseladb_topology::replset::{HelloContext, LastWrite, Limits, MemberId, ReplicaSet};
 
 use crate::commands::auth::{AUTHENTICATE, SASL_START, SPECULATIVE_AUTHENTICATE};
 use crate::compressed::Compressor;

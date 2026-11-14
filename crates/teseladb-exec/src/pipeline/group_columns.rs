@@ -12,10 +12,10 @@
 //! greatest values, taking the document the one-at-a-time order would keep. Doubles summed,
 //! and any other mix of types, go one document at a time.
 
+use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value};
 use teseladb_mql::MqlError;
 use teseladb_mql::simd::{self, Column, LANES};
 use teseladb_mql::vm::{Cell, load_column};
-use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value};
 
 use crate::accum::{Accumulator, State, Unary};
 use crate::expr::stats::Total;

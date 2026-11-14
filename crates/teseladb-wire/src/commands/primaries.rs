@@ -11,8 +11,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_meta::command::SettingChange;
 use teseladb_bson::{Document, Value};
+use teseladb_meta::command::SettingChange;
 use teseladb_types::NodeId;
 
 use super::{Backend, Ctx, admin};

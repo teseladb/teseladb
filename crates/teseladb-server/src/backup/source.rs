@@ -20,12 +20,12 @@ use std::path::PathBuf;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::MultiRaftCore;
+use teseladb_raft::Role;
+use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_range::host::{RangeError, RangeHost, ReadSpec, Reply, ReqId};
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::snapshot::{CHUNK_BYTES, write_ops};
-use teseladb_raft::Role;
-use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use super::{BACKUP_END, BACKUP_START};
@@ -586,8 +586,8 @@ mod tests {
     use teseladb_lsm::LsmConfig;
     use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
     use teseladb_multiraft::{CoreConfig, GroupDesc, NodeClock};
-    use teseladb_range::sm::RangeSm;
     use teseladb_raftlog::{CoreStore, Disk, MemDisk, StorageConfig};
+    use teseladb_range::sm::RangeSm;
 
     use super::*;
 

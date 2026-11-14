@@ -4,11 +4,11 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::search::Scored;
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 /// A node whose search stages give two documents with their scores.
 struct SearchEnv;

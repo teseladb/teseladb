@@ -6,10 +6,10 @@
 mod common;
 
 use common::{open, small, ts};
+use teseladb_bson::{Document, RawValue};
 use teseladb_keys::zone::{Bounds, Zones};
 use teseladb_keys::{Direction, KeyBuilder, TypeBits, encode_value};
 use teseladb_lsm::{DOCUMENT_VALUE, Kind, Lsm, LsmConfig, Step};
-use teseladb_bson::{Document, RawValue};
 use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 

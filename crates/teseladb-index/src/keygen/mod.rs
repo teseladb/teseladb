@@ -18,8 +18,8 @@ pub use geo2d::{
 pub use geo2dsphere::{INDEX_COVER, geo2dsphere_keys, geometry_keys};
 pub use hashed::hashed_key;
 
-use teseladb_keys::{Direction, FieldSpec, IndexKeySpec};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_keys::{Direction, FieldSpec, IndexKeySpec};
 
 use crate::geo::geojson::GeoError;
 use crate::geo::planar::Grid;

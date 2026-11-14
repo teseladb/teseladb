@@ -3,6 +3,7 @@
 //! with its drop, a collection created again starts without one, the snapshot keeps them from its
 //! format 22, and Group 0 refuses the names while a node runs an older format.
 
+use teseladb_bson::Document;
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{
@@ -10,7 +11,6 @@ use teseladb_meta::group0::{
 };
 use teseladb_meta::node_versions::{FORMAT, key as node_key};
 use teseladb_multiraft::StateMachine;
-use teseladb_bson::Document;
 
 fn ns(db: &str, coll: &str) -> Namespace {
     Namespace { db: db.into(), coll: coll.into() }

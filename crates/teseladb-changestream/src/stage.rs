@@ -1,8 +1,8 @@
 //! The `$changeStream` stage (014 FR-001): its options and the stages that may follow it, with
 //! the errors of a `refrouter` 9.0.4 (measured on 01-11).
 
-use teseladb_hlc::{Hlc, from_timestamp};
 use teseladb_bson::Value;
+use teseladb_hlc::{Hlc, from_timestamp};
 
 use crate::token::{EventKind, Position, TokenError};
 

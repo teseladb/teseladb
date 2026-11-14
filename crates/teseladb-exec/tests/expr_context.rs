@@ -2,8 +2,8 @@
 //! FR-005, FR-006): `$rand`, `$currentDate`, `$createObjectId` and `$meta`, and the one value a
 //! `refshell` cannot show (`undefined` from `$deserializeEJSON`).
 
-use teseladb_exec::expr::{Ctx, Eval, Expr, Scope};
 use teseladb_bson::{Document, RawDoc, Value, extjson};
+use teseladb_exec::expr::{Ctx, Eval, Expr, Scope};
 
 /// 2026-01-01T00:00:00Z.
 const NOW: i64 = 1_767_225_600_000;

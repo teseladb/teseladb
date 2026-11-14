@@ -1,11 +1,2 @@
-# TeselaDB has no third-party dependencies: all the code is in this repository or in the viuzi-* crates, which come at
-# their published version from the private Cargo registry of viuzi (owner, 06-11-2026). scripts/check-deps.sh fails on a
-# package from any other source, crates.io included.
-#
-# The registry is never open: reading it needs a token. On a developer's machine Cargo takes it from
-# ~/.cargo/credentials.toml; in CI each run asks Forgejo for its JWT with the audience of the Authorized Integration
-# that only gives read:package to the release tags of this repository, and passes it as
-# CARGO_REGISTRIES_VIUZI_TOKEN="Bearer <jwt>" (atbion-core-infra nomad/tools/forgejo-cargo-read.sh).
-[registries.viuzi]
-index = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-credential-provider = ["cargo:token"]
+# TeselaDB has no third-party dependencies: all the code is in this repository, the generic crates included
+# (crates/teseladb-*, D-169). scripts/check-deps.sh fails on a package from any registry or from git.

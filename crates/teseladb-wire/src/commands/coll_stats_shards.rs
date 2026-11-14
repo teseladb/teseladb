@@ -5,10 +5,10 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, Value};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_router::table::RouteEntry;
-use teseladb_bson::{Document, Value};
 
 use super::{Backend, shard_name};
 use crate::error::CommandError;

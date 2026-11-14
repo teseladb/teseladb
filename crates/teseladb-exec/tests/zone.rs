@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 use teseladb_exec::zone::block_may_match;
 use teseladb_keys::zone::{Bounds, Zones};
 use teseladb_keys::{Direction, TypeBits, encode_value};
 use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
-use teseladb_bson::{Document, RawDoc, RawValue, Value, extjson};
 
 /// The zones of a block, as the storage computes them.
 #[derive(Default)]

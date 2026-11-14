@@ -11,13 +11,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_rest::media::CANONICAL_JSON;
-use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_raftlog::MemDisk;
+use teseladb_rest::media::CANONICAL_JSON;
+use teseladb_server::http_listener::HttpPortConfig;
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::Rng;
 
 const DEFAULT_OPS: u64 = 3_000;

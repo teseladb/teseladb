@@ -31,9 +31,9 @@ use teseladb_range::view::{
     Begun, Decline, FastRead, FastWrite, Newest, NoChange, Part, RangeView,
 };
 use teseladb_stages::Stage;
+use teseladb_types::{GroupId, Nanos};
 use teseladb_wire::commands::mutation::{Bound, Prepared};
 use teseladb_wire::commands::{Backend, Rows, WriteOp};
-use teseladb_types::{GroupId, Nanos};
 
 use super::{ServerBackend, stage_since};
 use crate::logic::NodeMsg;

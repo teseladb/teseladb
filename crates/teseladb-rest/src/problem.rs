@@ -3,6 +3,7 @@
 //! error's other fields. Errors of HTTP itself, without a RefDb code, are `about:blank`
 //! problems titled with the status phrase of RFC 9110.
 
+use teseladb_bson::{Document, Value};
 use teseladb_wire::error::{
     AUTHENTICATION_FAILED, CURSOR_NOT_FOUND, Code, CommandError, DUPLICATE_KEY, INTERNAL_ERROR,
     INTERRUPTED_AT_SHUTDOWN, INTERRUPTED_DUE_TO_REPL_STATE_CHANGE, KEY_NOT_FOUND,
@@ -10,7 +11,6 @@ use teseladb_wire::error::{
     PRIMARY_STEPPED_DOWN, RETRYABLE_WRITE_ERROR, SHUTDOWN_IN_PROGRESS, TRANSIENT_TRANSACTION_ERROR,
     UNAUTHORIZED, USER_NOT_FOUND, WRITE_CONFLICT,
 };
-use teseladb_bson::{Document, Value};
 
 /// Media type of the error bodies.
 pub const PROBLEM_JSON: &str = "application/problem+json";

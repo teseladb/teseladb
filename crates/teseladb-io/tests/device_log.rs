@@ -5,9 +5,9 @@
 use std::thread;
 
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
-use teseladb_stages::Stage;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{CoreStore, LogEntry, MemDisk, StorageConfig};
+use teseladb_stages::Stage;
 use teseladb_types::{Bytes, Durability, GroupId, Nanos};
 
 const G: GroupId = GroupId(5);

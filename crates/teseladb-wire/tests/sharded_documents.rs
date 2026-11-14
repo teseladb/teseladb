@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_keys::PrimaryKey;
 use teseladb_bson::{Document, RawDoc, Value, extjson};
+use teseladb_keys::PrimaryKey;
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

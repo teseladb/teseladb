@@ -8,9 +8,9 @@ mod common;
 use std::sync::Arc;
 
 use common::{check_all, get, history, open, scan, scan_back, small, ts};
+use teseladb_crypto::at_rest::{CipherMode, KeyRing};
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Codec, Encryption, GcTable, Lsm, LsmConfig, Step};
-use teseladb_crypto::at_rest::{CipherMode, KeyRing};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Nanos, Rng};
 

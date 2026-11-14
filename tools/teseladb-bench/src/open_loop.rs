@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_io::poller::{Interest, Poller};
-use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 use teseladb_types::Histogram;
+use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
 /// Share of the requested rate the client must reach for its measure to count (FR-035).
 pub const KEPT_RATE: f64 = 0.99;

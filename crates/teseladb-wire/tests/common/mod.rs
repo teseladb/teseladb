@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use teseladb_keys::stored;
 
 use teseladb_auth::users::{RoleName, UserName};
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CatalogError, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry, Indexes};
@@ -21,7 +22,6 @@ use teseladb_wire::error::{
     CommandError, DATABASE_DIFFER_CASE, INTERNAL_ERROR, NAMESPACE_EXISTS, NAMESPACE_NOT_FOUND,
     UNSATISFIABLE_WRITE_CONCERN,
 };
-use teseladb_bson::{Document, Value};
 
 /// The node.
 /// Versions by key, with their value type; `None` for a deletion.

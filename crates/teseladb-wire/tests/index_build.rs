@@ -6,13 +6,13 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_index::build::{BUILD_DESC, Progress};
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::indexes::{IndexCommand, IndexState};
 use teseladb_range::ack::W;
 use teseladb_wire::commands::{Ctx, Shared, run};
 use teseladb_wire::ops::{Op, op_type};
-use teseladb_bson::{Decimal128, Document, Value};
 
 const DB: &str = "b";
 const DOCS: i32 = 2_500;

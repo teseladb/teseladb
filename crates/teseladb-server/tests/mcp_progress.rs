@@ -10,12 +10,12 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::Document;
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::http_listener::HttpPortConfig;
+use teseladb_server::node::{Node, NodeConfig};
 
 const META: &str =
     r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p1"}"#;

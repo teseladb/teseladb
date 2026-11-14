@@ -7,10 +7,10 @@
 mod common;
 
 use common::{Client, READY, batch, docs, ok, until};
-use teseladb_server::backend::scattered_groups;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::backend::scattered_groups;
+use teseladb_server::node::{Node, NodeConfig};
 
 const DOCS: i32 = 3000;
 

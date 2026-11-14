@@ -2,14 +2,14 @@
 //! both kinds of revision, the tools filtered by `mcpOptions`, their schemas and results, the
 //! untrusted block, the limits and the resources.
 
-use teseladb_mcp::calls::Limits;
-use teseladb_mcp::server::{Call, Options, SESSION_HEADER, Server};
-use teseladb_mcp::tools::{TOOLS, allowed, check_args, input_schema, tool};
-use teseladb_rest::api::Executor;
 use teseladb_bson::{Document, extjson};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
 use teseladb_json::{Object, Value, parse};
+use teseladb_mcp::calls::Limits;
+use teseladb_mcp::server::{Call, Options, SESSION_HEADER, Server};
+use teseladb_mcp::tools::{TOOLS, allowed, check_args, input_schema, tool};
+use teseladb_rest::api::Executor;
 
 /// Answers each command with the reply its name has, and records them.
 #[derive(Default)]

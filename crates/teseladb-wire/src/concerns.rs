@@ -3,9 +3,9 @@
 //! each one, and the write concern as its errors describe it. Every rule here was measured in a
 //! `refrouter` 9.0.4.
 
+use teseladb_bson::{Document, Value};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, Value};
 
 use crate::error::{
     BAD_VALUE, CommandError, FAILED_TO_PARSE, IDL_FAILED_TO_PARSE, IDL_UNKNOWN_FIELD,

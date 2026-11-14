@@ -2,10 +2,10 @@
 //! the replies and errors of a `refrouter` 9.0.4 (measured). The build itself, from `deleteOnly` to
 //! `ready`, is [`super::index_build`]'s.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry, IndexState};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::crud::{MODIFY_CHUNK_KEYS, Writer, ensure_collection};
 use super::index_build::{self, BuildOp, Stopped};

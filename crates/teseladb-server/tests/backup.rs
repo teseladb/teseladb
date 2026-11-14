@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_raftlog::MemDisk;
 use teseladb_rest::media::{Format, decode};
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backup::Cli;
 use teseladb_server::node::{Node, NodeConfig};
-use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 
 fn with_admin() -> NodeConfig {
     joining(Vec::new())

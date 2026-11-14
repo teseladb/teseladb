@@ -2,10 +2,10 @@
 //! deleting removes them, an update touches only the entries that change, a value of another
 //! numeric type with the same key rewrites the entry, and a refused new version fails.
 
+use teseladb_bson::{RawDoc, RawValue, extjson};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, KeygenError};
 use teseladb_keys::{Direction, PrimaryKey};
-use teseladb_bson::{RawDoc, RawValue, extjson};
 
 fn set() -> IndexSet {
     let def = |fields| IndexDef { fields, buckets: 0, sparse: false, unique: false };
