@@ -5,6 +5,7 @@
 
 pub mod build;
 pub mod delta;
+pub mod docset;
 pub mod geo;
 pub mod keygen;
 pub mod planner_api;

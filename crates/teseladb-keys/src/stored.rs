@@ -156,6 +156,8 @@ fn declared(stored: &[u8]) -> Result<usize, BsonError> {
 ///
 /// [`BsonError::InvalidBson`] when the frame of the BSON or of the table does not hold.
 pub fn split(stored: &[u8]) -> Result<Stored<'_>, BsonError> {
+    // A document's local identifier (009 FR-023) ends the value after its table.
+    let stored = crate::local_id::document_body(stored);
     let n = declared(stored)?;
     let doc = RawDoc::from_stored(&stored[..n])?;
     if n == stored.len() {

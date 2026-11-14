@@ -106,6 +106,10 @@ impl RangeState for CoreSm {
         self.range().map_or(0, RangeState::txn_mark)
     }
 
+    fn next_local_id(&self) -> u32 {
+        self.range().map_or(0, RangeState::next_local_id)
+    }
+
     fn shared_counts(&self) -> Option<std::sync::Arc<teseladb_range::doc_count::Counts>> {
         self.range().and_then(RangeState::shared_counts)
     }

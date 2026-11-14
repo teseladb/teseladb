@@ -332,6 +332,8 @@ impl MultiRangeWorkload {
         let mut host = RangeHost::new(lsm, n.hlc.clone());
         // Half the nodes write the counted format (007 FR-039), as during an upgrade.
         host.set_counted_writes(node.is_multiple_of(2));
+        // Two nodes in three number the new documents of the writes they lead (009 FR-023).
+        host.set_local_ids(!node.is_multiple_of(3));
         let Some(c) = w.cluster_core(node, core) else { return };
         for g in c.group_ids() {
             if let Some(sm) = c.state_machine(g).and_then(as_range) {

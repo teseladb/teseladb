@@ -296,7 +296,7 @@ fn entry_key(index: &Checked, key: &[u8], value: &[u8]) -> Document {
         let cut = teseladb_keys::values_len(rest, &dirs).ok()?;
         let bits = match unique {
             true => teseladb_keys::space::split_unique_value(value).ok()?.1,
-            false => TypeBits::from_bytes(value.to_vec()),
+            false => TypeBits::from_bytes(teseladb_keys::local_id::entry_rest(value).to_vec()),
         };
         teseladb_keys::decode(&rest[..cut], &bits, &dirs).ok()
     });

@@ -187,6 +187,10 @@ pub struct Mem {
     pub txn_rounds: usize,
     /// How many `PutIntents` and one-phase commits the ranges took.
     pub intent_puts: usize,
+    /// The next local identifier of a new document (009 FR-023), as a range's leader gives it;
+    /// with `unnumbered`, the writes keep none, as before every node read the format.
+    pub next_local: u32,
+    pub unnumbered: bool,
     pub one_phase: usize,
     /// The one-phase commits of client transactions, by session and number, with their marks
     /// (008 FR-022), and those a recovery refused.
@@ -1204,9 +1208,16 @@ impl Backend for Mem {
                 keys.iter().map(|k| self.data.get(k).cloned()).collect();
             let current: Vec<Option<(u8, &[u8])>> =
                 values.iter().map(|v| v.as_deref().map(|b| (1u8, b))).collect();
-            let out = bound
+            let mut out = bound
                 .eval_with(&keys, &current, ts)
                 .map_err(|e| CommandError::from_mutation(&e))?;
+            match self.unnumbered {
+                true => teseladb_range::local_ids::settle(&mut out.puts),
+                false => {
+                    self.next_local =
+                        teseladb_range::local_ids::fill(&mut out.puts, self.next_local);
+                }
+            }
             let unread: Vec<Vec<u8>> =
                 bound.reads(&out).into_iter().filter(|k| !keys.contains(k)).collect();
             if unread.is_empty() {

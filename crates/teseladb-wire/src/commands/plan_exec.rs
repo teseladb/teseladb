@@ -20,7 +20,7 @@ use teseladb_plan::logical::Bound;
 use teseladb_plan::rules::{
     Access, IndexMeta, IndexScan, Request, branch_scans, candidates, joined_or,
 };
-use teseladb_plan::stats::{Choice, RangeStats, choose as choose_by_cost};
+use teseladb_plan::stats::{Choice, RangeStats, cheaper_intersection, choose as choose_by_cost};
 use teseladb_range::read::ReadConcern;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
@@ -562,7 +562,21 @@ pub(crate) fn choose<B: Backend + ?Sized>(
         let key = query::documents_of(coll).0;
         let stats = teseladb_keys::space::collection_of(&key)
             .and_then(teseladb_plan::stats::collection_stats);
-        plans = by_estimate(plans, stats.as_ref().map(|(_, s)| &**s), &metas, &read.sort);
+        let stats = stats.as_ref().map(|(_, s)| &**s);
+        // Without hash intersection, an intersection of the sets of local identifiers of two
+        // indexes is planned when the statistics find it far cheaper than any other plan (009
+        // FR-023).
+        let numbered = match (read.intersect, stats) {
+            (false, Some(st)) => {
+                let pairs = teseladb_plan::rules::intersections_of(&request, &metas);
+                cheaper_intersection(&plans, pairs, st, &metas, !read.sort.is_empty())
+            }
+            _ => None,
+        };
+        plans = match numbered {
+            Some(pair) => vec![pair],
+            None => by_estimate(plans, stats, &metas, &read.sort),
+        };
     }
     if plans.len() < 2 {
         let Some(access) = plans.pop().filter(|a| *a != Access::Collscan) else {
@@ -863,7 +877,7 @@ fn run_reading<B: Backend + ?Sized>(
     let batch = if blocking { None } else { budget.map(|_| TRIAL_RESULTS) };
     let limit = if blocking { None } else { read.limit };
     let unbucketed = unbucketed(coll)?;
-    let mut seen: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    let mut seen = teseladb_index::docset::Seen::new();
     let mut ended = true;
     let mut cut = false;
     let mut last_past = false;
@@ -902,7 +916,7 @@ fn run_reading<B: Backend + ?Sized>(
         let mut fetcher = Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit));
         // A multikey scan drops the other entries of a document it gave before fetching it
         // again (`dupsDropped` of its `IXSCAN`, measured on a `refnode` 9.0.4).
-        let mut own: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+        let mut own = teseladb_index::docset::Seen::new();
         for entry in scanned.entries {
             if budget.is_some_and(|b| ran.keys >= b) {
                 ended = false;
@@ -911,19 +925,19 @@ fn run_reading<B: Backend + ?Sized>(
             ran.keys += 1;
             ran.child_keys[child] += 1;
             last_past = entry.is_none();
-            let Some(Entry { pk, key: index_key, doc, .. }) = entry else {
+            let Some(Entry { pk, local, key: index_key, doc, .. }) = entry else {
                 ran.past += 1;
                 ran.child_past[child] += 1;
                 continue;
             };
-            if index.meta.multikey && !own.insert(pk.clone()) {
+            if index.meta.multikey && !own.insert(&pk, local) {
                 ran.child_dups[child] += 1;
                 fetcher.skip(&pk);
                 continue;
             }
             // A scan without filter gives its entries to the `OR`, which drops those it has
             // seen; one with a filter fetches each document first.
-            let seen_before = seen.contains(&pk);
+            let seen_before = seen.contains(&pk, local);
             if residual.is_none() {
                 ran.child_given[child] += 1;
                 if seen_before {
@@ -961,7 +975,7 @@ fn run_reading<B: Backend + ?Sized>(
                 ran.child_given[child] += 1;
             }
             if keep && !seen_before {
-                seen.insert(pk);
+                seen.insert(&pk, local);
                 if read.index_keys {
                     let key = match index.id_index {
                         true => id_key(&bytes)?,
@@ -1079,7 +1093,7 @@ fn intersected<B: Backend + ?Sized>(
     let (last, held) = scans
         .split_last()
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an intersection without scans"))?;
-    let mut sets: Vec<std::collections::BTreeSet<Vec<u8>>> = Vec::new();
+    let mut sets: Vec<teseladb_index::docset::Held> = Vec::new();
     for s in held {
         let read_entries = entries(
             backend,
@@ -1093,8 +1107,9 @@ fn intersected<B: Backend + ?Sized>(
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
-        let pks: std::collections::BTreeSet<Vec<u8>> =
-            read_entries.into_iter().flatten().map(|e| e.pk).collect();
+        let pks = teseladb_index::docset::Held::of(
+            read_entries.iter().flatten().map(|e| (e.pk.as_slice(), e.local)),
+        );
         ran.keys += n;
         ran.past += past;
         ran.child_keys.push(n);
@@ -1109,12 +1124,13 @@ fn intersected<B: Backend + ?Sized>(
     for entry in scanned.entries {
         ran.keys += 1;
         last_keys += 1;
-        let Some(Entry { pk, doc, .. }) = entry else {
+        let Some(Entry { pk, local, doc, .. }) = entry else {
             ran.past += 1;
             last_past += 1;
             continue;
         };
-        if !sets.iter().all(|set| set.contains(&pk)) {
+        // A document with no number in some scan is read and the whole filter decides.
+        if !sets.iter().all(|set| set.may_hold(&pk, local)) {
             continue;
         }
         let Some((dk, bytes)) = fetched(backend, (coll, unbucketed), (&pk, doc), read.concern)?
@@ -1315,12 +1331,19 @@ pub(crate) fn key_after<B: Backend + ?Sized>(
 /// entry's key as `{$meta: "indexKey"}` gives it.
 pub(crate) struct Entry {
     pk: Vec<u8>,
+    /// The local identifier of its document (009 FR-023), when the range gave it one.
+    local: Option<u32>,
     key: Option<Document>,
     /// The entry's values as stored, when decoded.
     values: Option<Vec<Value>>,
     /// The document's key and bytes, when the entry was read with them: an entry of the index of
     /// `_id` is its document.
     doc: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+/// The local identifier a range gave the stored document `value` (009 FR-023), if any.
+fn given_document_id(value: &[u8]) -> Option<u32> {
+    teseladb_keys::local_id::document_id(value).filter(|id| teseladb_keys::local_id::is_given(*id))
 }
 
 /// The key of a document in the index of `_id`: `{_id: value}`.
@@ -1336,7 +1359,9 @@ impl PlanIndex {
     fn values_of(&self, values: &[u8], stored: &[u8]) -> Option<Vec<Value>> {
         let bits = match self.catalog.unique {
             true => teseladb_keys::space::split_unique_value(stored).ok()?.1,
-            false => teseladb_keys::TypeBits::from_bytes(stored.to_vec()),
+            false => teseladb_keys::TypeBits::from_bytes(
+                teseladb_keys::local_id::entry_rest(stored).to_vec(),
+            ),
         };
         teseladb_keys::decode(values, &bits, &self.dirs).ok()
     }
@@ -1386,7 +1411,10 @@ fn range_entries<B: Backend + ?Sized>(
         let read = id_entries(backend, (tenant, collection), span, concern, (most, backward))?;
         return Ok(read
             .into_iter()
-            .map(|(pk, doc)| Entry { pk, key: None, values: None, doc: Some(doc) })
+            .map(|(pk, doc)| {
+                let local = given_document_id(&doc.1);
+                Entry { pk, local, key: None, values: None, doc: Some(doc) }
+            })
             .collect());
     }
     let head = KeyBuilder::index_prefix(tenant, collection, index.entry.id).as_bytes().len();
@@ -1414,7 +1442,9 @@ fn range_entries<B: Backend + ?Sized>(
                 true => teseladb_keys::space::split_unique_value(value).map_err(|_| malformed())?.0,
                 false => &key[cut..],
             };
-            pks.push(Entry { pk: pk.to_vec(), key: found, values, doc: None });
+            let local = teseladb_keys::local_id::entry_id(value)
+                .filter(|id| teseladb_keys::local_id::is_given(*id));
+            pks.push(Entry { pk: pk.to_vec(), local, key: found, values, doc: None });
         }
         match rows.last() {
             _ if most.is_some_and(|m| pks.len() >= m) => break,
@@ -1501,7 +1531,14 @@ fn ordered_points<B: Backend + ?Sized>(
         for (key, value) in rows {
             if r.start.as_slice() <= key.as_slice() && key.as_slice() < end.as_slice() {
                 let pk = key.get(head..).unwrap_or_default().to_vec();
-                out.push(Some(Entry { pk, key: None, values: None, doc: Some((key, value)) }));
+                let local = given_document_id(&value);
+                out.push(Some(Entry {
+                    pk,
+                    local,
+                    key: None,
+                    values: None,
+                    doc: Some((key, value)),
+                }));
             } else {
                 held = true;
             }
@@ -1629,6 +1666,7 @@ fn point_entries<B: Backend + ?Sized>(
     for (step, &i) in order.iter().enumerate() {
         let found = rows.get(i).into_iter().flatten().map(|(k, v)| Entry {
             pk: pks[i].clone(),
+            local: given_document_id(v),
             key: None,
             values: None,
             doc: Some((k.clone(), v.clone())),
@@ -1724,6 +1762,7 @@ fn id_point<B: Backend + ?Sized>(
             .flatten()
             .map(|v| Entry {
                 pk: pk.to_vec(),
+                local: given_document_id(&v),
                 key: None,
                 values: None,
                 doc: Some((key.clone(), v)),
@@ -1755,7 +1794,8 @@ fn ordered_entries<B: Backend + ?Sized>(
         let last = rows.last().map(|(k, _)| k.clone());
         for (key, value) in rows {
             let pk = key.get(head..).unwrap_or_default().to_vec();
-            out.push(Entry { pk, key: None, values: None, doc: Some((key, value)) });
+            let local = given_document_id(&value);
+            out.push(Entry { pk, local, key: None, values: None, doc: Some((key, value)) });
         }
         match last {
             _ if most.is_some_and(|m| out.len() >= m) => break,

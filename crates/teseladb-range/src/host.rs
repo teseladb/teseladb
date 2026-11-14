@@ -26,7 +26,7 @@ use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::ack::{AckWhen, WriteConcern, ack_when, acked};
 use crate::checksum::{CHECKSUM_EVERY_MS, Computer, Rebuild, Report, Tally};
-use crate::command::{Command, DedupKey};
+use crate::command::{Command, DedupKey, Put};
 use crate::dedup;
 use crate::gc::{Periodic, Round};
 use crate::latch::{LatchId, Latches, ReadWait, WaitFor};
@@ -291,6 +291,9 @@ pub(crate) struct Leader {
     /// When it closes its next mark, and when it next writes one in the log (007 FR-012).
     close_at: Nanos,
     log_close_at: Nanos,
+    /// The next local identifier it gives a new document (009 FR-023): past the ones of the
+    /// writes it proposed and the range has not applied yet.
+    next_local: u32,
     /// Until when change streams read the range: it closes marks 200 ms behind its clock till
     /// then (014 FR-004).
     pub(crate) streams_until: Nanos,
@@ -653,6 +656,8 @@ pub struct RangeHost {
     /// Whether every node reads the writes whose records keep their greatest key (FR-022).
     reaching_records: bool,
     counted_resolutions: bool,
+    /// Whether every node reads the writes that number their new documents (009 FR-023).
+    local_ids: bool,
     wall_ms: u64,
     /// Monotonic time of the last call.
     now: Nanos,
@@ -746,6 +751,7 @@ impl RangeHost {
             moving: BTreeSet::new(),
             counted_writes: false,
             reaching_records: false,
+            local_ids: false,
             counted_resolutions: false,
             wall_ms: 0,
             now: Nanos::ZERO,
@@ -885,6 +891,13 @@ impl RangeHost {
     /// write them, counted as well.
     pub fn set_reaching_records(&mut self, on: bool) {
         self.reaching_records = on;
+    }
+
+    /// Whether every node reads the writes that number their new documents (009 FR-023,
+    /// [`crate::command::FORMAT_LOCAL_IDS`]): only then does a leader give them local
+    /// identifiers; otherwise they keep none.
+    pub fn set_local_ids(&mut self, on: bool) {
+        self.local_ids = on;
     }
 
     /// Whether a transaction's commit says how it changes each collection's live documents
@@ -1595,6 +1608,7 @@ impl RangeHost {
             load,
             close_at: Nanos::ZERO,
             log_close_at: Nanos::ZERO,
+            next_local: 0,
             streams_until: Nanos::ZERO,
             last_closed: (ZERO, 0),
             fencing: Vec::new(),

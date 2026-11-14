@@ -573,6 +573,7 @@ impl DataCore {
         self.host.set_moving(self.relocations.leaving());
         self.host.set_counted_writes(ranges.counted_writes);
         self.host.set_reaching_records(ranges.reaching_records);
+        self.host.set_local_ids(ranges.local_ids);
         self.host.set_counted_resolutions(ranges.counted_resolutions);
         self.collections.clone_from(&ranges.collections);
         if let Some(ms) = ranges.history_ms {

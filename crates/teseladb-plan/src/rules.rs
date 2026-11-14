@@ -99,6 +99,19 @@ pub fn candidates(request: &Request<'_>, indexes: &[IndexMeta]) -> Vec<Access> {
     found.into_iter().map(Access::Index).chain(pairs).collect()
 }
 
+/// The intersections of two index scans a filter allows (009 FR-023), as [`candidates`] makes
+/// them with hash intersection on; none with a `hint` or for a rooted `$or`.
+pub fn intersections_of(request: &Request<'_>, indexes: &[IndexMeta]) -> Vec<Access> {
+    let empty = Document::new();
+    let parsed = request.parsed.unwrap_or(&empty);
+    if request.hint.is_some() || branch_scans(request, indexes).is_some() {
+        return Vec::new();
+    }
+    let clauses = conjuncts(parsed);
+    let found = scans_of(&clauses, request, indexes, true);
+    intersections(&clauses, &found, !request.sort.is_empty())
+}
+
 /// The scans each clause of a rooted `$or` may take, in the order RefDb makes them (RefDb
 /// plans each clause on its own, by trial, `SUBPLAN`); `None` for a filter that is no rooted
 /// `$or`, or with a `hint`. A clause no index serves has no scans.

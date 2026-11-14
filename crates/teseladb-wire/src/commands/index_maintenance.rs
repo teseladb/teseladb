@@ -24,7 +24,7 @@ use super::Backend;
 use crate::error::{self, CommandError, DUPLICATE_KEY, INTERNAL_ERROR, WRITE_CONFLICT};
 
 /// Value type of an index entry (a document is [`super::mutation::DOCUMENT`]).
-pub const INDEX_ENTRY: u8 = 2;
+pub const INDEX_ENTRY: u8 = teseladb_keys::local_id::INDEX_ENTRY_VALUE;
 
 /// Value type of the mark that an index is multikey on a path (009 FR-001, 010 FR-001): one
 /// entry per field and path through an array, which the planner reads.
@@ -218,12 +218,13 @@ impl Maintainer {
     /// no document); an index that refuses `new` fails the write, and so does a unique key that
     /// another document holds (`stored`, the versions the leader read) or that an earlier
     /// statement of the write took (`guard`). The entries end in the primary key `pk`, or in the
-    /// document's `_id` without one.
+    /// document's `_id` without one, and the new ones carry the local identifier `local` of `new`
+    /// (009 FR-023), unless it is [`teseladb_keys::local_id::NO_LOCAL_ID`].
     pub fn changes<'a, 's>(
         &self,
         old: Option<RawDoc<'a>>,
         new: Option<RawDoc<'a>>,
-        pk: Option<&PrimaryKey>,
+        (pk, local): (Option<&PrimaryKey>, u32),
         guard: &mut UniqueGuard,
         stored: &dyn Fn(&[u8]) -> Option<&'s [u8]>,
     ) -> Result<(Vec<Put>, Vec<Vec<u8>>), CommandError> {
@@ -287,10 +288,14 @@ impl Maintainer {
                 }));
             }
             deletes.extend(gone);
+            let numbered = |value: Vec<u8>| match local {
+                teseladb_keys::local_id::NO_LOCAL_ID => value,
+                id => teseladb_keys::local_id::with_entry_id(id, &value),
+            };
             puts.extend(delta.add.into_iter().map(|(k, value)| Put {
                 key: k.as_bytes().to_vec(),
                 value_type: INDEX_ENTRY,
-                value,
+                value: numbered(value),
             }));
             if let Some(v) = after {
                 puts.extend(multikey_marks(&kept.set, &kept.pattern, v.doc));

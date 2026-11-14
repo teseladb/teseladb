@@ -22,6 +22,7 @@ mod bucket;
 mod decode;
 mod encode;
 pub mod fields;
+pub mod local_id;
 pub mod space;
 pub mod stored;
 mod typebits;
