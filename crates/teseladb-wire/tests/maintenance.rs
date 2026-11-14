@@ -1,6 +1,6 @@
-//! The maintenance commands of 006 FR-033 (`dataSize`, `logRotate`, `dropConnections`,
-//! `lockInfo`, `connPoolStats`, `isdbgrid`, `killAllSessionsByPattern`), as a `refrouter` 9.0.4
-//! answers them (measured).
+//! The maintenance commands of 006 FR-033 (`dataSize`, `logRotate`, `dropConnections`, `lockInfo`,
+//! `connPoolStats`, `isdbgrid`, `killAllSessionsByPattern`), as the reference router 9.0.4 answers
+//! them (measured).
 
 mod common;
 
@@ -41,7 +41,8 @@ fn five() -> Mem {
     m
 }
 
-/// The cluster presented as a replica set (018), whose nodes answer as a `refnode`.
+/// The cluster presented as a replica set (018), whose nodes answer as a reference replica set
+/// member.
 fn as_member(m: &mut Mem) {
     m.shards = vec!["node1".into(), "node2".into(), "node3".into()];
     let present = d(&[("mode", s("replicaset")), ("setName", s("rs0"))]);
@@ -50,10 +51,10 @@ fn as_member(m: &mut Mem) {
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
 }
 
-/// A `refrouter` 9.0.4 stops the count at the limits as its shard does but answers without
+/// The reference router 9.0.4 stops the count at the limits as its shard does but answers without
 /// `estimate` and `maxReached` (measured on 03-11-2026).
 #[test]
-fn data_size_through_a_refrouter_has_no_estimate_nor_max_reached() {
+fn data_size_through_the_reference_router_has_no_estimate_nor_max_reached() {
     let mut m = five();
     for extra in [None, Some(("estimate", Value::Boolean(true))), Some(("maxObjects", 1.into()))] {
         let mut cmd = doc(&[("dataSize", s("ds.c"))]);
@@ -118,7 +119,7 @@ fn data_size_counts_bytes_and_documents() {
 }
 
 #[test]
-fn admin_commands_without_state_answer_as_a_refrouter() {
+fn admin_commands_without_state_answer_as_the_reference_router() {
     let mut m = five();
     for cmd in [
         doc(&[("logRotate", 1.into())]),
@@ -153,7 +154,7 @@ fn admin_commands_without_state_answer_as_a_refrouter() {
     let r = m.run("admin", doc(&[("lockInfo", 1.into())]));
     assert_eq!(r, doc(&[("lockInfo", Value::Array(vec![])), ("ok", Value::Double(1.0))]));
     let r = m.run("admin", doc(&[("connPoolStats", 1.into())]));
-    // 32-bit counters, then 64-bit ones, as a `refrouter` 9.0.4 types them (measured).
+    // 32-bit counters, then 64-bit ones, as the reference router 9.0.4 types them (measured).
     assert_eq!(field(&r, "totalCreated"), &Value::Int32(0));
     assert_eq!(field(&r, "totalConnectionAcquisitionRequests"), &Value::Int64(0));
     assert_eq!(field(&r, "numReplicaSetMonitorsCreated"), &Value::Int32(0));
@@ -186,8 +187,8 @@ fn sessions_are_killed_by_pattern() {
     let other = Value::Binary { subtype: 0, bytes: vec![1; 32] };
     let (_, k) = by(&mut m, vec![d(&[("uid", other.clone())])]);
     assert_eq!(k, vec![KillScope::Sessions(vec![SessionMatch::owner([1; 32])])]);
-    // A `uid` next to an `lsid` reaches every session of that `uid` (measured on a `refrouter`
-    // 9.0.4 with authentication on 03-11-2026).
+    // A `uid` next to an `lsid` reaches every session of that `uid` (measured on the reference
+    // router 9.0.4 with authentication on 03-11-2026).
     let (_, k) = by(&mut m, vec![d(&[("lsid", lsid(7)), ("uid", other)])]);
     assert_eq!(k, vec![KillScope::Sessions(vec![SessionMatch::owner([1; 32])])]);
     // `users` and `roles` choose no session: they are whom the command acts for (measured).
@@ -315,7 +316,7 @@ fn sessions_are_killed_by_pattern() {
 }
 
 #[test]
-fn rotate_certificates_answers_as_refnode_and_reports_the_failure() {
+fn rotate_certificates_answers_as_the_reference_member_and_reports_the_failure() {
     let mut m = Mem::new();
     let ok = doc(&[("ok", Value::Double(1.0))]);
     assert_eq!(m.run("admin", doc(&[("rotateCertificates", 1.into())])), ok);
@@ -356,9 +357,9 @@ fn rotate_certificates_answers_as_refnode_and_reports_the_failure() {
     assert_eq!(m.rotations.len(), 2);
 }
 
-/// The limits of `dataSize` taken as whole numbers (a negative one stops at the first document,
-/// one between -1 and 1 is none), `maxReached` when they stopped the count, `estimate` on a
-/// collection that exists, and the types of the three (measured on a `refnode` 9.0.4 on
+/// The limits of `dataSize` taken as whole numbers (a negative one stops at the first document, one
+/// between -1 and 1 is none), `maxReached` when they stopped the count, `estimate` on a collection
+/// that exists, and the types of the three (measured on a reference replica set member 9.0.4 on
 /// 03-11-2026): what a member of a replica set answers (018).
 #[test]
 fn data_size_limits_estimate_and_max_reached() {
@@ -417,8 +418,8 @@ fn data_size_limits_estimate_and_max_reached() {
     }
 }
 
-/// A key pattern that is not `_id`'s is refused only on a collection that exists, and
-/// `logRotate` takes the generic arguments (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// A key pattern that is not `_id`'s is refused only on a collection that exists, and `logRotate`
+/// takes the generic arguments (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn data_size_checks_the_key_pattern_of_a_collection_that_exists() {
     let mut m = five();

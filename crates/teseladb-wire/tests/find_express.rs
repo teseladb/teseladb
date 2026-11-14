@@ -1,7 +1,8 @@
-//! A `find` of one `_id` by equality goes without the planner (H-013 of the native tests, as
-//! RefDb's express path): it answers what the planned read answers for every kind of `_id`,
-//! with a sort or without one and with a simple projection, and the commands it does not take (a
-//! projection with an operator, a collation, a `skip`, a `batchSize`) still answer as before.
+//! A `find` of one `_id` by equality goes without the planner (H-013 of the native tests, as the
+//! reference server's express path): it answers what the planned read answers for every kind of
+//! `_id`, with a sort or without one and with a simple projection, and the commands it does not
+//! take (a projection with an operator, a collation, a `skip`, a `batchSize`) still answer as
+//! before.
 
 mod common;
 
@@ -173,7 +174,7 @@ fn an_aggregate_by_id_answers_what_the_planned_read_answers() {
                 }
             }
             // The express path reads no index key, also for an `_id` that is a document
-            // (measured on a `refnode` 9.0.4).
+            // (measured on a reference replica set member 9.0.4).
             let keyed = format!(
                 r#"{{"aggregate":"{coll}","pipeline":[{{"$match":{{"_id":{id}}}}},{{"$set":{{"m":{{"$meta":"indexKey"}}}}}}],"cursor":{{}}}}"#
             );

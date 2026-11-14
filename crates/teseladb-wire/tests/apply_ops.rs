@@ -1,5 +1,5 @@
 //! `applyOps` over the in-memory node of `common` (018 FR-011, T012), with the replies of a
-//! replica set of RefDb 9.0.4 (measured on 02-11-2026).
+//! replica set of the reference server 9.0.4 (measured on 02-11-2026).
 
 mod common;
 
@@ -69,7 +69,7 @@ fn entries_apply_one_by_one() {
 }
 
 #[test]
-fn failures_as_refdb_gives_them() {
+fn failures_as_the_reference_gives_them() {
     let mut m = Mem::new();
     let r = m.run("ap", doc(&[("create", Value::from("t"))]));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
@@ -129,7 +129,7 @@ fn failures_as_refdb_gives_them() {
 /// An entry that fails the command (a namespace that does not exist, an unknown `op`) stops it
 /// there: the reply gives `applied` with the entries run up to it, the error, and `results` with
 /// `false` for it; the entries before it stay applied (measured on a replica set of
-/// `ref:9.0.4`, 03-11-2026).
+/// the reference server 9.0.4, 03-11-2026).
 #[test]
 fn an_entry_that_fails_the_command_stops_it() {
     let mut m = Mem::new();
@@ -163,8 +163,8 @@ fn an_entry_that_fails_the_command_stops_it() {
     assert_eq!(ids, [Value::Int32(1), Value::Int32(3)]);
 }
 
-/// The refusals of RefDb 9.0.4 (measured on 03-11-2026, `ap.js`): an entry that is not a
-/// document is 14, an update without `o2` is 4 with the entry, a `c` entry with a command an
+/// The refusals of the reference server 9.0.4 (measured on 03-11-2026, `ap.js`): an entry that is
+/// not a document is 14, an update without `o2` is 4 with the entry, a `c` entry with a command an
 /// oplog never carries is 2; the replacement of a document that is not there does not apply.
 #[test]
 fn entries_that_do_not_apply() {
@@ -214,11 +214,11 @@ fn entry(n: i32) -> Document {
     Document::new().with("op", "i").with("ns", "ap.t").with("o", id(n))
 }
 
-/// RefDb 9.0.4 checks `op` and `ns` of every entry before applying any; the other fields of an
-/// entry are read when its turn comes, and an error then ends the command with what applied so
-/// far (measured on 03-11-2026, `ap9.js`, `ap10.js` and `ap11.js` in the lane's notes).
+/// The reference server 9.0.4 checks `op` and `ns` of every entry before applying any; the other
+/// fields of an entry are read when its turn comes, and an error then ends the command with what
+/// applied so far (measured on 03-11-2026, `ap9.js`, `ap10.js` and `ap11.js` in the lane's notes).
 #[test]
-fn malformed_entries_as_refdb_finds_them() {
+fn malformed_entries_as_the_reference_finds_them() {
     let mut m = Mem::new();
     m.run("ap", doc(&[("create", Value::from("t"))]));
     let first = |m: &mut Mem, bad: Value| apply(m, vec![Value::Document(entry(1)), bad]);
@@ -307,9 +307,9 @@ fn malformed_entries_as_refdb_finds_them() {
     assert_eq!(field(&r, "results.0"), &Value::Boolean(false));
 }
 
-/// A write error or a diff RefDb does not write ends the command with its error and what
-/// applied so far; an array subdiff on a field that is not an array leaves it null (measured on
-/// 03-11-2026, `ap4.js` to `ap8.js`).
+/// A write error or a diff the reference server does not write ends the command with its error and
+/// what applied so far; an array subdiff on a field that is not an array leaves it null (measured
+/// on 03-11-2026, `ap4.js` to `ap8.js`).
 #[test]
 fn errors_while_applying_end_the_command() {
     let mut m = Mem::new();

@@ -1,6 +1,6 @@
 //! Unique secondary indexes in the writes (009 T010, FR-004): a document whose key another one
-//! holds, or that an earlier statement of the same write took, is a `DuplicateKey` with the
-//! index's `keyPattern` and `keyValue` (message measured on a `refrouter` 9.0.4); `null` and a
+//! holds, or that an earlier statement of the same write took, is a `DuplicateKey` with the index's
+//! `keyPattern` and `keyValue` (message measured on the reference router 9.0.4); `null` and a
 //! missing field are the same key; a document that moves off a key frees it; a build over
 //! duplicates fails with 11000 and leaves no index.
 

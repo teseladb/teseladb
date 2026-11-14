@@ -1,7 +1,8 @@
 //! `admin.system.users`, `admin.system.roles` and `admin.system.version` generated from Group 0,
-//! `getParameter` of `authSchemaVersion` and `_mergeAuthzCollections`, which `refdump
-//! --dumpDbUsersAndRoles` and `refrestore --restoreDbUsersAndRoles` use (013 T043, FR-030), as
-//! RefDb 9.0.4 answers them (measured on 31-10-2026 on a `refnode` and a `refrouter`).
+//! `getParameter` of `authSchemaVersion` and `_mergeAuthzCollections`, which the reference dump
+//! tool --dumpDbUsersAndRoles` and the reference restore tool --restoreDbUsersAndRoles` use (013
+//! T043, FR-030), as the reference server 9.0.4 answers them (measured on 31-10-2026 on a reference
+//! replica set member and the reference router).
 
 mod common;
 
@@ -227,7 +228,7 @@ fn the_auth_schema_version_is_5_and_cannot_change() {
 }
 
 /// Copies the stored users and roles of `app` into `admin.tempusers` and `admin.temproles`,
-/// as `refrestore` does with the files of a dump, with `edit` applied to the copies.
+/// as the reference restore tool does with the files of a dump, with `edit` applied to the copies.
 fn copy_to_temp(m: &mut Mem, edit: impl Fn(&mut Vec<Document>, &mut Vec<Document>)) {
     let mut users =
         first_batch(&m.run(ADMIN, json(r#"{"find": "system.users", "filter": {"db": "app"}}"#)));
@@ -327,8 +328,8 @@ fn merging_without_drop_only_adds_what_is_missing() {
     assert_eq!(u3.user_id, None, "a merged user is stored as given, without a userId");
     let roles = first_batch(&m.run(ADMIN, json(r#"{"find": "system.roles", "filter": {}}"#)));
     assert!(roles[0].get("authenticationRestrictions").is_none());
-    // A `refrouter` refuses to drop collections of `admin`, the temporary ones too (measured on
-    // 9.0.4): `refrestore` leaves them there.
+    // The reference router refuses to drop collections of `admin`, the temporary ones too (measured
+    // on 9.0.4): the reference restore tool leaves them there.
     for coll in ["tempusers", "temproles", "other"] {
         let r = m.run(ADMIN, doc(&[("drop", s(coll))]));
         let msg = "Cannot drop collection in 'admin' database in sharded cluster";
@@ -396,7 +397,7 @@ fn a_missing_temporary_collection_counts_as_empty() {
 }
 
 #[test]
-fn merge_errors_as_refdb() {
+fn merge_errors_as_the_reference() {
     let mut m = seeded();
     let cases: [(&str, &str, (i32, &str, &str)); 9] = [
         (
@@ -670,7 +671,7 @@ fn more_malformed_documents() {
     assert_eq!(Document::from(teseladb_bson::RawDoc::from_bytes(&stored).unwrap()), u);
 }
 
-/// 013 T043: `aggregate` reads the users and roles of Group 0, as `refdump
+/// 013 T043: `aggregate` reads the users and roles of Group 0, as the reference dump tool
 /// --dumpDbUsersAndRoles` does with `[{$match: {db: …}}]`.
 #[test]
 fn aggregate_reads_the_users_and_roles_of_group_0() {

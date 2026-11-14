@@ -1,7 +1,7 @@
-//! The handshake as a `refrouter` answers it (006 T008, FR-003, FR-004; contract
+//! The handshake as the reference router answers it (006 T008, FR-003, FR-004; contract
 //! `hello-response.md`): fields and their order, `isMaster`, compression, client metadata, the
-//! awaitable `hello`, `loadBalanced`, and the errors a `refrouter` gives (measured against RefDb
-//! 7.0's `refrouter`; the version fields are 9.0's).
+//! awaitable `hello`, `loadBalanced`, and the errors the reference router gives (measured against
+//! the reference server 7.0's the reference router; the version fields are 9.0's).
 
 use teseladb_bson::{Document, Value};
 use teseladb_wire::connection::{Connection, Request};
@@ -63,7 +63,7 @@ fn error_of(d: &Document) -> (i32, String) {
 }
 
 #[test]
-fn hello_fields_in_refrouter_order() {
+fn hello_fields_in_the_reference_router_order() {
     let mut c = Connection::new(17);
     let d = reply(&mut c, hello());
     assert_eq!(
@@ -219,7 +219,11 @@ fn awaitable_hello() {
     let other = Document::new().with("processId", Value::ObjectId([1; 12])).with("counter", 0i64);
     let a = run(&mut c, hello().with("topologyVersion", other).with("maxAwaitTimeMS", 500));
     assert!(matches!(a, Action::Reply(_)));
-    // Errors, as a refrouter gives them.
+    // Errors, as the reference router gives them.
+    let newer = format!(
+        "Received a topology version with counter: 5 which is greater than the {} topology version counter: 0",
+        teseladb_names::ROUTER
+    );
     let cases: Vec<(Document, i32, &str)> = vec![
         (
             hello().with("maxAwaitTimeMS", 5),
@@ -239,7 +243,7 @@ fn awaitable_hello() {
         (
             hello().with("topologyVersion", tv(Value::Int64(5))).with("maxAwaitTimeMS", 5),
             51761,
-            "Received a topology version with counter: 5 which is greater than the refrouter topology version counter: 0",
+            &newer,
         ),
         (
             hello().with("topologyVersion", tv(Value::Int64(0))).with("maxAwaitTimeMS", -1),
@@ -350,7 +354,13 @@ fn op_query_answers() {
     let Action::Reply(d) = dispatch(&mut c, &req, &node()) else { panic!() };
     assert_eq!(
         error_of(&d),
-        (352, "Unsupported OP_QUERY command: ping. The client driver may require an upgrade. For more details see https://dochub.refdb.org/core/legacy-opcode-removal".into())
+        (
+            352,
+            format!(
+                "Unsupported OP_QUERY command: ping. The client driver may require an upgrade. For more details see {}",
+                teseladb_names::DOC_LEGACY_OPCODES
+            )
+        )
     );
     c.receive(&q("test.items", Document::new().with("a", 1)));
     let req = c.next_request().unwrap().unwrap();
@@ -383,7 +393,7 @@ fn database_and_unknown_commands() {
     assert_eq!(error_of(&d), (73, "Invalid database name: ''".into()));
     let d = reply(&mut c, Document::new().with("nosuch", 1).with("$db", "admin"));
     assert_eq!(error_of(&d), (59, "no such cmd: nosuch".into()));
-    // A `refrouter` 9.0.4 has no `reIndex` (009 FR-020, measured).
+    // The reference router 9.0.4 has no `reIndex` (009 FR-020, measured).
     let d = reply(&mut c, Document::new().with("reIndex", "c").with("$db", "t"));
     assert_eq!(error_of(&d), (59, "no such cmd: reIndex".into()));
     assert_eq!(keys(&d), ["ok", "errmsg", "code", "codeName", "$clusterTime", "operationTime"]);
@@ -402,7 +412,7 @@ fn negotiation_keeps_only_enabled_compressors() {
 }
 
 #[test]
-fn field_types_as_refrouter_checks_them() {
+fn field_types_as_the_reference_router_checks_them() {
     let tv = |d: Document| hello().with("topologyVersion", d).with("maxAwaitTimeMS", 5);
     let cases: Vec<(Document, i32, &str)> = vec![
         (
@@ -442,9 +452,8 @@ fn field_types_as_refrouter_checks_them() {
         let d = reply(&mut c, cmd);
         assert_eq!(error_of(&d), (code, msg.into()));
     }
-    // Accepted: a user for saslSupportedMechs (a `refrouter` 9.0 lists its mechanisms for any
-    // user), a short
-    // application name, `helloOk: 1`, a fractional maxAwaitTimeMS.
+    // Accepted: a user for saslSupportedMechs (the reference router 9.0 lists its mechanisms for
+    // any user), a short application name, `helloOk: 1`, a fractional maxAwaitTimeMS.
     let mut c = Connection::new(1);
     let client = Document::new()
         .with("application", Document::new().with("name", "app"))

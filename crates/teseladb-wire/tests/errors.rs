@@ -31,7 +31,7 @@ fn error_document_order_and_labels() {
 }
 
 #[test]
-fn every_range_error_has_its_refdb_code() {
+fn every_range_error_has_the_reference_code() {
     let plain = RangeContext::default();
     let retry = RangeContext { retryable_write: true, ..RangeContext::default() };
     let expired = RangeContext { max_time_expired: true, ..retry };

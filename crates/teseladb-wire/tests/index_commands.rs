@@ -1,6 +1,6 @@
 //! `createIndexes`, `listIndexes` and `dropIndexes` (009 T013, FR-006, FR-007): the replies and
-//! errors of a `refrouter` 9.0.4 (measured), the backfill of the documents already there, the
-//! entries the writes keep afterwards and the entries a drop removes.
+//! errors of the reference router 9.0.4 (measured), the backfill of the documents already there,
+//! the entries the writes keep afterwards and the entries a drop removes.
 
 mod common;
 
@@ -64,7 +64,8 @@ fn an_index_is_built_over_the_documents_and_kept_by_the_writes() {
     m.run(DB, Document::new().with("insert", "c").with("documents", arr(docs)));
     let c = m.catalog.collections.values().next().unwrap().id;
     let r = create(&mut m, vec![spec(a1(), "a_1")]);
-    // The node's own reply goes first under `raw`, as a `refrouter` gives its shard's (D-102).
+    // The node's own reply goes first under `raw`, as the reference router gives its shard's
+    // (D-102).
     let own = Document::new()
         .with("numIndexesBefore", 1)
         .with("numIndexesAfter", 2)
@@ -95,7 +96,7 @@ fn an_index_is_built_over_the_documents_and_kept_by_the_writes() {
 }
 
 #[test]
-fn conflicts_and_bad_requests_answer_as_a_refrouter() {
+fn conflicts_and_bad_requests_answer_as_the_reference_router() {
     let mut m = Mem::new();
     create(&mut m, vec![spec(a1(), "a_1")]);
     let r = create(&mut m, vec![spec(a1(), "other")]);
@@ -182,8 +183,8 @@ fn drops_remove_the_entries_and_the_catalog_entry() {
 }
 
 /// Two specifications of one `createIndexes` that are the same index, or that conflict as an
-/// existing index would, fail the build and create nothing (measured on a `refrouter` 9.0.4 on
-/// 03-11-2026).
+/// existing index would, fail the build and create nothing (measured on the reference router 9.0.4
+/// on 03-11-2026).
 #[test]
 fn conflicting_specifications_of_one_command_fail_the_build() {
     let mut m = Mem::new();

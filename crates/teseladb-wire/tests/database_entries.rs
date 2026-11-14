@@ -1,4 +1,4 @@
-//! Databases in the catalog (D-077, FR-006, FR-027), as a `refrouter` 9.0.4 keeps them in
+//! Databases in the catalog (D-077, FR-006, FR-027), as the reference router 9.0.4 keeps them in
 //! `config.databases` (measured): a write records its database even when it writes nothing, a
 //! read does not, a database outlives its last collection until `dropDatabase`, two databases
 //! may not differ only in case (13297), and commands on a missing database name it.
@@ -108,7 +108,8 @@ fn databases_that_differ_only_in_case_fail_the_whole_command() {
         assert_eq!(error(&r), (13297, CLASH.to_owned()), "{cmd:?}");
         assert_eq!(field(&r, "codeName"), &s("DatabaseDifferCase"));
         // The router refuses the database: no shard's reply under `raw`, the fields as any error
-        // (a `refrouter` 9.0.4's `createIndexes`, battery's crud-database-entries on 04-11-2026).
+        // (the reference router 9.0.4's `createIndexes`, battery's crud-database-entries on
+        // 04-11-2026).
         let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
         assert_eq!(keys, ["ok", "errmsg", "code", "codeName"], "{cmd:?}");
     }
@@ -159,8 +160,8 @@ fn commands_on_a_missing_database_name_it() {
         };
         let r = m.run(&db("none"), missing);
         assert_eq!(error(&r), (26, "database none not found".to_owned()), "{name}");
-        // The router answers it, with the fields of any error (a `refrouter` 9.0.4's `dropIndexes`,
-        // battery's crud-database-entries on 04-11-2026).
+        // The router answers it, with the fields of any error (the reference router 9.0.4's
+        // `dropIndexes`, battery's crud-database-entries on 04-11-2026).
         let keys: Vec<&str> = r.iter().map(|(k, _)| k).collect();
         assert_eq!(keys, ["ok", "errmsg", "code", "codeName"], "{name}");
         let r = m.run(&db("empty"), cmd);

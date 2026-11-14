@@ -46,7 +46,7 @@ fn a_histogram_counts_points_and_intervals() {
 }
 
 #[test]
-fn values_of_several_types_follow_refdb_order() {
+fn values_of_several_types_follow_the_reference_order() {
     let mut values = ints(0..100);
     values.extend((0..100).map(|i| Value::String(format!("s{i:03}"))));
     let f = FieldStats::build(values);

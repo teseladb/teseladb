@@ -1,5 +1,5 @@
-//! `$text` with `find` and `aggregate` over a text index (011 FR-001, T029), against a RefDb
-//! 9.0.4 replica set (measured 02-11-2026 with `scratchpad/lane3m/m37.js`).
+//! `$text` with `find` and `aggregate` over a text index (011 FR-001, T029), against the reference
+//! server 9.0.4 replica set (measured 02-11-2026 with `scratchpad/lane3m/m37.js`).
 
 mod common;
 
@@ -115,7 +115,7 @@ fn aggregate_gives_the_score_to_the_first_match() {
 }
 
 #[test]
-fn text_errors_are_refds() {
+fn text_errors_are_the_reference_ones() {
     let mut m = setup();
     let cases: Vec<(&str, i32, &str)> = vec![
         (
@@ -153,7 +153,8 @@ fn text_errors_are_refds() {
 }
 
 /// `$text` next to the operators the node's extensions run (`$expr`, `$where`, geometry,
-/// `$sampleRate`) and on a view, as a RefDb 9.0.4 replica set gives them (measured 03-11-2026, `scratchpad/lane3s/m89.js`).
+/// `$sampleRate`) and on a view, as the reference server 9.0.4 replica set gives them (measured
+/// 03-11-2026, `scratchpad/lane3s/m89.js`).
 #[test]
 fn text_runs_next_to_the_other_operators() {
     let mut m = Mem::new();
@@ -252,8 +253,8 @@ fn joined_setup(sharded: bool) -> Mem {
     m
 }
 
-/// `v` with each array of documents that all have an integer `_id` in the order of `_id`: RefDb
-/// gives the documents of a `$text` in the order of its hash table, which varies.
+/// `v` with each array of documents that all have an integer `_id` in the order of `_id`: the
+/// reference server gives the documents of a `$text` in the order of its hash table, which varies.
 fn by_id(v: Value) -> Value {
     match v {
         Value::Document(d) => {
@@ -343,7 +344,7 @@ fn union(spec: &str, pre: Option<&str>) -> String {
 const NO_DOCS: Option<&str> = Some(r#"{"$match": {"_id": 99}}"#);
 
 /// The `$text` cases of the pipelines of `$lookup`, `$unionWith` and `$facet`, with the command,
-/// whether the order of the documents counts, and RefDb's answer (`RUN ` stands for
+/// whether the order of the documents counts, and the reference server's answer (`RUN ` stands for
 /// [`RUNNING`]).
 fn joined_cases() -> Vec<(String, bool, &'static str)> {
     let both = r#"[{"_id": 1, "k": 1, "x": X}, {"_id": 2, "k": 2, "x": X}]"#;
@@ -1011,13 +1012,14 @@ fn joined_cases() -> Vec<(String, bool, &'static str)> {
 }
 
 /// `$text` first in the pipeline of a `$lookup` or `$unionWith` reads the text index of the
-/// collection that stage reads, and in a `$facet` fails, as a RefDb 9.0.4 replica set and a
-/// `refrouter` of two shards answer (measured 03-11-2026, `scratchpad/lane3t/m97.js` to `m107.js`;
-/// 011 T054). The foreign collection `f` without and with a shard key. A `$sort` by the score
-/// then a projection without it follows the `refrouter` (a `refnode` alone gives 16410 for
-/// `$computed0`, as with `randVal` in `tests/aggregate/meta_sort.out`).
+/// collection that stage reads, and in a `$facet` fails, as the reference server 9.0.4 replica set
+/// and a the reference router of two shards answer (measured 03-11-2026, `scratchpad/lane3t/m97.js`
+/// to `m107.js`; 011 T054). The foreign collection `f` without and with a shard key. A `$sort` by
+/// the score then a projection without it follows the reference router (a reference replica set
+/// member alone gives 16410 for `$computed0`, as with `randVal` in
+/// `tests/aggregate/meta_sort.out`).
 #[test]
-fn text_in_joined_pipelines_answers_as_refdb() {
+fn text_in_joined_pipelines_answers_as_the_reference() {
     for sharded in [false, true] {
         let mut m = joined_setup(sharded);
         let mut wrong = Vec::new();

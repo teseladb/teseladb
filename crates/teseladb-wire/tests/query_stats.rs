@@ -1,4 +1,4 @@
-//! `$queryStats` through the dispatcher (010 FR-023), as a `refrouter` 9.0.4 counts queries
+//! `$queryStats` through the dispatcher (010 FR-023), as the reference router 9.0.4 counts queries
 //! (measured on 02-11-2026 on database `qsk`): a query counts when its cursor ends, with every
 //! batch; its key has the read concern, the write concern of an `aggregate` and the client's
 //! metadata; the parameters `internalQueryStatsRateLimit` and `internalQueryStatsSampleRate`
@@ -18,7 +18,7 @@ use teseladb_wire::msg::OpMsg;
 const DB: &str = "qsk";
 const RATE_LIMIT: &str = "internalQueryStatsRateLimit";
 const SAMPLE_RATE: &str = "internalQueryStatsSampleRate";
-const CLIENT: &str = r#"{"application":{"name":"refshell 2.14.0"},"driver":{"name":"nodejs","version":"7.5.0"},"os":{"type":"Linux"}}"#;
+const CLIENT: &str = r#"{"application":{"name":"shell 2.14.0"},"driver":{"name":"nodejs","version":"7.5.0"},"os":{"type":"Linux"}}"#;
 
 fn cmd(text: &str) -> Document {
     extjson::parse(text).expect("a command")
@@ -180,8 +180,8 @@ fn an_aggregate_key_has_options_in_the_measured_order() {
 
 #[test]
 fn a_hint_is_part_of_the_key_after_the_client() {
-    // RefDb 9.0.4 (02-11-2026): the hint, outside the shape, after `client` and before
-    // `maxTimeMS`; an index's name as `{$hint: name}`; each hint its own entry.
+    // The reference server 9.0.4 (02-11-2026): the hint, outside the shape, after `client` and
+    // before `maxTimeMS`; an index's name as `{$hint: name}`; each hint its own entry.
     let mut c = Client::new();
     c.set(-1, 0.0);
     c.ok(DB, r#"{"createIndexes":"c","indexes":[{"key":{"a":1},"name":"a_1"}]}"#);
@@ -232,7 +232,7 @@ fn the_parameters_decide_which_queries_count() {
 }
 
 #[test]
-fn set_parameter_refuses_what_refdb_refuses() {
+fn set_parameter_refuses_what_the_reference_refuses() {
     let mut c = Client::new();
     let cases = [
         (
@@ -438,8 +438,9 @@ fn find_on_q(c: &mut Client, part: &str) -> Document {
 
 #[test]
 fn a_shape_runs_from_the_plan_cache_once_its_entry_is_active() {
-    // RefDb 9.0.4, six runs of `{a: 3, b: {$gt: 3}}`: the first two plans compete (the first
-    // leaves an inactive entry, the second makes it active), the other four take the cached plan.
+    // The reference server 9.0.4, six runs of `{a: 3, b: {$gt: 3}}`: the first two plans compete
+    // (the first leaves an inactive entry, the second makes it active), the other four take the
+    // cached plan.
     let mut c = Client::new();
     c.set(-1, 0.0);
     fifty(&mut c);
@@ -469,7 +470,8 @@ fn a_cached_plan_that_works_ten_times_more_is_planned_again() {
         (100..2100).map(|i| format!(r#"{{"_id":{i},"a":4,"b":{i}}}"#)).collect();
     c.ok(DB, &format!(r#"{{"insert":"q","documents":[{}]}}"#, more.join(",")));
     c.ok(DB, query);
-    // RefDb 9.0.4 drops the entry and keeps nothing of the plans that competed again.
+    // The reference server 9.0.4 drops the entry and keeps nothing of the plans that competed
+    // again.
     let r = c.ok(DB, r#"{"aggregate":"q","pipeline":[{"$planCacheStats":{}}],"cursor":{}}"#);
     assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(Vec::new()), "{r:?}");
     let e = find_on_q(&mut c, "$gt");
@@ -493,9 +495,10 @@ fn a_hinted_read_never_takes_the_cached_plan() {
 
 #[test]
 fn a_cached_plan_reads_the_values_of_the_query_that_runs_it() {
-    // The plan the cache keeps is a plan of the shape: each query of that shape scans its own values.
-    // Ten queries `{a, b}` with other values each: from the third on they take the cached plan, and
-    // each finds its own document (measured on RefDb 9.0.4: a cached entry keeps no bounds).
+    // The plan the cache keeps is a plan of the shape: each query of that shape scans its own
+    // values. Ten queries `{a, b}` with other values each: from the third on they take the cached
+    // plan, and each finds its own document (measured on the reference server 9.0.4: a cached entry
+    // keeps no bounds).
     let mut c = Client::new();
     c.set(-1, 0.0);
     fifty(&mut c);

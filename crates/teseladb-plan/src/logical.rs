@@ -1,9 +1,9 @@
-//! The logical analysis of a filter for the planner (010 FR-001, T014): its clauses as RefDb
-//! writes them back after parsing (`parsedQuery`), and for each clause on a path the intervals
-//! of values an index must scan to find its matches, written as `explain` writes them (measured
-//! on a `refrouter` 9.0.4, 01-11-2026). A comparison stays within its type's values (`(3, inf]`,
-//! `["a", {})`); an equality, an `$in` and a prefix regular expression are points and intervals
-//! of their own; an interval is exact when the index alone decides the clause.
+//! The logical analysis of a filter for the planner (010 FR-001, T014): its clauses as the
+//! reference server writes them back after parsing (`parsedQuery`), and for each clause on a path
+//! the intervals of values an index must scan to find its matches, written as `explain` writes them
+//! (measured on the reference router 9.0.4, 01-11-2026). A comparison stays within its type's
+//! values (`(3, inf]`, `["a", {})`); an equality, an `$in` and a prefix regular expression are
+//! points and intervals of their own; an interval is exact when the index alone decides the clause.
 
 use std::cmp::Ordering;
 
@@ -77,7 +77,8 @@ pub fn shown_value(v: &Value) -> String {
         Value::Document(d) if d.is_empty() => "{}".to_owned(),
         Value::Array(a) if a.is_empty() => "[]".to_owned(),
         Value::Regex { pattern, options } => format!("/{pattern}/{options}"),
-        // As RefDb's bounds write a date (measured on a `refnode` 9.0.4, 02-11-2026).
+        // As the reference server's bounds write a date (measured on a reference replica set member
+        // 9.0.4, 02-11-2026).
         Value::DateTime(ms) => format!("new Date({ms})"),
         other => format!("{other:?}"),
     }
@@ -141,7 +142,7 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
             Some((items.iter().cloned().map(Bound::point).collect(), exact))
         }
         // NaN is only equal to NaN and below every other number: `$gte` and `$lte` find the
-        // NaNs of either type, `$gt` and `$lt` nothing (measured on a `refrouter` 9.0.4).
+        // NaNs of either type, `$gt` and `$lt` nothing (measured on the reference router 9.0.4).
         "$gt" | "$lt" if is_nan(arg) => Some((Vec::new(), true)),
         "$gte" | "$lte" if is_nan(arg) => Some((vec![Bound::point(Value::Double(f64::NAN))], true)),
         "$gt" | "$gte" | "$lt" | "$lte" => {
@@ -158,7 +159,7 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
         }
         // What an `$expr` comparison implies compares across types, as the expression does:
         // the interval runs to the end of the whole index, the expression deciding (measured
-        // on a `refrouter` 9.0.4: `{$expr: {$gt: ["$v", 1]}}` scans `(1, MaxKey]`).
+        // on the reference router 9.0.4: `{$expr: {$gt: ["$v", 1]}}` scans `(1, MaxKey]`).
         "$_internalExprEq" => Some((vec![Bound::point(arg.clone())], false)),
         "$_internalExprGt" | "$_internalExprGte" => {
             let b = Bound {
@@ -201,7 +202,7 @@ fn is_nan(v: &Value) -> bool {
     }
 }
 
-/// Whether an `$exists` argument asks for the field, as RefDb reads it.
+/// Whether an `$exists` argument asks for the field, as the reference server reads it.
 fn truthy(v: &Value) -> bool {
     match v {
         Value::Boolean(b) => *b,
@@ -213,8 +214,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// The ends of the values of `v`'s type a comparison stays within; `None` for a type RefDb
-/// does not compare within a range this planner scans.
+/// The ends of the values of `v`'s type a comparison stays within; `None` for a type the reference
+/// server does not compare within a range this planner scans.
 fn bracket(v: &Value) -> Option<(Value, Value)> {
     match v {
         Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
@@ -222,10 +223,10 @@ fn bracket(v: &Value) -> Option<(Value, Value)> {
         }
         Value::String(_) => Some((Value::String(String::new()), Value::Document(Document::new()))),
         // Dates from the least to the greatest one (`new Date(-9223372036854775808)` to
-        // `new Date(9223372036854775807)` in RefDb's bounds).
+        // `new Date(9223372036854775807)` in the reference server's bounds).
         Value::DateTime(_) => Some((Value::DateTime(i64::MIN), Value::DateTime(i64::MAX))),
-        // Documents from the empty one to the arrays that follow them (`[{}, [])` in RefDb's
-        // bounds, measured on 05-11-2026).
+        // Documents from the empty one to the arrays that follow them (`[{}, [])` in the reference
+        // server's bounds, measured on 05-11-2026).
         Value::Document(_) => Some((Value::Document(Document::new()), Value::Array(Vec::new()))),
         _ => None,
     }
@@ -317,7 +318,7 @@ pub fn sorted(mut items: Vec<Bound>) -> Vec<Bound> {
     items
 }
 
-/// RefDb's order of two values.
+/// The reference server's order of two values.
 pub fn compare_values(a: &Value, b: &Value) -> Ordering {
     let holder = Document::new().with("a", a.clone()).with("b", b.clone());
     let Ok(bytes) = holder.to_bytes() else { return Ordering::Equal };

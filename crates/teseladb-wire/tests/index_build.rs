@@ -1,7 +1,7 @@
 //! Online index builds (009 T012, FR-006): the index goes through `deleteOnly` and `writeOnly`
 //! before its backfill, the backfill's writes wait for the `commitQuorum`, `currentOp` shows its
 //! progress, `killOp` stops it, and a failed build leaves nothing behind. Replies and errors as a
-//! `refnode` and a `refrouter` 9.0.4 give them (measured).
+//! the reference replica set member and the reference router 9.0.4 give them (measured).
 
 mod common;
 
@@ -98,7 +98,7 @@ fn the_backfill_waits_for_the_commit_quorum() {
 }
 
 #[test]
-fn commit_quorum_answers_as_on_a_refnode() {
+fn commit_quorum_answers_as_on_a_reference_member() {
     let decimal = |s: &str| Value::Decimal128(s.parse::<Decimal128>().expect("decimal"));
     let shown = [
         (Value::Int32(0), Value::Int32(1)),
@@ -155,7 +155,7 @@ fn commit_quorum_answers_as_on_a_refnode() {
         assert!(m.indexes.indexes.is_empty(), "{q:?}: nothing is built");
     }
     // An unsatisfiable quorum is refused even when the index already exists (measured on a
-    // `refrouter`).
+    // the reference router).
     let mut m = seeded(3);
     let r = m.run(DB, create("a", None));
     assert_eq!(r.get("ok"), Some(&Value::Double(1.0)), "{r:?}");
@@ -221,7 +221,7 @@ fn current_op_shows_the_progress_of_the_backfill() {
 }
 
 #[test]
-fn current_op_lists_a_build_as_a_refnode_does() {
+fn current_op_lists_a_build_as_a_reference_member_does() {
     let mut m = Mem::new();
     let shared = leaked();
     let command = Document::new().with("createIndexes", "c");
@@ -249,7 +249,10 @@ fn current_op_lists_a_build_as_a_refnode_does() {
     let r = run_on_db(&mut m, shared, "admin", &doc(&[("currentOp", Value::Int32(1))]));
     let Some(Value::Array(ops)) = r.get("inprog") else { panic!("{r:?}") };
     let Value::Document(d) = &ops[0] else { panic!() };
-    assert_eq!(d.get("desc"), Some(&Value::from("IndexBuildsCoordinatorRefNode-3")));
+    assert_eq!(
+        d.get("desc"),
+        Some(&Value::from(format!("{}3", teseladb_names::INDEX_BUILD_DESC_PREFIX)))
+    );
     assert_eq!(d.get("active"), Some(&Value::Boolean(false)));
     assert_eq!(d.get("connectionId"), None);
     assert_eq!(
@@ -260,7 +263,7 @@ fn current_op_lists_a_build_as_a_refnode_does() {
     );
     let progress = Document::new().with("done", 500_i64).with("total", 1000_i64);
     assert_eq!(d.get("progress"), Some(&Value::Document(progress)));
-    // As on a `refnode`: `msg` and `progress` right after `command`.
+    // As on a reference replica set member: `msg` and `progress` right after `command`.
     let keys: Vec<&str> = d.iter().map(|(k, _)| k).collect();
     let at = keys.iter().position(|k| *k == "command").expect("command");
     assert_eq!(&keys[at + 1..at + 3], ["msg", "progress"]);
@@ -299,7 +302,8 @@ fn a_duplicate_fails_a_unique_build_without_leftovers() {
     let c = collection(&m);
     let r = m.run(DB, create("a", Some(("unique", Value::Boolean(true)))));
     assert_eq!(field(&r, "code"), &Value::Int32(11000), "{r:?}");
-    // RefDb names the smallest duplicated key, whatever the scan met first (measured).
+    // The reference server names the smallest duplicated key, whatever the scan met first
+    // (measured).
     let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
     assert!(msg.ends_with("dup key: { a: 0 }"), "{msg}");
     let id = m.indexes.last_index;
@@ -311,12 +315,12 @@ fn a_duplicate_fails_a_unique_build_without_leftovers() {
 }
 
 #[test]
-fn a_document_the_index_refuses_fails_the_build_as_on_a_refnode() {
+fn a_document_the_index_refuses_fails_the_build_as_on_a_reference_member() {
     let mut m = seeded(DOCS);
     let c = collection(&m);
-    // Documents the index refuses, inserted in `_id` order after the seeded ones: RefDb scans
-    // in insertion order and names the first; TeselaDB names the first in `_id` order, which is
-    // the same here, whatever the order of the keys in the ranges.
+    // Documents the index refuses, inserted in `_id` order after the seeded ones: the reference
+    // server scans in insertion order and names the first; TeselaDB names the first in `_id` order,
+    // which is the same here, whatever the order of the keys in the ranges.
     let refused: Vec<Value> = (0..40)
         .map(|i| {
             Value::Document(
@@ -337,7 +341,8 @@ fn a_document_the_index_refuses_fails_the_build_as_on_a_refnode() {
     let r = m.run(DB, cmd);
     assert_eq!(r.get("code"), Some(&Value::Int32(171)), "{r:?}");
     let Some(Value::String(msg)) = r.get("errmsg") else { panic!("{r:?}") };
-    // Measured on a `refnode` and a `refrouter` 9.0.4: the documents before it, and its position.
+    // Measured on a reference replica set member and the reference router 9.0.4: the documents
+    // before it, and its position.
     assert!(msg.starts_with("Index build failed: "), "{msg}");
     let scan =
         format!(":: caused by :: collection scan stopped. totalRecords: {DOCS}; durationMillis: ");

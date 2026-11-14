@@ -1,5 +1,5 @@
-//! `$readPreference` (007 FR-013) as a `refrouter` 9.0.4 reads it with `find` (measured): the types of
-//! its fields, its rules, and where it is checked among the other arguments.
+//! `$readPreference` (007 FR-013) as the reference router 9.0.4 reads it with `find` (measured):
+//! the types of its fields, its rules, and where it is checked among the other arguments.
 
 use teseladb_bson::{Document, Value};
 use teseladb_router::read_pref::Mode;
@@ -55,7 +55,7 @@ fn a_read_preference_is_read_with_its_tags_and_staleness() {
 }
 
 #[test]
-fn bad_fields_get_the_refrouter_codes_and_messages() {
+fn bad_fields_get_the_reference_router_codes_and_messages() {
     let rp = |fields: &[(&str, Value)]| find(Value::Document(d(fields)));
     assert_eq!(
         err(parse(&find(s("nearest")), "find")),

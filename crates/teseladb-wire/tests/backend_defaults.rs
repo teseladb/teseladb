@@ -271,12 +271,12 @@ fn a_bare_backend_knows_nothing_outside_an_operation() {
 }
 
 #[test]
-fn a_stored_user_is_read_as_refdb_reads_it() {
+fn a_stored_user_is_read_as_the_reference_reads_it() {
     let name = UserName::new("alice", "admin");
     let mut b = Bare::default();
     assert_eq!(b.user(&name).unwrap(), None);
-    // Without a string `user` it names no user; without credentials RefDb does not use it
-    // (measured: UnsupportedFormat).
+    // Without a string `user` it names no user; without credentials the reference server does not
+    // use it (measured: UnsupportedFormat).
     b.stored_user = Some(Document::new().with("x", 1).to_bytes().unwrap());
     assert_eq!(b.user(&name).unwrap(), None);
     let good = User::new(UserName::new("alice", "$external"));

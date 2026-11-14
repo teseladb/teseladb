@@ -1,6 +1,6 @@
 //! 018 T008: `listShards`, `balancerStart`, `balancerStop`, `balancerStatus`,
-//! `configureCollectionBalancing` and `balancerCollectionStatus` (FR-004, FR-005, FR-018) over
-//! the in-memory node of `common`, with the replies and messages of a `refrouter` 9.0.4 of two
+//! `configureCollectionBalancing` and `balancerCollectionStatus` (FR-004, FR-005, FR-018) over the
+//! in-memory node of `common`, with the replies and messages of the reference router 9.0.4 of two
 //! shards (measured on 02-11-2026).
 
 mod common;
@@ -262,7 +262,8 @@ fn a_defragmentation_waits_for_the_balancer() {
 }
 
 /// The balancer's document with the old `stopped: true` stops it whatever its `mode` says, and a
-/// name `db.` is shown without its dot, as a `refrouter` 9.0.4 does (measured on 03-11-2026).
+/// name `db.` is shown without its dot, as the reference router 9.0.4 does (measured on
+/// 03-11-2026).
 #[test]
 fn an_old_stopped_flag_and_a_database_name() {
     let mut m = cluster();
@@ -333,8 +334,8 @@ fn max_chunk_bytes_reads_only_a_shard_key_s_settings() {
     assert_eq!(max_chunk_bytes(&bare), None);
 }
 
-/// The names `setAllowMigrations` and the other balancing commands refuse, as a `refrouter` 9.0.4
-/// refuses them (measured on 03-11-2026, `b3.js` to `b5.js`): `setAllowMigrations` checks the
+/// The names `setAllowMigrations` and the other balancing commands refuse, as the reference router
+/// 9.0.4 refuses them (measured on 03-11-2026, `b3.js` to `b5.js`): `setAllowMigrations` checks the
 /// database's name, then that it exists, then the collection's; the others check the whole name.
 #[test]
 fn names_the_balancing_commands_refuse() {

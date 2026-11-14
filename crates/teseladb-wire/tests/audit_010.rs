@@ -1,6 +1,6 @@
-//! Adversarial cases of the 010 audit (T038, third pass), each measured on a `refnode` 9.0.4 on
-//! 02-11-2026: documents past 16 MiB inside and at the end of a pipeline, pipelines nested in
-//! `$lookup` and `$facet`, and a `$group` that writes to disk under a collation.
+//! Adversarial cases of the 010 audit (T038, third pass), each measured on a reference replica set
+//! member 9.0.4 on 02-11-2026: documents past 16 MiB inside and at the end of a pipeline, pipelines
+//! nested in `$lookup` and `$facet`, and a `$group` that writes to disk under a collation.
 
 mod common;
 

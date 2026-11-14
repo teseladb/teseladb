@@ -1,5 +1,5 @@
 //! `listIndexes` with the `_id` index alone (secondary indexes come with 009) and the complete
-//! collation a collection keeps, as a `refrouter` 9.0.4 shows them (measured).
+//! collation a collection keeps, as the reference router 9.0.4 shows them (measured).
 
 mod common;
 
@@ -86,7 +86,7 @@ fn a_collection_keeps_its_complete_collation() {
 fn create_checks_the_id_index_and_does_not_keep_it() {
     let mut m = Mem::new();
     let key = || d(&[("_id", 1.into())]);
-    // What `refrestore` sends is taken, and is not a collection option.
+    // What the reference restore tool sends is taken, and is not a collection option.
     let spec = d(&[("key", key()), ("ns", s("db.a")), ("name", s("_id_"))]);
     let r = m.run("db", doc(&[("create", s("a")), ("idIndex", spec)]));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0));
@@ -258,9 +258,9 @@ fn constraint_needs_valid_documents_and_a_strict_level() {
     assert_eq!(field(&r, "cursor.firstBatch.0.options"), &both);
 }
 
-/// `create` with `idIndex` as `refrestore` sends it for a collection dumped with a version 1
-/// `_id` index, and every check of the index specification, as a `refrouter` 9.0.4 answers them
-/// (measured).
+/// `create` with `idIndex` as the reference restore tool sends it for a collection dumped with a
+/// version 1 `_id` index, and every check of the index specification, as the reference router 9.0.4
+/// answers them (measured).
 #[test]
 fn create_keeps_the_version_of_the_id_index() {
     use teseladb_bson::Decimal128;

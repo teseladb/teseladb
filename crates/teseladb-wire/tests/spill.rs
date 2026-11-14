@@ -1,6 +1,6 @@
 //! Stages that pass their memory write to the node's temporary store (010 T024, FR-010): a
 //! `$sort` over more than its limit sorts in runs it merges back with `allowDiskUse`, and fails
-//! with 292 without it, as a `refnode` 9.0.4 with the limit set does.
+//! with 292 without it, as a reference replica set member 9.0.4 with the limit set does.
 
 mod common;
 
@@ -245,7 +245,7 @@ fn a_cursor_past_the_cursors_part_waits_in_the_store() {
 #[test]
 fn a_leading_sort_holds_only_the_fields_the_rest_uses() {
     // 60 documents of about 130 bytes pass the 2,000 bytes of the stage; their `k` alone does
-    // not, and RefDb's query plan projects `k` under its sort (010 FR-010).
+    // not, and the reference server's query plan projects `k` under its sort (010 FR-010).
     let store = Arc::new(MemorySpill::default());
     let mut m = node(&store);
     let r = m.run(

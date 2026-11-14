@@ -1,5 +1,5 @@
-//! Tailable cursors and `$natural` order (015 T008, FR-004), against what a `refrouter` 9.0.4
-//! answered on 31-10-2026.
+//! Tailable cursors and `$natural` order (015 T008, FR-004), against what the reference router
+//! 9.0.4 answered on 31-10-2026.
 
 mod common;
 
@@ -58,7 +58,7 @@ fn capped(m: &mut Mem, options: &str, docs: &str) {
 }
 
 #[test]
-fn tailable_refuses_what_a_refrouter_refuses() {
+fn tailable_refuses_what_the_reference_router_refuses() {
     let mut m = Mem::new();
     capped(&mut m, r#""size":10000"#, r#"{"_id":1}"#);
     run(&mut m, r#"{"create":"plain"}"#);

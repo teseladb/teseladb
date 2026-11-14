@@ -1,7 +1,8 @@
-//! `$expr` under the collation of the command (010): RefDb 9.0.4 evaluates the expressions of
-//! a query with the collator of the operation, the command's or else the collection's default,
-//! so `{$expr: {$eq: ["$s", "abc"]}}` with `{locale: "en", strength: 2}` matches "ABC" in a
-//! `find`, as it does in a `$match` of an aggregation; `$regexMatch` ignores the collation.
+//! `$expr` under the collation of the command (010): the reference server 9.0.4 evaluates the
+//! expressions of a query with the collator of the operation, the command's or else the
+//! collection's default, so `{$expr: {$eq: ["$s", "abc"]}}` with `{locale: "en", strength: 2}`
+//! matches "ABC" in a `find`, as it does in a `$match` of an aggregation; `$regexMatch` ignores the
+//! collation.
 
 mod common;
 

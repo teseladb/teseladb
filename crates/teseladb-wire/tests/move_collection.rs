@@ -1,7 +1,7 @@
 //! 018 T020 and T024: `moveCollection`, `unshardCollection`, `rewriteCollection`, their aborts,
 //! `commitReshardCollection` and `cleanupReshardCollection` (FR-017, FR-018) over the in-memory
-//! node of `common`, with the replies and messages of a `refrouter` 9.0.4 of two shards (measured on
-//! 02-11-2026, `t1.js` to `t12.js` in the lane's notes).
+//! node of `common`, with the replies and messages of the reference router 9.0.4 of two shards
+//! (measured on 02-11-2026, `t1.js` to `t12.js` in the lane's notes).
 
 mod common;
 
@@ -91,7 +91,7 @@ fn node(m: &mut Mem, coll: &str) -> Option<u64> {
 }
 
 #[test]
-fn move_collection_fails_as_on_a_refrouter() {
+fn move_collection_fails_as_on_the_reference_router() {
     let mut m = cluster();
     ok(&m.run("m", json(r#"{"create":"v","viewOn":"u","pipeline":[]}"#)));
     let cases: [(&str, &str, i32, &str); 12] = [
@@ -230,7 +230,7 @@ fn a_capped_collection_moves_its_ranges_alone() {
 }
 
 #[test]
-fn unshard_collection_fails_as_on_a_refrouter() {
+fn unshard_collection_fails_as_on_the_reference_router() {
     let mut m = cluster();
     let cases: [(&str, &str, i32, &str); 8] = [
         (
@@ -331,8 +331,8 @@ fn empty_ranges(m: &mut Mem, node: u64, first_group: u64) {
     m.routes[0].end = vec![0xFF, 0];
 }
 
-/// Without `toShard`, a `refrouter` 9.0.4 sends the collection to the shard with the least data,
-/// whatever the chunks each one has (measured on 02-11-2026, `u1.js` to `u5.js` in the lane's
+/// Without `toShard`, the reference router 9.0.4 sends the collection to the shard with the least
+/// data, whatever the chunks each one has (measured on 02-11-2026, `u1.js` to `u5.js` in the lane's
 /// notes): here the shard that leads more ranges, all of them empty.
 #[test]
 fn unshard_collection_picks_the_shard_with_the_least_data() {
@@ -426,7 +426,7 @@ fn rewrite_collection_without_chunks_takes_the_default() {
 }
 
 #[test]
-fn rewrite_collection_fails_and_rewrites_as_on_a_refrouter() {
+fn rewrite_collection_fails_and_rewrites_as_on_the_reference_router() {
     let mut m = cluster();
     let cases: [(&str, &str, i32, &str); 7] = [
         (
@@ -554,15 +554,15 @@ fn each_abort_stops_the_resharding_of_its_command() {
 }
 
 #[test]
-fn cleanup_reshard_collection_is_no_command_of_a_refrouter() {
-    // A `refrouter` 9.0.4 answers 59 «no such cmd: cleanupReshardCollection»: the dispatcher does
-    // the same for a name no module knows.
+fn cleanup_reshard_collection_is_no_command_of_the_reference_router() {
+    // The reference router 9.0.4 answers 59 «no such cmd: cleanupReshardCollection»: the dispatcher
+    // does the same for a name no module knows.
     assert!(!is_data_command("cleanupReshardCollection"));
     assert!(is_data_command("commitReshardCollection"));
 }
 
 #[test]
-fn their_unknown_fields_fail_as_on_a_refrouter() {
+fn their_unknown_fields_fail_as_on_the_reference_router() {
     let cases: [(&str, &str); 8] = [
         (r#"{"moveCollection":"m.u","toShard":"node2","extra":1}"#, "moveCollection.extra"),
         (r#"{"moveCollection":"m.u","toShard":"node2","zones":[]}"#, "moveCollection.zones"),

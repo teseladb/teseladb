@@ -1,8 +1,8 @@
 //! Edges of time series through the commands (015 FR-006 to FR-008): unordered inserts with a
 //! measurement without its date, reads bounded beyond the windows a bucket `_id` can hold,
-//! `$rename` within the meta value, updates that change nothing, collections without a meta
-//! field, and index specifications and partial filters a `refnode` 9.0.4 accepted or refused on
-//! 01-11-2026.
+//! `$rename` within the meta value, updates that change nothing, collections without a meta field,
+//! and index specifications and partial filters a reference replica set member 9.0.4 accepted or
+//! refused on 01-11-2026.
 
 mod common;
 
@@ -167,7 +167,7 @@ fn deletes_without_a_meta_value() {
     assert_eq!(batch(&r), vec![json(&format!(r#"{{"t":{},"v":8}}"#, date(T0)))]);
 }
 
-/// Index specifications on a time series, as a `refnode` 9.0.4 takes them.
+/// Index specifications on a time series, as a reference replica set member 9.0.4 takes them.
 #[test]
 fn index_specifications_over_the_buckets() {
     let mut m = Mem::new();
@@ -297,7 +297,7 @@ fn index_specifications_over_the_buckets() {
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
 }
 
-/// Partial filters a `refnode` 9.0.4 refused or translated on 01-11-2026.
+/// Partial filters a reference replica set member 9.0.4 refused or translated on 01-11-2026.
 #[test]
 fn partial_filter_edges() {
     let mut m = Mem::new();
@@ -340,9 +340,9 @@ fn partial_filter_edges() {
     );
 }
 
-/// Measurements before 1970 and past what a bucket `_id` can hold are stored and read back by
-/// time, by meta value and time through the `{m: 1, t: 1}` index, and in time order, as a `refnode`
-/// 9.0.4 gave them on 02-11-2026 (015 T020, adversarial pass).
+/// Measurements before 1970 and past what a bucket `_id` can hold are stored and read back by time,
+/// by meta value and time through the `{m: 1, t: 1}` index, and in time order, as a reference
+/// replica set member 9.0.4 gave them on 02-11-2026 (015 T020, adversarial pass).
 #[test]
 fn measurements_outside_the_bucket_id_years_are_read_by_time() {
     let mut m = Mem::new();
@@ -402,7 +402,7 @@ fn measurements_outside_the_bucket_id_years_are_read_by_time() {
 
 /// `listCollections` shows a time series' `expireAfterSeconds` before `timeseries`, whether it
 /// came with `create` or with `collMod`, as an `int64`, and without it once `collMod` turns it
-/// off (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// off (measured on a reference replica set member 9.0.4 on 02-11-2026).
 #[test]
 fn a_time_series_lists_its_expiry_before_its_buckets() {
     let mut m = Mem::new();
@@ -501,9 +501,10 @@ fn a_lookup_without_the_meta_index() {
     assert_eq!(values(&r), vec![Value::Int32(2), Value::Int32(3), Value::Int32(1)]);
 }
 
-/// An index specification without its key, or with a key that is not an object, is refused as on
-/// a collection that is not a time series, and reads bounded both ways in time on a series without
-/// a meta field find their measurements (015 T021, measured on a `refnode` 9.0.4 on 02-11-2026).
+/// An index specification without its key, or with a key that is not an object, is refused as on a
+/// collection that is not a time series, and reads bounded both ways in time on a series without a
+/// meta field find their measurements (015 T021, measured on a reference replica set member 9.0.4
+/// on 02-11-2026).
 #[test]
 fn index_specifications_without_a_key_and_bounded_reads_without_meta() {
     let mut m = Mem::new();
@@ -541,8 +542,8 @@ fn index_specifications_without_a_key_and_bounded_reads_without_meta() {
     assert_eq!(values(&r), vec![Value::Int32(2)]);
 }
 
-/// An index made on the buckets with `rawData` lists its key on the measurements' fields, the
-/// least and greatest of a field once (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// An index made on the buckets with `rawData` lists its key on the measurements' fields, the least
+/// and greatest of a field once (measured on a reference replica set member 9.0.4 on 02-11-2026).
 #[test]
 fn a_raw_bucket_index_lists_its_measurement_key() {
     let mut m = Mem::new();
@@ -588,7 +589,7 @@ fn an_attempt_back_in_time_finds_the_closed_bucket() {
 }
 
 /// A raw bucket index on a field that is not a measurement's nor the meta value's is listed only
-/// with `rawData` (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// with `rawData` (measured on a reference replica set member 9.0.4 on 02-11-2026).
 #[test]
 fn a_raw_index_off_the_measurements_lists_only_raw() {
     let mut m = Mem::new();

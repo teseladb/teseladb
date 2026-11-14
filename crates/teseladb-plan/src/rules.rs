@@ -1,10 +1,9 @@
-//! The plans a query may take (010 FR-001, T014), by the rule RefDb's planner follows
-//! (measured on a `refrouter` 9.0.4, 01-11-2026): an index whose first field the filter constrains
-//! scans the intervals of each of its fields; an index that
-//! gives the order of the sort is a plan even when the filter does not constrain it; a `$or`
-//! whose every clause has an index scans each and joins them; without any, the collection is
-//! scanned. The clauses an index decides alone leave the filter; the others filter what it
-//! finds.
+//! The plans a query may take (010 FR-001, T014), by the rule the reference server's planner
+//! follows (measured on the reference router 9.0.4, 01-11-2026): an index whose first field the
+//! filter constrains scans the intervals of each of its fields; an index that gives the order of
+//! the sort is a plan even when the filter does not constrain it; a `$or` whose every clause has an
+//! index scans each and joins them; without any, the collection is scanned. The clauses an index
+//! decides alone leave the filter; the others filter what it finds.
 
 use teseladb_bson::{Document, Value};
 
@@ -38,7 +37,7 @@ pub enum Access {
     AndHash {
         /// The scans, the streamed one last.
         scans: Vec<IndexScan>,
-        /// The filter of the documents found, its clauses in RefDb's order.
+        /// The filter of the documents found, its clauses in the reference server's order.
         filter: Option<Document>,
     },
 }
@@ -65,7 +64,7 @@ pub struct IndexScan {
 /// What a query asks of the planner.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Request<'a> {
-    /// The filter as RefDb writes it back after parsing it.
+    /// The filter as the reference server writes it back after parsing it.
     pub parsed: Option<&'a Document>,
     /// The sort, as fields and directions.
     pub sort: &'a [(String, i32)],
@@ -75,8 +74,8 @@ pub struct Request<'a> {
     pub intersect: bool,
 }
 
-/// The plans of `request` over `indexes`, in the order RefDb makes them; the collection scan
-/// alone when no index serves.
+/// The plans of `request` over `indexes`, in the order the reference server makes them; the
+/// collection scan alone when no index serves.
 pub fn candidates(request: &Request<'_>, indexes: &[IndexMeta]) -> Vec<Access> {
     let empty = Document::new();
     let parsed = request.parsed.unwrap_or(&empty);
@@ -112,9 +111,9 @@ pub fn intersections_of(request: &Request<'_>, indexes: &[IndexMeta]) -> Vec<Acc
     intersections(&clauses, &found, !request.sort.is_empty())
 }
 
-/// The scans each clause of a rooted `$or` may take, in the order RefDb makes them (RefDb
-/// plans each clause on its own, by trial, `SUBPLAN`); `None` for a filter that is no rooted
-/// `$or`, or with a `hint`. A clause no index serves has no scans.
+/// The scans each clause of a rooted `$or` may take, in the order the reference server makes them
+/// (the reference server plans each clause on its own, by trial, `SUBPLAN`); `None` for a filter
+/// that is no rooted `$or`, or with a `hint`. A clause no index serves has no scans.
 pub fn branch_scans(request: &Request<'_>, indexes: &[IndexMeta]) -> Option<Vec<Vec<IndexScan>>> {
     let parsed = request.parsed?;
     let Some(Value::Array(branches)) = parsed.get("$or").filter(|_| parsed.len() == 1) else {
@@ -134,11 +133,11 @@ pub fn branch_scans(request: &Request<'_>, indexes: &[IndexMeta]) -> Option<Vec<
     Some(out)
 }
 
-/// The scans of the clauses of a rooted `$or` as RefDb joins them (measured on a `refrouter`
-/// 9.0.4): in the order of their indexes, on one index the clauses of several predicates first
-/// (RefDb orders them by path, theirs empty), and a clause that is one predicate on the leading
-/// field of the same index as the clause before it adds its intervals to that clause's scan,
-/// which then reads in the sort's order if the index gives it.
+/// The scans of the clauses of a rooted `$or` as the reference server joins them (measured on the
+/// reference router 9.0.4): in the order of their indexes, on one index the clauses of several
+/// predicates first (the reference server orders them by path, theirs empty), and a clause that is
+/// one predicate on the leading field of the same index as the clause before it adds its intervals
+/// to that clause's scan, which then reads in the sort's order if the index gives it.
 pub fn joined_or(
     mut scans: Vec<IndexScan>,
     indexes: &[IndexMeta],
@@ -167,11 +166,11 @@ pub fn joined_or(
     out.into_iter().map(|(s, _)| s).collect()
 }
 
-/// The intersections of two scans RefDb makes when hash intersection is on (measured on a
-/// `refrouter` 9.0.4 with `internalQueryPlannerEnableHashIntersection`): every pair of scans that
-/// the filter constrains on different clauses, unless one index alone takes those clauses; the
-/// later index of the catalog first, or last with a sort; the filter of the documents with the
-/// streamed scan's clauses first, then the other's, then the rest.
+/// The intersections of two scans the reference server makes when hash intersection is on (measured
+/// on a the reference router 9.0.4 with `internalQueryPlannerEnableHashIntersection`): every pair
+/// of scans that the filter constrains on different clauses, unless one index alone takes those
+/// clauses; the later index of the catalog first, or last with a sort; the filter of the documents
+/// with the streamed scan's clauses first, then the other's, then the rest.
 fn intersections(clauses: &[Document], scans: &[IndexScan], sorted: bool) -> Vec<Access> {
     let mut out = Vec::new();
     for a in scans.iter().filter(|s| !s.preds.is_empty()) {
@@ -233,9 +232,9 @@ fn scans_of(
     out
 }
 
-/// The scans in the order RefDb makes their plans, which keeps them when their trials tie
-/// (measured): those that take more clauses first, then those of fewer fields, then those
-/// nearer the first in the catalog.
+/// The scans in the order the reference server makes their plans, which keeps them when their
+/// trials tie (measured): those that take more clauses first, then those of fewer fields, then
+/// those nearer the first in the catalog.
 fn order(scans: &mut [IndexScan]) {
     let Some(top) = scans.iter().max_by_key(|s| {
         (s.assigned, std::cmp::Reverse(s.bounds.len()), std::cmp::Reverse(s.index))
@@ -248,12 +247,11 @@ fn order(scans: &mut [IndexScan]) {
     });
 }
 
-/// The scan of `index` for `clauses`: the intervals of its leading fields, the clauses it
-/// decides alone removed.
-/// The order in which a multikey index prefers the clauses of a field for its intervals, since
-/// it takes those of one only (measured on a `refnode` 9.0.4 on 02-11-2026 with every pair of
-/// these operators on a multikey field, in both orders: `$eq`, then `$in`, `$regex`, `$lte`,
-/// `$lt`, `$gt` and `$gte`).
+/// The scan of `index` for `clauses`: the intervals of its leading fields, the clauses it decides
+/// alone removed. The order in which a multikey index prefers the clauses of a field for its
+/// intervals, since it takes those of one only (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026 with every pair of these operators on a multikey field, in both orders: `$eq`, then
+/// `$in`, `$regex`, `$lte`, `$lt`, `$gt` and `$gte`).
 fn multikey_rank(op: &str) -> usize {
     const ORDER: [&str; 7] = ["$eq", "$in", "$regex", "$lte", "$lt", "$gt", "$gte"];
     ORDER.iter().position(|o| *o == op).unwrap_or(ORDER.len())
@@ -264,9 +262,9 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
     let mut assigned = 0;
     let mut preds = Vec::new();
     let mut bounds = Vec::new();
-    // Every field takes the intervals of its clauses, also after a range or a field without
-    // any, once the leading field has one: the scan checks each key against them and seeks past
-    // those outside (measured on a `refrouter` 9.0.4: `{g: {$gt: "a"}, n: 5}` over `{g: 1, n: 1}`
+    // Every field takes the intervals of its clauses, also after a range or a field without any,
+    // once the leading field has one: the scan checks each key against them and seeks past those
+    // outside (measured on the reference router 9.0.4: `{g: {$gt: "a"}, n: 5}` over `{g: 1, n: 1}`
     // scans `n` in `[5, 5]`; a hinted index whose leading field has no clause scans everything).
     for (pos, (field, _)) in index.key.iter().enumerate() {
         if pos > 0 && assigned == 0 {
@@ -279,7 +277,7 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
         let on_field = clauses.iter().enumerate().filter_map(|(i, c)| {
             let (path, op, arg) = on_path(c)?;
             // An `$expr` compares a whole array, which a multikey index keys by element: it
-            // does not use one (measured on a `refrouter` 9.0.4).
+            // does not use one (measured on the reference router 9.0.4).
             if path != field || (index.multikey && op.starts_with("$_internalExpr")) {
                 return None;
             }
@@ -328,10 +326,10 @@ fn scan(pos: usize, index: &IndexMeta, clauses: &[Document], sort: &[(String, i3
 pub const HASHED: i32 = 0;
 
 /// The intervals an equality or an `$in` scans on a hashed field: a point for each value, in the
-/// order of their hashes, and never alone, since two values may share a hash (measured on a
-/// `refnode` 9.0.4 on 05-11-2026); `None` for any other clause, which scans all of the field. The
-/// points keep the values: the index hashes them when it reads, and `explain` shows their hashes
-/// ([`hashed_value`]).
+/// order of their hashes, and never alone, since two values may share a hash (measured on a the
+/// reference replica set member 9.0.4 on 05-11-2026); `None` for any other clause, which scans all
+/// of the field. The points keep the values: the index hashes them when it reads, and `explain`
+/// shows their hashes ([`hashed_value`]).
 fn hashed_intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
     let values: Vec<&Value> = match (op, arg) {
         ("$eq", Value::Array(_) | Value::Regex { .. }) => return None,

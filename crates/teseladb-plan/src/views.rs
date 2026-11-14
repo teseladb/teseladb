@@ -2,12 +2,12 @@
 //! collection or view it reads, never materialized. A query on a view runs on the collection at
 //! the end of the chain with the pipelines of the views put first, the innermost one first.
 //!
-//! Before the catalog keeps a definition, `create` and `collMod` check it as a `refrouter` 9.0.4
-//! does (measured 31-10-2026): its pipeline may not write (`$out`, `$merge`) nor open a change
-//! stream, also inside `$lookup`, `$unionWith` and `$facet`; the views it reads (`viewOn` and the
-//! namespaces of `$lookup`, `$graphLookup` and `$unionWith`) must have its collation; it may not
-//! reach itself again; and it may not stand on more than [`MAX_VIEW_DEPTH`] views. A query refuses
-//! a chain of [`MAX_VIEW_DEPTH`] views or more.
+//! Before the catalog keeps a definition, `create` and `collMod` check it as the reference router
+//! 9.0.4 does (measured 31-10-2026): its pipeline may not write (`$out`, `$merge`) nor open a
+//! change stream, also inside `$lookup`, `$unionWith` and `$facet`; the views it reads (`viewOn`
+//! and the namespaces of `$lookup`, `$graphLookup` and `$unionWith`) must have its collation; it
+//! may not reach itself again; and it may not stand on more than [`MAX_VIEW_DEPTH`] views. A query
+//! refuses a chain of [`MAX_VIEW_DEPTH`] views or more.
 
 use teseladb_bson::{RawDoc, RawValue};
 use teseladb_meta::collection_types::CollectionKind;
@@ -29,15 +29,15 @@ pub const LOOKUP_WRITES: i32 = 51_047;
 /// A writing stage inside the sub-pipeline of `$unionWith`.
 pub const UNION_WITH_WRITES: i32 = 31_441;
 
-/// The stage a change stream turns into, as RefDb names it inside a sub-pipeline.
+/// The stage a change stream turns into, as the reference server names it inside a sub-pipeline.
 const CHANGE_STREAM_INNER: &str = "$_internalChangeStreamOplogMatch";
 
-/// Why a view is refused, with RefDb's code and message.
+/// Why a view is refused, with the reference server's code and message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewError {
-    /// RefDb's code.
+    /// The reference server's code.
     pub code: i32,
-    /// RefDb's message.
+    /// The reference server's message.
     pub message: String,
 }
 

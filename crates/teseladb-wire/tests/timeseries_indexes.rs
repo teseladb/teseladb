@@ -1,7 +1,7 @@
 //! Indexes on the meta value and the time of a time series used over its buckets (015 FR-008,
-//! T014), as a `refnode` 9.0.4 counted them in `$indexStats` on 02-11-2026: a read with a
-//! condition on the meta value scans the default index `m_1_t_1`, one on the time alone reads
-//! the buckets in `_id` order unless an index on the time exists, one on a measurement field
+//! T014), as a reference replica set member 9.0.4 counted them in `$indexStats` on 02-11-2026: a
+//! read with a condition on the meta value scans the default index `m_1_t_1`, one on the time alone
+//! reads the buckets in `_id` order unless an index on the time exists, one on a measurement field
 //! scans the buckets; each lookup of a bucket by an insert scans the default index too.
 
 mod common;

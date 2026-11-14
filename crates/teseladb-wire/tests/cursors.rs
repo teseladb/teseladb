@@ -1,6 +1,6 @@
 //! Cursors and sessions over time (FR-016, FR-017): what `getMore` and `killCursors` answer
 //! for a cursor of another namespace or session, and how the node reaps expired cursors and
-//! sessions, with the answers of a `refrouter` 9.0.4 (measured).
+//! sessions, with the answers of the reference router 9.0.4 (measured).
 
 mod common;
 
@@ -112,11 +112,11 @@ fn a_get_more_on_another_namespace_is_refused_and_the_cursor_stays_open() {
     assert!(matches!(field(&r, "cursor.nextBatch"), Value::Array(a) if a.len() == 4));
 }
 
-/// A `getMore` in a session other than its cursor's, on a node without authorization: a `refrouter`
-/// 9.0.4 refuses it in `validateLSID` (`cluster_find.cpp`) with 50799, 50800 or 50801 (measured
-/// on the native `refrouter` on 09-11-2026).
+/// A `getMore` in a session other than its cursor's, on a node without authorization: the reference
+/// router 9.0.4 refuses it in `validateLSID` (`cluster_find.cpp`) with 50799, 50800 or 50801
+/// (measured on the native the reference router on 09-11-2026).
 #[test]
-fn a_get_more_from_another_session_without_authorization_is_refused_as_a_refrouter() {
+fn a_get_more_from_another_session_without_authorization_is_refused_as_the_reference_router() {
     let mut m = node();
     let named = |n: u8| format!("{} - {ANONYMOUS_UID} -  - ", uuid(n));
     let without = open(&mut m, None);
@@ -159,7 +159,8 @@ fn a_get_more_from_another_session_without_authorization_is_refused_as_a_refrout
 
 /// The same `getMore` from a user authenticated on a node that authorizes commands: the session
 /// check of `AuthorizationSessionImpl` refuses it first with 13 `Unauthorized`, naming both
-/// sessions, `none` for a missing one (measured on a `refrouter` 9.0.4 with users on 03-11-2026).
+/// sessions, `none` for a missing one (measured on the reference router 9.0.4 with users on
+/// 03-11-2026).
 #[test]
 fn a_get_more_from_another_session_of_an_authenticated_user_is_unauthorized() {
     use teseladb_auth::actions::ActionType;
@@ -194,10 +195,10 @@ fn a_get_more_from_another_session_of_an_authenticated_user_is_unauthorized() {
     assert_eq!(code(&get_more(&mut m, "db", with, "c", Some(2))), 50801);
 }
 
-/// The same refusals from a member of a replica set, as a `refnode` 9.0.4 gives them (measured on
-/// 03-11-2026), and its message for a cursor that does not exist.
+/// The same refusals from a member of a replica set, as a reference replica set member 9.0.4 gives
+/// them (measured on 03-11-2026), and its message for a cursor that does not exist.
 #[test]
-fn a_member_refuses_a_get_more_from_another_session_as_a_refnode() {
+fn a_member_refuses_a_get_more_from_another_session_as_a_reference_member() {
     let mut m = node();
     m.shards = vec!["node1".into(), "node2".into(), "node3".into()];
     let present = Document::new().with("mode", "replicaset").with("setName", "rs0");
@@ -287,7 +288,7 @@ fn reaping_kills_idle_cursors_without_a_session_and_expired_sessions_with_theirs
 }
 
 #[test]
-fn a_node_keeps_refdb_timeouts_by_default() {
+fn a_node_keeps_the_reference_timeouts_by_default() {
     let t = Timeouts::default();
     assert_eq!((t.cursor_ms, t.session_ms), (600_000, 1_800_000));
     let n = NodeSessions::default();
@@ -316,9 +317,9 @@ fn kills_reach_the_other_nodes_and_ending_stays_local() {
     assert_eq!(code(&get_more(&mut m, "db", with, "c", Some(1))), 43);
 }
 
-/// `aggregate` on a collection answers its cursor as a `refrouter` 9.0.4 does (`id`, `ns`,
-/// `firstBatch`), and in the replica set presentation (018) as a `refnode` does (`firstBatch`,
-/// `id`, `ns`; measured by the battery's `autocomplete-options` on 04-11-2026).
+/// `aggregate` on a collection answers its cursor as the reference router 9.0.4 does (`id`, `ns`,
+/// `firstBatch`), and in the replica set presentation (018) as a reference replica set member does
+/// (`firstBatch`, `id`, `ns`; measured by the battery's `autocomplete-options` on 04-11-2026).
 #[test]
 fn aggregate_orders_its_cursor_as_the_presented_process_does() {
     let mut m = Mem::new();

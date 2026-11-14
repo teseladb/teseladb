@@ -1,6 +1,6 @@
-//! `returnKey` of `find` (006 FR-008) against what a `refrouter` 9.0.4 answered on 05-11-2026
-//! (scenario `find-return-key`): each document goes out as the index key that found it, `{}` in a
-//! collection scan, and the projection goes unused.
+//! `returnKey` of `find` (006 FR-008) against what the reference router 9.0.4 answered on
+//! 05-11-2026 (scenario `find-return-key`): each document goes out as the index key that found it,
+//! `{}` in a collection scan, and the projection goes unused.
 
 mod common;
 
@@ -75,9 +75,9 @@ fn return_key_is_a_boolean() {
     );
 }
 
-/// With `returnKey`, a plan whose index has the sort's fields reads no document and wins (RefDb
-/// gives it the bonus of a plan without `FETCH`); without it both plans read the documents and the
-/// first one made wins (measured on a `refrouter` 9.0.4 on 05-11-2026).
+/// With `returnKey`, a plan whose index has the sort's fields reads no document and wins (the
+/// reference server gives it the bonus of a plan without `FETCH`); without it both plans read the
+/// documents and the first one made wins (measured on the reference router 9.0.4 on 05-11-2026).
 #[test]
 fn return_key_prefers_the_index_with_the_sort_fields() {
     let mut m = setup();

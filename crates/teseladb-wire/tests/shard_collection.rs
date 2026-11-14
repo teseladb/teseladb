@@ -1,5 +1,5 @@
-//! `shardCollection` and `enableSharding` (018 FR-001, T004) as a `refrouter` 9.0.4 of one shard
-//! answered them on 01-11-2026: the key's rules and their messages, the namespaces and
+//! `shardCollection` and `enableSharding` (018 FR-001, T004) as the reference router 9.0.4 of one
+//! shard answered them on 01-11-2026: the key's rules and their messages, the namespaces and
 //! collections that cannot be sharded, the index it makes or needs, a repeated call, and the
 //! entries of `config.collections`.
 
@@ -197,8 +197,9 @@ fn a_collection_with_documents_needs_its_index() {
     assert_eq!(b.len(), 3);
 }
 
-/// A unique key over an existing unique index and a hashed `_id` key are accepted (measured on
-/// the same `refrouter`); the hashed key gets an index of its own, with RefDb's default name.
+/// A unique key over an existing unique index and a hashed `_id` key are accepted (measured on the
+/// same the reference router); the hashed key gets an index of its own, with the reference server's
+/// default name.
 #[test]
 fn a_unique_index_serves_a_unique_key_and_a_hashed_id_gets_its_index() {
     let mut m = Mem::new();
@@ -217,10 +218,10 @@ fn a_unique_index_serves_a_unique_key_and_a_hashed_id_gets_its_index() {
     assert_eq!(index_keys(&mut m, "id").get(1), Some(&hashed));
 }
 
-/// The arguments of `shardCollection` and `enableSharding` with the wrong type or missing, and
-/// the numbers that say 1 in a shard key and in the index that serves it, as a `refrouter` 9.0.4
-/// answers them (measured on 03-11-2026, `sh1.js`, `sh2.js`): any numeric 1, a decimal too, and
-/// an index field of another number does not serve.
+/// The arguments of `shardCollection` and `enableSharding` with the wrong type or missing, and the
+/// numbers that say 1 in a shard key and in the index that serves it, as the reference router 9.0.4
+/// answers them (measured on 03-11-2026, `sh1.js`, `sh2.js`): any numeric 1, a decimal too, and an
+/// index field of another number does not serve.
 #[test]
 fn arguments_and_the_numbers_of_a_key() {
     let mut m = Mem::new();
@@ -279,9 +280,9 @@ fn arguments_and_the_numbers_of_a_key() {
     }
 }
 
-/// The indexes that start with the shard key but cannot serve it, as a `refrouter` 9.0.4 refuses
-/// them (measured on 03-11-2026, `sh3.js`, `sh4.js`): each index in its order with its reason,
-/// or the request for an index; the documents stay as they were.
+/// The indexes that start with the shard key but cannot serve it, as the reference router 9.0.4
+/// refuses them (measured on 03-11-2026, `sh3.js`, `sh4.js`): each index in its order with its
+/// reason, or the request for an index; the documents stay as they were.
 #[test]
 fn indexes_that_cannot_serve_the_key() {
     let mut m = Mem::new();
@@ -344,7 +345,7 @@ fn indexes_that_cannot_serve_the_key() {
 }
 
 /// Documents of a dotted shard key: a missing or scalar parent is a null key, an array on the
-/// way is refused with each insert's error (measured on a `refrouter` 9.0.4 on 03-11-2026,
+/// way is refused with each insert's error (measured on the reference router 9.0.4 on 03-11-2026,
 /// `sh7.js`); a collection dropped by another client while it is sharded fails the command.
 #[test]
 fn dotted_keys_and_a_collection_dropped_meanwhile() {

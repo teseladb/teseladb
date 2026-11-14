@@ -1,7 +1,7 @@
-//! The audit log configured while the node runs (013 T042, FR-031), against RefDb Enterprise
-//! 9.0.4 with `--auditRuntimeConfiguration true` (measured on 31-10-2026): the cluster parameter
-//! `auditConfig` with its forms and errors, the events of the cluster parameters,
-//! `logApplicationMessage`, and another node that picks up the new filter.
+//! The audit log configured while the node runs (013 T042, FR-031), against the enterprise edition
+//! of the reference server 9.0.4 with `--auditRuntimeConfiguration true` (measured on 31-10-2026):
+//! the cluster parameter `auditConfig` with its forms and errors, the events of the cluster
+//! parameters, `logApplicationMessage`, and another node that picks up the new filter.
 
 mod common;
 
@@ -20,7 +20,7 @@ use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_
 use teseladb_wire::msg::OpMsg;
 
 const ADMIN: &str = "admin";
-const CERT_USER: &str = "CN=client,OU=KernelUser,O=RefDb,L=New York City,ST=New York,C=US";
+const CERT_USER: &str = "CN=client,OU=KernelUser,O=TeselaDB,L=New York City,ST=New York,C=US";
 const AUDIT_CONFIG: &str = "auditConfig";
 const AAS: &str = "auditAuthorizationSuccess";
 
@@ -148,7 +148,7 @@ fn error(r: &Document) -> (i32, String) {
 }
 
 #[test]
-fn audit_config_has_refdbs_forms_and_errors() {
+fn audit_config_has_the_reference_forms_and_errors() {
     let mut m = backend();
     let (shared, cap) = sessions(runtime());
     let mut c = root(&mut m, &shared);
@@ -339,9 +339,10 @@ fn audit_authorization_success_is_a_server_parameter() {
     assert_eq!(field(&run(&mut m, &shared, &mut c, get()), AAS), &Value::Boolean(true));
 }
 
-/// The OCSP parameters, with the defaults a `refnode` 9.0.4 shows (measured; 013 FR-031).
+/// The OCSP parameters, with the defaults a reference replica set member 9.0.4 shows (measured; 013
+/// FR-031).
 #[test]
-fn the_ocsp_parameters_read_as_refnode_shows_them() {
+fn the_ocsp_parameters_read_as_the_reference_member_shows_them() {
     let mut m = backend();
     let (shared, _) = sessions(Options::default());
     let mut c = root(&mut m, &shared);

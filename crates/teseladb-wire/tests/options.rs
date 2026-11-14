@@ -1,7 +1,7 @@
-//! Options and errors of the CRUD and catalog commands measured on a `refrouter` 9.0.4 (006 T024):
-//! sort specifications, `hint`, `awaitData`, `$meta` the query cannot give, `update` with `sort`,
-//! `listDatabases` outside `admin`, capped options, `constraint` with `warn`, the projection of
-//! `findAndModify` read before the write, and the positional projection's errors.
+//! Options and errors of the CRUD and catalog commands measured on the reference router 9.0.4 (006
+//! T024): sort specifications, `hint`, `awaitData`, `$meta` the query cannot give, `update` with
+//! `sort`, `listDatabases` outside `admin`, capped options, `constraint` with `warn`, the
+//! projection of `findAndModify` read before the write, and the positional projection's errors.
 
 mod common;
 

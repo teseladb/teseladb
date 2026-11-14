@@ -1,8 +1,9 @@
 //! The building of a new search index outside the command (011 FR-014, T040): with the node's
 //! builder, `createSearchIndexes` returns at once, the index stays `PENDING` and its queries are
-//! refused as `refsearch` refuses them in `INITIAL_SYNC` until the builder fills it over the
-//! documents already written; then it is `READY`. An update keeps the version served before
-//! until the new one is built (measured with `refsearch` 1.70.6, `scratchpad/lane3m/m32.js`).
+//! refused as the reference search server refuses them in `INITIAL_SYNC` until the builder fills it
+//! over the documents already written; then it is `READY`. An update keeps the version served
+//! before until the new one is built (measured with the reference search server 1.70.6,
+//! `scratchpad/lane3m/m32.js`).
 
 mod common;
 

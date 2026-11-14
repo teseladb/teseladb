@@ -1,6 +1,6 @@
 //! Time series through the commands (015 T012, T013, FR-006, FR-007): measurements go into
 //! buckets and `find`, `count` and `distinct` read them unpacked, `rawData` reads the buckets,
-//! against what a `refrouter` 9.0.4 answered on 31-10-2026.
+//! against what the reference router 9.0.4 answered on 31-10-2026.
 
 mod common;
 
@@ -139,7 +139,7 @@ fn meta_series(m: &mut Mem) {
 }
 
 #[test]
-fn updates_change_only_the_meta_value_as_a_refrouter_allows() {
+fn updates_change_only_the_meta_value_as_the_reference_router_allows() {
     let mut m = Mem::new();
     meta_series(&mut m);
     let refused = [
@@ -418,9 +418,9 @@ fn bucket_namespaces_are_not_served() {
     assert_eq!(field(&r, "n"), &Value::Int32(1));
 }
 
-/// The bucket filter of each partial filter, as a `refrouter` 9.0.4 lists it with `rawData`.
+/// The bucket filter of each partial filter, as the reference router 9.0.4 lists it with `rawData`.
 #[test]
-fn partial_filters_list_over_the_buckets_as_refdb_writes_them() {
+fn partial_filters_list_over_the_buckets_as_the_reference_writes_them() {
     let mut m = Mem::new();
     run(&mut m, r#"{"create":"ts","timeseries":{"timeField":"t","metaField":"m"}}"#);
     let t = r#"{"$date":"2026-01-01T00:00:00Z"}"#;
@@ -493,8 +493,8 @@ fn partial_filters_list_over_the_buckets_as_refdb_writes_them() {
             "can't handle this predicate: { v: { $elemMatch: { a: { $eq: 1 } } } }",
         ),
         (r#"{"v":{"$type":"int"}}"#, "can't handle this predicate: { v: { $type: [ 16 ] } }"),
-        // Measured on a `refnode` 9.0.4 on 02-11-2026: the types once each, sorted, `number` first;
-        // the operator refused alone; an `$elemMatch` one predicate each.
+        // Measured on a reference replica set member 9.0.4 on 02-11-2026: the types once each,
+        // sorted, `number` first; the operator refused alone; an `$elemMatch` one predicate each.
         (
             r#"{"v":{"$type":["string","int","string"]}}"#,
             "can't handle this predicate: { v: { $type: [ 2, 16 ] } }",
@@ -582,9 +582,10 @@ fn partial_filters_list_over_the_buckets_as_refdb_writes_them() {
     assert_eq!(field(&r, "n"), &Value::Int32(1));
 }
 
-/// The bucket counters of `collStats`, after the steps a `refrouter` 9.0.4 counted on 31-10-2026.
+/// The bucket counters of `collStats`, after the steps the reference router 9.0.4 counted on
+/// 31-10-2026.
 #[test]
-fn coll_stats_counts_the_buckets_as_refdb_does() {
+fn coll_stats_counts_the_buckets_as_the_reference_does() {
     let mut m = Mem::new();
     run(&mut m, r#"{"create":"ts","timeseries":{"timeField":"t","metaField":"m"}}"#);
     let at = |ms: i64| date(T0 + ms);

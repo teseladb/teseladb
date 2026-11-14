@@ -1,6 +1,6 @@
 //! 018 T022: `getShardMap`, `getShardVersion`, `flushRouterConfig`, `checkMetadataConsistency`,
 //! `appendOplogNote` and `transitionToDedicatedConfigServer` (FR-017) over the in-memory node of
-//! `common`, with the replies of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026).
+//! `common`, with the replies of the reference router 9.0.4 of two shards (measured on 02-11-2026).
 
 mod common;
 
@@ -102,7 +102,7 @@ fn get_shard_version_of_a_collection_and_of_a_database() {
         json(r#"{"_id":"a","primary":"node2","version":{"lastMod":3}}"#),
         json(r#"{"_id":"z","primary":"node1","version":{"lastMod":1}}"#),
     ]);
-    // `z.` names the database too (measured on a `refrouter` 9.0.4 on 03-11-2026).
+    // `z.` names the database too (measured on the reference router 9.0.4 on 03-11-2026).
     for name in ["z", "z."] {
         let r = admin(&mut m, &format!(r#"{{"getShardVersion":"{name}"}}"#));
         assert_eq!(field(&r, "primaryShard"), &Value::from("node1"), "{name}");

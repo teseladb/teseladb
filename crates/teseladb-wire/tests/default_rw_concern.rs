@@ -1,6 +1,6 @@
-//! 007 T032: the cluster's default concerns (FR-018), with the answers and errors of a `refrouter`
-//! 9.0.4 (measured): `setDefaultRWConcern` keeps them in Group 0, `getDefaultRWConcern` shows them
-//! over the implicit ones, and a command without its own concern takes them.
+//! 007 T032: the cluster's default concerns (FR-018), with the answers and errors of the reference
+//! router 9.0.4 (measured): `setDefaultRWConcern` keeps them in Group 0, `getDefaultRWConcern`
+//! shows them over the implicit ones, and a command without its own concern takes them.
 
 mod common;
 
@@ -54,7 +54,7 @@ fn without_a_default_the_implicit_ones_are_shown() {
 }
 
 #[test]
-fn defaults_set_are_kept_shown_and_refused_as_a_refrouter_does() {
+fn defaults_set_are_kept_shown_and_refused_as_the_reference_router_does() {
     let mut m = Mem::new();
     let majority = Document::new().with("level", "majority");
     let r = m.run("admin", set().with("defaultReadConcern", majority.clone()));
@@ -157,7 +157,7 @@ fn a_write_without_its_own_concern_takes_the_default() {
 }
 
 /// `fsync`, `compact`, `autoCompact` and `shutdown` (007 T032, FR-018, DV-017), with the checks
-/// measured on a `refrouter` 9.0.4 and, for `compact` and `autoCompact`, on its shard.
+/// measured on the reference router 9.0.4 and, for `compact` and `autoCompact`, on its shard.
 #[test]
 fn fsync_compact_and_shutdown_check_their_fields() {
     let mut m = Mem::new();
@@ -168,7 +168,7 @@ fn fsync_compact_and_shutdown_check_their_fields() {
     assert_eq!(r.get("code"), Some(&Value::Int32(13)));
     let r = m.run("admin", doc(&[("fsync", Value::Int32(1)), ("lock", Value::from("x"))]));
     let want = "BSON field 'fsync.lock' is the wrong type 'string', expected types '[decimal, int, long, bool, double]'";
-    // The code goes only in `all`, after each shard's answer, as a `refrouter` 9.0.4 answers
+    // The code goes only in `all`, after each shard's answer, as the reference router 9.0.4 answers
     // (measured on 03-11-2026).
     assert_eq!(err(&r), (None, Some(&Value::from(want))));
     assert_eq!(field(&r, "all.code"), &Value::Int32(14));
@@ -215,7 +215,8 @@ fn fsync_compact_and_shutdown_check_their_fields() {
 }
 
 /// `serverStatus` shows in `defaultRWConcern` what `getDefaultRWConcern` answers, the time of the
-/// last change included (a `refrouter` 9.0.4, measured by the battery's `admin-status` on 04-11-2026).
+/// last change included (the reference router 9.0.4, measured by the battery's `admin-status` on
+/// 04-11-2026).
 #[test]
 fn server_status_shows_the_defaults_set() {
     let mut m = Mem::new();

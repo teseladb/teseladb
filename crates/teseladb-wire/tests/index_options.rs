@@ -1,7 +1,7 @@
 //! Partial indexes in the writes (009 T015, T016, FR-008): only the documents that match
 //! `partialFilterExpression`, with the index's collation, have entries; a document that starts or
 //! stops matching gains or loses them; a unique or prepared partial index only compares the
-//! documents it holds (measured on RefDb 9.0.4: `{x: 9}` twice is a duplicate under
+//! documents it holds (measured on the reference server 9.0.4: `{x: 9}` twice is a duplicate under
 //! `{x: {$gt: 5}}`, `{x: 1}` twice is not).
 
 mod common;
@@ -212,9 +212,9 @@ fn a_partial_filter_takes_only_what_an_index_can_hold() {
             67,
             "Expression not supported in partial index: $nor\n    a $eq 1\n".into(),
         ),
-        // Measured on a `refnode` 9.0.4 on 02-11-2026: a child of `$nor` with more than one
-        // predicate is an `$and` one level deeper, and an equality to an array or a document
-        // shows the value as the shell writes it.
+        // Measured on a reference replica set member 9.0.4 on 02-11-2026: a child of `$nor` with
+        // more than one predicate is an `$and` one level deeper, and an equality to an array or a
+        // document shows the value as the shell writes it.
         (
             d(&[(
                 "$nor",

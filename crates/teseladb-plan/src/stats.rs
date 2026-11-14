@@ -40,7 +40,7 @@ pub struct FieldStats {
     pub count: u64,
     /// Distinct values.
     pub distinct: u64,
-    /// Equal-depth buckets in RefDb's order of values.
+    /// Equal-depth buckets in the reference server's order of values.
     pub buckets: Vec<Bucket>,
 }
 

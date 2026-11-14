@@ -1,6 +1,6 @@
-//! Synonyms read from their collection (011 T036, FR-006): the scores `refsearch` 1.70.6 gives on
-//! the corpus of `scratchpad/lane3l/m21.js` (measured 02-11-2026), a change of the synonym
-//! collection seen by the next query, and the error of a mapping with a bad document.
+//! Synonyms read from their collection (011 T036, FR-006): the scores the reference search server
+//! 1.70.6 gives on the corpus of `scratchpad/lane3l/m21.js` (measured 02-11-2026), a change of the
+//! synonym collection seen by the next query, and the error of a mapping with a bad document.
 
 mod common;
 
@@ -94,7 +94,7 @@ fn corpus() -> Mem {
 }
 
 #[test]
-fn synonyms_come_from_their_collection_with_refsearch_scores() {
+fn synonyms_come_from_their_collection_with_the_reference_search_scores() {
     let mut m = corpus();
     assert_eq!(
         scores(&mut m, "minino"),

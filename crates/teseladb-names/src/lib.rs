@@ -213,6 +213,11 @@ pub const HELP_SHUTDOWN: &str = "Shuts down the mongos. Must be run against the 
 pub const HELP_UPDATE_SEARCH_INDEX: &str =
     "Command to update a search index. Only supported with Atlas.";
 
+// d170-l2
+/// The start of the documentation link of the release notes, which the error of an invalid
+/// feature compatibility version ends with; the version's page follows.
+pub const DOC_RELEASE_NOTES: &str = "https://docs.mongodb.com/master/release-notes/";
+
 /// Every constant with its name, for [`expand`].
 pub const ALL: &[(&str, &str)] = &[
     ("ROUTER", ROUTER),
@@ -281,6 +286,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("HELP_SET_PARAMETER", HELP_SET_PARAMETER),
     ("HELP_SHUTDOWN", HELP_SHUTDOWN),
     ("HELP_UPDATE_SEARCH_INDEX", HELP_UPDATE_SEARCH_INDEX),
+    // d170-l2
+    ("DOC_RELEASE_NOTES", DOC_RELEASE_NOTES),
 ];
 
 /// A mark `${name:X}` whose `X` is not a constant of this crate.

@@ -1,8 +1,8 @@
-//! `createIndexes` and `collMod` of indexes as a `refrouter` 9.0.4 answers them (009 T011, T013,
-//! scenario `index-commands`, measured): errors forwarded from the shard with `code` and
+//! `createIndexes` and `collMod` of indexes as the reference router 9.0.4 answers them (009 T011,
+//! T013, scenario `index-commands`, measured): errors forwarded from the shard with `code` and
 //! `codeName` first, «Error in specification» around the specification errors, the TTL and
-//! hashed-unique refusals, the `_id` index options, the specifications as `listIndexes` shows
-//! them, and `collMod` of `hidden` and `expireAfterSeconds`.
+//! hashed-unique refusals, the `_id` index options, the specifications as `listIndexes` shows them,
+//! and `collMod` of `hidden` and `expireAfterSeconds`.
 
 mod common;
 
@@ -44,7 +44,7 @@ fn listed(m: &mut Mem, name: &str) -> Document {
 }
 
 #[test]
-fn errors_come_as_a_refrouter_forwards_them() {
+fn errors_come_as_the_reference_router_forwards_them() {
     let mut m = Mem::new();
     // `createIndexes` puts the shard's own reply first, under `raw` (measured on 03-11-2026).
     let r = create(&mut m, "c", vec![]);
@@ -111,10 +111,14 @@ fn a_hashed_index_cannot_be_unique() {
 }
 
 #[test]
-fn indexes_are_listed_as_refdb_stores_them() {
+fn indexes_are_listed_as_the_reference_stores_them() {
     let mut m = Mem::new();
     let r = create(&mut m, "new", vec![spec(doc(&[("a", 1.into())]), "a_1")]);
-    assert_eq!(field(&r, "createdCollectionAutomatically"), &Value::Boolean(false), "as a refrouter");
+    assert_eq!(
+        field(&r, "createdCollectionAutomatically"),
+        &Value::Boolean(false),
+        "as the reference router"
+    );
     let geo = spec(Document::new().with("loc", "2dsphere"), "loc_2dsphere");
     let plane = spec(Document::new().with("p", "2d"), "p_2d").with("bits", 20).with("min", -500);
     let plane = plane.with("max", 500);
@@ -187,10 +191,11 @@ fn listed_fields(m: &mut Mem, name: &str) -> Vec<String> {
 }
 
 #[test]
-fn specifications_are_stored_in_refdb_order_with_their_booleans() {
+fn specifications_are_stored_in_the_reference_order_with_their_booleans() {
     let mut m = Mem::new();
     let fr = Document::new().with("locale", "fr");
-    // Given in reverse, stored in the order of RefDb's specification (measured on 9.0.4).
+    // Given in reverse, stored in the order of the reference server's specification (measured on
+    // 9.0.4).
     let reversed = spec(Document::new().with("o", 1), "o")
         .with("prepareUnique", true)
         .with("collation", fr.clone())
@@ -331,8 +336,8 @@ fn an_index_takes_hash_buckets_of_its_own() {
 
 #[test]
 fn the_namespace_of_a_specification_is_not_kept() {
-    // `refrestore` sends `ns` in the specifications of an old dump; a `refrouter` 9.0.4 drops it,
-    // whatever namespace it names (measured on `lc12`).
+    // The reference restore tool sends `ns` in the specifications of an old dump; the reference
+    // router 9.0.4 drops it, whatever namespace it names (measured on `lc12`).
     let mut m = Mem::new();
     let with_ns = |key: &str, ns: &str| spec(Document::new().with(key, 1), key).with("ns", ns);
     let r = create(&mut m, "c", vec![with_ns("a", "t.c"), with_ns("b", "other.c")]);
@@ -343,9 +348,9 @@ fn the_namespace_of_a_specification_is_not_kept() {
 
 #[test]
 fn indexes_on_the_same_key_differ_by_their_identifying_options() {
-    // Measured on a `refrouter` 9.0.4 (`lc12`): `unique`, `sparse`, `partialFilterExpression`,
-    // `collation` and `wildcardProjection` make another index on the same key; `hidden`,
-    // `expireAfterSeconds` and `prepareUnique` do not.
+    // Measured on the reference router 9.0.4 (`lc12`): `unique`, `sparse`,
+    // `partialFilterExpression`, `collation` and `wildcardProjection` make another index on the
+    // same key; `hidden`, `expireAfterSeconds` and `prepareUnique` do not.
     let mut m = Mem::new();
     let s = || Document::new().with("s", 1);
     let ok = |r: &Document| r.get("ok") == Some(&Value::Double(1.0));
@@ -406,7 +411,7 @@ fn only_one_field_of_an_index_may_be_hashed() {
 
 #[test]
 fn wildcard_specifications_are_checked_before_the_build() {
-    // Measured on a `refrouter` 9.0.4 (`lc12`), with another `$**` index on the collection.
+    // Measured on the reference router 9.0.4 (`lc12`), with another `$**` index on the collection.
     let mut m = Mem::new();
     let all = || Document::new().with("$**", 1);
     assert_eq!(create(&mut m, "c", vec![spec(all(), "all")]).get("ok"), Some(&Value::Double(1.0)));

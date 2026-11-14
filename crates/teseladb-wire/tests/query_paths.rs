@@ -1,6 +1,7 @@
-//! Paths of `find` measured on a `refnode` 9.0.4 on 01-11-2026: the query tree of a tailable read
-//! of a collection that is not capped with an equality to a document, `system.views` read in
-//! batches of one and with a filter no view matches, and a single batch of `admin.system.users`.
+//! Paths of `find` measured on a reference replica set member 9.0.4 on 01-11-2026: the query tree
+//! of a tailable read of a collection that is not capped with an equality to a document,
+//! `system.views` read in batches of one and with a filter no view matches, and a single batch of
+//! `admin.system.users`.
 
 mod common;
 

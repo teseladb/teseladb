@@ -1,5 +1,5 @@
-//! The `let` of `find`, `update`, `delete`, `findAndModify` and `bulkWrite` (FR-032, T050):
-//! checked as a `refrouter` 9.0.4 checks it (measured on 30-10-2026), its literals resolved in 006,
+//! The `let` of `find`, `update`, `delete`, `findAndModify` and `bulkWrite` (FR-032, T050): checked
+//! as the reference router 9.0.4 checks it (measured on 30-10-2026), its literals resolved in 006,
 //! its expressions sent to the engine of 010, and its variables carried to the range's leader in
 //! the encoded mutation.
 

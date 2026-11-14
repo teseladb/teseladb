@@ -1,6 +1,6 @@
-//! `internalQueryMaxMemoryUsageBytesPerOperation` (010 T043, FR-010), measured on a `refnode`
-//! 9.0.4 set to 2000 bytes: a `$group` that holds more writes to disk with `allowDiskUse` and
-//! fails with 292 without it; a sort is not held to it.
+//! `internalQueryMaxMemoryUsageBytesPerOperation` (010 T043, FR-010), measured on a reference
+//! replica set member 9.0.4 set to 2000 bytes: a `$group` that holds more writes to disk with
+//! `allowDiskUse` and fails with 292 without it; a sort is not held to it.
 
 mod common;
 

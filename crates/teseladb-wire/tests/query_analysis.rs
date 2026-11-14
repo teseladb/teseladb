@@ -1,6 +1,6 @@
 //! 018 T021: `configureQueryAnalyzer`, the sampling of queries, `$listSampledQueries`,
 //! `analyzeShardKey` and `$shardedDataDistribution` (FR-017) over the in-memory node of
-//! `common`, with the replies and messages of a `refrouter` 9.0.4 of two shards (measured on
+//! `common`, with the replies and messages of the reference router 9.0.4 of two shards (measured on
 //! 02-11-2026, `t5.js` to `t8.js` and `t13.js` in the lane's notes).
 
 mod common;
@@ -73,7 +73,7 @@ fn cursor(r: &Document) -> Vec<Document> {
 }
 
 #[test]
-fn configure_query_analyzer_fails_and_answers_as_on_a_refrouter() {
+fn configure_query_analyzer_fails_and_answers_as_on_the_reference_router() {
     let mut m = cluster();
     let cases: [(&str, &str, i32, &str); 11] = [
         (
@@ -280,7 +280,7 @@ fn sampled_queries_are_listed_newest_first() {
 }
 
 #[test]
-fn analyze_shard_key_fails_as_on_a_refrouter() {
+fn analyze_shard_key_fails_as_on_the_reference_router() {
     let mut m = cluster();
     ok(&m.run("q", json(r#"{"create":"e"}"#)));
     let cases: [(&str, &str, i32, &str); 12] = [
@@ -353,7 +353,7 @@ fn analyze_shard_key_fails_as_on_a_refrouter() {
 }
 
 #[test]
-fn key_characteristics_are_those_of_a_refrouter() {
+fn key_characteristics_are_those_of_the_reference_router() {
     let mut m = cluster();
     let r = admin(
         &mut m,
@@ -483,7 +483,7 @@ fn the_read_and_write_distribution_routes_the_samples() {
     assert_eq!(writes.get("percentageOfShardKeyUpdates"), Some(&Value::Double(25.0)));
     assert_eq!(writes.get("percentageOfSingleWritesWithoutShardKey"), Some(&Value::Double(25.0)));
     assert_eq!(writes.get("percentageOfMultiWritesWithoutShardKey"), Some(&Value::Double(25.0)));
-    // Rounded up to ten decimals, as on a `refrouter`: 2 of 3.
+    // Rounded up to ten decimals, as on the reference router: 2 of 3.
     m.now += 100;
     ok(&m.run("q", json(r#"{"find":"big","filter":{"y":4}}"#)));
     let r =
@@ -525,7 +525,7 @@ fn sharded_data_distribution_lists_each_shards_documents() {
 
 /// A unique index makes the key unique; a compound key routes by its first field, and the
 /// conditions that do not bound it (a document, `$exists`, an empty `$in`) count as they do on
-/// a `refrouter`: the samples are all counted.
+/// the reference router: the samples are all counted.
 #[test]
 fn unique_and_compound_keys_and_conditions_that_bound_nothing() {
     let mut m = cluster();

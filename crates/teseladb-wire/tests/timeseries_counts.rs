@@ -1,8 +1,8 @@
-//! Time series writes measured on a `refnode` 9.0.4 (replica set) on 01-11-2026: the bucket
-//! counters of an insert that fills a bucket by count or by size in one statement and of a bucket
-//! made again after its measurements were deleted; a delete and a find with a collation; an update whose
-//! operator is no document, or that gives measurements without one a meta value; and an index
-//! hidden after it was made, as `listIndexes` shows it.
+//! Time series writes measured on a reference replica set member 9.0.4 (replica set) on 01-11-2026:
+//! the bucket counters of an insert that fills a bucket by count or by size in one statement and of
+//! a bucket made again after its measurements were deleted; a delete and a find with a collation;
+//! an update whose operator is no document, or that gives measurements without one a meta value;
+//! and an index hidden after it was made, as `listIndexes` shows it.
 
 mod common;
 
@@ -188,10 +188,10 @@ fn an_update_gives_a_meta_value_to_measurements_without_one() {
     assert_eq!(b, &want, "{r:?}");
 }
 
-/// Partial filters of a time series index as a `refnode` 9.0.4 translates them to the buckets
-/// (`listIndexes` with `rawData`) or refuses them, measured on 01-11-2026.
+/// Partial filters of a time series index as a reference replica set member 9.0.4 translates them
+/// to the buckets (`listIndexes` with `rawData`) or refuses them, measured on 01-11-2026.
 #[test]
-fn partial_filters_translate_to_the_buckets_as_refdb_does() {
+fn partial_filters_translate_to_the_buckets_as_the_reference_does() {
     let d = |ms: i64| format!(r#"{{"$date":{{"$numberLong":"{ms}"}}}}"#);
     let translated = [
         (

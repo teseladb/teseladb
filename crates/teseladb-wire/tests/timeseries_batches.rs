@@ -1,6 +1,6 @@
-//! Inserts of time series measurements in batches (015 FR-006, FR-008, T023), as a `refnode`
-//! 9.0.4 answered them on 02-11-2026: the measurements of one bucket go in together or fail
-//! together, a measurement that changes the type of a field closes its bucket
+//! Inserts of time series measurements in batches (015 FR-006, FR-008, T023), as a reference
+//! replica set member 9.0.4 answered them on 02-11-2026: the measurements of one bucket go in
+//! together or fail together, a measurement that changes the type of a field closes its bucket
 //! (`numBucketsClosedDueToSchemaChange`), and an ordered insert stops at its first failure.
 
 mod common;
@@ -299,7 +299,8 @@ fn a_retried_insert_commits_nothing_again() {
     assert_eq!(field(&r, "n"), &Value::Int32(2), "{r:?}");
 }
 
-/// `collStats.timeseries` gives RefDb's 41 fields after `bucketsNs`, in alphabetical order.
+/// `collStats.timeseries` gives the reference server's 41 fields after `bucketsNs`, in alphabetical
+/// order.
 #[test]
 fn coll_stats_gives_every_bucket_catalog_field() {
     let mut m = Mem::new();
@@ -331,12 +332,13 @@ const CATALOG: [&str; 14] = [
     "numMeasurementsCommitted",
 ];
 
-/// The bucket catalog's counters through a sequence of inserts, as a `refnode` 9.0.4 counted
-/// them on 02-11-2026: time forward closes the open bucket, time backward looks the old one up
-/// and reopens it, the next insert there archives the later one, which a later insert fetches;
-/// a schema change closes a bucket; a meta value whose bucket was deleted looks it up again.
+/// The bucket catalog's counters through a sequence of inserts, as a reference replica set member
+/// 9.0.4 counted them on 02-11-2026: time forward closes the open bucket, time backward looks the
+/// old one up and reopens it, the next insert there archives the later one, which a later insert
+/// fetches; a schema change closes a bucket; a meta value whose bucket was deleted looks it up
+/// again.
 #[test]
-fn the_bucket_catalog_counts_as_refdb() {
+fn the_bucket_catalog_counts_as_the_reference() {
     const H: i64 = 3_600_000;
     let mut m = Mem::new();
     series(&mut m, "k", false);
@@ -364,9 +366,9 @@ fn the_bucket_catalog_counts_as_refdb() {
     assert_eq!(counters(&mut m, "k", &CATALOG), want.to_vec(), "after the delete");
 }
 
-/// An ordered insert with meta values in turn commits once per bucket, and a refused
-/// measurement leaves out everything after it, in every bucket (measured on a `refnode` 9.0.4
-/// on 02-11-2026: `n` 2, the error at 2, two commits).
+/// An ordered insert with meta values in turn commits once per bucket, and a refused measurement
+/// leaves out everything after it, in every bucket (measured on a reference replica set member
+/// 9.0.4 on 02-11-2026: `n` 2, the error at 2, two commits).
 #[test]
 fn an_ordered_insert_of_meta_values_in_turn_commits_once_per_bucket() {
     let mut m = Mem::new();

@@ -1,6 +1,6 @@
 //! `collMod` of views, time series and the expiry of clustered collections (015 FR-001, FR-006,
-//! FR-009; audit T020), with the replies and the options `listCollections` shows that a `refnode`
-//! 9.0.4 gave on 02-11-2026.
+//! FR-009; audit T020), with the replies and the options `listCollections` shows that a reference
+//! replica set member 9.0.4 gave on 02-11-2026.
 
 mod common;
 

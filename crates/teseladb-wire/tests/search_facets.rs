@@ -1,6 +1,6 @@
 //! Facets through the commands (011 T034, FR-004): `$searchMeta` with the `facet` collector and
-//! `$$SEARCH_META` after `$search`, as a 9.0.4 replica set with `refsearch` 1.70.6 answers them on
-//! the corpus of `scratchpad/lane3l/m23.js` (measured 02-11-2026).
+//! `$$SEARCH_META` after `$search`, as a 9.0.4 replica set with the reference search server 1.70.6
+//! answers them on the corpus of `scratchpad/lane3l/m23.js` (measured 02-11-2026).
 
 mod common;
 
@@ -110,8 +110,8 @@ fn search_meta_variable_follows_a_search() {
     );
 }
 
-/// `{$meta: "searchHighlights"}` (011 T035): a text of one word gives the passage `refsearch`
-/// gives for it in `scratchpad/lane3k/m17.js`.
+/// `{$meta: "searchHighlights"}` (011 T035): a text of one word gives the passage the reference
+/// search server gives for it in `scratchpad/lane3k/m17.js`.
 #[test]
 fn highlights_reach_the_documents() {
     let mut m = corpus();
@@ -145,10 +145,10 @@ fn joined_corpus() -> Mem {
     m
 }
 
-/// Search stages first in the pipeline of a `$lookup` or `$unionWith` read the search indexes
-/// of the collection that stage reads (011 FR-004, found with T054), as a 9.0.4 replica set with
-/// `refsearch` 1.70.6 answers on 03-11-2026 (`scratchpad/lane3t/m112.js`, `m113.js`): with
-/// `localField` the equality applies to what the search gives, a collection without the index
+/// Search stages first in the pipeline of a `$lookup` or `$unionWith` read the search indexes of
+/// the collection that stage reads (011 FR-004, found with T054), as a 9.0.4 replica set with the
+/// reference search server 1.70.6 answers on 03-11-2026 (`scratchpad/lane3t/m112.js`, `m113.js`):
+/// with `localField` the equality applies to what the search gives, a collection without the index
 /// gives nothing, the errors of the query come when the pipeline runs, and the `$search` of a
 /// `$lookup` on a view without stages finds nothing.
 #[test]
@@ -222,15 +222,15 @@ fn search_stages_in_joined_pipelines_read_the_joined_collection() {
         (lookup(two, format!(r#"{{"from": "vf", "pipeline": [{search}], "as": "x"}}"#)), Ok(both("[]"))),
         (
             lookup(two, format!(r#"{{"from": "vfs", "pipeline": [{search}], "as": "x"}}"#)),
-            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+            Err(format!("{}$match stage can only contain $expr", teseladb_names::ERR_SEARCH_VIEW_INCOMPATIBLE)),
         ),
         (
             lookup(none, format!(r#"{{"from": "vfs", "pipeline": [{search}], "as": "x"}}"#)),
-            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+            Err(format!("{}$match stage can only contain $expr", teseladb_names::ERR_SEARCH_VIEW_INCOMPATIBLE)),
         ),
         (
             format!(r#"[{none}, {{"$unionWith": {{"coll": "vfs", "pipeline": [{search}]}}}}]"#),
-            Err("Cannot perform a search operation as the view definition is incompatible with RefCloud: $match stage can only contain $expr".to_owned()),
+            Err(format!("{}$match stage can only contain $expr", teseladb_names::ERR_SEARCH_VIEW_INCOMPATIBLE)),
         ),
         (
             format!(r#"[{none}, {{"$unionWith": {{"coll": "vf", "pipeline": [{search}]}}}}]"#),

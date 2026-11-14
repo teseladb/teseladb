@@ -1,8 +1,8 @@
-//! A read through an index whose document went away between the index entry and the document:
-//! reads that are not at a snapshot read the index and the documents separately, so a delete in
-//! between leaves an entry without its document. The read goes on without it, as RefDb skips
-//! a record deleted while the read yields (found by 018 T013 with a client writing during a
-//! copy: `an index entry without its document`).
+//! A read through an index whose document went away between the index entry and the document: reads
+//! that are not at a snapshot read the index and the documents separately, so a delete in between
+//! leaves an entry without its document. The read goes on without it, as the reference server skips
+//! a record deleted while the read yields (found by 018 T013 with a client writing during a copy:
+//! `an index entry without its document`).
 
 mod common;
 

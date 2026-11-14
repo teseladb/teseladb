@@ -1,10 +1,10 @@
-//! The walk of an index scan over keys whose fields each have intervals (010 FR-001), as
-//! RefDb's index bounds checker walks them (measured on a `refrouter` 9.0.4, 01-11-2026): from
-//! the first key at or after the start of every field's first interval, each key the scan lands
-//! on is examined; a key within every field's intervals is given, the next key follows it; a key
-//! outside makes the scan seek to the first key that could be within, and a key past the last
-//! interval of the leading field ends the scan. `{g: {$gte: "a"}, n: 5}` over `{g: 1, n: 1}`
-//! with keys `a/5, a/5, a/7, b/-1, b/3, c/2.5` examines 5 keys and seeks 4 times.
+//! The walk of an index scan over keys whose fields each have intervals (010 FR-001), as the
+//! reference server's index bounds checker walks them (measured on the reference router 9.0.4,
+//! 01-11-2026): from the first key at or after the start of every field's first interval, each key
+//! the scan lands on is examined; a key within every field's intervals is given, the next key
+//! follows it; a key outside makes the scan seek to the first key that could be within, and a key
+//! past the last interval of the leading field ends the scan. `{g: {$gte: "a"}, n: 5}` over `{g: 1,
+//! n: 1}` with keys `a/5, a/5, a/7, b/-1, b/3, c/2.5` examines 5 keys and seeks 4 times.
 
 use std::cmp::Ordering;
 

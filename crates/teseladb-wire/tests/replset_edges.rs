@@ -108,8 +108,8 @@ fn requests_and_designations() {
     assert!(Presentation { replica_set_port: None, ..p }.on_port(&hosts).is_none());
 }
 
-/// `replSetReconfig`, `replSetResizeOplog` and `replSetStepDown` refuse what RefDb 9.0.4
-/// refuses (measured on 02-11-2026, `r4.js`).
+/// `replSetReconfig`, `replSetResizeOplog` and `replSetStepDown` refuse what the reference server
+/// 9.0.4 refuses (measured on 02-11-2026, `r4.js`).
 #[test]
 fn member_command_refusals() {
     let mut m = node();
@@ -135,7 +135,7 @@ fn member_command_refusals() {
     assert_eq!(code(&reconfig(&mut m, Value::Document(votes))), 93);
     let hidden = base(vec![member(N1, Document::new().with("hidden", true))]);
     assert_eq!(code(&reconfig(&mut m, Value::Document(hidden))), 93);
-    // Wrong types, measured on 9.0.4 (`rc.js`): 93 with RefDb's message.
+    // Wrong types, measured on 9.0.4 (`rc.js`): 93 with the reference server's message.
     let errmsg = |r: &Document| match r.get("errmsg") {
         Some(Value::String(s)) => s.clone(),
         _ => panic!("{r:?}"),
@@ -196,7 +196,7 @@ fn the_served_collections_of_local() {
             other => panic!("{other:?}"),
         }
     };
-    assert_eq!(list(&mut m, true).len(), 2, "no system.replset as a refrouter");
+    assert_eq!(list(&mut m, true).len(), 2, "no system.replset as the reference router");
     replica(&mut m, N2);
     let full = list(&mut m, false);
     assert_eq!(full.len(), 3, "{full:?}");
@@ -217,9 +217,9 @@ fn the_served_collections_of_local() {
     );
 }
 
-/// More of RefDb 9.0.4's answers: a freeze for an infinite time unfreezes, a `replSetReconfig`
-/// whose `_id` is not a string goes on to its other checks, `replSetSyncFrom ""` cannot parse,
-/// and a fractional priority is shown as a double.
+/// More of the reference server 9.0.4's answers: a freeze for an infinite time unfreezes, a
+/// `replSetReconfig` whose `_id` is not a string goes on to its other checks, `replSetSyncFrom ""`
+/// cannot parse, and a fractional priority is shown as a double.
 #[test]
 fn more_member_answers() {
     let mut m = node();
@@ -248,9 +248,10 @@ fn more_member_answers() {
     );
 }
 
-/// `replSetReconfig`'s `version` as RefDb 9.0.4 reads it (measured on 03-11-2026, `rs3.js`):
-/// missing, not a number, not whole or not above 0 is 93 with RefDb's message; a whole double, a decimal
-/// and a long past 32 bits are taken, and the long is kept whole.
+/// `replSetReconfig`'s `version` as the reference server 9.0.4 reads it (measured on 03-11-2026,
+/// `rs3.js`): missing, not a number, not whole or not above 0 is 93 with the reference server's
+/// message; a whole double, a decimal and a long past 32 bits are taken, and the long is kept
+/// whole.
 #[test]
 fn the_version_of_a_reconfig() {
     let mut m = node();
@@ -307,8 +308,8 @@ fn the_version_of_a_reconfig() {
     );
 }
 
-/// The members' `priority`, `votes` and `hidden` as decimals, and `hidden` as a number, as
-/// RefDb 9.0.4 takes them (measured on 03-11-2026): a decimal is a number, and a numeric
+/// The members' `priority`, `votes` and `hidden` as decimals, and `hidden` as a number, as the
+/// reference server 9.0.4 takes them (measured on 03-11-2026): a decimal is a number, and a numeric
 /// `hidden` is shown as the flag it means.
 #[test]
 fn decimal_and_numeric_member_attributes() {
@@ -339,9 +340,9 @@ fn decimal_and_numeric_member_attributes() {
     assert_eq!(field(&r, "config.members.2.hidden"), &Value::Boolean(false));
 }
 
-/// More of `replSetReconfig`'s refusals and answers as RefDb 9.0.4 gives them (measured on
-/// 03-11-2026): a member without a host or with one that is not a string, a priority that is a
-/// boolean, a version far below 64 bits; a member without votes and priority is taken.
+/// More of `replSetReconfig`'s refusals and answers as the reference server 9.0.4 gives them
+/// (measured on 03-11-2026): a member without a host or with one that is not a string, a priority
+/// that is a boolean, a version far below 64 bits; a member without votes and priority is taken.
 #[test]
 fn reconfig_members_hosts_and_flags() {
     let mut m = node();

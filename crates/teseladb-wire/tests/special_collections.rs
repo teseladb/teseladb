@@ -1,6 +1,6 @@
 //! `create` of views, capped collections, time series and clustered collections, the shape
 //! `listCollections` gives them and the writes a view refuses (015 T005, FR-001 to FR-003, FR-006,
-//! FR-009, FR-010), against what a `refrouter` 9.0.4 answered on 31-10-2026.
+//! FR-009, FR-010), against what the reference router 9.0.4 answered on 31-10-2026.
 
 mod common;
 
@@ -441,7 +441,7 @@ const REFUSED: &[(&str, i32, &str)] = &[
 ];
 
 #[test]
-fn create_stores_the_options_of_each_kind_as_refrouter_does() {
+fn create_stores_the_options_of_each_kind_as_the_reference_router_does() {
     for (options, shown) in CREATED {
         let mut m = Mem::new();
         let r = create(&mut m, "c", options);
@@ -452,7 +452,7 @@ fn create_stores_the_options_of_each_kind_as_refrouter_does() {
 }
 
 #[test]
-fn create_refuses_the_options_refrouter_refuses() {
+fn create_refuses_the_options_the_reference_router_refuses() {
     for (options, code, msg) in REFUSED {
         let mut m = Mem::new();
         let r = create(&mut m, "c", options);

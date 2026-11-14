@@ -1,6 +1,6 @@
 //! Reads of `aggregate` whose leading `$match` may go through the planner, and the namespace and
-//! argument checks of the stages of the node itself, against what a `refnode` 9.0.4 answered on
-//! 01-11-2026.
+//! argument checks of the stages of the node itself, against what a reference replica set member
+//! 9.0.4 answered on 01-11-2026.
 
 mod common;
 
@@ -118,8 +118,8 @@ fn list_local_sessions_checks_its_users() {
 }
 
 /// A `find` on a view whose pipeline starts with a stage of the node itself sees the node as an
-/// aggregation does (measured on a `refrouter` 9.0.4 on 02-11-2026): the indexes of the collection
-/// under the view, its count, its catalog entry and its geospatial index.
+/// aggregation does (measured on the reference router 9.0.4 on 02-11-2026): the indexes of the
+/// collection under the view, its count, its catalog entry and its geospatial index.
 #[test]
 fn a_view_over_a_stage_of_the_node_reads_the_collection_under_it() {
     let mut m = loaded();
@@ -154,7 +154,8 @@ fn a_view_over_a_stage_of_the_node_reads_the_collection_under_it() {
 
 /// A view whose pipeline starts with a stage of the node, read from another pipeline (`$lookup`,
 /// `$unionWith`), by `aggregate` and inside an explained `$facet`, sees the node as a `find` on it
-/// does (measured on a `refnode` 9.0.4 on 03-11-2026: the `_id_` index of the collection).
+/// does (measured on a reference replica set member 9.0.4 on 03-11-2026: the `_id_` index of the
+/// collection).
 #[test]
 fn a_view_over_a_stage_of_the_node_read_from_another_pipeline() {
     let mut m = loaded();
@@ -192,10 +193,10 @@ fn a_view_over_a_stage_of_the_node_read_from_another_pipeline() {
     assert_eq!(batch(&r).len(), 1, "{r:?}");
 }
 
-/// The namespaces of `$listExtensions`, `$listCatalog` and `$listSampledQueries` that run
-/// (measured on a `refnode` 9.0.4 on 03-11-2026): the first two on `admin` with `aggregate: 1`,
-/// `$listCatalog` on a view with no stages lists the collection under it, `$listSampledQueries`
-/// on a collection of `admin` is refused.
+/// The namespaces of `$listExtensions`, `$listCatalog` and `$listSampledQueries` that run (measured
+/// on a reference replica set member 9.0.4 on 03-11-2026): the first two on `admin` with
+/// `aggregate: 1`, `$listCatalog` on a view with no stages lists the collection under it,
+/// `$listSampledQueries` on a collection of `admin` is refused.
 #[test]
 fn the_namespaces_of_the_admin_stages() {
     let mut m = loaded();
@@ -227,7 +228,7 @@ fn the_namespaces_of_the_admin_stages() {
 
 /// The storage of a collection with no document has no `avgObjSize`; a time series has no
 /// `avgBucketSize` without buckets, and no counters before its first insert (measured on a
-/// `refnode` 9.0.4 on 03-11-2026).
+/// the reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn the_storage_of_empty_collections_has_no_averages() {
     let mut m = Mem::new();
@@ -267,7 +268,7 @@ fn the_storage_of_empty_collections_has_no_averages() {
 
 /// The stages of the node on a time series: `$indexStats` lists the index on its meta and time
 /// fields, `$listCatalog` its entry with that index, and `$listClusterCatalog` on `admin` lists
-/// it with the other databases (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// it with the other databases (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn the_stages_of_the_node_on_a_time_series() {
     let mut m = Mem::new();
@@ -300,7 +301,7 @@ fn the_stages_of_the_node_on_a_time_series() {
 }
 
 /// `$geoNear` on a collection that does not exist, and on one whose other indexes are not
-/// geospatial (measured on a `refnode` 9.0.4 on 03-11-2026).
+/// geospatial (measured on a reference replica set member 9.0.4 on 03-11-2026).
 #[test]
 fn geo_near_needs_a_collection_and_its_geospatial_index() {
     let mut m = loaded();
@@ -323,8 +324,8 @@ fn geo_near_needs_a_collection_and_its_geospatial_index() {
     assert_eq!(batch(&r).len(), 3, "{r:?}");
 }
 
-/// An `$expr` comparison compares across types with or without an index, and a multikey index
-/// does not answer it, since the expression compares a whole array (measured on a `refrouter`
+/// An `$expr` comparison compares across types with or without an index, and a multikey index does
+/// not answer it, since the expression compares a whole array (measured on the reference router
 /// 9.0.4 on 11-11-2026).
 #[test]
 fn expr_comparisons_cross_types_through_an_index() {

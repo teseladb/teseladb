@@ -1,5 +1,5 @@
-//! The bucket catalog of a time series through sequences of inserts (015 FR-010, T025), as a
-//! `refnode` 9.0.4 counted them on 02-11-2026: each step gives the counters of
+//! The bucket catalog of a time series through sequences of inserts (015 FR-010, T025), as a the
+//! reference replica set member 9.0.4 counted them on 02-11-2026: each step gives the counters of
 //! `collStats.timeseries` that moved and by how much, and `numActiveBuckets` after it.
 
 mod common;

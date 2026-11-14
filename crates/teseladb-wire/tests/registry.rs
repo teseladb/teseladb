@@ -1,6 +1,6 @@
 //! The cluster's record of sessions, `config.system.sessions` (FR-016): each node writes the
-//! sessions it used with their last use, as RefDb's documents `{_id: {id, uid}, lastUse}`, and
-//! removes the records unused for the session timeout.
+//! sessions it used with their last use, as the reference server's documents `{_id: {id, uid},
+//! lastUse}`, and removes the records unused for the session timeout.
 
 mod common;
 
@@ -79,11 +79,12 @@ fn a_refresh_with_nothing_to_record_creates_nothing() {
     assert!(m.catalog.collections.is_empty());
 }
 
-/// The record has RefDb's TTL index `lsidTTLIndex` on `lastUse`, with the session timeout, from
-/// the refresh that creates it (006 FR-038; measured on the native `refrouter` 9.0.4 on 09-11-2026:
-/// `{v: 2, key: {lastUse: 1}, name: "lsidTTLIndex", expireAfterSeconds: 1800}`).
+/// The record has the reference server's TTL index `lsidTTLIndex` on `lastUse`, with the session
+/// timeout, from the refresh that creates it (006 FR-038; measured on the native the reference
+/// router 9.0.4 on 09-11-2026: `{v: 2, key: {lastUse: 1}, name: "lsidTTLIndex", expireAfterSeconds:
+/// 1800}`).
 #[test]
-fn the_record_has_the_ttl_index_of_refdb() {
+fn the_record_has_the_ttl_index_of_the_reference() {
     let mut m = Mem::new();
     let t0 = m.now;
     m.run("admin", doc(&[("refreshSessions", Value::Array(vec![lsid(1)]))]));
@@ -102,8 +103,9 @@ fn the_record_has_the_ttl_index_of_refdb() {
     assert_eq!(ttl.get("expireAfterSeconds"), Some(&Value::Int32(1800)));
 }
 
-/// Once created, the record shows as a `refrouter` 9.0.4 shows it, a collection sharded by `{_id: 1}`
-/// that lives on the shards (006 FR-038, measured on the native `refrouter` on 09-11-2026).
+/// Once created, the record shows as the reference router 9.0.4 shows it, a collection sharded by
+/// `{_id: 1}` that lives on the shards (006 FR-038, measured on the native the reference router on
+/// 09-11-2026).
 #[test]
 fn the_record_shows_as_a_sharded_collection() {
     let mut m = Mem::new();

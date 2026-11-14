@@ -1,6 +1,7 @@
 //! 007 FR-018, FR-029 and DV-017: the checks of `setDefaultRWConcern`, `fsync`, `compact`,
-//! `autoCompact` and `shutdown` that a `refrouter` 9.0.4 (or a `refnode`, for `compact`) makes before
-//! running them (measured, 01-11-2026), with the shards of `config.shards` in the answers.
+//! `autoCompact` and `shutdown` that the reference router 9.0.4 (or a reference replica set member,
+//! for `compact`) makes before running them (measured, 01-11-2026), with the shards of
+//! `config.shards` in the answers.
 
 mod common;
 

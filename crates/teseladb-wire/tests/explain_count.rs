@@ -1,5 +1,5 @@
-//! `explain` of `count` with each access path (010, measured shapes of a `refrouter` 9.0.4): an
-//! `_id` equality reads one document (`IDHACK`), an index that decides the whole filter counts
+//! `explain` of `count` with each access path (010, measured shapes of the reference router 9.0.4):
+//! an `_id` equality reads one document (`IDHACK`), an index that decides the whole filter counts
 //! its keys (`IXSCAN` under `COUNT`) and an `$or` over two such indexes runs under `SUBPLAN`;
 //! `queryPlanner` plans them without running, so every counter is 0.
 

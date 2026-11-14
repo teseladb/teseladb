@@ -36,7 +36,7 @@ fn with(base: &[(&str, Value)], extra: (&str, Value)) -> Document {
 }
 
 #[test]
-fn malformed_options_fail_with_refdb_codes() {
+fn malformed_options_fail_with_the_reference_codes() {
     let mut m = Mem::new();
     m.run("db", doc(&[("insert", s("c")), ("documents", many(3, 1))]));
     let find = [("find", s("c"))];
@@ -119,8 +119,9 @@ fn nested(levels: usize) -> Value {
 }
 
 #[test]
-fn stored_limits_answer_as_a_refrouter() {
-    // Measured against a `refrouter` 9.0.4 (003 T009): 16 MiB exactly and 180 levels are stored.
+fn stored_limits_answer_as_the_reference_router() {
+    // Measured against the reference router 9.0.4 (003 T009): 16 MiB exactly and 180 levels are
+    // stored.
     let mut m = Mem::new();
     let insert = |docs: Vec<Value>| doc(&[("insert", s("c")), ("documents", Value::Array(docs))]);
     let r = m.run("db", insert(vec![of_size(1, 16 << 20)]));
@@ -318,7 +319,7 @@ fn find_and_modify_and_bulk_write_cover_their_options() {
         )),
         15975
     );
-    // An update that fails on the leader keeps RefDb's code.
+    // An update that fails on the leader keeps the reference server's code.
     let r = m.run(
         "db",
         doc(&[
@@ -640,7 +641,7 @@ fn required_fields_are_reported() {
             ("allowDiskUse", true.into()),
         ]),
     );
-    // As a `refrouter` 7.0 sorts them (measured).
+    // As the reference router 7.0 sorts them (measured).
     assert_eq!(field(&r, "cursor.firstBatch.0"), &d(&[("_id", 4.into())]));
     for (dir, want) in [(1, [1, 3, 4, 2]), (-1, [2, 4, 3, 1])] {
         let r = m.run(
@@ -706,7 +707,7 @@ fn required_fields_are_reported() {
         field(&m.run("admin", doc(&[("renameCollection", s("db.s")), ("to", s("nodot"))])), "code"),
         &Value::Int32(73)
     );
-    // A null character fails the whole command (measured on a `refrouter` 9.0.4).
+    // A null character fails the whole command (measured on the reference router 9.0.4).
     assert_eq!(
         field(&m.run("db", doc(&[("insert", s("a\0b")), ("documents", many(1, 1))])), "code"),
         &Value::Int32(73)
@@ -720,7 +721,7 @@ fn limits_of_batches_sorts_and_options() {
     let r = m.run("db", doc(&[("insert", s("c")), ("documents", Value::Array(docs))]));
     assert_eq!(field(&r, "code"), &Value::Int32(16));
     // Sorting more than 100 MiB with `allowDiskUse: false` fails; without it, it is allowed
-    // (measured on a `refrouter` 9.0.4).
+    // (measured on the reference router 9.0.4).
     m.run("db", doc(&[("insert", s("big")), ("documents", many(8, 14 << 20))]));
     let r = m.run(
         "db",
@@ -752,7 +753,7 @@ fn limits_of_batches_sorts_and_options() {
         ]),
     );
     assert_eq!(field(&r, "cursor.firstBatch.0._id"), &Value::Int32(0));
-    // An infinite skip saturates, as in RefDb: nothing is left.
+    // An infinite skip saturates, as in the reference server: nothing is left.
     let r = m.run("db", with(&[("find", s("c"))], ("skip", Value::Double(f64::INFINITY))));
     assert_eq!(field(&r, "cursor.firstBatch"), &Value::Array(Vec::new()));
     let ins = [("insert", s("c")), ("documents", many(1, 1))];
@@ -823,10 +824,10 @@ fn dispatch_runs_the_data_commands_when_a_node_is_behind() {
     assert!(run(&mut Ctx { backend: &mut m, shared: &shared, db: "db", cmd: &cmd }).is_none());
 }
 
-/// Each boolean option takes the types its IDL type takes in `refrouter` 9.0.4: `find`'s only a
-/// boolean, `bool` fields a boolean or `null`, `safeBool` fields also a number.
+/// Each boolean option takes the types its IDL type takes in the reference router 9.0.4: `find`'s
+/// only a boolean, `bool` fields a boolean or `null`, `safeBool` fields also a number.
 #[test]
-fn boolean_options_take_the_types_refdb_takes() {
+fn boolean_options_take_the_types_the_reference_takes() {
     let mut m = Mem::new();
     m.run("db", doc(&[("insert", s("c")), ("documents", many(1, 1))]));
     let find_msg =
@@ -842,7 +843,8 @@ fn boolean_options_take_the_types_refdb_takes() {
         (&ins[..], "ordered", Value::Int32(1), "BSON field 'insert.ordered' is the wrong type 'int', expected type 'bool'".to_owned()),
         (&ins[..], "bypassDocumentValidation", s("x"), format!("BSON field 'insert.bypassDocumentValidation' is the wrong type 'string', expected types {safe}")),
         (&[("listCollections", 1.into())][..], "nameOnly", Value::Int32(1), "BSON field 'listCollections.nameOnly' is the wrong type 'int', expected type 'bool'".to_owned()),
-        // RefDb r9.0.4 list_collections.idl names the command, `listCollections` (09-11-2026).
+        // The reference server r9.0.4 list_collections.idl names the command, `listCollections`
+        // (09-11-2026).
         (&[("listCollections", 1.into())][..], "filter", Value::Int32(1), "BSON field 'listCollections.filter' is the wrong type 'int', expected type 'object'".to_owned()),
         (&[("listDatabases", 1.into())][..], "nameOnly", s("x"), "BSON field 'listDatabases.nameOnly' is the wrong type 'string', expected types '[decimal, long, int, bool, double]'".to_owned()),
         (&[("findAndModify", s("c")), ("remove", true.into())][..], "new", s("x"), format!("BSON field 'findAndModify.new' is the wrong type 'string', expected types {safe}")),
@@ -913,9 +915,10 @@ fn drop_target_is_a_boolean_or_the_target_uuid() {
 }
 
 #[test]
-fn a_sort_without_index_orders_as_a_refrouter() {
-    // Measured on a `refrouter` 9.0.4 (003 T012): an empty array sorts as `undefined` (after MinKey,
-    // before null, ties by `_id`), and DBPointers of one size go by ObjectId before namespace.
+fn a_sort_without_index_orders_as_the_reference_router() {
+    // Measured on the reference router 9.0.4 (003 T012): an empty array sorts as `undefined` (after
+    // MinKey, before null, ties by `_id`), and DBPointers of one size go by ObjectId before
+    // namespace.
     let mut m = Mem::new();
     let p = |ns: &str, id: u8| Value::DbPointer { namespace: ns.into(), id: [id; 12] };
     let rows = [
@@ -959,10 +962,10 @@ fn a_sort_without_index_orders_as_a_refrouter() {
 }
 
 #[test]
-fn a_sort_on_a_path_through_arrays_orders_as_a_refrouter() {
-    // Measured on a `refrouter` 9.0.4 (002 FR-031): an empty array reached through an array sorts
-    // as `undefined`, an element where the path ends (a document without the field, a scalar, a
-    // nested array) gives `null`, in `find` and in `$sort` alike.
+fn a_sort_on_a_path_through_arrays_orders_as_the_reference_router() {
+    // Measured on the reference router 9.0.4 (002 FR-031): an empty array reached through an array
+    // sorts as `undefined`, an element where the path ends (a document without the field, a scalar,
+    // a nested array) gives `null`, in `find` and in `$sort` alike.
     let mut m = Mem::new();
     let a = |v: Value| d(&[("a", v)]);
     let rows = [
@@ -1083,7 +1086,7 @@ fn empty_timestamps_take_the_time_of_the_write() {
 }
 
 /// `warn` and `errorAndLog` write their lines (20294 and 7488700) with the namespace, the document
-/// and its `errInfo`, as a `refrouter` 9.0.4's shard does (006 T052).
+/// and its `errInfo`, as the reference router 9.0.4's shard does (006 T052).
 #[test]
 fn validation_actions_write_their_log_lines() {
     let mut m = Mem::new();
@@ -1125,8 +1128,9 @@ fn validation_actions_write_their_log_lines() {
 }
 
 /// `redactClientLogData` (013 FR-027): the validation lines keep the namespace and the names and
-/// shapes of the document and its `errInfo`, every value `"###"`; `setParameter` takes the value
-/// as BSON truthiness, as RefDb Enterprise 9.0.4 does (measured 31-10-2026).
+/// shapes of the document and its `errInfo`, every value `"###"`; `setParameter` takes the value as
+/// BSON truthiness, as the enterprise edition of the reference server 9.0.4 does (measured
+/// 31-10-2026).
 #[test]
 fn redaction_hides_the_values_of_the_logged_documents() {
     let mut m = Mem::new();
@@ -1364,7 +1368,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
 }
 
 /// A field `listCollections` does not take is named after the command, `listCollections`, like
-/// every other command (RefDb r9.0.4 list_collections.idl).
+/// every other command (the reference server r9.0.4 list_collections.idl).
 #[test]
 fn an_unknown_field_of_list_collections_names_the_command() {
     use teseladb_wire::generic::check_unknown_fields;
@@ -1374,7 +1378,8 @@ fn an_unknown_field_of_list_collections_names_the_command() {
         (e.code.code, e.errmsg)
     };
     let msg = |s: &str| format!("BSON field '{s}.zzUnknown' is an unknown field.");
-    // RefDb r9.0.4 list_collections.idl: `cpp_name: listCollections` (refrouter and refnode, 09-11-2026).
+    // The reference server r9.0.4 list_collections.idl: `cpp_name: listCollections` (the reference
+    // router and the reference replica set member, 09-11-2026).
     assert_eq!(unknown("listCollections"), (40415, msg("listCollections")));
     assert_eq!(unknown("find"), (40415, msg("find")));
 }
@@ -1409,9 +1414,9 @@ fn type_number_leaves_min_key_out_of_a_sorted_find() {
     }
 }
 
-/// A filter 200 levels below the command, the most a command may nest, reads like any other
-/// filter: a `refrouter` 9.0.4 answers an empty batch over a collection holding a document of 180
-/// levels (measured on the native `refrouter` on 09-11-2026, scenario `bson-errors`).
+/// A filter 200 levels below the command, the most a command may nest, reads like any other filter:
+/// the reference router 9.0.4 answers an empty batch over a collection holding a document of 180
+/// levels (measured on the native the reference router on 09-11-2026, scenario `bson-errors`).
 #[test]
 fn a_filter_as_deep_as_a_command_may_nest_is_read() {
     let mut m = Mem::new();
@@ -1458,9 +1463,10 @@ fn a_filter_as_deep_as_a_command_may_nest_is_read() {
 
 #[test]
 fn an_id_may_hold_a_db_ref_and_no_other_dollar_name() {
-    // Measured on a `refnode` 9.0.4 on 14-11-2026 (native battery, `crud-id-bulk`): a `$` name of
-    // an `_id` is valid when it is part of a DBRef, `$ref` with a string followed by `$id`, then
-    // optionally `$db` with a string, at any depth and with other fields after them.
+    // Measured on a reference replica set member 9.0.4 on 14-11-2026 (native battery,
+    // `crud-id-bulk`): a `$` name of an `_id` is valid when it is part of a DBRef, `$ref` with a
+    // string followed by `$id`, then optionally `$db` with a string, at any depth and with other
+    // fields after them.
     let id = |pairs: &[(&str, Value)]| d(&[("_id", d(pairs))]);
     let (r, i, db) = (("$ref", s("y")), ("$id", 1.into()), ("$db", s("d")));
     let cases: Vec<(Value, Option<&str>)> = vec![
@@ -1504,7 +1510,7 @@ fn an_id_may_hold_a_db_ref_and_no_other_dollar_name() {
 
 #[test]
 fn a_server_bulk_write_answers_its_failed_updates_and_refuses_no_operations() {
-    // Measured on a `refrouter` 9.0.4 on 14-11-2026 (native battery, `crud-id-bulk`).
+    // Measured on the reference router 9.0.4 on 14-11-2026 (native battery, `crud-id-bulk`).
     let mut m = Mem::new();
     let ns = Value::Array(vec![d(&[("ns", s("db.a"))])]);
     let ops = Value::Array(vec![

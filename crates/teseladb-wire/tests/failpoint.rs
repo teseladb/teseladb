@@ -1,7 +1,7 @@
-//! `configureFailPoint` with `failCommand` (FR-034, DV-025), as a `refrouter` 9.0.4 started with
-//! `enableTestCommands=1` answers it (measured): the modes, the count of times it fired, the
-//! error it injects with its labels, a closed connection, a blocked one and a
-//! `writeConcernError`, and `CommandNotFound` without test commands.
+//! `configureFailPoint` with `failCommand` (FR-034, DV-025), as the reference router 9.0.4 started
+//! with `enableTestCommands=1` answers it (measured): the modes, the count of times it fired, the
+//! error it injects with its labels, a closed connection, a blocked one and a `writeConcernError`,
+//! and `CommandNotFound` without test commands.
 
 mod common;
 
@@ -313,7 +313,7 @@ fn times_probability_and_empty_options() {
 /// A statement of a transaction (`autocommit: false`) gets `TransientTransactionError` for the
 /// retryable codes, `WriteConflict` and `NoSuchTransaction`; `commitTransaction` and
 /// `abortTransaction` only for the last two; outside a transaction no label (measured on a
-/// `refrouter` 9.0.4 with `failCommand` on 05-11-2026).
+/// the reference router 9.0.4 with `failCommand` on 05-11-2026).
 #[test]
 fn a_statement_of_a_transaction_gets_the_transient_label() {
     let mut m = node(true);
@@ -343,8 +343,8 @@ fn a_statement_of_a_transaction_gets_the_transient_label() {
     assert_eq!(label(&run(&mut m, &mut c, "db", insert())), None);
 }
 
-/// The labels the test named go with a `writeConcernError`, before `ok` (measured on a `refrouter`
-/// 9.0.4: `n`, `writeConcernError`, `errorLabels`, `ok`).
+/// The labels the test named go with a `writeConcernError`, before `ok` (measured on the reference
+/// router 9.0.4: `n`, `writeConcernError`, `errorLabels`, `ok`).
 #[test]
 fn a_write_concern_error_carries_the_labels_the_test_named() {
     let mut m = node(true);
@@ -365,7 +365,7 @@ fn a_write_concern_error_carries_the_labels_the_test_named() {
 }
 
 /// `failGetMoreAfterCursorCheckout` fails the next `getMore` once its cursor was taken, which
-/// kills it, as a `refrouter` 9.0.4 relays it (measured on 05-11-2026).
+/// kills it, as the reference router 9.0.4 relays it (measured on 05-11-2026).
 #[test]
 fn a_get_more_fails_after_its_cursor_was_taken() {
     let mut m = node(true);

@@ -1,6 +1,6 @@
 //! 014 T015: `fullDocument: "whenAvailable" | "required"` and `fullDocumentBeforeChange` over the
 //! in-memory node of `common` (FR-008): the images exist while the collection keeps them
-//! (`changeStreamPreAndPostImages`), as a `refrouter` 9.0.4 gives them (measured on 01-11).
+//! (`changeStreamPreAndPostImages`), as the reference router 9.0.4 gives them (measured on 01-11).
 
 mod common;
 
@@ -134,7 +134,7 @@ fn a_collection_that_keeps_images_gives_them_and_one_that_does_not_gives_null() 
 }
 
 #[test]
-fn required_images_that_are_missing_fail_as_on_a_refrouter() {
+fn required_images_that_are_missing_fail_as_on_the_reference_router() {
     let mut m = Mem::new();
     run(&mut m, Document::new().with("create", "c"));
     let post = open(&mut m, "c", Document::new().with("fullDocument", "required"));
@@ -146,7 +146,7 @@ fn required_images_that_are_missing_fail_as_on_a_refrouter() {
         Some(Value::String(s)) => s.clone(),
         other => panic!("{other:?}"),
     };
-    // Through a `refrouter` the shard that read the event names itself (measured on 01-11).
+    // Through the reference router the shard that read the event names itself (measured on 01-11).
     let msg = msg
         .strip_prefix("Error on remote shard ")
         .and_then(|m| m.split_once(" :: caused by :: ").map(|(_, rest)| rest))
@@ -204,7 +204,7 @@ fn the_images_follow_the_option_at_the_time_of_each_write() {
 }
 
 #[test]
-fn the_option_is_checked_as_on_a_refrouter() {
+fn the_option_is_checked_as_on_the_reference_router() {
     let mut m = Mem::new();
     m.run(DB, Document::new().with("create", "c"));
     let try_mod = |m: &mut Mem, v: Value| {
@@ -296,7 +296,8 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
         Some(Value::String(s)) => s.clone(),
         other => panic!("{other:?}"),
     };
-    // With the shard prefix a `refrouter` 9.0.4 puts before it (`cs-split-large` step 10, 04-11).
+    // With the shard prefix the reference router 9.0.4 puts before it (`cs-split-large` step 10,
+    // 04-11).
     assert!(msg.starts_with("Error on remote shard "), "{msg}");
     assert!(msg.contains(" :: caused by :: Executor error during getMore :: caused by :: Serializing Document failed :: caused by :: Size "), "{msg}");
     assert!(msg.ends_with(" exceeds maximum 16793600"), "{msg}");
@@ -331,12 +332,12 @@ fn a_large_event_fails_whole_and_comes_in_fragments_with_the_split_stage() {
     assert_eq!(field(&rest[0], "splitEvent"), &d(&[("fragment", 2.into()), ("of", 2.into())]));
 }
 
-/// A stream without `$changeStreamSplitLargeEvent` reads its events as a `refrouter` 9.0.4 reads a
-/// shard's batch (measured on 04-11-2026, `cs-split-large`): in order, until the next event does
-/// not fit in what is left of 16 MiB, which starts the next batch. An event too large to
-/// serialize fails the batch it falls in, with the events of that batch, and the cursor is
-/// gone; the batches before it come out. Before, the event before the large one came out and
-/// the `getMore` after it failed.
+/// A stream without `$changeStreamSplitLargeEvent` reads its events as the reference router 9.0.4
+/// reads a shard's batch (measured on 04-11-2026, `cs-split-large`): in order, until the next event
+/// does not fit in what is left of 16 MiB, which starts the next batch. An event too large to
+/// serialize fails the batch it falls in, with the events of that batch, and the cursor is gone;
+/// the batches before it come out. Before, the event before the large one came out and the
+/// `getMore` after it failed.
 fn too_large_stream(m: &mut Mem) -> i64 {
     // Each read of the range gives one millisecond of its history, so that each event comes in
     // a read of its own, as the node's reads of 4 MiB cut a history of large versions (014
@@ -418,7 +419,7 @@ fn the_batches_before_the_one_of_an_event_too_large_come_out() {
 
 /// `changeStreamOptions.preAndPostImages.expireAfterSeconds` (007 T046, FR-019) limits how long
 /// the images of an event are served: past it, `whenAvailable` gives `null` and `required` fails,
-/// as once RefDb removed them; `"off"` serves them again.
+/// as once the reference server removed them; `"off"` serves them again.
 #[test]
 fn images_older_than_their_expiry_are_not_served() {
     let mut m = Mem::new();

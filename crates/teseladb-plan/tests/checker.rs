@@ -1,5 +1,5 @@
-//! The walk of an index scan over its keys (010 FR-001), against the keys examined and the
-//! seeks of a `refrouter` 9.0.4 over the index `{g: 1, n: 1}` of `tests/compat` collection `c`
+//! The walk of an index scan over its keys (010 FR-001), against the keys examined and the seeks of
+//! the reference router 9.0.4 over the index `{g: 1, n: 1}` of `tests/compat` collection `c`
 //! (measured 01-11-2026).
 
 use teseladb_bson::{Decimal128, Value};
@@ -43,7 +43,7 @@ fn counts(fields: &[FieldWalk], from: usize, backward: bool) -> (usize, u64, usi
 }
 
 #[test]
-fn walks_examine_and_seek_as_refdb() {
+fn walks_examine_and_seek_as_the_reference() {
     let a = Value::String("a".to_owned());
     // `{g: {$gt: "a"}, n: 5}`: 2 keys, 3 seeks, nothing given (from the first key after "a").
     let f = [field("$gt", a.clone(), true), field("$eq", Value::Int32(5), true)];

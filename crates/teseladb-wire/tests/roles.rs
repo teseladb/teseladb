@@ -1,7 +1,7 @@
-//! Role commands as RefDb 9.0.4 answers them (013 T022, FR-009, FR-010; measured on a
-//! `refrouter` with `--keyFile`, 30-10-2026): custom roles with privileges and inherited roles,
-//! their checks, the role graph without cycles, `dropRole` taking the role from every user and
-//! role, `rolesInfo` in each of its forms and `usersInfo` with what a user inherits.
+//! Role commands as the reference server 9.0.4 answers them (013 T022, FR-009, FR-010; measured on
+//! a the reference router with `--keyFile`, 30-10-2026): custom roles with privileges and inherited
+//! roles, their checks, the role graph without cycles, `dropRole` taking the role from every user
+//! and role, `rolesInfo` in each of its forms and `usersInfo` with what a user inherits.
 
 mod common;
 
@@ -584,7 +584,8 @@ fn graph_and_document_edges() {
     assert_eq!(field(&r, "code"), &Value::Int32(14));
     let r = m.run(TEST, doc(&[("usersInfo", d(&[("forAllDBs", true.into()), ("x", 1.into())]))]));
     assert_eq!(field(&r, "code"), &Value::Int32(2));
-    // Stored documents written directly: what RefDb 9.0.4 answers for them (measured).
+    // Stored documents written directly: what the reference server 9.0.4 answers for them
+    // (measured).
     let bad_role = json(
         r#"{"_id": "test.bad", "role": "bad", "db": "test", "roles": {"role": "read", "db": "test"}}"#,
     );
@@ -603,8 +604,9 @@ fn graph_and_document_edges() {
 
 #[test]
 fn roles_info_and_users_info_read_what_any_node_wrote_before_them() {
-    // A node whose copy of Group 0 is behind the writes of another node (013 T058): the reads of users
-    // and roles take the barrier first and find them, as a `refrouter` reads them from the config servers.
+    // A node whose copy of Group 0 is behind the writes of another node (013 T058): the reads of
+    // users and roles take the barrier first and find them, as the reference router reads them from
+    // the config servers.
     let mut m = Mem::new();
     m.stale_security = true;
     let r = m.run("db", json(r#"{"createRole":"r1","privileges":[],"roles":[]}"#));

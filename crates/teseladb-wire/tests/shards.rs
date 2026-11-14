@@ -1,6 +1,6 @@
 //! 018 T008 and T025: `removeShard` and the draining commands (FR-005, FR-018) over the in-memory
 //! node of `common`: a shard is a node and its removal is its drain, ordered to Group 0; replies
-//! of a `refrouter` 9.0.4 of two shards (measured on 02-11-2026).
+//! of the reference router 9.0.4 of two shards (measured on 02-11-2026).
 
 mod common;
 

@@ -215,8 +215,8 @@ fn id_ranges_read_every_chunk_of_every_bucket() {
     assert_eq!(ids(&r), expected(6000, |i| i >= 10));
 }
 
-/// Two clauses of an `$or` on one index use it once (measured on a `refnode` 9.0.4 on
-/// 02-11-2026): `$indexStats` counts one access, and the clauses' documents come in their
+/// Two clauses of an `$or` on one index use it once (measured on a reference replica set member
+/// 9.0.4 on 02-11-2026): `$indexStats` counts one access, and the clauses' documents come in their
 /// clauses' order.
 #[test]
 fn or_clauses_on_one_index_count_one_access() {
@@ -258,7 +258,7 @@ fn a_unique_index_plan_finds_its_documents() {
 }
 
 /// A wildcard index is no plan of the planner's: the query takes the index of its field, as a
-/// `refnode` 9.0.4 picks `a_1` next to `$**_1` (measured on 02-11-2026).
+/// the reference replica set member 9.0.4 picks `a_1` next to `$**_1` (measured on 02-11-2026).
 #[test]
 fn a_wildcard_index_next_to_a_field_index_leaves_the_field_index() {
     let mut m = loaded(30);
@@ -271,8 +271,9 @@ fn a_wildcard_index_next_to_a_field_index_leaves_the_field_index() {
     assert_eq!(plan, &Value::from("a_1"), "{r:?}");
 }
 
-/// A `distinct` whose interval runs to the end of the index reads no key after it: two keys
-/// for `{a: {$gte: 5}}` over 1, 3, 5, 5, 7 (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// A `distinct` whose interval runs to the end of the index reads no key after it: two keys for
+/// `{a: {$gte: 5}}` over 1, 3, 5, 5, 7 (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026).
 #[test]
 fn a_distinct_scan_to_the_end_of_the_index_reads_no_key_after_it() {
     let mut m = Mem::new();
@@ -292,10 +293,11 @@ fn a_distinct_scan_to_the_end_of_the_index_reads_no_key_after_it() {
     }
 }
 
-/// The trial ends at the round where a plan reached its end (RefDb alternates the plans and
-/// stops there): a plan that would read up to the budget is not run past that round. Measured on
-/// the internal cluster of TeselaDB Cloud, a plan of a selective compound index that ended at 9
-/// documents waited for a plan of a broad index to read 157.000 entries, 20 s per planning.
+/// The trial ends at the round where a plan reached its end (the reference server alternates the
+/// plans and stops there): a plan that would read up to the budget is not run past that round.
+/// Measured on the internal cluster of TeselaDB Cloud, a plan of a selective compound index that
+/// ended at 9 documents waited for a plan of a broad index to read 157.000 entries, 20 s per
+/// planning.
 #[test]
 fn a_trial_reads_no_further_than_the_round_where_a_plan_ended() {
     use std::cell::Cell;
@@ -345,11 +347,11 @@ fn a_read_with_a_limit_ends_its_trial_at_the_limit_and_keeps_its_cached_plan() {
     let mut m = sessions(6_000);
     let find = format!(r#"{{"find":"c","filter":{OPEN_SESSION},"limit":1,"singleBatch":true}}"#);
     let count = format!(r#"{{"count":"c","query":{OPEN_SESSION},"limit":1}}"#);
-    // Each read competes its plans or takes the cached one; none reads the range of
-    // `expires_at_1` (every session) nor counts the collection for the trial's budget. RefDb
-    // 9.0.4 ends the trial at min(limit, 101) results and keeps a cached plan that gives them.
-    // A trial gives each of the three plans its first round of 128 works, so a read with its
-    // fetches stays under 400 rows; before, a `findOne` read 55.889.
+    // Each read competes its plans or takes the cached one; none reads the range of `expires_at_1`
+    // (every session) nor counts the collection for the trial's budget. The reference server 9.0.4
+    // ends the trial at min(limit, 101) results and keeps a cached plan that gives them. A trial
+    // gives each of the three plans its first round of 128 works, so a read with its fetches stays
+    // under 400 rows; before, a `findOne` read 55.889.
     for round in 0..4 {
         m.scanned_rows = 0;
         let r = run(&mut m, &find);
@@ -545,9 +547,9 @@ fn an_id_equality_with_a_sort_reads_its_document_alone() {
         field(&r, "metrics.queryExecutor.collectionScans.total").clone()
     };
     let before = scans(&mut m);
-    // YCSB's read: the sort and the limit change nothing on one document. A `refnode` 9.0.4
-    // answers the four through the index of `_id` and counts no collection scan (measured on
-    // 08-11-2026); before, each read every document, 11 ms a read on 20.000 documents.
+    // YCSB's read: the sort and the limit change nothing on one document. The reference replica set
+    // member 9.0.4 answers the four through the index of `_id` and counts no collection scan
+    // (measured on 08-11-2026); before, each read every document, 11 ms a read on 20.000 documents.
     let cases = [
         (r#"{"find":"c","filter":{"_id":2},"sort":{"_id":1},"limit":1}"#, vec![2]),
         (r#"{"find":"c","filter":{"_id":3},"sort":{"a":-1}}"#, vec![3]),
@@ -572,10 +574,11 @@ fn an_id_equality_with_a_sort_reads_its_document_alone() {
 #[test]
 fn an_ascending_id_read_with_a_limit_reads_that_many_of_each_bucket() {
     let mut m = loaded(2_000);
-    // YCSB's scan and a `findOne` of the first `_id`: the documents go by the hash of their
-    // `_id` into 16 buckets, each in `_id` order, so the first `n` of the collection are among
-    // the first `n` of each bucket. Before, the read took every document of the range from each
-    // bucket and sorted them, 13 ms on 20.000 documents against 1,5 ms in a `refnode` 9.0.4.
+    // YCSB's scan and a `findOne` of the first `_id`: the documents go by the hash of their `_id`
+    // into 16 buckets, each in `_id` order, so the first `n` of the collection are among the first
+    // `n` of each bucket. Before, the read took every document of the range from each bucket and
+    // sorted them, 13 ms on 20.000 documents against 1,5 ms in a reference replica set member
+    // 9.0.4.
     let cases = [
         (
             r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}"#,
@@ -598,9 +601,9 @@ fn an_ascending_id_read_with_a_limit_reads_that_many_of_each_bucket() {
 #[test]
 fn a_descending_id_read_with_a_limit_reads_from_the_end_of_each_bucket() {
     let mut m = loaded(2_000);
-    // H-003: `find().sort({_id: -1}).limit(1)` read the whole collection and turned it round,
-    // 22 ms on 20.000 documents against 0,6 ms in a `refnode` 9.0.4. Each bucket is now read from
-    // its end down and the buckets merged from the highest `_id`.
+    // H-003: `find().sort({_id: -1}).limit(1)` read the whole collection and turned it round, 22 ms
+    // on 20.000 documents against 0,6 ms in a reference replica set member 9.0.4. Each bucket is
+    // now read from its end down and the buckets merged from the highest `_id`.
     let cases = [
         (r#"{"find":"c","filter":{},"sort":{"_id":-1},"limit":1}"#, vec![1999]),
         (
@@ -627,9 +630,9 @@ fn a_descending_id_read_with_a_limit_reads_from_the_end_of_each_bucket() {
 #[test]
 fn a_write_by_id_with_a_sort_reads_its_document_alone() {
     let mut m = loaded(2_000);
-    // An `update` and a `findAndModify` by `_id` with a sort change that document, as on a
-    // `refnode` 9.0.4; before, each read every document to pick the first by the sort (27 to 31
-    // ms on 20.000 documents against 7 to 9 ms).
+    // An `update` and a `findAndModify` by `_id` with a sort change that document, as on a the
+    // reference replica set member 9.0.4; before, each read every document to pick the first by the
+    // sort (27 to 31 ms on 20.000 documents against 7 to 9 ms).
     m.scanned_rows = 0;
     let r = run(
         &mut m,
@@ -653,7 +656,8 @@ fn an_id_range_gives_the_documents_it_read_and_asks_the_buckets_in_one_trip() {
     let mut m = loaded(2_000);
     // An entry of the index of `_id` is its document: the read keeps it instead of reading each
     // document again, and asks the 16 buckets together. Before, YCSB-E's scan read each of its
-    // documents a second time, one trip each (14,7 ms against 0,12 ms in a `refnode` 9.0.4).
+    // documents a second time, one trip each (14,7 ms against 0,12 ms in a reference replica set
+    // member 9.0.4).
     m.scanned_rows = 0;
     m.span_reads = 0;
     let r = run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":5}"#);
@@ -667,7 +671,7 @@ fn a_long_id_scan_merges_the_buckets_and_reads_little_more_than_it_gives() {
     let mut m = loaded(2_000);
     // YCSB-E's scan asks for up to 100 documents. Before, the read began with 16 entries of each
     // bucket and, short, read everything again with 64 and then 256: some 5.400 rows for 100
-    // documents, 11,7 ms against 0,115 ms in a `refnode` 9.0.4.
+    // documents, 11,7 ms against 0,115 ms in a reference replica set member 9.0.4.
     m.scanned_rows = 0;
     let r =
         run(&mut m, r#"{"find":"c","filter":{"_id":{"$gte":100}},"sort":{"_id":1},"limit":100}"#);
@@ -698,7 +702,7 @@ fn loaded_clustered(count: i32) -> Mem {
 fn a_clustered_collection_reads_only_the_interval_of_its_id_conditions() {
     let mut m = loaded_clustered(2_000);
     // H-027: a range of `_id` read the whole collection and sorted it (50 of 50 documents
-    // examined where a `refnode` 9.0.4 examines 3, with `CLUSTERED_IXSCAN`).
+    // examined where a reference replica set member 9.0.4 examines 3, with `CLUSTERED_IXSCAN`).
     let cases = [
         (
             r#"{"find":"c","filter":{"_id":{"$gte":10,"$lt":20}},"sort":{"_id":1},"limit":3}"#,
@@ -729,12 +733,12 @@ fn a_clustered_collection_uses_its_secondary_indexes() {
 }
 
 #[test]
-fn explain_shows_a_clustered_scan_as_a_refnode_does() {
+fn explain_shows_a_clustered_scan_as_a_reference_member_does() {
     let mut m = loaded_clustered(50);
     let explain = |m: &mut Mem, find: &str| {
         run(m, &format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#))
     };
-    // Measured on a `refnode` 9.0.4 on 09-11-2026 (015 FR-014).
+    // Measured on a reference replica set member 9.0.4 on 09-11-2026 (015 FR-014).
     let r = explain(
         &mut m,
         r#"{"find":"c","filter":{"_id":{"$gte":10,"$lt":20}},"sort":{"_id":1},"limit":3}"#,
@@ -755,7 +759,8 @@ fn explain_shows_a_clustered_scan_as_a_refnode_does() {
     let r = explain(&mut m, r#"{"find":"c","filter":{"_id":7}}"#);
     let stage = field(&r, &format!("{plan}.stage"));
     assert_eq!(stage, &Value::String("EXPRESS_CLUSTERED_IXSCAN".into()), "{r:?}");
-    // Backward below a value: `NaN` as the lower end of the numbers, as a `refnode` shows it.
+    // Backward below a value: `NaN` as the lower end of the numbers, as a reference replica set
+    // member shows it.
     let r = explain(&mut m, r#"{"find":"c","filter":{"_id":{"$lt":5}},"sort":{"_id":-1}}"#);
     let Value::Document(scan) = field(&r, plan).clone() else { panic!("{r:?}") };
     assert_eq!(scan.get("direction"), Some(&Value::String("backward".into())), "{scan:?}");
@@ -786,8 +791,8 @@ fn a_collection_created_in_id_order_reads_an_id_interval_as_one() {
     assert_eq!(ids_in_order(&r), vec![100, 101, 102, 103, 104], "{r:?}");
     assert!(m.scanned_rows < 20, "{} rows read", m.scanned_rows);
     assert_eq!(m.span_reads, 0, "no read of the 16 buckets");
-    // Without a sort, the documents come in `_id` order, as a `refnode` gives them in insertion
-    // order for increasing `_id`s.
+    // Without a sort, the documents come in `_id` order, as a reference replica set member gives
+    // them in insertion order for increasing `_id`s.
     let r = run(&mut m, r#"{"find":"c","filter":{},"limit":3}"#);
     assert_eq!(ids_in_order(&r), vec![0, 1, 2], "{r:?}");
     // It shows as any collection: the `_id_` index in `explain`, no option in `listCollections`.
@@ -804,9 +809,10 @@ fn a_collection_created_in_id_order_reads_an_id_interval_as_one() {
 
 #[test]
 fn an_or_works_once_for_each_work_of_its_scans() {
-    // Measured on a `refnode` 9.0.4 (battery `plan-or-join2`): an `OR` works once for each work
-    // of its scans (two scans of 2 works: 4), with one `needTime` when its first scan ends.
-    // Here `a` = 3 finds `_id` 3 and 13 (3 works) and `b` = 5 finds 5, 12 and 19 (4 works).
+    // Measured on a reference replica set member 9.0.4 (battery `plan-or-join2`): an `OR` works
+    // once for each work of its scans (two scans of 2 works: 4), with one `needTime` when its first
+    // scan ends. Here `a` = 3 finds `_id` 3 and 13 (3 works) and `b` = 5 finds 5, 12 and 19 (4
+    // works).
     let mut m = loaded(20);
     index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
     index(&mut m, r#"{"key":{"b":1},"name":"b_1"}"#);
@@ -831,8 +837,8 @@ fn an_or_works_once_for_each_work_of_its_scans() {
 
 #[test]
 fn a_plan_chosen_among_several_saved_its_state_once() {
-    // Measured on a `refnode` 9.0.4 (battery `plan-plans`): the winner of competing plans shows
-    // `saveState` and `restoreState` 1 in each stage; a plan alone, 0.
+    // Measured on a reference replica set member 9.0.4 (battery `plan-plans`): the winner of
+    // competing plans shows `saveState` and `restoreState` 1 in each stage; a plan alone, 0.
     let mut m = loaded(20);
     index(&mut m, r#"{"key":{"a":1},"name":"a_1"}"#);
     index(&mut m, r#"{"key":{"b":1},"name":"b_1"}"#);
@@ -920,8 +926,8 @@ fn an_explicit_create_takes_the_id_order_and_the_special_kinds_keep_their_keys()
 
 #[test]
 fn an_id_read_plans_the_same_in_both_layouts_and_reads_one_span_in_id_order() {
-    // The plan of an `_id` interval is RefDb's `_id_` scan in both layouts; under it the
-    // collection with hash buckets reads its 16 buckets and the one in `_id` order one stretch.
+    // The plan of an `_id` interval is the reference server's `_id_` scan in both layouts; under it
+    // the collection with hash buckets reads its 16 buckets and the one in `_id` order one stretch.
     let load = |ordered: bool| {
         let mut m = Mem::new();
         m.ordered_ids = ordered;
