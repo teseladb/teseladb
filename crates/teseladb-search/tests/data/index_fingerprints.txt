@@ -1,0 +1,13 @@
+contents	52a55722d6cd7734
+stats	15288515ea7ec503
+documents	0000000000000225
+text-one (208 hits)	8b269f7567270287
+text-many (366 hits)	b76e9649af054df8
+text-paths (282 hits)	cdaf4d925c5de39c
+text-fuzzy (240 hits)	4c653e97d4f28ecb
+phrase (150 hits)	357e5ad2e4edcec9
+phrase-slop (154 hits)	bf8fc096925e22b7
+phrase-shingles (145 hits)	0bb6d928157c3c0e
+autocomplete (114 hits)	f09afb2baaf8e167
+wildcard (238 hits)	0517eb5ba1f4656e
+compound (159 hits)	f35124e451fdbee1

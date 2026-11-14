@@ -17,6 +17,7 @@ use crate::definition::{DEFAULT_ANALYZER, Definition, Dynamic, FieldMapping, Map
 use crate::query::bm25::{Bm25, idf};
 use crate::query::fuzzy::Levenshtein;
 use crate::segment::norms;
+use table::{Postings, TermTable};
 
 /// A string field of the index: the postings of each term (document number to positions), the
 /// length of the field in each document and its number of tokens. As the reference search library's BM25 does with
@@ -25,7 +26,11 @@ use crate::segment::norms;
 /// token.
 #[derive(Clone, Debug, Default)]
 struct TextField {
-    postings: BTreeMap<String, BTreeMap<u32, Vec<u32>>>,
+    /// The terms and their posting lists (FR-032).
+    postings: TermTable,
+    /// The (term, position) pairs of the document being added, which [`TermTable::add_doc`]
+    /// takes once its texts are analyzed.
+    pending: Vec<(u32, u32)>,
     lengths: BTreeMap<u32, u32>,
     /// Tokens of each document, overlaps included.
     tokens: BTreeMap<u32, u32>,
@@ -220,7 +225,7 @@ impl MemIndex {
             .fields
             .iter()
             .map(|(path, f)| {
-                let df = f.postings.iter().map(|(t, d)| (t.clone(), d.len() as u64)).collect();
+                let df = f.postings.iter().map(|(t, d)| (t.to_owned(), d.len() as u64)).collect();
                 let length = f.tokens.values().map(|&l| u64::from(l)).sum();
                 (path.clone(), FieldStats { docs: f.lengths.len() as u64, length, df })
             })
@@ -271,6 +276,17 @@ impl MemIndex {
         let mut texts: Vec<Collected> = Vec::new();
         let mapping = self.definition.mappings.clone();
         self.collect(&mapping, "", doc, &mut texts);
+        let indexed = self.index_texts(id, texts);
+        // The lists take the document's terms also when a text failed, as they took the terms
+        // of its earlier texts.
+        for field in self.fields.values_mut() {
+            field.postings.add_doc(id, &mut field.pending);
+        }
+        indexed
+    }
+
+    /// Analyzes the texts of document `id` into the pending terms of their fields.
+    fn index_texts(&mut self, id: u32, texts: Vec<Collected>) -> Result<(), IndexError> {
         let mut buffer = TermBuffer::default();
         let mut starts: Vec<u32> = Vec::new();
         for Collected { path, analyzer: analyzer_name, search: search_name, text, grams } in texts {
@@ -299,12 +315,8 @@ impl MemIndex {
                     if t.text.len() > MAX_TERM_BYTES {
                         return;
                     }
-                    if !field.postings.contains_key(t.text) {
-                        field.postings.insert(t.text.to_owned(), BTreeMap::new());
-                    }
-                    if let Some(docs) = field.postings.get_mut(t.text) {
-                        docs.entry(id).or_default().push(base + t.position);
-                    }
+                    let term = field.postings.intern(t.text);
+                    field.pending.push((term, base + t.position));
                     count += 1;
                     end = end.max(t.position + 1);
                     starts.push(t.position);
@@ -469,7 +481,8 @@ impl MemIndex {
         let base = field.ends.get(&id).copied().unwrap_or(0);
         for (i, t) in terms.iter().enumerate() {
             let at = base + i as u32;
-            field.postings.entry(t.clone()).or_default().entry(id).or_default().push(at);
+            let term = field.postings.intern(t);
+            field.pending.push((term, at));
         }
         *field.ends.entry(id).or_insert(0) += terms.len() as u32;
         *field.lengths.entry(id).or_insert(0) += words.len() as u32;
@@ -506,10 +519,7 @@ impl MemIndex {
             field.lengths.remove(&id);
             field.tokens.remove(&id);
             field.ends.remove(&id);
-            field.postings.retain(|_, docs| {
-                docs.remove(&id);
-                !docs.is_empty()
-            });
+            field.postings.delete(id);
         }
     }
 
@@ -587,7 +597,7 @@ impl MemIndex {
             .postings
             .iter()
             .filter(|(term, _)| matches(term))
-            .flat_map(|(_, d)| d.keys().copied())
+            .flat_map(|(_, d)| d.docs())
             .collect();
         docs.sort_unstable();
         docs.dedup();
@@ -678,16 +688,7 @@ impl MemIndex {
         let postings: usize = self
             .fields
             .iter()
-            .map(|(name, f)| {
-                name.len()
-                    + f.postings
-                        .iter()
-                        .map(|(t, by_doc)| {
-                            t.len() + by_doc.values().map(|p| 8 + 4 * p.len()).sum::<usize>()
-                        })
-                        .sum::<usize>()
-                    + 12 * f.lengths.len()
-            })
+            .map(|(name, f)| name.len() + f.postings.memory_bytes() + 12 * f.lengths.len())
             .sum();
         (docs + postings) as u64
     }
@@ -708,7 +709,7 @@ impl MemIndex {
     }
 
     /// The positions of `term` in the field at `path`, by document.
-    pub(crate) fn positions(&self, path: &str, term: &str) -> Option<&BTreeMap<u32, Vec<u32>>> {
+    pub(crate) fn positions(&self, path: &str, term: &str) -> Option<Postings<'_>> {
         self.fields.get(path)?.postings.get(term)
     }
 
@@ -767,7 +768,7 @@ impl MemIndex {
                     .postings
                     .iter()
                     .map(|(t, docs)| {
-                        (t.clone(), docs.iter().map(|(d, ps)| (key(d), ps.clone())).collect())
+                        (t.to_owned(), docs.iter().map(|(d, ps)| (key(&d), ps.collect())).collect())
                     })
                     .collect();
                 let lengths = f
@@ -883,17 +884,19 @@ impl TextField {
         }
         let (shortest, _) =
             lists.iter().min_by_key(|(d, _)| d.len()).copied().unwrap_or((lists[0].0, 0));
+        let mut cursors: Vec<_> = lists.iter().map(|(d, _)| d.cursor()).collect();
         let freqs = shortest
-            .keys()
+            .docs()
             .filter_map(|doc| {
                 let places: Option<Vec<Vec<i64>>> = lists
                     .iter()
-                    .map(|(d, offset)| {
-                        d.get(doc).map(|ps| ps.iter().map(|&p| i64::from(p) - offset).collect())
+                    .zip(&mut cursors)
+                    .map(|((_, offset), c)| {
+                        c.at(doc).map(|ps| ps.map(|p| i64::from(p) - offset).collect())
                     })
                     .collect();
                 let freq = phrase_freq(&places?, i64::from(slop));
-                (freq > 0.0).then_some((*doc, freq))
+                (freq > 0.0).then_some((doc, freq))
             })
             .collect();
         Some((dfs, freqs))
@@ -952,9 +955,9 @@ impl TextField {
         let mut freqs: BTreeMap<u32, f32> = BTreeMap::new();
         let mut df = 0;
         for term in terms {
-            let Some(docs) = self.postings.get(*term) else { continue };
+            let Some(docs) = self.postings.get(term) else { continue };
             df = df.max(self.df(term, docs.len(), g));
-            for (&doc, positions) in docs {
+            for (doc, positions) in docs {
                 *freqs.entry(doc).or_insert(0.0) += positions.len() as f32;
             }
         }
@@ -972,15 +975,15 @@ impl TextField {
     /// its segments (measured in `m80.js`).
     fn fuzzy_terms(&self, term: &str, fuzzy: &Fuzzy, g: Option<&FieldStats>) -> Vec<(String, f32)> {
         match g {
-            Some(g) => closest_terms(g.df.keys(), term, fuzzy),
-            None => closest_terms(self.postings.keys(), term, fuzzy),
+            Some(g) => closest_terms(g.df.keys().map(String::as_str), term, fuzzy),
+            None => closest_terms(self.postings.iter().map(|(t, _)| t), term, fuzzy),
         }
     }
 
     /// The largest document count among `kept`, which every kept term's idf uses.
     fn blended_df(&self, kept: &[(String, f32)], g: Option<&FieldStats>) -> u64 {
         kept.iter()
-            .map(|(t, _)| self.df(t, self.postings.get(t).map_or(0, BTreeMap::len), g))
+            .map(|(t, _)| self.df(t, self.postings.get(t).map_or(0, |d| d.len()), g))
             .max()
             .unwrap_or(0)
     }
@@ -1002,7 +1005,7 @@ impl TextField {
         for (t, weight) in &kept {
             let score = self.scorer(boost * weight, idf, &[t.as_str()], g);
             let Some(docs) = self.postings.get(t) else { continue };
-            for (&doc, positions) in docs {
+            for (doc, positions) in docs {
                 *sums.entry(doc).or_insert(0.0) += f64::from(score(doc, positions.len() as f32));
             }
         }
@@ -1015,7 +1018,7 @@ impl TextField {
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf = idf(n, self.df(term, docs.len(), g)) as f32;
         let score = self.scorer(boost, idf, &[term], g);
-        docs.iter().map(|(&doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
+        docs.iter().map(|(doc, positions)| (doc, score(doc, positions.len() as f32))).collect()
     }
 }
 
@@ -1257,6 +1260,7 @@ mod dump;
 mod explain;
 mod phrases;
 mod synonyms;
+mod table;
 pub use dump::{DumpError, applied_of};
 pub use explain::Explanation;
 pub(crate) use explain::{FreqKind, Weight, java_double, java_float};
@@ -1267,13 +1271,13 @@ pub use synonyms::{EQUIVALENT, EXPLICIT};
 /// The `fuzzy.max_expansions` terms of `terms` closest to `term` within `fuzzy`, in term order,
 /// each with its weight (see [`TextField::fuzzy_terms`]).
 fn closest_terms<'t>(
-    terms: impl Iterator<Item = &'t String>,
+    terms: impl Iterator<Item = &'t str>,
     term: &str,
     fuzzy: &Fuzzy,
 ) -> Vec<(String, f32)> {
     let lev = Levenshtein::new(term, fuzzy.max_edits, fuzzy.prefix_length);
     let len = term.chars().count();
-    let mut found: Vec<(&String, f32)> = terms
+    let mut found: Vec<(&str, f32)> = terms
         .filter_map(|t| {
             let edits = lev.distance(t)?;
             let shortest = len.min(t.chars().count()).max(1);
@@ -1282,7 +1286,7 @@ fn closest_terms<'t>(
         .collect();
     found.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     let mut kept: Vec<(String, f32)> =
-        found.into_iter().take(fuzzy.max_expansions).map(|(t, w)| (t.clone(), w)).collect();
+        found.into_iter().take(fuzzy.max_expansions).map(|(t, w)| (t.to_owned(), w)).collect();
     // The rewritten query lists its terms in term order (measured with `scoreDetails`).
     kept.sort_by(|a, b| a.0.cmp(&b.0));
     kept

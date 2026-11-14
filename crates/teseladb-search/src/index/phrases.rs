@@ -21,7 +21,7 @@ impl TextField {
                 // A synonym the field lacks leaves the others of its position.
                 let mut by_doc: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
                 for t in terms {
-                    for (&doc, ps) in self.postings.get(t).into_iter().flatten() {
+                    for (doc, ps) in self.postings.get(t).into_iter().flatten() {
                         by_doc.entry(doc).or_default().extend(ps);
                     }
                 }
@@ -69,16 +69,20 @@ impl TextField {
         let mut found: BTreeMap<u32, f32> = BTreeMap::new();
         for path in paths {
             let Some(first) = path.first().and_then(|t| self.postings.get(t)) else { continue };
-            for (&doc, starts) in first {
+            // The documents come in increasing order, so each later term reads its list once.
+            let mut rest: Vec<_> =
+                path.iter().skip(1).map(|t| self.postings.get(t).map(|d| d.cursor())).collect();
+            for (doc, starts) in first {
+                let others: Vec<Option<Vec<u32>>> = rest
+                    .iter_mut()
+                    .map(|c| c.as_mut().and_then(|c| c.at(doc)).map(|ps| ps.collect()))
+                    .collect();
                 let follows = |p: u32| {
-                    path.iter().enumerate().skip(1).all(|(i, t)| {
-                        self.postings
-                            .get(t)
-                            .and_then(|d| d.get(&doc))
-                            .is_some_and(|ps| ps.contains(&(p + i as u32)))
+                    others.iter().enumerate().all(|(i, ps)| {
+                        ps.as_ref().is_some_and(|ps| ps.contains(&(p + i as u32 + 1)))
                     })
                 };
-                let n = starts.iter().filter(|&&p| follows(p)).count();
+                let n = starts.filter(|&p| follows(p)).count();
                 if n > 0 {
                     *found.entry(doc).or_insert(0.0) += n as f32;
                 }
@@ -91,7 +95,7 @@ impl TextField {
     fn synonym_freqs(&self, terms: &[String]) -> BTreeMap<u32, f32> {
         let mut freqs: BTreeMap<u32, f32> = BTreeMap::new();
         for t in terms {
-            for (&doc, ps) in self.postings.get(t).into_iter().flatten() {
+            for (doc, ps) in self.postings.get(t).into_iter().flatten() {
                 *freqs.entry(doc).or_insert(0.0) += ps.len() as f32;
             }
         }
@@ -100,7 +104,7 @@ impl TextField {
 
     /// The documents with each term of `terms`.
     fn dfs(&self, terms: &[String], g: Option<&FieldStats>) -> Vec<u64> {
-        terms.iter().map(|t| self.df(t, self.postings.get(t).map_or(0, BTreeMap::len), g)).collect()
+        terms.iter().map(|t| self.df(t, self.postings.get(t).map_or(0, |d| d.len()), g)).collect()
     }
 }
 
@@ -159,7 +163,7 @@ impl MemIndex {
         fuzzy: &super::Fuzzy,
     ) -> Vec<(String, f32)> {
         match (self.fields.get(key), self.global_of(key)) {
-            (_, Some(g)) => super::closest_terms(g.df.keys(), term, fuzzy),
+            (_, Some(g)) => super::closest_terms(g.df.keys().map(String::as_str), term, fuzzy),
             (Some(f), None) => f.fuzzy_terms(term, fuzzy, None),
             (None, None) => Vec::new(),
         }
@@ -177,7 +181,7 @@ impl MemIndex {
     ) -> Option<Explanation> {
         let field = self.fields.get(key)?;
         let g = self.global_of(key);
-        let freq = field.postings.get(term)?.get(&doc)?.len() as f32;
+        let freq = field.postings.get(term)?.get(doc)?.len() as f32;
         let df = field.blended_df(kept, g);
         let terms = vec![term.to_owned()];
         let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term, terms };

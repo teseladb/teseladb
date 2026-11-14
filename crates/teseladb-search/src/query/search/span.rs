@@ -180,7 +180,7 @@ impl Span {
                     .positions(path, term)
                     .map(|docs| {
                         docs.iter()
-                            .map(|(&doc, ps)| (doc, ps.iter().map(|&p| (p, p + 1, 0)).collect()))
+                            .map(|(doc, ps)| (doc, ps.map(|p| (p, p + 1, 0)).collect()))
                             .collect()
                     })
                     .unwrap_or_default(),

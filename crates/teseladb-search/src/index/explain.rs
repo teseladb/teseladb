@@ -2,8 +2,6 @@
 //! (the reference search library's `Explanation` of `BM25Similarity`, measured 02-11-2026,
 //! `scratchpad/lane3k/m15.js`).
 
-use std::collections::BTreeMap;
-
 use super::{FieldStats, MemIndex, Similarity, TextField, mismatch, rarity_of};
 use crate::query::bm25::{Bm25, idf};
 use crate::segment::norms;
@@ -210,7 +208,7 @@ impl MemIndex {
         let field = self.fields.get(key)?;
         let g = self.global_of(key);
         let docs = field.postings.get(term)?;
-        let freq = docs.get(&doc)?.len() as f32;
+        let freq = docs.get(doc)?.len() as f32;
         let df = field.df(term, docs.len(), g);
         let terms = vec![term.to_owned()];
         let weight = Weight { description, dfs: &[df], boost, kind: FreqKind::Term, terms };
@@ -233,7 +231,7 @@ impl MemIndex {
     /// one is a segment of it).
     pub(crate) fn doc_freq(&self, key: &str, term: &str) -> u64 {
         let Some(field) = self.fields.get(key) else { return 0 };
-        let local = field.postings.get(term).map_or(0, BTreeMap::len);
+        let local = field.postings.get(term).map_or(0, |d| d.len());
         field.df(term, local, self.global_of(key))
     }
 

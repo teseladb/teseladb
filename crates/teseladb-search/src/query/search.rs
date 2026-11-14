@@ -884,11 +884,7 @@ fn eval_all_terms(index: &MemIndex, op: &Operator) -> Result<BTreeMap<u32, f32>,
                     Some(f) => index.fuzzy_terms(p, t, f).into_iter().map(|(t, _)| t).collect(),
                     None => vec![t.to_owned()],
                 };
-                terms
-                    .iter()
-                    .filter_map(|t| index.positions(p, t))
-                    .flat_map(|d| d.keys().copied())
-                    .collect()
+                terms.iter().filter_map(|t| index.positions(p, t)).flat_map(|d| d.docs()).collect()
             };
             let lists: Vec<Vec<u32>> = tokens.iter().map(|t| docs_of(t)).collect();
             for (doc, s) in eval(index, &unit)? {

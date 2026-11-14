@@ -16,6 +16,7 @@ use teseladb_bson::{Document, RawDoc};
 use teseladb_keys::Hlc;
 use teseladb_types::GroupId;
 
+use super::table::TermTable;
 use super::{MemIndex, TextField};
 use crate::analysis::ANALYZERS_VERSION;
 use crate::definition::Definition;
@@ -102,12 +103,16 @@ impl MemIndex {
                 let t = f.tokens.get(id).copied().unwrap_or(0);
                 tokens[n] = Some(t.to_le_bytes().to_vec());
             }
-            for (term, docs) in &f.postings {
+            // The terms go sorted (FR-032).
+            for (term, docs) in f.postings.sorted() {
                 // The file numbers documents in key order, which is not the order they were
                 // indexed in when a later key sorts first: its postings go by that number.
                 let mut list: Vec<PostingEntry> = docs
                     .iter()
-                    .map(|(id, ps)| PostingEntry { doc: number[id], occurrences: occurrences(ps) })
+                    .map(|(id, ps)| PostingEntry {
+                        doc: number[&id],
+                        occurrences: occurrences(&ps.collect::<Vec<_>>()),
+                    })
                     .collect();
                 list.sort_unstable_by_key(|p| p.doc);
                 field.terms.insert(term.as_bytes().to_vec(), list);
@@ -159,20 +164,22 @@ impl MemIndex {
                 f.lengths.insert(id as u32, field.lengths[id]);
                 f.tokens.insert(id as u32, u32::from_le_bytes(t));
             }
+            let mut lists: Vec<(String, Vec<(u32, Vec<u32>)>)> = Vec::new();
             for (term, list) in &field.terms {
                 let term = String::from_utf8(term.clone())
                     .map_err(|_| DumpError::Corrupt("segment: term"))?;
-                let docs = list
+                let docs: BTreeMap<u32, Vec<u32>> = list
                     .iter()
                     .map(|p| (p.doc, p.occurrences.iter().map(|o| o.position).collect()))
                     .collect();
-                f.postings.insert(term, docs);
+                lists.push((term, docs.into_iter().collect()));
             }
-            for (id, positions) in f.postings.values().flat_map(|d| d.iter()) {
+            for (id, positions) in lists.iter().flat_map(|(_, d)| d.iter()) {
                 let end = positions.iter().max().map_or(0, |p| p + 1);
                 let e = f.ends.entry(*id).or_insert(0);
                 *e = (*e).max(end);
             }
+            f.postings = TermTable::from_lists(lists);
             index.fields.insert(path.clone(), f);
         }
         Ok(index)
