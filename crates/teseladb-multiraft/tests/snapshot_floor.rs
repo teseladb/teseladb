@@ -505,6 +505,50 @@ fn a_replica_parked_on_a_snapshot_whose_data_never_comes_can_be_closed_and_vote_
 }
 
 #[test]
+fn a_replica_whose_parked_snapshot_nobody_serves_keeps_it_and_lets_the_leader_commit() {
+    let mut c = Cluster::new(3);
+    let l = c.elect();
+    let f = *c.nodes.keys().find(|&&n| n != l).unwrap();
+    let third = *c.nodes.keys().find(|&&n| n != l && n != f).unwrap();
+    c.cut.insert(f);
+    for i in 0..AWAY_ENTRIES {
+        c.propose(l, &[i]);
+    }
+    c.ticks(5);
+    // The follower parks the leader's snapshot, whose data is not here, and the third replica goes
+    // for good: the leader commits nothing more without the follower.
+    c.nodes[&f].missing.set(true);
+    c.cut.clear();
+    c.cut.insert(third);
+    c.ticks(5);
+    let parked = c.nodes[&f].core.awaited_snapshot(G).expect("parked").to_vec();
+    let commit = |c: &Cluster, n: NodeId| c.nodes[&n].core.status(G).unwrap().hard_state.commit;
+    let before = commit(&c, l);
+    c.propose(l, b"w");
+    c.ticks(20);
+    assert_eq!(commit(&c, l), before, "a parked replica answers nothing");
+    // No replica will serve its data (the range split past it, or its data would land over
+    // another range of the node): the replica keeps the snapshot as its own without its data,
+    // and votes, appends and commits again, so that the leader commits past it (multirange seed
+    // 83, D-067).
+    let applied = c.nodes[&f].core.state_machine(G).unwrap().entries;
+    c.nodes.get_mut(&f).unwrap().core.reject_awaited(G);
+    c.ticks(20);
+    assert!(commit(&c, l) > before, "the leader commits with the follower's vote");
+    assert_eq!(commit(&c, f), commit(&c, l));
+    assert_eq!(c.nodes[&f].core.awaited_snapshot(G).map(<[u8]>::to_vec), Some(parked));
+    assert_eq!(c.nodes[&f].core.state_machine(G).unwrap().entries, applied, "nothing applied");
+    assert_ne!(c.nodes[&f].core.status(G).unwrap().role, Role::Leader);
+    // Once its data is here it applies what it held back.
+    c.nodes[&f].missing.set(false);
+    let now = c.now;
+    c.nodes.get_mut(&f).unwrap().core.snapshot_data_ready(G, now);
+    c.ticks(20);
+    assert_eq!(c.nodes[&f].core.awaited_snapshot(G), None);
+    assert_eq!(c.applied(f), c.applied(l));
+}
+
+#[test]
 fn a_snapshot_taken_while_the_state_runs_ahead_of_the_log_is_sent_past_the_floor() {
     let mut c = Cluster::new(3);
     let l = c.elect();

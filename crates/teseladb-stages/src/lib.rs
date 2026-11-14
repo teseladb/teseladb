@@ -94,11 +94,22 @@ pub enum Stage {
     /// Entries of a Raft log from their append to the core's log until the core learns they are
     /// durable.
     LogAppendToDurable,
+    /// A core's sync in its queue to the node's device log until the log's writer takes it.
+    LogQueueWait,
+    /// A sync the device log's writer took until the sync of its group starts: the oldest of the
+    /// group's.
+    LogTurnWait,
+    /// The write of the record that starts a group of the device log.
+    LogWrite,
+    /// The sync of a group of the device log, from the end of its record's write.
+    LogSync,
+    /// The answer of a sync of the device log in its core's mailbox until the core takes it.
+    LogNotify,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 31] = [
+    pub const ALL: [Stage; 36] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -130,6 +141,11 @@ impl Stage {
         Stage::DiskSync,
         Stage::MailboxWait,
         Stage::LogAppendToDurable,
+        Stage::LogQueueWait,
+        Stage::LogTurnWait,
+        Stage::LogWrite,
+        Stage::LogSync,
+        Stage::LogNotify,
     ];
 
     /// Its label in the metrics.
@@ -166,6 +182,11 @@ impl Stage {
             Stage::DiskSync => "disk_sync",
             Stage::MailboxWait => "mailbox_wait",
             Stage::LogAppendToDurable => "log_append_to_durable",
+            Stage::LogQueueWait => "log_queue_wait",
+            Stage::LogTurnWait => "log_turn_wait",
+            Stage::LogWrite => "log_write",
+            Stage::LogSync => "log_sync",
+            Stage::LogNotify => "log_notify",
         }
     }
 }

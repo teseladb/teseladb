@@ -29,6 +29,10 @@
 //!   snapshot for the replica that never applied the cut, and with a node lost it never committed.
 //! - Heavy 2076: that replica then took the born range's snapshot, which had no write of its own,
 //!   as if its data were already here, and served what an older replica of the parent had left.
+//! - Default 83: after a merge and a split, a node lost and a leader restarted with the split
+//!   in its log but not committed, the replica that missed both parked the leader's snapshot from
+//!   before the split, whose data would land over the range the split made, and answered nothing:
+//!   the leader could not commit the split without its vote, and so had no newer snapshot.
 
 use teseladb_sim::faults::FaultPlan;
 use teseladb_sim::{SimConfig, Verdict, run_seed};
@@ -50,6 +54,7 @@ fn the_seeds_that_found_defects_pass() {
         (FaultPlan::Default, 753),
         (FaultPlan::Default, 1388),
         (FaultPlan::Default, 1575),
+        (FaultPlan::Default, 83),
         (FaultPlan::Heavy, 87),
         (FaultPlan::Heavy, 152),
         (FaultPlan::Heavy, 329),

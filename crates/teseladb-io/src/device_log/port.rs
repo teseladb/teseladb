@@ -5,6 +5,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
+use std::time::Instant;
 
 use teseladb_devlog::port::{LogLink, LogReq, PortBook};
 use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
@@ -74,7 +75,9 @@ impl ThreadLink {
 
 impl LogLink for ThreadLink {
     fn send(&mut self, req: LogReq) -> bool {
-        self.queue(Req::Log(req))
+        // A sync carries when it was asked: the writer counts its wait in the queue.
+        let asked = matches!(req, LogReq::Sync(_)).then(Instant::now);
+        self.queue(Req::Log(req, asked))
     }
 
     fn read(&mut self, wal: u64) -> Result<Vec<u8>, IoErrno> {
