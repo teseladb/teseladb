@@ -1016,6 +1016,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         return Err(text_not_first());
     }
     check_joined_views(ctx.backend, ctx.db, &stages)?;
+    super::out_merge::check_databases(ctx.backend, ctx.db, pipeline.write(), on_collection)?;
     if on_collection && ctx.backend.collection(&ns)?.is_some() {
         pipeline.check_collection_plan().map_err(from_mql)?;
     }
@@ -1172,10 +1173,12 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         Some("$currentOp") => !local_ops,
         _ => false,
     };
-    // The reference router 9.0.4 answers `id`, `ns`, `firstBatch` for a collection; a reference
+    // The reference router 9.0.4 answers `id`, `ns`, `firstBatch` for a collection and for an
+    // `aggregate: 1` that ends in `$out` or `$merge`, which it sends to a shard; a reference
     // replica set member, which the replica set presentation (018) is, `firstBatch`, `id`, `ns`
-    // (measured on 04-11-2026).
-    let as_router = forwarded || (on_collection && !super::config_db::as_member(ctx.backend)?);
+    // (measured on 04-11-2026 and 14-11-2026).
+    let routed = on_collection || pipeline.write().is_some();
+    let as_router = forwarded || (routed && !super::config_db::as_member(ctx.backend)?);
     let cursor = if as_router {
         Document::new().with("id", id).with("ns", ns_text).with("firstBatch", batch)
     } else {

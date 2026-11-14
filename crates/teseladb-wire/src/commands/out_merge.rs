@@ -47,6 +47,42 @@ pub(super) fn write<B: Backend + ?Sized>(
     }
 }
 
+/// The databases `$merge` and `$out` need before anything runs, as the reference router 9.0.4
+/// answers (measured on 14-11-2026, 002 T048): `$merge` needs its target's database and, from a
+/// collection, its source's first; an `aggregate: 1` with `$out` fails only when neither its own
+/// database nor the target's exists, and names its own. Each error is a 26.
+pub(super) fn check_databases<B: Backend + ?Sized>(
+    backend: &mut B,
+    db: &str,
+    w: Option<&Write>,
+    on_collection: bool,
+) -> Result<(), CommandError> {
+    let missing = |name: &str| {
+        CommandError::new(crate::error::NAMESPACE_NOT_FOUND, format!("database {name} not found"))
+    };
+    match w {
+        Some(Write::Merge(m)) => {
+            if on_collection && !super::catalog::has_database(backend, db)? {
+                return Err(missing(db));
+            }
+            let target = m.db.as_deref().unwrap_or(db);
+            if !super::catalog::has_database(backend, target)? {
+                return Err(missing(target));
+            }
+        }
+        Some(Write::Out(o)) if !on_collection => {
+            let target = o.db.as_deref().unwrap_or(db);
+            if !super::catalog::has_database(backend, db)?
+                && !super::catalog::has_database(backend, target)?
+            {
+                return Err(missing(db));
+            }
+        }
+        Some(Write::Out(_)) | None => {}
+    }
+    Ok(())
+}
+
 /// Runs `cmd` on database `db` with the node's own command and its checks; an error of one of
 /// its writes is the command's.
 fn run<B: Backend + ?Sized>(
