@@ -221,7 +221,9 @@ fn a_memory_limit_is_split_between_the_cores() {
 fn a_core_whose_log_fails_after_the_start_acknowledges_no_write() {
     let armed = Arc::new(AtomicBool::new(false));
     let on = armed.clone();
-    let open = move || Ok(FaultyDisk::over(MemDisk::new(), "core-", Fails::Broken, on.clone()));
+    // The cores' logs are in the node's device log (012 FR-035).
+    let log = teseladb_io::device_log::format::DIR;
+    let open = move || Ok(FaultyDisk::over(MemDisk::new(), log, Fails::Broken, on.clone()));
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
     let node = Node::start(cfg, open, None).unwrap();
     assert!(node.wait_ready(READY));

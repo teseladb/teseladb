@@ -122,6 +122,7 @@ dependencies = [
  "teseladb-sys",
  "teseladb-crypto",
  "teseladb-deflate",
+ "teseladb-hash",
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-tls",

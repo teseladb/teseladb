@@ -19,7 +19,7 @@ use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_auth::clustertime::KeySealer;
 
 use teseladb_hlc::Hlc;
+use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogPort, PortDisk};
 use teseladb_io::handshake::{
     Acceptor, AcceptorOptions, EnrollHandler, JOIN_TIMEOUT, JoinHandler, JoinRequest,
     request_join_with,
@@ -46,10 +47,10 @@ use teseladb_sys::FileLock;
 use teseladb_wire::commands::{NodeSessions, Shared};
 use teseladb_raftlog::paths::core_dir;
 use teseladb_raftlog::{
-    CoreStore, Disk, FileId, IoErrno, StorageConfig, StorageError, open_node, read_node_meta,
-    write_atomic, write_node_meta,
+    CoreStore, Disk, FileId, IoDone, IoErrno, IoOp, StorageConfig, StorageError, open_node,
+    read_node_meta, write_atomic, write_node_meta,
 };
-use teseladb_types::{GroupId, NodeId};
+use teseladb_types::{Bytes, GroupId, NodeId};
 
 use crate::admin::{NodeAdmin, answer};
 use crate::admin_http::{AdminListener, Handler};
@@ -87,8 +88,13 @@ pub const DATA_FORMAT_FILE: &str = "data.format";
 /// whose catalog keeps the databases left without collections (D-077). 6: Group 0's node
 /// enrollment tokens, kinds 46 and 47 and its snapshot format 8 (013 FR-005). 7: the range commands
 /// of transactions (008): `PutIntents`, `EndTxn`, `ResolveIntents` and `PushTxn`, kinds 8, 9, 10
-/// and 12, with intents and records in the range's data.
-pub const DATA_FORMAT: u32 = 7;
+/// and 12, with intents and records in the range's data. 8: the cores' Raft logs in the node's
+/// device log, `raftlog/` (012 FR-035, D-154); a directory of format 7 has its cores' WAL segments
+/// moved there when it starts.
+pub const DATA_FORMAT: u32 = 8;
+
+/// The format before the device log, which a node moves to [`DATA_FORMAT`] when it starts.
+const PER_CORE_LOG_FORMAT: u32 = 7;
 
 /// Bytes of system randomness that seed the generator of the `$clusterTime` signing keys.
 const KEY_ENTROPY: usize = 48;
@@ -397,7 +403,7 @@ pub fn join_cluster_with(
 /// Checks the data format of the directory, which a new one takes: one with `node.meta` and no
 /// [`DATA_FORMAT_FILE`] was written before the file existed. A node never reads a format it does
 /// not know: it would stop its ranges at the first entry it cannot decode and hang its writes.
-fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<(), NodeError> {
+fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<bool, NodeError> {
     let found = match disk.read_all(Path::new(DATA_FORMAT_FILE)) {
         Ok(b) => String::from_utf8_lossy(&b).trim().parse::<u32>().map_err(|_| {
             NodeError::Config(format!("{DATA_FORMAT_FILE}: not a data format number"))
@@ -412,9 +418,61 @@ fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<(), NodeErro
             return Err(NodeError::Io(io::Error::other(format!("{DATA_FORMAT_FILE}: {e:?}"))));
         }
     };
-    match found == DATA_FORMAT {
-        true => Ok(()),
-        false => Err(NodeError::DataFormat { found }),
+    match found {
+        DATA_FORMAT => Ok(false),
+        PER_CORE_LOG_FORMAT => Ok(true),
+        _ => Err(NodeError::DataFormat { found }),
+    }
+}
+
+/// Moves the WAL segments a node of format 7 kept in `core-NN/wal` into the device log, through
+/// `port`, and deletes them once the log has them durable. A segment the log already has (a
+/// move cut short) is written again with the same bytes.
+fn import_wal<D: Disk>(port: &mut LogPort, disk: &mut D) -> Result<(), NodeError> {
+    let dir = teseladb_raftlog::paths::wal_dir(port.core());
+    let found = match disk.list(&dir) {
+        Ok(v) => v,
+        Err(IoErrno::NotFound) => return Ok(()),
+        Err(e) => return Err(io_failed(&dir, e)),
+    };
+    let segments: Vec<PathBuf> =
+        found.into_iter().filter(|p| teseladb_raftlog::paths::classify_wal(p).is_some()).collect();
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let mut log = port.disk(disk);
+    for (k, path) in segments.iter().enumerate() {
+        let bytes = log_inner_read(&mut log, path)?;
+        let file = FileId(u32::MAX - 16 - u32::try_from(k).unwrap_or(0));
+        let created = IoOp::Create { file, path: path.clone(), prealloc: bytes.len() as u64 };
+        if let IoDone::Err { errno: IoErrno::AlreadyExists, .. } = log.execute(created) {
+            check(log.execute(IoOp::Open { file, path: path.clone() }), path)?;
+        }
+        let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        let data = Bytes::from_vec(bytes[..end].to_vec());
+        check(log.execute(IoOp::WriteAt { file, offset: 0, data, batch: 0 }), path)?;
+        check(log.execute(IoOp::Sync { file, batch: 0 }), path)?;
+        check(log.execute(IoOp::Close { file }), path)?;
+    }
+    for path in &segments {
+        check(disk.execute(IoOp::Remove { path: path.clone() }), path)?;
+    }
+    check(disk.execute(IoOp::SyncDir { path: dir.clone() }), &dir)
+}
+
+/// Reads a WAL segment of format 7 from the core's own disk, under the log's view.
+fn log_inner_read<D: Disk>(log: &mut PortDisk<'_, D>, path: &Path) -> Result<Vec<u8>, NodeError> {
+    log.inner_read_all(path).map_err(|e| io_failed(path, e))
+}
+
+fn io_failed(path: &Path, e: IoErrno) -> NodeError {
+    NodeError::Io(io::Error::other(format!("{}: {e:?}", path.display())))
+}
+
+fn check(done: IoDone, path: &Path) -> Result<(), NodeError> {
+    match done {
+        IoDone::Err { errno, .. } => Err(io_failed(path, errno)),
+        _ => Ok(()),
     }
 }
 
@@ -499,6 +557,8 @@ struct Group0Spec {
 /// What a core's thread needs to build its state.
 struct CoreSpec {
     core: u16,
+    /// Its part of the node's device log, where its WAL is (012 FR-035).
+    log: Option<LogPort>,
     /// The node's cores, among which a split by load spreads its new half (007 FR-040).
     node_cores: u16,
     node_id: NodeId,
@@ -572,8 +632,12 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
 }
 
 /// A core's state, built on its thread.
-fn build_core<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<NodeLogic, NodeError> {
-    let (store, _) = CoreStore::recover(&spec.storage, spec.core, disk)?;
+fn build_core<D: Disk>(
+    spec: &CoreSpec,
+    port: &mut LogPort,
+    disk: &mut D,
+) -> Result<NodeLogic, NodeError> {
+    let (store, _) = CoreStore::recover(&spec.storage, spec.core, &mut port.disk(disk))?;
     // The ranges of its log, before core 0 hands out Group 0's (007 FR-011).
     for g in store.group_ids().into_iter().filter(|g| *g != GROUP0) {
         spec.hosting.add(g, spec.core);
@@ -648,7 +712,12 @@ fn run_core<D: Disk + Send + 'static>(
         let _ = ready.send(Err(NodeError::Config(format!("core {}: CPU {cpu}: {e}", spec.core))));
         return Ok(None);
     }
-    let logic = match build_core(&spec, &mut disk) {
+    let mut spec = spec;
+    let Some(mut port) = spec.log.take() else {
+        let _ = ready.send(Err(NodeError::Config(format!("core {}: no raft log", spec.core))));
+        return Ok(None);
+    };
+    let logic = match build_core(&spec, &mut port, &mut disk) {
         Ok(l) => l,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -662,7 +731,8 @@ fn run_core<D: Disk + Send + 'static>(
         origin: Some(spec.origin),
     };
     match CoreRuntime::new(logic, disk, spec.hello, rcfg) {
-        Ok((rt, tx)) => {
+        Ok((mut rt, tx)) => {
+            rt.attach_log(port);
             let _ = ready.send(Ok(tx));
             rt.run().map(|(_, d)| d)
         }
@@ -706,6 +776,8 @@ pub struct Node<D> {
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// The roles the cores publish (H-039).
     roles: Arc<NodeRoles>,
+    /// The Raft log of the node's cores (012 FR-035).
+    device_log: Option<DeviceLog<D>>,
     _lock: Option<FileLock>,
 }
 
@@ -923,7 +995,7 @@ impl<D: Disk + Send + 'static> Node<D> {
 
         let mut meta_disk = open_disk()?;
         let existing = read_node_meta(&mut meta_disk)?;
-        check_data_format(&mut meta_disk, existing.is_some())?;
+        let import_logs = check_data_format(&mut meta_disk, existing.is_some())?;
         // A node without an identifier (a new directory, or one that stopped between `node.meta`
         // and the write of its identifier) joins with `--join` before creating anything: it adopts
         // the cluster's identifier and cores. One that had started joining never founds a cluster.
@@ -1064,6 +1136,20 @@ impl<D: Disk + Send + 'static> Node<D> {
         // Before the cores' threads allocate (012 FR-022).
         let arenas = crate::allocator::bound(cores);
         log.step("allocator", &[("arenas", &arenas)]);
+        // The Raft logs of every core, in one log of the device (012 FR-035, D-154).
+        let (device_log, mut ports) =
+            DeviceLog::start(open_disk()?, cores, DeviceLogConfig::default())?;
+        log.step("raft log", &[("files", &device_log.recovered_files())]);
+        if import_logs {
+            let mut disk = open_disk()?;
+            for port in &mut ports {
+                import_wal(port, &mut disk)?;
+            }
+            let text = DATA_FORMAT.to_string().into_bytes();
+            write_atomic(&mut disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
+            log.step("raft logs moved to the device log", &[("cores", &cores)]);
+        }
+        let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
             let disk = match open_disk() {
@@ -1082,6 +1168,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             });
             let spec = CoreSpec {
                 core: k,
+                log: ports.next(),
                 node_cores: cores,
                 node_id,
                 clock: clock.clone(),
@@ -1334,6 +1421,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             lsm,
             shutdown,
             roles,
+            device_log: Some(device_log),
             _lock: lock,
         })
     }
@@ -1559,6 +1647,10 @@ impl<D: Disk + Send + 'static> Node<D> {
         self.acceptor.stop();
         let senders: Vec<_> = self.senders.iter().map(CoreSenders::sender).collect();
         let disks = stop_cores(&senders, self.threads);
+        // Once the cores stopped, the log's writer has nothing more to make durable.
+        if let Some(l) = self.device_log {
+            l.stop();
+        }
         // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
         self.clock.stop();
         disks
