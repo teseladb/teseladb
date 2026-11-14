@@ -4,8 +4,9 @@
 //! evaluates the mutation with them as the leader would, and writes everything it gives as one
 //! internal transaction of 008 reading at that mark; a version committed after it is a
 //! `WriteConflict`, and the statement starts again from the read. A retryable statement leaves
-//! its result in the same transaction, next to the record of a transaction whose identifier comes
-//! from the statement: a retry finds it and answers with it.
+//! its result in the same transaction, under a key that comes from the statement: a retry finds
+//! it and answers with it. Each round runs its own transaction: a range's record that a conflict
+//! aborted refuses every later commit with its identifier.
 
 use teseladb_hlc::Hlc;
 use teseladb_range::host::{CROSSES_RANGES, Mutation};
@@ -90,21 +91,22 @@ pub fn write<B: Backend + ?Sized>(
     bound: &Bound,
     statement: Option<StatementKey>,
 ) -> Result<Vec<u8>, CommandError> {
-    let txn = statement.as_ref().map(statement_txn);
+    // The result's key: the same for every send of the statement, which looks for it at the mark
+    // it evaluates at, so a send that committed meanwhile answers this one.
+    let result_at = statement.as_ref().map(|s| result_key(statement_txn(s)));
     let mut rounds = 0;
     loop {
-        if let Some(s) = &statement
-            && let Some(result) = earlier_result(backend, s)?
-        {
-            return Ok(result);
+        let ((read_ts, mut writes, result), earlier) =
+            evaluate_with(backend, bound, result_at.as_deref())?;
+        if let Some(earlier) = earlier {
+            return Ok(earlier);
         }
-        let (read_ts, writes, result) = evaluate(backend, bound)?;
-        let mut writes = writes;
-        if let Some(txn) = txn {
+        if let Some(key) = &result_at {
             let value = stored_result(read_ts, &result);
-            writes.push((result_key(txn), IntentOp::Put { value_type: STATEMENT_RESULT, value }));
+            writes.push((key.clone(), IntentOp::Put { value_type: STATEMENT_RESULT, value }));
         }
-        match backend.transact(read_ts, writes, txn) {
+        // A fresh transaction each round: the one a conflict aborted can never commit.
+        match backend.transact(read_ts, writes, None) {
             Ok(_) => return Ok(result),
             Err(e) if e.code == WRITE_CONFLICT && rounds < MAX_CONFLICT_ROUNDS => rounds += 1,
             Err(e) => return Err(e),
@@ -121,9 +123,28 @@ pub(crate) fn evaluate<B: Backend + ?Sized>(
     backend: &mut B,
     bound: &Bound,
 ) -> Result<Evaluation, CommandError> {
+    evaluate_with(backend, bound, None).map(|(evaluation, _)| evaluation)
+}
+
+/// [`evaluate`], reading also the result an earlier send of the statement left under `result_at`,
+/// at the same mark: that result, if there is one.
+fn evaluate_with<B: Backend + ?Sized>(
+    backend: &mut B,
+    bound: &Bound,
+    result_at: Option<&[u8]>,
+) -> Result<(Evaluation, Option<Vec<u8>>), CommandError> {
     let mut keys = bound.latch_keys();
     loop {
-        let (ts, values) = backend.read_versions(&keys)?;
+        let mut read = keys.clone();
+        read.extend(result_at.map(<[u8]>::to_vec));
+        let (ts, mut values) = backend.read_versions(&read)?;
+        let earlier = match result_at {
+            Some(_) => values.pop().flatten(),
+            None => None,
+        };
+        if let Some(result) = earlier.as_ref().and_then(|(_, v)| read_result(v)) {
+            return Ok(((ts, Vec::new(), Vec::new()), Some(result.1.to_vec())));
+        }
         let current: Vec<Option<(u8, &[u8])>> =
             values.iter().map(|v| v.as_ref().map(|(t, b)| (*t, b.as_slice()))).collect();
         let outcome =
@@ -135,7 +156,7 @@ pub(crate) fn evaluate<B: Backend + ?Sized>(
             continue;
         }
         let result = outcome.result.clone();
-        return Ok((ts, intent_writes(outcome), result));
+        return Ok(((ts, intent_writes(outcome), result), None));
     }
 }
 

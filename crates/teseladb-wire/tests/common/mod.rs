@@ -23,6 +23,9 @@ use teseladb_wire::error::{
 use teseladb_bson::{Document, Value};
 
 /// The node.
+/// Versions by key, with their value type; `None` for a deletion.
+pub type Versions = BTreeMap<Vec<u8>, Option<(u8, Vec<u8>)>>;
+
 #[derive(Default)]
 pub struct Mem {
     pub catalog: Catalog,
@@ -136,6 +139,13 @@ pub struct Mem {
     pub txns: Vec<(Option<teseladb_range::intents::TxnId>, Vec<Vec<u8>>)>,
     /// The next this many transactions find a conflict.
     pub conflicts: usize,
+    /// The transactions a conflict aborted: as a range's record, an aborted one never commits
+    /// again, whatever its coordinator sends with its identifier.
+    pub aborted: Vec<teseladb_range::intents::TxnId>,
+    /// Once this many reads of this key have been answered, these versions (with their
+    /// value type, `None` for a deletion) are written: an earlier send of a statement that
+    /// commits meanwhile.
+    pub after_look: Option<(Vec<u8>, usize, Versions)>,
     /// Group 0's settings that `group0_settings` reads and writes (018 zones).
     pub group0: BTreeMap<Vec<u8>, Vec<u8>>,
     /// The next this many writes of Group 0's settings find a concurrent change.
@@ -957,17 +967,46 @@ impl Backend for Mem {
         self.now += 1;
         let ts = Hlc { physical: self.now, logical: 0 };
         let type_of = |k: &[u8]| self.types.get(k).copied().unwrap_or(1);
-        Ok((ts, keys.iter().map(|k| self.data.get(k).map(|v| (type_of(k), v.clone()))).collect()))
+        let found =
+            keys.iter().map(|k| self.data.get(k).map(|v| (type_of(k), v.clone()))).collect();
+        if let Some((key, looks, _)) = self.after_look.as_mut()
+            && keys.contains(key)
+        {
+            *looks = looks.saturating_sub(1);
+            if *looks == 0 {
+                let (_, _, writes) = self.after_look.take().unwrap_or_default();
+                self.now += 1;
+                let at = Hlc { physical: self.now, logical: 0 };
+                for (k, version) in writes {
+                    self.record(&k, at, version.clone());
+                    match version {
+                        Some((t, v)) => {
+                            self.types.insert(k.clone(), t);
+                            self.data.insert(k, v);
+                        }
+                        None => {
+                            self.types.remove(&k);
+                            self.data.remove(&k);
+                        }
+                    }
+                }
+            }
+        }
+        Ok((ts, found))
     }
 
     fn transact(
         &mut self,
-        _: Hlc,
+        read_ts: Hlc,
         writes: Vec<(Vec<u8>, teseladb_range::intents::IntentOp)>,
         txn: Option<teseladb_range::intents::TxnId>,
     ) -> Result<Hlc, CommandError> {
-        if self.conflicts > 0 {
-            self.conflicts -= 1;
+        // A version committed above the read mark of a key it writes, as a range finds it.
+        let newer =
+            self.history.iter().any(|v| v.ts > read_ts && writes.iter().any(|(k, _)| *k == v.key));
+        if newer || self.conflicts > 0 || txn.is_some_and(|t| self.aborted.contains(&t)) {
+            self.conflicts = self.conflicts.saturating_sub(1);
+            self.aborted.extend(txn);
             return Err(CommandError::new(teseladb_wire::error::WRITE_CONFLICT, "conflict"));
         }
         self.check_fences(&writes.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>())?;

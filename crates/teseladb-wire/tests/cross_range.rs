@@ -95,6 +95,86 @@ fn a_retried_statement_gets_the_result_it_left() {
     assert_eq!(entries(&m, c), 1);
 }
 
+/// A retryable statement whose transaction a conflict aborted starts again with another one: a
+/// range's record, once aborted, refuses every later commit with its identifier, so a statement
+/// that kept it conflicted until it gave up, holding its reads of the indexes all along (seen on
+/// 14-11-2026: an `update` of 101 s on a node of three).
+#[test]
+fn a_retryable_statement_aborted_by_a_conflict_commits_with_another_transaction() {
+    let (mut m, c) = node();
+    m.conflicts = 1;
+    let lsid = Value::Document(
+        Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![8; 16] }),
+    );
+    let cmd = insert(vec![Document::new().with("_id", 1).with("a", 5)])
+        .with("lsid", lsid)
+        .with("txnNumber", 4_i64);
+    let r = m.run(DB, cmd.clone());
+    assert_eq!(r.get("writeErrors"), None, "{r:?}");
+    assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    assert_eq!(entries(&m, c), 1);
+    assert_eq!(m.txns.len(), 1);
+    assert!(m.txns[0].0.is_none_or(|t| !m.aborted.contains(&t)), "a fresh transaction");
+    // The retry is answered from the result the statement left, by its statement's key.
+    let retry = m.run(DB, cmd);
+    assert_eq!(field(&retry, "n"), &Value::Int32(1), "{retry:?}");
+    assert_eq!(m.txns.len(), 1, "nothing written again");
+}
+
+/// A retryable statement whose earlier send committed after this send looked for its result is
+/// answered with that result and changes nothing more: its evaluation reads the result with the
+/// documents, at one mark (005 FR-011). Before, an `$inc` applied twice.
+#[test]
+fn a_result_committed_between_the_look_and_the_evaluation_answers_the_statement() {
+    let lsid = Value::Document(
+        Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] }),
+    );
+    let u = Document::new()
+        .with("q", Document::new().with("_id", 1))
+        .with("u", Document::new().with("$inc", Document::new().with("a", 1)));
+    let cmd = Document::new()
+        .with("update", "c")
+        .with("updates", Value::Array(vec![u.into()]))
+        .with("lsid", lsid)
+        .with("txnNumber", 5_i64);
+    // The earlier send, on a node of its own: what it leaves is what this send meets.
+    let (mut earlier, _) = node();
+    let (mut m, c) = node();
+    for n in [&mut earlier, &mut m] {
+        let r = n.run(DB, insert(vec![Document::new().with("_id", 1).with("a", 5)]));
+        assert_eq!(field(&r, "n"), &Value::Int32(1), "{r:?}");
+    }
+    let before = earlier.data.clone();
+    let r = earlier.run(DB, cmd.clone());
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
+    let version = |k: &Vec<u8>| {
+        earlier.data.get(k).map(|v| (earlier.types.get(k).copied().unwrap_or(1), v.clone()))
+    };
+    let keys: std::collections::BTreeSet<&Vec<u8>> =
+        before.keys().chain(earlier.data.keys()).collect();
+    let left: std::collections::BTreeMap<Vec<u8>, Option<(u8, Vec<u8>)>> = keys
+        .into_iter()
+        .filter(|k| before.get(*k) != earlier.data.get(*k))
+        .map(|k| (k.clone(), version(k)))
+        .collect();
+    let s = StatementKey { lsid: u128::from_be_bytes([9; 16]), txn_number: 5, stmt_id: 0 };
+    let key = result_key(statement_txn(&s));
+    assert!(left.contains_key(&key), "the earlier send left its result");
+    let txns = m.txns.len();
+    // The earlier send commits after the second read of the result: the look before the
+    // statement's first send and the one of its evaluation across ranges.
+    m.after_look = Some((key, 2, left.clone()));
+    let r = m.run(DB, cmd);
+    assert_eq!(r.get("writeErrors"), None, "{r:?}");
+    assert_eq!(field(&r, "nModified"), &Value::Int32(1), "{r:?}");
+    assert_eq!(m.txns.len(), txns, "nothing written again: {:?}", &m.txns[txns..]);
+    for (k, v) in &left {
+        let got = m.data.get(k);
+        assert_eq!(got, v.as_ref().map(|(_, v)| v), "the earlier send's version stays");
+    }
+    assert_eq!(entries(&m, c), 1);
+}
+
 #[test]
 fn a_statements_transaction_and_result_are_stable() {
     let s = StatementKey { lsid: 9, txn_number: 2, stmt_id: 1 };
