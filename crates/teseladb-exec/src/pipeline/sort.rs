@@ -190,9 +190,19 @@ impl SortSpec {
     }
 }
 
+impl SortSpec {
+    /// The paths it sorts by; `None` when a key sorts by metadata.
+    pub(crate) fn paths(&self) -> Option<Vec<&str>> {
+        if self.metas.iter().any(Option::is_some) {
+            return None;
+        }
+        Some(self.keys.iter().map(|(p, _)| p.as_str()).collect())
+    }
+}
+
 /// The most documents a top-k keeps in order by insertion; a larger `$limit` sorts every
 /// document and keeps the first ones.
-const TOP_K_INSERTION: usize = 4096;
+pub(super) const TOP_K_INSERTION: usize = 4096;
 
 impl SortSpec {
     /// The first `k` documents of `docs` in the order of [`SortSpec::sort`] (`$sort` followed by

@@ -196,12 +196,17 @@ pub(crate) fn check_sort_memory(
     if allow_disk_use || bytes_of(docs) <= limit {
         return Ok(());
     }
-    Err(error(
+    Err(sort_memory_error(limit))
+}
+
+/// The 292 of a sort past `limit` bytes without `allowDiskUse`.
+pub(crate) fn sort_memory_error(limit: usize) -> MqlError {
+    error(
         NO_DISK_USE,
         format!(
             "Sort exceeded memory limit of {limit} bytes, but did not opt in to external sorting."
         ),
-    ))
+    )
 }
 
 /// RefDb's `UnsupportedFormat` (12).

@@ -241,3 +241,21 @@ fn a_cursor_past_the_cursors_part_waits_in_the_store() {
     assert_eq!(field(&m.run("sp", cmd(&kill)), "ok"), &Value::Double(1.0));
     assert!(store.is_empty(), "a killed cursor drops its run");
 }
+
+#[test]
+fn a_leading_sort_holds_only_the_fields_the_rest_uses() {
+    // 60 documents of about 130 bytes pass the 2,000 bytes of the stage; their `k` alone does
+    // not, and RefDb's query plan projects `k` under its sort (010 FR-010).
+    let store = Arc::new(MemorySpill::default());
+    let mut m = node(&store);
+    let r = m.run(
+        "sp",
+        cmd(r#"{"aggregate":"c","pipeline":[{"$sort":{"k":-1}},{"$group":{"_id":"$k"}},{"$sort":{"_id":-1}},{"$project":{"k":"$_id"}}],"cursor":{"batchSize":100},"allowDiskUse":false}"#),
+    );
+    assert_eq!(ids(&r), (0..60).rev().collect::<Vec<i64>>(), "{r:?}");
+    let r = m.run(
+        "sp",
+        cmd(r#"{"aggregate":"c","pipeline":[{"$sort":{"k":-1}},{"$group":{"_id":"$s"}}],"cursor":{},"allowDiskUse":false}"#),
+    );
+    assert_eq!(field(&r, "code"), &Value::Int32(292), "{r:?}");
+}
