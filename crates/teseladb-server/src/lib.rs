@@ -42,6 +42,7 @@ pub mod enroll;
 pub mod forward;
 pub mod frames;
 pub mod hlc_bound;
+pub mod host_settings;
 pub mod hosting;
 pub mod http_listener;
 pub mod http_service;

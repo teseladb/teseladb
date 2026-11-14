@@ -1093,6 +1093,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         let mut tables =
             cfg.client.as_ref().map_or_else(NodeSessions::default, ClientConfig::sessions);
         if let Some(dir) = &cfg.data_dir {
+            // What the host has of the settings of a data node (012 FR-036).
+            crate::host_settings::HostSettings::read(dir).log();
             // The segments of the search indexes, one file per index (011 FR-012).
             crate::search_segments::open(dir, &mut tables.search, cfg.direct_io)?;
             // What aggregation stages write past their memory (010 FR-010).
