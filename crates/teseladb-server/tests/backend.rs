@@ -1288,3 +1288,83 @@ fn the_routing_table_is_read_once_it_holds_the_whole_key_space() {
     let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300));
     assert_eq!(b.route_entries().unwrap_err().code.code, 89);
 }
+
+/// What a transaction's backward read asks a range: its first key, its end and the documents
+/// still missing, its direction and its mark.
+type BackwardRead = (Vec<u8>, Option<(Vec<u8>, u32)>, bool, Option<Hlc>);
+
+/// A backward scan through the backend (005 FR-027, H-003): range by range from the last one
+/// down, each asked for its part from its last key down with what is still missing, the rows in
+/// descending order and stopped at the limit; with a read preference other than `primary` each
+/// part goes to the range's candidates, and a transaction's scan carries its mark and its view.
+#[test]
+fn a_backward_scan_reads_the_ranges_from_the_last_one_down() {
+    use teseladb_range::push::TxnView;
+    use teseladb_router::read_pref::{Mode, ReadPreference};
+    let rows = |r: &[(&[u8], &[u8])]| {
+        let r = r.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect();
+        Ok(DataReply::Remote(RemoteReply::Rows(r)))
+    };
+    let start = |answers: Vec<Result<DataReply, RangeError>>| {
+        let seen: Arc<Mutex<Vec<RemoteReq>>> = Arc::default();
+        let h = recording_core(seen.clone(), Arc::default(), Arc::new(Mutex::new(answers.into())));
+        (ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300)), seen)
+    };
+    let high = rows(&[(&[3, 2], &[9]), (&[2, 1], &[8])]);
+    let low = rows(&[(&[1, 7], &[7])]);
+    let (mut b, seen) = start(vec![high.clone(), low]);
+    let got = b.scan_back(&[1], &[3, 5], 10, ReadConcern::Local).unwrap();
+    let want: Vec<(Vec<u8>, Vec<u8>)> =
+        vec![(vec![3, 2], vec![9]), (vec![2, 1], vec![8]), (vec![1, 7], vec![7])];
+    assert_eq!(got, want);
+    let parts: Vec<(Vec<u8>, Vec<u8>, u32, bool)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| match r {
+            RemoteReq::Scan { start, end, limit, backward, .. } => {
+                (start.clone(), end.clone(), *limit, *backward)
+            }
+            other => panic!("not a scan: {other:?}"),
+        })
+        .collect();
+    assert_eq!(parts, vec![(vec![2], vec![3, 5], 10, true), (vec![1], vec![2], 8, true)]);
+    // The limit is met in the last range: the first one is not asked.
+    let (mut b, seen) = start(vec![high.clone()]);
+    assert_eq!(b.scan_back(&[1], &[3, 5], 2, ReadConcern::Local).unwrap().len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    // With `secondaryPreferred` each part goes to the range's candidates, still backward.
+    let pref =
+        ReadPreference { mode: Mode::SecondaryPreferred, max_staleness_ms: None, tag_sets: vec![] };
+    let (mut b, seen) = start(vec![rows(&[])]);
+    b.set_read_preference(Some(pref));
+    assert_eq!(b.scan_back(&[2], &[3], 10, ReadConcern::Local), Ok(vec![]));
+    assert!(matches!(
+        seen.lock().unwrap().as_slice(),
+        [RemoteReq::FollowerScan { backward: true, .. }]
+    ));
+    // A transaction's scan reads at its mark with its view, from the last range down.
+    let at = Hlc { physical: 1_000, logical: 0 };
+    let (mut b, seen) = start(vec![rows(&[(&[2, 1], &[8])]), rows(&[(&[1, 1], &[7])])]);
+    let both = b.txn_scan_back(&[1], &[3], 10, at, &TxnView::default(), None).unwrap();
+    assert_eq!(both, vec![(vec![2, 1], vec![8]), (vec![1, 1], vec![7])]);
+    let reads: Vec<BackwardRead> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| match r {
+            RemoteReq::ReadWith { key, scan, backward, at, .. } => {
+                (key.clone(), scan.clone(), *backward, *at)
+            }
+            other => panic!("not a read: {other:?}"),
+        })
+        .collect();
+    let want = vec![
+        (vec![2], Some((vec![3], 10)), true, Some(at)),
+        (vec![1], Some((vec![2], 9)), true, Some(at)),
+    ];
+    assert_eq!(reads, want);
+    // An answer without rows is an internal error.
+    let (mut b, _) = start(vec![written(&[1])]);
+    assert_eq!(b.scan_back(&[1], &[3], 10, ReadConcern::Local).unwrap_err().code.code, 1);
+}
