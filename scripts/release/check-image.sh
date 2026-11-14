@@ -2,7 +2,7 @@
 # Checks an image saved with `docker save`: every layer, uncompressed, hashes to the diff_id its config declares in
 # the same position. The classic builder once put the base layer of one platform into the image of the other when the
 # base was pinned by the digest of its multi-platform index, and the registry then refused the pull of that platform
-# with «wrong diff id» (viuzi/teseladb:0.1.0 on arm64). publish.sh runs it on each image before it pushes it.
+# with «wrong diff id» (the 0.1.0 image on arm64). publish.sh runs it on each image before it pushes it.
 #   scripts/release/check-image.sh <archive.tar>
 set -euo pipefail
 

@@ -7,7 +7,7 @@
 #     -t teseladb/teseladb:0.1.0-arm64 dist/image/arm64
 # The base is debian:bookworm-slim pinned by the digest of the platform being built, which publish.sh passes as BASE:
 # with the digest of the multi-platform index, the classic builder put the base layer of one platform into the image of
-# the other, and Docker Hub refused the pull of viuzi/teseladb:0.1.0 on arm64 with «wrong diff id».
+# the other, and Docker Hub refused the pull of the 0.1.0 image on arm64 with «wrong diff id».
 ARG BASE
 FROM ${BASE}
 
