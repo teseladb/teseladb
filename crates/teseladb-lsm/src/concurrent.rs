@@ -144,9 +144,7 @@ impl SharedLsm {
     /// the LSM; a shard busy at that moment is waited for, as a block read waits for it.
     pub(crate) fn place_blocks(&self, memory: &Arc<dyn crate::BlockMemory>) {
         for shard in &self.inner.cache {
-            while shard.try_with(|c| c.set_memory(Arc::clone(memory))).is_none() {
-                std::hint::spin_loop();
-            }
+            shard.with_waiting(|c| c.set_memory(Arc::clone(memory)));
         }
     }
 
@@ -178,29 +176,14 @@ impl SharedLsm {
 
     /// Bytes the shared cache holds.
     pub fn cache_bytes(&self) -> u64 {
-        let mut total = 0;
-        for shard in self.inner.cache.iter() {
-            loop {
-                if let Some(used) = shard.try_with(|c| c.used()) {
-                    total += used;
-                    break;
-                }
-                std::hint::spin_loop();
-            }
-        }
-        total
+        self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.used())).sum()
     }
 
     /// Drops the blocks of file `file` (of `blocks` data blocks) from the shared cache: the file
     /// is gone, and its blocks would hold the cache's memory until other blocks evict them.
     pub(crate) fn forget(&self, file: u64, blocks: usize) {
         for shard in self.inner.cache.iter() {
-            loop {
-                if shard.try_with(|c| c.forget(file, blocks)).is_some() {
-                    break;
-                }
-                std::hint::spin_loop();
-            }
+            shard.with_waiting(|c| c.forget(file, blocks));
         }
     }
 
@@ -213,12 +196,8 @@ impl SharedLsm {
         let shard = self.inner.shard(file, block);
         // A miss already cost a read of the disk; a moment's retry keeps the block for the next
         // reads instead of dropping it when another thread holds the shard.
-        loop {
-            if shard.try_with(|c| c.insert(file, block as u32, payload.clone())).is_some() {
-                return Ok(());
-            }
-            std::hint::spin_loop();
-        }
+        shard.with_waiting(|c| c.insert(file, block as u32, payload.clone()));
+        Ok(())
     }
 }
 
