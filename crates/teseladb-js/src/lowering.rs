@@ -1,7 +1,7 @@
 //! The parts of a generator's rewriting ([`crate::generators`]) where a `yield` sits inside
 //! something the interpreter evaluates in one go: a destructuring pattern whose defaults or
 //! computed keys yield, a class whose `extends` or computed keys yield, and an optional chain
-//! whose keys or arguments after a `?.` yield (measured on a `refrouter` 9.0.4 on 02-11).
+//! whose keys or arguments after a `?.` yield (measured on a reference router 9.0.4 on 02-11).
 
 use std::rc::Rc;
 

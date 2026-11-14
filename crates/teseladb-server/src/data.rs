@@ -65,7 +65,8 @@ const LIVE_EVERY: Nanos = Nanos::from_secs(5);
 /// How often a core counts its memtables and its log with the node's.
 const PRESSURE_EVERY: Nanos = Nanos::from_millis(100);
 /// Longest a memtable holds back a range's log before it is flushed, however busy its core:
-/// RefEngine's checkpoint period (`syncPeriodSecs`), after which RefDb removes old journal files.
+/// The reference storage engine's checkpoint period (`syncPeriodSecs`), after which the reference
+/// server removes old journal files.
 pub const CHECKPOINT_EVERY: Nanos = Nanos::from_secs(60);
 
 pub use crate::idle_flush::IdleFlush;
@@ -345,7 +346,7 @@ pub struct DataCore {
     transfers: Transfers,
     /// The sums of the replicas on their way to the leaders, and the rebuilds (FR-014).
     checksums: Checksums,
-    /// RefDb's UUID of each collection, by its identifier (from Group 0's catalog).
+    /// The reference server's UUID of each collection, by its identifier (from Group 0's catalog).
     collections: BTreeMap<u32, [u8; 16]>,
     /// The merges of this core's ranges (007 FR-009).
     merges: Merges,
@@ -1376,7 +1377,7 @@ impl DataCore {
         let _ = self.router.on_answer(&start, &sent, 1, true, read);
     }
 
-    /// RefDb's UUID of each collection, by its identifier.
+    /// The reference server's UUID of each collection, by its identifier.
     pub fn collections(&self) -> &BTreeMap<u32, [u8; 16]> {
         &self.collections
     }

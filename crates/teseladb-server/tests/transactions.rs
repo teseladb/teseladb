@@ -1,7 +1,8 @@
 //! Client transactions on a node (008 FR-009, T016): statements that start and continue a
 //! transaction, read their own writes at the transaction's mark and stay invisible to other
 //! clients until `commitTransaction`; `abortTransaction`; a commit asked again; a write conflict
-//! between two transactions; and the session rules with the errors RefDb 9.0.4 gives.
+//! between two transactions; and the session rules with the errors the reference server 9.0.4
+//! gives.
 
 mod common;
 
@@ -313,9 +314,9 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
 }
 
 /// A commit asked of another node, with the transaction's `recoveryToken`, recovers its decision
-/// from the transaction's record, which Raft keeps in its range, as a second `refrouter` 9.0.4
-/// recovers it from the shard (008, measured on 01-11-2026 through two routers): a committed one
-/// answers `ok`, also when it committed in one phase and its decision is in its range (FR-022);
+/// from the transaction's record, which Raft keeps in its range, as a second reference router
+/// 9.0.4 recovers it from the shard (008, measured on 01-11-2026 through two routers): a committed
+/// one answers `ok`, also when it committed in one phase and its decision is in its range (FR-022);
 /// an open one is aborted and its own commit on its node fails after, and a record
 /// whose range cannot answer fails at the command's `maxTimeMS`.
 #[test]

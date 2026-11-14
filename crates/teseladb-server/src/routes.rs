@@ -57,7 +57,8 @@ pub struct SharedRoutes {
     nodes: Arc<std::sync::atomic::AtomicUsize>,
     /// This node's copy of the catalog, which core 0 publishes before it answers any change of
     /// it: the workers read it here instead of asking core 0 on every command (H-017 of the
-    /// native tests against RefDb, whose operations take the latest catalog the same way).
+    /// native tests against the reference server, whose operations take the latest catalog the same
+    /// way).
     catalog: Arc<RwLock<Arc<Option<Arc<teseladb_meta::catalog::Catalog>>>>>,
     /// This node's copy of the cluster settings, published the same way (H-017).
     settings: Arc<RwLock<Arc<Option<Arc<Settings>>>>>,

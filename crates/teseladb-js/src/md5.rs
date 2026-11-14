@@ -1,9 +1,9 @@
 //! MD5 (RFC 1321) for `hex_md5` of the shell, written from the RFC.
 //!
 //! `hex_md5` encodes the UTF-16 code units of its argument as UTF-8 and hashes the bytes. What a
-//! `refrouter` 9.0.4 does with values that are not code units (measured on 02-11, through objects
-//! whose `charCodeAt` returns them) is kept: a unit is compared as a number (`NaN` takes the
-//! three-byte path), a lone surrogate is encoded in three bytes, and a "byte" outside 0..=255
+//! reference router 9.0.4 does with values that are not code units (measured on 02-11, through
+//! objects whose `charCodeAt` returns them) is kept: a unit is compared as a number (`NaN` takes
+//! the three-byte path), a lone surrogate is encoded in three bytes, and a "byte" outside 0..=255
 //! (`-1`, or the lead byte of `70000`) is merged into its 32-bit word as a 32-bit integer.
 
 /// The per-round shift amounts of RFC 1321, section 3.4.
@@ -129,9 +129,9 @@ mod tests {
         }
     }
 
-    /// Code units against the refrouter 9.0.4 (measured on 02-11).
+    /// Code units against the reference router 9.0.4 (measured on 02-11).
     #[test]
-    fn code_units_as_the_refrouter_encodes_them() {
+    fn code_units_as_the_reference_encodes_them() {
         let cases: [(&[f64], &str); 7] = [
             (&[233.0], "66ddcd97cfdeabb2f6fb8a999b4bc76f"),
             (&[55_357.0, 56_832.0], "2a02eac39d716a70ecf37579185927b6"),

@@ -365,7 +365,7 @@ fn a_given_key_an_unknown_key_and_a_server_out_of_reach() {
     set_state(&f, "pre", ACTIVE);
     let m = kmip::master_key(&given, &f.data, &mut random).unwrap();
     assert_eq!((m.id.as_str(), m.log.len()), ("pre", 0));
-    // An identifier the server does not know: RefDb's message.
+    // An identifier the server does not know: the reference server's message.
     let unknown =
         KmipOpts { key_identifier: Some("99".into()), activate_keys: false, ..f.opts.clone() };
     let fresh = f.base.join("fresh");

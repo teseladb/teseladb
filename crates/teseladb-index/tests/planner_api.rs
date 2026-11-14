@@ -1,7 +1,7 @@
 //! The planner's view of indexes (009 T026, FR-006, FR-009, FR-015): usable indexes by time and
 //! visibility, `hint`, key intervals with buckets and hashed fields, and the cell intervals of a
-//! `2dsphere` query, compared with `explain` on refnode 7.0.45 (image `ref:7.0`) and again on 9.0.4
-//! (image `ref:9.0`, same bounds), 30-10-2026.
+//! `2dsphere` query, compared with `explain` on the reference server 7.0.45 (its 7.0 image) and
+//! again on 9.0.4 (its 9.0 image, same bounds), 30-10-2026.
 
 use teseladb_bson::{Document, RawDoc, RawValue, extjson};
 use teseladb_index::geo::geojson::{Geometry, parse};

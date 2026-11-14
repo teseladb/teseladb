@@ -1,8 +1,9 @@
-//! GeoJSON and legacy coordinate pairs read and validated as RefDb does (FR-011): the types of
-//! RFC 7946 (points, lines, polygons with holes, their multiple versions and collections of
-//! geometries) and pairs `[x, y]` or `{a: x, b: y}`. The reasons of a rejection are the server's,
-//! measured on refnode 9.0.4 (`tests/data/geo-vectors.json`). A query's `$geometry` and an indexed
-//! value tell a pair from GeoJSON differently ([`parse`], [`parse_indexed`]).
+//! GeoJSON and legacy coordinate pairs read and validated as the reference server does (FR-011):
+//! the types of RFC 7946 (points, lines, polygons with holes, their multiple versions and
+//! collections of geometries) and pairs `[x, y]` or `{a: x, b: y}`. The reasons of a rejection are
+//! the server's, measured on the reference server 9.0.4 (`tests/data/geo-vectors.json`). A query's
+//! `$geometry` and an indexed value tell a pair from GeoJSON differently ([`parse`],
+//! [`parse_indexed`]).
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -148,7 +149,7 @@ fn legacy_point(v: RawValue<'_>) -> Result<Point, GeoError> {
 
 /// A geometry of a query from a GeoJSON object or a legacy pair: an array is a pair, and so is a
 /// document whose first value is a number; any other document is GeoJSON. A pair has exactly two
-/// values (measured on refnode 9.0.4).
+/// values (measured on the reference server 9.0.4).
 pub fn parse(v: RawValue<'_>) -> Result<Geometry, GeoError> {
     let pair_values = match v {
         RawValue::Document(d) if d.iter().next().and_then(|(_, f)| number(f)).is_none() => {
@@ -166,8 +167,9 @@ pub fn parse(v: RawValue<'_>) -> Result<Geometry, GeoError> {
 }
 
 /// A geometry of an indexed value: an array is a pair, and so is a document whose first two values
-/// are numbers; any other document is GeoJSON (measured on refnode 9.0.4: `{a: 1, b: "x"}` and
-/// `{type: 1, coordinates: [1, 2]}` are GeoJSON without a type, which a query reads as pairs).
+/// are numbers; any other document is GeoJSON (measured on the reference server 9.0.4: `{a: 1, b:
+/// "x"}` and `{type: 1, coordinates: [1, 2]}` are GeoJSON without a type, which a query reads as
+/// pairs).
 pub fn parse_indexed(v: RawValue<'_>) -> Result<Geometry, GeoError> {
     match v {
         RawValue::Document(d) if !numeric_pair(d) => parse_geojson(d),
@@ -184,7 +186,7 @@ fn numeric_pair(d: RawDoc<'_>) -> bool {
 /// The geometry types other than a collection.
 const SIMPLE_KINDS: [&str; 6] =
     [POINT, LINE_STRING, POLYGON, MULTI_POINT, MULTI_LINE_STRING, MULTI_POLYGON];
-/// The reference systems RefDb knows by name.
+/// The reference systems the reference server knows by name.
 const KNOWN_CRS: [&str; 3] = ["urn:ogc:def:crs:OGC:1.3:CRS84", "EPSG:4326", STRICT_WINDING_CRS];
 /// The start of the reason for a member that is not an array of positions.
 const NOT_POSITIONS: &str = "GeoJSON coordinates must be an array of coordinates";
@@ -216,7 +218,8 @@ fn members<'a>(
     Ok(items)
 }
 
-/// Whether the `crs` of `d` is the strict winding system, after checking it as RefDb does.
+/// Whether the `crs` of `d` is the strict winding system, after checking it as the reference server
+/// does.
 fn reference_system(d: RawDoc<'_>) -> Result<bool, GeoError> {
     let Some(crs) = d.get("crs") else { return Ok(false) };
     let RawValue::Document(crs) = crs else {

@@ -189,9 +189,10 @@ pub enum Caller {
     /// No client certificate, or no TLS.
     Anonymous,
     /// A node of the cluster: a certificate of the cluster's CA with the organization,
-    /// organizational unit and domain components of the node's own, RefDb's rule for members.
+    /// organizational unit and domain components of the node's own, the reference server's rule for
+    /// members.
     Member,
-    /// The REFDB-X509 user name of the client certificate, a user of `$external`.
+    /// The X.509 authentication user name of the client certificate, a user of `$external`.
     User(String),
 }
 

@@ -110,7 +110,7 @@ fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
     }
     let two = r#"{"document":{"v":2,"n":0}}"#;
     assert_eq!(send(at[1], "POST", &format!("{C}/insertOne"), two, None).status, 200);
-    // A write RefDb does not retry runs as a transaction of the key's session.
+    // A write the reference server does not retry runs as a transaction of the key's session.
     let many = r#"{"filter":{},"update":{"$inc":{"n":1}}}"#;
     let m = send(at[2], "POST", &format!("{C}/updateMany"), many, Some("k-many"));
     assert_eq!(m.status, 200, "{:?}", doc(&m));

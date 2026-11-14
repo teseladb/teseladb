@@ -90,18 +90,18 @@ pub(crate) fn empty_doc() -> RawDoc<'static> {
     }
 }
 
-/// A BSON error with its RefDb code.
+/// A BSON error with the reference server's code.
 pub(crate) fn bson_error(e: teseladb_bson::BsonError) -> MqlError {
     let (code, name) = e.code();
     MqlError::new(crate::ErrorCode { code, name }, e.to_string())
 }
 
-/// `a` compared with `b` in RefDb's order, strings by `collation`.
+/// `a` compared with `b` in the reference server's order, strings by `collation`.
 pub(crate) fn cmp(a: RawValue<'_>, b: RawValue<'_>, collation: Option<&dyn Collator>) -> Ordering {
     compare(a, b, collation)
 }
 
-/// Whether two values are equal in RefDb's order (also across numeric types).
+/// Whether two values are equal in the reference server's order (also across numeric types).
 pub(crate) fn equal(a: RawValue<'_>, b: RawValue<'_>, collation: Option<&dyn Collator>) -> bool {
     cmp(a, b, collation) == Ordering::Equal
 }
@@ -190,8 +190,8 @@ fn decimal_trunc_i64(negative: bool, coefficient: u128, exponent: i32) -> Option
     }
 }
 
-/// Whether the value is "true" as RefDb reads flags: numbers other than zero, `true`, and
-/// every other type except `false`, null and undefined.
+/// Whether the value is "true" as the reference server reads flags: numbers other than zero,
+/// `true`, and every other type except `false`, null and undefined.
 pub(crate) fn truthy(v: &RawValue<'_>) -> bool {
     match *v {
         RawValue::Boolean(b) => b,
@@ -239,7 +239,8 @@ mod tests {
             deep = Value::Array(vec![deep]);
         }
         assert!(OwnedValue::new(deep).is_err());
-        // A UUID of another length is stored, as RefDb stores it (measured on 9.0.4).
+        // A UUID of another length is stored, as the reference server stores it (measured on
+        // 9.0.4).
         assert!(OwnedValue::new(Value::Binary { subtype: 4, bytes: vec![1] }).is_ok());
         assert!(
             display(RawValue::Binary { subtype: 4, bytes: &[1] }).contains("\"subType\":\"04\"")

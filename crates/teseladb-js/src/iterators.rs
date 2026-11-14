@@ -1,6 +1,6 @@
 //! The `Iterator` global and the iterator helpers of ECMA-262 §27.1 (`map`, `filter`, `take`,
 //! `drop`, `flatMap`, `reduce`, `toArray`, `forEach`, `some`, `every`, `find`), which the
-//! engine of RefDb 9.0 has.
+//! engine of the reference server 9.0 has.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -41,7 +41,8 @@ fn direct(it: &mut Interp, this: &Val) -> R<IterRec> {
         return it.type_error(&crate::builtins::non_object(this));
     }
     let next = it.get(this, "next")?;
-    // Measured on a `refrouter` 9.0.4: the first `next()` fails with `nextMethod is not a function`.
+    // Measured on a reference router 9.0.4: the first `next()` fails with `nextMethod is not a
+    // function`.
     let next = if next.is_callable() {
         next
     } else {
@@ -111,7 +112,8 @@ fn state(it: &mut Interp, this: &Val) -> R<Rc<RefCell<Helper>>> {
     {
         return Ok(h.clone());
     }
-    // `next method called on incompatible Array Iterator` (measured on a `refrouter` 9.0.4 on 03-11).
+    // `next method called on incompatible Array Iterator` (measured on a reference router 9.0.4 on
+    // 03-11).
     let name = it.native.clone();
     let class = crate::builtins::class_name(this);
     it.type_error(&format!("{name} method called on incompatible {class}"))

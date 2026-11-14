@@ -1,9 +1,9 @@
 //! test262 (016 FR-011, T002, T003, T015): the tests of `tests/test262/subset.tsv`, those of
-//! the chosen directories that the engine of a `refrouter` 9.0.4 passes (measured on 02-11), run
-//! as RefDb runs a `$function`: the harness and the test inside one function, `"use strict"`
-//! first for the strict-only tests. A test passes when the function returns, a negative test
-//! when the code does not compile (`parse`) or throws (`runtime`). The files are BSD-licensed and
-//! are not copied into the repository: `scripts/fetch-pinned.sh
+//! the chosen directories that the engine of a reference router 9.0.4 passes (measured on 02-11),
+//! run as the reference server runs a `$function`: the harness and the test inside one function,
+//! `"use strict"` first for the strict-only tests. A test passes when the function returns, a
+//! negative test when the code does not compile (`parse`) or throws (`runtime`). The files are
+//! BSD-licensed and are not copied into the repository: `scripts/fetch-pinned.sh
 //! crates/teseladb-js/tests/test262.sha256` downloads them, checked against their SHA-256.
 
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ fn outcome(body: &str) -> String {
 }
 
 #[test]
-fn the_subset_of_test262_that_refdb_s_engine_passes_passes() {
+fn the_subset_of_test262_that_the_reference_engine_passes_passes() {
     let mut wrong = Vec::new();
     for line in SUBSET.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();

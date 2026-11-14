@@ -3,14 +3,14 @@
 //! turns bytes into requests and replies into bytes.
 //!
 //! The connection's thread reads its requests, runs their commands against the node's cores and
-//! writes their replies, as RefDb's thread per connection (`ServiceExecutorSynchronous`) does:
-//! a command that waits (for a majority, a leader or its `maxTimeMS`) holds up only its own
-//! connection, and no request changes threads on its way (H-013 of the native tests). What
-//! arrives while a command runs waits in the socket, in order.
+//! writes their replies, as the reference server's thread per connection
+//! (`ServiceExecutorSynchronous`) does: a command that waits (for a majority, a leader or its
+//! `maxTimeMS`) holds up only its own connection, and no request changes threads on its way (H-013
+//! of the native tests). What arrives while a command runs waits in the socket, in order.
 //!
-//! Beyond `--maxConns` open connections a new one is closed at once, as `refnode` does with
-//! `net.maxIncomingConnections`. An awaitable `hello` waits in its worker until its deadline (or
-//! until the node changes state), and with `exhaustAllowed` keeps answering that way.
+//! Beyond `--maxConns` open connections a new one is closed at once, as the reference server does
+//! with `net.maxIncomingConnections`. An awaitable `hello` waits in its worker until its deadline
+//! (or until the node changes state), and with `exhaustAllowed` keeps answering that way.
 
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Read, Write};
@@ -44,7 +44,7 @@ use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
 use teseladb_wire::hello::HelloRequest;
 use teseladb_wire::ingress::Admission;
 
-/// RefDb's default `net.maxIncomingConnections`.
+/// The reference server's default `net.maxIncomingConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
 /// Bytes read from a socket at a time.
 const READ_CHUNK: usize = 64 * 1024;
@@ -102,13 +102,13 @@ pub struct ClientConfig {
     pub audit: Option<crate::audit_log::AuditLog>,
     /// The LDAP server of PLAIN logins (013 FR-025).
     pub ldap: Option<crate::ldap_client::SharedLdap>,
-    /// The STS of REFDB-AWS logins (013 FR-025).
+    /// The STS of AWS IAM authentication logins (013 FR-025).
     pub sts: Option<Arc<crate::sts_client::Sts>>,
-    /// The identity providers of REFDB-OIDC logins (013 FR-025).
+    /// The identity providers of OIDC authentication logins (013 FR-025).
     pub oidc: Option<Arc<crate::oidc_client::Oidc>>,
     /// The keytab of GSSAPI logins (013 FR-025).
     pub kerberos: Option<Arc<Vec<teseladb_auth::kerberos::ServiceKey>>>,
-    /// `authenticationMechanisms`; empty, RefDb's default.
+    /// `authenticationMechanisms`; empty, the reference server's default.
     pub mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
     /// The parameters of the limiter of new connections given at start (006 FR-036), in order.
     pub ingress: Vec<teseladb_wire::ingress::Setting>,
@@ -142,7 +142,7 @@ impl ClientConfig {
         if self.test_commands { s.with_test_commands() } else { s }
     }
 
-    /// The port on `addrs` with RefDb's defaults.
+    /// The port on `addrs` with the reference server's defaults.
     pub fn new(addrs: Vec<SocketAddr>) -> ClientConfig {
         ClientConfig {
             addrs,
@@ -285,7 +285,7 @@ impl NodePresence {
         watchers.iter().filter(|w| w.strong_count() > 0).count()
     }
 
-    /// The replica set presentation this node answers in (`None`: as a `refrouter`).
+    /// The replica set presentation this node answers in (`None`: as a reference router).
     pub fn set_replica(&self, replica: Option<ReplicaMember>) {
         let mut slot = self.replica.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot.as_deref() != replica.as_ref() {
@@ -851,7 +851,7 @@ impl Acceptor {
             if self.state.closed() {
                 continue;
             }
-            // Over the limit the connection is closed at once, as `refnode` does.
+            // Over the limit the connection is closed at once, as the reference server does.
             if self.open.load(Ordering::Acquire) >= self.max {
                 PortStats::add(&self.diag.stats.rejected, 1);
                 continue;
@@ -934,8 +934,8 @@ impl ClientKit {
 
 impl PortParts {
     /// Starts the thread of connection `id` on `stream`: a [`Worker`] of that one connection that
-    /// reads it, runs its commands and writes their replies (H-013, RefDb's thread per
-    /// connection); its waker, to stop it. Without a thread the connection closes: the worker,
+    /// reads it, runs its commands and writes their replies (H-013, the reference server's thread
+    /// per connection); its waker, to stop it. Without a thread the connection closes: the worker,
     /// dropped without running, closes it.
     fn serve(&self, stream: TcpStream, id: i32) -> Option<Arc<Waker>> {
         let Ok(poller) = Poller::new() else {
@@ -1141,7 +1141,8 @@ impl Client {
         }
     }
 
-    /// Records the REFDB-X509 user of the client certificate once the TLS handshake has it.
+    /// Records the X.509 authentication user of the client certificate once the TLS handshake has
+    /// it.
     fn note_certificate(&mut self) {
         if let Some(conn) = self.conn.as_mut() {
             certify(conn, &self.transport, self.member_subject.as_deref());
@@ -1188,8 +1189,8 @@ impl Client {
     }
 
     /// Runs what arrived and writes the replies; the replies of the requests before a fault still
-    /// go out before the connection closes, as `refnode` answers each message before reading the
-    /// next. `false` if the connection must close.
+    /// go out before the connection closes, as the reference server answers each message before
+    /// reading the next. `false` if the connection must close.
     pub(crate) fn flush_after(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
         let served = self.serve(info, cmds);
         self.write() && served
@@ -1298,8 +1299,8 @@ impl Client {
 
     /// Answers its awaitable `hello` `p`, due at `p.deadline`; with exhaust, the next one of the
     /// stream, and whether the connection stays open. Each reply of a stream after the first is a
-    /// `hello` the failpoint acts on, as on a `refrouter` 9.0.4 with `enableTestCommands`: it holds
-    /// it, answers its error and ends the stream, or closes the connection.
+    /// `hello` the failpoint acts on, as on a reference router 9.0.4 with `enableTestCommands`: it
+    /// holds it, answers its error and ends the stream, or closes the connection.
     fn fire(
         &mut self,
         mut p: HelloWait,
@@ -1518,8 +1519,8 @@ pub(crate) fn kill_suspended_cursors(
     }
 }
 
-/// Records on `conn` the REFDB-X509 user of the client certificate `transport` received, if
-/// any and not yet recorded; a member's when its subject has the organization, unit or domain
+/// Records on `conn` the X.509 authentication user of the client certificate `transport` received,
+/// if any and not yet recorded; a member's when its subject has the organization, unit or domain
 /// components of `member` (013 FR-034).
 fn certify(conn: &mut Connection, transport: &Transport, member: Option<&teseladb_x509::Name>) {
     if conn.auth.peer_user.is_none()
@@ -1726,8 +1727,8 @@ impl Worker {
         }
     }
 
-    /// Makes every waiting `hello` due now: the node's state changed (018 FR-015, as a `refnode`
-    /// answers them at a change of its `topologyVersion`).
+    /// Makes every waiting `hello` due now: the node's state changed (018 FR-015, as a reference
+    /// replica set member answers them at a change of its `topologyVersion`).
     fn hasten_hellos(&mut self) {
         let now = Instant::now();
         let due: Vec<(Instant, u64)> = self

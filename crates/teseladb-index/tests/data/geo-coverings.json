@@ -39645,6 +39645,6 @@
    "loc": "{\"v\": {\"type\": \"Polygon\", \"coordinates\": [[[{\"$numberDouble\": \"48.002392\"}, {\"$numberDouble\": \"25.655448\"}], [{\"$numberDouble\": \"47.891314\"}, {\"$numberDouble\": \"25.51342\"}], [{\"$numberDouble\": \"48.051779\"}, {\"$numberDouble\": \"25.43083\"}], [{\"$numberDouble\": \"48.075903\"}, {\"$numberDouble\": \"25.001179\"}], [{\"$numberDouble\": \"48.161686\"}, {\"$numberDouble\": \"25.098388\"}], [{\"$numberDouble\": \"48.549746\"}, {\"$numberDouble\": \"25.096619\"}], [{\"$numberDouble\": \"48.712625\"}, {\"$numberDouble\": \"25.220893\"}], [{\"$numberDouble\": \"48.666613\"}, {\"$numberDouble\": \"25.289177\"}], [{\"$numberDouble\": \"48.633357\"}, {\"$numberDouble\": \"25.304837\"}], [{\"$numberDouble\": \"48.002392\"}, {\"$numberDouble\": \"25.655448\"}]]]}}"
   }
  ],
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "note": "first measured on 7.0.45; re-measured on 9.0.4 with the same keys"
 }

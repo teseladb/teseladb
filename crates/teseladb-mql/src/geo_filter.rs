@@ -1,6 +1,6 @@
-//! The operator documents of the geospatial query operators, read as a `refrouter` 9.0.4 reads them
-//! (measured): which fields go with `$geoWithin`, `$geoIntersects`, `$near` and `$nearSphere`, and
-//! their distances. The shapes themselves are 009's (`GeoQuery::spec`).
+//! The operator documents of the geospatial query operators, read as a reference router 9.0.4 reads
+//! them (measured): which fields go with `$geoWithin`, `$geoIntersects`, `$near` and `$nearSphere`,
+//! and their distances. The shapes themselves are 009's (`GeoQuery::spec`).
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -27,7 +27,7 @@ pub(crate) fn is_near(key: &str) -> bool {
     matches!(key, ops::NEAR | ops::NEAR_SPHERE)
 }
 
-/// A document as RefDb writes it inside a message: `{ a: 1 }`.
+/// A document as the reference server writes it inside a message: `{ a: 1 }`.
 fn object(d: RawDoc<'_>) -> String {
     shell(RawValue::Document(d))
 }
@@ -58,7 +58,7 @@ pub(crate) fn within(doc: RawDoc<'_>, key: &str, value: RawValue<'_>) -> Result<
     // `$within` is `$geoWithin` under its old name.
     let key = if key == ops::WITHIN { ops::GEO_WITHIN } else { key };
     // `$geoIntersects` takes the legacy shapes too: 009 reads them and refuses all but
-    // `$centerSphere` (measured on a `refrouter` 9.0.4).
+    // `$centerSphere` (measured on a reference router 9.0.4).
     let shapes: &[&str] = &WITHIN_SHAPES;
     let typed = match first {
         ops::GEOMETRY => matches!(arg, RawValue::Document(_)),

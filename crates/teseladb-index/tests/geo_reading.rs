@@ -1,6 +1,6 @@
 //! Reading of malformed GeoJSON (009 T019, FR-011, FR-012): every value of
-//! `tests/data/geo-reading.json`, measured on refnode 9.0.4, is refused with the server's reason or
-//! accepted, both as an indexed value and as a query's `$geometry`.
+//! `tests/data/geo-reading.json`, measured on the reference server 9.0.4, is refused with the
+//! server's reason or accepted, both as an indexed value and as a query's `$geometry`.
 
 use teseladb_bson::{RawDoc, Value, extjson};
 use teseladb_index::geo::geojson::parse;
@@ -24,7 +24,7 @@ fn measured(case: &teseladb_bson::Document, field: &str) -> Option<String> {
 }
 
 #[test]
-fn every_measured_value_is_read_as_refdb_reads_it() {
+fn every_measured_value_is_read_as_the_reference_reads_it() {
     let file = extjson::parse(cases_text()).unwrap();
     let Some(Value::Array(cases)) = file.get("cases") else { panic!("no cases") };
     let index = IndexDef {

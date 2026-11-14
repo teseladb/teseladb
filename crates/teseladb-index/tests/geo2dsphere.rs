@@ -1,6 +1,6 @@
 //! `2dsphere` keys and geometry errors (009 T019–T021, FR-011): every geometry measured on a real
-//! RefDb server (`tests/data/geo-vectors.json`, with the image digest and the date) gives the
-//! same keys or the same error.
+//! the reference server (`tests/data/geo-vectors.json`, with the image digest and the date) gives
+//! the same keys or the same error.
 
 use teseladb_bson::{RawDoc, Value, extjson};
 use teseladb_index::keygen::{
@@ -21,12 +21,12 @@ fn vectors(file: &str) -> Vec<Value> {
 }
 
 #[test]
-fn every_measured_geometry_gives_refdb_keys_or_error() {
+fn every_measured_geometry_gives_the_reference_keys_or_error() {
     check(vectors_text());
 }
 
 #[test]
-fn every_measured_random_geometry_gives_refdb_keys() {
+fn every_measured_random_geometry_gives_the_reference_keys() {
     check(COVERINGS);
 }
 

@@ -1,6 +1,6 @@
-//! Whole 64-bit integers read from numbers as RefDb reads them: exactly, with the messages
-//! of its `exactInt64` parse (`$pop`, `maxTimeMS`, `count`'s `limit`), or rounded and saturated
-//! into a "safe" integer field (`skip`, `limit`, `batchSize`).
+//! Whole 64-bit integers read from numbers as the reference server reads them: exactly, with the
+//! messages of its `exactInt64` parse (`$pop`, `maxTimeMS`, `count`'s `limit`), or rounded and
+//! saturated into a "safe" integer field (`skip`, `limit`, `batchSize`).
 
 use teseladb_bson::{Decimal, Decimal128, RawValue};
 
@@ -10,8 +10,8 @@ use crate::fmt::{double, shell};
 const I64_LOW: f64 = -9_223_372_036_854_775_808.0;
 const I64_HIGH: f64 = 9_223_372_036_854_775_808.0;
 
-/// `v` as an `i64` when it is a number equal to one; otherwise RefDb's message, naming the
-/// element `field`.
+/// `v` as an `i64` when it is a number equal to one; otherwise the reference server's message,
+/// naming the element `field`.
 pub fn exact_int64(v: RawValue<'_>, field: &str) -> Result<i64, String> {
     let not_int64 =
         |shown: String| format!("Cannot represent as a 64-bit integer: {field}: {shown}");
@@ -53,7 +53,7 @@ fn saturate(negative: bool, magnitude: u128) -> i64 {
     i64::try_from(v).unwrap_or(if negative { i64::MIN } else { i64::MAX })
 }
 
-/// A decimal128 as an `i64` when it is one exactly (`2.00`, `1E+1`), as RefDb's
+/// A decimal128 as an `i64` when it is one exactly (`2.00`, `1E+1`), as the reference server's
 /// `exactInt64` reads it.
 pub fn decimal_exact(d: Decimal128) -> Option<i64> {
     let Decimal::Finite { negative, coefficient, exponent } = d.classify() else {
@@ -64,8 +64,8 @@ pub fn decimal_exact(d: Decimal128) -> Option<i64> {
     i64::try_from(if negative { -m } else { m }).ok()
 }
 
-/// A decimal128 rounded half to even and saturated to `i64`, NaN as 0: how RefDb reads it
-/// into a "safe" 64-bit integer field (`skip`, `limit`, `batchSize`).
+/// A decimal128 rounded half to even and saturated to `i64`, NaN as 0: how the reference server
+/// reads it into a "safe" 64-bit integer field (`skip`, `limit`, `batchSize`).
 pub fn decimal_saturating(d: Decimal128) -> i64 {
     match d.classify() {
         Decimal::NaN => 0,

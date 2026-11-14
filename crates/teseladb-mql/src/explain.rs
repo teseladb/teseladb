@@ -1,4 +1,4 @@
-//! The `errInfo.details` of a document a validator refuses, as a `refrouter` 9.0.4 writes them
+//! The `errInfo.details` of a document a validator refuses, as a reference router 9.0.4 writes them
 //! (measured): each clause explains why it failed, or, under a `$nor` or a `$not`, why it
 //! matched (`inverted`).
 
@@ -259,7 +259,7 @@ fn leaf(op: &str, spec: Value, path: &str, doc: RawDoc<'_>, inverted: bool) -> D
         .with(info::OPERATOR_NAME, op)
         .with(info::SPECIFIED_AS, spec)
         .with(info::REASON, reason);
-    // `$exists` shows no value (measured on a `refrouter` 9.0.4).
+    // `$exists` shows no value (measured on a reference router 9.0.4).
     if op == ops::EXISTS {
         return d;
     }

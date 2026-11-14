@@ -12,14 +12,14 @@
 //!   the heap while a program runs.
 //! - `LoadField` walks a dotted path on the bytes, crossing documents. A path that meets an array
 //!   before its end leaves the register "through an array", and the comparison that reads it
-//!   walks the path again on the bytes with RefDb's rules for arrays inside a path (each
-//!   document of the array, and the element at a numeric segment), testing every value it
+//!   walks the path again on the bytes with the reference server's rules for arrays inside a path
+//!   (each document of the array, and the element at a numeric segment), testing every value it
 //!   reaches. An array at the end of the path is compared whole, then element by element, inside
 //!   the comparison's own loop.
 //! - Comparisons are specialized by the literal's type (`CmpEqStr`, `CmpGtI64Imm`, `CmpF64`…):
 //!   when the document's value has the literal's type they compare machine values; any other
-//!   type goes to RefDb's generic comparison inside the same instruction (mixed numbers,
-//!   collations, `null` against a missing field, `MinKey` and `MaxKey`).
+//!   type goes to the reference server's generic comparison inside the same instruction (mixed
+//!   numbers, collations, `null` against a missing field, `MinKey` and `MaxKey`).
 //! - `$and`, `$or`, `$nor` and `$not` compile to jumps straight to `Yield`, `Reject` or the next
 //!   condition. When none of the conditions of an `$and` or `$or` can fail, they are ordered by
 //!   the estimated fraction of documents they let through ([`Selectivity`]): the most selective

@@ -1,7 +1,7 @@
 //! Property attributes (ECMA-262 §6.2.6, §10.1.6, §20.1.2): `Object.defineProperty` and its
 //! checks, the descriptors `Object.getOwnPropertyDescriptor` gives, `freeze`, `seal` and
 //! `preventExtensions`, and the symbol keys of an object. Messages are those of the engine of a
-//! `refrouter` 9.0.4 (measured on 02-11).
+//! reference router 9.0.4 (measured on 02-11).
 
 use std::rc::Rc;
 
@@ -231,7 +231,7 @@ fn forbidden(cur: &Prop, d: &Desc) -> bool {
 }
 
 /// `[[DefineOwnProperty]]` of an element of a typed array (ECMA-262 §10.4.5.3), with the
-/// messages of a `refrouter` 9.0.4 (measured on 02-11): an element is writable, enumerable and
+/// messages of a reference router 9.0.4 (measured on 02-11): an element is writable, enumerable and
 /// configurable, and nothing else can be made of it.
 fn define_element(
     it: &mut Interp,
@@ -449,7 +449,7 @@ fn merged(base: &Prop, d: &Desc) -> Prop {
 
 /// A key as the engine shows it in a message: `"b"`, `0` for an index, and a symbol as it is
 /// written: `Symbol.iterator`, `Symbol.for("r")`, `Symbol("k")` or `Symbol()` (measured on a
-/// `refrouter` 9.0.4 on 02-11).
+/// reference router 9.0.4 on 02-11).
 pub fn shown_key(it: &Interp, key: &str) -> String {
     if let Val::Sym(sym) = symbol_of_key(key)
         && key.starts_with("@@")

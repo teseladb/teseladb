@@ -1,6 +1,6 @@
 //! Opening the node's TCP ports: a port that cannot be opened fails the start with an error that
 //! names the port and its address, so whoever runs the node knows which one another process
-//! holds (as `refnode` names the address it could not listen on).
+//! holds (as the reference server names the address it could not listen on).
 
 use std::io;
 use std::net::{SocketAddr, TcpListener};

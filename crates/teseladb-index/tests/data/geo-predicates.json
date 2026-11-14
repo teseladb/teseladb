@@ -468,6 +468,6 @@
    "same_with_index": true
   }
  ],
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "note": "first measured on 7.0.45; re-measured on 9.0.4 with the same ids, with and without an index"
 }

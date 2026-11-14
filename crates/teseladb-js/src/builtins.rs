@@ -1,7 +1,7 @@
-//! The global objects (ECMA-262 §19 to §24) the engine of RefDb 9.0.4 has, measured on a
-//! `refrouter` 9.0.4 on 02-11: `Object`, `Function`, `Array`, `String`, `Number`, `Boolean`,
-//! `Symbol`, `Math`, `JSON`, `Date`, `RegExp`, `Map`, `Set`, the errors, and RefDb's `print`,
-//! `sleep` and `Array.sum`. `Reflect` is not there.
+//! The global objects (ECMA-262 §19 to §24) the engine of the reference server 9.0.4 has, measured
+//! on a reference router 9.0.4 on 02-11: `Object`, `Function`, `Array`, `String`, `Number`,
+//! `Boolean`, `Symbol`, `Math`, `JSON`, `Date`, `RegExp`, `Map`, `Set`, the errors, and the
+//! reference server's `print`, `sleep` and `Array.sum`. `Reflect` is not there.
 
 use std::rc::Rc;
 
@@ -21,7 +21,7 @@ pub(crate) fn new_target(this: &Val) -> Option<Val> {
 }
 
 /// `number is not a non-null object`: what SpiderMonkey says of a value that had to be an
-/// object (measured on a `refrouter` 9.0.4).
+/// object (measured on a reference router 9.0.4).
 pub(crate) fn non_object(v: &Val) -> String {
     let t = if matches!(v, Val::Null) { "null" } else { v.type_of() };
     format!("{t} is not a non-null object")
@@ -34,8 +34,8 @@ pub(crate) fn class_name(v: &Val) -> String {
         if crate::proxy::is_proxy(o) {
             return "Proxy".into();
         }
-        // A built-in prototype is named after its constructor (measured on a `refrouter` 9.0.4 on
-        // 02-11: `Date.prototype.getTime called on incompatible Date.prototype`).
+        // A built-in prototype is named after its constructor (measured on a reference router 9.0.4
+        // on 02-11: `Date.prototype.getTime called on incompatible Date.prototype`).
         if let Some(name) = prototype_of_ctor(o) {
             return format!("{name}.prototype");
         }
@@ -246,9 +246,10 @@ pub fn install(it: &mut Interp) -> R<()> {
     Ok(())
 }
 
-/// Freezes the objects of the globals, as RefDb's engine does (measured on a `refrouter` 9.0.4
-/// on 02-11: `Object.isFrozen(Array.prototype)` is `true`, a new property of a prototype is not
-/// kept, and strict code that assigns `name` on an error throws `"name" is read-only`).
+/// Freezes the objects of the globals, as the reference server's engine does (measured on a
+/// reference router 9.0.4 on 02-11: `Object.isFrozen(Array.prototype)` is `true`, a new property of
+/// a prototype is not kept, and strict code that assigns `name` on an error throws `"name" is
+/// read-only`).
 fn freeze_builtins(it: &Interp) {
     fn freeze(o: &ObjRef) {
         crate::props::lock(o, true);
@@ -319,7 +320,7 @@ fn is_finite(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Bool(it.number_of(&arg(a, 0))?.is_finite()))
 }
 
-/// `print` writes to the server's log in RefDb; here it is kept with the invocation.
+/// `print` writes to the server's log in the reference server; here it is kept with the invocation.
 fn print(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let mut parts = Vec::new();
     for x in a {
@@ -330,9 +331,9 @@ fn print(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     Ok(Val::Undef)
 }
 
-/// `sleep(ms)` waits on the operation's clock, as in RefDb: on the host's when it gives one,
-/// which ends the call when the deadline passes; the interpreter has no clock of its own, so
-/// without one it counts the wait as steps against the deadline.
+/// `sleep(ms)` waits on the operation's clock, as in the reference server: on the host's when it
+/// gives one, which ends the call when the deadline passes; the interpreter has no clock of its
+/// own, so without one it counts the wait as steps against the deadline.
 fn sleep(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let ms = it.number_of(&arg(a, 0))?;
     let n = if ms.is_finite() && ms > 0.0 { (ms as u64).min(1_000_000) } else { 0 };
@@ -816,7 +817,8 @@ fn fn_bind(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let target = &callable_this(it, "bind", this)?;
     let bound_args = a.get(1..).unwrap_or(&[]).to_vec();
     // `length` is the target's less the bound arguments, `name` is `bound ` and the target's;
-    // reading them does not make the target's lazy ones (measured on a `refrouter` 9.0.4 on 02-11).
+    // reading them does not make the target's lazy ones (measured on a reference router 9.0.4 on
+    // 02-11).
     let mut read = |key: &str| -> R {
         let own =
             target.borrow().get_own(key).filter(|p| !p.is_accessor()).map(|p| p.value.clone());
@@ -847,7 +849,7 @@ fn fn_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
         Kind::Func(Func::Closure { class: Some(c), .. }) => c.source.to_string(),
         Kind::Func(Func::Closure { def, .. }) => def.source.to_string(),
         Kind::Func(Func::Native(_, n)) => format!("function {n}() {{\n    [native code]\n}}"),
-        // A bound function and a callable proxy (measured on a `refrouter` 9.0.4 on 02-11).
+        // A bound function and a callable proxy (measured on a reference router 9.0.4 on 02-11).
         Kind::Func(Func::Bound(..)) | Kind::Proxy(_, true, _) => {
             "function () {\n    [native code]\n}".to_owned()
         }
@@ -866,8 +868,8 @@ fn array_builtins(it: &mut Interp, g: &ObjRef) -> R<()> {
     {
         method(it, &c, name, f, n)?;
     }
-    // RefDb's own helpers, which the shell's prelude defines: their places in the order of
-    // `Array`'s properties, before the prelude replaces them.
+    // The reference server's own helpers, which the shell's prelude defines: their places in the
+    // order of `Array`'s properties, before the prelude replaces them.
     for name in ["sum", "avg", "contains", "unique", "shuffle", "stdDev"] {
         method(it, &c, name, array_is_array, 1)?;
     }
@@ -919,7 +921,7 @@ fn array_from(it: &mut Interp, this: &Val, a: &[Val]) -> R {
             return it.type_error(&format!("{} is not iterable", it.show(&src)));
         }
         // A number, boolean, symbol or bigint has no iterator and no length: no elements
-        // (measured on a `refrouter` 9.0.4 on 02-11: `Set.tojson(5)` is `new Set([ ])`).
+        // (measured on a reference router 9.0.4 on 02-11: `Set.tojson(5)` is `new Set([ ])`).
         Val::Num(_) | Val::Bool(_) | Val::Sym(_) | Val::BigInt(_) => Vec::new(),
         _ => {
             target = crate::arrays::made_by(it, this, &[])?;
@@ -1280,7 +1282,7 @@ fn is_error(v: &Val) -> bool {
 
 /// `Error.captureStackTrace(target, fn)`: gives `target` an own `stack` with the calls in
 /// progress; with `fn`, the frames from the newest down to `fn`'s are left out, and none remain
-/// when `fn` is not running (measured on a `refrouter` 9.0.4 on 02-11).
+/// when `fn` is not running (measured on a reference router 9.0.4 on 02-11).
 fn capture_stack_trace(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     let Some(target) = a.first() else {
         return it.type_error(
@@ -1314,7 +1316,7 @@ fn capture_stack_trace(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 
 /// `Error.prototype.stack`: the stack of the error, kept when it was made.
 /// An object that is not an error reads the stack of the first error of its prototypes, and an
-/// empty one when it reaches `Error.prototype` (measured on a `refrouter` 9.0.4).
+/// empty one when it reaches `Error.prototype` (measured on a reference router 9.0.4).
 fn stack_getter(it: &mut Interp, this: &Val, _: &[Val]) -> R {
     let Val::Obj(o) = this else {
         return it
@@ -1362,7 +1364,7 @@ fn error_to_string(it: &mut Interp, this: &Val, _: &[Val]) -> R {
 // Map and Set.
 
 /// A method of `Map.prototype` or `Set.prototype` that first checks that `this` is one of them:
-/// `entries method called on incompatible Object` (measured on a `refrouter` 9.0.4 on 02-11).
+/// `entries method called on incompatible Object` (measured on a reference router 9.0.4 on 02-11).
 macro_rules! branded {
     ($map:expr, $f:path) => {
         |it: &mut Interp, t: &Val, a: &[Val]| {
@@ -1638,7 +1640,7 @@ fn coll_for_each(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     let o = coll(it, this)?;
     let f = arg(a, 0);
     if a.is_empty() {
-        // Measured on a `refrouter` 9.0.4 on 03-11.
+        // Measured on a reference router 9.0.4 on 03-11.
         return it.type_error("undefined is not a function");
     }
     if !f.is_callable() {
@@ -1658,7 +1660,7 @@ pub(crate) const SET_ITERATOR: &str = "Set Iterator";
 pub(crate) const STRING_ITERATOR: &str = "String Iterator";
 pub(crate) const REGEXP_STRING_ITERATOR: &str = "RegExp String Iterator";
 /// Each kind with its `next`, which refuses an iterator of another kind (measured on a
-/// `refrouter` 9.0.4 on 02-11: `next method called on incompatible Map Iterator`).
+/// reference router 9.0.4 on 02-11: `next method called on incompatible Map Iterator`).
 const ITERATOR_KINDS: [(&str, NativeFn); 5] = [
     (ARRAY_ITERATOR, |it, this, _| iter_next(it, this, ARRAY_ITERATOR)),
     (MAP_ITERATOR, |it, this, _| iter_next(it, this, MAP_ITERATOR)),
@@ -1901,8 +1903,8 @@ const REGEXP_FLAGS: [(&str, char); 8] = [
 ];
 
 /// `this` of a `RegExp.prototype` accessor: the pattern and flags of a regular expression,
-/// `None` for `RegExp.prototype` itself, an error otherwise (measured on a `refrouter` 9.0.4 on
-/// 02-11: `RegExp.prototype.global getter called on non-RegExp object: Object`).
+/// `None` for `RegExp.prototype` itself, an error otherwise (measured on a reference router 9.0.4
+/// on 02-11: `RegExp.prototype.global getter called on non-RegExp object: Object`).
 fn regexp_this(it: &mut Interp, this: &Val) -> R<Option<(Name, Name)>> {
     if let Val::Obj(o) = this {
         if let Kind::RegExp(s, f) = &o.borrow().kind {
@@ -2090,7 +2092,8 @@ fn regexp_ctor(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 /// `__defineGetter__(key, f)` and `__defineSetter__` of Annex B: an enumerable, configurable
-/// accessor (`invalid getter usage` when `f` is not a function, measured on a `refrouter` 9.0.4).
+/// accessor (`invalid getter usage` when `f` is not a function, measured on a reference router
+/// 9.0.4).
 fn define_legacy_accessor(it: &mut Interp, this: &Val, a: &[Val], getter: bool) -> R {
     let o = it.object_of(this)?;
     let f = arg(a, 1);

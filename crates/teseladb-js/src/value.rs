@@ -155,7 +155,7 @@ pub enum Func {
     Bound(ObjRef, Val, Vec<Val>),
 }
 
-/// A value of a BSON type RefDb shows to JavaScript with its own constructor.
+/// A value of a BSON type the reference server shows to JavaScript with its own constructor.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Bson {
     Long(i64),
@@ -182,8 +182,8 @@ pub enum ArrayIterKind {
 }
 
 /// An array iterator: the object it reads (`None` once it is done), the next index and what it
-/// gives. It reads `length` at each step, as SpiderMonkey does (measured on a `refrouter` 9.0.4 on
-/// 02-11: elements pushed while iterating are visited, and once done it stays done).
+/// gives. It reads `length` at each step, as SpiderMonkey does (measured on a reference router
+/// 9.0.4 on 02-11: elements pushed while iterating are visited, and once done it stays done).
 #[derive(Debug)]
 pub struct ArrayIter {
     pub source: Option<Val>,
@@ -193,7 +193,8 @@ pub struct ArrayIter {
 
 /// An iterator of a `Map` or a `Set`: the collection (`None` once it is done), where it is in
 /// its entries, what it gives and its class (`Map Iterator` or `Set Iterator`). Entries added
-/// while it goes are visited and deleted ones are not (measured on a `refrouter` 9.0.4 on 03-11).
+/// while it goes are visited and deleted ones are not (measured on a reference router 9.0.4 on
+/// 03-11).
 #[derive(Debug)]
 pub struct CollIter {
     pub source: Option<ObjRef>,
@@ -243,7 +244,7 @@ pub enum Kind {
     /// A generator object.
     Generator(Rc<RefCell<crate::generators::GenState>>),
     /// An async generator object: the interpreter never runs its body (`next` traps), so it
-    /// only carries its class (`AsyncGenerator`, measured on a `refrouter` 9.0.4 on 02-11).
+    /// only carries its class (`AsyncGenerator`, measured on a reference router 9.0.4 on 02-11).
     AsyncGenerator,
     /// A promise.
     Promise(Rc<RefCell<crate::promise::PromiseState>>),
@@ -289,9 +290,9 @@ pub const ELEMENTS_FROZEN: u8 = 4;
 pub const ELEMENTS_OWN: u8 = 8;
 
 /// The built-in properties of a function SpiderMonkey makes when they are first looked up
-/// (measured on a `refrouter` 9.0.4 on 02-11: a property added before lists before them, and one
-/// looked up moves ahead of those still unmade): `prototype` (of a plain function), `length` and
-/// `name`.
+/// (measured on a reference router 9.0.4 on 02-11: a property added before lists before them, and
+/// one looked up moves ahead of those still unmade): `prototype` (of a plain function), `length`
+/// and `name`.
 pub const LAZY_PROTOTYPE: u8 = 16;
 pub const LAZY_LENGTH: u8 = 32;
 pub const LAZY_NAME: u8 = 64;

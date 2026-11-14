@@ -1,5 +1,5 @@
-//! OCSP stapling of the clients' port (013 FR-031), as `refnode` 9.0.4 staples (measured on
-//! 31-10-2026): when the port's certificate names an OCSP responder in its
+//! OCSP stapling of the clients' port (013 FR-031), as the reference server 9.0.4 staples (measured
+//! on 31-10-2026): when the port's certificate names an OCSP responder in its
 //! `authorityInfoAccess`, the node asks it over HTTP, checks the answer against the issuer and
 //! staples a `good` answer that has a `nextUpdate`; without one it warns and staples nothing. The
 //! answer is asked for again halfway to its `nextUpdate`.
@@ -25,7 +25,7 @@ pub const RETRY_SECS: i64 = 60;
 const OCSP_REQUEST: &str = "application/ocsp-request";
 /// HTTP status of a successful answer.
 const HTTP_OK: u16 = 200;
-/// RefDb's identifiers of its log lines (measured).
+/// The reference server's identifiers of its log lines (measured).
 const ID_FETCH_STATUS: i32 = 577_163;
 const ID_NO_NEXT_UPDATE: i32 = 6_144_500;
 

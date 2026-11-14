@@ -1,7 +1,7 @@
-//! The identity providers of REFDB-OIDC (013 FR-025): `--setParameter oidcIdentityProviders`
-//! and the JWKS of each provider, found through its discovery document and read over HTTPS when
-//! a login first needs it. A key the JWKS does not know reads it again, at most once every
-//! `JWKSMinimumQuiescePeriodSecs` (60 seconds, RefDb's default).
+//! The identity providers of OIDC authentication (013 FR-025): `--setParameter
+//! oidcIdentityProviders` and the JWKS of each provider, found through its discovery document and
+//! read over HTTPS when a login first needs it. A key the JWKS does not know reads it again, at
+//! most once every `JWKSMinimumQuiescePeriodSecs` (60 seconds, the reference server's default).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};

@@ -189,6 +189,7 @@ name = "teseladb-js"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+ "teseladb-names",
  "teseladb-types",
 ]
 

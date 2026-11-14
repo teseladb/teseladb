@@ -1,5 +1,6 @@
 //! Decimal trigonometric and hyperbolic functions (010 T007): correctly rounded to 34 digits in
-//! RefDb's form, and their special values and domains (measured on a `refrouter` 9.0.4).
+//! the reference server's form, and their special values and domains (measured on a reference
+//! router 9.0.4).
 
 use teseladb_bson::Decimal128;
 use teseladb_mql::decimal_trig::{Trig, atan2, trig};
@@ -29,7 +30,7 @@ fn trig_of(name: &str) -> Trig {
 }
 
 /// Each value correctly rounded to 34 digits, as an independent computation (Python's `decimal`
-/// at 160 digits, π to 6 800 digits for the reductions) gives it, in RefDb's form.
+/// at 160 digits, π to 6 800 digits for the reductions) gives it, in the reference server's form.
 #[test]
 fn values_are_correctly_rounded() {
     let cases: &[(&str, &str, &str, &str)] = &[
@@ -143,7 +144,7 @@ fn special_values_and_domains() {
     assert_eq!(trig(Trig::Sigmoid, d("1E-45")).map(|v| v.to_string()), Some("0.5".into()));
     assert_eq!(trig(Trig::Acosh, d("1E-45")), None);
     assert!(trig(Trig::Acos, d("1E-45")).expect("a value").to_string().starts_with("1.5707963"));
-    // Zeros keep RefDb's exponents.
+    // Zeros keep the reference server's exponents.
     for (f, want) in [
         (Trig::Tan, "0E-37"),
         (Trig::Asin, "0E-37"),

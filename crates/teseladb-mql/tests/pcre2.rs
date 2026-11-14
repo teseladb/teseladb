@@ -1,10 +1,10 @@
 //! The regular expression engine against PCRE2 10.43's own test data (006 T058, FR-015): every
-//! pattern of `testoutput1`, `testoutput4` and `testoutput5` that RefDb can send (only the
-//! options `i`, `m`, `s`, `x` and inline equivalents, no `pcre2test` subject modifiers) is compiled
-//! and run on its subjects, and the result is compared with the output PCRE2 printed: the match
-//! and every capture group, `No match`, or the compile error. The files are BSD-licensed and are
-//! not copied into the repository: `scripts/fetch-pinned.sh crates/teseladb-mql/tests/pcre2.sha256`
-//! downloads them, checked against their SHA-256.
+//! pattern of `testoutput1`, `testoutput4` and `testoutput5` that the reference server can send
+//! (only the options `i`, `m`, `s`, `x` and inline equivalents, no `pcre2test` subject modifiers)
+//! is compiled and run on its subjects, and the result is compared with the output PCRE2 printed:
+//! the match and every capture group, `No match`, or the compile error. The files are BSD-licensed
+//! and are not copied into the repository: `scripts/fetch-pinned.sh
+//! crates/teseladb-mql/tests/pcre2.sha256` downloads them, checked against their SHA-256.
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -22,7 +22,8 @@ fn testdata(name: &str) -> String {
             path.display()
         )
     });
-    // The non-UTF files hold some bytes above 0x7F; those cases are not RefDb's (always UTF).
+    // The non-UTF files hold some bytes above 0x7F; those cases are not the reference server's
+    // (always UTF).
     bytes.iter().map(|&b| char::from(b)).collect()
 }
 
@@ -47,8 +48,8 @@ struct Case {
     subjects: Option<Vec<(String, Outcome)>>,
 }
 
-/// Modifiers of `pcre2test` that RefDb's options or inline settings express, and those that only
-/// change what `pcre2test` prints.
+/// Modifiers of `pcre2test` that the reference server's options or inline settings express, and
+/// those that only change what `pcre2test` prints.
 fn translate(modifiers: &str) -> Option<(String, String, bool)> {
     let mut options = String::new();
     let mut prefix = String::new();

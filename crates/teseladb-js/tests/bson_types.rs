@@ -1,5 +1,5 @@
 //! BSON types in JavaScript (016 FR-003, T010): each type goes in and comes back with its type,
-//! as on a `refrouter` 9.0.4 (measured on 02-11): numbers come back as doubles except a
+//! as on a reference router 9.0.4 (measured on 02-11): numbers come back as doubles except a
 //! `NumberInt`, `int32` arguments are plain numbers, `undefined` is `null` and a function is
 //! `Code`.
 
@@ -52,8 +52,8 @@ fn numbers_come_back_as_doubles_and_number_int_as_int32() {
     assert_eq!(call("function(){ return undefined }", &[]), Value::Null);
 }
 
-/// A hole of an array is written as `null`, like `undefined` (measured on a `refrouter` 9.0.4 on
-/// 02-11: `[1, , 3]`, `a[2] = 1` on `[]` and `new Array(2)`).
+/// A hole of an array is written as `null`, like `undefined` (measured on a reference router 9.0.4
+/// on 02-11: `[1, , 3]`, `a[2] = 1` on `[]` and `new Array(2)`).
 #[test]
 fn holes_come_back_as_null() {
     let (one, three) = (Value::Double(1.0), Value::Double(3.0));
@@ -69,7 +69,7 @@ fn holes_come_back_as_null() {
 }
 
 #[test]
-fn constructors_and_methods_are_those_of_refdb() {
+fn constructors_and_methods_are_those_of_the_reference() {
     let id = Value::ObjectId([0x65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(
         call(
@@ -115,11 +115,11 @@ fn a_function_comes_back_as_code() {
     );
 }
 
-/// What the newer objects come back as, measured on a `refrouter` 9.0.4 on 02-11: a typed array is
-/// a document of its elements, a proxy the document of its target, a buffer, a map, a
+/// What the newer objects come back as, measured on a reference router 9.0.4 on 02-11: a typed
+/// array is a document of its elements, a proxy the document of its target, a buffer, a map, a
 /// generator or a promise an empty document, and a `BigInt` cannot be converted.
 #[test]
-fn newer_objects_come_back_as_on_a_refrouter() {
+fn newer_objects_come_back_as_on_the_reference() {
     let doc = |pairs: &[(&str, f64)]| {
         let mut d = Document::new();
         for (k, v) in pairs {
@@ -148,10 +148,6 @@ fn newer_objects_come_back_as_on_a_refrouter() {
         let e = Program::compile(src)
             .and_then(|p| p.call(None, &[], &mut JsCtx::default()))
             .expect_err(src);
-        assert_eq!(
-            e.message(),
-            format!("unable to convert JavaScript property to ref element {field}"),
-            "{src}"
-        );
+        assert_eq!(e.message(), teseladb_names::JS_ELEMENT_ERROR.replace("{name}", field), "{src}");
     }
 }

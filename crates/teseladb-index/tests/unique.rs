@@ -2,7 +2,8 @@
 //! goes in its value, so two documents with the same values write the same key; a write that puts
 //! a key another document holds, or that an earlier statement of the same write took, is a
 //! `DuplicateKey` with the index's `keyPattern` and the conflicting `keyValue` (message measured on
-//! a `refrouter` 9.0.4: `E11000 duplicate key error collection: msgs.c index: b_u dup key: { b: 0 }`).
+//! a reference router 9.0.4:
+//! `E11000 duplicate key error collection: msgs.c index: b_u dup key: { b: 0 }`).
 
 use teseladb_bson::{Document, RawDoc, Value, extjson};
 use teseladb_index::delta::{IndexSet, Version};
@@ -51,7 +52,8 @@ fn documents_with_the_same_values_share_the_key_and_keep_their_primary_key_in_th
 
 #[test]
 fn null_and_a_missing_field_are_the_same_key() {
-    // Measured on refnode 9.0.4: `{_id: 2}` after `{_id: 1, a: null}` is a duplicate of `{ a: null }`.
+    // Measured on the reference server 9.0.4: `{_id: 2}` after `{_id: 1, a: null}` is a duplicate
+    // of `{ a: null }`.
     let unique = def(&["a"], true);
     let null = entries(&unique, &bytes(r#"{"_id": 1, "a": null}"#), 1);
     let missing = entries(&unique, &bytes(r#"{"_id": 2}"#), 2);

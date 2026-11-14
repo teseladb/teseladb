@@ -1,5 +1,5 @@
 //! Checking a value against a parsed schema, and the explanation of each rule it breaks, with
-//! the fields of RefDb's `errInfo`.
+//! the fields of the reference server's `errInfo`.
 
 use std::cmp::Ordering;
 
@@ -255,7 +255,7 @@ impl Rule {
     }
 
     /// `additionalItems: false` after `items` with a schema per position: its own failure, with
-    /// the items past them (measured on a `refrouter` 9.0.4).
+    /// the items past them (measured on a reference router 9.0.4).
     pub(super) fn additional_items(&self, v: RawValue<'_>) -> Option<Document> {
         let Kind::Items(Items::Tuple { schemas, additional: Some(Additional::Allowed(false)) }) =
             &self.kind
@@ -368,8 +368,8 @@ impl Rule {
             Ok(())
         };
         match items {
-            // One schema for every item: the first item that fails, with RefDb's reason
-            // (measured on a `refrouter` 9.0.4).
+            // One schema for every item: the first item that fails, with the reference server's
+            // reason (measured on a reference router 9.0.4).
             Items::All(s) => {
                 for (i, e) in elems.iter().enumerate() {
                     if let Some((details, s)) = s.nested_details(*e, explaining)? {

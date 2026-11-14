@@ -39,9 +39,9 @@ impl IdleFlush {
         // A snapshot waited for is flushed for once per mark, however busy the core: the replica
         // that needs it, or the split or replica change of its range, waits for it.
         let for_snapshot = awaits.is_some() && awaits != self.served;
-        // What the memtable holds back of the log is flushed at least this often, as RefEngine
-        // checkpoints every 60 s so that RefDb can remove its old journal files: a core that
-        // always applies something is never idle.
+        // What the memtable holds back of the log is flushed at least this often, as the reference
+        // storage engine checkpoints every 60 s so that the reference server can remove its old
+        // journal files: a core that always applies something is never idle.
         let checkpoint = held && now.saturating_since(self.flushed_at) >= CHECKPOINT_EVERY;
         let mut next = IdleFlush { served: awaits, ..self };
         let flush = if applied == self.seen {

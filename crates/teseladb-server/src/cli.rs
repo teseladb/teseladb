@@ -95,8 +95,8 @@ pub struct StartOpts {
     pub direct_io: teseladb_io::node_disk::DirectIo,
     /// A kernel thread polls each core's ring (`--io-uring-sqpoll`, 012 FR-025).
     pub io_uring_sqpoll: bool,
-    /// The codec of the new blocks of every core (`--refengineCollectionBlockCompressor`,
-    /// 004 FR-023); `None`: the default one.
+    /// The codec of the new blocks of every core (the block compressor option,
+    /// [`BLOCK_COMPRESSOR`], 004 FR-023); `None`: the default one.
     pub block_codec: Option<teseladb_lsm::Codec>,
     /// The cores' CPUs (`--cpu-list`, 012 FR-006); `None`: the CPUs the process may use.
     pub cpu_list: Option<Vec<usize>>,
@@ -153,11 +153,11 @@ pub struct StartOpts {
     pub audit: crate::audit_log::AuditOpts,
     /// The LDAP server of PLAIN logins (013 FR-025).
     pub ldap: crate::ldap_client::LdapOpts,
-    /// `--setParameter awsSTSUrl`: the STS of REFDB-AWS (013 FR-025).
+    /// `--setParameter awsSTSUrl`: the STS of AWS IAM authentication (013 FR-025).
     pub aws_sts_url: Option<String>,
-    /// `--setParameter oidcIdentityProviders`: the providers of REFDB-OIDC (013 FR-025).
+    /// `--setParameter oidcIdentityProviders`: the providers of OIDC authentication (013 FR-025).
     pub oidc_providers: Option<String>,
-    /// `--setParameter authenticationMechanisms`; empty, RefDb's default.
+    /// `--setParameter authenticationMechanisms`; empty, the reference server's default.
     pub mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
 }
 
@@ -165,8 +165,8 @@ pub struct StartOpts {
 pub const TLS_MODE: &str = "tlsMode";
 /// `--http-port`.
 pub const HTTP_PORT: &str = "http-port";
-/// `--refengineCollectionBlockCompressor` (004 FR-023): the codec of the new blocks, with
-/// RefDb's name.
+/// The block compressor option (004 FR-023): the codec of the new blocks, with the reference
+/// server's name.
 pub const BLOCK_COMPRESSOR: &str = teseladb_names::OPTION_BLOCK_COMPRESSOR;
 /// `--http-bind`.
 pub const HTTP_BIND: &str = "http-bind";
@@ -189,7 +189,8 @@ pub const TLS_CRL_FILE: &str = "tlsCRLFile";
 pub const TLS_ALLOW_WITHOUT_CERTIFICATES: &str = "tlsAllowConnectionsWithoutCertificates";
 /// `--tlsFIPSMode` (013 FR-029).
 pub const TLS_FIPS_MODE: &str = "tlsFIPSMode";
-/// What `refnode` 9.0.4 says when `authenticationMechanisms` names SCRAM-SHA-1 in FIPS mode.
+/// What the reference server 9.0.4 says when `authenticationMechanisms` names SCRAM-SHA-1 in FIPS
+/// mode.
 pub const SCRAM_SHA1_FIPS: &str = "SCRAM-SHA-1 is not allowed in FIPS mode.";
 /// `--redactClientLogData` (013 FR-027).
 pub const REDACT_CLIENT_LOG_DATA: &str = "redactClientLogData";
@@ -245,7 +246,7 @@ pub const LDAP_TIMEOUT_MS: &str = "ldapTimeoutMS";
 pub const LDAP_AUTHZ_QUERY_TEMPLATE: &str = "ldapAuthzQueryTemplate";
 /// `--setParameter ldapUserCacheInvalidationInterval=<seconds>`.
 pub const LDAP_CACHE_INTERVAL: &str = "ldapUserCacheInvalidationInterval";
-/// Its bounds, as RefDb 9.0.4 checks them.
+/// Its bounds, as the reference server 9.0.4 checks them.
 const LDAP_CACHE_INTERVAL_MAX: u64 = 86_400;
 /// `--keyFile` (013 FR-034).
 pub const KEY_FILE: &str = "keyFile";
@@ -271,7 +272,7 @@ pub const AUDIT_ENCRYPTION_KEY_UID: &str = "auditEncryptionKeyUID";
 pub const AUDIT_COMPRESSION_MODE: &str = "auditCompressionMode";
 /// `--setParameter auditAuthorizationSuccess=<bool>` (013 FR-016).
 pub const AUDIT_AUTHORIZATION_SUCCESS: &str = "auditAuthorizationSuccess";
-/// What `getCmdLineOpts` shows instead of a password, as `refnode` does.
+/// What `getCmdLineOpts` shows instead of a password, as the reference server does.
 pub const REDACTED_PASSWORD: &str = "<password>";
 
 /// A password given on the command line, hidden from debug output.
@@ -461,7 +462,7 @@ fn ldap_opts(o: &Opts, fips: bool) -> Result<crate::ldap_client::LdapOpts, CliEr
     Ok(opts)
 }
 
-/// `--setParameter ldapUserCacheInvalidationInterval`, with RefDb's messages.
+/// `--setParameter ldapUserCacheInvalidationInterval`, with the reference server's messages.
 fn cache_interval(o: &Opts) -> Result<Option<u64>, CliError> {
     let mut out = None;
     for v in set_parameters(o, LDAP_CACHE_INTERVAL) {
@@ -478,7 +479,7 @@ fn cache_interval(o: &Opts) -> Result<Option<u64>, CliError> {
     Ok(out)
 }
 
-/// The audit options (013 FR-016), refused with RefDb's messages.
+/// The audit options (013 FR-016), refused with the reference server's messages.
 fn audit_opts(o: &Opts, fips: bool) -> Result<crate::audit_log::AuditOpts, CliError> {
     let get = |name| o.get(name).map(str::to_owned);
     let opts = crate::audit_log::AuditOpts {
@@ -523,8 +524,8 @@ fn ocsp_enabled(o: &Opts) -> Result<bool, CliError> {
 const USE_INTERNAL_AUTHZ_FOR_X509: &str =
     teseladb_wire::commands::server_params::USE_INTERNAL_AUTHZ_FOR_X509;
 
-/// `--setParameter useInternalAuthzForX509=<bool>`: `true`, `false`, `1` or `0`, as `refnode`
-/// 9.0.4 takes it (measured); false by default.
+/// `--setParameter useInternalAuthzForX509=<bool>`: `true`, `false`, `1` or `0`, as the reference
+/// server 9.0.4 takes it (measured); false by default.
 fn use_internal_authz_for_x509(o: &Opts) -> Result<bool, CliError> {
     let mut on = false;
     for v in set_parameters(o, USE_INTERNAL_AUTHZ_FOR_X509) {
@@ -541,8 +542,8 @@ fn use_internal_authz_for_x509(o: &Opts) -> Result<bool, CliError> {
     Ok(on)
 }
 
-/// `--setParameter auditAuthorizationSuccess=<bool>`, refused with RefDb's message when it is
-/// not a boolean (measured).
+/// `--setParameter auditAuthorizationSuccess=<bool>`, refused with the reference server's message
+/// when it is not a boolean (measured).
 fn authorization_success(o: &Opts) -> Result<Option<bool>, CliError> {
     let mut out = None;
     for v in set_parameters(o, AUDIT_AUTHORIZATION_SUCCESS) {
@@ -560,7 +561,7 @@ fn authorization_success(o: &Opts) -> Result<Option<bool>, CliError> {
 }
 
 /// The options of encryption at rest; a key file or a cipher mode without `--enableEncryption`
-/// is refused, as `refnode` refuses them.
+/// is refused, as the reference server refuses them.
 fn at_rest_opts(o: &Opts, fips: bool) -> Result<crate::at_rest::AtRestOpts, CliError> {
     use teseladb_crypto::at_rest::CipherMode;
     let enable = o.flag(ENABLE_ENCRYPTION)?;
@@ -578,7 +579,7 @@ fn at_rest_opts(o: &Opts, fips: bool) -> Result<crate::at_rest::AtRestOpts, CliE
             "--{ENCRYPTION_KEY_FILE} and --{ENCRYPTION_CIPHER_MODE} need --{ENABLE_ENCRYPTION}"
         ));
     }
-    // Without --enableEncryption `refnode` takes the KMIP options and does not use them.
+    // Without --enableEncryption the reference server takes the KMIP options and does not use them.
     let kmip = kmip_opts(o, fips)?.filter(|_| enable);
     if key_file.is_some() && kmip.is_some() {
         return err(
@@ -647,8 +648,8 @@ fn set_parameters<'a>(o: &'a Opts, name: &'a str) -> impl Iterator<Item = &'a st
 const AUTHENTICATION_MECHANISMS: &str = "authenticationMechanisms";
 
 /// `--setParameter authenticationMechanisms=<names>`: the mechanisms, refused when one is not
-/// RefDb's. In FIPS mode SCRAM-SHA-1, which derives its key with MD5, is refused, and the
-/// default leaves it out (RefDb 8.3 and later).
+/// the reference server's. In FIPS mode SCRAM-SHA-1, which derives its key with MD5, is refused,
+/// and the default leaves it out (the reference server 8.3 and later).
 fn mechanisms(o: &Opts, fips: bool) -> Result<Vec<teseladb_auth::sasl::SaslMechanism>, CliError> {
     use teseladb_auth::sasl::SaslMechanism;
     let out = named_mechanisms(o)?;
@@ -683,7 +684,8 @@ fn named_mechanisms(o: &Opts) -> Result<Vec<teseladb_auth::sasl::SaslMechanism>,
 /// `--setParameter awsSTSUrl`.
 pub const AWS_STS_URL: &str = "awsSTSUrl";
 
-/// `--setParameter awsSTSUrl=<https URL>`, refused with RefDb's message when it is not HTTPS.
+/// `--setParameter awsSTSUrl=<https URL>`, refused with the reference server's message when it is
+/// not HTTPS.
 fn aws_sts_url(o: &Opts) -> Result<Option<String>, CliError> {
     let mut out = None;
     for url in set_parameters(o, AWS_STS_URL) {
@@ -718,7 +720,7 @@ const MAX_TRANSACTIONS_DEFAULT: i64 =
     teseladb_wire::commands::server_params::MAX_CONCURRENT_TRANSACTIONS_DEFAULT;
 
 /// The integer of `--setParameter <name>=<n>` (`default` without one), at least `least`, with a
-/// `refnode` 9.0.4's messages (measured).
+/// reference replica set member 9.0.4's messages (measured).
 fn integer_parameter(o: &Opts, name: &str, default: i64, least: i64) -> Result<i64, CliError> {
     let mut value = default;
     for v in set_parameters(o, name) {
@@ -742,7 +744,7 @@ const ENABLE_TEST_COMMANDS: &str = "enableTestCommands";
 const AUTH_SCHEMA_VERSION: &str = teseladb_wire::commands::server_params::AUTH_SCHEMA_VERSION;
 
 /// `--setParameter`: whether `enableTestCommands` is on; another parameter is refused, as
-/// `refnode` refuses one it does not know.
+/// the reference server refuses one it does not know.
 fn test_commands(o: &Opts) -> Result<bool, CliError> {
     let mut on = false;
     for item in o.get(SET_PARAMETER).into_iter().flat_map(|v| v.split('\n')) {
@@ -1199,7 +1201,7 @@ pub fn parse_with(
     args: &[String],
     read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
 ) -> Result<Command, CliError> {
-    let Some((sub, rest)) = args.split_first() else { return err(USAGE) };
+    let Some((sub, rest)) = args.split_first() else { return err(*USAGE) };
     match sub.as_str() {
         "start" => {
             let mut o = parse_opts(rest, START)?;
@@ -1221,9 +1223,8 @@ pub fn parse_with(
     }
 }
 
-/// The codec of `--refengineCollectionBlockCompressor` (004 FR-023, FR-037): `none`, `zlib`,
-/// `zstd` or `lz4`;
-/// RefDb's `snappy` is a codec the node does not have.
+/// The codec of the block compressor option ([`BLOCK_COMPRESSOR`], 004 FR-023, FR-037): `none`,
+/// `zlib`, `zstd` or `lz4`; the reference server's `snappy` is a codec the node does not have.
 fn block_codec(v: Option<&str>) -> Result<Option<teseladb_lsm::Codec>, CliError> {
     use teseladb_lsm::Codec;
     match v {
@@ -1238,13 +1239,18 @@ fn block_codec(v: Option<&str>) -> Result<Option<teseladb_lsm::Codec>, CliError>
     }
 }
 
-/// Usage text.
-pub const USAGE: &str = "\
+/// Usage text, with the option names of [`teseladb_names`] in place of the marks of
+/// [`USAGE_TEXT`].
+pub static USAGE: std::sync::LazyLock<&'static str> =
+    std::sync::LazyLock::new(|| teseladb_names::expand_static(USAGE_TEXT));
+
+/// [`USAGE`] with a mark `${name:…}` for each option name that [`teseladb_names`] holds.
+const USAGE_TEXT: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
                  [--io-uring-sqpoll]
-                 [--refengineCollectionBlockCompressor none|zlib|zstd|lz4]
+                 [--${name:OPTION_BLOCK_COMPRESSOR} none|zlib|zstd|lz4]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]
                  [--join <ip:port>,...]

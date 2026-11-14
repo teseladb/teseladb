@@ -1,8 +1,9 @@
 //! The builder of the node's search indexes (011 FR-014, T040): a thread with its own backend
 //! that fills each new index, or each new definition version, over the documents already written,
 //! outside the command that created it. Meanwhile `$listSearchIndexes` shows the index
-//! `BUILDING` and its queries are refused as `refsearch` refuses them in `INITIAL_SYNC` (an older
-//! definition keeps serving while a new one builds); at the end the index is `READY`.
+//! `BUILDING` and its queries are refused as the reference search server refuses them in
+//! `INITIAL_SYNC` (an older definition keeps serving while a new one builds); at the end the index
+//! is `READY`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

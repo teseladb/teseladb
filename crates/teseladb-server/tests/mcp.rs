@@ -143,7 +143,7 @@ fn argument(name: &str, schema: &Value, r: &mut u64) -> String {
         ("collection", _) => "\"c\"",
         ("newName", _) => "\"c2\"",
         ("indexName", _) => "\"_id_\"",
-        ("connectionString", _) => "\"refdb://localhost\"",
+        ("connectionString", _) => "\"localhost:27017\"",
         ("documents", _) => r#"[{"_id":1000}]"#,
         ("method" | "exportTarget", _) => [
             r#"[{"name":"find","arguments":{}}]"#,

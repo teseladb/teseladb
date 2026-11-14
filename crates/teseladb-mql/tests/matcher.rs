@@ -381,7 +381,7 @@ fn bit_operators() {
         (r#"{"a": {"$bitsAnySet": []}}"#, r#"{"a": 1}"#, false),
         (r#"{"a": {"$bitsAnySet": 1}}"#, r#"{"a": [2, 3]}"#, true),
         // Subtype 2 keeps its inner length in front of its bytes, and both the value and the
-        // mask are tested with it (measured on a `refrouter` 9.0.4).
+        // mask are tested with it (measured on a reference router 9.0.4).
         (
             r#"{"a": {"$bitsAllSet": [0, 1, 32]}}"#,
             r#"{"a": {"$binary": {"base64": "YWJj", "subType": "02"}}}"#,
@@ -422,7 +422,7 @@ fn geospatial_operators_go_to_the_integration_point() {
         ),
         (r#"{"p": {"$nearSphere": {"$geometry": {}}}}"#, r#"{"q": 1}"#, false),
         (r#"{"p": {"$geoWithin": {"$polygon": []}}}"#, r#"{"p": [{"x": 1}]}"#, true),
-        // `$within`, the old name of `$geoWithin` (009 T035, measured on a `refrouter` 9.0.4).
+        // `$within`, the old name of `$geoWithin` (009 T035, measured on a reference router 9.0.4).
         (r#"{"p": {"$within": {"$box": [[0, 0], [1, 1]]}}}"#, r#"{"p": {"x": 1}}"#, true),
     ]);
     let ext = TestExt::default();
@@ -510,7 +510,7 @@ fn without_extensions_the_engines_report_their_absence() {
 }
 
 #[test]
-fn malformed_filters_fail_like_refdb() {
+fn malformed_filters_fail_like_the_reference() {
     let q = FilterUse::Query;
     let bad = codes::BAD_VALUE;
     let cases: &[(&str, ErrorCode, &str)] = &[
@@ -707,7 +707,7 @@ fn contexts_restrict_operators() {
 }
 
 /// An array reached with a position at the end of the path is the value, not its elements; one
-/// reached through a field is expanded (measured on a `refrouter` 9.0.4).
+/// reached through a field is expanded (measured on a reference router 9.0.4).
 #[test]
 fn an_array_reached_by_position_is_not_expanded() {
     check(&[
@@ -743,8 +743,8 @@ fn min_and_max_key_bound_everything() {
 }
 
 /// `$options` beside a `$regex` that is a regular expression, in both orders, and the operator
-/// documents of the geospatial operators, as a `refrouter` 9.0.4 answers them (measured with the
-/// Node driver, which sends these documents as they are written).
+/// documents of the geospatial operators, as a reference router 9.0.4 answers them (measured with
+/// the Node driver, which sends these documents as they are written).
 #[test]
 fn regex_options_and_geo_operator_documents() {
     let q = FilterUse::Query;

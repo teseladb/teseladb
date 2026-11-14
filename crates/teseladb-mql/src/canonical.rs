@@ -1,15 +1,15 @@
-//! The order RefDb gives the clauses of a conjunction before it evaluates them: by the kind of
-//! each clause, then by its path (`matchExpressionComparator`). Matching does not depend on it;
-//! the position of the positional `$` does, since the last clause that goes through an array
-//! records it (measured on a `refrouter` 9.0.4: `{a: {$gt: 0, $lt: 3}}` gives the position `$gt`
-//! found).
+//! The order the reference server gives the clauses of a conjunction before it evaluates them: by
+//! the kind of each clause, then by its path (`matchExpressionComparator`). Matching does not
+//! depend on it; the position of the positional `$` does, since the last clause that goes through
+//! an array records it (measured on a reference router 9.0.4: `{a: {$gt: 0, $lt: 3}}` gives the
+//! position `$gt` found).
 
 use crate::parse::{BitsOp, CmpOp, Expr, Pred};
 
 /// The rank of `$in`.
 pub(crate) const IN_RANK: u8 = 13;
 
-/// The rank of a predicate's kind, in the order of RefDb's `MatchType`.
+/// The rank of a predicate's kind, in the order of the reference server's `MatchType`.
 pub(crate) fn pred_rank(p: &Pred) -> u8 {
     match p {
         Pred::And(_) => 0,
@@ -33,7 +33,7 @@ pub(crate) fn pred_rank(p: &Pred) -> u8 {
         Pred::Type(_) => 20,
         Pred::Geo(g) if g.near => 27,
         Pred::Geo(_) => 21,
-        // After every user-facing kind, as RefDb's internal match types.
+        // After every user-facing kind, as the reference server's internal match types.
         Pred::ExprEq(_) => 28,
         Pred::ExprCmp(CmpOp::Gt, _) => 29,
         Pred::ExprCmp(CmpOp::Gte, _) => 30,
@@ -71,7 +71,7 @@ fn flatten(e: Expr, out: &mut Vec<Expr>) {
     }
 }
 
-/// `e` with every conjunction in RefDb's order.
+/// `e` with every conjunction in the reference server's order.
 pub(crate) fn canonical(e: Expr) -> Expr {
     match e {
         Expr::And(items) => {

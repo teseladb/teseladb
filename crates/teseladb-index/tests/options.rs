@@ -1,7 +1,7 @@
 //! The options of an index as the planner sees them (009 T015, FR-008, FR-009): a stored
 //! specification gives a catalog index that is unique, sparse, partial or hidden as it says; a
-//! hidden index is not chosen and a `hint` to it is refused as RefDb refuses one to an index
-//! that is not there.
+//! hidden index is not chosen and a `hint` to it is refused as the reference server refuses one to
+//! an index that is not there.
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::planner_api::{Hint, IndexCatalog, IndexState};

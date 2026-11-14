@@ -86,8 +86,8 @@ fn properly_crossed(a: impl Iterator<Item = (Point, Point)>, b: &Polygon) -> boo
 }
 
 /// Whether some edge of `a` lies along an edge of `b` without being that whole edge: a
-/// `refnode` 9.0.4 does not count it within (measured: a line along part of a side of the box is
-/// not within it, the whole side is, and so is a polygon equal to the box).
+/// reference replica set member 9.0.4 does not count it within (measured: a line along part of a
+/// side of the box is not within it, the whole side is, and so is a polygon equal to the box).
 fn partly_along(a: impl Iterator<Item = (Point, Point)>, b: &Polygon) -> bool {
     let edges: Vec<_> = b.edges().collect();
     a.into_iter().any(|(p, q)| {

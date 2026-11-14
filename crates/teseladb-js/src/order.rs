@@ -1,8 +1,8 @@
 //! The order of the own properties of the built-ins (016 R11), as `Object.getOwnPropertyNames`
-//! lists them on a `refrouter` 9.0.4 (measured on 02-11). The built-ins are made in the order that
-//! suits the code; this puts each object's properties in the measured order before they are frozen.
-//! A path is a global (`""` is the global object), `X.prototype`, `X^` (the prototype of `X`) or
-//! `%Name` (an intrinsic prototype of the realm).
+//! lists them on a reference router 9.0.4 (measured on 02-11). The built-ins are made in the order
+//! that suits the code; this puts each object's properties in the measured order before they are
+//! frozen. A path is a global (`""` is the global object), `X.prototype`, `X^` (the prototype of
+//! `X`) or `%Name` (an intrinsic prototype of the realm).
 
 use crate::interp::Interp;
 use crate::value::ObjRef;

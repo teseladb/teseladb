@@ -1,6 +1,6 @@
 //! Hashed, `2dsphere` and `2d` fields in index keys (009 T021, T025, FR-011, FR-014), with the
-//! behaviour measured on refnode 7.0.45 and again on 9.0.4 (30-10-2026): which documents get no entries, which are
-//! refused and with what message.
+//! behaviour measured on the reference server 7.0.45 and again on 9.0.4 (30-10-2026): which
+//! documents get no entries, which are refused and with what message.
 
 use teseladb_bson::{RawDoc, RawValue, extjson};
 use teseladb_index::geo::planar::DEFAULT_GRID;

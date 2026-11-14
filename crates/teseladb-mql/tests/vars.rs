@@ -1,6 +1,6 @@
-//! The `let` of a command (006 FR-032): RefDb's rules for user variable names and for what a
-//! command variable may hold, measured on a `refrouter` 9.0.4 (30-10-2026), and the variables
-//! reaching the expression engine of 010 through the integration point.
+//! The `let` of a command (006 FR-032): the reference server's rules for user variable names and
+//! for what a command variable may hold, measured on a reference router 9.0.4 (30-10-2026), and the
+//! variables reaching the expression engine of 010 through the integration point.
 
 mod common;
 
@@ -21,7 +21,7 @@ fn parse_error(name: &str, why: &str) -> (i32, String) {
 }
 
 #[test]
-fn variable_names_follow_refdb_rules() {
+fn variable_names_follow_the_reference_rules() {
     let starts = "starts with an invalid character for a user variable name";
     for name in ["$v", "V", "_v", "9a", "ROOT", "REMOVE", "SEARCH_META"] {
         assert_eq!(err(&format!(r#"{{"{name}": 1}}"#)), parse_error(name, starts), "{name}");
@@ -63,7 +63,7 @@ fn values_may_not_read_documents_and_expressions_go_to_the_engine() {
     assert_eq!(r.code.code, 2);
     let r = resolve_let(&doc(r#"{"v": {"$literal": 5}, "w": "$$v"}"#), &e).unwrap();
     assert_eq!(r.get("w"), Some(&Value::Document(doc(r#"{"$literal": 5}"#)))); // What `$literal` holds is not read: a string with `$` stays a string (the drivers'
-    // `aggregate-let` test, measured on a `refrouter` 9.0.4 on 03-11-2026).
+    // `aggregate-let` test, measured on a reference router 9.0.4 on 03-11-2026).
     for v in [r#"{"$literal": "$bar"}"#, r#"{"$literal": {"x": "$$ROOT"}}"#] {
         assert!(resolve_let(&doc(&format!(r#"{{"y": {v}}}"#)), &e).is_ok(), "{v}");
     }

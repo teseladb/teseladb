@@ -5,7 +5,8 @@
 //! files under its data directory. The node's handle writes raw keys of no collection, so the
 //! version stays in the range's own records, at
 //! `rollback/teseladb-internal/range-1/removed.<time>.<term>.<index>.bson`; documents of a
-//! collection go to RefDb's `rollback/<UUID>/` (`teseladb_server::rollback::ref_layout`).
+//! collection go to the reference server's `rollback/<UUID>/`
+//! (`teseladb_server::rollback::reference_layout`).
 
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
@@ -28,7 +29,7 @@ const READY: Duration = Duration::from_secs(30);
 const ASK: Duration = Duration::from_secs(2);
 /// How long after losing its followers the leader gets its `w: 1` write: a client that takes its
 /// time, as the 002 battery's Python runner did in `rollback-w1`. A leader cut off keeps the role
-/// for 10 s, as a RefDb primary does (`step_down_ticks`).
+/// for 10 s, as a reference server primary does (`step_down_ticks`).
 const LATE: Duration = Duration::from_secs(1);
 
 /// A data directory removed when the test ends.

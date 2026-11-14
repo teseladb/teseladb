@@ -1,5 +1,5 @@
-//! The PCRE2 syntax that RefDb accepts, read into a [`Node`] tree: literals and escapes,
-//! classes with ranges, POSIX classes and Unicode properties, groups (capturing, named,
+//! The PCRE2 syntax that the reference server accepts, read into a [`Node`] tree: literals and
+//! escapes, classes with ranges, POSIX classes and Unicode properties, groups (capturing, named,
 //! non-capturing, atomic, branch reset), inline options, quantifiers (greedy, lazy and
 //! possessive), back references, lookahead and lookbehind, conditional groups, `\K`, `\Q...\E`,
 //! comments and the start-of-pattern verbs.
@@ -502,7 +502,7 @@ impl Parser {
     }
 
     /// `(?C)`, `(?Cn)` and `(?C"text")` after the `C`: callouts, which do nothing without a
-    /// callout function, and RefDb sets none.
+    /// callout function, and the reference server sets none.
     fn callout(&mut self) -> PResult<()> {
         const DELIMITERS: &str = "`'\"^%#$";
         match self.peek() {

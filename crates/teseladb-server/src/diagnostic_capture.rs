@@ -1,10 +1,10 @@
 //! The periodic diagnostic capture (010 FR-024, T041): each second the node's sample
-//! (`getDiagnosticData`) is appended to `<data>/diagnostic.data`, as RefDb's full-time
-//! diagnostic data capture does. Each sample is one BSON document `{_id: <date>, type: 1, data:
-//! <sample>}` in files named `metrics.<UTC time of the first sample>-00000`, as RefDb names
-//! them; a file ends at 10 MB and the oldest files go once the directory passes 250 MB
+//! (`getDiagnosticData`) is appended to `<data>/diagnostic.data`, as the reference server's
+//! full-time diagnostic data capture does. Each sample is one BSON document `{_id: <date>, type: 1,
+//! data: <sample>}` in files named `metrics.<UTC time of the first sample>-00000`, as the reference
+//! server names them; a file ends at 10 MB and the oldest files go once the directory passes 250 MB
 //! (`diagnosticDataCollectionFileSizeMB` and `diagnosticDataCollectionDirectorySizeMB` of
-//! 9.0). The documents are not compressed into RefDb's chunks (DV-077).
+//! 9.0). The documents are not compressed into the reference server's chunks (DV-077).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -21,8 +21,8 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 pub const FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Bytes of the directory at most.
 pub const DIRECTORY_BYTES: u64 = 250 * 1024 * 1024;
-/// The log line of a sample that could not be written: TeselaDB's own, with no RefDb
-/// identifier.
+/// The log line of a sample that could not be written: TeselaDB's own, with no identifier of the
+/// reference server.
 pub const FAILED_ID: i32 = 0;
 
 /// The files of the capture and the one being written.
@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn files_are_named_by_their_first_sample_as_refdb_names_them() {
+    fn files_are_named_by_their_first_sample_as_the_reference_names_them() {
         assert_eq!(file_name(1_793_569_254_004), "metrics.2026-11-01T21-40-54Z-00000");
     }
 

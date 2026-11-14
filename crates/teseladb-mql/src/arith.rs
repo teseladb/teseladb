@@ -1,7 +1,7 @@
-//! Arithmetic of `$inc` and `$mul` with RefDb's type promotion: `int` widens to `long` on
-//! overflow, a `long` that overflows fails, a `double` operand gives a `double` and a `decimal`
-//! operand gives a `decimal` computed exactly and rounded to 34 digits, half to even. A double
-//! becomes a decimal with 15 significant digits, as RefDb converts it.
+//! Arithmetic of `$inc` and `$mul` with the reference server's type promotion: `int` widens to
+//! `long` on overflow, a `long` that overflows fails, a `double` operand gives a `double` and a
+//! `decimal` operand gives a `decimal` computed exactly and rounded to 34 digits, half to even. A
+//! double becomes a decimal with 15 significant digits, as the reference server converts it.
 
 use teseladb_bson::{Decimal, Decimal128, MAX_DIGITS, MAX_EXPONENT, MIN_EXPONENT, Value};
 

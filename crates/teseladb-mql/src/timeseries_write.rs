@@ -6,17 +6,17 @@
 //!   data: { <field>: <BSON column> } }
 //! ```
 //!
-//! as RefDb 9.0 keeps them in the collection itself (measured on a `refrouter` 9.0.4 with
-//! `rawData: true`). Each field of the measurements, the time field among them, is one column
-//! (`teseladb_bson::column`), with a row per measurement; `control.min` and `control.max` hold
-//! the least and greatest value of each field (subdocuments field by field), `control.min` of the
-//! time field rounded down to `bucketRoundingSeconds`. A bucket holds at most
+//! as the reference server 9.0 keeps them in the collection itself (measured on a reference router
+//! 9.0.4 with `rawData: true`). Each field of the measurements, the time field among them, is one
+//! column (`teseladb_bson::column`), with a row per measurement; `control.min` and `control.max`
+//! hold the least and greatest value of each field (subdocuments field by field), `control.min` of
+//! the time field rounded down to `bucketRoundingSeconds`. A bucket holds at most
 //! [`MAX_MEASUREMENTS`] measurements and [`MAX_BUCKET_BYTES`] bytes.
 //!
 //! The windows are aligned to `bucketMaxSpanSeconds`, and a bucket's `_id` is the window's start
 //! in seconds, five bytes of a hash of the meta value and a three-byte number for the buckets of
-//! one window and meta value, so a writer knows which document to read: RefDb's `_id`s of the
-//! same buckets differ (TeselaDB keeps no catalog of open buckets in memory).
+//! one window and meta value, so a writer knows which document to read: the reference server's
+//! `_id`s of the same buckets differ (TeselaDB keeps no catalog of open buckets in memory).
 
 use std::cmp::Ordering;
 
@@ -58,7 +58,7 @@ const HOLDER: &str = "v";
 /// Why a measurement or a bucket is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TsError {
-    /// The measurement has no date in the time field: RefDb's `BadValue` text.
+    /// The measurement has no date in the time field: the reference server's `BadValue` text.
     NoTime(String),
     /// The bucket is full, by its count or its size: the measurement goes to the next one.
     Full(Full),
@@ -74,12 +74,13 @@ pub enum Full {
     /// The next measurement would take it past [`MAX_BUCKET_BYTES`].
     Size,
     /// The next measurement has a field of another type than the bucket's measurements
-    /// (RefDb's schema change).
+    /// (the reference server's schema change).
     Schema,
 }
 
-/// The class of a BSON element type RefDb compares schemas by (`canonicalizeBSONType`):
-/// the numbers one class, strings and symbols one, `null` and `undefined` apart.
+/// The class of a BSON element type the reference server compares schemas by
+/// (`canonicalizeBSONType`): the numbers one class, strings and symbols one, `null` and `undefined`
+/// apart.
 fn type_class(v: &Value) -> i32 {
     use teseladb_bson::types as t;
     match v.element_type() {
@@ -113,7 +114,8 @@ fn parts(v: &Value) -> Vec<(String, &Value)> {
 }
 
 /// Whether `new` has, at every path `seen` also has, a value of the same class: what a bucket
-/// whose measurements gave `seen` still takes (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// whose measurements gave `seen` still takes (measured on a reference replica set member 9.0.4 on
+/// 02-11-2026).
 fn fits(seen: &Value, new: &Value) -> bool {
     if type_class(seen) != type_class(new) {
         return false;
@@ -212,7 +214,7 @@ fn value_of(c: &Cell) -> Result<Value, TsError> {
     Document::from(raw).remove(HOLDER).ok_or_else(|| malformed("an empty cell"))
 }
 
-/// RefDb's order of two values.
+/// The reference server's order of two values.
 fn order(a: &Value, b: &Value) -> Result<Ordering, TsError> {
     let holder = Document::new().with("a", a.clone()).with("b", b.clone());
     let bytes = holder.to_bytes().map_err(broken)?;
@@ -248,7 +250,8 @@ fn extreme(current: Option<&Value>, v: &Value, less: bool) -> Result<Value, TsEr
 
 /// A 40-bit FNV-1a hash of the BSON of a meta value.
 /// Meta value `v` as a bucket keeps it: the fields of its documents sorted by name, also inside
-/// arrays, as RefDb normalizes it (measured on a `refnode` 9.0.4 on 02-11-2026).
+/// arrays, as the reference server normalizes it (measured on a reference replica set member 9.0.4
+/// on 02-11-2026).
 pub fn normalized_meta(v: &Value) -> Value {
     match v {
         Value::Document(d) => {

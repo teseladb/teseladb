@@ -248,7 +248,7 @@ fn client_options() {
         (o.max_conns, o.compressors.clone()),
         (5, vec![Compressor::Snappy, Compressor::Zlib])
     );
-    // Port 0: the system chooses it, as `refnode --port 0` does.
+    // Port 0: the system chooses it, as the reference server does with `--port 0`.
     assert_eq!(start("start --insecure --port 0").port, 0);
     let o = start("start --insecure --networkMessageCompressors disabled");
     assert!(o.compressors.is_empty());
@@ -668,7 +668,7 @@ fn a_presentation_change_wakes_the_waiting_hellos() {
 
 /// The replica set port (018 FR-016, T018): opened on the running node when Group 0 says so,
 /// it answers as a member of the replica set at that port while the main port keeps answering
-/// as a `refrouter`, one application on each at the same time; 0 closes it.
+/// as a reference router, one application on each at the same time; 0 closes it.
 #[test]
 fn the_replica_set_port_opens_and_closes_without_a_restart() {
     let cfg = NodeConfig {
@@ -843,10 +843,10 @@ fn a_closed_connection_is_no_longer_woken() {
     drop(b);
 }
 
-/// The limiter of new connections (006 FR-036, measured on a `refnode` 9.0.4): with a bucket of
-/// two tokens refilled at one a second and a queue of one, of five connections that greet at once
-/// two are answered now, one a second later and two are closed without a reply. A connection that
-/// has sent nothing has taken no token, and is answered when it greets.
+/// The limiter of new connections (006 FR-036, measured on a reference replica set member 9.0.4):
+/// with a bucket of two tokens refilled at one a second and a queue of one, of five connections
+/// that greet at once two are answered now, one a second later and two are closed without a reply.
+/// A connection that has sent nothing has taken no token, and is answered when it greets.
 #[test]
 fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_bucket() {
     use teseladb_wire::ingress::Setting;

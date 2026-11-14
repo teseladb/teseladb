@@ -1,14 +1,15 @@
-//! A filter's clauses as RefDb rewrites them before it plans (measured on a `refrouter` 9.0.4 by
-//! `explain`'s `parsedQuery`): nested `$and` and `$or` opened into their parents, the clauses that
-//! match every document or none settling their parents, one clause left of a conjunction or
-//! disjunction standing alone, equalities on one path in a disjunction joined in one `$in`, and
-//! the clauses of each in the order of RefDb's match types, then by path, the others as made.
+//! A filter's clauses as the reference server rewrites them before it plans (measured on a
+//! reference router 9.0.4 by `explain`'s `parsedQuery`): nested `$and` and `$or` opened into their
+//! parents, the clauses that match every document or none settling their parents, one clause left
+//! of a conjunction or disjunction standing alone, equalities on one path in a disjunction joined
+//! in one `$in`, and the clauses of each in the order of the reference server's match types, then
+//! by path, the others as made.
 
 use teseladb_bson::{Document, Value};
 
 use crate::ops;
 
-/// The rank of each kind of clause, in the order of RefDb's `MatchType`.
+/// The rank of each kind of clause, in the order of the reference server's `MatchType`.
 pub(crate) mod rank {
     pub const AND: u8 = 0;
     pub const OR: u8 = 1;
@@ -89,7 +90,8 @@ impl Clause {
     }
 
     /// Where the clause goes in a sorted conjunction or disjunction: by kind, a `$not` by the
-    /// kind of what it negates (RefDb compares a `$not`'s child before any path), then by path.
+    /// kind of what it negates (the reference server compares a `$not`'s child before any path),
+    /// then by path.
     fn rank(&self) -> (u8, u8, &str) {
         match self {
             Clause::And(_) => (rank::AND, 0, ""),
@@ -105,7 +107,7 @@ impl Clause {
         }
     }
 
-    /// The clause rewritten as RefDb does.
+    /// The clause rewritten as the reference server does.
     pub(crate) fn simplified(self) -> Clause {
         match self {
             Clause::And(items) => {
@@ -207,7 +209,8 @@ fn negated_rank(pred: &Document) -> u8 {
 }
 
 /// The order of two clauses in a sorted conjunction or disjunction: by rank, then, between two
-/// `$and`, `$or` or `$nor`, by their clauses in turn (RefDb compares a node's children).
+/// `$and`, `$or` or `$nor`, by their clauses in turn (the reference server compares a node's
+/// children).
 fn compare(a: &Clause, b: &Clause) -> std::cmp::Ordering {
     let children = |c: &'_ Clause| match c {
         Clause::And(items) | Clause::Or(items) | Clause::Nor(items) => items.clone(),
@@ -261,8 +264,8 @@ fn joined(items: Vec<Clause>) -> Vec<Clause> {
     out
 }
 
-/// `{path: {$in: …}}` as RefDb writes it: the values in BSON order without repeats, then the
-/// expressions; one value alone is `$eq`, one expression alone `$regex`.
+/// `{path: {$in: …}}` as the reference server writes it: the values in BSON order without repeats,
+/// then the expressions; one value alone is `$eq`, one expression alone `$regex`.
 pub(crate) fn in_clause(path: &str, values: Vec<Value>, regexes: Vec<Value>) -> Clause {
     let mut owned: Vec<crate::value::OwnedValue> =
         values.into_iter().filter_map(|v| crate::value::OwnedValue::new(v).ok()).collect();

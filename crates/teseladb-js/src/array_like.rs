@@ -1,8 +1,8 @@
 //! `pop`, `shift`, `unshift`, `reverse`, `splice` and `sort` of `Array.prototype` on a `this`
 //! that is not an array (an object with a `length`, a proxy, a string), as ECMA-262 §23.1.3
 //! writes them: through `length`, `get`, `set`, `has` and `delete`, which throw when they fail.
-//! Measured on a `refrouter` 9.0.4 on 03-11: `Array.prototype.pop.call({length: 2, 0: 'a', 1: 'b'})`
-//! is `'b'` and leaves `{0: 'a', length: 1}`.
+//! Measured on a reference router 9.0.4 on 03-11: `Array.prototype.pop.call({length: 2, 0: 'a', 1:
+//! 'b'})` is `'b'` and leaves `{0: 'a', length: 1}`.
 
 use crate::arrays::{key, move_element, read_at, relative, sorted, species, species_result};
 use crate::interp::{Interp, R};

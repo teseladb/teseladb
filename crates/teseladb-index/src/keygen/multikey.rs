@@ -1,5 +1,5 @@
 //! The values of the fields of an index in a document, element by element (FR-005), as measured
-//! on refnode 7.0.45 and 9.0.4 (`tests/keygen.rs`).
+//! on the reference server 7.0.45 and 9.0.4 (`tests/keygen.rs`).
 //!
 //! Each field follows its path through documents. Where a path meets an array, every field that
 //! meets the same array takes its values from the same element: `{r.s: 1, r.b: 1}` over

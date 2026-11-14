@@ -1,21 +1,22 @@
 //! The collections of `config` that show the cluster (007 FR-017, contract `config-db.md`),
-//! generated from this node's copy of Group 0 with the fields of a `refrouter` 9.0.4 (measured):
+//! generated from this node's copy of Group 0 with the fields of a reference router 9.0.4
+//! (measured):
 //!
 //! - `shards`: one document per node that is not removed, `_id` its shard name (`node<n>`, the
 //!   one of a transaction's `recoveryToken`), `host` its client address, `state` 1 and `node` its
 //!   number; a node being drained says `draining: true`;
 //! - `databases`: one per database of the catalog, in creation order, with `primary` the first
 //!   active node (018 gives each database its own) and `version` with the mark that created it;
-//! - `refrouter`: one per node that is not removed, as a router;
+//! - the reference router: one per node that is not removed, as a router;
 //! - `version`: `{_id: 1, clusterId}`, the cluster's identifier as an ObjectId;
 //! - `settings`: the documents Group 0 keeps for `config.settings` (the defaults of
 //!   `setDefaultRWConcern` among them), which [`teseladb_wire::commands::config_settings`]
 //!   writes;
 //! - `changelog`: the splits, merges, replica changes and core changes Group 0 recorded (T045),
-//!   with the fields of a `refrouter` 9.0.4 (measured): a split is `split` with its range `before`
-//!   and its `left` and `right` halves, a merge `merge` with the `min` and `max` of the range
-//!   it left, a replica change `moveChunk.commit` with the shards `added` and `removed`, and a
-//!   core change `relocate` with its `core`; a range's bounds are its keys as binary data, the
+//!   with the fields of a reference router 9.0.4 (measured): a split is `split` with its range
+//!   `before` and its `left` and `right` halves, a merge `merge` with the `min` and `max` of the
+//!   range it left, a replica change `moveChunk.commit` with the shards `added` and `removed`, and
+//!   a core change `relocate` with its `core`; a range's bounds are its keys as binary data, the
 //!   ranges of TeselaDB not being chunks of a shard key (D-008);
 //! - `collections`, `chunks` and `tags`: the collections with a shard key, their chunks and
 //!   zones (018); `tags` lists the zones' intervals (`_id`, `ns`, `min`, `max`, `tag`, measured on
@@ -79,8 +80,8 @@ pub fn documents(sm: &Group0Sm, coll: &str) -> Vec<Document> {
 const CHUNKS: &str = "chunks";
 
 /// The replica set presentation as node `me` takes part in it (018 FR-007), from this node's
-/// copy of Group 0: the set over the live nodes and the member `me` is; `None` in the `refrouter`
-/// presentation, or when `me` is not a member.
+/// copy of Group 0: the set over the live nodes and the member `me` is; `None` in the reference
+/// router presentation, or when `me` is not a member.
 pub fn replica_member(
     sm: &Group0Sm,
     me: NodeId,
@@ -122,7 +123,8 @@ pub fn replica_port_member(
 /// electable member with the highest priority, not held back by `replSetFreeze` or
 /// `replSetMaintenance` at the cluster time, with a new term, `setVersion` and `electionId`; and
 /// while the primary is alive, a live member with a higher priority takes over (a new term, as a
-/// priority takeover of RefDb). `None` if nothing changes or no member can take over.
+/// priority takeover of the reference server). `None` if nothing changes or no member can take
+/// over.
 pub fn reassignment(sm: &Group0Sm, alive: &dyn Fn(NodeId) -> bool) -> Option<(Vec<u8>, Vec<u8>)> {
     use teseladb_wire::commands::presentation::{Presentation, REASON_TAKEOVER, REASON_TIMEOUT};
     let p = presentation(sm)?;
@@ -471,7 +473,7 @@ mod tests {
         use teseladb_wire::commands::presentation::Presentation;
         let mut sm = cluster();
         assert!(presentation(&sm).is_none());
-        assert!(replica_member(&sm, NodeId(1)).is_none(), "a refrouter without the parameter");
+        assert!(replica_member(&sm, NodeId(1)).is_none(), "a router without the parameter");
         let mut p = Presentation {
             mode: teseladb_topology::replset::PresentationMode::ReplicaSet,
             set_name: "rs0".into(),
@@ -484,7 +486,7 @@ mod tests {
         assert_eq!(rs.primary(), Some("n2:27017"));
         assert_eq!(rs.member("n1:27017"), Some(me));
         assert!(replica_member(&sm, NodeId(9)).is_none(), "not a node of the cluster");
-        p.mode = teseladb_topology::replset::PresentationMode::RefRouter;
+        p.mode = teseladb_topology::replset::PresentationMode::default();
         sm.settings.insert(PRESENTATION_KEY.to_vec(), p.to_document().to_bytes().unwrap());
         assert!(replica_member(&sm, NodeId(1)).is_none());
         assert_eq!(presentation(&sm).map(|p| p.term), Some(1));
@@ -566,7 +568,7 @@ mod tests {
         assert_eq!(port, 27100);
         assert_eq!(rs.member("n2:27100"), Some(me));
         assert_eq!(rs.primary(), Some("n1:27100"));
-        assert!(replica_member(&sm, NodeId(2)).is_none(), "the main port stays a refrouter");
+        assert!(replica_member(&sm, NodeId(2)).is_none(), "the main port stays a router");
     }
 
     #[test]
@@ -692,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn the_changelog_shows_each_change_as_a_refrouter_writes_it() {
+    fn the_changelog_shows_each_change_as_the_router_writes_it() {
         let mut sm = cluster();
         let replicas = vec![NodeId(1), NodeId(2)];
         let create = Group0Command::CreateRange { start: vec![1], end: vec![4], replicas };

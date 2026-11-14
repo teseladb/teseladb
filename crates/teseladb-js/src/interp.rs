@@ -28,12 +28,12 @@ pub enum Fatal {
     OutOfMemory,
     Deadline,
     Steps,
-    /// A value without a BSON form, with RefDb's code and message.
+    /// A value without a BSON form, with the reference server's code and message.
     Convert(i32, String),
-    /// What the engine of RefDb 9.0 cannot run and ends the call with a trap of its
+    /// What the engine of the reference server 9.0 cannot run and ends the call with a trap of its
     /// WebAssembly build: a promise job (`then`, `await`) or a `FinalizationRegistry`.
     Trap,
-    /// A function the engine of RefDb 9.0 declares and cannot run (`version()`): its
+    /// A function the engine of the reference server 9.0 declares and cannot run (`version()`): its
     /// WebAssembly build reaches an `unreachable` instruction.
     Unreachable,
     /// Code whose parse exhausts the stack of the engine's WebAssembly build (arrow functions
@@ -161,8 +161,8 @@ pub enum IterRec {
 pub struct Limits {
     /// Statements, calls and loop turns a call may run.
     pub steps: u64,
-    /// Bytes of the heap of a `refrouter` 9.0.4 the call's live values may take, at the costs it
-    /// measures ([`crate::heap`]); past them `"out of memory"` is thrown, and `try` catches it.
+    /// Bytes of the heap of a reference router 9.0.4 the call's live values may take, at the costs
+    /// it measures ([`crate::heap`]); past them `"out of memory"` is thrown, and `try` catches it.
     pub heap: usize,
     /// Bytes of this process the call's live values may take; past them the call ends.
     pub memory: usize,
@@ -204,7 +204,7 @@ pub struct Interp<'c> {
     /// and the text written for it, which the operator that sees its expression may replace.
     pub operand_failure: Option<(ObjRef, Val, String)>,
     /// The argument a native refused as its callback: the call names it by the expression in
-    /// that place, whatever its value (measured on a `refrouter` 9.0.4 on 03-11:
+    /// that place, whatever its value (measured on a reference router 9.0.4 on 03-11:
     /// `[].forEach.call(a, 5)` is `a is not a function`).
     pub operand_arg: Option<usize>,
     /// Whether the conversion to a primitive that failed last called a method of the object
@@ -238,15 +238,15 @@ pub struct Interp<'c> {
     pub frames: Vec<(Name, Pos)>,
     /// Where the last `throw` left the evaluation: the place of a value that is not an error.
     pub thrown_at: Pos,
-    /// What the engine of RefDb adds to the columns of the first line: the `(` it puts before a
-    /// function, or the code it puts before a `$where` expression.
+    /// What the engine of the reference server adds to the columns of the first line: the `(` it
+    /// puts before a function, or the code it puts before a `$where` expression.
     pub col_offset: u32,
 }
 
 /// The key the parser gives a class's `static { … }` block.
 pub const STATIC_BLOCK: &str = "@@static-block";
 
-/// The file SpiderMonkey names in RefDb's errors.
+/// The file SpiderMonkey names in the reference server's errors.
 pub const ERROR_FILE: &str = "wasm:function";
 
 /// How often the deadline is read, in steps.
@@ -301,7 +301,8 @@ pub fn is_constructor(f: &Val) -> bool {
         Kind::Func(Func::Closure { def, .. }) => {
             !(def.arrow || def.generator || def.is_async || def.method)
         }
-        // `UUID`, `MD5` and `HexData` of the RefDb shell have no `prototype` and still construct.
+        // `UUID`, `MD5` and `HexData` of the reference shell have no `prototype` and still
+        // construct.
         Kind::Func(Func::Native(_, name)) => {
             b.get_own("prototype").is_some()
                 || matches!(&**name, "Proxy" | "UUID" | "MD5" | "HexData" | "MinKey" | "MaxKey")
@@ -484,8 +485,8 @@ impl<'c> Interp<'c> {
         self.reserve(Cost::elements(n))
     }
 
-    /// The error of a full heap: `"out of memory"`, which `try` catches, when the `refrouter` heap
-    /// is full; the end of the call when the bytes of this process are.
+    /// The error of a full heap: `"out of memory"`, which `try` catches, when the reference router
+    /// heap is full; the end of the call when the bytes of this process are.
     fn exhausted(&self, e: Exhausted) -> Ctrl {
         match e {
             Exhausted::Heap => {
@@ -498,7 +499,7 @@ impl<'c> Interp<'c> {
 
     /// A string made by joining others (`+`, a template, `concat`): past SpiderMonkey's longest
     /// string, the catchable «allocation size overflow» (measured: `s = s + s` in a loop on a
-    /// `refrouter` 9.0.4).
+    /// reference router 9.0.4).
     pub fn joined_string(&self, s: String) -> R {
         self.check_length(s.len())?;
         self.string(s)
@@ -513,7 +514,7 @@ impl<'c> Interp<'c> {
     }
 
     /// The longest string a call makes: SpiderMonkey's 2^30 - 2 characters (a string that long
-    /// fits in the heap of a `refrouter` 9.0.4, measured on 03-11).
+    /// fits in the heap of a reference router 9.0.4, measured on 03-11).
     pub fn max_string(&self) -> usize {
         MAX_STRING
     }
@@ -618,7 +619,7 @@ impl<'c> Interp<'c> {
         Ok(o)
     }
 
-    /// The column RefDb reports for `p`.
+    /// The column the reference server reports for `p`.
     pub fn shown(&self, p: Pos) -> (u32, u32) {
         (p.line, if p.line == 1 { p.col + self.col_offset } else { p.col })
     }
@@ -752,7 +753,7 @@ impl<'c> Interp<'c> {
 
     /// `r`, with the operand of a failed conversion to a string named by its class, as
     /// SpiderMonkey's self-hosted methods write a value they hold (`can't convert Object to
-    /// string`; measured on a `refrouter` 9.0.4 on 02-11).
+    /// string`; measured on a reference router 9.0.4 on 02-11).
     pub fn operand_as_class<T>(&mut self, r: R<T>) -> R<T> {
         self.rename_operand(r, |it, v, text| match v {
             Val::Obj(o) => crate::builtins::object_class(it, o).to_string(),
@@ -1086,8 +1087,8 @@ impl<'c> Interp<'c> {
         while let Some(c) = cur {
             touch(&c, key);
             let found = c.borrow().get_own(key).cloned();
-            // A `String` object's `length` and characters are read-only (measured on a `refrouter`
-            // 9.0.4 on 03-11: `"length" is read-only` in strict code).
+            // A `String` object's `length` and characters are read-only (measured on a reference
+            // router 9.0.4 on 03-11: `"length" is read-only` in strict code).
             let found = match found {
                 None if matches!(c.borrow().kind, Kind::Str(_)) => crate::props::own_prop(&c, key),
                 found => found,
@@ -1541,7 +1542,7 @@ impl<'c> Interp<'c> {
         };
         // A derived constructor gives the `this` its `super(...)` made, unless it returns an
         // object.
-        // Measured on a `refrouter` 9.0.4 on 02-11: another value is refused, and `undefined`
+        // Measured on a reference router 9.0.4 on 02-11: another value is refused, and `undefined`
         // needs the `this` of `super(...)`.
         if def.is_ctor_of_derived && !matches!(v, Val::Obj(_)) {
             if !matches!(v, Val::Undef) {
@@ -2381,7 +2382,7 @@ impl<'c> Interp<'c> {
                     }
                     // The completion value of a statement list (`eval`): a catch starts from
                     // undefined, and a finally that ends normally keeps the value before it
-                    // (measured on the engine of a `refrouter` 9.0.4).
+                    // (measured on the engine of a reference router 9.0.4).
                     self.last = Some(Val::Undef);
                     r = self.block(handler, &scope);
                 }
@@ -2791,8 +2792,8 @@ impl<'c> Interp<'c> {
         scope.borrow().vars.iter().any(|(k, _)| &**k == n)
     }
 
-    /// Reads the private member `key` of `v` (measured on a `refrouter` 9.0.4 on 02-11): only an
-    /// own member, never through a proxy or the prototypes.
+    /// Reads the private member `key` of `v` (measured on a reference router 9.0.4 on 02-11): only
+    /// an own member, never through a proxy or the prototypes.
     fn private_get(&mut self, v: &Val, key: &str) -> R {
         let p = match v {
             Val::Obj(o) => o.borrow().get_own(key).cloned(),
@@ -3199,8 +3200,8 @@ impl<'c> Interp<'c> {
     }
 
     /// `r` of a call of `f`, with the argument a native could not convert named by its
-    /// expression, unless the conversion called a method (measured on a `refrouter` 9.0.4 on 02-11:
-    /// `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
+    /// expression, unless the conversion called a method (measured on a reference router 9.0.4 on
+    /// 02-11: `Math.max(o)`, `new Date(o)`; `String(o)` names it in both cases).
     fn name_arguments(&mut self, r: R, f: &Val, exprs: &[Expr], args: &[Val]) -> R {
         let Some(name) = native_name(f) else { return r };
         let arg = self.operand_arg.take();
@@ -3713,7 +3714,8 @@ impl<'c> Interp<'c> {
 
 /// SpiderMonkey's message for reading `key` of `o` (null or undefined) that `obj` gave:
 /// `can't access property "x", o is null` when the expression has a name, and
-/// `can't access property "x" of null` for a literal (measured on a `refrouter` 9.0.4 on 02-11).
+/// `can't access property "x" of null` for a literal (measured on a reference router 9.0.4 on
+/// 02-11).
 fn null_access(obj: &Expr, key: &str, o: &Val) -> String {
     // `key` is shown already: `"x"`, or `Symbol()` for a symbol.
     let what = if matches!(o, Val::Undef) { "undefined" } else { "null" };

@@ -1,7 +1,7 @@
 //! HTTPS requests of the node to the services that authentication needs (013 FR-025): the STS
-//! of REFDB-AWS and the JWKS of REFDB-OIDC. Each request goes on its own connection with
-//! [`teseladb_http`]'s messages over [`TlsStream`], trusting the system's certificate
-//! authorities.
+//! of AWS IAM authentication and the JWKS of OIDC authentication. Each request goes on its own
+//! connection with [`teseladb_http`]'s messages over [`TlsStream`], trusting the system's
+//! certificate authorities.
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;

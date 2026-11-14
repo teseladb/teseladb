@@ -39,8 +39,8 @@ pub trait Extensions {
         vars: Option<&Document>,
     ) -> Result<Option<Value>>;
 
-    /// [`Extensions::eval`] for a computed field of a `find` projection, where RefDb words an
-    /// unknown operator as 31325 (`Unknown expression`) instead of 168.
+    /// [`Extensions::eval`] for a computed field of a `find` projection, where the reference server
+    /// words an unknown operator as 31325 (`Unknown expression`) instead of 168.
     fn eval_projection(
         &self,
         expr: RawValue<'_>,
@@ -61,7 +61,8 @@ pub trait Extensions {
 }
 
 /// The extensions of a node without the engines of 009, 010, 011 and 016: each operator that
-/// needs them fails with the error RefDb gives when the engine has nothing to run it.
+/// needs them fails with the error the reference server gives when the engine has nothing to run
+/// it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoExtensions;
 

@@ -1,5 +1,5 @@
-//! `$jsonSchema`: RefDb's keywords and `bsonType`, the parse errors and the explanation of a
-//! failed validation (006 T017, FR-009, FR-022).
+//! `$jsonSchema`: the reference server's keywords and `bsonType`, the parse errors and the
+//! explanation of a failed validation (006 T017, FR-009, FR-022).
 
 pub mod common;
 
@@ -206,7 +206,7 @@ fn combinations_and_encryption() {
 fn explanations_follow_errinfo() {
     let s = schema(
         r#"{"title": "Contacts", "required": ["phone"], "properties": {
-            "email": {"bsonType": "string", "pattern": "@refdb\\.com$", "description": "must end in refdb.com"},
+            "email": {"bsonType": "string", "pattern": "@example\\.com$", "description": "must end in example.com"},
             "age": {"bsonType": "int", "minimum": 0}}}"#,
     );
     let d = bytes(r#"{"email": "amanda@xyz.com", "age": "x"}"#);
@@ -217,8 +217,8 @@ fn explanations_follow_errinfo() {
             // `properties` before `required`, whatever the schema's order (measured).
             r#"{"operatorName": "$jsonSchema", "title": "Contacts", "schemaRulesNotSatisfied": [
                 {"operatorName": "properties", "propertiesNotSatisfied": [
-                    {"propertyName": "email", "description": "must end in refdb.com", "details": [
-                        {"operatorName": "pattern", "specifiedAs": {"pattern": "@refdb\\.com$"},
+                    {"propertyName": "email", "description": "must end in example.com", "details": [
+                        {"operatorName": "pattern", "specifiedAs": {"pattern": "@example\\.com$"},
                          "reason": "regular expression did not match", "consideredValue": "amanda@xyz.com"}]},
                     {"propertyName": "age", "details": [
                         {"operatorName": "bsonType", "specifiedAs": {"bsonType": "int"},
@@ -303,7 +303,7 @@ fn explanations_of_every_rule() {
     has(r#"{"not": {}}"#, "{}", "child expression matched");
     has(r#"{"properties": {"s": {"encrypt": {}}}}"#, r#"{"s": 1}"#, "value was not encrypted");
     // With `bsonType`, a CSFLE value (subtype 1 or 2) whose original type is one of them (measured
-    // on a `refnode` 9.0.4).
+    // on a reference replica set member 9.0.4).
     let wrong = "encrypted value has wrong type";
     let typed = r#"{"properties": {"s": {"encrypt": {"bsonType": "string"}}}}"#;
     has(
@@ -428,12 +428,12 @@ fn malformed_schemas() {
 }
 
 #[test]
-fn items_explain_as_refdb_9_0_does() {
+fn items_explain_as_the_reference_9_0_does() {
     let explain = |s: &str, d: &str| {
         let b = bytes(d);
         json(&schema(s).explain(raw(&b)).unwrap().unwrap())
     };
-    // One schema for every item: the first item that fails (measured on a `refrouter` 9.0.4).
+    // One schema for every item: the first item that fails (measured on a reference router 9.0.4).
     let text = explain(
         r#"{"properties": {"t": {"items": {"bsonType": "string"}}}}"#,
         r#"{"t": ["x", 1, 2]}"#,
@@ -451,10 +451,11 @@ fn items_explain_as_refdb_9_0_does() {
     assert!(text.contains(r#""itemIndex":{"$numberInt":"1"}"#), "{text}");
 }
 
-/// What a `refrouter` 9.0.4 writes for the counts of items, `additionalItems: false`, an exclusive
-/// bound, and a missing property under `oneOf` once the document fails for another reason.
+/// What a reference router 9.0.4 writes for the counts of items, `additionalItems: false`, an
+/// exclusive bound, and a missing property under `oneOf` once the document fails for another
+/// reason.
 #[test]
-fn explanation_details_measured_on_refdb() {
+fn explanation_details_measured_on_the_reference() {
     let explain = |s: &str, d: &str| {
         let b = bytes(d);
         json(&schema(s).explain(raw(&b)).unwrap().unwrap())

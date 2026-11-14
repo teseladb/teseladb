@@ -60,7 +60,7 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     let Some(Value::String(client)) = op.get("client_s") else { panic!("{op:?}") };
     assert!(client.starts_with("127.0.0.1:"), "{client}");
     assert_eq!(op.get("ns"), Some(&Value::from("admin.$cmd")));
-    // Named as a `refrouter` names a shard's operation (DV-031, D-102), which `killOp` takes.
+    // Named as a reference router names a shard's operation (DV-031, D-102), which `killOp` takes.
     let Some(Value::String(shard)) = op.get("shard") else { panic!("{op:?}") };
     let Some(Value::String(opid)) = op.get("opid") else { panic!("{op:?}") };
     assert!(opid.starts_with(&format!("{shard}:")), "{opid}");

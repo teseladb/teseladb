@@ -1,8 +1,8 @@
-//! A filter as RefDb writes it back after parsing it (`parsedQuery` of `explain`, 010 FR-003),
-//! measured on a `refrouter` 9.0.4: each value under an operator (`{a: 1}` is `{a: {$eq: 1}}`), the
-//! clauses of a conjunction in RefDb's order, one clause of `$and`, `$or` or `$nor` without
-//! them, `$ne` and `$nin` as `$not`, `$type` as sorted type codes and the bits of a mask as their
-//! positions.
+//! A filter as the reference server writes it back after parsing it (`parsedQuery` of `explain`,
+//! 010 FR-003), measured on a reference router 9.0.4: each value under an operator (`{a: 1}` is
+//! `{a: {$eq: 1}}`), the clauses of a conjunction in the reference server's order, one clause of
+//! `$and`, `$or` or `$nor` without them, `$ne` and `$nin` as `$not`, `$type` as sorted type codes
+//! and the bits of a mask as their positions.
 
 use teseladb_bson::{Document, Value};
 
@@ -13,12 +13,12 @@ use crate::parse::{BitsOp, CmpOp, Expr, InItem, Pred};
 use crate::types::TypeSpec;
 
 /// The alias `$type` writes for the four numeric types, before the codes (measured on a
-/// `refrouter` 9.0.4 on 04-11-2026: `["number", 2]`).
+/// reference router 9.0.4 on 04-11-2026: `["number", 2]`).
 const NUMBER_ALIAS: &str = "number";
 
 impl Filter {
-    /// The filter as RefDb writes it back after parsing it: `$alwaysTrue` alone as given, an
-    /// empty filter as `{}`.
+    /// The filter as the reference server writes it back after parsing it: `$alwaysTrue` alone as
+    /// given, an empty filter as `{}`.
     pub fn parsed_query(&self) -> Document {
         match self.ordered_expr() {
             Expr::True => Document::new().with(ops::ALWAYS_TRUE, 1),
@@ -78,8 +78,8 @@ fn rank_of(e: &Expr) -> u8 {
     crate::canonical::expr_rank(e).0
 }
 
-/// Predicate `pred` on `path`: `$in` as RefDb writes it, an empty `$in` matching nothing and
-/// its `$not` everything.
+/// Predicate `pred` on `path`: `$in` as the reference server writes it, an empty `$in` matching
+/// nothing and its `$not` everything.
 fn field_clause(path: &str, pred: &Pred) -> Clause {
     match pred {
         Pred::In(items) => {
@@ -211,8 +211,8 @@ fn bits_name(op: BitsOp) -> &'static str {
     }
 }
 
-/// An `$expr` as RefDb optimises it before it plans: a constant that settles the filter, or
-/// the expression as `explain` writes it.
+/// An `$expr` as the reference server optimises it before it plans: a constant that settles the
+/// filter, or the expression as `explain` writes it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OptimizedExpr {
     /// Every document matches.
@@ -223,9 +223,9 @@ pub enum OptimizedExpr {
     Expr(Value),
 }
 
-/// Filter `filter` with each `$expr` as RefDb rewrites it before it plans (measured on a
-/// `refrouter` 9.0.4): `optimize` gives the optimised expression; a constant settles its clause,
-/// and beside an expression go the clauses it implies on a path: `$_internalExprEq` and the
+/// Filter `filter` with each `$expr` as the reference server rewrites it before it plans (measured
+/// on a reference router 9.0.4): `optimize` gives the optimised expression; a constant settles its
+/// clause, and beside an expression go the clauses it implies on a path: `$_internalExprEq` and the
 /// others for a comparison of a path with a constant, `$in` for a constant list.
 pub fn optimize_exprs(
     filter: &Document,
@@ -370,7 +370,7 @@ pub fn scan_filter(parsed: &Document) -> Document {
 }
 
 /// Whether clause `d` is one an `$expr` implied: `$_internalExpr…` clauses, or a disjunction
-/// with one among its clauses (measured: RefDb drops it whole).
+/// with one among its clauses (measured: the reference server drops it whole).
 fn only_implied(d: &Document) -> bool {
     fn any_internal(d: &Document) -> bool {
         d.iter().any(|(k, v)| match (k, v) {

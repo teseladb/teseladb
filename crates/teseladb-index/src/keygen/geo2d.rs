@@ -1,7 +1,7 @@
-//! Keys of a `2d` index (FR-011): the geohash of each legacy pair of the field, as RefDb writes
-//! it (binary subtype 128, 8 bytes, big-endian). A field without an array or a document gives no
-//! keys; an array of pairs gives one per pair. Rejections and their codes were measured on refnode
-//! 7.0.45 (`tests/geo2d.rs`).
+//! Keys of a `2d` index (FR-011): the geohash of each legacy pair of the field, as the reference
+//! server writes it (binary subtype 128, 8 bytes, big-endian). A field without an array or a
+//! document gives no keys; an array of pairs gives one per pair. Rejections and their codes were
+//! measured on the reference server 7.0.45 (`tests/geo2d.rs`).
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -23,11 +23,11 @@ pub const ONE_ELEMENT: i32 = 13068;
 /// Why a document has no `2d` keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Geo2dError {
-    /// RefDb's code.
+    /// The reference server's code.
     pub code: i32,
-    /// RefDb's reason.
+    /// The reference server's reason.
     pub reason: String,
-    /// Whether RefDb appends ` :: caused by :: <document>` to the reason.
+    /// Whether the reference server appends ` :: caused by :: <document>` to the reason.
     pub shows_document: bool,
 }
 
@@ -63,7 +63,7 @@ fn pair_key(pair: RawDoc<'_>, grid: &Grid) -> Result<u64, Geo2dError> {
         ));
     };
     if !grid.contains(x) || !grid.contains(y) {
-        // Measured on refnode 9.0.4: six significant digits (`[ 0.1, 0.333333 ]`).
+        // Measured on the reference server 9.0.4: six significant digits (`[ 0.1, 0.333333 ]`).
         let reason = format!(
             "point not in interval of [ {}, {} ]",
             general(grid.min, STREAM_DIGITS),

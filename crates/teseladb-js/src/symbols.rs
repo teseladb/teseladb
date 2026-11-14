@@ -1,6 +1,6 @@
 //! `Symbol` (ECMA-262 §20.4): the constructor, the registry of `Symbol.for`, the well-known
-//! symbols and the prototype, with the messages of the engine of a `refrouter` 9.0.4 (measured on
-//! 02-11). A symbol is its description and an identity; the well-known ones have identity 0.
+//! symbols and the prototype, with the messages of the engine of a reference router 9.0.4 (measured
+//! on 02-11). A symbol is its description and an identity; the well-known ones have identity 0.
 
 use std::rc::Rc;
 

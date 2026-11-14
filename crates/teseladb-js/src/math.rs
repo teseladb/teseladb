@@ -296,7 +296,7 @@ fn sum_precise(it: &mut Interp, _: &Val, a: &[Val]) -> R {
 }
 
 // The inverse hyperbolic functions as fdlibm computes them (SpiderMonkey uses fdlibm), so the
-// last bit matches the engine of RefDb.
+// last bit matches the engine of the reference server.
 
 fn acosh(x: f64) -> f64 {
     if x.is_nan() || x < 1.0 {

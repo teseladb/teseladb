@@ -1,4 +1,5 @@
-//! BSON type aliases of `$type` and `bsonType`, each declared once, with RefDb's numbers.
+//! BSON type aliases of `$type` and `bsonType`, each declared once, with the reference server's
+//! numbers.
 
 use teseladb_bson::types as t;
 
@@ -115,7 +116,7 @@ pub fn by_code(code: i32) -> Option<TypeSpec> {
     Some(TypeSpec::Element(element))
 }
 
-/// The alias of an element type, as RefDb names types in messages.
+/// The alias of an element type, as the reference server names types in messages.
 pub fn name_of(ty: u8) -> &'static str {
     ALIASES.iter().find(|&&(_, e)| e == ty).map_or("unknown", |&(a, _)| a)
 }

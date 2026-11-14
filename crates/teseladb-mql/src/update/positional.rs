@@ -77,8 +77,8 @@ impl UpdatePath {
     }
 }
 
-/// RefDb's order of update paths: segment by segment, names by their bytes and numeric names
-/// by their value.
+/// The reference server's order of update paths: segment by segment, names by their bytes and
+/// numeric names by their value.
 pub(crate) fn path_order(a: &str, b: &str) -> Ordering {
     let mut sa = a.split('.');
     let mut sb = b.split('.');

@@ -50,9 +50,9 @@ pub(super) fn load<'d>(doc: &Stored<'d>, path: &[String], keys: &[FieldKey]) -> 
     cur
 }
 
-/// Walks `segs` from `cur` with RefDb's rules for arrays inside a path, calling `f` on each
-/// value reached with whether an array there is also tried element by element, until `f` says
-/// yes: the walk of the tree evaluator, on the bytes.
+/// Walks `segs` from `cur` with the reference server's rules for arrays inside a path, calling `f`
+/// on each value reached with whether an array there is also tried element by element, until `f`
+/// says yes: the walk of the tree evaluator, on the bytes.
 fn walk<'d>(
     doc: &'d [u8],
     cur: ValueRef<'d>,
@@ -163,8 +163,8 @@ impl Env<'_, '_, '_> {
         }
     }
 
-    /// `$expr` comparison `i` of `a` and `b` (or the leaf's literal), in RefDb's order of
-    /// values with a missing value below every other; a path through an array leaves the
+    /// `$expr` comparison `i` of `a` and `b` (or the leaf's literal), in the reference server's
+    /// order of values with a missing value below every other; a path through an array leaves the
     /// comparison to the extensions.
     fn expr_cmp(
         &self,
@@ -388,7 +388,7 @@ impl Env<'_, '_, '_> {
             },
             Op::CmpF64 => match (v.tag, &self.literal(i).fast) {
                 (Tag::F64, Fast::F64(k)) if !f64::from_bits(v.payload).is_nan() => {
-                    // Neither is NaN, and -0.0 equals 0.0 as numbers do in RefDb.
+                    // Neither is NaN, and -0.0 equals 0.0 as numbers do in the reference server.
                     let o = f64::from_bits(v.payload).partial_cmp(k).unwrap_or(Ordering::Equal);
                     ordered(cmp_of(i.src2()), o)
                 }

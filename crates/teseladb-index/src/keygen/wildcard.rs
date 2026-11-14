@@ -1,5 +1,5 @@
-//! Wildcard indexes (FR-013), measured on refnode 9.0.4 (`tests/data/wildcard-keys.json`, 009
-//! research R11).
+//! Wildcard indexes (FR-013), measured on the reference server 9.0.4
+//! (`tests/data/wildcard-keys.json`, 009 research R11).
 //!
 //! A wildcard field (`$**`, or `a.$**` for one subtree) gives one key per value it reaches, as the
 //! pair (path, value): the path without positions and the value of a leaf. Documents are walked
@@ -24,31 +24,32 @@ pub const WILDCARD_SUFFIX: &str = ".$**";
 /// The document's identifier, left out unless the projection names it.
 const ID: &str = "_id";
 
-/// RefDb's code of a regular field of a compound wildcard index that holds an array.
+/// The reference server's code of a regular field of a compound wildcard index that holds an array.
 pub const WILDCARD_COMPOUND_ARRAY: i32 = 7_246_301;
-/// RefDb's `FailedToParse`.
+/// The reference server's `FailedToParse`.
 pub const FAILED_TO_PARSE: i32 = 9;
-/// RefDb's `CannotCreateIndex`.
+/// The reference server's `CannotCreateIndex`.
 pub const CANNOT_CREATE_INDEX: i32 = 67;
-/// RefDb's code of an exclusion inside an inclusion projection.
+/// The reference server's code of an exclusion inside an inclusion projection.
 pub const EXCLUSION_IN_INCLUSION: i32 = 31_254;
-/// RefDb's code of an inclusion inside an exclusion projection.
+/// The reference server's code of an inclusion inside an exclusion projection.
 pub const INCLUSION_IN_EXCLUSION: i32 = 31_253;
-/// RefDb's code of a projection value that is an unknown expression.
+/// The reference server's code of a projection value that is an unknown expression.
 pub const UNKNOWN_EXPRESSION: i32 = 31_325;
-/// RefDb's code of a projection value that is not a number, a boolean or a document.
+/// The reference server's code of a projection value that is not a number, a boolean or a document.
 pub const PROJECTION_COMPUTED: i32 = 51_271;
-/// RefDb's code of a projection path with a name that starts with `$`.
+/// The reference server's code of a projection path with a name that starts with `$`.
 pub const PROJECTION_DOLLAR: i32 = 16_410;
-/// RefDb's code of a key with two wildcard fields.
+/// The reference server's code of a key with two wildcard fields.
 pub const TWO_WILDCARDS: i32 = 7_246_201;
-/// RefDb's code of an inclusion projection that names a regular field of the key.
+/// The reference server's code of an inclusion projection that names a regular field of the key.
 pub const PROJECTION_OVERLAPS_KEY: i32 = 7_246_208;
-/// RefDb's code of an exclusion projection that leaves a regular field of the key in.
+/// The reference server's code of an exclusion projection that leaves a regular field of the key
+/// in.
 pub const PROJECTION_KEEPS_KEY: i32 = 7_246_209;
 
-/// Why a wildcard index definition is refused: RefDb's code and the reason it gives after
-/// `Error in specification { … } :: caused by ::`.
+/// Why a wildcard index definition is refused: the reference server's code and the reason it gives
+/// after `Error in specification { … } :: caused by ::`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecError {
     /// Code.
@@ -186,7 +187,7 @@ impl WildcardProjection {
     }
 }
 
-/// The reason for a value RefDb reads as a computed field.
+/// The reason for a value the reference server reads as a computed field.
 fn computed() -> SpecError {
     spec_error(
         PROJECTION_COMPUTED,
@@ -243,8 +244,8 @@ fn flatten(
     Ok(())
 }
 
-/// The options a wildcard index refuses, in the order RefDb checks them (measured: `sparse`,
-/// then `unique`, then `expireAfterSeconds`).
+/// The options a wildcard index refuses, in the order the reference server checks them (measured:
+/// `sparse`, then `unique`, then `expireAfterSeconds`).
 pub fn check_options(unique: bool, sparse: bool, ttl: bool) -> Result<(), SpecError> {
     let refuse =
         |option: &str| format!("Index type 'wildcard' does not support the '{option}' option");
@@ -266,8 +267,9 @@ pub fn check_options(unique: bool, sparse: bool, ttl: bool) -> Result<(), SpecEr
 pub const WILDCARD_NOT_ORDERED: &str =
     "Index key contains an illegal field name: field name starts with '$'.";
 
-/// The restrictions RefDb puts on a key with a wildcard field, given its fields as written
-/// (`(path, is_wildcard)`), whether another field is hashed or geographic, and the projection.
+/// The restrictions the reference server puts on a key with a wildcard field, given its fields as
+/// written (`(path, is_wildcard)`), whether another field is hashed or geographic, and the
+/// projection.
 pub fn check_key(
     fields: &[(&str, bool)],
     plugin: bool,
@@ -329,7 +331,7 @@ pub fn check_key(
 pub struct WildcardValues<'a> {
     /// Path and value of each key.
     pub keys: Vec<(String, RawValue<'a>)>,
-    /// Paths of the arrays walked (RefDb's multikey paths of the index).
+    /// Paths of the arrays walked (the reference server's multikey paths of the index).
     pub multikey_paths: BTreeSet<String>,
 }
 

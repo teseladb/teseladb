@@ -624,7 +624,7 @@ fn node_value(n: NodeId) -> Value {
 }
 
 /// The disk's metrics: its syncs, which bound what a confirmed write costs (H-008 of the native
-/// tests against RefDb).
+/// tests against the reference server).
 fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, (flush_micros, log_syncs): (u64, u64)) {
     let name = "teseladb_disk_syncs_total";
     let _ = writeln!(out, "# HELP {name} Syncs of files and folders to the disk.");
@@ -1055,7 +1055,8 @@ fn topology_set(
 ) -> Result<AdminAction, String> {
     use teseladb_wire::commands::presentation::{MODE, PRIMARY, SET_NAME, TOPOLOGY_PRESENTATION};
     if teseladb_topology::replset::PresentationMode::from_name(mode).is_none() {
-        return Err(format!("not a presentation: {mode} (refrouter or replicaset)"));
+        let router = teseladb_names::ROUTER;
+        return Err(format!("not a presentation: {mode} ({router} or replicaset)"));
     }
     let mut value = Document::new().with(MODE, mode);
     if let Some(n) = name {
@@ -1349,7 +1350,7 @@ pub fn parse(args: &[String]) -> Result<AdminOpts, String> {
             ) {
                 (Some(t), _) => AdminAction::Tenant(t?),
                 (None, Some(k)) => AdminAction::ApiKey(k?),
-                (None, None) => return Err(ADMIN_USAGE.to_owned()),
+                (None, None) => return Err((*ADMIN_USAGE).to_owned()),
             }
         }
     };
@@ -1386,7 +1387,11 @@ pub(crate) fn component(text: &str) -> String {
 }
 
 /// Usage of `teseladb admin`.
-pub const ADMIN_USAGE: &str = "\
+pub static ADMIN_USAGE: std::sync::LazyLock<&'static str> =
+    std::sync::LazyLock::new(|| teseladb_names::expand_static(ADMIN_USAGE_TEXT));
+
+/// [`ADMIN_USAGE`] with a mark `${name:…}` for each name that [`teseladb_names`] holds.
+const ADMIN_USAGE_TEXT: &str = "\
 usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
                       [--tlsCertificateKeyFile <pem> --tlsCAFile <pem>] <subcommand>
   nodes
@@ -1399,7 +1404,7 @@ usage: teseladb admin [--node <ip:port>] [--format text|json] [--dbpath <dir>]
   node remove <node>
   config get <parameter>
   config set <parameter> '<Extended JSON document>'
-  topology set <refrouter|replicaset> [--name <set>] [--primary <host:port>]
+  topology set <${name:ROUTER}|replicaset> [--name <set>] [--primary <host:port>]
   token create [--ttl <90s|30m|1h|2d>]
   cert rotate
   backup [--at <seconds.increment|now>] --out <dir>
@@ -2065,8 +2070,8 @@ mod tests {
             rename_warning(&rs("rs0"), &Document::new().with("mode", teseladb_names::ROUTER)),
             None
         );
-        let refrouter = Document::new().with("mode", teseladb_names::ROUTER);
-        assert_eq!(rename_warning(&refrouter, &rs("rs1")), None, "no replica set yet");
+        let router = Document::new().with("mode", teseladb_names::ROUTER);
+        assert_eq!(rename_warning(&router, &rs("rs1")), None, "no replica set yet");
         assert_eq!(rename_warning(&Document::new().with("mode", "replicaset"), &rs("a")), None);
         // `topology set` is `setClusterParameter` of `topologyPresentation` (018 FR-007).
         let words = |w: &[&str]| parse(&w.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());

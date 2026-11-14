@@ -1,8 +1,8 @@
 //! `$expr` on the register machine (010 FR-031): comparisons (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`,
 //! `$lte`) of field paths and constants, inside `$and` and `$or`, compile to `ExprCmp`
-//! instructions that compare the registers in RefDb's order of values, a missing value below
-//! every other. A path that crosses an array gives an array of what each element gives, which
-//! the instruction leaves to the extensions for that comparison on that document. Any other
+//! instructions that compare the registers in the reference server's order of values, a missing
+//! value below every other. A path that crosses an array gives an array of what each element gives,
+//! which the instruction leaves to the extensions for that comparison on that document. Any other
 //! expression is one `Ext` instruction.
 
 use teseladb_bson::RawValue;

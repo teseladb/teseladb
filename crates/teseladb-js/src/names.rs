@@ -2,7 +2,7 @@
 //! (`frontend/NameFunctions.cpp`): the place the function is written to (`o.m`, `x.k`), after
 //! the name of the function around it and a `/` (`v</o.m`), and `<` when the function is only
 //! somewhere inside that value (`v<` for a callback in `const v = f(() => …)`). Measured on a
-//! `refrouter` 9.0.4 on 02-11.
+//! reference router 9.0.4 on 02-11.
 
 use std::rc::Rc;
 

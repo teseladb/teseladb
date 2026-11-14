@@ -1,7 +1,7 @@
 //! Function declarations in blocks of non-strict code (ECMA-262 Annex B.3.3): besides the
 //! block's own binding, each one whose name a `var` could take without an early error gets a
 //! `var` of the function, or of the program, that holds it, which takes the function's value
-//! when the declaration is evaluated (measured on a `refrouter` 9.0.4 on 02-11:
+//! when the declaration is evaluated (measured on a reference router 9.0.4 on 02-11:
 //! `{ function f() {} } typeof f` gives `function`).
 
 use std::rc::Rc;

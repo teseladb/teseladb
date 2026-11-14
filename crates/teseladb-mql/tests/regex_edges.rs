@@ -1,7 +1,8 @@
 //! The regular expression engine at the edges of PCRE2's syntax (006 T058): numbers past their
 //! limits, recursion and subroutine calls, verbs, newline conventions, conditions and POSIX
-//! classes. Each expected result is what `$regexMatch` gave on a `refrouter` 9.0.4 on 31-10-2026
-//! (a match, or the compile error's message), with the limits of group numbers and names.
+//! classes. Each expected result is what `$regexMatch` gave on a reference router 9.0.4 on
+//! 31-10-2026 (a match, or the compile error's message), with the limits of group numbers and
+//! names.
 
 use teseladb_mql::regex::Regex;
 
@@ -227,7 +228,7 @@ const CASES: &[Case] = &[
 ];
 
 #[test]
-fn edges_behave_as_refdb() {
+fn edges_behave_as_the_reference() {
     let wrong: Vec<String> = CASES
         .iter()
         .filter_map(|&(pattern, options, subject, want)| {

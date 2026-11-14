@@ -1,5 +1,6 @@
 //! Projections of `find` (006 T018, FR-011): inclusion and exclusion, `_id`, dotted paths through
-//! arrays, `$`, `$elemMatch`, `$slice`, `$meta` and expressions, with RefDb's errors.
+//! arrays, `$`, `$elemMatch`, `$slice`, `$meta` and expressions, with the reference server's
+//! errors.
 
 pub mod common;
 
@@ -372,7 +373,7 @@ fn malformed_projections() {
 }
 
 /// `{$meta: "sortKey"}` gives the values the document was sorted by, also on a dotted path,
-/// which goes into each element of an array (measured on a `refrouter` 9.0.4); the `$meta` the
+/// which goes into each element of an array (measured on a reference router 9.0.4); the `$meta` the
 /// query cannot give are refused.
 #[test]
 fn sort_key_and_metadata_checks() {

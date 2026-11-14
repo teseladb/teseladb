@@ -1,9 +1,9 @@
-//! The node's LDAP server (013 FR-025): RefDb Enterprise's options `--ldapServers`,
-//! `--ldapTransportSecurity`, `--ldapBindMethod`, `--ldapQueryUser`, `--ldapQueryPassword`,
-//! `--ldapUserToDNMapping` and `--ldapTimeoutMS`, and the connection a PLAIN login opens to run
-//! the conversation of [`teseladb_auth::ldap::Login`]: plain TCP with `none`, LDAPS (TLS from
-//! the first byte) with `tls`, trusting the system's certificate authorities. Each server of the
-//! list is tried in turn until one answers.
+//! The node's LDAP server (013 FR-025): the reference server's enterprise edition's options
+//! `--ldapServers`, `--ldapTransportSecurity`, `--ldapBindMethod`, `--ldapQueryUser`,
+//! `--ldapQueryPassword`, `--ldapUserToDNMapping` and `--ldapTimeoutMS`, and the connection a PLAIN
+//! login opens to run the conversation of [`teseladb_auth::ldap::Login`]: plain TCP with `none`,
+//! LDAPS (TLS from the first byte) with `tls`, trusting the system's certificate authorities. Each
+//! server of the list is tried in turn until one answers.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -24,7 +24,7 @@ use crate::tls_stream::TlsStream;
 const LDAP_PORT: u16 = 389;
 /// LDAPS's port.
 const LDAPS_PORT: u16 = 636;
-/// `--ldapTimeoutMS` by default, as RefDb.
+/// `--ldapTimeoutMS` by default, as the reference server.
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const NONE: &str = "none";
 const TLS: &str = "tls";
@@ -55,7 +55,7 @@ pub struct LdapOpts {
     pub fips: bool,
 }
 
-/// `ldapUserCacheInvalidationInterval` by default, as RefDb: 30 seconds.
+/// `ldapUserCacheInvalidationInterval` by default, as the reference server: 30 seconds.
 pub const DEFAULT_CACHE_INTERVAL_SECS: u64 = 30;
 
 /// The node's LDAP server, ready to log users in.
@@ -137,7 +137,7 @@ impl LdapServer {
             TLS => {
                 let trust =
                     system_trust().map_err(|e| format!("--ldapTransportSecurity tls: {e}"))?;
-                // TLS 1.2 or 1.3, as `refnode` reaches LDAP servers through OpenSSL.
+                // TLS 1.2 or 1.3, as the reference server reaches LDAP servers through OpenSSL.
                 let config = ClientConfig {
                     min_version: teseladb_tls::Version::Tls12,
                     ..ClientConfig::new(trust)
@@ -283,8 +283,8 @@ impl LdapServer {
     }
 
     /// With `--ldapAuthzQueryTemplate`, the roles of `user`, who logged in another way
-    /// (REFDB-X509, 013 FR-033): the DNs of its groups, roles of `admin`, kept like those of
-    /// a PLAIN login; `None` without the template. A name the mapping does not take has no
+    /// (X.509 authentication, 013 FR-033): the DNs of its groups, roles of `admin`, kept like those
+    /// of a PLAIN login; `None` without the template. A name the mapping does not take has no
     /// groups.
     pub fn groups(&self, user: &str) -> Result<Option<Vec<RoleName>>, String> {
         let Some(template) = &self.authz else { return Ok(None) };
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(shared, shared.clone());
     }
 
-    /// The groups of a REFDB-X509 user (013 T045): only with the authorization template,
+    /// The groups of a X.509 authentication user (013 T045): only with the authorization template,
     /// without a bind of the user, kept like those of a PLAIN login; a dead server is an error.
     #[test]
     fn groups_of_a_user_that_logged_in_another_way() {

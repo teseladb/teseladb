@@ -1,5 +1,5 @@
-//! `--keyFile` and `--clusterAuthMode` (013 T046, FR-034), as `refnode` 9.0.4 checks them
-//! (measured on 31-10-2026; every fault stops the start with code 1), and the warning a node
+//! `--keyFile` and `--clusterAuthMode` (013 T046, FR-034), as the reference server 9.0.4 checks
+//! them (measured on 31-10-2026; every fault stops the start with code 1), and the warning a node
 //! gives at start for each option that relaxes the secure default (constitution IX).
 
 use std::os::unix::fs::PermissionsExt;
@@ -48,7 +48,7 @@ fn start(line: &str) -> StartOpts {
 const KEY: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 #[test]
-fn key_files_are_checked_as_refnode_checks_them() {
+fn key_files_are_checked_as_the_reference_checks_them() {
     let d = Dir::new("keys");
     let good = d.file("good", KEY, 0o600);
     assert_eq!(read_key_file(Path::new(&good)), Ok(vec![KEY.to_owned()]));
@@ -106,8 +106,8 @@ fn the_mode_follows_the_options() {
 
 /// The connections a node opens use TLS with `preferTLS` and `requireTLS` (the default), not with
 /// `allowTLS` or without TLS: a `setParameter` of `clusterAuthMode` past `keyFile` then needs
-/// them (measured on 04-11-2026: a `refrouter` 9.0.4 with `allowTLS` answers 2 `BadValue`, a `refnode`
-/// with `preferTLS` 5579202).
+/// them (measured on 04-11-2026: a reference router 9.0.4 with `allowTLS` answers 2 `BadValue`, a
+/// reference replica set member with `preferTLS` 5579202).
 #[test]
 fn outgoing_connections_use_tls_with_prefer_and_require() {
     assert!(outgoing_tls(&start("start")));
@@ -186,8 +186,9 @@ fn the_start_checks_the_key_file_and_warns() {
     assert_eq!(code, 2, "{err}");
 }
 
-/// Members' certificates (measured on `refnode` and `refrouter` 9.0.4 with `clusterAuthMode` x509):
-/// the organization and unit of the node's certificate make a client certificate a member's.
+/// Members' certificates (measured on the reference server and the reference router 9.0.4 with
+/// `clusterAuthMode` x509): the organization and unit of the node's certificate make a client
+/// certificate a member's.
 #[test]
 fn a_members_certificate_shares_the_nodes_organization() {
     use teseladb_crypto::ec::NamedCurve;

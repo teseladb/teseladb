@@ -113,7 +113,7 @@ fn config_settings_takes_the_documents_its_validator_lets_through() {
     assert_eq!(code_of(&r), Some(&Value::Int32(11000)), "{r:?}");
     let r = insert(&mut c, Document::new().with("_id", AUTO_MERGE).with("enabled", false));
     assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
-    // An update that breaks the validator fails like a `refrouter`'s.
+    // An update that breaks the validator fails like a reference router's.
     let set = Document::new().with("$set", Document::new().with("value", 2000));
     let u = Document::new().with("q", Document::new().with("_id", CHUNK_SIZE)).with("u", set);
     let r = c.run(

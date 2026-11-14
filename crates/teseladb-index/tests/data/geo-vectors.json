@@ -1,6 +1,6 @@
 {
  "server": "9.0.4",
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "date": "2026-10-30",
  "method": "insert {_id: 1, loc: g} into a collection with {loc: \"2dsphere\"}; keys enumerated with find hint+min+returnKey, limit 1; errors are the write error with its errInfo. First measured on 7.0.45 (same keys; errors changed in 9.0)",
  "vectors": [

@@ -481,7 +481,7 @@ impl NetHandler for RingClients {
         if p.state.closed() || p.stop.load(Ordering::Acquire) {
             return false;
         }
-        // Over the limit the connection is closed at once, as `refnode` does.
+        // Over the limit the connection is closed at once, as the reference server does.
         if p.open.load(Ordering::Acquire) >= p.max {
             PortStats::add(&p.diag.stats.rejected, 1);
             return false;

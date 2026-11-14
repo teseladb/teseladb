@@ -4,8 +4,8 @@
 //! Fields that go through different arrays are refused with `CannotIndexParallelArrays`. A hashed
 //! field stores the hash of its value and refuses arrays; a `2dsphere` field stores the cells of
 //! its geometry and a `2d` field the geohash of its pair, and a document without a value for one
-//! of them has no entries (measured on refnode 7.0.45 and 9.0.4). A wildcard field gives one key
-//! per (path, value) it reaches ([`super::wildcard`]).
+//! of them has no entries (measured on the reference server 7.0.45 and 9.0.4). A wildcard field
+//! gives one key per (path, value) it reaches ([`super::wildcard`]).
 
 use std::collections::BTreeMap;
 
@@ -53,7 +53,8 @@ pub struct KeyValues<'a> {
     pub tuples: Vec<Vec<KeyValue<'a>>>,
     /// Some field went through an array.
     pub multikey: bool,
-    /// The paths of the arrays a wildcard field walked (RefDb keeps one entry per path).
+    /// The paths of the arrays a wildcard field walked (the reference server keeps one entry per
+    /// path).
     pub multikey_paths: Vec<String>,
 }
 
@@ -68,7 +69,8 @@ fn no_location(v: &RawValue<'_>) -> bool {
 }
 
 /// The cells of every measurement's geometry in bucket column `v` (015 FR-008); a value that
-/// stands for no location has none, and one that is no geometry fails as RefDb's 511.
+/// stands for no location has none, and one that is no geometry fails as the reference server's
+/// 511.
 fn bucket_geo_keys(field: &IndexField, v: RawValue<'_>) -> Result<Vec<i64>, KeygenError> {
     let RawValue::Binary { subtype: teseladb_bson::types::BINARY_COLUMN, bytes } = v else {
         return Ok(Vec::new());

@@ -134,7 +134,7 @@ fn update_walk_corners() {
     assert_eq!(code(r#"{"$rename": {"a.0.b": "c"}}"#, r#"{"a": [{"b": 1}]}"#), codes::BAD_VALUE);
     ok(r#"{"$addToSet": {"a": {"b": 1}}}"#, r#"{"a": []}"#, r#"{"a": [{"b": 1}]}"#);
     ok(r#"{"$set": {"a": {"$each": 1}}}"#, "{}", r#"{"a": {"$each": 1}}"#);
-    // `$pop` reads its argument as a whole number, with the messages of RefDb 9.0.4.
+    // `$pop` reads its argument as a whole number, with the messages of the reference server 9.0.4.
     for (value, msg) in [
         ("2.5", "Expected an integer: a: 2.5"),
         (r#"{"$numberDouble": "NaN"}"#, "Expected an integer, but found NaN in: a: nan"),
@@ -300,8 +300,8 @@ fn filter_corners() {
     assert!(m(r#"{"$alwaysTrue": 1.0}"#, "{}"));
     assert!(m(r#"{"a": {"$all": [{"b": 1}]}}"#, r#"{"a": [{"b": 1}]}"#));
     assert!(m(r#"{"a": {"$in": [{"b": 1}]}}"#, r#"{"a": {"b": 1}}"#));
-    // The last clause through an array gives the position, with the clauses in RefDb's order
-    // (kind, then path), as measured on a `refrouter` 9.0.4.
+    // The last clause through an array gives the position, with the clauses in the reference
+    // server's order (kind, then path), as measured on a reference router 9.0.4.
     let d = bytes(r#"{"a": [0, 1, 2, 3], "b": [2]}"#);
     for (filter, want) in [
         (r#"{"a": 1, "b": 2}"#, 0),

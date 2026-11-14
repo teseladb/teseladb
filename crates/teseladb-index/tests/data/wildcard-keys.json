@@ -1,6 +1,6 @@
 {
  "server": "9.0.4",
- "image": "ref@sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
+ "image": "reference server, sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058",
  "date": "2026-10-30",
  "method": "createIndex(key, options) on an empty collection, insert the document, keysPerIndex of validate as total; keys found with equality, $type (null, array, object) and $exists queries on every path and value of the document with hint + returnKey, read as raw BSON (undefined kept); the prefix fields of a compound index are added to each query; keys in index order, numbers as relaxed JSON",
  "cases": [

@@ -1,6 +1,6 @@
-//! `2d` keys (009 T021, FR-011), measured on refnode 7.0.45 (image `ref:7.0`,
+//! `2d` keys (009 T021, FR-011), measured on the reference server 7.0.45 (its 7.0 image,
 //! `sha256:8bb4442761a63a8dda452744082cdac9644b429807eb977b42324a63cef59ca4`) and again on 9.0.4
-//! (image `ref:9.0`, `sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058`,
+//! (its 9.0 image, `sha256:452bdaf2127b8ff851e31410a267809b9829eded219979f2210e7c7efb85a058`,
 //! same keys and errors), 30-10-2026: a
 //! document `{_id: 1, loc: <value>}` inserted into a collection with `{loc: "2d"}` and the options
 //! shown, and its key read with `find` + `hint` + `returnKey`.
@@ -45,7 +45,10 @@ fn geohashes_as_measured() {
 fn several_locations_and_values_without_keys() {
     let two = keys("[[1, 2], [3, 4]]", &DEFAULT_GRID).unwrap();
     assert_eq!(two.len(), 2);
-    assert_eq!(two[0], 0xc001_9e78_019e_7000, "RefDb's returnKey shows the first location");
+    assert_eq!(
+        two[0], 0xc001_9e78_019e_7000,
+        "the reference server's returnKey shows the first location"
+    );
     for none in ["\"x\"", "null", "[]", "{}"] {
         assert_eq!(keys(none, &DEFAULT_GRID), Ok(vec![]), "{none}");
     }

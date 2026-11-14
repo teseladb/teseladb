@@ -1,6 +1,6 @@
 //! `$geoWithin` and `$geoIntersects` without an index (009 T022, FR-012): the documents and the
-//! queries below were run on a `refnode` 9.0.4 (30-10-2026) and each query selects the `_id`s it
-//! selected there; the errors are its errors.
+//! queries below were run on a reference replica set member 9.0.4 (30-10-2026) and each query
+//! selects the `_id`s it selected there; the errors are its errors.
 
 use teseladb_bson::{RawDoc, extjson};
 use teseladb_index::geo::query::{GeoOperator, matches, parse_query};
@@ -54,7 +54,7 @@ fn error(op: GeoOperator, spec: &str) -> (i32, String) {
 }
 
 #[test]
-fn each_shape_selects_what_refdb_selected() {
+fn each_shape_selects_what_the_reference_selected() {
     use GeoOperator::{Intersects, Within};
     let planar = vec![1, 2, 3, 4, 5, 12, 17];
     assert_eq!(
@@ -76,7 +76,7 @@ fn each_shape_selects_what_refdb_selected() {
 }
 
 #[test]
-fn a_bad_shape_is_refused_as_refdb_refuses_it() {
+fn a_bad_shape_is_refused_as_the_reference_refuses_it() {
     use GeoOperator::{Intersects, Within};
     let cases = [
         (
@@ -101,8 +101,8 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
             "$geoIntersect not supported with provided geometry: { $geoIntersects: { $box: [ [ 0, 0 ], [ 5, 5 ] ] } }",
         ),
         (Within, r#"{"$center": [[0, 0], -1]}"#, "Radius must be a non-negative number: -1"),
-        // Measured on a `refrouter` 9.0.4 (02-11-2026): a missing radius, and a `$geometry` that
-        // is no geometry under each operator.
+        // Measured on a reference router 9.0.4 (02-11-2026): a missing radius, and a `$geometry`
+        // that is no geometry under each operator.
         (Within, r#"{"$center": [[0, 0]]}"#, "Radius must be a non-negative number: EOO"),
         (
             Intersects,
@@ -114,8 +114,8 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
             r#"{"$geometry": {"type": "Polygon", "coordinates": [[1]]}}"#,
             "GeoJSON coordinates must be an array, instead got type int",
         ),
-        // 009 T035, measured on a `refrouter` 9.0.4: a legacy shape under `$geoIntersects` is read
-        // first, so its own errors come before the refusal.
+        // 009 T035, measured on a reference router 9.0.4: a legacy shape under `$geoIntersects` is
+        // read first, so its own errors come before the refusal.
         (
             Intersects,
             r#"{"$box": []}"#,
@@ -148,8 +148,8 @@ fn a_bad_shape_is_refused_as_refdb_refuses_it() {
 
 #[test]
 fn a_geometry_partly_along_the_boundary_is_not_within() {
-    // Measured on refnode 9.0.4, with and without a 2dsphere index: polygons and lines along part
-    // of a side are not within the square; along a whole side, or equal to it, they are.
+    // Measured on the reference server 9.0.4, with and without a 2dsphere index: polygons and lines
+    // along part of a side are not within the square; along a whole side, or equal to it, they are.
     let poly = |c: &str| format!(r#"{{"type": "Polygon", "coordinates": [{c}]}}"#);
     let line = |c: &str| format!(r#"{{"type": "LineString", "coordinates": {c}}}"#);
     let docs = [
@@ -177,7 +177,7 @@ fn a_geometry_partly_along_the_boundary_is_not_within() {
 }
 
 /// 009 T035: `$geoIntersects` with `$centerSphere` is accepted and selects nothing, even a point
-/// at the centre (measured on a `refrouter` 9.0.4 on 02-11-2026: `[]` against `[1]` for
+/// at the centre (measured on a reference router 9.0.4 on 02-11-2026: `[]` against `[1]` for
 /// `$geoWithin` with the same cap).
 #[test]
 fn a_spherical_cap_under_geo_intersects_selects_nothing() {

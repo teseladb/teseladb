@@ -1,7 +1,8 @@
-//! Keys of a hashed index (FR-014): the same 64-bit integer RefDb gives a value, so that a hashed
-//! shard key and `$toHashedIndexKey` agree with it. RefDb does not document the function and its
-//! source is not consulted (constitution, principle V): it was measured on a real server with
-//! `convertShardKeyToHashed` (009 research R5, vectors in `tests/data/hashed-vectors.json`).
+//! Keys of a hashed index (FR-014): the same 64-bit integer the reference server gives a value, so
+//! that a hashed shard key and `$toHashedIndexKey` agree with it. The reference server does not
+//! document the function and its source is not consulted (constitution, principle V): it was
+//! measured on a real server with `convertShardKeyToHashed` (009 research R5, vectors in
+//! `tests/data/hashed-vectors.json`).
 //!
 //! The key is the first 8 bytes, little-endian, of the MD5 of a seed (`i32` 0) followed by the
 //! value: its type class (`i32`) and its bytes. Numbers hash by their integer value (`i64`): a
@@ -13,7 +14,7 @@
 use teseladb_bson::{Decimal, RawDoc, RawValue};
 use teseladb_hash::md5;
 
-/// The seed RefDb hashes with.
+/// The seed the reference server hashes with.
 const SEED: i32 = 0;
 
 /// Type classes of the hash.

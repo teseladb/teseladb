@@ -280,7 +280,7 @@ impl Parser<'_> {
         self.i += 1;
         let class = |item| Node::Class(vec![item], false);
         Ok(match c {
-            // The engine of a `refrouter` 9.0.4 has no Unicode properties (measured on 02-11).
+            // The engine of a reference router 9.0.4 has no Unicode properties (measured on 02-11).
             'p' | 'P' if self.unicode => {
                 return Err("invalid property name in regular expression".into());
             }
@@ -453,9 +453,9 @@ fn is_word(c: u32) -> bool {
     char::from_u32(c).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Canonicalize (ECMA-262 §22.2.2.7.3, without the `u` flag), which the engine of a `refrouter`
-/// 9.0.4 also applies with it (measured on 02-11: `/\u212A/iu` does not match `k`): the upper
-/// case of one character, unless it takes a non-ASCII character to ASCII.
+/// Canonicalize (ECMA-262 §22.2.2.7.3, without the `u` flag), which the engine of a reference
+/// router 9.0.4 also applies with it (measured on 02-11: `/\u212A/iu` does not match `k`): the
+/// upper case of one character, unless it takes a non-ASCII character to ASCII.
 fn fold(c: u32, icase: bool) -> u32 {
     if !icase {
         return c;
@@ -708,7 +708,7 @@ fn parts(it: &Interp, v: &Val) -> R<(Name, Name)> {
     {
         return Ok((s.clone(), f.clone()));
     }
-    // Measured on a `refrouter` 9.0.4 on 02-11: `exec method called on incompatible Object`.
+    // Measured on a reference router 9.0.4 on 02-11: `exec method called on incompatible Object`.
     let class = crate::builtins::class_name(v);
     Err(it.error("TypeError", &format!("{} method called on incompatible {class}", it.native)))
 }
@@ -777,8 +777,8 @@ fn remember(it: &mut Interp, s: &[u32], caps: &Caps, input: &Name) {
     it.last_match = Some((input.clone(), units));
 }
 
-/// The legacy statics of `RegExp` (Annex B, measured on a `refrouter` 9.0.4 on 02-11): `$1`…`$9`,
-/// `input` (`$_`), `lastMatch` (`$&`), `lastParen` (`$+`), `leftContext` (`` $` ``) and
+/// The legacy statics of `RegExp` (Annex B, measured on a reference router 9.0.4 on 02-11):
+/// `$1`…`$9`, `input` (`$_`), `lastMatch` (`$&`), `lastParen` (`$+`), `leftContext` (`` $` ``) and
 /// `rightContext` (`$'`), from the last successful match of the call.
 pub fn legacy_static(it: &mut Interp, _: &Val, _: &[Val]) -> R {
     let name = it.native.clone();
@@ -910,7 +910,7 @@ pub fn exec(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 
 /// `RegExp.prototype.test`.
 pub fn test(it: &mut Interp, this: &Val, a: &[Val]) -> R {
-    // Measured on a `refrouter` 9.0.4 on 02-11: `number is not a non-null object`.
+    // Measured on a reference router 9.0.4 on 02-11: `number is not a non-null object`.
     if !matches!(this, Val::Obj(_)) {
         return it.type_error(&crate::builtins::non_object(this));
     }
@@ -1220,7 +1220,7 @@ pub fn split(it: &mut Interp, s: &Name, rv: &Val, limit: usize) -> R {
 
 /// `String.prototype.matchAll`: a regular expression without `g` is an error; any other value
 /// with its own `Symbol.matchAll` method decides; a string is a pattern with `g` (measured on a
-/// `refrouter` 9.0.4 on 02-11). The matches are found when it is called.
+/// reference router 9.0.4 on 02-11). The matches are found when it is called.
 pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
     if this.is_nullish() {
         return it.type_error(&format!(
@@ -1261,8 +1261,8 @@ pub fn match_all(it: &mut Interp, this: &Val, a: &[Val]) -> R {
 }
 
 /// `this` of the methods `RegExp.prototype[Symbol.match]` and the others: a regular expression
-/// (measured on a `refrouter` 9.0.4 on 02-11: `number is not a non-null object`, `[Symbol.search]
-/// method called on incompatible Object`).
+/// (measured on a reference router 9.0.4 on 02-11: `number is not a non-null object`,
+/// `[Symbol.search] method called on incompatible Object`).
 fn symbol_this(it: &mut Interp, this: &Val) -> R<()> {
     if !matches!(this, Val::Obj(_)) {
         return it.type_error(&format!("{} is not a non-null object", this.type_of()));

@@ -5,7 +5,7 @@
 //! A `2dsphere` field is scanned through the cells of a covering of the query region: every
 //! indexed cell inside a covering cell (its range of descendants) and every coarser indexed cell
 //! that contains one (its ancestors from the coarsest indexed level), merged where they overlap or
-//! touch. Measured on refnode 7.0.45 with `explain` (`tests/planner_api.rs`).
+//! touch. Measured on the reference server 7.0.45 with `explain` (`tests/planner_api.rs`).
 
 use teseladb_bson::{Collator, RawValue, compare};
 use teseladb_keys::{
@@ -16,9 +16,9 @@ use crate::geo::cells::CellId;
 use crate::geo::cover::{CoverOptions, Region, covering};
 use crate::keygen::{FieldKind, IndexDef, hashed_key};
 
-/// RefDb's `BadValue`, the code of a `hint` that names no usable index.
+/// The reference server's `BadValue`, the code of a `hint` that names no usable index.
 pub const BAD_VALUE: i32 = 2;
-/// The reason RefDb's planner gives for such a `hint`.
+/// The reason the reference server's planner gives for such a `hint`.
 pub const HINT_NOT_FOUND: &str = "hint provided does not correspond to an existing index";
 
 /// Covering limits of query regions on a `2dsphere` index (measured).
@@ -57,8 +57,8 @@ pub struct CatalogIndex {
     /// Some document went through an array on one of its fields.
     pub multikey: bool,
     /// The paths of the arrays a wildcard field walked in some document
-    /// ([`crate::keygen::KeyValues::multikey_paths`]); RefDb counts one index entry per path
-    /// in `validate` and shows them in `explain`.
+    /// ([`crate::keygen::KeyValues::multikey_paths`]); the reference server counts one index entry
+    /// per path in `validate` and shows them in `explain`.
     pub multikey_paths: Vec<String>,
     /// State.
     pub state: IndexState,
@@ -97,8 +97,8 @@ impl IndexCatalog {
         self.indexes.iter().filter(move |i| i.usable_at(read_ts))
     }
 
-    /// The index `hint` names, if a read at `read_ts` may use it; otherwise RefDb's error code
-    /// and reason (a hidden index or one not ready counts as missing).
+    /// The index `hint` names, if a read at `read_ts` may use it; otherwise the reference server's
+    /// error code and reason (a hidden index or one not ready counts as missing).
     pub fn resolve_hint(
         &self,
         hint: Hint<'_>,

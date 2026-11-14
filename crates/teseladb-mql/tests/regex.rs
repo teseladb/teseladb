@@ -1,6 +1,6 @@
-//! The regular expression engine against PCRE2's syntax as RefDb uses it (006 T013, FR-015):
-//! options, classes, quantifiers, groups, references, lookaround, the limit of steps and the
-//! compile errors.
+//! The regular expression engine against PCRE2's syntax as the reference server uses it (006 T013,
+//! FR-015): options, classes, quantifiers, groups, references, lookaround, the limit of steps and
+//! the compile errors.
 
 use teseladb_mql::codes;
 use teseladb_mql::regex::{MAX_PATTERN_LEN, Regex};

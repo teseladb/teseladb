@@ -1,7 +1,7 @@
 //! Reads with a read preference no replica can satisfy (007 FR-013, D-093): a single node has no
 //! follower. With `maxTimeMS` the read waits until it ends (`MaxTimeMSExpired`); without it, the
-//! selection limit of a refrouter 9.0.4 (15 s, measured), then `FailedToSatisfyReadPreference`
-//! naming the range's replica group.
+//! selection limit of a reference router 9.0.4 (15 s, measured), then
+//! `FailedToSatisfyReadPreference` naming the range's replica group.
 
 mod common;
 

@@ -1,6 +1,6 @@
 //! Update operators (006 T020, FR-012, FR-013): field and array operators, positional paths with
-//! `arrayFilters`, the `$push` modifiers, replacement documents, upserts, the order RefDb
-//! applies them in and the errors of conflicting paths and the immutable `_id`.
+//! `arrayFilters`, the `$push` modifiers, replacement documents, upserts, the order the reference
+//! server applies them in and the errors of conflicting paths and the immutable `_id`.
 
 pub mod common;
 
@@ -507,10 +507,11 @@ fn pipelines_go_to_the_integration_point() {
     assert!(out.modified);
 }
 
-/// What a pipeline gives against the stored `_id`, measured on a `refrouter` 9.0.4 (03-11-2026):
-/// without `_id` it keeps the stored one, first; another `_id` is error 66; a top-level name with
-/// `$` (from `$setField`) is stored; and the update counts as a change when the pipeline's
-/// document differs from the stored one, even if putting the `_id` back makes them equal.
+/// What a pipeline gives against the stored `_id`, measured on a reference router 9.0.4
+/// (03-11-2026): without `_id` it keeps the stored one, first; another `_id` is error 66; a
+/// top-level name with `$` (from `$setField`) is stored; and the update counts as a change when the
+/// pipeline's document differs from the stored one, even if putting the `_id` back makes them
+/// equal.
 #[test]
 fn a_pipeline_keeps_the_stored_id_and_may_write_dollar_names() {
     let u = parse(r#"[{"$set": {"a": 1}}]"#, None).unwrap();
@@ -986,8 +987,8 @@ fn errors() {
 
 #[test]
 fn documents_over_16_mib_are_the_servers_to_refuse() {
-    // The update itself goes past 16 MiB: the server refuses to store it with RefDb's words for
-    // an update or an upsert (003 T009, teseladb-wire `stored_bytes`).
+    // The update itself goes past 16 MiB: the server refuses to store it with the reference
+    // server's words for an update or an upsert (003 T009, teseladb-wire `stored_bytes`).
     let big = "x".repeat(9 * 1024 * 1024);
     let doc = format!(r#"{{"a": "{big}"}}"#);
     let update = parse(&format!(r#"{{"$set": {{"b": "{big}"}}}}"#), None).unwrap();
@@ -1006,7 +1007,7 @@ fn documents_over_16_mib_are_the_servers_to_refuse() {
 }
 
 /// A positional segment can be any element, so it meets a position of the same array (measured
-/// on a `refrouter` 9.0.4).
+/// on a reference router 9.0.4).
 #[test]
 fn positional_paths_conflict_with_positions() {
     let u = |spec: &str| {

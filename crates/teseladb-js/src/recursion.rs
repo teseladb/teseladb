@@ -1,5 +1,5 @@
-//! How deep the calls of a program go before `too much recursion`, as a `refrouter` 9.0.4 counts
-//! them (016 A016-3-18, measured on 02-11).
+//! How deep the calls of a program go before `too much recursion`, as a reference router 9.0.4
+//! counts them (016 A016-3-18, measured on 02-11).
 //!
 //! Its engine counts two things. The frames of functions: the program's function and every
 //! function it calls, the builtins it writes in JavaScript (`map`, `forEach`, `replace`…)
@@ -43,9 +43,9 @@ pub const SELF_HOSTED_ENTRY: usize = 48;
 pub const NATIVE_FRAME: usize = 2_830;
 
 // What the constructs of a parse take of the engine's stack, in the units of [`NATIVE_BUDGET`]
-// (measured on a `refrouter` 9.0.4 on 02-11 with nesting of each kind, in a program's function and
-// in an `eval`): 330 and 341 unary operators, 66 and 69 parentheses or template substitutions, 168
-// and 173 blocks, 83 and 86 argument lists, 33 and 34 object literals in parentheses, 27 and 28
+// (measured on a reference router 9.0.4 on 02-11 with nesting of each kind, in a program's function
+// and in an `eval`): 330 and 341 unary operators, 66 and 69 parentheses or template substitutions,
+// 168 and 173 blocks, 83 and 86 argument lists, 33 and 34 object literals in parentheses, 27 and 28
 // function expressions in parentheses, 331 and 342 conditional operators, 335 and 345 `if`.
 
 /// A statement other than those below.
@@ -79,7 +79,7 @@ pub const NESTING: usize = 2_865;
 /// that native's frame (172 nested arrays converted to a string).
 pub const NATIVE_CONVERSION: usize = 80;
 /// The arrow functions nested in one another after which the engine's stack runs out: in a
-/// program and in an `eval` (measured as a trap of the `refrouter`).
+/// program and in an `eval` (measured as a trap of the reference router).
 pub const TOP_ARROWS: usize = 313;
 /// See [`TOP_ARROWS`].
 pub const EVAL_ARROWS: usize = 315;

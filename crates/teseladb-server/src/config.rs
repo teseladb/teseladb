@@ -1,6 +1,7 @@
-//! The configuration file of `teseladb start --config` (001 FR-021): the keys of the `refnode` file
-//! for the options that have one in RefDb and the `teseladb.*` section for TeselaDB's own,
-//! turned into command line options that go before the real command line, which therefore wins.
+//! The configuration file of `teseladb start --config` (001 FR-021): the keys of the reference
+//! server's file for the options that have one in the reference server and the `teseladb.*` section
+//! for TeselaDB's own, turned into command line options that go before the real command line, which
+//! therefore wins.
 
 use teseladb_json::{Value, parse_yaml, to_string};
 
@@ -122,7 +123,7 @@ const KEYS: &[(&str, Kind)] = &[
     ),
 ];
 
-/// Most verbose level of `systemLog.verbosity`, as in `refnode`.
+/// Most verbose level of `systemLog.verbosity`, as in the reference server.
 const MAX_VERBOSITY: u64 = 5;
 
 /// A scalar as the command line writes it.

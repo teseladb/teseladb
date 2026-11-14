@@ -70,7 +70,7 @@ fn loops_and_polygons() {
     assert!(Loop::new(vec![d(0.0, 0.0), d(1.0, 0.0)]).contains(d(0.0, 0.0)));
 }
 
-/// Reasons measured on refnode 9.0.4 for values outside `tests/data/geo-reading.json`.
+/// Reasons measured on the reference server 9.0.4 for values outside `tests/data/geo-reading.json`.
 #[test]
 fn reading_rejections_measured_one_by_one() {
     assert_eq!(
@@ -106,7 +106,8 @@ fn reading_rejections_measured_one_by_one() {
         reason("{\"type\": \"Point\", \"coordinates\": [1, 2], \"crs\": {\"type\": \"name\"}}"),
         "CRS must have field \"properties\" which is an object, instead got type missing"
     );
-    assert!(geo("{\"type\": \"Polygon\", \"coordinates\": [[[0, 0], [1, 0], [1, 1], [0, 0]]], \"crs\": {\"type\": \"name\", \"properties\": {\"name\": \"urn:x-refdb:crs:strictwinding:EPSG:4326\"}}}").is_ok());
+    let strict = teseladb_names::GEO_CRS_STRICT_WINDING;
+    assert!(geo(&format!("{{\"type\": \"Polygon\", \"coordinates\": [[[0, 0], [1, 0], [1, 1], [0, 0]]], \"crs\": {{\"type\": \"name\", \"properties\": {{\"name\": \"{strict}\"}}}}}}")).is_ok());
     assert_eq!(type_name(None), "missing");
     assert!(geo("[{\"$numberLong\": \"10\"}, {\"$numberDecimal\": \"5\"}]").is_ok());
 }
@@ -150,8 +151,8 @@ fn relations_between_shapes() {
     );
     let collection = geo("{\"type\": \"GeometryCollection\", \"geometries\": [{\"type\": \"Point\", \"coordinates\": [2.5, 2.6]}, {\"type\": \"MultiLineString\", \"coordinates\": [[[3, 3], [3.5, 3.5]]]}]}").unwrap();
     assert!(within(&collection, &container));
-    // The line runs along the triangle's last side against its direction: on a `refrouter` 9.0.4
-    // it does not meet the triangle, and the same side walked the triangle's way does.
+    // The line runs along the triangle's last side against its direction: on a reference router
+    // 9.0.4 it does not meet the triangle, and the same side walked the triangle's way does.
     let triangle = geo(
         "{\"type\": \"MultiPolygon\", \"coordinates\": [[[[3, 3], [3.5, 3], [3.5, 3.5], [3, 3]]]]}",
     )
@@ -172,13 +173,13 @@ fn shell_values() {
     );
 }
 
-/// A line and a polygon intersect as RefDb clips the line to the polygon (S2's
+/// A line and a polygon intersect as the reference server clips the line to the polygon (S2's
 /// `IntersectWithPolyline`): a piece of positive length must lie inside, with the boundary
 /// decided by the symbolic perturbation, and an edge shared in the polygon's direction counts.
-/// Measured on a `refrouter` 9.0.4 (`lc12`), with and without a `2dsphere` index, for the square
-/// given counterclockwise and clockwise.
+/// Measured on a reference router 9.0.4 (`lc12`), with and without a `2dsphere` index, for the
+/// square given counterclockwise and clockwise.
 #[test]
-fn lines_meet_a_polygon_as_refdb_clips_them() {
+fn lines_meet_a_polygon_as_the_reference_clips_them() {
     let lines: [(&str, &str, bool); 17] = [
         ("A", "[[1, 0], [3, 0]]", false),
         ("B", "[[0, 0], [5, 0]]", true),
@@ -214,7 +215,7 @@ fn lines_meet_a_polygon_as_refdb_clips_them() {
 }
 
 /// A polygon a billionth of a degree wide is that small square, not the rest of the sphere
-/// (measured on a `refrouter` 9.0.4: it meets a point inside it and none far away).
+/// (measured on a reference router 9.0.4: it meets a point inside it and none far away).
 #[test]
 fn a_tiny_polygon_is_its_small_side() {
     let tiny = geo(

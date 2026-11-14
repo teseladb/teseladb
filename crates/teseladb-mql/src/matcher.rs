@@ -1,6 +1,6 @@
-//! Evaluation of a filter on a document (FR-009) with RefDb's semantics of dotted paths and
-//! arrays: a path crosses arrays of documents, a numeric segment also picks an element, and at
-//! the end of the path most predicates match the value or any element of an array.
+//! Evaluation of a filter on a document (FR-009) with the reference server's semantics of dotted
+//! paths and arrays: a path crosses arrays of documents, a numeric segment also picks an element,
+//! and at the end of the path most predicates match the value or any element of an array.
 
 use std::cell::Cell;
 use std::cmp::Ordering;
@@ -32,11 +32,12 @@ pub struct MatchContext<'a> {
 #[derive(Debug)]
 pub struct Filter {
     expr: Expr,
-    /// The same filter with its conjunctions in RefDb's order, when that order differs, for the
-    /// position of `$` ([`crate::canonical`]); the upsert and the validators follow `expr`.
+    /// The same filter with its conjunctions in the reference server's order, when that order
+    /// differs, for the position of `$` ([`crate::canonical`]); the upsert and the validators
+    /// follow `expr`.
     ordered: Option<Expr>,
-    /// The tree a query evaluates, in RefDb's order, when it leaves out `$_internalExpr…`
-    /// comparisons ([`crate::implied`]).
+    /// The tree a query evaluates, in the reference server's order, when it leaves out
+    /// `$_internalExpr…` comparisons ([`crate::implied`]).
     run: Option<Expr>,
     /// The tree a query evaluates, compiled for the register machine (010 FR-031).
     program: Box<crate::vm::Program>,
@@ -147,7 +148,7 @@ impl Filter {
         &self.expr
     }
 
-    /// The tree with its conjunctions in RefDb's order ([`crate::canonical`]).
+    /// The tree with its conjunctions in the reference server's order ([`crate::canonical`]).
     pub(crate) fn ordered_expr(&self) -> &Expr {
         self.ordered.as_ref().unwrap_or(&self.expr)
     }
@@ -280,7 +281,7 @@ impl<'c, 'a> Eval<'c, 'a> {
     }
 
     /// Records the position of an array a predicate matched through; the last predicate that
-    /// records one wins, as in RefDb (`{$all: [2, 3]}` gives the position of 3).
+    /// records one wins, as in the reference server (`{$all: [2, 3]}` gives the position of 3).
     fn hit(&self, pos: Option<usize>) {
         if self.record && pos.is_some() {
             self.pos.set(pos);
@@ -558,7 +559,7 @@ fn regex_matches(re: &Regex, v: Option<RawValue<'_>>) -> Result<bool> {
 }
 
 /// The length of binary data as BSON stores it: subtype 2 keeps its 4-byte inner length in front
-/// of the bytes, and the bit operators test those bytes too (measured on a `refrouter` 9.0.4).
+/// of the bytes, and the bit operators test those bytes too (measured on a reference router 9.0.4).
 pub(crate) fn stored_len(subtype: u8, bytes: &[u8]) -> usize {
     bytes.len() + if subtype == BINARY_OLD { 4 } else { 0 }
 }

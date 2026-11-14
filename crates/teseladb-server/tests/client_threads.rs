@@ -274,8 +274,8 @@ fn log_in(s: &mut TcpStream, user: &str, password: &str) {
 
 /// A logged-in client that leaves while its thread runs its command (a `getMore` waiting for new
 /// documents of a capped collection): the thread closes the connection when the command ends, and
-/// its logout is recorded then, as RefDb Enterprise 9.0.4 records the logout of every
-/// authenticated client that disconnects.
+/// its logout is recorded then, as the reference server's enterprise edition 9.0.4 records the
+/// logout of every authenticated client that disconnects.
 #[test]
 fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
     let dir = std::env::temp_dir().join(format!("teseladb-threads-{}", std::process::id()));

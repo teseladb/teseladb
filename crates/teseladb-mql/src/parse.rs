@@ -1,6 +1,6 @@
 //! Query filters read into an [`Expr`] tree (FR-009, FR-010): every query operator, with the
-//! errors RefDb gives for malformed ones. `$text`, the geospatial operators, `$where` and
-//! `$expr` are read here and evaluated through [`crate::Extensions`].
+//! errors the reference server gives for malformed ones. `$text`, the geospatial operators,
+//! `$where` and `$expr` are read here and evaluated through [`crate::Extensions`].
 
 use teseladb_bson::{RawDoc, RawValue};
 
@@ -67,9 +67,9 @@ pub enum Pred {
     /// Ordered against the value.
     Cmp(CmpOp, OwnedValue),
     /// Ordered against the value as an expression compares (`$_internalExprGt` and the others
-    /// that the partial filters of a time series' bucket indexes use, 015): in RefDb's order
-    /// across types, on the whole value; an array on the path matches, and a missing value
-    /// sorts before every value (measured on 9.0.4).
+    /// that the partial filters of a time series' bucket indexes use, 015): in the reference
+    /// server's order across types, on the whole value; an array on the path matches, and a missing
+    /// value sorts before every value (measured on 9.0.4).
     ExprCmp(CmpOp, OwnedValue),
     /// Equal to the value as an expression compares (`$_internalExprEq`): on the whole value; an
     /// array on the path matches, and a missing value never does.
@@ -178,7 +178,7 @@ pub fn parse(doc: RawDoc<'_>, usage: FilterUse) -> Result<Expr> {
 }
 
 /// The `$near` and `$nearSphere` of a filter, which are only taken at the top level or inside
-/// `$and` (and a `$or` of one clause, which RefDb removes).
+/// `$and` (and a `$or` of one clause, which the reference server removes).
 fn near_count(e: &Expr, top: bool) -> Result<usize> {
     let sum = |items: &[Expr], top: bool| -> Result<usize> {
         items.iter().map(|e| near_count(e, top)).sum::<Result<usize>>()

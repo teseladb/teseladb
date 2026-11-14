@@ -1,7 +1,7 @@
-//! The globals of the RefDb shell that the JavaScript engine of RefDb 9.0.4 defines in every
-//! scope (measured on a `refrouter` 9.0.4 on 02-11): the native ones here, and those that engine
-//! writes in JavaScript (`tojson`, `assert`, `hex_md5`…) in `prelude.js`, TeselaDB's own code
-//! written from their measured inputs, outputs and errors.
+//! The globals of the reference shell that the JavaScript engine of the reference server 9.0.4
+//! defines in every scope (measured on a reference router 9.0.4 on 02-11): the native ones here,
+//! and those that engine writes in JavaScript (`tojson`, `assert`, `hex_md5`…) in `prelude.js`,
+//! TeselaDB's own code written from their measured inputs, outputs and errors.
 
 use teseladb_bson::{Document, RawDoc, Value};
 
@@ -10,7 +10,7 @@ use crate::builtins::method;
 use crate::interp::{Ctrl, Fatal, Interp, R};
 use crate::value::*;
 
-/// What `getJSHeapLimitMB()` gives on the `refrouter` 9.0.4.
+/// What `getJSHeapLimitMB()` gives on the reference router 9.0.4.
 const HEAP_LIMIT_MB: f64 = 100.0;
 /// Binary subtypes of `UUID` and `MD5`.
 const SUBTYPE_UUID_OLD: u8 = 3;
@@ -64,8 +64,8 @@ fn proto_of_ctor(g: &ObjRef, name: &str) -> ObjRef {
 }
 
 /// What the shell adds to the prototypes of the built-ins and of the BSON types (measured on a
-/// `refrouter` 9.0.4 on 02-11): `ltrim` and `rtrim` of strings, `tojson` and `toJSON` of regular
-/// expressions.
+/// reference router 9.0.4 on 02-11): `ltrim` and `rtrim` of strings, `tojson` and `toJSON` of
+/// regular expressions.
 fn prototype_additions(it: &mut Interp, g: &ObjRef) -> R<()> {
     let p = proto_of_ctor(g, "String");
     assigned(it, &p, "ltrim", "trimStart", crate::strings::trim_start)?;
@@ -137,8 +137,8 @@ fn wrapped(it: &mut Interp, v: &Val) -> R<Document> {
 }
 
 /// `bsonsize(o)`, on `Object.prototype`: the size of `o` as a BSON document, 0 for `null`
-/// (measured on a `refrouter` 9.0.4 on 02-11). An object that is not a document (a date, a regular
-/// expression, a function) counts as an empty one.
+/// (measured on a reference router 9.0.4 on 02-11). An object that is not a document (a date, a
+/// regular expression, a function) counts as an empty one.
 fn bson_size(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     if a.len() != 1 {
         return Err(it.error("Error", "bsonsize needs 1 argument"));
@@ -233,7 +233,7 @@ fn get_immutable(it: &mut Interp, _: &Val, a: &[Val]) -> R {
     crate::bson::from_document(it, &d, 0)
 }
 
-/// RefDb's canonical order of BSON types, whose difference `woCompare` gives.
+/// The reference server's canonical order of BSON types, whose difference `woCompare` gives.
 fn canonical(v: &Value) -> i64 {
     match v {
         Value::MinKey => -1,

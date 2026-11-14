@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 teseladb-bson = { workspace = true }
+teseladb-names = { workspace = true }
 
 [dev-dependencies]
 teseladb-types = { workspace = true }
