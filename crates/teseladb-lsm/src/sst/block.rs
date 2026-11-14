@@ -1127,6 +1127,50 @@ mod tests {
         assert_eq!((c.pending(), c.value_slice()), (None, doc(5).as_slice()));
     }
 
+    /// FR-035: an old version goes whole when the builder writes no deltas or when the version
+    /// handed as its next newer one is of another key; a whole entry has no base to be given.
+    #[test]
+    fn an_old_version_goes_whole_without_deltas_or_against_another_key() {
+        use crate::entry::internal_key;
+        let at = |p: u64| teseladb_keys::Hlc { physical: p, logical: 0 };
+        let doc = vec![7u8; 200];
+        let newer = (internal_key(b"k", at(9)), doc.clone());
+        let other = (internal_key(b"j", at(9)), doc.clone());
+        let builders =
+            [(BlockBuilder::new(16), &newer), (BlockBuilder::new(16).with_deltas(), &other)];
+        for (mut b, (nkey, nvalue)) in builders {
+            b.add_old(&internal_key(b"k", at(5)), Kind::Put, &doc, (nkey, nvalue));
+            let payload = b.finish();
+            assert!(payload.len() > doc.len(), "{} bytes", payload.len());
+            let block = Block::parse(Bytes::from_vec(payload)).unwrap();
+            let mut c = BlockCursor::first(block).unwrap();
+            assert_eq!((c.pending(), c.base(), c.value_slice()), (None, None, doc.as_slice()));
+            assert_eq!(c.resolve(&doc), Err(Bad));
+        }
+    }
+
+    /// A delta mark on the entry after a reference is refused: a reference is never a base.
+    #[test]
+    fn a_delta_after_a_reference_is_refused() {
+        use crate::entry::internal_key;
+        let ts = |p| teseladb_keys::Hlc { physical: p, logical: 0 };
+        let mut b = BlockBuilder::new(16);
+        b.add(&internal_key(b"k", ts(9)), Kind::Put, &[7u8; 50]);
+        b.add_ref(&internal_key(b"k", ts(8)), Kind::Put, b"ref-8");
+        b.add(&internal_key(b"k", ts(7)), Kind::Put, &[7u8; 50]);
+        let block = Block::parse(Bytes::from_vec(b.finish())).unwrap();
+        let mut raw = block.data.to_vec();
+        // The last entry's kind byte comes right before its value.
+        let value_at = raw.windows(50).rposition(|w| w.iter().all(|x| *x == 7)).unwrap();
+        assert_eq!(raw[value_at - 1], Kind::Put as u8);
+        raw[value_at - 1] |= PATCH;
+        let broken = Block::parse(Bytes::from_vec(raw)).unwrap();
+        let mut c = BlockCursor::first(broken).unwrap();
+        c.advance().unwrap();
+        assert!(c.is_ref());
+        assert_eq!(c.advance(), Err(Bad));
+    }
+
     #[test]
     fn a_base_with_another_flag_or_too_short_is_refused() {
         for (flags, value) in

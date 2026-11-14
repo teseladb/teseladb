@@ -785,3 +785,19 @@ fn an_export_of_part_of_the_keys_passes_over_the_deltas_outside_it() {
         );
     }
 }
+
+#[test]
+fn a_file_ref_names_each_of_its_files_once() {
+    let p = |s: &str| std::path::PathBuf::from(s);
+    let written = FileRef::new(p("x/9.sst"), 10);
+    assert_eq!(written.paths().collect::<Vec<_>>(), [&p("x/9.sst")]);
+    // A linked file with a history file whose value files it shares in part.
+    let linked = FileRef {
+        history: Some((p("x/4.sst"), 7)),
+        values: vec![(p("x/6.val"), 3), (p("x/5.val"), 2)],
+        history_values: vec![(p("x/5.val"), 2), (p("x/8.val"), 1)],
+        ..FileRef::new(p("x/3.sst"), 20)
+    };
+    let names: Vec<_> = linked.paths().cloned().collect();
+    assert_eq!(names, [p("x/3.sst"), p("x/4.sst"), p("x/5.val"), p("x/6.val"), p("x/8.val")]);
+}

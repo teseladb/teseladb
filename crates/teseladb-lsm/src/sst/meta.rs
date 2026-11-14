@@ -300,6 +300,9 @@ mod tests {
             let e = packed.encode();
             assert_eq!(Props::decode(&e), Ok(packed));
             assert_eq!(Props::decode(&e[..e.len() - 1]), Err(Bad));
+            let mut trailing = e.clone();
+            trailing.push(0);
+            assert_eq!(Props::decode(&trailing), Err(Bad), "a byte after the shapes");
         }
         let mut no_shape = Props { zones: Some((12_288, 300)), ..p.clone() }.encode();
         no_shape.push(0);

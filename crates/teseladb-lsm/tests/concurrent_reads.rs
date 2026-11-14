@@ -271,10 +271,13 @@ fn a_reader_sees_what_its_mark_sees() {
     let after = shared.view();
     let (ask, _asks) = mpsc::channel();
     let read = |v: &SharedView, at| get(&shared, v, &ask, b"k", at).map(|r| r.3);
+    let (gets, _) = teseladb_lsm::outside_probes();
     assert_eq!(read(&before, ts(1, 5)), Some(b"one".to_vec()));
     assert_eq!(read(&after, ts(1, 5)), Some(b"one".to_vec()));
     assert_eq!(read(&after, ts(9, 0)), Some(b"two".to_vec()));
     assert_eq!(read(&after, ts(0, 9)), None);
+    // The counts are the process's, which other tests add to meanwhile.
+    assert!(teseladb_lsm::outside_probes().0 >= gets + 4);
 }
 
 #[test]
@@ -295,6 +298,26 @@ fn a_cached_view_belongs_to_its_lsm() {
     assert_eq!(get(&s1, &first, &ask, b"k", ts(5, 0)).map(|r| r.3), Some(b"one".to_vec()));
     let second = s2.view_cached(&mut cache).clone();
     assert_eq!(get(&s2, &second, &ask, b"k", ts(5, 0)).map(|r| r.3), Some(b"two".to_vec()));
+    // Nothing published since: the cache keeps the view, whose active memtable takes the
+    // core's writes. A flush the core publishes puts them in a file of a new version, which the
+    // cache takes; the view it kept before still reads them from its memtable, now frozen.
+    two.put(GroupId(1), 2, b"k", ts(6, 0), b"newer").expect("write");
+    let kept = s2.view_cached(&mut cache).clone();
+    assert_eq!(get(&s2, &kept, &ask, b"k", ts(9, 0)).map(|r| r.3), Some(b"newer".to_vec()));
+    assert!(!kept.may_exist(b"absent"));
+    two.flush();
+    two.run_io(&mut d2, Nanos::ZERO);
+    two.publish();
+    let newer = s2.view_cached(&mut cache).clone();
+    let (ask, asks) = mpsc::channel();
+    let reader = thread::spawn(move || get(&s2, &newer, &ask, b"k", ts(9, 0)).map(|r| r.3));
+    let mut served = 0;
+    while !reader.is_finished() {
+        served += serve(&mut d2, &asks);
+        thread::yield_now();
+    }
+    assert_eq!(reader.join().unwrap(), Some(b"newer".to_vec()));
+    assert!(served > 0, "the new version reads the key from its file");
 }
 
 #[test]
@@ -345,6 +368,8 @@ fn the_shared_cache_forgets_the_blocks_of_a_deleted_file() {
             SharedStep::Item(_) => seen += 1,
             SharedStep::Done => break,
             SharedStep::Need(need) => {
+                let shown = format!("{need:?}");
+                assert!(shown.contains(&need.path) && shown.contains("offset"), "{shown}");
                 let bytes = read_block(&mut disk, &need);
                 shared.supply(&need, &bytes).expect("a good block");
             }
@@ -352,6 +377,12 @@ fn the_shared_cache_forgets_the_blocks_of_a_deleted_file() {
         }
     }
     assert_eq!(seen, 400);
+    // What a log line of a read shows: the directory, and where the block it waits for is.
+    assert!(format!("{shared:?}").contains("core-00/lsm"), "{shared:?}");
+    let mut again = view.scan(b"k", b"l", ts(2, 0));
+    let SharedStep::Item(_) = again.next(&shared) else { panic!("cached blocks read at once") };
+    assert!(format!("{again:?}").contains("start: [107]"), "{again:?}");
+    drop(again);
     drop(s);
     drop(view);
     assert!(shared.cache_bytes() > 0, "the reads filled the shared cache");

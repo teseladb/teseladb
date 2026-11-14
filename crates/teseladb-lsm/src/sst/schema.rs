@@ -313,6 +313,10 @@ mod tests {
         assert!(p.pack(&doc_key(7, 1), &no_name_end).is_none(), "a value cut short");
         no_name_end[5] = 0x02;
         assert!(p.pack(&doc_key(7, 1), &no_name_end).is_none(), "a string cut short");
+        let tiny = [DOCUMENT_VALUE, 3, 0, 0, 0];
+        assert!(p.pack(&doc_key(7, 1), &tiny[..4]).is_none(), "shorter than a frame");
+        let no_end_zero = [DOCUMENT_VALUE, 12, 0, 0, 0, 0x02, b'a', 0, 0, 0, 0, 0, 0];
+        assert!(p.pack(&doc_key(7, 1), &no_end_zero).is_none(), "a string without its zero");
         assert!(p.finish().is_empty());
     }
 

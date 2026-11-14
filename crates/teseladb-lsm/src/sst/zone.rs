@@ -424,4 +424,56 @@ mod tests {
         flags[at] = 0x80;
         assert!(ZoneMap::decode(&flags, 1).is_err());
     }
+
+    #[test]
+    fn a_zone_block_with_no_fields_too_many_or_bounds_upside_down_does_not_decode() {
+        // One field `a`, one summarised block with `a` within `[min, max]`.
+        let payload = |min: &[u8], max: &[u8]| {
+            let mut out = Vec::new();
+            put_varint(&mut out, 1);
+            put_bytes(&mut out, b"a");
+            put_varint(&mut out, 1);
+            out.push(SUMMARISED);
+            out.push(WITHIN);
+            put_bytes(&mut out, min);
+            put_bytes(&mut out, max);
+            out
+        };
+        let (three, five) = (enc(RawValue::Int32(3)), enc(RawValue::Int32(5)));
+        let map = ZoneMap::decode(&payload(&three, &five), 1).unwrap();
+        assert_eq!(map.block(0).unwrap().field("a"), Bounds::Within { min: &three, max: &five });
+        assert!(ZoneMap::decode(&payload(&five, &three), 1).is_err());
+        let mut unknown_tag = payload(&three, &five);
+        let tag_at = unknown_tag.len() - 2 * (1 + three.len()) - 1;
+        unknown_tag[tag_at] = 9;
+        assert!(ZoneMap::decode(&unknown_tag, 1).is_err());
+        let mut none = Vec::new();
+        put_varint(&mut none, 0);
+        put_varint(&mut none, 0);
+        assert!(ZoneMap::decode(&none, 0).is_err());
+        let mut many = Vec::new();
+        put_varint(&mut many, (MAX_FIELDS + 1) as u64);
+        assert!(ZoneMap::decode(&many, 0).is_err());
+    }
+
+    #[test]
+    fn history_values_keep_the_block_summarised_and_fields_past_the_tracked_ones_are_dropped() {
+        let mut z = ZoneBuilder::default();
+        // Nothing ended yet: there is no block whose versions go on.
+        z.continues();
+        let mut wide = Document::new().with("a", 1i32);
+        for i in 0..MAX_TRACKED {
+            wide = wide.with(format!("f{i:02}").as_str(), 1i32);
+        }
+        z.add(&ikey(1, 9), Kind::Put, Some(&stored(wide.clone())));
+        z.add(&ikey(1, 5), Kind::Put, Some(&[HISTORY_VALUE, 1, 2]));
+        z.add(&ikey(2, 9), Kind::Put, Some(&stored(wide)));
+        z.end_block();
+        let map = ZoneMap::decode(&z.finish().unwrap(), 1).unwrap();
+        let b = map.block(0).expect("summarised, its last key does not go on");
+        let one = enc(RawValue::Int32(1));
+        assert_eq!(b.field("a"), Bounds::Within { min: &one, max: &one });
+        let last = format!("f{:02}", MAX_TRACKED - 1);
+        assert_eq!(b.field(&last), Bounds::Unknown, "past the names it tracks");
+    }
 }

@@ -276,3 +276,40 @@ fn a_file_whose_dictionary_the_manifest_does_not_have_marks_the_core_corrupt() {
         other => panic!("{:?}", other.map(|_| ())),
     }
 }
+
+/// Only a collection with enough sampled values gets a dictionary: keys outside any collection
+/// are not sampled, nor values too small to teach it anything, and a collection's samples stop
+/// at the bytes the dictionary's size allows.
+#[test]
+fn a_dictionary_is_trained_only_from_values_worth_sampling() {
+    let cfg = LsmConfig { dict_bytes: 1 << 10, ..with(Codec::ZstdDict) };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    let (mut model, mut clock) = (Model::default(), 0);
+    // About 200 KiB of documents, twice the samples a dictionary of 1 KiB takes, each written
+    // twice: the older versions go to history files.
+    write_docs(&mut lsm, &mut disk, &mut model, (7, 0, 800), &mut clock);
+    write_docs(&mut lsm, &mut disk, &mut model, (7, 0, 800), &mut clock);
+    for i in 0..300u32 {
+        clock += 1;
+        let tiny = format!("{i}").into_bytes();
+        let key = doc_key(8, i);
+        lsm.put(G, clock, &key, ts(clock, 0), &tiny).unwrap();
+        model.write(&key, ts(clock, 0), Kind::Put, &tiny);
+        let outside = [b"\x02settings-".as_slice(), &i.to_be_bytes()].concat();
+        let value = doc(&mut Rng::new(u64::from(i)), i);
+        lsm.put(G, clock, &outside, ts(clock, 0), &value).unwrap();
+        model.write(&outside, ts(clock, 0), Kind::Put, &value);
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    compact_all(&mut lsm, &mut disk);
+    let trained = lsm.dictionaries();
+    assert_eq!(trained.len(), 1, "{trained:?}");
+    assert_eq!(trained[0].0, doc_key(7, 0)[..9].to_vec());
+    check_all(&mut lsm, &mut disk, &model, clock + 1);
+    // Nothing new to learn from: the next compaction keeps the dictionary as it is.
+    compact_all(&mut lsm, &mut disk);
+    assert_eq!(lsm.dictionaries(), trained);
+    check_all(&mut lsm, &mut disk, &model, clock + 1);
+}

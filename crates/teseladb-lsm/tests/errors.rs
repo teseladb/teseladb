@@ -38,6 +38,7 @@ fn a_bad_checksum_in_a_block_marks_the_core_corrupt() {
         Err(LsmError::Corrupt { file: number, offset: 0 })
     );
     assert!(lsm.health().is_err());
+    assert_eq!(lsm.failure(), Some(&LsmError::Corrupt { file: number, offset: 0 }));
     let mut s = v.scan(b"", b"z", ts(2, 0));
     assert!(matches!(s.next(&mut lsm), teseladb_lsm::Step::Failed(LsmError::Corrupt { .. })));
 }
@@ -167,4 +168,113 @@ fn a_failed_read_of_a_compaction_stops_the_core() {
     disk.inject_error("read", IoErrno::Io);
     lsm.run_io(&mut disk, Nanos::ZERO);
     assert_eq!(lsm.health(), Err(LsmError::Stopped(IoErrno::Io)));
+}
+
+#[test]
+fn a_read_that_missed_waits_until_its_blocks_come_back_or_a_read_fails() {
+    let cfg = small();
+    let mut disk = SimDisk::default();
+    let mut lsm = open(&cfg, &mut disk);
+    lsm.put(G, 1, b"k", ts(1, 0), b"v").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    assert_eq!(lsm.failure(), None);
+    let v = lsm.view();
+    let before = lsm.block_reads_asked();
+    assert!(lsm.block_reads_back(before), "nothing asked yet");
+    assert!(matches!(v.get(&mut lsm, b"k", ts(2, 0)), Lookup::Miss(_)));
+    let due = lsm.block_reads_asked();
+    assert!(due > before);
+    assert!(!lsm.block_reads_back(due), "the block is not read yet");
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    assert!(lsm.block_reads_back(due));
+    assert!(matches!(v.get(&mut lsm, b"k", ts(2, 0)), Lookup::Hit(_)));
+    // A read that fails answers every request waiting, also one waiting for later reads.
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    let v = lsm.view();
+    assert!(matches!(v.get(&mut lsm, b"k", ts(2, 0)), Lookup::Miss(_)));
+    let due = lsm.block_reads_asked();
+    disk.inject_error("read", IoErrno::Io);
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    assert!(lsm.block_reads_back(due + 10));
+    assert_eq!(lsm.failure(), Some(&LsmError::Stopped(IoErrno::Io)));
+}
+
+#[test]
+fn a_backward_scan_fails_once_the_core_stops_and_an_ended_one_stays_ended() {
+    let cfg = small();
+    let mut disk = SimDisk::default();
+    let mut lsm = open(&cfg, &mut disk);
+    // A file that holds only a range tombstone, which the scan has no key to take from.
+    lsm.delete_range(G, 1, b"x", b"y", ts(1, 0)).unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.put(G, 2, b"k", ts(1, 0), b"v").unwrap();
+    let v = lsm.view();
+    let mut s = v.scan_back(b"a", b"z", ts(2, 0));
+    assert!(matches!(s.next(&mut lsm), teseladb_lsm::Step::Item(i) if i.key == b"k"));
+    assert!(matches!(s.next(&mut lsm), teseladb_lsm::Step::Done));
+    assert!(matches!(s.next(&mut lsm), teseladb_lsm::Step::Done), "still ended");
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    drop(lsm);
+    let mut lsm = open(&cfg, &mut disk);
+    let v = lsm.view();
+    let mut s = v.scan_back(b"a", b"z", ts(2, 0));
+    assert!(matches!(s.next(&mut lsm), teseladb_lsm::Step::Miss(_)));
+    disk.inject_error("read", IoErrno::Io);
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let failed = s.next(&mut lsm);
+    assert!(matches!(failed, teseladb_lsm::Step::Failed(LsmError::Stopped(IoErrno::Io))));
+}
+
+/// Every way of walking a file stops with the core corrupt at a damaged block in its middle,
+/// after giving the keys before it.
+#[test]
+fn a_scan_that_meets_a_damaged_block_fails() {
+    use teseladb_lsm::Step;
+    let cfg = small();
+    let mut disk = SimDisk::default();
+    let mut lsm = open(&cfg, &mut disk);
+    for i in 0..400u64 {
+        let key = format!("k{i:04}");
+        lsm.put(G, i + 1, key.as_bytes(), ts(1 + i, 0), &[i as u8; 200]).unwrap();
+    }
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    drop(lsm);
+    let sst = sst_path(&mut disk, &cfg.dir);
+    let len = disk.read_all(&sst).unwrap().len() as u64;
+    assert!(disk.corrupt(&sst, len / 3));
+    for name in ["forward", "backward", "by time"] {
+        let mut lsm = open(&cfg, &mut disk);
+        let v = lsm.view();
+        let (mut items, mut failed) = (0, None);
+        let mut s_fwd = v.scan(b"k", b"l", ts(999, 0));
+        let mut s_back = v.scan_back(b"k", b"l", ts(999, 0));
+        let mut s_time = v.scan_time(b"k", b"l", ts(0, 0), ts(999, 0));
+        for _ in 0..10_000 {
+            let step = match name {
+                "forward" => s_fwd.next(&mut lsm),
+                "backward" => s_back.next(&mut lsm),
+                _ => s_time.next(&mut lsm),
+            };
+            match step {
+                Step::Item(_) => items += 1,
+                Step::Miss(_) => {
+                    lsm.run_io(&mut disk, Nanos::ZERO);
+                }
+                Step::Done => break,
+                Step::Failed(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(matches!(failed, Some(LsmError::Corrupt { .. })), "{name}: {failed:?}");
+        assert!(items > 0 && items < 400, "{name}: {items}");
+    }
 }

@@ -53,6 +53,7 @@ fn an_interval_is_measured_in_memory_and_in_files_and_cut_near_its_middle() {
     let half = lsm.interval_size(&key(1_000), &end);
     assert!(half.bytes * 3 > files.bytes && half.bytes * 3 < files.bytes * 2);
     assert_eq!(lsm.interval_size(&[0x02], &[0x03]), IntervalSize::default());
+    assert_eq!(lsm.interval_size(&[0x00], &key(0)), IntervalSize::default(), "below every file");
 }
 
 #[test]
