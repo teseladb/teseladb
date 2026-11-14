@@ -11,6 +11,7 @@ use teseladb_meta::group0::{
     SNAPSHOT_VERSION_WITHOUT_TENANT_STATE,
 };
 use teseladb_meta::node_versions::{FORMAT, all_run, format_of, key as node_key, snapshot_format};
+use teseladb_meta::request::RequestId;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_meta::tenants::{
     DEFAULT_TENANT, ServiceUser, TENANT_FIELD, TenantLimits, TenantState, qualified_db, split_db,
@@ -51,6 +52,21 @@ fn create(tenant: u32, db: &str, coll: &str) -> Group0Command {
         options: Vec::new(),
         if_absent: false,
     })
+}
+
+#[test]
+fn a_tenant_created_twice_by_the_same_request_is_created_once_with_its_first_answer() {
+    // The administration port asks again with the same request when an answer is late (T052).
+    let mut sm = cluster();
+    let req = RequestId { origin: NodeId(1), id: 1_794_700_000_000_000_000 };
+    let once = Group0Command::Idempotent { req, cmd: Box::new(create_tenant("acme")) };
+    assert_eq!(apply(&mut sm, 2, once.clone()), Group0Result::Tenant(1));
+    assert_eq!(apply(&mut sm, 3, once), Group0Result::Tenant(1));
+    assert_eq!(sm.tenants.list(), vec![(1, "acme")]);
+    // Another request for the same name is refused, as a plain one.
+    let other = RequestId { id: req.id + 1, ..req };
+    let again = Group0Command::Idempotent { req: other, cmd: Box::new(create_tenant("acme")) };
+    assert_eq!(apply(&mut sm, 4, again), Group0Result::Err(Group0Error::TenantExists));
 }
 
 #[test]

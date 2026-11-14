@@ -2,9 +2,13 @@
 //! the administration port under [`TENANTS`], what a node answers on them, and the command line's
 //! part. A tenant goes only when it has no database and no user left.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use teseladb_bson::{Document, Value};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::Group0Error;
+use teseladb_meta::request::RequestId;
 
 use crate::admin::{AdminBackend, AdminError, Answer, NodeAdmin, json};
 use crate::admin_http::{HttpRequest, HttpResponse, Method};
@@ -312,12 +316,74 @@ pub(crate) fn listed(a: &NodeAdmin) -> Result<(Vec<Listed>, bool), AdminError> {
 /// A tenant of the list: its number, its name and its state.
 pub(crate) type Listed = (u32, String, teseladb_meta::tenants::TenantState);
 
-/// Proposes tenant change `cmd` of tenant `name` through node `a`.
+/// How long a tenant change waits for Group 0 to take it: through an election, or a leader that
+/// a loaded host slows down, a change is not lost because one answer of core 0 came late.
+pub const GROUP0_WAIT: Duration = Duration::from_secs(15);
+/// The pause before core 0 is asked again.
+const RETRY_PAUSE: Duration = Duration::from_millis(20);
+// The client waits for the change and then for this node's list of tenants (`create`), or for
+// the list before the change (`admin_tenant_state::apply`); the last ask may start just before
+// the deadline.
+const _: () = assert!(
+    crate::admin_http::ANSWER_WAIT.as_secs()
+        > GROUP0_WAIT.as_secs() + 2 * crate::admin::CORE_WAIT.as_secs()
+);
+
+/// The number of this node's next tenant change: growing, as Group 0 remembers the results of
+/// each node's latest requests (`teseladb_meta::request`), and above every number an earlier life
+/// of the node gave, since it starts from the wall clock.
+fn next_request() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    let mut last = LAST.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(last.saturating_add(1));
+        match LAST.compare_exchange_weak(last, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
+}
+
+/// Proposes tenant change `cmd` of tenant `name` through node `a`, for as long as
+/// [`GROUP0_WAIT`]. The change goes with a request number, so that asking again after an answer
+/// that did not come, or a Group 0 without a leader, gets the result of the change Group 0 took
+/// instead of applying it twice: a `tenant create` that went through is never refused as
+/// existing by its own second attempt.
 pub(crate) fn change(a: &NodeAdmin, name: &str, cmd: Group0Command) -> Result<(), AdminError> {
-    match a.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Security(cmd), tx)) {
-        Some(CatalogAnswer::Done(_)) => Ok(()),
-        Some(CatalogAnswer::Refused(e)) => Err(refusal(name, e)),
-        _ => Err(AdminError::unavailable("Group 0 did not answer")),
+    let req = RequestId { origin: a.handle.node, id: next_request() };
+    let ask = |cmd: &Group0Command| {
+        a.ask(0, |tx| NodeMsg::Catalog(CatalogReq::Security(cmd.clone()), tx))
+    };
+    match propose(req, cmd, Instant::now() + GROUP0_WAIT, ask) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(refusal(name, e)),
+        None => Err(AdminError::unavailable("Group 0 did not answer")),
+    }
+}
+
+/// Asks core 0 with `ask` to take `cmd` as request `req` until it answers or `until` passes:
+/// Group 0's result, or `None` without one. Every attempt sends the same request.
+fn propose(
+    req: RequestId,
+    cmd: Group0Command,
+    until: Instant,
+    mut ask: impl FnMut(&Group0Command) -> Option<CatalogAnswer>,
+) -> Option<Result<(), Group0Error>> {
+    let cmd = Group0Command::Idempotent { req, cmd: Box::new(cmd) };
+    loop {
+        match ask(&cmd) {
+            Some(CatalogAnswer::Done(_)) => return Some(Ok(())),
+            Some(CatalogAnswer::Refused(e)) => return Some(Err(e)),
+            // No leader yet, or no answer within the core's wait: the same request again.
+            _ => {}
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(RETRY_PAUSE);
     }
 }
 
@@ -361,6 +427,38 @@ pub fn drop(a: &NodeAdmin, name: &str) -> Answer {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_is_asked_again_as_the_same_request_until_group_0_answers() {
+        let req = RequestId { origin: teseladb_types::NodeId(3), id: next_request() };
+        let create = Group0Command::CreateTenant { name: "acme".into() };
+        let mut seen = Vec::new();
+        // No answer within the core's wait, then no leader, then the result.
+        let mut answers =
+            vec![None, Some(CatalogAnswer::Unavailable), Some(CatalogAnswer::Done(None))]
+                .into_iter();
+        let until = Instant::now() + Duration::from_secs(60);
+        let r = propose(req, create.clone(), until, |cmd| {
+            seen.push(cmd.clone());
+            answers.next().flatten()
+        });
+        assert_eq!(r, Some(Ok(())));
+        let wrapped = Group0Command::Idempotent { req, cmd: Box::new(create.clone()) };
+        assert_eq!(seen, vec![wrapped.clone(), wrapped.clone(), wrapped]);
+        // Group 0's refusal ends it at once.
+        let mut asked = 0;
+        let r = propose(req, create.clone(), until, |_| {
+            asked += 1;
+            Some(CatalogAnswer::Refused(Group0Error::TenantExists))
+        });
+        assert_eq!((r, asked), (Some(Err(Group0Error::TenantExists)), 1));
+        // Without an answer it gives up at the deadline.
+        let r = propose(req, create, Instant::now() + Duration::from_millis(50), |_| None);
+        assert_eq!(r, None);
+        // Request numbers grow.
+        let (a, b) = (next_request(), next_request());
+        assert!(b > a);
+    }
 
     #[test]
     fn the_words_and_answers_of_the_command_line() {
