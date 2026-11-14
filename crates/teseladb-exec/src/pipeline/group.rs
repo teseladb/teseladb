@@ -20,6 +20,10 @@ use crate::expr::arith::type_name_of;
 use crate::expr::{Ctx, Expr, Scope, order};
 
 mod bucket;
+mod partial;
+
+pub use partial::PartialGroups;
+pub(super) use partial::wire_limits;
 
 pub use bucket::{Bucket, BucketAuto};
 pub(super) use bucket::{BucketAutoRun, Bucketing};
@@ -194,27 +198,6 @@ impl Group {
     }
 }
 
-/// The groups of a `$group` over one part of its input, before their values are finished (010
-/// FR-034): in the order they appeared, each with its canonical key, its key and its
-/// accumulators' states. The groups of consecutive parts merge into those of the whole
-/// ([`Group::merge_parts`]).
-#[derive(Clone, Debug, Default)]
-pub struct PartialGroups {
-    list: Vec<(Vec<u8>, Value, Vec<Part>)>,
-}
-
-impl PartialGroups {
-    /// How many groups.
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    /// Whether there are none.
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-}
-
 impl Group {
     /// Whether the states of every accumulator merge, so that the groups of parts of the input
     /// give those of the whole ([`Accumulator::merges`]).
@@ -270,6 +253,9 @@ impl Group {
         let mut held = 0usize;
         for part in parts {
             for (canon, key, states) in part.list {
+                if !self.holds(&states) {
+                    return Ok(None);
+                }
                 let Some(&i) = index.get(&canon) else {
                     held += super::errors::value_size(&key);
                     index.insert(canon, list.len());

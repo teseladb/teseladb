@@ -7,7 +7,7 @@
 use teseladb_keys::VERSION_LEN;
 
 use crate::lsm::Lsm;
-use crate::memtable::ENTRY_OVERHEAD;
+use crate::memtable::version_bytes;
 
 /// What an interval of keys takes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -54,10 +54,7 @@ impl Lsm {
                 if k >= end {
                     break;
                 }
-                pieces.push((
-                    k.to_vec(),
-                    key.len() as u64 + slot.value.len() as u64 + ENTRY_OVERHEAD,
-                ));
+                pieces.push((k.to_vec(), version_bytes(key.len(), slot.value.len())));
                 at = m.next_after(pos, key);
             }
         }

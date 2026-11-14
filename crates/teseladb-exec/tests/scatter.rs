@@ -6,7 +6,7 @@
 
 use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::Ctx;
-use teseladb_exec::pipeline::{Env, PartialGroups, Pipeline};
+use teseladb_exec::pipeline::{Env, PartialGroups, Pipeline, Program};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
 use teseladb_bson::{Decimal128, Document, RawDoc, RawValue, Value};
 
@@ -192,6 +192,36 @@ fn scattered(
     split.finish(&pipeline, partials, env).transpose()
 }
 
+/// [`scattered`] with the program and every part's groups through their bytes, as they go to
+/// and come back from the leader of a range on another node; each encoding gives back its own
+/// bytes once decoded.
+fn scattered_over_the_wire(
+    stages: &[Document],
+    rows: &[Vec<(Vec<u8>, Vec<u8>)>],
+    env: &TestEnv,
+    sbe: bool,
+) -> Option<Result<Vec<Document>, MqlError>> {
+    let pipeline = parse(stages);
+    let split = pipeline.scatter(stages, sbe, env.limit).expect("the pipeline splits");
+    let sent = split.program().encode().expect("a program encodes");
+    let program = Program::decode(&sent).expect("its bytes decode");
+    assert_eq!(program.encode().expect("again"), sent, "{stages:?}");
+    let mut partials: Vec<PartialGroups> = Vec::new();
+    for part in rows {
+        let groups = program.run(part)?;
+        let bytes = groups.encode().expect("groups encode");
+        let back = PartialGroups::decode(&bytes).expect("their bytes decode");
+        assert_eq!(back.encode().expect("again"), bytes, "{stages:?}");
+        partials.push(back);
+    }
+    split.finish(&pipeline, partials, env).transpose()
+}
+
+/// The canonical bytes of an answer, or its error.
+fn outcome(r: Option<Result<Vec<Document>, MqlError>>) -> Option<Result<Vec<Vec<u8>>, String>> {
+    r.map(|r| r.map(|d| canonical(&d)).map_err(|e| format!("{e:?}")))
+}
+
 fn canonical(docs: &[Document]) -> Vec<Vec<u8>> {
     docs.iter().map(|d| d.to_bytes().expect("small")).collect()
 }
@@ -295,4 +325,91 @@ fn pipelines_that_read_more_than_the_document_do_not_split() {
     for stages in cases {
         assert!(parse(&stages).scatter(&stages, true, PLENTY.limit).is_none(), "{stages:?}");
     }
+}
+
+/// Sums of every width, doubles with fractions and NaN, decimals, huge longs, strings and the
+/// order of `$first` and `$last`: through their bytes, the program and the groups give exactly
+/// what they give in the node, refusals included.
+#[test]
+fn the_program_and_the_groups_go_through_their_bytes_unchanged() {
+    for seed in 1..=60u64 {
+        let mut rng = Rng(seed * 0xA24B_AED4);
+        let n = 1 + rng.below(300);
+        let value = if seed % 2 == 0 { whole } else { any };
+        let input = docs(&mut rng, n, value);
+        let rows = parts(&mut rng, &input);
+        for stages in pipelines() {
+            for sbe in [false, true] {
+                let here = outcome(scattered(&stages, &rows, &PLENTY, sbe));
+                let there = outcome(scattered_over_the_wire(&stages, &rows, &PLENTY, sbe));
+                assert_eq!(there, here, "seed {seed} {stages:?} {sbe}");
+            }
+        }
+    }
+    // Past the memory limit the merge fails as in one core, through the bytes too.
+    let mut rng = Rng(7);
+    let input = docs(&mut rng, 500, whole);
+    let rows: Vec<Vec<(Vec<u8>, Vec<u8>)>> = input
+        .chunks(20)
+        .map(|c| c.iter().map(|d| (Vec::new(), d.to_bytes().expect("small"))).collect())
+        .collect();
+    let stages = vec![group_all("$_id".into())];
+    let strict = TestEnv { limit: 4_000, disk: false };
+    let here = outcome(scattered(&stages, &rows, &strict, false));
+    assert!(matches!(here, Some(Err(_))), "{here:?}");
+    assert_eq!(outcome(scattered_over_the_wire(&stages, &rows, &strict, false)), here);
+}
+
+/// Totals at their edges keep every bit: a sum of longs past 2^63 in its 128 bits, a negative
+/// zero, an infinity, a decimal and an average's plain sum.
+#[test]
+fn totals_at_their_edges_keep_every_bit_through_their_bytes() {
+    let values = [
+        Value::Int64(i64::MAX),
+        Value::Int64(i64::MAX),
+        Value::Double(-0.0),
+        Value::Double(f64::INFINITY),
+        Value::Double(0.1),
+        Value::Decimal128(Decimal128::from_parts(true, 12_345, 3).expect("d")),
+        Value::Int32(-7),
+    ];
+    for upto in 1..=values.len() {
+        let input: Vec<Document> = values[..upto]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| Document::new().with("_id", i as i32).with("k", 1).with("v", v.clone()))
+            .collect();
+        let rows = vec![input.iter().map(|d| (Vec::new(), d.to_bytes().expect("small"))).collect()];
+        for stages in pipelines() {
+            for sbe in [false, true] {
+                let here = outcome(scattered(&stages, &rows, &PLENTY, sbe));
+                let there = outcome(scattered_over_the_wire(&stages, &rows, &PLENTY, sbe));
+                assert_eq!(there, here, "{upto} {stages:?} {sbe}");
+            }
+        }
+    }
+}
+
+#[test]
+fn bytes_that_are_not_a_program_do_not_decode() {
+    let program = |d: Document| Program::decode(&d.to_bytes().expect("small"));
+    assert!(Program::decode(b"junk").is_none());
+    assert!(program(Document::new()).is_none());
+    let base = || {
+        Document::new()
+            .with("m", Value::Array(vec![]))
+            .with("g", Document::new().with("_id", Value::Null))
+            .with("s", false)
+            .with("l", 10i64)
+    };
+    assert!(program(base()).is_some());
+    let mut extra = base();
+    extra.insert("x", 1);
+    assert!(program(extra).is_none());
+    let mut bad_match = base();
+    bad_match.insert("m", Value::Array(vec![1.into()]));
+    assert!(program(bad_match).is_none());
+    let mut negative = base();
+    negative.insert("l", -1i64);
+    assert!(program(negative).is_none());
 }

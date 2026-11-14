@@ -71,6 +71,9 @@ pub struct LsmConfig {
     /// A value longer than this goes to a value file, and the file of its key keeps a reference
     /// (FR-034).
     pub value_separation_bytes: usize,
+    /// Whether the data files store the documents of a shape of theirs packed (003 FR-024);
+    /// `false` writes them whole, as the files written before.
+    pub pack_documents: bool,
 }
 
 /// Default size of a dictionary: zstd's own default for trained dictionaries.
@@ -104,6 +107,7 @@ impl Default for LsmConfig {
             manifest_rotate_bytes: 64 << 20,
             encryption: None,
             value_separation_bytes: VALUE_SEPARATION_BYTES,
+            pack_documents: true,
         }
     }
 }

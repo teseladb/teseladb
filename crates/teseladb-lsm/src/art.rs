@@ -6,7 +6,13 @@
 //! The tree walks the bytes of a sort key that the map makes from each key with its [`Order`]:
 //! the order of the sort keys is the order of the map, and no sort key may be the start of
 //! another. A memtable's internal keys, whose order is not the order of their bytes, get a sort
-//! key that is (`crate::entry::byte_order`).
+//! key that is (`crate::entry::byte_order`). A leaf keeps only the key: the order compares a key
+//! with a sort key without building the key's, and the writer and a walk build it in a buffer
+//! they reuse.
+//!
+//! The map counts the bytes it takes from the allocator ([`Art::heap_bytes`]): its nodes, the
+//! keys of its leaves, the boxes of its values, the lists of what it replaced and the writer's
+//! buffers, all of which stay until it drops. The values' own heap is the caller's to count.
 //!
 //! Readers never see a node change under them except in ways they can follow:
 //! - a node of 4 or 16 children gets a new child at the end of its arrays: the byte and the
@@ -44,7 +50,7 @@
 
 use std::cell::UnsafeCell;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 /// State that only the writer touches, behind a flag that makes a second writer at the same
 /// time fail at once instead of waiting: the core is the only writer of its memtables, so the
@@ -83,13 +89,25 @@ impl<T> WriterCell<T> {
     }
 }
 
-/// How a map makes the sort key of a key, appending it to the buffer.
-pub(crate) type Order = fn(&[u8], &mut Vec<u8>);
+/// How a map makes the sort key of a key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Order {
+    /// Appends the sort key of a key to the buffer.
+    pub(crate) encode: fn(&[u8], &mut Vec<u8>),
+    /// The order of the sort key of a key (the first argument) against a sort key.
+    pub(crate) compare: fn(&[u8], &[u8]) -> std::cmp::Ordering,
+}
 
-/// The sort key of a key whose bytes already sort in the map's order.
-pub(crate) fn bytes_order(key: &[u8], out: &mut Vec<u8>) {
+fn copy_bytes(key: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(key);
 }
+
+fn compare_bytes(key: &[u8], sort: &[u8]) -> std::cmp::Ordering {
+    key.cmp(sort)
+}
+
+/// The order of keys whose bytes already sort in the map's order: a key is its sort key.
+pub(crate) const BYTES_ORDER: Order = Order { encode: copy_bytes, compare: compare_bytes };
 
 type Link<V> = AtomicPtr<Node<V>>;
 
@@ -98,21 +116,15 @@ fn empty<V>() -> Link<V> {
 }
 
 struct Leaf<V> {
-    /// The sort key, then the key.
-    bytes: Box<[u8]>,
-    split: usize,
+    key: Box<[u8]>,
     /// Its number in the order of insertion, from 1.
     seq: usize,
     value: AtomicPtr<V>,
 }
 
 impl<V> Leaf<V> {
-    fn sort(&self) -> &[u8] {
-        &self.bytes[..self.split]
-    }
-
     fn key(&self) -> &[u8] {
-        &self.bytes[self.split..]
+        &self.key
     }
 }
 
@@ -210,6 +222,16 @@ impl<V> Kids<V> {
                 }
                 Kids::N256(Box::new(links))
             }
+        }
+    }
+
+    /// The bytes it takes from the allocator besides its node.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Kids::N4(_) => 0,
+            Kids::N16(_) => size_of::<Small<V, 16>>(),
+            Kids::N48(_) => size_of::<Node48<V>>(),
+            Kids::N256(_) => size_of::<[Link<V>; 256]>(),
         }
     }
 
@@ -323,10 +345,13 @@ impl<V> Kids<V> {
     }
 }
 
-/// What only the writer touches: the nodes and values it replaced.
+/// What only the writer touches: the nodes and values it replaced, and the buffers it builds
+/// sort keys in.
 struct Writer<V> {
     nodes: Vec<*mut Node<V>>,
     values: Vec<*mut V>,
+    ours: Vec<u8>,
+    theirs: Vec<u8>,
 }
 
 // SAFETY: the retired pointers are owned nodes and values that only the map frees, in `drop`;
@@ -337,6 +362,8 @@ unsafe impl<V: Send> Send for Writer<V> {}
 pub(crate) struct Art<V> {
     root: Link<V>,
     len: AtomicUsize,
+    /// Bytes taken from the allocator; only the writer raises it.
+    heap: AtomicU64,
     writer: WriterCell<Writer<V>>,
     order: Order,
 }
@@ -384,10 +411,23 @@ impl<'a, V> Entry<'a, V> {
         // guarantees.
         unsafe { &*v }
     }
+}
 
-    /// The entry after it.
-    pub(crate) fn next(&self) -> Option<Entry<'a, V>> {
-        self.art.bound(self.leaf.sort(), true)
+/// The entries from one on, in order, building each sort key in the same buffer.
+pub(crate) struct Walk<'a, V> {
+    at: Option<Entry<'a, V>>,
+    sort: Vec<u8>,
+}
+
+impl<'a, V> Iterator for Walk<'a, V> {
+    type Item = Entry<'a, V>;
+
+    fn next(&mut self) -> Option<Entry<'a, V>> {
+        let e = self.at?;
+        self.sort.clear();
+        (e.art.order.encode)(e.key(), &mut self.sort);
+        self.at = e.art.bound(&self.sort, true);
+        Some(e)
     }
 }
 
@@ -399,12 +439,30 @@ fn shared(a: &[u8], b: &[u8]) -> usize {
 impl<V> Art<V> {
     /// An empty map ordered by the sort keys `order` makes.
     pub(crate) fn new(order: Order) -> Art<V> {
+        let writer =
+            Writer { nodes: Vec::new(), values: Vec::new(), ours: Vec::new(), theirs: Vec::new() };
         Art {
             root: empty(),
             len: AtomicUsize::new(0),
-            writer: WriterCell::new(Writer { nodes: Vec::new(), values: Vec::new() }),
+            heap: AtomicU64::new(0),
+            writer: WriterCell::new(writer),
             order,
         }
+    }
+
+    /// What a leaf and its value's box take from the allocator besides its key: the least a key
+    /// adds to [`Art::heap_bytes`].
+    pub(crate) const LEAF_BYTES: u64 = (size_of::<Node<V>>() + size_of::<V>()) as u64;
+
+    /// Bytes the map holds from the allocator: its nodes, those it replaced, the keys, the boxes
+    /// of the values, the lists of what it replaced and the writer's sort-key buffers. Not the
+    /// values' own heap.
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        self.heap.load(Ordering::Relaxed)
+    }
+
+    fn grow(&self, bytes: usize) {
+        self.heap.store(self.heap.load(Ordering::Relaxed) + bytes as u64, Ordering::Relaxed);
     }
 
     /// Number of keys.
@@ -414,7 +472,7 @@ impl<V> Art<V> {
 
     fn sort_key(&self, key: &[u8]) -> Vec<u8> {
         let mut s = Vec::with_capacity(key.len() + 4);
-        (self.order)(key, &mut s);
+        (self.order.encode)(key, &mut s);
         s
     }
 
@@ -478,7 +536,7 @@ impl<V> Art<V> {
     ) -> Option<&'a Leaf<V>> {
         let inner = match n {
             Node::Leaf(l) => {
-                let at = l.sort().cmp(s);
+                let at = (self.order.compare)(l.key(), s);
                 let after = at.is_gt() || (!strict && at.is_eq());
                 return (after && l.seq <= moment).then_some(l);
             }
@@ -514,7 +572,10 @@ impl<V> Art<V> {
         moment: usize,
     ) -> Option<&'a Leaf<V>> {
         let inner = match n {
-            Node::Leaf(l) => return (l.sort() < s && l.seq <= moment).then_some(l),
+            Node::Leaf(l) => {
+                let before = (self.order.compare)(l.key(), s).is_lt();
+                return (before && l.seq <= moment).then_some(l);
+            }
             Node::Inner(inner) => inner,
         };
         let rest = &s[depth..];
@@ -572,65 +633,84 @@ impl<V> Art<V> {
     }
 
     /// Every entry from the first.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Entry<'_, V>> {
-        std::iter::successors(self.first(), Entry::next)
+    pub(crate) fn iter(&self) -> Walk<'_, V> {
+        self.walk(self.first())
+    }
+
+    /// The entries from `start` on.
+    pub(crate) fn walk<'a>(&'a self, start: Option<Entry<'a, V>>) -> Walk<'a, V> {
+        Walk { at: start, sort: Vec::new() }
     }
 
     /// Adds `value` at `key`; a value already there is replaced, and returned: it stays readable
     /// until the map drops, for readers that hold it. Panics when the sort key of `key` is the
     /// start of another's, or another's is the start of it.
     pub(crate) fn insert(&self, key: impl AsRef<[u8]>, value: V) -> Option<&V> {
-        let key = key.as_ref();
-        let mut bytes = self.sort_key(key);
-        let split = bytes.len();
-        bytes.extend_from_slice(key);
-        self.writer.with(|w| self.insert_as_writer(w, bytes.into_boxed_slice(), split, value))
+        self.insert_owned(key.as_ref().into(), value)
+    }
+
+    /// [`Art::insert`] of a key the leaf can keep as it is.
+    pub(crate) fn insert_owned(&self, key: Box<[u8]>, value: V) -> Option<&V> {
+        self.writer.with(|w| {
+            let buffers = w.ours.capacity() + w.theirs.capacity();
+            let mut ours = std::mem::take(&mut w.ours);
+            ours.clear();
+            (self.order.encode)(&key, &mut ours);
+            let out = self.insert_as_writer(w, &ours, key, value);
+            w.ours = ours;
+            // The buffers only grow, to the longest sort key.
+            self.grow(w.ours.capacity() + w.theirs.capacity() - buffers);
+            out
+        })
     }
 
     fn insert_as_writer(
         &self,
         w: &mut Writer<V>,
-        bytes: Box<[u8]>,
-        split: usize,
+        s: &[u8],
+        key: Box<[u8]>,
         value: V,
     ) -> Option<&V> {
         // The value is boxed only where it goes in, after the checks that may panic.
-        let s = &bytes[..split];
         let mut link = &self.root;
         let mut depth = 0;
         loop {
             let at = link.load(Ordering::Acquire);
             let Some(n) = self.node(at) else {
                 // The empty root.
-                link.store(self.leaf(bytes, split, value), Ordering::Release);
+                link.store(self.leaf(key, value), Ordering::Release);
                 break;
             };
             match n {
-                Node::Leaf(l) if l.sort() == s => {
-                    let old = l.value.swap(Box::into_raw(Box::new(value)), Ordering::AcqRel);
-                    w.values.push(old);
-                    // SAFETY: the old value stays allocated in the retired list until the map
-                    // drops (invariant 2), and `&self` keeps the map alive for the returned
-                    // borrow.
-                    return Some(unsafe { &*old });
-                }
                 Node::Leaf(l) => {
-                    let common = shared(&l.sort()[depth..], &s[depth..]);
-                    let (theirs, ours) = (depth + common, depth + common);
+                    w.theirs.clear();
+                    (self.order.encode)(l.key(), &mut w.theirs);
+                    let theirs_sort = &w.theirs;
+                    if theirs_sort.as_slice() == s {
+                        let old = l.value.swap(Box::into_raw(Box::new(value)), Ordering::AcqRel);
+                        self.grow(size_of::<V>());
+                        retire(self, &mut w.values, old);
+                        // SAFETY: the old value stays allocated in the retired list until the
+                        // map drops (invariant 2), and `&self` keeps the map alive for the
+                        // returned borrow.
+                        return Some(unsafe { &*old });
+                    }
+                    let common = shared(&theirs_sort[depth..], &s[depth..]);
+                    let cut = depth + common;
                     assert!(
-                        theirs < l.sort().len() && ours < s.len(),
+                        cut < theirs_sort.len() && cut < s.len(),
                         "a sort key that is the start of another"
                     );
-                    let prefix: Box<[u8]> = s[depth..ours].into();
-                    let (b_theirs, b_ours) = (l.sort()[theirs], s[ours]);
-                    let fresh = self.leaf(bytes, split, value);
+                    let prefix: Box<[u8]> = s[depth..cut].into();
+                    let (b_theirs, b_ours) = (theirs_sort[cut], s[cut]);
+                    let fresh = self.leaf(key, value);
                     let kids = match b_theirs < b_ours {
                         true => [(b_theirs, at), (b_ours, fresh)],
                         false => [(b_ours, fresh), (b_theirs, at)],
                     };
-                    let node = Node::Inner(Inner { prefix, kids: Kids::build(&kids) });
+                    let node = self.inner(prefix, Kids::build(&kids));
                     // The leaf moves under the new node, which takes its place.
-                    link.store(Box::into_raw(Box::new(node)), Ordering::Release);
+                    link.store(node, Ordering::Release);
                     break;
                 }
                 Node::Inner(inner) => {
@@ -639,21 +719,19 @@ impl<V> Art<V> {
                         let ours = depth + common;
                         assert!(ours < s.len(), "a sort key that is the start of another");
                         // A copy below the shared part, then a new node over it and the leaf.
-                        let below = Inner {
-                            prefix: inner.prefix[common + 1..].into(),
-                            kids: Kids::build(&inner.kids.children()),
-                        };
-                        let below = Box::into_raw(Box::new(Node::Inner(below)));
+                        let below = self.inner(
+                            inner.prefix[common + 1..].into(),
+                            Kids::build(&inner.kids.children()),
+                        );
                         let b_theirs = inner.prefix[common];
                         let b_ours = s[ours];
                         let prefix: Box<[u8]> = s[depth..ours].into();
-                        let fresh = self.leaf(bytes, split, value);
+                        let fresh = self.leaf(key, value);
                         let kids = match b_theirs < b_ours {
                             true => [(b_theirs, below), (b_ours, fresh)],
                             false => [(b_ours, fresh), (b_theirs, below)],
                         };
-                        let node = Node::Inner(Inner { prefix, kids: Kids::build(&kids) });
-                        self.replace(w, link, node);
+                        self.replace(w, link, self.inner(prefix, Kids::build(&kids)));
                         break;
                     }
                     depth += inner.prefix.len();
@@ -664,17 +742,13 @@ impl<V> Art<V> {
                         depth += 1;
                         continue;
                     }
-                    let fresh = self.leaf(bytes, split, value);
+                    let fresh = self.leaf(key, value);
                     if !inner.kids.add_in_place(b, fresh) {
                         let mut kids = inner.kids.children();
                         let at = kids.partition_point(|c| c.0 < b);
                         kids.insert(at, (b, fresh));
                         let prefix = inner.prefix.clone();
-                        self.replace(
-                            w,
-                            link,
-                            Node::Inner(Inner { prefix, kids: Kids::build(&kids) }),
-                        );
+                        self.replace(w, link, self.inner(prefix, Kids::build(&kids)));
                     }
                     break;
                 }
@@ -685,19 +759,33 @@ impl<V> Art<V> {
         None
     }
 
+    /// A new inner node, counted.
+    fn inner(&self, prefix: Box<[u8]>, kids: Kids<V>) -> *mut Node<V> {
+        self.grow(size_of::<Node<V>>() + prefix.len() + kids.heap_bytes());
+        Box::into_raw(Box::new(Node::Inner(Inner { prefix, kids })))
+    }
+
     /// A new leaf, numbered after the keys there are; only the writer calls it, once per insert.
-    fn leaf(&self, bytes: Box<[u8]>, split: usize, value: V) -> *mut Node<V> {
+    fn leaf(&self, key: Box<[u8]>, value: V) -> *mut Node<V> {
         let seq = self.len.load(Ordering::Relaxed) + 1;
+        self.grow(key.len() + Self::LEAF_BYTES as usize);
         let value = AtomicPtr::new(Box::into_raw(Box::new(value)));
-        let leaf = Leaf { bytes, split, seq, value };
+        let leaf = Leaf { key, seq, value };
         Box::into_raw(Box::new(Node::Leaf(leaf)))
     }
 
     /// Publishes `node` at `link` and keeps the node it replaces until the map drops.
-    fn replace(&self, w: &mut Writer<V>, link: &Link<V>, node: Node<V>) {
-        let old = link.swap(Box::into_raw(Box::new(node)), Ordering::AcqRel);
-        w.nodes.push(old);
+    fn replace(&self, w: &mut Writer<V>, link: &Link<V>, node: *mut Node<V>) {
+        let old = link.swap(node, Ordering::AcqRel);
+        retire(self, &mut w.nodes, old);
     }
+}
+
+/// Keeps `old` in a list of what the writer replaced, counting what the list grows by.
+fn retire<V, T>(art: &Art<V>, list: &mut Vec<*mut T>, old: *mut T) {
+    let before = list.capacity();
+    list.push(old);
+    art.grow((list.capacity() - before) * size_of::<*mut T>());
 }
 
 impl<V> Drop for Art<V> {
@@ -742,7 +830,7 @@ mod tests {
     use super::*;
 
     fn map() -> Art<u64> {
-        Art::new(bytes_order)
+        Art::new(BYTES_ORDER)
     }
 
     fn keys(m: &Art<u64>) -> Vec<Vec<u8>> {
@@ -846,7 +934,7 @@ mod tests {
         }
         m.insert(b"k1", 2);
         assert_eq!((held.key(), *held_value, *held.value()), (&b"k1"[..], 1, 2));
-        assert_eq!(held.next().map(|e| e.key().to_vec()), Some(vec![b'k', b'2', 0]));
+        assert_eq!(m.walk(Some(held)).nth(1).map(|e| e.key().to_vec()), Some(vec![b'k', b'2', 0]));
         assert_eq!(*m.seek(b"k1").expect("k1").value(), 2);
     }
 

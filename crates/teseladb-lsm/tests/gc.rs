@@ -188,7 +188,7 @@ fn files_far_above_the_live_data_are_all_compacted_and_collected() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);
     let value = vec![7u8; 1024];
-    let keys: Vec<Vec<u8>> = (0..200u32).map(|k| format!("k{k:04}").into_bytes()).collect();
+    let keys: Vec<Vec<u8>> = (0..800u32).map(|k| format!("k{k:04}").into_bytes()).collect();
     let mut index = 0;
     for round in 1..=100u64 {
         for k in &keys {
@@ -208,7 +208,11 @@ fn files_far_above_the_live_data_are_all_compacted_and_collected() {
     // refills with time.
     lsm.run_io(&mut disk, Nanos::from_secs(10));
     let leveled = files_bytes(&lsm);
-    assert!(leveled > 4 * live, "the leveled compactions leave the old versions: {leveled}");
+    // Above what the live bytes allow, or the LSM rightly leaves the files as they are: with 200
+    // keys the leveled compactions left 3.2 MiB, under the floor, once the memtable counted the
+    // bytes it holds (004 T070).
+    let allowed = live * teseladb_lsm::SPACE_AMP + teseladb_lsm::SPACE_FLOOR;
+    assert!(leveled > allowed, "the leveled compactions leave the old versions: {leveled}");
     lsm.set_live_bytes(live);
     lsm.run_io(&mut disk, Nanos::from_secs(20));
     let after = files_bytes(&lsm);

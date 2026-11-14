@@ -3,7 +3,8 @@
 //! resolutions, range deletions) as entries of its groups; once an entry is durable it is applied
 //! to the LSM with its index and to a model, and the key it touched is read back against the
 //! model. The LSM declares to the log, as its release provider, what it no longer needs, and
-//! snapshots let the log release the rest.
+//! snapshots let the log release the rest. The keys are documents of a collection per group and
+//! most values are documents of three shapes, which the data files store packed (003 FR-024).
 //!
 //! After every restart the LSM is recovered, each group's log is replayed from its flushed index
 //! and every key is compared with the model at several timestamps. An entry the log released
@@ -17,6 +18,7 @@ use std::rc::Rc;
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone, Step};
+use teseladb_bson::Document;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{
     Completions, LogEntry, LogGap, ReleaseProvider, SimDisk, SnapshotMeta, Ticket,
@@ -164,8 +166,30 @@ impl Model {
     }
 }
 
+/// Key `n` of group `g`: a document of the group's collection, so that the data files pack the
+/// documents written at it (003 FR-024).
 fn key(g: GroupId, n: u64) -> Vec<u8> {
-    format!("g{:05}-k{n:03}", g.0).into_bytes()
+    let mut k = key_prefix(g);
+    k.extend_from_slice(format!("k{n:03}").as_bytes());
+    k
+}
+
+/// A value of a write: a document of one of three shapes most of the time, else random bytes
+/// (some above the size that goes to a value file).
+fn value(w: &mut World) -> Vec<u8> {
+    if w.rng.chance(0.6) {
+        let n = w.rng.range(0, 1000) as i64;
+        let doc = match w.rng.range(0, 3) {
+            0 => Document::new().with("n", n).with("s", "x".repeat(w.rng.range(0, 40) as usize)),
+            1 => Document::new().with("n", n).with("f", n as f64 / 3.0),
+            _ => Document::new().with("n", n).with("o", Document::new().with("t", n as i32)),
+        };
+        let bytes = doc.to_bytes().expect("a small document");
+        return [&[teseladb_lsm::DOCUMENT_VALUE][..], &bytes].concat();
+    }
+    let mut value = vec![0u8; if w.rng.chance(0.05) { 6000 } else { w.rng.range(0, 80) as usize }];
+    w.rng.fill(&mut value);
+    value
 }
 
 fn at(physical: u64) -> Hlc {
@@ -286,9 +310,7 @@ impl LsmWorkload {
         let ts =
             at(cl.clock.saturating_sub(if w.rng.chance(0.2) { w.rng.range(0, 30) } else { 0 }));
         let k = key(g, w.rng.range(0, KEYS));
-        let mut value =
-            vec![0u8; if w.rng.chance(0.05) { 6000 } else { w.rng.range(0, 80) as usize }];
-        w.rng.fill(&mut value);
+        let value = value(w);
         let intents: Vec<(Vec<u8>, Hlc)> = cl
             .model
             .intents()
@@ -364,8 +386,14 @@ impl LsmWorkload {
     }
 }
 
+/// The documents' prefix of the collection of group `g`.
 fn key_prefix(g: GroupId) -> Vec<u8> {
-    format!("g{:05}-", g.0).into_bytes()
+    let collection = u32::try_from(g.0).expect("a group number of the workload");
+    let mut k = vec![teseladb_keys::space::DATA];
+    k.extend_from_slice(&1u32.to_be_bytes());
+    k.extend_from_slice(&collection.to_be_bytes());
+    k.extend_from_slice(&teseladb_keys::space::DOCUMENTS.to_be_bytes());
+    k
 }
 
 /// Applies `op` (entry `index` of `g`) to the LSM.

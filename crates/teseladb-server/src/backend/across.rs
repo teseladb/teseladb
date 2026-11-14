@@ -54,7 +54,8 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
         | RemoteReply::Changes { .. }
         | RemoteReply::Fenced { .. }
         | RemoteReply::Live { .. }
-        | RemoteReply::DocCount { .. } => Err(RangeError::Unavailable),
+        | RemoteReply::DocCount { .. }
+        | RemoteReply::Pushed(_) => Err(RangeError::Unavailable),
     }
 }
 

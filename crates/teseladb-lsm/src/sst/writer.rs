@@ -11,6 +11,7 @@ use teseladb_types::Bytes;
 use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::reader::{BlockStats, Table};
+use super::schema::Packer;
 use super::value::ValueRef;
 use super::zone::ZoneBuilder;
 use super::{ALIGN, PAD, filter, pad, put_varint};
@@ -92,6 +93,9 @@ pub(crate) struct TableWriter {
     zones: Option<ZoneBuilder>,
     /// The logical key of the last version of the block just written.
     block_last: Vec<u8>,
+    /// The shapes of its packed documents (003 FR-024); none for a history file, whose values
+    /// may be deltas, and for a value file.
+    packer: Option<Packer>,
 }
 
 impl TableWriter {
@@ -118,7 +122,13 @@ impl TableWriter {
             slots: Vec::new(),
             zones: Some(ZoneBuilder::default()),
             block_last: Vec::new(),
+            packer: Some(Packer::default()),
         }
+    }
+
+    /// The writer storing every document whole, as files were written before 003 FR-024.
+    pub(crate) fn unpacked(self) -> TableWriter {
+        TableWriter { packer: None, ..self }
     }
 
     /// The writer sealing its blocks with a new data key of `ring` (013 FR-015); without a ring,
@@ -137,7 +147,7 @@ impl TableWriter {
     /// The writer of a history file: an old version goes as a delta against the next newer
     /// version of its key when that takes fewer bytes (FR-035).
     pub(crate) fn for_history(self) -> TableWriter {
-        TableWriter { data: self.data.with_deltas(), zones: None, ..self }
+        TableWriter { data: self.data.with_deltas(), zones: None, packer: None, ..self }
     }
 
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
@@ -210,13 +220,21 @@ impl TableWriter {
         written
     }
 
-    /// Adds a version; internal keys come in order.
+    /// Adds a version; internal keys come in order. A document with a shape of the file goes
+    /// packed (003 FR-024).
     pub(crate) fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
-        self.open_block(ikey, value.len());
+        let packed = match (&mut self.packer, kind) {
+            (Some(p), Kind::Put) => p.pack(entry::logical(ikey), value),
+            _ => None,
+        };
+        self.open_block(ikey, packed.as_ref().map_or(value.len(), Vec::len));
         if let Some(z) = &mut self.zones {
             z.add(ikey, kind, Some(value));
         }
-        self.data.add(ikey, kind, value);
+        match &packed {
+            Some(p) => self.data.add_packed(ikey, kind, p),
+            None => self.data.add(ikey, kind, value),
+        }
         self.note(ikey);
     }
 
@@ -368,6 +386,7 @@ impl TableWriter {
             dictionary: self.file_dict.as_ref().map_or(0, |(v, _)| *v),
             values: self.slots.iter().map(|(_, b)| *b).collect(),
             zones,
+            shapes: self.packer.take().map(Packer::finish).unwrap_or_default(),
         };
         let props_handle = self.meta_block(&props.encode());
         let index_payload = self.index.finish();
@@ -391,6 +410,7 @@ impl TableWriter {
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
+    use super::super::block::BlockCursor;
     use super::*;
 
     /// FR-031: the versions under a value or a deletion go to the history file; those under an
@@ -496,5 +516,74 @@ mod tests {
         }
         let none = crate::sst::reader::Dictionaries::new();
         assert!(Table::from_meta(9, size, footer.filter.offset, &meta, (None, &none)).is_err());
+    }
+
+    /// 003 FR-024: the documents of a file's shapes go packed and every block reads back with
+    /// them whole, in a file smaller than one with every document whole; the other values, and
+    /// a history file, stay as they were.
+    #[test]
+    fn documents_go_packed_and_read_back_whole() {
+        use teseladb_bson::Document;
+        let doc = |i: u32| {
+            let d = Document::new().with("_id", i64::from(i)).with("name", format!("user {i}"));
+            let d = match i % 5 {
+                0 => d.with("tags", Document::new().with("0", "a").with("1", "b")),
+                _ => d.with("age", i32::try_from(i % 90).unwrap()).with("city", "Bilbao"),
+            };
+            [&[crate::DOCUMENT_VALUE][..], &d.to_bytes().unwrap()].concat()
+        };
+        let mut versions = Vec::new();
+        for i in 0..400u32 {
+            let ik = entry::internal_key(&data_key(7, i), Hlc { physical: 5, logical: i });
+            versions.push((ik, Kind::Put, doc(i)));
+        }
+        // A value that is not a document, and a deletion.
+        versions.push((
+            entry::internal_key(&data_key(7, 500), Hlc { physical: 1, logical: 0 }),
+            Kind::Put,
+            vec![9; 30],
+        ));
+        versions.push((
+            entry::internal_key(&data_key(7, 501), Hlc { physical: 1, logical: 0 }),
+            Kind::Delete,
+            Vec::new(),
+        ));
+        let write = |w: TableWriter| {
+            let mut w = w;
+            let mut file = Vec::new();
+            for (k, kind, v) in &versions {
+                w.add(k, *kind, v);
+                if let Some((_, c)) = w.take() {
+                    file.extend_from_slice(&c);
+                }
+            }
+            let (_, c, table) = w.finish(3, Vec::new()).unwrap();
+            file.extend_from_slice(&c);
+            (file, table)
+        };
+        let read_all = |file: &[u8], t: &Table| {
+            let mut out = Vec::new();
+            for i in 0..t.blocks() {
+                let h = t.handle(i);
+                let read =
+                    Bytes::from_vec(file[h.offset as usize..(h.offset + h.len) as usize].to_vec());
+                let mut c = BlockCursor::first(t.block(i, &read).unwrap()).unwrap();
+                while c.valid() {
+                    out.push((c.key().to_vec(), c.kind(), c.value_slice().to_vec()));
+                    c.advance().unwrap();
+                }
+            }
+            out
+        };
+        let (packed, pt) = write(TableWriter::new(4096, Codec::None));
+        let (whole, wt) = write(TableWriter::new(4096, Codec::None).unpacked());
+        assert_eq!(pt.props.shapes.len(), 2, "two shapes");
+        assert!(wt.props.shapes.is_empty());
+        assert_eq!(read_all(&packed, &pt), versions);
+        assert_eq!(read_all(&whole, &wt), versions);
+        assert!(pt.blocks() * 10 < wt.blocks() * 8, "{} and {} blocks", pt.blocks(), wt.blocks());
+        // A history file keeps its documents whole.
+        let (_, ht) = write(TableWriter::new(4096, Codec::None).for_history());
+        assert!(ht.props.shapes.is_empty());
     }
 }
