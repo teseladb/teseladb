@@ -305,6 +305,7 @@ dependencies = [
 name = "teseladb-range"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-hash",
  "teseladb-hlc",
  "teseladb-keys",

@@ -21,6 +21,7 @@
 //! data block, and its entry holds a reference instead ([`value`], FR-034).
 
 pub(crate) mod block;
+pub(crate) mod columns;
 pub(crate) mod delta;
 pub(crate) mod elias_fano;
 pub(crate) mod filter;

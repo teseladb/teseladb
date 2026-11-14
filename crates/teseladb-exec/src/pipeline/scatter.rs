@@ -19,7 +19,9 @@ use std::sync::Arc;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
 
-use super::group::{Group, PartialGroups};
+use teseladb_keys::columns::ColumnsView;
+
+use super::group::{Fed, Group, PartialGroups};
 use super::{Env, Pipeline, Stage};
 use crate::collation::Collation;
 use crate::expr::Ctx;
@@ -114,6 +116,34 @@ fn parse(stages: &[Document]) -> Result<Pipeline, MqlError> {
     Pipeline::parse(&values, &Ctx::checked(std::iter::empty()))
 }
 
+/// One part of the input of a [`Program`], in key order (010 FR-033).
+#[derive(Clone, Debug)]
+pub enum Input<'a> {
+    /// The stored bytes of a document.
+    Row(&'a [u8]),
+    /// The documents of a data block, as its column block.
+    Columns(ColumnsView<'a>),
+}
+
+/// Operators that read a field named by a string rather than a path, which the dependency
+/// analysis does not see: a program that names one takes no columns.
+const FIELDS_BY_NAME: [&str; 3] = ["$getField", "$setField", "$unsetField"];
+
+/// Whether `v` names an operator of `ops`.
+fn names_any(v: &Value, ops: &[&str]) -> bool {
+    match v {
+        Value::Document(d) => d.iter().any(|(k, v)| ops.contains(&k) || names_any(v, ops)),
+        Value::Array(a) => a.iter().any(|v| names_any(v, ops)),
+        _ => false,
+    }
+}
+
+/// The stored document `bytes`.
+fn document(bytes: &[u8]) -> Option<Document> {
+    let bson = teseladb_keys::stored::bson(bytes).ok()?;
+    Document::from_stored(bson.to_vec()).ok()
+}
+
 impl Program {
     /// The partial groups of the stored documents `rows` (key and bytes, in key order), one
     /// part of the input; `None` when the core declines: a document that does not read, a stage
@@ -121,19 +151,65 @@ impl Program {
     /// the pipeline over the whole input, which gives the error or the spill a run in one core
     /// gives.
     pub fn run(&self, rows: &[(Vec<u8>, Vec<u8>)]) -> Option<PartialGroups> {
-        let mut docs = Vec::with_capacity(rows.len());
-        for (_, bytes) in rows {
-            let bson = teseladb_keys::stored::bson(bytes).ok()?;
-            docs.push(Document::from_stored(bson.to_vec()).ok()?);
+        let inputs: Vec<Input<'_>> = rows.iter().map(|(_, b)| Input::Row(b)).collect();
+        self.run_inputs(&inputs)
+    }
+
+    /// The top-level fields the program reads, when it reads nothing else (010 FR-033): the
+    /// columns a scan may hand over in place of its documents.
+    pub fn columns(&self) -> Option<Vec<String>> {
+        let group = Document::new().with("$group", self.group.clone());
+        let stages: Vec<Document> = self.matches.iter().cloned().chain([group]).collect();
+        let named = stages.iter().any(|d| names_any(&Value::Document(d.clone()), &FIELDS_BY_NAME));
+        if named {
+            return None;
         }
-        let docs = match self.matches.is_empty() {
-            true => docs,
-            false => parse(&self.matches).ok()?.run_in(docs, &PlainEnv, self.sbe).ok()?,
+        let mut out: Vec<String> = Vec::new();
+        for path in super::deps::needed(&stages)? {
+            let top = path.split('.').next().unwrap_or_default();
+            if top.is_empty() || top.starts_with('$') {
+                return None;
+            }
+            if !out.iter().any(|f| f == top) {
+                out.push(top.to_owned());
+            }
+        }
+        Some(out)
+    }
+
+    /// [`Program::run`] over a part of the input that comes as stored documents and column
+    /// blocks (010 FR-033), in key order: the same partial groups as over the documents of
+    /// those blocks. Without `$match`es the `$group` takes each column block on its columns;
+    /// otherwise each of its documents is made again from the fields the program reads.
+    pub fn run_inputs(&self, inputs: &[Input<'_>]) -> Option<PartialGroups> {
+        let columnar = inputs.iter().any(|i| matches!(i, Input::Columns(_)));
+        let want = match columnar {
+            true => self.columns()?,
+            false => Vec::new(),
         };
         let spec = self.group.to_bytes().ok()?;
         let raw = RawDoc::from_bytes(&spec).ok()?;
         let group =
             Group::parse(RawValue::Document(raw), &Ctx::checked(std::iter::empty())).ok()?;
+        if self.matches.is_empty() {
+            let mut fed: Vec<Fed<'_>> = Vec::new();
+            for input in inputs {
+                match (input, fed.last_mut()) {
+                    (Input::Row(b), Some(Fed::Docs(docs))) => docs.push(document(b)?),
+                    (Input::Row(b), _) => fed.push(Fed::Docs(vec![document(b)?])),
+                    (Input::Columns(view), _) => fed.push(Fed::Columns(view.clone())),
+                }
+            }
+            return group.partial_fed(&fed, &want, (&PlainEnv, self.sbe, self.limit)).ok()?;
+        }
+        let mut docs = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match input {
+                Input::Row(b) => docs.push(document(b)?),
+                Input::Columns(view) => docs.extend(super::group::documents_of(view, &want)),
+            }
+        }
+        let docs = parse(&self.matches).ok()?.run_in(docs, &PlainEnv, self.sbe).ok()?;
         group.partial(docs, &PlainEnv, self.sbe, self.limit).ok()?
     }
 }

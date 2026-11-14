@@ -31,6 +31,7 @@ use teseladb_range::host::{
     TxnReq, WriteReq,
 };
 use teseladb_range::mutate::Outcome;
+use teseladb_range::push::Piece;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::route::{Answer, Router};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
@@ -294,6 +295,45 @@ fn folded(
         }
         _ => Err(RangeError::Unavailable),
     }
+}
+
+/// The answer to a [`DataReq::Partial`] whose scan of at most `limit` documents took columns
+/// (010 FR-033): the program run over its rows and batches, on this core.
+fn folded_pieces(pieces: &[Piece], fold: &Fold, limit: usize) -> DataReply {
+    let (inputs, examined, next) = inputs_of(pieces, limit);
+    let groups = fold.0.run_inputs(&inputs).map(Arc::new);
+    DataReply::Partial(Folded { groups, examined, next })
+}
+
+/// The inputs of a program from the pieces of a scan of at most `limit` documents, the documents
+/// they hold and where the scan goes on when it stopped at its limit.
+pub(crate) fn inputs_of(
+    pieces: &[Piece],
+    limit: usize,
+) -> (Vec<teseladb_exec::pipeline::Input<'_>>, usize, Option<Vec<u8>>) {
+    use teseladb_exec::pipeline::Input;
+    let mut docs = 0;
+    let inputs: Vec<Input<'_>> = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Row((_, (_, v))) => {
+                docs += 1;
+                Input::Row(v)
+            }
+            Piece::Columns(c) => {
+                docs += c.docs;
+                Input::Columns(c.view())
+            }
+        })
+        .collect();
+    let batches = pieces.iter().filter(|p| matches!(p, Piece::Columns(_))).count();
+    crate::pushed::note_column_batches(batches);
+    let last = pieces.last().map(|p| match p {
+        Piece::Row((k, _)) => k.as_slice(),
+        Piece::Columns(c) => c.last.as_slice(),
+    });
+    let next = last.filter(|_| docs >= limit).map(|k| [k, &[0]].concat());
+    (inputs, docs, next)
 }
 
 /// The mutation of a put: the new value, whatever was there.
@@ -822,13 +862,31 @@ impl DataCore {
             RemoteReq::Scan { start, end, limit, concern, backward } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
                 let req = ScanReq { g, start, end, concern, limit, backward };
-                self.host.scan(core, req, now, wall_ms)
+                // An aggregation's part takes the columns of the fields its program reads (010
+                // FR-033).
+                let want = match &client {
+                    Client::Partial(_, fold, _) => fold.0.columns(),
+                    _ => None,
+                };
+                match want {
+                    Some(w) => self.host.scan_columns(core, (req, w.into()), now, wall_ms),
+                    None => self.host.scan(core, req, now, wall_ms),
+                }
             }
             // The scan as any other on the leader; its rows go through the work (010 FR-034).
             RemoteReq::Pushed { start, end, limit, concern, work } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
                 let req = ScanReq { g, start, end, concern, limit, backward: false };
-                let id = self.host.scan(core, req, now, wall_ms);
+                let want = match &work {
+                    crate::pushed::Work::Fold(p) => {
+                        teseladb_exec::pipeline::Program::decode(p).and_then(|p| p.columns())
+                    }
+                    crate::pushed::Work::Filter(_) => None,
+                };
+                let id = match want {
+                    Some(w) => self.host.scan_columns(core, (req, w.into()), now, wall_ms),
+                    None => self.host.scan(core, req, now, wall_ms),
+                };
                 self.clients.insert(id, Client::Worked(Box::new(client), work, limit));
                 self.answer(core, now);
                 return;
@@ -1084,10 +1142,24 @@ impl DataCore {
                         // A stream's read comes as a remote request, never from the handle.
                         Reply::Changes { .. } | Reply::Barrier => DataReply::Get(None),
                         Reply::Fenced { ts } => DataReply::Put(ts),
+                        // Only an aggregation's part asks for columns.
+                        Reply::Pieces(_) => DataReply::Get(None),
                     });
                     let _ = to.send(r);
                 }
-                client => self.send_answer(core, client, r.map(remote_reply), now),
+                Client::Partial(to, fold, limit) if matches!(r, Ok(Reply::Pieces(_))) => {
+                    let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
+                    let _ = to.send(Ok(folded_pieces(&pieces, &fold, limit)));
+                }
+                Client::Worked(client, work, limit) if matches!(r, Ok(Reply::Pieces(_))) => {
+                    let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
+                    if matches!(*client, Client::Remote(..)) {
+                        crate::pushed::note_ran_for_other_node();
+                    }
+                    let worked = work.apply_pieces(&pieces, limit);
+                    self.send_answer(core, *client, Ok(RemoteReply::Pushed(worked)), now);
+                }
+                client => self.send_answer(core, client, r.and_then(remote_reply), now),
             }
         }
     }
@@ -1609,9 +1681,10 @@ fn core_end(core: &MultiRaftCore<CoreSm>, g: GroupId) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-/// The answer of the host to a [`RemoteReq`].
-fn remote_reply(reply: Reply) -> RemoteReply {
-    match reply {
+/// The answer of the host to a [`RemoteReq`]; a scan that took columns answers only the
+/// aggregation's part that asked for them (010 FR-033).
+fn remote_reply(reply: Reply) -> Result<RemoteReply, RangeError> {
+    Ok(match reply {
         Reply::Mutated { ts, result, entry, .. } => RemoteReply::Written { ts, result, entry },
         Reply::Barrier => RemoteReply::Settled,
         Reply::Batch(rows) => {
@@ -1624,7 +1697,8 @@ fn remote_reply(reply: Reply) -> RemoteReply {
             RemoteReply::Changes { rows, to, oldest_intent }
         }
         Reply::Fenced { ts } => RemoteReply::Fenced { ts },
-    }
+        Reply::Pieces(_) => return Err(RangeError::Unavailable),
+    })
 }
 
 #[cfg(test)]

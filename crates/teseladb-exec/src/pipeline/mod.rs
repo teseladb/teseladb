@@ -34,8 +34,8 @@ mod stages;
 mod system;
 pub use system::{LIST_SAMPLED_QUERIES, SHARDED_DATA_DISTRIBUTION};
 
-pub use group::PartialGroups;
-pub use scatter::{Program, Scatter};
+pub use group::{Fed, PartialGroups};
+pub use scatter::{Input, Program, Scatter};
 pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};

@@ -19,6 +19,7 @@
 
 mod bounds;
 mod bucket;
+pub mod columns;
 mod decode;
 mod encode;
 pub mod fields;

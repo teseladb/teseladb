@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_keys::columns::ColumnsView;
 use teseladb_mql::MqlError;
 
 use std::borrow::Cow;
@@ -14,6 +15,7 @@ use super::Env;
 use super::errors::{
     GROUP_DOLLAR, GROUP_DOT, GROUP_ID, SORT_BY_COUNT_FIELD, SORT_BY_COUNT_OBJECT, error,
 };
+use super::group_columns::Columns;
 use super::spill::{Sorter, SpillStore, key_of, with_key, without_key};
 use crate::accum::{Accumulator, Part, State};
 use crate::expr::arith::type_name_of;
@@ -220,20 +222,55 @@ impl Group {
         }
         let mut grouping = self.start(env, sbe);
         grouping.absorb_groups(&docs, (limit, true))?;
-        if grouping.spill {
+        grouping.parts()
+    }
+
+    /// [`Group::partial`] of a part of the input that comes as documents and column blocks (010
+    /// FR-033), in their order; a column block gives the fields `want`, all the stage reads.
+    pub fn partial_fed(
+        &self,
+        fed: &[Fed<'_>],
+        want: &[String],
+        (env, sbe, limit): (&dyn Env, bool, usize),
+    ) -> Result<Option<PartialGroups>, MqlError> {
+        if !self.merges() {
             return Ok(None);
         }
+        let mut grouping = self.start(env, sbe);
+        for f in fed {
+            match f {
+                Fed::Docs(docs) => grouping.absorb_groups(docs, (limit, true))?,
+                Fed::Columns(view) => grouping.absorb_view(view, want, (limit, true))?,
+            }
+            if grouping.spill {
+                return Ok(None);
+            }
+        }
+        grouping.parts()
+    }
+}
+
+impl Grouping<'_> {
+    /// The partial groups of what the run took; `None` when they passed the limit or a state
+    /// does not merge.
+    fn parts(self) -> Result<Option<PartialGroups>, MqlError> {
+        if self.spill {
+            return Ok(None);
+        }
+        let env = self.env;
         let collation = env.collation();
         let col = collation.get();
-        let mut list = Vec::with_capacity(grouping.groups.list.len());
-        for (key, states) in grouping.groups.list {
+        let mut list = Vec::with_capacity(self.groups.list.len());
+        for (key, states) in self.groups.list {
             let parts: Option<Vec<Part>> = states.into_iter().map(Part::of).collect();
             let Some(parts) = parts else { return Ok(None) };
             list.push((canonical(&key, col), key, parts));
         }
         Ok(Some(PartialGroups { list }))
     }
+}
 
+impl Group {
     /// The documents of the groups of the whole input from those of its consecutive parts
     /// `parts`, in their order: each group in the order it first appeared, with the key of its
     /// first document, as [`Group::run`] gives them over the parts one after the other, the
@@ -283,6 +320,28 @@ impl Group {
         check_memory(&self.outputs, &out, env.allow_disk_use(), sbe, limit)?;
         Ok(Some(out))
     }
+}
+
+/// A part of the input of [`Group::partial_fed`] (010 FR-033).
+pub enum Fed<'a> {
+    /// Documents.
+    Docs(Vec<Document>),
+    /// The documents of a column block.
+    Columns(ColumnsView<'a>),
+}
+
+/// The documents of column block `view` with the fields `want` each holds, in that order.
+pub(super) fn documents_of(view: &ColumnsView<'_>, want: &[String]) -> Vec<Document> {
+    let mut docs = vec![Document::new(); view.docs()];
+    for name in want {
+        let Some(cells) = view.cells(name) else { continue };
+        for (d, v) in docs.iter_mut().zip(cells) {
+            if let Some(v) = v {
+                d.push(name.clone(), Value::from(v));
+            }
+        }
+    }
+    docs
 }
 
 /// A `$group` taking its input a batch at a time (010 FR-028): the groups so far and the bytes
@@ -382,34 +441,14 @@ impl Grouping<'_> {
             let raws = self.plan.as_ref().and_then(|_| super::group_columns::stored(chunk));
             let columns = self.plan.as_ref().zip(raws.as_deref()).map(|(p, r)| (p, p.load(r)));
             if let Some((p, c)) = columns.as_ref().filter(|(p, c)| p.whole(c)) {
-                // Every key and input from the columns: the lanes of each group of the batch
-                // go into its accumulators together.
-                let mut lanes_of: Vec<(usize, u64)> = Vec::new();
-                for lane in 0..chunk.len() {
-                    let key = p.key(c, lane).expect("a whole batch's keys come from its columns");
-                    let before = self.groups.list.len();
-                    let size = super::errors::value_size(&key);
-                    let g = self.groups.index_of(key, &group.outputs, col);
-                    if self.groups.list.len() > before {
-                        self.held += size;
-                    }
-                    match lanes_of.iter_mut().find(|(x, _)| *x == g) {
-                        Some((_, mask)) => *mask |= 1 << lane,
-                        None => lanes_of.push((g, 1 << lane)),
-                    }
-                    if store && self.held > limit {
-                        self.spill = true;
-                        break 'batches;
-                    }
-                }
-                // The accumulators on columns collect no values, so they hold no more bytes.
-                for (g, mask) in lanes_of {
-                    let states = &mut self.groups.list[g].1;
-                    for (k, ((_, acc), st)) in
-                        group.outputs.iter().zip(states.iter_mut()).enumerate()
-                    {
-                        p.accumulate(c, k, acc, st, mask, (col, sbe))?;
-                    }
+                if Self::take_whole(
+                    (&mut self.groups, &mut self.held),
+                    (group, p, c, chunk.len()),
+                    (col, sbe),
+                    (limit, store),
+                )? {
+                    self.spill = true;
+                    break 'batches;
                 }
                 continue;
             }
@@ -442,6 +481,70 @@ impl Grouping<'_> {
                     self.spill = true;
                     break 'batches;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes the `lanes` documents of a batch whose keys and inputs all come from the columns
+    /// `c` of plan `p`: the lanes of each group go into its accumulators together. Returns
+    /// whether the groups passed `limit` with a store to write to, at which the run stops.
+    fn take_whole(
+        (groups, held): (&mut Groups, &mut usize),
+        (group, p, c, lanes): (&Group, &super::group_columns::Columnar, &Columns<'_>, usize),
+        (col, sbe): (Option<&dyn teseladb_bson::Collator>, bool),
+        (limit, store): (usize, bool),
+    ) -> Result<bool, MqlError> {
+        let mut lanes_of: Vec<(usize, u64)> = Vec::new();
+        for lane in 0..lanes {
+            let key = p.key(c, lane).expect("a whole batch's keys come from its columns");
+            let before = groups.list.len();
+            let size = super::errors::value_size(&key);
+            let g = groups.index_of(key, &group.outputs, col);
+            if groups.list.len() > before {
+                *held += size;
+            }
+            match lanes_of.iter_mut().find(|(x, _)| *x == g) {
+                Some((_, mask)) => *mask |= 1 << lane,
+                None => lanes_of.push((g, 1 << lane)),
+            }
+            if store && *held > limit {
+                return Ok(true);
+            }
+        }
+        // The accumulators on columns collect no values, so they hold no more bytes.
+        for (g, mask) in lanes_of {
+            let states = &mut groups.list[g].1;
+            for (k, ((_, acc), st)) in group.outputs.iter().zip(states.iter_mut()).enumerate() {
+                p.accumulate(c, k, acc, st, mask, (col, sbe))?;
+            }
+        }
+        Ok(false)
+    }
+
+    /// The documents of column block `view` (010 FR-033), in their order, into the groups: on
+    /// the columns of the plan when it has one, else as documents of the fields `want`.
+    fn absorb_view(
+        &mut self,
+        view: &ColumnsView<'_>,
+        want: &[String],
+        (limit, store): (usize, bool),
+    ) -> Result<(), MqlError> {
+        let plan = self.plan.clone();
+        let Some((p, cols)) = plan.as_ref().and_then(|p| p.load_view(view).map(|c| (p, c))) else {
+            return self.absorb_groups(&documents_of(view, want), (limit, store));
+        };
+        let (group, sbe) = (&*self.group, self.sbe);
+        let collation = self.env.collation();
+        let col = collation.get();
+        let docs = view.docs();
+        for from in (0..docs).step_by(teseladb_mql::vm::BATCH) {
+            let to = docs.min(from + teseladb_mql::vm::BATCH);
+            let c = cols.chunk(from, to);
+            let held = (&mut self.groups, &mut self.held);
+            if Self::take_whole(held, (group, p, &c, to - from), (col, sbe), (limit, store))? {
+                self.spill = true;
+                return Ok(());
             }
         }
         Ok(())

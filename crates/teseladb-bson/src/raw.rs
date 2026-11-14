@@ -154,6 +154,27 @@ impl<'a> RawDoc<'a> {
         RawIter { bytes: self.bytes, pos: 4 }
     }
 
+    /// Its fields in order, each with the bytes of its value as BSON writes them after the
+    /// element's type and name.
+    ///
+    /// # Panics
+    ///
+    /// Never: the document's bytes were validated when the view was made.
+    pub fn elements(&self) -> impl Iterator<Item = (&'a str, RawValue<'a>, &'a [u8])> + 'a {
+        let bytes = self.bytes;
+        let mut pos = 4;
+        std::iter::from_fn(move || {
+            if bytes[pos] == 0 {
+                return None;
+            }
+            let (key, value, next) =
+                read::element(bytes, pos, Mode::Trusted).expect("a validated document");
+            let start = pos + 1 + key.len() + 1;
+            pos = next;
+            Some((key, value, &bytes[start..next]))
+        })
+    }
+
     /// Whether it has no fields.
     #[must_use]
     pub fn is_empty(&self) -> bool {

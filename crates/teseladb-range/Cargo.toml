@@ -21,3 +21,6 @@ teseladb-raft = { workspace = true }
 teseladb-raftlog = { workspace = true }
 teseladb-types = { workspace = true }
 
+
+[dev-dependencies]
+teseladb-bson = { workspace = true }

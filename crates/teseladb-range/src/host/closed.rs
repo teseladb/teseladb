@@ -91,6 +91,7 @@ impl RangeHost {
             since: now,
             view,
             uncertain_to: None,
+            columns: None,
         };
         self.reqs.insert(id, Req::Get(req));
         self.step(core, id, now);

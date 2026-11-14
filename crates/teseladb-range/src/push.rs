@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use teseladb_hlc::Hlc;
-use teseladb_lsm::{BackScan, Found, Kind, Lookup, Lsm, Scan, Step, TimeScan};
+use teseladb_lsm::{BackScan, ColumnStep, Columns, Found, Kind, Lookup, Lsm, Scan, Step, TimeScan};
 
 use crate::intents::{Intent, IntentOp, IntentOwner, TxnId, pred};
 use crate::sm::split_value;
@@ -193,6 +193,15 @@ fn read_from(
 /// A document a scan returns: its key and its `(value type, value)`.
 pub type Row = (Vec<u8>, (u8, Vec<u8>));
 
+/// What a scan that takes columns returns (010 FR-033), in key order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// A document.
+    Row(Row),
+    /// The documents of a data block, as its columns.
+    Columns(Columns),
+}
+
 /// The intents of the reader's own transaction in a scan's interval, above its read mark.
 struct OwnScan {
     txn: TxnId,
@@ -262,6 +271,12 @@ pub struct ScanState {
     /// A key of the main scan whose visible version is below an intent: `(key, mark)`.
     below: Option<(Vec<u8>, Hlc)>,
     rows: Vec<Row>,
+    /// Whether the main scan takes columns (010 FR-033), and the batch it gave next.
+    columnar: bool,
+    main_batch: Option<Columns>,
+    /// The pieces taken so far by [`ScanState::step_pieces`], and their documents.
+    pieces: Vec<Piece>,
+    piece_docs: usize,
 }
 
 impl ScanState {
@@ -301,13 +316,29 @@ impl ScanState {
             main_done: false,
             below: None,
             rows: Vec::new(),
+            columnar: false,
+            main_batch: None,
+            pieces: Vec::new(),
+            piece_docs: 0,
+        }
+    }
+
+    /// The scan taking the data blocks it may as their columns of the top-level fields `want`
+    /// (010 FR-033), read with [`ScanState::step_pieces`]. Only a scan in key order without
+    /// intents of its own takes them; any other stays as it was.
+    pub fn with_columns(self, want: std::sync::Arc<[String]>) -> ScanState {
+        match self.main {
+            MainScan::Forward(s) if self.own.is_none() => {
+                ScanState { main: MainScan::Forward(s.with_columns(want)), columnar: true, ..self }
+            }
+            main => ScanState { main, ..self },
         }
     }
 
     /// Fills `main_next`: `Some(Ok(()))` once it is there or the scan ended, `None` while a block
     /// is being read.
     fn fill_main(&mut self, lsm: &RefCell<Lsm>, view: &TxnView) -> Option<Result<(), ReadFault>> {
-        while self.main_next.is_none() && !self.main_done {
+        while self.main_next.is_none() && self.main_batch.is_none() && !self.main_done {
             if let Some((key, at)) = self.below.clone() {
                 match read_from(lsm, &key, at, (self.read_ts, self.uncertain_to), view)? {
                     Ok(v) => self.main_next = Some((key, v)),
@@ -316,7 +347,16 @@ impl ScanState {
                 self.below = None;
                 continue;
             }
-            let step = self.main.next(&mut lsm.borrow_mut());
+            let step = match (&mut self.main, self.columnar) {
+                (MainScan::Forward(s), true) => match s.next_columns(&mut lsm.borrow_mut(), None) {
+                    ColumnStep::Step(step) => step,
+                    ColumnStep::Columns(c) => {
+                        self.main_batch = Some(c);
+                        continue;
+                    }
+                },
+                _ => self.main.next(&mut lsm.borrow_mut()),
+            };
             match step {
                 Step::Item(i) => {
                     let found = Found { ts: i.ts, kind: i.kind, value: i.value };
@@ -363,6 +403,35 @@ impl ScanState {
             o.next = o.rest.pop();
         }
         Some(Ok(()))
+    }
+
+    /// [`ScanState::step`] for a scan [`ScanState::with_columns`]: its rows and batches until
+    /// they hold `limit` documents or the interval ends, or `None` while a block is being read. A
+    /// batch counts all its documents.
+    pub fn step_pieces(
+        &mut self,
+        lsm: &RefCell<Lsm>,
+        view: &TxnView,
+        limit: usize,
+    ) -> Option<Result<Vec<Piece>, ReadFault>> {
+        while self.piece_docs < limit {
+            if let Err(e) = self.fill_main(lsm, view)? {
+                return Some(Err(e));
+            }
+            if let Some(c) = self.main_batch.take() {
+                self.piece_docs += c.docs;
+                self.pieces.push(Piece::Columns(c));
+                continue;
+            }
+            let Some((key, visible)) = self.main_next.take() else { break };
+            // A version that only serves the history (014) is no document.
+            if let Some(v) = visible.filter(|(t, _)| *t != crate::HISTORY_VALUE) {
+                self.pieces.push(Piece::Row((key, v)));
+                self.piece_docs += 1;
+            }
+        }
+        self.piece_docs = 0;
+        Some(Ok(std::mem::take(&mut self.pieces)))
     }
 
     /// Moves the scan on until it has `limit` documents or the interval ends (the documents), or

@@ -240,6 +240,9 @@ pub enum Reply {
     },
     /// A scan: the visible documents in key order.
     Batch(Vec<Row>),
+    /// A scan that took columns (010 FR-033): its rows and its batches of documents as columns,
+    /// in key order.
+    Pieces(Vec<crate::push::Piece>),
     /// A transaction's intents written, or resolved, at mark `ts` (008).
     Intents {
         /// Mark of the entry.
@@ -527,6 +530,9 @@ pub(crate) struct GetReq {
     view: TxnView,
     /// The end of its uncertainty window, for a mark from another node's clock (008 FR-008).
     uncertain_to: Option<Hlc>,
+    /// The top-level fields whose columns a scan in key order takes in place of whole data blocks
+    /// (010 FR-033): the answer is then [`Reply::Pieces`].
+    columns: Option<std::sync::Arc<[String]>>,
 }
 
 /// A read with what its reader knows about transactions (008 FR-003): a point read of `key`, or a
@@ -713,13 +719,11 @@ fn reading(lsm: &RefCell<Lsm>, q: &GetReq, ts: Hlc) -> GetState {
     match &q.scan {
         Some((end, _)) => {
             let mark = (ts, window_of(q));
-            GetState::Scanning(Box::new(ScanState::new(
-                lsm,
-                (&q.key, end),
-                mark,
-                &q.view,
-                q.backward,
-            )))
+            let scan = ScanState::new(lsm, (&q.key, end), mark, &q.view, q.backward);
+            GetState::Scanning(Box::new(match &q.columns {
+                Some(want) => scan.with_columns(want.clone()),
+                None => scan,
+            }))
         }
         None => GetState::Read(ts),
     }
@@ -1117,6 +1121,7 @@ impl RangeHost {
             since: now,
             view: TxnView::default(),
             uncertain_to: None,
+            columns: None,
         };
         self.read(core, req, true, now)
     }
@@ -1149,6 +1154,7 @@ impl RangeHost {
             since: now,
             view: TxnView::default(),
             uncertain_to: None,
+            columns: None,
         };
         self.read(core, req, true, now)
     }
@@ -1186,6 +1192,7 @@ impl RangeHost {
             since: now,
             view,
             uncertain_to,
+            columns: None,
         };
         self.read(core, req, ends_inside, now)
     }
@@ -1195,6 +1202,30 @@ impl RangeHost {
         &mut self,
         core: &mut MultiRaftCore<S>,
         r: ScanReq,
+        now: Nanos,
+        wall_ms: u64,
+    ) -> ReqId {
+        self.scan_with(core, (r, None), now, wall_ms)
+    }
+
+    /// A scan in key order that takes the data blocks it may as their columns of the top-level
+    /// fields `columns` (010 FR-033): its answer is [`Reply::Pieces`], rows and batches in key
+    /// order, each batch counting its documents in the scan's limit.
+    pub fn scan_columns<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        (r, columns): (ScanReq, std::sync::Arc<[String]>),
+        now: Nanos,
+        wall_ms: u64,
+    ) -> ReqId {
+        let columns = (!r.backward).then_some(columns);
+        self.scan_with(core, (r, columns), now, wall_ms)
+    }
+
+    fn scan_with<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        (r, columns): (ScanReq, Option<std::sync::Arc<[String]>>),
         now: Nanos,
         wall_ms: u64,
     ) -> ReqId {
@@ -1217,6 +1248,7 @@ impl RangeHost {
             since: now,
             view: TxnView::default(),
             uncertain_to: None,
+            columns,
         };
         self.read(core, req, ends_inside, now)
     }
@@ -1796,6 +1828,11 @@ impl RangeHost {
                 read_visible(&self.lsm, &q.key, (*ts, window), &q.view).map(|r| {
                     r.map(|value| Reply::Value { ts: *ts, value }).map_err(|e| read_fault(e, *ts))
                 })
+            }
+            GetState::Scanning(scan) if q.columns.is_some() => {
+                let at = scan.read_ts();
+                scan.step_pieces(&self.lsm, &q.view, limit)
+                    .map(|r| r.map(Reply::Pieces).map_err(|e| read_fault(e, at)))
             }
             GetState::Scanning(scan) => {
                 let at = scan.read_ts();

@@ -1069,7 +1069,7 @@ impl RangeDocsWorkload {
                 self.last_read.insert(client, k);
                 seen = Some(v);
             }
-            Ok(Reply::Batch(_) | Reply::Changes { .. }) => {
+            Ok(Reply::Batch(_) | Reply::Pieces(_) | Reply::Changes { .. }) => {
                 unreachable!("the workload does not scan nor read change streams")
             }
             Ok(

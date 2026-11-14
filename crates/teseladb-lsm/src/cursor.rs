@@ -22,6 +22,10 @@ pub(crate) enum Pos {
     Block(usize),
     /// At an entry of block `.0`.
     Ready(usize, BlockCursor),
+    /// At data block `block`'s column block (010 FR-033), whose `docs` documents a scan hands
+    /// over whole; `at` orders it among the other sources, below every key of the block and
+    /// above every key before it.
+    Columns { block: usize, at: Vec<u8>, payload: Bytes, docs: usize },
     /// Past the end.
     Done,
 }
@@ -71,6 +75,17 @@ fn another_version(c: &BlockCursor, logical: &[u8]) -> bool {
         && (c.shared() >= logical.len() || entry::logical(key) == logical)
 }
 
+/// What a cursor does with the data block it is about to read (FR-039, 010 FR-033).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Reads it.
+    Read,
+    /// Passes over it unread.
+    Skip,
+    /// Takes its column block instead, when the block has one that `fits`.
+    Columns,
+}
+
 /// A cursor over one source.
 pub(crate) enum Cursor {
     Mem(MemCursor),
@@ -116,6 +131,35 @@ impl Cursor {
             }
         }
         Ok(())
+    }
+
+    /// Whether the source may hold a version of a logical key in `[lo, hi]`: `false` is certain.
+    pub(crate) fn may_hold(&self, lo: &[u8], hi: &[u8]) -> bool {
+        match self {
+            Cursor::Mem(m) => m
+                .mem
+                .seek(&entry::first_version(lo))
+                .is_some_and(|(_, k, _)| entry::logical(k) <= hi),
+            Cursor::Table { pos: Pos::Done, .. } => false,
+            Cursor::Table { table, .. } => table.may_hold(lo, hi),
+        }
+    }
+
+    /// The column block the cursor stands at, which it leaves for the next data block.
+    pub(crate) fn take_columns(&mut self) -> Option<(Arc<Table>, usize, Bytes, usize)> {
+        let Cursor::Table { table, pos, .. } = self else { return None };
+        let Pos::Columns { block, .. } = pos else { return None };
+        let block = *block;
+        let Pos::Columns { payload, docs, .. } = std::mem::replace(pos, Pos::Block(block + 1))
+        else {
+            unreachable!("checked")
+        };
+        Some((table.clone(), block, payload, docs))
+    }
+
+    /// Whether the cursor stands at a column block.
+    pub(crate) fn at_columns(&self) -> bool {
+        matches!(self, Cursor::Table { pos: Pos::Columns { .. }, .. })
     }
 
     /// Moves past the versions of `logical` from the current entry on, which is one of them. A
@@ -167,30 +211,44 @@ impl Cursor {
 
     /// Loads what the cursor needs; `Some(token)` if it waits for a read.
     pub(crate) fn ready<B: Blocks>(&mut self, r: &mut B) -> Result<Option<ReadToken>, LsmError> {
-        self.ready_skipping(r, &mut |_, _| false)
+        self.ready_choosing(r, &mut |_, _, _| Choice::Read, &|_| None)
     }
 
-    /// [`Cursor::ready`] passing over, without reading it, each data block that `skip` names
-    /// (FR-039): the cursor goes on at the next block.
-    pub(crate) fn ready_skipping<B: Blocks>(
+    /// [`Cursor::ready`] doing with each data block it is about to read what `choose` says,
+    /// given the block and, when the cursor seeks into it, its target: passing over it unread
+    /// (FR-039), or taking its column block when it has one and `fits` gives the number of
+    /// documents of its payload (010 FR-033). Either way the cursor goes on at the next block.
+    pub(crate) fn ready_choosing<B: Blocks>(
         &mut self,
         r: &mut B,
-        skip: &mut dyn FnMut(&Table, usize) -> bool,
+        choose: &mut dyn FnMut(&Table, usize, Option<&[u8]>) -> Choice,
+        fits: &dyn Fn(&Bytes) -> Option<usize>,
     ) -> Result<Option<ReadToken>, LsmError> {
         let Cursor::Table { table, pos, .. } = self else {
             return Ok(None);
         };
         loop {
             match pos {
-                Pos::Ready(..) | Pos::Done => return Ok(None),
+                Pos::Ready(..) | Pos::Columns { .. } | Pos::Done => return Ok(None),
                 Pos::Seek(target) => {
                     let Some(i) = table.find_block(target) else {
                         *pos = Pos::Done;
                         continue;
                     };
-                    if skip(table, i) {
-                        *pos = Pos::Block(i + 1);
-                        continue;
+                    match choose(table, i, Some(target)) {
+                        Choice::Skip => {
+                            *pos = Pos::Block(i + 1);
+                            continue;
+                        }
+                        Choice::Columns => match columns_of(r, table, i, fits)? {
+                            Taken::Wait(t) => return Ok(Some(t)),
+                            Taken::Columns(p) => {
+                                *pos = p;
+                                continue;
+                            }
+                            Taken::No => {}
+                        },
+                        Choice::Read => {}
                     }
                     let block = match r.block(table, i)? {
                         Fetch::Ready(b) => b,
@@ -206,9 +264,20 @@ impl Cursor {
                         *pos = Pos::Done;
                         continue;
                     }
-                    if skip(table, i) {
-                        *pos = Pos::Block(i + 1);
-                        continue;
+                    match choose(table, i, None) {
+                        Choice::Skip => {
+                            *pos = Pos::Block(i + 1);
+                            continue;
+                        }
+                        Choice::Columns => match columns_of(r, table, i, fits)? {
+                            Taken::Wait(t) => return Ok(Some(t)),
+                            Taken::Columns(p) => {
+                                *pos = p;
+                                continue;
+                            }
+                            Taken::No => {}
+                        },
+                        Choice::Read => {}
                     }
                     let block = match r.block(table, i)? {
                         Fetch::Ready(b) => b,
@@ -226,6 +295,7 @@ impl Cursor {
         match self {
             Cursor::Mem(m) => m.valid.then_some(m.key.as_slice()),
             Cursor::Table { pos: Pos::Ready(_, c), .. } => Some(c.key()),
+            Cursor::Table { pos: Pos::Columns { at, .. }, .. } => Some(at),
             Cursor::Table { .. } => None,
         }
     }
@@ -248,4 +318,34 @@ impl Cursor {
             Cursor::Table { .. } => unreachable!("a cursor without an entry has no value"),
         }
     }
+}
+
+/// What [`columns_of`] found.
+enum Taken {
+    /// The read of the column block to wait for.
+    Wait(ReadToken),
+    /// The cursor's place at the column block.
+    Columns(Pos),
+    /// No column block that fits: the data block is read.
+    No,
+}
+
+/// Data block `i`'s column block in `table`, when the reads give column blocks and it `fits`.
+fn columns_of<B: Blocks>(
+    r: &mut B,
+    table: &Arc<Table>,
+    i: usize,
+    fits: &dyn Fn(&Bytes) -> Option<usize>,
+) -> Result<Taken, LsmError> {
+    let payload = match r.columns(table, i)? {
+        None => return Ok(Taken::No),
+        Some(Err(t)) => return Ok(Taken::Wait(t)),
+        Some(Ok(p)) => p,
+    };
+    let Some(docs) = fits(&payload) else { return Ok(Taken::No) };
+    let at = match i {
+        0 => entry::first_version(&table.props.lo),
+        _ => entry::after_all_versions(entry::logical(table.last_key(i - 1))),
+    };
+    Ok(Taken::Columns(Pos::Columns { block: i, at, payload, docs }))
 }

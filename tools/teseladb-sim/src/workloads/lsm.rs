@@ -16,9 +16,11 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use teseladb_bson::Document;
+use teseladb_bson::{Document, Value};
 use teseladb_keys::Hlc;
-use teseladb_lsm::{Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone, Step};
+use teseladb_lsm::{
+    ColumnStep, Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone, Step,
+};
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{
     Completions, LogEntry, LogGap, ReleaseProvider, SimDisk, SnapshotMeta, Ticket,
@@ -262,6 +264,78 @@ fn scan(
             Step::Failed(e) => return Err(e),
         }
     }
+}
+
+/// The fields whose columns the columnar scans ask for: a number in every document, a double in
+/// some, and a document in some, which leaves its blocks without a column for it.
+const COLUMN_SETS: [&[&str]; 3] = [&["n"], &["n", "f"], &["o"]];
+
+/// Checks the scans of group `g` at `ts` that take columns (010 FR-033) against `rows`, what
+/// the scan of the rows gave: each batch stands for as many rows as it has documents, with each
+/// field's values those of the rows' documents, and the rows between batches are the same.
+fn columns_match(
+    lsm: &mut Lsm,
+    disk: &mut SimDisk,
+    (g, ts, now): (GroupId, Hlc, Nanos),
+    rows: &[(Vec<u8>, Shown)],
+) -> Result<Result<(), String>, LsmError> {
+    let (start, end) = (key(g, 0), key(g, KEYS));
+    // A version that only serves the history is no document: a batch leaves it out.
+    let history = |v: &[u8]| v.first() == Some(&teseladb_lsm::HISTORY_VALUE);
+    let rows: Vec<&(Vec<u8>, Shown)> = rows.iter().filter(|(_, (_, _, v))| !history(v)).collect();
+    for want in COLUMN_SETS {
+        let fields: std::sync::Arc<[String]> = want.iter().map(|f| (*f).to_owned()).collect();
+        let mut s = lsm.view().scan(&start, &end, ts).with_columns(fields);
+        let mut at = 0;
+        loop {
+            match s.next_columns(lsm, None) {
+                ColumnStep::Step(Step::Item(i)) if history(&i.value) => {}
+                ColumnStep::Step(Step::Item(i)) => {
+                    let row = (i.key, (i.ts, i.kind, i.value.to_vec()));
+                    if rows.get(at) != Some(&&row) {
+                        return Ok(Err(format!("{want:?}: row {at} is {row:?}")));
+                    }
+                    at += 1;
+                }
+                ColumnStep::Step(Step::Miss(_)) => {
+                    lsm.run_io(disk, now);
+                }
+                ColumnStep::Step(Step::Done) => break,
+                ColumnStep::Step(Step::Failed(e)) => return Err(e),
+                ColumnStep::Columns(c) => {
+                    let view = c.view();
+                    let Some(part) = rows.get(at..at + c.docs) else {
+                        return Ok(Err(format!("{want:?}: a batch of {} at row {at}", c.docs)));
+                    };
+                    for f in want {
+                        let Some(cells) = view.cells(f) else {
+                            return Ok(Err(format!("{want:?}: a batch without {f}")));
+                        };
+                        for (cell, (k, (_, _, v))) in cells.zip(part.iter().copied()) {
+                            let doc = v
+                                .split_first()
+                                .filter(|(t, _)| **t == teseladb_lsm::DOCUMENT_VALUE)
+                                .and_then(|(_, b)| teseladb_bson::RawDoc::from_bytes(b).ok());
+                            let Some(doc) = doc else {
+                                return Ok(Err(format!("{want:?}: {k:?} is no document")));
+                            };
+                            if cell.map(Value::from) != doc.get(f).map(Value::from) {
+                                return Ok(Err(format!("{want:?}: {f} of {k:?} is {cell:?}")));
+                            }
+                        }
+                    }
+                    at += c.docs;
+                    if rows[at - 1].0 != c.last {
+                        return Ok(Err(format!("{want:?}: a batch ends at {:?}", c.last)));
+                    }
+                }
+            }
+        }
+        if at != rows.len() {
+            return Ok(Err(format!("{want:?}: {at} documents of {}", rows.len())));
+        }
+    }
+    Ok(Ok(()))
 }
 
 #[derive(Default)]
@@ -597,6 +671,15 @@ impl Workload for LsmWorkload {
                              model {expected:?}"
                         );
                         return Err(Violation::safety("lsm", detail));
+                    }
+                    match columns_match(&mut lsm, &mut c.disk, (g, ts, local), &got) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            let detail = format!("n{node} c{core}: the columns of {g:?}: {e}");
+                            return Err(Violation::safety("lsm", detail));
+                        }
+                        Err(LsmError::Stopped(_)) => break 'check,
+                        Err(e) => return Err(Violation::safety("lsm", e.to_string())),
                     }
                 }
                 for n in 0..KEYS {

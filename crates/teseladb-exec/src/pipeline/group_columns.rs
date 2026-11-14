@@ -13,6 +13,7 @@
 //! and any other mix of types, go one document at a time.
 
 use teseladb_bson::{Collator, Document, RawDoc, RawValue, Value};
+use teseladb_keys::columns::ColumnsView;
 use teseladb_mql::MqlError;
 use teseladb_mql::simd::{self, Column, LANES};
 use teseladb_mql::vm::{Cell, load_column};
@@ -73,6 +74,29 @@ pub(super) struct Columns<'d> {
 }
 
 impl Columnar {
+    /// The columns of the documents of a column block (010 FR-033), when it gives every field
+    /// they read; a path below a top-level field is missing in every document, since a column
+    /// holds no documents nor arrays.
+    pub(super) fn load_view<'d>(&self, view: &ColumnsView<'d>) -> Option<Columns<'d>> {
+        let column = |i: &Input| -> Option<Vec<Cell<'d>>> {
+            let Input::Field(p) = i else { return Some(Vec::new()) };
+            let (top, below) = match p.split_once('.') {
+                Some((top, _)) => (top, true),
+                None => (p.as_str(), false),
+            };
+            let cells = view.cells(top)?;
+            Some(cells.map(|v| if below { Cell::Missing } else { cell_of(v) }).collect())
+        };
+        let mut inputs = Vec::with_capacity(self.inputs.len());
+        for i in &self.inputs {
+            inputs.push(match i {
+                Some(i) => column(i)?,
+                None => Vec::new(),
+            });
+        }
+        Some(Columns { key: column(&self.key)?, inputs })
+    }
+
     /// Loads the columns of `docs`.
     pub(super) fn load<'d>(&self, docs: &[RawDoc<'d>]) -> Columns<'d> {
         let column = |i: &Input| {
@@ -157,6 +181,25 @@ impl Columnar {
             acc.add_evaluated(st, v, (col, sbe))?;
         }
         Ok(())
+    }
+}
+
+/// The cell of a top-level value of a column block, as [`load_column`] gives it from the document.
+fn cell_of(v: Option<RawValue<'_>>) -> Cell<'_> {
+    match v {
+        None => Cell::Missing,
+        Some(RawValue::Int32(n)) => Cell::Int32(n),
+        Some(RawValue::Int64(n)) => Cell::Int64(n),
+        Some(RawValue::Double(x)) => Cell::Double(x),
+        Some(v) => Cell::Value(v),
+    }
+}
+
+impl<'d> Columns<'d> {
+    /// The lanes `[from, to)` of the columns, at most a batch of them.
+    pub(super) fn chunk(&self, from: usize, to: usize) -> Columns<'d> {
+        let part = |c: &Vec<Cell<'d>>| if c.is_empty() { Vec::new() } else { c[from..to].to_vec() };
+        Columns { key: part(&self.key), inputs: self.inputs.iter().map(part).collect() }
     }
 }
 

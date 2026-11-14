@@ -9,6 +9,7 @@ use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
 
 use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
+use super::columns::{ColumnWriter, encode_directory};
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::reader::{BlockStats, Table};
 use super::schema::Packer;
@@ -96,6 +97,8 @@ pub(crate) struct TableWriter {
     /// The shapes of its packed documents (003 FR-024); none for a history file, whose values
     /// may be deltas, and for a value file.
     packer: Option<Packer>,
+    /// The column blocks of its data blocks (010 FR-033); none where there are no zones.
+    columns: Option<ColumnWriter>,
 }
 
 impl TableWriter {
@@ -123,6 +126,7 @@ impl TableWriter {
             zones: Some(ZoneBuilder::default()),
             block_last: Vec::new(),
             packer: Some(Packer::default()),
+            columns: Some(ColumnWriter::default()),
         }
     }
 
@@ -147,7 +151,8 @@ impl TableWriter {
     /// The writer of a history file: an old version goes as a delta against the next newer
     /// version of its key when that takes fewer bytes (FR-035).
     pub(crate) fn for_history(self) -> TableWriter {
-        TableWriter { data: self.data.with_deltas(), zones: None, packer: None, ..self }
+        let data = self.data.with_deltas();
+        TableWriter { data, zones: None, packer: None, columns: None, ..self }
     }
 
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
@@ -190,6 +195,9 @@ impl TableWriter {
         if let Some(z) = &mut self.zones {
             z.end_block();
         }
+        if let Some(c) = &mut self.columns {
+            c.end_block();
+        }
         self.block_last.clear();
         self.block_last.extend_from_slice(entry::logical(&last));
         let payload = self.data.finish();
@@ -231,6 +239,9 @@ impl TableWriter {
         if let Some(z) = &mut self.zones {
             z.add(ikey, kind, Some(value));
         }
+        if let Some(c) = &mut self.columns {
+            c.add(ikey, kind, value);
+        }
         match &packed {
             Some(p) => self.data.add_packed(ikey, kind, p),
             None => self.data.add(ikey, kind, value),
@@ -245,6 +256,9 @@ impl TableWriter {
         self.open_block(ikey, value.len());
         if let Some(z) = &mut self.zones {
             z.add(ikey, kind, Some(value));
+        }
+        if let Some(c) = &mut self.columns {
+            c.spoil();
         }
         self.data.add_old(ikey, kind, value, newer);
         self.note(ikey);
@@ -266,6 +280,9 @@ impl TableWriter {
         if let Some(z) = &mut self.zones {
             z.add(ikey, kind, None);
         }
+        if let Some(c) = &mut self.columns {
+            c.spoil();
+        }
         self.data.add_ref(ikey, kind, &encoded);
         self.note(ikey);
     }
@@ -274,6 +291,7 @@ impl TableWriter {
     /// (slot 0, which the file of its key sets) (FR-034).
     pub(crate) fn add_alone(&mut self, ikey: &[u8], value: &[u8]) -> ValueRef {
         self.zones = None;
+        self.columns = None;
         if !self.data.is_empty() {
             self.flush_block();
         }
@@ -299,9 +317,14 @@ impl TableWriter {
         }
         if self.data.is_empty() {
             let first = entry::logical(ikey);
-            if let Some(z) = self.zones.as_mut().filter(|_| self.block_last == first) {
+            if !self.block_last.is_empty() && self.block_last == first {
                 // The versions of the previous block's last key go on in this one.
-                z.continues();
+                if let Some(z) = &mut self.zones {
+                    z.continues();
+                }
+                if let Some(c) = &mut self.columns {
+                    c.continues();
+                }
             }
             self.block_first = Some(first.to_vec());
         }
@@ -341,6 +364,32 @@ impl TableWriter {
         self.out.len() - self.out.len() % ALIGN
     }
 
+    /// Writes the column blocks after the last data block, one after the other (010 FR-033):
+    /// each framed with the file's compression, zstd alone for a file with a dictionary. The
+    /// framed length and highest mark of each, by data block; `None` when no block has one.
+    fn write_columns(&mut self) -> Option<Vec<Option<(u64, Hlc)>>> {
+        let blocks = self.columns.take()?.finish();
+        if blocks.iter().all(Option::is_none) {
+            return None;
+        }
+        let method = match self.codec {
+            Codec::None => Method::None,
+            Codec::Zlib => Method::Zlib,
+            Codec::Lz4 => Method::Lz4,
+            Codec::Zstd | Codec::ZstdDict => Method::Zstd,
+        };
+        let mut sizes = Vec::with_capacity(blocks.len());
+        for b in blocks {
+            sizes.push(b.map(|(payload, ts)| {
+                let offset = self.taken + self.out.len() as u64;
+                let framed = self.framed(&payload, method, offset);
+                self.out.extend_from_slice(&framed);
+                (framed.len() as u64, ts)
+            }));
+        }
+        Some(sizes)
+    }
+
     fn meta_block(&mut self, payload: &[u8]) -> Handle {
         let offset = self.taken + self.out.len() as u64;
         let framed = self.framed(payload, Method::None, offset);
@@ -363,11 +412,16 @@ impl TableWriter {
         if !self.data.is_empty() {
             self.flush_block();
         }
+        let column_sizes = self.write_columns();
         pad(&mut self.out);
         let meta_start = self.taken + self.out.len() as u64;
         let filter = self.meta_block(&filter::build(&self.hashes));
         let zones = self.zones.take().and_then(ZoneBuilder::finish).map(|z| {
             let h = self.meta_block(&z);
+            (h.offset, h.len)
+        });
+        let columns = column_sizes.map(|sizes| {
+            let h = self.meta_block(&encode_directory(&sizes));
             (h.offset, h.len)
         });
         tombstones.sort_by(|a, b| (&a.start, &a.end, a.ts).cmp(&(&b.start, &b.end, b.ts)));
@@ -391,6 +445,7 @@ impl TableWriter {
             values: self.slots.iter().map(|(_, b)| *b).collect(),
             zones,
             shapes: self.packer.take().map(Packer::finish).unwrap_or_default(),
+            columns,
         };
         let props_handle = self.meta_block(&props.encode());
         let index_payload = self.index.finish();

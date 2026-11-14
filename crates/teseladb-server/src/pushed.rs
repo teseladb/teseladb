@@ -70,6 +70,20 @@ pub fn ran_for_other_nodes() -> u64 {
     FOR_OTHERS.load(Ordering::Relaxed)
 }
 
+/// Data blocks taken as their column blocks by the parts of split aggregations (010 FR-033).
+static COLUMN_BATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Data blocks whose column block the part of an aggregation took in place of their rows, since
+/// the process started (010 FR-033).
+pub fn column_batches() -> u64 {
+    COLUMN_BATCHES.load(Ordering::Relaxed)
+}
+
+/// Counts `n` column blocks a part took.
+pub(crate) fn note_column_batches(n: usize) {
+    COLUMN_BATCHES.fetch_add(n as u64, Ordering::Relaxed);
+}
+
 /// Counts a part the leader ran for another node.
 pub(crate) fn note_ran_for_other_node() {
     FOR_OTHERS.fetch_add(1, Ordering::Relaxed);
@@ -141,6 +155,11 @@ pub fn metrics(out: &mut String) {
             "teseladb_pushed_parts_taken_ahead_total",
             "Parts of filtered scans asked for ahead that their scan took.",
             crate::backend::parts_taken_ahead(),
+        ),
+        (
+            "teseladb_pushed_column_batches_total",
+            "Data blocks whose column block an aggregation's part took in place of their rows.",
+            column_batches(),
         ),
         (
             "teseladb_pushed_ran_for_other_nodes_total",
@@ -234,6 +253,27 @@ impl Work {
                 let seen = kept.seen.into_iter().map(|n| u32::try_from(n).unwrap_or(u32::MAX));
                 Worked::Matched { rows: kept.rows, seen: seen.collect(), examined, next }
             }
+        }
+    }
+}
+
+impl Work {
+    /// [`Work::apply`] for a scan that took columns (010 FR-033): its rows and batches, of at
+    /// most `limit` documents. Only an aggregation's program asks for columns.
+    pub(crate) fn apply_pieces(
+        &self,
+        pieces: &[teseladb_range::push::Piece],
+        limit: usize,
+    ) -> Worked {
+        let (inputs, docs, next) = crate::data::inputs_of(pieces, limit);
+        let examined = u32::try_from(docs).unwrap_or(u32::MAX);
+        let Work::Fold(program) = self else { return Worked::Declined };
+        let groups = Program::decode(program)
+            .and_then(|p| p.run_inputs(&inputs))
+            .and_then(|groups| groups.encode());
+        match groups {
+            Some(groups) => Worked::Folded { groups, examined, next },
+            None => Worked::Declined,
         }
     }
 }

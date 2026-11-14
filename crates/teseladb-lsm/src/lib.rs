@@ -45,6 +45,7 @@
 
 mod art;
 mod cache;
+mod columnar;
 mod compaction;
 mod concurrent;
 mod config;
@@ -86,6 +87,7 @@ pub const HISTORY_VALUE: u8 = 5;
 /// First byte of the stored value of a document of a collection (and the type of a change
 /// stream's document, 014): what the zone maps summarise (FR-039).
 pub const DOCUMENT_VALUE: u8 = 1;
+pub use columnar::{ColumnStep, Columns};
 pub use entry::{Kind, RangeTombstone};
 pub use error::LsmError;
 pub use gc::GcTable;

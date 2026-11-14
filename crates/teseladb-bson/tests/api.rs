@@ -141,3 +141,17 @@ fn only_a_document_value_gives_its_document() {
     assert_eq!(Value::Array(vec![Value::Document(d)]).as_document(), None);
     assert_eq!(Value::Int32(1).as_document(), None);
 }
+
+#[test]
+fn elements_give_each_value_with_the_bytes_bson_writes_for_it() {
+    let doc = Document::new().with("a", 7i32).with("bb", "xy").with("c", 1.5f64);
+    let bytes = doc.to_bytes().expect("a small document");
+    let raw = RawDoc::from_bytes(&bytes).expect("a document");
+    let got: Vec<(&str, RawValue<'_>, Vec<u8>)> =
+        raw.elements().map(|(k, v, b)| (k, v, b.to_vec())).collect();
+    assert_eq!(got[0], ("a", RawValue::Int32(7), 7i32.to_le_bytes().to_vec()));
+    assert_eq!(got[1], ("bb", RawValue::String("xy"), vec![3, 0, 0, 0, b'x', b'y', 0]));
+    assert_eq!(got[2], ("c", RawValue::Double(1.5), 1.5f64.to_le_bytes().to_vec()));
+    assert_eq!(got.len(), 3);
+    assert_eq!(RawDoc::EMPTY.elements().count(), 0);
+}

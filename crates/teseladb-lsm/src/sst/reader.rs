@@ -10,6 +10,7 @@ use teseladb_crypto::at_rest::{FileKey, KeyRing};
 use teseladb_types::Bytes;
 
 use super::block::{Block, BlockCursor, unframe_with, unpack};
+use super::columns::{ColumnEntry, decode_directory};
 use super::elias_fano::EliasFano;
 use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
@@ -50,7 +51,13 @@ pub struct Table {
     pub(crate) values: Vec<Arc<Table>>,
     /// Its zone map (FR-039), when it has one.
     pub(crate) zones: Option<ZoneMap>,
+    /// Its column blocks by data block (010 FR-033), when it has any.
+    pub(crate) columns: Option<Box<[Option<ColumnEntry>]>>,
 }
+
+/// The slots of the cache and of the reads that stand for column blocks: data block `i`'s column
+/// block is slot `COLUMN_SLOT + i`.
+pub(crate) const COLUMN_SLOT: usize = 1 << 31;
 
 /// Data blocks written: how many with each compression code, and their bytes before and after
 /// compression (the latter framed, without the padding to the page).
@@ -160,8 +167,17 @@ impl Table {
                 Some(ZoneMap::decode(&block(Handle { offset, len })?, last_keys.len())?)
             }
         };
+        let columns = match props.columns {
+            None => None,
+            Some((offset, len)) => {
+                let first = bounds.last().copied().ok_or(Bad)?;
+                let dir = block(Handle { offset, len })?;
+                Some(decode_directory(&dir, last_keys.len(), (first, meta_start))?)
+            }
+        };
         Ok(Table {
             zones,
+            columns,
             number,
             size,
             props,
@@ -271,10 +287,23 @@ impl Table {
         self.pgm.is_some()
     }
 
-    /// The aligned pages that hold data block `i`, as `(offset, len)`: what a read of it takes
-    /// (FR-043).
+    /// Data block `i`'s column block, when it has one (010 FR-033).
+    pub(crate) fn column_entry(&self, i: usize) -> Option<ColumnEntry> {
+        *self.columns.as_ref()?.get(i)?
+    }
+
+    /// Where the block of slot `slot` is: a data block, or a column block from [`COLUMN_SLOT`].
+    pub(crate) fn slot_handle(&self, slot: usize) -> Handle {
+        match slot.checked_sub(COLUMN_SLOT) {
+            None => self.handle(slot),
+            Some(i) => self.column_entry(i).expect("a column block the file has").handle,
+        }
+    }
+
+    /// The aligned pages that hold the block of slot `i` (a data block, or a column block from
+    /// [`COLUMN_SLOT`]), as `(offset, len)`: what a read of it takes (FR-043).
     pub(crate) fn pages(&self, i: usize) -> (u64, u64) {
-        let h = self.handle(i);
+        let h = self.slot_handle(i);
         let start = align_down(h.offset);
         (start, align_up(h.offset + h.len) - start)
     }
@@ -282,13 +311,18 @@ impl Table {
     /// The checked payload of data block `i` from bytes read from the start of its first page
     /// ([`Table::pages`]), its packed documents whole (003 FR-024).
     pub(crate) fn payload(&self, i: usize, read: &Bytes) -> Result<Bytes, Bad> {
-        let h = self.handle(i);
+        let h = self.slot_handle(i);
         let skip = (h.offset - align_down(h.offset)) as usize;
         let end = skip + h.len as usize;
         if read.len() < end {
             return Err(Bad);
         }
         let key = self.key.as_deref().map(|k| (k, h.offset));
+        if i >= COLUMN_SLOT {
+            let payload = unframe_with(&read.slice(skip..end), key, None)?;
+            teseladb_keys::columns::ColumnsView::parse(&payload).map_err(|_| Bad)?;
+            return Ok(payload);
+        }
         let payload = unframe_with(&read.slice(skip..end), key, self.dict.as_deref())?;
         if self.props.shapes.is_empty() {
             Block::parse(payload.clone())?;
@@ -515,6 +549,7 @@ mod tests {
             values: Vec::new(),
             zones: None,
             shapes: Vec::new(),
+            columns: None,
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);

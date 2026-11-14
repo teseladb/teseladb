@@ -1178,7 +1178,7 @@ pub(crate) fn record_answer(
             rec.result = OpResult::Ok(value.map(|(_, v)| String::from_utf8_lossy(&v).into_owned()));
             prefer.insert(rec.client, node);
         }
-        Ok(Reply::Batch(_)) => rec.result = OpResult::Unknown,
+        Ok(Reply::Batch(_) | Reply::Pieces(_)) => rec.result = OpResult::Unknown,
         Ok(
             Reply::Intents { .. }
             | Reply::Record(_)

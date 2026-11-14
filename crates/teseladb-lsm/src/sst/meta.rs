@@ -4,7 +4,7 @@
 //! props  := lo · hi (length-prefixed) · min_ts(12 BE) · max_ts(12 BE) · versions(varint)
 //!           · tombstones(varint) · (start · end · ts(12 BE))* · dictionary(varint)
 //!           · [values(varint) · bytes(varint)*] · [zone_off(varint) · zone_len(varint)]
-//!           · [shapes(varint) · shape(length-prefixed)*]
+//!           · [shapes(varint) · shape(length-prefixed)*] · [columns_off(varint) · columns_len(varint)]
 //! footer := filter_off · filter_len · props_off · props_len · index_off · index_len (u64 LE)
 //!           · encryption(32 bytes) · version(u32 LE = 1) · magic "TSLSST01"
 //!           · padding(32 bytes) · crc32c(u32 LE), 128 bytes
@@ -61,6 +61,10 @@ pub struct Props {
     /// count of value files and the zones before them, the zones as `0 · 0` without a zone
     /// block; a file without packed documents ends its properties without them.
     pub shapes: Vec<Vec<u8>>,
+    /// Offset and framed length of its column directory (010 FR-033), when it has one. A file
+    /// with one writes the count of value files, the zones and the shapes before it, with a
+    /// count of shapes of zero when it has none.
+    pub columns: Option<(u64, u64)>,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -89,7 +93,8 @@ impl Props {
             put_ts(&mut out, t.ts);
         }
         put_varint(&mut out, self.dictionary);
-        let shapes = !self.shapes.is_empty();
+        let columns = self.columns.is_some();
+        let shapes = !self.shapes.is_empty() || columns;
         if !self.values.is_empty() || self.zones.is_some() || shapes {
             put_varint(&mut out, self.values.len() as u64);
             for bytes in &self.values {
@@ -106,6 +111,10 @@ impl Props {
             for shape in &self.shapes {
                 put_bytes(&mut out, shape);
             }
+        }
+        if let Some((offset, len)) = self.columns {
+            put_varint(&mut out, offset);
+            put_varint(&mut out, len);
         }
         out
     }
@@ -150,10 +159,15 @@ impl Props {
                 super::schema::check_shape(shape)?;
                 shapes.push(shape.to_vec());
             }
-            if n == 0 {
+            // A count of zero only comes before a column directory.
+            if n == 0 && at == b.len() {
                 return Err(Bad);
             }
         }
+        let columns = match at < b.len() {
+            true => Some((get_varint(b, &mut at)?, get_varint(b, &mut at)?)),
+            false => None,
+        };
         // A zone block at offset 0 stands for none: data blocks come first.
         let zones = zones.filter(|z| *z != (0, 0));
         if at != b.len() || lo > hi || min_ts > max_ts {
@@ -170,6 +184,7 @@ impl Props {
             values,
             zones,
             shapes,
+            columns,
         })
     }
 }
@@ -271,6 +286,7 @@ mod tests {
             values: Vec::new(),
             zones: None,
             shapes: Vec::new(),
+            columns: None,
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
@@ -307,6 +323,13 @@ mod tests {
         let mut no_shape = Props { zones: Some((12_288, 300)), ..p.clone() }.encode();
         no_shape.push(0);
         assert_eq!(Props::decode(&no_shape), Err(Bad), "a count of no shapes");
+        // With a column directory (010 FR-033), with and without the fields before it.
+        for (zones, shapes) in [(None, Vec::new()), (Some((12_288, 300)), shapes.clone())] {
+            let columnar = Props { zones, shapes, columns: Some((8_192, 77)), ..p.clone() };
+            let e = columnar.encode();
+            assert_eq!(Props::decode(&e), Ok(columnar));
+            assert_eq!(Props::decode(&e[..e.len() - 1]), Err(Bad));
+        }
         let broken = Props { shapes: vec![vec![0x42, b'a', 0]], ..p.clone() };
         assert_eq!(Props::decode(&broken.encode()), Err(Bad), "a shape with an unknown type");
         let mut no_zone = p.encode();

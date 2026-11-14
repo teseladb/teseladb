@@ -53,9 +53,9 @@ struct Part {
 
 impl ServerBackend {
     /// [`teseladb_wire::commands::Backend::scatter_groups`]: `None` for a read at a command's
-    /// mark or with a read preference, a span of one range, and whenever a core or a leader
-    /// declines, a range does not answer or its answer does not read; the caller then reads the
-    /// span.
+    /// mark or with a read preference, a span of one range unless the program takes columns (010
+    /// FR-033), and whenever a core or a leader declines, a range does not answer or its answer
+    /// does not read; the caller then reads the span.
     pub(super) fn scatter_together(
         &self,
         (start, end): (&[u8], &[u8]),
@@ -66,7 +66,8 @@ impl ServerBackend {
             return None;
         }
         let pending = self.parts_of(start, end)?;
-        if pending.len() < 2 {
+        // One range goes to its core too when the program takes columns (010 FR-033).
+        if pending.is_empty() || (pending.len() < 2 && program.columns().is_none()) {
             return None;
         }
         let found = self.scatter_parts(pending, program, concern);

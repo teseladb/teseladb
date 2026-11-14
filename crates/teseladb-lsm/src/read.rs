@@ -20,7 +20,8 @@ use teseladb_raftlog::{IoErrno, IoOp};
 use teseladb_types::Bytes;
 
 use crate::cache::BlockCache;
-use crate::cursor::{Cursor, MemCursor, Pos};
+use crate::columnar::{self, ColumnStep};
+use crate::cursor::{Choice, Cursor, MemCursor, Pos};
 use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::lsm::Lsm;
@@ -263,6 +264,15 @@ pub(crate) enum Fetch {
 pub(crate) trait Blocks {
     /// Block `i` of `table`, or the read it waits for.
     fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError>;
+    /// Data block `i`'s column block in `table` (010 FR-033), which it must have: its payload or
+    /// the read to wait for; `None` when these reads give no column blocks.
+    fn columns(
+        &mut self,
+        _table: &Arc<Table>,
+        _i: usize,
+    ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
+        Ok(None)
+    }
     /// The core's failure, which ends every read.
     fn failure(&self) -> Option<&LsmError>;
     /// Starts a read attempt.
@@ -276,6 +286,14 @@ pub(crate) trait Blocks {
 impl Blocks for Reader {
     fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
         Reader::block(self, table, i)
+    }
+
+    fn columns(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+    ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
+        Reader::columns(self, table, i).map(Some)
     }
 
     fn failure(&self) -> Option<&LsmError> {
@@ -321,7 +339,7 @@ const FRESH_LIFETIME: u64 = 1024;
 
 /// The error of bad bytes in block `block` of `table`.
 pub(crate) fn corrupt(table: &Table, block: usize) -> LsmError {
-    LsmError::Corrupt { file: table.number, offset: table.handle(block).offset }
+    LsmError::Corrupt { file: table.number, offset: table.slot_handle(block).offset }
 }
 
 impl Reader {
@@ -361,6 +379,29 @@ impl Reader {
     /// Block `i` of `table`, from the cache or after a read.
     /// Reads check the core's failure before they start, and nothing sets it while they run.
     pub(crate) fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
+        match self.payload(table, i)? {
+            Ok(payload) => Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i)),
+            Err(token) => Ok(Fetch::Wait(token)),
+        }
+    }
+
+    /// Data block `i`'s column block in `table` (010 FR-033), which it must have: its payload,
+    /// checked when it was read, or the read to wait for.
+    pub(crate) fn columns(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+    ) -> Result<Result<Bytes, ReadToken>, LsmError> {
+        self.payload(table, crate::sst::reader::COLUMN_SLOT + i)
+    }
+
+    /// The payload of the block of slot `i` of `table` (a data block, or a column block), from
+    /// the cache or after a read.
+    fn payload(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+    ) -> Result<Result<Bytes, ReadToken>, LsmError> {
         let key = (table.number, i);
         let cached = match self.fresh.get(&key) {
             Some((payload, _)) => {
@@ -370,10 +411,10 @@ impl Reader {
             None => self.cache.get(table.number, i as u32),
         };
         if let Some(payload) = cached {
-            return Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i));
+            return Ok(Ok(payload));
         }
         if let Some(t) = self.by_block.get(&(table.number, i)) {
-            return Ok(Fetch::Wait(ReadToken(*t)));
+            return Ok(Err(ReadToken(*t)));
         }
         let token = self.next_token;
         self.next_token += 1;
@@ -386,7 +427,7 @@ impl Reader {
         });
         self.waiting.insert(token, (table.clone(), i));
         self.by_block.insert((table.number, i), token);
-        Ok(Fetch::Wait(ReadToken(token)))
+        Ok(Err(ReadToken(token)))
     }
 
     /// Starts a read attempt.
@@ -645,6 +686,7 @@ impl View {
             ready: None,
             finished: false,
             skipped: 0,
+            want: None,
         }
     }
 }
@@ -740,6 +782,9 @@ pub struct Scan {
     finished: bool,
     /// Data blocks passed over by their zone maps (FR-039).
     skipped: u64,
+    /// The top-level fields whose columns the scan takes in place of whole data blocks (010
+    /// FR-033), when it takes any.
+    want: Option<Arc<[String]>>,
 }
 
 impl std::fmt::Debug for Scan {
@@ -839,6 +884,29 @@ impl Scan {
         self.next_pruned_with(&mut lsm.reader, Some(prune))
     }
 
+    /// The scan taking each data block it may as its column block, with the columns of the
+    /// top-level fields `want` (010 FR-033): [`Scan::next_columns`] gives those batches in key
+    /// order among the other documents.
+    pub fn with_columns(self, want: Arc<[String]>) -> Scan {
+        Scan { want: Some(want), ..self }
+    }
+
+    /// [`Scan::next_pruned`] for a scan [`Scan::with_columns`]: the next document, or the next
+    /// batch of them.
+    pub fn next_columns(
+        &mut self,
+        lsm: &mut Lsm,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> ColumnStep {
+        let r = &mut lsm.reader;
+        r.begin();
+        let step = self.step(r, prune);
+        if !matches!(step, ColumnStep::Step(Step::Miss(_))) {
+            r.finish();
+        }
+        step
+    }
+
     /// Data blocks the scan passed over by their zone maps so far (FR-039).
     pub fn skipped_blocks(&self) -> u64 {
         self.skipped
@@ -856,7 +924,10 @@ impl Scan {
         prune: Option<&dyn Fn(&dyn Zones) -> bool>,
     ) -> Step {
         r.begin();
-        let step = self.step(r, prune);
+        let step = match self.step(r, prune) {
+            ColumnStep::Step(s) => s,
+            ColumnStep::Columns(_) => unreachable!("only a scan that asks for columns takes them"),
+        };
         if !matches!(step, Step::Miss(_)) {
             r.finish();
         }
@@ -871,27 +942,46 @@ impl Scan {
         prune: Option<&dyn Fn(&dyn Zones) -> bool>,
     ) -> Result<Option<ReadToken>, LsmError> {
         let cursors = self.cursors.as_mut().expect("opened");
-        let Some(prune) = prune else { return cursors[at].ready(r) };
-        let (head, older) = cursors.split_at_mut(at + 1);
+        if prune.is_none() && self.want.is_none() {
+            return cursors[at].ready(r);
+        }
+        let (newer, rest) = cursors.split_at_mut(at);
+        let (this, older) = rest.split_first_mut().expect("a cursor at `at`");
         let asleep = &self.asleep;
         let skipped = &mut self.skipped;
-        let mut skip = |table: &Table, i: usize| {
-            let gone = skippable(table, i, prune, older, |j| asleep.contains(&Some(at + 1 + j)));
-            *skipped += u64::from(gone);
-            gone
+        let want = self.want.as_deref();
+        let ask = columnar::Ask { read: self.read, end: &self.end, tombstones: &self.tombstones };
+        let mut choose = |table: &Table, i: usize, target: Option<&[u8]>| {
+            if let Some(prune) = prune {
+                let asleep = |j| asleep.contains(&Some(at + 1 + j));
+                if skippable(table, i, prune, older, asleep) {
+                    *skipped += 1;
+                    return Choice::Skip;
+                }
+            }
+            let others = || newer.iter().chain(older.iter());
+            match want.is_some() && columnar::takes(table, i, target, &ask, others()) {
+                true => Choice::Columns,
+                false => Choice::Read,
+            }
         };
-        head[at].ready_skipping(r, &mut skip)
+        let fits = |payload: &Bytes| want.and_then(|w| columnar::fits(payload, w));
+        this.ready_choosing(r, &mut choose, &fits)
     }
 
-    fn step<B: Blocks>(&mut self, r: &mut B, prune: Option<&dyn Fn(&dyn Zones) -> bool>) -> Step {
+    fn step<B: Blocks>(
+        &mut self,
+        r: &mut B,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> ColumnStep {
         if let Some(e) = r.failure() {
-            return Step::Failed(e.clone());
+            return ColumnStep::Step(Step::Failed(e.clone()));
         }
         if self.ready.is_some() {
-            return self.deliver(r);
+            return ColumnStep::Step(self.deliver(r));
         }
         if self.finished {
-            return Step::Done;
+            return ColumnStep::Step(Step::Done);
         }
         if self.cursors.is_none() {
             let c = self.open();
@@ -902,7 +992,7 @@ impl Scan {
             let mut waiting = None;
             for at in 0..self.cursors.as_ref().expect("opened").len() {
                 match self.ready_at(at, r, prune) {
-                    Err(e) => return Step::Failed(e),
+                    Err(e) => return ColumnStep::Step(Step::Failed(e)),
                     Ok(Some(t)) => {
                         waiting.get_or_insert(t);
                     }
@@ -910,7 +1000,7 @@ impl Scan {
                 }
             }
             if let Some(t) = waiting {
-                return Step::Miss(t);
+                return ColumnStep::Step(Step::Miss(t));
             }
             let cursors = self.cursors.as_mut().expect("opened");
             let mut heap: Vec<usize> =
@@ -925,8 +1015,8 @@ impl Scan {
                 // Only the first cursor moves: ready again, it goes to its place or leaves.
                 let top = self.heap.as_ref().expect("ordered")[0];
                 match self.ready_at(top, r, prune) {
-                    Err(e) => return Step::Failed(e),
-                    Ok(Some(t)) => return Step::Miss(t),
+                    Err(e) => return ColumnStep::Step(Step::Failed(e)),
+                    Ok(Some(t)) => return ColumnStep::Step(Step::Miss(t)),
                     Ok(None) => {}
                 }
                 let cursors = self.cursors.as_mut().expect("opened");
@@ -940,8 +1030,8 @@ impl Scan {
             if let Some(j) = self.joining {
                 // A history file a key woke: at its entry, it takes its place among the others.
                 match self.ready_at(j, r, prune) {
-                    Err(e) => return Step::Failed(e),
-                    Ok(Some(t)) => return Step::Miss(t),
+                    Err(e) => return ColumnStep::Step(Step::Failed(e)),
+                    Ok(Some(t)) => return ColumnStep::Step(Step::Miss(t)),
                     Ok(None) => {}
                 }
                 let cursors = self.cursors.as_mut().expect("opened");
@@ -954,6 +1044,24 @@ impl Scan {
                     }
                 }
             }
+            // A column block first in the heap: the key being decided goes out before its batch.
+            let top = self.heap.as_ref().expect("ordered").first().copied();
+            if let Some(i) = top.filter(|&i| self.cursors.as_ref().expect("opened")[i].at_columns())
+            {
+                if let Some(st) = self.current.take() {
+                    if let Some(item) = self.emit(st) {
+                        return ColumnStep::Step(Step::Item(item));
+                    }
+                    if self.ready.is_some() {
+                        return ColumnStep::Step(self.deliver(r));
+                    }
+                }
+                let cursors = self.cursors.as_mut().expect("opened");
+                let (table, block, payload, docs) =
+                    cursors[i].take_columns().expect("a cursor at a column block");
+                self.moved = true;
+                return ColumnStep::Columns(columnar::batch(&table, block, payload, docs));
+            }
             // The first cursor's entry: its number, its mark and whether it is of the key being
             // decided (`None`: no key is).
             let head = self.heap.as_ref().expect("ordered").first().and_then(|&i| {
@@ -965,19 +1073,19 @@ impl Scan {
             let Some((i, ts, same)) = head else {
                 self.finished = true;
                 let st = self.current.take();
-                return match st.and_then(|s| self.emit(s)) {
+                return ColumnStep::Step(match st.and_then(|s| self.emit(s)) {
                     Some(item) => Step::Item(item),
                     None if self.ready.is_some() => self.deliver(r),
                     None => Step::Done,
-                };
+                });
             };
             if same == Some(false) {
                 let st = self.current.take().expect("checked");
                 if let Some(item) = self.emit(st) {
-                    return Step::Item(item);
+                    return ColumnStep::Step(Step::Item(item));
                 }
                 if self.ready.is_some() {
-                    return self.deliver(r);
+                    return ColumnStep::Step(self.deliver(r));
                 }
                 continue;
             }
@@ -996,14 +1104,14 @@ impl Scan {
             }
             if st.found.is_some() {
                 if let Err(e) = cursors[i].skip_versions(&st.key, VERSIONS_STEPPED) {
-                    return Step::Failed(e);
+                    return ColumnStep::Step(Step::Failed(e));
                 }
                 continue;
             }
             let c = &cursors[i];
             let seen = match see(ts, c.kind(), || c.stored(), &mut st.retracted, &mut st.found) {
                 Ok(seen) => seen,
-                Err(e) => return Step::Failed(e),
+                Err(e) => return ColumnStep::Step(Step::Failed(e)),
             };
             // The scan passes over this version: the ones under it may be in the history file
             // it left closed, which it opens at this key (FR-031).
@@ -1013,7 +1121,7 @@ impl Scan {
                 self.joining = Some(j);
             }
             if let Err(e) = cursors[i].advance() {
-                return Step::Failed(e);
+                return ColumnStep::Step(Step::Failed(e));
             }
         }
     }
