@@ -78,6 +78,7 @@ pub(crate) mod plan_hash;
 pub mod presentation;
 pub mod primaries;
 pub mod profile;
+pub mod pushed_filter;
 pub mod query;
 pub mod query_analysis;
 pub mod query_settings;
@@ -540,7 +541,9 @@ pub trait Backend {
     /// backend that can evaluates `keep` on the stored bytes and copies only what it accepts;
     /// by default it reads them all and filters. A backend whose storage keeps zone maps passes
     /// over, unread and unexamined, the blocks for which `block` says no document of theirs can
-    /// be accepted (004 FR-039).
+    /// be accepted (004 FR-039). `sent` is the filter in BSON when the node that holds the
+    /// documents may evaluate it alone ([`pushed_filter::sendable`], 010 FR-027): a backend whose
+    /// ranges live on other nodes sends it to their leaders, which give back only what it keeps.
     fn scan_matching(
         &mut self,
         start: &[u8],
@@ -549,6 +552,7 @@ pub trait Backend {
         concern: ReadConcern,
         keep: &mut Keep<'_>,
         _block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
+        _sent: Option<&[u8]>,
     ) -> Result<Matching, CommandError> {
         matching_by_scan(self, (start, end), examine, concern, keep)
     }

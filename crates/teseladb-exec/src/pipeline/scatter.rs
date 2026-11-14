@@ -137,6 +137,47 @@ impl Program {
     }
 }
 
+impl Program {
+    /// The program in bytes, as it travels to the leader of a range on another node (010
+    /// FR-034): the documents of its `$match`es and of its `$group`, whether it runs with the
+    /// slot-based engine and its limit; `None` when they cannot be written.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        let matches = self.matches.iter().cloned().map(Value::Document).collect();
+        let limit = i64::try_from(self.limit).unwrap_or(i64::MAX);
+        Document::new()
+            .with("m", Value::Array(matches))
+            .with("g", self.group.clone())
+            .with("s", self.sbe)
+            .with("l", limit)
+            .to_bytes_with(super::group::wire_limits())
+            .ok()
+    }
+
+    /// What [`Program::encode`] wrote; `None` for anything else.
+    pub fn decode(bytes: &[u8]) -> Option<Program> {
+        let raw = RawDoc::from_bytes_with(bytes, super::group::wire_limits()).ok()?;
+        let doc = Document::from(raw);
+        let [
+            ("m", Value::Array(m)),
+            ("g", Value::Document(g)),
+            ("s", Value::Boolean(sbe)),
+            ("l", Value::Int64(l)),
+        ] = doc.iter().collect::<Vec<_>>().as_slice()
+        else {
+            return None;
+        };
+        let matches = m
+            .iter()
+            .map(|v| match v {
+                Value::Document(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<Document>>>()?;
+        let limit = usize::try_from(*l).ok()?;
+        Some(Program { matches, group: g.clone(), sbe: *sbe, limit })
+    }
+}
+
 impl Scatter {
     /// What each core runs.
     pub fn program(&self) -> &Arc<Program> {

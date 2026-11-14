@@ -386,7 +386,7 @@ pub(crate) fn by_statistics(filter: Filter, c: &CollectionEntry) -> Filter {
 }
 
 /// `filter` with its conditions ordered by the statistics of the collection key `key` is in.
-fn by_statistics_of_key(filter: Filter, key: &[u8]) -> Filter {
+pub(crate) fn by_statistics_of_key(filter: Filter, key: &[u8]) -> Filter {
     match teseladb_keys::space::collection_of(key) {
         Some(c) => teseladb_exec::selectivity::ordered_by_statistics(filter, c),
         None => filter,
@@ -404,6 +404,8 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
     mut each: impl FnMut(Vec<u8>, Vec<u8>) -> Result<bool, CommandError>,
 ) -> Result<u64, CommandError> {
     let mut plan = Plan::new(filter, None, collation)?.with_vars(vars);
+    // The filter as it can go to the leaders of the ranges on other nodes (010 FR-027).
+    let sent = super::pushed_filter::sendable(filter, &plan.filter, collation)?;
     plan.filter = by_statistics_of_key(plan.filter, &start);
     let ctx = plan.ctx();
     let mut next = start;
@@ -447,7 +449,15 @@ pub(crate) fn for_each_match_taken<B: Backend + ?Sized>(
         let block = |z: &dyn teseladb_keys::zone::Zones| {
             teseladb_exec::zone::block_may_match(plan.filter.expr(), collated, z)
         };
-        let found = backend.scan_matching(&next, &end, SCAN_CHUNK, concern, &mut keep, &block)?;
+        let found = backend.scan_matching(
+            &next,
+            &end,
+            SCAN_CHUNK,
+            concern,
+            &mut keep,
+            &block,
+            sent.as_deref(),
+        )?;
         if let Some(e) = fault {
             return Err(e);
         }

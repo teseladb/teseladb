@@ -1068,8 +1068,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         concern: ReadConcern,
         keep: &mut crate::commands::Keep<'_>,
         block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
+        sent: Option<&[u8]>,
     ) -> Result<crate::commands::Matching, CommandError> {
-        let m = self.call(|b| b.scan_matching(start, end, examine, concern, keep, block))?;
+        let m = self.call(|b| b.scan_matching(start, end, examine, concern, keep, block, sent))?;
         self.check()?;
         // Every document it examined counts, not only those its filter accepted.
         if space_of(start) == Some(teseladb_keys::space::DOCUMENTS) {

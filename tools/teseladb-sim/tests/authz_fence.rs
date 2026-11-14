@@ -60,6 +60,12 @@ fn run(
                     wl.on_completions(w, node, core, c);
                 }
             }
+            Event::LogFlush { node, life, sync } => w.on_log_flush(node, life, sync),
+            Event::LogDone { node, core, life, done } => {
+                if let Some(c) = w.on_log_done(node, core, life, done) {
+                    wl.on_completions(w, node, core, c);
+                }
+            }
             Event::Tick { node, core, life } => {
                 act_on(w, wl, Trigger::Tick);
                 if let Some(c) = w.on_tick(node, core, life) {

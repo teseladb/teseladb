@@ -94,6 +94,10 @@ pub fn drive_seeing(
             Event::Disk { node, core, life } => {
                 w.on_disk(node, core, life);
             }
+            Event::LogFlush { node, life, sync } => w.on_log_flush(node, life, sync),
+            Event::LogDone { node, core, life, done } => {
+                w.on_log_done(node, core, life, done);
+            }
             Event::Tick { node, core, life } => {
                 w.on_tick(node, core, life);
             }

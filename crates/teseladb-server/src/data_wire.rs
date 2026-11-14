@@ -168,6 +168,20 @@ pub enum RemoteReq {
         /// Collection.
         collection: u32,
     },
+    /// A scan of `[start, end)` of at most `limit` documents whose rows the leader runs `work`
+    /// over, answering what the work gives instead of the rows (010 FR-034).
+    Pushed {
+        /// First key.
+        start: Vec<u8>,
+        /// End (excluded).
+        end: Vec<u8>,
+        /// Most documents.
+        limit: u32,
+        /// Read concern.
+        concern: ReadConcern,
+        /// What the leader runs over the rows.
+        work: crate::pushed::Work,
+    },
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -260,6 +274,8 @@ pub enum RemoteReply {
         /// Documents.
         n: Option<u64>,
     },
+    /// What the work of a [`RemoteReq::Pushed`] gave.
+    Pushed(crate::pushed::Worked),
 }
 
 const WRITE: u8 = 0;
@@ -279,6 +295,7 @@ const SCAN_BACK: u8 = 12;
 const FOLLOWER_SCAN_BACK: u8 = 13;
 const READ_WITH_BACK: u8 = 14;
 const DOC_COUNT: u8 = 15;
+const PUSHED: u8 = 16;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -457,6 +474,10 @@ impl RemoteReq {
             RemoteReq::DocCount { tenant, collection } => {
                 e.u8(DOC_COUNT).u32(*tenant).u32(*collection);
             }
+            RemoteReq::Pushed { start, end, limit, concern, work } => {
+                e.u8(PUSHED).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
+                work.put(&mut e);
+            }
         }
         e.finish()
     }
@@ -560,6 +581,13 @@ impl RemoteReq {
             },
             LIVE => RemoteReq::Live,
             DOC_COUNT => RemoteReq::DocCount { tenant: d.u32()?, collection: d.u32()? },
+            PUSHED => RemoteReq::Pushed {
+                start: d.bytes()?.to_vec(),
+                end: d.bytes()?.to_vec(),
+                limit: d.u32()?,
+                concern: get_concern(&mut d)?,
+                work: crate::pushed::Work::get(&mut d)?,
+            },
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -579,6 +607,7 @@ const OK_CHANGES: u8 = 8;
 const OK_FENCED: u8 = 9;
 const OK_LIVE: u8 = 10;
 const OK_DOC_COUNT: u8 = 11;
+const OK_PUSHED: u8 = 12;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -711,6 +740,10 @@ pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
         Ok(RemoteReply::DocCount { n }) => {
             e.u8(OK_DOC_COUNT).bool(n.is_some()).u64(n.unwrap_or(0));
         }
+        Ok(RemoteReply::Pushed(worked)) => {
+            e.u8(OK_PUSHED);
+            worked.put(&mut e);
+        }
         Err(err) => {
             e.u8(ERR);
             put_error(&mut e, err);
@@ -788,6 +821,7 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
             let (some, n) = (d.bool()?, d.u64()?);
             Ok(RemoteReply::DocCount { n: some.then_some(n) })
         }
+        OK_PUSHED => Ok(RemoteReply::Pushed(crate::pushed::Worked::get(&mut d)?)),
         ERR => Err(get_error(&mut d)?),
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     };
@@ -945,6 +979,13 @@ mod tests {
             RemoteReq::Fence { start: vec![1], end: vec![2], on: true },
             RemoteReq::Fence { start: vec![], end: vec![9], on: false },
             RemoteReq::Live,
+            RemoteReq::Pushed {
+                start: vec![1],
+                end: vec![2],
+                limit: 1024,
+                concern: ReadConcern::Local,
+                work: crate::pushed::Work::Fold(vec![5, 6]),
+            },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
@@ -970,6 +1011,12 @@ mod tests {
             Ok(RemoteReply::Intents { ts: Hlc { physical: 6, logical: 0 } }),
             Ok(RemoteReply::Fenced { ts: Hlc { physical: 6, logical: 4 } }),
             Ok(RemoteReply::Live { bytes: 1 << 40 }),
+            Ok(RemoteReply::Pushed(crate::pushed::Worked::Declined)),
+            Ok(RemoteReply::Pushed(crate::pushed::Worked::Folded {
+                groups: vec![3; 9],
+                examined: 1024,
+                next: Some(vec![4, 0]),
+            })),
             Err(RangeError::Fenced),
             Ok(RemoteReply::Changes {
                 rows: vec![

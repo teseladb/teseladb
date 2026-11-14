@@ -256,6 +256,9 @@ enum Client {
     Remote(NodeId, u64),
     /// The handle's scan for an aggregation's program (010 FR-034), of at most `.2` documents.
     Partial(DataSender, Fold, usize),
+    /// A scan whose rows go through work for whoever asked (`.0`), of at most `.2` documents
+    /// (010 FR-034): run here when this replica leads the range.
+    Worked(Box<Client>, crate::pushed::Work, usize),
 }
 
 /// The answer to a [`DataReq::Partial`] from the answer `r` of its scan of at most `limit`
@@ -793,6 +796,15 @@ impl DataCore {
                 let req = ScanReq { g, start, end, concern, limit, backward };
                 self.host.scan(core, req, now, wall_ms)
             }
+            // The scan as any other on the leader; its rows go through the work (010 FR-034).
+            RemoteReq::Pushed { start, end, limit, concern, work } => {
+                let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+                let req = ScanReq { g, start, end, concern, limit, backward: false };
+                let id = self.host.scan(core, req, now, wall_ms);
+                self.clients.insert(id, Client::Worked(Box::new(client), work, limit));
+                self.answer(core, now);
+                return;
+            }
             // The leader scans as for `primary`; a follower at its closed mark. The replica that
             // leads serves it as the leader even when the router did not know it led yet, if the
             // request lets the leader serve it (each candidate's flag); `follower_scan` skipped it
@@ -1003,6 +1015,17 @@ impl DataCore {
             },
             Client::Local(to, None) => drop(to.send(r.map(DataReply::Remote))),
             Client::Partial(to, fold, limit) => drop(to.send(folded(r, &fold, limit))),
+            Client::Worked(client, work, limit) => {
+                // A refusal goes back as it is: the node's handle sends it on to the leader.
+                let r = r.and_then(|reply| match reply {
+                    RemoteReply::Rows(rows) => Ok(RemoteReply::Pushed(work.apply(rows, limit))),
+                    _ => Err(RangeError::Unavailable),
+                });
+                if r.is_ok() && matches!(*client, Client::Remote(..)) {
+                    crate::pushed::note_ran_for_other_node();
+                }
+                self.send_answer(core, *client, r, now);
+            }
             Client::Remote(node, req) => {
                 let body = encode_reply(&r);
                 core.answer_forward(node, req, Bytes::from_vec(body));

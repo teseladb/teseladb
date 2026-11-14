@@ -1,0 +1,16 @@
+[package]
+name = "teseladb-devlog"
+version = "0.1.0"
+description = "TeselaDB's device log without I/O: the format of raftlog/, its state over a Disk, and a core's side of it, shared by the node's writer thread and the simulator."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teseladb-types = { workspace = true }
+teseladb-raftlog = { workspace = true }
+teseladb-hash = { workspace = true }

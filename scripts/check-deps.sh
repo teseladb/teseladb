@@ -27,7 +27,7 @@ IO_TOOLS=(teseladb-bench teseladb-unicodegen compat-compare)
 SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
 # Crates whose code runs on a core's thread for each operation (012 FR-008): no lock shared between
 # threads there.
-HOT_CRATES=(teseladb-sys teseladb-io teseladb-multiraft teseladb-lsm teseladb-range teseladb-hlc
+HOT_CRATES=(teseladb-sys teseladb-io teseladb-devlog teseladb-multiraft teseladb-lsm teseladb-range teseladb-hlc
   teseladb-txn teseladb-index teseladb-meta teseladb-search)
 # The viuzi-* crates of the hot path (cryptography runs on every authenticated or encrypted
 # operation, D-090), read from the source of the registry that the build uses: $TESELADB_ANOTHERPRODUCT, or

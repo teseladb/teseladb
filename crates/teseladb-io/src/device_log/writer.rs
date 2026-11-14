@@ -13,10 +13,11 @@ use std::thread::{self, JoinHandle, Thread};
 use std::time::Duration;
 
 use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
-use teseladb_types::Bytes;
+
+use teseladb_devlog::port::LogReq;
+use teseladb_devlog::state::LogState;
 
 use super::port::LogPort;
-use super::state::LogState;
 use crate::mailbox::Notify;
 use crate::spsc::{self, SpscReceiver};
 
@@ -34,28 +35,10 @@ pub type Sink = Box<dyn FnMut(IoDone) -> bool + Send>;
 
 /// What a core asks of the writer.
 pub enum Req {
-    Create {
-        wal: u64,
-        len: u64,
-    },
-    Write {
-        wal: u64,
-        offset: u64,
-        data: Bytes,
-    },
-    Truncate {
-        wal: u64,
-        len: u64,
-    },
-    Remove {
-        wal: u64,
-    },
-    /// Answered once everything before it is durable.
-    Sync(IoOp),
-    Read {
-        wal: u64,
-        reply: mpsc::Sender<Result<Vec<u8>, IoErrno>>,
-    },
+    /// A request for the log.
+    Log(LogReq),
+    /// The contents of a WAL segment.
+    Read { wal: u64, reply: mpsc::Sender<Result<Vec<u8>, IoErrno>> },
     /// The core recovered; its answers go to this sink from now on.
     Attach(Sink),
 }
@@ -226,11 +209,7 @@ fn run<D: Disk + 'static>(
                 took = true;
                 let disk = &mut LogClass(&mut disk);
                 match req {
-                    Req::Create { wal, len } => state.create(core, wal, len),
-                    Req::Write { wal, offset, data } => state.write(core, wal, offset, &data),
-                    Req::Truncate { wal, len } => state.truncate(core, wal, len),
-                    Req::Remove { wal } => state.remove(core, wal),
-                    Req::Sync(op) => state.sync(core, op),
+                    Req::Log(r) => r.apply(&mut state, core),
                     Req::Read { wal, reply } => {
                         let _ = reply.send(state.read(disk, core, wal));
                     }
@@ -247,7 +226,11 @@ fn run<D: Disk + 'static>(
         // A full disk is tried again after its wait, or when something new comes.
         let due = state.has_waiting() || state.buffered() >= WRITE_AHEAD;
         let flushed = if due && (took || !state.disk_full() || woke_by_timer) {
+            let before = state.syncs();
             let answers = state.flush(&mut LogClass(&mut disk));
+            for _ in before..state.syncs() {
+                crate::counters::record_log_sync();
+            }
             shared.disk_full.store(state.disk_full(), Ordering::Release);
             shared.syncs.store(state.syncs(), Ordering::Relaxed);
             for (core, done) in answers {

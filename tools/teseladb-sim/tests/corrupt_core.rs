@@ -32,12 +32,24 @@ fn corrupting(at: Vec<(Nanos, u32)>) -> Corrupting {
     Corrupting { kv: KvWorkload::new(3, 2), at, later: nothing, later_at: LATER, done: false }
 }
 
-/// Damages the header of node 0's newest core 0 WAL segment behind the fault's back (a disk that
-/// rots by itself); the newest one is still there at the end, older ones may have been released.
+/// Damages the header of node 0's newest device log file with records behind the fault's back (a
+/// disk that rots by itself); the newest one is still there at the end, older ones may have gone.
 fn rot_node0(w: &mut World) {
-    let disk = &mut w.nodes[0].cores[0].disk;
-    let wal = teseladb_raftlog::Disk::list(disk, &teseladb_raftlog::paths::wal_dir(0)).unwrap();
-    let newest = wal.iter().max().expect("a WAL segment").clone();
+    let disk = &mut w.nodes[0].log_disk;
+    let dir = std::path::Path::new(teseladb_devlog::format::DIR);
+    let mut files = teseladb_raftlog::Disk::list(disk, dir).unwrap();
+    files.sort();
+    let newest = files
+        .into_iter()
+        .rev()
+        .find(|p| {
+            teseladb_raftlog::Disk::read_all(disk, p)
+                .unwrap()
+                .iter()
+                .skip(teseladb_devlog::format::BLOCK as usize)
+                .any(|b| *b != 0)
+        })
+        .expect("a file of the log with records");
     assert!(disk.corrupt(&newest, 3));
 }
 
