@@ -103,6 +103,14 @@ gate "1. Miri on the vector kernels (x86_64, SSE2)" env MIRIFLAGS=-Zmiri-disable
 gate "1. Miri on the vector kernels (x86_64, AVX2)" env MIRIFLAGS=-Zmiri-disable-isolation \
   RUSTFLAGS="-C target-feature=+avx2" \
   cargo +nightly miri test -q -p teseladb-mql --lib --target x86_64-unknown-linux-gnu -- simd::
+# The unpacking of the posting blocks in four lanes (011 FR-027), on the same three kernels.
+gate "1. Miri on the posting lanes (host)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-search --lib -- segment::lanes segment::bitpack
+gate "1. Miri on the posting lanes (x86_64, SSE2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-search --lib --target x86_64-unknown-linux-gnu -- segment::lanes segment::bitpack
+gate "1. Miri on the posting lanes (x86_64, AVX2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  RUSTFLAGS="-C target-feature=+avx2" \
+  cargo +nightly miri test -q -p teseladb-search --lib --target x86_64-unknown-linux-gnu -- segment::lanes segment::bitpack
 # The pool that carves blocks out of one mapping of huge pages (012 FR-032), on normal pages.
 gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-sys --lib -- huge_pool::

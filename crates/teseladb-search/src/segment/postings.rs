@@ -108,17 +108,11 @@ fn body(
 ) -> Option<(Vec<u32>, Vec<u32>, Vec<Vec<Occurrence>>)> {
     let b = &bytes[h.body..h.body + h.body_len];
     let mut pos = 0;
-    let gaps = bitpack::unpack(b, &mut pos, h.count)?;
-    let mut docs = Vec::with_capacity(h.count);
-    let mut prev = base;
-    for (i, g) in gaps.into_iter().enumerate() {
-        if (g == 0 && !(i == 0 && base == 0)) || prev.checked_add(g).is_none() {
-            return None;
-        }
-        prev += g;
-        docs.push(prev);
-    }
-    if prev != h.last {
+    let docs = bitpack::documents(base, bitpack::unpack(b, &mut pos, h.count)?);
+    // A gap of 0 after the first document, or a sum past `u32::MAX` (which wraps below the
+    // document before), leaves a document that does not grow.
+    let first_ok = docs[0] > base || (docs[0] == 0 && base == 0);
+    if !first_ok || docs.windows(2).any(|d| d[1] <= d[0]) || docs.last() != Some(&h.last) {
         return None;
     }
     let freqs: Vec<u32> = bitpack::unpack(b, &mut pos, h.count)?

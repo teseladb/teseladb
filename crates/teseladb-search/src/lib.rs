@@ -18,7 +18,10 @@
 //!   defaults as `refsearch` does (FR-006).
 //! - [`vector`] and [`segment::hnsw`]: the similarities and scores of `$vectorSearch` and the
 //!   HNSW graph of each vector field of a segment (FR-005, FR-017).
-#![forbid(unsafe_code)]
+//!
+//! `unsafe` is denied except in `segment::lanes`, the vector unpacking of the posting blocks
+//! (FR-027, D-151).
+#![deny(unsafe_code)]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod analysis;
