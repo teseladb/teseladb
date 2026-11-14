@@ -421,6 +421,8 @@ pub struct Hooks {
     pub spawn_connection: SpawnFn,
     /// Period of the TTL monitor.
     pub ttl_every: Duration,
+    /// Period of the statistics of the ranges compactions rewrote (010 FR-029).
+    pub stats_every: Duration,
 }
 
 impl Default for Hooks {
@@ -428,6 +430,9 @@ impl Default for Hooks {
         Hooks {
             spawn_connection: spawn_thread,
             ttl_every: Duration::from_secs(teseladb_wire::commands::ttl::TTL_MONITOR_SECS),
+            stats_every: Duration::from_secs(
+                teseladb_wire::commands::range_stats::STATS_EVERY_SECS,
+            ),
         }
     }
 }
@@ -485,6 +490,8 @@ pub struct ClientListener {
     /// The threads that resolve the intents of the finished transactions (008 FR-005), with a
     /// node behind the port.
     resolvers: Vec<JoinHandle<()>>,
+    /// The thread of the ranges' statistics (010 FR-029).
+    statistics: Option<JoinHandle<()>>,
     open: Arc<AtomicUsize>,
 }
 
@@ -623,6 +630,7 @@ impl ClientListener {
             None => None,
         };
         let resolvers = spawn_resolvers(state.as_ref(), &shared, &stop)?;
+        let statistics = spawn_statistics(state.as_ref(), &stop, hooks.stats_every)?;
         let keeper = match state.handle() {
             Some(h) => {
                 let k = Keeper {
@@ -638,7 +646,17 @@ impl ClientListener {
             }
             None => None,
         };
-        Ok(ClientListener { addrs, stop, acceptor, keeper, builder, usage, resolvers, open })
+        Ok(ClientListener {
+            addrs,
+            stop,
+            acceptor,
+            keeper,
+            builder,
+            usage,
+            resolvers,
+            statistics,
+            open,
+        })
     }
 
     /// Whether the port runs on io_uring rings (012 FR-024) rather than a thread per connection.
@@ -671,12 +689,38 @@ impl ClientListener {
             #[cfg(target_os = "linux")]
             Accepting::Rings(rings) => rings.stop(),
         }
-        let threads = self.keeper.into_iter().chain(self.builder).chain(self.usage);
+        let threads =
+            self.keeper.into_iter().chain(self.builder).chain(self.usage).chain(self.statistics);
         for k in threads.chain(self.resolvers) {
             k.thread().unpark();
             let _ = k.join();
         }
     }
+}
+
+/// Starts the thread that recomputes the statistics of the ranges this node's compactions
+/// rewrote, every `every` (010 FR-029): apart from the keeper, since reading the entries of a
+/// range's indexes takes longer than reaping cursors. None without a node behind the port.
+fn spawn_statistics(
+    state: &dyn NodeState,
+    stop: &Arc<AtomicBool>,
+    every: Duration,
+) -> io::Result<Option<JoinHandle<()>>> {
+    let Some(h) = state.handle() else { return Ok(None) };
+    let mut backend = ServerBackend::new(h, seed(u64::MAX - 3 - RESOLVERS as u64));
+    let stop = stop.clone();
+    let t = thread::Builder::new().name("range-statistics".into()).spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            thread::park_timeout(every);
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            // A range whose statistics could not be read waits for the next pass.
+            let _ = teseladb_wire::commands::range_stats::pass(&mut backend);
+            backend.end_operation();
+        }
+    })?;
+    Ok(Some(t))
 }
 
 /// How many threads resolve the intents of the finished transactions: a resolution waits for a

@@ -1394,6 +1394,41 @@ impl PlanIndex {
     }
 }
 
+impl PlanIndex {
+    /// The index of `_id`, whose entries are the collection's documents.
+    pub(crate) fn is_id_index(&self) -> bool {
+        self.id_index
+    }
+
+    /// Whether its definition names a collation: its keys hold the collation's sort keys of
+    /// strings, not the strings.
+    pub(crate) fn has_collation(&self) -> bool {
+        RawDoc::from_bytes(&self.entry.spec)
+            .is_ok_and(|spec| matches!(spec.get("collation"), Some(RawValue::Document(_))))
+    }
+
+    /// The first key of its entries in collection `coll` (tenant and number) and the first key
+    /// after them.
+    pub(crate) fn span(&self, coll: (u32, u32)) -> (Vec<u8>, Vec<u8>) {
+        index_span(coll, self)
+    }
+}
+
+/// The values of each entry of `index` of `coll` within `[start, end)` (an empty end is the
+/// index's end), in key order, read as the stored data has them (010 FR-029); `None` when an
+/// entry does not decode.
+pub(crate) fn index_values<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    index: &PlanIndex,
+    (start, end): &(Vec<u8>, Vec<u8>),
+) -> Result<Option<Vec<Vec<Value>>>, CommandError> {
+    let r = KeyRange { start: start.clone(), end: (!end.is_empty()).then(|| end.clone()) };
+    let read = (ReadConcern::Local, true);
+    let entries = range_entries(backend, (coll.tenant, coll.id), index, &r, read, (None, false))?;
+    Ok(entries.into_iter().map(|e| e.values).collect())
+}
+
 /// The first key of `index` and the first key after it.
 fn index_span((tenant, collection): (u32, u32), index: &PlanIndex) -> (Vec<u8>, Vec<u8>) {
     let id = index.entry.id;

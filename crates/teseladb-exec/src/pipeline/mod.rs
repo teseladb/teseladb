@@ -12,6 +12,8 @@ pub mod geo_near;
 mod granularity;
 mod group;
 mod group_columns;
+#[cfg(test)]
+mod join_tests;
 mod joined;
 pub mod meta;
 mod narrow;
@@ -763,6 +765,7 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
         searched |= d.get("$search").is_some();
         sbe_specs.push(d.iter().all(|(name, arg)| sbe::spec_runs_in_sbe(name, arg)));
     }
+    join_matches(&mut stages, pipeline, ctx);
     let mut read = Vec::new();
     pipeline.iter().for_each(|v| meta::metas_read(*v, &mut read));
     let reads_sort_key = read.iter().any(|n| n == crate::expr::SORT_KEY);
@@ -776,6 +779,46 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
         reads_search_meta: reads_meta,
         narrow: None,
     })
+}
+
+/// The filter of stage `raw` when it is a `$match` that runs as [`Stage::Match`] (`st`): not a
+/// first `$match` with `$text`, nor `$_internalInhibitOptimization`, which exists to keep the
+/// stages around it apart.
+fn match_filter<'a>(st: &Stage, raw: &RawValue<'a>) -> Option<RawDoc<'a>> {
+    let (Stage::Match(_), RawValue::Document(d)) = (st, raw) else { return None };
+    let mut fields = d.iter();
+    match (fields.next(), fields.next()) {
+        (Some(("$match", RawValue::Document(m))), None) => Some(m),
+        _ => None,
+    }
+}
+
+/// Joins each run of consecutive `$match`es of `stages` (parsed from `pipeline`) into its first
+/// one, whose filter becomes the `$and` of theirs, the reference server's rewrite of consecutive
+/// `$match` stages (010 FR-029): one pass of the register machine per batch, each document
+/// checked against the filters in their order. The others pass every document, so that the
+/// stages keep the positions of the command's. A run whose joined filter does not parse stays as
+/// it was.
+fn join_matches(stages: &mut [Stage], pipeline: &[RawValue<'_>], ctx: &Ctx) {
+    let mut i = 0;
+    while i < stages.len() {
+        let mut filters = Vec::new();
+        let mut j = i;
+        while let (Some(st), Some(raw)) = (stages.get(j), pipeline.get(j)) {
+            let Some(f) = match_filter(st, raw) else { break };
+            filters.push(f);
+            j += 1;
+        }
+        if filters.len() > 1
+            && let Ok(joined) = Match::all_of(&filters, ctx)
+        {
+            stages[i] = Stage::Match(joined);
+            for st in &mut stages[i + 1..j] {
+                *st = Stage::Match(Match::passing());
+            }
+        }
+        i = j.max(i + 1);
+    }
 }
 
 fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {

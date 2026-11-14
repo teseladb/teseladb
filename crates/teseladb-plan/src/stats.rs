@@ -309,7 +309,7 @@ pub fn cheaper_intersection(
 /// merge with the epoch it was made in.
 #[derive(Default)]
 struct Published {
-    ranges: BTreeMap<u64, RangeStats>,
+    ranges: BTreeMap<u64, Held>,
     merged: Option<(u64, Arc<RangeStats>)>,
 }
 
@@ -348,7 +348,7 @@ pub fn recompute_at_compaction(
 pub fn publish_range(collection: &[u8], range: u64, stats: RangeStats) {
     let mut map = locked();
     let entry = map.entry(collection.to_vec()).or_default();
-    entry.ranges.insert(range, stats);
+    entry.ranges.insert(range, (None, stats));
     entry.merged = None;
 }
 
@@ -372,8 +372,76 @@ pub fn collection_stats(collection: &[u8]) -> Option<(u64, Arc<RangeStats>)> {
     if let Some(m) = &entry.merged {
         return Some(m.clone());
     }
-    let merged = entry.ranges.values().fold(RangeStats::default(), |acc, r| acc.merge(r));
+    let merged = entry.ranges.values().fold(RangeStats::default(), |acc, (_, r)| acc.merge(r));
     let m = (EPOCH.fetch_add(1, AtomicOrdering::Relaxed), Arc::new(merged));
     entry.merged = Some(m.clone());
     Some(m)
+}
+
+/// A key interval: its first key and the first key past it (empty: no end).
+type Span = (Vec<u8>, Vec<u8>);
+
+/// A range's statistics as published: the key interval they were read over, when the publisher
+/// gave it, and the statistics.
+type Held = (Option<Span>, RangeStats);
+
+/// Whether the key intervals `[a0, a1)` and `[b0, b1)` share a key; an empty end is no end.
+fn overlap((a0, a1): &Span, (b0, b1): &Span) -> bool {
+    (a1.is_empty() || b0 < a1) && (b1.is_empty() || a0 < b1)
+}
+
+/// [`recompute_at_compaction`] for range `range` over the key interval `span` (an empty end is no
+/// end): the statistics of the ranges of `collection` published before over an interval that
+/// shares keys with `span` go, since two ranges never hold the same key and theirs are those of a
+/// range that split or merged since.
+pub fn recompute_range(
+    collection: &[u8],
+    (range, span): (u64, Span),
+    documents: u64,
+    fields: Vec<(String, Vec<Value>)>,
+) {
+    let fields =
+        fields.into_iter().map(|(path, values)| (path, FieldStats::build(values))).collect();
+    let stats = RangeStats { documents, fields };
+    let mut map = locked();
+    let entry = map.entry(collection.to_vec()).or_default();
+    entry
+        .ranges
+        .retain(|r, (held, _)| *r == range || held.as_ref().is_none_or(|h| !overlap(h, &span)));
+    entry.ranges.insert(range, (Some(span), stats));
+    entry.merged = None;
+}
+
+/// Keeps the statistics of the ranges `live` says are still on the node and forgets the others.
+pub fn retain_ranges(live: impl Fn(u64) -> bool) {
+    let mut map = locked();
+    map.retain(|_, entry| {
+        let before = entry.ranges.len();
+        entry.ranges.retain(|r, _| live(*r));
+        if entry.ranges.len() != before {
+            entry.merged = None;
+        }
+        !entry.ranges.is_empty()
+    });
+}
+
+/// The ranges whose keys a compaction rewrote, waiting for their statistics: the key interval of
+/// each by its number.
+fn compacted() -> &'static Mutex<BTreeMap<u64, Span>> {
+    static COMPACTED: OnceLock<Mutex<BTreeMap<u64, Span>>> = OnceLock::new();
+    COMPACTED.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// The hook of the storage (010 FR-029): a compaction rewrote keys of range `range`, which holds
+/// the key interval `[start, end)` (an empty end is no end). The range waits for
+/// [`take_compacted`] once, however many compactions touched it.
+pub fn mark_compacted(range: u64, start: &[u8], end: &[u8]) {
+    let mut due = compacted().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    due.insert(range, (start.to_vec(), end.to_vec()));
+}
+
+/// The ranges marked by [`mark_compacted`] since the last call, in range order.
+pub fn take_compacted() -> Vec<(u64, Vec<u8>, Vec<u8>)> {
+    let mut due = compacted().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::take(&mut *due).into_iter().map(|(r, (s, e))| (r, s, e)).collect()
 }

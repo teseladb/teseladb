@@ -1,0 +1,155 @@
+//! The statistics of the ranges a compaction rewrote (010 FR-029): the storage of a core marks
+//! each range whose keys a compaction of its LSM rewrote ([`teseladb_plan::stats::mark_compacted`]),
+//! and the node's keeper reads, every [`STATS_EVERY_SECS`], the entries of the indexes of each
+//! collection the range holds and publishes the range's statistics for the planner: its documents
+//! and, for each field of an index the planner scans, the values of the field as the index keeps
+//! them.
+//!
+//! The fields come from the ordered indexes the planner may scan, without collation (their keys
+//! hold sort keys, not values) and without hash buckets; the index of `_id` is left out, since
+//! its entries are the documents themselves and reading them all is the cost the statistics
+//! exist to avoid. A field two indexes share is read from the first one.
+
+use teseladb_bson::Value;
+use teseladb_keys::space::KeyBuilder;
+use teseladb_meta::catalog::CollectionEntry;
+use teseladb_plan::stats;
+use teseladb_range::read::ReadConcern;
+
+use super::Backend;
+use super::plan_exec::{self, PlanIndex};
+use super::query::documents_of;
+use crate::error::CommandError;
+
+/// How often the node's keeper recomputes the statistics of the ranges compactions rewrote: a
+/// range gets them at most once in that time, however many compactions touch it.
+pub const STATS_EVERY_SECS: u64 = 10;
+
+/// Documents read per call when the backend keeps no count of a collection's documents.
+const COUNT_CHUNK: usize = 1024;
+
+/// A key interval; an empty end is no end.
+type Span = (Vec<u8>, Vec<u8>);
+
+/// Recomputes and publishes the statistics of each range compactions rewrote since the last pass,
+/// and forgets those of the ranges no longer in the node's routing table. A range whose
+/// statistics cannot be read now (no leader for a range) waits for the next pass. Gives the
+/// ranges it published.
+pub fn pass<B: Backend + ?Sized>(backend: &mut B) -> Result<usize, CommandError> {
+    // The routing table first: a pass that cannot read it leaves the ranges marked.
+    let live = backend.route_entries()?;
+    let due = stats::take_compacted();
+    if due.is_empty() {
+        return Ok(0);
+    }
+    if !live.is_empty() {
+        stats::retain_ranges(|r| live.iter().any(|e| e.group.0 == r));
+    }
+    let collections = backend.collections()?;
+    let mut published = 0;
+    for (range, start, end) in due {
+        // A range that left the node since it was marked has nothing to publish.
+        if !live.is_empty() && !live.iter().any(|e| e.group.0 == range) {
+            continue;
+        }
+        let span = (start, end);
+        let mut read = Ok(());
+        for (_, coll) in collections.iter().filter(|(_, c)| holds(&span, c)) {
+            read = refresh(backend, coll, range, &span);
+            if read.is_err() {
+                break;
+            }
+        }
+        match read {
+            Ok(()) => published += 1,
+            Err(_) => stats::mark_compacted(range, &span.0, &span.1),
+        }
+        backend.end_operation();
+    }
+    Ok(published)
+}
+
+/// Whether range `span` holds keys of collection `c` (its documents or its indexes).
+fn holds(span: &Span, c: &CollectionEntry) -> bool {
+    let first = KeyBuilder::collection_start(c.tenant, c.id).as_bytes().to_vec();
+    let past = KeyBuilder::collection_end(c.tenant, c.id).as_bytes().to_vec();
+    (span.1.is_empty() || first < span.1) && span.0 < past
+}
+
+/// `[a0, a1)` cut to `[b0, b1)`; empty ends are no ends.
+fn cut((a0, a1): (&[u8], &[u8]), (b0, b1): (&[u8], &[u8])) -> Span {
+    let start = a0.max(b0).to_vec();
+    let end = match (a1.is_empty(), b1.is_empty()) {
+        (true, _) => b1.to_vec(),
+        (_, true) => a1.to_vec(),
+        _ => a1.min(b1).to_vec(),
+    };
+    (start, end)
+}
+
+/// Publishes the statistics of collection `coll` in range `range` over `span`.
+fn refresh<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    range: u64,
+    span: &Span,
+) -> Result<(), CommandError> {
+    if !plan_exec::plannable_kind(coll)? {
+        return Ok(());
+    }
+    let (first, past) = documents_of(coll);
+    let docs = cut((&first, &past), (&span.0, &span.1));
+    let documents = match backend.doc_tally((coll.tenant, coll.id), (&docs.0, &docs.1))? {
+        Some((n, _, _)) => n,
+        None => counted(backend, &docs)?,
+    };
+    let indexes = plan_exec::plan_indexes(backend, coll)?;
+    let mut fields: Vec<(String, Vec<Value>)> = Vec::new();
+    for index in indexes.iter().filter(|i| i.gives_statistics()) {
+        let (first, past) = index.span((coll.tenant, coll.id));
+        let within = cut((&first, &past), (&span.0, &span.1));
+        let Some(entries) = plan_exec::index_values(backend, coll, index, &within)? else {
+            continue;
+        };
+        for (i, path) in index.paths().enumerate() {
+            if fields.iter().any(|(p, _)| p == path) {
+                continue;
+            }
+            let values = entries.iter().filter_map(|e| e.get(i).cloned()).collect();
+            fields.push((path.to_owned(), values));
+        }
+    }
+    let prefix = KeyBuilder::collection_start(coll.tenant, coll.id).as_bytes().to_vec();
+    stats::recompute_range(&prefix, (range, span.clone()), documents, fields);
+    Ok(())
+}
+
+/// The documents of `span`, counted by reading them.
+fn counted<B: Backend + ?Sized>(backend: &mut B, span: &Span) -> Result<u64, CommandError> {
+    let mut from = span.0.clone();
+    let mut n = 0u64;
+    loop {
+        let rows = backend.scan(&from, &span.1, COUNT_CHUNK, ReadConcern::Local)?;
+        n += rows.iter().filter(|(_, v)| teseladb_keys::stored::raw(v).is_ok()).count() as u64;
+        match rows.last() {
+            Some((k, _)) if rows.len() == COUNT_CHUNK => from = [k.as_slice(), &[0]].concat(),
+            _ => return Ok(n),
+        }
+    }
+}
+
+impl PlanIndex {
+    /// Whether the statistics read its fields' values from its entries.
+    fn gives_statistics(&self) -> bool {
+        self.meta.plannable
+            && !self.is_id_index()
+            && self.entry.buckets == 0
+            && self.meta.key.iter().all(|(_, d)| d.abs() == 1)
+            && !self.has_collation()
+    }
+
+    /// Its fields' paths, in its order.
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.meta.key.iter().map(|(p, _)| p.as_str())
+    }
+}

@@ -373,6 +373,7 @@ dependencies = [
  "teseladb-mql",
  "teseladb-multiraft",
  "teseladb-names",
+ "teseladb-plan",
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-range",

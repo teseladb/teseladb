@@ -1564,6 +1564,16 @@ impl DataCore {
                 None => {}
             }
         }
+        // The ranges of this core whose keys a compaction rewrote get their statistics again
+        // (010 FR-029).
+        for (lo, hi) in &c.rewritten {
+            for e in self.router.table().entries() {
+                let touched = (e.end.is_empty() || lo < &e.end) && hi >= &e.start;
+                if touched && self.host_has(e.group) {
+                    teseladb_plan::stats::mark_compacted(e.group.0, &e.start, &e.end);
+                }
+            }
+        }
         for id in c.compacted {
             if let Some((before, reply)) = self.compactions.remove(&id) {
                 let after = lsm.borrow().metrics().level_bytes.iter().sum::<u64>();

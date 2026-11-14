@@ -29,7 +29,9 @@ use super::scoped::matches;
 /// A `$match`.
 #[derive(Clone, Debug)]
 pub struct Match {
-    filter: Arc<Filter>,
+    /// `None`: it passes every document, its filter joined into the `$match` before it (010
+    /// FR-029).
+    filter: Option<Arc<Filter>>,
 }
 
 /// Whether filter `d` names `$where` among its clauses.
@@ -61,18 +63,40 @@ impl Match {
             return Err(error(NEAR_IN_MATCH, NEAR_MESSAGE));
         }
         check_exprs(d, ctx)?;
-        Ok(Match { filter: Arc::new(filter) })
+        Ok(Match { filter: Some(Arc::new(filter)) })
     }
 
     /// The `$match` of a filter already read.
     pub(crate) fn of(filter: Filter) -> Match {
-        Match { filter: Arc::new(filter) }
+        Match { filter: Some(Arc::new(filter)) }
+    }
+
+    /// The `$match` of the `$and` of `filters`, each checked in its order (010 FR-029).
+    pub(crate) fn all_of(filters: &[RawDoc<'_>], ctx: &Ctx) -> Result<Match, MqlError> {
+        let each: Vec<Value> =
+            filters.iter().map(|f| Value::Document(Document::from(*f))).collect();
+        let joined = Document::new().with("$and", Value::Array(each));
+        let bytes = joined.to_bytes().map_err(|e| error(BAD_VALUE, e.to_string()))?;
+        let raw = RawDoc::from_bytes(&bytes).map_err(|e| error(BAD_VALUE, e.to_string()))?;
+        Match::parse(RawValue::Document(raw), ctx)
+    }
+
+    /// The `$match` that passes every document: its filter went into the one before it.
+    pub(crate) fn passing() -> Match {
+        Match { filter: None }
+    }
+
+    /// Whether it passes every document without looking at it.
+    #[cfg(test)]
+    pub(crate) fn passes_all(&self) -> bool {
+        self.filter.is_none()
     }
 
     /// The documents of `docs` that match, in their order: batches of up to
     /// [`super::BATCH_DOCS`] documents, each filtered 64 at a time by the register machine
     /// (010 FR-028, FR-031).
     pub fn run(&self, docs: Vec<Document>, env: &dyn Env) -> Result<Vec<Document>, MqlError> {
+        let Some(filter) = &self.filter else { return Ok(docs) };
         let mut out = Vec::with_capacity(docs.len());
         let mut masks = Vec::with_capacity(super::BATCH_DOCS / teseladb_mql::vm::BATCH);
         let mut docs = docs.into_iter().peekable();
@@ -81,7 +105,7 @@ impl Match {
             batch.extend(docs.by_ref().take(super::BATCH_DOCS));
             masks.clear();
             for lanes in batch.chunks(teseladb_mql::vm::BATCH) {
-                masks.push(super::scoped::matches_batch(&self.filter, lanes, env)?);
+                masks.push(super::scoped::matches_batch(filter, lanes, env)?);
             }
             for (i, d) in batch.drain(..).enumerate() {
                 let mask = masks[i / teseladb_mql::vm::BATCH];

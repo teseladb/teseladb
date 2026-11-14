@@ -41,6 +41,7 @@ teseladb-rest = { path = "../teseladb-rest" }
 teseladb-wire = { path = "../teseladb-wire" }
 teseladb-topology = { path = "../teseladb-topology" }
 teseladb-exec = { path = "../teseladb-exec" }
+teseladb-plan = { path = "../teseladb-plan" }
 teseladb-mql = { path = "../teseladb-mql" }
 teseladb-auth = { path = "../teseladb-auth" }
 teseladb-bson = { workspace = true }

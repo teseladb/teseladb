@@ -97,6 +97,9 @@ pub struct Completions {
     pub cleared: Vec<u64>,
     /// Compactions of everything asked by [`Lsm::compact_now`] that ended: their identifier.
     pub compacted: Vec<u64>,
+    /// The keys each compaction that ended rewrote (010 FR-029): the lowest and the highest
+    /// logical key (both included) of the files it wrote. A flush writes no such span.
+    pub rewritten: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Completions {
@@ -106,6 +109,7 @@ impl Completions {
         self.ingested.extend(other.ingested);
         self.cleared.extend(other.cleared);
         self.compacted.extend(other.compacted);
+        self.rewritten.extend(other.rewritten);
     }
 }
 

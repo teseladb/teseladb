@@ -196,6 +196,12 @@ impl Lsm {
             }
             Outcome::Changed { added, removed, edit, dict_written, ingest } => {
                 self.counters.ingest_compactions += u64::from(ingest);
+                // The keys of the files written, for the statistics of their ranges (010 FR-029).
+                let lo = added.iter().map(|(_, t)| &t.props.lo).min().cloned();
+                let hi = added.iter().map(|(_, t)| &t.props.hi).max().cloned();
+                if let (Some(lo), Some(hi)) = (lo, hi) {
+                    self.done.rewritten.push((lo, hi));
+                }
                 self.apply_files(added, &removed, &edit);
                 if let Some(w) = dict_written {
                     self.dict_written = w;

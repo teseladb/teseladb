@@ -86,6 +86,7 @@ pub mod query_analysis;
 pub mod query_settings;
 pub mod query_shape;
 pub mod query_stats;
+pub mod range_stats;
 pub mod registry;
 pub mod replset;
 pub mod reshard;

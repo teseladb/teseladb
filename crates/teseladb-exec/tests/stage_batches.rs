@@ -94,3 +94,47 @@ fn a_sort_followed_by_a_limit_keeps_the_first_documents_of_the_whole_sort() {
         }
     }
 }
+
+#[test]
+fn consecutive_matches_joined_give_what_each_gives_in_turn() {
+    let docs = stored(&corpus(4_000, 0x00A1_6EB2));
+    let group = d().with(
+        "$group",
+        d().with("_id", "$sub.a").with("n", d().with("$sum", 1)).with("k", d().with("$max", "$k")),
+    );
+    let pipelines = [
+        // At the start, on the documents.
+        vec![
+            d().with("$match", d().with("k", d().with("$ne", 3))),
+            d().with("$match", d().with("v", d().with("$lt", 60))),
+            d().with(
+                "$match",
+                d().with("$expr", d().with("$gt", vec![Value::from("$k"), 1.into()])),
+            ),
+        ],
+        // After a stage that changes each document, and before a group.
+        vec![
+            d().with("$unwind", "$tags"),
+            d().with("$match", d().with("tags", 1)),
+            d().with(
+                "$match",
+                d().with("$or", vec![d().with("k", 2).into(), d().with("k", 5).into()]),
+            ),
+            group.clone(),
+        ],
+        // After a group, on its documents.
+        vec![
+            group,
+            d().with("$match", d().with("n", d().with("$gt", 700))),
+            d().with("$match", d().with("_id", d().with("$lt", 4))),
+        ],
+    ];
+    for stages in &pipelines {
+        let joined = Reference::new(1)
+            .with_collection("c", docs.clone())
+            .evaluate("c", stages)
+            .expect("runs");
+        assert!(!joined.is_empty(), "{stages:?}");
+        assert_eq!(joined, one_by_one(docs.clone(), stages), "{stages:?}");
+    }
+}
