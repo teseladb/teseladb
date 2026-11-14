@@ -171,6 +171,7 @@ impl<'g> Grouping<'g> {
             plan,
             spill: false,
             kept: Vec::new(),
+            kept_bytes: 0,
             sorter: None,
         }
     }
@@ -300,7 +301,10 @@ impl Group {
 
 /// A `$group` taking its input a batch at a time (010 FR-028): the groups so far and the bytes
 /// they hold; with a store, the documents so far, which go through the store sorted by key once
-/// the groups pass the stage's limit, as does every document after them.
+/// the groups pass the stage's limit, as does every document after them. Until then the
+/// documents wait in memory only within what the groups leave of the limit ([`spare`]); the
+/// rest goes to the store as it comes, in runs the store counts only if the groups pass the
+/// limit (010 T066).
 pub(super) struct Grouping<'g> {
     group: Cow<'g, Group>,
     env: &'g dyn Env,
@@ -310,10 +314,20 @@ pub(super) struct Grouping<'g> {
     plan: Option<super::group_columns::Columnar>,
     /// The groups passed the limit: the rest only waits for the sort through the store.
     spill: bool,
-    /// The input so far, kept only with a store to write to.
+    /// The input so far that waits in memory, kept only with a store to write to and before
+    /// the sort by key starts.
     kept: Vec<Document>,
-    /// The sort by key through the store, once the groups passed the limit.
+    /// The bytes of `kept`.
+    kept_bytes: usize,
+    /// The sort by key through the store: provisional while the groups fit in the limit.
     sorter: Option<Sorter<'g, (Vec<u8>, Value)>>,
+}
+
+/// The bytes the documents waiting for the store may hold beside groups that hold `held` of
+/// the stage's `limit`: what the groups leave, and at least a quarter of the limit so that the
+/// runs do not shrink to a document each as the groups near the limit.
+pub(super) fn spare(limit: usize, held: usize) -> usize {
+    limit.saturating_sub(held).max(limit / 4)
 }
 
 /// The limit of a group's memory in `env`, and the store it writes to with `allowDiskUse`.
@@ -330,16 +344,39 @@ impl Grouping<'_> {
             self.absorb_groups(&batch, (limit, store.is_some()))?;
         }
         let Some(store) = store else { return Ok(()) };
-        self.kept.extend(batch);
-        if !self.spill {
-            return Ok(());
+        if self.spill && !self.groups.list.is_empty() {
+            // The groups are built again from the store, one at a time.
+            self.groups = Groups::default();
+            self.held = 0;
+            if let Some(sorter) = &mut self.sorter {
+                sorter.confirm();
+            }
         }
+        let budget = if self.spill { limit } else { spare(limit, self.held) };
+        if self.sorter.is_none() {
+            self.kept_bytes += batch.iter().map(super::errors::document_size).sum::<usize>();
+            self.kept.extend(batch);
+            if !self.spill && self.kept_bytes <= budget {
+                return Ok(());
+            }
+            let sorter = key_sorter(self.env.collation(), (limit, store));
+            self.sorter = Some(if self.spill { sorter } else { sorter.provisional() });
+            self.kept_bytes = 0;
+            let kept = std::mem::take(&mut self.kept);
+            return self.feed_sorter(kept, budget);
+        }
+        self.feed_sorter(batch, budget)
+    }
+
+    /// Gives `docs` with their keys to the sort by key, the documents waiting in memory within
+    /// `budget` bytes.
+    fn feed_sorter(&mut self, docs: Vec<Document>, budget: usize) -> Result<(), MqlError> {
         let (env, sbe) = (self.env, self.sbe);
-        let sorter = self.sorter.get_or_insert_with(|| key_sorter(env.collation(), (limit, store)));
-        for doc in self.kept.drain(..) {
+        let Some(sorter) = &mut self.sorter else { return Ok(()) };
+        for doc in docs {
             let key =
                 self.group.id.eval(&doc, &group_scope(env, &doc, sbe))?.unwrap_or(Value::Null);
-            sorter.push(with_key(doc, key))?;
+            sorter.push_within(with_key(doc, key), budget)?;
         }
         Ok(())
     }
@@ -429,7 +466,7 @@ impl Grouping<'_> {
     pub(super) fn finish(self) -> Result<Vec<Document>, MqlError> {
         let (limit, _) = limits(self.env);
         let (env, sbe, outputs) = (self.env, self.sbe, &self.group.outputs);
-        if let Some(sorter) = self.sorter {
+        if let Some(sorter) = self.sorter.filter(|_| self.spill) {
             drop(self.groups);
             let col = env.collation();
             return groups_from_sorter(outputs, sorter, (env, sbe))?

@@ -27,8 +27,11 @@ pub fn runs_written() -> u64 {
     WRITTEN.with(std::cell::Cell::get)
 }
 
-/// The bytes a merge reads from a run at a time.
+/// The most bytes a merge reads from a run at a time.
 const READ_BYTES: usize = 64 * 1024;
+
+/// The fewest bytes a merge reads from a run at a time, when many runs share the limit.
+const MIN_READ_BYTES: usize = 1024;
 
 /// The node's temporary store for what stages write to disk; sans-I/O, the server gives one
 /// over its files.
@@ -39,19 +42,44 @@ pub trait SpillStore: Debug {
     fn read(&self, run: u64, offset: u64, len: usize) -> Result<Vec<u8>, MqlError>;
     /// Drops run `run`.
     fn remove(&self, run: u64);
+
+    /// Writes `bytes` as a new run that a stage may still drop without having used it: what a
+    /// store reports counts it only after [`SpillStore::count`]. By default, as
+    /// [`SpillStore::write`], for stores that report nothing.
+    fn write_unseen(&self, bytes: &[u8]) -> Result<u64, MqlError> {
+        self.write(bytes)
+    }
+
+    /// Counts as written the runs of `stats`, written before with [`SpillStore::write_unseen`].
+    fn count(&self, _stats: SpillStats) {}
 }
 
-/// A run being read back: its documents a piece at a time.
+/// A run being read back: its documents a piece at a time, from the pieces of the store that
+/// hold it one after the other.
 struct Reader<'a> {
     store: &'a dyn SpillStore,
+    /// The pieces of the run, and the place of the next one to read.
+    pieces: &'a [u64],
+    next: usize,
     run: u64,
     offset: u64,
     buf: Vec<u8>,
     at: usize,
     done: bool,
+    /// The bytes it reads at a time.
+    step: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    /// A reader of the pieces `run`, `step` bytes at a time.
+    fn of(store: &'a dyn SpillStore, pieces: &'a [u64], step: usize) -> Reader<'a> {
+        let (run, done) = match pieces.first() {
+            Some(&id) => (id, false),
+            None => (0, true),
+        };
+        Reader { store, pieces, next: 1, run, offset: 0, buf: Vec::new(), at: 0, done, step }
+    }
+
     /// The next document of the run, if any.
     fn next_doc(&mut self) -> Result<Option<Document>, MqlError> {
         loop {
@@ -67,13 +95,14 @@ impl Reader<'_> {
                 }
             }
             if self.done {
-                return match left.is_empty() {
-                    true => Ok(None),
-                    false => Err(errors::error(codes::INTERNAL_ERROR, "a spilled run is cut")),
-                };
+                if !left.is_empty() {
+                    return Err(errors::error(codes::INTERNAL_ERROR, "a spilled run is cut"));
+                }
+                let Some(&run) = self.pieces.get(self.next) else { return Ok(None) };
+                (self.run, self.offset, self.done, self.next) = (run, 0, false, self.next + 1);
             }
-            let more = self.store.read(self.run, self.offset, READ_BYTES)?;
-            self.done = more.len() < READ_BYTES;
+            let more = self.store.read(self.run, self.offset, self.step)?;
+            self.done = more.len() < self.step;
             self.offset += u64::try_from(more.len()).unwrap_or(u64::MAX);
             self.buf.drain(..self.at);
             self.at = 0;
@@ -82,27 +111,30 @@ impl Reader<'_> {
     }
 }
 
-/// Removes the runs it holds when it goes, also on an error.
+/// The runs of a sort, each the pieces of the store that hold it in order; it removes them when
+/// it goes, also on an error.
 struct Runs<'a> {
     store: &'a dyn SpillStore,
-    ids: Vec<u64>,
+    ids: Vec<Vec<u64>>,
 }
 
 impl Drop for Runs<'_> {
     fn drop(&mut self) {
-        for id in &self.ids {
+        for id in self.ids.iter().flatten() {
             self.store.remove(*id);
         }
     }
 }
 
-/// Writes `docs`, sorted by `cmp` over their keys `keys`, as one run.
+/// Writes `docs`, sorted by `cmp` over their keys `keys`, as one run; with `unseen`, as a run
+/// the store does not count yet, whose figures it adds there.
 fn write_run<K>(
     docs: Vec<Document>,
     keys: &dyn Fn(&Document) -> Result<K, MqlError>,
     cmp: &dyn Fn(&K, &K) -> Result<Ordering, MqlError>,
-    store: &dyn SpillStore,
+    (store, unseen): (&dyn SpillStore, Option<&mut SpillStats>),
 ) -> Result<u64, MqlError> {
+    let records = u64::try_from(docs.len()).unwrap_or(u64::MAX);
     let mut keyed = Vec::with_capacity(docs.len());
     for d in docs {
         keyed.push((keys(&d)?, d));
@@ -113,8 +145,15 @@ fn write_run<K>(
         let b = d.to_bytes().map_err(|e| errors::error(codes::INTERNAL_ERROR, e.to_string()))?;
         bytes.extend_from_slice(&b);
     }
-    let id = store.write(&bytes)?;
-    WRITTEN.with(|w| w.set(w.get() + 1));
+    let Some(unseen) = unseen else {
+        let id = store.write(&bytes)?;
+        WRITTEN.with(|w| w.set(w.get() + 1));
+        return Ok(id);
+    };
+    let id = store.write_unseen(&bytes)?;
+    unseen.spills += 1;
+    unseen.records += records;
+    unseen.bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     Ok(id)
 }
 
@@ -127,7 +166,9 @@ pub(crate) type OrderOf<'s, K> = Box<dyn Fn(&K, &K) -> Result<Ordering, MqlError
 /// An external sort that takes its input a document at a time, as the stage before it gives
 /// it (010 FR-028): the documents wait in memory until the next one would pass `limit` bytes;
 /// then those waiting go to the store as one sorted run. [`Sorter::finish`] merges the runs,
-/// equal keys in input order.
+/// equal keys in input order. A provisional sort ([`Sorter::provisional`]) writes runs the
+/// store does not count until [`Sorter::confirm`]; dropped before, it leaves no trace in what
+/// the stage reports (010 T066).
 pub(crate) struct Sorter<'s, K> {
     keys: KeyOf<'s, K>,
     cmp: OrderOf<'s, K>,
@@ -135,6 +176,10 @@ pub(crate) struct Sorter<'s, K> {
     runs: Runs<'s>,
     run: Vec<Document>,
     held: usize,
+    /// What the runs written so far add up to, while the sort is provisional.
+    unseen: Option<SpillStats>,
+    /// The bytes of the largest document taken.
+    largest: usize,
 }
 
 impl<'s, K> Sorter<'s, K> {
@@ -144,20 +189,57 @@ impl<'s, K> Sorter<'s, K> {
         cmp: OrderOf<'s, K>,
         (limit, store): (usize, &'s dyn SpillStore),
     ) -> Sorter<'s, K> {
-        Sorter { keys, cmp, limit, runs: Runs { store, ids: Vec::new() }, run: Vec::new(), held: 0 }
+        Sorter {
+            keys,
+            cmp,
+            limit,
+            runs: Runs { store, ids: Vec::new() },
+            run: Vec::new(),
+            held: 0,
+            unseen: None,
+            largest: 0,
+        }
+    }
+
+    /// The sort, writing runs the store counts only after [`Sorter::confirm`].
+    pub(crate) fn provisional(mut self) -> Sorter<'s, K> {
+        self.unseen = Some(SpillStats::default());
+        self
+    }
+
+    /// Counts the runs written so far and every later one as written.
+    pub(crate) fn confirm(&mut self) {
+        if let Some(stats) = self.unseen.take() {
+            WRITTEN.with(|w| w.set(w.get() + stats.spills));
+            self.runs.store.count(stats);
+        }
     }
 
     /// Takes document `d`, after those before it; the documents waiting go to the store first
     /// when `d` would take them past the limit.
     pub(crate) fn push(&mut self, d: Document) -> Result<(), MqlError> {
+        self.push_within(d, self.limit)
+    }
+
+    /// [`Sorter::push`] with the documents waiting in memory kept within `budget` bytes, at
+    /// most the limit, when the stage holds other things under the same limit.
+    pub(crate) fn push_within(&mut self, d: Document, budget: usize) -> Result<(), MqlError> {
         let size = document_size(&d);
-        if self.held + size > self.limit && !self.run.is_empty() {
-            let run = std::mem::take(&mut self.run);
-            self.runs.ids.push(write_run(run, &self.keys, &self.cmp, self.runs.store)?);
-            self.held = 0;
+        if self.held + size > budget.min(self.limit) && !self.run.is_empty() {
+            self.write_waiting()?;
         }
         self.held += size;
+        self.largest = self.largest.max(size);
         self.run.push(d);
+        Ok(())
+    }
+
+    /// Writes the documents waiting as a run.
+    fn write_waiting(&mut self) -> Result<(), MqlError> {
+        let run = std::mem::take(&mut self.run);
+        let id = write_run(run, &self.keys, &self.cmp, (self.runs.store, self.unseen.as_mut()))?;
+        self.runs.ids.push(vec![id]);
+        self.held = 0;
         Ok(())
     }
 
@@ -166,17 +248,87 @@ impl<'s, K> Sorter<'s, K> {
         mut self,
         mut emit: impl FnMut(K, Document) -> Result<(), MqlError>,
     ) -> Result<(), MqlError> {
-        let store = self.runs.store;
         if !self.run.is_empty() {
-            let run = std::mem::take(&mut self.run);
-            self.runs.ids.push(write_run(run, &self.keys, &self.cmp, store)?);
+            self.write_waiting()?;
         }
-        let mut readers: Vec<Reader<'_>> = self
-            .runs
-            .ids
-            .iter()
-            .map(|&id| Reader { store, run: id, offset: 0, buf: Vec::new(), at: 0, done: false })
-            .collect();
+        self.confirm();
+        // What a run open in a merge holds: its next document, a document read in part and
+        // what it reads at a time.
+        let slot = 2 * self.largest + MIN_READ_BYTES;
+        let fan_in = (self.limit / 2 / slot).max(2);
+        while self.runs.ids.len() > fan_in {
+            self.merge_pass(fan_in)?;
+        }
+        let runs = std::mem::take(&mut self.runs.ids);
+        let merged = self.merge(&runs, &mut emit);
+        self.runs.ids = runs;
+        merged
+    }
+
+    /// Merges the runs in groups of `fan_in` consecutive ones, each into one run, so that a
+    /// merge never holds more runs open than the limit allows.
+    fn merge_pass(&mut self, fan_in: usize) -> Result<(), MqlError> {
+        let store = self.runs.store;
+        let mut pending: std::collections::VecDeque<Vec<u64>> =
+            std::mem::take(&mut self.runs.ids).into();
+        let mut merged = Vec::new();
+        while !pending.is_empty() {
+            let group: Vec<Vec<u64>> = pending.drain(..fan_in.min(pending.len())).collect();
+            let mut pieces = Vec::new();
+            if let Err(e) = self.merge_into_pieces(&group, &mut pieces) {
+                // The sort keeps every piece written, to remove them when it goes.
+                merged.push(pieces);
+                merged.extend(group);
+                merged.extend(pending);
+                self.runs.ids = merged;
+                return Err(e);
+            }
+            for id in group.iter().flatten() {
+                store.remove(*id);
+            }
+            merged.push(pieces);
+        }
+        self.runs.ids = merged;
+        Ok(())
+    }
+
+    /// Merges `runs` into `pieces` of at most a quarter of the limit, written in order. What a
+    /// store reports leaves them out: they hold documents the stage already wrote.
+    fn merge_into_pieces(&self, runs: &[Vec<u64>], pieces: &mut Vec<u64>) -> Result<(), MqlError> {
+        let store = self.runs.store;
+        let piece = (self.limit / 4).max(1);
+        let mut bytes = Vec::new();
+        let mut flush = |bytes: &mut Vec<u8>| -> Result<(), MqlError> {
+            pieces.push(store.write_unseen(bytes)?);
+            bytes.clear();
+            Ok(())
+        };
+        self.merge(runs, &mut |_, d: Document| {
+            let b =
+                d.to_bytes().map_err(|e| errors::error(codes::INTERNAL_ERROR, e.to_string()))?;
+            if !bytes.is_empty() && bytes.len() + b.len() > piece {
+                flush(&mut bytes)?;
+            }
+            bytes.extend_from_slice(&b);
+            Ok(())
+        })?;
+        if !bytes.is_empty() {
+            flush(&mut bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Gives `emit` the documents of `runs` in order, the earlier run first on a tie.
+    fn merge(
+        &self,
+        runs: &[Vec<u64>],
+        emit: &mut dyn FnMut(K, Document) -> Result<(), MqlError>,
+    ) -> Result<(), MqlError> {
+        let store = self.runs.store;
+        // The reads of all the runs together stay within the limit, down to a floor.
+        let step = (self.limit / 2 / runs.len().max(1)).clamp(MIN_READ_BYTES, READ_BYTES);
+        let mut readers: Vec<Reader<'_>> =
+            runs.iter().map(|run| Reader::of(store, run, step)).collect();
         let keys = &self.keys;
         let next = |r: &mut Reader<'_>| -> Result<Option<(K, Document)>, MqlError> {
             r.next_doc()?.map(|d| Ok((keys(&d)?, d))).transpose()
@@ -352,6 +504,18 @@ impl<S: std::ops::Deref<Target = T> + Debug, T: SpillStore + ?Sized> SpillStore 
     fn remove(&self, run: u64) {
         self.inner.remove(run);
     }
+
+    fn write_unseen(&self, bytes: &[u8]) -> Result<u64, MqlError> {
+        self.inner.write_unseen(bytes)
+    }
+
+    fn count(&self, stats: SpillStats) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.spills.fetch_add(stats.spills, Relaxed);
+        self.records.fetch_add(stats.records, Relaxed);
+        self.bytes.fetch_add(stats.bytes, Relaxed);
+        self.inner.count(stats);
+    }
 }
 
 /// A store in memory, for nodes without a data directory and for tests.
@@ -437,9 +601,12 @@ mod tests {
         assert_eq!(store.written(), 0);
         let docs: Vec<Document> =
             (0..3).map(|i: i32| Document::new().with("k", -i).with("s", "x".repeat(50))).collect();
-        let out = sort_runs(&s, docs.clone(), None, 1, &store).expect("sorted");
+        let counted = Counting::new(&store);
+        let out = sort_runs(&s, docs.clone(), None, 1, &counted).expect("sorted");
         assert_eq!(out, docs.into_iter().rev().collect::<Vec<_>>());
-        assert_eq!(store.written(), 3);
+        // Three runs, merged two at a time in a pass the figures leave out.
+        assert_eq!((counted.stats().spills, counted.stats().records), (3, 3));
+        assert!(store.written() > 3, "{}", store.written());
         let counted = Counting::new(&store);
         let more = vec![Document::new().with("k", 1), Document::new().with("k", 0)];
         sort_runs(&s, more, None, 1, &counted).expect("sorted");
@@ -447,6 +614,64 @@ mod tests {
         assert_eq!((stats.spills, stats.records), (2, 2));
         assert_eq!(stats.minus(SpillStats { spills: 1, records: 5, bytes: 0 }).records, 0);
         assert!(runs_written() >= 5);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn many_runs_merge_in_passes_and_keep_ties_in_input_order() {
+        let docs: Vec<Document> = (0..2_000)
+            .map(|i: i32| Document::new().with("k", (i * 7919) % 13).with("i", i))
+            .collect();
+        let s = spec(r#"{"k":-1}"#);
+        let expected = s.sort(docs.clone(), None).expect("sorted");
+        let store = MemorySpill::default();
+        // Runs of a few documents and room in a merge for two of them at a time.
+        let out = sort_runs(&s, docs, None, 200, &store).expect("sorted");
+        assert_eq!(out, expected);
+        let counted = Counting::new(&store);
+        sort_runs(&s, expected.clone(), None, 200, &counted).expect("sorted");
+        assert!(store.written() > 2 * counted.stats().spills, "the passes write runs too");
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_provisional_sort_counts_its_runs_only_once_confirmed() {
+        let s = spec(r#"{"k":1}"#);
+        let store = MemorySpill::default();
+        let counted = Counting::new(&store);
+        let sorter = |store| {
+            let (by, cmp) = (s.clone(), s.clone());
+            Sorter::new(
+                Box::new(move |d: &Document| by.key(d, None)),
+                Box::new(move |a: &Vec<Value>, b: &Vec<Value>| cmp.compare(a, b, None)),
+                (40, store),
+            )
+            .provisional()
+        };
+        let before = runs_written();
+        let mut dropped = sorter(&counted);
+        for i in 0..5 {
+            dropped.push_within(Document::new().with("k", i), 20).expect("taken");
+        }
+        drop(dropped);
+        assert_eq!((counted.stats(), runs_written()), (SpillStats::default(), before));
+        assert!(store.is_empty() && store.written() >= 4, "{}", store.written());
+        let mut kept = sorter(&counted);
+        for i in (0..5).rev() {
+            kept.push_within(Document::new().with("k", i), 20).expect("taken");
+        }
+        kept.confirm();
+        let mut out = Vec::new();
+        kept.finish(|_, d| {
+            out.push(d);
+            Ok(())
+        })
+        .expect("merged");
+        let ks: Vec<Value> = out.iter().filter_map(|d| d.get("k").cloned()).collect();
+        assert_eq!(ks, (0..5).map(Value::Int32).collect::<Vec<_>>());
+        let stats = counted.stats();
+        assert_eq!(stats.records, 5, "{stats:?}");
+        assert!(stats.spills >= 4 && runs_written() >= before + stats.spills, "{stats:?}");
         assert!(store.is_empty());
     }
 
