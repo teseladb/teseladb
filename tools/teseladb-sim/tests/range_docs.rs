@@ -94,13 +94,19 @@ fn a_retried_write_acknowledged_with_w1_names_no_predecessor() {
     assert_eq!(total.w1_blind_named, 0, "{total:?}");
 }
 
+/// Seeds of [`lost_writes_are_retried_with_their_key`]: every one must pass, and together they
+/// must reach each kind of retry. Six were enough until the memtable's byte count changed the
+/// timing of the runs (14-11-2026) and left none of them with a retry answered from its record;
+/// forty keep several of each kind whatever the timing.
+const RETRY_SEEDS: std::ops::RangeInclusive<u64> = 1..=40;
+
 /// FR-011: writes whose answer is lost go again with the same key; some retries get a definite
 /// answer, and some of those come from the record of an original that was applied, while every
 /// checker still passes (a write applied twice would break the history).
 #[test]
 fn lost_writes_are_retried_with_their_key() {
     let mut total = RetryStats::default();
-    for seed in 1..=6 {
+    for seed in RETRY_SEEDS {
         let stats = Rc::new(Cell::new(RetryStats::default()));
         let wl = RangeDocsWorkload::counting(3, 2, Rc::clone(&stats));
         let r = run_workload(&cfg(FaultPlan::Heavy), seed, wl);
