@@ -16,6 +16,8 @@ pub const ALIGN: usize = 4096;
 
 /// Bytes of a huge page.
 pub const HUGE_PAGE: usize = 2 << 20;
+/// Bytes of a 1 GiB page, where the block cache goes when it fills one (012 FR-032).
+pub const GIGANTIC_PAGE: usize = 1 << 30;
 
 /// A zeroed buffer whose address and length are multiples of [`ALIGN`].
 pub struct AlignedBuf {

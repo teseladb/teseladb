@@ -594,6 +594,16 @@ pub(crate) fn map_huge(_len: usize) -> Option<std::ptr::NonNull<u8>> {
     None
 }
 
+/// macOS has no 1 GiB pages either.
+pub(crate) fn map_gigantic(_len: usize) -> Option<std::ptr::NonNull<u8>> {
+    None
+}
+
+/// macOS reserves no 1 GiB pages.
+pub(crate) fn gigantic_pages_free() -> usize {
+    0
+}
+
 /// Never called: [`map_huge`] maps nothing on macOS.
 pub(crate) fn unmap(_ptr: std::ptr::NonNull<u8>, _len: usize) {}
 

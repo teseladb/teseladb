@@ -1,8 +1,9 @@
-//! Memory on 2 MiB pages carved into blocks (012 FR-032): the block cache of a core keeps its
-//! blocks here when the system has huge pages reserved, so the TLB covers the cache with one
-//! entry per 2 MiB. Without them, or once the pool is full, the caller keeps its heap memory.
+//! Memory on 2 MiB or 1 GiB pages carved into blocks (012 FR-032): the block cache of a core
+//! keeps its blocks here when the system has huge pages reserved, so the TLB covers the cache
+//! with one entry per page. Without them, or once the pool is full, the caller keeps its heap
+//! memory.
 //!
-//! The pool is one `MAP_HUGETLB` mapping. A block takes the smallest power of two from 4 KiB that
+//! The pool is one `MAP_HUGETLB` mapping, of 2 MiB pages or of 1 GiB ones (`MAP_HUGE_1GB`). A block takes the smallest power of two from 4 KiB that
 //! holds it, carved at an offset that is a multiple of its size; a freed block goes to the list of
 //! its size and is the first taken for that size again; blocks of one size are not joined into a
 //! larger one, so a pool carved into small blocks gives none of a larger size, and the caller
@@ -20,7 +21,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use crate::aligned::{AlignedBuf, HUGE_PAGE};
+use crate::aligned::{AlignedBuf, GIGANTIC_PAGE, HUGE_PAGE};
 
 /// Smallest block: 4 KiB.
 const MIN_SHIFT: u32 = 12;
@@ -28,6 +29,8 @@ const MIN_SHIFT: u32 = 12;
 const MAX_SHIFT: u32 = 21;
 /// Sizes of block.
 const CLASSES: usize = (MAX_SHIFT - MIN_SHIFT + 1) as usize;
+/// Bytes of a normal page, for a pool on the heap.
+const NORMAL_PAGE: usize = 4096;
 
 /// A pool of blocks on huge pages; it holds nothing when the system has none reserved.
 #[derive(Clone, Debug)]
@@ -41,6 +44,8 @@ struct Pool {
     len: usize,
     /// What the memory is: a huge mapping, or a heap buffer in the tests.
     region: Region,
+    /// Bytes of each of its pages.
+    page: usize,
     /// The first byte never handed out.
     bump: AtomicUsize,
     /// The head of each size's stack of freed blocks: version in the high 32 bits, block index
@@ -110,7 +115,20 @@ impl HugePool {
         let pool = enough
             .then(|| crate::os::map_huge(len))
             .flatten()
-            .map(|base| Arc::new(Pool::new(base, len, Region::Huge)));
+            .map(|base| Arc::new(Pool::new(base, len, Region::Huge, HUGE_PAGE)));
+        HugePool { pool }
+    }
+
+    /// A pool of the whole 1 GiB pages that fit in `bytes`, when the system has that many
+    /// reserved and free; an empty pool otherwise, and for fewer than 1 GiB. The pool never
+    /// takes more than `bytes`: what is left of them is for a pool of 2 MiB pages.
+    pub fn on_gigantic_pages(bytes: usize) -> HugePool {
+        let len = bytes / GIGANTIC_PAGE * GIGANTIC_PAGE;
+        let enough = len > 0 && crate::os::gigantic_pages_free() * GIGANTIC_PAGE >= len;
+        let pool = enough
+            .then(|| crate::os::map_gigantic(len))
+            .flatten()
+            .map(|base| Arc::new(Pool::new(base, len, Region::Huge, GIGANTIC_PAGE)));
         HugePool { pool }
     }
 
@@ -120,7 +138,13 @@ impl HugePool {
         let mut buf = AlignedBuf::new(bytes);
         let len = buf.len();
         let base = NonNull::new(buf.as_mut_ptr()).expect("a buffer has an address");
-        HugePool { pool: Some(Arc::new(Pool::new(base, len, Region::Heap(buf)))) }
+        HugePool { pool: Some(Arc::new(Pool::new(base, len, Region::Heap(buf), NORMAL_PAGE))) }
+    }
+
+    /// Bytes of each page of the pool: [`HUGE_PAGE`], [`GIGANTIC_PAGE`], or 4 KiB on normal pages;
+    /// 0 for an empty pool.
+    pub fn page_bytes(&self) -> usize {
+        self.pool.as_ref().map_or(0, |p| p.page)
     }
 
     /// Whether the pool has memory on huge pages.
@@ -154,12 +178,12 @@ const INDEX_BITS: u32 = 32;
 const INDEX_MASK: u64 = (1 << INDEX_BITS) - 1;
 
 impl Pool {
-    fn new(base: NonNull<u8>, len: usize, region: Region) -> Pool {
+    fn new(base: NonNull<u8>, len: usize, region: Region, page: usize) -> Pool {
         let free = std::array::from_fn(|_| AtomicU64::new(0));
         let units = len >> MIN_SHIFT;
         assert!(units < u32::MAX as usize, "a pool of fewer than 16 TiB");
         let next = (0..units).map(|_| AtomicU32::new(0)).collect();
-        Pool { base, len, region, bump: AtomicUsize::new(0), free, next }
+        Pool { base, len, region, page, bump: AtomicUsize::new(0), free, next }
     }
 
     /// The link of the block at `at` to the next free block of its stack.
@@ -314,7 +338,7 @@ mod tests {
     fn a_pool_has_huge_pages_or_nothing() {
         let pool = HugePool::new(4 << 20);
         if pool.is_huge() {
-            assert_eq!(pool.capacity(), 4 << 20);
+            assert_eq!((pool.capacity(), pool.page_bytes()), (4 << 20, HUGE_PAGE));
             let b = pool.copy(b"on a huge page").expect("room");
             assert!(b.is_huge());
             assert_eq!(&b[..], b"on a huge page");
@@ -324,6 +348,27 @@ mod tests {
             assert!(pool.block(10).is_none());
         }
         assert!(HugePool::new(0).block(1).is_none());
+    }
+
+    #[test]
+    fn a_pool_on_1_gib_pages_takes_only_whole_pages_it_has() {
+        // Less than a page, or no pages of 1 GiB reserved: nothing, and no mapping is tried.
+        assert_eq!(HugePool::on_gigantic_pages(GIGANTIC_PAGE - 1).capacity(), 0);
+        assert_eq!(HugePool::on_gigantic_pages(0).page_bytes(), 0);
+        let free = crate::os::gigantic_pages_free();
+        let pool = HugePool::on_gigantic_pages(GIGANTIC_PAGE + HUGE_PAGE);
+        if free == 0 {
+            assert_eq!(pool.capacity(), 0);
+            assert!(pool.block(10).is_none());
+        } else {
+            // The 2 MiB past the page are left out: the pool never takes more than asked.
+            assert_eq!((pool.capacity(), pool.page_bytes()), (GIGANTIC_PAGE, GIGANTIC_PAGE));
+            assert!(pool.is_huge());
+            let b = pool.copy(b"on a page of 1 GiB").expect("room");
+            assert!(b.is_huge());
+            assert_eq!(&b[..], b"on a page of 1 GiB");
+        }
+        assert_eq!(HugePool::on_normal_pages(8 << 10).page_bytes(), NORMAL_PAGE);
     }
 
     #[test]

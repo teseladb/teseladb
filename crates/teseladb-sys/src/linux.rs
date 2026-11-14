@@ -497,15 +497,27 @@ const HUGE_PROT: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
 const MAP_PRIVATE: i32 = 0x02;
 const MAP_ANONYMOUS: i32 = 0x20;
 const MAP_HUGETLB: i32 = 0x40000;
+/// The page size of a `MAP_HUGETLB` mapping, as its log2 in the bits from `MAP_HUGE_SHIFT` (26).
+const MAP_HUGE_1GB: i32 = 30 << 26;
 const MAP_FAILED: usize = usize::MAX;
 
 /// `len` zeroed bytes on 2 MiB pages (`MAP_HUGETLB`, 012 FR-032); `None` when the system has not
 /// enough huge pages reserved (`ENOMEM`) or refuses them.
 pub(crate) fn map_huge(len: usize) -> Option<std::ptr::NonNull<u8>> {
+    map_hugetlb(len, MAP_HUGETLB)
+}
+
+/// `len` zeroed bytes on 1 GiB pages (`MAP_HUGETLB | MAP_HUGE_1GB`, 012 FR-032); `None` when the
+/// system has not enough of them reserved, or none of that size.
+pub(crate) fn map_gigantic(len: usize) -> Option<std::ptr::NonNull<u8>> {
+    map_hugetlb(len, MAP_HUGETLB | MAP_HUGE_1GB)
+}
+
+fn map_hugetlb(len: usize, huge: i32) -> Option<std::ptr::NonNull<u8>> {
     // SAFETY: an anonymous private mapping at an address the kernel picks; no memory of the
     // process is touched.
     let p = unsafe {
-        mmap(std::ptr::null_mut(), len, HUGE_PROT, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0)
+        mmap(std::ptr::null_mut(), len, HUGE_PROT, MAP_PRIVATE | MAP_ANONYMOUS | huge, -1, 0)
     };
     if p as usize == MAP_FAILED {
         return None;
@@ -519,6 +531,15 @@ pub(crate) fn unmap(ptr: std::ptr::NonNull<u8>, len: usize) {
     // owner when nothing points into it any more. A failure leaves the mapping in place, which
     // only keeps its memory.
     unsafe { munmap(ptr.as_ptr(), len) };
+}
+
+/// The free 1 GiB pages the system has reserved (012 FR-032): `/proc/meminfo` counts only the
+/// pages of the default size, so they are read from their own directory of `/sys`.
+pub(crate) fn gigantic_pages_free() -> usize {
+    std::fs::read_to_string("/sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages")
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// The free huge pages the system has reserved (`HugePages_Free` of `/proc/meminfo`).
