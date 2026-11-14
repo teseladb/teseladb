@@ -491,6 +491,31 @@ pub(crate) fn usec(v: Suseconds) -> i64 {
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+}
+
+const MAP_NORESERVE: i32 = 0x4000;
+const MADV_DONTNEED: i32 = 4;
+
+/// `len` bytes of address space, readable and writable, that take memory only where they are
+/// touched (`MAP_NORESERVE`): the request arenas' region (012 FR-027). `None` if refused.
+pub(crate) fn reserve(len: usize) -> Option<std::ptr::NonNull<u8>> {
+    let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+    // SAFETY: an anonymous private mapping at an address the kernel picks; no memory of the
+    // process is touched, and `mmap` does not allocate from the process's heap.
+    let p = unsafe { mmap(std::ptr::null_mut(), len, HUGE_PROT, flags, -1, 0) };
+    if p as usize == MAP_FAILED {
+        return None;
+    }
+    std::ptr::NonNull::new(p)
+}
+
+/// Gives the memory of `len` bytes at `ptr`, inside a [`reserve`]d region, back to the system:
+/// they read as zeros when touched again.
+pub(crate) fn discard(ptr: *mut u8, len: usize) {
+    // SAFETY: the range lies in a mapping of this process that nothing reads until it is handed
+    // out again; a failure only keeps the memory.
+    unsafe { madvise(ptr, len, MADV_DONTNEED) };
 }
 
 const HUGE_PROT: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
