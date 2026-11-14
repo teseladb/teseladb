@@ -216,3 +216,77 @@ fn a_top_k_holds_only_the_documents_it_keeps() {
     let e = wide.run(docs(), &env).expect_err("two thousand are not");
     assert_eq!(e.code.code, 292);
 }
+
+/// `text` over a collection: its `$sort` narrowed as RefDb's query plan narrows it.
+fn over_collection(text: &str) -> Pipeline {
+    let holder = extjson::parse(&format!(r#"{{"p":{text}}}"#)).expect("pipeline");
+    let Some(Value::Array(stages)) = holder.get("p") else { panic!("not a pipeline") };
+    let stages: Vec<Document> = stages
+        .iter()
+        .map(|s| match s {
+            Value::Document(d) => d.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let mut p = parsed(&holder);
+    p.narrow_sort_input(&stages);
+    p
+}
+
+#[test]
+fn a_leading_sort_holds_only_the_fields_the_rest_uses_as_refdb_counts_them() {
+    // Room for the input with two or three small fields each, not for the whole documents.
+    let small = SpillEnv { limit: 120_000, disk: false, store: None };
+    let roomy = SpillEnv { limit: usize::MAX, disk: false, store: None };
+    for text in [
+        // The fields the rest uses cover the sort: the plan projects them under it.
+        r#"[{"$match":{"v":{"$gte":0}}},{"$sort":{"v":1}},{"$group":{"_id":"$g","f":{"$first":"$v"}}}]"#,
+        r#"[{"$sort":{"v":-1}},{"$limit":3000},{"$group":{"_id":"$v"}}]"#,
+        // A projection of fields that keeps the sort's, right after it, runs under it.
+        r#"[{"$sort":{"v":1}},{"$project":{"v":1,"g":1}}]"#,
+        r#"[{"$sort":{"v":1}},{"$unset":["s","t","z","g"]}]"#,
+    ] {
+        let whole = pipeline(text).run(docs(), &small).expect_err("full documents pass");
+        assert_eq!(whole.code.code, 292, "{text}");
+        let narrowed = over_collection(text).run(docs(), &small);
+        let narrowed = narrowed.unwrap_or_else(|e| panic!("{text}: {e:?}"));
+        assert_eq!(narrowed, pipeline(text).run(docs(), &roomy).expect("runs"), "{text}");
+    }
+    for text in [
+        // The sort reads a field the rest does not: the projection goes above it.
+        r#"[{"$sort":{"v":1}},{"$group":{"_id":"$g"}}]"#,
+        // With a `$limit` the user's projection stays above the sort.
+        r#"[{"$sort":{"v":1}},{"$limit":3000},{"$project":{"v":1}}]"#,
+        // A projection that computes a field stands for the fields, above the sort.
+        r#"[{"$sort":{"v":1}},{"$project":{"w":{"$add":["$v",1]}}}]"#,
+        // `$skip` after the sort.
+        r#"[{"$sort":{"v":1}},{"$skip":1},{"$group":{"_id":"$v"}}]"#,
+        // The rest needs the whole document.
+        r#"[{"$sort":{"v":1}}]"#,
+    ] {
+        let e = over_collection(text).run(docs(), &small).expect_err("full documents");
+        assert_eq!(e.code.code, 292, "{text}");
+    }
+}
+
+#[test]
+fn a_projection_of_the_id_alone_stays_above_a_sort_by_other_fields() {
+    let roomy = SpillEnv { limit: usize::MAX, disk: false, store: None };
+    for text in [
+        r#"[{"$sort":{"g":1,"_id":1}},{"$project":{"_id":1}}]"#,
+        r#"[{"$sort":{"g":-1,"_id":1}},{"$project":{"_id":1}}]"#,
+        r#"[{"$sort":{"_id":-1}},{"$project":{"_id":1}}]"#,
+        r#"[{"$sort":{"g":1}},{"$project":{"_id":0}}]"#,
+    ] {
+        let narrowed = over_collection(text).run(docs(), &roomy).expect("runs");
+        assert_eq!(narrowed, pipeline(text).run(docs(), &roomy).expect("runs"), "{text}");
+    }
+}
+
+#[test]
+fn the_engine_plan_leaves_the_users_projection_above_the_sort() {
+    let small = SpillEnv { limit: 120_000, disk: false, store: None };
+    let text = r#"[{"$sort":{"v":1}},{"$project":{"v":1,"g":1}},{"$group":{"_id":"$g","f":{"$first":"$v"}}}]"#;
+    let e = over_collection(text).run(docs(), &small).expect_err("full documents");
+    assert_eq!(e.code.code, 292);
+}

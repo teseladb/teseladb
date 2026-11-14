@@ -14,6 +14,7 @@ mod group;
 mod group_columns;
 mod joined;
 pub mod meta;
+mod narrow;
 pub mod optimize;
 pub mod out_merge;
 pub mod radix;
@@ -260,6 +261,9 @@ pub struct Pipeline {
     random_sort: Option<MqlError>,
     /// Whether a stage after its `$search` reads `$$SEARCH_META`.
     reads_search_meta: bool,
+    /// The projection the documents go through before the stage at its place, the `$sort` of
+    /// RefDb's query plan ([`Pipeline::narrow_sort_input`]).
+    narrow: Option<Box<(usize, Projection)>>,
 }
 
 impl Pipeline {
@@ -551,9 +555,18 @@ impl Pipeline {
                 if let (Some(last), Some(spec)) = (self.stages.get(end), self.sbe_specs.get(end)) {
                     let sink_sbe = run_sbe && *spec && sbe_capable(last);
                     if let Some(mut sink) = sink::Sink::of(self, end, env, sink_sbe) {
+                        let narrow = self.narrow.as_deref().filter(|(i, _)| *i == end);
                         for_each_batch(run, docs, env, run_sbe, &mut |batch| {
                             env.interrupted()?;
-                            sink.absorb(batch)
+                            match narrow {
+                                Some((_, p)) => sink.absorb(
+                                    batch
+                                        .iter()
+                                        .map(|d| p.apply(d, &env.scope(d)))
+                                        .collect::<Result<_, _>>()?,
+                                ),
+                                None => sink.absorb(batch),
+                            }
                         })?;
                         docs = sink.finish()?;
                         sbe = sink_sbe;
@@ -759,6 +772,7 @@ fn parse_stages(pipeline: &[RawValue<'_>], ctx: &Ctx) -> Result<Pipeline, MqlErr
         reads_index_key,
         random_sort: None,
         reads_search_meta: reads_meta,
+        narrow: None,
     })
 }
 
