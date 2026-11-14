@@ -24,8 +24,6 @@ use std::sync::Arc;
 use super::charfilters::Filtered;
 use super::jregex::{JavaRegex, RegexError};
 use super::morph;
-use super::props::category;
-use super::tokenfilters::is_java_whitespace;
 use super::uax29::word_segments;
 use super::unicode::{
     WordBreak, is_complex_context, is_han, is_hiragana, is_pictographic, word_break,
@@ -183,7 +181,8 @@ struct Emitter<'a> {
 
 impl Emitter<'_> {
     /// Emits the runs of characters that `in_token` accepts, cut into pieces of at most `max`
-    /// characters.
+    /// characters: the reference of [`super::spans::letter`] and [`super::spans::whitespace`].
+    #[cfg(test)]
     fn emit_runs(&mut self, in_token: impl Fn(char) -> bool, max: usize) {
         let text = &self.input.text;
         let mut start = None;
@@ -245,6 +244,7 @@ impl Emitter<'_> {
 
     /// Emits `from..to` cut into pieces: a piece ends once it holds `max` UTF-16 code units or
     /// more, so a last supplementary character may take it one unit past `max`.
+    #[cfg(test)]
     fn emit_chunks(&mut self, from: usize, to: usize, max: usize) {
         let mut start = from;
         let mut count = 0;
@@ -327,7 +327,8 @@ impl Emitter<'_> {
 
     /// Emits the words of the text from `from`. A word longer than `max` UTF-16 code units is
     /// cut after `max` units; the words of the cut piece are emitted and the text after the cut
-    /// is segmented anew, as if it started there.
+    /// is segmented anew, as if it started there: the reference of [`super::spans::standard`].
+    #[cfg(test)]
     fn emit_words(&mut self, from: usize, max: usize) {
         let text = &self.input.text;
         let mut base = from;
@@ -365,13 +366,42 @@ impl Emitter<'_> {
 }
 
 impl Tokenizer {
+    /// Gives `emit` the byte range of each token of `text`, in order, for the tokenizers whose
+    /// tokens are pieces of the text (`standard`, `whitespace`, `letter` and `keyword`), and
+    /// whether this tokenizer is one of them. No token text is built (FR-028).
+    pub fn spans(&self, text: &str, emit: &mut impl FnMut(usize, usize)) -> bool {
+        match *self {
+            Tokenizer::Standard { max_token_length } => {
+                super::spans::standard(text, max_token_length, emit);
+            }
+            Tokenizer::Whitespace { max_token_length } => {
+                super::spans::whitespace(text, max_token_length, emit);
+            }
+            Tokenizer::Letter { max_token_length } => {
+                super::spans::letter(text, max_token_length, emit);
+            }
+            Tokenizer::Keyword => {
+                if !text.is_empty() {
+                    emit(0, text.len());
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// The tokens of filtered text. Only the regular-expression tokenizers fail, when a match
     /// runs out of the engine's steps.
     pub fn tokenize(&self, input: &Filtered) -> Result<Vec<Token>, RegexError> {
         let mut e = Emitter { input, out: Vec::new() };
         let text = &input.text;
         match self {
-            &Tokenizer::Standard { max_token_length } => e.emit_words(0, max_token_length),
+            Tokenizer::Standard { .. }
+            | Tokenizer::Whitespace { .. }
+            | Tokenizer::Letter { .. }
+            | Tokenizer::Keyword => {
+                self.spans(text, &mut |from, to| e.emit(from, to));
+            }
             &Tokenizer::UaxUrlEmail { max_token_length } => e.emit_url_email(max_token_length),
             Tokenizer::RegexSplit { pattern } => {
                 let mut from = 0;
@@ -393,17 +423,6 @@ impl Tokenizer {
                     {
                         e.emit(start, end);
                     }
-                }
-            }
-            &Tokenizer::Whitespace { max_token_length } => {
-                e.emit_runs(|c| !is_java_whitespace(c), max_token_length);
-            }
-            &Tokenizer::Letter { max_token_length } => {
-                e.emit_runs(|c| matches!(category(c), 1..=5), max_token_length);
-            }
-            Tokenizer::Keyword => {
-                if !text.is_empty() {
-                    e.emit(0, text.len());
                 }
             }
             Tokenizer::Kuromoji => e.emit_morph(
@@ -438,7 +457,7 @@ impl Tokenizer {
 
 /// Where `word` reaches `max` UTF-16 code units, if it is longer: the byte offset of the first
 /// character that does not fit, and at least one character.
-fn cut_point(word: &str, max: usize) -> Option<usize> {
+pub(super) fn cut_point(word: &str, max: usize) -> Option<usize> {
     let mut units = 0;
     for (i, c) in word.char_indices() {
         if units + c.len_utf16() > max {
@@ -548,7 +567,7 @@ fn text_presentation_pieces(w: &str) -> Vec<(usize, &str)> {
 
 /// The UAX #29 segments of `text` that are tokens, with each run of segments of
 /// characters of Line_Break=SA (Thai, Lao, Myanmar, Khmer and others) joined into one.
-fn words(text: &str) -> Vec<(usize, &str)> {
+pub(super) fn words(text: &str) -> Vec<(usize, &str)> {
     let mut out: Vec<(usize, &str)> = Vec::new();
     let mut last_asian = false;
     for (at, w) in word_segments(text) {
@@ -589,6 +608,115 @@ mod tests {
     }
 
     const STANDARD: Tokenizer = Tokenizer::Standard { max_token_length: DEFAULT_MAX_TOKEN_LENGTH };
+
+    /// Pseudo-random texts of the characters where word limits are hard: ASCII letters, digits,
+    /// joiners and separators, letters and marks of several bytes, joiners of emoji, regional
+    /// indicators, Thai, Han and Hiragana, white space outside ASCII.
+    fn fuzz_texts(seeds: u64) -> Vec<String> {
+        const PIECES: &[&str] = &[
+            "a",
+            "Z",
+            "q",
+            "7",
+            "0",
+            ".",
+            ",",
+            ":",
+            ";",
+            "'",
+            "\"",
+            "_",
+            " ",
+            "  ",
+            "\t",
+            "\n",
+            "\r\n",
+            "-",
+            "!",
+            "(",
+            "@",
+            "/",
+            "é",
+            "Ñ",
+            "ß",
+            "\u{301}",
+            "\u{200D}",
+            "😀",
+            "👍\u{1F3FD}",
+            "\u{FE0E}",
+            "🇪",
+            "🇸",
+            "ไทย",
+            "中文",
+            "ひら",
+            "カタ",
+            "\u{A0}",
+            "\u{2003}",
+            "\u{3000}",
+            "١٢",
+            "\u{600}",
+            "½",
+            "№",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "ab'cd",
+            "3.14",
+            "1,000",
+            "can't",
+            "e.g.",
+            "ñandú",
+            "ΑΒΓ",
+            "ﬁ",
+        ];
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..seeds)
+            .map(|_| {
+                let len = (next() % 40) as usize;
+                (0..len).map(|_| PIECES[(next() % PIECES.len() as u64) as usize]).collect()
+            })
+            .collect()
+    }
+
+    /// The tokens the tokenizers gave before their spans came from byte classes.
+    fn reference(t: &Tokenizer, text: &str) -> Vec<Token> {
+        let input = Filtered::new(text);
+        let mut e = Emitter { input: &input, out: Vec::new() };
+        match *t {
+            Tokenizer::Standard { max_token_length } => e.emit_words(0, max_token_length),
+            Tokenizer::Whitespace { max_token_length } => e.emit_runs(
+                |c| !super::super::tokenfilters::is_java_whitespace(c),
+                max_token_length,
+            ),
+            Tokenizer::Letter { max_token_length } => {
+                e.emit_runs(|c| matches!(super::super::props::category(c), 1..=5), max_token_length)
+            }
+            _ => unreachable!("not a tokenizer of spans"),
+        }
+        e.out
+    }
+
+    #[test]
+    fn span_tokenizers_give_the_tokens_of_before() {
+        let texts = fuzz_texts(4000);
+        for max in [1, 2, 3, 5, 8, 31, 32, 33, 255] {
+            for t in [
+                Tokenizer::Standard { max_token_length: max },
+                Tokenizer::Whitespace { max_token_length: max },
+                Tokenizer::Letter { max_token_length: max },
+            ] {
+                for text in &texts {
+                    let got = t.tokenize(&Filtered::new(text)).unwrap();
+                    assert_eq!(got, reference(&t, text), "{t:?} {text:?}");
+                }
+            }
+        }
+        assert!(!Tokenizer::Thai.spans("x", &mut |_, _| {}));
+    }
 
     #[test]
     fn documentation_examples() {

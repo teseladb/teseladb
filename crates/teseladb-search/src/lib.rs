@@ -18,10 +18,11 @@
 //!   defaults as `refsearch` does (FR-006).
 //! - [`vector`] and [`segment::hnsw`]: the similarities and scores of `$vectorSearch` and the
 //!   HNSW graph of each vector field of a segment (FR-005, FR-017).
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 
 pub mod analysis;
+pub mod byte_simd;
 pub mod definition;
 pub mod index;
 pub mod indexer;

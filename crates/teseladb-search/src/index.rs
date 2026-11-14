@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use teseladb_bson::{Document, Value};
 
-use crate::analysis::analyzer::Analyzer;
+use crate::analysis::analyzer::{Analyzer, TermBuffer};
 use crate::analysis::jregex::RegexError;
 use crate::definition::{DEFAULT_ANALYZER, Definition, Dynamic, FieldMapping, Mapping};
 use crate::query::bm25::{Bm25, idf};
@@ -98,6 +98,20 @@ pub enum IndexError {
 
 /// The longest term, in UTF-8 bytes, that an index keeps (measured on `refsearch` 1.70.6).
 pub(crate) const MAX_TERM_BYTES: usize = 32766;
+
+/// The analyzer called `name` in `definition`: one the definition defines, or a built-in one.
+fn analyzer_of<'a>(
+    definition: &'a Definition,
+    name: &str,
+) -> Result<Cow<'a, Analyzer>, IndexError> {
+    if let Some(custom) = definition.custom_analyzer(name) {
+        return match &custom.built {
+            Ok(a) => Ok(Cow::Borrowed(a)),
+            Err(message) => Err(IndexError::Analysis(message.clone())),
+        };
+    }
+    Analyzer::builtin(name).map(Cow::Owned).ok_or_else(|| IndexError::Analyzer(name.to_owned()))
+}
 
 /// The documents of one search index.
 #[derive(Clone, Debug)]
@@ -239,13 +253,7 @@ impl MemIndex {
 
     /// The analyzer called `name`: one the definition defines, or a built-in one.
     fn analyzer(&self, name: &str) -> Result<Cow<'_, Analyzer>, IndexError> {
-        if let Some(custom) = self.definition.custom_analyzer(name) {
-            return match &custom.built {
-                Ok(a) => Ok(Cow::Borrowed(a)),
-                Err(message) => Err(IndexError::Analysis(message.clone())),
-            };
-        }
-        Analyzer::builtin(name).map(Cow::Owned).ok_or_else(|| IndexError::Analyzer(name.to_owned()))
+        analyzer_of(&self.definition, name)
     }
 
     /// The index analyzer of the fields without their own.
@@ -263,44 +271,58 @@ impl MemIndex {
         let mut texts: Vec<Collected> = Vec::new();
         let mapping = self.definition.mappings.clone();
         self.collect(&mapping, "", doc, &mut texts);
+        let mut buffer = TermBuffer::default();
+        let mut starts: Vec<u32> = Vec::new();
         for Collected { path, analyzer: analyzer_name, search: search_name, text, grams } in texts {
             if let Some(g) = grams {
                 self.put_grams(id, &path, &analyzer_name, &g, &text)?;
                 continue;
             }
-            let mut tokens = self.analyzer(&analyzer_name)?.analyze(&text).map_err(analysis)?;
-            // A term over 32 766 bytes is not indexed, and the document keeps its other terms
-            // (measured: a `reflib.keyword` value of 40 000 characters is found by `exists`
-            // and by no query of its text).
-            tokens.retain(|t| t.text.len() <= MAX_TERM_BYTES);
-            // A value without tokens (an empty string) leaves no length: the document does not
-            // count among those of the field (measured: `t: ""` changes no score).
-            if tokens.is_empty() {
-                continue;
-            }
             let similarity = self.similarity_of(&path);
-            let field = self.fields.entry(path).or_insert_with(|| TextField {
+            let analyzer = analyzer_of(&self.definition, &analyzer_name)?;
+            let existed = self.fields.contains_key(&path);
+            let field = self.fields.entry(path.clone()).or_insert_with(|| TextField {
                 search_analyzer: search_name.clone(),
                 similarity,
                 ..TextField::default()
             });
             let base = field.ends.get(&id).copied().unwrap_or(0);
-            for t in &tokens {
-                field
-                    .postings
-                    .entry(t.text.clone())
-                    .or_default()
-                    .entry(id)
-                    .or_default()
-                    .push(base + t.position);
+            starts.clear();
+            let (mut count, mut end) = (0u32, 0u32);
+            // The terms come without tokens (FR-028); a term is copied only the first time the
+            // field holds it.
+            analyzer
+                .for_each_term(&text, &mut buffer, |t| {
+                    // A term over 32 766 bytes is not indexed, and the document keeps its other
+                    // terms (measured: a `reflib.keyword` value of 40 000 characters is found by
+                    // `exists` and by no query of its text).
+                    if t.text.len() > MAX_TERM_BYTES {
+                        return;
+                    }
+                    if !field.postings.contains_key(t.text) {
+                        field.postings.insert(t.text.to_owned(), BTreeMap::new());
+                    }
+                    if let Some(docs) = field.postings.get_mut(t.text) {
+                        docs.entry(id).or_default().push(base + t.position);
+                    }
+                    count += 1;
+                    end = end.max(t.position + 1);
+                    starts.push(t.position);
+                })
+                .map_err(analysis)?;
+            // A value without tokens (an empty string) leaves no length: the document does not
+            // count among those of the field (measured: `t: ""` changes no score).
+            if count == 0 {
+                if !existed {
+                    self.fields.remove(&path);
+                }
+                continue;
             }
-            let end = tokens.iter().map(|t| t.position + 1).max().unwrap_or(0);
-            let mut starts: Vec<u32> = tokens.iter().map(|t| t.position).collect();
             starts.sort_unstable();
             starts.dedup();
             *field.ends.entry(id).or_insert(0) += end;
             *field.lengths.entry(id).or_insert(0) += starts.len() as u32;
-            *field.tokens.entry(id).or_insert(0) += tokens.len() as u32;
+            *field.tokens.entry(id).or_insert(0) += count;
         }
         Ok(())
     }

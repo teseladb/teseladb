@@ -103,6 +103,14 @@ gate "1. Miri on the vector kernels (x86_64, SSE2)" env MIRIFLAGS=-Zmiri-disable
 gate "1. Miri on the vector kernels (x86_64, AVX2)" env MIRIFLAGS=-Zmiri-disable-isolation \
   RUSTFLAGS="-C target-feature=+avx2" \
   cargo +nightly miri test -q -p teseladb-mql --lib --target x86_64-unknown-linux-gnu -- simd::
+# The byte kernels of text analysis (011 FR-028), on the host and interpreted on x86_64.
+gate "1. Miri on the byte kernels of search (host)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-search --lib -- byte_simd::
+gate "1. Miri on the byte kernels of search (x86_64, SSE2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  cargo +nightly miri test -q -p teseladb-search --lib --target x86_64-unknown-linux-gnu -- byte_simd::
+gate "1. Miri on the byte kernels of search (x86_64, AVX2)" env MIRIFLAGS=-Zmiri-disable-isolation \
+  RUSTFLAGS="-C target-feature=+avx2" \
+  cargo +nightly miri test -q -p teseladb-search --lib --target x86_64-unknown-linux-gnu -- byte_simd::
 # The pool that carves blocks out of one mapping of huge pages (012 FR-032), on normal pages.
 gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
   cargo +nightly miri test -q -p teseladb-sys --lib -- huge_pool::
