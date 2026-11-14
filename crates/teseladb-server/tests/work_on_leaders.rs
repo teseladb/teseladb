@@ -313,6 +313,19 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
     assert!(sent >= tail_parts, "{sent} parts sent, {tail_parts} in the last range alone");
     assert!(ran >= tail_parts, "{ran} parts ran for this node");
     assert!(ahead > 0, "no part asked for ahead was taken: {sent} sent");
+    // A find's scan sends its filter the same way, counted while the leaders stay.
+    let (sent, ran) = until("a find while the leaders stay", || {
+        let still = |g| leader_of(&nodes, g) == Some(leader) && last() == g;
+        if !still(g) {
+            return None;
+        }
+        let before = (filtered_parts_sent(), ran_for_other_nodes());
+        assert_eq!(find(&mut c, by_k(), false), here);
+        let after = (filtered_parts_sent(), ran_for_other_nodes());
+        still(g).then_some((after.0 - before.0, after.1 - before.1))
+    });
+    assert!(sent >= tail_parts, "{sent} parts of the find sent, {tail_parts} in the last range");
+    assert!(ran >= tail_parts, "{ran} parts of the find ran for this node");
     // An update of every document the filter keeps.
     let set = Document::new().with("$set", Document::new().with("u", 1));
     let many = Document::new().with("q", by_k()).with("u", set).with("multi", true);
