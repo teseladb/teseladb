@@ -109,7 +109,7 @@ const ROWS: &[Row] = &[
     // An internal privilege on the cluster, and `moveChunk` on `admin` (the reference server
     // r9.0.4).
     ("untrackUnshardedCollection", On::Cluster, &[A::Internal]),
-    ("resetPlacementHistory", On::Db, &[A::MoveChunk]),
+    ("resetPlacementHistory", On::Admin, &[A::MoveChunk]),
     ("abortMoveCollection", On::FullNs, &[A::MoveCollection]),
     ("unshardCollection", On::FullNs, &[A::UnshardCollection]),
     ("abortUnshardCollection", On::FullNs, &[A::UnshardCollection]),
@@ -139,7 +139,6 @@ const ROWS: &[Row] = &[
     ("balancerStatus", On::Config, &[A::Find]),
     ("balancerStart", On::Config, &[A::Update]),
     ("balancerStop", On::Config, &[A::Update]),
-    ("resetPlacementHistory", On::Admin, &[A::MoveChunk]),
     ("hostInfo", On::Cluster, &[A::HostInfo]),
     ("serverStatus", On::Cluster, &[A::ServerStatus]),
     ("netstat", On::Cluster, &[A::Netstat]),
@@ -215,7 +214,6 @@ const ROWS: &[Row] = &[
     ("stopTrafficRecording", On::Cluster, &[A::TrafficRecord]),
     ("autoCompact", On::Cluster, &[A::Compact]),
     ("getQueryableEncryptionCountInfo", On::Cluster, &[A::Internal]),
-    ("untrackUnshardedCollection", On::Cluster, &[A::Internal]),
     ("coordinateCommitTransaction", On::Cluster, &[A::Internal]),
     ("autoSplitVector", On::Cluster, &[A::SplitVector]),
 ];
