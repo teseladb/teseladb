@@ -275,6 +275,9 @@ fn open_ended_ranges_and_unknown_ranges() {
     assert_eq!(router.route(b"zzz").unwrap().group, GroupId(2));
     assert_eq!(router.route(b"b").unwrap().group, GroupId(1));
     assert!(router.route(b"0").is_none());
+    // The table lists them in key order.
+    let groups: Vec<GroupId> = router.table().entries().map(|e| e.group).collect();
+    assert_eq!(groups, [GroupId(1), GroupId(2)]);
     // The range of the keys just below a bound (H-003): a bound at a range's start belongs to
     // the range before it; nothing below the first range's start.
     let below = |key: &[u8]| router.table().lookup_below(key).map(|e| e.group);

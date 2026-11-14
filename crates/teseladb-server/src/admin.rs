@@ -1851,6 +1851,10 @@ mod tests {
             "split 7 true"
         );
         assert_eq!(did(&route(&req(Method::Post, "/admin/ranges/7/merge", ""), &b)), "merge 7");
+        // A tenant is created and dropped with POST only.
+        for path in ["/admin/tenants/acme", "/admin/tenants/acme/drop"] {
+            assert_eq!(route(&req(Method::Get, path, ""), &b).status, 405, "{path}");
+        }
         let relocate = req(Method::Post, "/admin/ranges/7/relocate?core=3", "");
         assert_eq!(did(&route(&relocate, &b)), "relocate 7 3");
         let no_core = route(&req(Method::Post, "/admin/ranges/7/relocate", ""), &b);

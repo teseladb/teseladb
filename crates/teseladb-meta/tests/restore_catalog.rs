@@ -119,6 +119,10 @@ fn a_catalog_with_a_collection_or_an_index_refuses_it() {
     let mut dst = cluster();
     assert_eq!(run(&mut dst, restore_of(&src)), Group0Result::Ok);
     assert_eq!(run(&mut dst, restore_of(&src)), Group0Result::Err(Group0Error::NotEmpty));
+    // Index definitions without their collections make a catalog that is not empty either.
+    let mut dst = cluster();
+    dst.indexes = src.indexes.clone();
+    assert_eq!(run(&mut dst, restore_of(&src)), Group0Result::Err(Group0Error::NotEmpty));
 }
 
 /// A user `name` of `admin`.

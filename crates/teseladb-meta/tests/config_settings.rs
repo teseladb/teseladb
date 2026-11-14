@@ -109,6 +109,9 @@ fn days_that_do_not_read_stop_the_balancer() {
     let missing = Document::new().with("day", "Sunday").with("start", "22:00");
     let doc = Document::new().with("activeWindowDOW", vec![teseladb_bson::Value::from(missing)]);
     assert!(!balancing(&with(BALANCER_KEY, doc), SUNDAY_NIGHT));
+    // An entry that is not a document does not read either.
+    let doc = Document::new().with("activeWindowDOW", vec![teseladb_bson::Value::from("Sunday")]);
+    assert!(!balancing(&with(BALANCER_KEY, doc), SUNDAY_NIGHT));
 }
 
 #[test]

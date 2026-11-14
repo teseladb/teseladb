@@ -375,6 +375,18 @@ mod tests {
         assert_eq!(text(&TenantAction::List, None), "");
         let odd = Document::new().with("tenants", Value::Array(vec![Value::Int32(1)]));
         assert_eq!(text(&TenantAction::List, Some(&odd)), "");
+        // A line shows the limits that are set, never the tenant's number again.
+        let acme = Document::new()
+            .with("_id", 3i64)
+            .with("name", "acme")
+            .with(crate::admin_tenant_state::field::STORAGE_BYTES, 5i64)
+            .with(crate::admin_tenant_state::field::MAX_CONNECTIONS, 0i64);
+        let listed = Document::new().with("tenants", Value::Array(vec![Value::Document(acme)]));
+        let line = text(&TenantAction::List, Some(&listed));
+        assert!(line.starts_with("3\tacme") && !line.contains("_id="), "{line}");
+        let storage = format!("{}=5", crate::admin_tenant_state::field::STORAGE_BYTES);
+        let connections = crate::admin_tenant_state::field::MAX_CONNECTIONS;
+        assert!(line.contains(&storage) && !line.contains(connections), "{line}");
         let e = refusal("x", Group0Error::InvalidTenantName);
         assert_eq!(e.message, "'x' cannot name a tenant: 1 to 64 bytes without a zero byte");
         assert_eq!(refusal("x", Group0Error::NoSuchGroup).status, 503);

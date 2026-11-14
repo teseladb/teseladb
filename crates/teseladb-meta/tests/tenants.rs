@@ -162,6 +162,10 @@ fn a_qualified_database_names_its_tenant() {
     assert_eq!(split_db(&qualified_db(u32::MAX, "")), (u32::MAX, ""));
     // A name with the mark but no number after it stays the default tenant's.
     assert_eq!(split_db("\0x\0app"), (DEFAULT_TENANT, "\0x\0app"));
+    // The default tenant's number between marks is not a qualified name: the default tenant's
+    // names are never qualified, so it stays the whole name.
+    let default_number = format!("\0{DEFAULT_TENANT}\0app");
+    assert_eq!(split_db(&default_number), (DEFAULT_TENANT, default_number.as_str()));
     assert_eq!(split_db("\0"), (DEFAULT_TENANT, "\0"));
 }
 
@@ -226,6 +230,8 @@ fn a_tenant_keeps_its_limits_its_suspension_and_its_access_list() {
         (&state.limits, state.suspended, &state.allowed_sources),
         (&limits(), true, &sources)
     );
+    // A suspended tenant's users are not served (FR-034).
+    assert!(!state.admits_users());
     // 0 takes a limit away, and the service user goes with it.
     let none = Group0Command::SetTenantLimits { tenant: 1, limits: TenantLimits::default() };
     assert_eq!(apply(&mut sm, 6, none), Group0Result::Ok);
@@ -233,6 +239,7 @@ fn a_tenant_keeps_its_limits_its_suspension_and_its_access_list() {
     let resume = Group0Command::SetTenantSuspended { tenant: 1, suspended: false };
     assert_eq!(apply(&mut sm, 7, resume), Group0Result::Ok);
     assert!(!sm.tenants.state(1).unwrap().suspended);
+    assert!(sm.tenants.state(1).unwrap().admits_users());
     // The snapshot keeps them, and a tenant that goes takes them with it.
     let mut back = Group0Sm::default();
     back.restore(&sm.snapshot()).unwrap();

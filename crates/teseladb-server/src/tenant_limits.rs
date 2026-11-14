@@ -571,6 +571,49 @@ mod tests {
         }
     }
 
+    /// Routes with tenant 1, `acme`, and a storage quota of `quota` bytes, on one node.
+    fn quota_routes(quota: u64) -> crate::routes::SharedRoutes {
+        let routes = crate::routes::SharedRoutes::default();
+        let state = teseladb_meta::tenants::TenantState {
+            limits: TenantLimits { storage_bytes: quota, ..TenantLimits::default() },
+            ..teseladb_meta::tenants::TenantState::default()
+        };
+        routes.publish_tenants(std::sync::Arc::new(BTreeMap::from([(1, state)])));
+        routes.publish_tenant_names(std::sync::Arc::new(BTreeMap::from([(1, "acme".into())])));
+        routes.publish_nodes(1);
+        routes
+    }
+
+    #[test]
+    fn a_tenant_without_a_reading_is_read_at_its_first_write() {
+        let user = teseladb_auth::users::UserName { user: "u".into(), db: "admin".into() };
+        // The node cannot read the tenant's data: a write that grows it waits for the next
+        // reading, with the labels the drivers retry.
+        let routes = quota_routes(1000);
+        let e = begin(&routes, 1, &user, (100, true), &mut || None).unwrap_err();
+        assert_eq!(e.code, teseladb_wire::error::INGRESS_REQUEST_RATE_LIMIT_EXCEEDED);
+        assert!(e.errmsg.contains("acme") && e.labels.contains(&RETRYABLE), "{e:?}");
+        // A write that does not grow it does not need the reading.
+        assert_eq!(begin(&routes, 1, &user, (100, false), &mut || None), Ok(Some(0)));
+        routes.limiter().end(1);
+        // Read at once: 100 used of 1000 lets the write through and keeps the reading.
+        let mut reads = 0;
+        let mut read = || {
+            reads += 1;
+            Some(100)
+        };
+        assert_eq!(begin(&routes, 1, &user, (100, true), &mut read), Ok(Some(0)));
+        routes.limiter().end(1);
+        assert_eq!(begin(&routes, 1, &user, (100, true), &mut read), Ok(Some(0)));
+        routes.limiter().end(1);
+        assert_eq!(reads, 1, "the second write uses the reading the first one kept");
+        // A tenant already over its quota is refused with its usage.
+        let routes = quota_routes(1000);
+        let e = begin(&routes, 1, &user, (1, true), &mut || Some(1000)).unwrap_err();
+        assert_eq!(e.code, teseladb_wire::error::OUT_OF_DISK_SPACE);
+        assert!(e.errmsg.contains("1000 of 1000"), "{e:?}");
+    }
+
     #[test]
     fn connections_stop_at_the_limit_and_come_back_when_one_closes() {
         let l = TenantLimiter::default();

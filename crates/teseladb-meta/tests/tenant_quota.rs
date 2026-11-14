@@ -64,6 +64,15 @@ fn without_the_reading_of_two_epochs_before_nothing_grows() {
 /// A node that started in window 99 counts from window 100: the reading of 100 lets it write in
 /// window 102, and nothing older does.
 #[test]
+fn a_reading_of_the_window_now_does_not_count_yet() {
+    // In window 102 a reading of 102 is still running: only the reading of 100 gives the part.
+    let mut w = QuotaWindow::default();
+    let r = [at(100, 400), at(102, LIMIT)];
+    assert_eq!(w.admit(LIMIT, 3, 0, inside(102), &r, 200), Ok(()));
+    assert_eq!(w.admit(LIMIT, 3, 0, inside(102), &r, 1), Err(QuotaRefusal::ShareSpent(200)));
+}
+
+#[test]
 fn a_node_counts_only_from_the_window_after_its_start() {
     let mut w = QuotaWindow::default();
     let since = window_of(inside(99)) + 1;

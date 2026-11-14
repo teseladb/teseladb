@@ -13,12 +13,16 @@ use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 fn user(root: &mut Client, name: &str) {
+    user_of(root, name, "acme");
+}
+
+fn user_of(root: &mut Client, name: &str, tenant: &str) {
     let create = Document::new()
         .with("createUser", name)
         .with("pwd", PASSWORD)
         .with("roles", Value::Array(vec![Value::from("readWriteAnyDatabase")]))
         .with("mechanisms", Value::Array(vec![Value::from("SCRAM-SHA-256")]))
-        .with("$tenant", "acme");
+        .with("$tenant", tenant);
     assert!(ok(&root.run("admin", create)));
 }
 
@@ -115,4 +119,67 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
     for n in nodes.into_iter().rev() {
         n.stop();
     }
+}
+
+/// `teseladb admin <args>` on `node`: its error output when it fails.
+fn admin_try(node: &Node<MemDisk>, args: &[&str]) -> Result<(), String> {
+    let at = node.admin_addr().unwrap().to_string();
+    let argv: Vec<String> =
+        ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    match teseladb_server::run(&argv, &mut out, &mut err, &|| true) {
+        0 => Ok(()),
+        _ => Err(String::from_utf8_lossy(&err).into_owned()),
+    }
+}
+
+/// Splits the range that holds document `id` of `app.c` of the tenant numbered `tenant`.
+fn split_at(node: &Node<MemDisk>, tenant: u32, id: i32) {
+    let at = format!(r#"{{"ns": "\u0000{tenant}\u0000app.c", "_id": {id}}}"#);
+    // A range still splitting refuses the next split (`RangeBusy`) until it is done.
+    until("the split", || {
+        let ranges = admin(node, &["ranges"]);
+        let mut ids = ranges.lines().filter_map(|l| l.split('\t').next());
+        ids.any(|r| admin_try(node, &["range", "split", r, "--at", &at]).is_ok()).then_some(())
+    });
+}
+
+/// FR-031: the data a tenant uses adds up the ranges of its keys when they are split around and
+/// inside its collections: one range wholly its own, ranges that hold another tenant's data
+/// too, and ranges before or after its keys, which count for nothing.
+#[test]
+fn the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it() {
+    let node = start(Vec::new());
+    for t in ["acme", "beta"] {
+        admin(&node, &["tenant", "create", t]);
+    }
+    let mut root = Client::new(&node);
+    assert!(ok(&login(&mut root, "root", ROOT_PASSWORD)));
+    user_of(&mut root, "ann", "acme");
+    user_of(&mut root, "bob", "beta");
+    for name in ["ann", "bob"] {
+        let mut c = signed_in(&node, name);
+        let insert = Document::new().with("insert", "c").with("documents", docs(0..100));
+        assert!(ok(&c.run("app", insert)));
+    }
+    let used = |t: &str| {
+        field(&admin(&node, &["tenant", "usage", t]), "storageBytes").parse::<u64>().unwrap_or(0)
+    };
+    let before: Vec<u64> = ["acme", "beta"]
+        .iter()
+        .map(|t| until("the first reading of each tenant", || Some(used(t)).filter(|u| *u > 0)))
+        .collect();
+    // acme is 1 and beta 2: acme's documents 30 to 59 get a range of their own, and the range
+    // from acme's 60 to beta's 50 holds both tenants' data.
+    split_at(&node, 1, 30);
+    split_at(&node, 1, 60);
+    split_at(&node, 2, 50);
+    // The reading of two epochs later sees the new ranges, and finds the same documents.
+    let epoch = std::time::Duration::from_millis(teseladb_meta::tenant_quota::EPOCH_MS);
+    std::thread::sleep(3 * epoch);
+    for (t, was) in ["acme", "beta"].iter().zip(before) {
+        let now = used(t);
+        assert!(now > 0 && now <= 2 * was && 2 * now >= was, "{t}: {was} bytes, then {now}");
+    }
+    node.stop();
 }

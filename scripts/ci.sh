@@ -143,6 +143,7 @@ gate "3. tests on x86_64 Linux" scripts/test-x86_64.sh
 gate "3. tests on the Linux kernel, io_uring included (012)" scripts/test-linux.sh
 gate "3. TLS interoperability with openssl and curl (013 FR-019)" scripts/tls-interop.sh
 gate "4. tests of coverage" scripts/tests/coverage_test.sh
+gate "4. tests of the coverage of a set of commits" scripts/tests/coverage_of_commits_test.sh
 long_gate() {
   if [[ ${TESELADB_CI_LONG:-1} == 0 ]]; then
     echo "== gate: $1: run by scripts/final-phase.sh (TESELADB_CI_LONG=0)"
