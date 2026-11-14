@@ -1,5 +1,5 @@
-# IPADIC 2.7.0-20070801 for the reflib.kuromoji analyzer (011 T009, D-109): the dictionary RefLib's
-# kuromoji is built from. Licence: the NAIST and ICOT terms in its COPYING file, which allow use,
+# IPADIC 2.7.0-20070801 for the kuromoji search analyzer (011 T009, D-109): the dictionary the reference
+# kuromoji analyzer is built from. Licence: the NAIST and ICOT terms in its COPYING file, which allow use,
 # copying and distribution with that notice. scripts/gen-morph-dicts.py writes data/kuromoji.bin.
 # source https://downloads.sourceforge.net/project/mecab
 # dest .tools/kuromoji

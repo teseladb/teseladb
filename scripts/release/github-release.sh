@@ -56,7 +56,7 @@ docker pull $GHCR:$VERSION
 \`\`\`
 
 The [quick start](https://github.com/$REPO/blob/main/docs/quickstart.md) takes you from here to a running node with a
-\`refshell\` session on it in about five minutes.
+shell session on it in about five minutes.
 
 ## Files
 

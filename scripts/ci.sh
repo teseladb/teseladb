@@ -36,11 +36,7 @@ gate() {
 }
 
 shell_scripts() {
-  {
-    find scripts -name '*.sh'
-    # The MCP battery; not the packages its runners install.
-    find tests -name '*.sh' -not -path '*/node_modules/*'
-  } | sort
+  find scripts -name '*.sh' | sort
 }
 
 shellcheck_all() {

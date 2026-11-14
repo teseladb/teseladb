@@ -8,16 +8,7 @@
 #   https://csrc.nist.gov/CSRC/media/Projects/PKI-Testing/documents/PKITS.pdf
 #   (SHA-256 506913f4b727704ee1b52b17aa472dc6fbcf01e41e7ad88ba505f29c1a74d9ea), transcribed from its text.
 # openssl/: written by openssl/generate.sh with OpenSSL 3.6.3 on 2026-10-30 (test keys only). The ec521-* files on 2026-10-31, sha1-leaf.pem on 2026-11-02.
-# refdb/: client certificates written by refdb/generate.sh with OpenSSL 3.6.3 on 2026-10-30.
 # ocsp/: certificates and answers of an OpenSSL 3.0.2 responder (openssl ocsp -index), written on 2026-10-31 (013 T042).
-1aa00514f0364cd5b7596c0a8d64e3686d88af8ba0e468cf90015113824f0c98  refdb/generate.sh
-a95c015dc7c69d4337dde31777037ef09999078a25a37266286b3d9f744ec137  refdb/x509-user-1.pem
-38d8d424488673cb79614e7a5304412b41e7c734ef6fc2c21f3cb0378264cb89  refdb/x509-user-2.pem
-b76d1cef595032793b4382d9fae3dbd8c5a327de077709fc5caa928b95a4fd59  refdb/x509-user-3.pem
-ab0c17e017b510546edd1445267052736d421b5b8b9796e193982ce83e63a60d  refdb/x509-user-4.pem
-448d56d47116847de79cd871ce8785690ba8ae523c4401047dd9aae19245c820  refdb/x509-user-5.pem
-2d439bf6fd673814cec2af64e66fc73d096fbfc295a7e5107971567aae95df1b  refdb/x509-user-6.pem
-7625445dc2bad0d90bdd72aefddc9279f0c35f3a90c10aa7cc3a9ab2d7563ca9  refdb/x509-user-7.pem
 27af705a2bef7316daa5b9a5f689e6269d852197e64b8f8197ee6f8f833a97b2  ocsp/ca.pem
 14de5c149b006bfb493b69a77f08b86cb94d275e7c6932af35d30ae4a3a9cb1b  ocsp/good.der
 552a8cfa9fea53582890daa2c6c8b3cc410e78edf590bfc140127502b1546b8d  ocsp/no-next-update.der

@@ -2,7 +2,7 @@
 
 ## Fase final: `final-phase.sh`
 
-Lanza los trabajos largos de la fase final en el orden del plan de `TRACKING.md` (orden del propietario del 01-11-2026)
+Lanza los trabajos largos de la fase final en el orden del plan de `docs/seguimiento-codigo.md` de `teseladb-specs` (orden del propietario del 01-11-2026)
 con los parámetros de las tareas planificadas para esa fase. Cada trabajo es una fase con su registro y sus resultados en
 un directorio de ejecución con fecha. Si se corta o una fase falla, la siguiente llamada sigue en el mismo directorio y
 repite solo las fases que no han pasado.

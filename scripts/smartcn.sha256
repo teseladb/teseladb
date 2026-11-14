@@ -1,4 +1,4 @@
-# Data of the reflib.smartcn analyzer (011 T009, D-109): the ICU 74.2 Chinese and Japanese word
+# Data of the smartcn search analyzer (011 T009, D-109): the ICU 74.2 Chinese and Japanese word
 # dictionary (Unicode licence, with the BSD, Libtabe and IPADIC notices in its header) and the
 # Unihan 15.1 variants, whose simplified variants tell which characters only traditional Chinese
 # uses. scripts/gen-smartcn-dict.py writes data/smartcn-words.txt.

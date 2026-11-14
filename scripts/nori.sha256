@@ -1,5 +1,5 @@
-# mecab-ko-dic 2.1.1-20180720 for the reflib.nori analyzer (011 T009, D-109): the dictionary RefLib's
-# nori is built from. Licence: Apache License 2.0. scripts/gen-morph-dicts.py writes data/nori.bin.
+# mecab-ko-dic 2.1.1-20180720 for the nori search analyzer (011 T009, D-109): the dictionary the reference
+# nori analyzer is built from. Licence: Apache License 2.0. scripts/gen-morph-dicts.py writes data/nori.bin.
 # source https://bitbucket.org/eunjeon/mecab-ko-dic/downloads
 # dest .tools/nori
 fd62d3d6d8fa85145528065fabad4d7cb20f6b2201e71be4081a4e9701a5b330  mecab-ko-dic-2.1.1-20180720.tar.gz

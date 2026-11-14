@@ -1,5 +1,5 @@
 # CLDR 29 collation data: the root collation in ICU's form (FractionalUCA.txt, with ICU's weights, anchors
-# and script groups) and its conformance tests, the version of ICU 57.1, which RefDb 9.0 bundles
+# and script groups) and its conformance tests, the version of ICU 57.1, which the reference server 9.0 bundles
 # (decision D-043). Unicode License (unicode-license.txt in CLDR).
 # source https://raw.githubusercontent.com/unicode-org/cldr/release-29
 # dest .tools/unicode/cldr-29

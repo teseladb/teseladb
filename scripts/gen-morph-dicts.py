@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes the dictionaries of the reflib.kuromoji and reflib.nori analyzers (011 T009, D-109):
+"""Writes the dictionaries of the kuromoji and nori search analyzers (011 T009, D-109):
 crates/teseladb-search/data/kuromoji.bin from IPADIC 2.7.0-20070801 and data/nori.bin from
 mecab-ko-dic 2.1.1-20180720, both fetched with their SHA-256 by scripts/fetch-pinned.sh
 (scripts/kuromoji.sha256, scripts/nori.sha256).
@@ -20,11 +20,11 @@ mecab-ko-dic: the left tag). `extra` is a string or 0: IPADIC, the base form whe
 `*`; mecab-ko-dic, the type letter (M, C, I or P), U+0001, the reading when it differs from the
 surface, then for each morpheme of the expression U+0001, its tag, U+0002 and its surface.
 
-Entries follow the order RefLib's builders give them (CSV files sorted by name, lines sorted by
-surface with a stable sort); unknown entries are sorted by character class, after the NGRAM
-entry. IPADIC is read as EUC-JP. IPADIC gains the era 令和, which refsearch 1.70.6 knows as one
-word: the entry of 平成 as 名詞-固有名詞-一般 (left and right id 1288, cost 5904), deduced from
-the tokens refsearch gives in 18 contexts.
+Entries follow the order the reference analyzers' builders give them (CSV files sorted by name, lines
+sorted by surface with a stable sort); unknown entries are sorted by character class, after the
+NGRAM entry. IPADIC is read as EUC-JP. IPADIC gains the era 令和, which the reference search server
+knows as one word: the entry of 平成 as 名詞-固有名詞-一般 (left and right id 1288, cost 5904),
+deduced from the tokens it gives in 18 contexts.
 """
 import glob
 import gzip
@@ -46,7 +46,7 @@ REIWA = "令和,1288,1288,5904,名詞,固有名詞,一般,*,*,*,令和,レイワ
 
 
 def csv(line):
-    """The fields of a CSV line, with quoted fields as RefLib's CSVUtil reads them."""
+    """The fields of a CSV line, with quoted fields as the reference analyzers' CSV reader reads them."""
     out, cur, quoted, i = [], [], False, 0
     while i < len(line):
         c = line[i]

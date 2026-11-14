@@ -1,6 +1,6 @@
 # ICU 57.1 collation tailorings (the CLDR 29 rules as ICU compiles them, with each locale's default type) and
-# the ICU license, the ICU version of RefDb 9.0 (decision D-043). Only the files RefDb packages: root and the
-# 109 locales of src/third_party/icu4c-57.1/source/ref_sources/languages.txt (branch v9.0), no aliases;
+# the ICU license, the ICU version of the reference server 9.0 (decision D-043). Only the files the reference
+# packages: root and its 109 locales (the list of D-043), no aliases;
 # and ICU's collation tests (collationtest.txt), the oracle of the tailoring builder.
 # source https://raw.githubusercontent.com/unicode-org/icu/release-57-1/icu4c
 # dest .tools/unicode/icu-57.1

@@ -38,19 +38,15 @@ rustup component add llvm-tools
 SYSROOT=$(rustc --print sysroot)
 PROFDATA=$(find "$SYSROOT" -name llvm-profdata -type f | head -n 1)
 [ -x "$PROFDATA" ] || { echo "pgo: llvm-profdata is missing from llvm-tools" >&2; exit 1; }
-# The sustained load's client.
-if ! python3 -c 'import pyref' 2>/dev/null; then
-  pip install --quiet --break-system-packages pyref==4.19.0
-fi
-
-# The node on its own data, its pid in a file, as soak.py expects.
+# The node on its own data, its pid in a file.
 start_node() {
   rm -rf "$WORK/data" && mkdir -p "$WORK/data"
   "$1" start --insecure --cores 2 --dbpath "$WORK/data" --port "$PORT" \
     --peer-listen 127.0.0.1:0 --admin-listen 127.0.0.1:0 >"$WORK/node.log" 2>&1 &
   echo $! >"$WORK/node.pid"
   for _ in $(seq 1 120); do
-    if python3 -c "import pyref; pyref.RefClient('refdb://127.0.0.1:$PORT', serverSelectionTimeoutMS=500).admin.command('ping')" 2>/dev/null; then
+    # Ready once its client port takes connections.
+    if python3 -c "import socket; socket.create_connection(('127.0.0.1', $PORT), 0.5).close()" 2>/dev/null; then
       return 0
     fi
     sleep 1
@@ -71,7 +67,7 @@ stop_node() {
 run_load() {
   for scenario in $SCENARIOS; do
     "$CARGO_TARGET_DIR/dist/teseladb-bench" --scenario "$scenario" \
-      --target "refdb://127.0.0.1:$PORT" --duration "${PGO_SECONDS}s" --warmup 1s \
+      --target "127.0.0.1:$PORT" --duration "${PGO_SECONDS}s" --warmup 1s \
       --format text >"$WORK/bench-$scenario.txt"
   done
 }

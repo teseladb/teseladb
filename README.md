@@ -1,7 +1,8 @@
 # TeselaDB
 
-Base de datos documental compatible con el protocolo de RefDb 9.0 y con RefDb Search, distribuida en rangos
-replicados con Raft, con un hilo por núcleo y en un único binario. Está escrita en Rust sin dependencias externas.
+Base de datos documental compatible con el protocolo y la búsqueda del servidor de referencia que nombran las
+especificaciones, distribuida en rangos replicados con Raft, con un hilo por núcleo y en un único binario. Está escrita
+en Rust sin dependencias externas.
 
 Las especificaciones están en `../teseladb-specs` (constitución, decisiones, divergencias y las especificaciones 001 a
 019 con sus tareas). Este repositorio las implementa en el orden de su `README.md`.
@@ -23,7 +24,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-`TRACKING.md` registra la evolución de las tareas.
+La evolución de las tareas está en `docs/seguimiento-codigo.md` de `teseladb-specs`.
 
 ## Licencia
 

@@ -1,4 +1,4 @@
-# IANA time zone database 2024a, the version RefDb 9.0.4's timelib carries (measured: Almaty at
+# IANA time zone database 2024a, the version the reference server 9.0.4 carries (measured: Almaty at
 # +05 in 2025, Asuncion at -04 in July 2025, no America/Coyhaique); public domain. Not copied into
 # the repository: teseladb-tzgen reads it and writes crates/teseladb-tz/src/tzdata.rs.
 # source https://data.iana.org/time-zones/releases

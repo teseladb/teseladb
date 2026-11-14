@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# The final phase (plan of the long jobs in TRACKING.md, owner's order of 01-11-2026, and the tasks
-# of the specifications planned for it): each long job is a phase, run in the plan's order, with
-# its log and results in a dated run directory that keeps the state, so that a second call resumes
-# the same run (the phases already passed are not repeated). Usage and the list of phases in
-# scripts/README.md.
+# The final phase (plan of the long jobs in docs/seguimiento-codigo.md of teseladb-specs, owner's
+# order of 01-11-2026, and the tasks of the specifications planned for it): each long job is a
+# phase, run in the plan's order, with its log and results in a dated run directory that keeps the
+# state, so that a second call resumes the same run (the phases already passed are not repeated).
+# Usage and the list of phases in scripts/README.md.
 #   scripts/final-phase.sh [--dry-run] [--quick] [--only a,b] [--from id] [--new] [--stop-on-failure]
 # Nothing here pushes, tags, opens a PR or deploys: the end-to-end jobs use local Docker images
 # and the loopback. Exit 0 when every selected phase passed, 1 when one failed, 2 for a wrong

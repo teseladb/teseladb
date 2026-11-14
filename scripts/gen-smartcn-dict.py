@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Writes crates/teseladb-search/data/smartcn-words.txt for the reflib.smartcn analyzer (011 T009,
+"""Writes crates/teseladb-search/data/smartcn-words.txt for the smartcn search analyzer (011 T009,
 D-109) from the ICU 74.2 dictionary cjdict.txt and the Unihan 15.1 variants, both fetched with their
 SHA-256 by scripts/fetch-pinned.sh (scripts/smartcn.sha256, scripts/unihan.sha256).
 
    python3 -I scripts/gen-smartcn-dict.py
 
-The dictionary of RefLib's smartcn exists only inside RefLib, so the analyzer cuts Chinese with
-the ICU dictionary instead (divergence recorded for 011). smartcn knows simplified Chinese words
+The dictionary of the reference smartcn analyzer exists only inside the reference analyzers, so the
+analyzer cuts Chinese with the ICU dictionary instead (divergence recorded for 011). smartcn knows simplified Chinese words
 only: a word of two or more characters is kept when none of its characters is a traditional form
 (a character whose Unihan kSimplifiedVariant differs from it). Each line is a word, a tab and its
 ICU cost; the header keeps the notices of cjdict.txt.

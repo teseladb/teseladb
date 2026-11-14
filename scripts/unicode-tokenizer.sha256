@@ -1,5 +1,5 @@
 # Unicode 12.1.0 character database files for the standard tokenizer of the search analyzers (011
-# FR-019): `refsearch` 1.70.6 splits words by the Unicode 12.1 word-break classes, takes ideographs by
+# FR-019): the reference search server splits words by the Unicode 12.1 word-break classes, takes ideographs by
 # Script=Han, one token per Hiragana character by Script=Hiragana, Hangul words by Script=Hangul and
 # the runs of Thai, Lao, Myanmar and Khmer by Line_Break=SA (measured on every assigned code point,
 # 011 T009). The word-break conformance test of the same version checks the segmentation.
