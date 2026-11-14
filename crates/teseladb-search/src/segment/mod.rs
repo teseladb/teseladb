@@ -6,6 +6,7 @@ pub mod data;
 pub mod file;
 pub mod fst;
 pub mod hnsw;
+mod lanes;
 pub mod manifest;
 pub mod merge;
 pub mod norms;
