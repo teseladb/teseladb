@@ -112,12 +112,17 @@ fn a_group_past_its_limit_sorts_through_the_store_and_gives_the_same_groups() {
 #[test]
 fn a_small_group_stays_in_memory_in_first_seen_order() {
     let p = pipeline(r#"[{"$group":{"_id":"$t","n":{"$sum":1}}}]"#);
-    let store = MemorySpill::default();
+    let inner = MemorySpill::default();
+    let store = Counting::new(&inner);
     let env = SpillEnv { limit: SMALL, disk: true, store: Some(&store) };
     let out = p.run(docs(), &env).expect("runs");
     assert_eq!(out.len(), 2);
     assert_eq!(out[0].get("_id"), Some(&teseladb_bson::Value::Double(1.0)));
-    assert_eq!(store.written(), 0);
+    // The input passes the limit, so the documents waiting for the store went to it in runs
+    // that the groups, which never passed the limit, leave uncounted and removed (T066).
+    assert!(inner.written() > 0);
+    assert_eq!(store.stats(), teseladb_exec::pipeline::spill::SpillStats::default());
+    assert!(inner.is_empty());
 }
 
 #[test]

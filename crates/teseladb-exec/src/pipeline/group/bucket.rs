@@ -189,6 +189,8 @@ impl Bucket {
             states: vec![None; self.boundaries.len()],
             held: 0,
             kept: Vec::new(),
+            kept_bytes: 0,
+            spill: false,
             sorter: None,
         }
     }
@@ -396,7 +398,8 @@ fn bucket_count(v: &Value) -> Result<usize, MqlError> {
 
 /// A `$bucket` taking its input a batch at a time: the state of each bucket and the bytes their
 /// values hold; with a store to write to, the documents so far with their bucket, which go
-/// through the store sorted by bucket once the buckets pass the stage's limit.
+/// through the store sorted by bucket once the buckets pass the stage's limit. Until then they
+/// wait in memory only within what the buckets leave of the limit, as those of a `$group`.
 pub(in crate::pipeline) struct Bucketing<'g> {
     bucket: &'g Bucket,
     env: &'g dyn Env,
@@ -404,8 +407,13 @@ pub(in crate::pipeline) struct Bucketing<'g> {
     /// The states of each bucket, the default last.
     states: Vec<Option<Vec<State>>>,
     held: usize,
+    /// The documents so far with their bucket, before the sort by bucket starts.
     kept: Vec<(usize, Document)>,
-    /// The sort by bucket, once the buckets passed the limit.
+    /// The bytes of `kept`.
+    kept_bytes: usize,
+    /// The buckets passed the limit: they are built again from the store.
+    spill: bool,
+    /// The sort by bucket: provisional while the buckets fit in the limit.
     sorter: Option<Sorter<'g, (Vec<u8>, Value)>>,
 }
 
@@ -423,26 +431,40 @@ impl Bucketing<'_> {
         for doc in batch {
             let scope = group_scope(env, &doc, sbe);
             let i = bucket.slot(&doc, &scope, collation.get(), sbe)?;
-            if let Some(sorter) = &mut self.sorter {
-                sorter.push(with_key(doc, slot_key(i)))?;
-                continue;
-            }
-            let st = self.states[i]
-                .get_or_insert_with(|| bucket.outputs.iter().map(|(_, a)| a.start()).collect());
-            for ((_, acc), s) in bucket.outputs.iter().zip(st.iter_mut()) {
-                acc.add(s, &doc, &scope)?;
-                self.held += held_by(acc, s);
+            if !self.spill {
+                let st = self.states[i]
+                    .get_or_insert_with(|| bucket.outputs.iter().map(|(_, a)| a.start()).collect());
+                for ((_, acc), s) in bucket.outputs.iter().zip(st.iter_mut()) {
+                    acc.add(s, &doc, &scope)?;
+                    self.held += held_by(acc, s);
+                }
             }
             let Some(store) = store else { continue };
-            self.kept.push((i, doc));
-            if self.held > limit {
-                let mut sorter = key_sorter(env.collation(), (limit, store));
-                for (i, d) in self.kept.drain(..) {
-                    sorter.push(with_key(d, slot_key(i)))?;
-                }
+            if !self.spill && self.held > limit {
+                self.spill = true;
                 self.states.iter_mut().for_each(|s| *s = None);
-                self.sorter = Some(sorter);
+                self.held = 0;
+                if let Some(sorter) = &mut self.sorter {
+                    sorter.confirm();
+                }
             }
+            let budget = if self.spill { limit } else { super::spare(limit, self.held) };
+            if let Some(sorter) = &mut self.sorter {
+                sorter.push_within(with_key(doc, slot_key(i)), budget)?;
+                continue;
+            }
+            self.kept_bytes += errors::document_size(&doc);
+            self.kept.push((i, doc));
+            if !self.spill && self.kept_bytes <= budget {
+                continue;
+            }
+            let sorter = key_sorter(env.collation(), (limit, store));
+            let mut sorter = if self.spill { sorter } else { sorter.provisional() };
+            for (i, d) in self.kept.drain(..) {
+                sorter.push_within(with_key(d, slot_key(i)), budget)?;
+            }
+            self.kept_bytes = 0;
+            self.sorter = Some(sorter);
         }
         Ok(())
     }
@@ -452,7 +474,7 @@ impl Bucketing<'_> {
         let (env, sbe, bucket) = (self.env, self.sbe, self.bucket);
         let (limit, _) = limits(env);
         let n = bucket.boundaries.len() - 1;
-        let filled: Vec<(usize, Vec<State>)> = match self.sorter {
+        let filled: Vec<(usize, Vec<State>)> = match self.sorter.filter(|_| self.spill) {
             Some(sorter) => groups_from_sorter(&bucket.outputs, sorter, (env, sbe))?
                 .into_iter()
                 .map(|(k, st)| match k {
