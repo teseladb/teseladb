@@ -190,6 +190,10 @@ impl StateMachine for CoreSm {
         self.range().is_none_or(|sm| sm.has_data_for(snap))
     }
 
+    fn data_index(&self, snap: &[u8], index: u64) -> u64 {
+        self.range().map_or(index, |sm| sm.data_index(snap, index))
+    }
+
     fn snapshot_floor(&self) -> u64 {
         self.range().map_or(0, StateMachine::snapshot_floor)
     }

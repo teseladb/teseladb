@@ -35,6 +35,19 @@ fn a_leader_restarted_past_its_commit_index_still_makes_progress() {
     assert!(r.events > 10_000, "{} events", r.events);
 }
 
+/// Seed 13 (heavy plan, twice the fault rate): a snapshot taken while the log replayed what the
+/// LSM had flushed holds the state past its index, and its last write with it. The replica asked
+/// for its data up to the snapshot's index, the ingest marked that index, and the data never
+/// counted as here: the replica parked the snapshot again after every ingest and, with the leader
+/// down, its range elected no one.
+#[test]
+fn a_snapshot_whose_state_runs_past_its_index_is_installed_once_its_data_arrives() {
+    let cfg = SimConfig { fault_rate_pct: DOUBLE_FAULTS, ..cfg(FaultPlan::Heavy) };
+    let r = run_seed(&cfg, 13);
+    assert_eq!(r.verdict, Verdict::Pass);
+    assert!(r.events > 10_000, "{} events", r.events);
+}
+
 #[test]
 fn the_seeds_that_found_defects_pass() {
     for (plan, seed) in [

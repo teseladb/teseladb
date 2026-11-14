@@ -1087,9 +1087,10 @@ impl DataCore {
         self.stale.retain(|g, _| core.awaited_snapshot(*g).is_some());
         for g in self.transfers.take_stale() {
             core.reject_awaited(g);
-            // The leader sends a newer snapshot. If none comes (no leader: a replica waiting for
-            // data votes for no one), the replica opens again from its log after a while: the
-            // snapshot it waits for is not on disk, and no replica will ever serve it.
+            // The replica keeps the snapshot as its own without its data, votes and appends
+            // meanwhile, and asks the leader for a newer one with each round of entries. If none
+            // comes, it opens again from its log after a while: no replica will ever serve the
+            // one it waits for.
             let since = *self.stale.entry(g).or_insert(now);
             if now.saturating_since(since) >= UNSERVED_FETCH && core.close_group(g).is_ok() {
                 self.stale.remove(&g);

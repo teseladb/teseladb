@@ -1433,6 +1433,12 @@ impl StateMachine for RangeSm {
             Err(_) => true,
         }
     }
+
+    fn data_index(&self, snap: &[u8], index: u64) -> u64 {
+        // The state the snapshot holds is the one at its `applied`, past its index when it was
+        // taken while the log replayed what the LSM had flushed; its last write may be there.
+        self.decode_snapshot(snap).map_or(index, |s| s.applied.max(s.last_write).max(index))
+    }
 }
 
 /// Whether `cmd` may change the transaction records (008 FR-007, H-040): a document write that

@@ -959,9 +959,10 @@ impl MultiRangeWorkload {
                     })
             });
             if stale_everywhere || covers {
-                // The leader learns it once and sends a newer one. If none comes (no leader),
-                // the replica opens again from its log after a while, so that it votes: no
-                // replica will ever serve the one it waits for.
+                // The replica keeps the snapshot as its own without its data, votes and appends
+                // meanwhile, and asks the leader for a newer one with each round of entries. If
+                // none comes and no replica will ever serve the one it waits for, it opens again
+                // from its log after a while, as the server does.
                 let now = w.now();
                 let since = self.stale.get(&(node, g)).copied();
                 let reopen = stale_everywhere
