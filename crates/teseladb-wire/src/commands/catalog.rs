@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
+use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, DocumentLayout, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_mql::validation::{ValidationAction, ValidationLevel};
 use teseladb_mql::{Expr, Filter, FilterUse, MatchContext, Pred};
@@ -109,10 +109,8 @@ const HIDDEN_OPTIONS: [&str; 4] = [
     ORDERED_IDS,
 ];
 
-/// The option of a collection that keeps its documents in `_id` order without hash bucket
-/// (D-153, 003 FR-012): set when it is created while every node reads that layout. It is not a
-/// collection option, and `listCollections` does not show it.
-pub(crate) const ORDERED_IDS: &str = "$orderedIds";
+/// The option of a collection's entry that keeps its documents in `_id` order (D-153).
+pub(crate) use teseladb_meta::catalog::ORDERED_IDS;
 
 /// Whether `c` keeps its documents in `_id` order: a clustered collection (015 FR-009) or a
 /// collection created with [`ORDERED_IDS`].
@@ -120,7 +118,8 @@ pub(crate) fn in_id_order(c: &CollectionEntry) -> Result<bool, CommandError> {
     Ok(match kinds::kind_of(c)? {
         CollectionKind::Clustered { .. } => true,
         CollectionKind::Normal => {
-            matches!(stored_options(c)?.get(ORDERED_IDS), Some(Value::Boolean(true)))
+            c.layout().map_err(|e| CommandError::new(INTERNAL_ERROR, e.0.to_owned()))?
+                == DocumentLayout::IdOrder
         }
         CollectionKind::Capped { .. }
         | CollectionKind::View { .. }

@@ -41,6 +41,34 @@ pub struct CollectionEntry {
     pub tenant: u32,
 }
 
+/// The option of a collection's entry that keeps its documents in `_id` order without hash
+/// bucket (003 FR-012, D-153): set when it is created while every node reads that layout. It is
+/// not a collection option: `listCollections` does not show it and `collMod` carries it over.
+pub const ORDERED_IDS: &str = "$orderedIds";
+
+/// How a collection without shard key, capping or clustering keys its documents (003 FR-012).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentLayout {
+    /// `01 · tenant · collection · 0 · bucket · enc(_id)`: a collection created before D-153, or
+    /// while some node did not read the `_id` order.
+    Buckets,
+    /// `01 · tenant · collection · 0 · enc(_id)`, in `_id` order (D-153).
+    IdOrder,
+}
+
+impl CollectionEntry {
+    /// The layout of its documents, from [`ORDERED_IDS`] in its options; without it, the hash
+    /// bucket the collection was created with.
+    pub fn layout(&self) -> Result<DocumentLayout, crate::collection_types::KindError> {
+        let options = teseladb_bson::RawDoc::from_bytes(&self.options)
+            .map_err(|_| crate::collection_types::KindError("options that are not BSON"))?;
+        Ok(match options.get(ORDERED_IDS) {
+            Some(teseladb_bson::RawValue::Boolean(true)) => DocumentLayout::IdOrder,
+            _ => DocumentLayout::Buckets,
+        })
+    }
+}
+
 /// Why a catalog command did not change anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogError {

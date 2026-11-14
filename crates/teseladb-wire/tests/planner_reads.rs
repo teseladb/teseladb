@@ -880,3 +880,70 @@ fn a_collection_created_before_keeps_its_hash_buckets() {
     assert_eq!(ids_in_order(&r), vec![1998, 1999, 5000], "{r:?}");
     assert!(m.span_reads > 0, "read through its buckets");
 }
+
+#[test]
+fn an_explicit_create_takes_the_id_order_and_the_special_kinds_keep_their_keys() {
+    // D-153 by `create` as by an insert's implicit creation: the two paths write the layout.
+    let mut m = Mem::new();
+    m.ordered_ids = true;
+    for cmd in [
+        r#"{"create":"plain"}"#,
+        r#"{"create":"capped","capped":true,"size":4096}"#,
+        r#"{"create":"clustered","clusteredIndex":{"key":{"_id":1},"unique":true}}"#,
+    ] {
+        let r = run(&mut m, cmd);
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{cmd}: {r:?}");
+    }
+    let reversed: Vec<String> = (0..40).rev().map(|i| format!(r#"{{"_id":{i}}}"#)).collect();
+    for coll in ["plain", "capped", "clustered"] {
+        let insert = format!(r#"{{"insert":"{coll}","documents":[{}]}}"#, reversed.join(","));
+        let r = run(&mut m, &insert);
+        assert_eq!(field(&r, "n"), &Value::Int32(40), "{coll}: {r:?}");
+    }
+    // In `_id` order without a sort; the capped collection keeps the order of insertion.
+    let natural = |m: &mut Mem, coll: &str| {
+        ids_in_order(&run(m, &format!(r#"{{"find":"{coll}","filter":{{}},"batchSize":100}}"#)))
+    };
+    let ascending: Vec<i32> = (0..40).collect();
+    let inserted: Vec<i32> = (0..40).rev().collect();
+    assert_eq!(natural(&mut m, "plain"), ascending);
+    assert_eq!(natural(&mut m, "clustered"), ascending);
+    assert_eq!(natural(&mut m, "capped"), inserted);
+    // A point read finds each document under the key of its layout.
+    for coll in ["plain", "capped", "clustered"] {
+        let r = run(&mut m, &format!(r#"{{"find":"{coll}","filter":{{"_id":17}}}}"#));
+        assert_eq!(ids_in_order(&r), vec![17], "{coll}: {r:?}");
+    }
+    let r = run(&mut m, r#"{"listCollections":1,"filter":{"name":"plain"}}"#);
+    assert!(!format!("{r:?}").contains("orderedIds"), "{r:?}");
+}
+
+#[test]
+fn an_id_read_plans_the_same_in_both_layouts_and_reads_one_span_in_id_order() {
+    // The plan of an `_id` interval is RefDb's `_id_` scan in both layouts; under it the
+    // collection with hash buckets reads its 16 buckets and the one in `_id` order one stretch.
+    let load = |ordered: bool| {
+        let mut m = Mem::new();
+        m.ordered_ids = ordered;
+        let docs: Vec<String> = (0..500).map(|i| format!(r#"{{"_id":{i}}}"#)).collect();
+        run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, docs.join(",")));
+        m
+    };
+    let find = r#"{"find":"c","filter":{"_id":{"$gte":200,"$lt":205}},"sort":{"_id":1}}"#;
+    let plan = |m: &mut Mem| {
+        let r = run(m, &format!(r#"{{"explain":{find},"verbosity":"queryPlanner"}}"#));
+        let shown = format!("{r:?}");
+        assert!(shown.contains("\"IXSCAN\"") && shown.contains("\"_id_\""), "{shown}");
+        assert!(!shown.contains("CLUSTERED"), "{shown}");
+        field(&r, "queryPlanner.winningPlan").clone()
+    };
+    let (mut hashed, mut ordered) = (load(false), load(true));
+    assert_eq!(plan(&mut hashed), plan(&mut ordered));
+    for m in [&mut hashed, &mut ordered] {
+        m.span_reads = 0;
+        let r = run(m, find);
+        assert_eq!(ids_in_order(&r), vec![200, 201, 202, 203, 204], "{r:?}");
+    }
+    assert!(hashed.span_reads > 0, "the buckets are read together");
+    assert_eq!(ordered.span_reads, 0, "one stretch of keys");
+}

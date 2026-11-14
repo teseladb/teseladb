@@ -117,6 +117,7 @@ gate "2. tests of the GitHub release" scripts/tests/github_release_test.sh
 gate "2. tests of the platform check of the install script" scripts/tests/install_platform_test.sh
 gate "2. tests of the battery's publication of the enrollment tokens" scripts/tests/compat_publish_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
+gate "2. tests of the native topologies (002 FR-025)" scripts/tests/native_topology_test.sh
 # The published source of teseladb-raftlog, the one TeselaDB is built with (scripts/teseladb-src.sh).
 gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env VIUZI_CRASH_SEEDS=2000 CARGO_TARGET_DIR=target/viuzi \
   cargo test -q --offline --release --manifest-path "$(scripts/teseladb-src.sh teseladb-raftlog)/Cargo.toml" --test crash_sim
