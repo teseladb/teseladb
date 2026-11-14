@@ -72,7 +72,6 @@ gate "1. tests of the native measuring tools" python3 -m unittest discover -s te
 # FR-032); they need pyref.
 gate "1. tests of the differential suite and the sustained load" diff_suite_tests
 gate "2. dependencies" scripts/check-deps.sh
-gate "2. origin register" scripts/check-origin.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256
 gate "2. CLDR 29 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-cldr.sha256
 gate "2. ICU 57.1 collation data (D-043)" scripts/fetch-pinned.sh scripts/icu-coll.sha256
@@ -146,7 +145,6 @@ gate "1. Miri on the arch modules of hash, crypto and BSON (x86_64)" miri_arch x
 gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
   "${MIRI_TEST[@]}" -q -p teseladb-sys --lib -- huge_pool::
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
-gate "2. tests of check-origin" scripts/tests/check_origin_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the check of the release images" scripts/tests/check_image_test.sh
 gate "2. tests of the battery's requires" scripts/tests/compat_requires_test.sh

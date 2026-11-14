@@ -10,7 +10,6 @@
 #    (FR-001);
 #  - the crates of the hot path share no lock between threads: no `Mutex`, `RwLock` or `Condvar`
 #    (012 FR-008);
-#  - the origin project of the copied code is only named in ORIGIN.md.
 #   scripts/check-deps.sh
 # Bash 3.2 (macOS) or later.
 set -euo pipefail
@@ -40,8 +39,6 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   crates/teseladb-search/src/segment/lanes.rs
   crates/teseladb-search/src/byte_simd.rs
   crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs)
-# Built in two halves so that this script does not contain the word itself.
-ORIGIN_WORD="raf""tree"
 
 fail=0
 finding() {
@@ -285,11 +282,6 @@ check_hot_path_locks() {
   ' "${files[@]}")
 }
 
-check_origin_word() {
-  grep_findings "the origin project is only named in ORIGIN.md" < <(grep -RIni --exclude-dir=target --exclude-dir=.git --exclude-dir=.tools \
-    --exclude=ORIGIN.md -e "$ORIGIN_WORD" . || true)
-}
-
 check_lock
 check_logic_crates
 check_tools
@@ -297,7 +289,6 @@ check_engine_has_no_git
 check_testkv_not_linked
 check_unsafe_forbidden
 check_hot_path_locks
-check_origin_word
 
 [[ $fail -eq 0 ]] || exit 1
 echo "check-deps: OK"

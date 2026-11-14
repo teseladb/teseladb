@@ -5,7 +5,7 @@ members = ["crates/*", "tools/*"]
 
 [workspace.dependencies]
 # The generic crates (types, hashes, JSON, cryptography, X.509, TLS, BSON, compression, DEFLATE, HTTP, time zones, Raft
-# and its log), members of this workspace since 14-11-2026 (D-169, constitution 3.4.0, principle V; ORIGIN.md).
+# and its log), members of this workspace since 14-11-2026 (D-169, constitution 3.4.0, principle V).
 teseladb-types = { path = "crates/teseladb-types" }
 teseladb-hash = { path = "crates/teseladb-hash" }
 teseladb-json = { path = "crates/teseladb-json" }

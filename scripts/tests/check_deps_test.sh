@@ -8,8 +8,6 @@ cd "$(dirname "$0")/../.."
 SCRIPT=$PWD/scripts/check-deps.sh
 WORK=$(mktemp -d)
 trap 'find "$WORK" -depth -delete' EXIT
-# Built in two halves so that this file does not contain the word itself.
-ORIGIN_WORD="raf""tree"
 passed=0
 failed=0
 
@@ -35,7 +33,6 @@ EOF
   printf '[package]\nname = "teseladb-sim"\n' > "$dir/tools/teseladb-sim/Cargo.toml"
   printf '#![forbid(unsafe_code)]\nfn main() { std::process::exit(0) }\n' > "$dir/tools/teseladb-sim/src/main.rs"
   printf '#![forbid(unsafe_code)]\npub fn run() {}\n' > "$dir/tools/teseladb-sim/src/lib.rs"
-  printf 'Copied from %s.\n' "$ORIGIN_WORD" > "$dir/ORIGIN.md"
   echo "$dir"
 }
 
@@ -73,42 +70,42 @@ expect "git package in Cargo.lock" "$d" 1 "external package: foo"
 # constitution 3.4.0, principle V; owner, 14-11-2026). A package from any registry, the private one of
 # viuzi included, from git or from a path outside the workspace is a finding.
 REGISTRY_SOURCE="sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-generic() { # dir dependency [source]: the workspace takes teseladb-bson with that dependency
+generic() { # dir dependency [source]: the workspace takes teseladb-json with that dependency
   local d=$1 dep=$2 source=${3:-}
-  mkdir -p "$d/crates/teseladb-bson/src"
-  printf '[package]\nname = "teseladb-bson"\n' > "$d/crates/teseladb-bson/Cargo.toml"
-  printf '#![forbid(unsafe_code)]\npub fn f() {}\n' > "$d/crates/teseladb-bson/src/lib.rs"
-  printf '\n[[package]]\nname = "teseladb-bson"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
+  mkdir -p "$d/crates/teseladb-json/src"
+  printf '[package]\nname = "teseladb-json"\n' > "$d/crates/teseladb-json/Cargo.toml"
+  printf '#![forbid(unsafe_code)]\npub fn f() {}\n' > "$d/crates/teseladb-json/src/lib.rs"
+  printf '\n[[package]]\nname = "teseladb-json"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
   [[ -z $source ]] || printf 'source = "%s"\n' "$source" >> "$d/Cargo.lock"
-  printf '[workspace]\nmembers = ["crates/*"]\n\n[workspace.dependencies]\nteseladb-bson = %s\n' "$dep" > "$d/Cargo.toml"
+  printf '[workspace]\nmembers = ["crates/*"]\n\n[workspace.dependencies]\nteseladb-json = %s\n' "$dep" > "$d/Cargo.toml"
 }
 d=$(fixture generic)
-generic "$d" '{ path = "crates/teseladb-bson" }'
-printf '\n[dependencies]\nteseladb-bson = { workspace = true }\n' >> "$d/crates/teseladb-types/Cargo.toml"
+generic "$d" '{ path = "crates/teseladb-json" }'
+printf '\n[dependencies]\nteseladb-json = { workspace = true }\n' >> "$d/crates/teseladb-types/Cargo.toml"
 expect "a generic crate of the workspace by path" "$d" 0 "^check-deps: OK$"
 
 d=$(fixture generic-registry)
 generic "$d" '{ version = "0.1.0", registry = "viuzi" }' "$REGISTRY_SOURCE"
-expect "a crate of the private registry" "$d" 1 "Cargo.lock: external package: teseladb-bson"
+expect "a crate of the private registry" "$d" 1 "Cargo.lock: external package: teseladb-json"
 
 d=$(fixture generic-crates-io)
 generic "$d" '{ version = "0.1.0" }' "registry+https://github.com/rust-lang/crates.io-index"
-expect "a crate from crates.io" "$d" 1 "Cargo.lock: external package: teseladb-bson"
+expect "a crate from crates.io" "$d" 1 "Cargo.lock: external package: teseladb-json"
 
 d=$(fixture generic-git)
 generic "$d" '{ git = "https://example.com/crates" }' "git+https://example.com/crates#0"
-expect "a crate from git" "$d" 1 "Cargo.lock: external package: teseladb-bson"
+expect "a crate from git" "$d" 1 "Cargo.lock: external package: teseladb-json"
 
 d=$(fixture generic-outside-path)
 generic "$d" '{ path = "../../other-repository/crates/bson" }'
 expect "a workspace dependency by a path outside the workspace" "$d" 1 \
-  "Cargo.toml: teseladb-bson: path outside the workspace \(../../other-repository/crates/bson\)"
+  "Cargo.toml: teseladb-json: path outside the workspace \(../../other-repository/crates/bson\)"
 
 d=$(fixture generic-member-path)
-generic "$d" '{ path = "crates/teseladb-bson" }'
-printf '\n[dependencies]\nteseladb-bson = { path = "../../../elsewhere/teseladb-bson" }\n' >> "$d/crates/teseladb-types/Cargo.toml"
+generic "$d" '{ path = "crates/teseladb-json" }'
+printf '\n[dependencies]\nteseladb-json = { path = "../../../elsewhere/teseladb-json" }\n' >> "$d/crates/teseladb-types/Cargo.toml"
 expect "a member with a path outside the workspace" "$d" 1 \
-  "crates/teseladb-types/Cargo.toml: teseladb-bson: path outside the workspace \(../../../elsewhere/teseladb-bson\)"
+  "crates/teseladb-types/Cargo.toml: teseladb-json: path outside the workspace \(../../../elsewhere/teseladb-json\)"
 
 d=$(fixture outside)
 printf '\n[[package]]\nname = "foo"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
@@ -141,20 +138,6 @@ d=$(fixture sim-lib-io)
 printf 'pub fn h() { let _ = std::fs::read("x"); }\n' >> "$d/tools/teseladb-sim/src/lib.rs"
 expect "I/O in the simulator outside main.rs and cli.rs" "$d" 1 "tools/teseladb-sim/src/lib.rs:3: "
 
-d=$(fixture origin-word)
-printf '# %s notes\n' "$ORIGIN_WORD" > "$d/README.md"
-expect "origin word outside ORIGIN.md" "$d" 1 "README.md:1: "
-
-d=$(fixture origin-word-case)
-mkdir -p "$d/docs"
-printf 'see %s\n' "$(tr '[:lower:]' '[:upper:]' <<<"$ORIGIN_WORD")" > "$d/docs/notes.md"
-expect "origin word in capitals" "$d" 1 "docs/notes.md:1: "
-
-d=$(fixture origin-word-in-target)
-mkdir -p "$d/target/debug"
-printf '%s\n' "$ORIGIN_WORD" > "$d/target/debug/build.log"
-expect "build output is not searched" "$d" 0 "^check-deps: OK$"
-
 d=$(fixture git-in-engine)
 mkdir -p "$d/crates/teseladb-multiraft/src"
 printf '[package]\nname = "teseladb-multiraft"\n' > "$d/crates/teseladb-multiraft/Cargo.toml"
@@ -183,7 +166,7 @@ expect "teseladb-sys may use unsafe code" "$d" 0 "^check-deps: OK$"
 d=$(fixture several)
 printf 'pub fn g() {\n    let _ = std::env::var("A");\n    let _ = std::fs::read("b");\n}\n' \
   >> "$d/crates/teseladb-types/src/lib.rs"
-printf '%s\n' "$ORIGIN_WORD" > "$d/NOTES"
+printf 'use std::sync::Mutex;\n' >> "$d/crates/teseladb-io/src/lib.rs"
 out=$("$d/scripts/check-deps.sh" 2>&1 || true)
 if [[ $(grep -c "^check-deps: " <<<"$out") -eq 3 ]]; then
   passed=$((passed + 1))

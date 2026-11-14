@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-`ORIGIN.md` registra el código copiado de su proyecto de origen y `TRACKING.md` la evolución de las tareas.
+`TRACKING.md` registra la evolución de las tareas.
 
 ## Licencia
 
