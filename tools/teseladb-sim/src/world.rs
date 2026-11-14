@@ -235,14 +235,14 @@ pub enum Event {
         /// Node generation when it was emitted (if the node crashed, it is dropped).
         life: u64,
     },
-    /// The node's device log writes what its cores asked, and then, with `sync`, makes it
-    /// durable and answers their syncs (012 FR-035).
+    /// The node's device log takes what its cores asked and writes it; with `sync`, the sync of
+    /// the group in flight ends first and its cores are answered (012 FR-035).
     LogFlush {
         /// Node.
         node: u32,
         /// Node generation.
         life: u64,
-        /// The sync that ends the flush, after its write.
+        /// The end of the group's sync.
         sync: bool,
     },
     /// A core takes the answer of a sync of its WAL from the node's device log.
@@ -399,8 +399,12 @@ pub struct SimNode {
     pub log_disk: SimDisk,
     /// The node's device log (`None` while the node is down).
     pub log: Option<LogState>,
-    /// When the device log's next flush runs, if one is due.
+    /// When the device log's writer next takes what the cores asked, if it is due.
     pub log_flush_at: Option<Nanos>,
+    /// When the sync of the device log's group in flight ends, if one runs.
+    pub log_sync_at: Option<Nanos>,
+    /// The syncs of the group in flight, which run on the disk when they end.
+    pub log_syncs: Vec<IoOp>,
     /// A core's WAL was damaged while it was down and its restart has not checked it yet.
     pub corrupted: bool,
     /// Out for good: its recovery found the damage (002 research R3c).
@@ -600,6 +604,8 @@ impl World {
                 log_disk: sim_disk(),
                 log: None,
                 log_flush_at: None,
+                log_sync_at: None,
+                log_syncs: Vec::new(),
                 corrupted: false,
                 lost: false,
                 hlc: NodeClock::for_node(NodeId(u64::from(id) + 1)),
@@ -901,6 +907,8 @@ impl World {
         log.allow_tidying();
         n.log = Some(log);
         n.log_flush_at = None;
+        n.log_sync_at = None;
+        n.log_syncs.clear();
         n.alive = true;
         self.renew_bound(node);
         for core in 0..self.nodes[node as usize].cores.len() as u16 {
@@ -950,6 +958,8 @@ impl World {
         n.life += 1;
         n.log = None;
         n.log_flush_at = None;
+        n.log_sync_at = None;
+        n.log_syncs.clear();
         n.log_disk.crash(&mut self.rng);
         for c in &mut n.cores {
             c.book = None;

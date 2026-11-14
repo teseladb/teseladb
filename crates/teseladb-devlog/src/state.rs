@@ -10,6 +10,11 @@
 //! segment for a long time: when the log has more than [`KEPT_FILES`] files and the oldest holds
 //! little that is still needed, a flush copies that part forward and the file goes.
 //!
+//! The writer works in a pipeline ([`LogState::next`] and [`LogState::on_done`]): while the sync
+//! of one group runs, what the cores queue is written in new records, and the group's sync starts
+//! as soon as the one before ends, covering them. A file is removed only once the record that let
+//! go of its last live byte is durable, since records written behind a sync that ends are not.
+//!
 //! A file's header is durable before any record goes into it. On recovery a file without a valid
 //! header is the one whose creation a crash cut short, and holds only zeros after its header; one
 //! with anything else there was damaged, and the log does not start.
@@ -24,6 +29,11 @@ use crate::format::{self, BLOCK, FrameKind, HEAD};
 
 /// Files of the log kept before the oldest one is copied forward.
 pub const KEPT_FILES: usize = 4;
+/// Bytes waiting that are written without waiting for a sync.
+pub const WRITE_AHEAD: usize = 1 << 20;
+/// Records written while one sync runs, unless what waits passes [`WRITE_AHEAD`]: each record
+/// takes whole blocks.
+pub const AHEAD_RECORDS: usize = 4;
 
 /// Bytes of a WAL segment held at one place of a file of the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +64,8 @@ struct LogFile {
     refs: u64,
     /// Bytes of its extents.
     live: u64,
+    /// The flush whose record left it with nothing pointing into it, while that holds.
+    freed_at: Option<u64>,
 }
 
 /// A frame of the flush being built, to apply to the maps once its place is known.
@@ -86,6 +98,16 @@ pub struct LogState {
     /// Files with records written and not synced (two when a flush opened a file).
     dirty: Vec<u64>,
     waiting: Vec<(u16, IoOp)>,
+    /// The operations the sync in flight answers.
+    syncing: Vec<(u16, IoOp)>,
+    /// Syncs of files handed out and not done.
+    sync_left: usize,
+    /// The last flush the sync in flight covers.
+    sync_upto: u64,
+    /// The last flush a sync made durable.
+    durable: u64,
+    /// Records written since the sync in flight started.
+    ahead: usize,
     failed: Option<IoErrno>,
     disk_full: bool,
     syncs: u64,
@@ -124,6 +146,11 @@ impl LogState {
             pending: Vec::new(),
             dirty: Vec::new(),
             waiting: Vec::new(),
+            syncing: Vec::new(),
+            sync_left: 0,
+            sync_upto: 0,
+            durable: 0,
+            ahead: 0,
             failed: None,
             disk_full: false,
             syncs: 0,
@@ -153,7 +180,7 @@ impl LogState {
             let opened = ok(disk.execute(IoOp::Open { file: id, path: path.clone() }));
             opened.map_err(|errno| StorageError::Io { op: "open", errno })?;
             let size = data.len() as u64;
-            s.files.insert(seq, LogFile { id, size, used: size, refs: 0, live: 0 });
+            s.files.insert(seq, LogFile { id, size, used: size, refs: 0, live: 0, freed_at: None });
             s.next_file = seq + 1;
             if !format::header_ok(&data, seq) {
                 continue;
@@ -174,6 +201,10 @@ impl LogState {
             }
         }
         s.next_flush = expected.unwrap_or(1);
+        s.durable = s.next_flush - 1;
+        for f in s.files.values_mut().filter(|f| f.refs == 0) {
+            f.freed_at = Some(0);
+        }
         Ok(s)
     }
 
@@ -222,6 +253,12 @@ impl LogState {
     #[must_use]
     pub fn has_waiting(&self) -> bool {
         !self.waiting.is_empty()
+    }
+
+    /// Whether a sync handed out by [`next`](LogState::next) has not ended.
+    #[must_use]
+    pub fn syncing(&self) -> bool {
+        self.sync_left > 0
     }
 
     /// Bytes waiting for the next flush.
@@ -439,7 +476,8 @@ impl LogState {
         self.disk_full = matches!(made, Err(IoErrno::NoSpace));
         made?;
         self.next_file += 1;
-        self.files.insert(seq, LogFile { id, size, used: BLOCK, refs: 0, live: 0 });
+        let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: None };
+        self.files.insert(seq, file);
         self.active = Some(seq);
         let header = Bytes::from_vec(format::segment_header(seq));
         ok(disk.execute(IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 }))?;
@@ -453,6 +491,13 @@ impl LogState {
 
     /// Writes the flush being built as one record, unsynced.
     fn write_out(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
+        let write = self.place(disk)?;
+        ok(disk.execute(write)).map(|_| ())
+    }
+
+    /// Places the flush being built as one record of the active file (a new one if it does not
+    /// fit, made on `disk`) and returns its write, unsynced.
+    fn place(&mut self, disk: &mut dyn Disk) -> Result<IoOp, IoErrno> {
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
         let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
@@ -463,83 +508,146 @@ impl LogState {
             (f.id, f.used)
         };
         let data = Bytes::from_vec(record);
-        ok(disk.execute(IoOp::WriteAt { file: id, offset: at, data, batch: 0 }))?;
         self.files.get_mut(&seq).expect("the file written").used = at + need;
         let base = at + HEAD as u64;
         for p in std::mem::take(&mut self.pending) {
             let place = (seq, base + p.data_at as u64, p.len);
             self.apply(p.kind, (p.core, p.wal), p.arg, place);
         }
+        let flush = self.next_flush;
+        for f in self.files.values_mut() {
+            if f.refs > 0 {
+                f.freed_at = None;
+            } else if f.freed_at.is_none() {
+                f.freed_at = Some(flush);
+            }
+        }
         self.body.clear();
         self.next_flush += 1;
         if !self.dirty.contains(&seq) {
             self.dirty.push(seq);
         }
-        Ok(())
+        Ok(IoOp::WriteAt { file: id, offset: at, data, batch: 0 })
     }
 
     /// Writes what is waiting as one record and, if anything waits for durability, makes it
-    /// durable with one sync.
+    /// durable with one sync, running the operations of [`next`](LogState::next) on `disk` one
+    /// after another: for the callers that cannot wait for them apart.
     /// Returns the answers of the operations waiting. A full disk leaves everything waiting for
     /// the next try; any other error fails every operation waiting and every later one.
     pub fn flush(&mut self, disk: &mut dyn Disk) -> Answers {
+        let mut out = Vec::new();
+        let mut ops = Vec::new();
+        loop {
+            out.extend(self.step(disk, &mut ops, true));
+            if ops.is_empty() {
+                return out;
+            }
+            for op in ops.drain(..) {
+                let done = disk.execute(op);
+                out.extend(self.on_done(&done));
+            }
+        }
+    }
+
+    /// What the writer does next (012 FR-035), with the operations to hand to the disk in `ops`,
+    /// whose results go to [`on_done`](LogState::on_done) in that order. With no sync in flight,
+    /// it writes what waits as one record and starts the sync of every operation waiting; while
+    /// one runs, it writes what came since as records of the next group, up to
+    /// [`AHEAD_RECORDS`] of them. Without anything waiting for a sync it writes only once
+    /// [`WRITE_AHEAD`] bytes wait. The rare steps (a new file, copying the oldest one forward,
+    /// removing old files) run on `disk` before it returns. Returns the answers ready now: the
+    /// operations waiting when nothing is left to sync, or failed.
+    pub fn next(&mut self, disk: &mut dyn Disk, ops: &mut Vec<IoOp>) -> Answers {
+        self.step(disk, ops, false)
+    }
+
+    fn step(&mut self, disk: &mut dyn Disk, ops: &mut Vec<IoOp>, all: bool) -> Answers {
         if let Some(errno) = self.failed {
             return self.answer(Some(errno));
         }
-        match self.flush_steps(disk) {
-            Ok(()) => {
-                let out = self.answer(None);
-                if let Err(e) = self.release(disk) {
-                    self.failed = Some(e);
-                }
-                out
-            }
+        match self.step_ops(disk, ops, all) {
+            Ok(answers) => answers,
             Err(IoErrno::NoSpace) if self.disk_full => Vec::new(),
-            Err(e) => {
-                self.failed = Some(e);
-                self.answer(Some(e))
-            }
+            Err(e) => self.fail(e),
         }
     }
 
-    /// Writes what is waiting as one record without syncing it, as the writer does with what
-    /// piles up between syncs: the next [`flush`](LogState::flush) syncs it. Returns the answers
-    /// of the operations waiting if the write failed for any reason but a full disk, which stops
-    /// the log as in a flush.
-    pub fn write_ahead(&mut self, disk: &mut dyn Disk) -> Answers {
-        if self.failed.is_some() || self.body.is_empty() {
+    fn step_ops(
+        &mut self,
+        disk: &mut dyn Disk,
+        ops: &mut Vec<IoOp>,
+        all: bool,
+    ) -> Result<Answers, IoErrno> {
+        if self.sync_left > 0 {
+            let room = self.ahead < AHEAD_RECORDS || self.body.len() >= WRITE_AHEAD;
+            if !self.body.is_empty() && room {
+                ops.push(self.place(disk)?);
+                self.ahead += 1;
+            }
+            return Ok(Vec::new());
+        }
+        self.release(disk)?;
+        if self.waiting.is_empty() {
+            if !self.body.is_empty() && (all || self.body.len() >= WRITE_AHEAD) {
+                ops.push(self.place(disk)?);
+            }
+            return Ok(Vec::new());
+        }
+        self.copy_oldest(disk)?;
+        if !self.body.is_empty() {
+            ops.push(self.place(disk)?);
+        }
+        // Everything written before is durable: nothing to sync.
+        if self.dirty.is_empty() {
+            return Ok(self.answer(None));
+        }
+        for seq in std::mem::take(&mut self.dirty) {
+            ops.push(IoOp::Sync { file: self.files[&seq].id, batch: 0 });
+            self.sync_left += 1;
+        }
+        self.syncing = std::mem::take(&mut self.waiting);
+        self.sync_upto = self.next_flush - 1;
+        self.ahead = 0;
+        Ok(Vec::new())
+    }
+
+    /// The result of an operation [`next`](LogState::next) handed out, in the order it handed
+    /// them out. Returns the answers of the group whose sync ended, or of every operation waiting
+    /// if it failed.
+    pub fn on_done(&mut self, done: &IoDone) -> Answers {
+        let (op, err) = match done {
+            IoDone::Ok(op) => (op, None),
+            IoDone::Err { op, errno } => (op, Some(*errno)),
+            IoDone::Read { .. } => return Vec::new(),
+        };
+        let sync = matches!(op, IoOp::Sync { .. });
+        if sync {
+            self.sync_left = self.sync_left.saturating_sub(1);
+        }
+        if self.failed.is_some() {
             return Vec::new();
         }
-        match self.write_out(disk) {
-            Ok(()) => Vec::new(),
-            Err(IoErrno::NoSpace) if self.disk_full => Vec::new(),
-            Err(e) => {
-                self.failed = Some(e);
-                self.answer(Some(e))
-            }
+        if let Some(errno) = err {
+            return self.fail(errno);
         }
+        if !sync || self.sync_left > 0 {
+            return Vec::new();
+        }
+        self.syncs += 1;
+        self.durable = self.sync_upto;
+        std::mem::take(&mut self.syncing).into_iter().map(|(c, op)| (c, IoDone::Ok(op))).collect()
     }
 
-    fn flush_steps(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
-        if self.waiting.is_empty() && self.body.is_empty() {
-            return Ok(());
-        }
-        if !self.waiting.is_empty() {
-            self.copy_oldest(disk)?;
-            if !self.body.is_empty() {
-                self.write_out(disk)?;
-            }
-        }
-        if !self.waiting.is_empty() && !self.dirty.is_empty() {
-            for seq in std::mem::take(&mut self.dirty) {
-                let id = self.files[&seq].id;
-                ok(disk.execute(IoOp::Sync { file: id, batch: 0 }))?;
-            }
-            self.syncs += 1;
-        } else if self.waiting.is_empty() {
-            self.write_out(disk)?;
-        }
-        Ok(())
+    /// Stops the log with `errno`: the group in flight and every operation waiting fail.
+    fn fail(&mut self, errno: IoErrno) -> Answers {
+        self.failed = Some(errno);
+        let mut out: Answers = std::mem::take(&mut self.syncing)
+            .into_iter()
+            .map(|(core, op)| (core, IoDone::Err { op, errno }))
+            .collect();
+        out.extend(self.answer(Some(errno)));
+        out
     }
 
     fn answer(&mut self, err: Option<IoErrno>) -> Answers {
@@ -560,7 +668,9 @@ impl LogState {
         }
         let mut removed = false;
         while let Some((&seq, f)) = self.files.iter().next() {
-            if Some(seq) == self.active || f.refs > 0 {
+            // A file freed by a record not durable yet is still needed after a crash.
+            let freed = f.freed_at.is_some_and(|at| at <= self.durable);
+            if Some(seq) == self.active || f.refs > 0 || !freed {
                 break;
             }
             let id = f.id;
