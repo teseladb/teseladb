@@ -95,6 +95,9 @@ pub struct StartOpts {
     pub direct_io: teseladb_io::node_disk::DirectIo,
     /// A kernel thread polls each core's ring (`--io-uring-sqpoll`, 012 FR-025).
     pub io_uring_sqpoll: bool,
+    /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
+    /// (`--net-xdp`, 012 FR-033); `None`: the kernel's TCP only.
+    pub net_xdp: Option<String>,
     /// The codec of the new blocks of every core (the block compressor option,
     /// [`BLOCK_COMPRESSOR`], 004 FR-023); `None`: the default one.
     pub block_codec: Option<teseladb_lsm::Codec>,
@@ -357,6 +360,8 @@ type Spec = (&'static str, bool);
 
 /// `--io-uring-sqpoll` (012 FR-025).
 const IO_URING_SQPOLL: &str = "io-uring-sqpoll";
+/// `--net-xdp <interface>` (012 FR-033).
+pub(crate) const NET_XDP: &str = "net-xdp";
 const VALUE: bool = false;
 const FLAG: bool = true;
 
@@ -367,6 +372,7 @@ const START: &[Spec] = &[
     ("io-executor", VALUE),
     ("direct-io", VALUE),
     (IO_URING_SQPOLL, FLAG),
+    (NET_XDP, VALUE),
     (BLOCK_COMPRESSOR, VALUE),
     ("cpu-list", VALUE),
     ("bind_ip", VALUE),
@@ -1128,6 +1134,10 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
         io_uring_sqpoll: o.flag(IO_URING_SQPOLL)?,
+        net_xdp: match o.get(NET_XDP) {
+            Some("") => return Err(CliError("--net-xdp: no interface given".to_owned())),
+            v => v.map(str::to_owned),
+        },
         block_codec: block_codec(o.get(BLOCK_COMPRESSOR))?,
         cpu_list: cpu_list(o.get("cpu-list"), cores)?,
         enroll_token: o.get(ENROLL_TOKEN).map(Password::from),
@@ -1249,7 +1259,7 @@ const USAGE_TEXT: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
-                 [--io-uring-sqpoll]
+                 [--io-uring-sqpoll] [--net-xdp <interface>]
                  [--${name:OPTION_BLOCK_COMPRESSOR} none|zlib|zstd|lz4]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]

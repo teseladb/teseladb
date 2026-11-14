@@ -21,7 +21,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use teseladb_io::net_ring::{NetHandler, NetRing};
+use teseladb_io::conn_port::{ConnPort, NetHandler, PortDriver};
+use teseladb_io::net_ring::NetRing;
 use teseladb_io::poller::Waker;
 use teseladb_sys::uring::Part;
 use teseladb_wire::commands::Shared;
@@ -52,8 +53,8 @@ pub(crate) struct RingParts {
     pub(crate) open: Arc<AtomicUsize>,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) max: usize,
-    /// The number of the next connection, across the rings.
-    pub(crate) next_id: AtomicI32,
+    /// The number of the next connection, across the rings and the rest of the port.
+    pub(crate) next_id: Arc<AtomicI32>,
 }
 
 /// The running rings of a port and its command pool.
@@ -92,6 +93,27 @@ pub(crate) fn spawn(
             let mut net = net;
             ring.run(&mut net);
         })?;
+        started.push((waker, t));
+    }
+    Ok(RingPort { rings: started, pool })
+}
+
+/// Runs the port's queues on AF_XDP (012 FR-033), each on a thread of its own with the same
+/// connections' handling as a ring, and one command pool for all of them.
+pub(crate) fn spawn_xdp(
+    parts: RingParts,
+    ports: Vec<teseladb_io::xdp_port::XdpPort>,
+) -> io::Result<RingPort> {
+    let parts = Arc::new(parts);
+    let pool = Arc::new(Pool::new(parts.clone()));
+    let mut started = Vec::with_capacity(ports.len());
+    for mut port in ports {
+        let q = port.queue() as usize;
+        let waker = port.waker();
+        let mut ring = RingClients::new(parts.clone(), pool.clone(), waker.clone(), 1024 + q);
+        let t = thread::Builder::new()
+            .name(format!("client-xdp-{q}"))
+            .spawn(move || ring.run(&mut port))?;
         started.push((waker, t));
     }
     Ok(RingPort { rings: started, pool })
@@ -296,7 +318,7 @@ impl RingClients {
         }
     }
 
-    fn run(&mut self, net: &mut NetRing) {
+    fn run(&mut self, net: &mut dyn PortDriver) {
         // A change of the node's state wakes the ring, to answer the waiting `hello`s.
         self.parts.state.watch_topology(&self.waker);
         while !self.parts.stop.load(Ordering::Acquire) {
@@ -355,7 +377,7 @@ impl RingClients {
 
     /// Takes back the connections the pool ran: sends their replies, schedules their waits and
     /// runs what arrived meanwhile.
-    fn take_back(&mut self, net: &mut NetRing) {
+    fn take_back(&mut self, net: &mut dyn ConnPort) {
         for Done { token, mut client, alive } in self.mailbox.take() {
             let backlog = match self.clients.get_mut(&token).map(|e| &mut e.slot) {
                 Some(Slot::Away { closed: false, backlog }) => std::mem::take(backlog),
@@ -389,7 +411,7 @@ impl RingClients {
     }
 
     /// Reads connection `token` again once what waits for it is small.
-    fn settle(&mut self, net: &mut NetRing, token: u64) {
+    fn settle(&mut self, net: &mut dyn ConnPort, token: u64) {
         let Some(e) = self.clients.get_mut(&token) else { return };
         let waiting = match &e.slot {
             Slot::Away { backlog, .. } => backlog.len(),
@@ -443,7 +465,7 @@ impl RingClients {
     }
 
     /// Closes the connections of the tenants suspended since the last look (007 FR-034).
-    fn close_suspended(&mut self, net: &mut NetRing) {
+    fn close_suspended(&mut self, net: &mut dyn ConnPort) {
         let Some(routes) = self.parts.state.routes() else { return };
         let states = routes.tenants();
         if self.tenants_seen.as_ref().is_some_and(|seen| Arc::ptr_eq(seen, &states)) {
@@ -471,7 +493,7 @@ impl RingClients {
 impl NetHandler for RingClients {
     fn accepted(
         &mut self,
-        _net: &mut NetRing,
+        _net: &mut dyn ConnPort,
         token: u64,
         peer: Option<SocketAddr>,
         local: Option<SocketAddr>,
@@ -486,10 +508,7 @@ impl NetHandler for RingClients {
             PortStats::add(&p.diag.stats.rejected, 1);
             return false;
         }
-        let id = p.next_id.fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| {
-            Some(id.wrapping_add(1).max(1))
-        });
-        let id = id.unwrap_or(1);
+        let id = crate::client_listener::next_connection_id(&p.next_id);
         let Some(client) = p.kit.client(id, None, peer, local) else { return false };
         p.open.fetch_add(1, Ordering::AcqRel);
         PortStats::add(&p.diag.stats.total_created, 1);
@@ -497,7 +516,7 @@ impl NetHandler for RingClients {
         true
     }
 
-    fn received(&mut self, net: &mut NetRing, token: u64, bytes: &[u8]) {
+    fn received(&mut self, net: &mut dyn ConnPort, token: u64, bytes: &[u8]) {
         let Some(e) = self.clients.get_mut(&token) else { return };
         match &mut e.slot {
             Slot::Here(client) => {
@@ -514,11 +533,11 @@ impl NetHandler for RingClients {
         self.settle(net, token);
     }
 
-    fn sent(&mut self, net: &mut NetRing, token: u64) {
+    fn sent(&mut self, net: &mut dyn ConnPort, token: u64) {
         self.settle(net, token);
     }
 
-    fn closed(&mut self, _net: &mut NetRing, token: u64) {
+    fn closed(&mut self, _net: &mut dyn ConnPort, token: u64) {
         let Some(e) = self.clients.get_mut(&token) else { return };
         match &mut e.slot {
             Slot::Away { closed, .. } => *closed = true,
@@ -530,7 +549,7 @@ impl NetHandler for RingClients {
         }
     }
 
-    fn woken(&mut self, net: &mut NetRing) {
+    fn woken(&mut self, net: &mut dyn ConnPort) {
         self.take_back(net);
         let info = self.parts.state.info();
         if info.topology.counter != self.seen {

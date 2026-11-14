@@ -22,6 +22,12 @@ mod macos;
 /// io_uring (Linux only, 012 FR-001).
 #[cfg(target_os = "linux")]
 pub use linux::io_uring as uring;
+/// Network namespaces and `veth` pairs, for the tests of AF_XDP (Linux only, 012 FR-033).
+#[cfg(target_os = "linux")]
+pub use linux::netns;
+/// AF_XDP and its XDP program (Linux only, 012 FR-033).
+#[cfg(target_os = "linux")]
+pub use linux::xdp;
 pub mod memory_limit;
 pub mod numa;
 pub mod poll;

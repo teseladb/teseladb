@@ -774,6 +774,8 @@ pub struct Node<D> {
     lsm: LsmConfig,
     /// Set by a client's `shutdown` (007 FR-018).
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// The node's state as the clients' port shows it, with its quiesce period.
+    presence: Arc<NodePresence>,
     /// The roles the cores publish (H-039).
     roles: Arc<NodeRoles>,
     /// The Raft log of the node's cores (012 FR-035).
@@ -1422,6 +1424,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             cpus,
             lsm,
             shutdown,
+            presence,
             roles,
             device_log: Some(device_log),
             _lock: lock,
@@ -1455,6 +1458,18 @@ impl<D: Disk + Send + 'static> Node<D> {
     /// Whether a client asked the node to stop (`shutdown`, 007 FR-018).
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Enters the quiesce period of a stop (007 FR-027): every `hello` answers
+    /// `ShutdownInProgress`, the waiting ones at once, and the other commands still run.
+    pub fn quiesce(&self) {
+        self.presence.quiesce();
+    }
+
+    /// How long no client has started a command other than the handshake since the quiesce
+    /// period began.
+    pub fn quiet_for(&self) -> Duration {
+        self.presence.quiet_for()
     }
 
     /// The addresses the HTTP port listens on; none if the node did not open it.

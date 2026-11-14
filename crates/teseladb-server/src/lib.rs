@@ -27,6 +27,7 @@ pub mod cli;
 pub mod client_listener;
 #[cfg(target_os = "linux")]
 mod client_ring;
+mod client_xdp;
 pub mod clock;
 pub mod cluster_auth;
 pub mod clustertime_keys;
@@ -668,6 +669,7 @@ pub fn start(
         let machine = std::thread::available_parallelism().map_or(1, |n| n.get().min(256));
         let cores = cfg.cores.map_or(machine, usize::from);
         client.rings = choice.uring.then_some(cores);
+        client.xdp.clone_from(&o.net_xdp);
     }
     // Every core's disk is rooted at the data directory.
     cfg.shared_files = true;
@@ -991,9 +993,36 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
         std::thread::sleep(STOP_POLL);
     }
     crate::log::drain(log);
+    quiesce(&node, log, QUIESCE_LONGEST, QUIESCE_QUIET);
     log.info("stopping", &[]);
     node.stop();
     0
+}
+
+/// The longest quiesce period of a stop: the reference router's default for a signal, 15 s.
+pub const QUIESCE_LONGEST: Duration = Duration::from_secs(15);
+/// The quiesce period ends earlier once no client has started a command other than the
+/// handshake for this long: the drivers learnt from their `hello` that the node stops.
+pub const QUIESCE_QUIET: Duration = Duration::from_secs(1);
+
+/// The quiesce period of a stop (007 FR-027): the drivers' monitors get `ShutdownInProgress` and
+/// stop choosing the node while its connections still answer, so that none of them closes under
+/// a command a driver is starting, which some drivers then wait for forever. It lasts until no
+/// client started a command other than the handshake for `quiet`, and never past `longest`.
+pub fn quiesce<D: teseladb_raftlog::Disk + Send + 'static>(
+    node: &Node<D>,
+    log: &Logger,
+    longest: Duration,
+    quiet: Duration,
+) {
+    let started = std::time::Instant::now();
+    node.quiesce();
+    log.info("quiesce", &[]);
+    while started.elapsed() < longest && node.quiet_for() < quiet {
+        std::thread::sleep(STOP_POLL.min(quiet));
+    }
+    let took = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    log.info("quiesce ended", &[("ms", &took)]);
 }
 
 #[cfg(test)]

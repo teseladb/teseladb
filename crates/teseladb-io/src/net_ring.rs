@@ -17,13 +17,14 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb_sys::uring::{Completion, Op, Part, Ring, opcode};
 
+pub use crate::conn_port::{ConnPort, NetHandler, PortDriver};
 use crate::poller::{Poller, Waker};
 
 /// Submission slots of a port's ring.
@@ -57,27 +58,6 @@ pub fn check_support() -> Result<(), String> {
     }
     ring.register_buf_ring(GROUP, 2, 64)
         .map_err(|e| format!("IORING_REGISTER_PBUF_RING failed: {e}"))
-}
-
-/// What a port's ring tells the code that serves its connections.
-pub trait NetHandler {
-    /// A new connection `token` from `peer` to `local`; `false` closes it (and
-    /// [`NetHandler::closed`] follows for it too).
-    fn accepted(
-        &mut self,
-        net: &mut NetRing,
-        token: u64,
-        peer: Option<SocketAddr>,
-        local: Option<SocketAddr>,
-    ) -> bool;
-    /// Bytes that arrived on connection `token`, in order.
-    fn received(&mut self, net: &mut NetRing, token: u64, bytes: &[u8]);
-    /// A send of connection `token` finished; [`NetRing::queued`] says what still waits.
-    fn sent(&mut self, net: &mut NetRing, token: u64);
-    /// Connection `token` is gone: the peer closed it, it failed, or [`NetRing::close`] ended it.
-    fn closed(&mut self, net: &mut NetRing, token: u64);
-    /// After every round of the ring, and when another thread woke it.
-    fn woken(&mut self, net: &mut NetRing);
 }
 
 /// What an operation of the ring is for.
@@ -313,7 +293,7 @@ impl NetRing {
 
     /// One round: submits, waits up to `timeout` for a completion, and hands every completion
     /// to `handler`, then calls [`NetHandler::woken`].
-    pub fn run_once(&mut self, handler: &mut impl NetHandler, timeout: Duration) -> io::Result<()> {
+    pub fn run_once(&mut self, handler: &mut dyn NetHandler, timeout: Duration) -> io::Result<()> {
         self.ring.submit_and_wait_for(timeout)?;
         while let Some(c) = self.ring.complete() {
             self.on_completion(c, handler)?;
@@ -330,7 +310,7 @@ impl NetRing {
     /// Hands over what arrived on the connections resumed since, a buffer's worth at a time
     /// while they are still read: a handler that pauses again stops the rest, as it stops the
     /// reception.
-    fn deliver_stashes(&mut self, handler: &mut impl NetHandler) {
+    fn deliver_stashes(&mut self, handler: &mut dyn NetHandler) {
         while let Some(token) = self.unstash.pop() {
             while let Some(c) = self.conns.get_mut(&token).filter(|c| c.reading) {
                 if c.stash_at == c.stash.len() {
@@ -346,13 +326,13 @@ impl NetRing {
         }
     }
 
-    fn deliver_ends(&mut self, handler: &mut impl NetHandler) {
+    fn deliver_ends(&mut self, handler: &mut dyn NetHandler) {
         while let Some(token) = self.ended.pop() {
             handler.closed(self, token);
         }
     }
 
-    fn on_completion(&mut self, c: Completion, handler: &mut impl NetHandler) -> io::Result<()> {
+    fn on_completion(&mut self, c: Completion, handler: &mut dyn NetHandler) -> io::Result<()> {
         let purpose = if c.more { self.ops.get(&c.id).copied() } else { self.ops.remove(&c.id) };
         match purpose {
             Some(Purpose::Accept(i)) => self.on_accept(i, c, handler),
@@ -369,7 +349,7 @@ impl NetRing {
         Ok(())
     }
 
-    fn on_accept(&mut self, i: usize, c: Completion, handler: &mut impl NetHandler) {
+    fn on_accept(&mut self, i: usize, c: Completion, handler: &mut dyn NetHandler) {
         if let Some(fd) = c.fd {
             let stream = std::net::TcpStream::from(fd);
             let token = self.next_token;
@@ -406,7 +386,7 @@ impl NetRing {
         }
     }
 
-    fn on_recv(&mut self, token: u64, c: Completion, handler: &mut impl NetHandler) {
+    fn on_recv(&mut self, token: u64, c: Completion, handler: &mut dyn NetHandler) {
         if let Some(bid) = c.buffer {
             self.scratch.clear();
             if let Some(bytes) = self.ring.provided(GROUP, bid) {
@@ -447,7 +427,7 @@ impl NetRing {
         }
     }
 
-    fn on_send(&mut self, token: u64, c: &Completion, handler: &mut impl NetHandler) {
+    fn on_send(&mut self, token: u64, c: &Completion, handler: &mut dyn NetHandler) {
         let Some(conn) = self.conns.get_mut(&token) else { return };
         conn.send = None;
         let sending = std::mem::take(&mut conn.sending);
@@ -475,3 +455,43 @@ impl NetRing {
 
 const ENOBUFS: i32 = 105;
 const ECANCELED: i32 = 125;
+
+impl ConnPort for NetRing {
+    fn send(&mut self, token: u64, bytes: Part) -> bool {
+        NetRing::send(self, token, bytes)
+    }
+
+    fn queued(&self, token: u64) -> usize {
+        NetRing::queued(self, token)
+    }
+
+    fn pause(&mut self, token: u64) {
+        NetRing::pause(self, token);
+    }
+
+    fn resume(&mut self, token: u64) {
+        NetRing::resume(self, token);
+    }
+
+    fn close(&mut self, token: u64) {
+        NetRing::close(self, token);
+    }
+
+    fn stop_accepting(&mut self) {
+        NetRing::stop_accepting(self);
+    }
+
+    fn connections(&self) -> usize {
+        NetRing::connections(self)
+    }
+}
+
+impl PortDriver for NetRing {
+    fn run_once(&mut self, handler: &mut dyn NetHandler, timeout: Duration) -> io::Result<()> {
+        NetRing::run_once(self, handler, timeout)
+    }
+
+    fn waker(&self) -> Waker {
+        NetRing::waker(self)
+    }
+}

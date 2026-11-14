@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -94,6 +94,9 @@ pub struct ClientConfig {
     /// reads and writes its connections, and a pool runs their commands. `None`, a port with TLS
     /// or a kernel without multishot `recv`: a thread per connection.
     pub rings: Option<usize>,
+    /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
+    /// (`--net-xdp`, 012 FR-033), besides the kernel's listener of `addrs`.
+    pub xdp: Option<String>,
     /// Clients authenticate before running commands (a node started without `--insecure`, 013).
     pub auth: bool,
     /// What `rotateCertificates` loads again (013 FR-006); `None` on a node without a PKI.
@@ -166,6 +169,7 @@ impl ClientConfig {
             process: ProcessConfig::default(),
             tls: TlsPort::default(),
             rings: None,
+            xdp: None,
             auth: false,
             certificates: None,
             audit: None,
@@ -203,6 +207,15 @@ pub trait NodeState: Send + Sync + 'static {
         false
     }
 
+    /// The node is in its quiesce period ([`NodePresence::quiesce`]): every `hello` answers
+    /// `ShutdownInProgress`.
+    fn quiescing(&self) -> bool {
+        false
+    }
+
+    /// A client's command other than the handshake starts.
+    fn note_command(&self) {}
+
     /// Wake `waker` whenever the `topologyVersion` counter changes, so the waiting `hello`s
     /// answer at once (018 FR-015); a node without one never changes it.
     fn watch_topology(&self, _waker: &Arc<Waker>) {}
@@ -214,6 +227,11 @@ pub trait NodeState: Send + Sync + 'static {
 pub struct NodePresence {
     counter: AtomicI64,
     closed: AtomicBool,
+    /// The node is stopping and in its quiesce period ([`NodePresence::quiesce`]).
+    quiescing: AtomicBool,
+    /// When a client's last command other than the handshake started, in milliseconds of the
+    /// wall clock, while the node quiesces.
+    last_command_ms: AtomicU64,
     /// The replica set and the member this node is, in the replica set presentation (018
     /// FR-007).
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
@@ -298,9 +316,39 @@ impl NodePresence {
         self.replica.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
-    /// The `topologyVersion` counter.
+    /// The `topologyVersion` counter: Group 0's, and past every value of it once the node
+    /// quiesces, so that the waiting `hello`s answer.
     pub fn counter(&self) -> i64 {
-        self.counter.load(Ordering::Acquire)
+        let raw = self.counter.load(Ordering::Acquire);
+        if self.quiescing() { raw.saturating_add(QUIESCE_COUNTER_STEP) } else { raw }
+    }
+
+    /// The node stops (a signal or `shutdown`): it enters its quiesce period, as a reference
+    /// router does. Its `topologyVersion` changes, every `hello` answers `ShutdownInProgress`
+    /// (the waiting ones at once), and the other commands still run, so that the drivers stop
+    /// sending to it before its connections close (007 FR-027).
+    pub fn quiesce(&self) {
+        self.last_command_ms.store(wall_ms() as u64, Ordering::Release);
+        if !self.quiescing.swap(true, Ordering::AcqRel) {
+            self.wake();
+        }
+    }
+
+    /// Whether the node is in its quiesce period.
+    pub fn quiescing(&self) -> bool {
+        self.quiescing.load(Ordering::Acquire)
+    }
+
+    /// A client's command other than the handshake starts while the node quiesces.
+    pub fn note_command(&self) {
+        self.last_command_ms.store(wall_ms() as u64, Ordering::Release);
+    }
+
+    /// How long no client has started a command other than the handshake, while the node
+    /// quiesces.
+    pub fn quiet_for(&self) -> Duration {
+        let last = self.last_command_ms.load(Ordering::Acquire);
+        Duration::from_millis((wall_ms() as u64).saturating_sub(last))
     }
 
     /// Whether the port is closed.
@@ -308,6 +356,10 @@ impl NodePresence {
         self.closed.load(Ordering::Acquire)
     }
 }
+
+/// How much the `topologyVersion` counter grows when the node enters its quiesce period: past
+/// any counter Group 0 gives.
+const QUIESCE_COUNTER_STEP: i64 = 1 << 48;
 
 /// [`NodeState`] of a running node: its process id and its HLC.
 #[derive(Clone, Debug)]
@@ -407,6 +459,16 @@ impl NodeState for NodeClockState {
     fn closed(&self) -> bool {
         self.presence.closed()
     }
+
+    fn quiescing(&self) -> bool {
+        self.presence.quiescing()
+    }
+
+    fn note_command(&self) {
+        if self.presence.quiescing() {
+            self.presence.note_command();
+        }
+    }
 }
 
 /// Starts a thread named after its first argument that runs its second.
@@ -469,6 +531,14 @@ pub(crate) struct Cmds<'a> {
     pub(crate) state: &'a dyn NodeState,
 }
 
+/// The number of the port's next connection: one counter for every way the port takes them
+/// (threads, rings and AF_XDP), so that no two connections share a number.
+pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
+    let id =
+        ids.fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| Some(id.wrapping_add(1).max(1)));
+    id.unwrap_or(1)
+}
+
 /// The seed of the random numbers of backend `k`: the clock and the number.
 pub(crate) fn seed(k: u64) -> u64 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
@@ -481,6 +551,8 @@ pub struct ClientListener {
     stop: Arc<AtomicBool>,
     /// The acceptor of the connections that get a thread each, or the port's rings.
     acceptor: Accepting,
+    /// The port on AF_XDP (012 FR-033), or why it is not there.
+    xdp: crate::client_xdp::XdpState,
     /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
     keeper: Option<JoinHandle<()>>,
     /// The thread that builds the node's search indexes, with a node behind the port.
@@ -571,6 +643,21 @@ impl ClientListener {
             stop: stop.clone(),
             spawn: hooks.spawn_connection,
         };
+        let ids = Arc::new(std::sync::atomic::AtomicI32::new(1));
+        #[cfg(target_os = "linux")]
+        let xdp_parts = crate::client_xdp::XdpParts {
+            state: state.clone(),
+            shared: shared.clone(),
+            kit: parts.kit.clone(),
+            diag: diag.clone(),
+            open: open.clone(),
+            stop: stop.clone(),
+            ids: ids.clone(),
+        };
+        #[cfg(target_os = "linux")]
+        let xdp = crate::client_xdp::start(cfg, &addrs, xdp_parts);
+        #[cfg(not(target_os = "linux"))]
+        let xdp = crate::client_xdp::unsupported(cfg);
         #[cfg(target_os = "linux")]
         let rings = ring_count(cfg);
         #[cfg(not(target_os = "linux"))]
@@ -586,7 +673,7 @@ impl ClientListener {
                     open: open.clone(),
                     stop: stop.clone(),
                     max: cfg.max_connections,
-                    next_id: std::sync::atomic::AtomicI32::new(1),
+                    next_id: ids.clone(),
                 };
                 Accepting::Rings(crate::client_ring::spawn(ring_parts, &listeners, n)?)
             }
@@ -605,7 +692,7 @@ impl ClientListener {
                     max: cfg.max_connections,
                     open: open.clone(),
                     stop: stop.clone(),
-                    next_id: 1,
+                    next_id: ids.clone(),
                     diag: diag.clone(),
                     state: state.clone(),
                 };
@@ -650,6 +737,7 @@ impl ClientListener {
             addrs,
             stop,
             acceptor,
+            xdp,
             keeper,
             builder,
             usage,
@@ -657,6 +745,12 @@ impl ClientListener {
             statistics,
             open,
         })
+    }
+
+    /// The port on AF_XDP (012 FR-033): `None` without `--net-xdp`, its description, or why the
+    /// interface could not take it (the kernel's TCP then serves the clients alone).
+    pub fn xdp(&self) -> Option<Result<String, String>> {
+        self.xdp.status()
     }
 
     /// Whether the port runs on io_uring rings (012 FR-024) rather than a thread per connection.
@@ -679,6 +773,8 @@ impl ClientListener {
     /// unwaited.
     pub fn stop(self) {
         self.stop.store(true, Ordering::Release);
+        // Its queues' threads end and the XDP program leaves the interface.
+        drop(self.xdp);
         match self.acceptor {
             Accepting::Threads(waker, t) => {
                 // A thread that already ended needs no wake-up, and its end is all `join` waits
@@ -864,7 +960,7 @@ struct Acceptor {
     max: usize,
     open: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    next_id: i32,
+    next_id: Arc<std::sync::atomic::AtomicI32>,
     diag: Arc<Diag>,
     state: Arc<dyn NodeState>,
 }
@@ -902,8 +998,7 @@ impl Acceptor {
             }
             self.open.fetch_add(1, Ordering::AcqRel);
             PortStats::add(&self.diag.stats.total_created, 1);
-            let id = self.next_id;
-            self.next_id = self.next_id.wrapping_add(1).max(1);
+            let id = next_connection_id(&self.next_id);
             if let Some(waker) = self.parts.serve(stream, id) {
                 self.live.retain(|w| w.strong_count() > 0);
                 self.live.push(Arc::downgrade(&waker));
@@ -1263,6 +1358,11 @@ impl Client {
             self.apply(conn, req, Action::Reply(e.to_document()));
             return false;
         }
+        if cmds.state.quiescing() && teseladb_wire::hello::is_hello(req.name()) {
+            let doc = quiesce_reply(&cmds.state.info());
+            return self.apply(conn, req, Action::Reply(doc));
+        }
+        cmds.state.note_command();
         stats.active.fetch_add(1, Ordering::Relaxed);
         let fresh;
         let (info, commands) = match cmds.inline.as_deref_mut() {
@@ -1350,6 +1450,7 @@ impl Client {
         mut p: HelloWait,
         info: &NodeInfo,
         shared: &Shared,
+        quiescing: bool,
     ) -> (Option<Pending>, bool) {
         // A connection waiting for a `hello` has its connection.
         let Some(conn) = self.conn.as_mut() else { return (None, true) };
@@ -1379,6 +1480,14 @@ impl Client {
         }
         if let Some(e) = p.held.take() {
             let doc = teseladb_wire::hello::with_cluster_time(e, info);
+            let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
+            let _ = self.transport.outgoing_owned(bytes, &mut self.out);
+            self.waiting = false;
+            return (None, true);
+        }
+        if quiescing {
+            // The stream ends with the error: the driver marks the node unknown.
+            let doc = quiesce_reply(info);
             let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
             let _ = self.transport.outgoing_owned(bytes, &mut self.out);
             self.waiting = false;
@@ -1480,6 +1589,24 @@ impl Drop for Worker {
     }
 }
 
+/// The answer of a `hello` while the node quiesces, as a reference router's: `ShutdownInProgress`
+/// with the node's `topologyVersion`.
+pub(crate) fn quiesce_reply(info: &NodeInfo) -> teseladb_bson::Document {
+    let e = CommandError::new(SHUTDOWN_IN_PROGRESS, QUIESCE_MESSAGE);
+    let version = teseladb_bson::Document::new()
+        .with("processId", teseladb_bson::Value::ObjectId(info.topology.process_id))
+        .with("counter", teseladb_bson::Value::Int64(info.topology.counter));
+    let doc = teseladb_bson::Document::new().with("topologyVersion", version);
+    let mut doc = doc;
+    for (k, v) in e.to_document().iter() {
+        doc.push(k, v.clone());
+    }
+    teseladb_wire::hello::with_cluster_time(doc, info)
+}
+
+/// The message of [`quiesce_reply`], the reference router's.
+pub const QUIESCE_MESSAGE: &str = "The server is in quiesce mode and will shut down";
+
 /// The connection of a wait whose client closed: a held one's close is recorded by the caller, and
 /// one in the limiter's queue leaves it as interrupted (006 FR-036).
 pub(crate) fn abandon(p: Pending, shared: &Shared) -> Option<Connection> {
@@ -1504,7 +1631,7 @@ pub(crate) fn run_pending(
 ) -> bool {
     match p {
         Pending::Hello(p) => {
-            let (next, open) = c.fire(p, info, cmds.shared);
+            let (next, open) = c.fire(p, info, cmds.shared, cmds.state.quiescing());
             c.new_wait = next;
             open
         }

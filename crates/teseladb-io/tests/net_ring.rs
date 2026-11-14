@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::net_ring::{NetHandler, NetRing, check_support};
+use teseladb_io::net_ring::{ConnPort, NetHandler, NetRing, check_support};
 use teseladb_sys::uring::Part;
 
 /// Above this many bytes waiting to go out, a connection stops being read.
@@ -43,7 +43,7 @@ impl Echo {
 impl NetHandler for Echo {
     fn accepted(
         &mut self,
-        _net: &mut NetRing,
+        _net: &mut dyn ConnPort,
         token: u64,
         peer: Option<SocketAddr>,
         local: Option<SocketAddr>,
@@ -54,7 +54,7 @@ impl NetHandler for Echo {
         true
     }
 
-    fn received(&mut self, net: &mut NetRing, token: u64, bytes: &[u8]) {
+    fn received(&mut self, net: &mut dyn ConnPort, token: u64, bytes: &[u8]) {
         let inbox = self.inbox.get_mut(&token).unwrap();
         inbox.extend_from_slice(bytes);
         while inbox.len() >= 4 {
@@ -81,19 +81,19 @@ impl NetHandler for Echo {
         }
     }
 
-    fn sent(&mut self, net: &mut NetRing, token: u64) {
+    fn sent(&mut self, net: &mut dyn ConnPort, token: u64) {
         if self.paused.get(&token).copied().unwrap_or(false) && net.queued(token) < HIGH / 2 {
             self.paused.insert(token, false);
             net.resume(token);
         }
     }
 
-    fn closed(&mut self, _net: &mut NetRing, token: u64) {
+    fn closed(&mut self, _net: &mut dyn ConnPort, token: u64) {
         self.inbox.remove(&token);
         self.seen.closed.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn woken(&mut self, _net: &mut NetRing) {}
+    fn woken(&mut self, _net: &mut dyn ConnPort) {}
 }
 
 /// A ring serving `listener` on its own thread until `stop`.
@@ -259,17 +259,17 @@ fn another_thread_wakes_the_ring() {
     impl NetHandler for Count {
         fn accepted(
             &mut self,
-            _: &mut NetRing,
+            _: &mut dyn ConnPort,
             _: u64,
             _: Option<SocketAddr>,
             _: Option<SocketAddr>,
         ) -> bool {
             false
         }
-        fn received(&mut self, _: &mut NetRing, _: u64, _: &[u8]) {}
-        fn sent(&mut self, _: &mut NetRing, _: u64) {}
-        fn closed(&mut self, _: &mut NetRing, _: u64) {}
-        fn woken(&mut self, _: &mut NetRing) {
+        fn received(&mut self, _: &mut dyn ConnPort, _: u64, _: &[u8]) {}
+        fn sent(&mut self, _: &mut dyn ConnPort, _: u64) {}
+        fn closed(&mut self, _: &mut dyn ConnPort, _: u64) {}
+        fn woken(&mut self, _: &mut dyn ConnPort) {
             *self.0.lock().unwrap() += 1;
         }
     }

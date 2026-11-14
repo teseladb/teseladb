@@ -1,6 +1,8 @@
 //! Linux: `posix_fallocate`, epoll, eventfd, affinity and io_uring.
 
 pub mod io_uring;
+pub mod netns;
+pub mod xdp;
 
 use std::fs::File;
 use std::io;

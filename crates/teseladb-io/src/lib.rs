@@ -7,6 +7,8 @@
 pub mod admission;
 pub mod bandwidth;
 pub mod buffers;
+#[cfg(target_os = "linux")]
+pub mod conn_port;
 pub mod counters;
 pub mod device_log;
 pub mod disk_thread;
@@ -30,6 +32,9 @@ pub mod service;
 pub mod spin;
 pub mod spsc;
 pub mod timer;
+pub mod user_tcp;
+#[cfg(target_os = "linux")]
+pub mod xdp_port;
 
 pub use file_disk::{FileDisk, direct_io_supported, read_up_to, sync_dir, write_whole};
 pub use io_class::IoClass;

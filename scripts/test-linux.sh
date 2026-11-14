@@ -4,10 +4,14 @@
 # above all (012), runs here. The tests are built for `<arch>-unknown-linux-musl` (static, linked
 # with rust-lld) and run inside the image of scripts/docker/x86_64-qemu.Dockerfile, without the
 # seccomp profile (Docker's default one refuses the io_uring calls) and with a 1 MiB tmpfs at
-# `TESELADB_FULL_DIR`, the full disk of the executors' equivalence battery.
+# `TESELADB_FULL_DIR`, the full disk of the executors' equivalence battery. The container has
+# CAP_NET_ADMIN, CAP_BPF, CAP_SYS_ADMIN and CAP_IPC_LOCK, which the tests of the port on AF_XDP
+# (012 FR-033) need to make `veth` pairs and namespaces inside it, load the XDP program and lock
+# the UMEM; the pairs live in the container's own network namespace and go with it.
 # With --huge-pages the engine's kernel first reserves 2 MiB pages, and 1 GiB pages where it can,
 # so the tests of 012 FR-032 map their pools on them, and gets its own counts back at the end.
-#   scripts/test-linux.sh [--huge-pages] [crate...]
+# With --test <name> (once or more) only those test files of the crates are built and run.
+#   scripts/test-linux.sh [--huge-pages] [--test <name>]... [crate...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,6 +20,11 @@ if [[ ${1:-} == --huge-pages ]]; then
   huge=1
   shift
 fi
+only=()
+while [[ ${1:-} == --test ]]; do
+  only+=(--test "$2")
+  shift 2
+done
 
 case $(uname -m) in
   arm64 | aarch64) TARGET=aarch64-unknown-linux-musl ;;
@@ -51,13 +60,14 @@ if [[ $huge == 1 ]]; then
 fi
 runs=()
 while IFS= read -r run; do runs+=("$run"); done < <(
-  cargo test --offline --target "$TARGET" "${pkgs[@]}" --no-run --message-format=json 2>/dev/null |
+  cargo test --offline --target "$TARGET" "${pkgs[@]}" ${only[@]+"${only[@]}"} --no-run --message-format=json 2>/dev/null |
     grep -E '"profile":\{[^}]*"test":true' |
     sed -n 's/.*"manifest_path":"\([^"]*\)\/Cargo.toml".*"executable":"\([^"]*\)".*/\1:\2/p'
 )
 [[ ${#runs[@]} -gt 0 ]] || { echo "test-linux: nothing was built" >&2; exit 1; }
 
 docker run --rm -i --security-opt seccomp=unconfined --tmpfs /full:rw,size=1m \
+  --cap-add NET_ADMIN --cap-add BPF --cap-add SYS_ADMIN --cap-add IPC_LOCK --ulimit memlock=-1 \
   -e TESELADB_FULL_DIR=/full -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
   sh -s -- "${runs[@]}" <<'SH'
 fail=0
