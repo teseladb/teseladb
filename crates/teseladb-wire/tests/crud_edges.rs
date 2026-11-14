@@ -398,7 +398,8 @@ fn find_and_modify_and_bulk_write_cover_their_options() {
             "admin",
             doc(&[("bulkWrite", 1.into()), ("ops", Value::Array(vec![])), ("nsInfo", info)]),
         );
-        assert!(matches!(r.get("code"), Some(Value::Int32(14 | 40414 | 73))), "{r:?}");
+        // The fields first, then the empty batch before the namespace (measured on 14-11-2026).
+        assert!(matches!(r.get("code"), Some(Value::Int32(14 | 40414 | 16))), "{r:?}");
     }
 }
 
@@ -1453,4 +1454,86 @@ fn a_filter_as_deep_as_a_command_may_nest_is_read() {
         let r = m.run("db", cmd.clone());
         assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{cmd:?} {r:?}");
     }
+}
+
+#[test]
+fn an_id_may_hold_a_db_ref_and_no_other_dollar_name() {
+    // Measured on a `refnode` 9.0.4 on 14-11-2026 (native battery, `crud-id-bulk`): a `$` name of
+    // an `_id` is valid when it is part of a DBRef, `$ref` with a string followed by `$id`, then
+    // optionally `$db` with a string, at any depth and with other fields after them.
+    let id = |pairs: &[(&str, Value)]| d(&[("_id", d(pairs))]);
+    let (r, i, db) = (("$ref", s("y")), ("$id", 1.into()), ("$db", s("d")));
+    let cases: Vec<(Value, Option<&str>)> = vec![
+        (id(&[r.clone(), i.clone()]), None),
+        (id(&[r.clone(), i.clone(), db.clone()]), None),
+        (id(&[r.clone(), i.clone(), db.clone(), ("x", 1.into())]), None),
+        (id(&[r.clone(), i.clone(), ("x", 1.into())]), None),
+        (id(&[("a", d(&[r.clone(), i.clone()]))]), None),
+        (id(std::slice::from_ref(&i)), Some("$id")),
+        (id(std::slice::from_ref(&r)), Some("$ref")),
+        (id(&[("$ref", 1.into()), i.clone()]), Some("$ref")),
+        (id(&[r.clone(), i.clone(), ("$db", 2.into())]), Some("$db")),
+        (id(std::slice::from_ref(&db)), Some("$db")),
+        (id(&[r.clone(), ("x", 1.into()), i.clone()]), Some("$ref")),
+        (id(&[("a", d(&[("$x", 1.into())]))]), Some("$x")),
+        (id(&[r.clone(), i.clone(), ("$x", 1.into())]), Some("$x")),
+    ];
+    let mut m = Mem::new();
+    for (n, (document, refused)) in cases.into_iter().enumerate() {
+        let mut document = match document {
+            Value::Document(d) => d,
+            other => panic!("{other:?}"),
+        };
+        if let Some(Value::Document(inner)) = document.get_mut("_id") {
+            inner.push("n", n as i32);
+        }
+        let docs = Value::Array(vec![Value::Document(document)]);
+        let r = m.run("db", doc(&[("insert", s("refs")), ("documents", docs)]));
+        match refused {
+            None => assert_eq!(field(&r, "n"), &Value::Int32(1), "case {n}: {r:?}"),
+            Some(name) => assert_eq!(
+                field(&r, "writeErrors.0.errmsg"),
+                &s(&format!(
+                    "_id fields may not contain '$'-prefixed fields: {name} is not valid for storage."
+                )),
+                "case {n}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn a_server_bulk_write_answers_its_failed_updates_and_refuses_no_operations() {
+    // Measured on a `refrouter` 9.0.4 on 14-11-2026 (native battery, `crud-id-bulk`).
+    let mut m = Mem::new();
+    let ns = Value::Array(vec![d(&[("ns", s("db.a"))])]);
+    let ops = Value::Array(vec![
+        d(&[("insert", 0.into()), ("document", d(&[("_id", 1.into()), ("n", s("x"))]))]),
+        d(&[
+            ("update", 0.into()),
+            ("filter", d(&[("_id", 1.into())])),
+            ("updateMods", d(&[("$inc", d(&[("n", 1.into())]))])),
+        ]),
+    ]);
+    let cmd = |ops: Value| doc(&[("bulkWrite", 1.into()), ("ops", ops), ("nsInfo", ns.clone())]);
+    let r = m.run("admin", cmd(ops));
+    // A failed update still says it modified nothing, after `n`.
+    let failed = field(&r, "cursor.firstBatch.1");
+    assert_eq!(field(failed.as_document().unwrap(), "code"), &Value::Int32(14), "{r:?}");
+    let keys: Vec<&str> = failed.as_document().unwrap().iter().map(|(k, _)| k).collect();
+    assert_eq!(&keys[keys.len() - 2..], ["n", "nModified"], "{failed:?}");
+    assert_eq!(field(failed.as_document().unwrap(), "nModified"), &Value::Int32(0));
+    // No operation at all is a batch of the wrong length.
+    let r = m.run("admin", cmd(Value::Array(Vec::new())));
+    assert_eq!(code(&r), 16, "{r:?}");
+    let nodot = Value::Array(vec![d(&[("ns", s("nodot"))])]);
+    let r = m.run(
+        "admin",
+        doc(&[("bulkWrite", 1.into()), ("ops", Value::Array(vec![])), ("nsInfo", nodot)]),
+    );
+    assert_eq!(code(&r), 16, "the length before the namespace: {r:?}");
+    assert_eq!(
+        field(&r, "errmsg"),
+        &s("Write batch sizes must be between 1 and 100000. Got 0 operations.")
+    );
 }

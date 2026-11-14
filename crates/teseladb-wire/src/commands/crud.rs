@@ -495,10 +495,12 @@ fn check_id(id: &Value) -> Result<(), CommandError> {
     }
 }
 
-/// An `_id` document has no `$` name at any depth (measured on a `refrouter` 9.0.4).
+/// An `_id` document has no `$` name at any depth but those of a DBRef (measured on a `refrouter`
+/// and a `refnode` 9.0.4, the DBRef on 14-11-2026).
 fn dollar_free_id(d: &Document) -> Result<(), CommandError> {
-    for (k, v) in d.iter() {
-        if k.starts_with('$') {
+    let fields: Vec<(&str, &Value)> = d.iter().collect();
+    for (at, &(k, v)) in fields.iter().enumerate() {
+        if k.starts_with('$') && !in_db_ref(&fields, at) {
             return Err(CommandError::new(
                 DOLLAR_PREFIXED_FIELD_NAME,
                 format!(
@@ -511,6 +513,25 @@ fn dollar_free_id(d: &Document) -> Result<(), CommandError> {
         }
     }
     Ok(())
+}
+
+/// Whether field `at` of `fields` belongs to a DBRef: `$ref` with a string right before `$id`,
+/// then optionally `$db` with a string.
+fn in_db_ref(fields: &[(&str, &Value)], at: usize) -> bool {
+    let named = |i: Option<usize>, name: &str| {
+        i.and_then(|i| fields.get(i)).is_some_and(|(k, _)| *k == name)
+    };
+    let string_ref = |i: Option<usize>| {
+        i.and_then(|i| fields.get(i))
+            .is_some_and(|(k, v)| *k == "$ref" && matches!(v, Value::String(_)))
+    };
+    let (before, after) = (at.checked_sub(1), Some(at + 1));
+    match fields[at] {
+        ("$ref", Value::String(_)) => named(after, "$id"),
+        ("$id", _) => string_ref(before),
+        ("$db", Value::String(_)) => named(before, "$id") && string_ref(at.checked_sub(2)),
+        _ => false,
+    }
 }
 
 /// The document as stored: `_id` first, generated if missing.
@@ -1635,20 +1656,28 @@ pub(crate) fn project(doc: &Document, spec: &Document) -> Result<Value, CommandE
 /// result per operation in a cursor.
 pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, CommandError> {
     let name = BULK_WRITE;
-    let ops = args::array(ctx.cmd, name, "ops")?.ok_or_else(|| missing(name, "ops"))?.to_vec();
+    args::array(ctx.cmd, name, "ops")?.ok_or_else(|| missing(name, "ops"))?;
     let ns_info =
         args::array(ctx.cmd, name, "nsInfo")?.ok_or_else(|| missing(name, "nsInfo"))?.to_vec();
     let ordered = args::bool_field(ctx.cmd, name, "ordered")?.unwrap_or(true);
     let errors_only = args::bool_field(ctx.cmd, name, "errorsOnly")?.unwrap_or(false);
     let bypass = args::safe_bool(ctx.cmd, name, "bypassDocumentValidation", &BULK_SAFE_BOOL_TYPES)?
         .unwrap_or(false);
-    let mut spaces = Vec::new();
+    // The fields of `nsInfo` parse first, then the number of operations, then the namespaces
+    // (measured on a `refrouter` 9.0.4 on 14-11-2026).
+    let mut full_names = Vec::new();
     for (i, v) in ns_info.iter().enumerate() {
         let Value::Document(d) = v else {
             return Err(wrong_type(&format!("bulkWrite.nsInfo.{i}"), v, "object"));
         };
         let full_name = args::string(d, "NamespaceInfoEntry", "ns")?
             .ok_or_else(|| missing("NamespaceInfoEntry", "ns"))?;
+        full_names.push(full_name.to_owned());
+    }
+    let ops = batch(ctx.cmd, name, "ops")?.to_vec();
+    let mut spaces = Vec::new();
+    for full_name in &full_names {
+        let full_name = full_name.as_str();
         let ns = names::parse_full(full_name).ok_or_else(|| {
             CommandError::new(
                 crate::error::INVALID_NAMESPACE,
@@ -1727,6 +1756,10 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
                     res.push(k, v.clone());
                 }
                 res.push("n", 0);
+                // A failed update modified nothing (measured on a `refrouter` 9.0.4 on 14-11-2026).
+                if parsed[idx].0 == BulkKind::Update {
+                    res.push("nModified", 0);
+                }
                 results.push(Value::Document(res));
                 if ordered {
                     break;
