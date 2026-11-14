@@ -199,11 +199,7 @@ impl Rewrites {
 /// another, all stemmed by the reference search server 1.70.6 (`data/kStemming.tsv`).
 pub fn k_stemming(word: &str) -> String {
     static TABLE: OnceLock<Rewrites> = OnceLock::new();
-    TABLE
-        .get_or_init(|| {
-            Rewrites::parse(teseladb_names::expand_static(include_str!("data/kStemming.tsv")))
-        })
-        .stem(word)
+    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/kStemming.tsv"))).stem(word)
 }
 
 /// The stem `stempel` gives `word`: the table learned from the 62 576 Polish words of the fixture,

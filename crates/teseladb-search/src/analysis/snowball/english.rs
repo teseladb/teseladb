@@ -21,7 +21,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
     ("sky", "sky"),
     ("news", "news"),
     ("howe", "howe"),
-    (teseladb_names::WORD_BOOK_OF_MAPS, teseladb_names::WORD_BOOK_OF_MAPS),
+    ("atlas", "atlas"),
     ("cosmos", "cosmos"),
     ("bias", "bias"),
     ("andes", "andes"),
