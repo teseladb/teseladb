@@ -1743,7 +1743,11 @@ fn remote_class(req: &RemoteReq) -> ServiceClass {
         RemoteReq::ReadWith { scan: Some((_, limit)), .. } if long(*limit) => {
             ServiceClass::Background
         }
-        // An aggregation's part reads a whole range's part: behind the document operations.
+        // A filtered part is a scan; an aggregation's part reads a whole range's part, behind
+        // the document operations.
+        RemoteReq::Pushed { work: crate::pushed::Work::Filter(_), limit, .. } if !long(*limit) => {
+            ServiceClass::Foreground
+        }
         RemoteReq::BackupFetch { .. } | RemoteReq::Pushed { .. } => ServiceClass::Background,
         _ => ServiceClass::Foreground,
     }

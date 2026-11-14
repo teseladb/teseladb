@@ -1,16 +1,21 @@
-//! Three nodes in one process, the client on a node that does not lead the collection's ranges
-//! (010 FR-034): the `$match`es and the partial `$group` of an aggregation travel in bytes to the
-//! leader of each range on another node, which runs them on its core and answers its partial
-//! groups. The answer is the one of the same pipeline read and run in one place (a command with
+//! Three nodes in one process, the client on a node that does not lead the collection's ranges.
+//! The `$match`es and the partial `$group` of an aggregation travel in bytes to the leader of each
+//! range on another node, which runs them on its core and answers its partial groups (010
+//! FR-034); the answer is the one of the same pipeline read and run in one place (a command with
 //! `let` variables never splits), and a pipeline whose sums do not merge exactly still answers
-//! the same through the usual path.
+//! the same through the usual path. A scan's filter goes to the leaders the same way, which
+//! answer only the documents it accepts, the next parts asked for ahead (FR-027); a `find`, an
+//! `update` with `multi` and an aggregation's `$match` give what the same filter evaluated on
+//! this node gives.
 
 mod common;
 
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::backend::{scattered_groups, scattered_parts_sent_away};
+use teseladb_server::backend::{
+    filtered_parts_sent, parts_taken_ahead, scattered_groups, scattered_parts_sent_away,
+};
 use teseladb_server::node::Node;
 use teseladb_server::pushed::ran_for_other_nodes;
 use teseladb_bson::{Document, Value};
@@ -154,5 +159,76 @@ fn an_aggregation_runs_its_partial_group_on_the_leaders_of_other_nodes() {
     let Some(Value::Document(d)) = whole.first() else { panic!("{whole:?}") };
     let want: i32 = (900..DOCS).map(|i| i * 10).sum();
     assert_eq!(d.get("s"), Some(&Value::Int32(want)));
+    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+}
+
+fn find(c: &mut Client, filter: Document, collation: bool) -> Vec<Value> {
+    let mut cmd =
+        Document::new().with("find", "c").with("filter", filter).with("batchSize", 10_000);
+    if collation {
+        cmd.insert("collation", Document::new().with("locale", "en"));
+    }
+    let r = c.run("app", cmd);
+    assert!(ok(&r), "{r:?}");
+    batch(&r, "firstBatch")
+}
+
+/// `{field: value}` as `$expr`, which the leaders never evaluate: the usual path.
+fn as_expr(field: &str, value: i32) -> Document {
+    let eq = op("$eq", Value::Array(vec![format!("${field}").into(), value.into()]));
+    Document::new().with("$expr", eq)
+}
+
+#[test]
+fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
+    let nodes = cluster();
+    let mut c = Client::new(follower(&nodes));
+    load(&mut c);
+    let by_k = || Document::new().with("k", 3);
+    let want: Vec<i32> = (0..DOCS).filter(|i| i % 7 == 3).collect();
+    let (sent, ran, ahead) = (filtered_parts_sent(), ran_for_other_nodes(), parts_taken_ahead());
+    // A find: the same documents as the filter evaluated here, and with a collation (never sent).
+    let here = find(&mut c, as_expr("k", 3), false);
+    let ids = |docs: &[Value]| -> Vec<i32> {
+        docs.iter()
+            .map(|d| match d {
+                Value::Document(d) => match d.get("_id") {
+                    Some(Value::Int32(i)) => *i,
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(ids(&here), want);
+    assert_eq!(find(&mut c, by_k(), false), here);
+    assert_eq!(find(&mut c, by_k(), true), here);
+    // An aggregation whose `$match` the scan takes, not split (no `$group`).
+    let pipeline = |m: Document| {
+        vec![
+            Document::new().with("$match", m),
+            Document::new().with("$project", Document::new().with("v", 1)),
+        ]
+    };
+    let agg_here = aggregate(&mut c, &pipeline(as_expr("k", 3)), false);
+    assert_eq!(aggregate(&mut c, &pipeline(by_k()), false), agg_here);
+    assert_eq!(agg_here.len(), want.len());
+    // An update of every document the filter keeps.
+    let set = Document::new().with("$set", Document::new().with("u", 1));
+    let many = Document::new().with("q", by_k()).with("u", set).with("multi", true);
+    let update =
+        Document::new().with("update", "c").with("updates", Value::Array(vec![many.into()]));
+    let r = c.run("app", update);
+    assert_eq!(
+        r.get("nModified"),
+        Some(&Value::Int32(i32::try_from(want.len()).unwrap())),
+        "{r:?}"
+    );
+    assert_eq!(ids(&find(&mut c, as_expr("u", 1), false)), want);
+    // The filter went to leaders on other nodes, which ran it for this one, and parts asked for
+    // ahead served the scans.
+    assert!(filtered_parts_sent() > sent);
+    assert!(ran_for_other_nodes() > ran);
+    assert!(parts_taken_ahead() > ahead);
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
 }

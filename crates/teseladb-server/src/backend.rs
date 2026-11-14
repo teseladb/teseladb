@@ -7,6 +7,7 @@
 mod across;
 mod intent_wait;
 mod outside;
+mod pushed_scan;
 mod scatter;
 mod span;
 mod spans;
@@ -14,6 +15,7 @@ mod together;
 mod txn_reaper;
 
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
+pub use pushed_scan::{filtered_parts_sent, parts_taken_ahead};
 pub use scatter::{scattered_groups, scattered_parts_sent_away};
 pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
@@ -148,6 +150,8 @@ pub struct ServerBackend {
     committed: Hlc,
     /// What its reads served without the cores keep (005 FR-028).
     outside: outside::Outside,
+    /// The parts of a filtered scan asked for ahead from the leaders of their ranges (010 FR-027).
+    ahead: pushed_scan::ReadAhead,
     /// How long it spins for a core's answer before it sleeps, after the answers it waited for
     /// (H-042).
     spin: std::cell::Cell<teseladb_io::spin::AdaptiveSpin>,
@@ -185,6 +189,7 @@ impl ServerBackend {
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
             outside: outside::Outside::default(),
+            ahead: pushed_scan::ReadAhead::default(),
             spin: std::cell::Cell::default(),
         }
     }
@@ -1096,6 +1101,7 @@ impl Backend for ServerBackend {
         concern: ReadConcern,
         keep: &mut teseladb_wire::commands::Keep<'_>,
         block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
+        sent: Option<&[u8]>,
     ) -> Result<teseladb_wire::commands::Matching, CommandError> {
         // On this thread when the range's view serves it, for a read at the latest mark on the
         // leaders (005 FR-028, FR-031): the filter runs on the stored bytes (010 FR-027).
@@ -1107,6 +1113,12 @@ impl Backend for ServerBackend {
                 self.scan_matching_outside((start, end), examine, concern, (keep, block))
             {
                 stage_since(Stage::ScanOutside, began);
+                return Ok(found);
+            }
+            // A range led elsewhere evaluates the filter on its leader (010 FR-027).
+            if let Some(filter) = sent
+                && let Some(found) = self.scan_matching_sent((start, end), examine, concern, filter)
+            {
                 return Ok(found);
             }
         }
@@ -1255,6 +1267,7 @@ impl Backend for ServerBackend {
     }
 
     fn end_operation(&mut self) {
+        self.ahead.clear();
         self.release_pins();
         self.release_outside();
     }

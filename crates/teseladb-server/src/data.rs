@@ -1018,7 +1018,7 @@ impl DataCore {
             Client::Worked(client, work, limit) => {
                 // A refusal goes back as it is: the node's handle sends it on to the leader.
                 let r = r.and_then(|reply| match reply {
-                    RemoteReply::Rows(rows) => Ok(RemoteReply::Pushed(work.apply(&rows, limit))),
+                    RemoteReply::Rows(rows) => Ok(RemoteReply::Pushed(work.apply(rows, limit))),
                     _ => Err(RangeError::Unavailable),
                 });
                 if r.is_ok() && matches!(*client, Client::Remote(..)) {
