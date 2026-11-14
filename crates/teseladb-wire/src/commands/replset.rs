@@ -751,18 +751,24 @@ pub fn get_status<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     if let (Some(e), Some(pi)) = (election, primary_index) {
         let me_index = member_index(&rs, me);
         let priority = rs.members()[me_index].priority();
+        // The process voted only in the designations after it started (002 T050).
+        let voted = |at: teseladb_hlc::Hlc| at.physical >= facts.start_ms;
+        let prior = p.previous.as_ref().map(|v| v.primary.as_str());
+        let prior = prior.and_then(|h| rs.members().iter().position(|m| m.host() == h));
         if Some(me_index) == primary_index {
-            out.push("electionCandidateMetrics", candidate_metrics(e, &rs, majority, priority));
-            // Its vote in the designation before, as a secondary (002 T050).
-            if let Some(v) = &p.previous
-                && let Some(candidate) = rs.members().iter().position(|m| m.host() == v.primary)
+            let named = prior.filter(|_| knows_prior(&e.reason)).map(index);
+            let metrics = candidate_metrics(e, &rs, (majority, priority), named);
+            out.push("electionCandidateMetrics", metrics);
+            // Its vote in the designation before, as a secondary.
+            if let (Some(v), Some(candidate)) = (&p.previous, prior)
+                && voted(v.at)
             {
                 out.push(
                     "electionParticipantMetrics",
                     previous_metrics(v, index(candidate), priority),
                 );
             }
-        } else {
+        } else if voted(e.at) {
             out.push(
                 "electionParticipantMetrics",
                 participant_metrics(e, &rs, index(pi), priority),
@@ -795,11 +801,11 @@ fn date_of(at: teseladb_hlc::Hlc) -> Value {
 fn candidate_metrics(
     e: &super::presentation::Election,
     rs: &ReplicaSet,
-    majority: i32,
-    priority: f64,
+    (majority, priority): (i32, f64),
+    prior: Option<i32>,
 ) -> Document {
     let before = op_time_doc(e.at, rs.term().saturating_sub(1));
-    Document::new()
+    let d = Document::new()
         .with("lastElectionReason", e.reason.as_str())
         .with("lastElectionDate", date_of(e.at))
         .with("electionTerm", rs.term())
@@ -808,10 +814,22 @@ fn candidate_metrics(
         .with("lastSeenOpTimeAtElection", before)
         .with("numVotesNeeded", majority)
         .with("priorityAtElection", priority)
-        .with("electionTimeoutMillis", ELECTION_TIMEOUT_MS)
-        .with("numCatchUpOps", 0i64)
+        .with("electionTimeoutMillis", ELECTION_TIMEOUT_MS);
+    // The primary it took over from, after a takeover or a step-up (measured on 9.0.4).
+    let d = match prior {
+        Some(id) => d.with("priorPrimaryMemberId", id),
+        None => d,
+    };
+    d.with("numCatchUpOps", 0i64)
         .with("newTermStartDate", date_of(e.at))
         .with("wMajorityWriteAvailabilityDate", date_of(e.at))
+}
+
+/// Whether a designation for `reason` took over from a live primary, which a reference primary
+/// names in `priorPrimaryMemberId`: a priority takeover or a step-up, not an election after the
+/// primary fell.
+fn knows_prior(reason: &str) -> bool {
+    reason == REASON_STEP_UP || reason == super::presentation::REASON_TAKEOVER
 }
 
 /// `electionParticipantMetrics` of the other members: each took the designation as its vote.
@@ -917,4 +935,33 @@ pub fn member_write_reply(
         out.push(k, v.clone());
     }
     out
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::super::presentation::{Election, REASON_TAKEOVER, REASON_TIMEOUT};
+    use super::*;
+    use teseladb_topology::replset::Member;
+
+    fn set() -> ReplicaSet {
+        let members = vec![Member::new("a:1"), Member::new("b:1"), Member::new("c:1")];
+        ReplicaSet::new("rs0", members, Some("b:1"), 1, 3).expect("set")
+    }
+
+    #[test]
+    fn a_takeover_names_its_prior_primary_after_the_election_timeout() {
+        let at = teseladb_hlc::Hlc { physical: 5, logical: 0 };
+        let e = Election { at, reason: REASON_TAKEOVER.into() };
+        let d = candidate_metrics(&e, &set(), (2, 2.0), Some(0));
+        let keys: Vec<&str> = d.iter().map(|(k, _)| k).collect();
+        let place = |k: &str| keys.iter().position(|x| *x == k).expect(k);
+        assert_eq!(place("priorPrimaryMemberId"), place("electionTimeoutMillis") + 1);
+        assert_eq!(d.get("priorPrimaryMemberId"), Some(&Value::Int32(0)));
+        assert_eq!(d.get("priorityAtElection"), Some(&Value::Double(2.0)));
+        let none = candidate_metrics(&e, &set(), (2, 1.0), None);
+        assert!(none.get("priorPrimaryMemberId").is_none());
+        assert!(knows_prior(REASON_STEP_UP) && knows_prior(REASON_TAKEOVER));
+        assert!(!knows_prior(REASON_TIMEOUT));
+    }
 }

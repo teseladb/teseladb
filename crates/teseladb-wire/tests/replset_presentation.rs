@@ -578,6 +578,31 @@ fn status_with_the_election() {
     assert_eq!(me.frozen_until_ms, m.now + 10_000);
 }
 
+/// A reference process shows only the votes it gave: one started after a designation did not vote
+/// in it (measured on 9.0.4, 14-11-2026, 002 T050).
+#[test]
+fn status_shows_only_the_votes_the_process_gave() {
+    let mut m = node();
+    replica(&mut m, N2);
+    m.now += 1_000;
+    replica(&mut m, N1);
+    let r = status_of(&mut m);
+    assert!(r.get("electionParticipantMetrics").is_some(), "it voted for N2: {r:?}");
+    m.facts.start_ms = m.now + 10_000;
+    m.now += 20_000;
+    let r = status_of(&mut m);
+    assert_eq!(r.get("electionParticipantMetrics"), None, "{r:?}");
+    assert!(r.get("electionCandidateMetrics").is_some(), "{r:?}");
+    // A secondary that started after the primary's designation shows no vote either.
+    replica(&mut m, N2);
+    let r = status_of(&mut m);
+    assert!(r.get("electionParticipantMetrics").is_some(), "started before this one: {r:?}");
+    m.facts.start_ms = m.now + 30_000;
+    m.now += 40_000;
+    let r = status_of(&mut m);
+    assert_eq!(r.get("electionParticipantMetrics"), None, "{r:?}");
+}
+
 /// `replSetSyncFrom` answers as the reference server 9.0.4 for a host outside the set and a value
 /// that is not one (`f1.js`).
 #[test]
