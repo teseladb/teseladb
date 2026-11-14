@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use teseladb_hlc::{Hlc, Next};
+use teseladb_keys::zone::Zones;
 use teseladb_lsm::{
     BlockNeed, Kind, Published, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep,
     ViewCache,
@@ -614,7 +615,7 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         supply: impl FnMut(&BlockNeed) -> bool,
-        keep: impl FnMut(&[&[u8]]) -> u64,
+        keep: (impl FnMut(&[&[u8]]) -> u64, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let most = (examine, blocks, &self.begin());
         self.scan_matching_begun(cache, span, most, now, concern, supply, keep)
@@ -625,7 +626,9 @@ impl RangeView {
     /// it on the stored bytes and leaves the rest where they are. `keep` takes the documents a
     /// batch of at most [`MATCH_BATCH`] at a time and gives the bits of those it accepts (bit
     /// `i` for the document at `i`; 010 FR-028). It reads at most `blocks` blocks from their
-    /// files once it has examined a document, as a [`Part`] does.
+    /// files once it has examined a document, as a [`Part`] does. `block` says whether a data
+    /// block may hold a document `keep` accepts, from its zone map: the blocks it rules out are
+    /// passed over unread and their documents are not examined (004 FR-039).
     pub fn scan_matching_begun(
         &self,
         cache: &mut ViewCache,
@@ -634,7 +637,7 @@ impl RangeView {
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
-        mut keep: impl FnMut(&[&[u8]]) -> u64,
+        (mut keep, block): (impl FnMut(&[&[u8]]) -> u64, &dyn Fn(&dyn Zones) -> bool),
     ) -> Option<Matched> {
         let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
@@ -649,7 +652,7 @@ impl RangeView {
             if batch.len() == MATCH_BATCH {
                 left_out = keep_batch(&mut batch, &mut keep, &mut out);
             }
-            match scan.next(&self.lsm) {
+            match scan.next_pruned(&self.lsm, block) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
                     Decline::Intent.count();
                     return None;

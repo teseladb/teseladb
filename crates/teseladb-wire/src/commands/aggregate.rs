@@ -990,7 +990,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
             "$currentOp must be run against the 'admin' database with {aggregate: 1}",
         ));
     }
-    let pipeline = Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
+    let mut pipeline =
+        Pipeline::parse_command(&stages, &ctx_vars, on_collection).map_err(from_mql)?;
     teseladb_exec::pipeline::optimize::optimize_stages(&stages, a.vars.as_ref())
         .map_err(from_mql)?;
     check_system_namespace(&pipeline, &ns, on_collection)?;
@@ -1027,6 +1028,11 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         let operation = usize::try_from(shared.params.operation_memory).unwrap_or(usize::MAX);
         shared.spill.stage_limit().min(operation)
     };
+    // The `$sort` of the query plan holds only the fields the rest uses, as RefDb's does
+    // (010 FR-010).
+    if on_collection && pipeline.reads_collection() {
+        pipeline.narrow_sort_input(&stage_docs);
+    }
     // The system variables are always there; the stages that split read none (`$$`).
     let scatter = (plans_read && !find && ctx.cmd.get("let").is_none())
         .then(|| pipeline.scatter(&stage_docs, true, limit))

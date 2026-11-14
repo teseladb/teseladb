@@ -538,7 +538,9 @@ pub trait Backend {
     /// Examines at most `examine` documents of `[start, end)` in key order and gives those
     /// `keep` accepts, handing it the documents a batch at a time (010 FR-027, FR-028). A
     /// backend that can evaluates `keep` on the stored bytes and copies only what it accepts;
-    /// by default it reads them all and filters.
+    /// by default it reads them all and filters. A backend whose storage keeps zone maps passes
+    /// over, unread and unexamined, the blocks for which `block` says no document of theirs can
+    /// be accepted (004 FR-039).
     fn scan_matching(
         &mut self,
         start: &[u8],
@@ -546,6 +548,7 @@ pub trait Backend {
         examine: usize,
         concern: ReadConcern,
         keep: &mut Keep<'_>,
+        _block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
     ) -> Result<Matching, CommandError> {
         matching_by_scan(self, (start, end), examine, concern, keep)
     }

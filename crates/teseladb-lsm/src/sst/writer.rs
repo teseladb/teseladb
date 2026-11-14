@@ -12,6 +12,7 @@ use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::reader::{BlockStats, Table};
 use super::value::ValueRef;
+use super::zone::ZoneBuilder;
 use super::{ALIGN, PAD, filter, pad, put_varint};
 use crate::config::Codec;
 use crate::entry::{self, Kind, RangeTombstone};
@@ -86,6 +87,11 @@ pub(crate) struct TableWriter {
     /// The value files its references point to, by slot: their numbers and the bytes the
     /// references keep alive (FR-034).
     slots: Vec<(u64, u64)>,
+    /// The zone map of its data blocks (FR-039); none for a history file, whose values may be
+    /// deltas, and for a value file.
+    zones: Option<ZoneBuilder>,
+    /// The logical key of the last version of the block just written.
+    block_last: Vec<u8>,
 }
 
 impl TableWriter {
@@ -110,6 +116,8 @@ impl TableWriter {
             versions: 0,
             key: None,
             slots: Vec::new(),
+            zones: Some(ZoneBuilder::default()),
+            block_last: Vec::new(),
         }
     }
 
@@ -129,7 +137,7 @@ impl TableWriter {
     /// The writer of a history file: an old version goes as a delta against the next newer
     /// version of its key when that takes fewer bytes (FR-035).
     pub(crate) fn for_history(self) -> TableWriter {
-        TableWriter { data: self.data.with_deltas(), ..self }
+        TableWriter { data: self.data.with_deltas(), zones: None, ..self }
     }
 
     /// The writer compressing its blocks with the dictionaries of `dicts` too.
@@ -169,6 +177,11 @@ impl TableWriter {
 
     fn flush_block(&mut self) -> Handle {
         let last = self.data.last_key().to_vec();
+        if let Some(z) = &mut self.zones {
+            z.end_block();
+        }
+        self.block_last.clear();
+        self.block_last.extend_from_slice(entry::logical(&last));
         let payload = self.data.finish();
         let offset = self.taken + self.out.len() as u64;
         let first = self.block_first.take().unwrap_or_default();
@@ -200,6 +213,9 @@ impl TableWriter {
     /// Adds a version; internal keys come in order.
     pub(crate) fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
         self.open_block(ikey, value.len());
+        if let Some(z) = &mut self.zones {
+            z.add(ikey, kind, Some(value));
+        }
         self.data.add(ikey, kind, value);
         self.note(ikey);
     }
@@ -217,6 +233,9 @@ impl TableWriter {
         self.slots[slot].1 += r.bytes();
         let encoded = ValueRef { slot: slot as u32, ..*r }.encode();
         self.open_block(ikey, encoded.len());
+        if let Some(z) = &mut self.zones {
+            z.add(ikey, kind, None);
+        }
         self.data.add_ref(ikey, kind, &encoded);
         self.note(ikey);
     }
@@ -224,6 +243,7 @@ impl TableWriter {
     /// Adds a version to a value file in a block of its own, and returns the reference to it
     /// (slot 0, which the file of its key sets) (FR-034).
     pub(crate) fn add_alone(&mut self, ikey: &[u8], value: &[u8]) -> ValueRef {
+        self.zones = None;
         if !self.data.is_empty() {
             self.flush_block();
         }
@@ -248,7 +268,12 @@ impl TableWriter {
             self.flush_block();
         }
         if self.data.is_empty() {
-            self.block_first = Some(entry::logical(ikey).to_vec());
+            let first = entry::logical(ikey);
+            if let Some(z) = self.zones.as_mut().filter(|_| self.block_last == first) {
+                // The versions of the previous block's last key go on in this one.
+                z.continues();
+            }
+            self.block_first = Some(first.to_vec());
         }
     }
 
@@ -307,6 +332,10 @@ impl TableWriter {
         }
         let meta_start = self.taken + self.out.len() as u64;
         let filter = self.meta_block(&filter::build(&self.hashes));
+        let zones = self.zones.take().and_then(ZoneBuilder::finish).map(|z| {
+            let h = self.meta_block(&z);
+            (h.offset, h.len)
+        });
         tombstones.sort_by(|a, b| (&a.start, &a.end, a.ts).cmp(&(&b.start, &b.end, b.ts)));
         let mut lo = self.first_logical.take();
         let mut hi = self.last_logical.take();
@@ -326,6 +355,7 @@ impl TableWriter {
             tombstones,
             dictionary: self.file_dict.as_ref().map_or(0, |(v, _)| *v),
             values: self.slots.iter().map(|(_, b)| *b).collect(),
+            zones,
         };
         let props_handle = self.meta_block(&props.encode());
         let index_payload = self.index.finish();

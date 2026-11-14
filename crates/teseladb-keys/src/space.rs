@@ -134,6 +134,12 @@ const META_TAIL: usize = 5;
 /// Bytes of a capped collection's document after its prefix: the insertion number.
 const CAPPED_SEQ: usize = 8;
 
+/// Whether `key` is in the documents of a collection: a document's key or one of its change
+/// metas (014), whose values are documents or the history of one.
+pub fn in_documents(key: &[u8]) -> bool {
+    key.first() == Some(&DATA) && key.get(9..DOC_PREFIX) == Some(&DOCUMENTS.to_be_bytes()[..])
+}
+
 /// The document of `key` if `key` is one of its change metas (014, `document · 00 · position`):
 /// a document's key whose values are complete, then `00` and four bytes. An encoded value never
 /// starts with `00`, so after whole values the byte `00` is no other key's; a document's key that

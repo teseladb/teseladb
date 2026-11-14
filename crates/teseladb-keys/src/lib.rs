@@ -24,6 +24,7 @@ mod encode;
 pub mod space;
 mod typebits;
 mod version;
+pub mod zone;
 
 pub use bounds::{FieldBounds, Interval, KeyRange, bounds, next_prefix};
 pub use bucket::{DOCUMENT_BUCKETS, bucket};
