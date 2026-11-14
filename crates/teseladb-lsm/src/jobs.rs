@@ -225,6 +225,9 @@ pub(crate) struct FlushJob {
     writer: Option<TableWriter>,
     /// The writer of the history file, from its first version on.
     history: Option<TableWriter>,
+    /// The version added just before, when it is a `Put` with its value in line: the base of the
+    /// next one's delta in the history file (FR-035).
+    newer: Option<(Vec<u8>, Vec<u8>)>,
     split: Split,
     /// The last internal key written; the next chunk starts after it.
     last: Option<Vec<u8>>,
@@ -277,6 +280,7 @@ impl FlushJob {
             writer: has_data.then(|| new_writer(&format)),
             format,
             history: None,
+            newer: None,
             split: Split::default(),
             last: None,
             table: None,
@@ -301,12 +305,17 @@ impl FlushJob {
             self.values.start(self.values_number, w, &self.dir, &mut self.queued);
         }
         let stored = apart.then(|| self.values.put(ikey, value));
-        let to = |w: &mut TableWriter| match &stored {
-            Some((file, r)) => w.add_ref(ikey, kind, *file, r),
-            None => w.add(ikey, kind, value),
+        let newer = std::mem::take(&mut self.newer);
+        if stored.is_none() && kind == Kind::Put {
+            self.newer = Some((ikey.to_vec(), value.to_vec()));
+        }
+        let to = |w: &mut TableWriter, old: bool| match (&stored, &newer) {
+            (Some((file, r)), _) => w.add_ref(ikey, kind, *file, r),
+            (None, Some((nkey, nvalue))) if old => w.add_old(ikey, kind, value, (nkey, nvalue)),
+            (None, _) => w.add(ikey, kind, value),
         };
         if !self.split.sets_apart(ikey, kind) {
-            to(self.writer.as_mut().expect("a flush with data has a writer"));
+            to(self.writer.as_mut().expect("a flush with data has a writer"), false);
             return;
         }
         if self.history.is_none() {
@@ -317,7 +326,7 @@ impl FlushJob {
             });
             self.history = Some(new_writer(&self.format).for_history());
         }
-        to(self.history.as_mut().expect("started above"));
+        to(self.history.as_mut().expect("started above"), true);
     }
 
     /// Queues the write of what each writer has ready, when it fills a chunk.

@@ -24,6 +24,7 @@ use teseladb_types::Bytes;
 
 use super::{Bad, delta, get_varint, lz4, put_varint};
 use crate::entry::{Kind, logical};
+use teseladb_keys::VERSION_LEN;
 
 /// Bytes after the payload of a framed block.
 pub(crate) const TRAILER: usize = 1 + ENCRYPTION + 4;
@@ -168,6 +169,12 @@ pub(crate) struct BlockBuilder {
 /// entry with it.
 const PATCH: u8 = 0x80;
 
+/// The bit of an entry's kind byte that marks its value as `base · delta` (FR-035): `base`, the
+/// 12 bytes of a timestamp as in an internal key, names the next newer version of the key, which
+/// is not the entry before it but one in another block or in the data file of the history file.
+/// Files written before have no entry with it.
+const BASE: u8 = 0x20;
+
 /// The bit of an entry's kind byte that marks its value as a reference to a value file (FR-034):
 /// the value is in a block of that file, and the entry holds where. Files written before have no
 /// entry with it.
@@ -217,16 +224,31 @@ impl BlockBuilder {
 
     /// Adds an entry; keys come in order.
     pub(crate) fn add(&mut self, key: &[u8], kind: Kind, value: &[u8]) {
-        self.add_entry(key, kind, value, false);
+        self.add_entry(key, kind, value, false, None);
+    }
+
+    /// Adds an old version whose next newer version is `newer` (its internal key and value, a
+    /// `Put` with the value in line): in a builder with deltas it goes as a delta against it,
+    /// against the entry before when that is the one, or naming its timestamp otherwise, when
+    /// the delta is smaller (FR-035).
+    pub(crate) fn add_old(&mut self, key: &[u8], kind: Kind, value: &[u8], newer: (&[u8], &[u8])) {
+        self.add_entry(key, kind, value, false, Some(newer));
     }
 
     /// Adds an entry whose value is a reference to a value file (FR-034); it is never a delta,
     /// and the entry after it is never a delta against it.
     pub(crate) fn add_ref(&mut self, key: &[u8], kind: Kind, encoded: &[u8]) {
-        self.add_entry(key, kind, encoded, true);
+        self.add_entry(key, kind, encoded, true, None);
     }
 
-    fn add_entry(&mut self, key: &[u8], kind: Kind, value: &[u8], is_ref: bool) {
+    fn add_entry(
+        &mut self,
+        key: &[u8],
+        kind: Kind,
+        value: &[u8],
+        is_ref: bool,
+        newer: Option<(&[u8], &[u8])>,
+    ) {
         let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
         let restart = self.since_restart == self.interval
             || self.restarts.is_empty()
@@ -249,13 +271,32 @@ impl BlockBuilder {
             }
             _ => None,
         };
+        // Against a newer version elsewhere: its timestamp, then the delta.
+        let based = match newer {
+            Some((nkey, nvalue))
+                if self.deltas
+                    && patch.is_none()
+                    && !is_ref
+                    && kind == Kind::Put
+                    && logical(nkey) == logical(key) =>
+            {
+                delta::encode(nvalue, value).and_then(|d| {
+                    let mut b = Vec::with_capacity(VERSION_LEN + d.len());
+                    b.extend_from_slice(&nkey[nkey.len() - VERSION_LEN..]);
+                    b.extend_from_slice(&d);
+                    (b.len() < value.len()).then_some(b)
+                })
+            }
+            _ => None,
+        };
         if self.deltas {
             self.last_value = (!is_ref).then(|| (kind, value.to_vec()));
         }
-        let (flag, stored) = match &patch {
-            Some(d) => (PATCH, d.as_slice()),
-            None if is_ref => (REF, value),
-            None => (0, value),
+        let (flag, stored) = match (&patch, &based) {
+            (Some(d), _) => (PATCH, d.as_slice()),
+            (None, Some(b)) => (BASE, b.as_slice()),
+            (None, None) if is_ref => (REF, value),
+            (None, None) => (0, value),
         };
         put_varint(&mut self.buf, shared as u64);
         put_varint(&mut self.buf, (key.len() - shared) as u64);
@@ -298,6 +339,8 @@ struct Raw {
     kind: Kind,
     /// The value is a delta against the value of the entry before (FR-035).
     patch: bool,
+    /// The value is `base · delta` against a version elsewhere (FR-035).
+    based: bool,
     /// The value is a reference to a value file (FR-034).
     is_ref: bool,
     value: Range<usize>,
@@ -336,14 +379,15 @@ impl Block {
         let delta = p..p.checked_add(unshared).ok_or(Bad)?;
         let kind_at = delta.end;
         let byte = *d.get(kind_at).ok_or(Bad)?;
-        let kind = Kind::from_u8(byte & !(PATCH | REF)).ok_or(Bad)?;
-        let (patch, is_ref) = (byte & PATCH != 0, byte & REF != 0);
+        let kind = Kind::from_u8(byte & !(PATCH | REF | BASE)).ok_or(Bad)?;
+        let (patch, is_ref, based) = (byte & PATCH != 0, byte & REF != 0, byte & BASE != 0);
         let value = kind_at + 1..(kind_at + 1).checked_add(vlen).ok_or(Bad)?;
-        if value.end > d.len() || (patch && is_ref) {
+        let flags = u8::from(patch) + u8::from(is_ref) + u8::from(based);
+        if value.end > d.len() || flags > 1 || (based && vlen < VERSION_LEN) {
             return Err(Bad);
         }
         let next = value.end;
-        Ok((Raw { shared, delta, kind, patch, is_ref, value }, next))
+        Ok((Raw { shared, delta, kind, patch, is_ref, based, value }, next))
     }
 
     /// Key of the entry at restart point `i`, stored whole.
@@ -370,6 +414,10 @@ pub(crate) struct BlockCursor {
     patched: Option<Bytes>,
     /// The entry's value is a reference to a value file (FR-034).
     is_ref: bool,
+    /// The internal key of the entry with a base elsewhere ([`BASE`]) that the entry's value
+    /// depends on, itself or one before it in a run of deltas, until [`BlockCursor::resolve`]
+    /// gives that entry its base (FR-035).
+    pending: Option<Vec<u8>>,
     valid: bool,
 }
 
@@ -384,6 +432,7 @@ impl BlockCursor {
             value: 0..0,
             patched: None,
             is_ref: false,
+            pending: None,
             valid: false,
         }
     }
@@ -477,17 +526,26 @@ impl BlockCursor {
         if raw.shared > self.key.len() {
             return Err(Bad);
         }
-        self.patched = match raw.patch {
-            // The entry before is the next newer version of the key, and holds its value.
-            true if self.valid && !self.is_ref => {
-                let stored = &self.block.data[raw.value.clone()];
-                Some(Bytes::from_vec(delta::apply(self.value_slice(), stored)?))
-            }
+        let (patched, pending) = match raw.patch {
+            // The entry before is the next newer version of the key, and holds its value, or
+            // will once the entry its value depends on has its base.
+            true if self.valid && !self.is_ref => match self.pending.clone() {
+                Some(start) => (None, Some(start)),
+                None => {
+                    let stored = &self.block.data[raw.value.clone()];
+                    (Some(Bytes::from_vec(delta::apply(self.value_slice(), stored)?)), None)
+                }
+            },
             true => return Err(Bad),
-            false => None,
+            false => (None, None),
         };
+        self.patched = patched;
+        self.pending = pending;
         self.key.truncate(raw.shared);
         self.key.extend_from_slice(&self.block.data[raw.delta]);
+        if raw.based {
+            self.pending = Some(self.key.clone());
+        }
         self.shared = raw.shared;
         self.kind = raw.kind;
         self.is_ref = raw.is_ref;
@@ -520,6 +578,36 @@ impl BlockCursor {
     /// Whether the entry's value is a reference to a value file (FR-034).
     pub(crate) fn is_ref(&self) -> bool {
         self.is_ref
+    }
+
+    /// The internal key of the entry with a base elsewhere that the entry's value depends on,
+    /// while it has not been given its base: the value is not readable until then (FR-035).
+    pub(crate) fn pending(&self) -> Option<&[u8]> {
+        self.pending.as_deref()
+    }
+
+    /// The internal key of the base of the entry, when it is the one with a base elsewhere that
+    /// waits for it: its logical key and the timestamp its value names.
+    pub(crate) fn base(&self) -> Option<Vec<u8>> {
+        if self.pending.as_deref() != Some(self.key.as_slice()) {
+            return None;
+        }
+        let ts = &self.block.data[self.value.start..self.value.start + VERSION_LEN];
+        let mut k = logical(&self.key).to_vec();
+        k.extend_from_slice(ts);
+        Some(k)
+    }
+
+    /// Gives the entry waiting for its base the base's value: its value is rebuilt, and so are
+    /// those of the deltas after it as the cursor advances (FR-035).
+    pub(crate) fn resolve(&mut self, base: &[u8]) -> Result<(), Bad> {
+        if self.base().is_none() {
+            return Err(Bad);
+        }
+        let stored = &self.block.data[self.value.start + VERSION_LEN..self.value.end];
+        self.patched = Some(Bytes::from_vec(delta::apply(base, stored)?));
+        self.pending = None;
+        Ok(())
     }
 
     /// Value of the entry, sharing the block's bytes.
@@ -928,5 +1016,65 @@ mod tests {
         payload[5] |= PATCH;
         let block = Block::parse(Bytes::from_vec(payload)).unwrap();
         assert_eq!(BlockCursor::first(block).err(), Some(Bad));
+    }
+
+    /// FR-035: an old version whose next newer version is elsewhere names its timestamp and
+    /// waits for its value, as do the deltas after it, until it is given its base; then every
+    /// one reads whole, and a seek into the run waits the same way.
+    #[test]
+    fn a_delta_against_a_version_elsewhere_waits_for_its_base() {
+        use crate::entry::internal_key;
+        let at = |p: u64| teseladb_keys::Hlc { physical: p, logical: 0 };
+        let doc = |v: u8| -> Vec<u8> {
+            let mut d = vec![7u8; 200];
+            d[10] = v;
+            d[150] = v.wrapping_mul(3);
+            d
+        };
+        let newest = (internal_key(b"k", at(9)), doc(9));
+        let mut b = BlockBuilder::new(16).with_deltas();
+        let mut newer = newest.clone();
+        for v in (5..9u8).rev() {
+            let k = internal_key(b"k", at(u64::from(v)));
+            b.add_old(&k, Kind::Put, &doc(v), (&newer.0, &newer.1));
+            newer = (k, doc(v));
+        }
+        let payload = b.finish();
+        assert!(payload.len() < 200, "{} bytes", payload.len());
+        let block = Block::parse(Bytes::from_vec(payload)).unwrap();
+        let mut c = BlockCursor::first(block.clone()).unwrap();
+        assert_eq!(c.base(), Some(newest.0.clone()));
+        assert_eq!(c.pending(), Some(c.key()));
+        assert_eq!(c.resolve(b"not the base"), Err(Bad), "the delta does not apply");
+        let mut waiting = c.clone();
+        waiting.advance().unwrap();
+        assert_eq!((waiting.pending(), waiting.base()), (Some(c.key()), None));
+        c.resolve(&newest.1).unwrap();
+        for v in (5..9u8).rev() {
+            assert_eq!((c.pending(), c.value_slice()), (None, doc(v).as_slice()), "version {v}");
+            c.advance().unwrap();
+        }
+        assert!(!c.valid());
+        let sought = BlockCursor::seek(block, &internal_key(b"k", at(6)), crate::entry::compare);
+        assert!(sought.unwrap().pending().is_some());
+        // Without a newer version, or against a reference, it goes whole.
+        let mut b = BlockBuilder::new(16).with_deltas();
+        b.add(&internal_key(b"k", at(5)), Kind::Put, &doc(5));
+        let c = BlockCursor::first(Block::parse(Bytes::from_vec(b.finish())).unwrap()).unwrap();
+        assert_eq!((c.pending(), c.value_slice()), (None, doc(5).as_slice()));
+    }
+
+    #[test]
+    fn a_base_with_another_flag_or_too_short_is_refused() {
+        for (flags, value) in
+            [(BASE | PATCH, &[0u8; 20][..]), (BASE | REF, &[0; 20]), (BASE, &[0; 4])]
+        {
+            let mut b = BlockBuilder::new(16);
+            b.add(b"k1", Kind::Put, value);
+            let mut payload = b.finish();
+            payload[5] |= flags;
+            let block = Block::parse(Bytes::from_vec(payload)).unwrap();
+            assert_eq!(BlockCursor::first(block).err(), Some(Bad), "{flags:#x}");
+        }
     }
 }
