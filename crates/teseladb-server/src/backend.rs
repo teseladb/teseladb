@@ -52,7 +52,8 @@ use teseladb_wire::commands::{Backend, LdapLogin, Shared, WriteOp, lock, txn_sta
 use teseladb_wire::error::{
     CommandError, DATABASE_DIFFER_CASE, FAILED_TO_SATISFY_READ_PREFERENCE, INDEX_NOT_FOUND,
     INTERNAL_ERROR, INTERRUPTED_AT_SHUTDOWN, MAX_TIME_MS_EXPIRED, NAMESPACE_EXISTS,
-    NAMESPACE_NOT_FOUND, NETWORK_TIMEOUT, NOT_WRITABLE_PRIMARY, RangeContext, from_range,
+    NAMESPACE_NOT_FOUND, NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT, NETWORK_TIMEOUT,
+    NOT_WRITABLE_PRIMARY, RangeContext, from_range,
 };
 use teseladb_types::NodeId;
 
@@ -485,7 +486,7 @@ impl ServerBackend {
                 return Ok(c);
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -501,7 +502,7 @@ impl ServerBackend {
                 return Ok(teseladb_wire::commands::DdlBatch { records, floor, resolved });
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -514,10 +515,13 @@ impl ServerBackend {
         req: CatalogReq,
     ) -> Result<Result<Option<CollectionEntry>, Group0Error>, CommandError> {
         let until = self.until();
+        // Whether the last answer of core 0 was that Group 0 has no leader.
+        let mut no_leader = false;
         loop {
             match self.ask(0, |tx| NodeMsg::Catalog(req.clone(), tx), until) {
                 Some(CatalogAnswer::Done(e)) => return Ok(Ok(e)),
                 Some(CatalogAnswer::Refused(e)) => return Ok(Err(e)),
+                Some(CatalogAnswer::Unavailable) => no_leader = true,
                 Some(
                     CatalogAnswer::Catalog(_)
                     | CatalogAnswer::Settings(_)
@@ -527,13 +531,12 @@ impl ServerBackend {
                     | CatalogAnswer::Documents(_)
                     | CatalogAnswer::Dump(_)
                     | CatalogAnswer::Tenants(..)
-                    | CatalogAnswer::Ddl(..)
-                    | CatalogAnswer::Unavailable,
-                )
-                | None => {}
+                    | CatalogAnswer::Ddl(..),
+                ) => no_leader = false,
+                None => {}
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, no_leader));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -624,7 +627,7 @@ impl ServerBackend {
                 return Ok(docs);
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -900,8 +903,26 @@ fn unsettled(e: &RangeError) -> bool {
     matches!(e, RangeError::Timeout | RangeError::Unavailable)
 }
 
-fn unavailable() -> CommandError {
-    CommandError::new(NOT_WRITABLE_PRIMARY, "Group 0 has no leader to take the catalog change")
+/// What a read or a change of the catalog answers once its wait for core 0 ends without an
+/// answer it can use (009 FR-006): `MaxTimeMSExpired` past the command's `maxTimeMS`,
+/// `NotWritablePrimary` when Group 0 said it has no leader, and otherwise a time limit of the
+/// node, `NetworkInterfaceExceededTimeLimit`. A `NotWritablePrimary` makes the driver drop the
+/// server for its next 30 s of server selection, which a change held back by the fence of the
+/// indexes does not deserve.
+fn catalog_gave_up(max_until: Option<Instant>, no_leader: bool) -> CommandError {
+    if max_until.is_some_and(|m| Instant::now() >= m) {
+        return CommandError::new(MAX_TIME_MS_EXPIRED, "operation exceeded time limit");
+    }
+    if no_leader {
+        return CommandError::new(
+            NOT_WRITABLE_PRIMARY,
+            "Group 0 has no leader to take the catalog change",
+        );
+    }
+    CommandError::new(
+        NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT,
+        "the catalog did not answer within the time limit",
+    )
 }
 
 /// How far behind the node's clock Group 0's last mark may be before a change stream's read
@@ -1010,7 +1031,7 @@ impl Backend for ServerBackend {
                 return Ok(all.into_iter().find(|(_, n, _)| n == name).map(|(id, _, _)| id));
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -1612,7 +1633,7 @@ impl Backend for ServerBackend {
                 return Ok(all);
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -1635,7 +1656,7 @@ impl Backend for ServerBackend {
                 return Ok(all);
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -1670,7 +1691,7 @@ impl Backend for ServerBackend {
                     .collect();
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -1711,7 +1732,7 @@ impl Backend for ServerBackend {
                 return Ok(all.into_iter().filter(|(k, _)| k.starts_with(prefix)).collect());
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }
@@ -1849,7 +1870,7 @@ impl Backend for ServerBackend {
                 return Ok(parameters_of(&all));
             }
             if Instant::now() >= until {
-                return Err(unavailable());
+                return Err(catalog_gave_up(self.max_until, false));
             }
             thread::sleep(RETRY_PAUSE);
         }

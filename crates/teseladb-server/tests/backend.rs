@@ -239,7 +239,7 @@ fn the_catalog_is_read_and_changed_through_core_zero() {
     let mut b = backend(vec![], vec![CatalogAnswer::Catalog(Arc::new(catalog))]);
     assert_eq!(b.collections().map(|c| c.len()), Ok(1));
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.collections().unwrap_err().code.code, 10107);
+    assert_eq!(b.collections().unwrap_err().code.code, 202);
     let index = IndexEntry {
         id: 4,
         collection: 1,
@@ -254,7 +254,7 @@ fn the_catalog_is_read_and_changed_through_core_zero() {
     );
     assert_eq!(b.indexes(1), Ok(vec![index]));
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.indexes(1).unwrap_err().code.code, 10107);
+    assert_eq!(b.indexes(1).unwrap_err().code.code, 202);
     let drop = CatalogCommand::Drop { ns: ns() };
     for (answer, code) in [
         (CatalogAnswer::Refused(Group0Error::NamespaceExists), 48),
@@ -268,7 +268,7 @@ fn the_catalog_is_read_and_changed_through_core_zero() {
         backend(vec![], vec![CatalogAnswer::Unavailable, CatalogAnswer::Done(Some(entry.clone()))]);
     assert_eq!(b.catalog_write(drop.clone()), Ok(Some(entry)));
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.catalog_write(drop).unwrap_err().code.code, 10107);
+    assert_eq!(b.catalog_write(drop).unwrap_err().code.code, 202);
 }
 
 #[test]
@@ -373,7 +373,7 @@ fn users_and_roles_are_read_and_changed_through_core_zero() {
     assert_eq!(b.principal(Principal::Role, "d", "r"), Ok(None));
     // No copy of Group 0 answers before the deadline.
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.principals(Principal::User, None).unwrap_err().code.code, 10107);
+    assert_eq!(b.principals(Principal::User, None).unwrap_err().code.code, 202);
     for (answer, want) in [
         (CatalogAnswer::Done(None), Ok(Ok(()))),
         (
@@ -852,7 +852,7 @@ fn group0_refusals_and_late_answers() {
     let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, CatalogAnswer::Documents(vec![])]);
     assert_eq!(b.config_documents("shards"), Ok(vec![]));
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.config_documents("shards").unwrap_err().code.code, 10107);
+    assert_eq!(b.config_documents("shards").unwrap_err().code.code, 202);
 }
 
 /// A transaction's reads through the backend (008 FR-003): a scan over two ranges at one mark up to
@@ -1065,7 +1065,7 @@ fn a_change_stream_reads_the_catalog_changes_and_moves_a_quiet_group_0() {
     let mut b = backend(vec![], vec![answer(old), refused]);
     assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 1);
     let mut b = backend(vec![], vec![]);
-    assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 10107);
+    assert_eq!(b.catalog_changes(floor).unwrap_err().code.code, 202);
 }
 
 /// 007 FR-025 and 010 T033: a tenant's number and the Group 0 settings once core 0 has Group 0, or
@@ -1078,14 +1078,14 @@ fn tenants_settings_and_other_operations_wait_for_core_zero() {
     let mut b = backend(vec![], vec![CatalogAnswer::Unavailable, tenants.clone(), tenants]);
     assert_eq!(b.tenant_named("acme"), Ok(Some(4)));
     assert_eq!(b.tenant_named("other"), Ok(None));
-    assert_eq!(b.tenant_named("acme").unwrap_err().code.code, 10107);
+    assert_eq!(b.tenant_named("acme").unwrap_err().code.code, 202);
     let settings: BTreeMap<Vec<u8>, Vec<u8>> =
         [(b"zone/a".to_vec(), vec![1]), (b"other".to_vec(), vec![2])].into();
     let answers = vec![CatalogAnswer::Unavailable, CatalogAnswer::Settings(settings)];
     let mut b = backend(vec![], answers);
     let zones = b.group0_settings(b"zone/").unwrap();
     assert_eq!(zones.into_iter().collect::<Vec<_>>(), vec![(b"zone/a".to_vec(), vec![1])]);
-    assert_eq!(b.group0_settings(b"zone/").unwrap_err().code.code, 10107);
+    assert_eq!(b.group0_settings(b"zone/").unwrap_err().code.code, 202);
     let op = Document::new().with("opid", 9);
     let listed = Document::new()
         .with("ops", Value::Array(vec![Value::Document(op.clone()), Value::Int32(1)]));
@@ -1459,4 +1459,35 @@ fn a_statement_barrier_asks_each_range_for_the_last_entry_of_each_term() {
     b.begin_statements();
     write_at(&mut b, 1);
     assert_eq!(b.statement_barrier(wc).unwrap_err().code.code, 89);
+}
+
+/// A change of the catalog whose wait for core 0 ends is a time limit, not a missing leader
+/// (009 FR-006): on 14-11-2026 a `createIndexes` held back by the fence of the indexes answered
+/// `NotWritablePrimary` and the driver dropped the node for 30 s of server selection.
+#[test]
+fn a_catalog_change_that_gets_no_answer_in_time_is_a_time_limit() {
+    use teseladb_meta::indexes::IndexCommand;
+    use teseladb_wire::error::{
+        MAX_TIME_MS_EXPIRED, NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT, NOT_WRITABLE_PRIMARY,
+    };
+    let script: CatalogScript = Arc::default();
+    let h = cores(Arc::default(), script.clone(), Arc::default());
+    let mut b = ServerBackend::new(h, 7).with_deadline(Duration::from_millis(100));
+    let ready = || IndexCommand::SetState { id: 1, state: IndexState::Ready };
+    // Core 0 holds the change (the fence of the indexes has not passed it).
+    let e = b.index_write(ready()).unwrap_err();
+    assert_eq!(e.code.code, NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT.code, "{e:?}");
+    // A read of the catalog with nothing published waits the same way.
+    let e = b.indexes(1).unwrap_err();
+    assert_eq!(e.code.code, NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT.code, "{e:?}");
+    // Group 0 says it has no leader until the end of the wait.
+    script.lock().unwrap().extend((0..1_000).map(|_| CatalogAnswer::Unavailable));
+    let e = b.index_write(ready()).unwrap_err();
+    assert_eq!(e.code.code, NOT_WRITABLE_PRIMARY.code, "{e:?}");
+    script.lock().unwrap().clear();
+    // The command's `maxTimeMS` ends first.
+    let soon = b.now_micros() / 1000 + 30;
+    b.set_deadline(Some(soon));
+    let e = b.index_write(ready()).unwrap_err();
+    assert_eq!(e.code.code, MAX_TIME_MS_EXPIRED.code, "{e:?}");
 }

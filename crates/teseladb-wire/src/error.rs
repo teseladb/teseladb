@@ -137,6 +137,9 @@ codes! {
     SAMPLE_SIZE = 28_747, "Location28747";
     /// A forwarded request timed out.
     NETWORK_TIMEOUT = 89, "NetworkTimeout";
+    /// A request of the node that got no answer within its time limit: what a `refrouter` answers
+    /// when a shard does not answer in time.
+    NETWORK_INTERFACE_EXCEEDED_TIME_LIMIT = 202, "NetworkInterfaceExceededTimeLimit";
     /// The codes `failGetMoreAfterCursorCheckout` may inject that the node has no other use for
     /// (006 FR-034).
     HOST_NOT_FOUND = 7, "HostNotFound";
