@@ -59,6 +59,16 @@ fn find(c: &mut Client, id: i32) -> Vec<Value> {
     batch(&r, "firstBatch")
 }
 
+/// Waits until the reads served outside the cores since `before` reach `least`. A connection's
+/// worker reports what it served every 64 reads of a range or 10 ms, and the rest when it ends:
+/// `c` gets a new connection so that the last reads of the old one are reported too.
+fn served_at_least(node: &Node<FileDisk>, c: &mut Client, before: u64, least: u64) {
+    *c = Client::new(node);
+    until("the reads served outside reported", || {
+        (served_outside() - before >= least).then_some(())
+    });
+}
+
 fn field(d: &Value, name: &str) -> Option<Value> {
     let Value::Document(d) = d else { panic!("{d:?}") };
     d.get(name).cloned()
@@ -99,7 +109,7 @@ fn a_read_by_id_is_served_without_the_core_also_from_the_files() {
     assert_eq!(field(&find(&mut c, 7)[0], "seen"), Some(Value::Boolean(true)));
     // The reads went outside the core (counted as each 64 of a range are reported), and some
     // of them read their blocks from the files.
-    assert!(served_outside() - served >= 64, "served outside: {}", served_outside() - served);
+    served_at_least(&node, &mut c, served, 64);
     assert!(blocks_read_outside() > blocks, "no block read from the files");
 }
 
@@ -148,7 +158,7 @@ fn scans_by_id_are_served_without_the_core_also_from_the_files() {
         let got: Vec<Option<Value>> = found.iter().map(|d| field(d, "_id")).collect();
         assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
     }
-    assert!(served_outside() - served >= 64, "scans outside: {}", served_outside() - served);
+    served_at_least(&node, &mut c, served, 64);
     assert!(blocks_read_outside() > blocks, "no block read from the files");
     // From the last key down (H-003): `$lte` with a descending sort.
     let served = served_outside();
@@ -159,8 +169,7 @@ fn scans_by_id_are_served_without_the_core_also_from_the_files() {
         let got: Vec<Option<Value>> = found.iter().map(|d| field(d, "_id")).collect();
         assert_eq!(got, want.iter().map(|&i| Some(Value::Int32(i))).collect::<Vec<_>>());
     }
-    let back = served_outside() - served;
-    assert!(back >= 64, "backward scans outside: {back}");
+    served_at_least(&node, &mut c, served, 64);
     for from in (0..DOCS).step_by(97) {
         let ids = vec![Value::Int32(from), Value::Int32(DOCS + 5), Value::Int32((from + 3) % DOCS)];
         let within = Document::new().with("_id", Document::new().with("$in", ids));
@@ -201,7 +210,7 @@ fn a_scan_right_after_a_write_answered_from_the_log_sees_it() {
             batch(&r, "firstBatch").iter().map(|d| field(d, "_id")).collect();
         assert_eq!(got, vec![Some(Value::Int32(id))], "the write answered before the scan");
     }
-    assert!(served_outside() - served >= 64, "scans outside: {}", served_outside() - served);
+    served_at_least(&node, &mut c, served, 64);
 }
 
 /// Each connection's thread prepares the evaluation of its update on the version it reads, and
