@@ -49,6 +49,9 @@ pub struct Report {
     pub notes: Vec<String>,
     /// Machine it ran on (FR-022).
     pub fingerprint: Option<Fingerprint>,
+    /// Connections of the run (`--concurrency`), so that two systems compare only at the same one
+    /// (FR-028).
+    pub concurrency: Option<usize>,
 }
 
 impl Report {
@@ -80,7 +83,11 @@ impl Report {
 
     /// JSON of the report (no dependencies: written by hand).
     pub fn to_json(&self) -> String {
-        let mut out = format!("{{\"scenario\":{},\"metrics\":[", quote(&self.scenario));
+        let mut out = format!("{{\"scenario\":{},", quote(&self.scenario));
+        if let Some(c) = self.concurrency {
+            out.push_str(&format!("\"concurrency\":{c},"));
+        }
+        out.push_str("\"metrics\":[");
         for (i, m) in self.metrics.iter().enumerate() {
             if i > 0 {
                 out.push(',');

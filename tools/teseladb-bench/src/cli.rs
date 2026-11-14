@@ -26,6 +26,10 @@ pub struct Args {
     pub save_baseline: Option<PathBuf>,
     /// A saved report to compare with the baseline instead of running (`--compare`).
     pub compare: Option<PathBuf>,
+    /// TeselaDB's repeats to compare with the reference's instead of running (`--versus`).
+    pub versus: Vec<PathBuf>,
+    /// The reference server's repeats (`--reference`).
+    pub reference: Vec<PathBuf>,
     /// Output on stdout: text or JSON (`--format`).
     pub format: Format,
     /// Server of the network scenarios (`host:port`); a local cluster
@@ -70,6 +74,8 @@ impl Default for Args {
             baseline: None,
             save_baseline: None,
             compare: None,
+            versus: Vec::new(),
+            reference: Vec::new(),
             format: Format::Text,
             target: None,
             concurrency: 1,
@@ -91,7 +97,8 @@ pub const USAGE: &str = "usage: teseladb-bench --scenario raftlog|raftlog-recove
                          [--duration 3s] [--warmup 10s] [--records N] [--groups N] [--format text|json] \
                          [--target host:port] [--concurrency N] [--rate ops/s] [--max-cores N] [--skip-load] \
                          [--baseline file] [--save-baseline file]\n       \
-                         teseladb-bench --compare report.json --baseline file";
+                         teseladb-bench --compare report.json --baseline file\n       \
+                         teseladb-bench --versus a.json,b.json --reference c.json,d.json";
 
 /// Parses a duration such as `30s`, `500ms` or `2m`.
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -103,6 +110,11 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         "m" => Ok(Duration::from_secs(n * 60)),
         _ => Err(format!("unknown duration unit: {s}")),
     }
+}
+
+/// A comma-separated list of files.
+fn paths(list: &str) -> Vec<PathBuf> {
+    list.split(',').filter(|p| !p.is_empty()).map(PathBuf::from).collect()
 }
 
 /// Parses the arguments (without the program name).
@@ -129,6 +141,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--baseline" => out.baseline = Some(PathBuf::from(value()?)),
             "--save-baseline" => out.save_baseline = Some(PathBuf::from(value()?)),
             "--compare" => out.compare = Some(PathBuf::from(value()?)),
+            "--versus" => out.versus = paths(&value()?),
+            "--reference" => out.reference = paths(&value()?),
             "--target" => out.target = Some(value()?),
             "--max-cores" => {
                 out.max_cores = value()?
@@ -168,7 +182,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     if out.compare.is_some() && out.baseline.is_none() {
         return Err(format!("--compare needs --baseline\n{USAGE}"));
     }
-    if out.scenario.is_empty() && out.compare.is_none() {
+    if out.versus.is_empty() != out.reference.is_empty() {
+        return Err(format!("--versus and --reference go together\n{USAGE}"));
+    }
+    if out.scenario.is_empty() && out.compare.is_none() && out.versus.is_empty() {
         return Err(USAGE.into());
     }
     Ok(out)
@@ -229,6 +246,11 @@ mod tests {
         let c = p("--compare r.json --baseline b.json").unwrap();
         assert_eq!((c.compare, c.scenario.as_str()), (Some(PathBuf::from("r.json")), ""));
         assert!(p("--compare r.json").unwrap_err().contains("needs --baseline"));
+        let v = p("--versus a.json,b.json --reference c.json").unwrap();
+        assert_eq!(v.versus, [PathBuf::from("a.json"), PathBuf::from("b.json")]);
+        assert_eq!(v.reference, [PathBuf::from("c.json")]);
+        assert!(p("--versus a.json").unwrap_err().contains("go together"));
+        assert!(p("--reference a.json").unwrap_err().contains("go together"));
     }
 
     #[test]
