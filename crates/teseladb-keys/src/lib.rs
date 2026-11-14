@@ -22,6 +22,7 @@ mod bucket;
 mod decode;
 mod encode;
 pub mod space;
+pub mod stored;
 mod typebits;
 mod version;
 pub mod zone;

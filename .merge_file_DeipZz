@@ -1,0 +1,103 @@
+//! Documents stored with their table of field offsets (003 FR-021, T035) on a node over real
+//! files: a find through a filter, by `_id`, an update and the sizes a client sees give the same
+//! documents and the BSON sizes, and after a restart the node reads them back the same.
+
+mod common;
+
+use std::fs;
+use std::path::PathBuf;
+
+use common::{Client, READY, batch, config, ok, until};
+use teseladb_io::FileDisk;
+use teseladb_server::node::{Node, lock_dir};
+use teseladb_bson::{Document, Value};
+
+/// A data directory removed when the test ends.
+struct Dir(PathBuf);
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn start(dir: &Dir) -> Node<FileDisk> {
+    let path = dir.0.clone();
+    let node =
+        Node::start(config(Vec::new()), || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap()))
+            .unwrap();
+    assert!(node.wait_ready(READY));
+    node
+}
+
+/// Document `i`: wide enough for a table, with an embedded document that has its own.
+fn wide(i: i32) -> Document {
+    let mut inner = Document::new();
+    for f in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+        inner.push(format!("in{f}"), i * 10 + f as i32);
+    }
+    let mut d = Document::new().with("_id", i);
+    for f in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+        d.push(format!("f{f}"), format!("value {i} {f}"));
+    }
+    d.push("nested", inner);
+    d.push("n", i);
+    d
+}
+
+fn find(c: &mut Client, filter: Document) -> Vec<Value> {
+    let r = c.run("app", Document::new().with("find", "wide").with("filter", filter));
+    batch(&r, "firstBatch")
+}
+
+/// What the node answers about collection `wide`, read the same before and after a restart.
+fn reads(c: &mut Client) -> (Vec<Value>, Vec<Value>, Vec<Value>, Value) {
+    let by_filter = find(c, Document::new().with("nested.in3", 53));
+    let by_id = find(c, Document::new().with("_id", 7));
+    let by_range = find(c, Document::new().with("n", Document::new().with("$gte", 18)));
+    let stats = c.run("app", Document::new().with("collStats", "wide"));
+    (by_filter, by_id, by_range, stats.get("size").cloned().unwrap_or(Value::Null))
+}
+
+#[test]
+fn documents_with_tables_read_the_same_and_come_back_after_a_restart() {
+    let dir = Dir(std::env::temp_dir().join(format!("teseladb-tables-{}", std::process::id())));
+    let _ = fs::remove_dir_all(&dir.0);
+    let node = start(&dir);
+    let mut c = Client::new(&node);
+    let docs: Vec<Value> = (0..20).map(|i| Value::Document(wide(i))).collect();
+    let r = c.run("app", Document::new().with("insert", "wide").with("documents", docs));
+    assert_eq!(r.get("n"), Some(&Value::Int32(20)), "{r:?}");
+    let set = Document::new().with("$set", Document::new().with("nested.in3", 53));
+    let upd = Document::new().with("q", Document::new().with("_id", 9)).with("u", set);
+    let r = c.run("app", Document::new().with("update", "wide").with("updates", vec![Value::Document(upd)]));
+    assert_eq!(r.get("nModified"), Some(&Value::Int32(1)), "{r:?}");
+    let before = reads(&mut c);
+    let (by_filter, by_id, by_range, size) = before.clone();
+    let mut nine = wide(9);
+    if let Some(Value::Document(inner)) = nine.get_mut("nested") {
+        inner.insert("in3", 53);
+    }
+    assert_eq!(by_filter, vec![Value::Document(wide(5)), Value::Document(nine)]);
+    assert_eq!(by_id, vec![Value::Document(wide(7))]);
+    assert_eq!(by_range, vec![Value::Document(wide(18)), Value::Document(wide(19))]);
+    let bson: usize = (0..20).map(|i| wide(i).to_bytes().unwrap().len()).sum();
+    // The update keeps every size: an int32 for an int32.
+    assert!(
+        matches!(size, Value::Int32(n) if n as usize == bson)
+            || matches!(size, Value::Int64(n) if n as usize == bson),
+        "the size counts the BSON alone: {size:?}, {bson}"
+    );
+    drop(c);
+    node.stop();
+    let node = start(&dir);
+    let mut c = Client::new(&node);
+    let after = until("the documents after the restart", || {
+        let got = reads(&mut c);
+        (got.0.len() == 2).then_some(got)
+    });
+    assert_eq!(after, before);
+    assert!(ok(&c.run("app", Document::new().with("drop", "wide"))));
+    drop(c);
+    node.stop();
+}

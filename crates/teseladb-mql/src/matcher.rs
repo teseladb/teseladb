@@ -4,6 +4,7 @@
 
 use std::cell::Cell;
 use std::cmp::Ordering;
+use teseladb_keys::stored::Stored;
 
 use teseladb_bson::types::BINARY_OLD;
 use teseladb_bson::{Collator, RawDoc, RawValue, type_class};
@@ -81,13 +82,15 @@ impl Filter {
     }
 
     /// Whether `doc` matches, run by the register machine (010 FR-031).
-    pub fn matches(&self, doc: RawDoc<'_>, ctx: &MatchContext<'_>) -> Result<bool> {
-        self.program.run(self.run_tree(), doc, ctx)
+    /// A document read from storage comes with its table of offsets ([`Stored`], 003 FR-021),
+    /// through which its fields are read.
+    pub fn matches<'d>(&self, doc: impl Into<Stored<'d>>, ctx: &MatchContext<'_>) -> Result<bool> {
+        self.program.run(self.run_tree(), doc.into(), ctx)
     }
 
     /// The documents of `docs` (at most 64) that match, as the bits of a mask: bit `i` for
     /// `docs[i]` (010 FR-028, FR-031). An error is the first one the documents give in order.
-    pub fn matches_batch(&self, docs: &[RawDoc<'_>], ctx: &MatchContext<'_>) -> Result<u64> {
+    pub fn matches_batch(&self, docs: &[Stored<'_>], ctx: &MatchContext<'_>) -> Result<u64> {
         self.program.run_batch(self.run_tree(), docs, ctx)
     }
 

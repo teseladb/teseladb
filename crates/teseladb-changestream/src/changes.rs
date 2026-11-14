@@ -106,7 +106,7 @@ pub fn changes(versions: impl IntoIterator<Item = Versioned>) -> Result<Vec<Chan
                 }
             }
             Some((crate::DOCUMENT_VALUE, bytes)) => {
-                docs.insert((v.key, v.ts), Some(bytes));
+                docs.insert((v.key, v.ts), Some(teseladb_keys::stored::strip(bytes)));
             }
             Some(_) => {}
             None => {

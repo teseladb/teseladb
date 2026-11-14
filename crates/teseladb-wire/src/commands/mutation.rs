@@ -1084,8 +1084,9 @@ fn id_of(doc: &Document) -> Value {
     doc.get("_id").cloned().unwrap_or(Value::Null)
 }
 
+/// The put of a document's new version, stored with its table of field offsets (003 FR-021).
 fn put(key: &[u8], bytes: Vec<u8>) -> Put {
-    Put { key: key.to_vec(), value_type: DOCUMENT, value: bytes }
+    Put { key: key.to_vec(), value_type: DOCUMENT, value: teseladb_keys::stored::encode(bytes) }
 }
 
 /// A [`DocMutation`] bound to the keys of its write, ready for the range.
@@ -1675,7 +1676,8 @@ fn backfill(
     let (mut puts, mut deletes) = (Vec::new(), Vec::new());
     let mut r = MutationResult::default();
     for (index, key) in keys.iter().enumerate() {
-        let Some((_, bytes)) = lookup(key) else { continue };
+        let Some((_, stored)) = lookup(key) else { continue };
+        let bytes = teseladb_keys::stored::bson(stored)?;
         match checker.entries_at(Some(key), None, Some(bytes), lookup) {
             Ok((entries, gone)) => {
                 puts.extend(entries);
@@ -1785,7 +1787,7 @@ fn modify(
         let Some((_, bytes)) = lookup(key) else { continue };
         // Only the frame of a stored document is checked: one whose frame does not hold is a
         // fault, not a miss.
-        let doc = RawDoc::from_stored(bytes)?;
+        let doc = teseladb_keys::stored::raw(bytes)?;
         let position = parsed.match_position(doc, &ctx).map_err(from_mql);
         let position = match (&update, position) {
             (Some(_), Err(e)) => return Err(executor_error(executor_of(image))(e)),

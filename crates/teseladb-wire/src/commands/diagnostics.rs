@@ -774,7 +774,8 @@ pub(super) fn tally_within<B: Backend + ?Sized>(
             let next = [last.as_slice(), &[0]].concat();
             for (key, doc) in &chunk {
                 t.count += 1;
-                t.bytes += doc.len() as u64;
+                // The size of its BSON, as it came in: the table of offsets is not data.
+                t.bytes += teseladb_keys::stored::bson(doc).map_or(doc.len(), <[u8]>::len) as u64;
                 t.key_bytes += key.len() as u64;
             }
             if chunk.len() < SCAN_CHUNK {

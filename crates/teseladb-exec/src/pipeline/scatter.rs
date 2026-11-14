@@ -123,7 +123,8 @@ impl Program {
     pub fn run(&self, rows: &[(Vec<u8>, Vec<u8>)]) -> Option<PartialGroups> {
         let mut docs = Vec::with_capacity(rows.len());
         for (_, bytes) in rows {
-            docs.push(Document::from_stored(bytes.clone()).ok()?);
+            let bson = teseladb_keys::stored::bson(bytes).ok()?;
+            docs.push(Document::from_stored(bson.to_vec()).ok()?);
         }
         let docs = match self.matches.is_empty() {
             true => docs,

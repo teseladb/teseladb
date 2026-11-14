@@ -238,7 +238,9 @@ fn touched_documents(rows: Vec<Versioned>, resolved: Hlc) -> BTreeMap<Vec<u8>, T
     let mut metas: BTreeMap<(Vec<u8>, Hlc), ChangeMeta> = BTreeMap::new();
     for r in rows.into_iter().filter(|r| r.ts <= resolved) {
         let doc = match r.value {
-            Some((teseladb_changestream::DOCUMENT_VALUE, b)) => Some(b),
+            Some((teseladb_changestream::DOCUMENT_VALUE, b)) => {
+                Some(teseladb_keys::stored::strip(b))
+            }
             None => None,
             // The history's metas: the first write of each document at each mark. One that
             // does not read back is as if missing.

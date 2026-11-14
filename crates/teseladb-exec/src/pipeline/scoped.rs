@@ -96,7 +96,7 @@ pub(super) fn matches_batch(
             (None, None) => None,
         };
         match raw {
-            Some(r) => raws.push(r),
+            Some(r) => raws.push(teseladb_keys::stored::Stored::plain(r)),
             None => return one_by_one(filter, docs, env),
         }
     }
