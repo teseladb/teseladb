@@ -8,6 +8,11 @@
 //! FR-011). The exact timestamps and the applied indexes are the core's; readers on other threads
 //! see the physical part of the timestamps, which only ever widens, to skip a memtable that cannot
 //! hold what they look for.
+//!
+//! Its bytes, which the budget counts (012 FR-013), are those it holds from the allocator: what
+//! the trees count of themselves ([`Art::heap_bytes`]), each value's buffer, the ends of each
+//! range tombstone, and a bound of the map of applied indexes. A version written again at the
+//! same internal key keeps the one it replaced until the memtable drops, so both count.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,11 +20,33 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use teseladb_keys::Hlc;
 use teseladb_types::{Bytes, GroupId};
 
-use crate::art::{Art, WriterCell, bytes_order};
+use crate::art::{Art, BYTES_ORDER, Order, WriterCell};
 use crate::entry::{self, Kind, RangeTombstone};
 
-/// Fixed memory cost counted per version, besides its key and value.
-pub(crate) const ENTRY_OVERHEAD: u64 = 64;
+/// The order of the versions' tree: the bytes of [`entry::byte_order`].
+const VERSION_ORDER: Order =
+    Order { encode: entry::byte_order, compare: entry::byte_order_compare };
+
+/// The heap of a value of `len` bytes in a [`Bytes`]: one block of two counters and the bytes,
+/// rounded up to the alignment of the counters.
+fn value_heap(len: usize) -> u64 {
+    (2 * size_of::<usize>() + len).next_multiple_of(align_of::<usize>()) as u64
+}
+
+/// A bound of what the map of applied indexes grows by with one more range. A node of the
+/// standard library's `BTreeMap` holds from 1 to 11 entries and, when inner, 12 edges, besides
+/// a parent pointer and two counters; there are never more nodes than entries, so a node per
+/// range bounds the map.
+const APPLIED_RANGE_BYTES: u64 = (11 * (size_of::<GroupId>() + size_of::<Applied>())
+    + 12 * size_of::<usize>()
+    + 2 * size_of::<usize>()) as u64;
+
+/// What a version of a key of `key_len` bytes (the internal key) and a value of `value_len`
+/// bytes adds to a memtable's bytes at least: its leaf, its key and its value. The inner nodes
+/// over it come on top.
+pub(crate) fn version_bytes(key_len: usize, value_len: usize) -> u64 {
+    key_len as u64 + value_heap(value_len) + Art::<Slot>::LEAF_BYTES
+}
 
 /// A version's kind and value.
 #[derive(Clone, Debug)]
@@ -41,6 +68,7 @@ struct Meta {
     applied: BTreeMap<GroupId, Applied>,
     min_ts: Option<Hlc>,
     max_ts: Option<Hlc>,
+    /// The bytes it holds besides those the trees count.
     bytes: u64,
     tombstones: u64,
 }
@@ -85,8 +113,8 @@ impl Drop for Memtable {
 impl Default for Memtable {
     fn default() -> Memtable {
         Memtable {
-            versions: Art::new(entry::byte_order),
-            tombstones: Art::new(bytes_order),
+            versions: Art::new(VERSION_ORDER),
+            tombstones: Art::new(BYTES_ORDER),
             min_physical: AtomicU64::new(u64::MAX),
             max_physical: AtomicU64::new(0),
             frozen: AtomicBool::new(false),
@@ -96,9 +124,9 @@ impl Default for Memtable {
 }
 
 impl Memtable {
-    /// Bytes counted against the budget.
+    /// Bytes counted against the budget: those it holds from the allocator.
     pub(crate) fn bytes(&self) -> u64 {
-        self.meta.with(|m| m.bytes)
+        self.meta.with(|m| m.bytes) + self.versions.heap_bytes() + self.tombstones.heap_bytes()
     }
 
     /// Number of versions.
@@ -160,17 +188,15 @@ impl Memtable {
         value: &[u8],
     ) {
         debug_assert!(!self.frozen.load(Ordering::Relaxed), "a frozen memtable takes no writes");
-        let ikey = entry::internal_key(key, ts);
-        let key_bytes = ikey.len() as u64;
+        let ikey = entry::internal_key(key, ts).into_boxed_slice();
         let slot = Slot { kind, value: Bytes::copy_from_slice(value) };
         self.meta.with(|m| {
             // The time first: a reader that finds the version also finds the memtable may hold
             // it.
             self.note(m, range, index, ts);
-            if let Some(old) = self.versions.insert(ikey, slot) {
-                m.bytes -= key_bytes + old.value.len() as u64 + ENTRY_OVERHEAD;
-            }
-            m.bytes += key_bytes + value.len() as u64 + ENTRY_OVERHEAD;
+            // A replaced version stays until the memtable drops: its bytes stay counted.
+            self.versions.insert_owned(ikey, slot);
+            m.bytes += value_heap(value.len());
         });
     }
 
@@ -178,7 +204,7 @@ impl Memtable {
     pub(crate) fn insert_tombstone(&self, range: GroupId, index: u64, t: RangeTombstone) {
         debug_assert!(!self.frozen.load(Ordering::Relaxed), "a frozen memtable takes no writes");
         let order = self.meta.with(|m| {
-            m.bytes += (t.start.len() + t.end.len()) as u64 + ENTRY_OVERHEAD;
+            m.bytes += (t.start.capacity() + t.end.capacity()) as u64;
             self.note(m, range, index, t.ts);
             m.tombstones += 1;
             m.tombstones
@@ -216,7 +242,7 @@ impl Memtable {
             Some(k) => self.versions.after(k),
             None => self.versions.first(),
         };
-        std::iter::successors(start, |e| e.next()).map(|e| (e.key(), e.value()))
+        self.versions.walk(start).map(|e| (e.key(), e.value()))
     }
 
     /// The version after the one at `key`.
@@ -231,13 +257,16 @@ impl Memtable {
 }
 
 fn note_applied(m: &mut Meta, range: GroupId, index: u64) {
-    m.applied
-        .entry(range)
-        .and_modify(|a| {
+    match m.applied.get_mut(&range) {
+        Some(a) => {
             a.first = a.first.min(index);
             a.last = a.last.max(index);
-        })
-        .or_insert(Applied { first: index, last: index });
+        }
+        None => {
+            m.applied.insert(range, Applied { first: index, last: index });
+            m.bytes += APPLIED_RANGE_BYTES;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -481,12 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn replacing_a_version_keeps_the_count_of_bytes() {
+    fn a_replaced_version_counts_until_the_memtable_drops() {
         let m = Memtable::default();
         m.insert(GroupId(1), 1, b"k", ts(1), Kind::Put, b"1234");
         let one = m.bytes();
+        assert!(one >= version_bytes(b"k".len() + teseladb_keys::VERSION_LEN, 4));
         m.insert(GroupId(1), 2, b"k", ts(1), Kind::Put, b"5678");
-        assert_eq!(m.bytes(), one);
+        // The new value's box and buffer, and the list of replaced values.
+        assert!(m.bytes() >= one + size_of::<Slot>() as u64 + value_heap(4), "{}", m.bytes());
+        assert_eq!(m.len(), 1);
+        let one = m.bytes();
         m.insert_tombstone(
             GroupId(1),
             3,
