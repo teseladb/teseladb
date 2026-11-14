@@ -95,7 +95,7 @@ pub use lsm::{
     SPACE_AMP, SPACE_FLOOR, VersionWrite, cache_split,
 };
 pub use memtable::frozen_alive_bytes;
-pub use metrics::LsmMetrics;
+pub use metrics::{FileSpace, LsmMetrics, SpaceUse};
 pub use read::{Found, Item, Lookup, ReadToken, Scan, Step};
 pub use read_back::BackScan;
 pub use size::IntervalSize;

@@ -370,14 +370,14 @@ fn a_key_with_many_versions_among_many_files_reads_each_version() {
         index += 1;
         lsm.put(G, index, key, ts(at, 0), value).unwrap();
     };
-    for i in 0..400u32 {
+    for i in 0..800u32 {
         put(&mut lsm, format!("a{i:04}").as_bytes(), 1, &[1; 300]);
     }
     // Each version of `m` 1 KiB: 120 KiB, more than one file of 64 KiB.
     for v in 1..=VERSIONS {
         put(&mut lsm, b"m", 10 + v, &[u8::try_from(v).unwrap(); 1024]);
     }
-    for i in 0..400u32 {
+    for i in 0..800u32 {
         put(&mut lsm, format!("z{i:04}").as_bytes(), 2, &[2; 300]);
     }
     lsm.flush();

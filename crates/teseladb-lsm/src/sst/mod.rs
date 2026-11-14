@@ -1,8 +1,8 @@
 //! SST files, version 1 (`sst-format.md`, FR-003, FR-016).
 //!
 //! ```text
-//! [data block]*   4–32 KiB each, starting on a 4 KiB boundary; a version larger than a block
-//!                 gets a block of its own of the length it needs
+//! [data block]*   4–32 KiB each before compression, one right after the other (FR-043); a
+//!                 version larger than a block gets a block of its own of the length it needs
 //! [filter block]  Bloom filter of the logical keys
 //! [zone block]    optional: per data block, the bounds of the fields most documents hold
 //! [props block]   key and timestamp bounds, number of versions, range tombstones,
@@ -11,8 +11,11 @@
 //! [footer page]   4 KiB whose last 128 bytes are the footer
 //! ```
 //!
-//! Every block is framed as `payload · compression(u8) · encryption(32 bytes) · crc32c(u32 LE)`
-//! and padded with `0x5a` up to the next 4 KiB, so that every read and write is aligned.
+//! Every block is framed as `payload · compression(u8) · encryption(32 bytes) · crc32c(u32 LE)`.
+//! The filter block and each block after it start on a 4 KiB boundary, padded with `0x5a` up to
+//! it; the data blocks follow one another without padding, and a read of one takes the aligned
+//! pages that hold it, so that every read and write stays aligned. Files written before FR-043
+//! padded each data block too and read the same way.
 //!
 //! A value longer than `value_separation_bytes` goes to a value file, an SST with one version per
 //! data block, and its entry holds a reference instead ([`value`], FR-034).
@@ -61,6 +64,11 @@ pub(crate) struct Bad;
 /// Rounds up to the alignment.
 pub(crate) fn align_up(n: u64) -> u64 {
     n.next_multiple_of(ALIGN as u64)
+}
+
+/// Rounds down to the alignment.
+pub(crate) fn align_down(n: u64) -> u64 {
+    n - n % ALIGN as u64
 }
 
 /// Pads `v` with [`PAD`] up to the alignment.
@@ -142,5 +150,6 @@ mod tests {
         assert_eq!(v.len(), ALIGN);
         assert_eq!(align_up(1), ALIGN as u64);
         assert_eq!(align_up(0), 0);
+        assert_eq!((align_down(4097), align_down(4096), align_down(5)), (4096, 4096, 0));
     }
 }

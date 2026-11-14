@@ -1,6 +1,8 @@
 //! Metrics of the LSM (FR-019, data-model §5).
 
 use crate::lsm::Lsm;
+use crate::sst::align_up;
+use crate::sst::reader::Table;
 
 /// A snapshot of the LSM's metrics.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +66,58 @@ pub struct LsmMetrics {
     pub value_files_sparse: usize,
 }
 
+/// What one kind of file of the current version takes on disk, by part.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileSpace {
+    /// Files.
+    pub files: usize,
+    /// Data blocks.
+    pub blocks: u64,
+    /// Bytes of the data blocks as stored: compressed and framed, without the padding to the page.
+    pub stored: u64,
+    /// Bytes the data blocks take with that padding.
+    pub pages: u64,
+    /// Bytes of the filter, zone, properties and index blocks and of the footer, with their
+    /// padding.
+    pub meta: u64,
+    /// Bytes of the data blocks before compression, for the files this LSM wrote since it opened
+    /// (0 for the others).
+    pub raw: u64,
+}
+
+impl FileSpace {
+    fn add(&mut self, t: &Table) {
+        let stored: u64 = (0..t.blocks()).map(|i| t.handle(i).len).sum();
+        let pages = t.blocks().checked_sub(1).map_or(0, |last| {
+            let h = t.handle(last);
+            align_up(h.offset + h.len)
+        });
+        self.files += 1;
+        self.blocks += t.blocks() as u64;
+        self.stored += stored;
+        self.pages += pages;
+        self.meta += t.size - pages;
+        self.raw += t.written.raw;
+    }
+
+    /// Bytes of the files.
+    pub fn bytes(&self) -> u64 {
+        self.pages + self.meta
+    }
+}
+
+/// The files of the current version by kind (FR-019, FR-043): where the space of the files
+/// goes, for the measures of compression.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpaceUse {
+    /// The files of the levels.
+    pub data: FileSpace,
+    /// Their history files (FR-031).
+    pub history: FileSpace,
+    /// The value files they point to (FR-034).
+    pub values: FileSpace,
+}
+
 fn ratio(num: u64, den: u64) -> f64 {
     if den == 0 { 0.0 } else { num as f64 / den as f64 }
 }
@@ -105,6 +159,22 @@ impl Lsm {
             value_live_bytes: live.values().sum(),
             value_files_sparse: sparse,
         }
+    }
+
+    /// Where the space of the files of the current version goes.
+    pub fn space(&self) -> SpaceUse {
+        let v = &self.version;
+        let mut s = SpaceUse::default();
+        for t in v.tables() {
+            s.data.add(t);
+            if let Some(h) = &t.history {
+                s.history.add(h);
+            }
+        }
+        for t in v.value_files().values() {
+            s.values.add(t);
+        }
+        s
     }
 
     /// The dictionaries in the manifest: the prefix of their collection and their version, in

@@ -376,12 +376,11 @@ impl IngestJob {
                 let b = t
                     .find_block(&entry::first_version(&self.intervals[i].0))
                     .expect("checked when queued");
-                let h = t.handle(b);
-                let len = crate::sst::align_up(h.len) as u32;
+                let (offset, len) = t.pages(b);
                 self.queued.push_back(IoOp::ReadAt {
                     file: file_id(t.number),
-                    offset: h.offset,
-                    len,
+                    offset,
+                    len: len as u32,
                     token: JOB_TOKEN,
                 });
                 self.pending = Some(Pending::Check(t, b, i));
