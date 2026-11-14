@@ -44,7 +44,7 @@ fn answers(
 }
 
 /// Every name of `d` and of the documents in it, through documents and arrays.
-fn all_names(d: RawDoc<'_>, out: &mut Vec<Vec<u8>>) {
+pub(super) fn all_names(d: RawDoc<'_>, out: &mut Vec<Vec<u8>>) {
     for (k, v) in d.iter() {
         out.push(k.as_bytes().to_vec());
         match v {
@@ -266,21 +266,21 @@ fn the_edges_of_the_semantics_match_the_tree() {
 }
 
 /// A small deterministic generator (xorshift64*).
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
 
-    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+    pub(super) fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.below(items.len())]
     }
 }
@@ -307,9 +307,9 @@ fn value(rng: &mut Rng, depth: u32) -> Value {
     }
 }
 
-const FIELDS: [&str; 3] = ["a", "b", "0"];
+pub(super) const FIELDS: [&str; 3] = ["a", "b", "0"];
 
-fn doc(rng: &mut Rng, depth: u32) -> Document {
+pub(super) fn doc(rng: &mut Rng, depth: u32) -> Document {
     let mut out = d();
     for f in FIELDS {
         if rng.below(4) != 0 {
@@ -737,7 +737,7 @@ fn vector_comparisons_match_the_tree() {
 /// `src` with enough fields to be stored with a table of offsets (003 FR-021), as are the documents
 /// embedded in it through documents, and a repeated name at the end: the lookup through the
 /// table finds the first one, as the walk does.
-fn widen(src: &Document) -> Document {
+pub(super) fn widen(src: &Document) -> Document {
     let mut out = d();
     for (k, v) in src.iter() {
         let v = match v {

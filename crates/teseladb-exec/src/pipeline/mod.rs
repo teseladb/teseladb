@@ -23,6 +23,8 @@ mod scatter;
 mod scoped;
 pub mod search;
 mod shape;
+#[cfg(test)]
+mod shape_tests;
 mod sink;
 pub mod sort;
 pub mod spill;
