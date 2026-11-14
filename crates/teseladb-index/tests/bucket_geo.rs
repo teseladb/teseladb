@@ -2,12 +2,12 @@
 //! every measurement's geometry in a column, none for a measurement without a location, and the
 //! time series' error for one that is no geometry.
 
-use teseladb_index::keygen::{
-    FieldKind, IndexDef, IndexField, KeyValue, KeygenError, geo2dsphere_keys, key_values,
-};
 use teseladb_bson::column::{Cell, encode};
 use teseladb_bson::types::{BINARY_COLUMN, DOCUMENT, NULL};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_index::keygen::{
+    FieldKind, IndexDef, IndexField, KeyValue, KeygenError, geo2dsphere_keys, key_values,
+};
 
 fn def() -> IndexDef {
     let field = IndexField::special("data.loc", FieldKind::SphereBucket);

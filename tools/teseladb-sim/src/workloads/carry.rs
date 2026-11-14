@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use teseladb_lsm::FileRef;
-use teseladb_range::snapshot::write_ops;
 use teseladb_raftlog::{Disk, FileId, IoOp, SimDisk};
+use teseladb_range::snapshot::write_ops;
 
 /// A file an export linked whole, with its bytes, its history file's and its precedence group.
 #[derive(Clone)]

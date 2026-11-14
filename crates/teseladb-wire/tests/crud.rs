@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_wire::error::{CommandError, INTERRUPTED_AT_SHUTDOWN};
 use teseladb_bson::{Document, Value};
+use teseladb_wire::error::{CommandError, INTERRUPTED_AT_SHUTDOWN};
 
 fn s(x: &str) -> Value {
     Value::from(x)

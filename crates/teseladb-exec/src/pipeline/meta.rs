@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_mql::{ErrorCode, Extensions, MqlError};
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::{ErrorCode, Extensions, MqlError};
 
 use super::Env;
 use super::errors::{

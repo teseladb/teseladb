@@ -7,10 +7,10 @@
 //! Both go through the node's own commands (`create`, `createIndexes`, `insert`, `update`,
 //! `renameCollection`, `drop`), with their checks and index maintenance.
 
+use teseladb_bson::{Document, Value};
 use teseladb_exec::pipeline::Env;
 use teseladb_exec::pipeline::out_merge::{Merge, MergeAction, Write};
 use teseladb_meta::catalog::Namespace;
-use teseladb_bson::{Document, Value};
 
 use super::mutation::from_mql;
 use super::{Backend, Ctx, names};

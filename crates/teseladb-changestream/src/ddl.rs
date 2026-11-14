@@ -6,8 +6,8 @@
 //! `dropDatabase` of a watched database are followed by an `invalidate` that closes the cursor,
 //! with the same place in the merge (measured on 01-11).
 
-use teseladb_hlc::Hlc;
 use teseladb_bson::{Document, Value};
+use teseladb_hlc::Hlc;
 
 use crate::order::EventKey;
 use crate::stage::Scope;

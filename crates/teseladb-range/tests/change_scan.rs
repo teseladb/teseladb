@@ -8,8 +8,8 @@ use std::cell::RefCell;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
-use teseladb_range::changes::ChangeScan;
 use teseladb_raftlog::MemDisk;
+use teseladb_range::changes::ChangeScan;
 use teseladb_types::{GroupId, Nanos};
 
 const G: GroupId = GroupId(7);

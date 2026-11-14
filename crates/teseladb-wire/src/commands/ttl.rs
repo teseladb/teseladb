@@ -3,11 +3,11 @@
 //! `{<field>: {$lte: <cutoff>}}`, which selects a date, or an array with a date, at or before the
 //! cutoff (`teseladb_index::ttl`). The node runs a pass every `ttlMonitorSleepSecs` (60 s).
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::ttl::Ttl;
 use teseladb_meta::catalog::Namespace;
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::IndexState;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::crud::{Modify, Writer, modify};
 use super::mutation::Image;

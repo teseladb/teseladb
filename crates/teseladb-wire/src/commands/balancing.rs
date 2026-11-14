@@ -16,8 +16,8 @@
 //! balancer runs (a defragmentation of TeselaDB's ranges is the merge of small neighbours that
 //! the ranges already do, so a running balancer finishes it at once).
 
-use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 
 use super::config_settings::{BALANCER, CHUNK_SIZE, SETTINGS, SettingsWrite};
 use super::names::parse_full;

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use teseladb_keys::{Key, PrimaryKey};
 use teseladb_bson::{Collator, RawDoc, RawValue};
+use teseladb_keys::{Key, PrimaryKey};
 
 use crate::keygen::{FieldKind, IndexDef, KeygenError, entry_value, index_entries};
 

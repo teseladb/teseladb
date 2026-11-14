@@ -4,9 +4,9 @@
 mod common;
 
 use common::drive;
+use teseladb_raftlog::HardState;
 use teseladb_sim::checkers::storage::{Confirmed, verify};
 use teseladb_sim::world::{Event, World};
-use teseladb_raftlog::HardState;
 use teseladb_types::{Bytes, Durability, GroupId, Nanos};
 
 /// Runs the disk and deadline events until nothing is left.
@@ -142,8 +142,8 @@ fn with_every_node_down_any_node_is_picked() {
 fn every_frame_crosses_the_simulated_network_unchanged() {
     use teseladb_multiraft::chunks::split;
     use teseladb_multiraft::{GroupHeartbeat, GroupHeartbeatResp, PeerFrame};
-    use teseladb_sim::world::{decode_frame, encode_frame};
     use teseladb_raft::{Message, MessageType};
+    use teseladb_sim::world::{decode_frame, encode_frame};
     use teseladb_types::NodeId;
     let m = Message::new(MessageType::AppendReq, NodeId(1), NodeId(2), 3);
     let all = vec![

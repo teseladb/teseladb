@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use teseladb_raftlog::{
+    Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, open_node, write_atomic, write_node_meta,
+};
 use teseladb_range::host::RangeError;
 use teseladb_server::data::DataError;
 use teseladb_server::node::{
     DATA_FORMAT, DATA_FORMAT_FILE, JOIN_VOTERS, Node, NodeConfig, NodeError,
-};
-use teseladb_raftlog::{
-    Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, open_node, write_atomic, write_node_meta,
 };
 
 /// How long a node of these tests has to be ready.

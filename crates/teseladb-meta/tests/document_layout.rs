@@ -3,6 +3,7 @@
 //! of options that carries it and a snapshot; one created before, without the option, keeps the
 //! hash bucket of its `_id`, so its documents are not moved.
 
+use teseladb_bson::Document;
 use teseladb_meta::catalog::{
     CatalogCommand, CollectionEntry, DocumentLayout, Namespace, ORDERED_IDS,
 };
@@ -10,7 +11,6 @@ use teseladb_meta::collection_types::KindError;
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{Group0Result, Group0Sm};
 use teseladb_multiraft::StateMachine;
-use teseladb_bson::Document;
 
 fn ns(coll: &str) -> Namespace {
     Namespace { db: "db".into(), coll: coll.into() }

@@ -24,9 +24,9 @@ use std::rc::Rc;
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{FileRef, Lookup, Lsm, LsmConfig, LsmError, Pressure};
-use teseladb_range::snapshot::write_ops;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{Completions, Disk, FileId, IoDone, LogEntry, SimDisk, Ticket};
+use teseladb_range::snapshot::write_ops;
 use teseladb_types::{Bytes, Durability, GroupId, Nanos};
 
 use crate::checkers::Violation;

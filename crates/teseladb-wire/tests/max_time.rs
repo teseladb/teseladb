@@ -7,6 +7,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::commands::{NodeSessions, Shared, Timeouts, lock};
 use teseladb_wire::connection::{Connection, Request};
@@ -16,7 +17,6 @@ use teseladb_wire::ops::{
     DEFAULT_MAX_TIME_MS, Guarded, MAX_TIME_MS, Op, OpTable, READ_OPERATIONS, default_read_ms,
     effective_limit, max_time_ms, op_ns, op_type,
 };
-use teseladb_bson::{Decimal128, Document, Value};
 
 const DB: &str = "t";
 const COLL: &str = "c";

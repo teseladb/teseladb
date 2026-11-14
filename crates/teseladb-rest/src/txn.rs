@@ -9,11 +9,11 @@
 //! the fields of that command (`filter`, `documents`, `updates`, `deletes`, `query`, `update`…).
 //! The answer is `{"results": [...]}`: the documents of a `find`, the reply of the others.
 
+use teseladb_bson::{Document, Value};
 use teseladb_wire::error::{
     BAD_VALUE, CommandError, FAILED_TO_PARSE, TRANSIENT_TRANSACTION_ERROR,
     UNKNOWN_TRANSACTION_COMMIT_RESULT,
 };
-use teseladb_bson::{Document, Value};
 
 use crate::api::Executor;
 use crate::commands::check_session_fields;

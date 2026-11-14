@@ -9,12 +9,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use teseladb_bson::{Document, RawValue, extjson};
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::spill::{Counting, SpillStats, SpillStore};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions, codes};
 use teseladb_sys::alloc_count::{CountingAlloc, peak_bytes, reset_peak};
-use teseladb_bson::{Document, RawValue, extjson};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;

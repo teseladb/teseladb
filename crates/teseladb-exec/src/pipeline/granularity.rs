@@ -6,8 +6,8 @@
 //! that gives (`63 × 0.1` is `6.300000000000001`) is part of the result. Decimals go through the
 //! same steps in decimal, each series value converted as a double of 15 digits.
 
-use teseladb_mql::{DecOp, MqlError, dec_binary, to_decimal128};
 use teseladb_bson::{Decimal, Decimal128, Value};
+use teseladb_mql::{DecOp, MqlError, dec_binary, to_decimal128};
 
 use super::errors::error;
 use crate::expr::arith::type_name_of;

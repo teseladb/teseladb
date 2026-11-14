@@ -8,11 +8,11 @@ mod common;
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_bson::{Document, Value};
+use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::dev;
 use teseladb_server::node::Node;
-use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 
 /// Writes spaced further apart than the one second a stream's read covers at a time.
 const SPACING: Duration = Duration::from_millis(1_200);

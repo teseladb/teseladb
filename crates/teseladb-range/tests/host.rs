@@ -12,6 +12,7 @@ use teseladb_keys::zone::Zones;
 use teseladb_lsm::ViewCache;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
+use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::{DedupKey, Put};
 use teseladb_range::host::{
@@ -23,7 +24,6 @@ use teseladb_range::push::Row;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
 use teseladb_range::view::{Decline, FastRead, MATCH_BATCH, Newest, Part};
-use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 const G: GroupId = GroupId(7);

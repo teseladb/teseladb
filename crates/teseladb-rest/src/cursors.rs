@@ -2,9 +2,9 @@
 //! of 006, which tells the node that opened it, the reply of a query with its first batch and the
 //! link to the next one, and the `getMore` and `killCursors` of the cursor routes.
 
+use teseladb_bson::{Document, Value};
 use teseladb_session::cursor::node_of;
 use teseladb_wire::error::{BAD_VALUE, CURSOR_NOT_FOUND, CommandError};
-use teseladb_bson::{Document, Value};
 
 use crate::routes::{BASE, query_param};
 

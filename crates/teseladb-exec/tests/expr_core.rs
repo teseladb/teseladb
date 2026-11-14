@@ -2,8 +2,8 @@
 //! each result with the value and type a `refrouter` 9.0.4 gave on 31-10-2026 (`$project` with
 //! `$type` beside each expression).
 
-use teseladb_exec::expr::{Expr, Scope, order, try_sort_by};
 use teseladb_bson::{Decimal128, Document, Value, extjson};
+use teseladb_exec::expr::{Expr, Scope, order, try_sort_by};
 
 fn json(text: &str) -> Document {
     extjson::parse(text).unwrap_or_else(|e| panic!("{text}: {e:?}"))

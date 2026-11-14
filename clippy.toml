@@ -1,3 +1,5 @@
 cognitive-complexity-threshold = 30
 too-many-arguments-threshold = 9
 type-complexity-threshold = 300
+# Names that clippy::doc_markdown, on in the generic crates (D-169) through `clippy::pedantic`, would ask to quote.
+doc-valid-idents = ["TeselaDB", "TZif", ".."]

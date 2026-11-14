@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use teseladb_auth::privileges::{self, Privilege, PrivilegeError};
 use teseladb_auth::roles::{self, Role};
 use teseladb_auth::users::{RoleName, User};
-use teseladb_meta::security::{Expect, Principal, SecurityError, SecurityOp};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::security::{Expect, Principal, SecurityError, SecurityOp};
 
 use super::args::{self, missing};
 use super::authz_writes::{ROLE_FIELDS, key_error};

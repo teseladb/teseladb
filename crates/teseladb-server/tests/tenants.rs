@@ -6,9 +6,9 @@ mod common;
 use std::net::SocketAddr;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::{Node, NodeConfig};
 
 fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
     let argv: Vec<String> =

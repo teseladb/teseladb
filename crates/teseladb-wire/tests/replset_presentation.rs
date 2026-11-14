@@ -8,13 +8,13 @@ mod common;
 use std::sync::Arc;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{LastWrite, OpTime, Timestamp};
 use teseladb_wire::commands::presentation::replica_set;
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::hello::ReplicaView;
 use teseladb_wire::msg::OpMsg;
-use teseladb_bson::{Document, Value};
 
 const N1: &str = "node1.cluster:27018";
 const N2: &str = "node2.cluster:27018";

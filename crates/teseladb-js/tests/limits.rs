@@ -4,8 +4,8 @@
 
 use std::cell::Cell;
 
-use teseladb_js::{JsCtx, JsError, Limits, Program};
 use teseladb_bson::Value;
+use teseladb_js::{JsCtx, JsError, Limits, Program};
 
 fn run_with(src: &str, ctx: &mut JsCtx<'_>) -> Result<Value, JsError> {
     Program::compile(src)?.call(None, &[], ctx)

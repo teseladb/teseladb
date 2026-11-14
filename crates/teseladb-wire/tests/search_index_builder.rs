@@ -7,8 +7,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_wire::commands::search_indexes::build_pending;
 use teseladb_bson::{Document, Value};
+use teseladb_wire::commands::search_indexes::build_pending;
 
 const DB: &str = "t";
 

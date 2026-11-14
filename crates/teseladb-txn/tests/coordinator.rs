@@ -10,6 +10,7 @@ use std::rc::Rc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock};
+use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::host::{
     RangeError, RangeHost, ReadSpec, Reply, ReqId, SplitDone, TxnOp, TxnReq,
@@ -22,7 +23,6 @@ use teseladb_range::sm::{RangeSm, RangeState};
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, ReqNo, Route, StmtId, TxnError};
 use teseladb_txn::reaper::Reaper;
 use teseladb_txn::record::{HEARTBEAT_EVERY_MS, Spans};
-use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 const G1: GroupId = GroupId(7);

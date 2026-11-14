@@ -3,6 +3,7 @@
 //! of a tenant; and the limits, the suspension and the access list of a tenant (007 FR-030,
 //! FR-034, FR-035), which wait until every node runs the version that reads them (FR-027).
 
+use teseladb_bson::Document;
 use teseladb_meta::catalog::{CatalogCommand, Namespace};
 use teseladb_meta::command::{Group0Command, NodeAddrs, NodeState};
 use teseladb_meta::group0::{
@@ -15,7 +16,6 @@ use teseladb_meta::tenants::{
     DEFAULT_TENANT, ServiceUser, TENANT_FIELD, TenantLimits, TenantState, qualified_db, split_db,
 };
 use teseladb_multiraft::StateMachine;
-use teseladb_bson::Document;
 use teseladb_types::NodeId;
 
 fn cluster() -> Group0Sm {

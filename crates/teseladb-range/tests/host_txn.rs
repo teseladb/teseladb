@@ -15,8 +15,8 @@ use teseladb_range::intents::{
 };
 use teseladb_range::read::ReadConcern;
 use teseladb_range::view::Part;
-use txn_node::*;
 use teseladb_types::GroupId;
+use txn_node::*;
 
 #[test]
 fn put_intents_conflict_with_newer_versions_and_other_transactions() {

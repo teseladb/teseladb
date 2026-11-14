@@ -5,6 +5,7 @@
 //! plan reads the index the other way), takes each document once and keeps those the rest of
 //! the filter matches.
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_index::planner_api::{CatalogIndex, IndexCatalog, IndexState};
 use teseladb_index::spec::catalog_index;
 use teseladb_keys::{
@@ -22,7 +23,6 @@ use teseladb_plan::rules::{
 };
 use teseladb_plan::stats::{Choice, RangeStats, choose as choose_by_cost};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::index_maintenance::MULTIKEY_MARKS;
 use super::mutation::from_mql;

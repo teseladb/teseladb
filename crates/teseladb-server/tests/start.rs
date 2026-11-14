@@ -13,13 +13,13 @@ use teseladb_io::FileDisk;
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START, data_range_core};
 use teseladb_meta::group0::ReplicaRole;
+use teseladb_raft::Role;
 use teseladb_range::host::RangeError;
 use teseladb_server::data::{DataError, DataStatus};
 use teseladb_server::memory::Component;
 use teseladb_server::node::{
     DATA_FORMAT, DATA_FORMAT_FILE, FOUNDER, Node, NodeConfig, NodeError, lock_dir,
 };
-use teseladb_raft::Role;
 use teseladb_types::NodeId;
 
 const READY: Duration = Duration::from_secs(20);

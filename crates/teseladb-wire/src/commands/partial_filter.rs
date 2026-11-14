@@ -5,8 +5,8 @@
 //! «Expression not supported in partial index:» followed by RefDb's description of the first
 //! one, one line per node, four spaces deeper per level.
 
-use teseladb_mql::{Filter, FilterUse};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_mql::{Filter, FilterUse};
 
 use super::display;
 use crate::error::{BAD_VALUE, CommandError, QUERY_FEATURE_NOT_ALLOWED};

@@ -16,8 +16,8 @@ use teseladb_auth::actions::ActionType;
 use teseladb_auth::apikey::{self, ApiKey};
 use teseladb_auth::authz::{self, Target};
 use teseladb_auth::users::{RoleName, UserName};
-use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::security::{Expect, Principal, SecurityOp};
 
 use super::args;
 use super::authz_writes::key_error;

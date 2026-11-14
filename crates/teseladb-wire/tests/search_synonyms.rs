@@ -5,8 +5,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_search::index::{EQUIVALENT, EXPLICIT};
 use teseladb_bson::{Document, Value};
+use teseladb_search::index::{EQUIVALENT, EXPLICIT};
 
 const DB: &str = "t";
 

@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 /// Documents 0 to `n - 1` of [`docs`], in `_id` order.
 fn ascending(n: i32) -> Vec<Value> {

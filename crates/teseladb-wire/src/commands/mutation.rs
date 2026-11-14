@@ -7,6 +7,7 @@
 //! The result the driver gets back is a BSON document too (see [`MutationResult`]): it is what
 //! the range keeps in the idempotence record of a retryable write (005 FR-011).
 
+use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
 use teseladb_changestream::describe::{Touch, describe};
 use teseladb_changestream::meta::RetryInfo;
 use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
@@ -20,7 +21,6 @@ use teseladb_mql::{Filter, FilterUse, MatchContext, MqlError};
 use teseladb_range::command::Put;
 use teseladb_range::host::{Mutation, MutationError};
 use teseladb_range::mutate::Outcome;
-use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
 
 use super::index_maintenance::{self, IndexRule, Maintainer};
 use teseladb_range::capped::CappedLimits;

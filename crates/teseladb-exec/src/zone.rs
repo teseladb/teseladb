@@ -14,10 +14,10 @@
 //! Under a collation, a string, a symbol and a document or array literal are left out: the zone
 //! orders strings by their bytes. Anything else may match.
 
+use teseladb_bson::RawValue;
 use teseladb_keys::zone::{Bounds, Zones};
 use teseladb_keys::{Direction, TypeBits, encode_value};
 use teseladb_mql::{CmpOp, Expr, InItem, Pred};
-use teseladb_bson::RawValue;
 
 /// Whether a block whose zones are `zones` may hold a document `filter` accepts; `collated`:
 /// the filter compares strings under a collation.

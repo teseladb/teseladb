@@ -4,8 +4,8 @@
 //! value as `null` or the empty string, as noted on each; `$toLower`, `$toUpper`, `$substr*` and
 //! `$strcasecmp` turn numbers and dates into text first.
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, Value};
+use teseladb_mql::MqlError;
 
 use super::arith::type_name_of;
 use super::{Eval, Expr, Scope, codes, count, error};

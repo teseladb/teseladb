@@ -298,7 +298,8 @@ mod tests {
 
     #[test]
     fn decimals_and_large_integers_beside_doubles_keep_the_comparison_sort() {
-        let dec = Value::Decimal128(teseladb_bson::Decimal128::from_parts(false, 1, 0).expect("one"));
+        let dec =
+            Value::Decimal128(teseladb_bson::Decimal128::from_parts(false, 1, 0).expect("one"));
         assert!(encode(&[vec![dec]], &[true]).is_none());
         let big = vec![vec![Value::Int64(i64::MAX)], vec![Value::Double(1.0)]];
         assert!(encode(&big, &[true]).is_none());

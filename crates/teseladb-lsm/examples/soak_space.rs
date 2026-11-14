@@ -14,12 +14,12 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::RawValue;
 use teseladb_keys::space::{FieldSpec, IndexKeySpec, KeyBuilder, PrimaryKey};
 use teseladb_keys::{Direction, Hlc, VERSION_LEN};
 use teseladb_lsm::{
     Codec, DOCUMENT_VALUE, EntryWrite, FileSpace, HISTORY_VALUE, Kind, Lsm, LsmConfig, SpaceUse,
 };
-use teseladb_bson::RawValue;
 use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos, Rng};
 

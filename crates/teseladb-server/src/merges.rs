@@ -28,10 +28,10 @@ use teseladb_meta::bootstrap::{DATA_END, DATA_START};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::group0::RangeDesc;
 use teseladb_multiraft::{GroupDesc, MultiRaftCore, OpId};
+use teseladb_raft::Role;
 use teseladb_range::host::{MergeSource, RangeHost};
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::local_interval;
-use teseladb_raft::Role;
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 
 use crate::coresm::CoreSm;
@@ -449,9 +449,9 @@ mod tests {
     use teseladb_hlc::Hlc;
     use teseladb_lsm::{Lsm, LsmConfig};
     use teseladb_multiraft::{ApplyCtx, StateMachine};
+    use teseladb_raftlog::MemDisk;
     use teseladb_range::command::Command;
     use teseladb_range::sm::RangeSm;
-    use teseladb_raftlog::MemDisk;
     use teseladb_types::GroupId;
 
     use super::replica_ready;
@@ -487,10 +487,10 @@ mod tests {
         use teseladb_multiraft::{
             ApplyCtx, CoreConfig, GroupDesc, MultiRaftCore, NodeClock, OpId, StateMachine,
         };
+        use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
         use teseladb_range::command::{Absorbed, Command};
         use teseladb_range::host::RangeHost;
         use teseladb_range::sm::RangeSm;
-        use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
         use teseladb_types::{GroupId, Nanos, NodeId};
 
         use super::super::{Merges, READY};

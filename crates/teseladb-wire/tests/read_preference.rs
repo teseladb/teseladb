@@ -1,10 +1,10 @@
 //! `$readPreference` (007 FR-013) as a `refrouter` 9.0.4 reads it with `find` (measured): the types of
 //! its fields, its rules, and where it is checked among the other arguments.
 
+use teseladb_bson::{Document, Value};
 use teseladb_router::read_pref::Mode;
 use teseladb_wire::error::CommandError;
 use teseladb_wire::generic::parse;
-use teseladb_bson::{Document, Value};
 
 fn d(fields: &[(&str, Value)]) -> Document {
     let mut doc = Document::new();

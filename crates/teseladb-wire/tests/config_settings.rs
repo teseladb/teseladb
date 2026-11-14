@@ -6,10 +6,10 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_wire::commands::config_settings::{
     AUDIT, BALANCER, CHUNK_SIZE, CHUNK_SIZE_RANGE, SETTINGS,
 };
-use teseladb_bson::{Document, Value};
 
 const CONFIG: &str = "config";
 /// `DocumentValidationFailure`.

@@ -42,8 +42,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::{ErrorCode, MqlError};
 
 pub(crate) use logic::sort_by_values;
 pub use logic::{order, truthy, try_sort_by};

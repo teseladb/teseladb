@@ -3,11 +3,11 @@
 //! `_id`, `splitEvent`, `wallTime`, `clusterTime`, `operationType`, `documentKey`, `ns`,
 //! `updateDescription` and `fullDocument`, the second with `fullDocumentBeforeChange`.
 
+use teseladb_bson::{Document, Value};
 use teseladb_changestream::order::EventKey;
 use teseladb_changestream::split_large::{MAX_EVENT_BYTES, SplitError, metadata, size, split};
 use teseladb_changestream::token::{EventKind, ResumeToken};
 use teseladb_hlc::Hlc;
-use teseladb_bson::{Document, Value};
 
 fn token() -> ResumeToken {
     let event = EventKey { ts: Hlc { physical: 7, logical: 1 }, txn: 0, op: 0, key: b"k".to_vec() };

@@ -6,10 +6,10 @@ mod common;
 use std::net::SocketAddr;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::admin_http::{Method, request};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::Document;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::admin_http::{Method, request};
+use teseladb_server::node::{Node, NodeConfig};
 
 fn with_admin(join: Vec<String>) -> NodeConfig {
     NodeConfig { admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))), ..config(join) }

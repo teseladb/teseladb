@@ -3,8 +3,8 @@
 //! clauses RefDb settles or joins, `$in` in order, and `$jsonSchema` in RefDb's internal
 //! operators.
 
-use teseladb_mql::{Filter, FilterUse};
 use teseladb_bson::{Document, RawDoc, extjson};
+use teseladb_mql::{Filter, FilterUse};
 
 fn canonical(d: &Document) -> String {
     let bytes = d.to_bytes().expect("small");

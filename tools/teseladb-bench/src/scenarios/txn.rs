@@ -16,8 +16,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use teseladb_meta::group0::Group0Error;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_meta::group0::Group0Error;
 use teseladb_types::{Histogram, Rng};
 
 use super::wire::each;

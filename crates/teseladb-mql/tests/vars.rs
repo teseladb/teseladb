@@ -5,9 +5,9 @@
 mod common;
 
 use common::{TestExt, bytes, canon, doc, json, raw};
+use teseladb_bson::Value;
 use teseladb_mql::vars::resolve_let;
 use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
-use teseladb_bson::Value;
 
 fn err(let_json: &str) -> (i32, String) {
     match resolve_let(&doc(let_json), &NoExtensions) {

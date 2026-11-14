@@ -1,8 +1,8 @@
 //! `updateDescription` (014 FR-009): the shape a `refrouter` 9.0.4 gives (measured on 31-10), and the
 //! bytes kept with the version read back.
 
-use teseladb_changestream::update_desc::{DescError, PathPart, UpdateDescription};
 use teseladb_bson::{Document, Value};
+use teseladb_changestream::update_desc::{DescError, PathPart, UpdateDescription};
 
 fn keys(d: &Document) -> Vec<&str> {
     d.iter().map(|(k, _)| k).collect()

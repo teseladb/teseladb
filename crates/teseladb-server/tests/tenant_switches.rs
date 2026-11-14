@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::http_listener::HttpPortConfig;
+use teseladb_server::node::{Node, NodeConfig};
 
 const ROOT_PASSWORD: &str = "root-pw-31";
 const PASSWORD: &str = "acme-pw-123";

@@ -3,11 +3,11 @@
 
 #![allow(dead_code)]
 
+use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::clock::ClockLimits;
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::world::{Event, World};
-use teseladb_raftlog::Completions;
 
 /// Hook on the world.
 pub type Hook = Box<dyn FnMut(&mut World)>;

@@ -17,10 +17,10 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use teseladb_bson::{Document, Value};
 use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Codec, Lookup, Lsm, LsmConfig};
-use teseladb_bson::{Document, Value};
 use teseladb_raftlog::Disk;
 use teseladb_types::{GroupId, Nanos, Rng};
 

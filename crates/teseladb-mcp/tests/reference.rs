@@ -3,8 +3,8 @@
 //! each tool reads are the properties and required ones of its `inputSchema`, the same hints, and
 //! a `structuredContent` with the fields of its `outputSchema`.
 
-use teseladb_mcp::tools::{TOOLS, input_schema, listing, own_input_schema, reference};
 use teseladb_json::Value;
+use teseladb_mcp::tools::{TOOLS, input_schema, listing, own_input_schema, reference};
 
 fn names(v: Option<&Value>) -> Vec<String> {
     match v {

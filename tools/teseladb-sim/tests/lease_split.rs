@@ -4,13 +4,13 @@
 //! the step, the start waits at least 500 ms, longer than any lease, and the faulty variant
 //! `vote_after_restart` went undetected. After the heal no clock steps.
 
+use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::{FaultAction, FaultPlan};
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::workloads::kv::KvWorkload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
-use teseladb_raftlog::Completions;
 use teseladb_types::Nanos;
 
 /// When node 1 goes down.

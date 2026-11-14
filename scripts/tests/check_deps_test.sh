@@ -69,53 +69,46 @@ d=$(fixture git-source)
 printf '\n[[package]]\nname = "foo"\nversion = "0.1.0"\nsource = "git+https://example.com/foo"\n' >> "$d/Cargo.lock"
 expect "git package in Cargo.lock" "$d" 1 "external package: foo"
 
-# The viuzi-* crates copied from TeselaDB come from the private registry viuzi at a published version
-# (001 FR-023, constitution 3.0.0, principle V; owner, 06-11-2026).
-VIUZI_SOURCE="sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-viuzi() {
-  local d=$1 dep=$2 source=${3:-$VIUZI_SOURCE}
-  printf '\n[[package]]\nname = "teseladb-bson"\nversion = "0.1.0"\nsource = "%s"\n' "$source" >> "$d/Cargo.lock"
+# The generic crates are members of the workspace, used by path from crates/ (001 FR-023, D-169,
+# constitution 3.4.0, principle V; owner, 14-11-2026). A package from any registry, the private one of
+# viuzi included, from git or from a path outside the workspace is a finding.
+REGISTRY_SOURCE="sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
+generic() { # dir dependency [source]: the workspace takes teseladb-bson with that dependency
+  local d=$1 dep=$2 source=${3:-}
+  mkdir -p "$d/crates/teseladb-bson/src"
+  printf '[package]\nname = "teseladb-bson"\n' > "$d/crates/teseladb-bson/Cargo.toml"
+  printf '#![forbid(unsafe_code)]\npub fn f() {}\n' > "$d/crates/teseladb-bson/src/lib.rs"
+  printf '\n[[package]]\nname = "teseladb-bson"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
+  [[ -z $source ]] || printf 'source = "%s"\n' "$source" >> "$d/Cargo.lock"
   printf '[workspace]\nmembers = ["crates/*"]\n\n[workspace.dependencies]\nteseladb-bson = %s\n' "$dep" > "$d/Cargo.toml"
-  # The hot-path check reads the source of the crates of the registry; here, an empty folder of them.
-  mkdir -p "$d/teseladb-src"
 }
-registry='{ version = "0.1.0", registry = "viuzi" }'
-viuzi_expect() { # what dir rc pattern
-  local out rc
-  out=$(cd "$2" && TESELADB_ANOTHERPRODUCT=teseladb-src scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
-  if [[ $rc -eq $3 ]] && grep -Eq "$4" <<<"$out"; then
-    passed=$((passed + 1))
-  else
-    failed=$((failed + 1))
-    echo "FAILED: $1 (exit $rc)"
-    echo "  | ${out//$'\n'/$'\n'  | }"
-  fi
-}
-d=$(fixture viuzi)
-viuzi "$d" "$registry"
+d=$(fixture generic)
+generic "$d" '{ path = "crates/teseladb-bson" }'
 printf '\n[dependencies]\nteseladb-bson = { workspace = true }\n' >> "$d/crates/teseladb-types/Cargo.toml"
-viuzi_expect "a viuzi crate from the registry" "$d" 0 "^check-deps: OK$"
+expect "a generic crate of the workspace by path" "$d" 0 "^check-deps: OK$"
 
-d=$(fixture viuzi-features)
-viuzi "$d" '{ version = "0.1.0", registry = "viuzi", features = ["serde"] }'
-viuzi_expect "a viuzi crate from the registry with features" "$d" 0 "^check-deps: OK$"
+d=$(fixture generic-registry)
+generic "$d" '{ version = "0.1.0", registry = "viuzi" }' "$REGISTRY_SOURCE"
+expect "a crate of the private registry" "$d" 1 "Cargo.lock: external package: teseladb-bson"
 
-d=$(fixture viuzi-path)
-viuzi "$d" '{ path = "../../shared-crates/crates/teseladb-bson" }'
-viuzi_expect "a viuzi crate by path" "$d" 1 "Cargo.toml: teseladb-bson: not a version of the registry viuzi"
+d=$(fixture generic-crates-io)
+generic "$d" '{ version = "0.1.0" }' "registry+https://github.com/rust-lang/crates.io-index"
+expect "a crate from crates.io" "$d" 1 "Cargo.lock: external package: teseladb-bson"
 
-d=$(fixture shared-crates-io)
-viuzi "$d" '{ version = "0.1.0" }' "registry+https://github.com/rust-lang/crates.io-index"
-viuzi_expect "a viuzi crate from crates.io" "$d" 1 "Cargo.lock: external package: teseladb-bson"
+d=$(fixture generic-git)
+generic "$d" '{ git = "https://example.com/crates" }' "git+https://example.com/crates#0"
+expect "a crate from git" "$d" 1 "Cargo.lock: external package: teseladb-bson"
 
-d=$(fixture viuzi-git)
-viuzi "$d" '{ git = "https://git.viuzi.com/viuzi/shared-crates" }' "git+https://git.viuzi.com/viuzi/shared-crates#0"
-viuzi_expect "a viuzi crate from git" "$d" 1 "Cargo.lock: external package: teseladb-bson"
+d=$(fixture generic-outside-path)
+generic "$d" '{ path = "../../other-repository/crates/bson" }'
+expect "a workspace dependency by a path outside the workspace" "$d" 1 \
+  "Cargo.toml: teseladb-bson: path outside the workspace \(../../other-repository/crates/bson\)"
 
-d=$(fixture viuzi-own-path)
-viuzi "$d" "$registry"
-printf '\n[dependencies]\nteseladb-bson = { path = "../../../teseladb-bson" }\n' >> "$d/crates/teseladb-types/Cargo.toml"
-viuzi_expect "a member with its own path to a viuzi crate" "$d" 1 "crates/teseladb-types/Cargo.toml: teseladb-bson: not from the workspace's dependencies"
+d=$(fixture generic-member-path)
+generic "$d" '{ path = "crates/teseladb-bson" }'
+printf '\n[dependencies]\nteseladb-bson = { path = "../../../elsewhere/teseladb-bson" }\n' >> "$d/crates/teseladb-types/Cargo.toml"
+expect "a member with a path outside the workspace" "$d" 1 \
+  "crates/teseladb-types/Cargo.toml: teseladb-bson: path outside the workspace \(../../../elsewhere/teseladb-bson\)"
 
 d=$(fixture outside)
 printf '\n[[package]]\nname = "foo"\nversion = "0.1.0"\n' >> "$d/Cargo.lock"
@@ -207,19 +200,15 @@ for lock in "std::sync::Mutex" "std::sync::{Arc, RwLock}" "std::sync::Condvar"; 
   printf 'use %s;\n' "$lock" >> "$d/crates/teseladb-io/src/lib.rs"
   expect "$lock in a hot-path crate" "$d" 1 "crates/teseladb-io/src/lib.rs:[0-9]+: .*\\(a lock in a hot-path crate\\)"
 done
-# Cryptography runs on every authenticated or encrypted operation (D-090: a generator per thread).
-# teseladb-crypto lives in shared-crates since 05-11-2026 (001 FR-023).
-d=$(fixture lock-crypto)
-mkdir -p "$d/viuzi/teseladb-crypto/src"
-printf 'use std::sync::Mutex;\n' > "$d/viuzi/teseladb-crypto/src/lib.rs"
-out=$(cd "$d" && TESELADB_ANOTHERPRODUCT=viuzi scripts/check-deps.sh 2>&1) && rc=0 || rc=$?
-if [[ $rc -eq 1 ]] && grep -Eq "viuzi/teseladb-crypto/src/lib.rs:[0-9]+: .*\\(a lock in a hot-path crate\\)" <<<"$out"; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1))
-  echo "FAILED: a lock in teseladb-crypto (exit $rc)"
-  echo "  | ${out//$'\n'/$'\n'  | }"
-fi
+# Cryptography runs on every authenticated or encrypted operation (D-090: a generator per thread),
+# and Raft and its log on every write: their crates are on the hot path (001 FR-023).
+for crate in teseladb-crypto teseladb-raft teseladb-raftlog; do
+  d=$(fixture "lock-$crate")
+  mkdir -p "$d/crates/$crate/src"
+  printf '[package]\nname = "%s"\n' "$crate" > "$d/crates/$crate/Cargo.toml"
+  printf '#![forbid(unsafe_code)]\nuse std::sync::Mutex;\n' > "$d/crates/$crate/src/lib.rs"
+  expect "a lock in $crate" "$d" 1 "crates/$crate/src/lib.rs:2: .*\\(a lock in a hot-path crate\\)"
+done
 d=$(fixture test-threads)
 printf '#[cfg(test)]\nmod tests {\n    fn t() {\n        std::thread::spawn(|| ());\n    }\n}\n' \
   >> "$d/crates/teseladb-types/src/lib.rs"

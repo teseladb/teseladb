@@ -38,6 +38,7 @@ use std::rc::Rc;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{FileRef, LsmError, ViewCache};
 use teseladb_multiraft::{Done, GroupDesc, OpError, OpId, StateMachine};
+use teseladb_raftlog::{Completions, Disk, FileId, IoOp, SimDisk};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::checksum::Report;
 use teseladb_range::command::{DedupKey, Put};
@@ -50,7 +51,6 @@ use teseladb_range::read::ReadConcern;
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
 use teseladb_range::snapshot::{Assembler, local_interval, split, write_ops};
 use teseladb_range::view::{FastRead, FastWrite, NoChange};
-use teseladb_raftlog::{Completions, Disk, FileId, IoOp, SimDisk};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::checkers::{Violation, durability, linearizable, liveness};

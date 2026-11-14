@@ -7,9 +7,9 @@
 mod common;
 
 use common::pool;
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_keys::fields::{FieldNumbers, MAX_FIELD_NAME_LEN, MAX_FIELD_NAMES, UNNUMBERED};
 use teseladb_keys::stored::{self, FieldKey, Lookup, MIN_TABLE_FIELDS, Stored};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 const DICTIONARY: u32 = 0x5EED_0001;
 

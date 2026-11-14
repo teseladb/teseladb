@@ -12,11 +12,11 @@ use teseladb_keys::stored;
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::{RoleName, UserName};
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, Value};
 
 use crate::commands::session::KillScope;
 use crate::commands::tenants;

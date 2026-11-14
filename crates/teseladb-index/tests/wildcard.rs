@@ -6,13 +6,13 @@
 
 use std::cmp::Ordering;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, extjson};
 use teseladb_index::keygen::wildcard::{
     CANNOT_CREATE_INDEX, SpecError, WILDCARD_FIELD, WILDCARD_NOT_ORDERED, WILDCARD_SUFFIX,
     WildcardProjection, check_key, check_options,
 };
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, key_values};
 use teseladb_keys::Direction;
-use teseladb_bson::{Document, RawDoc, RawValue, Value, compare, extjson};
 
 const CASES: &str = include_str!("data/wildcard-keys.json");
 /// The only aggregation expression the measured projections use.

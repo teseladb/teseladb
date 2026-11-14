@@ -10,13 +10,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::admin_http::{Method, request};
-use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::Document;
 use teseladb_http::http1::{Limits, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_raftlog::MemDisk;
+use teseladb_server::admin_http::{Method, request};
+use teseladb_server::http_listener::HttpPortConfig;
+use teseladb_server::node::{Node, NodeConfig};
 
 fn get(addr: SocketAddr, text: &str) -> Response {
     let mut s = TcpStream::connect(addr).unwrap();

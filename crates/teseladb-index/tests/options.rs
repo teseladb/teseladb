@@ -3,10 +3,10 @@
 //! hidden index is not chosen and a `hint` to it is refused as RefDb refuses one to an index
 //! that is not there.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_index::planner_api::{Hint, IndexCatalog, IndexState};
 use teseladb_index::spec::catalog_index;
 use teseladb_keys::Hlc;
-use teseladb_bson::{Document, RawDoc, Value};
 
 fn ts(physical: u64) -> Hlc {
     Hlc { physical, logical: 0 }

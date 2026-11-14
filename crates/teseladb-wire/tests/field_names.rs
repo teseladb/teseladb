@@ -6,10 +6,10 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_keys::space::{collection_id_of, in_documents};
 use teseladb_keys::stored::{self, MIN_TABLE_FIELDS};
 use teseladb_meta::catalog::Namespace;
-use teseladb_bson::{Document, Value};
 
 /// Document `i` with fields `{prefix}0…` enough for a table and a nested document with its own.
 fn wide(i: i32, prefix: &str) -> Document {

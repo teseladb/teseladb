@@ -5,10 +5,10 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_router::table::RouteEntry;
-use teseladb_wire::generic::parse;
 use teseladb_bson::{Document, Value, extjson};
+use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
+use teseladb_wire::generic::parse;
 
 /// `minSnapshotHistoryWindowInSeconds` of the shards of a `refrouter` 9.0.4 by default (measured
 /// 03-11-2026), in milliseconds.

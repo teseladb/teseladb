@@ -2,8 +2,8 @@
 //! columns, its `control` as a `refrouter` 9.0.4 writes it (measured with `rawData: true` on
 //! 31-10-2026), and unpacked again.
 
-use teseladb_mql::timeseries_write::{BucketSpec, Full, MAX_MEASUREMENTS, TsError};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_mql::timeseries_write::{BucketSpec, Full, MAX_MEASUREMENTS, TsError};
 
 const T0: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
 

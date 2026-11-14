@@ -3,9 +3,8 @@
 # are built for `x86_64-unknown-linux-musl` (static, linked with rust-lld) and run with
 # `qemu-x86_64 -cpu max` inside a local image (scripts/docker/x86_64-qemu.Dockerfile). That CPU
 # model has SSE4.2, SSSE3, SSE4.1 and the SHA extensions on any host, so the x86_64 paths (CRC32C,
-# Adler-32, SHA-NI, epoll, eventfd) run even on an AArch64 machine. The accelerated hashes and
-# their check that the CPU has them are those of teseladb-hash, tested by the same script in
-# shared-crates (001 FR-023).
+# Adler-32, SHA-NI, epoll, eventfd) run even on an AArch64 machine; `TESELADB_EXPECT_ACCEL` makes the
+# tests of teseladb-hash fail if one of the hash accelerations is not detected (001 FR-023).
 #   scripts/test-x86_64.sh [crate...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -35,7 +34,7 @@ while IFS= read -r run; do runs+=("$run"); done < <(
 # The repository is mounted at its own path: the tests find their files through paths fixed at
 # build time (`env!("CARGO_MANIFEST_DIR")`). Every binary runs from its crate's directory, as
 # `cargo test` does.
-docker run --rm -i -v "$PWD:$PWD" -w "$PWD" \
+docker run --rm -i -e TESELADB_EXPECT_ACCEL=crc32c,sha1,sha256,adler32 -v "$PWD:$PWD" -w "$PWD" \
   "$IMAGE" sh -s -- "${runs[@]}" <<'EOF'
 fail=0
 for run in "$@"; do

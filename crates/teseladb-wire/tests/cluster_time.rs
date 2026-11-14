@@ -12,6 +12,7 @@ use common::{Mem, doc, field};
 use teseladb_auth::clustertime::{HmacKey, KEY_LEN, KeyRing, Time, sign};
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_auth::users::{RoleName, User, UserName};
+use teseladb_bson::{Decimal128, Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::cluster_time::{GivenTime, parse};
@@ -25,7 +26,6 @@ use teseladb_wire::error::{
 };
 use teseladb_wire::hello::{restamp_cluster_time, with_cluster_time};
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
-use teseladb_bson::{Decimal128, Document, Value};
 
 const ADMIN: &str = "admin";
 const NOW: ClusterTime = ClusterTime { time: 1_793_376_615, increment: 1 };

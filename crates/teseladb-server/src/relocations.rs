@@ -37,12 +37,12 @@ use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_meta::command::Group0Command;
 use teseladb_multiraft::{Durable, ExportBase, GroupImport, MultiRaftCore, OpError, StateMachine};
+use teseladb_raft::Role;
+use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_range::command::Command;
 use teseladb_range::host::RangeHost;
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::write_ops;
-use teseladb_raft::Role;
-use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::{GroupId, Nanos};
 
 use crate::coresm::CoreSm;
@@ -943,10 +943,10 @@ mod tests {
     use teseladb_lsm::{EntryWrite, Kind, Lookup, LsmConfig};
     use teseladb_meta::group0::{RangeDesc, ReplicaRole};
     use teseladb_multiraft::{CoreConfig, NodeClock};
+    use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
     use teseladb_range::ack::{W, WriteConcern};
     use teseladb_range::host::{DeleteReq, RangeError, Reply};
     use teseladb_range::tscache::LEASE_MARGIN_MS;
-    use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
     use teseladb_types::NodeId;
 
     use crate::ranges::Ranges;

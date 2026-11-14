@@ -16,9 +16,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use teseladb_bson::Document;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Commit, Kind, Lookup, Lsm, LsmConfig, LsmError, RangeTombstone, Step};
-use teseladb_bson::Document;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{
     Completions, LogEntry, LogGap, ReleaseProvider, SimDisk, SnapshotMeta, Ticket,

@@ -5,8 +5,8 @@
 //! `$expMovingAvg` and the covariances compute in decimal, as RefDb does, and give a double
 //! unless a decimal came in; `$derivative` and `$integral` compute in doubles.
 
-use teseladb_mql::{DecOp, ErrorCode, MqlError, dec_binary, to_decimal128};
 use teseladb_bson::{Decimal128, Value};
+use teseladb_mql::{DecOp, ErrorCode, MqlError, dec_binary, to_decimal128};
 
 use crate::expr::arith::{add, divide, multiply, subtract, type_name_of};
 use crate::expr::codes::BAD_DIVISION;

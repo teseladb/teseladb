@@ -9,8 +9,8 @@
 //! and with `showExpandedEvents` `operationDescription`, `stateBeforeChange` and `nsType`; an
 //! `invalidate` has no `ns`.
 
-use teseladb_hlc::{Hlc, to_timestamp};
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
+use teseladb_hlc::{Hlc, to_timestamp};
 
 use crate::changes::Change;
 use crate::meta::lsid_document;

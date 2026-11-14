@@ -2,9 +2,9 @@
 //! seeks of a `refrouter` 9.0.4 over the index `{g: 1, n: 1}` of `tests/compat` collection `c`
 //! (measured 01-11-2026).
 
+use teseladb_bson::{Decimal128, Value};
 use teseladb_plan::checker::{FieldWalk, Visit, walk};
 use teseladb_plan::logical::{Bound, intervals};
-use teseladb_bson::{Decimal128, Value};
 
 /// The keys of `{g: 1, n: 1}` in index order.
 fn keys() -> Vec<Vec<Value>> {

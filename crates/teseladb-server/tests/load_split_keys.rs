@@ -14,9 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, docs, ok, until};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::{Node, NodeConfig};
 
 const WRITERS: i32 = 8;
 const LOAD: Duration = Duration::from_secs(20);

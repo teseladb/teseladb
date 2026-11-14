@@ -2,8 +2,8 @@
 //! `error-codes.md`, FR-021), and the translation of the range's errors (005) into them.
 
 use crate::commands::txn::{ABORT_TRANSACTION, COMMIT_TRANSACTION};
-use teseladb_range::host::{MutationError, RangeError};
 use teseladb_bson::{Document, Value};
+use teseladb_range::host::{MutationError, RangeError};
 
 /// `errmsg` of a write whose Raft entry would pass 64 MiB (005 FR-023): the node writes it again
 /// as an internal transaction in parts (008 FR-006).

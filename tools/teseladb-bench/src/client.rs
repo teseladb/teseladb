@@ -7,11 +7,11 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::node::Node;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_raftlog::MemDisk;
 
 /// Longest a request waits for its answer.
 const TIMEOUT: Duration = Duration::from_secs(30);

@@ -7,8 +7,8 @@
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
-use teseladb_sys::alloc_count::{CountingAlloc, held_bytes};
 use teseladb_raftlog::MemDisk;
+use teseladb_sys::alloc_count::{CountingAlloc, held_bytes};
 use teseladb_types::GroupId;
 
 #[global_allocator]

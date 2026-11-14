@@ -9,10 +9,10 @@
 
 use std::time::{Duration, Instant};
 
+use teseladb_json::{Value, to_string};
 use teseladb_mcp::jsonrpc::{Incoming, Message, error_response, read, response};
 use teseladb_mcp::untrusted::{format_uuid, wrap};
 use teseladb_mcp::versions::{Revision, negotiate_initialize, request_revision};
-use teseladb_json::{Value, to_string};
 use teseladb_types::Rng;
 
 const DEFAULT_ROUNDS: u64 = 20_000;

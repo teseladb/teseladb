@@ -18,6 +18,9 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_bson::{Document, Value};
+use teseladb_raft::Role;
+use teseladb_raftlog::MemDisk;
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backend::{
     filtered_parts_sent, lookup_batches_sent, lookup_keys_filtered, lookup_keys_sent,
@@ -25,9 +28,6 @@ use teseladb_server::backend::{
 };
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pushed::ran_for_other_nodes;
-use teseladb_bson::{Document, Value};
-use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 
 const DOCS: i32 = 3000;
 
@@ -223,7 +223,10 @@ fn ranges_of_c(at: &str) -> Vec<teseladb_types::GroupId> {
 }
 
 /// The leader of range `g`, as every node that has a replica of it says, when they agree.
-fn leader_of(nodes: &[Node<MemDisk>], g: teseladb_types::GroupId) -> Option<teseladb_types::NodeId> {
+fn leader_of(
+    nodes: &[Node<MemDisk>],
+    g: teseladb_types::GroupId,
+) -> Option<teseladb_types::NodeId> {
     let said: Vec<teseladb_types::NodeId> = nodes
         .iter()
         .filter_map(|n| n.range_status(g, Duration::from_secs(2)))

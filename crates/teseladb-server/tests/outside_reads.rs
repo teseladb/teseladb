@@ -10,11 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_bson::{Document, Value};
 use teseladb_io::FileDisk;
 use teseladb_lsm::LsmConfig;
 use teseladb_server::backend::{blocks_read_outside, served_outside};
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
-use teseladb_bson::{Document, Value};
 
 const DB: &str = "outside";
 const COLL: &str = "c";
@@ -253,7 +253,8 @@ fn increments_from_several_connections_all_count() {
 /// between the values find those keys also when they are served outside the core.
 #[test]
 fn an_in_of_ids_examines_the_keys_refdb_examines() {
-    let node = Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node =
+        Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..100)));
@@ -311,7 +312,8 @@ fn delete_once(c: &mut Client, id: i32, txn: i64) -> Document {
 /// core and deletes it.
 #[test]
 fn a_write_of_an_absent_id_is_answered_without_the_core() {
-    let node = Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node =
+        Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..10)));

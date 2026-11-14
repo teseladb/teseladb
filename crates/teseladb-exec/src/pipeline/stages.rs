@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::{ErrorCode, Filter, FilterUse, MqlError};
 
 use super::errors::{
     BAD_VALUE, COUNT_DOLLAR, COUNT_DOT, COUNT_EMPTY, COUNT_ID, COUNT_TYPE, FACET_ARRAY,

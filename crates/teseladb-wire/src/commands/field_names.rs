@@ -5,10 +5,10 @@
 
 use std::collections::BTreeSet;
 
+use teseladb_bson::{Document, Value};
 use teseladb_keys::fields::{FieldNumbers, numberable};
 use teseladb_keys::stored::MIN_TABLE_FIELDS;
 use teseladb_meta::catalog::CatalogCommand;
-use teseladb_bson::{Document, Value};
 
 use super::Backend;
 use super::mutation::{Bound, DocMutation};

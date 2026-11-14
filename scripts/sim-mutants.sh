@@ -39,15 +39,8 @@ done
 known=()
 while IFS= read -r v; do known+=("$v"); done < <(
   {
+    # Raft and its log are crates of the workspace too (001 FR-023).
     grep -rhoE 'teseladb_bug = "[a-z0-9_]+"' crates 2>/dev/null
-    # The variants of the viuzi-* crates TeselaDB uses (Raft and its log, 001 FR-023).
-    # They are read from the published source TeselaDB is built with (scripts/teseladb-src.sh), a folder of links: each
-    # link goes with a trailing slash, since the BSD grep of macOS does not follow a link that -R meets inside a folder.
-    # Without that folder there is nothing to read (an empty path would make the links those of the root).
-    teseladb_src=${TESELADB_ANOTHERPRODUCT:-$(scripts/teseladb-src.sh 2>/dev/null)}
-    if [[ -n $teseladb_src && -d $teseladb_src ]]; then
-      grep -RhoE 'teseladb_bug = "[a-z0-9_]+"' "$teseladb_src"/*/ 2>/dev/null
-    fi
   } | sed -E 's/.*"([a-z0-9_]+)"/\1/' | sort -u
 )
 if [[ ${#known[@]} -eq 0 ]]; then
@@ -112,10 +105,7 @@ simulator() {
     echo "$TESELADB_SIM_CMD"
     return
   fi
-  # A variant's name is declared in TeselaDB's crates or in the viuzi-* ones, never in both: both
-  # markers get it, and both are expected so that neither workspace warns about the other's.
-  RUSTFLAGS="--check-cfg cfg(teseladb_bug,values(any())) --check-cfg cfg(teseladb_bug,values(any())) \
---cfg teseladb_bug=\"$v\" --cfg teseladb_bug=\"$v\"" CARGO_TARGET_DIR="$target" \
+  RUSTFLAGS="--check-cfg cfg(teseladb_bug,values(any())) --cfg teseladb_bug=\"$v\"" CARGO_TARGET_DIR="$target" \
     cargo build -q --offline --release -p teseladb-sim >&2 || return 1
   echo "$target/release/teseladb-sim"
 }

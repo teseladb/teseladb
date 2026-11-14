@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock};
 
 use teseladb_meta::group0::RangeDesc;
 use teseladb_router::table::{RouteEntry, RouteTable};
-use teseladb_wire::commands::write_block::WriteGate;
 use teseladb_types::{GroupId, NodeId};
+use teseladb_wire::commands::write_block::WriteGate;
 
 use crate::hosting::Hosting;
 

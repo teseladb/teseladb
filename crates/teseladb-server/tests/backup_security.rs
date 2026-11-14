@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_auth::scram::{ClientSession, Mechanism};
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::{Node, NodeConfig};
 
 const OLD_ROOT: &str = "old-root-pw-31";
 const NEW_ROOT: &str = "new-root-pw-31";

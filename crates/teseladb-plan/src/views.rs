@@ -9,8 +9,8 @@
 //! reach itself again; and it may not stand on more than [`MAX_VIEW_DEPTH`] views. A query refuses
 //! a chain of [`MAX_VIEW_DEPTH`] views or more.
 
-use teseladb_meta::collection_types::CollectionKind;
 use teseladb_bson::{RawDoc, RawValue};
+use teseladb_meta::collection_types::CollectionKind;
 
 use crate::stages::{self, Reach, StageError};
 

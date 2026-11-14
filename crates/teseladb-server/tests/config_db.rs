@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 fn find(c: &mut Client, coll: &str) -> Vec<Value> {
     until(coll, || {

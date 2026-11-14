@@ -16,8 +16,8 @@
 
 use std::sync::Arc;
 
-use teseladb_mql::{Extensions, MqlError, NoExtensions};
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::{Extensions, MqlError, NoExtensions};
 
 use super::group::{Group, PartialGroups};
 use super::{Env, Pipeline, Stage};

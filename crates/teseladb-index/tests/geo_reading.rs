@@ -2,9 +2,9 @@
 //! `tests/data/geo-reading.json`, measured on refnode 9.0.4, is refused with the server's reason or
 //! accepted, both as an indexed value and as a query's `$geometry`.
 
+use teseladb_bson::{RawDoc, Value, extjson};
 use teseladb_index::geo::geojson::parse;
 use teseladb_index::keygen::{FieldKind, IndexDef, IndexField, key_values};
-use teseladb_bson::{RawDoc, Value, extjson};
 
 const CASES: &str = include_str!("data/geo-reading.json");
 

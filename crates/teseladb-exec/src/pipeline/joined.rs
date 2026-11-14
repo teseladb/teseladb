@@ -2,8 +2,8 @@
 //! `$lookup`'s `let`, and the collection the stage reads, whose text and search indexes a first
 //! `$match` with `$text` or search stage reads (011 T054, FR-004).
 
-use teseladb_mql::{Extensions, MqlError};
 use teseladb_bson::Document;
+use teseladb_mql::{Extensions, MqlError};
 
 use super::Env;
 use crate::expr::Scope;

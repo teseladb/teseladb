@@ -7,12 +7,12 @@ mod common;
 use std::sync::Mutex;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_wire::commands::profile::SLOW_QUERY_ID;
 use teseladb_wire::commands::{NodeSessions, Shared, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::OpMsg;
-use teseladb_bson::{Document, Value, extjson};
 
 const DB: &str = "pf";
 

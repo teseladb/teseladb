@@ -2,8 +2,8 @@
 //! (seconds, a fixed process value, a counter) fall into the 16 buckets with less than 5 %
 //! deviation from the even share in each one, so that inserts do not all go to the last range.
 
-use teseladb_keys::{DOCUMENT_BUCKETS, bucket};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_keys::{DOCUMENT_BUCKETS, bucket};
 
 #[test]
 fn a_million_increasing_object_ids_spread_evenly() {

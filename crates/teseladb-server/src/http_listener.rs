@@ -25,8 +25,8 @@ use teseladb_http::metrics::{Family, HttpMetrics};
 
 /// The series of the HTTP port's routes: `teseladb_http_*` by `route`.
 pub const ROUTES: Family = Family::new("teseladb_http", "route");
-use teseladb_wire::commands::http_parameters::HttpOptions;
 use teseladb_http::server::{Conn, Incoming, Response, Settings};
+use teseladb_wire::commands::http_parameters::HttpOptions;
 use teseladb_x509::Certificate;
 
 use crate::tls_port::{TlsPort, Transport};

@@ -7,11 +7,11 @@ use teseladb_hlc::Hlc;
 use teseladb_range::host::{RangeError, Reply, TxnOp};
 use teseladb_range::intents::{IntentOp, TxnId};
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, Route, TxnError};
+use teseladb_types::{GroupId, Nanos};
 use teseladb_wire::commands::Backend;
 use teseladb_wire::error::{
     CommandError, INTERNAL_ERROR, RangeContext, WRITE_CONFLICT, from_range,
 };
-use teseladb_types::{GroupId, Nanos};
 
 use super::{RETRY_PAUSE, ServerBackend, process_start};
 use crate::data::{DataReply, DataReq};

@@ -27,8 +27,8 @@ use teseladb_server::data_wire::RemoteReq;
 use teseladb_server::logic::NodeMsg;
 use teseladb_server::routes::SharedRoutes;
 use teseladb_session::retry::StatementKey;
-use teseladb_wire::commands::{Backend, WriteOp};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
+use teseladb_wire::commands::{Backend, WriteOp};
 
 struct Quiet;
 

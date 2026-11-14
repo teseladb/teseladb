@@ -1,0 +1,1 @@
+{"_id": 5000, "name": "customer-8598", "email": "user97820@example.org", "address": {"street": "479 Main Street", "city": "Madrid", "zip": "40871"}, "orders": [{"sku": "SKU-6203", "qty": 6, "price": 98.5}, {"sku": "SKU-7248", "qty": 3, "price": 10.9}, {"sku": "SKU-1281", "qty": 5, "price": 8.08}], "active": true}

@@ -2,11 +2,11 @@
 //! them, measured on 31-10 with `watch()` from `refshell` (with and without `showExpandedEvents`,
 //! `fullDocument: "updateLookup"`, `fullDocumentBeforeChange: "whenAvailable"` and a transaction).
 
+use teseladb_bson::{Document, Value};
 use teseladb_changestream::event::{ChangeEvent, Namespace, operation_type};
 use teseladb_changestream::order::EventKey;
 use teseladb_changestream::token::{EventKind, ResumeToken};
 use teseladb_hlc::{Hlc, from_timestamp, to_timestamp};
-use teseladb_bson::{Document, Value};
 
 fn event(kind: EventKind) -> ChangeEvent {
     let ts = Hlc { physical: 1_730_198_400_123, logical: 2 };

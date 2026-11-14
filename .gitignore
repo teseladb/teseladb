@@ -23,3 +23,5 @@ __pycache__/
 /cdk/cdk.out/
 /cdk/cdk.context.json
 /tests/compat/native/diff/out/
+# Temporary files of a merge driver
+.merge_file_*

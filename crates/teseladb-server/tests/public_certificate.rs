@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use teseladb_crypto::ec::NamedCurve;
 use teseladb_server::certs::Certificates;
 use teseladb_server::cli::{Command, TLS_PUBLIC_CERTIFICATE_KEY_FILE, TlsOpts, parse, parse_with};
 use teseladb_server::client_listener::{ClientConfig, ClientListener, NodeState};
 use teseladb_server::pki::{self, Pki, PkiParams};
 use teseladb_server::tls_port::{self, TlsMode, TlsPort};
-use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
-use teseladb_crypto::ec::NamedCurve;
 use teseladb_tls::{Connection, ENTROPY_LEN, Error, Trust};
+use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
 use teseladb_x509::ext::GeneralName;
 use teseladb_x509::generate::{self, CertificateParams};
 use teseladb_x509::{Certificate, Name, PrivateKey, oid, pem};

@@ -4,11 +4,11 @@
 //! core, the order of the groups, `$first` and `$last` included; a merge that would not give the
 //! same values is refused instead.
 
+use teseladb_bson::{Decimal128, Document, RawDoc, RawValue, Value};
 use teseladb_exec::collation::Collation;
 use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::{Env, PartialGroups, Pipeline, Program};
 use teseladb_mql::{Extensions, MqlError, NoExtensions};
-use teseladb_bson::{Decimal128, Document, RawDoc, RawValue, Value};
 
 /// A command's environment: no variables, no collation, `limit` bytes per stage and whether it
 /// allows writing to disk (it has no store, so it fails past the limit when it does not).

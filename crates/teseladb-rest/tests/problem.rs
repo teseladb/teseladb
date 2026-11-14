@@ -1,6 +1,7 @@
 //! Errors as RFC 9457 problems (019 FR-013, contract `rest-api.md`, T012): the HTTP status of
 //! each RefDb error and the body with its code, name, message and labels.
 
+use teseladb_bson::{Document, Value};
 use teseladb_rest::problem::{PROBLEM_JSON, http_problem, problem, status, write_status};
 use teseladb_wire::error::{
     AUTHENTICATION_FAILED, BAD_VALUE, CURSOR_NOT_FOUND, CommandError, DUPLICATE_KEY,
@@ -8,7 +9,6 @@ use teseladb_wire::error::{
     NOT_WRITABLE_PRIMARY, RETRYABLE_WRITE_ERROR, SHUTDOWN_IN_PROGRESS, TRANSIENT_TRANSACTION_ERROR,
     UNAUTHORIZED, WRITE_CONFLICT,
 };
-use teseladb_bson::{Document, Value};
 
 #[test]
 fn status_of_each_error() {

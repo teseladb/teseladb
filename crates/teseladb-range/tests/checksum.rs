@@ -9,8 +9,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::*;
-use teseladb_range::checksum::{CHECKSUM_EVERY_MS, Rebuild, Report, Tally};
 use teseladb_raftlog::{FileId, IoOp};
+use teseladb_range::checksum::{CHECKSUM_EVERY_MS, Rebuild, Report, Tally};
 use teseladb_types::Bytes;
 
 /// A byte inside the first data block of an SST file.

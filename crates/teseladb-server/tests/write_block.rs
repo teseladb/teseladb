@@ -5,9 +5,9 @@
 mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 fn write_error_code(r: &Document) -> Option<Value> {
     let Some(Value::Array(errors)) = r.get("writeErrors") else { return None };

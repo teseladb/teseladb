@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use common::{Mem, doc, field};
 use teseladb_auth::audit::{Auditor, Config, Options};
 use teseladb_auth::users::{EXTERNAL_DB, RoleName, User, UserName};
+use teseladb_bson::{Document, Value};
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_wire::commands::audit::{Audit, Sink};
 use teseladb_wire::commands::auth::AUTHENTICATE;
@@ -17,7 +18,6 @@ use teseladb_wire::commands::{NodeSessions, Timeouts};
 use teseladb_wire::connection::{Connection, Request};
 use teseladb_wire::dispatch::{Action, ClusterTime, NodeInfo, Topology, dispatch_with};
 use teseladb_wire::msg::OpMsg;
-use teseladb_bson::{Document, Value};
 
 const ADMIN: &str = "admin";
 const CERT_USER: &str = "CN=client,OU=KernelUser,O=RefDb,L=New York City,ST=New York,C=US";

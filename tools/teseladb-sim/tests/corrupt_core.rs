@@ -2,13 +2,13 @@
 //! restarts, the node stays out like one that lost its disk, and the majority keeps what was
 //! confirmed and goes on answering.
 
+use teseladb_raftlog::Completions;
 use teseladb_sim::checkers::Violation;
 use teseladb_sim::faults::{FaultAction, FaultPlan};
 use teseladb_sim::workloads::Workload;
 use teseladb_sim::workloads::kv::KvWorkload;
 use teseladb_sim::world::{Event, World};
 use teseladb_sim::{SimConfig, Verdict, run_workload};
-use teseladb_raftlog::Completions;
 use teseladb_types::Nanos;
 
 /// `testkv` with corruptions of the given nodes' core 0 at fixed instants, and a hook that runs

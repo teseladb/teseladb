@@ -8,9 +8,9 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_wire::error::{CommandError, DUPLICATE_KEY, INTERRUPTED_DUE_TO_REPL_STATE_CHANGE};
-use teseladb_bson::{Document, Value};
 
 const IN_LOG: WriteConcern = WriteConcern { w: W::Nodes(1), j: false };
 

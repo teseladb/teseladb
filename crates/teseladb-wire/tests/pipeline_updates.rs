@@ -7,9 +7,9 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value, extjson};
 use teseladb_changestream::event::operation_type;
 use teseladb_changestream::token::EventKind;
-use teseladb_bson::{Document, Value, extjson};
 
 const FIXTURE: &str =
     include_str!("../../teseladb-changestream/tests/fixtures/pipeline_updates.jsonl");

@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 
 use teseladb_io::FileDisk;
 use teseladb_meta::bootstrap::{DATA_RANGE, DATA_START};
+use teseladb_raft::Role;
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::host::RangeError;
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
 use teseladb_server::data::{DataError, DataStatus};
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
 use teseladb_server::rollback::INTERNAL_DIR;
-use teseladb_raft::Role;
 use teseladb_types::NodeId;
 
 const READY: Duration = Duration::from_secs(30);

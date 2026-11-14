@@ -9,9 +9,9 @@
 
 use teseladb_range::HISTORY_VALUE;
 use teseladb_range::host::RangeError;
+use teseladb_types::{DecodeError, Decoder, Encoder};
 use teseladb_wire::commands::Fetched;
 use teseladb_wire::commands::pushed_filter::SentFilter;
-use teseladb_types::{DecodeError, Decoder, Encoder};
 
 use crate::data_wire::RemoteReply;
 
@@ -140,8 +140,8 @@ pub(crate) fn get(d: &mut Decoder<'_>) -> Result<Looked, DecodeError> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    use teseladb_hlc::Hlc;
     use teseladb_bson::Document;
+    use teseladb_hlc::Hlc;
     use teseladb_types::NodeId;
 
     fn value(doc: Option<Vec<u8>>) -> Result<RemoteReply, RangeError> {

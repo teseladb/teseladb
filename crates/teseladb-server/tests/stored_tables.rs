@@ -6,9 +6,9 @@
 mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 /// Fields of each document of `wide`: enough for a table, and at least the `in3` the reads
 /// filter on.

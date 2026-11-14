@@ -6,12 +6,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use teseladb_bson::{RawDoc, RawValue, extjson};
 use teseladb_index::delta::{IndexSet, Version};
 use teseladb_index::keygen::wildcard::{WILDCARD_FIELD, WildcardProjection};
 use teseladb_index::keygen::{IndexDef, IndexField, KeygenError, entry_value, index_entries};
 use teseladb_index::verify::verify_range;
 use teseladb_keys::{Direction, Key, KeyBuilder, PrimaryKey};
-use teseladb_bson::{RawDoc, RawValue, extjson};
 
 const A: u32 = 1;
 const WILD: u32 = 2;

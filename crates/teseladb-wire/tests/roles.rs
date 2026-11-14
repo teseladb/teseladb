@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_bson::{Document, Value};
+use teseladb_meta::security::{Expect, Principal, SecurityOp};
 
 const TEST: &str = "test";
 

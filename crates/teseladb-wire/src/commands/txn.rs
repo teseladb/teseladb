@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use teseladb_auth::privileges::Privilege;
 use teseladb_auth::users::{RoleName, UserName};
+use teseladb_bson::extjson::base64;
+use teseladb_bson::{Document, Value};
 use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
@@ -28,8 +30,6 @@ use teseladb_txn::commit_retry::{CommitAnswer, commit_answer};
 use teseladb_txn::coordinator::{Coordinator, Event, Outcome, Route, TxnError};
 use teseladb_txn::recovery::{Decision, Recovery, client_txn_id};
 use teseladb_txn::session_txn::{Ask, SessionError, SessionTxn, Verdict};
-use teseladb_bson::extjson::base64;
-use teseladb_bson::{Document, Value};
 use teseladb_types::{GroupId, Nanos};
 
 use super::cross_range;
@@ -347,7 +347,9 @@ pub(super) fn session_name(lsid: u128) -> String {
 /// `user@db`, [`ANONYMOUS_UID`] without a login (measured on a `refrouter` 9.0.4 on 03-11-2026).
 pub(super) fn user_uid(user: Option<&UserName>) -> String {
     match user {
-        Some(u) => base64::encode(&teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes())),
+        Some(u) => {
+            base64::encode(&teseladb_hash::sha256(format!("{}@{}", u.user, u.db).as_bytes()))
+        }
         None => ANONYMOUS_UID.to_owned(),
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Builds the release binaries with profile-guided optimization (012 FR-034). Runs inside the build
 # image of scripts/release/publish.sh, on the checkout at the current directory, with
-# CARGO_TARGET_DIR, CARGO_REGISTRIES_VIUZI_TOKEN and TESELADB_RELEASE_VERSION set by it:
+# CARGO_TARGET_DIR and TESELADB_RELEASE_VERSION set by it:
 #   1. an instrumented binary for PGO_HOST (-Cprofile-generate) serves the sustained load of 002
 #      (tests/compat/native/soak/soak.py) and the benches that drive a node (teseladb-bench
 #      ycsb-a..ycsb-f, crud, aggregate and txn with --target) for PGO_SECONDS each;

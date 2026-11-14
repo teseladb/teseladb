@@ -7,10 +7,10 @@
 //! that contains one (its ancestors from the coarsest indexed level), merged where they overlap or
 //! touch. Measured on refnode 7.0.45 with `explain` (`tests/planner_api.rs`).
 
+use teseladb_bson::{Collator, RawValue, compare};
 use teseladb_keys::{
     FieldBounds, Hlc, Interval, KeyBuilder, KeyRange, PrimaryKey, bounds as key_bounds,
 };
-use teseladb_bson::{Collator, RawValue, compare};
 
 use crate::geo::cells::CellId;
 use crate::geo::cover::{CoverOptions, Region, covering};

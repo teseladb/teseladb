@@ -2,11 +2,11 @@
 //! T010, T019). The expected replies are those of a three-member replica set of RefDb 9.0.4
 //! (`ref:9.0`), field by field and in their order.
 
+use teseladb_bson::{Document, Value};
 use teseladb_topology::replset::{
     ConfigError, HelloContext, LastWrite, Limits, Member, OpTime, PresentationMode, ReplicaSet,
     Timestamp,
 };
-use teseladb_bson::{Document, Value};
 
 const H1: &str = "h1:27017";
 const H2: &str = "h2:27017";

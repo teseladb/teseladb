@@ -5,9 +5,9 @@
 //! evaluator gives over all the documents at the same mark (`queries-oracle`). The variant
 //! `partial_double_count` sums one range's partial group twice.
 
+use teseladb_bson::{Document, Value};
 use teseladb_exec::distribute::run_distributed;
 use teseladb_exec::reference::Reference;
-use teseladb_bson::{Document, Value};
 use teseladb_raftlog::Completions;
 use teseladb_types::Nanos;
 

@@ -25,6 +25,7 @@ use std::rc::Rc;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{Done, GroupDesc, OpError, OpId, StateMachine};
+use teseladb_raftlog::{Completions, Disk, FileId, IoDone, IoOp, SimDisk};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::Put;
 use teseladb_range::host::{
@@ -34,7 +35,6 @@ use teseladb_range::mutate::Outcome;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::{Assembler, local_interval, split};
-use teseladb_raftlog::{Completions, Disk, FileId, IoDone, IoOp, SimDisk};
 use teseladb_types::{GroupId, Nanos, NodeId};
 
 use crate::checkers::{Violation, durability, linearizable, liveness};

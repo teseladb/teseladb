@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
-use teseladb_server::node::Node;
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
+use teseladb_server::node::Node;
 
 /// The second within which a suspended tenant's connections close (FR-034).
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);

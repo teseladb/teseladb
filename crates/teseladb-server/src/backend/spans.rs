@@ -11,9 +11,9 @@ use teseladb_io::runtime::CoreInput;
 use teseladb_range::host::RangeError;
 use teseladb_range::read::ReadConcern;
 use teseladb_router::read_pref::{Mode, ReadPreference};
+use teseladb_types::NodeId;
 use teseladb_wire::commands::{Backend, Rows, Span};
 use teseladb_wire::error::CommandError;
-use teseladb_types::NodeId;
 
 use super::{ServerBackend, scan_req};
 use crate::data::{DataReply, DataReq};

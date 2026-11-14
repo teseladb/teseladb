@@ -8,9 +8,9 @@ use std::sync::{Arc, PoisonError, RwLock};
 use teseladb_auth::clustertime::{
     HmacKey, KEY_LEN, KEY_VALID_SECS, KeyRing, KeySealer, NONCE_LEN, Time,
 };
+use teseladb_crypto::rand::HmacDrbg;
 use teseladb_meta::clustertime_keys::{ClusterTimeKeys, SealedKey};
 use teseladb_meta::command::Group0Command;
-use teseladb_crypto::rand::HmacDrbg;
 use teseladb_types::Nanos;
 
 /// Time between two looks at the keys while leading Group 0: a proposal that lost a race is

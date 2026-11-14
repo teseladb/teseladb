@@ -2,12 +2,12 @@
 //! T016, FR-005, FR-007, FR-008, FR-011): the command each route builds, how each reply becomes
 //! an answer, cursor ids and the causal-consistency headers.
 
-use teseladb_rest::api::{AFTER_CLUSTER_TIME, Executor, OPERATION_TIME, handle};
-use teseladb_rest::media::{BSON, CANONICAL_JSON};
-use teseladb_session::cursor::cursor_id;
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::Request;
 use teseladb_http::server::Response;
+use teseladb_rest::api::{AFTER_CLUSTER_TIME, Executor, OPERATION_TIME, handle};
+use teseladb_rest::media::{BSON, CANONICAL_JSON};
+use teseladb_session::cursor::cursor_id;
 
 const NODE: u64 = 3;
 

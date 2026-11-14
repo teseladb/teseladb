@@ -13,13 +13,13 @@ dependencies = [
 name = "teseladb-auth"
 version = "0.1.0"
 dependencies = [
- "teseladb-mql",
- "teseladb-search",
  "teseladb-bson",
  "teseladb-compress",
  "teseladb-crypto",
  "teseladb-hash",
  "teseladb-json",
+ "teseladb-mql",
+ "teseladb-search",
  "teseladb-types",
  "teseladb-x509",
 ]
@@ -29,38 +29,46 @@ name = "teseladb-bench"
 version = "0.1.0"
 dependencies = [
  "teseladb-auth",
+ "teseladb-bson",
  "teseladb-collation",
+ "teseladb-crypto",
+ "teseladb-deflate",
  "teseladb-fle",
+ "teseladb-http",
  "teseladb-io",
  "teseladb-js",
+ "teseladb-json",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-meta",
  "teseladb-multiraft",
+ "teseladb-raft",
+ "teseladb-raftlog",
  "teseladb-range",
  "teseladb-server",
  "teseladb-sys",
- "teseladb-wire",
- "teseladb-bson",
- "teseladb-crypto",
- "teseladb-deflate",
- "teseladb-http",
- "teseladb-json",
- "teseladb-raft",
- "teseladb-raftlog",
  "teseladb-tls",
  "teseladb-types",
+ "teseladb-wire",
  "teseladb-x509",
+]
+
+[[package]]
+name = "teseladb-bson"
+version = "0.4.1"
+dependencies = [
+ "teseladb-json",
+ "teseladb-types",
 ]
 
 [[package]]
 name = "teseladb-changestream"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-hlc",
  "teseladb-keys",
  "teseladb-lsm",
- "teseladb-bson",
 ]
 
 [[package]]
@@ -68,6 +76,29 @@ name = "teseladb-collation"
 version = "0.1.0"
 dependencies = [
  "teseladb-bson",
+]
+
+[[package]]
+name = "teseladb-compress"
+version = "0.1.0"
+dependencies = [
+ "teseladb-types",
+]
+
+[[package]]
+name = "teseladb-crypto"
+version = "0.1.1"
+dependencies = [
+ "teseladb-hash",
+ "teseladb-json",
+]
+
+[[package]]
+name = "teseladb-deflate"
+version = "0.1.0"
+dependencies = [
+ "teseladb-hash",
+ "teseladb-types",
 ]
 
 [[package]]
@@ -83,14 +114,14 @@ dependencies = [
 name = "teseladb-exec"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-collation",
+ "teseladb-compress",
+ "teseladb-hash",
  "teseladb-index",
  "teseladb-keys",
  "teseladb-mql",
  "teseladb-plan",
- "teseladb-bson",
- "teseladb-compress",
- "teseladb-hash",
  "teseladb-tz",
 ]
 
@@ -98,10 +129,17 @@ dependencies = [
 name = "teseladb-fle"
 version = "0.1.0"
 dependencies = [
- "teseladb-mql",
  "teseladb-bson",
  "teseladb-crypto",
  "teseladb-json",
+ "teseladb-mql",
+]
+
+[[package]]
+name = "teseladb-hash"
+version = "0.1.0"
+dependencies = [
+ "teseladb-types",
 ]
 
 [[package]]
@@ -113,28 +151,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-http"
+version = "0.1.0"
+dependencies = [
+ "teseladb-crypto",
+ "teseladb-tls",
+ "teseladb-types",
+ "teseladb-x509",
+]
+
+[[package]]
 name = "teseladb-index"
 version = "0.1.0"
 dependencies = [
- "teseladb-keys",
  "teseladb-bson",
  "teseladb-hash",
+ "teseladb-keys",
 ]
 
 [[package]]
 name = "teseladb-io"
 version = "0.1.0"
 dependencies = [
- "teseladb-devlog",
- "teseladb-keys",
- "teseladb-lsm",
- "teseladb-stages",
- "teseladb-sys",
  "teseladb-crypto",
  "teseladb-deflate",
+ "teseladb-devlog",
  "teseladb-hash",
+ "teseladb-keys",
+ "teseladb-lsm",
  "teseladb-raft",
  "teseladb-raftlog",
+ "teseladb-stages",
+ "teseladb-sys",
  "teseladb-tls",
  "teseladb-types",
  "teseladb-x509",
@@ -149,11 +197,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-json"
+version = "0.1.0"
+dependencies = [
+ "teseladb-types",
+]
+
+[[package]]
 name = "teseladb-keys"
 version = "0.1.0"
 dependencies = [
- "teseladb-collation",
  "teseladb-bson",
+ "teseladb-collation",
  "teseladb-hash",
  "teseladb-types",
 ]
@@ -162,12 +217,12 @@ dependencies = [
 name = "teseladb-lsm"
 version = "0.1.0"
 dependencies = [
- "teseladb-keys",
  "teseladb-bson",
  "teseladb-compress",
  "teseladb-crypto",
  "teseladb-deflate",
  "teseladb-hash",
+ "teseladb-keys",
  "teseladb-raftlog",
  "teseladb-types",
 ]
@@ -176,10 +231,10 @@ dependencies = [
 name = "teseladb-mcp"
 version = "0.1.0"
 dependencies = [
- "teseladb-rest",
  "teseladb-bson",
  "teseladb-http",
  "teseladb-json",
+ "teseladb-rest",
  "teseladb-types",
 ]
 
@@ -187,10 +242,10 @@ dependencies = [
 name = "teseladb-meta"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-hlc",
  "teseladb-keys",
  "teseladb-multiraft",
- "teseladb-bson",
  "teseladb-raft",
  "teseladb-raftlog",
  "teseladb-types",
@@ -200,20 +255,20 @@ dependencies = [
 name = "teseladb-mql"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-collation",
  "teseladb-keys",
- "teseladb-bson",
 ]
 
 [[package]]
 name = "teseladb-multiraft"
 version = "0.1.0"
 dependencies = [
- "teseladb-hlc",
- "teseladb-stages",
  "teseladb-hash",
+ "teseladb-hlc",
  "teseladb-raft",
  "teseladb-raftlog",
+ "teseladb-stages",
  "teseladb-types",
 ]
 
@@ -221,23 +276,39 @@ dependencies = [
 name = "teseladb-plan"
 version = "0.1.0"
 dependencies = [
+ "teseladb-bson",
  "teseladb-index",
  "teseladb-meta",
- "teseladb-bson",
+]
+
+[[package]]
+name = "teseladb-raft"
+version = "0.1.1"
+dependencies = [
+ "teseladb-types",
+]
+
+[[package]]
+name = "teseladb-raftlog"
+version = "0.4.0"
+dependencies = [
+ "teseladb-crypto",
+ "teseladb-hash",
+ "teseladb-types",
 ]
 
 [[package]]
 name = "teseladb-range"
 version = "0.1.0"
 dependencies = [
+ "teseladb-hash",
  "teseladb-hlc",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-multiraft",
- "teseladb-stages",
- "teseladb-hash",
  "teseladb-raft",
  "teseladb-raftlog",
+ "teseladb-stages",
  "teseladb-types",
 ]
 
@@ -245,13 +316,13 @@ dependencies = [
 name = "teseladb-rest"
 version = "0.1.0"
 dependencies = [
- "teseladb-session",
- "teseladb-wire",
  "teseladb-bson",
  "teseladb-hash",
  "teseladb-http",
  "teseladb-json",
+ "teseladb-session",
  "teseladb-types",
+ "teseladb-wire",
 ]
 
 [[package]]
@@ -267,12 +338,12 @@ dependencies = [
 name = "teseladb-search"
 version = "0.1.0"
 dependencies = [
- "teseladb-keys",
- "teseladb-mql",
  "teseladb-bson",
  "teseladb-crypto",
  "teseladb-deflate",
  "teseladb-hash",
+ "teseladb-keys",
+ "teseladb-mql",
  "teseladb-types",
 ]
 
@@ -281,35 +352,35 @@ name = "teseladb-server"
 version = "0.1.13"
 dependencies = [
  "teseladb-auth",
+ "teseladb-bson",
  "teseladb-changestream",
+ "teseladb-crypto",
  "teseladb-exec",
+ "teseladb-hash",
  "teseladb-hlc",
+ "teseladb-http",
  "teseladb-io",
+ "teseladb-json",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-mcp",
  "teseladb-meta",
  "teseladb-mql",
  "teseladb-multiraft",
+ "teseladb-raft",
+ "teseladb-raftlog",
  "teseladb-range",
  "teseladb-rest",
  "teseladb-router",
  "teseladb-session",
  "teseladb-stages",
  "teseladb-sys",
+ "teseladb-tls",
  "teseladb-topology",
  "teseladb-txn",
- "teseladb-wire",
- "teseladb-bson",
- "teseladb-crypto",
- "teseladb-hash",
- "teseladb-http",
- "teseladb-json",
- "teseladb-raft",
- "teseladb-raftlog",
- "teseladb-tls",
  "teseladb-types",
  "teseladb-tz",
+ "teseladb-wire",
  "teseladb-x509",
 ]
 
@@ -322,27 +393,27 @@ name = "teseladb-sim"
 version = "0.1.0"
 dependencies = [
  "teseladb-auth",
+ "teseladb-bson",
  "teseladb-changestream",
  "teseladb-devlog",
  "teseladb-exec",
+ "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",
+ "teseladb-json",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-meta",
  "teseladb-mql",
  "teseladb-multiraft",
+ "teseladb-raft",
+ "teseladb-raftlog",
  "teseladb-range",
  "teseladb-search",
  "teseladb-testkv",
  "teseladb-txn",
- "teseladb-wire",
- "teseladb-bson",
- "teseladb-hash",
- "teseladb-json",
- "teseladb-raft",
- "teseladb-raftlog",
  "teseladb-types",
+ "teseladb-wire",
 ]
 
 [[package]]
@@ -364,27 +435,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "teseladb-tls"
+version = "0.2.0"
+dependencies = [
+ "teseladb-crypto",
+ "teseladb-types",
+ "teseladb-x509",
+]
+
+[[package]]
 name = "teseladb-topology"
 version = "0.1.0"
 dependencies = [
- "teseladb-changestream",
  "teseladb-bson",
+ "teseladb-changestream",
 ]
 
 [[package]]
 name = "teseladb-txn"
 version = "0.1.0"
 dependencies = [
+ "teseladb-hash",
  "teseladb-hlc",
  "teseladb-keys",
  "teseladb-lsm",
  "teseladb-multiraft",
+ "teseladb-raftlog",
  "teseladb-range",
  "teseladb-stages",
- "teseladb-hash",
- "teseladb-raftlog",
  "teseladb-types",
 ]
+
+[[package]]
+name = "teseladb-types"
+version = "0.1.1"
+
+[[package]]
+name = "teseladb-tz"
+version = "0.1.0"
+
+[[package]]
+name = "teseladb-tzgen"
+version = "0.1.0"
 
 [[package]]
 name = "teseladb-unicodegen"
@@ -398,10 +490,15 @@ name = "teseladb-wire"
 version = "0.1.0"
 dependencies = [
  "teseladb-auth",
+ "teseladb-bson",
  "teseladb-changestream",
  "teseladb-collation",
+ "teseladb-compress",
+ "teseladb-crypto",
+ "teseladb-deflate",
  "teseladb-exec",
  "teseladb-fle",
+ "teseladb-hash",
  "teseladb-hlc",
  "teseladb-index",
  "teseladb-js",
@@ -416,114 +513,14 @@ dependencies = [
  "teseladb-stages",
  "teseladb-topology",
  "teseladb-txn",
- "teseladb-bson",
- "teseladb-compress",
- "teseladb-crypto",
- "teseladb-deflate",
- "teseladb-hash",
  "teseladb-types",
  "teseladb-x509",
 ]
-
-[[package]]
-name = "teseladb-bson"
-version = "0.4.1"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "e61071ecd4fae2b2520a1df2caa36f694aed91fb3b4de8c379adbdb9229060fa"
-dependencies = [
- "teseladb-json",
- "teseladb-types",
-]
-
-[[package]]
-name = "teseladb-compress"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "a7614f67db1f1becff2ad444705dea983bad7e20b93eae469719f27d5f67ecb2"
-
-[[package]]
-name = "teseladb-crypto"
-version = "0.1.1"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "6f9b7d7c62fc0fd06bf6c882bcbdcb41c73126acb535baad416f28944557a817"
-dependencies = [
- "teseladb-hash",
-]
-
-[[package]]
-name = "teseladb-deflate"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "7c6d5301233f6b51976c3c54d9a5016d6a173dab3df99c736200fb8c49cd336c"
-dependencies = [
- "teseladb-hash",
-]
-
-[[package]]
-name = "teseladb-hash"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "f0deadf61b0ebe934ab473bc9d40d2e347903b0aa1eca6984641165fb4d0d620"
-
-[[package]]
-name = "teseladb-http"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "e5d147264e694ad2fef3e6b9a17540dee517664d082d5866169407dd0073f51d"
-
-[[package]]
-name = "teseladb-json"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "d060682f91fecda4f614e3dba3495338169724d43a6a17bd5fd4a29849ad78c3"
-
-[[package]]
-name = "teseladb-raft"
-version = "0.1.1"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "8a88e63ae1da5d4d589b9cf02ade7bbccf5ec63d38f95731afdc0e544caadc7c"
-dependencies = [
- "teseladb-types",
-]
-
-[[package]]
-name = "teseladb-raftlog"
-version = "0.4.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "958ff5d4c7284ce76165c81bbcd2283d4ed8f45b1b81ba165babc07b9646925c"
-dependencies = [
- "teseladb-crypto",
- "teseladb-hash",
- "teseladb-types",
-]
-
-[[package]]
-name = "teseladb-tls"
-version = "0.2.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "770ccf788e7756a3b5bffc8e52b2ba82f3a2152296f2e41f8cf6ac8e3e4c14d1"
-dependencies = [
- "teseladb-crypto",
- "teseladb-x509",
-]
-
-[[package]]
-name = "teseladb-types"
-version = "0.1.1"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "9fb45b1ded77ed44808459ec26abac73cc9444ae3a5d1da74c9665f843b28516"
-
-[[package]]
-name = "teseladb-tz"
-version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "d5dbe996385305984d50961e4b4931ac00b8c09d1ac958d7309f3052dac01dbb"
 
 [[package]]
 name = "teseladb-x509"
 version = "0.1.0"
-source = "sparse+https://git.viuzi.com/api/packages/viuzi/cargo/"
-checksum = "95d865edd60fc12853868ae791c66fe9c8fa41d644f60d9e226132f712921da1"
 dependencies = [
  "teseladb-crypto",
+ "teseladb-types",
 ]

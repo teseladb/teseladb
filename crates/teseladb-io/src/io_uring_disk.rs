@@ -24,8 +24,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use teseladb_sys::uring::{Op, Part, Probe, Ring, SendData, Target, opcode};
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
+use teseladb_sys::uring::{Op, Part, Probe, Ring, SendData, Target, opcode};
 use teseladb_types::Bytes;
 
 use crate::bandwidth::{BandwidthSplit, cost_of};

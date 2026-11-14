@@ -2,6 +2,7 @@
 //! every replica applies them, their errors kept for idempotent retries, and the state in the
 //! snapshot.
 
+use teseladb_bson::Document;
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{
     Group0Error, Group0Result, Group0Sm, SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITH_NAMED_SECURITY,
@@ -10,7 +11,6 @@ use teseladb_meta::group0::{
 use teseladb_meta::request::RequestId;
 use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_multiraft::StateMachine;
-use teseladb_bson::Document;
 use teseladb_types::NodeId;
 
 fn cluster() -> Group0Sm {

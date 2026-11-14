@@ -4,11 +4,11 @@
 //! register machine's `$and`s and `$or`s; any other predicate, or a field without statistics,
 //! takes the default estimate.
 
+use teseladb_bson::Value;
 use teseladb_mql::vm::{DefaultSelectivity, Selectivity};
 use teseladb_mql::{CmpOp, Filter, InItem, Pred};
 use teseladb_plan::logical::intervals;
 use teseladb_plan::stats::{RangeStats, collection_stats};
-use teseladb_bson::Value;
 
 /// The estimate from statistics `stats`.
 pub struct StatsSelectivity<'s>(pub &'s RangeStats);
@@ -58,9 +58,9 @@ pub fn ordered_by_statistics(filter: Filter, collection: &[u8]) -> Filter {
 
 #[cfg(test)]
 mod tests {
+    use teseladb_bson::{Document, RawDoc};
     use teseladb_mql::FilterUse;
     use teseladb_plan::stats::{forget_range, recompute_at_compaction};
-    use teseladb_bson::{Document, RawDoc};
 
     use super::*;
 

@@ -3,9 +3,9 @@
 //! a time and in batches, with and without a collation, on paths through arrays (where the
 //! machine asks the engine) and on missing fields.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_exec::reference::Reference;
 use teseladb_mql::{Filter, FilterUse, MatchContext};
-use teseladb_bson::{Document, RawDoc, Value};
 
 fn d() -> Document {
     Document::new()

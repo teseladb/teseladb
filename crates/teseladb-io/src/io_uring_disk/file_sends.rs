@@ -12,8 +12,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use teseladb_sys::uring::{Completion, Op, Part};
 use teseladb_raftlog::FileId;
+use teseladb_sys::uring::{Completion, Op, Part};
 
 use super::{IoUringDisk, LOG_BUFFERS};
 use crate::buffers::{BUFFER_BYTES, BUFFERS_PER_CORE};

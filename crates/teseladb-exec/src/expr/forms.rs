@@ -8,8 +8,8 @@
 //! their input (without NaN) and give, for each `p`, the element at rank `⌈p·n⌉ − 1` of the
 //! sorted numbers as a double, as RefDb's `approximate` method does for every input measured.
 
-use teseladb_mql::{ErrorCode, MqlError};
 use teseladb_bson::{Document, RawValue, Value};
+use teseladb_mql::{ErrorCode, MqlError};
 
 use super::array::eval_type;
 use super::path::field_path;

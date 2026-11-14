@@ -26,8 +26,8 @@ const SYSTEM_CAS: [&str; 4] = [
 /// refuses (macOS's `/etc/ssl/cert.pem` has EC-ACC, with a negative serial number, which RFC 5280
 /// forbids); like Go's `AppendCertsFromPEM`, that root is left out and the others stay.
 pub fn bundle(path: &str, text: &str) -> Result<Vec<Certificate>, String> {
-    let ders =
-        teseladb_x509::pem::parse_label(text, "CERTIFICATE").map_err(|e| format!("{path}: {e:?}"))?;
+    let ders = teseladb_x509::pem::parse_label(text, "CERTIFICATE")
+        .map_err(|e| format!("{path}: {e:?}"))?;
     let cas: Vec<Certificate> = ders.iter().filter_map(|d| Certificate::from_der(d).ok()).collect();
     if cas.is_empty() {
         return Err(format!("{path}: no certificate"));

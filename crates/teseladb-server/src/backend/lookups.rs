@@ -11,9 +11,9 @@ use std::time::Instant;
 
 use teseladb_io::runtime::CoreInput;
 use teseladb_range::read::ReadConcern;
+use teseladb_types::GroupId;
 use teseladb_wire::commands::Fetched;
 use teseladb_wire::error::CommandError;
-use teseladb_types::GroupId;
 
 use super::ServerBackend;
 use crate::data::{DataReply, DataReq};

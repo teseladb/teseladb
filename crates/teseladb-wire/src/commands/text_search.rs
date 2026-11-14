@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::{Document, RawDoc, RawValue, Value};
 use teseladb_exec::pipeline::search::Scored;
 use teseladb_meta::catalog::{CollectionEntry, Namespace};
 use teseladb_mql::{
@@ -13,7 +14,6 @@ use teseladb_mql::{
 };
 use teseladb_range::read::ReadConcern;
 use teseladb_search::text_index::{Language, Sensitivity, TextIndex, TextQuery};
-use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
 use super::Backend;
 use super::engines::NodeExtensions;

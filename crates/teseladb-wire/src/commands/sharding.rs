@@ -3,10 +3,10 @@
 //! options under [`SHARD_KEY`] (not a collection option: `listCollections` does not show it) and
 //! listed in `config.collections`.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::collection_types::CollectionKind;
 use teseladb_meta::indexes::{IndexEntry, IndexState};
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::names::{full, parse_full};
 use super::{Backend, Ctx, display, kinds};

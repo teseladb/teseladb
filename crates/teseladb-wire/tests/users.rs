@@ -8,8 +8,8 @@ mod common;
 use common::{Mem, doc, field};
 use teseladb_auth::scram::{ClientSession, Mechanism, ServerSession};
 use teseladb_auth::users::{User, UserName};
-use teseladb_meta::security::{Expect, Principal, SecurityOp};
 use teseladb_bson::{Document, RawDoc, Value};
+use teseladb_meta::security::{Expect, Principal, SecurityOp};
 
 const TEST: &str = "test";
 /// A password that would show if it were stored.

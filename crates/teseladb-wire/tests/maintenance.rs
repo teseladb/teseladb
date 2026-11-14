@@ -5,11 +5,11 @@
 mod common;
 
 use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
+use teseladb_hash::sha256;
 use teseladb_session::session::SessionMatch;
 use teseladb_wire::commands::session::KillScope;
 use teseladb_wire::error::{CommandError, INVALID_SSL_CONFIGURATION};
-use teseladb_bson::{Document, Value};
-use teseladb_hash::sha256;
 
 fn s(x: &str) -> Value {
     Value::from(x)

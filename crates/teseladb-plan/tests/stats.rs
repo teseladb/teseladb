@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
+use teseladb_bson::Value;
 use teseladb_plan::logical::Bound;
 use teseladb_plan::rules::{Access, IndexMeta, IndexScan};
 use teseladb_plan::stats::{Choice, FieldStats, HISTOGRAM_BUCKETS, RangeStats, choose};
-use teseladb_bson::Value;
 
 fn ints(values: impl IntoIterator<Item = i32>) -> Vec<Value> {
     values.into_iter().map(Value::Int32).collect()

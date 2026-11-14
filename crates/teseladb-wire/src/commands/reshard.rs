@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_changestream::meta::{ChangeMeta, doc_of_meta};
 use teseladb_hlc::Hlc;
 use teseladb_keys::KeyBuilder;
@@ -32,7 +33,6 @@ use teseladb_meta::indexes::{IndexCommand, IndexState};
 use teseladb_range::changes::Versioned;
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
-use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_types::NodeId;
 
 use super::crud::{

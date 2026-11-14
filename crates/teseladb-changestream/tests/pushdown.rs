@@ -2,8 +2,8 @@
 //! FR-012): the namespaces and the event types it allows decide which collections' ranges a read
 //! asks; the whole `$match` still runs on each event.
 
-use teseladb_changestream::pushdown::Pushdown;
 use teseladb_bson::{Document, Value};
+use teseladb_changestream::pushdown::Pushdown;
 
 fn d(pairs: &[(&str, Value)]) -> Document {
     let mut doc = Document::new();

@@ -5,9 +5,9 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+use teseladb_raftlog::MemDisk;
 use teseladb_server::logic::GROUP0_MAX_VOTERS;
 use teseladb_server::node::{Node, NodeConfig};
-use teseladb_raftlog::MemDisk;
 use teseladb_types::NodeId;
 
 const JOINERS: usize = 6;

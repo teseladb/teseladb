@@ -9,10 +9,10 @@
 //! as one change that expects each touched document as it was read; another change in between
 //! makes it start again.
 
+use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_meta::catalog::Namespace;
 use teseladb_mql::MatchContext;
 use teseladb_mql::validation::{ValidationAction, ValidationLevel, Validator};
-use teseladb_bson::{Document, RawDoc, Value};
 
 use super::authz_writes::{Entry, Staged, statement};
 use super::config_db::CONFIG_DB;

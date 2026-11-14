@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Mem, doc, field};
-use teseladb_meta::security::Principal;
 use teseladb_bson::{Document, Value, extjson};
+use teseladb_meta::security::Principal;
 
 const ADMIN: &str = "admin";
 const APP: &str = "app";

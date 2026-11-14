@@ -6,8 +6,8 @@
 //! The result is the one the [`crate::reference::Reference`] evaluator gives over all the
 //! documents at the same mark, which the `queries` load of the simulator checks.
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
+use teseladb_mql::MqlError;
 
 use crate::expr::Ctx;
 use crate::pipeline::{Env, Pipeline};

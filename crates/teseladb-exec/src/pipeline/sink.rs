@@ -7,8 +7,8 @@
 
 use std::borrow::Cow;
 
-use teseladb_mql::MqlError;
 use teseladb_bson::{Document, Value};
+use teseladb_mql::MqlError;
 
 use super::errors::{self, document_size};
 use super::group::{BucketAutoRun, Bucketing, Grouping, by_count, counting};

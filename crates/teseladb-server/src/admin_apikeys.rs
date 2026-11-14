@@ -3,8 +3,8 @@
 //! [`teseladb_wire::commands::api_keys`], and the command line's part. `create` prints the key
 //! once; `list` shows only its first characters.
 
-use teseladb_wire::commands::api_keys::{CREATE_API_KEY, LIST_API_KEYS, REVOKE_API_KEY};
 use teseladb_bson::{Document, Value};
+use teseladb_wire::commands::api_keys::{CREATE_API_KEY, LIST_API_KEYS, REVOKE_API_KEY};
 
 use crate::admin::{AdminBackend, AdminError, body_doc, component, json};
 use crate::admin_http::{HttpRequest, HttpResponse, Method};

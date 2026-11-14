@@ -5,8 +5,8 @@
 //! their unknown fields at the end), then whether the command takes the write concern and the
 //! read level it was given.
 
-use teseladb_router::read_pref::{ReadPrefError, ReadPreference, TagSet};
 use teseladb_bson::{Document, Value};
+use teseladb_router::read_pref::{ReadPrefError, ReadPreference, TagSet};
 
 use crate::concerns::{
     READ_CONCERN, ReadConcernArgs, WRITE_CONCERN, WriteConcernArgs, canonical, check_support,

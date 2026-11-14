@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use teseladb_keys::{Key, KeyParts, PrimaryKey};
 use teseladb_bson::Collator;
+use teseladb_keys::{Key, KeyParts, PrimaryKey};
 
 use crate::delta::{IndexSet, Version};
 use crate::keygen::{FieldKind, KeygenError, entry_value, index_entries, key_values};
