@@ -19,6 +19,7 @@ use teseladb_hlc::Hlc;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
+use teseladb_range::ack::WriteConcern;
 use teseladb_range::host::{RangeError, TxnOp};
 use teseladb_range::intents::{IntentOp, TxnId};
 use teseladb_range::push::TxnView;
@@ -1971,6 +1972,15 @@ impl Backend for TxnBackend<'_> {
 
     fn tenant_name(&mut self, tenant: u32) -> Option<String> {
         self.inner.tenant_name(tenant)
+    }
+
+    /// A transaction's writes are its intents, which its commit confirms: no barrier.
+    fn begin_statements(&mut self) -> bool {
+        false
+    }
+
+    fn statement_barrier(&mut self, _wc: WriteConcern) -> Result<(), CommandError> {
+        Ok(())
     }
 
     /// A transaction's writes are its own intents: none is answered outside it.

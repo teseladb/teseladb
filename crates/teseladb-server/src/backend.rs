@@ -5,6 +5,7 @@
 //! [`REQUEST_DEADLINE`], and a write that may have been proposed only if it is retryable.
 
 mod across;
+mod barrier;
 mod intent_wait;
 mod outside;
 mod pushed_scan;
@@ -150,6 +151,9 @@ pub struct ServerBackend {
     committed: Hlc,
     /// What its reads served without the cores keep (005 FR-028).
     outside: outside::Outside,
+    /// The entries of the statements of the running command, which wait for one barrier
+    /// (005 FR-036); `None` while no such command runs.
+    statements: Option<barrier::Statements>,
     /// The parts of a filtered scan asked for ahead from the leaders of their ranges (010 FR-027).
     ahead: pushed_scan::ReadAhead,
     /// How long it spins for a core's answer before it sleeps, after the answers it waited for
@@ -189,6 +193,7 @@ impl ServerBackend {
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
             outside: outside::Outside::default(),
+            statements: None,
             ahead: pushed_scan::ReadAhead::default(),
             spin: std::cell::Cell::default(),
         }
@@ -314,7 +319,8 @@ impl ServerBackend {
                     | RemoteReply::Fenced { .. }
                     | RemoteReply::Live { .. }
                     | RemoteReply::DocCount { .. }
-                    | RemoteReply::Pushed(_),
+                    | RemoteReply::Pushed(_)
+                    | RemoteReply::Settled,
                 ) => {
                     return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows"));
                 }
@@ -1011,6 +1017,21 @@ impl Backend for ServerBackend {
         self.write_outside(op)
     }
 
+    fn begin_statements(&mut self) -> bool {
+        self.statements = Some(barrier::Statements::default());
+        true
+    }
+
+    fn statement_barrier(
+        &mut self,
+        wc: teseladb_range::ack::WriteConcern,
+    ) -> Result<(), CommandError> {
+        match self.statements.take() {
+            Some(s) => self.barriers(s, wc),
+            None => Ok(()),
+        }
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let dedup = op.dedup.map(|k| DedupKey {
             lsid: k.lsid,
@@ -1033,13 +1054,17 @@ impl Backend for ServerBackend {
             deadline: Some(deadline),
             prepared: prepared.clone(),
         };
-        match self.data(&first, dedup.is_some(), build)?.1 {
+        let (route, reply) = self.data(&first, dedup.is_some(), build)?;
+        match reply {
             // The write's mark comes into the node's clock, as a commit's does (`txn_send`): a
             // leader just elected writes above the clocks, and the node's next transaction reads
             // at or above the write instead of writing under it (008 FR-008).
-            RemoteReply::Written { ts, result } => {
+            RemoteReply::Written { ts, result, entry } => {
                 self.h.clock.0.update(ts);
                 self.committed = self.committed.max(ts);
+                if let (Some(s), Some(e)) = (self.statements.as_mut(), entry) {
+                    s.note(route.group, e);
+                }
                 Ok(result)
             }
             RemoteReply::Rows(_)
@@ -1052,7 +1077,8 @@ impl Backend for ServerBackend {
             | RemoteReply::Fenced { .. }
             | RemoteReply::Live { .. }
             | RemoteReply::DocCount { .. }
-            | RemoteReply::Pushed(_) => {
+            | RemoteReply::Pushed(_)
+            | RemoteReply::Settled => {
                 Err(CommandError::new(INTERNAL_ERROR, "a write answered with no result"))
             }
         }

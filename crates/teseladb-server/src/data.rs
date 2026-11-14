@@ -869,6 +869,11 @@ impl DataCore {
             }
             // A resharding's write fence, on the leader (018 FR-002).
             RemoteReq::Fence { start, end, on } => self.host.fence(core, (g, start, end), on, now),
+            // A command's statement barrier, on the leader (005 FR-036).
+            RemoteReq::Barrier { entries, wc } => {
+                let req = teseladb_range::host::BarrierReq { g, entries, wc };
+                self.host.barrier(core, req, now)
+            }
             // The live bytes, from the state machine at once (018 FR-017).
             RemoteReq::Live => {
                 let live = core.state_machine(g).and_then(CoreSm::range).map(|sm| sm.live_bytes());
@@ -980,7 +985,7 @@ impl DataCore {
                         Reply::Intents { ts } => DataReply::Put(ts),
                         Reply::Record(record) => DataReply::Get(Some(record.encode())),
                         // A stream's read comes as a remote request, never from the handle.
-                        Reply::Changes { .. } => DataReply::Get(None),
+                        Reply::Changes { .. } | Reply::Barrier => DataReply::Get(None),
                         Reply::Fenced { ts } => DataReply::Put(ts),
                     });
                     let _ = to.send(r);
@@ -1483,7 +1488,8 @@ fn core_end(core: &MultiRaftCore<CoreSm>, g: GroupId) -> Vec<u8> {
 /// The answer of the host to a [`RemoteReq`].
 fn remote_reply(reply: Reply) -> RemoteReply {
     match reply {
-        Reply::Mutated { ts, result, .. } => RemoteReply::Written { ts, result },
+        Reply::Mutated { ts, result, entry, .. } => RemoteReply::Written { ts, result, entry },
+        Reply::Barrier => RemoteReply::Settled,
         Reply::Batch(rows) => {
             RemoteReply::Rows(rows.into_iter().map(|(k, (_, v))| (k, v)).collect())
         }

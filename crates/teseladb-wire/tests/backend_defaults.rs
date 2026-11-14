@@ -9,6 +9,7 @@ use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::command::SettingChange;
 use teseladb_meta::indexes::{IndexCommand, IndexEntry};
 use teseladb_meta::security::{Principal, SecurityError, SecurityOp};
+use teseladb_range::ack::WriteConcern;
 use teseladb_range::read::ReadConcern;
 use teseladb_wire::commands::config_settings::SettingsWrite;
 use teseladb_wire::commands::diagnostics::ProcessFacts;
@@ -69,6 +70,12 @@ impl Backend for Bare {
     }
     fn write_unchanged(&mut self, _op: &WriteOp) -> Option<Vec<u8>> {
         None
+    }
+    fn begin_statements(&mut self) -> bool {
+        false
+    }
+    fn statement_barrier(&mut self, _wc: WriteConcern) -> Result<(), CommandError> {
+        Err(none())
     }
     fn read_versions(&mut self, _keys: &[Vec<u8>]) -> Result<Versions, CommandError> {
         Err(none())

@@ -2583,6 +2583,18 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
     }
 
+    /// The term of entry `index` of `g` once it is on this node's disk (005 FR-036): from the log,
+    /// or below its snapshot from the terms the snapshot carries. `None` if `g` is unknown or the
+    /// entry is not on disk.
+    pub fn durable_term(&self, g: GroupId, index: u64) -> Option<u64> {
+        let grp = self.groups.get(&g)?;
+        let store = GroupStore::new(&self.store, g);
+        if index == 0 || index > grp.raw.status(&store).persisted {
+            return None;
+        }
+        store.term(index).ok().or_else(|| grp.terms.term_of(index))
+    }
+
     /// Index of the last snapshot of a group (0: none, its log starts at its first entry).
     pub fn snapshot_index(&self, g: GroupId) -> Option<u64> {
         self.groups.get(&g).map(|grp| grp.snap_index)

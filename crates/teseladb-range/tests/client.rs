@@ -24,8 +24,12 @@ fn it_follows_the_hint_and_remembers_the_leader() {
     let hint = Err(RangeError::NotLeader { hint: n(3) });
     assert_eq!(c.on_reply(G, n(1), 1, hint), Route::Send(n(3)));
     assert_eq!(c.target(G), n(3));
-    let done =
-        Ok(Reply::Mutated { ts: Hlc { physical: 5, logical: 0 }, change: vec![], result: vec![] });
+    let done = Ok(Reply::Mutated {
+        ts: Hlc { physical: 5, logical: 0 },
+        change: vec![],
+        result: vec![],
+        entry: None,
+    });
     assert_eq!(c.on_reply(G, n(3), 2, done.clone()), Route::Done(done));
     assert_eq!(c.target(G), n(3), "the node that answered leads");
     assert_eq!(c.target(GroupId(8)), n(1), "each range on its own");

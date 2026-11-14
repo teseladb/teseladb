@@ -312,6 +312,17 @@ pub trait Backend {
     /// version and it changes nothing (005 FR-030); `None` when it goes as a [`Backend::write`].
     /// It has no default: a backend that wraps another forwards it, or the shortcut is lost.
     fn write_unchanged(&mut self, op: &WriteOp) -> Option<Vec<u8>>;
+    /// Starts the statements of a command of several outside a transaction (005 FR-036): from
+    /// now on the backend keeps the entry of each write for [`Backend::statement_barrier`].
+    /// `false` when its writes take no barrier (a transaction's are its intents), and each one
+    /// waits for its own write concern.
+    fn begin_statements(&mut self) -> bool;
+    /// The barrier of the writes since [`Backend::begin_statements`], which it ends: once it
+    /// returns `Ok`, each of them is confirmed at `wc`. A write the leader of its range no
+    /// longer holds fails it with `InterruptedDueToReplStateChange`; a `wc` above the replicas
+    /// of a range fails it with `UnsatisfiableWriteConcern` once the writes are confirmed at
+    /// `w: "majority"`.
+    fn statement_barrier(&mut self, wc: WriteConcern) -> Result<(), CommandError>;
     /// The newest committed versions of `keys` (value type and value, `None` without one) and a
     /// mark at which they are all current: what a write that spans ranges evaluates with
     /// (009 FR-003).

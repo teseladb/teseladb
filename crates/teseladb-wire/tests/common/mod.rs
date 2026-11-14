@@ -48,6 +48,12 @@ pub struct Mem {
     pub replicas: u32,
     /// The next write fails with this error.
     pub fail_next: Option<CommandError>,
+    /// The write concerns of the statement barriers asked for (005 FR-036).
+    pub statement_barriers: Vec<teseladb_range::ack::WriteConcern>,
+    /// Whether the statements of a command wait for a barrier now.
+    pub open_statements: bool,
+    /// The error the next statement barrier fails with.
+    pub fail_barrier: Option<CommandError>,
     /// The write after this many more fails with this error (`(0, e)` is the next one).
     pub fail_write_at: Option<(usize, CommandError)>,
     pub shared: Shared,
@@ -996,6 +1002,30 @@ impl Backend for Mem {
         })?;
         self.ddl.record_applied(self.mark(), changes, None);
         Ok(())
+    }
+
+    fn begin_statements(&mut self) -> bool {
+        self.open_statements = true;
+        true
+    }
+
+    /// Applied writes are confirmed at once: the barrier records its write concern.
+    fn statement_barrier(
+        &mut self,
+        wc: teseladb_range::ack::WriteConcern,
+    ) -> Result<(), CommandError> {
+        assert!(self.open_statements, "a barrier ends the statements a command began");
+        self.open_statements = false;
+        self.statement_barriers.push(wc);
+        if let Some(e) = self.fail_barrier.take() {
+            return Err(e);
+        }
+        match wc.w {
+            teseladb_range::ack::W::Nodes(n) if n > self.replicas => {
+                Err(CommandError::new(UNSATISFIABLE_WRITE_CONCERN, "unsatisfiable"))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Every write goes through [`Backend::write`], where the test backend applies it.

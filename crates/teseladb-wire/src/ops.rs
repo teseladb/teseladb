@@ -22,6 +22,7 @@ use crate::commands::tenants;
 use crate::commands::{Backend, Shared, WriteOp};
 use crate::error::{BAD_VALUE, CommandError, FAILED_TO_PARSE, INTERRUPTED, MAX_TIME_MS_EXPIRED};
 use crate::types::wrong_types;
+use teseladb_range::ack::WriteConcern;
 
 /// The `maxTimeMS` field of every command.
 pub const MAX_TIME_MS: &str = "maxTimeMS";
@@ -1017,6 +1018,16 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         let result = self.call(|b| b.write(op))?;
         self.note_keys_written(&result);
         Ok(result)
+    }
+
+    fn begin_statements(&mut self) -> bool {
+        self.inner.begin_statements()
+    }
+
+    fn statement_barrier(&mut self, wc: WriteConcern) -> Result<(), CommandError> {
+        // The statements written are confirmed whatever the time limit: a barrier with nothing
+        // to confirm answers at once, and the backend's own deadline bounds the wait.
+        self.inner.statement_barrier(wc)
     }
 
     fn write_unchanged(&mut self, op: &WriteOp) -> Option<Vec<u8>> {

@@ -37,6 +37,7 @@ use crate::read::{ReadConcern, admit_own_read, admit_read};
 use crate::sm::{RangeState, dedup_key};
 use crate::tscache::TsCache;
 
+mod barrier;
 mod closed;
 mod feed;
 mod fence;
@@ -47,6 +48,7 @@ mod split;
 mod txn;
 mod write;
 
+pub use barrier::BarrierReq;
 pub use feed::{ChangesReq, STREAM_HOLD};
 pub use fence::FenceOutcome;
 pub use merge::MergeSource;
@@ -162,6 +164,9 @@ pub enum RangeError {
     /// commit has locked (008 FR-022): nothing was written, and it waits for the lock, as it
     /// waits for an intent's owner.
     KeyLocked,
+    /// The leader of a barrier does not hold one of its entries with its term (FR-036): the
+    /// statement is in doubt, as after a change of leader.
+    EntryLost,
 }
 
 /// A write: its range, the documents it changes, the mutation, its idempotence record and its
@@ -219,7 +224,12 @@ pub enum Reply {
         change: Vec<u8>,
         /// The mutation's result.
         result: Vec<u8>,
+        /// The entry of the write in the range's log (FR-036); `None` for an answer without
+        /// one: a retry answered from its record, or a write that changes nothing (FR-026).
+        entry: Option<crate::ack::EntryId>,
     },
+    /// A barrier's entries are confirmed at its write concern (FR-036).
+    Barrier,
     /// A read at mark `ts`: the visible version (`(value type, value)`).
     Value {
         /// Mark of the read.
@@ -384,6 +394,8 @@ struct Proposal {
     ts: Hlc,
     change: Vec<u8>,
     result: Vec<u8>,
+    /// The leader's term and the entry's index.
+    term: u64,
     index: u64,
     replied: bool,
     applied: bool,
@@ -397,7 +409,8 @@ impl Proposal {
     /// Its answer once acknowledged.
     fn answer(&mut self) -> Reply {
         let (change, result) = (std::mem::take(&mut self.change), std::mem::take(&mut self.result));
-        self.reply.take().map_or(Reply::Mutated { ts: self.ts, change, result }, |r| *r)
+        let entry = Some(crate::ack::EntryId { term: self.term, index: self.index });
+        self.reply.take().map_or(Reply::Mutated { ts: self.ts, change, result, entry }, |r| *r)
     }
 }
 
@@ -558,6 +571,7 @@ pub(crate) enum Req {
     Purge(PurgeReq),
     Round(RoundReq),
     Fence(fence::FenceReq),
+    Barrier(barrier::BarrierWait),
 }
 
 impl Req {
@@ -601,6 +615,7 @@ impl Req {
             Req::Purge(_) => "purge".to_owned(),
             Req::Round(_) => "leadership round".to_owned(),
             Req::Fence(_) => "write fence".to_owned(),
+            Req::Barrier(b) => format!("statement barrier of range {}", b.g.0),
         }
     }
 }
@@ -832,6 +847,10 @@ impl RangeHost {
                 Req::Fence(fence::FenceReq { g: rg, .. }) => {
                     (*rg == g).then_some((*id, Some(RangeError::Unavailable)))
                 }
+                // Asked again where the range went.
+                Req::Barrier(b) => {
+                    (b.g == g).then_some((*id, Some(RangeError::NotLeader { hint: NodeId(0) })))
+                }
             })
             .collect();
         for (id, answer) in gone {
@@ -923,7 +942,8 @@ impl RangeHost {
             | Req::Changes(_)
             | Req::Purge(_)
             | Req::Round(_)
-            | Req::Fence(_) => None,
+            | Req::Fence(_)
+            | Req::Barrier(_) => None,
         }
     }
 
@@ -1264,6 +1284,11 @@ impl RangeHost {
             Req::Purge(p) => self.purge_done(p, r.map(|_| ())),
             Req::Round(p) => self.round_done(p),
             Req::Fence(f) => self.fence_done(id, f, r),
+            // A barrier waits in the host and has no operation in the core.
+            Req::Barrier(b) => {
+                self.reqs.insert(id, Req::Barrier(b));
+                return false;
+            }
             // Only a stream's read at a mark has an operation in the core.
             Req::Changes(f) => self.changes_confirmed(core, id, f, r.is_ok()),
             Req::Get(mut q) => match r {
@@ -1590,7 +1615,13 @@ impl RangeHost {
                 }) => *rg == g,
                 // A read waiting for the core is answered by the core.
                 Req::Changes(f) => f.g == g && f.state != feed::FeedState::Core,
-                Req::Mut(_) | Req::Get(_) | Req::Purge(_) | Req::Round(_) | Req::Fence(_) => false,
+                // A barrier compares the entries of earlier terms with the new leader's log.
+                Req::Mut(_)
+                | Req::Get(_)
+                | Req::Purge(_)
+                | Req::Round(_)
+                | Req::Fence(_)
+                | Req::Barrier(_) => false,
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1614,6 +1645,7 @@ impl RangeHost {
             Req::Get(q) => self.step_get(core, id, q),
             Req::Changes(f) => self.step_changes(core, id, f),
             // The core answers for them.
+            Req::Barrier(b) => self.step_barrier(core, id, b),
             r @ (Req::Purge(_) | Req::Round(_) | Req::Fence(_)) => {
                 self.reqs.insert(id, r);
                 false

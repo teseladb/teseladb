@@ -198,7 +198,10 @@ impl RangeHost {
                     }
                     Some(Ok(Some((ts, result)))) => {
                         self.release(m.g, m.term, latch);
-                        self.reply(id, Ok(Reply::Mutated { ts, change: Vec::new(), result }));
+                        self.reply(
+                            id,
+                            Ok(Reply::Mutated { ts, change: Vec::new(), result, entry: None }),
+                        );
                         return true;
                     }
                     // Without its record, a statement of an older `txnNumber` than the session's
@@ -551,7 +554,7 @@ impl RangeHost {
         };
         if let Some((result, ts)) = no_change {
             // What the replica holds goes out only while it leads (005 FR-009), as a read.
-            let answer = Reply::Mutated { ts, change: Vec::new(), result };
+            let answer = Reply::Mutated { ts, change: Vec::new(), result, entry: None };
             match core.read(m.g, ReadMode::Lease, now) {
                 Ok(op) => {
                     m.state = MutState::Answer(Box::new(answer));
@@ -572,6 +575,7 @@ impl RangeHost {
                     ts,
                     change,
                     result,
+                    term: m.term,
                     index,
                     replied,
                     applied,

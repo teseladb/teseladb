@@ -4,7 +4,7 @@
 //! restore (007 FR-021).
 
 use teseladb_hlc::Hlc;
-use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::ack::{EntryId, W, WriteConcern};
 use teseladb_range::changes::Versioned;
 use teseladb_range::command::DedupKey;
 use teseladb_range::host::{MutationError, RangeError, TxnOp};
@@ -182,6 +182,14 @@ pub enum RemoteReq {
         /// What the leader runs over the rows.
         work: crate::pushed::Work,
     },
+    /// The barrier of a command of several statements (005 FR-036): the last entry of each term
+    /// it wrote in the range, confirmed at its write concern.
+    Barrier {
+        /// The entries.
+        entries: Vec<EntryId>,
+        /// The command's write concern.
+        wc: WriteConcern,
+    },
 }
 
 fn put_mark(e: &mut Encoder, ts: Hlc) {
@@ -216,7 +224,11 @@ pub enum RemoteReply {
         ts: Hlc,
         /// Encoded result.
         result: Vec<u8>,
+        /// The write's entry in the range's log (005 FR-036), if it has one.
+        entry: Option<EntryId>,
     },
+    /// A barrier's entries are confirmed at its write concern (005 FR-036).
+    Settled,
     /// The rows of a scan.
     Rows(Vec<(Vec<u8>, Vec<u8>)>),
     /// A read at mark `ts`: the visible version, with its value type.
@@ -296,6 +308,7 @@ const FOLLOWER_SCAN_BACK: u8 = 13;
 const READ_WITH_BACK: u8 = 14;
 const DOC_COUNT: u8 = 15;
 const PUSHED: u8 = 16;
+const BARRIER: u8 = 17;
 
 fn put_hlc(e: &mut Encoder, ts: Hlc) {
     e.u64(ts.physical).u32(ts.logical);
@@ -478,6 +491,13 @@ impl RemoteReq {
                 e.u8(PUSHED).bytes(start).bytes(end).u32(*limit).u8(concern_code(*concern));
                 work.put(&mut e);
             }
+            RemoteReq::Barrier { entries, wc } => {
+                e.u8(BARRIER).var(entries.len() as u64);
+                for x in entries {
+                    e.u64(x.term).u64(x.index);
+                }
+                put_wc(&mut e, *wc);
+            }
         }
         e.finish()
     }
@@ -588,6 +608,18 @@ impl RemoteReq {
                 concern: get_concern(&mut d)?,
                 work: crate::pushed::Work::get(&mut d)?,
             },
+            BARRIER => {
+                let n = d.var()?;
+                // Each entry takes 16 bytes: a count above what is left is not a barrier.
+                if n > d.remaining() as u64 / 16 {
+                    return Err(DecodeError::InvalidValue { offset: at });
+                }
+                let mut entries = Vec::new();
+                for _ in 0..n {
+                    entries.push(EntryId { term: d.u64()?, index: d.u64()? });
+                }
+                RemoteReq::Barrier { entries, wc: get_wc(&mut d)? }
+            }
             _ => return Err(DecodeError::InvalidValue { offset: at }),
         };
         d.finish()?;
@@ -608,6 +640,9 @@ const OK_FENCED: u8 = 9;
 const OK_LIVE: u8 = 10;
 const OK_DOC_COUNT: u8 = 11;
 const OK_PUSHED: u8 = 12;
+/// A write with its entry: [`OK_WRITTEN`] keeps the encoding of a write without one.
+const OK_WRITTEN_AT: u8 = 13;
+const OK_SETTLED: u8 = 14;
 
 fn put_error(e: &mut Encoder, err: &RangeError) {
     let (tag, hint, text): (u8, u64, &str) = match err {
@@ -627,6 +662,7 @@ fn put_error(e: &mut Encoder, err: &RangeError) {
         RangeError::ReadUncertain { .. } => (13, 0, ""),
         RangeError::Fenced => (14, 0, ""),
         RangeError::KeyLocked => (15, 0, ""),
+        RangeError::EntryLost => (16, 0, ""),
     };
     e.u8(tag).u64(hint).str(text);
     let put_owner = |e: &mut Encoder, o: &IntentOwner| {
@@ -677,6 +713,7 @@ fn get_error(d: &mut Decoder<'_>) -> Result<RangeError, DecodeError> {
         13 => RangeError::ReadUncertain { ts: Hlc { physical: d.u64()?, logical: d.u32()? } },
         14 => RangeError::Fenced,
         15 => RangeError::KeyLocked,
+        16 => RangeError::EntryLost,
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -685,8 +722,15 @@ fn get_error(d: &mut Decoder<'_>) -> Result<RangeError, DecodeError> {
 pub fn encode_reply(r: &Result<RemoteReply, RangeError>) -> Vec<u8> {
     let mut e = Encoder::new();
     match r {
-        Ok(RemoteReply::Written { ts, result }) => {
+        Ok(RemoteReply::Written { ts, result, entry: None }) => {
             e.u8(OK_WRITTEN).u64(ts.physical).u32(ts.logical).bytes(result);
+        }
+        Ok(RemoteReply::Written { ts, result, entry: Some(x) }) => {
+            e.u8(OK_WRITTEN_AT).u64(ts.physical).u32(ts.logical).u64(x.term).u64(x.index);
+            e.bytes(result);
+        }
+        Ok(RemoteReply::Settled) => {
+            e.u8(OK_SETTLED);
         }
         Ok(RemoteReply::Rows(rows)) => {
             e.u8(OK_ROWS).var(rows.len() as u64);
@@ -759,8 +803,14 @@ pub fn decode_reply(b: &[u8]) -> Result<Result<RemoteReply, RangeError>, DecodeE
     let r = match d.u8()? {
         OK_WRITTEN => {
             let ts = Hlc { physical: d.u64()?, logical: d.u32()? };
-            Ok(RemoteReply::Written { ts, result: d.bytes()?.to_vec() })
+            Ok(RemoteReply::Written { ts, result: d.bytes()?.to_vec(), entry: None })
         }
+        OK_WRITTEN_AT => {
+            let ts = Hlc { physical: d.u64()?, logical: d.u32()? };
+            let entry = Some(EntryId { term: d.u64()?, index: d.u64()? });
+            Ok(RemoteReply::Written { ts, result: d.bytes()?.to_vec(), entry })
+        }
+        OK_SETTLED => Ok(RemoteReply::Settled),
         OK_ROWS => {
             let n = d.var()?;
             if n > d.remaining() as u64 {
@@ -986,10 +1036,19 @@ mod tests {
                 concern: ReadConcern::Local,
                 work: crate::pushed::Work::Fold(vec![5, 6]),
             },
+            RemoteReq::Barrier {
+                entries: vec![EntryId { term: 2, index: 6 }, EntryId { term: 3, index: 8 }],
+                wc: WriteConcern { w: W::Majority, j: true },
+            },
+            RemoteReq::Barrier { entries: vec![], wc: WriteConcern { w: W::Nodes(2), j: false } },
         ];
         for r in reqs {
             assert_eq!(RemoteReq::decode(&r.encode()), Ok(r));
         }
+        // A barrier that counts more entries than it carries.
+        let mut long = Encoder::new();
+        long.u8(BARRIER).var(1_000).u64(1).u64(2);
+        assert!(RemoteReq::decode(&long.finish()).is_err());
         // A view with more transactions than bytes, or an unknown state.
         let mut bad = Encoder::new();
         bad.u8(READ_WITH).bytes(&[1]).bool(false).bool(false).u64(0).u32(0).u8(2);
@@ -1001,7 +1060,18 @@ mod tests {
         state.bool(false).u128(0).var(1).u128(5).u8(9);
         assert!(RemoteReq::decode(&[head, state.finish()].concat()).is_err());
         let replies = [
-            Ok(RemoteReply::Written { ts: Hlc { physical: 5, logical: 2 }, result: vec![1] }),
+            Ok(RemoteReply::Written {
+                ts: Hlc { physical: 5, logical: 2 },
+                result: vec![1],
+                entry: None,
+            }),
+            Ok(RemoteReply::Written {
+                ts: Hlc { physical: 5, logical: 2 },
+                result: vec![1],
+                entry: Some(EntryId { term: 3, index: 9 }),
+            }),
+            Ok(RemoteReply::Settled),
+            Err(RangeError::EntryLost),
             Ok(RemoteReply::Rows(vec![(vec![1], vec![2])])),
             Ok(RemoteReply::Value { ts: Hlc { physical: 5, logical: 2 }, value: None }),
             Ok(RemoteReply::Value {

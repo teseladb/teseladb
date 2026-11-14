@@ -45,6 +45,17 @@ pub enum AckWhen {
     Applied,
 }
 
+/// An entry of a range's log: the term of the leader that proposed it and its index. A write
+/// answers with its entry, and a command of several statements confirms them with a barrier
+/// (FR-036).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryId {
+    /// Term.
+    pub term: u64,
+    /// Index.
+    pub index: u64,
+}
+
 /// `w` asks for more replicas than the range has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unsatisfiable;

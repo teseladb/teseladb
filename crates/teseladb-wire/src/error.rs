@@ -707,6 +707,16 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
         RangeError::Unavailable => {
             (CommandError::new(INTERRUPTED_AT_SHUTDOWN, "interrupted at shutdown"), true)
         }
+        // A statement of a command of several is in doubt after a change of leader (005
+        // FR-036): the driver repeats the command and the statements already written answer
+        // from their records.
+        RangeError::EntryLost => (
+            CommandError::new(
+                INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,
+                "operation was interrupted because the range's leader changed",
+            ),
+            true,
+        ),
         // A later statement of a transaction answers this; the first one, and a read outside a
         // transaction, go again above the mark it carries (008 FR-008).
         RangeError::ReadUncertain { ts } => (

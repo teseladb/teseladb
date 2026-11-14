@@ -38,8 +38,8 @@ fn now() -> Nanos {
 /// A leader's answer as the coordinator reads it.
 pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
     match r {
-        RemoteReply::Written { ts, result } => {
-            Ok(Reply::Mutated { ts, change: Vec::new(), result })
+        RemoteReply::Written { ts, result, entry } => {
+            Ok(Reply::Mutated { ts, change: Vec::new(), result, entry })
         }
         RemoteReply::Value { ts, value } => Ok(Reply::Value { ts, value }),
         RemoteReply::Intents { ts } => Ok(Reply::Intents { ts }),
@@ -55,7 +55,8 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
         | RemoteReply::Fenced { .. }
         | RemoteReply::Live { .. }
         | RemoteReply::DocCount { .. }
-        | RemoteReply::Pushed(_) => Err(RangeError::Unavailable),
+        | RemoteReply::Pushed(_)
+        | RemoteReply::Settled => Err(RangeError::Unavailable),
     }
 }
 

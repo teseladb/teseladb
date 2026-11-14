@@ -84,6 +84,9 @@ pub struct Writer {
     uid: [u8; 32],
     /// The mark of the command's last statement that wrote (the next one's `prevOpTime`).
     prev: Option<teseladb_hlc::Hlc>,
+    /// Its statements are answered once in the leader's log and wait for one barrier at the
+    /// end of the command (005 FR-036, D-163).
+    barrier: bool,
 }
 
 impl Writer {
@@ -99,6 +102,7 @@ impl Writer {
             relayed: String::new(),
             uid: [0; 32],
             prev: None,
+            barrier: false,
         }
     }
 
@@ -146,7 +150,45 @@ impl Writer {
             .load(std::sync::atomic::Ordering::Relaxed);
         let uid = owner.uid;
         let (retried, prev) = (Vec::new(), None);
-        Ok(Writer { wc, retry, wc_error, args: wc_args, retried, redact, relayed, uid, prev })
+        let barrier = false;
+        Ok(Writer {
+            wc,
+            retry,
+            wc_error,
+            args: wc_args,
+            retried,
+            redact,
+            relayed,
+            uid,
+            prev,
+            barrier,
+        })
+    }
+
+    /// A command of `count` statements outside a transaction waits for its write concern once
+    /// (005 FR-036, D-163): each statement is answered once its entry is in the leader's log,
+    /// and [`Writer::settle`] confirms them all. A command of one statement, one with `w: 0` and
+    /// one in a transaction wait as before.
+    pub fn statements<B: Backend + ?Sized>(&mut self, backend: &mut B, count: usize) {
+        self.barrier = count > 1 && self.wc.w != W::Zero && backend.begin_statements();
+    }
+
+    /// Confirms the statements written since [`Writer::statements`] at the command's write
+    /// concern: at its end, and when it stops at a statement that fails. A `w` above the
+    /// replicas leaves them confirmed at `w: "majority"` and the reply carries the error, as
+    /// [`Writer::write`] does for a single statement.
+    pub fn settle<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
+        if !std::mem::take(&mut self.barrier) {
+            return Ok(());
+        }
+        match backend.statement_barrier(self.wc) {
+            Err(e) if e.code == UNSATISFIABLE_WRITE_CONCERN => {
+                let e = CommandError::new(e.code, "Not enough data-bearing nodes");
+                self.wc_error = Some(write_concern_error(&e, &self.args, &self.relayed));
+                Ok(())
+            }
+            r => r,
+        }
     }
 
     /// Runs one mutation: its statement is `stmt` within the command.
@@ -162,10 +204,13 @@ impl Writer {
             self.retry.map(|(lsid, txn_number)| StatementKey { lsid, txn_number, stmt_id: stmt });
         // `w: 0` waits for no one: the write is applied by the range's leader before the next
         // request of the connection runs, and the reply says nothing of it (`finish`).
-        let wc = match self.wc.w {
-            W::Zero => WriteConcern { w: W::Nodes(1), j: false },
+        let in_log = WriteConcern { w: W::Nodes(1), j: false };
+        let own = match self.wc.w {
+            W::Zero => in_log,
             _ => self.wc,
         };
+        // A statement of a command with a barrier is answered once in the leader's log.
+        let wc = if self.barrier { in_log } else { own };
         // Each send of a retryable write has its own number: a result that comes back with
         // another one was kept from an earlier send, and the statement counts as retried.
         let attempt = match self.retry {
@@ -199,7 +244,11 @@ impl Writer {
             };
             // A delete or an update without upsert of absent documents may be answered without
             // the range's core (005 FR-030).
+            // Without an entry it has to meet the command's own write concern.
             let unchanged = match earlier {
+                None if b.unchanged_when_absent() && self.barrier => {
+                    backend.write_unchanged(&WriteOp { wc: own, ..op.clone() })
+                }
                 None if b.unchanged_when_absent() => backend.write_unchanged(&op),
                 _ => None,
             };
@@ -1383,6 +1432,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         .collect::<Result<_, _>>()?;
     let expected_uuid = uuid::expected(ctx.cmd, UPDATE)?;
     let mut w = Writer::new(ctx, UPDATE)?;
+    w.statements(ctx.backend, statements.len());
     let (mut n, mut n_modified) = (0i64, 0i64);
     let (mut upserted, mut errors): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
     // A time series refuses updates of its own before the general checks (015 FR-007).
@@ -1407,7 +1457,7 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
                 .and_then(|()| modify(ctx, &mut w, &ns, &statement.0, bypass, stmt_id(ctx.cmd, i))),
         };
         match r {
-            Err(e) if fails_command(&e) => return Err(e),
+            Err(e) if fails_command(&e) => return Err(stop(ctx.backend, &mut w, e)),
             Ok(r) => {
                 n += r.n;
                 n_modified += r.n_modified;
@@ -1433,7 +1483,16 @@ pub fn update<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     if !errors.is_empty() {
         reply.push("writeErrors", relayed(ctx, errors));
     }
+    w.settle(ctx.backend)?;
     Ok(w.finish(reply))
+}
+
+/// The error of a command that stops at a statement failing it: the statements before are
+/// confirmed first (005 FR-036). The command fails with `e` whatever the barrier answers: its
+/// client learns that the command did not complete either way.
+fn stop<B: Backend + ?Sized>(backend: &mut B, w: &mut Writer, e: CommandError) -> CommandError {
+    let _confirmed_or_in_doubt = w.settle(backend);
+    e
 }
 
 /// The fields of a statement in `deletes` (`DeleteOpEntry`, measured in `refrouter` 9.0.4).
@@ -1497,6 +1556,7 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
         .collect::<Result<_, _>>()?;
     let expected_uuid = uuid::expected(ctx.cmd, DELETE)?;
     let mut w = Writer::new(ctx, DELETE)?;
+    w.statements(ctx.backend, statements.len());
     let mut n = 0i64;
     let mut errors: Vec<Value> = Vec::new();
     let all = || statements.iter().cloned().map(Ok).collect();
@@ -1511,7 +1571,7 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
                 .and_then(|()| modify(ctx, &mut w, &ns, m, false, stmt_id(ctx.cmd, i))),
         };
         match r {
-            Err(e) if fails_command(&e) => return Err(e),
+            Err(e) if fails_command(&e) => return Err(stop(ctx.backend, &mut w, e)),
             Ok(r) => n += r.n,
             Err(e) => {
                 errors.push(write_error(i, &e));
@@ -1525,6 +1585,7 @@ pub fn delete<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     if !errors.is_empty() {
         reply.push("writeErrors", relayed(ctx, errors));
     }
+    w.settle(ctx.backend)?;
     Ok(w.finish(reply))
 }
 
@@ -1677,6 +1738,7 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         }
     }
     let mut w = Writer::new(ctx, name)?;
+    w.statements(ctx.backend, parsed.len());
     let mut results = Vec::new();
     let (
         mut n_inserted,
@@ -1748,6 +1810,7 @@ pub fn bulk_write<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         .with("nDeleted", n_deleted as i32)
         // Always, also empty (measured on a `refrouter` 9.0.4).
         .with(RETRIED_STMT_IDS, w.retried_value());
+    w.settle(ctx.backend)?;
     Ok(w.finish(reply))
 }
 

@@ -165,6 +165,7 @@ fn written(result: &[u8]) -> Result<DataReply, RangeError> {
     Ok(DataReply::Remote(RemoteReply::Written {
         ts: Hlc { physical: 1, logical: 0 },
         result: result.to_vec(),
+        entry: None,
     }))
 }
 
@@ -1257,7 +1258,8 @@ fn a_committed_mark_moves_the_clock_of_the_node() {
 #[test]
 fn a_written_mark_moves_the_clock_of_the_node() {
     let ahead = Hlc { physical: u64::from(u32::MAX) * 100, logical: 9 };
-    let reply = Ok(DataReply::Remote(RemoteReply::Written { ts: ahead, result: vec![1] }));
+    let reply =
+        Ok(DataReply::Remote(RemoteReply::Written { ts: ahead, result: vec![1], entry: None }));
     let mut b = backend(vec![reply], vec![]);
     assert!(b.cluster_mark() < ahead);
     assert_eq!(b.write(op(false)), Ok(vec![1]));
@@ -1367,4 +1369,94 @@ fn a_backward_scan_reads_the_ranges_from_the_last_one_down() {
     // An answer without rows is an internal error.
     let (mut b, _) = start(vec![written(&[1])]);
     assert_eq!(b.scan_back(&[1], &[3], 10, ReadConcern::Local).unwrap_err().code.code, 1);
+}
+
+/// The statements of a command of several (005 FR-036): the backend keeps the last entry of each
+/// term of each range the writes answered with, and the barrier asks each range for them at the
+/// command's write concern; a leader that changed is asked again, an entry in doubt fails the
+/// command with `InterruptedDueToReplStateChange`, and a `w` above the replicas confirms them at
+/// `w: "majority"` and reports `UnsatisfiableWriteConcern`.
+#[test]
+fn a_statement_barrier_asks_each_range_for_the_last_entry_of_each_term() {
+    use teseladb_range::ack::EntryId;
+    let at = |term, index| Some(EntryId { term, index });
+    let wrote = |entry| {
+        Ok(DataReply::Remote(RemoteReply::Written {
+            ts: Hlc { physical: 1, logical: 0 },
+            result: vec![1],
+            entry,
+        }))
+    };
+    let settled = || Ok(DataReply::Remote(RemoteReply::Settled));
+    let start = |answers: Vec<Result<DataReply, RangeError>>| {
+        let seen: Arc<Mutex<Vec<RemoteReq>>> = Arc::default();
+        let h = recording_core(seen.clone(), Arc::default(), Arc::new(Mutex::new(answers.into())));
+        (ServerBackend::new(h, 7).with_deadline(Duration::from_millis(300)), seen)
+    };
+    let write_at = |b: &mut ServerBackend, key: u8| {
+        let w = WriteOp { keys: vec![vec![key, 1]], ..op(false) };
+        b.write(w).unwrap();
+    };
+    let barriers = |seen: &Arc<Mutex<Vec<RemoteReq>>>| -> Vec<(Vec<EntryId>, WriteConcern)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| match r {
+                RemoteReq::Barrier { entries, wc } => Some((entries.clone(), *wc)),
+                _ => None,
+            })
+            .collect()
+    };
+    let wc = WriteConcern { w: W::Majority, j: true };
+    // Range 1 written in terms 2 and 3, range 2 once; a write answered from its record has no
+    // entry. A barrier refused by a deposed leader is asked again.
+    let answers = vec![
+        wrote(at(2, 5)),
+        wrote(at(2, 6)),
+        wrote(at(3, 8)),
+        wrote(None),
+        wrote(at(4, 2)),
+        settled(),
+        Err(RangeError::NotLeader { hint: NodeId(0) }),
+        settled(),
+    ];
+    let (mut b, seen) = start(answers);
+    assert!(b.begin_statements());
+    for key in [1, 1, 1, 1, 2] {
+        write_at(&mut b, key);
+    }
+    assert_eq!(b.statement_barrier(wc), Ok(()));
+    let range_1 = vec![EntryId { term: 2, index: 6 }, EntryId { term: 3, index: 8 }];
+    let range_2 = vec![EntryId { term: 4, index: 2 }];
+    let want = vec![(range_1, wc), (range_2.clone(), wc), (range_2, wc)];
+    assert_eq!(barriers(&seen), want);
+    // Without statements begun, a write keeps nothing and the barrier asks no range.
+    let (mut b, seen) = start(vec![wrote(at(2, 9))]);
+    write_at(&mut b, 1);
+    assert_eq!(b.statement_barrier(wc), Ok(()));
+    assert!(barriers(&seen).is_empty());
+    // An entry the leader no longer holds: the command fails as after a change of leader.
+    let (mut b, _) = start(vec![wrote(at(2, 9)), Err(RangeError::EntryLost)]);
+    b.begin_statements();
+    write_at(&mut b, 1);
+    let e = b.statement_barrier(wc).unwrap_err();
+    assert_eq!(e.code, teseladb_wire::error::INTERRUPTED_DUE_TO_REPL_STATE_CHANGE);
+    // A `w` above the range's replicas: confirmed at `w: "majority"`, then reported.
+    let five = WriteConcern { w: W::Nodes(5), j: false };
+    let (mut b, seen) = start(vec![wrote(at(2, 9)), Err(RangeError::Unsatisfiable), settled()]);
+    b.begin_statements();
+    write_at(&mut b, 1);
+    let e = b.statement_barrier(five).unwrap_err();
+    assert_eq!(e.code.code, 100);
+    let asked: Vec<WriteConcern> = barriers(&seen).into_iter().map(|(_, wc)| wc).collect();
+    assert_eq!(asked, vec![five, wc]);
+    // An answer of another kind, and no answer until the deadline.
+    let (mut b, _) = start(vec![wrote(at(2, 9)), wrote(None)]);
+    b.begin_statements();
+    write_at(&mut b, 1);
+    assert_eq!(b.statement_barrier(wc).unwrap_err().code.code, 1);
+    let (mut b, _) = start(vec![wrote(at(2, 9))]);
+    b.begin_statements();
+    write_at(&mut b, 1);
+    assert_eq!(b.statement_barrier(wc).unwrap_err().code.code, 89);
 }

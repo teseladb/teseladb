@@ -1178,7 +1178,11 @@ pub(crate) fn record_answer(
         }
         Ok(Reply::Batch(_)) => rec.result = OpResult::Unknown,
         Ok(
-            Reply::Intents { .. } | Reply::Record(_) | Reply::Changes { .. } | Reply::Fenced { .. },
+            Reply::Intents { .. }
+            | Reply::Record(_)
+            | Reply::Changes { .. }
+            | Reply::Fenced { .. }
+            | Reply::Barrier,
         )
         | Err(
             RangeError::WriteConflict
@@ -1187,8 +1191,9 @@ pub(crate) fn record_answer(
             | RangeError::ReadUncertain { .. }
             | RangeError::NoSuchTransaction
             | RangeError::Fenced
-            | RangeError::KeyLocked,
-        ) => unreachable!("the workload runs no transactions, change streams nor fences"),
+            | RangeError::KeyLocked
+            | RangeError::EntryLost,
+        ) => unreachable!("the workload runs no transactions, change streams, fences nor barriers"),
         // Refused before anything was proposed: it imposes nothing.
         Err(RangeError::NotLeader { hint }) => {
             rec.result = OpResult::Rejected;

@@ -102,6 +102,7 @@ impl RangeClient {
             }
             Err(
                 RangeError::OutOfRange
+                | RangeError::EntryLost
                 | RangeError::Unsatisfiable
                 | RangeError::TooLarge
                 | RangeError::Unavailable

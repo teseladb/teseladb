@@ -600,7 +600,7 @@ impl RangeDocsWorkload {
             self.writes.insert(self.history.ops.len(), write);
             self.history.ops.push(rec);
             self.pending.insert((node, req), self.history.ops.len() - 1);
-            let reply = Reply::Mutated { ts, change: result.clone(), result };
+            let reply = Reply::Mutated { ts, change: result.clone(), result, entry: None };
             self.answer(w, node, req, Ok(reply));
             return;
         }
@@ -1070,8 +1070,10 @@ impl RangeDocsWorkload {
             Ok(Reply::Batch(_) | Reply::Changes { .. }) => {
                 unreachable!("the workload does not scan nor read change streams")
             }
-            Ok(Reply::Intents { .. } | Reply::Record(_) | Reply::Fenced { .. }) => {
-                unreachable!("the workload runs no transactions")
+            Ok(
+                Reply::Intents { .. } | Reply::Record(_) | Reply::Fenced { .. } | Reply::Barrier,
+            ) => {
+                unreachable!("the workload runs no transactions nor statement barriers")
             }
             Err(RangeError::Mutation(MutationError(held))) => {
                 rec.result = OpResult::Fail;

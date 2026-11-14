@@ -1359,10 +1359,12 @@ mod tests {
         let (mut w, mut d) = setup();
         let mut s = Quiet::default();
         let ts = Hlc { physical: 5, logical: 0 };
-        for (i, answer) in
-            [Ok(Reply::Mutated { ts, change: vec![], result: vec![] }), Ok(Reply::Fenced { ts })]
-                .into_iter()
-                .enumerate()
+        for (i, answer) in [
+            Ok(Reply::Mutated { ts, change: vec![], result: vec![], entry: None }),
+            Ok(Reply::Fenced { ts }),
+        ]
+        .into_iter()
+        .enumerate()
         {
             client(&mut d, &w, 1, vec![], Waiting::Mutated);
             match i {

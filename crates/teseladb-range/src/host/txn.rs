@@ -761,6 +761,7 @@ impl RangeHost {
                     ts,
                     change: Vec::new(),
                     result: Vec::new(),
+                    term: m.term,
                     index,
                     replied: false,
                     applied: false,
