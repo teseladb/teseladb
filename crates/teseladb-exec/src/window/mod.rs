@@ -1,4 +1,4 @@
-//! `$setWindowFields` (010 FR-005, T008), as a `refrouter` 9.0.4 runs it (measured in
+//! `$setWindowFields` (010 FR-005, T008), as a reference router 9.0.4 runs it (measured in
 //! `crates/teseladb-exec/tests/agg/window.out`): the documents are split by `partitionBy`,
 //! partitions come in the order of their key and each is sorted by `sortBy`; every output field
 //! is a window function over a window of each document's partition — `documents` by position,
@@ -276,7 +276,7 @@ fn ema_alpha(v: &Value) -> Result<Weight, MqlError> {
 
 /// The fields of a sub-object argument (`$shift`, `$expMovingAvg`…).
 /// Reads `$minMaxScaler`'s argument: an `input` expression and, both or neither, the `min` and
-/// `max` of the scaled range as numeric constants, `min` below `max` (measured on a `refrouter`
+/// `max` of the scaled range as numeric constants, `min` below `max` (measured on a reference router
 /// 9.0.4).
 fn min_max_scaler(arg: RawValue<'_>, ctx: &Ctx) -> Result<Func, MqlError> {
     let root = format!("root.{SCALER}");
@@ -588,7 +588,7 @@ impl SetWindowFields {
         };
         let mut outputs = Vec::with_capacity(methods.len());
         for (field, method) in methods {
-            // RefDb reads `$` and the field as an expression: `$x` becomes a variable.
+            // The reference server reads `$` and the field as an expression: `$x` becomes a variable.
             let path = Expr::parse_in(RawValue::String(&format!("${field}")), ctx)?;
             let func = if method == "linear" {
                 if sort_field.is_none() {
@@ -823,7 +823,7 @@ impl SetWindowFields {
 
     /// The sort values of a sorted partition as numbers (dates as milliseconds), for
     /// `$linearFill`: each a number or a date, all of one kind and no two equal (measured on a
-    /// `refrouter` 9.0.4).
+    /// reference router 9.0.4).
     fn linear_positions(&self, docs: &[Document]) -> Result<Vec<f64>, MqlError> {
         let field = self.sort_field.as_ref().map_or("", |(f, _)| f.as_str());
         let mut out = Vec::with_capacity(docs.len());

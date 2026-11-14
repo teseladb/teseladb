@@ -1,5 +1,5 @@
 //! Field paths, variables, comparisons, booleans, conditionals and arithmetic (010 T007, FR-005),
-//! each result with the value and type a `refrouter` 9.0.4 gave on 31-10-2026 (`$project` with
+//! each result with the value and type a reference router 9.0.4 gave on 31-10-2026 (`$project` with
 //! `$type` beside each expression).
 
 use teseladb_bson::{Decimal128, Document, Value, extjson};
@@ -56,7 +56,7 @@ fn boolean(b: bool) -> Option<Value> {
 }
 
 #[test]
-fn paths_and_variables_read_as_refdb_does() {
+fn paths_and_variables_read_as_the_reference_does() {
     assert_eq!(
         eval(r#""$a.b""#),
         Some(Value::Array(vec![
@@ -108,7 +108,7 @@ fn booleans_and_conditionals_follow_truthiness() {
     assert_eq!(eval(r#"{"$and":[]}"#), boolean(true));
     assert_eq!(eval(r#"{"$or":[0,null,"$zz"]}"#), boolean(false));
     assert_eq!(eval(r#"{"$or":[0,{"$numberDecimal":"1"}]}"#), boolean(true));
-    // A decimal too small for a double is not zero (measured on a `refrouter` 9.0.4).
+    // A decimal too small for a double is not zero (measured on a reference router 9.0.4).
     let tiny = r#"{"$numberDecimal":"1E-6143"}"#;
     assert_eq!(eval(&format!(r#"{{"$and":[{tiny}]}}"#)), boolean(true));
     assert_eq!(eval(&format!(r#"{{"$not":[{tiny}]}}"#)), boolean(false));
@@ -156,7 +156,7 @@ fn booleans_and_conditionals_follow_truthiness() {
 }
 
 #[test]
-fn arithmetic_keeps_refdb_types() {
+fn arithmetic_keeps_the_reference_types() {
     assert_eq!(eval(r#"{"$add":["$i",1]}"#), long(2_147_483_648));
     assert_eq!(eval(r#"{"$add":["$l",1]}"#), dbl(9_223_372_036_854_775_808.0));
     assert_eq!(eval(r#"{"$add":["$dt",1000]}"#), Some(Value::DateTime(1_767_225_601_000)));
@@ -210,7 +210,7 @@ fn arithmetic_keeps_refdb_types() {
 }
 
 #[test]
-fn arithmetic_refuses_what_refdb_refuses() {
+fn arithmetic_refuses_what_the_reference_refuses() {
     assert_eq!(
         error(r#"{"$add":[1,"a"]}"#),
         (14, "$add only supports numeric or date types, not string".into())
@@ -271,7 +271,7 @@ fn sorting_values_that_do_not_compare_gives_the_error() {
 
 #[test]
 fn range_refuses_an_array_past_its_memory_limit_before_building_it() {
-    // Measured on a `refrouter` 9.0.4 on 11-11-2026: 16 bytes per step and 40 more, against
+    // Measured on a reference router 9.0.4 on 11-11-2026: 16 bytes per step and 40 more, against
     // 104857600 bytes; the largest range of 32-bit integers is refused at once.
     let size = |args: &str| eval(&format!(r#"{{"$size":{{"$range":{args}}}}}"#));
     assert_eq!(size("[0, 6553597]"), int(6_553_597));

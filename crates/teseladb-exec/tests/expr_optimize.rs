@@ -1,5 +1,5 @@
-//! Expressions as RefDb optimises them when it parses a filter (010 FR-003, FR-005, T018):
-//! each `$expr` of `tests/expr/optimize.out`, a tab and what a `refrouter` 9.0.4 gave for it on
+//! Expressions as the reference server optimises them when it parses a filter (010 FR-003, FR-005, T018):
+//! each `$expr` of `tests/expr/optimize.out`, a tab and what a reference router 9.0.4 gave for it on
 //! 01-11-2026 in the plan of an `explain` (`=> {"e": form}`), `=> true` or `=> false` for a
 //! constant that settles the filter, or the error (`!! code<TAB>message`) without the words
 //! «Failed to optimize expression» the filter adds.
@@ -22,7 +22,7 @@ fn shown(e: &Value) -> String {
 }
 
 #[test]
-fn expressions_optimise_as_refdb() {
+fn expressions_optimise_as_the_reference() {
     let mut wrong = Vec::new();
     for line in include_str!("expr/optimize.out").lines().filter(|l| !l.is_empty()) {
         let (e, want) = line.split_once('\t').expect("an expression and its form");
@@ -62,7 +62,7 @@ fn known_variables_are_constants() {
     assert_eq!(Optimized::Const(None).written(), e(r#""$$REMOVE""#));
 }
 
-/// Forms the measured expressions leave: each written as RefDb would by the rules above.
+/// Forms the measured expressions leave: each written as the reference server would by the rules above.
 #[test]
 fn optimisations_beyond_the_measured_forms() {
     let ctx = Ctx::default();

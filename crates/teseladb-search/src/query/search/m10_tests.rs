@@ -1,5 +1,5 @@
 //! `autocomplete` with `nGram` and `rightEdgeGram`, points on the boundary of a shape, and
-//! `hasAncestor` and `hasRoot` in nested `embeddedDocuments`, as `refsearch` 1.70.6 runs them
+//! `hasAncestor` and `hasRoot` in nested `embeddedDocuments`, as the reference search server 1.70.6 runs them
 //! (measured 02-11-2026 on a 9.0.4 replica set, `scratchpad/lane3k/m10.js` and `m11.js`, whose
 //! documents and index are these).
 
@@ -106,7 +106,7 @@ fn sorted(v: &[(u8, f64)]) -> Vec<(u8, f64)> {
 }
 
 /// `m10.out`: field, query, option (`seq` for `tokenOrder: sequential`, `fuzzy` for one edit)
-/// and the scores `refsearch` gives.
+/// and the scores the reference search server gives.
 type Case = (&'static str, &'static str, &'static str, &'static [(u8, f64)]);
 const AUTOCOMPLETE: &[Case] = &[
     (
@@ -164,7 +164,7 @@ const AUTOCOMPLETE: &[Case] = &[
 ];
 
 #[test]
-fn autocomplete_tokenizations_match_refsearch() {
+fn autocomplete_tokenizations_match_the_reference() {
     let idx = m10();
     for &(path, query, option, want) in AUTOCOMPLETE {
         let mut d = Document::new().with("path", path).with("query", query);
@@ -337,7 +337,7 @@ fn has_ancestor_scores_nested_elements() {
 }
 
 #[test]
-fn has_ancestor_errors_match_refsearch() {
+fn has_ancestor_errors_match_the_reference() {
     let idx = m10();
     let err = |s: Document| found(&idx, &s).unwrap_err();
     let a = |o: Document| embedded("a", o);

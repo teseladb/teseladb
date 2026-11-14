@@ -1,5 +1,5 @@
 //! The documents of a search index in memory (011 FR-009, FR-016): each string field analyzed
-//! by its mapping, its postings and its lengths, and the `text` operator scored as `refsearch`
+//! by its mapping, its postings and its lengths, and the `text` operator scored as the reference search server
 //! 1.70.6 scores it. Measured on a 9.0.4 replica set (01-11-2026): a term scores
 //! `w − w / (1 + freq · n)` in 32-bit floats, with `w = boost · idf` and
 //! `n = 1 / (k1 · (1 − b + b · dl / avgdl))`, `dl` the field's length through its norm byte and
@@ -19,8 +19,8 @@ use crate::query::fuzzy::Levenshtein;
 use crate::segment::norms;
 
 /// A string field of the index: the postings of each term (document number to positions), the
-/// length of the field in each document and its number of tokens. As RefLib's BM25 does with
-/// overlaps discounted (measured on `refsearch` with stacked edge grams), the length that scores a
+/// length of the field in each document and its number of tokens. As the reference search library's BM25 does with
+/// overlaps discounted (measured on the reference search server with stacked edge grams), the length that scores a
 /// document counts the tokens that start a position, while the mean length comes from every
 /// token.
 #[derive(Clone, Debug, Default)]
@@ -37,11 +37,11 @@ struct TextField {
     similarity: Similarity,
 }
 
-/// The `similarity` of a `string` or `autocomplete` field (measured on `refsearch` 1.70.6 with
+/// The `similarity` of a `string` or `autocomplete` field (measured on the reference search server 1.70.6 with
 /// `scoreDetails`, `query/search/similarity_tests.rs`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Similarity {
-    /// RefLib's BM25 over the index's statistics.
+    /// The reference search library's BM25 over the index's statistics.
     #[default]
     Bm25,
     /// Each matching term scores its boost.
@@ -91,12 +91,12 @@ fn rarity_of(p: f32) -> f32 {
 pub enum IndexError {
     /// An analyzer the definition names and this engine cannot build.
     Analyzer(String),
-    /// An analyzer failed on a text, with the message `refsearch` gives: a component that cannot be
+    /// An analyzer failed on a text, with the message the reference search server gives: a component that cannot be
     /// built, a replacement that names a group the pattern lacks, a match out of steps.
     Analysis(String),
 }
 
-/// The longest term, in UTF-8 bytes, that an index keeps (measured on `refsearch` 1.70.6).
+/// The longest term, in UTF-8 bytes, that an index keeps (measured on the reference search server 1.70.6).
 pub(crate) const MAX_TERM_BYTES: usize = 32766;
 
 /// The analyzer called `name` in `definition`: one the definition defines, or a built-in one.
@@ -184,7 +184,7 @@ pub type Contents = BTreeMap<String, FieldContents>;
 pub struct Hit {
     /// Key of the document.
     pub key: Vec<u8>,
-    /// Score, a 32-bit float as `refsearch` gives it.
+    /// Score, a 32-bit float as the reference search server gives it.
     pub score: f32,
 }
 
@@ -294,7 +294,7 @@ impl MemIndex {
             analyzer
                 .for_each_term(&text, &mut buffer, |t| {
                     // A term over 32 766 bytes is not indexed, and the document keeps its other
-                    // terms (measured: a `reflib.keyword` value of 40 000 characters is found by
+                    // terms (measured: a value of 40 000 characters under the built-in `keyword` analyzer is found by
                     // `exists` and by no query of its text).
                     if t.text.len() > MAX_TERM_BYTES {
                         return;
@@ -438,7 +438,7 @@ impl MemIndex {
     }
 
     /// Adds the grams of `text` to the `autocomplete` field `key` for document `id`: those of
-    /// each word and of each run of two or three words (measured on `refsearch`: `gato montes`
+    /// each word and of each run of two or three words (measured on the reference search server: `gato montes`
     /// holds `gat` twice, `el gatopardo salvaje` holds `el` three times); its length is its
     /// number of words.
     fn put_grams(
@@ -477,7 +477,7 @@ impl MemIndex {
         Ok(())
     }
 
-    /// The scores of `terms` on field `key` (a sum in doubles, as RefLib adds the clauses of a
+    /// The scores of `terms` on field `key` (a sum in doubles, as the reference search library adds the clauses of a
     /// disjunction, each a term query), with weight `boost`.
     pub(crate) fn terms_scores(
         &self,
@@ -550,8 +550,8 @@ impl MemIndex {
         paths: &[String],
         boost: f32,
     ) -> Result<BTreeMap<u32, f32>, IndexError> {
-        // The terms' scores add up in doubles, as RefLib's disjunctions do (measured: 1 024
-        // terms of one document give `refsearch`'s 269.5703125, and 269.56622 added in 32 bits).
+        // The terms' scores add up in doubles, as the reference search library's disjunctions do (measured: 1 024
+        // terms of one document give the reference search server's 269.5703125, and 269.56622 added in 32 bits).
         let mut scores: BTreeMap<u32, f64> = BTreeMap::new();
         for path in paths {
             let Some(field) = self.fields.get(path) else { continue };
@@ -595,7 +595,7 @@ impl MemIndex {
     }
 
     /// The documents where a phrase of `queries` appears in one of `paths` with at most `slop`
-    /// positions between its terms, scored as `refsearch` scores a phrase (measured): the weight
+    /// positions between its terms, scored as the reference search server scores a phrase (measured): the weight
     /// is `boost` times the sum of the terms' idf and the frequency counts each match as
     /// `1 / (1 + length)`, its length being how far the terms are from their places.
     pub(crate) fn phrase_scores(
@@ -621,8 +621,8 @@ impl MemIndex {
     }
 
     /// The documents with a term of one of `paths` within `fuzzy.max_edits` edits of a token of
-    /// `queries`, scored as RefLib's `FuzzyQuery` with its top-terms blended rewrite (measured
-    /// on `refsearch`): the `max_expansions` closest terms, each weighted `1 - edits / shortest
+    /// `queries`, scored as the reference search library's `FuzzyQuery` with its top-terms blended rewrite (measured
+    /// on the reference search server): the `max_expansions` closest terms, each weighted `1 - edits / shortest
     /// length` with the largest document count among them, their scores added.
     pub(crate) fn fuzzy_scores(
         &self,
@@ -718,7 +718,7 @@ impl MemIndex {
         Ok(a.analyze(text).map_err(analysis)?.into_iter().map(|t| t.text).collect())
     }
 
-    /// Scores of a span query of the field at `path` (RefLib's `SpanWeight`): the weight is
+    /// Scores of a span query of the field at `path` (the reference search library's `SpanWeight`): the weight is
     /// `boost` times the sum of the idf of `terms`, and `freqs` the documents' span frequencies.
     pub(crate) fn span_scores(
         &self,
@@ -921,7 +921,7 @@ impl TextField {
     }
 
     /// The documents with every term of `path`, each with the sum of the terms' scores (a
-    /// RefLib conjunction, summed in double precision).
+    /// reference search library conjunction, summed in double precision).
     fn path_scores(&self, path: &[&str], boost: f32, g: Option<&FieldStats>) -> Vec<(u32, f32)> {
         let mut sums: Option<BTreeMap<u32, f64>> = None;
         for term in path {
@@ -938,7 +938,7 @@ impl TextField {
     }
 
     /// The score of each document with one of `terms`, which sit at one position: one term
-    /// scores alone; several score as RefLib's `SynonymQuery`, with the sum of their
+    /// scores alone; several score as the reference search library's `SynonymQuery`, with the sum of their
     /// frequencies and the largest of their document counts.
     fn synonym_scores(
         &self,
@@ -967,8 +967,8 @@ impl TextField {
     }
 
     /// The terms within `fuzzy` of `term`, in term order, each with its weight
-    /// `1 - edits / shortest length` (RefLib's top-terms blended rewrite): the closest among
-    /// those of the whole index when `g` has them, as `refsearch` rewrites the query once for all
+    /// `1 - edits / shortest length` (the reference search library's top-terms blended rewrite): the closest among
+    /// those of the whole index when `g` has them, as the reference search server rewrites the query once for all
     /// its segments (measured in `m80.js`).
     fn fuzzy_terms(&self, term: &str, fuzzy: &Fuzzy, g: Option<&FieldStats>) -> Vec<(String, f32)> {
         match g {
@@ -996,8 +996,8 @@ impl TextField {
         let kept = self.fuzzy_terms(term, fuzzy, g);
         let n = g.map_or(self.lengths.len() as u64, |g| g.docs);
         let idf = idf(n, self.blended_df(&kept, g)) as f32;
-        // The terms' scores add up in doubles, as RefLib's disjunctions do (measured: 50 terms
-        // of one document give `refsearch`'s 8.862827, and 8.862825 added in 32 bits).
+        // The terms' scores add up in doubles, as the reference search library's disjunctions do (measured: 50 terms
+        // of one document give the reference search server's 8.862827, and 8.862825 added in 32 bits).
         let mut sums: BTreeMap<u32, f64> = BTreeMap::new();
         for (t, weight) in &kept {
             let score = self.scorer(boost * weight, idf, &[t.as_str()], g);
@@ -1050,7 +1050,7 @@ pub(crate) struct Grams {
     pub reverse: bool,
 }
 
-/// The most words `refsearch` joins into one string of an `autocomplete` field (measured
+/// The most words the reference search server joins into one string of an `autocomplete` field (measured
 /// 02-11-2026, `scratchpad/lane3k/m13.js`: `a1 b2 c3 d4 …` holds `a1 b2 c3` but no longer run).
 const SHINGLE_WORDS: usize = 3;
 
@@ -1080,7 +1080,7 @@ impl Grams {
 
     /// The grams of `word`: its prefixes (or every slice) of `min` to `max` characters, its
     /// first `max` characters once more when it is longer, and the word itself when it is shorter
-    /// than `min` (RefLib's gram filter keeping the original; measured on `refsearch`, with
+    /// than `min` (the reference search library's gram filter keeping the original; measured on the reference search server, with
     /// `rightEdgeGram` on the reversed word: two words `a` add two to `avgdl`'s sum).
     pub(crate) fn of(&self, word: &str) -> Vec<String> {
         let chars = self.chars(word);
@@ -1141,7 +1141,7 @@ pub(crate) struct Fuzzy {
     pub max_expansions: usize,
 }
 
-/// The most paths a query graph may expand to, RefLib's `maxClauseCount`.
+/// The most paths a query graph may expand to, the reference search library's `maxClauseCount`.
 const MAX_CLAUSES: usize = 1024;
 
 /// A part of a query's token graph between two positions every path goes through.
@@ -1152,8 +1152,8 @@ enum Segment<'a> {
     Paths(Vec<Vec<&'a str>>),
 }
 
-/// The query of `tokens` as RefLib's `QueryBuilder` builds it for a token graph (measured on
-/// `refsearch` with shingles and `wordDelimiterGraph`): the graph is cut at the positions no token
+/// The query of `tokens` as the reference search library's `QueryBuilder` builds it for a token graph (measured on
+/// the reference search server with shingles and `wordDelimiterGraph`): the graph is cut at the positions no token
 /// spans; a part of one position gives its terms, and a part with longer tokens gives each of its
 /// paths.
 fn segments(tokens: &[crate::analysis::tokenizers::Token]) -> Result<Vec<Segment<'_>>, IndexError> {
@@ -1214,7 +1214,7 @@ fn walk<'a>(
 }
 
 /// The weight of several terms: their idfs, each a 32-bit float, added in double precision as
-/// RefLib's `BM25Similarity.idfExplain` adds them.
+/// the reference search library's `BM25Similarity.idfExplain` adds them.
 pub(crate) fn idf_sum(n: u64, dfs: impl IntoIterator<Item = u64>) -> f32 {
     dfs.into_iter().map(|df| f64::from(idf(n, df) as f32)).sum::<f64>() as f32
 }

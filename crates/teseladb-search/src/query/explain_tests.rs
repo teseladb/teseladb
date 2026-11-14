@@ -1,4 +1,4 @@
-//! `scoreDetails` as `refsearch` 1.70.6 gives it on the documents of `m14.js` (measured
+//! `scoreDetails` as the reference search server 1.70.6 gives it on the documents of `m14.js` (measured
 //! 02-11-2026, `scratchpad/lane3k/m15.js`): each line is a node of the explanation, with its
 //! depth, value and description.
 
@@ -83,7 +83,7 @@ const CASES: [Case; 6] = [
         ],
     ),
     // {"text":{"path":"t","query":"gato","score":{"constant":{"value":3}}}}
-    // Every document ties: `refsearch` gives its first document number first (4), here key 1.
+    // Every document ties: the reference search server gives its first document number first (4), here key 1.
     (1, &[(0, 3.0, "ConstantScore($type:string/t:gato) [BM25Similarity], result of:")]),
     // {"compound":{"must":[{"text":{"path":"t","query":"gato"}}],"should":[{"text":{"path":"t","query":"negro"}}],"filter":[{"exists":{"path":"n"}}]}}
     (
@@ -126,15 +126,15 @@ const CASES: [Case; 6] = [
         ],
     ),
     // {"exists":{"path":"n"}}
-    // Every document ties: `refsearch` gives its first document number first (4), here key 1.
+    // Every document ties: the reference search server gives its first document number first (4), here key 1.
     (1, &[(0, 1.0, "ConstantScore($meta/fieldNames:n) [BM25Similarity], result of:")]),
     // {"wildcard":{"path":"t","query":"gat*","allowAnalyzedField":true}}
-    // Every document ties: `refsearch` gives its first document number first (4), here key 1.
+    // Every document ties: the reference search server gives its first document number first (4), here key 1.
     (1, &[(0, 1.0, "$type:string/t:gat*")]),
 ];
 
 #[test]
-fn score_details_explain_as_refsearch() {
+fn score_details_explain_as_the_reference() {
     let ix = m14();
     let compound = Document::new()
         .with("must", Value::Array(vec![op("text", text("gato")).into()]))

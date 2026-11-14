@@ -1,4 +1,4 @@
-//! The tokenizer of `reflib.thai` as `refsearch` 1.70.6 runs it (011 T009, D-109): the Thai word
+//! The tokenizer of the built-in `thai` analyzer as the reference search server 1.70.6 runs it (011 T009, D-109): the Thai word
 //! iterator of its Java runtime (Temurin 21.0.11), whose rules and dictionary walk this module
 //! follows. The rules cut the text into segments: a run of dictionary characters, with `ๆ` or
 //! `ฯๆ` after it, or with `ฯ` when the character after the `ฯ` is neither `ล` nor one to ignore;
@@ -13,10 +13,10 @@
 //! word stops the walk, and the rest of the segment joins that word.
 //!
 //! `data/thai-words.txt` holds the words and `data/thai-prefixes.txt` the strings the dictionary
-//! walks through without a word ending, asked of the runtime of `refsearch` for every place of the
-//! 12 000 sentences of `tests/sentences_refsearch.rs` and for the earlier word list, which kept only
+//! walks through without a word ending, asked of the runtime of the reference search server for every place of the
+//! 12 000 sentences of the recorded sentence comparison and for the earlier word list, which kept only
 //! the strings the runtime has as words (01-11-2026). Measured: the 12 000 sentences give the
-//! tokens of `refsearch`.
+//! tokens of the reference search server.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -91,7 +91,7 @@ fn ignorable(c: char) -> bool {
 }
 
 /// Whether the dictionary has no column for `c`: a character to ignore, or one of the Thai
-/// characters outside its alphabet (`ฃ ฅ ํ ๎`, asked of the Java runtime of `refsearch`). At the end of
+/// characters outside its alphabet (`ฃ ฅ ํ ๎`, asked of the Java runtime of the reference search server). At the end of
 /// a word the walk stops there and the rest of the segment joins that word.
 fn outside(c: char) -> bool {
     matches!(c, '\u{0E03}' | '\u{0E05}' | '\u{0E4D}' | '\u{0E4E}') || ignorable(c)
@@ -241,12 +241,12 @@ fn digit(c: char) -> bool {
     props::category(c) == 9
 }
 
-/// The signs that may close a word ending in a digit, measured on `refsearch` 1.70.6.
+/// The signs that may close a word ending in a digit, measured on the reference search server 1.70.6.
 const NUMBER_SIGNS: [char; 7] =
     ['%', '&', '\u{A2}', '\u{2030}', '\u{2031}', '\u{066A}', '\u{0E2F}'];
 
 /// The byte ranges of the tokens of `text`: Thai runs cut into words, and the other words by the
-/// Java word rules `refsearch` follows here (letters joined by one `-`, `.` or `'`, digits joined by
+/// Java word rules the reference search server follows here (letters joined by one `-`, `.` or `'`, digits joined by
 /// one `.` or `,`); a piece that starts with punctuation, such as `.5` after a letter, is no token.
 pub fn thai_words(text: &str) -> Vec<(usize, usize)> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn cuts_like_refsearch() {
+    fn cuts_like_the_reference() {
         assert_eq!(cut("ภาษาไทย"), ["ภาษา", "ไทย"]);
         // Letters no word covers join the next word, or the last one at the end of the run.
         assert_eq!(cut("ไทยฆฆภาษา"), ["ไทย", "ฆฆภาษา"]);
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn keeps_one_sign_after_a_number() {
-        // Measured on `refsearch` 1.70.6: one of `% & ¢ ‰ ٪ ‱`, or `ฯ`, closes a word that ends in a digit.
+        // Measured on the reference search server 1.70.6: one of `% & ¢ ‰ ٪ ‱`, or `ฯ`, closes a word that ends in a digit.
         assert_eq!(
             cut("1% 1%% 1%2 a1% a% 1.% 1,5% 1& 1‰ 4ฯ"),
             ["1%", "1%", "1%", "2", "a1%", "a", "1", "1,5%", "1&", "1‰", "4ฯ"]

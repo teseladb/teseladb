@@ -1,4 +1,4 @@
-//! Date text read with a `$dateFromString` format (measured on a `refrouter` 9.0.4): each `%`
+//! Date text read with a `$dateFromString` format (measured on a reference router 9.0.4): each `%`
 //! specifier reads its field, a literal must be there, and timelib's messages name what was
 //! missing. A format that gives no year with a month and a day, a day of the year, or an ISO
 //! year, gives an incomplete date.

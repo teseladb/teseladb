@@ -1,7 +1,7 @@
 //! BM25 and BM25F (research R2, FR-016).
 //!
 //! A term scores `boost · idf · tf` with `idf = ln(1 + (N − n + 0.5) / (n + 0.5))` and
-//! `tf = freq / (freq + k1 · (1 − b + b · dl / avgdl))`, the formula RefDb Search documents. The
+//! `tf = freq / (freq + k1 · (1 − b + b · dl / avgdl))`, the formula the reference search server documents. The
 //! statistics `N`, `n` and `avgdl` are the global ones at the read timestamp (FR-015), so every
 //! replica gives the same score. BM25F (Robertson, Zaragoza and Taylor, CIKM 2004) weights the
 //! frequency of each field before the saturation, which is how `$text` applies its index weights.
@@ -16,7 +16,7 @@ pub struct Bm25 {
 }
 
 impl Bm25 {
-    /// `k1 = 1.2` and `b = 0.75`. FR-016 asks for the parameters of RefDb Search; T048 checks
+    /// `k1 = 1.2` and `b = 0.75`. FR-016 asks for the parameters of the reference search server; T048 checks
     /// these against its `scoreDetails` on controlled corpora.
     pub const DEFAULT: Bm25 = Bm25 { k1: 1.2, b: 0.75 };
 

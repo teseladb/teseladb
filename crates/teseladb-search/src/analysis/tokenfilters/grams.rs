@@ -5,7 +5,7 @@
 //! Positions left empty by an earlier filter, also before the first token and after the last,
 //! become `_` tokens right after the token before them, at most `maxShingleSize - 1` of them per
 //! gap, and no shingle is made of `_` alone. Tokens stacked at one position (edge grams) count as
-//! tokens in a row, as RefLib's `ShingleFilter` reads them (measured on `refsearch`: the query graph
+//! tokens in a row, as the reference search library's `ShingleFilter` reads them (measured on the reference search server: the query graph
 //! of `h he hel` has the paths `h he` `he hel` and `h he hel`), so every later position moves by
 //! the tokens stacked before it.
 

@@ -1,4 +1,4 @@
-//! String expressions with named arguments (measured on a `refrouter` 9.0.4): `$trim`, `$ltrim`,
+//! String expressions with named arguments (measured on a reference router 9.0.4): `$trim`, `$ltrim`,
 //! `$rtrim`, `$regexMatch`, `$regexFind`, `$regexFindAll`, `$replaceOne` and `$replaceAll`.
 //!
 //! The trims remove, by default, ASCII whitespace, the null character and the Unicode spaces;

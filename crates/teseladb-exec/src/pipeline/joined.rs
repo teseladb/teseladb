@@ -87,7 +87,7 @@ impl Env for WithVars<'_> {
 
 /// The environment of the pipeline of a `$lookup` or `$unionWith` that reads collection `coll`
 /// (011 T054, FR-004): a `$match` with `$text` or a search stage first in it reads that
-/// collection's text or search indexes, as `refnode` does; everything else is the environment's
+/// collection's text or search indexes, as the reference server does; everything else is the environment's
 /// it runs in.
 pub(super) struct Joined<'a> {
     pub(super) inner: &'a dyn Env,

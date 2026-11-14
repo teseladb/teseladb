@@ -2,7 +2,7 @@
 //! `vectorSearch` index, the scores `{$meta: "vectorSearchScore"}` gives for them, and the
 //! quantizations of the index definition.
 //!
-//! The scores, measured on `refsearch` 1.70.6 with and without `exact`, are `1 / (1 + d²)` for
+//! The scores, measured on the reference search server 1.70.6 with and without `exact`, are `1 / (1 + d²)` for
 //! `euclidean`, where `d` is the euclidean distance, `(1 + cos) / 2` for `cosine` (the cosine divided by the root of the norms' product in
 //! double precision) and
 //! `(1 + dot) / 2` for `dotProduct` (which may pass 1 for vectors longer than 1), as `f32`. A higher
@@ -86,13 +86,13 @@ impl Quantization {
     }
 }
 
-/// Above this length RefLib's scalar code adds the terms in four accumulators.
+/// Above this length the reference search library's scalar code adds the terms in four accumulators.
 const UNROLL_ABOVE: usize = 32;
 
-/// `Σ term(i)` as RefLib's scalar vector code adds it: fused multiply-adds, in four accumulators
+/// `Σ term(i)` as the reference search library's scalar vector code adds it: fused multiply-adds, in four accumulators
 /// for the first multiple of four terms of a long vector, then one by one (measured: the
 /// euclidean score of an 8-dimension vector of `tests/compat/scenarios/vector-quantization.json`
-/// matches `refsearch` only with fused multiply-adds).
+/// matches the reference search server only with fused multiply-adds).
 fn fused_sum(len: usize, term: impl Fn(usize) -> (f32, f32)) -> f32 {
     let mut res = 0f32;
     let mut i = 0;
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scores_like_refdb() {
+    fn scores_like_the_reference() {
         let (a, b) = ([1.0, 0.0], [0.0, 1.0]);
         assert_eq!(Similarity::Euclidean.score(&a, &b), 1.0 / 3.0);
         assert_eq!(Similarity::Cosine.score(&a, &b), 0.5);
@@ -201,7 +201,7 @@ mod tests {
 }
 
 /// A vector longer than 32 dimensions adds in four accumulators first (`m87.js` of lane 3: the
-/// euclidean score of these 41 dimensions on `refsearch` 1.70.6).
+/// euclidean score of these 41 dimensions on the reference search server 1.70.6).
 #[cfg(test)]
 mod long_vectors {
     use super::Similarity;

@@ -1,4 +1,4 @@
-//! `$geoNear` (010 FR-004, with the geospatial indexes of 009), as a `refrouter` 9.0.4 runs it
+//! `$geoNear` (010 FR-004, with the geospatial indexes of 009), as a reference router 9.0.4 runs it
 //! (measured in `crates/teseladb-exec/tests/agg/geo_near.out`): the documents of the collection
 //! that the `query` matches, nearest first, each with its distance to `near` through the
 //! collection's 2d or 2dsphere index. A 2dsphere index measures on the sphere, in meters from a
@@ -17,7 +17,7 @@ use crate::expr::Ctx;
 use crate::expr::arith::raw_type_name;
 use crate::expr::field_path;
 
-/// The Earth's radius in meters that RefDb measures with (`kRadiusOfEarthInMeters`).
+/// The Earth's radius in meters that the reference server measures with (`kRadiusOfEarthInMeters`).
 const EARTH_RADIUS_METERS: f64 = 6_378_100.0;
 
 /// The bounds of a 2d index without `min` and `max`.
@@ -37,7 +37,7 @@ const DISTANCE_FIELD: ErrorCode = loc!(16606);
 const INCLUDE_LOCS: ErrorCode = loc!(16607);
 const NOT_FIRST: ErrorCode = loc!(40603);
 const FLAT_RANGE: ErrorCode = loc!(16433);
-/// RefDb's `NoQueryExecutionPlans`.
+/// The reference server's `NoQueryExecutionPlans`.
 const NO_PLANS: ErrorCode = ErrorCode { code: 291, name: "NoQueryExecutionPlans" };
 
 /// A geospatial index of the collection: its field and whether it is a 2dsphere one.
@@ -129,7 +129,7 @@ fn near_point(v: RawValue<'_>) -> Result<Near, MqlError> {
 }
 
 impl GeoNear {
-    /// Reads a `$geoNear` (measured on a `refrouter` 9.0.4).
+    /// Reads a `$geoNear` (measured on a reference router 9.0.4).
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<GeoNear, MqlError> {
         let RawValue::Document(d) = v else {
             return Err(error(NOT_OBJECT, "invalid parameter: expected an object ($geoNear)"));
@@ -211,7 +211,7 @@ impl GeoNear {
     }
 
     /// Chooses the index the stage reads before it runs: the errors of planning (no index, none
-    /// that answers `near`) come before any document, as RefDb's planner gives them.
+    /// that answers `near`) come before any document, as the reference server's planner gives them.
     pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
         let (ns, indexes) = env.geo_indexes()?;
         self.index(&ns, &indexes).map(|_| ())
@@ -270,7 +270,7 @@ impl GeoNear {
     /// one a GeoJSON point or a pair with `spherical`).
     fn index<'a>(&self, ns: &str, indexes: &'a [GeoIndex]) -> Result<&'a GeoIndex, MqlError> {
         // With `key`, a collection without geo indexes fails in the planner (measured on a
-        // `refrouter` 9.0.4 on 05-11-2026).
+        // reference router 9.0.4 on 05-11-2026).
         if indexes.is_empty() && self.key.is_none() {
             return Err(error(
                 INDEX_NOT_FOUND,
@@ -341,7 +341,7 @@ impl GeoNear {
     }
 }
 
-/// The angle in radians between two points given in degrees, as RefDb gives it: the angle of
+/// The angle in radians between two points given in degrees, as the reference server gives it: the angle of
 /// the sphere's points through meters and back (`(angle * R) / R`).
 fn sphere_degrees((x1, y1): (f64, f64), (x2, y2): (f64, f64)) -> f64 {
     let angle = Point::from_degrees(x1, y1).angle(Point::from_degrees(x2, y2));

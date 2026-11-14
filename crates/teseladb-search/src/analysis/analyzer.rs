@@ -22,7 +22,7 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    /// The built-in analyzer called `name` (`reflib.standard`, ...).
+    /// The built-in analyzer called `name` ([`teseladb_names::ANALYZER_STANDARD`], ...).
     pub fn builtin(name: &str) -> Option<Analyzer> {
         let max_token_length = DEFAULT_MAX_TOKEN_LENGTH;
         let (char_filters, tokenizer, token_filters) = match name {

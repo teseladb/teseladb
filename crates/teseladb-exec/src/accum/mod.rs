@@ -1,5 +1,5 @@
 //! The accumulators of `$group`, `$bucket`, `$bucketAuto` and `$setWindowFields` (010 FR-005,
-//! T008), as a `refrouter` 9.0.4 computes them (measured): each takes its argument from every
+//! T008), as a reference router 9.0.4 computes them (measured): each takes its argument from every
 //! document of a group in order and gives one value at the end.
 //!
 //! - `$sum`, `$avg`, `$min`, `$max`, `$stdDevPop` and `$stdDevSamp` keep the totals of the
@@ -188,7 +188,7 @@ impl Accumulator {
         }))
     }
 
-    /// Whether this collects its values in an array (`$push`, `$addToSet`), whose memory RefDb's
+    /// Whether this collects its values in an array (`$push`, `$addToSet`), whose memory the reference server's
     /// slot-based engine counts against a stage's limit.
     pub(crate) fn collects(&self) -> bool {
         matches!(self, Accumulator::Unary(Unary::Push | Unary::AddToSet, _))

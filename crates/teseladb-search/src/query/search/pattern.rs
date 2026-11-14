@@ -1,8 +1,8 @@
-//! The `wildcard` and `regex` operators (011 FR-002), as `refsearch` 1.70.6 runs them (measured
+//! The `wildcard` and `regex` operators (011 FR-002), as the reference search server 1.70.6 runs them (measured
 //! 02-11-2026): each query is a pattern over whole terms, normalized as the field's analyzer
-//! normalizes text (lower case, but for `reflib.keyword`), and every query and path a document
+//! normalizes text (lower case, but for the built-in `keyword` analyzer), and every query and path a document
 //! matches adds the operator's score, 1 without a `score` option. A field whose query analyzer is
-//! not `reflib.keyword` needs `allowAnalyzedField: true`.
+//! not the built-in `keyword` analyzer needs `allowAnalyzedField: true`.
 
 use teseladb_bson::{Document, Value};
 
@@ -25,7 +25,7 @@ pub(super) struct Pattern {
 }
 
 impl Pattern {
-    /// How `refsearch` names the query in `scoreDetails` (measured: `$type:string/t:gat*` and
+    /// How the reference search server names the query in `scoreDetails` (measured: `$type:string/t:gat*` and
     /// `$type:string/t:/ga.o/`), its field names after `prefix`.
     pub(super) fn description(&self, prefix: &str) -> String {
         let terms: Vec<String> = self

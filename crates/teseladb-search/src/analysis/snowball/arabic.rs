@@ -1,4 +1,4 @@
-//! The Arabic stemmer of `snowballStemming` (`arabic`), deduced from the stems `refsearch` 1.70.6
+//! The Arabic stemmer of `snowballStemming` (`arabic`), deduced from the stems the reference search server 1.70.6
 //! gives for the 73 415 words of the Arabic vocabulary of the tests (D-051) and for words built
 //! from neutral roots with every prefix and ending seen there. The word is normalised first
 //! (diacritics and tatweel go, Arabic-Indic digits become ASCII digits, presentation forms become

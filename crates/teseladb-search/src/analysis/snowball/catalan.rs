@@ -1,10 +1,10 @@
-//! The Catalan stemmer of `snowballStemming` (`catalan`), deduced from what `refsearch` 1.70.6 gives
-//! (D-051): the endings of each step were found by asking `refsearch` for each ending of the
+//! The Catalan stemmer of `snowballStemming` (`catalan`), deduced from what the reference search server 1.70.6 gives
+//! (D-051): the endings of each step were found by asking the reference search server for each ending of the
 //! vocabulary after stems that put it inside or outside R1 and R2, and checked on the 48 765
 //! words of the Catalan Snowball vocabulary. Four steps as in the other Romance stemmers of
 //! Snowball (attached pronouns, standard suffixes, verb suffixes when no standard suffix went,
 //! residual suffixes), then the accents go. The words of the fixture the steps do not stem as
-//! `refsearch` does are listed with their stems.
+//! the reference search server does are listed with their stems.
 
 use std::sync::OnceLock;
 

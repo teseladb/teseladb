@@ -1,9 +1,10 @@
-//! `wildcard` and `regex` as `refsearch` 1.70.6 runs them (measured 02-11-2026 on a 9.0.4 replica
+//! `wildcard` and `regex` as the reference search server 1.70.6 runs them (measured 02-11-2026 on a 9.0.4 replica
 //! set, `scratchpad/lane3i/w1.js`..`w3.js`): documents `{_id: 1, t: "gato perro"}`,
 //! `{_id: 2, t: "Gatos gatito"}`, `{_id: 3, t: "perro raton", k: "GaTo"}`,
 //! `{_id: 4, t: ["gato", "casa gata"]}` and `{_id: 5, t: "g?to g*to"}`, index
-//! `{mappings: {dynamic: true, fields: {k: {type: "string", analyzer: "reflib.keyword"}}}}`.
-//! Equal scores come in key order here (`refsearch` gives them in its own document order).
+//! `{mappings: {dynamic: true, fields: {k: {type: "string", analyzer: KEYWORD}}}}`.
+//! (`KEYWORD` stands for [`teseladb_names::ANALYZER_KEYWORD`].)
+//! Equal scores come in key order here (the reference search server gives them in its own document order).
 
 use teseladb_bson::{Document, Value};
 
@@ -134,7 +135,7 @@ fn regex_matches_whole_terms() {
 }
 
 #[test]
-fn pattern_errors_are_refsearch_s() {
+fn pattern_errors_are_the_reference_ones() {
     for name in ["wildcard", "regex"] {
         let err = |args: Document| found(&op(name, args)).unwrap_err();
         assert_eq!(err(q("g.*", "t", false)), ANALYZED);
@@ -172,7 +173,7 @@ fn pattern_errors_are_refsearch_s() {
 
 /// Measured on the keyword field `k` (`scratchpad/lane3i/w4.js`).
 #[test]
-fn regex_syntax_follows_refsearch() {
+fn regex_syntax_follows_the_reference() {
     let r = |query: &str| found(&op("regex", q(query, "k", false)));
     for ok in ["*a", "a}", "a>", "x", "()", "(|a)", "a||b", "g\\D+", "[\\d]"] {
         assert_eq!(r(ok), Ok(vec![]), "{ok}");

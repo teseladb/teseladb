@@ -1,5 +1,5 @@
 //! The definition of a `vectorSearch` index: its `fields`, vectors and filters (011 FR-005),
-//! with the errors measured on `refsearch` 1.70.6.
+//! with the errors measured on the reference search server 1.70.6.
 
 use teseladb_bson::{Document, Value};
 
@@ -9,7 +9,7 @@ use super::{
     unrecognized,
 };
 
-/// The field types of a `vectorSearch` index, in `refsearch`'s order.
+/// The field types of a `vectorSearch` index, in the reference search server's order.
 pub const VECTOR_FIELD_TYPES: [&str; 5] =
     ["autoEmbed", "embeddedDocuments", "filter", "text", "vector"];
 const QUANTIZATIONS: [&str; 3] = ["binary", "none", "scalar"];
@@ -33,12 +33,12 @@ pub enum VectorField {
         /// Path.
         path: String,
     },
-    /// A type `refsearch` accepts and this engine keeps as given (`autoEmbed`, `text`,
+    /// A type the reference search server accepts and this engine keeps as given (`autoEmbed`, `text`,
     /// `embeddedDocuments`).
     Other(Document),
 }
 
-/// The model a `text` field embeds with when it names none (measured on `refsearch` 1.70.6).
+/// The model a `text` field embeds with when it names none (measured on the reference search server 1.70.6).
 const DEFAULT_EMBEDDING_MODEL: &str = "voyage-3-large";
 
 /// The definition of a `vectorSearch` index.
@@ -86,7 +86,7 @@ impl VectorDefinition {
         Ok(VectorDefinition { fields })
     }
 
-    /// The definition as `refsearch` shows it.
+    /// The definition as the reference search server shows it.
     pub fn normalized(&self) -> Document {
         let all = self.fields.iter().map(|f| Value::Document(f.normalized())).collect();
         Document::new().with("fields", Value::Array(all))

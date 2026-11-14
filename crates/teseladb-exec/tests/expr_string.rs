@@ -1,4 +1,4 @@
-//! String expressions (010 T007, FR-005), each result with the value and type a `refrouter` 9.0.4
+//! String expressions (010 T007, FR-005), each result with the value and type a reference router 9.0.4
 //! gave on 31-10-2026 (`$project` with `$type` beside each expression).
 
 use teseladb_bson::{Document, Value, extjson};
@@ -47,7 +47,7 @@ fn s(text: &str) -> Option<Value> {
 }
 
 #[test]
-fn strings_read_as_refdb_does() {
+fn strings_read_as_the_reference_does() {
     let cases: &[(&str, Option<Value>)] = &[
         (r#"{"$concat":["a","b"]}"#, s("ab")),
         (r#"{"$concat":["a",null]}"#, Some(Value::Null)),
@@ -110,7 +110,7 @@ fn strings_read_as_refdb_does() {
 }
 
 #[test]
-fn strings_refuse_what_refdb_refuses() {
+fn strings_refuse_what_the_reference_refuses() {
     let cases: &[(&str, i32, &str)] = &[
         (r#"{"$concat":["a",1]}"#, 16702, "$concat only supports strings, not int"),
         (r#"{"$toLower":true}"#, 16007, "can't convert from BSON type bool to String"),

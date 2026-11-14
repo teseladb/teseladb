@@ -1,5 +1,5 @@
 //! `internalQueryMaxSingleExpressionMemoryUsageBytes` (010 T043, FR-010) when a pipeline's
-//! constants are folded, with the bytes a `refnode` 9.0.4 counts (measured on 02-11-2026 at 100
+//! constants are folded, with the bytes a reference server 9.0.4 counts (measured on 02-11-2026 at 100
 //! bytes; the same cases run through the protocol in `teseladb-wire/tests/expression_memory.rs`).
 
 use teseladb_bson::{Document, RawValue, extjson};
@@ -29,7 +29,7 @@ fn s(n: usize) -> String {
 }
 
 #[test]
-fn folded_constants_are_counted_as_refdb_counts_them() {
+fn folded_constants_are_counted_as_the_reference_counts_them() {
     let local = |what: &str, n: u64| {
         format!("{what} needs too much memory. Needs: {n} bytes. Local memory limit: 100 bytes.")
     };

@@ -4,7 +4,7 @@
 //! (decision D-049) compiles; matching follows `Matcher.find`, and replacements follow
 //! `Matcher.replaceAll` and `replaceFirst` with `$n`, `${name}` and `\` escapes.
 //!
-//! Choices the Javadoc does not settle, which T005 compares with `refsearch`: with
+//! Choices the Javadoc does not settle, which T005 compares with the reference search server: with
 //! `CASE_INSENSITIVE` only characters and ranges compare without case, not `\p{…}` nor the
 //! predefined classes; `\b` uses the word characters of `\w` (Java 19 and later); a back reference
 //! to a group that does not exist yet never matches, and one under `CASE_INSENSITIVE` uses the

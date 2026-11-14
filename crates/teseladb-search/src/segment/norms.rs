@@ -1,8 +1,8 @@
 //! Field lengths as norms: exact, and as the one-byte length that BM25 scores with (D-035,
 //! research R2).
 //!
-//! The rule comes from what `refsearch` reports as `dl` in `scoreDetails` for 434 field lengths from
-//! 1 to 1,000,000 (`tests/fixtures/refsearch/norms.txt`): a length up to [`EXACT`] is kept as it is;
+//! The rule comes from what the reference search server reports as `dl` in `scoreDetails` for 434 field lengths from
+//! 1 to 1,000,000 (recorded data, `norms.txt`): a length up to [`EXACT`] is kept as it is;
 //! above it, the length minus [`OFFSET`] keeps its four leading binary digits and the rest become
 //! zeros, so the length used for scoring never exceeds the real one (41 scores as 40, 1,000,000
 //! as 983,064).

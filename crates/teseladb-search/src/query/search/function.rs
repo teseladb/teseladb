@@ -1,5 +1,5 @@
 //! `score.function` (011 FR-003): an expression over the operator's score (`relevance`),
-//! constants and the numbers of the document, as `refsearch` 1.70.6 computes it (measured
+//! constants and the numbers of the document, as the reference search server 1.70.6 computes it (measured
 //! 02-11-2026, `scratchpad/lane3j/m2.js`): `log` is base 10, `log1p` is `log10(1 + x)`, `gauss`
 //! is `decay ^ (max(0, |x − origin| − offset)² / scale²)`, and a negative result scores 0.
 
@@ -8,7 +8,7 @@ use teseladb_bson::{Document, Value};
 use super::{SearchError, shape, value_at};
 use crate::definition::Definition;
 
-/// The kinds of expression, in the order `refsearch` names them.
+/// The kinds of expression, in the order the reference search server names them.
 const KINDS: [&str; 8] = ["add", "constant", "gauss", "log", "log1p", "multiply", "path", "score"];
 
 /// Default `decay` of `gauss`.
@@ -168,7 +168,7 @@ impl Expr {
         }
     }
 
-    /// How RefLib writes the expression (measured with `scoreDetails`, `m18.js` to `m20.js`).
+    /// How the reference search library writes the expression (measured with `scoreDetails`, `m18.js` to `m20.js`).
     pub(super) fn description(&self) -> String {
         let d = crate::index::java_double;
         let join = |args: &[Expr], op: &str| {

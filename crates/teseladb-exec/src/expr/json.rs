@@ -1,5 +1,5 @@
 //! Plain JSON for `$toString` of arrays and documents and for `$toArray` and `$toObject` of a
-//! string (measured on a `refrouter` 9.0.4). Reading is strict RFC 8259 JSON: keys that start with
+//! string (measured on a reference router 9.0.4). Reading is strict RFC 8259 JSON: keys that start with
 //! `$` stay plain fields, an integer is an `int`, a `long` when it does not fit or a double when
 //! neither fits, a number with a fraction or exponent is a double, and a repeated key keeps its
 //! first place with the last value. Writing gives numbers, booleans and `null` as they are,

@@ -1,5 +1,5 @@
 //! The extension point of server-side JavaScript in the executor (010 FR-019, T012): `$function`
-//! and the `$accumulator` of `$group` are read and checked here, as a `refrouter` 9.0.4 reads them
+//! and the `$accumulator` of `$group` are read and checked here, as a reference router 9.0.4 reads them
 //! (measured in `crates/teseladb-exec/tests/agg/js.out`), and each call of a function goes to the
 //! [`JsEngine`] of the scope, which 016 provides. Without one, a call fails.
 
@@ -41,7 +41,7 @@ const ACC_INIT_ARGS: ErrorCode = loc!(4544711);
 /// The code of a call without an engine.
 const NO_ENGINE: ErrorCode = ErrorCode { code: 1, name: "InternalError" };
 
-/// The only language RefDb runs.
+/// The only language the reference server runs.
 const JS: &str = "js";
 
 /// A `$function`.
@@ -153,7 +153,7 @@ pub struct Accumulator {
 }
 
 impl Accumulator {
-    /// Reads `$accumulator` (measured on a `refrouter` 9.0.4).
+    /// Reads `$accumulator` (measured on a reference router 9.0.4).
     pub(crate) fn parse(arg: RawValue<'_>, ctx: &Ctx) -> Result<Accumulator, MqlError> {
         let RawValue::Document(d) = arg else {
             return Err(error(
@@ -200,7 +200,7 @@ impl Accumulator {
         Accumulator::parse(arg, ctx)
     }
 
-    /// The state `init` gives with `initArgs`, which RefDb evaluates on an empty document
+    /// The state `init` gives with `initArgs`, which the reference server evaluates on an empty document
     /// (measured: `$$ROOT` is `{}`).
     pub(crate) fn start(&self, scope: &Scope) -> Result<Value, MqlError> {
         let args = match &self.init_args {

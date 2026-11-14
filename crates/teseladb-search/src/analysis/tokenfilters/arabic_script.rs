@@ -1,5 +1,5 @@
-//! The normalizers and stemmers of the Persian and Sorani analyzers, measured equal to `refsearch`
-//! 1.70.6 on the vocabulary of each language (`tests/fixtures/refsearch/analyzers/vocab/`) and, for
+//! The normalizers and stemmers of the Persian and Sorani analyzers, measured equal to the reference search server
+//! 1.70.6 on the vocabulary of each language (recorded data, `analyzers/vocab/`) and, for
 //! the Persian stemmer, on 30 330 words made of a stem and up to five endings.
 
 use super::light::ends;

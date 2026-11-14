@@ -28,7 +28,7 @@ pub(super) enum Sink<'p> {
 }
 
 impl<'p> Sink<'p> {
-    /// The stage at `i` of `p` taking batches, `sbe` when RefDb runs it with its slot-based
+    /// The stage at `i` of `p` taking batches, `sbe` when the reference server runs it with its slot-based
     /// engine; `None` when it is not a blocking stage that does. A `$sort` that sets the sort
     /// key of each document's metadata runs over the whole input.
     pub(super) fn of(p: &'p Pipeline, i: usize, env: &'p dyn Env, sbe: bool) -> Option<Sink<'p>> {
@@ -162,7 +162,7 @@ impl<'p> Sorting<'p> {
 }
 
 /// A `$sort` followed by a `$limit` of `k` taking batches: only the first `k` documents so far
-/// stay, and they are what the stage holds against its limit, as in RefDb's top-k sort. A
+/// stay, and they are what the stage holds against its limit, as in the reference server's top-k sort. A
 /// `k` past [`TOP_K_INSERTION`] keeps every document and sorts them at the end.
 pub(super) struct SortTop<'p> {
     spec: &'p SortSpec,

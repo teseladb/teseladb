@@ -1,4 +1,4 @@
-//! The queries synonyms make (011 T036), scored as RefLib scores them in `refsearch` 1.70.6
+//! The queries synonyms make (011 T036), scored as the reference search library scores them in the reference search server 1.70.6
 //! (measured 02-11-2026, `scratchpad/lane3l/m21.js`, `m22.js`): a phrase whose positions each
 //! hold one or more terms (`MultiPhraseQuery`, its weight the sum of the idf of every term listed,
 //! repeats included) and a `Synonym` query (the frequencies of its terms added, repeats counted
@@ -13,7 +13,7 @@ use crate::query::bm25::idf;
 impl TextField {
     /// The frequency of the phrase of `positions` in each document that has it. Without slop
     /// each occurrence of a term of the first position (repeats counted again) that the other
-    /// positions follow is one match, as RefLib's exact phrase matcher counts them.
+    /// positions follow is one match, as the reference search library's exact phrase matcher counts them.
     fn multi_phrase_freqs(&self, positions: &[Vec<String>], slop: u32) -> Vec<(u32, f32)> {
         let unions: Option<Vec<BTreeMap<u32, Vec<u32>>>> = positions
             .iter()
@@ -124,8 +124,8 @@ pub(crate) struct MultiPhrase {
     pub slop: u32,
 }
 
-/// The document frequencies of the terms a field holds: RefLib's multi-phrase weight leaves out
-/// the synonyms no document has (measured with `refsearch` 1.70.6: the phrase
+/// The document frequencies of the terms a field holds: the reference search library's multi-phrase weight leaves out
+/// the synonyms no document has (measured with the reference search server 1.70.6: the phrase
 /// `(sleepy slow lazy) (fox dog dog)` sums the idf of `lazy`, `fox`, `dog` and `dog`).
 fn present(dfs: Vec<u64>) -> Vec<u64> {
     dfs.into_iter().filter(|df| *df > 0).collect()
@@ -137,7 +137,7 @@ impl MultiPhrase {
         self.positions.iter().flatten().cloned().collect()
     }
 
-    /// How RefLib names it on the field `name`: `name:"(a b) c"`, `~slop` after.
+    /// How the reference search library names it on the field `name`: `name:"(a b) c"`, `~slop` after.
     pub(crate) fn description(&self, name: &str) -> String {
         let words: Vec<String> = self
             .positions
@@ -196,7 +196,7 @@ impl MemIndex {
         let g = self.global_of(key);
         let a = self.analyzer(&field.search_analyzer)?;
         let tokens = a.analyze(text).map_err(super::analysis)?;
-        // A phrase of one term is that term's query (RefLib's rewrite, measured).
+        // A phrase of one term is that term's query (the reference search library's rewrite, measured).
         if let [one] = tokens.as_slice() {
             let t = &one.text;
             let description = if weighted {
@@ -271,7 +271,7 @@ impl MemIndex {
         Some(field.explain_weight(&weight, doc, freq, g))
     }
 
-    /// The scores of RefLib's `TermAutomatonQuery` of `paths` on the field `key` (measured: the
+    /// The scores of the reference search library's `TermAutomatonQuery` of `paths` on the field `key` (measured: the
     /// sum of the idf of its distinct terms, its frequency the number of matches).
     pub(crate) fn automaton_scores(
         &self,
@@ -294,7 +294,7 @@ impl MemIndex {
         field.automaton_freqs(paths).into_iter().map(|(d, f)| (d, score(d, f))).collect()
     }
 
-    /// The scores of RefLib's `Synonym` query of `terms` on the field `key`, with weight
+    /// The scores of the reference search library's `Synonym` query of `terms` on the field `key`, with weight
     /// `boost`.
     pub(crate) fn synonym_query_scores(
         &self,

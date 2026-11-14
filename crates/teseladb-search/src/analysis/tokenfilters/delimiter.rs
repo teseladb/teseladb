@@ -1,5 +1,5 @@
-//! `wordDelimiterGraph`, from the attribute descriptions of the RefDb Search documentation and
-//! the behaviour measured on `refsearch` 1.70.6.
+//! `wordDelimiterGraph`, from the attribute descriptions of the reference search server documentation and
+//! the behaviour measured on the reference search server 1.70.6.
 //!
 //! A token is cut into parts: letters (categories `L*` and the marks `M*`) and digits (`N*`) are
 //! part characters and anything else is a delimiter. Inside a run of part characters a part ends

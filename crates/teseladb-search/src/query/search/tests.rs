@@ -1,4 +1,4 @@
-//! `$search` operators as `refsearch` 1.70.6 runs them on a 9.0.4 replica set (measured 01-11-2026
+//! `$search` operators as the reference search server 1.70.6 runs them on a 9.0.4 replica set (measured 01-11-2026
 //! on the corpus of `index::tests`, index `{mappings: {dynamic: true}}`).
 
 use teseladb_bson::{Document, Value};
@@ -50,7 +50,7 @@ fn sorted(mut v: Vec<(u8, f64)>) -> Vec<(u8, f64)> {
 }
 
 #[test]
-fn compound_adds_and_filters_as_refsearch() {
+fn compound_adds_and_filters_as_the_reference() {
     let must2 = compound(Document::new().with("must", list(vec![text("gato"), text("perro")])));
     assert_eq!(
         search(must2).unwrap(),
@@ -137,7 +137,7 @@ fn scores_can_be_constant_or_boosted_by_a_field() {
 }
 
 #[test]
-fn errors_are_refsearch_s() {
+fn errors_are_the_reference_ones() {
     let ops = OPERATORS.join(", ");
     let cases: Vec<(Document, String)> = vec![
         (
@@ -216,7 +216,7 @@ fn phrase(q: Value, slop: Option<i32>) -> Document {
 }
 
 #[test]
-fn phrases_score_as_refsearch() {
+fn phrases_score_as_the_reference() {
     assert_eq!(
         search(phrase("gato perro".into(), None)).unwrap(),
         [(1, 0.7410147190093994), (2, 0.6240124702453613)]
@@ -250,7 +250,7 @@ fn phrases_score_as_refsearch() {
 }
 
 #[test]
-fn exists_scores_one_as_refsearch() {
+fn exists_scores_one_as_the_reference() {
     let mut idx = index();
     let doc = Document::new()
         .with("_id", 3)
@@ -295,7 +295,7 @@ fn exists_scores_one_as_refsearch() {
 }
 
 #[test]
-fn search_meta_counts_as_refsearch() {
+fn search_meta_counts_as_the_reference() {
     let idx = index();
     let spec = |count: Option<Document>| {
         let mut d =
@@ -321,7 +321,7 @@ fn search_meta_counts_as_refsearch() {
     );
 }
 
-/// `returnStoredSource: true` needs `storedSource` in the definition (measured on `refsearch`), and
+/// `returnStoredSource: true` needs `storedSource` in the definition (measured on the reference search server), and
 /// a query without `highlight` has no highlights.
 #[test]
 fn stored_source_and_absent_highlights() {

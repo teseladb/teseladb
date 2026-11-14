@@ -1,4 +1,4 @@
-//! The queries `refsearch` 1.70.6 builds for `equals`, `in`, `range` and `near`, as `scoreDetails`
+//! The queries the reference search server 1.70.6 builds for `equals`, `in`, `range` and `near`, as `scoreDetails`
 //! writes them (measured 02-11-2026, `scratchpad/lane3l/m18.js` to `m20.js`). A number is asked
 //! as a 64-bit integer (when it has one) and as a double, each also on its `Multiple` field; a
 //! double is written as its sortable 64-bit encoding (`-bits(|x|)` below zero), a string token
@@ -10,12 +10,12 @@ use super::values::{Key, ValueOp, indexed, types_at};
 use crate::definition::FieldMapping;
 use crate::index::Explanation;
 
-/// The lowest double bound `refsearch` writes for an open range.
+/// The lowest double bound the reference search server writes for an open range.
 const OPEN_LOW: i64 = -9_218_868_437_227_405_311;
-/// The highest double bound `refsearch` writes for an open range (`Double.MAX_VALUE`).
+/// The highest double bound the reference search server writes for an open range (`Double.MAX_VALUE`).
 const OPEN_HIGH: i64 = 9_218_868_437_227_405_311;
 
-/// The 64-bit encoding `refsearch` gives a double.
+/// The 64-bit encoding the reference search server gives a double.
 pub(super) fn encoded(x: f64) -> i64 {
     let bits = |v: f64| v.to_bits() as i64;
     if x < 0.0 { -bits(-x) } else { bits(x) }
@@ -26,13 +26,13 @@ fn long(x: f64) -> i64 {
     x as i64
 }
 
-/// Bytes as RefLib's `BytesRef` writes them: `[61 62]`.
+/// Bytes as the reference search library's `BytesRef` writes them: `[61 62]`.
 fn hex(bytes: &[u8]) -> String {
     let all: Vec<String> = bytes.iter().map(|b| format!("{b:x}")).collect();
     format!("[{}]", all.join(" "))
 }
 
-/// A term's bytes as RefLib's `Term` writes them: the text when it is UTF-8, else in hex.
+/// A term's bytes as the reference search library's `Term` writes them: the text when it is UTF-8, else in hex.
 fn term_text(bytes: &[u8]) -> String {
     std::str::from_utf8(bytes).map_or_else(|_| hex(bytes), str::to_owned)
 }
@@ -361,7 +361,7 @@ fn number_distance(
     e
 }
 
-/// `near` on a date: RefLib's distance feature of 64-bit points.
+/// `near` on a date: the reference search library's distance feature of 64-bit points.
 fn date_distance(v: f64, o: f64, pivot: f64, boost: f32) -> Explanation {
     let value = (f64::from(boost) * (pivot / (pivot + (v - o).abs()))) as f32;
     Explanation::node(

@@ -1,4 +1,4 @@
-//! Scores of the `text` operator as `refsearch` 1.70.6 gives them on a 9.0.4 replica set
+//! Scores of the `text` operator as the reference search server 1.70.6 gives them on a 9.0.4 replica set
 //! (measured 01-11-2026 on the corpus below, index `{mappings: {dynamic: true}}`).
 
 use teseladb_bson::{Document, Value};
@@ -37,7 +37,7 @@ fn text(idx: &MemIndex, q: &str, paths: &[&str], boost: f32) -> Vec<(u8, f64)> {
 }
 
 #[test]
-fn single_terms_score_as_refsearch() {
+fn single_terms_score_as_the_reference() {
     let idx = index();
     assert_eq!(
         text(&idx, "gato", &["t"], 1.0),
@@ -68,7 +68,7 @@ fn single_terms_score_as_refsearch() {
 }
 
 #[test]
-fn terms_paths_and_boosts_add_up_as_refsearch() {
+fn terms_paths_and_boosts_add_up_as_the_reference() {
     let idx = index();
     assert_eq!(
         text(&idx, "gato perro", &["t"], 1.0),
@@ -147,7 +147,7 @@ fn mappings_decide_which_strings_are_indexed() {
     assert!(text(&idx, "gato", &["other"], 1.0).is_empty());
 }
 
-/// The grams of an `autocomplete` word (measured on `refsearch` 1.70.6, 02-11-2026: the five
+/// The grams of an `autocomplete` word (measured on the reference search server 1.70.6, 02-11-2026: the five
 /// documents of `search-op-autocomplete` sum 296 grams, `avgdl` 59.2): a word shorter than
 /// `minGrams` is kept whole, one longer than `maxGrams` gives its first `maxGrams` characters
 /// once more.

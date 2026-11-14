@@ -1,7 +1,7 @@
-//! The filters of the CJK analyzer (`reflib.cjk`, `reflib.chinese`, `reflib.japanese` and
-//! `reflib.korean` in `refsearch` 1.70.6): full-width ASCII and half-width Katakana to their usual
+//! The filters of the CJK analyzer (the built-in `cjk`, `chinese`, `japanese` and
+//! `korean` analyzers of the reference search server 1.70.6): full-width ASCII and half-width Katakana to their usual
 //! widths, and bigrams of the Han, Hiragana, Katakana and Hangul characters of adjacent tokens.
-//! Measured equal to `refsearch` on 48 000 sentences of Chinese, Japanese and Korean.
+//! Measured equal to the reference search server on 48 000 sentences of Chinese, Japanese and Korean.
 
 use crate::analysis::normalize::{Form, normalize};
 use crate::analysis::tokenizers::Token;

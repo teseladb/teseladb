@@ -1,5 +1,5 @@
-//! The dictionary tokenizers of `reflib.kuromoji` (Japanese, IPADIC 2.7.0-20070801) and
-//! `reflib.nori` (Korean, mecab-ko-dic 2.1.1-20180720), as `refsearch` 1.70.6 runs them (011 T009,
+//! The dictionary tokenizers of the built-in `kuromoji` analyzer (Japanese, IPADIC 2.7.0-20070801) and
+//! the built-in `nori` analyzer (Korean, mecab-ko-dic 2.1.1-20180720), as the reference search server 1.70.6 runs them (011 T009,
 //! D-109). Both find the cheapest path through a lattice of dictionary words: each word has a
 //! cost, and each pair of neighbouring words the connection cost of the right context id of the
 //! first and the left context id of the second. A character no dictionary word starts at, or
@@ -13,8 +13,8 @@
 //! their morphemes. Both drop punctuation and work on UTF-16 code units, as Java does.
 //!
 //! The dictionaries are `data/kuromoji.bin` and `data/nori.bin`, written by
-//! `scripts/gen-morph-dicts.py`, whose header describes the layout. Measured equal to `refsearch`
-//! on 12 000 sentences of each language (`tests/fixtures/refsearch/analyzers/sentences/`).
+//! `scripts/gen-morph-dicts.py`, whose header describes the layout. Measured equal to the reference search server
+//! on 12 000 sentences of each language (recorded data, `analyzers/sentences/`).
 
 use std::sync::OnceLock;
 
@@ -364,7 +364,7 @@ impl<'a> Lattice<'a> {
         }
     }
 
-    /// Marks position `p` as reached, as RefLib's position array does on each access.
+    /// Marks position `p` as reached, as the reference search library's position array does on each access.
     fn touch(&mut self, p: usize) {
         self.next = self.next.max(p + 1);
     }
@@ -757,7 +757,7 @@ pub struct MorphToken {
     pub end: usize,
 }
 
-/// The tags `reflib.kuromoji` drops, measured on `refsearch` (particles, auxiliary verbs,
+/// The tags the built-in `kuromoji` analyzer drops, measured on the reference search server (particles, auxiliary verbs,
 /// conjunctions, fillers, interjection-like others and symbols).
 pub const JAPANESE_STOP_TAGS: &[&str] = &[
     "その他-間投",
@@ -784,7 +784,7 @@ pub const JAPANESE_STOP_TAGS: &[&str] = &[
     "記号-読点",
 ];
 
-/// The tags `reflib.nori` drops, measured on `refsearch`.
+/// The tags the built-in `nori` analyzer drops, measured on the reference search server.
 pub const KOREAN_STOP_TAGS: &[&str] = &[
     "E", "IC", "J", "MAG", "MAJ", "MM", "NA", "SC", "SE", "SP", "SSC", "SSO", "UNA", "VSV", "XPN",
     "XSA", "XSN", "XSV",

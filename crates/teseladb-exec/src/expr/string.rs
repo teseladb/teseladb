@@ -1,4 +1,4 @@
-//! String expressions (measured on a `refrouter` 9.0.4): `$concat`, `$toLower`, `$toUpper`,
+//! String expressions (measured on a reference router 9.0.4): `$concat`, `$toLower`, `$toUpper`,
 //! `$strLenBytes`, `$strLenCP`, `$substrBytes` (`$substr`), `$substrCP`, `$indexOfBytes`,
 //! `$indexOfCP`, `$split` and `$strcasecmp` (`$toString` is a conversion, in `convert`). Most of them take `null` or a missing
 //! value as `null` or the empty string, as noted on each; `$toLower`, `$toUpper`, `$substr*` and
@@ -41,9 +41,9 @@ const NAMES: [(&str, Str); 12] = [
     ("$strcasecmp", Str::CaseCmp),
 ];
 
-/// A double as RefDb writes it as text: the shortest digits that read back the same, with an
+/// A double as the reference server writes it as text: the shortest digits that read back the same, with an
 /// exponent of at least two digits when the decimal exponent is below −4 or from 16 up (`1.5`,
-/// `2`, `1e+16`, `1e-07`, `1.2345678901234568e+17`), as measured on a `refrouter` 9.0.4.
+/// `2`, `1e+16`, `1e-07`, `1.2345678901234568e+17`), as measured on a reference router 9.0.4.
 pub fn double_text(x: f64) -> String {
     if x.is_nan() {
         return "NaN".to_owned();
@@ -61,7 +61,7 @@ pub fn double_text(x: f64) -> String {
     format!("{x}")
 }
 
-/// A date as RefDb writes it: ISO 8601 in UTC with milliseconds.
+/// A date as the reference server writes it: ISO 8601 in UTC with milliseconds.
 pub fn date_text(ms: i64) -> String {
     let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm, public domain).

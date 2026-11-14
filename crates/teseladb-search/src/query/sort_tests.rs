@@ -1,6 +1,6 @@
-//! `sort`, `searchAfter` and `searchBefore` as `refsearch` 1.70.6 runs them (measured 02-11-2026,
-//! `scratchpad/lane3k/m14.js`, whose documents and index these are). `refsearch` breaks ties with
-//! RefLib's document numbers; here keys break them, so the expected orders put tied documents in
+//! `sort`, `searchAfter` and `searchBefore` as the reference search server 1.70.6 runs them (measured 02-11-2026,
+//! `scratchpad/lane3k/m14.js`, whose documents and index these are). The reference search server breaks ties with
+//! the reference search library's document numbers; here keys break them, so the expected orders put tied documents in
 //! key order.
 
 use teseladb_bson::{Document, Value};
@@ -144,7 +144,7 @@ fn sort_orders_by_indexed_values_then_keys() {
 }
 
 #[test]
-fn sort_errors_match_refsearch() {
+fn sort_errors_match_the_reference() {
     let ix = m14();
     let err = |s: Value| ids(&ix, Document::new().with("sort", s)).unwrap_err();
     assert_eq!(err(Document::new().with("n", 0).into()), "\"sort\" sort order must be 1 or -1");
@@ -187,7 +187,7 @@ fn tokens_page_after_and_before() {
     let plain = Document::new;
     assert_eq!(page(plain().with("searchAfter", token(&ix, plain(), 4))), Ok(vec![2, 1, 3]));
     // `searchBefore` reads the results with the sort reversed and ties still in key order, as
-    // RefLib does with its document numbers: before 1 comes 3, its tie.
+    // the reference search library does with its document numbers: before 1 comes 3, its tie.
     assert_eq!(page(plain().with("searchBefore", token(&ix, plain(), 3))), Ok(vec![2, 4, 5]));
     assert_eq!(page(plain().with("searchBefore", token(&ix, plain(), 1))), Ok(vec![3, 2, 4, 5]));
     let n = || by("n", 1);

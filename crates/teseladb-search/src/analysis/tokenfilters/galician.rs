@@ -1,12 +1,12 @@
-//! The stemmer of the Galician analyzer (`reflib.galician`), deduced from what `refsearch` 1.70.6
+//! The stemmer of the Galician analyzer (the built-in `galician` analyzer), deduced from what the reference search server 1.70.6
 //! gives (D-051). It has the steps of the RSLP stemmers (V. Orengo and C. Huyck, «A Stemming
 //! Algorithm for the Portuguese Language», SPIRE 2001): plural, unification, adverb, augmentative
 //! (again while it removes something), noun, verb (when the noun step removed nothing) and
 //! vowel, then the acute accents go. In each step the longest suffix whose stem keeps at least the
 //! rule's letters is replaced; one whose stem is too short lets a shorter suffix be tried. The
-//! suffixes, their minimum stems and their replacements were found by asking `refsearch` for each
+//! suffixes, their minimum stems and their replacements were found by asking the reference search server for each
 //! ending of the vocabulary after stems of one to nine letters; the words of the fixture the steps
-//! do not stem as `refsearch` does are listed with their stems.
+//! do not stem as the reference search server does are listed with their stems.
 
 /// A suffix, the letters its stem must keep and what replaces it.
 type Rule = (&'static str, usize, &'static str);

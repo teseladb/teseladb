@@ -1,4 +1,4 @@
-//! `$vectorSearch` queries as `refsearch` 1.70.6 reads them on a 9.0.4 replica set (measured
+//! `$vectorSearch` queries as the reference search server 1.70.6 reads them on a 9.0.4 replica set (measured
 //! 01-11-2026, index `ve`: `v` vector of 3 dimensions with `euclidean`, filters `g` and `n`).
 
 use teseladb_bson::{Document, Value};
@@ -80,7 +80,7 @@ fn reads_a_valid_query() {
 }
 
 #[test]
-fn checks_fields_in_refsearch_order() {
+fn checks_fields_in_the_reference_order() {
     assert_eq!(err(spec(|d| drop(d.remove("index")))), "\"index\" is required");
     assert_eq!(err(spec(|d| set(d, "index", 5))), "\"index\" must be a string");
     assert_eq!(err(spec(|d| drop(d.remove("path")))), "\"path\" is required");
@@ -108,7 +108,7 @@ fn checks_fields_in_refsearch_order() {
     assert_eq!(err(spec(|d| set(d, "numCandidates", "5"))), "\"numCandidates\" must be a integer");
     assert_eq!(err(spec(|d| drop(d.remove("limit")))), "\"limit\" is required");
     assert_eq!(err(spec(|d| set(d, "limit", 2.5))), "\"limit\" must be an integer");
-    // Beyond 32 bits (`m88.js` of lane 3, `refsearch` 1.70.6).
+    // Beyond 32 bits (`m88.js` of lane 3, the reference search server 1.70.6).
     let over = "\"numCandidates\" overflowed, must fit in a 32 bit integer";
     let under = "\"numCandidates\" underflowed, must fit in a 32 bit integer";
     for (n, want) in [
@@ -161,7 +161,7 @@ fn checks_fields_in_refsearch_order() {
 }
 
 #[test]
-fn names_bson_types_as_refsearch() {
+fn names_bson_types_as_the_reference() {
     let cases: [(Value, &str); 8] = [
         (Value::Document(Document::new()), "DOCUMENT"),
         (Value::Array(vec![]), "ARRAY"),
@@ -233,7 +233,7 @@ fn checks_the_filter_shape() {
 }
 
 #[test]
-fn accepts_refsearch_filters() {
+fn accepts_the_reference_filters() {
     let uuid = Value::Binary { subtype: 4, bytes: vec![0; 16] };
     let fine = [
         op("n", "$gt", true),

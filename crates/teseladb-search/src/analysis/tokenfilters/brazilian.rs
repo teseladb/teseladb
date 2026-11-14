@@ -1,5 +1,5 @@
-//! The stemmer of the Brazilian Portuguese analyzer (`reflib.brazilian`), deduced from what
-//! `refsearch` 1.70.6 gives (D-051): the tables below were found by asking `refsearch` for each ending
+//! The stemmer of the Brazilian Portuguese analyzer (the built-in `brazilian` analyzer), deduced from what
+//! the reference search server 1.70.6 gives (D-051): the tables below were found by asking the reference search server for each ending
 //! of the vocabulary after stems that put it inside or outside each region, and the steps and
 //! regions were checked on the 40 000 words of the fixture and on 400 000 synthetic words.
 //!

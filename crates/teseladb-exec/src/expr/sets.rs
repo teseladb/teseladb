@@ -1,4 +1,4 @@
-//! Set expressions (measured on a `refrouter` 9.0.4): arrays as sets of distinct values in RefDb's
+//! Set expressions (measured on a reference router 9.0.4): arrays as sets of distinct values in the reference server's
 //! order, where `1`, `NumberLong(1)` and `1.0` are one value. `$setUnion` and
 //! `$setIntersection` give their result in that order, `$setDifference` keeps the order of its
 //! first array; the three give `null` for a `null` or missing operand, and `$setEquals` and
@@ -56,7 +56,7 @@ fn nullish(v: &Eval) -> bool {
     matches!(v, None | Some(Value::Null | Value::Undefined))
 }
 
-/// Whether `x` is in `sorted`, a list in RefDb's order (strings in collation `col`).
+/// Whether `x` is in `sorted`, a list in the reference server's order (strings in collation `col`).
 fn member(
     sorted: &[RawValue<'_>],
     x: RawValue<'_>,
@@ -65,7 +65,7 @@ fn member(
     sorted.binary_search_by(|y| compare(*y, x, col)).is_ok()
 }
 
-/// The distinct values of `items`, in RefDb's order (the first of each equal run).
+/// The distinct values of `items`, in the reference server's order (the first of each equal run).
 fn distinct(
     items: Vec<Value>,
     col: Option<&dyn teseladb_bson::Collator>,
@@ -178,7 +178,7 @@ impl SetOp {
     }
 }
 
-/// The values in every list, as RefDb keeps them: each later list's distinct values meet
+/// The values in every list, as the reference server keeps them: each later list's distinct values meet
 /// the values kept so far by walking the smaller of the two (the kept ones on a tie), so of
 /// equal values (in collation `col`) the smaller set's are shown.
 fn intersection(

@@ -1,4 +1,4 @@
-//! `geoWithin`, `geoShape` and `near` on `geo` fields as `refsearch` 1.70.6 runs them (measured
+//! `geoWithin`, `geoShape` and `near` on `geo` fields as the reference search server 1.70.6 runs them (measured
 //! 02-11-2026, `scratchpad/lane3j/m7.js`, whose documents and indexes are these).
 
 use teseladb_bson::{Document, Value};
@@ -207,7 +207,7 @@ fn near_a_point_scores_by_meters() {
 }
 
 #[test]
-fn geo_errors_are_refsearch_messages() {
+fn geo_errors_are_the_reference_messages() {
     let idx = index(true);
     let err = |spec: Document| found(&idx, &spec).unwrap_err();
     let b = || {

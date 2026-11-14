@@ -1,12 +1,12 @@
-//! The tokenizer of `reflib.smartcn` (011 T009, D-109). RefLib's smartcn cuts Chinese with a
-//! dictionary and a bigram model that exist only inside RefLib; TeselaDB cuts each run of Han
+//! The tokenizer of the built-in `smartcn` analyzer (011 T009, D-109). The reference search library's smartcn cuts Chinese with a
+//! dictionary and a bigram model that exist only inside the reference search library; TeselaDB cuts each run of Han
 //! characters with the ICU 74.2 Chinese and Japanese dictionary instead (`data/smartcn-words.txt`,
 //! written by `scripts/gen-smartcn-dict.py`): the path of least total cost, where a dictionary word
 //! costs its ICU cost and a character outside the dictionary costs 255. Words with characters of
 //! traditional Chinese are left out of the dictionary, since smartcn only knows simplified words.
 //! Runs of other letters and of digits are words of their own, and everything else is dropped.
-//! The tokens differ from `refsearch`'s in part of the sentences; the measured agreement is recorded
-//! as a divergence for 011 (`tests/sentences_refsearch.rs`).
+//! The tokens differ from the reference search server's in part of the sentences; the measured agreement is recorded
+//! as a divergence for 011 (the recorded sentence comparison).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

@@ -3,19 +3,19 @@
 //! `englishMinimalStemming` is the S stemmer of Harman ("How effective is suffixing?", JASIS 42(1),
 //! 1991): the first of `ies`, `es` and `s` the word ends in decides, `ies` becomes `y` unless `eies`
 //! or `aies` (or the whole word) precede it, `es` loses its `s` unless `aes`, `ees` or `oes`, and `s`
-//! goes unless `us` or `ss`. Words under three letters stay. Measured equal to `refsearch` 1.70.6 on
+//! goes unless `us` or `ss`. Words under three letters stay. Measured equal to the reference search server 1.70.6 on
 //! the 42 649 words of the English Snowball vocabulary.
 //!
-//! `spanishPluralStemming` was deduced from the stems `refsearch` 1.70.6 gives for the 28 378 words of
-//! the Spanish Snowball vocabulary (`tests/fixtures/refsearch/stem/spanishPluralStemming.txt`):
+//! `spanishPluralStemming` was deduced from the stems the reference search server 1.70.6 gives for the 28 378 words of
+//! the Spanish Snowball vocabulary (recorded data, `stem/spanishPluralStemming.txt`):
 //! words under four characters stay as they are; longer words lose the acute accent and the
 //! diaeresis of their vowels and then a plural ending, by the rules of [`spanish_plural`]. The
 //! words that keep their `s` are the ones observed (`INVARIANT`). The rules for `-ies`, `-us` and
-//! `-umes` were then checked on 238 words asked one by one (`tests/fixtures/refsearch/filters/
+//! `-umes` were then checked on 238 words asked one by one (recorded data, `filters/
 //! spanishPluralStemming.txt`, 02-11-2026): the `-us` words that keep their `s` are a list, not an
 //! ending, and so are `albumes` and `sies`.
 //!
-//! `kStemming` and `stempel` are tables of word endings learned from the stems `refsearch` gives
+//! `kStemming` and `stempel` are tables of word endings learned from the stems the reference search server gives
 //! (D-051), with the words of their fixtures that the endings alone get wrong; how each table was
 //! measured is at its function.
 
@@ -165,7 +165,7 @@ pub(super) fn spanish_plural(word: &str) -> String {
     }
 }
 
-/// A stemmer learned from the stems `refsearch` gives (D-051): word endings with the rewrite each
+/// A stemmer learned from the stems the reference search server gives (D-051): word endings with the rewrite each
 /// one calls for, and whole words (written `^word`) whose rewrite the endings do not give. A word
 /// takes the rewrite of its whole-word entry or else of the longest ending it has; without either
 /// it stays as it is.
@@ -196,15 +196,19 @@ impl Rewrites {
 
 /// The stem `kStemming` gives `word`: the table learned from the 42 649 words of the English
 /// Snowball vocabulary and 200 000 words made by joining the start of one of them to the end of
-/// another, all stemmed by `refsearch` 1.70.6 (`data/kStemming.tsv`).
+/// another, all stemmed by the reference search server 1.70.6 (`data/kStemming.tsv`).
 pub fn k_stemming(word: &str) -> String {
     static TABLE: OnceLock<Rewrites> = OnceLock::new();
-    TABLE.get_or_init(|| Rewrites::parse(include_str!("data/kStemming.tsv"))).stem(word)
+    TABLE
+        .get_or_init(|| {
+            Rewrites::parse(teseladb_names::expand_static(include_str!("data/kStemming.tsv")))
+        })
+        .stem(word)
 }
 
 /// The stem `stempel` gives `word`: the table learned from the 62 576 Polish words of the fixture,
 /// the 12 003 other words of the Polish analyzer vocabulary and 300 000 words made by joining the
-/// start of one of them to the end of another, all stemmed by `refsearch` 1.70.6
+/// start of one of them to the end of another, all stemmed by the reference search server 1.70.6
 /// (`data/stempel.tsv`).
 pub fn stempel(word: &str) -> String {
     static TABLE: OnceLock<Rewrites> = OnceLock::new();

@@ -1,5 +1,5 @@
-//! The explanation of a term's BM25 score, as `refsearch` 1.70.6 gives it with `scoreDetails`
-//! (RefLib's `Explanation` of `BM25Similarity`, measured 02-11-2026,
+//! The explanation of a term's BM25 score, as the reference search server 1.70.6 gives it with `scoreDetails`
+//! (the reference search library's `Explanation` of `BM25Similarity`, measured 02-11-2026,
 //! `scratchpad/lane3k/m15.js`).
 
 use std::collections::BTreeMap;
@@ -112,7 +112,7 @@ impl TextField {
         let Bm25 { k1, b } = Bm25::DEFAULT;
         let (k1, b) = (k1 as f32, b as f32);
         let score = self.scorer(weight.boost, idf_part.value, &[], g)(doc, freq);
-        // As RefLib's scorer: one minus one over one plus the frequency times the inverse norm.
+        // As the reference search library's scorer: one minus one over one plus the frequency times the inverse norm.
         let inverse = 1.0 / (k1 * ((1.0 - b) + b * dl / avg));
         let tf = 1.0 - 1.0 / (1.0 + freq * inverse);
         let freq_text = java_float(freq);
@@ -252,7 +252,7 @@ impl MemIndex {
     }
 }
 
-/// `boolean`: the boost of the query (measured on `refsearch` 1.70.6 with `scoreDetails`).
+/// `boolean`: the boost of the query (measured on the reference search server 1.70.6 with `scoreDetails`).
 fn explain_boolean(weight: &Weight<'_>) -> Explanation {
     let boost = Explanation::leaf(weight.boost, "boost, query boost");
     let computed =
@@ -265,7 +265,7 @@ fn explain_boolean(weight: &Weight<'_>) -> Explanation {
     )
 }
 
-/// The similarity a weight's explanation names: RefLib's wrapper for a phrase or span.
+/// The similarity a weight's explanation names: the reference search library's wrapper for a phrase or span.
 fn similarity_name(weight: &Weight<'_>, own: &'static str) -> &'static str {
     match weight.kind {
         FreqKind::Phrase => "SimilarityWrapper",
@@ -275,7 +275,7 @@ fn similarity_name(weight: &Weight<'_>, own: &'static str) -> &'static str {
 
 impl TextField {
     /// `stableTfl`: boost, saturation and the rarity of each term from its length and the
-    /// document's (measured on `refsearch` 1.70.6 with `scoreDetails`).
+    /// document's (measured on the reference search server 1.70.6 with `scoreDetails`).
     fn explain_stable(&self, weight: &Weight<'_>, doc: u32, freq: f32) -> Explanation {
         let names: Vec<&str> = weight.terms.iter().map(String::as_str).collect();
         let score = self.scorer(weight.boost, 0.0, &names, None)(doc, freq);

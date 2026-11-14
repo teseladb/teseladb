@@ -1,4 +1,4 @@
-# Code points of the BMP that a RefDb 9.0.4 text index drops from a token (textIndexVersion 3),
+# Code points of the BMP that a text index of the reference server 9.0.4 drops from a token (textIndexVersion 3),
 # measured 02-11-2026 with scratchpad/lane3m/m35.js: the document "zq<c>xv" matches "zqxv".
 00A8
 00AF

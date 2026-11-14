@@ -1,6 +1,6 @@
 //! Daitch-Mokotoff Soundex, from the rules and coding chart JewishGen publishes
 //! (<https://www.jewishgen.org/InfoFiles/soundex.html>, read on 30-10-2026), with the points the
-//! chart leaves open measured on `refsearch` 1.70.6.
+//! chart leaves open measured on the reference search server 1.70.6.
 //!
 //! The letters of a token are read left to right, taking at each step the longest chart entry
 //! that matches. An entry has a code for the start of the token (its first entry, after any

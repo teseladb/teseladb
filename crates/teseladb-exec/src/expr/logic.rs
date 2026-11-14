@@ -1,5 +1,5 @@
-//! Comparison, boolean and conditional expressions (measured on a `refrouter` 9.0.4): values compare
-//! in RefDb's order with a missing value below everything (`{$lt: ["$missing", null]}` is
+//! Comparison, boolean and conditional expressions (measured on a reference router 9.0.4): values compare
+//! in the reference server's order with a missing value below everything (`{$lt: ["$missing", null]}` is
 //! true, `$eq` false); `false`, `null`, a missing value, `undefined` and any zero are false, and
 //! everything else, `[]` and `""` too, is true.
 
@@ -41,7 +41,7 @@ const NAMES: [(&str, Logic); 11] = [
     ("$ifNull", Logic::IfNull),
 ];
 
-/// RefDb's order of two results, a missing one below everything, strings in collation
+/// The reference server's order of two results, a missing one below everything, strings in collation
 /// `col` (the binary order without one).
 pub fn order(
     a: &Eval,
@@ -78,7 +78,7 @@ pub fn try_sort_by<T>(
     failure.map_or(Ok(()), Err)
 }
 
-/// Sorts pairs stably by their values in RefDb's [`order`], strings in collation `col`.
+/// Sorts pairs stably by their values in the reference server's [`order`], strings in collation `col`.
 pub(crate) fn sort_by_values<T>(
     items: &mut [(Value, T)],
     col: Option<&dyn teseladb_bson::Collator>,

@@ -1,4 +1,4 @@
-//! Array expressions with positional arguments (measured on a `refrouter` 9.0.4): `$arrayElemAt`,
+//! Array expressions with positional arguments (measured on a reference router 9.0.4): `$arrayElemAt`,
 //! `$first`, `$last`, `$concatArrays`, `$in`, `$indexOfArray`, `$isArray`, `$size`,
 //! `$reverseArray`, `$slice`, `$range`, `$objectToArray` and `$arrayToObject`. Most of them give
 //! `null` for a `null` or missing array; `$size`, `$in` and `$isArray` do not.
@@ -89,7 +89,7 @@ const TO_OBJECT_PAIR_SIZE: ErrorCode = code!(40397);
 const TO_OBJECT_FORMAT: ErrorCode = code!(40398);
 const TO_OBJECT_NULL_BYTE: ErrorCode = code!(4940400);
 
-/// The type of a result as RefDb names it in a message, `missing` for nothing.
+/// The type of a result as the reference server names it in a message, `missing` for nothing.
 pub(super) fn eval_type(v: &Eval) -> &'static str {
     v.as_ref().map_or("missing", type_name_of)
 }
@@ -154,7 +154,7 @@ impl ArrayOp {
     }
 }
 
-/// A length or position as RefDb returns it: an `int`.
+/// A length or position as the reference server returns it: an `int`.
 fn size(n: usize) -> Value {
     Value::Int32(i32::try_from(n).unwrap_or(i32::MAX))
 }
@@ -351,9 +351,9 @@ fn slice(vals: &[Eval]) -> Result<Eval, MqlError> {
     Ok(Some(Value::Array(items.iter().skip(start).take(n).cloned().collect())))
 }
 
-/// The bytes `$range` may build (RefDb's limit, measured).
+/// The bytes `$range` may build (the reference server's limit, measured).
 const RANGE_MEMORY_LIMIT: u64 = 104_857_600;
-/// What RefDb counts per element of a `$range` and for the array itself.
+/// What the reference server counts per element of a `$range` and for the array itself.
 const RANGE_BYTES_PER_ITEM: u64 = 16;
 const RANGE_BYTES_BASE: u64 = 40;
 
@@ -392,8 +392,8 @@ fn range(vals: &[Eval]) -> Result<Eval, MqlError> {
     if step == 0 {
         return Err(error(RANGE_STEP_ZERO, "$range requires a non-zero step value"));
     }
-    // The array is refused before it is built when it would pass the limit, counted as RefDb
-    // counts it (measured on a `refrouter` 9.0.4: 16 bytes per step of `(end - start) / step` and
+    // The array is refused before it is built when it would pass the limit, counted as the reference server
+    // counts it (measured on a reference router 9.0.4: 16 bytes per step of `(end - start) / step` and
     // 40 more; `[0, 6553597]` fits and `[0, 6553598]` needs 104857608 bytes).
     let steps = u64::try_from((end - start) / step).unwrap_or(0);
     let needed = steps * RANGE_BYTES_PER_ITEM + RANGE_BYTES_BASE;

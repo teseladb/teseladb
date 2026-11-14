@@ -1,5 +1,5 @@
 //! The memory a blocking stage may hold without `allowDiskUse` (010 FR-010, T024): 100 MiB, as a
-//! `refrouter` 9.0.4 measured with 110 documents of 1 MiB (292 and its messages); with
+//! reference router 9.0.4 measured with 110 documents of 1 MiB (292 and its messages); with
 //! `allowDiskUse` the stages run.
 
 use teseladb_bson::{Document, RawValue, extjson};

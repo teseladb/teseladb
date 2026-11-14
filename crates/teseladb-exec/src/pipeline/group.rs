@@ -1,4 +1,4 @@
-//! The stages that group documents (measured on a `refrouter` 9.0.4): `$group`, `$bucket`,
+//! The stages that group documents (measured on a reference router 9.0.4): `$group`, `$bucket`,
 //! `$bucketAuto` and `$sortByCount`. Groups are keyed by values that compare equal (`1` and
 //! `1.0` are one group, a missing `_id` is `null`) and come out in the order their first document
 //! came; a `$group` that wrote to disk gives them in the order of their keys.
@@ -28,7 +28,7 @@ pub(super) use partial::wire_limits;
 pub use bucket::{Bucket, BucketAuto};
 pub(super) use bucket::{BucketAutoRun, Bucketing};
 
-/// The scope of an expression of a group over `doc`, `sbe` when RefDb evaluates it with its
+/// The scope of an expression of a group over `doc`, `sbe` when the reference server evaluates it with its
 /// slot-based engine.
 fn group_scope(env: &dyn Env, doc: &Document, sbe: bool) -> Scope {
     let mut s = env.scope(doc);
@@ -470,7 +470,7 @@ impl Grouping<'_> {
 /// The 292 of a group over `limit` bytes (the stage's limit or the operation's, the lower)
 /// when the command does not allow writing to disk: the classic engine counts the groups'
 /// keys and values, the slot-based one the arrays of `$push` and `$addToSet` (measured on a
-/// `refrouter` 9.0.4).
+/// reference router 9.0.4).
 fn check_memory(
     outputs: &Outputs,
     out: &[Document],

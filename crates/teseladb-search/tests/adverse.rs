@@ -1,4 +1,4 @@
-//! Adverse cases of 011 T046, measured on `refsearch` 1.70.6 with `refnode` 9.0.4 on 02-11-2026
+//! Adverse cases of 011 T046, measured on the reference search server 1.70.6 with the reference server 9.0.4 on 02-11-2026
 //! (`scratchpad/lane3p/m51.js` to `m53.js`): enormous texts and values, queries that expand into
 //! many terms and option values out of bounds.
 
@@ -7,7 +7,7 @@ use teseladb_search::definition::Definition;
 use teseladb_search::indexer::Indexer;
 use teseladb_search::query::search::SearchError;
 
-/// Value lengths of the measured documents, around the limits of `refsearch`.
+/// Value lengths of the measured documents, around the limits of the reference search server.
 const LENGTHS: [usize; 11] = [100, 255, 256, 1000, 8191, 8192, 8193, 16383, 16384, 32765, 32766];
 
 fn index(definition: &str, docs: Vec<Document>) -> Indexer {
@@ -116,7 +116,7 @@ fn keyword_terms_over_32766_bytes_are_not_indexed() {
 }
 
 #[test]
-fn enormous_texts_and_expanding_queries_score_as_refsearch() {
+fn enormous_texts_and_expanding_queries_score_as_the_reference() {
     let words: Vec<String> = (0..3000_u32).map(|i| format!("w{}x", radix36(i))).collect();
     let big = format!("{} b{}", "a".repeat(300), "c".repeat(40000));
     let docs = vec![
@@ -196,7 +196,7 @@ fn outcome(ix: &Indexer, query: &str) -> String {
 }
 
 #[test]
-fn clauses_are_counted_after_rewriting_as_refsearch() {
+fn clauses_are_counted_after_rewriting_as_the_reference() {
     let w: Vec<String> = (0..3000_u32).map(|i| format!("w{}x", radix36(i))).collect();
     let z: Vec<String> = (0..3000_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();
     let ix = clause_index(&w);
@@ -385,10 +385,10 @@ fn an_emptied_index_finds_nothing() {
     assert!(ix.search(&q(r#"{"text": {"query": "a", "path": "t"}}"#)).expect("search").is_empty());
 }
 
-/// `autocomplete` with a boost, several queries, `sequential` and `fuzzy`, as `refsearch` 1.70.6
+/// `autocomplete` with a boost, several queries, `sequential` and `fuzzy`, as the reference search server 1.70.6
 /// answers them (`scratchpad/lane3q/m79.js`, 02-11-2026).
 #[test]
-fn autocomplete_options_score_as_refsearch() {
+fn autocomplete_options_score_as_the_reference() {
     let docs = [(1, "abcd efgh", "abcd efgh"), (2, "efgh abcd", "efgh abcd"), (3, "xyz", "abd")]
         .into_iter()
         .map(|(id, a, s)| Document::new().with("_id", i64::from(id)).with("a", a).with("s", s))
@@ -437,7 +437,7 @@ fn autocomplete_options_score_as_refsearch() {
 
 /// The index of `m80.js`: document `i` has `t: "w1x" + suffix i`, the suffixes being the pairs of
 /// `[a-z0-9]` in that order, documents 0 to 599 in one segment and 600 to 1 199 in another
-/// (inserted in two waves on `refsearch`), or all in one segment.
+/// (inserted in two waves on the reference search server), or all in one segment.
 fn fuzzy_waves(split: bool) -> Indexer {
     let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
     let def = r#"{"mappings": {"dynamic": false, "fields": {"t": {"type": "string"}}}}"#;
@@ -460,7 +460,7 @@ fn fuzzy_waves(split: bool) -> Indexer {
 
 #[test]
 fn fuzzy_expansions_are_the_terms_of_the_whole_index() {
-    // Measured on `refsearch` 1.70.6 (`scratchpad/lane3r/m80.js`): 600 expansions and 300 terms are
+    // Measured on the reference search server 1.70.6 (`scratchpad/lane3r/m80.js`): 600 expansions and 300 terms are
     // fine with the first wave, and 1 000 expansions of the two waves and those 300 terms are too
     // many, though each segment has 600 only.
     let z: Vec<String> = (0..300_u32).map(|i| format!("zzzzzzzzz{}", radix36(i))).collect();

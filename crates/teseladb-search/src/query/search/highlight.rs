@@ -1,9 +1,9 @@
-//! `highlight` (011 FR-003, FR-015, T035) as `refsearch` 1.70.6 gives it (RefLib's
+//! `highlight` (011 FR-003, FR-015, T035) as the reference search server 1.70.6 gives it (the reference search library's
 //! `UnifiedHighlighter`, measured 02-11-2026, `scratchpad/lane3k/m17.js` and
 //! `scratchpad/lane3l/m25.js`), computed only for the documents of the final result. The text
 //! of each path (the values of an array joined by U+2029, where passages are also cut) is cut
 //! into sentences ([`sentences`]); each sentence with a term of the query is a passage, scored
-//! as RefLib's `PassageScorer`: the sum over its terms of
+//! as the reference search library's `PassageScorer`: the sum over its terms of
 //! `(k1 + 1) · ln(1 + (1 + len / 87 + 0.5) / (ttf + 0.5)) · f / (f + k1 · (1 − b + b · plen / 87))`
 //! times `1 + 1 / ln(87 + start)`, in 32-bit floats, with `k1 = 1.2`, `b = 0.75`, `len` the
 //! length of the text, `ttf` the term's highlighted occurrences in the field, `f` those in the
@@ -20,7 +20,7 @@ use crate::query::regex::Regex;
 /// `maxNumPassages` and `maxCharsToExamine` by default.
 const DEFAULT_PASSAGES: usize = 5;
 const DEFAULT_CHARS: usize = 500_000;
-/// RefLib's `PassageScorer` constants.
+/// The reference search library's `PassageScorer` constants.
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
 const PIVOT: f32 = 87.0;
@@ -63,7 +63,7 @@ pub(super) fn parse(index: &MemIndex, v: &Value) -> Result<Highlight, SearchErro
         if n <= 0 {
             return Err(shape(&at, "must be positive"));
         }
-        // Measured: RefLib refuses the largest 32-bit integer, each option with its message.
+        // Measured: the reference search library refuses the largest 32-bit integer, each option with its message.
         if n == i32::MAX {
             return Err(SearchError(
                 if name == "maxCharsToExamine" {
@@ -81,7 +81,7 @@ pub(super) fn parse(index: &MemIndex, v: &Value) -> Result<Highlight, SearchErro
     Ok(Highlight { paths, passages, chars })
 }
 
-/// The 32-bit integer `v` of the option at `at`, with `refsearch`'s messages (measured 02-11-2026,
+/// The 32-bit integer `v` of the option at `at`, with the reference search server's messages (measured 02-11-2026,
 /// `scratchpad/lane3m/m27.js` to `m29.js`): a double must be whole and a number must fit.
 fn int32(v: &Value, at: &str) -> Result<i32, SearchError> {
     let wide = match v {
@@ -304,13 +304,13 @@ fn piece(units: &[u16], kind: &str) -> Value {
     )
 }
 
-/// RefLib's `PassageScorer.tf`.
+/// The reference search library's `PassageScorer.tf`.
 fn tf(freq: f32, passage: f32) -> f32 {
     let norm = K1 * ((1.0 - B) + B * (passage / PIVOT));
     freq / (freq + norm)
 }
 
-/// RefLib's `PassageScorer.weight`.
+/// The reference search library's `PassageScorer.weight`.
 fn weight(length: f32, ttf: f32) -> f32 {
     let docs = 1.0 + length / PIVOT;
     (K1 + 1.0) * (1.0 + (f64::from(docs) + 0.5) / (f64::from(ttf) + 0.5)).ln() as f32
@@ -368,7 +368,7 @@ fn continues(c: u16) -> bool {
     char::from_u32(u32::from(c)).is_some_and(|c| c.is_lowercase() || c.is_numeric())
 }
 
-/// The sentences of `text` as `[start, end)` in UTF-16 units, by the rules `refsearch`'s highlighter
+/// The sentences of `text` as `[start, end)` in UTF-16 units, by the rules the reference search server's highlighter
 /// follows (Java's sentence `BreakIterator`, measured in `m25.js`): a `!`, `?` or `。` ends a
 /// sentence after the closing marks and spaces that follow; a period does when spaces follow it
 /// and the next character after one space is no lower-case letter or digit, or more than one
@@ -436,7 +436,7 @@ mod tests {
     /// Each separator of `m25.js` between `uno`, `gato dos` and `tres`: whether it ends a
     /// sentence (measured).
     #[test]
-    fn sentences_break_where_refsearch_breaks() {
+    fn sentences_break_where_the_reference_breaks() {
         let cases: [(&str, bool); 30] = [
             (". ", false),
             (".  ", true),

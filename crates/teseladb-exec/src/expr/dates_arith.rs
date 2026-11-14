@@ -1,4 +1,4 @@
-//! `$dateAdd`, `$dateSubtract`, `$dateDiff` and `$dateTrunc` (measured on a `refrouter` 9.0.4).
+//! `$dateAdd`, `$dateSubtract`, `$dateDiff` and `$dateTrunc` (measured on a reference router 9.0.4).
 //!
 //! Years, quarters, months, weeks and days count on the local calendar of the `timezone` (a
 //! month added to January 31 is the last day of February, the same local time); hours and

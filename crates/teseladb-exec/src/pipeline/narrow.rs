@@ -1,4 +1,4 @@
-//! The fields a leading `$sort` holds (010 FR-010, FR-028): RefDb 9.0.4 runs the `$match`es
+//! The fields a leading `$sort` holds (010 FR-010, FR-028): the reference server 9.0.4 runs the `$match`es
 //! and the `$sort` a pipeline starts with in its query plan, and under the `SORT` it puts the
 //! projection of the fields the rest of the pipeline uses when that projection keeps the sort's
 //! fields (its dependency analysis, measured in the shape of `explain`), or the user's `$project`
@@ -76,13 +76,13 @@ fn parsed(spec: &Document) -> Result<Projection, MqlError> {
 
 impl Pipeline {
     /// Sets the projection the documents go through before the `$sort` that follows the
-    /// `$match`es the pipeline starts with, as RefDb's query plan puts it under its `SORT`;
+    /// `$match`es the pipeline starts with, as the reference server's query plan puts it under its `SORT`;
     /// `stages` are its stages as the command gave them, the pipeline reads a collection.
     pub fn narrow_sort_input(&mut self, stages: &[Document]) {
         self.narrow = self.sort_input(stages).map(Box::new);
     }
 
-    /// Whether RefDb's query plan is its slot-based engine's: a `$group` or `$lookup` it runs
+    /// Whether the reference server's query plan is its slot-based engine's: a `$group` or `$lookup` it runs
     /// with every stage before it.
     fn engine_plan(&self) -> bool {
         self.stages[..self.sbe_prefix()]

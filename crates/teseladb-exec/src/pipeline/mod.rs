@@ -1,6 +1,6 @@
 //! Aggregation pipelines (010 FR-004, T010): a pipeline is parsed once ([`Pipeline::parse`]) and
 //! run over a batch of documents ([`Pipeline::run`]), each stage over the output of the one
-//! before, as a `refrouter` 9.0.4 runs them (measured in `crates/teseladb-exec/tests/agg_*.rs`).
+//! before, as a reference router 9.0.4 runs them (measured in `crates/teseladb-exec/tests/agg_*.rs`).
 //! What a pipeline reads besides its input — other collections, the command's variables, the
 //! extensions of the matcher — comes from its [`Env`].
 
@@ -96,7 +96,7 @@ pub trait Env {
     }
 
     /// The documents of a search stage (`$search`, `$searchMeta` or `$vectorSearch`) with its
-    /// specification, from the node's search indexes (011 FR-022). Without search, RefDb's
+    /// specification, from the node's search indexes (011 FR-022). Without search, the reference server's
     /// `SearchNotEnabled`.
     fn search_source(
         &self,
@@ -108,7 +108,7 @@ pub trait Env {
 
     /// The documents of a pipeline's first `$match` with a `$text` (011 FR-001): those of the
     /// collection its filter selects, each with its `textScore`. Without a text index,
-    /// RefDb's `IndexNotFound`.
+    /// the reference server's `IndexNotFound`.
     fn text_source(&self, _filter: &Document) -> Result<Vec<search::Scored>, MqlError> {
         Err(error(errors::INDEX_NOT_FOUND, "text index required for $text query"))
     }
@@ -116,7 +116,7 @@ pub trait Env {
     /// The documents of a `$match` with a `$text` first in the pipeline of a `$lookup` or
     /// `$unionWith` that reads collection `name` of the pipeline's database, with the variables
     /// `vars` its filter sees (011 T054): those of the text index of that collection, as
-    /// [`Env::text_source`] gives them for the pipeline's own. Without a text index, RefDb's
+    /// [`Env::text_source`] gives them for the pipeline's own. Without a text index, the reference server's
     /// `IndexNotFound`.
     fn joined_text_source(
         &self,
@@ -130,7 +130,7 @@ pub trait Env {
     /// The documents of a search stage first in the pipeline of a `$lookup` (`from_lookup`) or
     /// `$unionWith` that reads collection `name` of the pipeline's database (011 FR-004): those
     /// of that collection's search indexes, as [`Env::search_source`] gives them for the
-    /// pipeline's own. Without search, RefDb's `SearchNotEnabled`.
+    /// pipeline's own. Without search, the reference server's `SearchNotEnabled`.
     fn joined_search_source(
         &self,
         _name: &str,
@@ -140,7 +140,7 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
-    /// Checks a first `$match` with a `$text` while the pipeline is planned, as `refnode` does:
+    /// Checks a first `$match` with a `$text` while the pipeline is planned, as the reference server does:
     /// the text index and the query's `$language` fail as planning errors, not as running ones
     /// (measured on 9.0.4). Without a node, [`Env::text_source`] answers.
     fn check_text(&self, _filter: &Document) -> Result<(), MqlError> {
@@ -148,7 +148,7 @@ pub trait Env {
     }
 
     /// Sends a search stage's query to the search indexes while the pipeline is planned, as
-    /// `refnode` does with `refsearch`: its errors are those of planning, not of running (measured on
+    /// the reference server does with the reference search server: its errors are those of planning, not of running (measured on
     /// 9.0.4). Nothing to check without search.
     fn check_search(&self, _stage: &str, _spec: &Document) -> Result<(), MqlError> {
         Ok(())
@@ -264,7 +264,7 @@ pub struct Pipeline {
     /// Whether a stage after its `$search` reads `$$SEARCH_META`.
     reads_search_meta: bool,
     /// The projection the documents go through before the stage at its place, the `$sort` of
-    /// RefDb's query plan ([`Pipeline::narrow_sort_input`]).
+    /// the reference server's query plan ([`Pipeline::narrow_sort_input`]).
     narrow: Option<Box<(usize, Projection)>>,
 }
 
@@ -297,7 +297,7 @@ impl Pipeline {
     }
 
     /// Parses the pipeline of an `aggregate` command, on a collection or (`aggregate: 1`) on
-    /// none, checked in RefDb's order: each stage's arguments, the first stage of an
+    /// none, checked in the reference server's order: each stage's arguments, the first stage of an
     /// `aggregate: 1` (it must read no collection), the stages that only go first, and then
     /// `$documents` on a collection.
     pub fn parse_command(
@@ -369,7 +369,7 @@ impl Pipeline {
     }
 
     /// The errors of planning the pipeline on a collection that exists, before it runs: a
-    /// `refrouter` 9.0.4 only plans the start of a pipeline on the shard that has the collection
+    /// reference router 9.0.4 only plans the start of a pipeline on the shard that has the collection
     /// (measured: the `$sort` by a random value of [`sort::check_random_sort`] fails only then).
     pub fn check_collection_plan(&self) -> Result<(), MqlError> {
         self.random_sort.clone().map_or(Ok(()), Err)
@@ -452,14 +452,14 @@ impl Pipeline {
         self.run_in(docs, env, true)
     }
 
-    /// Whether RefDb runs every stage with its slot-based engine, so that stages that follow
+    /// Whether the reference server runs every stage with its slot-based engine, so that stages that follow
     /// them in the same pipeline (a read through a view, then the user's) can too.
     pub fn runs_in_sbe(&self) -> bool {
         !self.starts_with_documents()
             && self.stages.iter().zip(&self.sbe_specs).all(|(st, spec)| *spec && sbe_capable(st))
     }
 
-    /// How many of the leading stages RefDb runs with its slot-based engine, each with all the
+    /// How many of the leading stages the reference server runs with its slot-based engine, each with all the
     /// stages before it (`explain` shows them in one query plan).
     pub fn sbe_prefix(&self) -> usize {
         if self.starts_with_documents() {
@@ -472,7 +472,7 @@ impl Pipeline {
             .count()
     }
 
-    /// Runs the pipeline over `docs`; `sbe` when RefDb could run it with its slot-based
+    /// Runs the pipeline over `docs`; `sbe` when the reference server could run it with its slot-based
     /// engine (a pipeline over a collection whose stages before it all run there, not a
     /// sub-pipeline of `$facet` or `$lookup`). Its stages run there while each before them can,
     /// and `$documents` cannot.
@@ -486,7 +486,7 @@ impl Pipeline {
     }
 
     /// [`Pipeline::run_in`] over documents that carry metadata (`metas`, one per document, from
-    /// a stage that scores them), which the stages keep, drop or set as RefDb does
+    /// a stage that scores them), which the stages keep, drop or set as the reference server does
     /// ([`meta`]); the documents and their metadata at the end.
     pub fn run_with_meta(
         &self,
@@ -685,7 +685,7 @@ impl Pipeline {
     }
 }
 
-/// RefDb's code for `$$SEARCH_META` with no `$search` before it.
+/// The reference server's code for `$$SEARCH_META` with no `$search` before it.
 const SEARCH_META_WITHOUT_SEARCH: teseladb_mql::ErrorCode =
     teseladb_mql::ErrorCode { code: 6_347_902, name: "Location6347902" };
 
@@ -869,7 +869,7 @@ fn parse_stage(d: RawDoc<'_>, ctx: &Ctx) -> Result<Stage, MqlError> {
             Stage::SetWindowFields(Box::new(crate::window::SetWindowFields::parse(arg, ctx)?))
         }
         // Inside a change stream the stream reads it (014 FR-011); anywhere else it is refused
-        // as a `refrouter` 9.0.4 refuses it (measured on 04-11-2026).
+        // as a reference router 9.0.4 refuses it (measured on 04-11-2026).
         "$changeStreamSplitLargeEvent" => {
             return Err(error(
                 errors::ILLEGAL_OPERATION,
@@ -968,7 +968,7 @@ pub(crate) fn shape_set(doc: &mut Document, segs: &[&str], v: teseladb_bson::Val
     shape::set_path_value(doc, segs, v);
 }
 
-/// Whether RefDb's slot-based engine runs a stage of `st`'s kind (measured on a `refrouter`
+/// Whether the reference server's slot-based engine runs a stage of `st`'s kind (measured on a reference router
 /// 9.0.4 by the shard's `explainVersion`): the stages it cannot run send the rest of the
 /// pipeline to the classic engine, as the operators of [`sbe`] do. A `$lookup` runs there with
 /// `localField` and `foreignField` and an empty or no `pipeline`.
@@ -1149,7 +1149,7 @@ fn marked(docs: Vec<Document>) -> Vec<Document> {
 
 /// Runs stage `st` over documents with metadata (`metas`): a stage that changes, filters,
 /// reorders, unwinds or joins documents runs over each with its metadata in scope and keeps it;
-/// one that makes documents from many, or adds others, drops it (measured on a `refrouter` 9.0.4).
+/// one that makes documents from many, or adds others, drops it (measured on a reference router 9.0.4).
 fn run_stage_meta(
     st: &Stage,
     docs: Vec<Document>,

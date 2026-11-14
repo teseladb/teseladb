@@ -1,4 +1,4 @@
-//! Character filters of RefDb Search custom analyzers (FR-007): `htmlStrip`, `icuNormalize`,
+//! Character filters of the custom analyzers of the reference search server (FR-007): `htmlStrip`, `icuNormalize`,
 //! `mapping` and `persian`. A filter rewrites the text and keeps, for every byte boundary of its
 //! output, the byte of the original text it comes from, so tokens carry original offsets for
 //! highlighting.
@@ -251,7 +251,7 @@ fn html_strip(input: &Filtered, ignored: &BTreeSet<String>) -> Filtered {
                     .and_then(|i| text[end + i..].find('>').map(|j| end + i + j + 1))
                     .unwrap_or(text.len());
             }
-            // A whole `script` or `style` element leaves a line break, as measured on `refsearch`.
+            // A whole `script` or `style` element leaves a line break, as measured on the reference search server.
             let raw = RAW_TAGS.contains(&name.as_str()) && !closing;
             let block = BLOCK_TAGS.contains(&name.as_str()) || raw;
             let replacement = if block { "\n" } else { "" };

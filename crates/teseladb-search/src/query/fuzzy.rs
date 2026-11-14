@@ -1,7 +1,7 @@
 //! Term expansion over the dictionary (FR-018): Levenshtein automata for `fuzzy`, prefix automata
 //! for `autocomplete` and the bridge that runs automata over characters on the byte FST.
 //!
-//! RefDb Search documents `fuzzy` with `maxEdits` (1 or 2, by default 2) counted as a
+//! The reference search server documents `fuzzy` with `maxEdits` (1 or 2, by default 2) counted as a
 //! Damerau-Levenshtein distance, `prefixLength` (characters at the start of the term that must
 //! match exactly, by default 0) and `maxExpansions` (variations per token, by default 50). The
 //! automaton here is the optimal-string-alignment form of that distance: an insertion, a deletion,
@@ -11,8 +11,8 @@
 //! prunes a subtree as soon as every cell of its row exceeds `maxEdits`.
 //!
 //! When more terms match than `maxExpansions`, the closest ones are kept, and among equal
-//! distances the first ones in term order. RefDb does not document that choice; the battery
-//! (T020) compares it with `refsearch`.
+//! distances the first ones in term order. The reference server does not document that choice; the battery
+//! (T020) compares it with the reference search server.
 
 use crate::segment::fst::{Automaton, Fst};
 
@@ -107,7 +107,7 @@ impl<A: CharAutomaton> Automaton for Utf8<A> {
     }
 }
 
-/// The `fuzzy` options of RefDb Search.
+/// The `fuzzy` options of the reference search server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FuzzyOptions {
     /// Maximum edits, 1 or 2.
@@ -368,18 +368,13 @@ mod tests {
     }
 
     #[test]
-    fn story_one_finds_refdb_from_mongdb() {
-        let bytes = dict(&[
-            teseladb_names::KERBEROS_SERVICE,
-            teseladb_names::AUDIT_SCHEMA_NATIVE,
-            "anotherproduct",
-            "mango",
-        ]);
+    fn story_one_finds_keyboard_from_keybard() {
+        let bytes = dict(&["keyboard", "key", "keynote", "cupboard"]);
         let fst = Fst::new(&bytes).unwrap();
         let options = FuzzyOptions::new(1, 0, 50).unwrap();
-        let found = fuzzy_terms(&fst, "mongdb", options);
+        let found = fuzzy_terms(&fst, "keybard", options);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].term, b"refdb");
+        assert_eq!(found[0].term, b"keyboard");
         assert_eq!(found[0].edits, 1);
     }
 

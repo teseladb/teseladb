@@ -2,7 +2,7 @@
 //! FR-016): each range's documents are analyzed into their own segment, a split hands them to
 //! the segments of the new ranges and a merge joins them. With more than one segment a query runs
 //! in two steps: the statistics of every segment are added first and each segment scores with
-//! them, so the scores are those of one index with all the documents, as `refsearch` gives them on a
+//! them, so the scores are those of one index with all the documents, as the reference search server gives them on a
 //! replica set; with one segment the first step is left out.
 
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ struct Segment {
 pub struct Found {
     /// Key of the document.
     pub key: Vec<u8>,
-    /// Score, a 32-bit float as `refsearch` gives it.
+    /// Score, a 32-bit float as the reference search server gives it.
     pub score: f32,
     /// The document as the index has it.
     pub doc: Document,

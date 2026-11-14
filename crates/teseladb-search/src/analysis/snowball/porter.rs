@@ -1,6 +1,6 @@
 //! M. F. Porter's suffix-stripping algorithm (Program 14(3), 1980, 130–137), as the `porter`
 //! stemmer of snowballstem.org (`algorithms/porter/stemmer.html`) and as the `porterStemming`
-//! token filter, which differ in a few details measured against `refsearch`.
+//! token filter, which differ in a few details measured against the reference search server.
 
 use super::word::Word;
 

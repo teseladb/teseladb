@@ -1,4 +1,4 @@
-//! The morphological dictionaries of `reflib.morfologik` (Polish) and `reflib.ukrainian` (D-109):
+//! The morphological dictionaries of the built-in `morfologik` (Polish) and `ukrainian` analyzers (D-109):
 //! the word forms of the morfologik dictionaries with the encoded lemma of each, as an acyclic
 //! automaton of their bytes. `tests/morfologik_data.rs` builds the tables in `data/` from the
 //! dictionaries `scripts/morfologik.sha256` pins and fails if they differ.
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn lemmas_measured_on_refsearch() {
+    fn lemmas_measured_on_the_reference() {
         let polish = Dictionary::get(Language::Polish).expect("Polish table");
         assert_eq!(polish.lemmas("plakatów"), ["plakat"]);
         assert_eq!(polish.lemmas("objęciu"), ["objęcie", "objąć"]);

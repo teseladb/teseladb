@@ -1,4 +1,4 @@
-//! Radix sort of sort keys (010 FR-032): each key is written as bytes whose order is RefDb's
+//! Radix sort of sort keys (010 FR-032): each key is written as bytes whose order is the reference server's
 //! order of the key (type class first, then the value), descending fields with their bytes
 //! inverted, and the keys are sorted by a stable most-significant-digit radix sort. It covers
 //! numbers, dates, `ObjectId`s, timestamps, booleans, `null`, `undefined`, `MinKey`, `MaxKey`
@@ -261,7 +261,7 @@ mod tests {
         }
     }
 
-    /// RefDb's order of two values.
+    /// The reference server's order of two values.
     fn order(a: &Value, b: &Value) -> Ordering {
         let d =
             Document::new().with("a", a.clone()).with("b", b.clone()).to_bytes().expect("small");

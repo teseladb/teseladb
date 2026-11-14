@@ -1,8 +1,8 @@
-//! The `granularity` of `$bucketAuto` (measured on a `refrouter` 9.0.4): bucket boundaries rounded
+//! The `granularity` of `$bucketAuto` (measured on a reference router 9.0.4): bucket boundaries rounded
 //! to a series of preferred numbers (Renard R5–R80, `1-2-5`, IEC E6–E192) or to powers of two.
 //!
 //! A series is kept as whole numbers (R5 as `10, 16, 25, 40, 63`) and scaled by a power of ten
-//! built by repeated division or multiplication by 10, as RefDb does; the rounding of doubles
+//! built by repeated division or multiplication by 10, as the reference server does; the rounding of doubles
 //! that gives (`63 × 0.1` is `6.300000000000001`) is part of the result. Decimals go through the
 //! same steps in decimal, each series value converted as a double of 15 digits.
 
@@ -95,7 +95,7 @@ pub enum Granularity {
 }
 
 impl Granularity {
-    /// The granularity named `name`, or RefDb's 40257.
+    /// The granularity named `name`, or the reference server's 40257.
     pub fn named(name: &str) -> Result<Granularity, MqlError> {
         Ok(match name {
             "R5" => Granularity::Series(&R5),

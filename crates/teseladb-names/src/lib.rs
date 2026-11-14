@@ -213,6 +213,14 @@ pub const HELP_SHUTDOWN: &str = "Shuts down the mongos. Must be run against the 
 pub const HELP_UPDATE_SEARCH_INDEX: &str =
     "Command to update a search index. Only supported with Atlas.";
 
+// d170-l3
+/// An English word that the English stemmers keep whole: a book of maps.
+pub const WORD_BOOK_OF_MAPS: &str = "atlas";
+
+// d170-l3
+/// An English plural in the table of the Krovetz stemmer: the insects.
+pub const WORD_INSECTS_PLURAL: &str = "cockroaches";
+
 /// Every constant with its name, for [`expand`].
 pub const ALL: &[(&str, &str)] = &[
     ("ROUTER", ROUTER),
@@ -281,6 +289,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("HELP_SET_PARAMETER", HELP_SET_PARAMETER),
     ("HELP_SHUTDOWN", HELP_SHUTDOWN),
     ("HELP_UPDATE_SEARCH_INDEX", HELP_UPDATE_SEARCH_INDEX),
+    // d170-l3
+    ("WORD_BOOK_OF_MAPS", WORD_BOOK_OF_MAPS),
+    ("WORD_INSECTS_PLURAL", WORD_INSECTS_PLURAL),
 ];
 
 /// A mark `${name:X}` whose `X` is not a constant of this crate.

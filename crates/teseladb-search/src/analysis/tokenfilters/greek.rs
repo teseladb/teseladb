@@ -1,11 +1,11 @@
-//! The stemmer of the Greek analyzer (`reflib.greek`): the rule-sets of G. Ntais, «Development
+//! The stemmer of the Greek analyzer (the built-in `greek` analyzer): the rule-sets of G. Ntais, «Development
 //! of a Stemmer for the Greek Language» (master's thesis, Stockholm University and KTH, 2006,
 //! section 3.2, http://people.dsv.su.se/~hercules/papers/Ntais_greek_stemmer_thesis_final.pdf),
 //! with the suffixes the thesis lists. The thesis gives only the first entries of each list of
-//! stems and endings that keep a suffix; the lists below were deduced from what `refsearch` 1.70.6
+//! stems and endings that keep a suffix; the lists below were deduced from what the reference search server 1.70.6
 //! gives for 70 457 stems (the beginnings of the vocabulary words) before each suffix (D-051),
 //! and the word endings of rule 0 from the endings cut the same way after any beginning. Equal
-//! to `refsearch` on the 40 000 words of the fixture and on 399 975 of 399 984 synthetic words.
+//! to the reference search server on the 40 000 words of the fixture and on 399 975 of 399 984 synthetic words.
 //!
 //! The words come lower-cased by [`greek_lowercase`]: without tonos or dialytika and with final
 //! sigma as `σ`. Words of fewer than 4 letters are kept.
@@ -518,7 +518,7 @@ fn rule7(w: &mut Word) {
 }
 
 /// Rule 8: `ανε` and the past endings that end in it. The length checks apply to the first
-/// ending of each group only, as `refsearch` does.
+/// ending of each group only, as the reference search server does.
 fn rule8(w: &mut Word) {
     let past = if w.len() > 8 && w.ends("ιουντανε") {
         Some(8)

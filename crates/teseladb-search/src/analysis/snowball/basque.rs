@@ -1,4 +1,4 @@
-//! The Basque stemmer of `snowballStemming` (`basque`), deduced from the stems `refsearch` 1.70.6
+//! The Basque stemmer of `snowballStemming` (`basque`), deduced from the stems the reference search server 1.70.6
 //! gives for the 21 386 words of the Basque Snowball vocabulary (D-051): two repeated steps of
 //! verbal and nominal endings, then two steps of single endings. RV, R1 and R2 are the regions of
 //! the Romance stemmers. `arabera`, `atseden` and `baditu` are kept at the end of a word, and the

@@ -1,6 +1,6 @@
 //! The metadata of each document through a pipeline (010 FR-004, with 011): what `$score`,
 //! `$search`, `$vectorSearch` and the other stages that score documents attach to each one, which
-//! `$meta` reads and `$sort: {f: {$meta: …}}` sorts by. As a `refrouter` 9.0.4 does (measured in
+//! `$meta` reads and `$sort: {f: {$meta: …}}` sorts by. As a reference router 9.0.4 does (measured in
 //! `crates/teseladb-exec/tests/agg/meta.out`), a document keeps its metadata through the stages
 //! that change, filter, reorder, unwind or join it, and loses it in the stages that make new
 //! documents from many (`$group`, `$bucket`, `$bucketAuto`, `$sortByCount`, `$count`) and in
@@ -322,7 +322,7 @@ impl Score {
         }
     }
 
-    /// Reads `$score` (measured on a `refrouter` 9.0.4).
+    /// Reads `$score` (measured on a reference router 9.0.4).
     pub fn parse(v: RawValue<'_>, ctx: &Ctx) -> Result<Score, MqlError> {
         let RawValue::Document(d) = v else {
             return Err(error(
@@ -496,7 +496,7 @@ pub(crate) fn shown_expression(x: RawValue<'_>) -> Result<String, MqlError> {
     Ok(teseladb_mql::shell(RawValue::Document(raw)).replace('"', "'"))
 }
 
-/// RefDb's code for metadata a stage asks for and no stage before gives.
+/// The reference server's code for metadata a stage asks for and no stage before gives.
 pub const META_MISSING: ErrorCode = ErrorCode { code: 40_218, name: "Location40218" };
 
 /// The stages after which documents have no metadata.
@@ -525,7 +525,7 @@ fn given_by(name: &str, arg: RawValue<'_>) -> Vec<&'static str> {
 }
 
 /// Refuses a stage that reads with `$meta` metadata that no stage before it gives (40218,
-/// measured on a `refrouter` 9.0.4 for every name): `$facet`'s pipelines see the metadata of the
+/// measured on a reference router 9.0.4 for every name): `$facet`'s pipelines see the metadata of the
 /// stage's input, and `$redact` reads a missing value instead. The pipelines of `$lookup` and
 /// `$unionWith` start without any and are checked when they run ([`check_joined`]).
 pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
@@ -533,13 +533,13 @@ pub(crate) fn check_available(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
 }
 
 /// [`check_available`] for the pipeline of a `$lookup` or `$unionWith` on a collection, which a
-/// `refrouter` 9.0.4 checks when it first runs it (measured: a `$lookup` with no input document
+/// reference router 9.0.4 checks when it first runs it (measured: a `$lookup` with no input document
 /// gives no error).
 pub(crate) fn check_joined(stages: &[RawValue<'_>]) -> Result<(), MqlError> {
     check_pipeline(stages, Vec::new(), true)
 }
 
-/// The words a `refrouter` 9.0.4 puts before the missing metadata of a `$sort` that only `$match`
+/// The words a reference router 9.0.4 puts before the missing metadata of a `$sort` that only `$match`
 /// and `$sort` stages precede in a pipeline on a collection: it asks the query system whether it
 /// can run the pipeline's start, and that fails first (measured 01-11-2026 for each sortable name;
 /// not in `$facet`, nor after any other stage).

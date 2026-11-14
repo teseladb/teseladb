@@ -1,4 +1,4 @@
-# Code points of the BMP that end a token of a RefDb 9.0.4 text index (textIndexVersion 3,
+# Code points of the BMP that end a token of a text index of the reference server 9.0.4 (textIndexVersion 3,
 # language none; in english U+0027 is not one), measured 02-11-2026 with
 # scratchpad/lane3m/m35.js: the document "zq<c>xv" matches the query "zq". One range per line.
 0009..000D

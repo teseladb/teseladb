@@ -1,4 +1,4 @@
-# Code points of the BMP that a RefDb 9.0.4 text index keeps as they are, where the Unicode 15
+# Code points of the BMP that a text index of the reference server 9.0.4 keeps as they are, where the Unicode 15
 # lowercase mapping or canonical decomposition would change them (letters newer than its tables,
 # Indic and Arabic letters whose decomposition is not a diacritic), measured 02-11-2026 with
 # scratchpad/lane3m/m38.js and m39.js over every code point of the BMP.

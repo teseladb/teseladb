@@ -1,4 +1,4 @@
-//! The `facet` collector (011 FR-004, FR-015, T034) as `refsearch` 1.70.6 answers it (measured
+//! The `facet` collector (011 FR-004, FR-015, T034) as the reference search server 1.70.6 answers it (measured
 //! 02-11-2026, `scratchpad/lane3l/m23.js`, `m24.js`): a `string` facet counts the documents with
 //! each token of its path, most frequent first and equal counts in byte order, at most
 //! `numBuckets` (10 by default, 1 to 1000); a `number` or `date` facet counts the documents with a
@@ -75,7 +75,7 @@ fn number(v: &Value) -> Option<f64> {
 }
 
 /// The place of each of `names` in the iteration of a Java `HashMap` holding them, the order
-/// `refsearch` gives the facets in (measured: `zz`, `tags`, `ns`, `aa`, `mm` come out as `zz`, `aa`,
+/// the reference search server gives the facets in (measured: `zz`, `tags`, `ns`, `aa`, `mm` come out as `zz`, `aa`,
 /// `mm`, `ns`, `tags`): by bucket of the spread `String.hashCode`, then by insertion.
 fn java_hash_map_order(names: &[&str]) -> Vec<usize> {
     let mut capacity: usize = 16;
@@ -356,7 +356,7 @@ impl Partial {
 mod order_tests {
     use super::java_hash_map_order;
 
-    /// Measured on `refsearch` 1.70.6: facets asked as `zz`, `tags`, `ns`, `aa`, `mm` come out as
+    /// Measured on the reference search server 1.70.6: facets asked as `zz`, `tags`, `ns`, `aa`, `mm` come out as
     /// `zz`, `aa`, `mm`, `ns`, `tags`; `tags` and `ns` as `ns`, `tags`.
     #[test]
     fn facets_come_out_in_java_hash_map_order() {

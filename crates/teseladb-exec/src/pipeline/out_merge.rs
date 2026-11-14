@@ -1,4 +1,4 @@
-//! `$out` and `$merge` (010 FR-012, T029), as a `refrouter` 9.0.4 reads and runs them (measured
+//! `$out` and `$merge` (010 FR-012, T029), as a reference router 9.0.4 reads and runs them (measured
 //! 01-11-2026): their arguments are checked when the pipeline is parsed, and for each document
 //! that reaches `$merge` [`Merge::action`] says what becomes of the target collection's
 //! document with the same `on` fields. The node writes (the stage holds no I/O): `$out` into a
@@ -287,7 +287,7 @@ fn on(v: RawValue<'_>) -> Result<Vec<String>, MqlError> {
     }
 }
 
-/// Whether RefDb runs `$merge` with modes `m` and `n` (measured: `keepExisting` and `fail`
+/// Whether the reference server runs `$merge` with modes `m` and `n` (measured: `keepExisting` and `fail`
 /// only insert what does not match).
 fn supported(m: &WhenMatched, n: WhenNotMatched) -> bool {
     !matches!(

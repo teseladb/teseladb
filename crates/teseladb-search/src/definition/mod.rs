@@ -1,7 +1,7 @@
 //! Search index definitions (011 FR-006, T039): the definition of a `search` index (mappings,
 //! analyzers, `storedSource`, synonyms, type sets) and of a `vectorSearch` index (its `fields`),
-//! checked and filled with their defaults as `refsearch` 1.70.6 does (measured on a 9.0.4 replica
-//! set, 01-11-2026). [`Definition::normalized`] gives the definition as `refsearch` shows it in
+//! checked and filled with their defaults as the reference search server 1.70.6 does (measured on a 9.0.4 replica
+//! set, 01-11-2026). [`Definition::normalized`] gives the definition as the reference search server shows it in
 //! `statusDetail.mainIndex.definition`.
 
 mod analyzers;
@@ -20,7 +20,7 @@ use crate::analysis::analyzer::Analyzer;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefinitionError {
     /// The definition's shape: the path of the field inside the definition and what is wrong;
-    /// `refsearch` words it `"<path>" <what>`.
+    /// the reference search server words it `"<path>" <what>`.
     Shape {
         /// Path inside the definition (`mappings.fields.t.type`); empty for the root.
         path: String,
@@ -29,14 +29,14 @@ pub enum DefinitionError {
     },
     /// Names that are no analyzer, built-in or defined (`references non-existent analyzers`).
     MissingAnalyzers(Vec<String>),
-    /// What needs a service this engine does not have, as `refsearch` words it without one: the
+    /// What needs a service this engine does not have, as the reference search server words it without one: the
     /// models of the automatic embedding types (011 T052). `createSearchIndexes` refuses it with
     /// `BadValue`; `updateSearchIndex` takes it and the index keeps serving its older version.
     Unsupported(String),
 }
 
 /// The models of `models` refused because no embedding service is configured (measured on
-/// `refsearch` 1.70.6, `scratchpad/lane3p/m70.js` to `m72.js`).
+/// the reference search server 1.70.6, `scratchpad/lane3p/m70.js` to `m72.js`).
 pub(crate) fn no_embedding_service(models: &[String]) -> DefinitionError {
     DefinitionError::Unsupported(format!(
         "The following embedding model(s) are not supported: {}. Supported models: none \
@@ -46,7 +46,7 @@ pub(crate) fn no_embedding_service(models: &[String]) -> DefinitionError {
 }
 
 /// The `model` of an automatic embedding field `d` at `path`, after the options `required` that
-/// `refsearch` asks for in that order.
+/// the reference search server asks for in that order.
 pub(crate) fn embedding_model(
     d: &Document,
     path: &str,
@@ -68,7 +68,7 @@ impl DefinitionError {
         DefinitionError::Shape { path: path.to_owned(), what: what.into() }
     }
 
-    /// The message `refsearch` gives, with the shape errors' paths behind `prefix`
+    /// The message the reference search server gives, with the shape errors' paths behind `prefix`
     /// (`userCommand.indexes[0].` when creating, nothing when updating).
     pub fn message(&self, prefix: &str) -> String {
         match self {
@@ -166,7 +166,7 @@ pub enum StoredSource {
 impl StoredSource {
     fn parse(v: Option<&Value>, path: &str) -> Result<StoredSource, DefinitionError> {
         let list = |items: &Value, at: &str| -> Result<Vec<String>, DefinitionError> {
-            // Messages measured on `refsearch` 1.70.6 (`scratchpad/lane3p/m63.js`).
+            // Messages measured on the reference search server 1.70.6 (`scratchpad/lane3p/m63.js`).
             let Value::Array(items) = items else {
                 return Err(DefinitionError::shape(at, "must be a array"));
             };
@@ -197,7 +197,7 @@ impl StoredSource {
         }
     }
 
-    /// What `returnStoredSource` gives of `doc` (measured on `refsearch` 1.70.6: `_id` always, then
+    /// What `returnStoredSource` gives of `doc` (measured on the reference search server 1.70.6: `_id` always, then
     /// the fields kept, in the document's order).
     pub fn project(&self, doc: &Document) -> Document {
         match self {
@@ -297,7 +297,7 @@ pub struct Synonyms {
 /// The definition of a `search` index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Definition {
-    /// Index analyzer of the fields without their own (`reflib.standard` when absent).
+    /// Index analyzer of the fields without their own (the built-in `standard` analyzer when absent).
     pub analyzer: Option<String>,
     /// Query analyzer of the fields without their own (the index analyzer when absent).
     pub search_analyzer: Option<String>,
@@ -317,7 +317,7 @@ pub struct Definition {
 pub const DEFAULT_ANALYZER: &str = teseladb_names::ANALYZER_STANDARD;
 
 impl Definition {
-    /// Reads and checks a `search` definition. Fields `refsearch` does not know at the top are
+    /// Reads and checks a `search` definition. Fields the reference search server does not know at the top are
     /// left out, as it does (measured: `numPartitions` and unknown names are accepted).
     pub fn parse(def: &Document) -> Result<Definition, DefinitionError> {
         let mappings = match def.get("mappings") {
@@ -367,7 +367,7 @@ impl Definition {
         if missing.is_empty() { Ok(()) } else { Err(DefinitionError::MissingAnalyzers(missing)) }
     }
 
-    /// The definition as `refsearch` shows it, with its defaults filled in.
+    /// The definition as the reference search server shows it, with its defaults filled in.
     pub fn normalized(&self) -> Document {
         let mut d = Document::new();
         if let Some(a) = &self.analyzer {

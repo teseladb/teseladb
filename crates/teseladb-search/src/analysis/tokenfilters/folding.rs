@@ -1,9 +1,9 @@
-//! `asciiFolding` and `icuFolding` from the character tables observed on `refsearch` 1.70.6
+//! `asciiFolding` and `icuFolding` from the character tables observed on the reference search server 1.70.6
 //! (`data/ascii-folding.txt` and `data/icu-folding.txt`: one line per character the filter
 //! changes, its code point and the code points it becomes, in hexadecimal; none when the filter
 //! removes it). `asciiFolding` maps character by character. `icuFolding` maps character by
 //! character and then composes the result (NFC), which is how a run of conjoining jamo becomes
-//! one Hangul syllable as on `refsearch`.
+//! one Hangul syllable as on the reference search server.
 
 use std::sync::OnceLock;
 
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn examples_measured_on_refsearch() {
+    fn examples_measured_on_the_reference() {
         assert_eq!(ascii("ÆON Straße Ǆemal ﬁne"), "AEON Strasse DZemal fine");
         assert_eq!(icu("ÆON Straße Ǆemal ＡＢＣ e\u{301}té"), "aeon strasse dzemal abc ete");
         assert_eq!(icu("\u{1100}\u{1161}"), "가");

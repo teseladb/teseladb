@@ -1,5 +1,5 @@
 //! Synonym mappings (011 FR-003, FR-006, T036): the documents of a synonym collection analyzed
-//! by the mapping's analyzer, as `refsearch` 1.70.6 reads them (measured 02-11-2026,
+//! by the mapping's analyzer, as the reference search server 1.70.6 reads them (measured 02-11-2026,
 //! `scratchpad/lane3l/m21.js`, `m22.js`). An `equivalent` document makes each of its words
 //! stand for all of them, in the document's order; an `explicit` one makes each word of `input`
 //! stand for its `synonyms` and then for itself. A document of another shape leaves the whole
@@ -29,7 +29,7 @@ pub(crate) enum Segment {
     /// again at the end (as [`SynonymMap::expand`] with `keep_original`).
     Word(String, Option<Vec<String>>),
     /// A run of tokens a rule with an entry of several words names: the rule's entries, then
-    /// the run again. RefLib asks for any of them (`DisjunctionMax`).
+    /// the run again. The reference search library asks for any of them (`DisjunctionMax`).
     Group(Vec<Vec<String>>),
 }
 
@@ -49,7 +49,7 @@ fn strings(d: &Document, name: &str) -> Option<Vec<String>> {
 
 impl SynonymMap {
     /// The words `token` stands for, without repeats (`text`), or with the token added at the
-    /// end of an `equivalent` group as RefLib's graph keeps it (`phrase`, `keep_original`).
+    /// end of an `equivalent` group as the reference search library's graph keeps it (`phrase`, `keep_original`).
     /// `None` when no rule names the token.
     pub(crate) fn expand(&self, token: &str, keep_original: bool) -> Option<Vec<String>> {
         let single = |words: &[Vec<String>]| -> Vec<String> {
@@ -87,7 +87,7 @@ impl SynonymMap {
         Some(unique)
     }
 
-    /// The token sequences `tokens` stands for when a rule of several words is involved (RefLib
+    /// The token sequences `tokens` stands for when a rule of several words is involved (the reference search library
     /// then builds a `TermAutomatonQuery`, measured): each run of tokens a rule names, longest
     /// first, is replaced by every entry of the rule, `None` when no such rule is involved.
     pub(crate) fn multi_word(&self, tokens: &[String]) -> Option<Vec<Vec<String>>> {

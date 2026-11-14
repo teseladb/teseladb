@@ -1,4 +1,4 @@
-//! The Turkish stemmer of `snowballStemming` (`turkish`), deduced from the stems `refsearch` 1.70.6
+//! The Turkish stemmer of `snowballStemming` (`turkish`), deduced from the stems the reference search server 1.70.6
 //! gives for the 96 325 words of the Turkish Snowball vocabulary (D-051). Two machines remove
 //! endings from the end of the word: first the endings of the nominal predicate, then the noun
 //! endings. Each state lists, in order, the classes that may come off next, and the first one that

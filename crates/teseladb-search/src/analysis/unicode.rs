@@ -1,6 +1,6 @@
 //! Unicode character properties the analyzers need (FR-019). From the Unicode 12.1.0 database that
 //! `scripts/unicode-tokenizer.sha256` and `scripts/unicode-emoji-tokenizer.sha256` pin, the version
-//! `refsearch` 1.70.6 tokenizes by: word-break classes (UAX #29), Extended_Pictographic, Script=Han,
+//! the reference search server 1.70.6 tokenizes by: word-break classes (UAX #29), Extended_Pictographic, Script=Han,
 //! Script=Hiragana, Script=Hangul and Line_Break=SA. From the Unicode 15.1.0 database that
 //! `scripts/unicode-search.sha256` pins: letters and numbers, combining classes, decompositions,
 //! canonical compositions, NFKC_Casefold and simple lowercase mappings.

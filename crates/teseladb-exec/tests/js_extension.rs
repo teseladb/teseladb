@@ -1,6 +1,6 @@
 //! The extension point of server-side JavaScript (010 T012, FR-019): `$function` and
 //! `$accumulator` call the engine the environment gives (016 provides it), here a stand-in that
-//! knows the functions of the measured pipelines, whose results a `refrouter` 9.0.4 gave as
+//! knows the functions of the measured pipelines, whose results a reference router 9.0.4 gave as
 //! `y: 10.0, 6.0` and `t: 8.0, 80.0`.
 
 use std::rc::Rc;

@@ -1,4 +1,4 @@
-//! The `moreLikeThis` operator (011 FR-002) as `refsearch` 1.70.6 runs it (measured 02-11-2026,
+//! The `moreLikeThis` operator (011 FR-002) as the reference search server 1.70.6 runs it (measured 02-11-2026,
 //! `scratchpad/lane3j/m3.js`..`m5.js`): the strings of the `like` documents on indexed text
 //! fields give their distinct terms, those found in at least two documents of the field, up to
 //! 25 of them by `tf · idf`, and each term is an optional clause scored as `text` scores it.
@@ -81,7 +81,7 @@ pub(super) fn parse(index: &MemIndex, d: &Document, path: &str) -> Result<Operat
         Score::Boost(b) => (b, Score::Plain),
         other => (1.0, other),
     };
-    // RefLib's `MoreLikeThis` adds the kept terms from its queue, the lowest score first
+    // The reference search library's `MoreLikeThis` adds the kept terms from its queue, the lowest score first
     // (measured with `scoreDetails`).
     let kept: Vec<(f64, String, String)> =
         kept.into_iter().take(MAX_QUERY_TERMS).collect::<Vec<_>>().into_iter().rev().collect();

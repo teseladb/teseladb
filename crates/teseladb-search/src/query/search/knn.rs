@@ -1,4 +1,4 @@
-//! The deprecated `knnBeta` operator (011 FR-002) over a `knnVector` field, as `refsearch` 1.70.6
+//! The deprecated `knnBeta` operator (011 FR-002) over a `knnVector` field, as the reference search server 1.70.6
 //! runs it (measured 02-11-2026, `scratchpad/lane3j/m3.js`): the `k` nearest documents, exactly,
 //! among those its `filter` operator selects, scored with the field's similarity as
 //! `$vectorSearch` scores it (`1 / (1 + d²)` for `euclidean`, `(1 + x) / 2` for `cosine` and

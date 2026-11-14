@@ -1,4 +1,4 @@
-//! An expression as RefDb optimises it when it parses a command (measured on a `refrouter` 9.0.4,
+//! An expression as the reference server optimises it when it parses a command (measured on a reference router 9.0.4,
 //! 01-11-2026): every subexpression whose arguments are all known is evaluated once, so that a
 //! constant that fails (`{$divide: [1, 0]}`) fails the command before any document is read, and
 //! the expression is written back as `explain` shows it: each constant as `{$const: v}`, the
@@ -37,11 +37,11 @@ impl Optimized {
     }
 }
 
-/// RefDb's `ExceededMemoryLimit`.
+/// The reference server's `ExceededMemoryLimit`.
 pub const EXCEEDED_MEMORY_LIMIT: ErrorCode = ErrorCode { code: 146, name: "ExceededMemoryLimit" };
 /// `internalQueryMaxSingleExpressionMemoryUsageBytes` by default (100 MiB, measured).
 pub const EXPRESSION_MEMORY_DEFAULT: u64 = 100 * 1024 * 1024;
-/// The bytes RefDb counts for each value it holds (measured on a `refnode` 9.0.4).
+/// The bytes the reference server counts for each value it holds (measured on a reference server 9.0.4).
 const VALUE_BYTES: u64 = 16;
 /// A string up to this length lives in its value.
 const INLINE_STRING: usize = 12;
@@ -71,7 +71,7 @@ pub fn with_expression_memory_limit<T>(limit: u64, f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// The bytes RefDb counts for value `v` beyond its own [`VALUE_BYTES`].
+/// The bytes the reference server counts for value `v` beyond its own [`VALUE_BYTES`].
 fn extra_bytes(v: &Value) -> u64 {
     let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
     match v {
@@ -85,7 +85,7 @@ fn extra_bytes(v: &Value) -> u64 {
     }
 }
 
-/// The bytes RefDb counts for the values of an array.
+/// The bytes the reference server counts for the values of an array.
 fn array_bytes(items: &[Value]) -> u64 {
     items.iter().fold(0, |n, x| n.saturating_add(VALUE_BYTES).saturating_add(extra_bytes(x)))
 }
@@ -122,11 +122,11 @@ fn check_folded(name: &str, v: &Optimized) -> Result<(), MqlError> {
     }
 }
 
-/// Operators RefDb never evaluates when it parses them: their value changes with each call
+/// Operators the reference server never evaluates when it parses them: their value changes with each call
 /// or each document.
 const VOLATILE: [&str; 5] = ["$rand", "$meta", "$createObjectId", "$function", "$accumulator"];
 
-/// The operators RefDb r9.0.4 does not fold even over constants (their `optimize` returns
+/// The operators the reference server r9.0.4 does not fold even over constants (their `optimize` returns
 /// themselves): their errors come when the pipeline runs, not when it is optimised.
 const NOT_FOLDED: [&str; 4] = ["$zip", "$hash", "$serializeEJSON", "$deserializeEJSON"];
 
@@ -202,7 +202,7 @@ const CONVERSIONS: [(&str, &str); 8] = [
     ("$toObjectId", "objectId"),
 ];
 
-/// Optimises expression `v` as RefDb does when it parses it, with the variables of `ctx` and
+/// Optimises expression `v` as the reference server does when it parses it, with the variables of `ctx` and
 /// the values `scope` knows (the command's `let`, `NOW`…).
 pub fn optimize(v: &Value, ctx: &Ctx, scope: &Scope) -> Result<Optimized, MqlError> {
     // The expression must parse as a whole first: its syntax errors come before any value.
@@ -340,7 +340,7 @@ impl Walk<'_> {
             let rebuilt = Value::Document(Document::new().with(name, full.clone()));
             return self.named(name, &full, &rebuilt);
         }
-        // `$hexHash` is `$hash` converted to hexadecimal text (RefDb r9.0.4, `parseHexHash`).
+        // `$hexHash` is `$hash` converted to hexadecimal text (the reference server r9.0.4, `parseHexHash`).
         if name == "$hexHash" {
             let full = Document::new()
                 .with("input", Document::new().with("$hash", arg.clone()))
@@ -399,7 +399,7 @@ impl Walk<'_> {
         {
             let written = match (args.get(k), k) {
                 (Some(v), k) if RAW_ARGUMENTS.contains(&k) => v.clone(),
-                // Each input of `$zip` is an expression of its own (RefDb r9.0.4).
+                // Each input of `$zip` is an expression of its own (the reference server r9.0.4).
                 (Some(Value::Array(items)), "inputs") if name == "$zip" => {
                     let parts: Vec<Optimized> =
                         items.iter().map(|i| self.value(i)).collect::<Result<_, _>>()?;
@@ -611,10 +611,10 @@ fn defined(v: Value) -> Value {
     }
 }
 
-/// What RefDb adds before the error of a constant of an `$expr` that fails.
+/// What the reference server adds before the error of a constant of an `$expr` that fails.
 const FAILED_TO_OPTIMIZE_EXPRESSION: &str = "Failed to optimize expression :: caused by :: ";
 
-/// Filter `filter` with each `$expr` as RefDb rewrites it before it plans, with the command's
+/// Filter `filter` with each `$expr` as the reference server rewrites it before it plans, with the command's
 /// variables `vars` known ([`teseladb_mql::optimize_exprs`]); a constant that fails gives its
 /// error after «Failed to optimize expression».
 pub fn optimize_filter(filter: &Document, vars: Option<&Document>) -> Result<Document, MqlError> {

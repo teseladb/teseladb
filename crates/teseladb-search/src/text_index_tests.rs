@@ -1,4 +1,4 @@
-//! The scores and matches of a RefDb 9.0.4 text index measured on 02-11-2026
+//! The scores and matches of a text index of the reference server 9.0.4 measured on 02-11-2026
 //! (`scratchpad/lane3m/m33.js` and `m37.js`).
 
 use super::*;
@@ -182,7 +182,7 @@ fn unknown_languages_are_refused() {
     assert!(TextIndex::from_spec(&bad).is_err());
 }
 
-/// The documents of the `text-*` scenarios (011 T028), whose replies `refnode` 9.0.4 gave.
+/// The documents of the `text-*` scenarios (011 T028), whose replies the reference server 9.0.4 gave.
 fn scenario_docs() -> Vec<Document> {
     [
         r#"{"_id": 1, "title": "Coffee shop", "body": "the best coffee and cakes of the town", "lang": "english"}"#,

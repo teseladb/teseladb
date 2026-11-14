@@ -1,7 +1,7 @@
-//! `$serializeEJSON` and `$deserializeEJSON` (measured on a `refrouter` 9.0.4): a value to its
+//! `$serializeEJSON` and `$deserializeEJSON` (measured on a reference router 9.0.4): a value to its
 //! Extended JSON v2 form as documents (relaxed by default: numbers stay numbers, dates from 1970
 //! to 9999 as ISO-8601 text), and back. Reading refuses a BSON-only value in the input and a type
-//! wrapper of the wrong shape with RefDb's 241, which `onError` replaces.
+//! wrapper of the wrong shape with the reference server's 241, which `onError` replaces.
 
 use teseladb_bson::{Decimal128, Document, RawValue, Value};
 use teseladb_mql::{ErrorCode, MqlError};
@@ -148,7 +148,7 @@ fn serialize(v: &Value, relaxed: bool) -> Value {
         Value::Undefined => wrap("$undefined", true),
         Value::DbPointer { namespace, id } => wrap(
             "$dbPointer",
-            // The ObjectId's text, as RefDb 9.0.4 writes it.
+            // The ObjectId's text, as the reference server 9.0.4 writes it.
             Document::new().with("$ref", namespace.clone()).with("$id", bin::object_id_text(id)),
         ),
         Value::Document(d) => {
@@ -319,7 +319,7 @@ fn deserialize_doc(d: &Document) -> Result<Value, String> {
     // The value is checked before the fields beside it.
     let others = d.iter().filter(|(k, _)| *k != key && !(key == "$code" && *k == "$scope")).count();
     if others > 0 {
-        // RefDb words a field beside `$code` other than `$scope` as a misplaced `$code`.
+        // The reference server words a field beside `$code` other than `$scope` as a misplaced `$code`.
         if key == "$code" {
             return Err("$code must be the first field in the object".to_owned());
         }
@@ -343,7 +343,7 @@ fn timestamp(v: &Value) -> Result<Value, String> {
             Some(Value::Int64(n)) => *n,
             _ => return Err(format!("$timestamp.{name} value must be of type int or long")),
         };
-        // A wider number keeps its low 32 bits, as RefDb reads it.
+        // A wider number keeps its low 32 bits, as the reference server reads it.
         Ok(n as u32)
     };
     Ok(Value::Timestamp { time: part("t")?, increment: part("i")? })
@@ -369,7 +369,7 @@ fn binary(v: &Value) -> Result<Value, String> {
     Ok(Value::Binary { subtype, bytes })
 }
 
-/// The flags a regular expression keeps, in the order RefDb writes them.
+/// The flags a regular expression keeps, in the order the reference server writes them.
 const REGEX_FLAGS: &str = "ilmsux";
 
 fn regex(v: &Value) -> Result<Value, String> {
@@ -389,7 +389,7 @@ fn dbpointer(v: &Value) -> Result<Value, String> {
     let Some(Value::String(namespace)) = d.get("$ref") else {
         return Err("$dbPointer.$ref value must be of type string".to_owned());
     };
-    // `$id` is read as the ObjectId's text, as RefDb 9.0.4 reads it.
+    // `$id` is read as the ObjectId's text, as the reference server 9.0.4 reads it.
     let Some(Value::String(hex)) = d.get("$id") else {
         return Err("$dbPointer.$id value must be of type string".to_owned());
     };

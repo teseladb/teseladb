@@ -1,5 +1,5 @@
-# The stop words of language "norwegian" of a RefDb 9.0.4 text index, measured 02-11-2026 with
-# scratchpad/lane3m/m34.js among the strings of the refnode binary and the Snowball lists.
+# The stop words of language "norwegian" of a text index of the reference server 9.0.4, measured 02-11-2026 with
+# scratchpad/lane3m/m34.js among the strings of the reference server binary and the Snowball lists.
 alle
 at
 av

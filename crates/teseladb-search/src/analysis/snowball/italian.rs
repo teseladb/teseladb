@@ -71,7 +71,7 @@ fn prelude(text: &str) -> Word {
 /// Stems `text`.
 pub fn stem(text: &str) -> String {
     let mut w = prelude(text);
-    // `refsearch` starts RV after `divan` in the words that begin with it (`divano`, `divani` → `divan`).
+    // The reference search server starts RV after `divan` in the words that begin with it (`divano`, `divani` → `divan`).
     let rv = if w.starts("divan") { 5 } else { rv(&w.c, vowel) };
     let (r1, r2) = regions(&w.c, vowel);
     attached_pronoun(&mut w, rv);

@@ -1,4 +1,4 @@
-//! Definitions as `refsearch` 1.70.6 checks and shows them (measured on a 9.0.4 replica set,
+//! Definitions as the reference search server 1.70.6 checks and shows them (measured on a 9.0.4 replica set,
 //! 01-11-2026).
 
 use teseladb_bson::{Document, Value};
@@ -156,15 +156,15 @@ fn each_type_shows_its_defaults() {
 #[test]
 fn the_top_options_are_kept_and_unknown_ones_dropped() {
     let def = Document::new()
-        .with("analyzer", "reflib.french")
-        .with("searchAnalyzer", "reflib.french")
+        .with("analyzer", teseladb_names::ANALYZER_ENGLISH)
+        .with("searchAnalyzer", teseladb_names::ANALYZER_ENGLISH)
         .with("mappings", Document::new().with("dynamic", true))
         .with("storedSource", Document::new().with("include", Value::Array(vec!["t".into()])))
         .with("numPartitions", 1)
         .with("foo", 1);
     let want = Document::new()
-        .with("analyzer", "reflib.french")
-        .with("searchAnalyzer", "reflib.french")
+        .with("analyzer", teseladb_names::ANALYZER_ENGLISH)
+        .with("searchAnalyzer", teseladb_names::ANALYZER_ENGLISH)
         .with("mappings", Document::new().with("dynamic", true).with("fields", Document::new()))
         .with("storedSource", Document::new().with("include", Value::Array(vec!["t".into()])));
     assert_eq!(normalized(&def), want);
@@ -207,7 +207,7 @@ fn the_top_options_are_kept_and_unknown_ones_dropped() {
 }
 
 #[test]
-fn errors_name_the_path_as_refsearch_does() {
+fn errors_name_the_path_as_the_reference_does() {
     let p = "\"userCommand.indexes[0].";
     let cases = vec![
         (
@@ -312,7 +312,7 @@ fn vector_def(fields: Vec<Document>) -> Document {
 }
 
 #[test]
-fn vector_definitions_are_checked_as_refsearch_does() {
+fn vector_definitions_are_checked_as_the_reference_does() {
     let basic = vector_def(vec![vector("v", 3, "cosine")]);
     let parsed = VectorDefinition::parse(&basic).expect("valid");
     let want = vector_def(vec![
@@ -370,7 +370,7 @@ fn vector_definitions_are_checked_as_refsearch_does() {
     }
 }
 
-/// `returnStoredSource` (measured on `refsearch` 1.70.6 with `include: ["t"]`, scenario
+/// `returnStoredSource` (measured on the reference search server 1.70.6 with `include: ["t"]`, scenario
 /// `search-type-objectId`): `_id` and the fields kept.
 #[test]
 fn stored_source_keeps_the_id_and_the_fields_it_names() {
@@ -402,10 +402,10 @@ fn stored_source_keeps_the_id_and_the_fields_it_names() {
     );
 }
 
-/// Synonyms, type sets, `storedSource` and whole-number options as `refsearch` 1.70.6 checks them
+/// Synonyms, type sets, `storedSource` and whole-number options as the reference search server 1.70.6 checks them
 /// (`scratchpad/lane3p/m63.js`, 02-11-2026).
 #[test]
-fn synonyms_type_sets_and_stored_source_errors_as_refsearch_gives_them() {
+fn synonyms_type_sets_and_stored_source_errors_as_the_reference_gives_them() {
     let p = "\"userCommand.indexes[0].";
     let dynamic = || Document::new().with("dynamic", true);
     let def = |k: &str, v: Value| Document::new().with("mappings", dynamic()).with(k, v);
@@ -485,7 +485,7 @@ fn synonyms_type_sets_and_stored_source_errors_as_refsearch_gives_them() {
     assert!(Definition::parse(&one("t", ty("string").with("ignoreAbove", 2.0))).is_ok());
 }
 
-/// The automatic embedding types as `refsearch` 1.70.6 checks them without an embedding service
+/// The automatic embedding types as the reference search server 1.70.6 checks them without an embedding service
 /// (`scratchpad/lane3p/m70.js` to `m72.js`): the options it asks for, then the models refused.
 #[test]
 fn automatic_embedding_needs_a_service_this_engine_lacks() {
