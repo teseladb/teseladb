@@ -10,13 +10,15 @@
 
 mod common;
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use common::{Client, READY, batch, config, docs, ok, until};
+use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backend::{
     filtered_parts_sent, parts_taken_ahead, scattered_groups, scattered_parts_sent_away,
 };
-use teseladb_server::node::Node;
+use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pushed::ran_for_other_nodes;
 use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
@@ -30,12 +32,17 @@ fn op(name: &str, arg: impl Into<Value>) -> Value {
 
 /// Three nodes, the first one the seed.
 fn cluster() -> Vec<Node<MemDisk>> {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    cluster_with(config)
+}
+
+/// Three nodes with the configuration `cfg` gives for their seeds, the first one the seed.
+fn cluster_with(cfg: impl Fn(Vec<String>) -> NodeConfig) -> Vec<Node<MemDisk>> {
+    let first = Node::start(cfg(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        nodes.push(Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap());
+        nodes.push(Node::start(cfg(seed.clone()), || Ok(MemDisk::new()), None).unwrap());
     }
     for n in &nodes {
         assert!(n.wait_ready(READY));
@@ -230,5 +237,49 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
     assert!(filtered_parts_sent() > sent);
     assert!(ran_for_other_nodes() > ran);
     assert!(parts_taken_ahead() > ahead);
+    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+}
+
+/// The value of the sample `line` (name and labels) in `text`.
+fn sample(text: &str, line: &str) -> Option<u64> {
+    text.lines().find_map(|l| l.strip_prefix(line)?.strip_prefix(' ')?.trim().parse().ok())
+}
+
+#[test]
+fn the_work_sent_to_the_leaders_shows_in_the_metrics() {
+    let nodes = cluster_with(|seeds| NodeConfig {
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        ..config(seeds)
+    });
+    let client = follower(&nodes);
+    let mut c = Client::new(client);
+    load(&mut c);
+    // A split aggregation and a filtered scan, both through leaders on other nodes.
+    until("a split run", || {
+        let before = scattered_groups();
+        aggregate(&mut c, &[group("$k".into())], false);
+        (scattered_groups() > before).then_some(())
+    });
+    assert_eq!(find(&mut c, Document::new().with("k", 3), false).len(), 429);
+    let at = client.admin_addr().unwrap().to_string();
+    let (status, body) = request(&at, Method::Get, "/metrics", b"").unwrap();
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).unwrap();
+    for name in [
+        "scattered_groups",
+        "scattered_parts_sent_away",
+        "filtered_parts_sent",
+        "parts_taken_ahead",
+        "ran_for_other_nodes",
+    ] {
+        let name = format!("teseladb_pushed_{name}_total");
+        assert!(text.contains(&format!("# TYPE {name} counter")), "{name} in {text}");
+        let n = sample(&text, &name).unwrap_or_else(|| panic!("{name} in {text}"));
+        assert!(n > 0, "{name} is {n}");
+    }
+    for work in ["fold", "filter"] {
+        let line = format!("teseladb_pushed_fallbacks_total{{work=\"{work}\"}}");
+        assert!(sample(&text, &line).is_some(), "{line} in {text}");
+    }
     drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
 }
