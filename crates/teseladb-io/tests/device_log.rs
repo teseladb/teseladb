@@ -1,9 +1,11 @@
 //! The device log on the node's writer thread (012 FR-035, D-154): cores writing at once share its
-//! syncs and find their entries again after a restart.
+//! syncs and find their entries again after a restart, and the writer counts each part of a sync's
+//! wait as its stage.
 
 use std::thread;
 
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
+use teseladb_stages::Stage;
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{CoreStore, LogEntry, MemDisk, StorageConfig};
 use teseladb_types::{Bytes, Durability, GroupId, Nanos};
@@ -27,6 +29,8 @@ fn cfg() -> StorageConfig {
 
 #[test]
 fn cores_writing_at_once_share_the_syncs_and_find_their_entries_again() {
+    let parts = [Stage::LogQueueWait, Stage::LogTurnWait, Stage::LogWrite, Stage::LogSync];
+    let before: Vec<u64> = parts.iter().map(|s| teseladb_stages::count(*s)).collect();
     let (log, ports) =
         DeviceLog::start(MemDisk::new(), CORES, DeviceLogConfig { file_bytes: 256 << 10 }).unwrap();
     let writers: Vec<_> = ports
@@ -51,6 +55,9 @@ fn cores_writing_at_once_share_the_syncs_and_find_their_entries_again() {
     let batches: u64 = writers.into_iter().map(|t| t.join().unwrap()).sum();
     let syncs = log.syncs();
     assert!(syncs > 0 && syncs <= batches, "{syncs} syncs for {batches} batches");
+    for (stage, was) in parts.iter().zip(before) {
+        assert!(teseladb_stages::count(*stage) > was, "{stage:?}");
+    }
     let disk = log.stop().unwrap();
     let (log, ports) =
         DeviceLog::start(disk, CORES, DeviceLogConfig { file_bytes: 256 << 10 }).unwrap();

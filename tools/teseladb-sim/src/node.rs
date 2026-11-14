@@ -222,6 +222,13 @@ impl StateMachine for NodeSm {
         }
     }
 
+    fn data_index(&self, snap: &[u8], index: u64) -> u64 {
+        match self {
+            NodeSm::Range(sm) => sm.data_index(snap, index),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => index,
+        }
+    }
+
     fn snapshot_floor(&self) -> u64 {
         match self {
             NodeSm::Range(sm) => sm.snapshot_floor(),

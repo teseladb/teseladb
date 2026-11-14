@@ -788,7 +788,13 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
                 let class = self.thread_class(&done);
                 self.logic.on_io_done(done, class, now);
             }
-            CoreInput::Log(done) => self.logic.on_io_done(done, crate::IoClass::Log, now),
+            CoreInput::Log(done) => {
+                // How long the device log's answer waited for the core (012 FR-035).
+                let waited = started.saturating_duration_since(queued);
+                let waited = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+                teseladb_stages::record(teseladb_stages::Stage::LogNotify, waited);
+                self.logic.on_io_done(done, crate::IoClass::Log, now);
+            }
             CoreInput::App(m) if overloaded => {
                 // 012 FR-029: a new request is refused before the core spends CPU on it.
                 match self.logic.refuse_overloaded(m) {

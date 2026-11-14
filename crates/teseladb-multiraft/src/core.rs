@@ -1532,7 +1532,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
                         // Its data comes another way (a range cleared before a crash): the group
                         // asks for it and meanwhile votes, appends and commits, but applies
                         // nothing; the leader's snapshot may come first (007 T016).
-                        self.snapshot_data.push((group, meta.index));
+                        let wanted = self.data_index(group, &data, meta.index);
+                        self.snapshot_data.push((group, wanted));
                         let grp = self.groups.get_mut(&group).expect("loading");
                         grp.own = Some((meta.index, data));
                         grp.loading = false;
@@ -2256,14 +2257,15 @@ impl<S: StateMachine> MultiRaftCore<S> {
         grp.own_stale = false;
     }
 
-    fn install(&mut self, g: GroupId, snap: Snapshot, mut d: Deferred) -> bool {
+    fn install(&mut self, g: GroupId, snap: Snapshot, d: Deferred) -> bool {
         let grp = self.groups.get_mut(&g).expect("a group of this core");
         if let Ok((_, _, sm)) = unwrap_snapshot(&snap.data)
             && !grp.sm.has_data_for(sm)
         {
             // The data comes another way: nothing is applied until it is here.
             grp.installing = true;
-            self.snapshot_data.push((g, snap.meta.index));
+            let wanted = grp.sm.data_index(sm, snap.meta.index);
+            self.snapshot_data.push((g, wanted));
             grp.parked = Some((snap, d));
             return false;
         }
@@ -2278,10 +2280,16 @@ impl<S: StateMachine> MultiRaftCore<S> {
             self.frames.push((node, ack));
             return false;
         }
-        d.index = snap.meta.index;
         // The leader's snapshot replaces the own one whose data was missing.
         let grp = self.groups.get_mut(&g).expect("restored");
         (grp.own, grp.own_stale) = (None, false);
+        self.save_installed(g, snap, d)
+    }
+
+    /// Makes the snapshot Raft took durable, with the rest of its `Ready`: its state machine is
+    /// restored, or it is held as the replica's own snapshot without its data.
+    fn save_installed(&mut self, g: GroupId, snap: Snapshot, mut d: Deferred) -> bool {
+        d.index = snap.meta.index;
         // Faulty variant (005 T033): the entries the snapshot contradicts leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
         self.note_superseded(g, d.index);
@@ -2326,7 +2334,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
         }
         let Some((index, data)) = grp.own.take() else { return };
         if self.missing_data(g, &data) {
-            self.snapshot_data.push((g, index));
+            let wanted = self.data_index(g, &data, index);
+            self.snapshot_data.push((g, wanted));
             self.groups.get_mut(&g).expect("checked").own = Some((index, data));
         } else if self.restore(g, &data) {
             self.restored_own(g);
@@ -2344,31 +2353,46 @@ impl<S: StateMachine> MultiRaftCore<S> {
     }
 
     /// The layer above learnt that no replica will serve the data of the snapshot `g` waits for
-    /// (007: the range split past it): its leader is told the transfer failed, and sends its
-    /// newest snapshot, which replaces this one. A follower that waits for a snapshot's data
-    /// answers nothing else, so the leader would not learn it otherwise. For its own snapshot
-    /// after a restart, it asks for the leader's snapshot (index 0), which it installs even below
-    /// its commit index.
+    /// (007: the range split past it, or its data would land over another range of the core): the
+    /// replica keeps it as its own snapshot without its data, and asks the leader for its newest
+    /// snapshot (index 0) with each round of entries; it installs that one even below its commit
+    /// index. Meanwhile it votes, appends and commits, but applies nothing and does not campaign:
+    /// a leader that can only send a snapshot from before a split gets the vote it needs to commit
+    /// that split, and then sends the snapshot it takes once it applies it (D-067).
     pub fn reject_awaited(&mut self, g: GroupId) {
         let Some(grp) = self.groups.get_mut(&g) else { return };
-        // Its own snapshot after a restart: it asks the leader for its snapshot, now and with each
-        // round of the leader's entries (007 T016).
-        let own = grp.parked.is_none() && grp.own.is_some();
-        grp.own_stale |= own;
-        let index = match (&grp.parked, own) {
-            (Some((snap, _)), _) => snap.meta.index,
-            (None, true) => 0,
-            (None, false) => return,
-        };
+        // A parked snapshot whose data will not come is kept as the replica's own snapshot
+        // without its data: durable, with the rest of its `Ready`, so that the replica votes,
+        // appends and commits again while it waits, and asks the leader for a newer one with each
+        // round of entries (007 T016). Parked, it answered nothing, and a leader that needs its
+        // vote to commit past the snapshot (the split that would make a newer one) never got it.
+        if let Some((snap, d)) = grp.parked.take() {
+            grp.own = Some((snap.meta.index, snap.data.clone()));
+            grp.sync_awaiting();
+            if !self.save_installed(g, snap, d) {
+                return;
+            }
+        }
+        // Its own snapshot: it asks the leader for its snapshot, now and with each round of the
+        // leader's entries (007 T016).
+        let Some(grp) = self.groups.get_mut(&g).filter(|grp| grp.own.is_some()) else { return };
+        grp.own_stale = true;
         // The leader it last heard of may have lost the leadership while it waited: every voter
         // hears it, and only the leader acts on it.
         let me = self.cfg.node_id;
         let to: BTreeSet<NodeId> =
             grp.raw.conf().voters.iter().copied().filter(|n| *n != me).collect();
         for node in to {
-            let ack = PeerFrame::SnapshotAck { group: g, index, offset: 0, ok: false };
+            let ack = PeerFrame::SnapshotAck { group: g, index: 0, offset: 0, ok: false };
             self.frames.push((node, ack));
         }
+    }
+
+    /// The index the data of snapshot `data` of `g`, taken at `index`, reaches
+    /// ([`StateMachine::data_index`]).
+    fn data_index(&self, g: GroupId, data: &[u8], index: u64) -> u64 {
+        let grp = self.groups.get(&g).expect("a group of this core");
+        unwrap_snapshot(data).map_or(index, |(_, _, sm)| grp.sm.data_index(sm, index))
     }
 
     /// Whether the state machine of `g` lacks the data of snapshot `data`.

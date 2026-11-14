@@ -89,6 +89,15 @@ pub trait StateMachine {
         true
     }
 
+    /// The index the data that `snap`, the state machine's part of a snapshot at `index`, needs
+    /// reaches: what `Actions::snapshot_data` asks the layer above for, and the index its ingest
+    /// marks. `index` itself, or more for a snapshot taken while the log replayed entries the
+    /// state machine already held, whose state is the one past them.
+    fn data_index(&self, snap: &[u8], index: u64) -> u64 {
+        let _ = snap;
+        index
+    }
+
     /// The lowest index a snapshot of it may have to leave this replica (0: any). The core takes
     /// a snapshot as soon as it applied past one it has below it, whatever
     /// `CoreConfig::snapshot_entries` says, and sends none below it to another replica: those

@@ -35,6 +35,19 @@ fn a_leader_restarted_past_its_commit_index_still_makes_progress() {
     assert!(r.events > 10_000, "{} events", r.events);
 }
 
+/// Seed 13 (heavy plan, twice the fault rate): a snapshot taken while the log replayed what the
+/// LSM had flushed holds the state past its index, and its last write with it. The replica asked
+/// for its data up to the snapshot's index, the ingest marked that index, and the data never
+/// counted as here: the replica parked the snapshot again after every ingest and, with the leader
+/// down, its range elected no one.
+#[test]
+fn a_snapshot_whose_state_runs_past_its_index_is_installed_once_its_data_arrives() {
+    let cfg = SimConfig { fault_rate_pct: DOUBLE_FAULTS, ..cfg(FaultPlan::Heavy) };
+    let r = run_seed(&cfg, 13);
+    assert_eq!(r.verdict, Verdict::Pass);
+    assert!(r.events > 10_000, "{} events", r.events);
+}
+
 #[test]
 fn the_seeds_that_found_defects_pass() {
     for (plan, seed) in [
@@ -94,10 +107,11 @@ fn a_retried_write_acknowledged_with_w1_names_no_predecessor() {
     assert_eq!(total.w1_blind_named, 0, "{total:?}");
 }
 
-/// Seeds `lost_writes_are_retried_with_their_key` may take to reach every kind of retry: about
-/// one seed in six gets an answer from the record of an applied original, and which ones moves
-/// with every change to what the nodes do.
-const RETRY_SEEDS: u64 = 64;
+/// Seeds of [`lost_writes_are_retried_with_their_key`]: every one must pass, and together they
+/// must reach each kind of retry. Six were enough until the memtable's byte count changed the
+/// timing of the runs (14-11-2026) and left none of them with a retry answered from its record;
+/// forty keep several of each kind whatever the timing.
+const RETRY_SEEDS: std::ops::RangeInclusive<u64> = 1..=40;
 
 /// FR-011: writes whose answer is lost go again with the same key; some retries get a definite
 /// answer, and some of those come from the record of an original that was applied, while every
@@ -105,11 +119,7 @@ const RETRY_SEEDS: u64 = 64;
 #[test]
 fn lost_writes_are_retried_with_their_key() {
     let mut total = RetryStats::default();
-    let reached = |t: &RetryStats| t.retried > 0 && t.definite > 0 && t.from_record > 0;
-    for seed in 1..=RETRY_SEEDS {
-        if reached(&total) {
-            break;
-        }
+    for seed in RETRY_SEEDS {
         let stats = Rc::new(Cell::new(RetryStats::default()));
         let wl = RangeDocsWorkload::counting(3, 2, Rc::clone(&stats));
         let r = run_workload(&cfg(FaultPlan::Heavy), seed, wl);
@@ -125,7 +135,7 @@ fn lost_writes_are_retried_with_their_key() {
         total.definite += s.definite;
         total.from_record += s.from_record;
     }
-    assert!(reached(&total), "{total:?}");
+    assert!(total.retried > 0 && total.definite > 0 && total.from_record > 0, "{total:?}");
 }
 
 /// Seeds chosen by coverage (01-11-2026): each takes the workload through a guard of the
