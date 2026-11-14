@@ -71,8 +71,11 @@ impl SentFilter {
             if batch.is_empty() {
                 return Some(out);
             }
-            let docs: Vec<RawDoc<'_>> =
-                batch.iter().map(|(_, d)| RawDoc::from_stored(d)).collect::<Result<_, _>>().ok()?;
+            let docs: Vec<teseladb_keys::stored::Stored<'_>> = batch
+                .iter()
+                .map(|(_, d)| teseladb_keys::stored::split(d))
+                .collect::<Result<_, _>>()
+                .ok()?;
             let kept = self.filter.matches_batch(&docs, &ctx).ok()?;
             for (l, row) in batch.into_iter().enumerate() {
                 seen += 1;

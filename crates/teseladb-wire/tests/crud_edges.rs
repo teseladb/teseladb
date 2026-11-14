@@ -1037,7 +1037,7 @@ fn empty_timestamps_take_the_time_of_the_write() {
     let ts = Hlc { physical: 5_000, logical: 2 };
     let (time, inc) = teseladb_hlc::to_timestamp(ts);
     let stored = |out: &teseladb_range::mutate::Outcome, i: usize| {
-        Document::from(teseladb_bson::RawDoc::from_bytes(&out.puts[i].value).unwrap())
+        Document::from(teseladb_keys::stored::raw(&out.puts[i].value).unwrap())
     };
     let docs = vec![
         Document::new().with("_id", z.clone()).with("x", Document::new().with("t", z.clone())),

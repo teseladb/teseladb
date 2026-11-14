@@ -49,7 +49,7 @@ struct Read<'k, 'a> {
     collection: u32,
     rule: CappedRule,
     state: CappedState,
-    /// The oldest documents, `(seq, bytes)`.
+    /// The oldest documents, `(seq, BSON)`: their sizes are those of their BSON (003 FR-021).
     oldest: Vec<(u64, &'a [u8])>,
     /// The write's own keys.
     own: &'k [Vec<u8>],
@@ -78,7 +78,7 @@ fn read<'k, 'a>(
         // A document deleted since the scan.
         let Some((_, doc)) = lookup(k) else { return Err(refusal(CappedError::Stale)) };
         let seq = cap::seq_of(tenant, collection, k).ok_or_else(|| internal("not a capped key"))?;
-        oldest.push((seq, doc));
+        oldest.push((seq, teseladb_keys::stored::bson(doc)?));
     }
     Ok(Read { tenant, collection, rule, state, oldest, own })
 }
@@ -124,6 +124,12 @@ pub(super) fn eval(
             Err(internal("not a capped write"))
         }
     }
+}
+
+/// The size a capped collection counts for stored document `stored`: its BSON's, without its
+/// table (003 FR-021).
+fn bson_len(stored: &[u8]) -> Result<u64, CommandError> {
+    Ok(teseladb_keys::stored::bson(stored)?.len() as u64)
 }
 
 fn state_put((tenant, collection): (u32, u32), state: CappedState) -> Put {
@@ -192,11 +198,11 @@ fn change(
     let mut state = r.state;
     for k in r.own {
         let Some((_, old)) = lookup(k) else { continue };
-        let old = old.len() as u64;
+        let old = bson_len(old)?;
         if deletes.contains(k) {
             state = plan_delete(state, old);
         } else if let Some(p) = puts.iter().find(|p| &p.key == k) {
-            state = plan_update(state, old, p.value.len() as u64);
+            state = plan_update(state, old, bson_len(&p.value)?);
         }
     }
     if result.upserted.is_none() {
@@ -207,8 +213,8 @@ fn change(
     let size = puts
         .iter()
         .find(|p| p.key == upsert_key)
-        .map(|p| p.value.len() as u64)
-        .ok_or_else(|| internal("an upsert without its document"))?;
+        .map(|p| bson_len(&p.value))
+        .ok_or_else(|| internal("an upsert without its document"))??;
     let (p, d) = evict(r, state, size, checker, lookup)?;
     puts.extend(p);
     deletes.extend(d);

@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_keys::stored;
 use teseladb_stages::Stage;
 
 use teseladb_hlc::Hlc;
@@ -965,6 +966,221 @@ impl Drop for ServerBackend {
     }
 }
 
+/// The reads of documents as the node stores them: the trait's methods hand the commands their
+/// BSON (003 FR-021), cut from the table of offsets each stored document carries.
+impl ServerBackend {
+    fn scan_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // At the command's mark: on the leaders, which serve it once their clock gets there.
+        if let Some(mark) = self.read_mark {
+            return self.scan_at((start, end, limit), mark, false);
+        }
+        // A scan of one key on its leader, on this thread when its range's view serves it (005
+        // FR-028): a find by `_id` asks for one.
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        let one_key = end.len() == start.len() + 1 && end.starts_with(start) && end.ends_with(&[0]);
+        // Its core reads it as a point read too: a key the filters of a file rule out costs no
+        // block there, where a scan reads one from each file (H-010 of the native tests).
+        if primary && one_key && limit > 0 {
+            let value = match self.read_outside(start, concern) {
+                Some(value) => value,
+                None => self.point_on_leader(start, concern)?,
+            };
+            return Ok(value.map(|v| (start.to_vec(), v)).into_iter().collect());
+        }
+        // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
+        self.selection = self
+            .read_pref
+            .as_ref()
+            .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
+            .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
+        let rows = self.scan_ranges(start, end, limit, concern);
+        self.selection = None;
+        rows
+    }
+
+    fn scan_back_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        concern: ReadConcern,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `scan`, from the last key down (H-003).
+        if let Some(mark) = self.read_mark {
+            return self.scan_at((start, end, limit), mark, true);
+        }
+        self.selection = self
+            .read_pref
+            .as_ref()
+            .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
+            .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
+        let prefer = (self.read_pref.clone(), self.h.node, self.h.routes.tags());
+        let make = |e: &RouteEntry, part| scan_req(&prefer, e, part, (concern, true));
+        let rows = self.scan_ranges_back((start, end, limit), &make, Some(concern));
+        self.selection = None;
+        rows
+    }
+
+    fn scan_spans_stored(
+        &mut self,
+        spans: &[teseladb_wire::commands::Span],
+        concern: ReadConcern,
+    ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
+        self.spans_together(spans, concern)
+    }
+
+    fn points_stored(
+        &mut self,
+        keys: &[Vec<u8>],
+        concern: ReadConcern,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        // A read at the command's mark or with a read preference goes as a scan of each key,
+        // which those paths serve; otherwise each key is a point read on its leader, which skips
+        // the files its filters rule out (H-013).
+        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
+        if self.read_mark.is_some() || !primary {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                let rows = self.scan(k, &[k.as_slice(), &[0]].concat(), 1, concern)?;
+                out.push(rows.into_iter().next().map(|(_, v)| v));
+            }
+            return Ok(out);
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            // On this thread when the key's range published a view that serves it (005 FR-028).
+            let value = match self.read_outside(key, concern) {
+                Some(value) => value,
+                None => self.point_on_leader(key, concern)?,
+            };
+            out.push(value);
+        }
+        Ok(out)
+    }
+
+    fn txn_get_stored(
+        &mut self,
+        key: &[u8],
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
+        let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
+            key: key.to_vec(),
+            scan: None,
+            backward: false,
+            at: Some(at),
+            concern: ReadConcern::Majority,
+            view: view.clone(),
+            uncertain_to,
+        };
+        match self.data(key, true, build)?.1 {
+            RemoteReply::Value { value, .. } => Ok(value),
+            _ => Err(CommandError::new(INTERNAL_ERROR, "a read answered with no value")),
+        }
+    }
+
+    fn txn_scan_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // Range by range in key order at one mark, until the limit or the end (008 FR-003).
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut from = start.to_vec();
+        while from.as_slice() < end && rows.len() < limit {
+            let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
+            let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
+                true => end.to_vec(),
+                false => e.end.clone(),
+            };
+            let build = |e: &RouteEntry, _| RemoteReq::ReadWith {
+                key: from.clone(),
+                scan: Some((stop(e), left)),
+                backward: false,
+                at: Some(at),
+                concern: ReadConcern::Majority,
+                view: view.clone(),
+                uncertain_to,
+            };
+            match self.data(&from, true, build)? {
+                (e, RemoteReply::Rows(more)) => {
+                    rows.extend(more);
+                    from = stop(&e);
+                }
+                _ => return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows")),
+            }
+        }
+        Ok(rows)
+    }
+
+    fn txn_scan_back_stored(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<teseladb_hlc::Hlc>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        // As `txn_scan`, range by range from the last one down (H-003).
+        let make = |_: &RouteEntry, (lo, hi, left): (Vec<u8>, Vec<u8>, u32)| RemoteReq::ReadWith {
+            key: lo,
+            scan: Some((hi, left)),
+            backward: true,
+            at: Some(at),
+            concern: ReadConcern::Majority,
+            view: view.clone(),
+            uncertain_to,
+        };
+        self.scan_ranges_back((start, end, limit), &make, None)
+    }
+
+    fn txn_gets_stored(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<Hlc>,
+    ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
+        self.gets_together(keys, (at, view, uncertain_to))
+    }
+
+    fn txn_points_stored(
+        &mut self,
+        keys: &[Vec<u8>],
+        at: Hlc,
+        view: &TxnView,
+        uncertain_to: Option<Hlc>,
+    ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+        self.points_together(keys, (at, view, uncertain_to))
+    }
+}
+
+/// A value of `key` of type `value_type` as the commands read it: a document's BSON.
+fn document_value(value_type: u8, key: &[u8], value: Vec<u8>) -> Vec<u8> {
+    if value_type == teseladb_wire::commands::mutation::DOCUMENT {
+        stored::document_value(key, value)
+    } else {
+        value
+    }
+}
+
+/// [`stored::document_value`] on the point reads of `keys`.
+fn point_documents(keys: &[Vec<u8>], found: Vec<Option<Vec<u8>>>) -> Vec<Option<Vec<u8>>> {
+    keys.iter().zip(found).map(|(k, v)| v.map(|v| stored::document_value(k, v))).collect()
+}
+
 impl Backend for ServerBackend {
     fn collection(&mut self, ns: &Namespace) -> Result<Option<CollectionEntry>, CommandError> {
         Ok(self.catalog()?.get(ns).cloned())
@@ -1069,32 +1285,7 @@ impl Backend for ServerBackend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        // At the command's mark: on the leaders, which serve it once their clock gets there.
-        if let Some(mark) = self.read_mark {
-            return self.scan_at((start, end, limit), mark, false);
-        }
-        // A scan of one key on its leader, on this thread when its range's view serves it (005
-        // FR-028): a find by `_id` asks for one.
-        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
-        let one_key = end.len() == start.len() + 1 && end.starts_with(start) && end.ends_with(&[0]);
-        // Its core reads it as a point read too: a key the filters of a file rule out costs no
-        // block there, where a scan reads one from each file (H-010 of the native tests).
-        if primary && one_key && limit > 0 {
-            let value = match self.read_outside(start, concern) {
-                Some(value) => value,
-                None => self.point_on_leader(start, concern)?,
-            };
-            return Ok(value.map(|v| (start.to_vec(), v)).into_iter().collect());
-        }
-        // Without `maxTimeMS`, a refrouter looks for a replica for its selection limit (D-093).
-        self.selection = self
-            .read_pref
-            .as_ref()
-            .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
-            .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
-        let rows = self.scan_ranges(start, end, limit, concern);
-        self.selection = None;
-        rows
+        self.scan_stored(start, end, limit, concern).map(stored::document_rows)
     }
 
     fn scan_matching(
@@ -1152,28 +1343,7 @@ impl Backend for ServerBackend {
         keys: &[Vec<u8>],
         concern: ReadConcern,
     ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
-        // A read at the command's mark or with a read preference goes as a scan of each key,
-        // which those paths serve; otherwise each key is a point read on its leader, which skips
-        // the files its filters rule out (H-013).
-        let primary = self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
-        if self.read_mark.is_some() || !primary {
-            let mut out = Vec::with_capacity(keys.len());
-            for k in keys {
-                let rows = self.scan(k, &[k.as_slice(), &[0]].concat(), 1, concern)?;
-                out.push(rows.into_iter().next().map(|(_, v)| v));
-            }
-            return Ok(out);
-        }
-        let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
-            // On this thread when the key's range published a view that serves it (005 FR-028).
-            let value = match self.read_outside(key, concern) {
-                Some(value) => value,
-                None => self.point_on_leader(key, concern)?,
-            };
-            out.push(value);
-        }
-        Ok(out)
+        self.points_stored(keys, concern).map(|found| point_documents(keys, found))
     }
 
     fn scan_back(
@@ -1183,20 +1353,7 @@ impl Backend for ServerBackend {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        // As `scan`, from the last key down (H-003).
-        if let Some(mark) = self.read_mark {
-            return self.scan_at((start, end, limit), mark, true);
-        }
-        self.selection = self
-            .read_pref
-            .as_ref()
-            .filter(|p| p.mode != Mode::Primary && self.max_until.is_none())
-            .map(|p| (Instant::now() + SELECTION_LIMIT, p.describe()));
-        let prefer = (self.read_pref.clone(), self.h.node, self.h.routes.tags());
-        let make = |e: &RouteEntry, part| scan_req(&prefer, e, part, (concern, true));
-        let rows = self.scan_ranges_back((start, end, limit), &make, Some(concern));
-        self.selection = None;
-        rows
+        self.scan_back_stored(start, end, limit, concern).map(stored::document_rows)
     }
 
     fn scan_spans(
@@ -1204,7 +1361,8 @@ impl Backend for ServerBackend {
         spans: &[teseladb_wire::commands::Span],
         concern: ReadConcern,
     ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
-        self.spans_together(spans, concern)
+        self.scan_spans_stored(spans, concern)
+            .map(|all| all.into_iter().map(stored::document_rows).collect())
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
@@ -1449,19 +1607,8 @@ impl Backend for ServerBackend {
         view: &TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Option<(u8, Vec<u8>)>, CommandError> {
-        let build = |_: &RouteEntry, _| RemoteReq::ReadWith {
-            key: key.to_vec(),
-            scan: None,
-            backward: false,
-            at: Some(at),
-            concern: ReadConcern::Majority,
-            view: view.clone(),
-            uncertain_to,
-        };
-        match self.data(key, true, build)?.1 {
-            RemoteReply::Value { value, .. } => Ok(value),
-            _ => Err(CommandError::new(INTERNAL_ERROR, "a read answered with no value")),
-        }
+        self.txn_get_stored(key, at, view, uncertain_to)
+            .map(|found| found.map(|(t, v)| (t, document_value(t, key, v))))
     }
 
     fn txn_scan(
@@ -1473,33 +1620,7 @@ impl Backend for ServerBackend {
         view: &TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        // Range by range in key order at one mark, until the limit or the end (008 FR-003).
-        let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        let mut from = start.to_vec();
-        while from.as_slice() < end && rows.len() < limit {
-            let left = u32::try_from(limit - rows.len()).unwrap_or(u32::MAX);
-            let stop = |e: &RouteEntry| match e.end.is_empty() || end <= e.end.as_slice() {
-                true => end.to_vec(),
-                false => e.end.clone(),
-            };
-            let build = |e: &RouteEntry, _| RemoteReq::ReadWith {
-                key: from.clone(),
-                scan: Some((stop(e), left)),
-                backward: false,
-                at: Some(at),
-                concern: ReadConcern::Majority,
-                view: view.clone(),
-                uncertain_to,
-            };
-            match self.data(&from, true, build)? {
-                (e, RemoteReply::Rows(more)) => {
-                    rows.extend(more);
-                    from = stop(&e);
-                }
-                _ => return Err(CommandError::new(INTERNAL_ERROR, "a scan answered with no rows")),
-            }
-        }
-        Ok(rows)
+        self.txn_scan_stored(start, end, limit, at, view, uncertain_to).map(stored::document_rows)
     }
 
     fn txn_scan_back(
@@ -1511,17 +1632,8 @@ impl Backend for ServerBackend {
         view: &TxnView,
         uncertain_to: Option<teseladb_hlc::Hlc>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
-        // As `txn_scan`, range by range from the last one down (H-003).
-        let make = |_: &RouteEntry, (lo, hi, left): (Vec<u8>, Vec<u8>, u32)| RemoteReq::ReadWith {
-            key: lo,
-            scan: Some((hi, left)),
-            backward: true,
-            at: Some(at),
-            concern: ReadConcern::Majority,
-            view: view.clone(),
-            uncertain_to,
-        };
-        self.scan_ranges_back((start, end, limit), &make, None)
+        self.txn_scan_back_stored(start, end, limit, at, view, uncertain_to)
+            .map(stored::document_rows)
     }
 
     fn txn_gets(
@@ -1531,7 +1643,12 @@ impl Backend for ServerBackend {
         view: &TxnView,
         uncertain_to: Option<Hlc>,
     ) -> Result<Vec<Option<(u8, Vec<u8>)>>, CommandError> {
-        self.gets_together(keys, (at, view, uncertain_to))
+        self.txn_gets_stored(keys, at, view, uncertain_to).map(|found| {
+            keys.iter()
+                .zip(found)
+                .map(|(k, v)| v.map(|(t, v)| (t, document_value(t, k, v))))
+                .collect()
+        })
     }
 
     fn txn_points(
@@ -1541,7 +1658,8 @@ impl Backend for ServerBackend {
         view: &TxnView,
         uncertain_to: Option<Hlc>,
     ) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
-        self.points_together(keys, (at, view, uncertain_to))
+        self.txn_points_stored(keys, at, view, uncertain_to)
+            .map(|found| point_documents(keys, found))
     }
 
     fn read_versions(

@@ -27,7 +27,7 @@ fn a_document_deleted_after_its_index_entry_is_skipped() {
     let key = m
         .data
         .iter()
-        .find(|(_, v)| v.ends_with(&gone))
+        .find(|(_, v)| teseladb_keys::stored::bson(v).is_ok_and(|b| b == gone.as_slice()))
         .map(|(k, _)| k.clone())
         .expect("the document's key");
     m.data.remove(&key);

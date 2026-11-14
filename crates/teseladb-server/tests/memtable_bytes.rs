@@ -5,8 +5,6 @@
 //! version besides the key and the value, the figure of the skiplist, and with a leaf keeping the
 //! sort key and the internal key it was below what the memtable held.
 
-use std::sync::Mutex;
-
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_sys::alloc_count::{CountingAlloc, held_bytes};
@@ -15,9 +13,6 @@ use teseladb_types::GroupId;
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
-
-/// One test measures at a time, so that the other's memory does not count.
-static MEASURING: Mutex<()> = Mutex::new(());
 
 /// Versions written in each case.
 const VERSIONS: usize = 20_000;
@@ -75,9 +70,8 @@ fn measure(versions: &[(Vec<u8>, Vec<u8>)]) -> (u64, u64) {
     (held as u64, counted)
 }
 
-/// Builds the versions and measures them while no other test allocates.
+/// Builds the versions and measures them.
 fn check(name: &str, build: impl FnOnce() -> Vec<(Vec<u8>, Vec<u8>)>) {
-    let _one = MEASURING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let versions = build();
     let (held, counted) = measure(&versions);
     let per_version = |b: u64| b as f64 / versions.len() as f64;
@@ -93,8 +87,18 @@ fn check(name: &str, build: impl FnOnce() -> Vec<(Vec<u8>, Vec<u8>)>) {
     );
 }
 
+/// The four cases, one after another in the binary's only test: the allocator counts every
+/// thread of the process, and with several tests the harness allocated for one that ended while
+/// another measured (512 bytes over 4.4 MB on 14-11-2026, in `index entries`).
 #[test]
-fn documents_of_100_bytes_to_4_kib_count_what_they_hold() {
+fn the_memtable_counts_what_it_holds() {
+    documents_of_100_bytes_to_4_kib();
+    small_documents();
+    index_entries();
+    versions_of_the_same_documents();
+}
+
+fn documents_of_100_bytes_to_4_kib() {
     check("documents", || {
         let mut rng = 0x00D0_C0DE;
         (0..VERSIONS)
@@ -103,24 +107,21 @@ fn documents_of_100_bytes_to_4_kib_count_what_they_hold() {
     });
 }
 
-#[test]
-fn small_documents_count_what_they_hold() {
+fn small_documents() {
     check("documents of 100 bytes", || {
         let mut rng = 0x5A11;
         (0..VERSIONS).map(|_| (document_key(&mut rng), vec![7; 100])).collect()
     });
 }
 
-#[test]
-fn index_entries_count_what_they_hold() {
+fn index_entries() {
     check("index entries", || {
         let mut rng = 0x1DE7;
         (0..VERSIONS).map(|_| (index_key(&mut rng), Vec::new())).collect()
     });
 }
 
-#[test]
-fn versions_of_the_same_documents_count_what_they_hold() {
+fn versions_of_the_same_documents() {
     // A few hundred documents written again and again: many versions under each key.
     check("versions", || {
         let mut rng = 0x7E57;

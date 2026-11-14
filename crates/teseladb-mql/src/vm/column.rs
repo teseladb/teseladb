@@ -30,7 +30,7 @@ pub fn load_column<'d>(docs: &[RawDoc<'d>], path: &str, out: &mut Vec<Cell<'d>>)
     out.clear();
     out.extend(docs.iter().map(|d| {
         let bytes = d.as_bytes();
-        let r = load(bytes, &segs);
+        let r = load(&teseladb_keys::stored::Stored::plain(*d), &segs);
         match r.tag {
             Tag::Missing => Cell::Missing,
             Tag::ThroughArray => Cell::ThroughArray,

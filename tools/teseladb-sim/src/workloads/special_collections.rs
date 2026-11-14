@@ -184,7 +184,7 @@ fn documents(read: &BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Vec<(u64, Vec<u8>)> {
 
 /// The `_id` of a stored document.
 fn id_of(bytes: &[u8]) -> Option<String> {
-    match RawDoc::from_bytes(bytes).ok()?.get("_id")? {
+    match RawDoc::from_bytes(teseladb_keys::stored::bson(bytes).ok()?).ok()?.get("_id")? {
         RawValue::String(s) => Some(s.to_owned()),
         _ => None,
     }
@@ -205,7 +205,15 @@ impl SpecialCollections {
             |what: String| Err(Violation::safety(CHECKER, format!("{what} at {:?}", done.read_ts)));
         let s = state_of(&read)?;
         let docs = documents(&read);
-        let bytes: u64 = docs.iter().map(|(_, d)| d.len() as u64).sum();
+        // The state counts each document's BSON, without its table (003 FR-021).
+        let Ok(sizes) = docs
+            .iter()
+            .map(|(_, d)| teseladb_keys::stored::bson(d).map(|b| b.len() as u64))
+            .collect::<Result<Vec<u64>, _>>()
+        else {
+            return fail("an unreadable document".into());
+        };
+        let bytes: u64 = sizes.iter().sum();
         if (docs.len() as u64, bytes) != (s.docs, s.bytes) {
             return fail(format!("state {s:?} for {} documents of {bytes} bytes", docs.len()));
         }
@@ -244,7 +252,7 @@ impl SpecialCollections {
                 _ => None,
             });
             let Some(Some(bytes)) = read else { continue };
-            let Ok(raw) = RawDoc::from_bytes(&bytes) else {
+            let Ok(raw) = teseladb_keys::stored::bson(&bytes).and_then(RawDoc::from_bytes) else {
                 return fail("an unreadable bucket".into());
             };
             let doc = Document::from(raw);
@@ -536,6 +544,25 @@ mod tests {
         let s =
             CappedState { bytes: ok.iter().map(|(_, d)| d.len() as u64).sum(), docs: 2, next: 2 };
         script().check(&committed(capped(s, &ok))).expect("a good collection");
+        // Stored with their tables, the state still counts their BSON (003 FR-021).
+        let wide = |id: &str| {
+            let mut d = Document::new().with("_id", id);
+            for f in 0..teseladb_keys::stored::MIN_TABLE_FIELDS {
+                d.push(format!("f{f}"), 1);
+            }
+            d.to_bytes().expect("small")
+        };
+        let bson = [(0, wide("a")), (1, wide("b"))];
+        let tabled: Vec<(u64, Vec<u8>)> =
+            bson.iter().map(|(seq, d)| (*seq, teseladb_keys::stored::encode(d.clone()))).collect();
+        assert!(tabled[0].1.len() > bson[0].1.len(), "a document with its table");
+        let s2 =
+            CappedState { bytes: bson.iter().map(|(_, d)| d.len() as u64).sum(), docs: 2, next: 2 };
+        script().check(&committed(capped(s2, &tabled))).expect("documents with their tables");
+        let broken = [(0, vec![9, 0, 0])];
+        let s1 = CappedState { bytes: 3, docs: 1, next: 1 };
+        let v = script().check(&committed(capped(s1, &broken))).expect_err("unreadable");
+        assert!(v.detail.contains("an unreadable document"), "{}", v.detail);
         let big = [(0, doc("a", 300))];
         let s = CappedState { bytes: big[0].1.len() as u64, docs: 1, next: 1 };
         script().check(&committed(capped(s, &big))).expect("the newest alone may pass the size");
