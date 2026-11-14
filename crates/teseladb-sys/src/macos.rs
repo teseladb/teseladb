@@ -589,38 +589,6 @@ pub(crate) fn usec(v: Suseconds) -> i64 {
     i64::from(v)
 }
 
-unsafe extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-}
-
-const PROT_READ_WRITE: i32 = 0x1 | 0x2;
-const MAP_PRIVATE: i32 = 0x0002;
-const MAP_ANON: i32 = 0x1000;
-const MAP_FAILED: usize = usize::MAX;
-const MADV_FREE: i32 = 5;
-
-/// `len` bytes of address space, readable and writable, that take memory only where they are
-/// touched: the request arenas' region (012 FR-027). `None` if refused.
-pub(crate) fn reserve(len: usize) -> Option<std::ptr::NonNull<u8>> {
-    // SAFETY: an anonymous private mapping at an address the kernel picks; no memory of the
-    // process is touched, and `mmap` does not allocate from the process's heap.
-    let p =
-        unsafe { mmap(std::ptr::null_mut(), len, PROT_READ_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) };
-    if p as usize == MAP_FAILED {
-        return None;
-    }
-    std::ptr::NonNull::new(p)
-}
-
-/// Gives the memory of `len` bytes at `ptr`, inside a [`reserve`]d region, back to the system
-/// when it needs it; the bytes may keep their contents until then.
-pub(crate) fn discard(ptr: *mut u8, len: usize) {
-    // SAFETY: the range lies in a mapping of this process that nothing reads until it is handed
-    // out again; a failure only keeps the memory.
-    unsafe { madvise(ptr, len, MADV_FREE) };
-}
-
 /// macOS has no `MAP_HUGETLB`: the buffers stay on normal pages (012 FR-032).
 pub(crate) fn map_huge(_len: usize) -> Option<std::ptr::NonNull<u8>> {
     None
