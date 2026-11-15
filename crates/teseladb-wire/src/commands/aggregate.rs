@@ -1105,7 +1105,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         .then(|| pipeline.scatter(&stage_docs, true, limit))
         .flatten();
     // Each way of an aggregation that could split is timed from here to its results (012 FR-015).
-    let began = std::time::Instant::now();
+    let began = ctx.backend.now_micros();
     let planned = match plans_read {
         true => plan_read(
             ctx,
@@ -1189,12 +1189,13 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         (false, true) => Some(teseladb_stages::Stage::AggByIndex),
         (false, false) => None,
     };
-    if let Some(stage) = way {
-        let took = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        teseladb_stages::record(stage, took);
-    }
     let vars = env.vars.clone();
     drop(env);
+    // The time comes from the backend: a logic crate reads no clock of its own.
+    if let Some(stage) = way {
+        let took = ctx.backend.now_micros().saturating_sub(began).saturating_mul(1_000);
+        teseladb_stages::record(stage, took);
+    }
     // A classic stage at the end writes each document it gives as BSON, which may not pass
     // 16 MiB and 16 KiB; the slot-based engine hands its documents on as they are (measured on
     // a reference replica set member 9.0.4, 02-11-2026).
