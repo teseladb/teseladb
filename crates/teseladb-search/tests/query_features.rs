@@ -253,6 +253,40 @@ const SEARCHES: &[(&str, &str)] = &[
         r#"{"compound": {"filter": [{"phrase": {"query": "big cat", "path": "t", "synonyms": "s"}}]}}"#,
     ),
     (
+        "boost-value",
+        r#"{"text": {"query": "quick", "path": "t", "score": {"boost": {"value": 2}}}}"#,
+    ),
+    ("range-token-one-bound", r#"{"range": {"path": "g", "gt": "green"}}"#),
+    ("should-one", r#"{"compound": {"should": [{"text": {"query": "fox", "path": "t"}}]}}"#),
+    (
+        "should-minimum-one",
+        r#"{"compound": {"should": [{"text": {"query": "fox", "path": "t"}}, {"text": {"query": "zoo", "path": "t"}}], "minimumShouldMatch": 1}}"#,
+    ),
+    ("filter-only", r#"{"compound": {"filter": [{"text": {"query": "dog", "path": "t"}}]}}"#),
+    (
+        "compound-boost",
+        r#"{"compound": {"must": [{"text": {"query": "quick", "path": "t"}}], "should": [{"text": {"query": "fox", "path": "t"}}], "score": {"boost": {"value": 3}}}}"#,
+    ),
+    (
+        "criteria-all-plain",
+        r#"{"text": {"query": "quick brown", "path": "t", "matchCriteria": "all"}}"#,
+    ),
+    (
+        "embedded-minimum",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "quick fox", "path": "items.t"}},
+            "score": {"embedded": {"aggregate": "minimum"}}}}"#,
+    ),
+    (
+        "embedded-boost",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "zoo", "path": "items.t"}},
+            "score": {"boost": {"value": 2}}}}"#,
+    ),
+    (
+        "autocomplete-boost",
+        r#"{"autocomplete": {"query": "qui", "path": "a", "score": {"boost": {"value": 2}}}}"#,
+    ),
+    ("autocomplete-list", r#"{"autocomplete": {"query": ["qui", "laz"], "path": "a"}}"#),
+    (
         "must-criteria-all-paths",
         r#"{"compound": {"must": [{"text": {"query": "fast fox", "path": ["t", "syn"], "synonyms": "s", "matchCriteria": "all"}}]}}"#,
     ),
