@@ -34,7 +34,7 @@ UNSAFE_CRATES=(teseladb-sys)
 # Modules that D-151 admits with unsafe code for a measured performance gain: their crate denies
 # it and only these files allow it; Miri runs their tests in the gates (scripts/ci.sh).
 UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs
-  crates/teseladb-lsm/src/art.rs
+  crates/teseladb-lsm/src/art.rs crates/teseladb-lsm/src/sst/lz4.rs
   crates/teseladb-mql/src/simd.rs
   crates/teseladb-search/src/segment/lanes.rs
   crates/teseladb-search/src/byte_simd.rs

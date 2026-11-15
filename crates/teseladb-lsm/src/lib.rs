@@ -80,6 +80,29 @@ pub use concurrent::{
 pub use config::{Codec, Encryption, LsmConfig};
 pub use shared::Published;
 
+/// The LZ4 block of `input` (FR-037), as the LSM writes it after the decompressed length: for the
+/// benches that compare it with other implementations of the format.
+pub fn lz4_compress_block(input: &[u8]) -> Vec<u8> {
+    sst::lz4::compress_block(input)
+}
+
+/// [`lz4_compress_block`] appended to `out`, for the benches that reuse one buffer.
+pub fn lz4_compress_block_into(input: &[u8], out: &mut Vec<u8>) {
+    sst::lz4::compress_block_into(input, out);
+}
+
+/// What the LZ4 block `block` decompresses to, which must be `size` bytes long (FR-037); `None`
+/// when it does not decompress to that.
+pub fn lz4_decompress_block(block: &[u8], size: usize) -> Option<Vec<u8>> {
+    sst::lz4::decompress_block(block, size).ok()
+}
+
+/// [`lz4_decompress_block`] appended to `out`; `false`, with `out` as it was, when the block does
+/// not decompress to `size` bytes.
+pub fn lz4_decompress_block_into(block: &[u8], size: usize, out: &mut Vec<u8>) -> bool {
+    sst::lz4::decompress_block_into(block, size, out).is_ok()
+}
+
 /// First byte of the stored value of a version that only serves the history of its key (the
 /// change description of 014 next to each document): it is read at its own mark, never below the
 /// GC threshold, so at or below the threshold every such version goes, also the newest.
