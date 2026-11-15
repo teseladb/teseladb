@@ -9,7 +9,7 @@ use teseladb_types::Bytes;
 
 use crate::entry::{self, Kind};
 use crate::error::LsmError;
-use crate::memtable::Memtable;
+use crate::memtable::{MemPlace, Memtable, Slot};
 use crate::read::{Blocks, Fetch, ReadToken, corrupt};
 use crate::sst::block::BlockCursor;
 use crate::sst::reader::{COLUMN_SLOT, Table};
@@ -30,39 +30,35 @@ pub(crate) enum Pos {
     Done,
 }
 
-/// A cursor over a memtable: it walks by key, so the active memtable may take writes or be
-/// frozen while it is open.
+/// A cursor over a memtable: it keeps its place in the memtable's tree and goes from a version
+/// to the next without searching it from the root, reading the key where it is (FR-038). It
+/// sees the versions the memtable had when it last sought, so the active memtable may take
+/// writes or be frozen while it is open: a version written after that has a mark above the
+/// read's.
 pub(crate) struct MemCursor {
     mem: Arc<Memtable>,
-    pos: usize,
-    key: Vec<u8>,
-    kind: Kind,
-    value: Bytes,
-    valid: bool,
+    place: MemPlace,
+    /// The kind and the value of the version it stands at, taken together when it got there: a
+    /// version written again at its mark (an intent that is resolved) changes both at once, and
+    /// a reader on another thread that took each on its own could pair the old kind with the
+    /// new value.
+    slot: Option<Slot>,
 }
-
-type Found = Option<(usize, Vec<u8>, Kind, Bytes)>;
 
 impl MemCursor {
     /// A cursor over `mem`, at no entry until it seeks.
     pub(crate) fn new(mem: Arc<Memtable>) -> MemCursor {
-        MemCursor {
-            mem,
-            pos: 0,
-            key: Vec::new(),
-            kind: Kind::Put,
-            value: Bytes::new(),
-            valid: false,
-        }
+        MemCursor { mem, place: MemPlace::default(), slot: None }
     }
 
-    fn set(&mut self, found: Found) {
-        match found {
-            Some((p, k, kd, v)) => {
-                (self.pos, self.key, self.kind, self.value, self.valid) = (p, k, kd, v, true)
-            }
-            None => self.valid = false,
-        }
+    /// Takes the kind and the value of the version its place stands at.
+    fn settle(&mut self) {
+        self.slot = self.mem.at(&self.place).map(|(_, slot)| slot.clone());
+    }
+
+    /// The internal key of the version it stands at.
+    fn key(&self) -> Option<&[u8]> {
+        self.slot.as_ref().and_then(|_| self.mem.at(&self.place)).map(|(key, _)| key)
     }
 }
 
@@ -152,9 +148,8 @@ impl Cursor {
     pub(crate) fn seek(&mut self, target: Vec<u8>) {
         match self {
             Cursor::Mem(m) => {
-                let found =
-                    m.mem.seek(&target).map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
-                m.set(found);
+                m.mem.place(&target, &mut m.place);
+                m.settle();
             }
             Cursor::Table { pos, .. } => *pos = Pos::Seek(target),
         }
@@ -164,11 +159,8 @@ impl Cursor {
     pub(crate) fn advance(&mut self) -> Result<(), LsmError> {
         match self {
             Cursor::Mem(m) => {
-                let found = m
-                    .mem
-                    .next_after(m.pos, &m.key)
-                    .map(|(p, k, s)| (p, k.to_vec(), s.kind, s.value.clone()));
-                m.set(found);
+                m.mem.step(&mut m.place);
+                m.settle();
             }
             Cursor::Table { table, pos, .. } => {
                 let Pos::Ready(i, c) = pos else {
@@ -218,12 +210,26 @@ impl Cursor {
     /// this key alone: then the index takes it to the block of the next key without reading
     /// the blocks that hold only older versions (a document updated often fills blocks with
     /// them). Past the versions it steps over, it searches its own block when the index says
-    /// the next key is there, and the index otherwise. A memtable's cursor seeks at once, since
-    /// each of its steps copies a key.
+    /// the next key is there, and the index otherwise. A memtable's cursor steps over as many
+    /// and then seeks.
     pub(crate) fn skip_versions(&mut self, logical: &[u8], stepped: usize) -> Result<(), LsmError> {
-        let Cursor::Table { table, pos, .. } = self else {
-            self.seek(entry::after_all_versions(logical));
+        if let Cursor::Mem(m) = self {
+            let mut past = false;
+            for _ in 0..stepped {
+                m.mem.step(&mut m.place);
+                past = m.mem.at(&m.place).is_none_or(|(k, _)| entry::logical(k) != logical);
+                if past {
+                    break;
+                }
+            }
+            if !past {
+                m.mem.place(&entry::after_all_versions(logical), &mut m.place);
+            }
+            m.settle();
             return Ok(());
+        }
+        let Cursor::Table { table, pos, .. } = self else {
+            unreachable!("a memtable's cursor returned above")
         };
         let Pos::Ready(i, c) = pos else {
             unreachable!("only a cursor at an entry passes versions")
@@ -343,7 +349,7 @@ impl Cursor {
     /// The current internal key, if any (after [`Cursor::ready`]).
     pub(crate) fn key(&self) -> Option<&[u8]> {
         match self {
-            Cursor::Mem(m) => m.valid.then_some(m.key.as_slice()),
+            Cursor::Mem(m) => m.key(),
             Cursor::Table { pos: Pos::Ready(_, c), .. } => Some(c.key()),
             Cursor::Table { pos: Pos::Columns { at, .. }, .. } => Some(at),
             Cursor::Table { .. } => None,
@@ -352,7 +358,10 @@ impl Cursor {
 
     pub(crate) fn kind(&self) -> Kind {
         match self {
-            Cursor::Mem(m) => m.kind,
+            Cursor::Mem(m) => match &m.slot {
+                Some(slot) => slot.kind,
+                None => unreachable!("a cursor without an entry has no kind"),
+            },
             Cursor::Table { pos: Pos::Ready(_, c), .. } => c.kind(),
             Cursor::Table { .. } => unreachable!("a cursor without an entry has no kind"),
         }
@@ -361,7 +370,10 @@ impl Cursor {
     /// The entry's value, or where it is in its value file (FR-034).
     pub(crate) fn stored(&self) -> Result<(Bytes, Option<Box<crate::read::Deferred>>), LsmError> {
         match self {
-            Cursor::Mem(m) => Ok((m.value.clone(), None)),
+            Cursor::Mem(m) => match &m.slot {
+                Some(slot) => Ok((slot.value.clone(), None)),
+                None => unreachable!("a cursor without an entry has no value"),
+            },
             Cursor::Table { table, data, pos: Pos::Ready(i, c), .. } => {
                 crate::read::stored(table, data.as_ref(), *i, c)
             }
@@ -413,4 +425,77 @@ fn columns_of<B: Blocks>(
         _ => entry::after_all_versions(entry::logical(table.last_key(i - 1))),
     };
     Ok(Taken::Columns(Pos::Columns { block: i, at, payload, docs }))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_keys::Hlc;
+    use teseladb_types::GroupId;
+
+    use super::*;
+
+    fn ts(p: u64) -> Hlc {
+        Hlc { physical: p, logical: 0 }
+    }
+
+    /// The keys, marks and kinds a cursor gives from where it stands to the end.
+    fn rest(c: &mut Cursor) -> Vec<(Vec<u8>, u64, Kind)> {
+        let mut out = Vec::new();
+        while let Some(k) = c.key() {
+            let (logical, at) = entry::split(k);
+            out.push((logical.to_vec(), at.physical, c.kind()));
+            c.advance().expect("a memtable's cursor does not fail");
+        }
+        out
+    }
+
+    #[test]
+    fn a_memtable_s_cursor_walks_versions_and_passes_over_those_of_a_key() {
+        // FR-038: from a version to the next without a search from the root, the versions of a
+        // key from the newest, and past all of them whether they are few or many.
+        let m = Arc::new(Memtable::default());
+        for p in 1..=12 {
+            m.insert(GroupId(1), p, b"b", ts(p), Kind::Put, &p.to_be_bytes());
+        }
+        m.insert(GroupId(1), 13, b"a", ts(1), Kind::Put, b"x");
+        m.insert(GroupId(1), 14, b"c", ts(2), Kind::Delete, b"");
+        m.insert(GroupId(1), 15, b"c", ts(1), Kind::Put, b"y");
+        let mut c = Cursor::Mem(MemCursor::new(m));
+        assert!(c.key().is_none(), "at no entry until it seeks");
+        c.seek(entry::first_version(b""));
+        let all = rest(&mut c);
+        assert_eq!(all.len(), 15);
+        assert_eq!(all[0], (b"a".to_vec(), 1, Kind::Put));
+        assert_eq!(all[1], (b"b".to_vec(), 12, Kind::Put), "the newest version first");
+        assert_eq!(all[13..], [(b"c".to_vec(), 2, Kind::Delete), (b"c".to_vec(), 1, Kind::Put)]);
+        // Twelve versions of `b`: more than it steps over, so it seeks past them.
+        c.seek(entry::first_version(b"b"));
+        c.skip_versions(b"b", 8).expect("a memtable's cursor does not fail");
+        assert_eq!(c.key().map(|k| entry::split(k).0.to_vec()), Some(b"c".to_vec()));
+        assert_eq!(c.stored().expect("a value").0.as_ref(), b"");
+        // Two versions of `c`: it steps over them, and past the last key it stands nowhere.
+        c.skip_versions(b"c", 8).expect("a memtable's cursor does not fail");
+        assert!(c.key().is_none());
+        c.seek(entry::first_version(b"a"));
+        c.skip_versions(b"a", 8).expect("a memtable's cursor does not fail");
+        assert_eq!(c.key().map(entry::split), Some((&b"b"[..], ts(12))));
+    }
+
+    #[test]
+    fn a_memtable_s_cursor_keeps_the_kind_and_value_it_found_together() {
+        // An intent resolved while a reader on another thread stands at it is written again at
+        // its mark as a `Retract`: the reader gives the kind and the value of one of the two,
+        // the one it found, and never the kind of one with the value of the other.
+        let m = Arc::new(Memtable::default());
+        m.insert(GroupId(1), 1, b"k", ts(5), Kind::Intent, b"intent");
+        let mut c = Cursor::Mem(MemCursor::new(m.clone()));
+        c.seek(entry::first_version(b"k"));
+        m.insert(GroupId(1), 2, b"k", ts(5), Kind::Retract, b"");
+        assert_eq!(c.kind(), Kind::Intent);
+        assert_eq!(c.stored().expect("a value").0.as_ref(), b"intent");
+        // A cursor that gets there afterwards finds the new pair.
+        c.seek(entry::first_version(b"k"));
+        assert_eq!((c.kind(), c.stored().expect("a value").0.len()), (Kind::Retract, 0));
+    }
 }

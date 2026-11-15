@@ -385,7 +385,6 @@ impl<V> std::fmt::Debug for Art<V> {
 
 /// A position in the map: a leaf, valid while the map lives.
 pub(crate) struct Entry<'a, V> {
-    art: &'a Art<V>,
     leaf: &'a Leaf<V>,
 }
 
@@ -413,20 +412,54 @@ impl<'a, V> Entry<'a, V> {
     }
 }
 
-/// The entries from one on, in order, building each sort key in the same buffer.
-pub(crate) struct Walk<'a, V> {
-    at: Option<Entry<'a, V>>,
+/// A place in a map for a walk in order that keeps its way down the tree (FR-038): the inner
+/// nodes from the root to the leaf it stands at, each with the byte of the child taken, so that
+/// the next entry is found from the node above instead of from the root. It sees the keys of the
+/// moment it was placed at, as any read does; the nodes of its way may have been replaced since,
+/// and the ones it holds still lead to every key of that moment (invariant 1: a replaced node
+/// stays as it was, and its children are either the same nodes or copies made after them).
+///
+/// A place belongs to the map it was placed in ([`Art::place`]) and is only moved and read
+/// through that map, which checks it.
+pub(crate) struct Place<V> {
+    art: *const Art<V>,
+    moment: usize,
+    path: Vec<(*const Inner<V>, u8)>,
+    leaf: *const Leaf<V>,
+    /// The sort key of the last key it was placed at, kept for the next one.
     sort: Vec<u8>,
+}
+
+// SAFETY: a place holds pointers to nodes of a map, which it only reads through `&Art` (the map
+// checks that it is its own); those nodes stay allocated while the map lives (invariant 1) and
+// the map is `Sync`, so moving the place to another thread shares nothing the map does not
+// already share.
+unsafe impl<V: Send + Sync> Send for Place<V> {}
+
+impl<V> Default for Place<V> {
+    fn default() -> Place<V> {
+        Place { art: ptr::null(), moment: 0, path: Vec::new(), leaf: ptr::null(), sort: Vec::new() }
+    }
+}
+
+impl<V> std::fmt::Debug for Place<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Place").field("depth", &self.path.len()).finish()
+    }
+}
+
+/// The entries from one on, in order, as the keys were when the walk began.
+pub(crate) struct Walk<'a, V> {
+    art: &'a Art<V>,
+    place: Place<V>,
 }
 
 impl<'a, V> Iterator for Walk<'a, V> {
     type Item = Entry<'a, V>;
 
     fn next(&mut self) -> Option<Entry<'a, V>> {
-        let e = self.at?;
-        self.sort.clear();
-        (e.art.order.encode)(e.key(), &mut self.sort);
-        self.at = e.art.bound(&self.sort, true);
+        let e = self.art.at(&self.place)?;
+        self.art.step(&mut self.place);
         Some(e)
     }
 }
@@ -598,7 +631,7 @@ impl<V> Art<V> {
     }
 
     fn entry<'a>(&'a self, leaf: Option<&'a Leaf<V>>) -> Option<Entry<'a, V>> {
-        leaf.map(|leaf| Entry { art: self, leaf })
+        leaf.map(|leaf| Entry { leaf })
     }
 
     /// The first entry whose sort key is at or after `s` (after it with `strict`).
@@ -626,6 +659,7 @@ impl<V> Art<V> {
     }
 
     /// The first entry.
+    #[cfg(test)]
     pub(crate) fn first(&self) -> Option<Entry<'_, V>> {
         let moment = self.moment();
         let root = self.load(&self.root)?;
@@ -634,12 +668,144 @@ impl<V> Art<V> {
 
     /// Every entry from the first.
     pub(crate) fn iter(&self) -> Walk<'_, V> {
-        self.walk(self.first())
+        let mut place = Place::default();
+        self.place_first(&mut place);
+        Walk { art: self, place }
     }
 
-    /// The entries from `start` on.
-    pub(crate) fn walk<'a>(&'a self, start: Option<Entry<'a, V>>) -> Walk<'a, V> {
-        Walk { at: start, sort: Vec::new() }
+    /// The entries after `key`.
+    pub(crate) fn walk_after(&self, key: &[u8]) -> Walk<'_, V> {
+        let mut place = Place::default();
+        self.place(key, true, &mut place);
+        Walk { art: self, place }
+    }
+
+    /// Puts `at` at the first entry at or after `key` (after it with `strict`), or at none.
+    pub(crate) fn place(&self, key: &[u8], strict: bool, at: &mut Place<V>) {
+        let mut sort = std::mem::take(&mut at.sort);
+        sort.clear();
+        (self.order.encode)(key, &mut sort);
+        self.start(at);
+        if let Some(root) = self.load(&self.root) {
+            at.leaf = self.lower_placed(root, &sort, 0, strict, at).unwrap_or(ptr::null());
+        }
+        at.sort = sort;
+    }
+
+    /// Puts `at` at the first entry, or at none.
+    pub(crate) fn place_first(&self, at: &mut Place<V>) {
+        self.start(at);
+        if let Some(root) = self.load(&self.root) {
+            at.leaf = self.first_placed(root, at).unwrap_or(ptr::null());
+        }
+    }
+
+    /// Moves `at` to the entry after the one it stands at, or to none: the next child of the
+    /// node above, and of the nodes above that one once theirs are done.
+    pub(crate) fn step(&self, at: &mut Place<V>) {
+        assert!(ptr::eq(at.art, self), "a place of another map");
+        at.leaf = ptr::null();
+        while let Some((inner, b)) = at.path.pop() {
+            // SAFETY: the pointer was taken from a node of this map (checked above), published
+            // before the place saw it, and every node stays allocated while the map lives
+            // (invariant 1), which `&self` guarantees.
+            let inner = unsafe { &*inner };
+            if let Some(found) = self.placed_from(inner, usize::from(b) + 1, at) {
+                at.leaf = found;
+                return;
+            }
+        }
+    }
+
+    /// The entry `at` stands at.
+    pub(crate) fn at<'a>(&'a self, at: &Place<V>) -> Option<Entry<'a, V>> {
+        if at.leaf.is_null() {
+            return None;
+        }
+        assert!(ptr::eq(at.art, self), "a place of another map");
+        // SAFETY: a non-null leaf of a place of this map (checked above) is a published leaf,
+        // which stays allocated while the map lives (invariant 1); `'a` borrows the map.
+        Some(Entry { leaf: unsafe { &*at.leaf } })
+    }
+
+    /// Empties `at` for a walk of this map that sees the keys there are now.
+    fn start(&self, at: &mut Place<V>) {
+        at.art = self;
+        at.path.clear();
+        at.leaf = ptr::null();
+        at.moment = self.moment();
+    }
+
+    /// The first leaf under `n` that the walk of `at` sees, with the inner nodes down to it
+    /// added to its way; without one, the way is left as it was.
+    fn first_placed(&self, n: &Node<V>, at: &mut Place<V>) -> Option<*const Leaf<V>> {
+        match n {
+            Node::Leaf(l) => (l.seq <= at.moment).then_some(ptr::from_ref(l)),
+            Node::Inner(inner) => self.placed_from(inner, 0, at),
+        }
+    }
+
+    /// [`Art::first_placed`] under the children of `inner` whose bytes are `from` or more.
+    fn placed_from(
+        &self,
+        inner: &Inner<V>,
+        from: usize,
+        at: &mut Place<V>,
+    ) -> Option<*const Leaf<V>> {
+        let mut bytes = from..256;
+        while let Some((b, child)) = inner.kids.edge(bytes.clone(), false) {
+            at.path.push((ptr::from_ref(inner), b));
+            let found = self.node(child).and_then(|c| self.first_placed(c, at));
+            if found.is_some() {
+                return found;
+            }
+            // Only leaves written after the walk began: the children past it.
+            at.path.pop();
+            bytes.start = usize::from(b) + 1;
+        }
+        None
+    }
+
+    /// [`Art::lower`] for the walk of `at`, with the inner nodes down to the leaf found added
+    /// to its way; without one, the way is left as it was.
+    fn lower_placed(
+        &self,
+        n: &Node<V>,
+        s: &[u8],
+        depth: usize,
+        strict: bool,
+        at: &mut Place<V>,
+    ) -> Option<*const Leaf<V>> {
+        let inner = match n {
+            Node::Leaf(l) => {
+                let order = (self.order.compare)(l.key(), s);
+                let after = order.is_gt() || (!strict && order.is_eq());
+                return (after && l.seq <= at.moment).then_some(ptr::from_ref(l));
+            }
+            Node::Inner(inner) => inner,
+        };
+        let rest = &s[depth..];
+        let k = inner.prefix.len().min(rest.len());
+        match inner.prefix[..k].cmp(&rest[..k]) {
+            std::cmp::Ordering::Less => return None,
+            std::cmp::Ordering::Greater => return self.placed_from(inner, 0, at),
+            std::cmp::Ordering::Equal => {}
+        }
+        // `s` ends within the shared bytes: every key below is longer, so after it.
+        if rest.len() <= inner.prefix.len() {
+            return self.placed_from(inner, 0, at);
+        }
+        let next = depth + inner.prefix.len();
+        let b = s[next];
+        if let Some(child) = inner.kids.find(b).and_then(|l| self.load(l)) {
+            at.path.push((ptr::from_ref(inner), b));
+            let found = self.lower_placed(child, s, next + 1, strict, at);
+            if found.is_some() {
+                return found;
+            }
+            at.path.pop();
+        }
+        self.placed_from(inner, usize::from(b) + 1, at)
     }
 
     /// Adds `value` at `key`; a value already there is replaced, and returned: it stays readable
@@ -934,8 +1100,191 @@ mod tests {
         }
         m.insert(b"k1", 2);
         assert_eq!((held.key(), *held_value, *held.value()), (&b"k1"[..], 1, 2));
-        assert_eq!(m.walk(Some(held)).nth(1).map(|e| e.key().to_vec()), Some(vec![b'k', b'2', 0]));
+        let after = m.walk_after(held.key()).next().map(|e| e.key().to_vec());
+        assert_eq!(after, Some(vec![b'k', b'2', 0]));
         assert_eq!(*m.seek(b"k1").expect("k1").value(), 2);
+    }
+
+    /// xorshift64*.
+    fn draws(mut state: u64) -> impl FnMut() -> u64 {
+        move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// Keys of two to five bytes over a small alphabet, none the start of another (they end
+    /// with a byte no other position holds): shared starts, and nodes of every size.
+    fn random_keys(seed: u64, n: usize) -> Vec<Vec<u8>> {
+        let mut next = draws(seed);
+        (0..n)
+            .map(|_| {
+                let len = 1 + (next() % 4) as usize;
+                let mut k: Vec<u8> = (0..len).map(|_| (next() % 40) as u8).collect();
+                k.push(0xFF);
+                k
+            })
+            .collect()
+    }
+
+    /// The keys a place gives from where it stands to the end.
+    fn rest(m: &Art<u64>, at: &mut Place<u64>) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Some(e) = m.at(at) {
+            out.push(e.key().to_vec());
+            m.step(at);
+        }
+        out
+    }
+
+    #[test]
+    fn a_place_walks_the_keys_after_it_as_a_search_of_each_one_finds_them() {
+        // FR-038: the walk that keeps its way down the tree gives what `seek` and `after` give
+        // from the root, from any key, present or not. Fewer seeds and keys under Miri, the same
+        // cases.
+        let (seeds, n, probes) = if cfg!(miri) { (2, 60, 6) } else { (20, 600, 80) };
+        for seed in 1..=seeds {
+            let m = map();
+            let keys = random_keys(seed, n);
+            for (i, k) in keys.iter().enumerate() {
+                m.insert(k, i as u64);
+            }
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            let mut at = Place::default();
+            m.place_first(&mut at);
+            assert_eq!(rest(&m, &mut at), sorted, "seed {seed}");
+            for probe in random_keys(seed + 100, probes).iter().chain(sorted.iter().step_by(37)) {
+                for strict in [false, true] {
+                    let from = sorted.partition_point(|k| match strict {
+                        true => k <= probe,
+                        false => k < probe,
+                    });
+                    m.place(probe, strict, &mut at);
+                    let found = m.at(&at).map(|e| e.key().to_vec());
+                    let searched = match strict {
+                        true => m.after(probe),
+                        false => m.seek(probe),
+                    };
+                    assert_eq!(found, searched.map(|e| e.key().to_vec()), "seed {seed}");
+                    assert_eq!(rest(&m, &mut at), sorted[from..], "seed {seed} {probe:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_place_keeps_the_keys_of_its_moment_while_the_map_grows_under_it() {
+        // The nodes of its way are replaced by copies as keys come (a node that fills, shared
+        // bytes that are cut, a leaf that becomes a node): the walk gives every key there was
+        // when it was placed, in order, and none of the later ones. Fewer under Miri.
+        let (seeds, n, coming) = if cfg!(miri) { (2, 40, 400) } else { (10, 300, 3000) };
+        for seed in 1..=seeds {
+            let m = map();
+            let first = random_keys(seed, n);
+            for (i, k) in first.iter().enumerate() {
+                m.insert(k, i as u64);
+            }
+            let mut sorted = first.clone();
+            sorted.sort();
+            sorted.dedup();
+            let mut at = Place::default();
+            m.place(&sorted[sorted.len() / 3], false, &mut at);
+            let mut walked = Vec::new();
+            let mut later = random_keys(seed + 50, coming).into_iter();
+            while let Some(e) = m.at(&at) {
+                walked.push(e.key().to_vec());
+                // Keys keep coming between two steps.
+                for k in later.by_ref().take(8) {
+                    m.insert(&k, 0);
+                }
+                m.step(&mut at);
+            }
+            assert_eq!(walked, sorted[sorted.len() / 3..], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_place_of_an_empty_map_or_past_the_last_key_stands_nowhere() {
+        let m = map();
+        let mut at = Place::default();
+        assert!(m.at(&at).is_none(), "never placed");
+        m.place_first(&mut at);
+        assert!(m.at(&at).is_none());
+        m.place(b"a", false, &mut at);
+        assert!(m.at(&at).is_none());
+        m.step(&mut at);
+        assert!(m.at(&at).is_none(), "a step from nowhere stays there");
+        m.insert(b"k", 1);
+        m.place(b"k", true, &mut at);
+        assert!(m.at(&at).is_none());
+        m.place(b"k", false, &mut at);
+        assert_eq!(m.at(&at).map(|e| *e.value()), Some(1));
+        m.step(&mut at);
+        assert!(m.at(&at).is_none());
+        assert!(format!("{at:?}").contains("Place"));
+    }
+
+    #[test]
+    #[should_panic(expected = "a place of another map")]
+    fn a_place_is_read_only_through_its_own_map() {
+        let (m, other) = (map(), map());
+        m.insert(b"k", 1);
+        other.insert(b"k", 2);
+        let mut at = Place::default();
+        m.place_first(&mut at);
+        let _ = other.at(&at);
+    }
+
+    #[test]
+    #[should_panic(expected = "a place of another map")]
+    fn a_place_is_moved_only_through_its_own_map() {
+        let (m, other) = (map(), map());
+        m.insert(b"k", 1);
+        let mut at = Place::default();
+        m.place_first(&mut at);
+        other.step(&mut at);
+    }
+
+    #[test]
+    fn places_on_other_threads_walk_whole_moments_while_one_writes() {
+        // Small enough for Miri.
+        let n: u64 = if cfg!(miri) { 60 } else { 20_000 };
+        let m = Arc::new(map());
+        let readers: Vec<_> = (0..3)
+            .map(|r| {
+                let m = m.clone();
+                std::thread::spawn(move || {
+                    let mut at = Place::default();
+                    let mut seen = 0;
+                    while seen < n {
+                        // Keys are written in order: a walk from a key gives the keys from it
+                        // up to those there were when it was placed, each with its value.
+                        let from = (seen / 2 + r) % n.max(1);
+                        let before = m.len() as u64;
+                        m.place(&from.to_be_bytes(), false, &mut at);
+                        let mut expect = from;
+                        while let Some(e) = m.at(&at) {
+                            assert_eq!(e.key(), expect.to_be_bytes());
+                            assert_eq!(*e.value(), expect);
+                            expect += 1;
+                            m.step(&mut at);
+                        }
+                        assert!(expect >= before.max(from), "{expect} of {before} from {from}");
+                        seen = seen.max(expect);
+                    }
+                })
+            })
+            .collect();
+        for i in 0..n {
+            m.insert(i.to_be_bytes(), i);
+        }
+        for r in readers {
+            r.join().expect("a reader");
+        }
     }
 
     #[test]

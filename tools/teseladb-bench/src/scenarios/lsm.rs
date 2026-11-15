@@ -4,6 +4,9 @@
 //! - `lsm.flush_mb_s`: flushing a 64 MiB memtable, at least 300 MB/s on NVMe;
 //! - `lsm.get_cached` and `lsm.scan_1000_cached`: a point read and a scan of 1 000 keys with
 //!   every block cached, under 1.5 µs and 100 µs at p50;
+//! - `lsm.scan_1000_hot`: the scan of 1 000 keys of a collection that takes writes, with
+//!   documents of 1 KiB in the last level, in six files of level 0 and in the memtable, without
+//!   a target;
 //! - `lsm.get_disk`: a point read whose block comes from the disk (the page cache may serve
 //!   it), without a target;
 //! - `lsm.compaction_mb_s`: one compaction of every file, without a target;
@@ -77,6 +80,55 @@ fn scan_1000(lsm: &mut Lsm, disk: &mut FileDisk, from: u64, clock: &Instant) -> 
             _ => return n,
         }
     }
+}
+
+/// A document of the size of the sustained load's (002 FR-032).
+const HOT_VALUE: [u8; 1024] = [7; 1024];
+/// Keys of the collection of the hot scan.
+const HOT_KEYS: u64 = 20_000;
+/// Files of level 0 over them; each rewrites a third of the keys, and so does the memtable.
+const HOT_FILES: u64 = 6;
+
+/// The scan of 1 000 keys of a collection that takes writes, every block cached: each key has a
+/// version in the last level, and a third of the keys, picked at random each time, were written
+/// again in each of [`HOT_FILES`] files of level 0 and in the memtable. A scan then decides each
+/// key among the versions of several sources, as the scans of the sustained load do.
+fn hot_scan(args: &Args, dir: &DataDir, clock: &Instant) -> Result<Histogram, String> {
+    let cfg = LsmConfig {
+        dir: "lsm".into(),
+        l0_trigger: usize::MAX,
+        l0_slow: usize::MAX,
+        l0_reject: usize::MAX,
+        compaction_bytes_per_sec: 1 << 40,
+        ..LsmConfig::default()
+    };
+    let (mut lsm, mut disk) = open(dir, "hot", &cfg)?;
+    let mut n = 0u64;
+    let mut put = |lsm: &mut Lsm, k: u64| {
+        n += 1;
+        lsm.put(G, n, &key(k), ts(n), &HOT_VALUE).map_err(msg)
+    };
+    for k in 0..HOT_KEYS {
+        put(&mut lsm, k)?;
+    }
+    lsm.compact_now();
+    drain(&mut lsm, &mut disk, clock);
+    let mut rng = Rng::new(11);
+    for _ in 0..HOT_FILES {
+        for _ in 0..HOT_KEYS / 3 {
+            put(&mut lsm, rng.range(0, HOT_KEYS))?;
+        }
+        lsm.flush();
+        drain(&mut lsm, &mut disk, clock);
+    }
+    for _ in 0..HOT_KEYS / 3 {
+        put(&mut lsm, rng.range(0, HOT_KEYS))?;
+    }
+    let mut from = 0;
+    Ok(super::per_op(args.warmup, args.duration, || {
+        from = (from + 1000) % (HOT_KEYS - 1000);
+        black_box(scan_1000(&mut lsm, &mut disk, from, clock));
+    }))
 }
 
 /// Writes a batch of [`BATCH`] versions after the `n` already written and returns its average in
@@ -289,6 +341,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         black_box(scan_1000(&mut lsm, &mut disk, from, &clock));
     });
     report.latency("lsm.scan_1000_cached", &scan, Some(100_000.0), None);
+    report.latency("lsm.scan_1000_hot", &hot_scan(args, &dir, &clock)?, None, None);
     let cached_p50 = cached.percentile(50.0) as f64;
     let shared = shared_latency(args, &lsm, &dir.path.join("read"))?;
     report.latency("lsm.get_cached_shared", &shared, Some(cached_p50 * 1.1), None);
@@ -448,6 +501,7 @@ mod tests {
             "lsm.flush_mb_s",
             "lsm.get_cached.p50",
             "lsm.scan_1000_cached.p50",
+            "lsm.scan_1000_hot.p50",
             "lsm.get_disk.p50",
             "lsm.compaction_mb_s",
         ] {

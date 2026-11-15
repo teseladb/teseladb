@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use teseladb_keys::Hlc;
 use teseladb_types::{Bytes, GroupId};
 
-use crate::art::{Art, BYTES_ORDER, Order, WriterCell};
+use crate::art::{Art, BYTES_ORDER, Order, Place, WriterCell};
 use crate::entry::{self, Kind, RangeTombstone};
 
 /// The order of the versions' tree: the bytes of [`entry::byte_order`].
@@ -54,6 +54,11 @@ pub(crate) struct Slot {
     pub(crate) kind: Kind,
     pub(crate) value: Bytes,
 }
+
+/// A place among the versions of a memtable ([`Memtable::place`]), which is the only memtable
+/// that moves and reads it.
+#[derive(Debug, Default)]
+pub(crate) struct MemPlace(Place<Slot>);
 
 /// Lowest and highest Raft index applied to a memtable for one range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,11 +243,28 @@ impl Memtable {
     /// The versions after `key` (from the first without it), in order: a flush walks them one
     /// chunk at a time without seeking each one.
     pub(crate) fn from(&self, key: Option<&[u8]>) -> impl Iterator<Item = (&[u8], &Slot)> {
-        let start = match key {
-            Some(k) => self.versions.after(k),
-            None => self.versions.first(),
+        let walk = match key {
+            Some(k) => self.versions.walk_after(k),
+            None => self.versions.iter(),
         };
-        self.versions.walk(start).map(|e| (e.key(), e.value()))
+        walk.map(|e| (e.key(), e.value()))
+    }
+
+    /// Puts `place` at the first version at or after the internal key `at`, for a cursor that
+    /// then walks the versions in order with [`Memtable::step`] without searching each one from
+    /// the root (FR-038). The walk sees the versions there are now.
+    pub(crate) fn place(&self, at: &[u8], place: &mut MemPlace) {
+        self.versions.place(at, false, &mut place.0);
+    }
+
+    /// Moves `place` to the version after the one it stands at.
+    pub(crate) fn step(&self, place: &mut MemPlace) {
+        self.versions.step(&mut place.0);
+    }
+
+    /// The version `place` stands at: its internal key and its slot.
+    pub(crate) fn at(&self, place: &MemPlace) -> Option<(&[u8], &Slot)> {
+        self.versions.at(&place.0).map(|e| (e.key(), e.value()))
     }
 
     /// The version after the one at `key`.
@@ -406,6 +428,7 @@ mod tests {
             let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
             let m = Memtable::default();
             let list: SkipList<Slot> = SkipList::new(entry::compare);
+            let mut place = MemPlace::default();
             for step in 0..steps {
                 let k = random_key(&mut rng);
                 let kind = KINDS[(next(&mut rng) % 4) as usize];
@@ -428,6 +451,18 @@ mod tests {
                 let start = list.after(&probe);
                 let theirs: Vec<Vec<u8>> =
                     std::iter::successors(start, |e| e.next()).map(|e| e.key().to_vec()).collect();
+                assert_eq!(ours, theirs, "seed {seed} step {step}");
+                // A cursor's place walks from the first version at or after the probe.
+                m.place(&probe, &mut place);
+                let mut ours = Vec::new();
+                while let Some((k, s)) = m.at(&place) {
+                    ours.push((k.to_vec(), s.kind));
+                    m.step(&mut place);
+                }
+                let theirs: Vec<(Vec<u8>, Kind)> =
+                    std::iter::successors(list.seek(&probe), |e| e.next())
+                        .map(|e| (e.key().to_vec(), e.value().kind))
+                        .collect();
                 assert_eq!(ours, theirs, "seed {seed} step {step}");
             }
             let theirs: Vec<(Vec<u8>, Kind, Vec<u8>)> = list
