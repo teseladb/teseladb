@@ -59,6 +59,8 @@ gate "2. Unicode 15.1 data of the search analyzers (011)" scripts/fetch-pinned.s
 gate "2. Unicode 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned.sh scripts/unicode-tokenizer.sha256
 gate "2. emoji 12.1 data of the standard tokenizer (011)" scripts/fetch-pinned.sh scripts/unicode-emoji-tokenizer.sha256
 gate "2. morfologik dictionaries of the search analyzers (011)" scripts/fetch-pinned.sh scripts/morfologik.sha256
+gate "2. Snowball vocabularies of the search stemmers (011)" \
+  scripts/fetch-pinned.sh scripts/snowball-vocabularies.sha256
 gate "2. collation tables match their generator (D-043)" cargo run -q --offline -p teseladb-unicodegen -- --check
 gate "2. IANA time zone database 2024a (D-169)" scripts/fetch-pinned.sh scripts/tzdata.sha256
 gate "2. time zone tables match their generator (D-169)" \
