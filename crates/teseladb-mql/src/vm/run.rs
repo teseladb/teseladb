@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::matcher::{Eval, MatchContext, array_index, compare, eq};
 use crate::parse::{CmpOp, Expr, Pred};
 use crate::simd::{self, Cmp};
-use crate::value::{bson_error, cmp};
+use crate::value::bson_error;
 use teseladb_keys::stored::{FieldKey, Stored};
 
 /// What the instructions read besides their registers.
@@ -194,12 +194,7 @@ impl Env<'_, '_, '_> {
             Some(b) => b.raw(bytes),
             None => Some(self.leaf_literal(leaf).value()),
         };
-        let o = match (x, y) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(x), Some(y)) => cmp(x, y, self.ctx.collation),
-        };
+        let o = crate::matcher::expr_order(x, y, self.ctx.collation);
         Ok(match i.src2() {
             EXPR_EQ => o == Ordering::Equal,
             EXPR_NE => o != Ordering::Equal,

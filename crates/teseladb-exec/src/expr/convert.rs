@@ -904,7 +904,9 @@ fn to_date(v: &Value) -> Result<Value, MqlError> {
             to_int(v, &o, DATE).map(|n| Value::DateTime(n.0))
         }
         Value::ObjectId(id) => {
-            let secs = u32::from_be_bytes([id[0], id[1], id[2], id[3]]);
+            // Signed, as the reference reads it: an id from ff ff ff ff is one second before the
+            // epoch (measured on 9.0.4, 15-11-2026, 002 T065).
+            let secs = i32::from_be_bytes([id[0], id[1], id[2], id[3]]);
             Ok(Value::DateTime(i64::from(secs) * MS_PER_SECOND))
         }
         Value::Timestamp { time, .. } => Ok(Value::DateTime(i64::from(*time) * MS_PER_SECOND)),
@@ -913,7 +915,84 @@ fn to_date(v: &Value) -> Result<Value, MqlError> {
     }
 }
 
+/// The binary subtype of a vector, and the first byte of each of its element types.
+const VECTOR_SUBTYPE: u8 = 9;
+const VECTOR_INT8: u8 = 0x03;
+const VECTOR_FLOAT32: u8 = 0x27;
+const VECTOR_PACKED_BIT: u8 = 0x10;
+const BITS_PER_BYTE: usize = 8;
+
+/// An array as the vector (subtype 9) the reference makes of it, whatever subtype was asked
+/// (measured on 9.0.4, 15-11-2026, 002 T065): bits when every element is a boolean or the int 0
+/// or 1, INT8 when every one is an int or a whole double within -128..127, FLOAT32 otherwise.
+/// An element that is not a boolean, an int or a double, or an int outside INT8, fails as a
+/// conversion (241, which `onError` replaces); a boolean among numbers fails as the conversion
+/// of a boolean to a number, which it does not replace.
+fn array_vector(items: &[Value]) -> Result<Value, MqlError> {
+    let (mut bits, mut int8) = (true, true);
+    for v in items {
+        match v {
+            Value::Boolean(_) => {}
+            Value::Int32(n) if i8::try_from(*n).is_err() => {
+                return Err(error(
+                    CONVERSION_FAILURE,
+                    "Converting a BSON array with integers larger than INT8 is not supported.",
+                ));
+            }
+            Value::Int32(n) => bits &= *n == 0 || *n == 1,
+            Value::Double(x) => {
+                bits = false;
+                int8 &= x.fract() == 0.0 && (f64::from(i8::MIN)..=f64::from(i8::MAX)).contains(x);
+            }
+            _ => {
+                return Err(error(
+                    CONVERSION_FAILURE,
+                    "Converting array to BinData requires an array with numeric or bool content",
+                ));
+            }
+        }
+    }
+    let bool_to =
+        |code, to: &str| error(code, format!("can't convert from BSON type bool to {to}"));
+    let mut bytes = Vec::with_capacity(2 + items.len() * 4);
+    if bits {
+        let pad = (BITS_PER_BYTE - items.len() % BITS_PER_BYTE) % BITS_PER_BYTE;
+        bytes.extend([VECTOR_PACKED_BIT, pad as u8]);
+        for chunk in items.chunks(BITS_PER_BYTE) {
+            let byte = chunk.iter().enumerate().fold(0u8, |b, (i, v)| {
+                let on = matches!(v, Value::Boolean(true) | Value::Int32(1));
+                b | (u8::from(on) << (BITS_PER_BYTE - 1 - i))
+            });
+            bytes.push(byte);
+        }
+    } else if int8 {
+        bytes.extend([VECTOR_INT8, 0]);
+        for v in items {
+            bytes.push(match v {
+                // Within INT8, checked above.
+                Value::Int32(n) => *n as i8 as u8,
+                Value::Double(x) => *x as i8 as u8,
+                _ => return Err(bool_to(codes::CANNOT_CONVERT_TO_INT, "int")),
+            });
+        }
+    } else {
+        bytes.extend([VECTOR_FLOAT32, 0]);
+        for v in items {
+            let x = match v {
+                Value::Int32(n) => *n as f32,
+                Value::Double(x) => *x as f32,
+                _ => return Err(bool_to(codes::CANNOT_CONVERT_TO_DOUBLE, "double")),
+            };
+            bytes.extend(x.to_le_bytes());
+        }
+    }
+    Ok(Value::Binary { subtype: VECTOR_SUBTYPE, bytes })
+}
+
 fn to_bin_data(v: &Value, o: &Options) -> Result<Value, MqlError> {
+    if let Value::Array(items) = v {
+        return array_vector(items);
+    }
     let sub = o.subtype;
     let check_sub = |len: usize| -> Result<(), MqlError> {
         if sub == COLUMN {

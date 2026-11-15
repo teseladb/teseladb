@@ -41,8 +41,9 @@ const NAMES: [(&str, Logic); 11] = [
     ("$ifNull", Logic::IfNull),
 ];
 
-/// The reference server's order of two results, a missing one below everything, strings in collation
-/// `col` (the binary order without one).
+/// The reference server's order of two results, a missing one below everything but `MinKey`
+/// (`$cmp` of a missing field and `MinKey` is 1 on 9.0.4, 15-11-2026, 002 T065), strings in
+/// collation `col` (the binary order without one).
 pub fn order(
     a: &Eval,
     b: &Eval,
@@ -50,6 +51,8 @@ pub fn order(
 ) -> Result<Ordering, MqlError> {
     match (a, b) {
         (None, None) => Ok(Ordering::Equal),
+        (None, Some(Value::MinKey)) => Ok(Ordering::Greater),
+        (Some(Value::MinKey), None) => Ok(Ordering::Less),
         (None, Some(_)) => Ok(Ordering::Less),
         (Some(_), None) => Ok(Ordering::Greater),
         (Some(x), Some(y)) => {

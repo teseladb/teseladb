@@ -176,3 +176,12 @@ fn arithmetic_expressions_match_the_reference() {
 fn conversion_and_extended_json_edges_match_the_reference() {
     check(include_str!("expr/cover.out"));
 }
+
+/// What the differential suite found (002 T065), measured on the reference on 15-11-2026: an
+/// ObjectId's seconds as signed, arrays converted to vectors, a NaN alone in `$median`, a missing
+/// value above `MinKey`, arrays among the arguments of `$max` and `$min`, and `$avg` over the
+/// compensated total.
+#[test]
+fn differential_suite_findings_match_the_reference() {
+    check(include_str!("expr/differential.out"));
+}

@@ -1,13 +1,14 @@
 //! `$sum`, `$avg`, `$max`, `$min`, `$stdDevPop` and `$stdDevSamp` as expressions (measured on a
 //! reference router 9.0.4): with one argument that is an array they work over its elements, otherwise
-//! over their arguments (an array among several is then skipped). The totals are the
+//! over their arguments (an array among several is then one more value, which only `$max` and
+//! `$min` take). The totals are the
 //! accumulators of `$group` (010 T008), which reuses them.
 //!
 //! - `$sum` adds the numbers exactly: integers give an `int` or a `long` while the total fits,
 //!   doubles a double (with a compensated sum), a decimal makes the whole total a decimal, where
 //!   each double goes in with its exact value rounded to 34 digits. Anything else counts 0.
-//! - `$avg` divides that total by how many numbers there were, as a double (the integers summed
-//!   as doubles, as the reference server does) or a decimal; no number gives `null`.
+//! - `$avg` divides that total by how many numbers there were, as a double (the compensated
+//!   total, as the reference server does) or a decimal; no number gives `null`.
 //! - `$max` and `$min` skip `null`, `undefined` and missing values and keep the first of equal
 //!   values; nothing left gives `null`.
 //! - `$stdDevPop` and `$stdDevSamp` give a double over the numbers (decimals as doubles), `null`
@@ -50,8 +51,12 @@ fn long_decimal(n: i128) -> Decimal128 {
     Decimal128::from_parts(n < 0, n.unsigned_abs(), 0).unwrap_or_else(Decimal128::nan)
 }
 
-/// A double-double sum (Knuth's two-sum), as the reference server's `$sum` keeps its non-decimal total:
-/// `hi + lo` holds about 106 bits, so integers up to 2^63 add exactly.
+/// The compensated sum the reference server keeps as the non-decimal total of `$sum` and `$avg`:
+/// Kahan's, each new number added together with the error `lo` the sum `hi` left out before, and
+/// the total is `hi`. A long goes in as its low 32 bits and then the rest, each a double. Measured
+/// on 9.0.4 on 15-11-2026 (002 T065): `[1e16, 1, -1e16]` sums to 0 and `[1e16, -1e16, 1]` to 1,
+/// `[1, 2^53 + 1]` to 2^53 + 2, and `[0.2, 3e-16, 0.3]` to 0.5000000000000003, which `hi` gives
+/// and `hi + lo` does not.
 #[derive(Clone, Copy, Debug, Default)]
 struct DoubleDouble {
     hi: f64,
@@ -64,22 +69,23 @@ impl DoubleDouble {
             self.hi += x;
             return;
         }
-        let s = self.hi + x;
-        let bp = s - self.hi;
-        let err = (self.hi - (s - bp)) + (x - bp);
-        self.hi = s;
-        self.lo += err;
+        let y = x + self.lo;
+        let t = self.hi + y;
+        self.lo = y - (t - self.hi);
+        self.hi = t;
     }
 
-    /// Adds integer `n` exactly, in two halves that are each a double.
+    /// Adds integer `n` in two halves that are each a double: its low 32 bits, then the rest
+    /// (truncated toward zero, as the reference splits it).
     fn add_long(&mut self, n: i64) {
-        let high = (n >> 32) << 32;
-        self.add_double(high as f64);
+        const HALF: i64 = 1 << 32;
+        let high = n / HALF * HALF;
         self.add_double((n - high) as f64);
+        self.add_double(high as f64);
     }
 
     fn value(self) -> f64 {
-        if self.hi.is_finite() { self.hi + self.lo } else { self.hi }
+        self.hi
     }
 
     /// The exact total as a decimal: each half's exact value, added.
@@ -98,7 +104,9 @@ pub(crate) struct Total {
     has_long: bool,
     doubles: DoubleDouble,
     has_double: bool,
-    /// The plain double sum of every number, as `$avg` adds them.
+    /// The plain double sum of every number. No result reads it since `$avg` divides the
+    /// compensated total; it stays in the state that travels between nodes ([`Total::to_value`])
+    /// so that nodes of the version before read the same layout.
     plain: f64,
     decimals: Option<Decimal128>,
     count: u64,
@@ -243,7 +251,10 @@ impl Total {
                     .unwrap_or_else(Decimal128::nan),
             );
         }
-        Value::Double(self.plain / self.count as f64)
+        // The compensated total `$sum` keeps, divided: the reference averages 1 and the long
+        // 2^53 + 1 to 2^52 + 1 exactly, and 0.1, 0.2 and 0.3 to 0.19999999999999998 (measured on
+        // 9.0.4, 15-11-2026, as an expression and in `$group`, 002 T065).
+        Value::Double(self.doubles.value() / self.count as f64)
     }
 }
 
@@ -446,9 +457,10 @@ impl Stat {
         let items: Vec<Value> = match vals.as_slice() {
             [Some(Value::Array(items))] => items.clone(),
             [one] => one.iter().cloned().collect(),
-            many => {
-                many.iter().flatten().filter(|v| !matches!(v, Value::Array(_))).cloned().collect()
-            }
+            // Among several arguments an array is one more value: `$max` and `$min` order it
+            // with the rest (`$max: [0, []]` is `[]` on the reference, 9.0.4, 15-11-2026, 002
+            // T065), and the others count only numbers.
+            many => many.iter().flatten().cloned().collect(),
         };
         Ok(Some(self.over(&items, scope.collator())?))
     }

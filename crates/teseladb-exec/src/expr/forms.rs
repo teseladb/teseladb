@@ -204,12 +204,26 @@ impl Form {
             Form::Percentile { input, ps } => {
                 let nums: Vec<f64> = match input.eval(doc, scope)? {
                     Some(Value::Array(items)) => items.iter().filter_map(f64_of).collect(),
-                    Some(v) => f64_of(&v).into_iter().collect(),
+                    // A number alone is every percentile of itself, NaN too: the reference
+                    // leaves a NaN out of an array but gives it back alone (9.0.4, 15-11-2026,
+                    // 002 T065).
+                    Some(v) => match f64_of(&v) {
+                        Some(x) => return Ok(Some(alone(x, ps.as_deref()))),
+                        None => Vec::new(),
+                    },
                     None => Vec::new(),
                 };
                 Ok(Some(percentiles(nums, ps.as_deref())))
             }
         }
+    }
+}
+
+/// The percentiles `ps` (the median without them) of the number `x` alone.
+fn alone(x: f64, ps: Option<&[f64]>) -> Value {
+    match ps {
+        None => Value::Double(x),
+        Some(ps) => Value::Array(ps.iter().map(|_| Value::Double(x)).collect()),
     }
 }
 

@@ -465,7 +465,7 @@ impl<'c, 'a> Eval<'c, 'a> {
             Pred::ExprEq(_) | Pred::ExprCmp(..) if matches!(v, Some(RawValue::Array(_))) => true,
             Pred::ExprEq(t) => v.is_some_and(|v| cmp(v, t.get(), coll) == Ordering::Equal),
             Pred::ExprCmp(op, t) => {
-                let o = v.map_or(Ordering::Less, |v| cmp(v, t.get(), coll));
+                let o = expr_order(v, Some(t.get()), coll);
                 match op {
                     CmpOp::Gt => o == Ordering::Greater,
                     CmpOp::Gte => o != Ordering::Less,
@@ -505,6 +505,24 @@ impl<'c, 'a> Eval<'c, 'a> {
             | Pred::ElemMatchDoc(_)
             | Pred::ElemMatchValue(_) => self.leaf(pred, v, None, false)?,
         })
+    }
+}
+
+/// The order of two values as `$expr` compares them: a missing one below everything but
+/// `MinKey` (`$cmp` of a missing field and `MinKey` is 1 on the reference 9.0.4, 15-11-2026,
+/// 002 T065).
+pub(crate) fn expr_order(
+    a: Option<RawValue<'_>>,
+    b: Option<RawValue<'_>>,
+    coll: Option<&dyn Collator>,
+) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(RawValue::MinKey)) => Ordering::Greater,
+        (Some(RawValue::MinKey), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(x), Some(y)) => cmp(x, y, coll),
     }
 }
 

@@ -104,7 +104,9 @@ pub mod codes {
     location!(LOG_BASE, 28759);
     location!(LOG_ARGUMENT_NUMBER, 28756);
     location!(LOG_BASE_NUMBER, 28757);
+    location!(CANNOT_CONVERT_TO_INT, 16003);
     location!(CANNOT_CONVERT_TO_LONG, 16004);
+    location!(CANNOT_CONVERT_TO_DOUBLE, 16005);
     location!(LN_NOT_POSITIVE, 28766);
     location!(LOG10_NOT_POSITIVE, 28761);
     location!(POW_ZERO_NEGATIVE, 28764);

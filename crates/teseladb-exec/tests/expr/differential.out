@@ -1,0 +1,65 @@
+{"$convert":{"input":{"$oid":"ffffffffffffffffffffffff"},"to":"date"}}	=> {"x":{"$date":{"$numberLong":"-1000"}}}
+{"$toDate":{"$oid":"ffffffffffffffffffffffff"}}	=> {"x":{"$date":{"$numberLong":"-1000"}}}
+{"$toDate":{"$oid":"80000000ffffffffffffffff"}}	=> {"x":{"$date":{"$numberLong":"-2147483648000"}}}
+{"$toDate":{"$oid":"7fffffffffffffffffffffff"}}	=> {"x":{"$date":{"$numberLong":"2147483647000"}}}
+{"$convert":{"input":[],"to":"binData"}}	=> {"x":{"$binary":{"base64":"EAA=","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"1"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"EAeA","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"0"},{"$numberInt":"1"},true],"to":"binData"}}	=> {"x":{"$binary":{"base64":"EAVg","subType":"09"}}}
+{"$convert":{"input":[true,false,true,true,false,false,true,false,true,true],"to":"binData"}}	=> {"x":{"$binary":{"base64":"EAaywA==","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"1"},{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"1"},{"$numberInt":"0"},{"$numberInt":"0"},{"$numberInt":"1"},{"$numberInt":"0"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"EACy","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}],"to":{"type":"binData","subtype":{"$numberInt":"0"}}}}	=> {"x":{"$binary":{"base64":"AwABAgM=","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"-128"},{"$numberInt":"127"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"AwCAfw==","subType":"09"}}}
+{"$convert":{"input":[{"$numberDouble":"1.0"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"AwAB","subType":"09"}}}
+{"$convert":{"input":[{"$numberDouble":"-0.0"},{"$numberInt":"2"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"AwAAAg==","subType":"09"}}}
+{"$convert":{"input":[{"$numberDouble":"128.0"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"JwAAAABD","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"1"},{"$numberDouble":"2.5"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"JwAAAIA/AAAgQA==","subType":"09"}}}
+{"$convert":{"input":[{"$numberDouble":"1e+300"},{"$numberDouble":"NaN"},{"$numberDouble":"-Infinity"}],"to":"binData"}}	=> {"x":{"$binary":{"base64":"JwAAAIB/AADAfwAAgP8=","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"1"}],"to":{"type":"binData","subtype":{"$numberInt":"7"}}}}	=> {"x":{"$binary":{"base64":"EAeA","subType":"09"}}}
+{"$convert":{"input":[{"$numberInt":"128"}],"to":"binData"}}	!! 241	Converting a BSON array with integers larger than INT8 is not supported.
+{"$convert":{"input":[{"$numberInt":"128"}],"to":"binData","onError":"e"}}	=> {"x":"e"}
+{"$convert":{"input":[{"$numberDouble":"1.5"},{"$numberInt":"-129"}],"to":"binData"}}	!! 241	Converting a BSON array with integers larger than INT8 is not supported.
+{"$convert":{"input":[{"$numberLong":"1"}],"to":"binData"}}	!! 241	Converting array to BinData requires an array with numeric or bool content
+{"$convert":{"input":[{"$numberInt":"1"},"a"],"to":"binData","onError":"e"}}	=> {"x":"e"}
+{"$convert":{"input":[null],"to":"binData"}}	!! 241	Converting array to BinData requires an array with numeric or bool content
+{"$convert":{"input":[true,{"$numberInt":"2"}],"to":"binData","onError":"e"}}	!! 16003	can't convert from BSON type bool to int
+{"$convert":{"input":[{"$numberDouble":"1.5"},true],"to":"binData","onError":"e"}}	!! 16005	can't convert from BSON type bool to double
+{"$median":{"input":{"$numberDouble":"NaN"},"method":"approximate"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$median":{"input":{"$numberDecimal":"NaN"},"method":"approximate"}}	=> {"x":{"$numberDouble":"NaN"}}
+{"$median":{"input":{"$numberInt":"4"},"method":"approximate"}}	=> {"x":{"$numberDouble":"4.0"}}
+{"$median":{"input":[{"$numberDouble":"NaN"}],"method":"approximate"}}	=> {"x":null}
+{"$percentile":{"input":{"$numberDouble":"NaN"},"p":[{"$numberDouble":"0.5"},{"$numberDouble":"0.9"}],"method":"approximate"}}	=> {"x":[{"$numberDouble":"NaN"},{"$numberDouble":"NaN"}]}
+{"$percentile":{"input":{"$numberDouble":"-Infinity"},"p":[{"$numberDouble":"0.0"},{"$numberDouble":"1.0"}],"method":"approximate"}}	=> {"x":[{"$numberDouble":"-Infinity"},{"$numberDouble":"-Infinity"}]}
+{"$cmp":["$nope",{"$minKey":1}]}	=> {"x":{"$numberInt":"1"}}
+{"$cmp":[{"$minKey":1},"$nope"]}	=> {"x":{"$numberInt":"-1"}}
+{"$gt":["$nope",{"$minKey":1}]}	=> {"x":true}
+{"$lte":["$nope",{"$minKey":1}]}	=> {"x":false}
+{"$cmp":["$nope",null]}	=> {"x":{"$numberInt":"-1"}}
+{"$max":["$nope",{"$minKey":1}]}	=> {"x":{"$minKey":1}}
+{"$max":[{"$numberInt":"0"},[]]}	=> {"x":[]}
+{"$max":[{"$numberInt":"0"},[{"$numberInt":"1"},{"$numberInt":"2"}]]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"}]}
+{"$min":[[{"$numberInt":"1"}],[{"$numberInt":"0"}]]}	=> {"x":[{"$numberInt":"0"}]}
+{"$min":[null,[]]}	=> {"x":[]}
+{"$max":["$a",{"$numberInt":"5"}]}	=> {"x":[{"$numberInt":"1"},{"$numberInt":"2"},{"$numberInt":"3"}]}
+{"$min":["$a",{"$numberInt":"5"}]}	=> {"x":{"$numberInt":"5"}}
+{"$max":["$a"]}	=> {"x":{"$numberInt":"3"}}
+{"$max":["$e"]}	=> {"x":null}
+{"$min":[{"$binary":{"base64":"YWJj","subType":"00"}},[]]}	=> {"x":[]}
+{"$sum":[{"$numberInt":"1"},[{"$numberInt":"2"}]]}	=> {"x":{"$numberInt":"1"}}
+{"$avg":[{"$numberInt":"1"},[{"$numberInt":"2"}]]}	=> {"x":{"$numberDouble":"1.0"}}
+{"$stdDevPop":[{"$numberInt":"1"},[{"$numberInt":"2"}],{"$numberInt":"3"}]}	=> {"x":{"$numberDouble":"1.0"}}
+{"$avg":[{"$numberInt":"1"},{"$numberLong":"9007199254740993"}]}	=> {"x":{"$numberDouble":"4503599627370497.0"}}
+{"$avg":[{"$numberInt":"-1"},{"$numberLong":"9007199254740993"}]}	=> {"x":{"$numberDouble":"4503599627370496.0"}}
+{"$avg":[{"$numberInt":"-2147483648"},{"$numberLong":"9007199254740993"}]}	=> {"x":{"$numberDouble":"4503598553628672.5"}}
+{"$avg":[{"$numberDouble":"0.1"},{"$numberDouble":"0.2"},{"$numberDouble":"0.3"}]}	=> {"x":{"$numberDouble":"0.19999999999999998"}}
+{"$avg":[{"$numberDouble":"9007199254740992.0"},{"$numberInt":"1"},{"$numberInt":"1"}]}	=> {"x":{"$numberDouble":"3002399751580331.5"}}
+{"$avg":[{"$numberLong":"9223372036854775807"},{"$numberLong":"9223372036854775807"}]}	=> {"x":{"$numberDouble":"9223372036854775808.0"}}
+{"$avg":[{"$numberLong":"9007199254740993"},{"$numberLong":"9007199254740993"},{"$numberLong":"9007199254740993"}]}	=> {"x":{"$numberDouble":"9007199254740994.0"}}
+{"$avg":[{"$numberLong":"10000000000000000"},{"$numberInt":"3"},{"$numberLong":"-10000000000000000"}]}	=> {"x":{"$numberDouble":"1.3333333333333333"}}
+{"$avg":[{"$numberLong":"10000000000000000"},{"$numberLong":"-10000000000000000"},{"$numberInt":"1"}]}	=> {"x":{"$numberDouble":"0.3333333333333333"}}
+{"$avg":[{"$numberDouble":"0.2"},{"$numberDouble":"3e-16"},{"$numberDouble":"0.3"}]}	=> {"x":{"$numberDouble":"0.16666666666666677"}}
+{"$sum":[{"$numberDouble":"0.2"},{"$numberDouble":"3e-16"},{"$numberDouble":"0.3"}]}	=> {"x":{"$numberDouble":"0.5000000000000003"}}
+{"$sum":[{"$numberDouble":"1e+16"},{"$numberDouble":"1.0"},{"$numberDouble":"-1e+16"}]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sum":[{"$numberLong":"10000000000000000"},{"$numberDouble":"1.0"},{"$numberLong":"-10000000000000000"}]}	=> {"x":{"$numberDouble":"0.0"}}
+{"$sum":[{"$numberDouble":"3e-16"},{"$numberInt":"1"},{"$numberInt":"3"},{"$numberDouble":"3e-16"}]}	=> {"x":{"$numberDouble":"4.000000000000001"}}
+{"$sum":[{"$numberDouble":"3e-16"},{"$numberLong":"1"},{"$numberLong":"3"},{"$numberDouble":"3e-16"}]}	=> {"x":{"$numberDouble":"4.000000000000001"}}
+{"$sum":[{"$numberLong":"9007199254740993"},{"$numberDouble":"1.0"}]}	=> {"x":{"$numberDouble":"9007199254740994.0"}}
