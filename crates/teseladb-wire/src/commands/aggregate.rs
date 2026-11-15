@@ -56,10 +56,14 @@ struct WireEnv<'a, B: Backend + ?Sized> {
     node: Option<(&'a super::Shared, Namespace)>,
     /// What the search stages' queries gave while the pipeline was planned, by stage and
     /// specification, for the run to take (011 FR-022).
-    searched: RefCell<Vec<(String, Document, Vec<teseladb_exec::pipeline::search::Scored>)>>,
+    searched: RefCell<Vec<Planned>>,
     /// The node's temporary store and the memory of a stage (010 FR-010, D-105).
     spill: super::Spill,
 }
+
+/// A search stage's query run while the pipeline was planned: the stage, its specification, the
+/// most results the pipeline reads and its results, documents still unread (011 FR-031).
+type Planned = (String, Document, Option<usize>, super::search_ops::Ranked);
 
 /// An error of the node as an error of the pipeline.
 fn to_mql(e: CommandError) -> MqlError {
@@ -67,6 +71,19 @@ fn to_mql(e: CommandError) -> MqlError {
 }
 
 impl<B: Backend + ?Sized> WireEnv<'_, B> {
+    /// The results the query of `(stage, spec)` gave while the pipeline was planned with
+    /// `limit`, taken out of the cache.
+    fn planned(
+        &self,
+        stage: &str,
+        spec: &Document,
+        limit: Option<usize>,
+    ) -> Option<super::search_ops::Ranked> {
+        let mut searched = self.searched.borrow_mut();
+        let i = searched.iter().position(|(n, s, l, _)| n == stage && s == spec && *l == limit)?;
+        Some(searched.remove(i).3)
+    }
+
     /// `$listLocalSessions`: the sessions this node holds in memory, as the records of
     /// `config.system.sessions` write them, for the users `spec` asks for.
     fn local_sessions(
@@ -522,14 +539,17 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         stage: &str,
         spec: &Document,
     ) -> Result<Vec<teseladb_exec::pipeline::search::Scored>, MqlError> {
-        let mut searched = self.searched.borrow_mut();
-        if let Some(i) = searched.iter().position(|(n, s, _)| n == stage && s == spec) {
-            return Ok(searched.remove(i).2);
-        }
-        drop(searched);
         let Some((shared, ns)) = &self.node else { return Ok(Vec::new()) };
         let mut backend = self.backend.borrow_mut();
-        super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)
+        let Some(mut r) = self.planned(stage, spec, None) else {
+            return super::search_ops::source(&mut **backend, shared, ns, stage, spec)
+                .map_err(to_mql);
+        };
+        let n = r.metas.len();
+        let docs = super::search_ops::documents(&mut **backend, shared, &mut r, 0, n);
+        let docs = docs.map_err(to_mql)?;
+        let found = docs.into_iter().zip(r.metas);
+        Ok(found.map(|(doc, meta)| teseladb_exec::pipeline::search::Scored { doc, meta }).collect())
     }
 
     fn text_source(
@@ -580,6 +600,15 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
     }
 
     fn check_search(&self, stage: &str, spec: &Document) -> Result<(), MqlError> {
+        self.check_search_limited(stage, spec, None)
+    }
+
+    fn check_search_limited(
+        &self,
+        stage: &str,
+        spec: &Document,
+        limit: Option<usize>,
+    ) -> Result<(), MqlError> {
         // Only `$search` asks the reference search server while the pipeline is planned (measured
         // on 9.0.4: the errors of `$searchMeta` and `$vectorSearch` carry the executor's prefix).
         if stage != "$search" {
@@ -587,10 +616,38 @@ impl<B: Backend + ?Sized> Env for WireEnv<'_, B> {
         }
         let Some((shared, ns)) = &self.node else { return Ok(()) };
         let mut backend = self.backend.borrow_mut();
-        let found =
-            super::search_ops::source(&mut **backend, shared, ns, stage, spec).map_err(to_mql)?;
-        self.searched.borrow_mut().push((stage.to_owned(), spec.clone(), found));
+        let ranked = super::search_ops::ranked(&mut **backend, shared, ns, (stage, spec), limit)
+            .map_err(to_mql)?;
+        self.searched.borrow_mut().push((stage.to_owned(), spec.clone(), limit, ranked));
         Ok(())
+    }
+
+    fn search_results(
+        &self,
+        stage: &str,
+        spec: &Document,
+        limit: Option<usize>,
+    ) -> Result<teseladb_exec::pipeline::search::Lazy<'_>, MqlError> {
+        let Some((shared, ns)) = &self.node else {
+            return Ok(teseladb_exec::pipeline::search::Lazy::eager(Vec::new()));
+        };
+        let cached = self.planned(stage, spec, limit);
+        let mut ranked = match cached {
+            Some(r) => r,
+            None => {
+                let mut backend = self.backend.borrow_mut();
+                super::search_ops::ranked(&mut **backend, shared, ns, (stage, spec), limit)
+                    .map_err(to_mql)?
+            }
+        };
+        let metas = std::mem::take(&mut ranked.metas);
+        // The documents are read when a stage asks for them, from the index as the query saw it.
+        let load = move |from: usize, to: usize| {
+            let mut backend = self.backend.borrow_mut();
+            super::search_ops::documents(&mut **backend, shared, &mut ranked, from, to)
+                .map_err(to_mql)
+        };
+        Ok(teseladb_exec::pipeline::search::Lazy::new(metas, Box::new(load)))
     }
 
     fn system_stage(&self, name: &str, spec: &Document) -> Result<Vec<Document>, MqlError> {

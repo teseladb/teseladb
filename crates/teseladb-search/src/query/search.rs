@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use teseladb_bson::{Document, Value};
 
 use crate::index::{Fuzzy, Hit, IndexError, MemIndex};
+use crate::query::top;
 
 /// The operators the reference search server knows, in its order.
 pub const OPERATORS: [&str; 23] = [
@@ -166,6 +167,66 @@ pub fn run(index: &MemIndex, spec: &Document) -> Result<Vec<Hit>, SearchError> {
     let op = parse_root(index, spec)?;
     let scores = eval(index, &op)?;
     Ok(index.hits(scores))
+}
+
+/// The options that read results past the best ones, so that [`run_top`] does not apply.
+const READ_PAST_THE_BEST: [&str; 3] = ["sort", "searchAfter", "searchBefore"];
+
+/// Whether the first `k` documents of `spec` are its `k` best by score ([`run_top`]): it has no
+/// `sort`, `searchAfter` or `searchBefore`.
+pub fn top_applies(spec: &Document) -> bool {
+    READ_PAST_THE_BEST.iter().all(|k| spec.get(k).is_none())
+}
+
+/// The first `k` documents of [`run`] (FR-030, T058). A `text` without `fuzzy` whose score is
+/// its own or boosted, alone or as the one `must` clause of a `compound` with only `filter` and
+/// `mustNot` besides, runs as Block-Max WAND over its clauses ([`top::best`]); the clauses of a
+/// `compound` that do not score are evaluated first into the roaring bitmap of the document
+/// numbers they keep, which the iterator jumps through. Any other operator is evaluated whole.
+pub fn run_top(index: &MemIndex, spec: &Document, k: usize) -> Result<Vec<Hit>, SearchError> {
+    let op = parse_root(index, spec)?;
+    let Some((text, keep)) = wand_shape(&op) else {
+        let mut hits = index.hits(eval(index, &op)?);
+        hits.truncate(k);
+        return Ok(hits);
+    };
+    let Operator::Text { query, paths, score, .. } = text else { unreachable!("a text operator") };
+    let lists = index.text_clauses(query, paths, boost_of(score))?;
+    let candidates = match keep {
+        None => None,
+        Some((filter, must_not)) => {
+            let filter: Vec<_> = filter.iter().map(|o| eval(index, o)).collect::<Result<_, _>>()?;
+            let excluded: Vec<_> =
+                must_not.iter().map(|o| eval(index, o)).collect::<Result<_, _>>()?;
+            let kept = index.live().filter(|doc| {
+                filter.iter().all(|f| f.contains_key(doc))
+                    && !excluded.iter().any(|e| e.contains_key(doc))
+            });
+            Some(teseladb_index::roaring::Roaring::from_ids(kept))
+        }
+    };
+    let best = top::best(&lists, candidates.as_ref(), k, |d| index.key_of(d));
+    Ok(best.into_iter().map(|b| Hit { key: b.key.to_vec(), score: b.score }).collect())
+}
+
+/// The clauses that run as one Block-Max WAND with [`run_top`]: the `text` operator, and the
+/// `filter` and `mustNot` clauses that give its candidates, if any.
+type WandShape<'o> = (&'o Operator, Option<(&'o [Operator], &'o [Operator])>);
+
+/// `op` as a [`WandShape`], when it has one.
+fn wand_shape(op: &Operator) -> Option<WandShape<'_>> {
+    let plain_text = |o: &Operator| {
+        matches!(o, Operator::Text { fuzzy: None, score: Score::Plain | Score::Boost(_), .. })
+    };
+    match op {
+        o if plain_text(o) => Some((o, None)),
+        Operator::Compound { must, should, filter, must_not, minimum: 0, .. }
+            if must.len() == 1 && should.is_empty() && plain_text(&must[0]) =>
+        {
+            Some((&must[0], Some((filter, must_not))))
+        }
+        _ => None,
+    }
 }
 
 /// The explanations of the scores `spec` gives the documents of `keys` (`scoreDetails`).

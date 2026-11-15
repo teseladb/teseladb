@@ -108,6 +108,20 @@ pub trait Env {
         Err(search::not_enabled())
     }
 
+    /// The results of a search stage as [`Env::search_source`] gives them, each document read
+    /// only when a stage after it asks for it (011 FR-031). `limit`, when given, is the most
+    /// results the pipeline reads (a `$limit` right after the stage, with the `$skip` before
+    /// it), so the node may give only the best ones (FR-030). By default every document is read
+    /// at once.
+    fn search_results(
+        &self,
+        stage: &str,
+        spec: &Document,
+        _limit: Option<usize>,
+    ) -> Result<search::Lazy<'_>, MqlError> {
+        Ok(search::Lazy::eager(self.search_source(stage, spec)?))
+    }
+
     /// The documents of a pipeline's first `$match` with a `$text` (011 FR-001): those of the
     /// collection its filter selects, each with its `textScore`. Without a text index,
     /// the reference server's `IndexNotFound`.
@@ -154,6 +168,17 @@ pub trait Env {
     /// 9.0.4). Nothing to check without search.
     fn check_search(&self, _stage: &str, _spec: &Document) -> Result<(), MqlError> {
         Ok(())
+    }
+
+    /// [`Env::check_search`] with the most results the pipeline reads of the stage, as
+    /// [`Env::search_results`] takes it.
+    fn check_search_limited(
+        &self,
+        stage: &str,
+        spec: &Document,
+        _limit: Option<usize>,
+    ) -> Result<(), MqlError> {
+        self.check_search(stage, spec)
     }
 
     /// The collation strings compare with (010 FR-014): the binary order by default.
@@ -380,10 +405,12 @@ impl Pipeline {
     /// The errors of planning the pipeline's reads on `env`, before it runs (the index of
     /// `$geoNear`).
     pub fn check_plan(&self, env: &dyn Env) -> Result<(), MqlError> {
-        for st in &self.stages {
+        for (i, st) in self.stages.iter().enumerate() {
             match st {
                 Stage::GeoNear(g) => g.check_plan(env)?,
-                Stage::Search(name, spec) => env.check_search(name, spec)?,
+                Stage::Search(name, spec) => {
+                    env.check_search_limited(name, spec, self.limit_after(i + 1))?;
+                }
                 Stage::Text(filter) => env.check_text(filter)?,
                 // A `$match` with `$text` in a `$facet` passes the check of the metadata after
                 // a first one, and then fails when it is planned to run (measured on 9.0.4:
@@ -590,6 +617,49 @@ impl Pipeline {
                 }
             }
             sbe = sbe && *spec && sbe_capable(st);
+            if let Stage::Search(name, spec) = st {
+                // The stage reads with the scores and variables of the stages before it, which
+                // its results outlive.
+                let (names_now, vars_now) = (required.clone(), search_vars.clone());
+                let call =
+                    meta::RequiredEnv { inner: env, names: &names_now, vars: vars_now.as_ref() };
+                let call_env: &dyn Env =
+                    if names_now.is_empty() && vars_now.is_none() { env } else { &call };
+                let mut next_vars = None;
+                if self.reads_search_meta && *name == "$search" {
+                    let found = call_env.search_source("$searchMeta", spec)?;
+                    let meta = found.into_iter().next().map(|s| s.doc).unwrap_or_default();
+                    let mut vars = call_env.vars().cloned().unwrap_or_default();
+                    vars.insert(meta::SEARCH_META, meta);
+                    next_vars = Some(vars);
+                }
+                let own = meta::search_score_of(name);
+                let mut results = call_env.search_results(name, spec, self.limit_after(at))?;
+                let taken = std::mem::take(&mut results.metas);
+                results.metas = taken.into_iter().map(|m| meta::with_score(m, own)).collect();
+                required.extend(own.map(str::to_owned));
+                if next_vars.is_some() {
+                    search_vars = next_vars;
+                }
+                // The stages that read each document on its own take the results in batches,
+                // and a document is read only when a batch reaches them (FR-031).
+                let end = at + self.stages[at..].iter().take_while(|s| lazy_reads(s)).count();
+                let strict =
+                    meta::RequiredEnv { inner: env, names: &required, vars: search_vars.as_ref() };
+                let run_env: &dyn Env =
+                    if search_vars.is_none() && required.is_empty() { env } else { &strict };
+                let mut run_sbe = sbe;
+                for (st, spec) in self.stages[at..end].iter().zip(&self.sbe_specs[at..end]) {
+                    run_sbe = run_sbe && *spec && sbe_capable(st);
+                }
+                let (found, scores) = run_lazy(&self.stages[at..end], results, run_env, run_sbe)?;
+                (docs, metas) = (found, Some(scores));
+                if end > at {
+                    sbe = run_sbe;
+                }
+                at = end;
+                continue;
+            }
             // A grouping stage reads a score a document lacks as nothing (measured on 9.0.4,
             // after a `$unionWith`).
             let names: &[String] = if makes_new_documents(st) { &[] } else { &required };
@@ -610,28 +680,6 @@ impl Pipeline {
                     .unzip();
                 (docs, metas) = (found, Some(scores));
                 given.push(meta::TEXT_SCORE.to_owned());
-                continue;
-            }
-            if let Stage::Search(name, spec) = st {
-                let mut next_vars = None;
-                if self.reads_search_meta && *name == "$search" {
-                    let found = env.search_source("$searchMeta", spec)?;
-                    let meta = found.into_iter().next().map(|s| s.doc).unwrap_or_default();
-                    let mut vars = env.vars().cloned().unwrap_or_default();
-                    vars.insert(meta::SEARCH_META, meta);
-                    next_vars = Some(vars);
-                }
-                let own = meta::search_score_of(name);
-                let (found, scores): (Vec<Document>, Vec<meta::Meta>) = env
-                    .search_source(name, spec)?
-                    .into_iter()
-                    .map(|s| (s.doc, meta::with_score(s.meta, own)))
-                    .unzip();
-                (docs, metas) = (found, Some(scores));
-                required.extend(own.map(str::to_owned));
-                if next_vars.is_some() {
-                    search_vars = next_vars;
-                }
                 continue;
             }
             if let Stage::Score(s) = st {
@@ -662,6 +710,26 @@ impl Pipeline {
             }
         }
         Ok((docs, metas))
+    }
+
+    /// The most results the stages from `at` read of a search stage before them: those of the
+    /// `$limit` and `$skip` stages right after it, `None` without a `$limit` there.
+    fn limit_after(&self, at: usize) -> Option<usize> {
+        let mut skipped: usize = 0;
+        let mut most: Option<usize> = None;
+        for st in &self.stages[at..] {
+            match st {
+                Stage::Skip(n) => {
+                    skipped = skipped.saturating_add(usize::try_from(*n).unwrap_or(usize::MAX));
+                }
+                Stage::Limit(n) => {
+                    let n = skipped.saturating_add(usize::try_from(*n).unwrap_or(usize::MAX));
+                    most = Some(most.map_or(n, |m| m.min(n)));
+                }
+                _ => break,
+            }
+        }
+        most
     }
 
     /// The end of the stages from `from` that change or filter each document on its own
@@ -1074,6 +1142,93 @@ fn streams(st: &Stage) -> bool {
             | Stage::ReplaceRoot(_)
             | Stage::Unwind(_)
     )
+}
+
+/// Whether a stage after a search stage reads each result on its own, keeping its metadata, or
+/// only counts results, so that it takes the results in batches (011 FR-031).
+fn lazy_reads(st: &Stage) -> bool {
+    matches!(
+        st,
+        Stage::Match(_)
+            | Stage::Project(_)
+            | Stage::AddFields(_)
+            | Stage::ReplaceRoot(_)
+            | Stage::Redact(_)
+            | Stage::Unwind(_)
+            | Stage::Lookup(_)
+            | Stage::GraphLookup(_)
+            | Stage::Limit(_)
+            | Stage::Skip(_)
+    )
+}
+
+/// Runs `stages`, each of which [`lazy_reads`], over the results of a search stage (011 FR-031):
+/// the `$skip` and `$limit` stages first among them count results without reading them, and the
+/// others take the results [`search::SEARCH_BATCH`] at a time, each batch read when it reaches
+/// them; once a `$limit` has let through all it lets, no more results are read.
+fn run_lazy(
+    stages: &[Stage],
+    mut results: search::Lazy<'_>,
+    env: &dyn Env,
+    sbe: bool,
+) -> Result<(Vec<Document>, Vec<meta::Meta>), MqlError> {
+    let as_count = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+    let (mut from, mut to): (usize, usize) = (0, results.len());
+    let mut first = 0;
+    for st in stages {
+        match st {
+            Stage::Skip(n) => from = from.saturating_add(as_count(*n)).min(to),
+            Stage::Limit(n) => to = to.min(from.saturating_add(as_count(*n))),
+            _ => break,
+        }
+        first += 1;
+    }
+    let rest = &stages[first..];
+    // What each `$limit` or `$skip` of `rest` has let through or dropped so far.
+    let mut counted = vec![0usize; rest.len()];
+    let mut out: (Vec<Document>, Vec<meta::Meta>) = (Vec::new(), Vec::new());
+    let mut at = from;
+    while at < to {
+        let end = (at + search::SEARCH_BATCH).min(to);
+        let mut metas: Vec<meta::Meta> =
+            results.metas[at..end].iter_mut().map(std::mem::take).collect();
+        let mut docs = results.load(at, end)?;
+        at = end;
+        for (j, st) in rest.iter().enumerate() {
+            if docs.is_empty() {
+                break;
+            }
+            env.interrupted()?;
+            match st {
+                Stage::Limit(n) => {
+                    let left = as_count(*n).saturating_sub(counted[j]).min(docs.len());
+                    docs.truncate(left);
+                    metas.truncate(left);
+                    counted[j] += left;
+                }
+                Stage::Skip(n) => {
+                    let drop = as_count(*n).saturating_sub(counted[j]).min(docs.len());
+                    docs.drain(..drop);
+                    metas.drain(..drop);
+                    counted[j] += drop;
+                }
+                _ => {
+                    let (d, m) = run_stage_meta(st, docs, metas, env, sbe)?;
+                    (docs, metas) = (d, m.unwrap_or_default());
+                }
+            }
+        }
+        out.0.append(&mut docs);
+        out.1.append(&mut metas);
+        let done = rest.iter().zip(&counted).any(|(st, &c)| match st {
+            Stage::Limit(n) => c >= as_count(*n),
+            _ => false,
+        });
+        if done {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Runs `stages`, each of which [`streams`], over `docs` in batches of [`BATCH_DOCS`]: each batch

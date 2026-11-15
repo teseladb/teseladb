@@ -347,6 +347,7 @@ dependencies = [
  "teseladb-crypto",
  "teseladb-deflate",
  "teseladb-hash",
+ "teseladb-index",
  "teseladb-keys",
  "teseladb-mql",
  "teseladb-names",

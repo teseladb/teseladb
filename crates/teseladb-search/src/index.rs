@@ -563,6 +563,23 @@ impl MemIndex {
         // The terms' scores add up in doubles, as the reference search library's disjunctions do (measured: 1 024
         // terms of one document give the reference search server's 269.5703125, and 269.56622 added in 32 bits).
         let mut scores: BTreeMap<u32, f64> = BTreeMap::new();
+        for clause in self.text_clauses(query, paths, boost)? {
+            for (doc, score) in clause {
+                *scores.entry(doc).or_insert(0.0) += f64::from(score);
+            }
+        }
+        Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
+    }
+
+    /// The clauses [`MemIndex::text_scores`] adds, in its order (by path, query string and
+    /// segment of its tokens): the documents of each with their scores, by document number.
+    pub(crate) fn text_clauses(
+        &self,
+        query: &[String],
+        paths: &[String],
+        boost: f32,
+    ) -> Result<Vec<Vec<(u32, f32)>>, IndexError> {
+        let mut out = Vec::new();
         for path in paths {
             let Some(field) = self.fields.get(path) else { continue };
             let a = self.analyzer(&field.search_analyzer)?;
@@ -570,13 +587,13 @@ impl MemIndex {
                 let tokens = a.analyze(q).map_err(analysis)?;
                 for segment in segments(&tokens)? {
                     let g = self.global_of(path);
-                    for (doc, score) in field.segment_scores(&segment, boost, g) {
-                        *scores.entry(doc).or_insert(0.0) += f64::from(score);
-                    }
+                    let mut clause = field.segment_scores(&segment, boost, g);
+                    clause.sort_by_key(|&(doc, _)| doc);
+                    out.push(clause);
                 }
             }
         }
-        Ok(scores.into_iter().map(|(doc, s)| (doc, s as f32)).collect())
+        Ok(out)
     }
 
     /// The query analyzer of the field at `path`: its own, or the definition's when no document

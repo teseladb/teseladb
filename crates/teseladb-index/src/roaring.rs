@@ -48,6 +48,29 @@ impl Container {
         }
     }
 
+    /// The first value at or after `v`.
+    fn next_from(&self, v: u16) -> Option<u16> {
+        match self {
+            Container::Array(a) => a.get(a.partition_point(|&x| x < v)).copied(),
+            Container::Bitmap(b) => {
+                let mut i = usize::from(v >> 6);
+                let mut w = b[i] & (u64::MAX << (v & 63));
+                loop {
+                    if w != 0 {
+                        return Some((i as u16) << 6 | w.trailing_zeros() as u16);
+                    }
+                    i += 1;
+                    w = *b.get(i)?;
+                }
+            }
+            Container::Run(r) => {
+                // The first run that ends at or after `v`.
+                let i = r.partition_point(|&(s, l)| u32::from(s) + u32::from(l) < u32::from(v));
+                r.get(i).map(|&(s, _)| s.max(v))
+            }
+        }
+    }
+
     fn bitmap(&self) -> Box<[u64; WORDS]> {
         let mut b = Box::new([0u64; WORDS]);
         for v in self.values() {
@@ -215,6 +238,21 @@ impl Roaring {
         }
     }
 
+    /// The first id at or after `id`, if there is one: a reader that walks ids in order jumps
+    /// with it over the ones the set does not hold (011 FR-030).
+    pub fn next_from(&self, id: u32) -> Option<u32> {
+        let (high, low) = ((id >> 16) as u16, id as u16);
+        let mut i = self.keys.partition_point(|&k| k < high);
+        if self.keys.get(i) == Some(&high) {
+            if let Some(v) = self.containers[i].next_from(low) {
+                return Some(u32::from(high) << 16 | u32::from(v));
+            }
+            i += 1;
+        }
+        let first = self.containers.get(i)?.next_from(0)?;
+        Some(u32::from(self.keys[i]) << 16 | u32::from(first))
+    }
+
     /// The ids in order.
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.keys
@@ -376,6 +414,35 @@ mod tests {
                 assert_eq!(ra.contains(id), a.contains(&id));
             }
         }
+    }
+
+    #[test]
+    fn next_from_finds_the_first_id_at_or_after() {
+        let mut rng = Rng(0x1D5E_7F00_00A1_B2C3);
+        for round in 0..60 {
+            let a = ids(&mut rng);
+            let mut r = Roaring::from_ids(a.iter().copied());
+            // Some sets also take ids one by one, which turns runs and arrays into bitmaps.
+            if round % 3 == 0 {
+                for _ in 0..50 {
+                    r.insert(rng.below(300_000) as u32);
+                }
+            }
+            let set: BTreeSet<u32> = r.iter().collect();
+            for _ in 0..300 {
+                let id = rng.below(310_000) as u32;
+                assert_eq!(r.next_from(id), set.range(id..).next().copied(), "{id}");
+            }
+            for &id in set.iter().take(20) {
+                assert_eq!(r.next_from(id), Some(id));
+            }
+            assert_eq!(r.next_from(u32::MAX), set.range(u32::MAX..).next().copied());
+        }
+        assert_eq!(Roaring::new().next_from(0), None);
+        let edges = Roaring::from_ids([65_535, 65_536, 131_071]);
+        assert_eq!(edges.next_from(65_535), Some(65_535));
+        assert_eq!(edges.next_from(65_537), Some(131_071));
+        assert_eq!(edges.next_from(131_072), None);
     }
 
     #[test]

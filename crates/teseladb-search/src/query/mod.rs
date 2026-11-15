@@ -7,6 +7,7 @@ pub mod postings;
 pub mod regex;
 pub mod search;
 pub(crate) mod sort;
+pub mod top;
 pub mod vector_search;
 pub mod wand;
 

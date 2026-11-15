@@ -27,6 +27,63 @@ pub struct Scored {
     pub meta: BTreeMap<String, Value>,
 }
 
+/// The results a stage after a search reads at a time (011 FR-031): their documents are read
+/// together, when the first of those stages asks for them.
+pub const SEARCH_BATCH: usize = 64;
+
+/// What reads the documents of results `from..to` of a [`Lazy`], in order.
+pub type Loader<'a> = Box<dyn FnMut(usize, usize) -> Result<Vec<Document>, MqlError> + 'a>;
+
+/// The results of a search stage whose documents are read only when a stage asks for them
+/// (011 FR-031): each result's metadata, in order, and the reader of their documents.
+pub struct Lazy<'a> {
+    /// Each result's metadata for `$meta`.
+    pub metas: Vec<BTreeMap<String, Value>>,
+    load: Loader<'a>,
+    /// Documents read so far, for tests and metrics.
+    loaded: usize,
+}
+
+impl<'a> Lazy<'a> {
+    /// Results with `metas` whose documents `load` reads.
+    pub fn new(metas: Vec<BTreeMap<String, Value>>, load: Loader<'a>) -> Lazy<'a> {
+        Lazy { metas, load, loaded: 0 }
+    }
+
+    /// Results whose documents are already read.
+    pub fn eager(found: Vec<Scored>) -> Lazy<'a> {
+        let (docs, metas): (Vec<Document>, Vec<_>) =
+            found.into_iter().map(|s| (s.doc, s.meta)).unzip();
+        let mut docs: Vec<Option<Document>> = docs.into_iter().map(Some).collect();
+        let load = move |from: usize, to: usize| {
+            Ok(docs[from..to].iter_mut().map(|d| d.take().unwrap_or_default()).collect())
+        };
+        Lazy::new(metas, Box::new(load))
+    }
+
+    /// How many results there are.
+    pub fn len(&self) -> usize {
+        self.metas.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.metas.is_empty()
+    }
+
+    /// The documents of results `from..to`, each read once.
+    pub fn load(&mut self, from: usize, to: usize) -> Result<Vec<Document>, MqlError> {
+        let docs = (self.load)(from, to)?;
+        self.loaded += docs.len();
+        Ok(docs)
+    }
+
+    /// How many documents have been read.
+    pub fn loaded(&self) -> usize {
+        self.loaded
+    }
+}
+
 /// The error of a deployment without search, whatever the stage.
 pub fn not_enabled() -> MqlError {
     error(SEARCH_NOT_ENABLED, teseladb_names::ERR_SEARCH_NOT_CONFIGURED)

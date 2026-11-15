@@ -837,31 +837,120 @@ pub fn source<B: Backend + ?Sized>(
     stage: &str,
     spec: &Document,
 ) -> Result<Vec<Scored>, CommandError> {
+    let mut r = ranked(backend, shared, ns, (stage, spec), None)?;
+    let n = r.metas.len();
+    let docs = documents(backend, shared, &mut r, 0, n)?;
+    Ok(docs.into_iter().zip(r.metas).map(|(doc, meta)| Scored { doc, meta }).collect())
+}
+
+/// The results of a search stage, with the documents of a `$search` still to read from its
+/// index (011 FR-031): each result's metadata, in order.
+pub struct Ranked {
+    /// Each result's metadata for `$meta`.
+    pub metas: Vec<BTreeMap<String, Value>>,
+    reads: Reads,
+}
+
+/// Where the documents of a [`Ranked`] come from.
+enum Reads {
+    /// Read already.
+    Read(Vec<Option<Document>>),
+    /// The documents of `keys` in index `entry` of `coll`.
+    Index(Box<IndexReads>),
+}
+
+/// What reads the documents of a `$search` from its index.
+struct IndexReads {
+    keys: Vec<Vec<u8>>,
+    ns: Namespace,
+    coll: CollectionEntry,
+    entry: SearchIndexEntry,
+    synonyms: Vec<(String, Vec<Document>)>,
+    /// The query runs on a view: the documents are the index's.
+    on_view: bool,
+    /// `returnStoredSource: true`.
+    stored_source: bool,
+}
+
+impl Ranked {
+    /// Results whose documents are read already.
+    fn read(found: Vec<Scored>) -> Ranked {
+        let (docs, metas): (Vec<Document>, Vec<_>) =
+            found.into_iter().map(|s| (s.doc, s.meta)).unzip();
+        Ranked { metas, reads: Reads::Read(docs.into_iter().map(Some).collect()) }
+    }
+}
+
+/// The results of a search stage `(stage, spec)` on `ns` without reading the documents of a
+/// `$search`; with `limit`, the `$search` may give only its first `limit` results (FR-030).
+pub fn ranked<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    ns: &Namespace,
+    (stage, spec): (&str, &Document),
+    limit: Option<usize>,
+) -> Result<Ranked, CommandError> {
     let start = backend.now_micros();
-    let out = answer(backend, shared, ns, stage, spec);
+    let out = answer(backend, shared, ns, (stage, spec), limit);
     QUERIES.fetch_add(1, Ordering::Relaxed);
     QUERY_MICROS.fetch_add(backend.now_micros().saturating_sub(start), Ordering::Relaxed);
     out
 }
 
-/// What [`source`] answers.
+/// The documents of results `from..to` of `r`, each read once: from the index, as the
+/// collection was when the index read it, or as the index keeps it on a view; projected by the
+/// index's `storedSource` with `returnStoredSource: true`.
+pub fn documents<B: Backend + ?Sized>(
+    backend: &mut B,
+    shared: &Shared,
+    r: &mut Ranked,
+    from: usize,
+    to: usize,
+) -> Result<Vec<Document>, CommandError> {
+    let reads = match &mut r.reads {
+        Reads::Read(docs) => {
+            return Ok(docs[from..to].iter_mut().map(|d| d.take().unwrap_or_default()).collect());
+        }
+        Reads::Index(reads) => reads,
+    };
+    let IndexReads { keys, ns, coll, entry, synonyms, on_view, stored_source } = &**reads;
+    let keys = &keys[from..to];
+    let read = with_index(backend, shared, ns, coll, entry, synonyms, |ix, stored| {
+        let Segments::Search(ix) = ix else { return Vec::new() };
+        keys.iter()
+            .map(|k| {
+                let kept = (!*on_view).then(|| stored.get(k)).flatten();
+                let doc = kept.or_else(|| ix.document_of(k)).cloned().unwrap_or_default();
+                match stored_source {
+                    true => ix.definition().stored_source.project(&doc),
+                    false => doc,
+                }
+            })
+            .collect()
+    })?;
+    Ok(read)
+}
+
+/// What [`ranked`] answers.
 fn answer<B: Backend + ?Sized>(
     backend: &mut B,
     shared: &Shared,
     ns: &Namespace,
-    stage: &str,
-    spec: &Document,
-) -> Result<Vec<Scored>, CommandError> {
+    (stage, spec): (&str, &Document),
+    limit: Option<usize>,
+) -> Result<Ranked, CommandError> {
     if stage == "$vectorSearch" {
-        return vector_source(backend, shared, ns, spec);
+        return vector_source(backend, shared, ns, spec).map(Ranked::read);
     }
     let name = index_name(spec)?;
     let meta_only = stage == "$searchMeta";
     // Without the collection even `$searchMeta` gives nothing (measured).
-    let Some((coll, view)) = target(backend, ns, !meta_only)? else { return Ok(Vec::new()) };
+    let Some((coll, view)) = target(backend, ns, !meta_only)? else {
+        return Ok(Ranked::read(Vec::new()));
+    };
     let entry = backend.search_indexes(coll.id)?.into_iter().find(|e| e.name == name);
     let entry = match entry {
-        None => return Ok(missing(meta_only)),
+        None => return Ok(Ranked::read(missing(meta_only))),
         // The reference search server reads the query before it finds the index is of the other
         // type.
         Some(e) if e.kind == SearchIndexKind::VectorSearch => {
@@ -869,7 +958,7 @@ fn answer<B: Backend + ?Sized>(
             teseladb_search::query::search::run(&empty, spec).map_err(|e| query_error(e.0))?;
             return Err(query_error(vector_search::not_search(&name).0));
         }
-        Some(e) if !serves(&e, view.as_deref())? => return Ok(missing(meta_only)),
+        Some(e) if !serves(&e, view.as_deref())? => return Ok(Ranked::read(missing(meta_only))),
         Some(e) => e,
     };
     let failed = lock(shared).search.served(&entry.id);
@@ -877,16 +966,33 @@ fn answer<B: Backend + ?Sized>(
         return Err(query_error(state_message(&entry, &coll, ns, "FAILED")));
     }
     let synonyms = synonym_documents(backend, ns, &entry)?;
-    let found = with_index(backend, shared, ns, &coll, &entry, &synonyms, |ix, stored| {
-        match (ix, meta_only) {
-            (Segments::Search(ix), true) => ix.meta(spec).map(|d| vec![plain(d)]),
-            (Segments::Search(ix), false) => ix.search(spec).map(|f| {
-                let found = as_read(f, stored, view.is_some());
-                scored(stored_source(ix.definition(), spec, found), SEARCH_SCORE)
-            }),
+    let found =
+        with_index(backend, shared, ns, &coll, &entry, &synonyms, |ix, _| match (ix, meta_only) {
+            (Segments::Search(ix), true) => ix.meta(spec).map(|d| Ranked::read(vec![plain(d)])),
+            (Segments::Search(ix), false) => ix
+                .rank(spec, limit)
+                .map(|found| {
+                    let keys = found.iter().map(|f| f.key.clone()).collect();
+                    let metas = scored(found, SEARCH_SCORE).into_iter().map(|s| s.meta).collect();
+                    (metas, keys)
+                })
+                .map(|(metas, keys)| Ranked {
+                    metas,
+                    reads: Reads::Index(Box::new(IndexReads {
+                        keys,
+                        ns: ns.clone(),
+                        coll: coll.clone(),
+                        entry: entry.clone(),
+                        synonyms: synonyms.clone(),
+                        on_view: view.is_some(),
+                        stored_source: matches!(
+                            spec.get("returnStoredSource"),
+                            Some(Value::Boolean(true))
+                        ),
+                    })),
+                }),
             (Segments::Vector(_), _) => Err(vector_search::not_search(&name)),
-        }
-    })?;
+        })?;
     found.map_err(|e| query_error(e.0))
 }
 
@@ -977,20 +1083,6 @@ fn as_read(found: Vec<Found>, stored: &BTreeMap<Vec<u8>, Document>, on_view: boo
             // Every key the index found is in `stored`.
             let doc = stored.get(&f.key).cloned();
             f.doc = doc.unwrap_or(std::mem::take(&mut f.doc));
-            f
-        })
-        .collect()
-}
-
-/// With `returnStoredSource: true`, each document as the index's `storedSource` keeps it.
-fn stored_source(definition: &Definition, spec: &Document, found: Vec<Found>) -> Vec<Found> {
-    if !matches!(spec.get("returnStoredSource"), Some(Value::Boolean(true))) {
-        return found;
-    }
-    found
-        .into_iter()
-        .map(|mut f| {
-            f.doc = definition.stored_source.project(&f.doc);
             f
         })
         .collect()

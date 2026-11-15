@@ -283,10 +283,34 @@ impl Indexer {
     /// The documents `spec` selects in the order of its `sort` (best first without one; equal
     /// documents in key order), after or before its `searchAfter` or `searchBefore` token.
     pub fn search(&self, spec: &Document) -> Result<Vec<Found>, SearchError> {
+        let mut found = self.rank(spec, None)?;
+        for f in &mut found {
+            f.doc = self.document_of(&f.key).cloned().unwrap_or_default();
+        }
+        Ok(found)
+    }
+
+    /// The document of `key`, as the index has it.
+    pub fn document_of(&self, key: &[u8]) -> Option<&Document> {
+        self.segments.iter().find_map(|s| s.index.document_of(key))
+    }
+
+    /// [`Indexer::search`] without the documents, which [`Indexer::document_of`] reads when a
+    /// stage asks for them (FR-031). With `limit`, and a `spec` whose first documents are its
+    /// best ([`search::top_applies`]), only the first `limit`: each segment gives its best
+    /// `limit` ([`search::run_top`], scored with the statistics of every segment) and the best
+    /// of those stay (FR-030).
+    pub fn rank(&self, spec: &Document, limit: Option<usize>) -> Result<Vec<Found>, SearchError> {
         let mut found = Vec::new();
         let details = search::wants_details(spec);
+        let top = limit.filter(|_| search::top_applies(spec));
+        // `sort` reads the documents; without it the order is by score and key.
+        let sorted = spec.get("sort").is_some();
         for s in &self.segments {
-            let hits = search::run(&s.index, spec)?;
+            let hits = match top {
+                Some(k) => search::run_top(&s.index, spec, k)?,
+                None => search::run(&s.index, spec)?,
+            };
             let mut explained = if details {
                 let keys: Vec<Vec<u8>> = hits.iter().map(|h| h.key.clone()).collect();
                 search::explain(&s.index, spec, &keys)?.into_iter().collect()
@@ -295,7 +319,7 @@ impl Indexer {
             };
             for hit in hits {
                 if let Some(doc) = s.index.document_of(&hit.key) {
-                    let doc = doc.clone();
+                    let doc = if sorted { doc.clone() } else { Document::new() };
                     let details = explained.remove(&hit.key);
                     found.push(Found {
                         doc,
@@ -309,6 +333,12 @@ impl Indexer {
             }
         }
         let mut found = crate::query::paginate::arrange(found, spec, &self.definition)?;
+        if let Some(k) = top {
+            found.truncate(k);
+        }
+        if sorted {
+            found.iter_mut().for_each(|f| f.doc = Document::new());
+        }
         // Only the documents of the final result are highlighted (FR-015).
         if spec.get("highlight").is_some() {
             for f in &mut found {

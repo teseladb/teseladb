@@ -136,12 +136,30 @@ impl Env for RequiredEnv<'_> {
         self.inner.check_search(stage, spec)
     }
 
+    fn check_search_limited(
+        &self,
+        stage: &str,
+        spec: &Document,
+        limit: Option<usize>,
+    ) -> Result<(), MqlError> {
+        self.inner.check_search_limited(stage, spec, limit)
+    }
+
     fn search_source(
         &self,
         stage: &str,
         spec: &Document,
     ) -> Result<Vec<super::search::Scored>, MqlError> {
         self.inner.search_source(stage, spec)
+    }
+
+    fn search_results(
+        &self,
+        stage: &str,
+        spec: &Document,
+        limit: Option<usize>,
+    ) -> Result<super::search::Lazy<'_>, MqlError> {
+        self.inner.search_results(stage, spec, limit)
     }
 
     fn joined_text_source(
