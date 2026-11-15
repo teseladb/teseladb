@@ -204,3 +204,7 @@ embedded-in-boosted (2 hits)	c16ccaed936a1add
 embedded-in-boosted+details (2 hits)	aa04ab43adaee83f
 embedded-wildcard (2 hits)	142c0f749c01eba8
 embedded-wildcard+details (2 hits)	14160834b052d956
+nested-geo-contains-points (3 hits)	26d29daff69f1176
+nested-geo-contains-points+details (3 hits)	6870977264aafec5
+nested-geo-line (3 hits)	26d29daff69f1176
+nested-geo-line+details (3 hits)	c0250bfde449d84e

@@ -373,6 +373,16 @@ const SEARCHES: &[(&str, &str)] = &[
         "embedded-wildcard",
         r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "zoo", "path": {"wildcard": "items.*"}}}}}"#,
     ),
+    (
+        "nested-geo-contains-points",
+        r#"{"compound": {"filter": [{"compound": {"should": [{"exists": {"path": "t"}}], "mustNot": [{"geoShape": {"path": "loc", "relation": "contains",
+            "geometry": {"type": "MultiPoint", "coordinates": [[40, 40], [41, 41]]}}}]}}], "must": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    (
+        "nested-geo-line",
+        r#"{"compound": {"filter": [{"compound": {"should": [{"exists": {"path": "t"}}], "mustNot": [{"geoShape": {"path": "loc", "relation": "intersects",
+            "geometry": {"type": "LineString", "coordinates": [[40, 40], [41, 41]]}}}]}}], "must": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
     ("qs-range", r#"{"queryString": {"defaultPath": "t", "query": "t:[a TO fox}"}}"#),
     ("qs-range-open", r#"{"queryString": {"defaultPath": "t", "query": "t:{* TO brown]"}}"#),
     (
