@@ -202,6 +202,16 @@ impl Program {
             }
             return group.partial_fed(&fed, &want, (&PlainEnv, self.sbe, self.limit)).ok()?;
         }
+        // Stored documents only: the filter runs on their bytes first and only the documents it
+        // keeps are made (010 FR-027); they go through the `$match`es as before.
+        let prefiltered = match columnar {
+            false => Some(self.matching_rows(inputs)?),
+            true => None,
+        };
+        if let Some(docs) = prefiltered {
+            let docs = parse(&self.matches).ok()?.run_in(docs, &PlainEnv, self.sbe).ok()?;
+            return group.partial(docs, &PlainEnv, self.sbe, self.limit).ok()?;
+        }
         let mut docs = Vec::with_capacity(inputs.len());
         for input in inputs {
             match input {
@@ -211,6 +221,54 @@ impl Program {
         }
         let docs = parse(&self.matches).ok()?.run_in(docs, &PlainEnv, self.sbe).ok()?;
         group.partial(docs, &PlainEnv, self.sbe, self.limit).ok()?
+    }
+
+    /// The documents of `inputs` (stored documents only) that the program's `$match`es keep, in
+    /// their order: the `$match`es, one after the other, are the conjunction of their filters,
+    /// evaluated on the stored bytes a batch at a time on the register machine (010 FR-028,
+    /// FR-031) with the environment of a core, no collation and no extensions. `None` when a
+    /// document does not read or the filter fails; the coordinator then runs the pipeline over
+    /// the whole input, which gives that error.
+    fn matching_rows(&self, inputs: &[Input<'_>]) -> Option<Vec<Document>> {
+        // Each of `matches` is a whole `$match` stage: its filter is the stage's value.
+        let filters = self
+            .matches
+            .iter()
+            .map(|m| match m.get("$match") {
+                Some(Value::Document(f)) => Some(f.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<Document>>>()?;
+        let spec = match filters.as_slice() {
+            [one] => one.clone(),
+            all => Document::new()
+                .with("$and", Value::Array(all.iter().cloned().map(Value::Document).collect())),
+        };
+        let bytes = spec.to_bytes().ok()?;
+        let raw = RawDoc::from_bytes(&bytes).ok()?;
+        let filter = teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).ok()?;
+        let ctx = teseladb_mql::MatchContext { collation: None, ext: &NoExtensions, vars: None };
+        let rows: Vec<&[u8]> = inputs
+            .iter()
+            .map(|i| match i {
+                Input::Row(b) => Some(*b),
+                Input::Columns(_) => None,
+            })
+            .collect::<Option<_>>()?;
+        let mut docs = Vec::new();
+        for batch in rows.chunks(teseladb_mql::vm::BATCH) {
+            let stored = batch
+                .iter()
+                .map(|b| teseladb_keys::stored::split(b).ok())
+                .collect::<Option<Vec<_>>>()?;
+            let kept = filter.matches_batch(&stored, &ctx).ok()?;
+            for (lane, b) in batch.iter().enumerate() {
+                if (kept >> lane) & 1 == 1 {
+                    docs.push(document(b)?);
+                }
+            }
+        }
+        Some(docs)
     }
 }
 
