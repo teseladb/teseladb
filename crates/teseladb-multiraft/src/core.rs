@@ -1270,6 +1270,14 @@ impl<S: StateMachine> MultiRaftCore<S> {
         if self.groups.values().any(|g| g.raw.conf().voters.contains(&from)) {
             self.clock_rule.observe(from, wall_ms, self.wall_ms, now);
         }
+        // Its flight (012 FR-015); a clock of 0 is not known yet and says nothing.
+        if wall_ms != 0 && self.wall_ms != 0 {
+            let flight_ms = self.wall_ms.saturating_sub(wall_ms);
+            teseladb_stages::record(
+                teseladb_stages::Stage::PeerFrameFlight,
+                flight_ms.saturating_mul(1_000_000),
+            );
+        }
     }
 
     /// A frame from another node.

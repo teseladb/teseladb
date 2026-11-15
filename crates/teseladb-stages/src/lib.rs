@@ -105,11 +105,14 @@ pub enum Stage {
     LogSync,
     /// The answer of a sync of the device log in its core's mailbox until the core takes it.
     LogNotify,
+    /// A frame of Raft or of heartbeats from another node: the wall clock of the core that reads
+    /// it minus the one it carried, its delay between nodes of one machine.
+    PeerFrameFlight,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 36] = [
+    pub const ALL: [Stage; 37] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -146,6 +149,7 @@ impl Stage {
         Stage::LogWrite,
         Stage::LogSync,
         Stage::LogNotify,
+        Stage::PeerFrameFlight,
     ];
 
     /// Its label in the metrics.
@@ -187,6 +191,7 @@ impl Stage {
             Stage::LogWrite => "log_write",
             Stage::LogSync => "log_sync",
             Stage::LogNotify => "log_notify",
+            Stage::PeerFrameFlight => "peer_frame_flight",
         }
     }
 }
@@ -228,6 +233,11 @@ pub fn record(stage: Stage, nanos: u64) {
 /// How many times `stage` was recorded.
 pub fn count(stage: Stage) -> u64 {
     STAGES[stage as usize].buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum()
+}
+
+/// The nanoseconds `stage` added up.
+pub fn total_nanos(stage: Stage) -> u64 {
+    STAGES[stage as usize].sum_nanos.load(Ordering::Relaxed)
 }
 
 /// `nanos` in seconds as Prometheus writes a number: `0.000001`, `1`, `33.554432`.
