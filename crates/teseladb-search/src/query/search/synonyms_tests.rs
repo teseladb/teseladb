@@ -112,3 +112,47 @@ fn phrase_with_synonyms_runs_on_the_expansions() {
     assert_eq!(keys(&idx, &phrase("perro")), Ok(vec![2]));
     assert_eq!(keys(&idx, &phrase("blanco perro")), Ok(vec![]));
 }
+
+fn equivalent(all: &[&str]) -> Document {
+    Document::new().with("mappingType", EQUIVALENT).with("synonyms", words(all))
+}
+
+fn tokens(all: &[&str]) -> Vec<String> {
+    all.iter().map(|w| (*w).to_owned()).collect()
+}
+
+/// Rules with entries of several words: the longest entry that starts at a token wins, the first
+/// rule naming it in `multi_word`, and every rule naming it in the groups of `matchCriteria`.
+#[test]
+fn the_longest_entry_of_several_words_wins() {
+    let mut idx = index();
+    let docs = vec![
+        equivalent(&["gran gato", "tigre"]),
+        equivalent(&["gran gato", "felino"]),
+        equivalent(&["gran", "enorme animal"]),
+    ];
+    idx.set_synonyms("sy", &docs).expect("loaded");
+    let map = idx.synonym_map("sy").expect("a map");
+    let paths = map.multi_word(&tokens(&["gran", "gato"])).expect("a rule is involved");
+    assert!(paths.contains(&tokens(&["tigre"])), "{paths:?}");
+    assert!(paths.contains(&tokens(&["gran", "gato"])), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains(&"enorme".to_owned())), "{paths:?}");
+    let segments = map.segments(&tokens(&["gran", "gato", "rojo"]));
+    let [crate::index::SynonymSegment::Group(alts), word] = segments.as_slice() else {
+        panic!("{segments:?}")
+    };
+    assert!(alts.contains(&tokens(&["tigre"])) && alts.contains(&tokens(&["felino"])), "{alts:?}");
+    assert!(!alts.contains(&tokens(&["enorme", "animal"])), "{alts:?}");
+    assert_eq!(word, &crate::index::SynonymSegment::Word("rojo".to_owned(), None));
+}
+
+#[test]
+fn a_rule_with_a_word_that_is_no_string_makes_the_mapping_invalid() {
+    let mut idx = index();
+    let bad = Document::new()
+        .with("mappingType", EQUIVALENT)
+        .with("synonyms", Value::Array(vec![Value::from("gato"), Value::Int32(1)]));
+    idx.set_synonyms("sy", &[bad]).expect("loaded");
+    let spec = text(Document::new().with("synonyms", "sy"));
+    assert!(keys(&idx, &spec).is_err_and(|e| e.0.contains("INVALID")));
+}

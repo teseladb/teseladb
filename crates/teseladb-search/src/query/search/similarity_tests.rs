@@ -477,4 +477,17 @@ fn nested_fields_take_their_own_similarity() {
     assert_eq!(idx.similarity_of("t.x"), crate::index::Similarity::Bm25);
     assert_eq!(idx.similarity_of("body.nope"), crate::index::Similarity::Bm25);
     assert_eq!(idx.similarity_of("nope"), crate::index::Similarity::Bm25);
+    // A field that is text and `autocomplete`: the grams take the `autocomplete` mapping's.
+    let grams = Document::new()
+        .with("type", "autocomplete")
+        .with("similarity", Document::new().with("type", "stableTfl"));
+    let both = vec![Document::new().with("type", "string").into(), grams.into()];
+    let def = Document::new().with(
+        "mappings",
+        Document::new().with("dynamic", false).with("fields", Document::new().with("a", both)),
+    );
+    let idx = MemIndex::new(Definition::parse(&def).expect("valid"));
+    let key = crate::index::autocomplete_key("a");
+    assert_eq!(idx.similarity_of(&key), crate::index::Similarity::StableTfl);
+    assert_eq!(idx.similarity_of("a"), crate::index::Similarity::Bm25);
 }
