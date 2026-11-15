@@ -317,6 +317,23 @@ const SEARCHES: &[(&str, &str)] = &[
             "must": [{"exists": {"path": "t"}}]}}"#,
     ),
     ("range-string", r#"{"range": {"path": "t", "gte": "a", "lt": "m"}}"#),
+    ("must-not-only", r#"{"compound": {"mustNot": [{"text": {"query": "dog", "path": "t"}}]}}"#),
+    (
+        "boosted-compound",
+        r#"{"compound": {"must": [{"text": {"query": "quick", "path": "t"}}], "should": [{"text": {"query": "fox", "path": "t"}}],
+            "score": {"boost": {"value": 2}}}}"#,
+    ),
+    (
+        "nested-must-one",
+        r#"{"compound": {"filter": [{"compound": {"must": [{"text": {"query": "lazy", "path": "t"}}]}}],
+            "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    (
+        "nested-two-paths",
+        r#"{"compound": {"filter": [{"text": {"query": "quick", "path": ["t", "syn"]}}, {"phrase": {"query": "quick brown", "path": ["t", "syn"]}}],
+            "should": [{"text": {"query": "fox", "path": "t"}}]}}"#,
+    ),
+    ("phrase-two-paths", r#"{"phrase": {"query": "quick brown", "path": ["t", "syn"]}}"#),
     ("phrase-missing-path", r#"{"phrase": {"query": "brown fox", "path": "nope"}}"#),
     (
         "must-criteria-all-paths",

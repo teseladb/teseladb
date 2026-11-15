@@ -160,3 +160,13 @@ nested-compound (4 hits)	22b9cf98fca17134
 nested-compound+details (4 hits)	b3d4c82d0d3c21d2
 range-string (0 hits)	cbf29ce484222325
 range-string+details (0 hits)	cbf29ce484222325
+must-not-only (7 hits)	5b3076d8074fcfff
+must-not-only+details (7 hits)	22113a73afc3c1da
+boosted-compound (3 hits)	c1779a5037d65242
+boosted-compound+details (3 hits)	3d2d7a62e72ea089
+nested-must-one (2 hits)	88633640dd4be0e7
+nested-must-one+details (2 hits)	e7d1c5c234c93f65
+nested-two-paths (2 hits)	e1451fb77984c9a3
+nested-two-paths+details (2 hits)	fc0fa014c0fddc9a
+phrase-two-paths (2 hits)	f0edfbcb68baa298
+phrase-two-paths+details (2 hits)	2c969ea286a679a1
