@@ -233,3 +233,79 @@ fn well_formed_components_are_accepted() {
         assert_eq!(message(&json), "accepted", "{json}");
     }
 }
+
+/// An analyzer named `name` with the keyword tokenizer.
+fn named(name: &str) -> String {
+    definition(&format!(r#"[{{"name": "{name}", "tokenizer": {{"type": "keyword"}}}}]"#))
+}
+
+fn reserved(prefix: &str) -> (String, String) {
+    (named(&format!("{prefix}x")), format!(r#""analyzers[0].name" cannot begin with {prefix}"#))
+}
+
+#[test]
+fn reserved_names_numbers_and_gram_bounds_are_checked() {
+    let tl = format!("{T}.maxTokenLength");
+    let bounds = format!(r#""{tl}" must be within bounds [1..1048576]"#);
+    let types = "[edgeGram, keyword, nGram, regexCaptureGroup, regexSplit, standard, uaxUrlEmail, \
+                 whitespace]";
+    let cases: Vec<(String, String)> = vec![
+        reserved("builtin."),
+        reserved(teseladb_names::ANALYZER_PREFIX),
+        reserved(teseladb_names::ANALYZER_RESERVED_PREFIX),
+        (with_tokenizer(r#"{"type": "standard", "maxTokenLength": 0}"#), bounds.clone()),
+        (with_tokenizer(r#"{"type": "standard", "maxTokenLength": 1048577}"#), bounds),
+        (
+            with_tokenizer(r#"{"type": "standard", "maxTokenLength": 1.5}"#),
+            format!(r#""{tl}" must be an integer"#),
+        ),
+        (
+            with_tokenizer(r#"{"type": "standard", "maxTokenLength": 5000000000}"#),
+            format!(r#""{tl}" overflowed, must fit in a 32 bit integer"#),
+        ),
+        (
+            with_tokenizer(r#"{"type": "standard", "maxTokenLength": -5000000000}"#),
+            format!(r#""{tl}" underflowed, must fit in a 32 bit integer"#),
+        ),
+        (
+            with_tokenizer(r#"{"type": "standard", "maxTokenLength": "x"}"#),
+            format!(r#""{tl}" must be a integer"#),
+        ),
+        (with_tokenizer(r#"{"type": "standard", "maxTokenLength": 7.0}"#), "accepted".into()),
+        (
+            with_tokenizer(r#"{"type": "nGram", "minGram": 5, "maxGram": 2}"#),
+            format!(r#""{T}" minGram must not be greater than maxGram"#),
+        ),
+        (
+            with_tokenizer(r#"{"type": "edgeGram", "minGram": -1, "maxGram": 2}"#),
+            format!(r#""{T}.minGram" cannot be negative"#),
+        ),
+        // A `minGram` of 0 is accepted here and fails when the analyzer is built.
+        (with_tokenizer(r#"{"type": "edgeGram", "minGram": 0, "maxGram": 2}"#), "accepted".into()),
+        (
+            with_tokenizer(r#"{"type": "regexSplit", "pattern": "("}"#),
+            // Java's message, with the pattern on a second line.
+            format!("\"{T}\" Unclosed group near index 1\n("),
+        ),
+        (with_tokenizer(r#"{"type": "nope"}"#), format!(r#""{T}.type" must be one of {types}"#)),
+        (
+            with_filter(r#"{"type": "nGram", "minGram": 4, "maxGram": 2}"#),
+            format!(r#""{F}" minGram must not be greater than maxGram"#),
+        ),
+        (
+            with_filter(r#"{"type": "shingle", "minShingleSize": 4, "maxShingleSize": 2}"#),
+            format!(r#""{F}" minShingleSize must not be greater than maxShingleSize"#),
+        ),
+        (
+            with_filter(r#"{"type": "asciiFolding", "originalTokens": "include"}"#),
+            "accepted".into(),
+        ),
+        (
+            with_filter(r#"{"type": "length", "min": 5, "max": 2}"#),
+            format!(r#""{F}" min must not be greater than max"#),
+        ),
+    ];
+    for (json, want) in cases {
+        assert_eq!(message(&json), want, "{json}");
+    }
+}
