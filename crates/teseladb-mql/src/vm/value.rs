@@ -221,9 +221,10 @@ fn value_ref<'d>(doc: &'d [u8], ty: u8, v: usize, len: usize) -> Option<ValueRef
             Some(ValueRef::new(Tag::I32, 0, i64::from(i32::from_le_bytes(b)) as u64))
         }
         0x11 => {
-            // Stored as the increment, then the seconds.
-            let raw = le_u64(doc, v)?;
-            Some(ValueRef::new(Tag::Timestamp, 0, raw.rotate_left(32)))
+            // Stored as the increment, then the seconds: read as one little-endian number they are
+            // already the seconds above the increment, as the register keeps them. Turning the
+            // halves round read every stored timestamp with the two swapped (002 T065).
+            Some(ValueRef::new(Tag::Timestamp, 0, le_u64(doc, v)?))
         }
         0x12 => Some(ValueRef::new(Tag::I64, 0, le_u64(doc, v)?)),
         0x13 => place(Tag::Decimal),
