@@ -9,6 +9,10 @@
 pub const AHEAD_MS: u64 = 1_000;
 /// How close to the bound a new one is written.
 pub const RENEW_MS: u64 = 500;
+/// How close to the bound a new one goes in the records of the node's shared log while it writes
+/// (D-172): without a sync of its own, so it can go this early and a slow write of the disk does
+/// not leave the marks above it.
+pub const LOG_RENEW_MS: u64 = 900;
 /// How far ahead of the node's wall clock a received `$clusterTime` may be (DV-101): it is
 /// taken into the clock, and the bound follows it.
 pub const MAX_RECEIVED_AHEAD_MS: u64 = 1_000;

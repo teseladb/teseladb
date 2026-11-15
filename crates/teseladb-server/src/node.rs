@@ -90,11 +90,17 @@ pub const DATA_FORMAT_FILE: &str = "data.format";
 /// of transactions (008): `PutIntents`, `EndTxn`, `ResolveIntents` and `PushTxn`, kinds 8, 9, 10
 /// and 12, with intents and records in the range's data. 8: the cores' Raft logs in the node's
 /// device log, `raftlog/` (012 FR-035, D-154); a directory of format 7 has its cores' WAL segments
-/// moved there when it starts.
-pub const DATA_FORMAT: u32 = 8;
+/// moved there when it starts. 9: the device log's records carry the HLC bound in a `BOUND`
+/// frame (005 FR-003, D-172), which a node of format 8 would take for the end of its log; a
+/// directory of format 8 has none and starts as it is.
+pub const DATA_FORMAT: u32 = 9;
 
 /// The format before the device log, which a node moves to [`DATA_FORMAT`] when it starts.
 const PER_CORE_LOG_FORMAT: u32 = 7;
+
+/// The device log without the HLC bound in its records, which a node moves to [`DATA_FORMAT`]
+/// when it starts by writing the format.
+const DEVICE_LOG_FORMAT: u32 = 8;
 
 /// Bytes of system randomness that seed the generator of the `$clusterTime` signing keys.
 const KEY_ENTROPY: usize = 48;
@@ -421,6 +427,12 @@ fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<bool, NodeEr
     match found {
         DATA_FORMAT => Ok(false),
         PER_CORE_LOG_FORMAT => Ok(true),
+        // Before its log writes a `BOUND` frame (D-172).
+        DEVICE_LOG_FORMAT => {
+            let text = DATA_FORMAT.to_string().into_bytes();
+            write_atomic(disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
+            Ok(false)
+        }
         _ => Err(NodeError::DataFormat { found }),
     }
 }
@@ -1141,8 +1153,16 @@ impl<D: Disk + Send + 'static> Node<D> {
         let arenas = crate::allocator::bound(cores);
         log.step("allocator", &[("arenas", &arenas)]);
         // The Raft logs of every core, in one log of the device (012 FR-035, D-154).
-        let (device_log, mut ports) =
-            DeviceLog::start(open_disk()?, cores, DeviceLogConfig::default())?;
+        // Its records carry the HLC bound (005 FR-003, D-172): no core gives a mark before the
+        // clock passes the highest bound the log kept.
+        let log_bound = clock_keeper.log_bound();
+        let (device_log, mut ports) = DeviceLog::start_with_bound(
+            open_disk()?,
+            cores,
+            DeviceLogConfig::default(),
+            log_bound.clone(),
+        )?;
+        crate::clock::wait_past(&clock, log_bound.durable());
         log.step("raft log", &[("files", &device_log.recovered_files())]);
         if import_logs {
             let mut disk = open_disk()?;

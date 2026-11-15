@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use teseladb_hlc::wait_on_start;
+use teseladb_hlc::{LOG_RENEW_MS, wait_on_start};
+use teseladb_io::device_log::LogBound;
 use teseladb_multiraft::NodeClock;
 use teseladb_raftlog::{Disk, NodeMeta, StorageError, write_node_meta};
 
@@ -23,6 +24,35 @@ const PERIOD: Duration = Duration::from_millis(50);
 
 pub(crate) fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The bound through the node's shared log (005 FR-003, D-172): a bound in a durable record of the
+/// log holds, and while the marks are within [`LOG_RENEW_MS`] of the bound the next one is offered
+/// to the log, which carries it in its next records without a sync of its own. With the log
+/// quiet nothing is made durable that way and [`renew`] writes `hlc.bound` as before.
+fn renew_in_log(clock: &NodeClock, log: &LogBound) {
+    let durable = log.durable();
+    if durable > 0 {
+        clock.0.raise_bound(durable);
+    }
+    if let Some(bound) = clock.0.renewal_within(LOG_RENEW_MS) {
+        log.offer(bound);
+    }
+}
+
+/// Waits until the wall clock passes `bound`, the highest bound the node's shared log kept (005
+/// FR-003, D-172), when it is above the one the clock started under: as on a start, a clock that
+/// went back never repeats a mark. Called once the log is read and before any core gives marks.
+pub fn wait_past(clock: &NodeClock, bound: u64) {
+    if clock.0.bound().is_some_and(|b| b >= bound) {
+        return;
+    }
+    if let Some(until) = wait_on_start(bound, wall_ms()) {
+        while wall_ms() < until {
+            thread::sleep(Duration::from_millis((until - wall_ms()).min(50)));
+        }
+    }
+    clock.0.raise_bound(bound);
 }
 
 /// Writes a new bound if one is due.
@@ -58,9 +88,16 @@ pub struct ClockKeeper {
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<Option<StorageError>>>,
     thread: JoinHandle<()>,
+    log: Arc<LogBound>,
 }
 
 impl ClockKeeper {
+    /// What the thread shares with the node's shared log, for [`teseladb_io::device_log::DeviceLog`]
+    /// (D-172).
+    pub fn log_bound(&self) -> Arc<LogBound> {
+        self.log.clone()
+    }
+
     /// The last failed write of the bound, if the last attempt failed.
     pub fn error(&self) -> Option<StorageError> {
         self.error.lock().map_or(None, |e| e.clone())
@@ -90,20 +127,22 @@ pub fn start_clock<D: Disk + Send + 'static>(
     let clock = NodeClock::with_bound(NodeId(meta.node_id), bound);
     let stop = Arc::new(AtomicBool::new(false));
     let error = Arc::new(Mutex::new(None));
-    let (c, s, e) = (clock.clone(), stop.clone(), error.clone());
+    let log = Arc::new(LogBound::default());
+    let (c, s, e, l) = (clock.clone(), stop.clone(), error.clone(), log.clone());
     let thread = thread::Builder::new()
         .name("hlc-bound".into())
         .spawn(move || {
             // Nothing panics while holding the lock, so it is never poisoned.
             let keep = |result| *e.lock().unwrap_or_else(PoisonError::into_inner) = result;
             while !s.load(Ordering::Acquire) {
+                renew_in_log(&c, &l);
                 keep(renew(&c, &mut disk, &mut file).err());
                 thread::sleep(PERIOD);
             }
             keep(seal(&c, &mut disk, &mut file, &mut meta).err());
         })
         .map_err(|_| StorageError::Io { op: "spawn", errno: teseladb_raftlog::IoErrno::Io })?;
-    Ok((clock, ClockKeeper { stop, error, thread }))
+    Ok((clock, ClockKeeper { stop, error, thread, log }))
 }
 
 #[cfg(test)]
@@ -211,6 +250,67 @@ mod tests {
         assert!((1..=most).contains(&renewals), "{renewals} syncs in {window:?}, at most {most}");
         // Each write of a renewal is timed (012 FR-015).
         assert!(teseladb_stages::count(teseladb_stages::Stage::HlcBoundWrite) > writes);
+        keeper.stop();
+    }
+
+    /// While the node's shared log writes, the bound renews in its records (005 FR-003, D-172): it
+    /// keeps ahead of the marks with hardly any write of `hlc.bound`.
+    #[test]
+    fn a_writing_log_renews_the_bound_in_its_records() {
+        use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
+        use teseladb_raftlog::format::wal::EntryKind;
+        use teseladb_raftlog::{CoreStore, LogEntry, StorageConfig};
+        use teseladb_types::{Bytes, Durability, GroupId, Nanos};
+
+        let mut inner = MemDisk::new();
+        let mut meta = open_node(&mut inner, 1, [1; 16], wall_ms()).unwrap();
+        meta.node_id = 1;
+        let (syncs, renames) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let disk = Counting { inner, syncs: syncs.clone(), renames };
+        let (clock, keeper) = start_clock(disk, meta).unwrap();
+        let cfg = DeviceLogConfig { file_bytes: 1 << 20 };
+        let (log, mut ports) =
+            DeviceLog::start_with_bound(MemDisk::new(), 1, cfg, keeper.log_bound()).unwrap();
+        let mut port = ports.pop().expect("a port");
+        let mut own = MemDisk::new();
+        let store_cfg = StorageConfig {
+            wal_segment_size: 1 << 20,
+            max_batch_bytes: 64 << 10,
+            ..StorageConfig::default()
+        };
+        let mut disk = port.disk(&mut own);
+        let mut store = CoreStore::recover(&store_cfg, 0, &mut disk).unwrap().0;
+        let g = GroupId(5);
+        store.create_group(g, Bytes::new(), Durability::Strict).unwrap();
+        let base_syncs = syncs.load(Ordering::Relaxed);
+        let _ = clock.0.now(wall_ms());
+        let first = clock.0.peek();
+        let window = Duration::from_millis(2_000);
+        let end = Instant::now() + window;
+        let mut index = 0;
+        while Instant::now() < end {
+            index += 1;
+            let entry = LogEntry {
+                index,
+                term: 1,
+                kind: EntryKind::Normal,
+                data: Bytes::from_vec(vec![7; 64]),
+            };
+            store.append_raft(g, &[entry], None, Durability::Strict).unwrap();
+            for (_, r) in store.run_io(&mut disk, Nanos::ZERO).tickets {
+                r.unwrap();
+            }
+            let _ = clock.0.now(wall_ms());
+            thread::sleep(Duration::from_millis(5));
+        }
+        let bound = clock.0.bound().expect("a bound");
+        // The bound followed the marks the whole window.
+        assert!(bound > first.physical + window.as_millis() as u64, "{bound} {first:?}");
+        // The log renewed it: at most the first write of `hlc.bound`, before its first record.
+        let own_syncs = syncs.load(Ordering::Relaxed) - base_syncs;
+        assert!(own_syncs <= 1, "{own_syncs} syncs of hlc.bound");
+        drop(port);
+        drop(log);
         keeper.stop();
     }
 

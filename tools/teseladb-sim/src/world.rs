@@ -937,9 +937,23 @@ impl World {
     }
 
     /// Writes a new HLC bound to the node's `node.meta` if one is due, as the server's clock
-    /// thread does (005 FR-003).
+    /// thread does (005 FR-003): first through the node's device log (D-172), whose durable
+    /// records hold a bound that `hlc_bound`, what the node's disks keep, takes, and to which the
+    /// next one is offered once the marks are within [`teseladb_hlc::LOG_RENEW_MS`] of it.
     fn renew_bound(&mut self, node: u32) {
         let n = &mut self.nodes[node as usize];
+        if let Some(log) = n.log.as_mut() {
+            let durable = log.durable_bound();
+            if durable > n.hlc_bound {
+                n.hlc_bound = durable;
+            }
+            if durable > 0 {
+                n.hlc.0.raise_bound(durable);
+            }
+            if let Some(bound) = n.hlc.0.renewal_within(teseladb_hlc::LOG_RENEW_MS) {
+                log.offer_bound(bound);
+            }
+        }
         if let Some(bound) = n.hlc.0.renewal() {
             n.hlc_bound = bound;
             n.hlc.0.raise_bound(bound);

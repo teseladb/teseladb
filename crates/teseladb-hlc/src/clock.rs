@@ -139,9 +139,15 @@ impl HlcClock {
     /// ahead while the node is aside (005 FR-006) asks for no mark, so when NTP steps it back the
     /// node does not wait for that time on a restart.
     pub fn renewal(&self) -> Option<u64> {
+        self.renewal_within(RENEW_MS)
+    }
+
+    /// [`HlcClock::renewal`] once the marks are within `margin_ms` of the bound: the node's shared
+    /// log renews it in its records from [`crate::LOG_RENEW_MS`] on (D-172).
+    pub fn renewal_within(&self, margin_ms: u64) -> Option<u64> {
         let bound = self.bound()?;
         let ms = self.peek().physical.max(self.wanted.load(Ordering::Acquire));
-        (ms + RENEW_MS >= bound).then_some(ms + AHEAD_MS)
+        (ms + margin_ms >= bound).then_some(ms + AHEAD_MS)
     }
 
     /// Whether the bound on disk is above the last mark issued or received (always, without a
