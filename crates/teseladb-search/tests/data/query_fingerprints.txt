@@ -208,3 +208,13 @@ nested-geo-contains-points (3 hits)	26d29daff69f1176
 nested-geo-contains-points+details (3 hits)	6870977264aafec5
 nested-geo-line (3 hits)	26d29daff69f1176
 nested-geo-line+details (3 hits)	c0250bfde449d84e
+syn-stopword (0 hits)	cbf29ce484222325
+syn-stopword+details (0 hits)	cbf29ce484222325
+syn-stopword-criteria (0 hits)	cbf29ce484222325
+syn-stopword-criteria+details (0 hits)	cbf29ce484222325
+syn-one-criteria (3 hits)	8a8251a6ecd84634
+syn-one-criteria+details (3 hits)	5bb47db48ec47f8c
+syn-repeat (0 hits)	cbf29ce484222325
+syn-repeat+details (0 hits)	cbf29ce484222325
+syn-boosted-phrase (1 hits)	d01b4f3fb669d979
+syn-boosted-phrase+details (1 hits)	b0cf23a27adaa58a

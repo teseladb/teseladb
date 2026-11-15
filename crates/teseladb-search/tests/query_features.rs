@@ -383,6 +383,21 @@ const SEARCHES: &[(&str, &str)] = &[
         r#"{"compound": {"filter": [{"compound": {"should": [{"exists": {"path": "t"}}], "mustNot": [{"geoShape": {"path": "loc", "relation": "intersects",
             "geometry": {"type": "LineString", "coordinates": [[40, 40], [41, 41]]}}}]}}], "must": [{"text": {"query": "quick", "path": "t"}}]}}"#,
     ),
+    ("syn-stopword", r#"{"text": {"query": "the", "path": "syn", "synonyms": "s"}}"#),
+    (
+        "syn-stopword-criteria",
+        r#"{"text": {"query": "the", "path": "syn", "synonyms": "s", "matchCriteria": "all"}}"#,
+    ),
+    (
+        "syn-one-criteria",
+        r#"{"text": {"query": "car", "path": "syn", "synonyms": "s", "matchCriteria": "all"}}"#,
+    ),
+    ("syn-repeat", r#"{"text": {"query": "car automobile", "path": "syn", "synonyms": "s"}}"#),
+    (
+        "syn-boosted-phrase",
+        r#"{"compound": {"must": [{"text": {"query": "automobile", "path": "syn", "synonyms": "s"}}],
+            "should": [{"text": {"query": "quick", "path": "t"}}], "score": {"boost": {"value": 2}}}}"#,
+    ),
     ("qs-range", r#"{"queryString": {"defaultPath": "t", "query": "t:[a TO fox}"}}"#),
     ("qs-range-open", r#"{"queryString": {"defaultPath": "t", "query": "t:{* TO brown]"}}"#),
     (

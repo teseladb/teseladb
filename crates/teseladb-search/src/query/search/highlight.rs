@@ -483,5 +483,19 @@ mod tests {
         let units: Vec<u16> = "gato uno\u{2029}dos gatos".encode_utf16().collect();
         assert_eq!(sentences(&units, true), vec![(0, 8), (9, 18)]);
         assert_eq!(sentences(&units, false), vec![(0, 9), (9, 18)]);
+        // An empty value between two separators gives no passage.
+        let units: Vec<u16> = "uno\u{2029}\u{2029}dos".encode_utf16().collect();
+        assert_eq!(sentences(&units, true), vec![(0, 3), (5, 8)]);
+    }
+
+    /// The rules above at the end of the text: whatever ends it closes the last sentence, and no
+    /// empty sentence follows.
+    #[test]
+    fn the_end_of_the_text_closes_the_last_sentence() {
+        assert_eq!(cut("uno!"), vec!["uno!"]);
+        assert_eq!(cut("uno."), vec!["uno."]);
+        assert_eq!(cut("uno. "), vec!["uno. "]);
+        assert_eq!(cut("uno.  dos"), vec!["uno.  ", "dos"]);
+        assert_eq!(cut("uno?!\" dos"), vec!["uno?!\" ", "dos"]);
     }
 }
