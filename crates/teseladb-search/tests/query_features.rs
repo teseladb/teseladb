@@ -306,6 +306,17 @@ const SEARCHES: &[(&str, &str)] = &[
         r#"{"near": {"path": ["loc", "other"], "origin": {"type": "Point", "coordinates": [0, 0]}, "pivot": 50000}}"#,
     ),
     ("phrase-one-word", r#"{"phrase": {"query": "fox", "path": "t"}}"#),
+    ("must-one", r#"{"compound": {"must": [{"text": {"query": "lazy", "path": "t"}}]}}"#),
+    (
+        "must-not-should",
+        r#"{"compound": {"mustNot": [{"text": {"query": "dog", "path": "t"}}], "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    (
+        "nested-compound",
+        r#"{"compound": {"filter": [{"compound": {"should": [{"text": {"query": "fox", "path": "t"}}, {"text": {"query": "car", "path": "t"}}]}}],
+            "must": [{"exists": {"path": "t"}}]}}"#,
+    ),
+    ("range-string", r#"{"range": {"path": "t", "gte": "a", "lt": "m"}}"#),
     ("phrase-missing-path", r#"{"phrase": {"query": "brown fox", "path": "nope"}}"#),
     (
         "must-criteria-all-paths",

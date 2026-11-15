@@ -152,3 +152,11 @@ phrase-one-word (2 hits)	2c5ad04d23ae169a
 phrase-one-word+details (2 hits)	fa45b2405b199adc
 phrase-missing-path (0 hits)	cbf29ce484222325
 phrase-missing-path+details (0 hits)	cbf29ce484222325
+must-one (2 hits)	6f7ec54a243681d1
+must-one+details (2 hits)	0c4b484bb5e0a69a
+must-not-should (2 hits)	a40f8434b104f1ac
+must-not-should+details (2 hits)	51a224042bb54f7d
+nested-compound (4 hits)	22b9cf98fca17134
+nested-compound+details (4 hits)	b3d4c82d0d3c21d2
+range-string (0 hits)	cbf29ce484222325
+range-string+details (0 hits)	cbf29ce484222325
