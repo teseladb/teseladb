@@ -50,3 +50,22 @@ fn latvian_endings_and_their_unpalatalized_consonants() {
         ],
     );
 }
+
+/// The stems of `$text` in the reference server's spelling (011 FR-020): its Hungarian stemmer
+/// takes a letter beyond Latin-1 (`ő`, `ű`) for an unknown consonant, which stops its suffixes,
+/// and its Romanian one knows `ş` and `ţ` with cedilla as today's `ș` and `ț`.
+#[test]
+fn text_stems_follow_the_reference_stemmers_letters() {
+    use teseladb_search::text_index::{Language, Sensitivity, stems};
+    let s = Sensitivity { case: false, diacritic: true };
+    let stem = |lang: &str, w: &str| stems(w, Language::named(lang).expect("language"), s);
+    // The current Hungarian stemmer gives `kő` and `tűz`; the reference keeps the suffix.
+    assert_eq!(stem("hungarian", "kőben"), ["kőben"]);
+    assert_eq!(stem("hungarian", "tűzben"), ["tűzben"]);
+    // A Latin-1 letter is known: the suffix goes.
+    assert_eq!(stem("hungarian", "házban"), ["ház"]);
+    // Cedilla and comma below give the same stem.
+    assert_eq!(stem("romanian", "oraşul"), ["oraș"]);
+    assert_eq!(stem("romanian", "orașul"), ["oraș"]);
+    assert_eq!(stem("romanian", "oraşului"), ["oraș"]);
+}
