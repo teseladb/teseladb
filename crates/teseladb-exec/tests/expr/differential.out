@@ -63,3 +63,8 @@
 {"$sum":[{"$numberDouble":"3e-16"},{"$numberInt":"1"},{"$numberInt":"3"},{"$numberDouble":"3e-16"}]}	=> {"x":{"$numberDouble":"4.000000000000001"}}
 {"$sum":[{"$numberDouble":"3e-16"},{"$numberLong":"1"},{"$numberLong":"3"},{"$numberDouble":"3e-16"}]}	=> {"x":{"$numberDouble":"4.000000000000001"}}
 {"$sum":[{"$numberLong":"9007199254740993"},{"$numberDouble":"1.0"}]}	=> {"x":{"$numberDouble":"9007199254740994.0"}}
+{"$convert":{"input":{"$literal":{}},"to":"binData"}}	=> {"x":{"$binary":{"base64":"BQAAAAA=","subType":"00"}}}
+{"$convert":{"input":"$o","to":{"type":"binData","subtype":{"$numberInt":"4"}}}}	=> {"x":{"$binary":{"base64":"GwAAABB4AAEAAAADeQAMAAAAEHoAAgAAAAAA","subType":"04"}}}
+{"$convert":{"input":"$o","to":{"type":"binData","subtype":{"$numberInt":"128"}}}}	=> {"x":{"$binary":{"base64":"GwAAABB4AAEAAAADeQAMAAAAEHoAAgAAAAAA","subType":"80"}}}
+{"$convert":{"input":"$o","to":{"type":"binData","subtype":{"$numberInt":"5"}}}}	!! 13016802	$convert to BinData subtype 5 requires exactly 16 bytes
+{"$convert":{"input":"$o","to":{"type":"binData","subtype":{"$numberInt":"7"}}}}	!! 12910300	$convert to BinData subtype Column (7) is not allowed

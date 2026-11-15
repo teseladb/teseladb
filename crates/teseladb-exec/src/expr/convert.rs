@@ -1023,6 +1023,10 @@ fn to_bin_data(v: &Value, o: &Options) -> Result<Value, MqlError> {
         Value::Int64(n) => bin::number_bytes(n.to_le_bytes().to_vec(), o.big),
         Value::Double(x) => bin::number_bytes(x.to_le_bytes().to_vec(), o.big),
         Value::String(s) => string_bytes(s, o)?,
+        // An object is its BSON, in the subtype asked (measured on 9.0.4, 15-11-2026, 002 T065).
+        Value::Document(d) => {
+            d.to_bytes().map_err(|e| error(CONVERSION_FAILURE, format!("{e:?}")))?
+        }
         other => return Err(unsupported(other, BIN_DATA)),
     };
     check_sub(bytes.len())?;
