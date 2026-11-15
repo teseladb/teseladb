@@ -236,6 +236,26 @@ const SEARCHES: &[(&str, &str)] = &[
     ("in-tokens", r#"{"in": {"path": "g", "value": ["red", "blue"]}}"#),
     ("in-dates", r#"{"in": {"path": "n", "value": [{"$date": "2026-01-01T00:00:00Z"}, 7]}}"#),
     ("near-two-paths", r#"{"near": {"path": ["n", "items.k"], "origin": 7, "pivot": 3}}"#),
+    (
+        "filter-criteria-all",
+        r#"{"compound": {"filter": [{"text": {"query": "big cat zoo", "path": "t", "synonyms": "s", "matchCriteria": "all"}}]}}"#,
+    ),
+    (
+        "filter-criteria-any",
+        r#"{"compound": {"filter": [{"text": {"query": "fast car", "path": ["t", "syn"], "synonyms": "s", "matchCriteria": "any"}}]}}"#,
+    ),
+    (
+        "filter-synonyms-paths",
+        r#"{"compound": {"filter": [{"text": {"query": "motor car", "path": ["t", "syn"], "synonyms": "s"}}]}}"#,
+    ),
+    (
+        "filter-synonyms-phrase",
+        r#"{"compound": {"filter": [{"phrase": {"query": "big cat", "path": "t", "synonyms": "s"}}]}}"#,
+    ),
+    (
+        "must-criteria-all-paths",
+        r#"{"compound": {"must": [{"text": {"query": "fast fox", "path": ["t", "syn"], "synonyms": "s", "matchCriteria": "all"}}]}}"#,
+    ),
 ];
 
 /// The `$searchMeta` specifications, by name.

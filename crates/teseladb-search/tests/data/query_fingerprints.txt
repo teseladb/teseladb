@@ -108,3 +108,13 @@ in-dates (error)	2d547322539ff33f
 in-dates+details (error)	2d547322539ff33f
 near-two-paths (8 hits)	eb4dd67386affc9d
 near-two-paths+details (8 hits)	dc3e8e73104e702d
+filter-criteria-all (1 hits)	e817c56e882d5a8a
+filter-criteria-all+details (1 hits)	0df3a8f8bf25d3b8
+filter-criteria-any (6 hits)	351634b0b4380bfc
+filter-criteria-any+details (6 hits)	32682d7d9ddbabec
+filter-synonyms-paths (3 hits)	97b61238ea5bec05
+filter-synonyms-paths+details (3 hits)	9408909137780b05
+filter-synonyms-phrase (2 hits)	6ebf4712ce2aeecd
+filter-synonyms-phrase+details (2 hits)	5970c09c6a29601f
+must-criteria-all-paths (3 hits)	ce2371a6608bbc92
+must-criteria-all-paths+details (3 hits)	eeb82b705600d205
