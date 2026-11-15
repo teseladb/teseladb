@@ -12,7 +12,7 @@ use crate::error::LsmError;
 use crate::memtable::Memtable;
 use crate::read::{Blocks, Fetch, ReadToken, corrupt};
 use crate::sst::block::BlockCursor;
-use crate::sst::reader::Table;
+use crate::sst::reader::{COLUMN_SLOT, Table};
 
 /// Where a file cursor is.
 pub(crate) enum Pos {
@@ -90,12 +90,62 @@ pub(crate) enum Choice {
 pub(crate) enum Cursor {
     Mem(MemCursor),
     /// A file; `data` is the data file of a history file, where the bases of its deltas may
-    /// be (FR-035).
+    /// be (FR-035), and `ahead` how the cursor reads the file ahead (FR-044).
     Table {
         table: Arc<Table>,
         data: Option<Arc<Table>>,
         pos: Pos,
+        ahead: Readahead,
     },
+}
+
+/// Disk reads a file's cursor makes in order before it reads ahead (FR-044).
+const READS_BEFORE_AHEAD: u32 = 2;
+/// The first read ahead; each next one doubles it.
+const FIRST_AHEAD: u64 = 8 << 10;
+/// The largest read ahead.
+const MOST_AHEAD: u64 = 256 << 10;
+
+/// How a file's cursor reads ahead (FR-044): the disk reads it made in order, the bytes its next
+/// one takes and the slot where that read must start to count as in order.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Readahead {
+    reads: u32,
+    bytes: u64,
+    next: usize,
+}
+
+impl Default for Readahead {
+    fn default() -> Readahead {
+        Readahead { reads: 0, bytes: FIRST_AHEAD, next: usize::MAX }
+    }
+}
+
+impl Readahead {
+    /// The bytes a read of slot `slot` takes when it misses: none until the cursor has read the
+    /// file in order [`READS_BEFORE_AHEAD`] times, or when `slot` does not follow its last read.
+    fn size(&self, slot: usize) -> u64 {
+        match self.reads >= READS_BEFORE_AHEAD && slot == self.next {
+            true => self.bytes,
+            false => 0,
+        }
+    }
+
+    /// The cursor asked the disk for `blocks` slots from `slot` (none: it asked for nothing).
+    /// A read that does not follow the last one starts the count again; one that read ahead
+    /// doubles the next one, up to [`MOST_AHEAD`].
+    fn asked(&mut self, slot: usize, blocks: usize) {
+        if blocks == 0 {
+            return;
+        }
+        if slot != self.next {
+            *self = Readahead::default();
+        } else if self.reads >= READS_BEFORE_AHEAD {
+            self.bytes = (self.bytes * 2).min(MOST_AHEAD);
+        }
+        self.reads += 1;
+        self.next = slot + blocks;
+    }
 }
 
 impl Cursor {
@@ -224,7 +274,7 @@ impl Cursor {
         choose: &mut dyn FnMut(&Table, usize, Option<&[u8]>) -> Choice,
         fits: &dyn Fn(&Bytes) -> Option<usize>,
     ) -> Result<Option<ReadToken>, LsmError> {
-        let Cursor::Table { table, pos, .. } = self else {
+        let Cursor::Table { table, pos, ahead, .. } = self else {
             return Ok(None);
         };
         loop {
@@ -240,7 +290,7 @@ impl Cursor {
                             *pos = Pos::Block(i + 1);
                             continue;
                         }
-                        Choice::Columns => match columns_of(r, table, i, fits)? {
+                        Choice::Columns => match columns_of(r, (table, ahead), i, fits)? {
                             Taken::Wait(t) => return Ok(Some(t)),
                             Taken::Columns(p) => {
                                 *pos = p;
@@ -250,7 +300,7 @@ impl Cursor {
                         },
                         Choice::Read => {}
                     }
-                    let block = match r.block(table, i)? {
+                    let block = match block_of(r, (table, ahead), i)? {
                         Fetch::Ready(b) => b,
                         Fetch::Wait(t) => return Ok(Some(t)),
                     };
@@ -269,7 +319,7 @@ impl Cursor {
                             *pos = Pos::Block(i + 1);
                             continue;
                         }
-                        Choice::Columns => match columns_of(r, table, i, fits)? {
+                        Choice::Columns => match columns_of(r, (table, ahead), i, fits)? {
                             Taken::Wait(t) => return Ok(Some(t)),
                             Taken::Columns(p) => {
                                 *pos = p;
@@ -279,7 +329,7 @@ impl Cursor {
                         },
                         Choice::Read => {}
                     }
-                    let block = match r.block(table, i)? {
+                    let block = match block_of(r, (table, ahead), i)? {
                         Fetch::Ready(b) => b,
                         Fetch::Wait(t) => return Ok(Some(t)),
                     };
@@ -312,7 +362,7 @@ impl Cursor {
     pub(crate) fn stored(&self) -> Result<(Bytes, Option<Box<crate::read::Deferred>>), LsmError> {
         match self {
             Cursor::Mem(m) => Ok((m.value.clone(), None)),
-            Cursor::Table { table, data, pos: Pos::Ready(i, c) } => {
+            Cursor::Table { table, data, pos: Pos::Ready(i, c), .. } => {
                 crate::read::stored(table, data.as_ref(), *i, c)
             }
             Cursor::Table { .. } => unreachable!("a cursor without an entry has no value"),
@@ -330,14 +380,29 @@ enum Taken {
     No,
 }
 
-/// Data block `i`'s column block in `table`, when the reads give column blocks and it `fits`.
+/// Data block `i` of `table`, read ahead as `ahead` says (FR-044).
+fn block_of<B: Blocks>(
+    r: &mut B,
+    (table, ahead): (&Arc<Table>, &mut Readahead),
+    i: usize,
+) -> Result<Fetch, LsmError> {
+    let (fetch, asked) = r.block_ahead(table, i, ahead.size(i))?;
+    ahead.asked(i, asked);
+    Ok(fetch)
+}
+
+/// Data block `i`'s column block in `table`, when the reads give column blocks and it `fits`,
+/// read ahead as `ahead` says (FR-044).
 fn columns_of<B: Blocks>(
     r: &mut B,
-    table: &Arc<Table>,
+    (table, ahead): (&Arc<Table>, &mut Readahead),
     i: usize,
     fits: &dyn Fn(&Bytes) -> Option<usize>,
 ) -> Result<Taken, LsmError> {
-    let payload = match r.columns(table, i)? {
+    let slot = COLUMN_SLOT + i;
+    let (columns, asked) = r.columns_ahead(table, i, ahead.size(slot))?;
+    ahead.asked(slot, asked);
+    let payload = match columns {
         None => return Ok(Taken::No),
         Some(Err(t)) => return Ok(Taken::Wait(t)),
         Some(Ok(p)) => p,

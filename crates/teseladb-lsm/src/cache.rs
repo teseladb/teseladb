@@ -69,6 +69,12 @@ impl BlockCache {
         found
     }
 
+    /// Whether block `block` of file `file` is cached, without counting a hit: what a read ahead
+    /// leaves out (FR-044).
+    pub(crate) fn contains(&self, file: u64, block: u32) -> bool {
+        self.slots.contains_key(&(file, block))
+    }
+
     /// Counts one block read from the disk.
     pub(crate) fn note_miss(&mut self) {
         self.misses += 1;

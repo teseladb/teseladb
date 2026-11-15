@@ -21,7 +21,7 @@ use teseladb_types::Bytes;
 
 use crate::cache::BlockCache;
 use crate::columnar::{self, ColumnStep};
-use crate::cursor::{Choice, Cursor, MemCursor, Pos};
+use crate::cursor::{Choice, Cursor, MemCursor, Pos, Readahead};
 use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::lsm::Lsm;
@@ -273,6 +273,26 @@ pub(crate) trait Blocks {
     ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
         Ok(None)
     }
+    /// [`Blocks::block`] for a cursor that reads `table` in order (FR-044): a miss reads with
+    /// block `i` the blocks after it, up to `ahead` bytes, in one read. Also how many blocks the
+    /// read it asked for holds: 0 when it asked for none (a hit, or a block already being read).
+    fn block_ahead(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+        _ahead: u64,
+    ) -> Result<(Fetch, usize), LsmError> {
+        self.block(table, i).map(|f| (f, 0))
+    }
+    /// [`Blocks::columns`] for a cursor that reads `table` in order, as [`Blocks::block_ahead`].
+    fn columns_ahead(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+        _ahead: u64,
+    ) -> Result<(Option<Result<Bytes, ReadToken>>, usize), LsmError> {
+        self.columns(table, i).map(|c| (c, 0))
+    }
     /// The core's failure, which ends every read.
     fn failure(&self) -> Option<&LsmError>;
     /// Starts a read attempt.
@@ -294,6 +314,30 @@ impl Blocks for Reader {
         i: usize,
     ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
         Reader::columns(self, table, i).map(Some)
+    }
+
+    fn block_ahead(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+        ahead: u64,
+    ) -> Result<(Fetch, usize), LsmError> {
+        let (payload, asked) = self.payload_ahead(table, i, ahead)?;
+        let fetch = match payload {
+            Ok(p) => Fetch::Ready(Block::parse(p).map_err(|_| corrupt(table, i))?),
+            Err(token) => Fetch::Wait(token),
+        };
+        Ok((fetch, asked))
+    }
+
+    fn columns_ahead(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+        ahead: u64,
+    ) -> Result<(Option<Result<Bytes, ReadToken>>, usize), LsmError> {
+        let slot = crate::sst::reader::COLUMN_SLOT + i;
+        self.payload_ahead(table, slot, ahead).map(|(p, asked)| (Some(p), asked))
     }
 
     fn failure(&self) -> Option<&LsmError> {
@@ -319,7 +363,8 @@ impl Blocks for Reader {
 pub(crate) struct Reader {
     pub(crate) cache: BlockCache,
     queue: VecDeque<IoOp>,
-    waiting: HashMap<u64, (Arc<Table>, usize)>,
+    /// Each read in flight: its file, the first slot it reads and how many slots it holds (FR-044).
+    waiting: HashMap<u64, (Arc<Table>, usize, usize)>,
     by_block: HashMap<(u64, usize), u64>,
     next_token: u64,
     pub(crate) failure: Option<LsmError>,
@@ -402,6 +447,17 @@ impl Reader {
         table: &Arc<Table>,
         i: usize,
     ) -> Result<Result<Bytes, ReadToken>, LsmError> {
+        self.payload_ahead(table, i, 0).map(|(p, _)| p)
+    }
+
+    /// [`Reader::payload`] that, on a miss, reads with slot `i` the slots after it, up to `ahead`
+    /// bytes in all (FR-044); also how many blocks the read it asked for holds (0: none asked).
+    fn payload_ahead(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+        ahead: u64,
+    ) -> Result<(Result<Bytes, ReadToken>, usize), LsmError> {
         let key = (table.number, i);
         let cached = match self.fresh.get(&key) {
             Some((payload, _)) => {
@@ -411,25 +467,49 @@ impl Reader {
             None => self.cache.get(table.number, i as u32),
         };
         if let Some(payload) = cached {
-            return Ok(Ok(payload));
+            return Ok((Ok(payload), 0));
         }
         if let Some(t) = self.by_block.get(&(table.number, i)) {
-            return Ok(Err(ReadToken(*t)));
+            return Ok((Err(ReadToken(*t)), 0));
         }
         // A disk read asked for: the one miss of this block until it comes back (FR-013).
         self.cache.note_miss();
         let token = self.next_token;
         self.next_token += 1;
         let (offset, len) = table.pages(i);
+        let mut end = offset + len;
+        let mut blocks = 1;
+        while let Some(stop) = self.along(table, i + blocks, (offset, end), ahead) {
+            end = stop;
+            blocks += 1;
+        }
         self.queue.push_back(IoOp::ReadAt {
             file: file_id(table.number),
             offset,
-            len: len as u32,
+            len: (end - offset) as u32,
             token,
         });
-        self.waiting.insert(token, (table.clone(), i));
-        self.by_block.insert((table.number, i), token);
-        Ok(Err(ReadToken(token)))
+        self.waiting.insert(token, (table.clone(), i, blocks));
+        for s in i..i + blocks {
+            self.by_block.insert((table.number, s), token);
+        }
+        Ok((Err(ReadToken(token)), blocks))
+    }
+
+    /// The end of the pages of slot `s` of `table` when the read of `[offset, end)` takes it
+    /// along (FR-044): the file has it, it starts in the read's last page or right after it,
+    /// nobody holds it or reads it, and the read stays within `ahead` bytes.
+    fn along(&self, table: &Table, s: usize, (offset, end): (u64, u64), ahead: u64) -> Option<u64> {
+        if !table.has_slot(s) {
+            return None;
+        }
+        let (from, len) = table.pages(s);
+        let stop = from + len;
+        let held = self.fresh.contains_key(&(table.number, s))
+            || self.cache.contains(table.number, s as u32)
+            || self.by_block.contains_key(&(table.number, s));
+        let follows = from >= offset && from <= end && stop >= end;
+        (follows && stop - offset <= ahead && !held).then_some(stop)
     }
 
     /// Starts a read attempt.
@@ -446,24 +526,38 @@ impl Reader {
 
     /// Takes the result of one of its reads (the tokens of the jobs go elsewhere).
     pub(crate) fn on_read(&mut self, token: u64, data: Result<Bytes, IoErrno>) {
-        let (table, i) = self.waiting.remove(&token).expect("a token of a block read");
-        self.by_block.remove(&(table.number, i));
-        match data {
+        let (table, i, blocks) = self.waiting.remove(&token).expect("a token of a block read");
+        for s in i..i + blocks {
+            self.by_block.remove(&(table.number, s));
+        }
+        let bytes = match data {
             Err(errno) => {
                 self.failure.get_or_insert(LsmError::Stopped(errno));
+                return;
             }
-            Ok(bytes) => match table.payload(i, &bytes) {
-                Ok(payload) => {
-                    self.reads_done += 1;
-                    let now = self.reads_done;
-                    self.fresh.retain(|_, (_, at)| now - *at < FRESH_LIFETIME);
-                    self.fresh.insert((table.number, i), (payload.clone(), now));
-                    self.cache.insert(table.number, i as u32, payload);
-                }
-                Err(_) => {
-                    self.failure.get_or_insert(corrupt(&table, i));
-                }
-            },
+            Ok(bytes) => bytes,
+        };
+        self.reads_done += 1;
+        let now = self.reads_done;
+        self.fresh.retain(|_, (_, at)| now - *at < FRESH_LIFETIME);
+        // The read starts at the first page of slot `i`; each slot after it starts where its
+        // own first page falls in it (FR-044), and each is checked on its own (FR-014).
+        let base = table.pages(i).0;
+        for s in i..i + blocks {
+            let skip = usize::try_from(table.pages(s).0 - base).unwrap_or(usize::MAX);
+            let payload = (skip <= bytes.len())
+                .then(|| bytes.slice(skip..))
+                .and_then(|read| table.payload(s, &read).ok());
+            let Some(payload) = payload else {
+                self.failure.get_or_insert(corrupt(&table, s));
+                return;
+            };
+            // Only the block the read was asked for is held for its reader; the ones read
+            // ahead go to the cache.
+            if s == i {
+                self.fresh.insert((table.number, s), (payload.clone(), now));
+            }
+            self.cache.insert(table.number, s as u32, payload);
         }
     }
 }
@@ -830,7 +924,12 @@ impl Scan {
                 }
                 let pos = if open { Pos::Seek(first.clone()) } else { Pos::Done };
                 let data = (!Arc::ptr_eq(f, t)).then(|| t.clone());
-                cursors.push(Cursor::Table { table: f.clone(), data, pos });
+                cursors.push(Cursor::Table {
+                    table: f.clone(),
+                    data,
+                    pos,
+                    ahead: Readahead::default(),
+                });
                 asleep.push(None);
                 let at = cursors.len() - 1;
                 if Arc::ptr_eq(f, t) {

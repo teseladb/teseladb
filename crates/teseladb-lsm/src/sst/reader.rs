@@ -292,6 +292,15 @@ impl Table {
         *self.columns.as_ref()?.get(i)?
     }
 
+    /// Whether the file has a block in slot `slot`: a data block, or a column block from
+    /// [`COLUMN_SLOT`] of a data block that has one.
+    pub(crate) fn has_slot(&self, slot: usize) -> bool {
+        match slot.checked_sub(COLUMN_SLOT) {
+            None => slot < self.blocks(),
+            Some(i) => self.column_entry(i).is_some(),
+        }
+    }
+
     /// Where the block of slot `slot` is: a data block, or a column block from [`COLUMN_SLOT`].
     pub(crate) fn slot_handle(&self, slot: usize) -> Handle {
         match slot.checked_sub(COLUMN_SLOT) {

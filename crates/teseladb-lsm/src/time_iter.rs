@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use teseladb_keys::Hlc;
 
-use crate::cursor::{Cursor, MemCursor, Pos};
+use crate::cursor::{Cursor, MemCursor, Pos, Readahead};
 use crate::entry::{self, Kind, RangeTombstone};
 use crate::lsm::Lsm;
 use crate::read::{Deferred, Item, Step, fetch};
@@ -104,7 +104,12 @@ impl TimeScan {
             }
             self.take_tombstones(&p.tombstones);
             let pos = Pos::Seek(first.clone());
-            cursors.push(Cursor::Table { table: t.clone(), data, pos });
+            cursors.push(Cursor::Table {
+                table: t.clone(),
+                data,
+                pos,
+                ahead: Readahead::default(),
+            });
         }
         cursors
     }
