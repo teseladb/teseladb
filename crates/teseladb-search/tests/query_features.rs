@@ -354,6 +354,13 @@ const SEARCHES: &[(&str, &str)] = &[
             "minimumShouldMatch": 1}}], "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
     ),
     ("fuzzy-many", r#"{"text": {"query": "dog", "path": "t", "fuzzy": {"maxEdits": 1}}}"#),
+    ("qs-range", r#"{"queryString": {"defaultPath": "t", "query": "t:[a TO fox}"}}"#),
+    ("qs-range-open", r#"{"queryString": {"defaultPath": "t", "query": "t:{* TO brown]"}}"#),
+    (
+        "boosted-fuzzy",
+        r#"{"compound": {"must": [{"text": {"query": "dog", "path": "t", "fuzzy": {"maxEdits": 1}}}],
+            "should": [{"text": {"query": "quick", "path": "t"}}], "score": {"boost": {"value": 2}}}}"#,
+    ),
     ("phrase-two-queries", r#"{"phrase": {"query": ["quick brown", "lazy dog"], "path": "t"}}"#),
     (
         "boosted-nested",

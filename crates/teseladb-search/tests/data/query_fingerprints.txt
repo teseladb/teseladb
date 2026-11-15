@@ -190,3 +190,9 @@ phrase-two-queries (2 hits)	1b8573717c59cf7e
 phrase-two-queries+details (2 hits)	29c6c488e6b42fe2
 boosted-nested (3 hits)	a90da7534a2a0960
 boosted-nested+details (3 hits)	28bba7982cf98102
+qs-range (6 hits)	597622933f2dd4ab
+qs-range+details (6 hits)	e7e72f285e059cbf
+qs-range-open (6 hits)	597622933f2dd4ab
+qs-range-open+details (6 hits)	1e98b52f7b0d7607
+boosted-fuzzy (3 hits)	a195ec6172f61c58
+boosted-fuzzy+details (3 hits)	d1cba85bb5f27da9
