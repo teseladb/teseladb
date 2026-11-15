@@ -334,6 +334,32 @@ const SEARCHES: &[(&str, &str)] = &[
             "should": [{"text": {"query": "fox", "path": "t"}}]}}"#,
     ),
     ("phrase-two-paths", r#"{"phrase": {"query": "quick brown", "path": ["t", "syn"]}}"#),
+    ("exists-boost", r#"{"exists": {"path": "t", "score": {"boost": {"value": 3}}}}"#),
+    ("exists-constant", r#"{"exists": {"path": "t", "score": {"constant": {"value": 5}}}}"#),
+    ("range-token", r#"{"range": {"path": "g", "gt": "blue", "lte": "red"}}"#),
+    ("range-token-open", r#"{"range": {"path": "g", "gte": "green"}}"#),
+    (
+        "nested-leaf",
+        r#"{"compound": {"filter": [{"compound": {"must": [{"exists": {"path": "t"}}], "should": [{"text": {"query": "fox", "path": "t"}}]}}],
+            "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    (
+        "nested-must-not-only",
+        r#"{"compound": {"filter": [{"compound": {"mustNot": [{"text": {"query": "dog", "path": "t"}}]}}],
+            "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    (
+        "nested-minimum",
+        r#"{"compound": {"filter": [{"compound": {"should": [{"text": {"query": "fox", "path": "t"}}, {"text": {"query": "car", "path": "t"}}],
+            "minimumShouldMatch": 1}}], "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
+    ),
+    ("fuzzy-many", r#"{"text": {"query": "dog", "path": "t", "fuzzy": {"maxEdits": 1}}}"#),
+    ("phrase-two-queries", r#"{"phrase": {"query": ["quick brown", "lazy dog"], "path": "t"}}"#),
+    (
+        "boosted-nested",
+        r#"{"compound": {"must": [{"compound": {"must": [{"text": {"query": "quick", "path": "t"}}], "should": [{"text": {"query": "fox", "path": "t"}}]}}],
+            "should": [{"text": {"query": "lazy", "path": "t"}}], "score": {"boost": {"value": 2}}}}"#,
+    ),
     ("phrase-missing-path", r#"{"phrase": {"query": "brown fox", "path": "nope"}}"#),
     (
         "must-criteria-all-paths",
