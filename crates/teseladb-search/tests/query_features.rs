@@ -287,6 +287,27 @@ const SEARCHES: &[(&str, &str)] = &[
     ),
     ("autocomplete-list", r#"{"autocomplete": {"query": ["qui", "laz"], "path": "a"}}"#),
     (
+        "geo-polygon-hole",
+        r#"{"geoShape": {"path": "loc", "relation": "within", "geometry": {"type": "Polygon",
+            "coordinates": [[[-3, -3], [3, -3], [3, 3], [-3, 3], [-3, -3]], [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [-0.5, -0.5]]]}}}"#,
+    ),
+    (
+        "geo-contains-points",
+        r#"{"geoShape": {"path": "loc", "relation": "contains", "geometry": {"type": "MultiPoint",
+            "coordinates": [[0, 0], [1, 1]]}}}"#,
+    ),
+    (
+        "geo-intersects-line",
+        r#"{"geoShape": {"path": "loc", "relation": "intersects", "geometry": {"type": "LineString",
+            "coordinates": [[-3, 1], [3, -1]]}}}"#,
+    ),
+    (
+        "geo-near-two-paths",
+        r#"{"near": {"path": ["loc", "other"], "origin": {"type": "Point", "coordinates": [0, 0]}, "pivot": 50000}}"#,
+    ),
+    ("phrase-one-word", r#"{"phrase": {"query": "fox", "path": "t"}}"#),
+    ("phrase-missing-path", r#"{"phrase": {"query": "brown fox", "path": "nope"}}"#),
+    (
         "must-criteria-all-paths",
         r#"{"compound": {"must": [{"text": {"query": "fast fox", "path": ["t", "syn"], "synonyms": "s", "matchCriteria": "all"}}]}}"#,
     ),

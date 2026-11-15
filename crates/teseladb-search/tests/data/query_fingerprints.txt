@@ -140,3 +140,15 @@ autocomplete-boost (3 hits)	abceb78354220bf1
 autocomplete-boost+details (3 hits)	55ebd66075173954
 autocomplete-list (3 hits)	ef30e7c07846a004
 autocomplete-list+details (3 hits)	dae16800d03b5634
+geo-polygon-hole (6 hits)	93cdbbebb119c4a0
+geo-polygon-hole+details (6 hits)	0855a6a81cab220a
+geo-contains-points (0 hits)	cbf29ce484222325
+geo-contains-points+details (0 hits)	cbf29ce484222325
+geo-intersects-line (1 hits)	bc1161051e920862
+geo-intersects-line+details (1 hits)	8d07bcec32df7896
+geo-near-two-paths (8 hits)	1cc3076b21eaba28
+geo-near-two-paths+details (8 hits)	b4db766e1153dd00
+phrase-one-word (2 hits)	2c5ad04d23ae169a
+phrase-one-word+details (2 hits)	fa45b2405b199adc
+phrase-missing-path (0 hits)	cbf29ce484222325
+phrase-missing-path+details (0 hits)	cbf29ce484222325
