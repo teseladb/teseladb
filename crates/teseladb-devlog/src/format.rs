@@ -13,6 +13,7 @@
 //!
 //! A frame addresses a WAL segment of one core: `CREATE` makes it (`arg`: its reserved length),
 //! `WRITE` puts `data` at offset `arg`, `TRUNCATE` cuts it to `arg` bytes and `REMOVE` deletes it.
+//! `BOUND` names no segment: `arg` is the node's HLC bound in force (005 FR-003, D-172).
 //! The CRC of a record covers its whole body, so a record is whole or not there. Integers are
 //! little-endian.
 
@@ -42,6 +43,9 @@ pub enum FrameKind {
     Truncate = 3,
     /// The segment is gone.
     Remove = 4,
+    /// The node's HLC bound in force, `arg` milliseconds (005 FR-003, D-172); it names no
+    /// segment (core and segment 0). Every record carries one once a bound was offered.
+    Bound = 5,
 }
 
 impl FrameKind {
@@ -51,6 +55,7 @@ impl FrameKind {
             2 => Some(FrameKind::Write),
             3 => Some(FrameKind::Truncate),
             4 => Some(FrameKind::Remove),
+            5 => Some(FrameKind::Bound),
             _ => None,
         }
     }

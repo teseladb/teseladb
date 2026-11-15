@@ -116,6 +116,12 @@ pub struct LogState {
     /// Whether the log's directory may be new: its name in the data directory is synced with the
     /// first file's.
     dir_new: bool,
+    /// The HLC bound every record carries from now on, the highest offered (005 FR-003, D-172).
+    bound: u64,
+    /// The bound each record written and not yet durable carries, by flush, oldest first.
+    stamped: std::collections::VecDeque<(u64, u64)>,
+    /// The highest bound in a durable record, or found on recovery.
+    durable_bound: u64,
 }
 
 fn ok(done: IoDone) -> Result<Option<Bytes>, IoErrno> {
@@ -156,6 +162,9 @@ impl LogState {
             syncs: 0,
             tidy: false,
             dir_new: false,
+            bound: 0,
+            stamped: std::collections::VecDeque::new(),
+            durable_bound: 0,
         };
         let mut paths: Vec<(u64, std::path::PathBuf)> = match disk.list(Path::new(format::DIR)) {
             Ok(v) => {
@@ -193,6 +202,10 @@ impl LogState {
                 let Some(frames) = format::frames(r.body) else { break };
                 let base = (at + HEAD) as u64;
                 for f in frames {
+                    if f.kind == FrameKind::Bound {
+                        s.durable_bound = s.durable_bound.max(f.arg);
+                        continue;
+                    }
                     let pos = base + f.data_at as u64;
                     s.apply(f.kind, (f.core, f.segment), f.arg, (seq, pos, u64::from(f.len)));
                 }
@@ -202,6 +215,7 @@ impl LogState {
         }
         s.next_flush = expected.unwrap_or(1);
         s.durable = s.next_flush - 1;
+        s.bound = s.durable_bound;
         for f in s.files.values_mut().filter(|f| f.refs == 0) {
             f.freed_at = Some(0);
         }
@@ -381,7 +395,20 @@ impl LogState {
                     self.drop_ref(c, 0);
                 }
             }
+            // It names no segment: recovery and the writer read it apart.
+            FrameKind::Bound => {}
         }
+    }
+
+    /// From now on every record carries `bound` as the node's HLC bound, if it is higher than the
+    /// one offered before (005 FR-003, D-172). No record is written for it alone.
+    pub fn offer_bound(&mut self, bound: u64) {
+        self.bound = self.bound.max(bound);
+    }
+
+    /// The highest HLC bound in a durable record of the log (or found on recovery), 0 if none.
+    pub fn durable_bound(&self) -> u64 {
+        self.durable_bound
     }
 
     /// The contents of WAL segment `wal` of `core`, with the zeros of its reservation.
@@ -498,6 +525,12 @@ impl LogState {
     /// Places the flush being built as one record of the active file (a new one if it does not
     /// fit, made on `disk`) and returns its write, unsynced.
     fn place(&mut self, disk: &mut dyn Disk) -> Result<IoOp, IoErrno> {
+        // Every record carries the bound in force (D-172): the newest record has it even when the
+        // files that had it went.
+        if self.bound > 0 {
+            format::push_frame(&mut self.body, FrameKind::Bound, 0, 0, self.bound, &[]);
+            self.stamped.push_back((self.next_flush, self.bound));
+        }
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
         let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
@@ -636,6 +669,12 @@ impl LogState {
         }
         self.syncs += 1;
         self.durable = self.sync_upto;
+        while let Some(&(flush, bound)) = self.stamped.front()
+            && flush <= self.durable
+        {
+            self.durable_bound = self.durable_bound.max(bound);
+            self.stamped.pop_front();
+        }
         std::mem::take(&mut self.syncing).into_iter().map(|(c, op)| (c, IoDone::Ok(op))).collect()
     }
 

@@ -554,3 +554,61 @@ fn writes_nobody_syncs_wait_until_enough_bytes_wait_or_a_flush() {
     assert_eq!(&got[..5], b"small");
     assert_eq!(&got[got.len() - 4..], b"tail");
 }
+
+/// The HLC's bound rides in the log's records (005 FR-003, D-172): an offered bound goes in the
+/// next record and is durable once its sync ends, and it comes back on recovery.
+#[test]
+fn an_offered_bound_is_durable_with_the_next_sync_and_comes_back() {
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.durable_bound(), 0);
+    // Offered while nothing is written: no record goes for it alone.
+    s.offer_bound(5_000);
+    s.flush(&mut disk);
+    assert_eq!(s.durable_bound(), 0);
+    assert!(files(&mut disk).is_empty());
+    // The next record carries it.
+    s.create(0, 1, 0);
+    s.write(0, 1, 0, b"x");
+    s.sync(0, sync_op(1));
+    s.flush(&mut disk);
+    assert_eq!(s.durable_bound(), 5_000);
+    // A lower offer never lowers it.
+    s.offer_bound(4_000);
+    s.write(0, 1, 1, b"y");
+    s.sync(0, sync_op(2));
+    s.flush(&mut disk);
+    assert_eq!(s.durable_bound(), 5_000);
+    s.offer_bound(6_000);
+    s.write(0, 1, 2, b"z");
+    s.sync(0, sync_op(3));
+    s.flush(&mut disk);
+    assert_eq!(s.durable_bound(), 6_000);
+    let s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.durable_bound(), 6_000);
+}
+
+/// Every record carries the bound in force, so removing the oldest files never loses it.
+#[test]
+fn the_bound_outlives_the_files_that_go() {
+    let mut disk = MemDisk::new();
+    let file_bytes = 32 << 10;
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.offer_bound(9_000);
+    let block = vec![7u8; 8000];
+    for w in 1..40u64 {
+        s.create(0, w, 0);
+        for k in 0..3 {
+            s.write(0, w, k * 8000, &block);
+            s.sync(0, sync_op(w));
+            s.flush(&mut disk);
+        }
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+    }
+    assert!(files(&mut disk).len() <= KEPT_FILES + 2);
+    let s = LogState::recover(&mut disk, file_bytes).unwrap();
+    assert_eq!(s.durable_bound(), 9_000);
+}
