@@ -416,6 +416,8 @@ impl Reader {
         if let Some(t) = self.by_block.get(&(table.number, i)) {
             return Ok(Err(ReadToken(*t)));
         }
+        // A disk read asked for: the one miss of this block until it comes back (FR-013).
+        self.cache.note_miss();
         let token = self.next_token;
         self.next_token += 1;
         let (offset, len) = table.pages(i);

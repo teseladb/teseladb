@@ -59,15 +59,19 @@ impl BlockCache {
         self.cache.used()
     }
 
-    /// The payload of block `block` of file `file`, if cached.
+    /// The payload of block `block` of file `file`, if cached (a hit). A miss is counted by the
+    /// reader when it asks the disk for the block ([`BlockCache::note_miss`], FR-013).
     pub(crate) fn get(&mut self, file: u64, block: u32) -> Option<Bytes> {
         let found = self.slots.get(&(file, block)).and_then(|s| self.cache.get(*s));
         if found.is_some() {
             self.hits += 1;
-        } else {
-            self.misses += 1;
         }
         found
+    }
+
+    /// Counts one block read from the disk.
+    pub(crate) fn note_miss(&mut self) {
+        self.misses += 1;
     }
 
     fn put(&mut self, key: (u64, u32), data: Bytes, pinned: bool) {
@@ -117,7 +121,10 @@ mod tests {
         c.insert(1, 0, Bytes::from_vec(vec![1; 3000]));
         assert!(c.slots.contains_key(&(1, 0)));
         assert_eq!(c.get(1, 0).unwrap().len(), 3000);
+        // Not cached: the lookup counts nothing; the reader counts the disk read it asks for.
         assert!(c.get(1, 1).is_none());
+        assert_eq!((c.hits, c.misses), (1, 0));
+        c.note_miss();
         assert_eq!((c.hits, c.misses), (1, 1));
         // Two more blocks do not fit with the pinned meta: older blocks go, the meta stays.
         c.insert(1, 1, Bytes::from_vec(vec![2; 3000]));

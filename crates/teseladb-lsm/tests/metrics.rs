@@ -56,6 +56,27 @@ fn every_metric_follows_what_happened() {
     assert_eq!(read.cache_hit_ratio, read.cache_hits_total as f64 / total);
 }
 
+/// FR-013: a miss is a disk read asked for. Reads that wait for a block already being read, and a
+/// read tried again while it waits, ask for no other read and count no other miss.
+#[test]
+fn a_block_being_read_counts_one_miss_however_many_reads_wait_for_it() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    lsm.put(G, 1, b"a", ts(1, 0), b"v").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    drop(lsm);
+    // Reopened, the cache holds only the files' pinned meta: the data block must come from disk.
+    let mut lsm = open(&small(), &mut disk);
+    let v = lsm.view();
+    for _ in 0..3 {
+        assert!(matches!(v.get(&mut lsm, b"a", ts(9, 0)), teseladb_lsm::Lookup::Miss(_)));
+    }
+    assert_eq!(lsm.metrics().cache_misses_total, 1, "{:?}", lsm.metrics());
+    assert_eq!(get(&mut lsm, &mut disk, &v, b"a", ts(9, 0)).unwrap().3, b"v");
+    assert_eq!(lsm.metrics().cache_misses_total, 1, "{:?}", lsm.metrics());
+}
+
 #[test]
 fn rejects_count_writes_made_under_the_reject_signal() {
     let cfg = LsmConfig { l0_trigger: 100, l0_slow: 1, l0_reject: 2, ..small() };
