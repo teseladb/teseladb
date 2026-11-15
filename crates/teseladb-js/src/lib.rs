@@ -227,11 +227,14 @@ impl Program {
             }
             // The reference server compiles a function inside `(` and `)`: the error is that of
             // the source between them, where the `)` may close what the source left open
-            // (measured: `function() { f(1,` misses the `}` of the body, not an expression).
+            // (measured: `function() { f(1,` misses the `}` of the body, not an expression), without
+            // the whitespace at its end (a trailing space or line end leaves the error where it is,
+            // measured on 15-11-2026).
             let t = source.trim_start();
             let wrapped = t.starts_with("function") || t.starts_with("async") || t.starts_with('(');
             if wrapped
-                && let Err(w) = parser::parse_script(&text::encode(&format!("({source})")))
+                && let Err(w) =
+                    parser::parse_script(&text::encode(&format!("({})", source.trim_end())))
                 && w.message != parser::STACK_EXHAUSTED
             {
                 return JsError::Compile {

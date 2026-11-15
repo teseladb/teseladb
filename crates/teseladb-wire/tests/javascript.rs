@@ -98,9 +98,36 @@ fn function_runs_in_a_pipeline_and_keeps_bson_types() {
             Value::Double(10.0),
             Value::Int64(7),
             Value::Int32(3),
-            Value::Null
+            Value::Undefined
         ]))
     );
+}
+
+/// `undefined` inside an array or an object a function returns is BSON `undefined`, a hole of an
+/// array too; returned alone it is `null` (`$type` of each on the reference 9.0.4, 15-11-2026: the
+/// battery's Go client saw `{"$undefined": true}` where the shell prints `null`).
+#[test]
+fn undefined_inside_a_result_stays_undefined_and_alone_is_null() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let f = |body: &str| {
+        format!(r#"{{"$function":{{"body":"function(){{ {body} }}","args":[],"lang":"js"}}}}"#)
+    };
+    let cmd = format!(
+        r#"{{"aggregate":"c","pipeline":[{{"$match":{{"_id":0}}}},{{"$project":{{"_id":0,"a":{},"o":{},"h":{},"t":{}}}}}],"cursor":{{}}}}"#,
+        f("return [1, undefined]"),
+        f("return {x: undefined}"),
+        f("return [1,,3]"),
+        f("return undefined"),
+    );
+    let d = first(&run(&mut m, &cmd));
+    assert_eq!(d.get("a"), Some(&Value::Array(vec![Value::Double(1.0), Value::Undefined])));
+    assert_eq!(d.get("o"), Some(&Value::Document(Document::new().with("x", Value::Undefined))));
+    assert_eq!(
+        d.get("h"),
+        Some(&Value::Array(vec![Value::Double(1.0), Value::Undefined, Value::Double(3.0)]))
+    );
+    assert_eq!(d.get("t"), Some(&Value::Null));
 }
 
 #[test]

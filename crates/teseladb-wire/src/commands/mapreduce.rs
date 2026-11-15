@@ -59,6 +59,24 @@ fn out_of(db: &str, v: &Value) -> Result<Out, CommandError> {
     }
 }
 
+/// `v` with every `undefined` in it as `null`: what `mapReduce` emits, reduces and finalizes has
+/// no `undefined` at any depth, where `$function` keeps it inside arrays and objects (measured on
+/// the reference 9.0.4 on 15-11-2026).
+fn undefined_as_null(v: Value) -> Value {
+    match v {
+        Value::Undefined => Value::Null,
+        Value::Array(items) => Value::Array(items.into_iter().map(undefined_as_null).collect()),
+        Value::Document(d) => {
+            let mut out = Document::new();
+            for (k, x) in d.iter() {
+                out.push(k, undefined_as_null(x.clone()));
+            }
+            Value::Document(out)
+        }
+        other => other,
+    }
+}
+
 /// The error of a function that failed, as the reference router words it.
 fn js_error(ns: &Namespace, e: teseladb_mql::MqlError) -> CommandError {
     let mut c = super::mutation::from_mql(e);
@@ -116,6 +134,7 @@ pub fn map_reduce<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
         super::js::call_map_reduce(&map, Some(d), &[], Some(&mut emit), scope.as_ref())
             .map_err(|e| js_error(&ns, e))?;
         for (k, v) in emitted {
+            let (k, v) = (undefined_as_null(k), undefined_as_null(v));
             match groups.iter_mut().find(|(g, _)| *g == k) {
                 Some((_, vs)) => vs.push(v),
                 None => groups.push((k, vec![v])),
@@ -130,6 +149,7 @@ pub fn map_reduce<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
             None,
             scope.as_ref(),
         )
+        .map(undefined_as_null)
         .map_err(|e| js_error(&ns, e))
     };
     let mut results: Vec<(Value, Value)> = Vec::with_capacity(groups.len());
@@ -149,6 +169,7 @@ pub fn map_reduce<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document,
     if let Some(f) = &finalize {
         for (k, v) in &mut results {
             *v = super::js::call_map_reduce(f, None, &[k.clone(), v.clone()], None, scope.as_ref())
+                .map(undefined_as_null)
                 .map_err(|e| js_error(&ns, e))?;
         }
     }

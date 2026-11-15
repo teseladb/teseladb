@@ -46,6 +46,37 @@ fn sums(want: &[(&str, f64)]) -> Vec<(String, Value)> {
 const MAP: &str = r#"{"$code":"function(){ emit(this.k, this.v) }"}"#;
 const SUM: &str = r#"{"$code":"function(k, vs){ return Array.sum(vs) }"}"#;
 
+/// `undefined` in what `reduce` and `finalize` return, and in an emitted key, is `null` at every
+/// depth, where `$function` keeps it inside arrays and objects (measured on the reference 9.0.4 on
+/// 15-11-2026).
+#[test]
+fn undefined_in_the_results_is_null() {
+    let mut m = Mem::new();
+    load(&mut m);
+    let r = run(
+        &mut m,
+        r#"{"mapReduce":"m","map":{"$code":"function(){ emit(this.k, 1) }"},"reduce":{"$code":"function(k, vs){ return [undefined, {x: undefined}, [1,,2]] }"},"out":{"inline":1}}"#,
+    );
+    let nulled = Value::Array(vec![
+        Value::Null,
+        Value::Document(Document::new().with("x", Value::Null)),
+        Value::Array(vec![Value::Double(1.0), Value::Null, Value::Double(2.0)]),
+    ]);
+    for (_, v) in pairs(field(&r, "results")) {
+        assert_eq!(v, nulled);
+    }
+    let r = run(
+        &mut m,
+        r#"{"mapReduce":"m","map":{"$code":"function(){ emit([undefined], 1) }"},"reduce":{"$code":"function(k, vs){ return 1 }"},"finalize":{"$code":"function(k, v){ return {k: k, u: [undefined]} }"},"out":{"inline":1}}"#,
+    );
+    let Value::Array(results) = field(&r, "results") else { panic!("{r:?}") };
+    let key = Value::Array(vec![Value::Null]);
+    let want = Document::new()
+        .with("_id", key.clone())
+        .with("value", Document::new().with("k", key).with("u", Value::Array(vec![Value::Null])));
+    assert_eq!(results, &vec![Value::Document(want)]);
+}
+
 #[test]
 fn inline_reduces_every_key_even_with_one_value() {
     let mut m = Mem::new();

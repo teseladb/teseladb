@@ -36,3 +36,24 @@ fn early_errors_are_those_of_the_reference_engine() {
         wrong.join("\n")
     );
 }
+
+/// Whitespace after a function that does not close leaves the error where it is without it: the
+/// reference compiles the source without its trailing spaces, tabs and line ends (measured on
+/// 9.0.4 on 15-11-2026, `mapReduce` and `$function`).
+#[test]
+fn trailing_whitespace_does_not_move_the_error() {
+    let missing = "missing } after function body";
+    let cases = [
+        ("function() { emit(this.b, ", 28),
+        ("function() { emit(this.b,    ", 28),
+        ("function() { emit(this.b,\t", 28),
+        ("function() { emit(this.b,\n", 28),
+        ("function() { emit(this.b, \n  ", 28),
+        ("function() { return (1  ", 25),
+        ("function() { return (1\n", 25),
+        ("  function() { emit(this.b,", 30),
+    ];
+    for (body, col) in cases {
+        assert_eq!(ours(body), format!("{missing}\t1\t{col}"), "{body:?}");
+    }
+}

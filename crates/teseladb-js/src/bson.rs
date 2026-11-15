@@ -812,6 +812,10 @@ pub fn to_bson(it: &mut Interp, v: &Val, name: &str, depth: usize) -> R<Value> {
         return Err(it.error("InternalError", "too much recursion"));
     }
     Ok(match v {
+        // Inside an array or an object `undefined` (and a hole) is BSON `undefined`; a value that
+        // is `undefined` itself is `null` (measured with `$type` on the reference 9.0.4 on
+        // 15-11-2026).
+        Val::Undef | Val::Hole if depth > 0 => Value::Undefined,
         Val::Undef | Val::Hole | Val::Null => Value::Null,
         Val::Bool(b) => Value::Boolean(*b),
         Val::Num(n) => Value::Double(*n),

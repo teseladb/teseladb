@@ -52,20 +52,24 @@ fn numbers_come_back_as_doubles_and_number_int_as_int32() {
     assert_eq!(call("function(){ return undefined }", &[]), Value::Null);
 }
 
-/// A hole of an array is written as `null`, like `undefined` (measured on a reference router 9.0.4
-/// on 02-11: `[1, , 3]`, `a[2] = 1` on `[]` and `new Array(2)`).
+/// A hole of an array is written as BSON `undefined`, like `undefined` inside an array (`$type` of
+/// each element on a reference router 9.0.4 on 15-11-2026: `[1, , 3]` and `a[2] = 1` on `[]`; the
+/// measure of 02-11 read a shell's output, which prints `undefined` as `null`).
 #[test]
-fn holes_come_back_as_null() {
+fn holes_come_back_as_undefined() {
     let (one, three) = (Value::Double(1.0), Value::Double(3.0));
     assert_eq!(
         call("function(){ return [1, , 3] }", &[]),
-        Value::Array(vec![one.clone(), Value::Null, three])
+        Value::Array(vec![one.clone(), Value::Undefined, three])
     );
     assert_eq!(
         call("function(){ const a = []; a[2] = 1; return a }", &[]),
-        Value::Array(vec![Value::Null, Value::Null, one])
+        Value::Array(vec![Value::Undefined, Value::Undefined, one])
     );
-    assert_eq!(call("function(){ return new Array(2) }", &[]), Value::Array(vec![Value::Null; 2]));
+    assert_eq!(
+        call("function(){ return new Array(2) }", &[]),
+        Value::Array(vec![Value::Undefined; 2])
+    );
 }
 
 #[test]
