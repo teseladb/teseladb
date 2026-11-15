@@ -107,9 +107,23 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         assert_eq!(split, one_place, "{pipeline:?}");
     }
     // The sum is the one of the values the `$match` keeps.
+    let scattered = teseladb_stages::count(teseladb_stages::Stage::AggScattered);
     let whole = aggregate(&mut c, &pipelines[2], false);
     let Some(Value::Document(d)) = whole.first() else { panic!("{whole:?}") };
     let want: i32 = (900..DOCS).map(|i| i * 10).sum();
     assert_eq!(d.get("s"), Some(&Value::Int32(want)));
+    // Each way of a scatterable aggregation is timed (012 FR-015): split, and by an index.
+    assert!(teseladb_stages::count(teseladb_stages::Stage::AggScattered) > scattered);
+    let index = Document::new().with("createIndexes", "c").with(
+        "indexes",
+        Value::Array(vec![
+            Document::new().with("key", Document::new().with("v", 1)).with("name", "v_1").into(),
+        ]),
+    );
+    assert!(ok(&c.run("app", index)));
+    let by_index = teseladb_stages::count(teseladb_stages::Stage::AggByIndex);
+    let again = aggregate(&mut c, &pipelines[2], false);
+    assert_eq!(again, whole);
+    assert!(teseladb_stages::count(teseladb_stages::Stage::AggByIndex) > by_index);
     node.stop();
 }

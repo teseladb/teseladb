@@ -113,11 +113,16 @@ pub enum Stage {
     /// A write of the HLC's bound to disk: a core whose marks passed the bound sends no frame
     /// until it ends.
     HlcBoundWrite,
+    /// An aggregation split over the ranges (010 FR-034), from its plan to its results.
+    AggScattered,
+    /// An aggregation that could split over the ranges and read by an index with its documents
+    /// instead, from its plan to its results.
+    AggByIndex,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 39] = [
+    pub const ALL: [Stage; 41] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -157,6 +162,8 @@ impl Stage {
         Stage::PeerFrameFlight,
         Stage::CoreTickLate,
         Stage::HlcBoundWrite,
+        Stage::AggScattered,
+        Stage::AggByIndex,
     ];
 
     /// Its label in the metrics.
@@ -201,6 +208,8 @@ impl Stage {
             Stage::PeerFrameFlight => "peer_frame_flight",
             Stage::CoreTickLate => "core_tick_late",
             Stage::HlcBoundWrite => "hlc_bound_write",
+            Stage::AggScattered => "agg_scattered",
+            Stage::AggByIndex => "agg_by_index",
         }
     }
 }

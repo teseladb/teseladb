@@ -1104,6 +1104,8 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
     let scatter = (plans_read && !find && ctx.cmd.get("let").is_none())
         .then(|| pipeline.scatter(&stage_docs, true, limit))
         .flatten();
+    // Each way of an aggregation that could split is timed from here to its results (012 FR-015).
+    let began = std::time::Instant::now();
     let planned = match plans_read {
         true => plan_read(
             ctx,
@@ -1120,6 +1122,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         Some(Read::Planned(read)) => (None, Some(read)),
         None => (None, None),
     };
+    let by_index = scatter.is_some() && planned.is_some();
     let (docs, metas, sbe, applied) = match planned {
         Some((docs, metas, applied)) => (docs, metas, true, applied),
         None if scan.is_some() => (Vec::new(), None, true, 0),
@@ -1153,6 +1156,7 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
             .map_err(|e| executor(from_mql(e)))?,
         _ => None,
     };
+    let split = scattered.is_some();
     let mut results = match (scattered, scan) {
         (Some(out), _) => out,
         (None, coll) => {
@@ -1180,6 +1184,15 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
                 .0
         }
     };
+    let way = match (split, by_index) {
+        (true, _) => Some(teseladb_stages::Stage::AggScattered),
+        (false, true) => Some(teseladb_stages::Stage::AggByIndex),
+        (false, false) => None,
+    };
+    if let Some(stage) = way {
+        let took = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        teseladb_stages::record(stage, took);
+    }
     let vars = env.vars.clone();
     drop(env);
     // A classic stage at the end writes each document it gives as BSON, which may not pass
