@@ -648,6 +648,18 @@ fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, (flush_micros, log_s
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {log_syncs}");
 }
 
+/// The links to other nodes: how many of this node's outbound links went down, whose queued
+/// frames were dropped and wait for the next connection (012 FR-015).
+fn peer_metrics(out: &mut String, links_failed: u64) {
+    let name = "teseladb_peer_links_failed_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Outbound links to other nodes that went down; their queued frames were \
+         dropped (012 FR-015)."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter\n{name} {links_failed}");
+}
+
 /// The reads the connections' threads served without the cores (005 FR-028), and those whose
 /// range's view sent them back to its core (a write in flight, an intent, a view past its time).
 fn outside_metrics(out: &mut String, (served, declined, unchanged, blocks): (u64, u64, u64, u64)) {
@@ -828,6 +840,7 @@ impl AdminBackend for NodeAdmin {
             teseladb_io::counters::device_flushes(),
             (teseladb_io::counters::device_flush_micros(), teseladb_io::counters::log_syncs()),
         );
+        peer_metrics(&mut out, teseladb_io::counters::peer_links_failed());
         let outside = (
             crate::backend::served_outside(),
             crate::backend::declined_outside(),
@@ -1698,6 +1711,17 @@ mod tests {
         assert!(out.lines().any(|l| l == "teseladb_disk_device_flushes_total 3"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_raftlog_syncs_total 5"), "{out}");
         assert!(out.lines().any(|l| l == "# TYPE teseladb_disk_syncs_total counter"), "{out}");
+    }
+
+    #[test]
+    fn the_peer_metrics_give_the_links_that_went_down() {
+        let mut out = String::new();
+        peer_metrics(&mut out, 4);
+        assert!(out.lines().any(|l| l == "teseladb_peer_links_failed_total 4"), "{out}");
+        assert!(
+            out.lines().any(|l| l == "# TYPE teseladb_peer_links_failed_total counter"),
+            "{out}"
+        );
     }
 
     #[test]

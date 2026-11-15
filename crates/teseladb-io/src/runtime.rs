@@ -943,6 +943,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
 
     /// The outbound link to `node` is down: drop what was queued, tell the logic and redial later.
     fn link_failed(&mut self, node: NodeId) {
+        crate::counters::record_peer_link_failed();
         let link = self.links.get_mut(&node).expect("link of a failed dial or connection");
         let backoff = (link.backoff_ms * 2).clamp(BACKOFF_MIN_MS, BACKOFF_MAX_MS);
         link.backoff_ms = backoff;

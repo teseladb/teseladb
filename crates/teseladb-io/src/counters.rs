@@ -12,6 +12,7 @@ static DEVICE_FLUSHES: Line = Line(AtomicU64::new(0));
 static DEVICE_FLUSH_MICROS: Line = Line(AtomicU64::new(0));
 static WRITE_BEHINDS: Line = Line(AtomicU64::new(0));
 static LOG_SYNCS: Line = Line(AtomicU64::new(0));
+static PEER_LINKS_FAILED: Line = Line(AtomicU64::new(0));
 
 /// Counts a sync of a file or a folder to the disk.
 pub(crate) fn record_sync() {
@@ -42,6 +43,17 @@ pub(crate) fn record_device_flush_micros(micros: u64) {
 /// waiting in a drive's cache makes them longer (H-008 of the native tests).
 pub fn device_flush_micros() -> u64 {
     DEVICE_FLUSH_MICROS.0.load(Ordering::Relaxed)
+}
+
+/// Counts an outbound link to another node that went down (012 FR-015): what was queued on it
+/// is dropped and waits for the next connection.
+pub(crate) fn record_peer_link_failed() {
+    PEER_LINKS_FAILED.0.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The outbound links to other nodes that went down since the process started.
+pub fn peer_links_failed() -> u64 {
+    PEER_LINKS_FAILED.0.load(Ordering::Relaxed)
 }
 
 /// Counts a sync of the node's Raft log (012 FR-035): one for every core's writes of a turn.

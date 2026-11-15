@@ -357,6 +357,7 @@ fn a_peer_that_goes_away_is_reported_unreachable() {
     a.tx.send(CoreInput::App(Cmd::Addr(NodeId(7), ba))).ok().unwrap();
     a.tx.send(CoreInput::App(Cmd::Ping(NodeId(7), 1))).ok().unwrap();
     thread::sleep(Duration::from_millis(200));
+    let failed = teseladb_io::counters::peer_links_failed();
     drop(stop(b));
     // The closed connection is noticed when A next writes or reads on it.
     for _ in 0..20 {
@@ -365,6 +366,8 @@ fn a_peer_that_goes_away_is_reported_unreachable() {
     }
     let ta = stop(a);
     assert!(ta.unreachable.contains(&NodeId(7)));
+    // The metric counts the link that went down (012 FR-015).
+    assert!(teseladb_io::counters::peer_links_failed() > failed);
 }
 
 #[test]
