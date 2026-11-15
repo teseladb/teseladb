@@ -90,3 +90,21 @@ details-synonyms (5 hits)	fa01aa77a64f6ed7
 count-total	c5afff3973d558a4
 count-bound	87d0ad1994d84a3e
 facets	9762927e7200de27
+range-negative (1 hits)	94bd60c25d94ab46
+range-negative+details (1 hits)	57bc22cbfd0cb0e7
+range-no-integer (0 hits)	cbf29ce484222325
+range-no-integer+details (0 hits)	cbf29ce484222325
+range-two-paths (4 hits)	f0a67bf9f8aa0149
+range-two-paths+details (4 hits)	81b35888f81a800d
+range-tokens (5 hits)	ff6fb28b97edbd5f
+range-tokens+details (5 hits)	aec985927426a681
+equals-fraction (0 hits)	cbf29ce484222325
+equals-fraction+details (0 hits)	cbf29ce484222325
+equals-huge (0 hits)	cbf29ce484222325
+equals-huge+details (0 hits)	cbf29ce484222325
+in-tokens (5 hits)	f7e49265eccc0a7a
+in-tokens+details (5 hits)	d37f3d882184ef06
+in-dates (error)	2d547322539ff33f
+in-dates+details (error)	2d547322539ff33f
+near-two-paths (8 hits)	eb4dd67386affc9d
+near-two-paths+details (8 hits)	dc3e8e73104e702d

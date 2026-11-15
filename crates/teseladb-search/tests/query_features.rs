@@ -227,6 +227,15 @@ const SEARCHES: &[(&str, &str)] = &[
         r#"{"facet": {"operator": {"exists": {"path": "t"}},
             "facets": {"g": {"type": "string", "path": "g"}}}}"#,
     ),
+    ("range-negative", r#"{"range": {"path": "n", "gte": -5.5, "lt": 3}}"#),
+    ("range-no-integer", r#"{"range": {"path": "n", "gt": 3.25, "lt": 3.75}}"#),
+    ("range-two-paths", r#"{"range": {"path": ["n", "items.k"], "gte": 1, "lte": 14}}"#),
+    ("range-tokens", r#"{"range": {"path": "g", "gte": "blue", "lt": "red"}}"#),
+    ("equals-fraction", r#"{"equals": {"path": "n", "value": 3.5}}"#),
+    ("equals-huge", r#"{"equals": {"path": "n", "value": 1e19}}"#),
+    ("in-tokens", r#"{"in": {"path": "g", "value": ["red", "blue"]}}"#),
+    ("in-dates", r#"{"in": {"path": "n", "value": [{"$date": "2026-01-01T00:00:00Z"}, 7]}}"#),
+    ("near-two-paths", r#"{"near": {"path": ["n", "items.k"], "origin": 7, "pivot": 3}}"#),
 ];
 
 /// The `$searchMeta` specifications, by name.
