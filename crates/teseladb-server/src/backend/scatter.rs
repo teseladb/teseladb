@@ -9,9 +9,10 @@
 //! forwards to the leader ([`RemoteReq::Pushed`]); the leader runs it on its core over its part
 //! and answers the partial groups in bytes, which merge with those of this node's cores.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use teseladb_exec::pipeline::{PartialGroups, Program};
 use teseladb_io::runtime::CoreInput;
@@ -78,41 +79,27 @@ impl ServerBackend {
     }
 
     /// Runs `program` over the ranges of `pending`, all at once and each in parts until its
-    /// stop; `None` when a core or a leader declines, a range does not answer or its answer does
-    /// not read.
+    /// stop, each range asking for its next part as soon as the one before is back (010 FR-034);
+    /// `None` when a core or a leader declines, a range does not answer or its answer does not
+    /// read.
     fn scatter_parts(
         &self,
-        mut pending: Vec<Part>,
+        pending: Vec<Part>,
         program: &Arc<Program>,
         concern: ReadConcern,
     ) -> Option<Scattered> {
-        let until = self.until();
         // In bytes once, for the ranges another node leads.
         let sent = std::cell::OnceCell::new();
         let mut groups: Vec<Vec<PartialGroups>> = vec![Vec::new(); pending.len()];
         let mut examined = 0usize;
-        let mut index: Vec<usize> = (0..pending.len()).collect();
-        while !pending.is_empty() {
-            let mut waiting = Vec::with_capacity(pending.len());
-            for p in &pending {
-                waiting.push(self.send_part(p, (program, &sent), concern)?);
-            }
-            let mut next = Vec::new();
-            let mut next_index = Vec::new();
-            for ((p, i), rx) in pending.into_iter().zip(index).zip(waiting) {
-                let wait = until.saturating_duration_since(Instant::now());
-                let Ok(Ok(reply)) = rx.recv_timeout(wait) else { return None };
-                let (found, n, more) = groups_of(reply)?;
-                groups[i].push(found);
-                examined += n;
-                if let Some(from) = more.filter(|from| *from < p.stop) {
-                    next.push(Part { from, ..p });
-                    next_index.push(i);
-                }
-            }
-            pending = next;
-            index = next_index;
-        }
+        let send = |p: &Part| self.send_part(p, (program, &sent), concern);
+        let answer = |i: usize, p: Part, r: Result<DataReply, RangeError>| {
+            let (found, n, more) = groups_of(r.ok()?)?;
+            groups[i].push(found);
+            examined += n;
+            Some(more.filter(|from| *from < p.stop).map(|from| Part { from, ..p }))
+        };
+        drive(pending, self.until(), send, answer)?;
         SCATTERED.fetch_add(1, Ordering::Relaxed);
         Some(Scattered { parts: groups.into_iter().flatten().collect(), examined })
     }
@@ -158,6 +145,62 @@ impl ServerBackend {
     }
 }
 
+/// How long the coordinator waits for the oldest part in flight before it looks at the others
+/// (010 FR-034).
+const POLL: Duration = Duration::from_millis(1);
+
+/// Drives the parts of several ranges to their ends (010 FR-034), handling each range's answer as
+/// it comes: sends the `first` part of every range, then each
+/// range's next part as soon as its answer is back, without waiting for the other ranges. The
+/// oldest part in flight is waited for up to [`POLL`]; at each wake every part already back goes
+/// on. `answer` takes a range's index, its part and the answer, and gives the range's next part,
+/// none when the range ended, or `None` to give up. `None` when `send` or `answer` gives up, a
+/// part's sender goes away or `until` passes.
+fn drive<P, R>(
+    first: Vec<P>,
+    until: Instant,
+    mut send: impl FnMut(&P) -> Option<mpsc::Receiver<R>>,
+    mut answer: impl FnMut(usize, P, R) -> Option<Option<P>>,
+) -> Option<()> {
+    let mut flying: VecDeque<(usize, P, mpsc::Receiver<R>)> = VecDeque::with_capacity(first.len());
+    for (i, p) in first.into_iter().enumerate() {
+        let rx = send(&p)?;
+        flying.push_back((i, p, rx));
+    }
+    while let Some((_, _, oldest)) = flying.front() {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let mut back = Vec::new();
+        match oldest.recv_timeout(left.min(POLL)) {
+            Ok(r) => back.push((0, r)),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+        for (at, (_, _, rx)) in flying.iter().enumerate().skip(1) {
+            match rx.try_recv() {
+                Ok(r) => back.push((at, r)),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => return None,
+            }
+        }
+        // From the last answered position down, so that the positions before stay where they are.
+        let mut taken: Vec<(usize, P, R)> = Vec::with_capacity(back.len());
+        for (at, r) in back.into_iter().rev() {
+            let (i, p, _) = flying.remove(at).expect("an answered part in flight");
+            taken.push((i, p, r));
+        }
+        for (i, p, r) in taken.into_iter().rev() {
+            if let Some(next) = answer(i, p, r)? {
+                let rx = send(&next)?;
+                flying.push_back((i, next, rx));
+            }
+        }
+    }
+    Some(())
+}
+
 /// Whether this node publishes a view of the range of `p`, which only the range's leader does.
 fn leads_here(views: &[RangeViews], p: &Part) -> bool {
     views.get(usize::from(p.core)).is_some_and(|v| v.get(p.group).is_some())
@@ -176,5 +219,73 @@ fn groups_of(reply: DataReply) -> Option<(PartialGroups, usize, Option<Vec<u8>>)
             Some((PartialGroups::decode(&groups)?, examined, next))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A part of the fake ranges: its range and its number in that range.
+    type Fake = (usize, u32);
+
+    /// 010 FR-034: a range whose parts come back at once goes through all of them while another
+    /// range still waits for its first one; the slow range answers only once the fast one ended,
+    /// so a driver that waited for every range before the next parts would never get there.
+    #[test]
+    fn a_range_goes_on_without_waiting_for_the_slowest() {
+        let slow: RefCell<Option<mpsc::Sender<u32>>> = RefCell::new(None);
+        let mut order = Vec::new();
+        let send = |p: &Fake| {
+            let (tx, rx) = mpsc::channel();
+            match p.0 {
+                0 => tx.send(p.1).ok()?,
+                _ => *slow.borrow_mut() = Some(tx),
+            }
+            Some(rx)
+        };
+        let answer = |i: usize, p: Fake, got: u32| {
+            assert_eq!(got, p.1);
+            order.push(i);
+            match (i, p.1) {
+                (0, n) if n < 3 => Some(Some((0, n + 1))),
+                (0, _) => {
+                    slow.borrow_mut().take()?.send(0).ok()?;
+                    Some(None)
+                }
+                _ => Some(None),
+            }
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        assert_eq!(drive(vec![(0, 1), (1, 0)], until, send, answer), Some(()));
+        assert_eq!(order, [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn a_part_nobody_answers_gives_up_at_the_deadline() {
+        let kept = RefCell::new(Vec::new());
+        let send = |_: &Fake| {
+            let (tx, rx) = mpsc::channel::<u32>();
+            kept.borrow_mut().push(tx);
+            Some(rx)
+        };
+        let until = Instant::now() + Duration::from_millis(20);
+        assert_eq!(drive(vec![(0, 0)], until, send, |_, _, _| Some(None)), None);
+    }
+
+    #[test]
+    fn a_part_whose_answer_went_away_or_was_refused_gives_up() {
+        let gone = |_: &Fake| Some(mpsc::channel::<u32>().1);
+        let until = Instant::now() + Duration::from_secs(5);
+        assert_eq!(drive(vec![(0, 0)], until, gone, |_, _, _| Some(None)), None);
+        let answered = |p: &Fake| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(p.1).ok()?;
+            Some(rx)
+        };
+        assert_eq!(drive(vec![(0, 0), (1, 0)], until, answered, |_, _, _| None), None);
+        assert_eq!(drive(Vec::<Fake>::new(), until, answered, |_, _, _| None), Some(()));
     }
 }
