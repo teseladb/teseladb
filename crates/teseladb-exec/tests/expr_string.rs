@@ -136,6 +136,37 @@ fn strings_refuse_what_the_reference_refuses() {
             40092,
             "$indexOfBytes requires a string as the second argument, found: null",
         ),
+        // $indexOfCP has its own codes (measured on 9.0.4, 15-11-2026, 002 T065).
+        (
+            r#"{"$indexOfCP":[0,"a"]}"#,
+            40093,
+            "$indexOfCP requires a string as the first argument, found: int",
+        ),
+        (
+            r#"{"$indexOfCP":["a",1]}"#,
+            40094,
+            "$indexOfCP requires a string as the second argument, found: int",
+        ),
+        (
+            r#"{"$substrBytes":["abc",0,{"$numberDouble":"1e21"}]}"#,
+            31109,
+            "Can't coerce out of range value 1e+21 to long",
+        ),
+        (
+            r#"{"$substrBytes":["abc",{"$numberDouble":"Infinity"},1]}"#,
+            31109,
+            "Can't coerce out of range value inf to long",
+        ),
+        (
+            r#"{"$substrBytes":["abc",0,{"$numberDouble":"NaN"}]}"#,
+            31109,
+            "Can't coerce out of range value nan to long",
+        ),
+        (
+            r#"{"$substrBytes":["abc",0,{"$numberDecimal":"1E+30"}]}"#,
+            31109,
+            "Can't coerce out of range decimal value 1E+30 to long",
+        ),
         (r#"{"$split":["abc",""]}"#, 40087, "$split requires a non-empty separator"),
         (
             r#"{"$split":["abc",1]}"#,

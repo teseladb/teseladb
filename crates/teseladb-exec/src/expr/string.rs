@@ -188,8 +188,37 @@ impl Str {
     }
 }
 
+/// The smallest double past `long`'s range (2^63); −2^63 itself is in it.
+const LONG_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+/// `$substrBytes`'s start and length as the reference coerces them to a `long` (measured on
+/// 9.0.4, 15-11-2026, 002 T065): NaN, an infinity or a number out of its range is 31109.
+fn long_in_range(v: &Eval) -> Result<(), MqlError> {
+    let refuse = |shown: String| error(codes::COERCE_TO_LONG, shown);
+    match v {
+        Some(Value::Double(x)) if !x.is_finite() || *x >= LONG_LIMIT || *x < -LONG_LIMIT => {
+            let shown = teseladb_mql::stream_double(*x);
+            Err(refuse(format!("Can't coerce out of range value {shown} to long")))
+        }
+        Some(Value::Decimal128(d)) => {
+            let saturated = teseladb_mql::decimal_saturating(*d);
+            let finite = matches!(d.classify(), teseladb_bson::Decimal::Finite { .. });
+            let out = !finite
+                || (teseladb_mql::decimal_exact(*d).is_none()
+                    && (saturated == i64::MAX || saturated == i64::MIN));
+            if out {
+                return Err(refuse(format!("Can't coerce out of range decimal value {d} to long")));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn substr_bytes(vals: &[Eval]) -> Result<Eval, MqlError> {
     let s = coerce(&vals[0])?;
+    long_in_range(&vals[1])?;
+    long_in_range(&vals[2])?;
     let start = integer(&vals[1]).unwrap_or(0);
     if start < 0 {
         return Err(error(
@@ -243,13 +272,17 @@ fn substr_cp(vals: &[Eval]) -> Result<Eval, MqlError> {
 }
 
 fn index_of(op: Str, vals: &[Eval]) -> Result<Eval, MqlError> {
-    let name = if op == Str::IndexBytes { "$indexOfBytes" } else { "$indexOfCP" };
+    let (name, first, second) = if op == Str::IndexBytes {
+        ("$indexOfBytes", codes::INDEX_OF_FIRST, codes::INDEX_OF_SECOND)
+    } else {
+        ("$indexOfCP", codes::INDEX_OF_CP_FIRST, codes::INDEX_OF_CP_SECOND)
+    };
     let hay = match &vals[0] {
         None | Some(Value::Null | Value::Undefined) => return Ok(Some(Value::Null)),
         Some(Value::String(s)) => s.clone(),
         Some(other) => {
             return Err(error(
-                codes::INDEX_OF_FIRST,
+                first,
                 format!(
                     "{name} requires a string as the first argument, found: {}",
                     type_name_of(other)
@@ -260,7 +293,7 @@ fn index_of(op: Str, vals: &[Eval]) -> Result<Eval, MqlError> {
     let Some(Value::String(needle)) = &vals[1] else {
         let found = vals[1].as_ref().map_or("missing", type_name_of);
         return Err(error(
-            codes::INDEX_OF_SECOND,
+            second,
             format!("{name} requires a string as the second argument, found: {found}"),
         ));
     };

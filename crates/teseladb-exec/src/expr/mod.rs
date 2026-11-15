@@ -126,6 +126,9 @@ pub mod codes {
     location!(SUBSTR_CP_LENGTH, 34454);
     location!(INDEX_OF_FIRST, 40091);
     location!(INDEX_OF_SECOND, 40092);
+    location!(INDEX_OF_CP_FIRST, 40093);
+    location!(INDEX_OF_CP_SECOND, 40094);
+    location!(COERCE_TO_LONG, 31109);
     location!(INDEX_OF_BOUND, 40096);
     location!(SPLIT_FIRST, 40085);
     location!(SPLIT_SECOND, 40086);
