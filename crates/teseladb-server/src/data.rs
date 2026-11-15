@@ -166,6 +166,10 @@ pub struct LsmSizes {
     pub memtable_bytes: u64,
     /// Bytes in its block cache.
     pub cache_bytes: u64,
+    /// Block lookups its cache answered, and those it read from the disk (004 FR-013).
+    pub cache_hits: u64,
+    /// Block lookups its cache read from the disk.
+    pub cache_misses: u64,
     /// Compactions it ran since it opened.
     pub compactions: u64,
     /// The live bytes of the core's ranges it was last told.
@@ -683,6 +687,8 @@ impl DataCore {
                     level_files: m.level_files,
                     memtable_bytes: m.memtable_bytes,
                     cache_bytes: m.cache_bytes,
+                    cache_hits: m.cache_hits_total,
+                    cache_misses: m.cache_misses_total,
                     compactions: m.compactions_total,
                     live_bytes: m.live_bytes,
                     full_after: m.full_after,

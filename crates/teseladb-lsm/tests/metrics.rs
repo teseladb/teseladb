@@ -50,6 +50,10 @@ fn every_metric_follows_what_happened() {
     assert_eq!(read.read_files_per_get, 1.0);
     assert_eq!((read.gets_total, read.get_files_total), (2, 2));
     assert!(read.cache_hit_ratio > 0.0 && read.cache_hit_ratio < 1.0, "{read:?}");
+    // The counts behind the ratio (004 FR-013): the second read found what the first read in.
+    assert!(read.cache_hits_total > 0 && read.cache_misses_total > 0, "{read:?}");
+    let total = (read.cache_hits_total + read.cache_misses_total) as f64;
+    assert_eq!(read.cache_hit_ratio, read.cache_hits_total as f64 / total);
 }
 
 #[test]

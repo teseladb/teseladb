@@ -22,6 +22,10 @@ pub struct LsmMetrics {
     pub get_files_total: u64,
     /// `lsm_cache_hit_ratio`: block lookups found in the cache.
     pub cache_hit_ratio: f64,
+    /// `lsm_cache_hits_total`: block lookups found in the cache (FR-013).
+    pub cache_hits_total: u64,
+    /// `lsm_cache_misses_total`: block lookups read from the disk (FR-013).
+    pub cache_misses_total: u64,
     /// `lsm_compactions_total`.
     pub compactions_total: u64,
     /// `lsm_stalls_total`: writes that came while the LSM asked to slow down.
@@ -145,6 +149,8 @@ impl Lsm {
             gets_total: r.gets,
             get_files_total: r.probes,
             cache_hit_ratio: ratio(r.cache.hits, r.cache.hits + r.cache.misses),
+            cache_hits_total: r.cache.hits,
+            cache_misses_total: r.cache.misses,
             compactions_total: c.compactions,
             stalls_total: c.stalls,
             rejects_total: c.rejects,

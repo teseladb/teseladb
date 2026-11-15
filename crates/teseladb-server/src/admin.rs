@@ -501,7 +501,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     }
     // The Raft log of each core, on disk and in memory, and what its LSM writes (012 FR-016).
     type Gauge = (&'static str, &'static str, fn(&crate::data::LsmSizes) -> f64);
-    let per_core: [Gauge; 6] = [
+    let per_core: [Gauge; 8] = [
         (
             "teseladb_lsm_history_bytes",
             "Bytes of each core's history files, which its levels count too.",
@@ -526,6 +526,16 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "teseladb_lsm_stalls_total",
             "Writes that came while each core's LSM asked to slow down.",
             |s| s.stalls as f64,
+        ),
+        (
+            "teseladb_lsm_cache_hits_total",
+            "Block lookups each core's block cache answered (004 FR-013).",
+            |s| s.cache_hits as f64,
+        ),
+        (
+            "teseladb_lsm_cache_misses_total",
+            "Block lookups each core's block cache read from the disk (004 FR-013).",
+            |s| s.cache_misses as f64,
         ),
         (
             "teseladb_lsm_rejects_total",
@@ -1711,6 +1721,19 @@ mod tests {
         assert!(out.lines().any(|l| l == "teseladb_disk_device_flushes_total 3"), "{out}");
         assert!(out.lines().any(|l| l == "teseladb_raftlog_syncs_total 5"), "{out}");
         assert!(out.lines().any(|l| l == "# TYPE teseladb_disk_syncs_total counter"), "{out}");
+    }
+
+    #[test]
+    fn the_lsm_metrics_give_the_block_cache_hits_and_misses() {
+        let sizes =
+            crate::data::LsmSizes { cache_hits: 90, cache_misses: 10, ..Default::default() };
+        let mut out = String::new();
+        lsm_metrics(&mut out, &[(2, sizes)]);
+        assert!(out.lines().any(|l| l == "teseladb_lsm_cache_hits_total{core=\"2\"} 90"), "{out}");
+        assert!(
+            out.lines().any(|l| l == "teseladb_lsm_cache_misses_total{core=\"2\"} 10"),
+            "{out}"
+        );
     }
 
     #[test]
