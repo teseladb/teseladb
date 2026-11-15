@@ -286,8 +286,9 @@ pub struct CoreRuntime<L: CoreLogic, D: Disk + Send + 'static> {
     inputs: Vec<(Instant, CoreInput<L::Msg>)>,
     /// Refuses new requests while the queue wait stays high (012 FR-029).
     admission: Admission,
-    /// Background requests waiting for a turn with nothing else to do (012 FR-030).
-    background: VecDeque<L::Msg>,
+    /// Background requests waiting for a turn with nothing else to do (012 FR-030), each with the
+    /// instant it was queued.
+    background: VecDeque<(Instant, L::Msg)>,
     outbox: Vec<(NodeId, PeerMsg)>,
     /// Answers that end with a file's bytes, taken from the logic this turn.
     file_outbox: Vec<(NodeId, FileSend)>,
@@ -411,7 +412,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             self.turn()?;
         }
         // The background requests still waiting are answered before the core goes.
-        while let Some(m) = self.background.pop_front() {
+        while let Some((_, m)) = self.background.pop_front() {
             let now = self.now();
             self.logic.on_message(m, now);
         }
@@ -482,7 +483,10 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         if self.background.is_empty() || !self.mailbox.is_empty() {
             return;
         }
-        let m = self.background.pop_front().expect("a background request");
+        let (queued, m) = self.background.pop_front().expect("a background request");
+        // Its wait in the queue (012 FR-015).
+        let waited = u64::try_from(queued.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        teseladb_stages::record(teseladb_stages::Stage::BackgroundWait, waited);
         let now = self.now();
         self.logic.on_message(m, now);
     }
@@ -807,7 +811,7 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
             }
             CoreInput::App(m) => match self.logic.service_class(&m) {
                 ServiceClass::Foreground => self.logic.on_message(m, now),
-                ServiceClass::Background => self.background.push_back(m),
+                ServiceClass::Background => self.background.push_back((Instant::now(), m)),
             },
             CoreInput::Stop => self.stopped = true,
             CoreInput::Inbound(Inbound { stream, channel, got }) => {

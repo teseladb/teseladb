@@ -118,11 +118,14 @@ pub enum Stage {
     /// An aggregation that could split over the ranges and read by an index with its documents
     /// instead, from its plan to its results.
     AggByIndex,
+    /// A background request's wait in its core's background queue until the core runs it (012
+    /// FR-030).
+    BackgroundWait,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 41] = [
+    pub const ALL: [Stage; 42] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -164,6 +167,7 @@ impl Stage {
         Stage::HlcBoundWrite,
         Stage::AggScattered,
         Stage::AggByIndex,
+        Stage::BackgroundWait,
     ];
 
     /// Its label in the metrics.
@@ -210,6 +214,7 @@ impl Stage {
             Stage::HlcBoundWrite => "hlc_bound_write",
             Stage::AggScattered => "agg_scattered",
             Stage::AggByIndex => "agg_by_index",
+            Stage::BackgroundWait => "background_wait",
         }
     }
 }

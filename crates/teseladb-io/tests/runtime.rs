@@ -782,6 +782,7 @@ fn a_core_that_keeps_up_refuses_nothing() {
 fn document_operations_go_ahead_of_long_scans() {
     // 012 FR-030: scans and requests queued behind a busy stretch come out with the requests
     // first; the scans run once nothing else waits, and all of them are answered.
+    let waits = teseladb_stages::count(teseladb_stages::Stage::BackgroundWait);
     let a = start(22, Toy::default());
     a.tx.send(CoreInput::App(Cmd::Stall(Duration::from_millis(30)))).ok().unwrap();
     thread::sleep(Duration::from_millis(5));
@@ -797,6 +798,8 @@ fn document_operations_go_ahead_of_long_scans() {
     thread::sleep(Duration::from_millis(50));
     let t = stop(a);
     assert_eq!(t.served, vec![1, 2, 101, 102, 103]);
+    // Each scan's wait in the background queue is timed (012 FR-015).
+    assert!(teseladb_stages::count(teseladb_stages::Stage::BackgroundWait) >= waits + 3);
 }
 
 #[test]
