@@ -176,3 +176,31 @@ fn java_number_forms() {
     assert_eq!(java_double(100.0), "100.0");
     assert_eq!(java_double(1e7), "1.0E7");
 }
+
+#[test]
+fn path_patterns_take_a_star_for_any_run_of_characters() {
+    let fits = [
+        ("*", "a.b"),
+        ("t*", "title"),
+        ("*e", "title"),
+        ("a*b*c", "a.x.b.y.c"),
+        ("a*b*c", "abc"),
+        ("a**c", "ac"),
+        ("title", "title"),
+        ("*.title", "body.title"),
+    ];
+    for (pattern, path) in fits {
+        assert!(path_fits(pattern, path), "{pattern} {path}");
+    }
+    let misfits = [
+        ("t*", "body.title"),
+        ("a*a", "a"),
+        ("a*b*c", "a.c.b"),
+        ("title", "titles"),
+        ("*.title", "title"),
+        ("x*", ""),
+    ];
+    for (pattern, path) in misfits {
+        assert!(!path_fits(pattern, path), "{pattern} {path}");
+    }
+}

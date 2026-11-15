@@ -364,6 +364,15 @@ const SEARCHES: &[(&str, &str)] = &[
         r#"{"embeddedDocument": {"path": "items", "operator": {"compound": {"must": [{"text": {"query": "zoo", "path": "items.t"}}],
             "should": [{"hasRoot": {"operator": {"text": {"query": "quick", "path": "t"}}}}]}}, "score": {"boost": {"value": 3}}}}"#,
     ),
+    (
+        "embedded-in-boosted",
+        r#"{"compound": {"must": [{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "zoo", "path": "items.t"}}}}],
+            "should": [{"text": {"query": "car", "path": "t"}}], "score": {"boost": {"value": 2}}}}"#,
+    ),
+    (
+        "embedded-wildcard",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"text": {"query": "zoo", "path": {"wildcard": "items.*"}}}}}"#,
+    ),
     ("qs-range", r#"{"queryString": {"defaultPath": "t", "query": "t:[a TO fox}"}}"#),
     ("qs-range-open", r#"{"queryString": {"defaultPath": "t", "query": "t:{* TO brown]"}}"#),
     (

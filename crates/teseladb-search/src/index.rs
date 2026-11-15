@@ -533,13 +533,15 @@ impl MemIndex {
         self.by_key.is_empty()
     }
 
-    /// The indexed string paths that `pattern` names: a path, or `*` for all of them.
+    /// The indexed string paths that `pattern` names, where `*` stands for any run of
+    /// characters, dots included: `*` names all of them, `t*` the ones that start with `t`.
     pub fn paths(&self, pattern: &str) -> Vec<String> {
-        if pattern == "*" {
-            // The grams of `autocomplete` fields are not a string path.
-            return self.fields.keys().filter(|k| !k.starts_with("$type:")).cloned().collect();
-        }
-        self.fields.keys().filter(|p| *p == pattern).cloned().collect()
+        // The grams of `autocomplete` fields are not a string path.
+        self.fields
+            .keys()
+            .filter(|k| !k.starts_with("$type:") && path_fits(pattern, k))
+            .cloned()
+            .collect()
     }
 
     /// The documents with a term of `query` in one of `paths`, each with the sum of its term
@@ -1235,6 +1237,21 @@ fn walk<'a>(
 
 /// The weight of several terms: their idfs, each a 32-bit float, added in double precision as
 /// the reference search library's `BM25Similarity.idfExplain` adds them.
+/// Whether `path` fits `pattern`, where `*` stands for any run of characters, an empty one too.
+fn path_fits(pattern: &str, path: &str) -> bool {
+    let mut pieces = pattern.split('*');
+    let first = pieces.next().unwrap_or_default();
+    let Some(mut rest) = path.strip_prefix(first) else { return false };
+    let pieces: Vec<&str> = pieces.collect();
+    let Some((last, middle)) = pieces.split_last() else { return rest.is_empty() };
+    // The leftmost place of each middle piece leaves the most room for the ones after it.
+    for piece in middle {
+        let Some(at) = rest.find(piece) else { return false };
+        rest = &rest[at + piece.len()..];
+    }
+    rest.ends_with(last)
+}
+
 pub(crate) fn idf_sum(n: u64, dfs: impl IntoIterator<Item = u64>) -> f32 {
     dfs.into_iter().map(|df| f64::from(idf(n, df) as f32)).sum::<f64>() as f32
 }
