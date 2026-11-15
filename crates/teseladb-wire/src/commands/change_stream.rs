@@ -374,7 +374,7 @@ pub fn more<B: Backend + ?Sized>(
         if stream.shard_left == 0 && stream.failed.is_some() {
             failure = stream.failed.take();
         } else if stream.shard_left == 0 {
-            match fill(backend, stream, started) {
+            match fill(backend, stream, started, deadline) {
                 Ok(()) => {}
                 // The wait ran out while the node read the ranges: an empty `getMore` answers
                 // with what it has, it does not fail (the reference router never answers
@@ -437,16 +437,19 @@ fn event_bytes(doc: &Document) -> usize {
 /// Fills the next shard batch as a shard fills one for the reference router 9.0.4 (measured on
 /// 04-11-2026): the events in order, the ones left from the last batch first, until the next one
 /// does not fit in what is left of 16 MiB, which starts the batch after. It reads on while the
-/// queue holds less than 16 MiB, each read moves the stream's mark and the mark is below `until`
-/// (the node's clock when the `getMore` began): a read of a range stops at 4 MiB (014 FR-003),
-/// and one read alone may stop before an event too large to serialize that the shard's batch
-/// meets (`cs-split-large`, battery of 04-11-2026). Such an event fails the read with every
-/// event of the batch, which the queue held under 16 MiB. A read that runs out of time after
-/// some events gives those.
+/// queue holds less than 16 MiB and the mark is below `until` (the node's clock when the
+/// `getMore` began): a read of a range stops at 4 MiB (014 FR-003), and one read alone may stop
+/// before an event too large to serialize that the shard's batch meets (`cs-split-large`,
+/// battery of 04-11-2026). A read that does not move the mark, because the ranges' resolved mark
+/// lags behind the writes, waits for it until `deadline` (the `getMore`'s wait): the shard batch
+/// holds every event written before the `getMore` (native battery of 15-11-2026 under load). Such
+/// an event fails the read with every event of the batch, which the queue held under 16 MiB. A
+/// read that runs out of time after some events gives those.
 fn fill<B: Backend + ?Sized>(
     backend: &mut B,
     stream: &mut ChangeStream,
     until: Hlc,
+    deadline: u64,
 ) -> Result<(), CommandError> {
     loop {
         let queued =
@@ -465,7 +468,10 @@ fn fill<B: Backend + ?Sized>(
             Err(e) => return Err(e),
         }
         let mark = stream.position.from();
-        if mark <= before || mark >= until {
+        if mark >= until {
+            break;
+        }
+        if mark <= before && (backend.now_ms() >= deadline || !backend.pause()) {
             break;
         }
     }

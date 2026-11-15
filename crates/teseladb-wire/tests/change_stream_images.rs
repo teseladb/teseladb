@@ -400,6 +400,35 @@ fn an_event_too_large_fails_the_shard_batch_it_falls_in() {
     assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "{gone:?}");
 }
 
+/// The shard batch holds every event written before the `getMore`, also when the ranges' resolved
+/// mark lags behind the last of them: the batch waits for it within the `getMore`'s wait instead
+/// of giving the events read so far (native battery of 15-11-2026, `cs-split-large` under load,
+/// where the first event came out and the reference failed the whole batch).
+#[test]
+fn a_lagging_mark_does_not_split_the_batch_of_an_event_too_large() {
+    let mut m = Mem::new();
+    run(
+        &mut m,
+        Document::new().with("create", "c").with("changeStreamPreAndPostImages", images(true)),
+    );
+    let spec = Document::new()
+        .with("fullDocument", "required")
+        .with("fullDocumentBeforeChange", "required");
+    let plain = open_with(&mut m, "c", spec, vec![]);
+    m.now += 1;
+    let small = doc(&[("_id", 9.into())]);
+    run(&mut m, Document::new().with("insert", "c").with("documents", arr(vec![small])));
+    insert_big(&mut m, 1);
+    update_big(&mut m, 1);
+    // The first read resolves up to the big insert; the update comes in after one pause.
+    m.resolved_lag_ms = 2;
+    m.pause_ms = 1;
+    m.pauses_left = 10;
+    fails_too_large(&one_more(&mut m, plain));
+    let gone = one_more(&mut m, plain);
+    assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "{gone:?}");
+}
+
 #[test]
 fn the_batches_before_the_one_of_an_event_too_large_come_out() {
     let mut m = Mem::new();
