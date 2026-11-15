@@ -110,11 +110,14 @@ pub enum Stage {
     PeerFrameFlight,
     /// A tick of a core past the time it was due: the beats of its groups go out with it.
     CoreTickLate,
+    /// A write of the HLC's bound to disk: a core whose marks passed the bound sends no frame
+    /// until it ends.
+    HlcBoundWrite,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 38] = [
+    pub const ALL: [Stage; 39] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -153,6 +156,7 @@ impl Stage {
         Stage::LogNotify,
         Stage::PeerFrameFlight,
         Stage::CoreTickLate,
+        Stage::HlcBoundWrite,
     ];
 
     /// Its label in the metrics.
@@ -196,6 +200,7 @@ impl Stage {
             Stage::LogNotify => "log_notify",
             Stage::PeerFrameFlight => "peer_frame_flight",
             Stage::CoreTickLate => "core_tick_late",
+            Stage::HlcBoundWrite => "hlc_bound_write",
         }
     }
 }

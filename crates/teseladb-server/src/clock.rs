@@ -28,7 +28,11 @@ pub(crate) fn wall_ms() -> u64 {
 /// Writes a new bound if one is due.
 fn renew(clock: &NodeClock, disk: &mut dyn Disk, file: &mut BoundFile) -> Result<(), StorageError> {
     if let Some(bound) = clock.0.renewal() {
+        // Timed (012 FR-015): a core whose marks passed the bound sends nothing until it ends.
+        let began = std::time::Instant::now();
         file.write(disk, bound)?;
+        let took = u64::try_from(began.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        teseladb_stages::record(teseladb_stages::Stage::HlcBoundWrite, took);
         clock.0.raise_bound(bound);
     }
     Ok(())
@@ -192,6 +196,7 @@ mod tests {
         let (clock, keeper) = start_clock(disk, meta).unwrap();
         let (base_syncs, base_renames) =
             (syncs.load(Ordering::Relaxed), renames.load(Ordering::Relaxed));
+        let writes = teseladb_stages::count(teseladb_stages::Stage::HlcBoundWrite);
         let window = Duration::from_millis(2_000);
         let end = Instant::now() + window;
         while Instant::now() < end {
@@ -204,6 +209,8 @@ mod tests {
         // mark reaches the bound written on start.
         let most = window.as_millis() as u64 / teseladb_hlc::RENEW_MS + 2;
         assert!((1..=most).contains(&renewals), "{renewals} syncs in {window:?}, at most {most}");
+        // Each write of a renewal is timed (012 FR-015).
+        assert!(teseladb_stages::count(teseladb_stages::Stage::HlcBoundWrite) > writes);
         keeper.stop();
     }
 
