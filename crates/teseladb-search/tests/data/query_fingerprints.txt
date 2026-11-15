@@ -196,3 +196,7 @@ qs-range-open (6 hits)	597622933f2dd4ab
 qs-range-open+details (6 hits)	1e98b52f7b0d7607
 boosted-fuzzy (3 hits)	a195ec6172f61c58
 boosted-fuzzy+details (3 hits)	d1cba85bb5f27da9
+embedded-has-root (2 hits)	43b786ded09ed6a0
+embedded-has-root+details (2 hits)	3cb878d2b9ba1619
+embedded-has-root-boost (2 hits)	0972f254a77d7ce2
+embedded-has-root-boost+details (2 hits)	b2298cd2b2c6276c

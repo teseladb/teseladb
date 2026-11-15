@@ -354,6 +354,16 @@ const SEARCHES: &[(&str, &str)] = &[
             "minimumShouldMatch": 1}}], "should": [{"text": {"query": "quick", "path": "t"}}]}}"#,
     ),
     ("fuzzy-many", r#"{"text": {"query": "dog", "path": "t", "fuzzy": {"maxEdits": 1}}}"#),
+    (
+        "embedded-has-root",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"compound": {"must": [{"text": {"query": "zoo", "path": "items.t"}}],
+            "should": [{"hasRoot": {"operator": {"text": {"query": "quick", "path": "t"}}}}]}}}}"#,
+    ),
+    (
+        "embedded-has-root-boost",
+        r#"{"embeddedDocument": {"path": "items", "operator": {"compound": {"must": [{"text": {"query": "zoo", "path": "items.t"}}],
+            "should": [{"hasRoot": {"operator": {"text": {"query": "quick", "path": "t"}}}}]}}, "score": {"boost": {"value": 3}}}}"#,
+    ),
     ("qs-range", r#"{"queryString": {"defaultPath": "t", "query": "t:[a TO fox}"}}"#),
     ("qs-range-open", r#"{"queryString": {"defaultPath": "t", "query": "t:{* TO brown]"}}"#),
     (
