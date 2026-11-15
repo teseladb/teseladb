@@ -72,6 +72,38 @@ impl Notify for Shared {
     }
 }
 
+/// The node's HLC bound between the thread that keeps it and the log's writer (005 FR-003,
+/// D-172): the keeper offers a bound, every record the writer writes from then on carries it, and
+/// the writer publishes the highest bound in a durable record, the one the log found on start
+/// included.
+#[derive(Debug, Default)]
+#[repr(align(64))]
+pub struct LogBound {
+    offered: AtomicU64,
+    durable: AtomicU64,
+}
+
+impl LogBound {
+    /// Every record from now on carries `bound`, if it is higher than the one offered before.
+    pub fn offer(&self, bound: u64) {
+        self.offered.fetch_max(bound, Ordering::AcqRel);
+    }
+
+    /// The highest bound in a durable record of the log, 0 if none.
+    #[must_use]
+    pub fn durable(&self) -> u64 {
+        self.durable.load(Ordering::Acquire)
+    }
+
+    fn offered(&self) -> u64 {
+        self.offered.load(Ordering::Acquire)
+    }
+
+    fn set_durable(&self, bound: u64) {
+        self.durable.fetch_max(bound, Ordering::AcqRel);
+    }
+}
+
 /// Parameters of a device log.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceLogConfig {
@@ -129,12 +161,28 @@ impl<D: Disk + Send + 'static> DeviceLog<D> {
     ///
     /// The error of reading the log, or of starting the thread.
     pub fn start(
-        mut disk: D,
+        disk: D,
         cores: u16,
         cfg: DeviceLogConfig,
     ) -> io::Result<(DeviceLog<D>, Vec<LogPort>)> {
+        Self::start_with_bound(disk, cores, cfg, Arc::new(LogBound::default()))
+    }
+
+    /// [`DeviceLog::start`] whose records carry the HLC bound `bound` offers, and that publishes
+    /// in it the bound found on start and each one made durable (005 FR-003, D-172).
+    ///
+    /// # Errors
+    ///
+    /// The error of reading the log, or of starting the thread.
+    pub fn start_with_bound(
+        mut disk: D,
+        cores: u16,
+        cfg: DeviceLogConfig,
+        bound: Arc<LogBound>,
+    ) -> io::Result<(DeviceLog<D>, Vec<LogPort>)> {
         let state = LogState::recover(&mut LogClass(&mut disk), cfg.file_bytes)
             .map_err(|e| io::Error::other(format!("raft log: {e:?}")))?;
+        bound.set_durable(state.durable_bound());
         let poller = Poller::new()?;
         let shared = Arc::new(Shared {
             waker: poller.waker(),
@@ -156,7 +204,7 @@ impl<D: Disk + Send + 'static> DeviceLog<D> {
         let handle = thread::Builder::new().name("raft-log".into()).spawn(move || {
             // Every confirmed write waits for this thread's sync.
             let _ = teseladb_sys::favor_current_thread();
-            run(disk, state, queues, &s, poller)
+            run(disk, state, queues, (&s, &bound), poller)
         })?;
         Ok((DeviceLog { shared, recovered_files, handle: Some(handle) }, ports))
     }
@@ -309,7 +357,7 @@ fn run<D: Disk + 'static>(
     mut disk: D,
     mut state: LogState,
     mut queues: Vec<(SpscReceiver<Req>, Sink)>,
-    shared: &Shared,
+    (shared, bound): (&Shared, &LogBound),
     mut poller: Poller,
 ) -> D {
     let mut reqs = Vec::new();
@@ -327,6 +375,8 @@ fn run<D: Disk + 'static>(
     let mut ops = Vec::new();
     let mut results = Vec::new();
     loop {
+        // The records written from here on carry the bound offered (D-172).
+        state.offer_bound(bound.offered());
         let mut took = false;
         for (core, (rx, sink)) in queues.iter_mut().enumerate() {
             rx.drain_into(&mut reqs);
@@ -386,6 +436,7 @@ fn run<D: Disk + 'static>(
             flush_ring(&mut disk);
         }
         shared.syncs.store(state.syncs(), Ordering::Relaxed);
+        bound.set_durable(state.durable_bound());
         if worked {
             continue;
         }

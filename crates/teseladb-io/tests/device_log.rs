@@ -71,3 +71,45 @@ fn cores_writing_at_once_share_the_syncs_and_find_their_entries_again() {
     }
     drop(log);
 }
+
+/// The HLC bound offered to the log rides in its records (005 FR-003, D-172): it is durable once
+/// a sync of the cores' writes ends, and the next start finds it again.
+#[test]
+fn an_offered_bound_is_durable_with_the_cores_syncs_and_found_again() {
+    use std::sync::Arc;
+    use teseladb_io::device_log::LogBound;
+    let bound = Arc::new(LogBound::default());
+    bound.offer(7_000);
+    let (log, mut ports) = DeviceLog::start_with_bound(
+        MemDisk::new(),
+        1,
+        DeviceLogConfig { file_bytes: 256 << 10 },
+        bound.clone(),
+    )
+    .unwrap();
+    let mut port = ports.pop().expect("a port");
+    let mut own = MemDisk::new();
+    {
+        let mut disk = port.disk(&mut own);
+        let mut s = CoreStore::recover(&cfg(), 0, &mut disk).unwrap().0;
+        s.create_group(G, Bytes::new(), Durability::Strict).unwrap();
+        s.append_raft(G, &[entry(0, 1)], None, Durability::Strict).unwrap();
+        for (_, r) in s.run_io(&mut disk, Nanos::ZERO).tickets {
+            r.unwrap();
+        }
+    }
+    // Answered once durable: the record it went in was synced.
+    assert_eq!(bound.durable(), 7_000);
+    drop(port);
+    let disk = log.stop().unwrap();
+    let again = Arc::new(LogBound::default());
+    let (log, _ports) = DeviceLog::start_with_bound(
+        disk,
+        1,
+        DeviceLogConfig { file_bytes: 256 << 10 },
+        again.clone(),
+    )
+    .unwrap();
+    assert_eq!(again.durable(), 7_000);
+    drop(log);
+}

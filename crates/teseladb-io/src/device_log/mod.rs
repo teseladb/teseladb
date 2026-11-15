@@ -10,7 +10,7 @@ mod writer;
 
 pub use port::{LogPort, ThreadLink};
 pub use teseladb_devlog::{format, state};
-pub use writer::{DeviceLog, DeviceLogConfig, Sink};
+pub use writer::{DeviceLog, DeviceLogConfig, LogBound, Sink};
 
 /// A core's disk with its WAL in the node's device log ([`LogPort::disk`]).
 pub type PortDisk<'a, D> = teseladb_devlog::port::PortDisk<'a, ThreadLink, D>;
