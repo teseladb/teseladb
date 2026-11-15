@@ -456,3 +456,25 @@ fn stable_tfl_and_boolean_explanations_match_the_reference() {
         ]
     );
 }
+
+/// A field inside a `document` takes its own mapping's similarity; a path the mapping does not
+/// reach, or that names no `string` field, scores with BM25.
+#[test]
+fn nested_fields_take_their_own_similarity() {
+    let title = Document::new()
+        .with("type", "string")
+        .with("similarity", Document::new().with("type", "boolean"));
+    let body = Document::new()
+        .with("type", "document")
+        .with("fields", Document::new().with("title", title));
+    let fields =
+        Document::new().with("body", body).with("t", Document::new().with("type", "string"));
+    let def = Document::new()
+        .with("mappings", Document::new().with("dynamic", false).with("fields", fields));
+    let idx = MemIndex::new(Definition::parse(&def).expect("valid"));
+    assert_eq!(idx.similarity_of("body.title"), crate::index::Similarity::Boolean);
+    assert_eq!(idx.similarity_of("body"), crate::index::Similarity::Bm25);
+    assert_eq!(idx.similarity_of("t.x"), crate::index::Similarity::Bm25);
+    assert_eq!(idx.similarity_of("body.nope"), crate::index::Similarity::Bm25);
+    assert_eq!(idx.similarity_of("nope"), crate::index::Similarity::Bm25);
+}
