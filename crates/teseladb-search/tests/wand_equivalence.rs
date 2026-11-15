@@ -85,8 +85,30 @@ fn text(rng: &mut Rng) -> Document {
 }
 
 fn spec(rng: &mut Rng) -> Document {
-    let mut spec = match rng.below(3) {
+    let mut spec = match rng.below(6) {
         0 => text(rng),
+        // Shapes that are not a `text` alone nor its one `must`: evaluated whole.
+        3 => Document::new().with("exists", Document::new().with("path", "title")),
+        4 => {
+            let mut fuzzy_op = match text(rng).get("text") {
+                Some(Value::Document(d)) => d.clone(),
+                _ => Document::new(),
+            };
+            fuzzy_op.push("fuzzy", Document::new().with("maxEdits", 1));
+            let clauses: Vec<Value> = match rng.below(3) {
+                0 => vec![text(rng).into(), text(rng).into()],
+                1 => vec![Document::new().with("text", fuzzy_op).into()],
+                _ => vec![text(rng).into()],
+            };
+            let mut compound = Document::new().with("must", clauses);
+            if rng.below(2) == 0 {
+                compound.push("should", vec![Value::from(text(rng))]);
+                if rng.below(2) == 0 {
+                    compound.push("minimumShouldMatch", 1);
+                }
+            }
+            Document::new().with("compound", compound)
+        }
         _ => {
             let range = Document::new()
                 .with("range", Document::new().with("path", "n").with("gte", rng.below(60) as i32));

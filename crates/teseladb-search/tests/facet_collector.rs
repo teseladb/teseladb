@@ -144,3 +144,13 @@ fn facets_count_each_document_once_per_bucket() {
         r#"{"count":{"lowerBound":5},"facet":{"d":{"buckets":[{"_id":{"$date":"2026-01-01T00:00:00Z"},"count":1}]}}}"#
     );
 }
+
+#[test]
+fn a_collector_never_sits_beside_an_operator() {
+    let ix = index();
+    let spec = parse(&format!(
+        r#"{{"facet": {{{GATO}, "facets": {{"g": {{"type": "string", "path": "g"}}}}}}, "exists": {{"path": "t"}}}}"#
+    ));
+    let err = ix.meta(&spec).expect_err("an operator beside the collector");
+    assert_eq!(err.0, "Top-level operator is not allowed to be used with collector");
+}
