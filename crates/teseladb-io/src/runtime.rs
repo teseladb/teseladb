@@ -578,6 +578,9 @@ impl<L: CoreLogic, D: Disk + Send + 'static> CoreRuntime<L, D> {
         self.run_background();
         let now = self.now();
         if now >= self.next_tick {
+            // How late it runs (012 FR-015): its groups' beats go out with it.
+            let late = now.0.saturating_sub(self.next_tick.0);
+            teseladb_stages::record(teseladb_stages::Stage::CoreTickLate, late);
             self.logic.tick(now, wall_ms());
             self.resting =
                 self.logic.resting() && now.0.saturating_sub(self.busy_at.0) >= REST_AFTER.0;

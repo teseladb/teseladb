@@ -108,11 +108,13 @@ pub enum Stage {
     /// A frame of Raft or of heartbeats from another node: the wall clock of the core that reads
     /// it minus the one it carried, its delay between nodes of one machine.
     PeerFrameFlight,
+    /// A tick of a core past the time it was due: the beats of its groups go out with it.
+    CoreTickLate,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 37] = [
+    pub const ALL: [Stage; 38] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -150,6 +152,7 @@ impl Stage {
         Stage::LogSync,
         Stage::LogNotify,
         Stage::PeerFrameFlight,
+        Stage::CoreTickLate,
     ];
 
     /// Its label in the metrics.
@@ -192,6 +195,7 @@ impl Stage {
             Stage::LogSync => "log_sync",
             Stage::LogNotify => "log_notify",
             Stage::PeerFrameFlight => "peer_frame_flight",
+            Stage::CoreTickLate => "core_tick_late",
         }
     }
 }

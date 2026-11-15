@@ -349,6 +349,18 @@ fn a_stale_announced_address_gives_way_to_the_logics_after_a_failed_dial() {
     assert!(tb.last_seen >= 1, "A kept dialing the address B left");
 }
 
+/// Each tick records how late it ran past the time it was due (012 FR-015, `core_tick_late`):
+/// the beats of the core's groups go out with it.
+#[test]
+fn every_tick_records_how_late_it_ran() {
+    let ticks = teseladb_stages::count(teseladb_stages::Stage::CoreTickLate);
+    let a = start(9, Toy::default());
+    thread::sleep(Duration::from_millis(100));
+    drop(stop(a));
+    // Ticks of 5 ms for 100 ms: more than a few.
+    assert!(teseladb_stages::count(teseladb_stages::Stage::CoreTickLate) >= ticks + 5);
+}
+
 #[test]
 fn a_peer_that_goes_away_is_reported_unreachable() {
     let a = start(6, Toy::default());
