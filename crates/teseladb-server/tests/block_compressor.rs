@@ -24,9 +24,9 @@ fn the_option_chooses_the_codec_of_the_new_blocks() {
     assert_eq!(start(&[&format!("{option}=none")]), Ok(Codec::None));
     // 004 FR-037.
     assert_eq!(start(&[&option, "lz4"]), Ok(Codec::Lz4));
-    // Without the option, zlib (D-164).
-    assert_eq!(start(&[]), Ok(Codec::Zlib));
-    assert_eq!(teseladb_server::DEFAULT_BLOCK_CODEC, Codec::Zlib);
+    // Without the option, LZ4 (D-173).
+    assert_eq!(start(&[]), Ok(Codec::Lz4));
+    assert_eq!(teseladb_server::DEFAULT_BLOCK_CODEC, Codec::Lz4);
     let snappy = start(&[&option, "snappy"]).unwrap_err();
     assert!(snappy.contains("none, zlib, zstd or lz4"), "{snappy}");
 }
