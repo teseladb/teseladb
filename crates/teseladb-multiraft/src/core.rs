@@ -2570,6 +2570,11 @@ impl<S: StateMachine> MultiRaftCore<S> {
         self.drive(g);
     }
 
+    /// The number of this core in its node.
+    pub fn core_index(&self) -> u16 {
+        self.cfg.core
+    }
+
     /// Raft status of a group.
     pub fn status(&self, g: GroupId) -> Option<Status> {
         self.groups.get(&g).map(|grp| grp.raw.status(&GroupStore::new(&self.store, g)))

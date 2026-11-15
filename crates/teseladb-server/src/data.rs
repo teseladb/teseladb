@@ -1075,21 +1075,49 @@ impl DataCore {
         (now, wall_ms): (Nanos, u64),
     ) {
         self.wall_ms = wall_ms;
-        match decode_for(body) {
-            Ok((g, r)) if self.host_has(g) => {
-                self.run(core, (g, r), Client::Remote(from.0, from.1), (now, wall_ms));
-            }
+        if let Some(target) = self.remote_target(core, from, body) {
+            self.run_remote(core, from, target, (now, wall_ms));
+        }
+    }
+
+    /// The range and request of a request `from` forwarded (012 FR-030), when this core hosts the
+    /// range; otherwise it is answered here at once, with the leader this core knows or as out of
+    /// range, and `None` comes back.
+    pub fn remote_target(
+        &self,
+        core: &mut MultiRaftCore<CoreSm>,
+        from: (NodeId, u64),
+        body: &[u8],
+    ) -> Option<(GroupId, RemoteReq)> {
+        let refused = match decode_for(body) {
+            Ok((g, r)) if self.host_has(g) => return Some((g, r)),
             Ok((g, _)) => {
                 let hint = self.router.route_group(g).map_or(NodeId(0), |t| t.node);
                 let hint = if hint == self.me { NodeId(0) } else { hint };
-                let body = encode_reply(&Err(RangeError::NotLeader { hint }));
-                core.answer_forward(from.0, from.1, Bytes::from_vec(body));
+                RangeError::NotLeader { hint }
             }
-            Err(_) => {
-                let body = encode_reply(&Err(RangeError::OutOfRange));
-                core.answer_forward(from.0, from.1, Bytes::from_vec(body));
-            }
-        }
+            Err(_) => RangeError::OutOfRange,
+        };
+        core.answer_forward(from.0, from.1, Bytes::from_vec(encode_reply(&Err(refused))));
+        None
+    }
+
+    /// Runs request `(g, r)` that node `from.0` forwarded as its request `from.1`.
+    pub fn run_remote(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        from: (NodeId, u64),
+        (g, r): (GroupId, RemoteReq),
+        (now, wall_ms): (Nanos, u64),
+    ) {
+        self.wall_ms = wall_ms;
+        self.run(core, (g, r), Client::Remote(from.0, from.1), (now, wall_ms));
+    }
+
+    /// Answers request `from.1` that node `from.0` forwarded with `Overloaded` (012 FR-029).
+    pub fn refuse_remote(core: &mut MultiRaftCore<CoreSm>, from: (NodeId, u64)) {
+        let body = encode_reply(&Err(RangeError::Overloaded));
+        core.answer_forward(from.0, from.1, Bytes::from_vec(body));
     }
 
     fn status(&self, core: &MultiRaftCore<CoreSm>, g: GroupId) -> DataStatus {

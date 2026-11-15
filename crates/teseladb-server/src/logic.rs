@@ -157,6 +157,10 @@ pub enum NodeMsg {
     Drain(NodeId, bool, Sender<Option<Result<Group0Command, DrainError>>>),
     /// A request of the node's handle for a data range (on the range's core).
     Data(DataReq, DataSender),
+    /// A request for a range of this core that node `.0` forwarded as its request `.1`, put in
+    /// the core's own mailbox when its frame was read, so the frames of Raft and of heartbeats read
+    /// with it go first and it takes its service class like the node's own (012 FR-030).
+    Forwarded((NodeId, u64), GroupId, RemoteReq),
     /// The mailboxes of the node's cores, in core order (sent once at start).
     Cores(Vec<CoreSender<NodeMsg>>),
     /// Group 0's ranges, from core 0 to the other cores.
@@ -1544,8 +1548,28 @@ impl NodeLogic {
                         self.core.answer_forward(f.from, f.req, Bytes::new());
                     }
                     (Ok(Request::Data(body)), Some(data)) => {
-                        let at = (self.now, self.wall_ms);
-                        data.request_remote(&mut self.core, (f.from, f.req), &body, at);
+                        let from = (f.from, f.req);
+                        let own = self.cores.get(usize::from(self.core.core_index()));
+                        match (data.remote_target(&mut self.core, from, &body), own) {
+                            (None, _) => {}
+                            // Into the core's own mailbox (012 FR-030).
+                            (Some((g, r)), Some(tx)) => {
+                                // A full or closed mailbox gives it back: it runs at once.
+                                let msg = CoreInput::App(NodeMsg::Forwarded(from, g, r));
+                                if let Err(SendError::Full(back) | SendError::Closed(back)) =
+                                    tx.send(msg)
+                                    && let CoreInput::App(NodeMsg::Forwarded(_, g, r)) = back
+                                {
+                                    let at = (self.now, self.wall_ms);
+                                    data.run_remote(&mut self.core, from, (g, r), at);
+                                }
+                            }
+                            // Before the node gives the cores their mailboxes: at once.
+                            (Some(target), None) => {
+                                let at = (self.now, self.wall_ms);
+                                data.run_remote(&mut self.core, from, target, at);
+                            }
+                        }
                     }
                     (Ok(Request::Catalog(body)), _) => {
                         let op = match self.is_leader() {
@@ -1908,7 +1932,8 @@ impl CoreLogic for NodeLogic {
 
     fn service_class(&self, msg: &NodeMsg) -> ServiceClass {
         match msg {
-            NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _) => remote_class(req),
+            NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _)
+            | NodeMsg::Forwarded(_, _, req) => remote_class(req),
             // An aggregation's part reads a whole range's part: behind the document operations.
             NodeMsg::Data(DataReq::Partial(..), _) => ServiceClass::Background,
             _ => ServiceClass::Foreground,
@@ -1928,6 +1953,11 @@ impl CoreLogic for NodeLogic {
                 reply,
             ) => {
                 let _ = reply.send(Err(RangeError::Overloaded));
+                None
+            }
+            NodeMsg::Forwarded(from, _, _) => {
+                DataCore::refuse_remote(&mut self.core, from);
+                self.pump();
                 None
             }
             other => Some(other),
@@ -1958,6 +1988,14 @@ impl CoreLogic for NodeLogic {
                 None => {
                     let _ = reply.send(Err(RangeError::OutOfRange));
                 }
+            },
+            NodeMsg::Forwarded(from, g, r) => match &mut self.data {
+                Some(data) => {
+                    let began = Instant::now();
+                    data.run_remote(&mut self.core, from, (g, r), (now, self.wall_ms));
+                    took(Stage::CoreRequest, began);
+                }
+                None => DataCore::refuse_remote(&mut self.core, from),
             },
             NodeMsg::Cores(cores) => {
                 self.cores = cores;
@@ -2993,6 +3031,71 @@ mod tests {
         data.request_remote(&mut l.core, (NodeId(1), 900), &body, now);
         data.request_remote(&mut l.core, (NodeId(1), 901), &[0xff], now);
         c.step();
+
+        // A request forwarded for a range of this core goes into the core's own mailbox when its
+        // frame is read, with its service class, and is answered on its turn (012 FR-030).
+        let answered = |out: &[(NodeId, PeerMsg)], req: u64| {
+            out.iter().any(|(to, m)| {
+                *to == NodeId(2) && matches!(m, PeerMsg::ForwardResp { req: r, .. } if *r == req)
+            })
+        };
+        let (own, mut own_rx) = teseladb_io::mailbox::channel(std::sync::Arc::new(Quiet));
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Cores(vec![own]), now);
+        let mut ignored = Vec::new();
+        own_rx.drain_into(&mut ignored);
+        let forward = |req| PeerMsg::Forward {
+            req,
+            deadline_ms: 100,
+            hlc: None,
+            body: Bytes::from_vec(
+                Request::Data(crate::data_wire::encode_for(DATA_RANGE, &scan)).encode(),
+            ),
+        };
+        c.logic(1).on_peer(NodeId(2), forward(902), now);
+        let mut out = Vec::new();
+        c.logic(1).take_outbound(&mut out);
+        assert!(!answered(&out, 902), "answered as its frame was read: {out:?}");
+        for (to, m) in out {
+            c.deliver(to, m, NodeId(1));
+        }
+        let mut queued = Vec::new();
+        own_rx.drain_into(&mut queued);
+        let Some(CoreInput::App(msg @ NodeMsg::Forwarded(..))) = queued.pop() else {
+            panic!("no forwarded request in the core's mailbox: {queued:?}")
+        };
+        assert_eq!(c.logic(1).service_class(&msg), ServiceClass::Foreground);
+        c.logic(1).on_message(msg, now);
+        let mut seen = false;
+        for _ in 0..50 {
+            let now = c.now + TICK;
+            c.now = now;
+            let mut sent = Vec::new();
+            for (id, l, disk) in &mut c.nodes {
+                l.tick(now, now.0 / 1_000_000);
+                while let Some((op, class)) = l.poll_io(now) {
+                    let done = disk.execute(op);
+                    l.on_io_done(done, class, now);
+                }
+                let mut out = Vec::new();
+                l.take_outbound(&mut out);
+                seen |= *id == NodeId(1) && answered(&out, 902);
+                sent.extend(out.into_iter().map(|(to, m)| (*id, to, m)));
+            }
+            for (from, to, m) in sent {
+                c.deliver(to, m, from);
+            }
+            if seen {
+                break;
+            }
+        }
+        assert!(seen, "the forwarded request was never answered");
+        // An overloaded core refuses it before spending anything on it (012 FR-029).
+        let refused = NodeMsg::Forwarded((NodeId(2), 903), DATA_RANGE, scan.clone());
+        assert!(c.logic(1).refuse_overloaded(refused).is_none());
+        let mut out = Vec::new();
+        c.logic(1).take_outbound(&mut out);
+        assert!(answered(&out, 903), "{out:?}");
     }
 
     /// The state of node `id`'s replica of the data range.
