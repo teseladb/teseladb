@@ -2,24 +2,25 @@
 //! presentation, with the main port's TLS, authentication and limits, while the main port keeps
 //! its own. Group 0 says which port (`replicaSetPort` of `topologyPresentation`); every node opens
 //! it when it applies the entry and closes it when the parameter drops it, without a restart.
+//!
+//! On the engine (023 FR-019) its keeper is a task of shard 0 and the port, like the main one,
+//! listens on every shard.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::client_listener::{ClientConfig, ClientListener, Hooks, NodeClockState, NodePresence};
+use crate::client_tasks::{Task, TaskStop};
 
 /// How often the keeper looks at the port Group 0 wants: well within the second a presentation
 /// change has to reach every node (018 SC-005).
 const LOOK_EVERY: Duration = Duration::from_millis(50);
 
-/// The thread that keeps the replica set port as Group 0 wants it.
+/// The task that keeps the replica set port as Group 0 wants it.
 pub struct PortKeeper {
-    stop: Arc<AtomicBool>,
-    /// `None` when the thread could not start: the node goes on without the port.
-    thread: Option<JoinHandle<()>>,
+    /// `None` when the task could not start: the node goes on without the port.
+    task: Option<Task>,
 }
 
 /// The main port's addresses with port `port`.
@@ -42,19 +43,15 @@ impl PortKeeper {
         presence: Arc<NodePresence>,
         hooks: Hooks,
     ) -> PortKeeper {
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let thread = thread::Builder::new()
-            .name("replica-set-port".into())
-            .spawn(move || keep(&main, &state, &presence, hooks, &flag))
-            .ok();
-        PortKeeper { stop, thread }
+        let body = Box::new(move |stop: &TaskStop| keep(&main, &state, &presence, hooks, stop));
+        PortKeeper { task: crate::client_tasks::spawn(0, body) }
     }
 
     /// Stops the keeper and closes the port.
     pub fn stop(self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.thread.map(JoinHandle::join);
+        if let Some(t) = self.task {
+            let _ = t.stop();
+        }
     }
 }
 
@@ -63,13 +60,13 @@ fn keep(
     state: &Arc<NodeClockState>,
     presence: &NodePresence,
     hooks: Hooks,
-    stop: &AtomicBool,
+    stop: &TaskStop,
 ) {
     // The port open now, and the last one asked for (a port that cannot be bound is not tried
     // again until Group 0 asks for another).
     let mut open: Option<(u16, ClientListener)> = None;
     let mut tried: Option<u16> = None;
-    while !stop.load(Ordering::Acquire) {
+    while !stop.stopped() {
         let wanted = presence.replica_port().map(|(p, _)| p);
         if wanted != tried {
             if let Some((_, l)) = open.take() {
@@ -89,7 +86,7 @@ fn keep(
                 }
             }
         }
-        thread::sleep(LOOK_EVERY);
+        stop.pause(LOOK_EVERY);
     }
     if let Some((_, l)) = open {
         l.stop();

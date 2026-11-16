@@ -1,13 +1,11 @@
-//! TLS on the clients' port (013 FR-007, FR-034): the `--tlsMode` of a port and, per
-//! connection, the transport that sits between the socket and the wire protocol. `requireTLS`
-//! speaks only TLS; `allowTLS` and `preferTLS` take TLS when the first byte is a TLS handshake
-//! record and plain bytes otherwise; `disabled` takes only plain bytes.
+//! TLS on the clients' port (013 FR-007, FR-034): the `--tlsMode` of a port and its server side,
+//! which the engine's TLS streams run per connection (023 FR-019). `requireTLS` speaks only TLS;
+//! `allowTLS` and `preferTLS` take TLS when the first byte is a TLS handshake record and plain
+//! bytes otherwise; `disabled` takes only plain bytes ([`TlsPort::sniff`]).
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use teseladb_tls::{
-    CertifiedKey, ClientAuth, Connection, ENTROPY_LEN, ServerConfig, SniIdentity, Trust, Version,
-};
+use teseladb_tls::{CertifiedKey, ClientAuth, ServerConfig, SniIdentity, Trust, Version};
 use teseladb_x509::ext::GeneralName;
 use teseladb_x509::{Certificate, Crl, CrlCheck, PrivateKey};
 
@@ -15,9 +13,6 @@ use crate::cli::{
     TLS_CA_FILE, TLS_CERTIFICATE_KEY_FILE, TLS_CRL_FILE, TLS_PUBLIC_CERTIFICATE_KEY_FILE, TlsOpts,
 };
 use crate::pki::Pki;
-
-/// First byte of a TLS handshake record.
-const TLS_HANDSHAKE: u8 = 22;
 
 /// `--tlsMode` (`net.tls.mode`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -146,118 +141,18 @@ impl PartialEq for TlsPort {
 
 impl Eq for TlsPort {}
 
-/// How one connection's bytes travel.
-pub enum Transport {
-    /// Plain bytes.
-    Plain,
-    /// Waiting for the first byte to choose (`allowTLS`, `preferTLS`).
-    Undecided(Arc<ServerConfig>),
-    /// TLS, starting with the handshake.
-    Tls(Box<Connection>),
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-}
-
-fn tls(config: &Arc<ServerConfig>) -> Option<Transport> {
-    let mut entropy = [0u8; ENTROPY_LEN];
-    teseladb_sys::fill_random(&mut entropy).ok()?;
-    Some(Transport::Tls(Box::new(Connection::server(config.clone(), now_ms(), &entropy))))
-}
-
-impl Transport {
-    /// The transport of a new connection; `None` if the randomness for TLS is not available.
-    pub fn new(port: &TlsPort) -> Option<Transport> {
-        match (port.mode, port.config()) {
-            (TlsMode::Disabled, _) | (_, None) => Some(Transport::Plain),
-            (TlsMode::RequireTls, Some(c)) => tls(&c),
-            (TlsMode::AllowTls | TlsMode::PreferTls, Some(c)) => Some(Transport::Undecided(c)),
-        }
-    }
-
-    /// Takes bytes from the socket: what the wire protocol reads goes to `plain`, what goes back
-    /// to the socket (the TLS handshake, alerts) to `out`. `false` closes the connection.
-    pub fn incoming(&mut self, raw: &[u8], plain: &mut Vec<u8>, out: &mut Vec<u8>) -> bool {
-        if let (Transport::Undecided(c), Some(&first)) = (&*self, raw.first()) {
-            let next = if first == TLS_HANDSHAKE { tls(c) } else { Some(Transport::Plain) };
-            match next {
-                Some(t) => *self = t,
-                None => return false,
-            }
-        }
-        match self {
-            Transport::Plain => {
-                plain.extend_from_slice(raw);
-                true
-            }
-            Transport::Undecided(_) => true,
-            Transport::Tls(c) => {
-                let ok = c.feed(raw).is_ok();
-                out.extend_from_slice(&c.take_output());
-                plain.extend_from_slice(&c.read());
-                // close_notify: the client is done.
-                ok && !c.peer_closed()
-            }
-        }
-    }
-
-    /// Sends wire protocol bytes; `false` closes the connection.
-    pub fn outgoing(&mut self, data: &[u8], out: &mut Vec<u8>) -> bool {
-        match self {
-            Transport::Tls(c) => {
-                let ok = c.write(data).is_ok();
-                out.extend_from_slice(&c.take_output());
-                ok
-            }
-            Transport::Plain | Transport::Undecided(_) => {
-                out.extend_from_slice(data);
-                true
-            }
-        }
-    }
-
-    /// [`Transport::outgoing`] of a reply the caller no longer needs: without TLS and with
-    /// nothing waiting in `out`, the reply becomes `out` as it is, without copying it (a find's
-    /// reply of a hundred documents is about 100 KB, H-049 of the native tests).
-    pub fn outgoing_owned(&mut self, data: Vec<u8>, out: &mut Vec<u8>) -> bool {
-        match self {
-            Transport::Plain | Transport::Undecided(_) if out.is_empty() => {
-                *out = data;
-                true
-            }
-            Transport::Tls(_) | Transport::Plain | Transport::Undecided(_) => {
-                self.outgoing(&data, out)
-            }
-        }
-    }
-
-    /// Whether the connection is TLS and its handshake has finished.
-    pub fn tls_established(&self) -> bool {
-        matches!(self, Transport::Tls(c) if !c.is_handshaking())
-    }
-
-    /// The protocol ALPN agreed over TLS, if any.
-    pub fn alpn(&self) -> Option<&[u8]> {
-        match self {
-            Transport::Tls(c) => c.alpn_protocol(),
-            Transport::Plain | Transport::Undecided(_) => None,
-        }
-    }
-
-    /// Whether the connection carries plain bytes: no TLS on the port, or a client that did not
-    /// open with a handshake on a port that allows it.
-    pub fn is_plain(&self) -> bool {
-        matches!(self, Transport::Plain)
-    }
-
-    /// The client's certificate chain, leaf first, if it sent one over TLS.
-    pub fn peer_certificates(&self) -> &[Certificate] {
-        match self {
-            Transport::Tls(c) => c.peer_certificates(),
-            Transport::Plain | Transport::Undecided(_) => &[],
+#[cfg(target_os = "linux")]
+impl TlsPort {
+    /// How the clients' port takes the first bytes of a new connection: plain with `disabled`
+    /// (or without a server side), TLS only with `requireTLS`, and the first byte's choice with
+    /// `allowTLS` and `preferTLS`. The server side is the one in use now, so a rotation reaches
+    /// the connections that come after it.
+    pub fn sniff(&self) -> teseladb_io::engine::tls_stream::Sniff {
+        use teseladb_io::engine::tls_stream::Sniff;
+        match (self.mode, self.config()) {
+            (TlsMode::Disabled, _) | (_, None) => Sniff::Plain,
+            (TlsMode::RequireTls, Some(c)) => Sniff::Tls(c),
+            (TlsMode::AllowTls | TlsMode::PreferTls, Some(c)) => Sniff::Either(c),
         }
     }
 }
@@ -465,37 +360,17 @@ mod tests {
         assert_eq!(key(&a), PrivateKey::ed25519(&[2; 32]).public_key());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn transports_without_tls_have_no_peer() {
-        let plain = Transport::new(&TlsPort::default()).unwrap();
-        assert!(plain.peer_certificates().is_empty());
-        let mut undecided =
-            Transport::new(&TlsPort::new(TlsMode::PreferTls, Some(config(1)))).unwrap();
-        assert!(undecided.peer_certificates().is_empty());
-        let (mut plain_in, mut out) = (Vec::new(), Vec::new());
-        assert!(undecided.incoming(&[], &mut plain_in, &mut out));
-        assert!(undecided.outgoing(b"x", &mut out));
-        assert_eq!(out, b"x");
-        let tls = Transport::new(&TlsPort::new(TlsMode::RequireTls, Some(config(1)))).unwrap();
-        assert!(tls.peer_certificates().is_empty());
-    }
-
-    #[test]
-    fn a_reply_without_tls_becomes_the_output_without_a_copy_when_nothing_waits() {
-        let mut plain = Transport::new(&TlsPort::default()).unwrap();
-        let reply = b"reply".to_vec();
-        let at = reply.as_ptr();
-        let mut out = Vec::new();
-        assert!(plain.outgoing_owned(reply, &mut out));
-        assert_eq!(out, b"reply");
-        assert_eq!(out.as_ptr(), at, "the reply's own buffer");
-        // Behind bytes still waiting, it goes after them.
-        assert!(plain.outgoing_owned(b" next".to_vec(), &mut out));
-        assert_eq!(out, b"reply next");
-        // Over TLS it goes through the session, as with `outgoing`.
-        let mut tls = Transport::new(&TlsPort::new(TlsMode::RequireTls, Some(config(1)))).unwrap();
-        let mut sealed = Vec::new();
-        let _ = tls.outgoing_owned(b"x".to_vec(), &mut sealed);
-        assert_ne!(sealed, b"x");
+    fn each_mode_takes_the_first_bytes_its_way() {
+        use teseladb_io::engine::tls_stream::Sniff;
+        assert!(matches!(TlsPort::default().sniff(), Sniff::Plain));
+        let port = |m| TlsPort::new(m, Some(config(1)));
+        assert!(matches!(port(TlsMode::Disabled).sniff(), Sniff::Plain));
+        assert!(matches!(port(TlsMode::RequireTls).sniff(), Sniff::Tls(_)));
+        assert!(matches!(port(TlsMode::AllowTls).sniff(), Sniff::Either(_)));
+        assert!(matches!(port(TlsMode::PreferTls).sniff(), Sniff::Either(_)));
+        // A mode with TLS and no server side takes plain bytes.
+        assert!(matches!(TlsPort::new(TlsMode::RequireTls, None).sniff(), Sniff::Plain));
     }
 }

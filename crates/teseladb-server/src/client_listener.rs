@@ -1,53 +1,46 @@
-//! The clients' port (006 FR-005): an acceptor that gives each connection a thread of its own, a
-//! worker of that one connection with its own poller; the protocol is `teseladb-wire`'s, which
-//! turns bytes into requests and replies into bytes.
-//!
-//! The connection's thread reads its requests, runs their commands against the node's cores and
-//! writes their replies, as the reference server's thread per connection
-//! (`ServiceExecutorSynchronous`) does: a command that waits (for a majority, a leader or its
-//! `maxTimeMS`) holds up only its own connection, and no request changes threads on its way (H-013
-//! of the native tests). What arrives while a command runs waits in the socket, in order.
+//! The clients' port (006 FR-005) on the engine (023 FR-018, FR-019): every shard listens on the
+//! port's addresses through the engine's network, the engine hands each connection to a shard,
+//! and the connection is a task of that shard (`teseladb_io::engine::client_port`) with the wire
+//! protocol of `teseladb-wire` as its session ([`crate::client_session`]). A connection's
+//! commands run in an engine thread of its shard: a command that waits (for a majority, a leader
+//! or its `maxTimeMS`) holds up only its own connection, as the reference server's thread per
+//! connection (`ServiceExecutorSynchronous`) does, and no request changes shards on its way to
+//! the cores but the one `smp` message there and back. What arrives while a command runs waits
+//! in the connection, in order.
 //!
 //! Beyond `--maxConns` open connections a new one is closed at once, as the reference server does
-//! with `net.maxIncomingConnections`. An awaitable `hello` waits in its worker until its deadline
-//! (or until the node changes state), and with `exhaustAllowed` keeps answering that way.
+//! with `net.maxIncomingConnections`. An awaitable `hello` waits until its deadline (or until the
+//! node changes state), and with `exhaustAllowed` keeps answering that way. The port's periodic
+//! work (the sessions' keeper, the resolvers of finished transactions, the ranges' statistics and
+//! the reader of the tenants' data) runs as tasks of the shards ([`crate::client_tasks`]).
 
-use std::collections::BTreeMap;
-use std::io::{self, ErrorKind, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use teseladb_hlc::to_timestamp;
-use teseladb_io::poller::{Interest, Poller, WAKE_TOKEN, Waker};
 use teseladb_multiraft::NodeClock;
-use teseladb_wire::commands::diagnostic_data;
-use teseladb_wire::commands::registry::{REFRESH_INTERVAL_MS, refresh};
-use teseladb_wire::commands::{
-    Backend, NodeSessions, REAP_INTERVAL_MS, Shared, Timeouts, lock, reap,
-};
+use teseladb_wire::commands::registry::REFRESH_INTERVAL_MS;
+use teseladb_wire::commands::{NodeSessions, REAP_INTERVAL_MS, Timeouts};
 use teseladb_wire::compressed::Compressor;
-use teseladb_wire::connection::{Connection, ReplyPieces, Request, RequestArena};
-use teseladb_wire::dispatch::{
-    Action, ClusterTime, NodeInfo, Topology, dispatch_with, hello_after_wait,
-};
+use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
+use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
 
-use crate::backend::{NodeHandle, SCAN_EVERY, ServerBackend};
+use crate::backend::NodeHandle;
 use crate::certs::Certificates;
 use crate::clustertime_keys::KeySlot;
-use crate::diag::{Diag, PortStats, ProcessConfig};
-use crate::diagnostic_capture::{self, Capture};
-use crate::tls_port::{TlsPort, Transport};
-use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
-use teseladb_wire::hello::HelloRequest;
-use teseladb_wire::ingress::Admission;
+use crate::diag::ProcessConfig;
+use crate::tls_port::TlsPort;
 
 /// The reference server's default `net.maxIncomingConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
-/// Bytes read from a socket at a time.
-const READ_CHUNK: usize = 64 * 1024;
+/// The stack of the engine threads that run a connection's commands. It is smaller than the
+/// `COMMAND_STACK` a thread of its own reserved, since a shard keeps its idle stacks for the
+/// next commands; the calls of server-side JavaScript are told what it has (016 A016-3-18).
+pub const ENGINE_COMMAND_STACK: usize = 16 << 20;
 
 /// What the clients' port needs to know.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,10 +83,6 @@ pub struct ClientConfig {
     pub process: ProcessConfig,
     /// TLS on the port (`--tlsMode` and the certificate options, 013).
     pub tls: TlsPort,
-    /// With the io_uring executor, the rings of the port, one per core (012 FR-024): each accepts,
-    /// reads and writes its connections, and a pool runs their commands. `None`, a port with TLS
-    /// or a kernel without multishot `recv`: a thread per connection.
-    pub rings: Option<usize>,
     /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
     /// (`--net-xdp`, 012 FR-033), besides the kernel's listener of `addrs`.
     pub xdp: Option<String>,
@@ -168,7 +157,6 @@ impl ClientConfig {
                 teseladb_wire::commands::server_params::MAX_CONCURRENT_TRANSACTIONS_DEFAULT,
             process: ProcessConfig::default(),
             tls: TlsPort::default(),
-            rings: None,
             xdp: None,
             auth: false,
             certificates: None,
@@ -216,9 +204,10 @@ pub trait NodeState: Send + Sync + 'static {
     /// A client's command other than the handshake starts.
     fn note_command(&self) {}
 
-    /// Wake `waker` whenever the `topologyVersion` counter changes, so the waiting `hello`s
-    /// answer at once (018 FR-015); a node without one never changes it.
-    fn watch_topology(&self, _waker: &Arc<Waker>) {}
+    /// Calls `wake` whenever the `topologyVersion` counter or the tenants' states change, so
+    /// the waiting `hello`s answer at once (018 FR-015) and the connections of a suspended
+    /// tenant close; a node without one never changes it. The state keeps `wake` weakly.
+    fn watch_topology(&self, _wake: &Arc<dyn Fn() + Send + Sync>) {}
 }
 
 /// What core 0 tells the clients' port of the node's state in Group 0 (007 FR-015): the
@@ -235,9 +224,9 @@ pub struct NodePresence {
     /// The replica set and the member this node is, in the replica set presentation (018
     /// FR-007).
     replica: std::sync::Mutex<Option<Arc<ReplicaMember>>>,
-    /// The client workers to wake when the counter changes; a worker that stopped drops its
-    /// waker and leaves the list at the next change.
-    watchers: std::sync::Mutex<Vec<std::sync::Weak<Waker>>>,
+    /// The ports to wake when the counter changes (each wakes its connections on every shard);
+    /// a port that stopped drops its waker and leaves the list at the next change.
+    watchers: std::sync::Mutex<Vec<std::sync::Weak<dyn Fn() + Send + Sync>>>,
     /// The replica set port (018 FR-016) and the member this node is on it.
     port: std::sync::Mutex<Option<(u16, Arc<ReplicaMember>)>>,
 }
@@ -256,14 +245,14 @@ impl NodePresence {
         }
     }
 
-    /// Wakes every client worker: the node's state or the tenants' states changed (007 FR-034),
-    /// and an idle connection's thread sleeps until something wakes it.
+    /// Wakes every connection of every port: the node's state or the tenants' states changed
+    /// (007 FR-034), and an idle connection waits until something wakes it. Each port's waker
+    /// posts the wake-up to its shards and returns.
     pub fn wake(&self) {
         let mut watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         watchers.retain(|w| match w.upgrade() {
-            // A wake-up that fails finds the worker stopping, which needs none.
-            Some(waker) => {
-                let _ = waker.wake();
+            Some(wake) => {
+                wake();
                 true
             }
             None => false,
@@ -288,16 +277,16 @@ impl NodePresence {
         self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
-    /// Wakes `waker` at every change of the counter or of the tenants' states. The workers of
-    /// connections that closed leave the list here, since one comes with each connection.
-    pub fn watch(&self, waker: &Arc<Waker>) {
-        let weak = Arc::downgrade(waker);
+    /// Calls `wake` at every change of the counter or of the tenants' states. The ports that
+    /// stopped leave the list here.
+    pub fn watch(&self, wake: &Arc<dyn Fn() + Send + Sync>) {
+        let weak = Arc::downgrade(wake);
         let mut watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         watchers.retain(|w| w.strong_count() > 0);
         watchers.push(weak);
     }
 
-    /// How many client workers it wakes.
+    /// How many ports it wakes.
     pub fn watchers(&self) -> usize {
         let watchers = self.watchers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         watchers.iter().filter(|w| w.strong_count() > 0).count()
@@ -452,8 +441,8 @@ impl NodeState for NodeClockState {
         self.handle.as_ref().map(|h| &h.routes)
     }
 
-    fn watch_topology(&self, waker: &Arc<Waker>) {
-        self.presence.watch(waker);
+    fn watch_topology(&self, wake: &Arc<dyn Fn() + Send + Sync>) {
+        self.presence.watch(wake);
     }
 
     fn closed(&self) -> bool {
@@ -471,16 +460,10 @@ impl NodeState for NodeClockState {
     }
 }
 
-/// Starts a thread named after its first argument that runs its second.
-pub type SpawnFn = fn(String, Box<dyn FnOnce() + Send>) -> io::Result<()>;
-
-/// How a client listener starts the threads of its connections and how often it runs the TTL
-/// monitor: in production [`Hooks::default`]; a test gives a spawn that fails or starts late, and
-/// a short TTL period, to reach what a running node meets only by chance.
+/// How the clients' port runs its periodic tasks: in production [`Hooks::default`]; a test gives
+/// short periods to reach what a running node meets only by chance.
 #[derive(Clone, Copy, Debug)]
 pub struct Hooks {
-    /// Starts a connection's thread.
-    pub spawn_connection: SpawnFn,
     /// Period of the TTL monitor.
     pub ttl_every: Duration,
     /// Period of the statistics of the ranges compactions rewrote (010 FR-029).
@@ -490,7 +473,6 @@ pub struct Hooks {
 impl Default for Hooks {
     fn default() -> Hooks {
         Hooks {
-            spawn_connection: spawn_thread,
             ttl_every: Duration::from_secs(teseladb_wire::commands::ttl::TTL_MONITOR_SECS),
             stats_every: Duration::from_secs(
                 teseladb_wire::commands::range_stats::STATS_EVERY_SECS,
@@ -499,19 +481,9 @@ impl Default for Hooks {
     }
 }
 
-/// A named thread that is not joined.
-fn spawn_thread(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    let run: Box<dyn FnOnce() + Send> = Box::new(move || {
-        // A connection's commands run on this thread: on the fast cores, not left on an
-        // efficiency core while the node's other threads are busy (H-049 of the native tests).
-        let _ = teseladb_sys::favor_current_thread();
-        run();
-    });
-    command_thread(name).spawn(with_command_stack(run)).map(drop)
-}
-
-/// A thread that runs commands: with the stack the calls of server-side JavaScript need (016
-/// A016-3-18), which the system reserves and only commits as it is used.
+/// A thread that runs commands outside the engine (the HTTP port's): with the stack the calls of
+/// server-side JavaScript need (016 A016-3-18), which the system reserves and only commits as it
+/// is used.
 pub(crate) fn command_thread(name: String) -> thread::Builder {
     thread::Builder::new().name(name).stack_size(teseladb_wire::commands::js::COMMAND_STACK)
 }
@@ -524,15 +496,9 @@ pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() ->
     }
 }
 
-/// What a connection's commands run with: its backend when a node is behind the port.
-pub(crate) struct Cmds<'a> {
-    pub(crate) inline: Option<&'a mut ServerBackend>,
-    pub(crate) shared: &'a Shared,
-    pub(crate) state: &'a dyn NodeState,
-}
-
 /// The number of the port's next connection: one counter for every way the port takes them
-/// (threads, rings and AF_XDP), so that no two connections share a number.
+/// (the kernel's TCP and AF_XDP), so that no two connections share a number.
+#[cfg(target_os = "linux")]
 pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
     let id =
         ids.fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| Some(id.wrapping_add(1).max(1)));
@@ -540,49 +506,48 @@ pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
 }
 
 /// The seed of the random numbers of backend `k`: the clock and the number.
+#[cfg(target_os = "linux")]
 pub(crate) fn seed(k: u64) -> u64 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     nanos ^ (k << 40) ^ 0x9e37_79b9_7f4a_7c15
 }
 
+/// The state the commands of a command's thread keep, saved while its engine thread waits (023
+/// FR-018): the hooks every process that runs commands on the engine sets once.
+#[cfg(target_os = "linux")]
+fn set_switch_hooks() {
+    fn save() -> Box<dyn std::any::Any> {
+        Box::new(teseladb_wire::commands::context::take())
+    }
+    fn restore(state: Box<dyn std::any::Any>) {
+        if let Ok(c) = state.downcast::<teseladb_wire::commands::context::CommandContext>() {
+            teseladb_wire::commands::context::put(*c);
+        }
+    }
+    let _ = teseladb_io::engine::wait::set_switch_hooks(teseladb_io::engine::wait::SwitchHooks {
+        save,
+        restore,
+    });
+}
+
 /// The running clients' port.
 pub struct ClientListener {
     addrs: Vec<SocketAddr>,
-    stop: Arc<AtomicBool>,
-    /// The acceptor of the connections that get a thread each, or the port's rings.
-    acceptor: Accepting,
+    /// The port on the engine's shards.
+    #[cfg(target_os = "linux")]
+    port: teseladb_io::engine::client_port::PortRef,
+    /// Wakes the port's connections; the node's presence keeps a weak reference to it.
+    #[cfg(target_os = "linux")]
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// Connections open on the port, on every shard and on AF_XDP.
+    open: Arc<std::sync::atomic::AtomicUsize>,
     /// The port on AF_XDP (012 FR-033), or why it is not there.
     xdp: crate::client_xdp::XdpState,
-    /// The thread that reaps and refreshes the node's sessions, with a node behind the port.
-    keeper: Option<JoinHandle<()>>,
-    /// The thread that builds the node's search indexes, with a node behind the port.
-    builder: Option<JoinHandle<()>>,
-    /// The thread that reads the data each tenant uses (007 FR-031), with a node behind the port.
-    usage: Option<JoinHandle<()>>,
-    /// The threads that resolve the intents of the finished transactions (008 FR-005), with a
-    /// node behind the port.
-    resolvers: Vec<JoinHandle<()>>,
-    /// The thread of the ranges' statistics (010 FR-029).
-    statistics: Option<JoinHandle<()>>,
-    open: Arc<AtomicUsize>,
-}
-
-/// How the port takes its connections.
-enum Accepting {
-    /// An acceptor thread gives each connection a thread.
-    Threads(Arc<Waker>, JoinHandle<()>),
-    /// Rings of io_uring (012 FR-024).
-    #[cfg(target_os = "linux")]
-    Rings(crate::client_ring::RingPort),
-}
-
-/// The rings the port runs on, if it does (012 FR-024): with the io_uring executor, without TLS
-/// and with a kernel that has multishot `recv`.
-#[cfg(target_os = "linux")]
-fn ring_count(cfg: &ClientConfig) -> Option<usize> {
-    let n = cfg.rings?;
-    let plain = cfg.tls.mode == crate::tls_port::TlsMode::Disabled;
-    (plain && teseladb_io::net_ring::check_support().is_ok()).then_some(n)
+    /// The tasks of the port on the shards (023 FR-019).
+    tasks: Vec<crate::client_tasks::Task>,
+    /// The thread that builds the node's search indexes, with a node behind the port, and its
+    /// stop.
+    builder: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
 }
 
 impl std::fmt::Debug for ClientListener {
@@ -591,31 +556,46 @@ impl std::fmt::Debug for ClientListener {
     }
 }
 
+/// How many tasks resolve the intents of the finished transactions: a resolution waits for a
+/// write of the log, so a few run side by side.
+#[cfg(target_os = "linux")]
+const RESOLVERS: usize = 4;
+/// How long an idle resolver pauses before it looks at the queue again; a transaction that ends
+/// wakes it at once.
+#[cfg(target_os = "linux")]
+const RESOLVER_IDLE: Duration = Duration::from_millis(100);
+
+#[cfg(target_os = "linux")]
 impl ClientListener {
-    /// Listens on `cfg.addrs`, with a thread for each connection or on rings (`cfg.rings`).
+    /// Listens on `cfg.addrs` on the shards of the process's engine.
+    ///
+    /// # Errors
+    ///
+    /// When no engine runs or an address cannot be listened on.
     pub fn spawn(cfg: &ClientConfig, state: Arc<dyn NodeState>) -> io::Result<ClientListener> {
         ClientListener::spawn_with(cfg, state, Hooks::default())
     }
 
     /// [`ClientListener::spawn`] with `hooks`, for tests.
+    ///
+    /// # Errors
+    ///
+    /// As [`ClientListener::spawn`].
     #[doc(hidden)]
     pub fn spawn_with(
         cfg: &ClientConfig,
         state: Arc<dyn NodeState>,
         hooks: Hooks,
     ) -> io::Result<ClientListener> {
-        let listeners = cfg
-            .addrs
-            .iter()
-            .map(|a| crate::listen::bind(crate::listen::CLIENTS, *a))
-            .collect::<io::Result<Vec<_>>>()?;
-        let addrs =
-            listeners.iter().map(TcpListener::local_addr).collect::<io::Result<Vec<_>>>()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let open = Arc::new(AtomicUsize::new(0));
-        let port = addrs.first().map_or(0, SocketAddr::port);
+        use crate::client_session::{ClientKit, PortCore};
+        use crate::diag::Diag;
+
+        set_switch_hooks();
+        teseladb_io::engine::stacks::set_stack_size(ENGINE_COMMAND_STACK);
+        let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let port_no = cfg.addrs.first().map_or(0, SocketAddr::port);
         let diag = Arc::new(
-            Diag::new(cfg.process.clone(), port, open.clone(), cfg.max_connections)
+            Diag::new(cfg.process.clone(), port_no, open.clone(), cfg.max_connections)
                 .with_certificates(cfg.certificates.clone())
                 .with_tls(cfg.tls.clone())
                 .with_ldap(cfg.ldap.clone())
@@ -623,14 +603,13 @@ impl ClientListener {
                 .with_oidc(cfg.oidc.clone())
                 .with_kerberos(cfg.kerberos.clone()),
         );
-        let shared: Arc<Shared> = match state.handle() {
+        let shared: Arc<teseladb_wire::commands::Shared> = match state.handle() {
             Some(h) => h.sessions,
-            None => Arc::new(Mutex::new(cfg.sessions())),
+            None => Arc::new(std::sync::Mutex::new(cfg.sessions())),
         };
-        let parts = PortParts {
+        let core = Arc::new(PortCore {
             state: state.clone(),
             shared: shared.clone(),
-            diag: diag.clone(),
             kit: ClientKit {
                 compressors: cfg.compressors.clone(),
                 tls: cfg.tls.clone(),
@@ -640,122 +619,117 @@ impl ClientListener {
                 diag: diag.clone(),
             },
             open: open.clone(),
-            stop: stop.clone(),
-            spawn: hooks.spawn_connection,
-        };
-        let ids = Arc::new(std::sync::atomic::AtomicI32::new(1));
-        #[cfg(target_os = "linux")]
-        let xdp_parts = crate::client_xdp::XdpParts {
-            state: state.clone(),
-            shared: shared.clone(),
-            kit: parts.kit.clone(),
-            diag: diag.clone(),
-            open: open.clone(),
-            stop: stop.clone(),
-            ids: ids.clone(),
-        };
-        #[cfg(target_os = "linux")]
-        let xdp = crate::client_xdp::start(cfg, &addrs, xdp_parts);
-        #[cfg(not(target_os = "linux"))]
-        let xdp = crate::client_xdp::unsupported(cfg);
-        #[cfg(target_os = "linux")]
-        let rings = ring_count(cfg);
-        #[cfg(not(target_os = "linux"))]
-        let rings: Option<usize> = None;
-        let acceptor = match rings {
-            #[cfg(target_os = "linux")]
-            Some(n) => {
-                let ring_parts = crate::client_ring::RingParts {
-                    state: state.clone(),
-                    shared: shared.clone(),
-                    kit: parts.kit.clone(),
-                    diag: diag.clone(),
-                    open: open.clone(),
-                    stop: stop.clone(),
-                    max: cfg.max_connections,
-                    next_id: ids.clone(),
-                };
-                Accepting::Rings(crate::client_ring::spawn(ring_parts, &listeners, n)?)
-            }
-            _ => {
-                let poller = Poller::new()?;
-                for (i, l) in listeners.iter().enumerate() {
-                    l.set_nonblocking(true)?;
-                    poller.register(l, i as u64, Interest::READ)?;
+            max: cfg.max_connections,
+            ids: Arc::new(std::sync::atomic::AtomicI32::new(1)),
+        });
+        let service: Arc<dyn teseladb_io::engine::client_port::Service> = core.clone();
+        let port = teseladb_io::engine::client_port::start_port(&cfg.addrs, service)?;
+        let addrs = port.addrs().to_vec();
+        let xdp = crate::client_xdp::start(cfg, &addrs, core);
+        let wake = Arc::new({
+            let port_wake = port.waker();
+            let xdp_wake = xdp.waker();
+            move || {
+                port_wake();
+                if let Some(w) = xdp_wake.as_ref() {
+                    w();
                 }
-                let waker = Arc::new(poller.waker());
-                let acceptor = Acceptor {
-                    poller,
-                    listeners,
-                    parts,
-                    live: Vec::new(),
-                    max: cfg.max_connections,
-                    open: open.clone(),
-                    stop: stop.clone(),
-                    next_id: ids.clone(),
-                    diag: diag.clone(),
-                    state: state.clone(),
-                };
-                let t = thread::Builder::new()
-                    .name("client-accept".into())
-                    .spawn(move || acceptor.run())?;
-                Accepting::Threads(waker, t)
             }
+        }) as Arc<dyn Fn() + Send + Sync>;
+        state.watch_topology(&wake);
+        let shards = port.shards();
+        let mut l =
+            ClientListener { addrs, port, wake, open, xdp, tasks: Vec::new(), builder: None };
+        if let Some(h) = state.handle()
+            && let Err(e) = l.start_tasks(&h, cfg, &shared, &diag, hooks, shards)
+        {
+            l.stop();
+            return Err(e);
+        }
+        Ok(l)
+    }
+
+    /// Starts the port's tasks on the shards, spread over them, and the search builder.
+    fn start_tasks(
+        &mut self,
+        h: &NodeHandle,
+        cfg: &ClientConfig,
+        shared: &Arc<teseladb_wire::commands::Shared>,
+        diag: &Arc<crate::diag::Diag>,
+        hooks: Hooks,
+        shards: u32,
+    ) -> io::Result<()> {
+        use crate::backend::ServerBackend;
+        use crate::client_tasks::spawn;
+
+        let shard = |k: usize| u32::try_from(k).unwrap_or(0) % shards.max(1);
+        let gone = || io::Error::other("the engine stopped before the port's tasks started");
+        // The search builder stays a thread of its own until it moves to the engine (023 FR-025).
+        let stop = Arc::new(AtomicBool::new(false));
+        let backend = ServerBackend::new(h.clone(), seed(u64::MAX - 1)).with_diag(diag.clone());
+        let t = crate::search_builder::spawn(backend, shared.clone(), stop.clone())?;
+        self.builder = Some((stop, t));
+        // The sessions' keeper.
+        let keeper = Keeper {
+            handle: h.clone(),
+            diag: diag.clone(),
+            capture: cfg.process.dbpath.clone(),
+            shared: shared.clone(),
+            refresh_every: cfg.refresh_every,
+            ttl_every: hooks.ttl_every,
         };
-        let builder = match state.handle() {
-            Some(h) => {
-                let backend = ServerBackend::new(h, seed(u64::MAX - 1)).with_diag(diag.clone());
-                Some(crate::search_builder::spawn(backend, shared.clone(), stop.clone())?)
+        self.tasks.push(spawn(shard(0), Box::new(move |stop| keeper.run(stop))).ok_or_else(gone)?);
+        // The reader of the tenants' data (007 FR-031).
+        let hu = h.clone();
+        let usage = Box::new(move |stop: &crate::client_tasks::TaskStop| {
+            let backend = ServerBackend::new(hu, seed(u64::MAX - 2));
+            crate::tenant_limits::run_reader(backend, stop);
+        });
+        self.tasks.push(spawn(shard(1), usage).ok_or_else(gone)?);
+        // The statistics of the ranges compactions rewrote (010 FR-029).
+        let hs = h.clone();
+        let every = hooks.stats_every;
+        let statistics = Box::new(move |stop: &crate::client_tasks::TaskStop| {
+            let mut backend = ServerBackend::new(hs, seed(u64::MAX - 3 - RESOLVERS as u64));
+            while !stop.stopped() {
+                stop.pause(every);
+                if stop.stopped() {
+                    break;
+                }
+                // A range whose statistics could not be read waits for the next pass.
+                let _ = teseladb_wire::commands::range_stats::pass(&mut backend);
+                teseladb_wire::commands::Backend::end_operation(&mut backend);
             }
-            None => None,
-        };
-        let usage = match state.handle() {
-            Some(h) => {
-                let backend = ServerBackend::new(h, seed(u64::MAX - 2));
-                Some(crate::tenant_limits::spawn_reader(backend, stop.clone())?)
-            }
-            None => None,
-        };
-        let resolvers = spawn_resolvers(state.as_ref(), &shared, &stop)?;
-        let statistics = spawn_statistics(state.as_ref(), &stop, hooks.stats_every)?;
-        let keeper = match state.handle() {
-            Some(h) => {
-                let k = Keeper {
-                    backend: ServerBackend::new(h, seed(u64::MAX)).with_diag(diag.clone()),
-                    capture: cfg.process.dbpath.as_deref().map(Capture::new),
-                    shared,
-                    refresh_every: cfg.refresh_every,
-                    ttl_every: hooks.ttl_every,
-                    stop: stop.clone(),
-                    reapers: crate::backend::Reapers::default(),
-                };
-                Some(thread::Builder::new().name("client-sessions".into()).spawn(move || k.run())?)
-            }
-            None => None,
-        };
-        Ok(ClientListener {
-            addrs,
-            stop,
-            acceptor,
-            xdp,
-            keeper,
-            builder,
-            usage,
-            resolvers,
-            statistics,
-            open,
-        })
+        });
+        self.tasks.push(spawn(shard(2), statistics).ok_or_else(gone)?);
+        // The resolvers of the finished transactions (008 FR-005), apart from the connections:
+        // run after the answer on the connection, a resolution held that client's next command
+        // for a write of the log (H-050 of the native tests).
+        let mut resolvers = Vec::with_capacity(RESOLVERS);
+        for i in 0..RESOLVERS {
+            let (hr, sh) = (h.clone(), shared.clone());
+            let body = Box::new(move |stop: &crate::client_tasks::TaskStop| {
+                let mut backend = ServerBackend::new(hr, seed(u64::MAX - 3 - i as u64));
+                while !stop.stopped() {
+                    while teseladb_wire::commands::txn::resolve_one(&mut backend, &sh) {
+                        teseladb_wire::commands::Backend::end_operation(&mut backend);
+                    }
+                    stop.pause(RESOLVER_IDLE);
+                }
+            });
+            let task = spawn(shard(3 + i), body).ok_or_else(gone)?;
+            resolvers.push(task.handle());
+            self.tasks.push(task);
+        }
+        let wake = move || resolvers.iter().for_each(|r| r.wake());
+        teseladb_wire::commands::hot::of(shared).set_resolvers(Box::new(wake));
+        Ok(())
     }
 
     /// The port on AF_XDP (012 FR-033): `None` without `--net-xdp`, its description, or why the
     /// interface could not take it (the kernel's TCP then serves the clients alone).
     pub fn xdp(&self) -> Option<Result<String, String>> {
         self.xdp.status()
-    }
-
-    /// Whether the port runs on io_uring rings (012 FR-024) rather than a thread per connection.
-    pub fn on_rings(&self) -> bool {
-        !matches!(self.acceptor, Accepting::Threads(..))
     }
 
     /// The addresses it listens on (with the ports the system chose for port 0).
@@ -768,118 +742,125 @@ impl ClientListener {
         self.open.load(Ordering::Acquire)
     }
 
-    /// Stops accepting, wakes every connection's thread to close it and waits for the acceptor
-    /// and the keepers; a connection's thread running a command closes it when the command ends,
-    /// unwaited.
+    /// The shards it runs on.
+    pub fn shards(&self) -> u32 {
+        self.port.shards()
+    }
+
+    /// Connections of the kernel's TCP open on each shard, in shard order (the engine hands
+    /// each to a shard, 023 FR-018).
+    pub fn open_by_shard(&self) -> Vec<usize> {
+        self.port.open_by_shard()
+    }
+
+    /// Wakes every connection: the node's state changed.
+    pub fn wake(&self) {
+        (self.wake)();
+    }
+
+    /// Stops accepting on every shard, closes every connection once what it answered went out
+    /// (a connection running a command closes it when the command ends), and stops the port's
+    /// tasks, waiting for each.
     pub fn stop(self) {
-        self.stop.store(true, Ordering::Release);
-        // Its queues' threads end and the XDP program leaves the interface.
-        drop(self.xdp);
-        match self.acceptor {
-            Accepting::Threads(waker, t) => {
-                // A thread that already ended needs no wake-up, and its end is all `join` waits
-                // for.
-                let _ = waker.wake();
+        self.port.stop();
+        self.xdp.stop();
+        for t in self.tasks {
+            let _ = t.stop();
+        }
+        if let Some((stop, t)) = self.builder {
+            stop.store(true, Ordering::Release);
+            t.thread().unpark();
+            // A port stopped from a shard (the replica set port's keeper) does not hold the shard
+            // for the builder's pass: the thread ends on its own.
+            if !teseladb_io::engine::wait::in_engine_thread() {
                 let _ = t.join();
             }
-            #[cfg(target_os = "linux")]
-            Accepting::Rings(rings) => rings.stop(),
-        }
-        let threads =
-            self.keeper.into_iter().chain(self.builder).chain(self.usage).chain(self.statistics);
-        for k in threads.chain(self.resolvers) {
-            k.thread().unpark();
-            let _ = k.join();
         }
     }
 }
 
-/// Starts the thread that recomputes the statistics of the ranges this node's compactions
-/// rewrote, every `every` (010 FR-029): apart from the keeper, since reading the entries of a
-/// range's indexes takes longer than reaping cursors. None without a node behind the port.
-fn spawn_statistics(
-    state: &dyn NodeState,
-    stop: &Arc<AtomicBool>,
-    every: Duration,
-) -> io::Result<Option<JoinHandle<()>>> {
-    let Some(h) = state.handle() else { return Ok(None) };
-    let mut backend = ServerBackend::new(h, seed(u64::MAX - 3 - RESOLVERS as u64));
-    let stop = stop.clone();
-    let t = thread::Builder::new().name("range-statistics".into()).spawn(move || {
-        while !stop.load(Ordering::Acquire) {
-            thread::park_timeout(every);
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            // A range whose statistics could not be read waits for the next pass.
-            let _ = teseladb_wire::commands::range_stats::pass(&mut backend);
-            backend.end_operation();
-        }
-    })?;
-    Ok(Some(t))
-}
-
-/// How many threads resolve the intents of the finished transactions: a resolution waits for a
-/// write of the log, so a few run side by side.
-const RESOLVERS: usize = 4;
-/// How long an idle resolver sleeps before it looks at the queue again; a transaction that ends
-/// wakes it at once.
-const RESOLVER_IDLE: Duration = Duration::from_millis(100);
-
-/// Starts the threads that resolve the intents of the finished transactions apart from the
-/// connections (008 FR-005): run after the answer on the connection's own thread, a resolution
-/// held that client's next command for a write of the log, about 20 ms (H-050 of the native
-/// tests). None without a node behind the port.
-fn spawn_resolvers(
-    state: &dyn NodeState,
-    shared: &Arc<Shared>,
-    stop: &Arc<AtomicBool>,
-) -> io::Result<Vec<JoinHandle<()>>> {
-    let mut threads = Vec::with_capacity(RESOLVERS);
-    for i in 0..RESOLVERS {
-        let Some(h) = state.handle() else { return Ok(Vec::new()) };
-        let mut backend = ServerBackend::new(h, seed(u64::MAX - 3 - i as u64));
-        let (shared, stop) = (shared.clone(), stop.clone());
-        let t = thread::Builder::new().name(format!("txn-resolver-{i}")).spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                while teseladb_wire::commands::txn::resolve_one(&mut backend, &shared) {
-                    backend.end_operation();
-                }
-                thread::park_timeout(RESOLVER_IDLE);
-            }
-        })?;
-        threads.push(t);
+#[cfg(not(target_os = "linux"))]
+impl ClientListener {
+    /// The clients' port runs on the engine, which runs on Linux only (D3).
+    ///
+    /// # Errors
+    ///
+    /// Always: no engine runs outside Linux.
+    pub fn spawn(cfg: &ClientConfig, state: Arc<dyn NodeState>) -> io::Result<ClientListener> {
+        ClientListener::spawn_with(cfg, state, Hooks::default())
     }
-    let parked: Vec<thread::Thread> = threads.iter().map(|t| t.thread().clone()).collect();
-    let wake = move || parked.iter().for_each(thread::Thread::unpark);
-    teseladb_wire::commands::hot::of(shared).set_resolvers(Box::new(wake));
-    Ok(threads)
+
+    /// [`ClientListener::spawn`] with `hooks`.
+    ///
+    /// # Errors
+    ///
+    /// Always: no engine runs outside Linux.
+    #[doc(hidden)]
+    pub fn spawn_with(
+        cfg: &ClientConfig,
+        _state: Arc<dyn NodeState>,
+        _hooks: Hooks,
+    ) -> io::Result<ClientListener> {
+        let xdp = crate::client_xdp::unsupported(cfg);
+        let why = xdp.status().and_then(Result::err).map(|e| format!(" ({e})")).unwrap_or_default();
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the clients' port runs on Linux only{why}"),
+        ))
+    }
+
+    /// See the Linux port.
+    pub fn xdp(&self) -> Option<Result<String, String>> {
+        self.xdp.status()
+    }
+
+    /// See the Linux port.
+    pub fn addrs(&self) -> &[SocketAddr] {
+        &self.addrs
+    }
+
+    /// See the Linux port.
+    pub fn open_connections(&self) -> usize {
+        self.open.load(Ordering::Acquire)
+    }
+
+    /// See the Linux port.
+    pub fn stop(self) {
+        drop(self.tasks);
+        drop(self.builder);
+    }
 }
 
 /// Reaps the node's expired cursors and sessions, writes the sessions it used to
 /// `config.system.sessions`, runs the TTL monitor and the reapers of abandoned transactions, each
 /// on its own period, at the node's cluster time.
+#[cfg(target_os = "linux")]
 struct Keeper {
-    backend: ServerBackend,
-    shared: Arc<Shared>,
+    handle: NodeHandle,
+    diag: Arc<crate::diag::Diag>,
+    shared: Arc<teseladb_wire::commands::Shared>,
     refresh_every: Duration,
     /// Period of the TTL monitor (009 FR-010): `ttlMonitorSleepSecs`.
     ttl_every: Duration,
-    stop: Arc<AtomicBool>,
-    /// The reapers of abandoned transactions, one per core (008 FR-007).
-    reapers: crate::backend::Reapers,
-    /// The periodic diagnostic capture of a node with a data directory (010 FR-024).
-    capture: Option<Capture>,
+    /// The data directory of a node with one, where its periodic diagnostic capture goes (010
+    /// FR-024).
+    capture: Option<std::path::PathBuf>,
 }
 
+#[cfg(target_os = "linux")]
 impl Keeper {
     /// Writes the node's diagnostic sample (010 FR-024). A sample that cannot be taken or
     /// written is logged and the next one comes a period later.
-    fn sample(&mut self) {
-        let Some(capture) = self.capture.as_mut() else { return };
-        let at = i64::try_from(self.backend.wall_ms()).unwrap_or(i64::MAX);
-        let taken = diagnostic_data::capture(&mut self.backend, &self.shared);
-        self.backend.end_operation();
+    fn sample(
+        backend: &mut crate::backend::ServerBackend,
+        shared: &teseladb_wire::commands::Shared,
+        capture: &mut crate::diagnostic_capture::Capture,
+    ) {
+        use teseladb_wire::commands::Backend;
+
+        let at = i64::try_from(backend.wall_ms()).unwrap_or(i64::MAX);
+        let taken = teseladb_wire::commands::diagnostic_data::capture(backend, shared);
+        teseladb_wire::commands::Backend::end_operation(backend);
         let written = match taken {
             Ok(sample) => capture.write(at, sample).map_err(|e| e.to_string()),
             Err(e) => Err(e.errmsg),
@@ -887,711 +868,84 @@ impl Keeper {
         if let Err(e) = written {
             let attr = format!("{{\"error\":{e:?}}}");
             let msg = "Diagnostic capture failed".to_owned();
-            crate::log::defer(crate::log::Pending { id: diagnostic_capture::FAILED_ID, msg, attr });
+            let id = crate::diagnostic_capture::FAILED_ID;
+            crate::log::defer(crate::log::Pending { id, msg, attr });
         }
     }
 
     /// The reaping period: `clientCursorMonitorFrequencySecs` as `setParameter` left it, at
     /// least a millisecond.
-    fn reap_period(&self) -> Duration {
-        let ms = lock(&self.shared).params.monitor_ms;
+    fn reap_period(shared: &teseladb_wire::commands::Shared) -> Duration {
+        let ms = teseladb_wire::commands::lock(shared).params.monitor_ms;
         Duration::from_millis(u64::try_from(ms).unwrap_or(0).max(1))
     }
 
-    fn run(mut self) {
-        let start = Instant::now();
+    fn run(self, stop: &crate::client_tasks::TaskStop) {
+        use teseladb_wire::commands::Backend;
+
+        let mut backend =
+            crate::backend::ServerBackend::new(self.handle, seed(u64::MAX)).with_diag(self.diag);
+        let mut capture = self.capture.as_deref().map(crate::diagnostic_capture::Capture::new);
+        let mut reapers = crate::backend::Reapers::default();
+        let shared = &*self.shared;
+        let start = std::time::Instant::now();
         let (mut next_reap, mut next_refresh) =
-            (start + self.reap_period(), start + self.refresh_every);
-        // The TTL monitor (009 FR-010): every `ttlMonitorSleepSecs` at the cluster time.
-        let ttl_every = self.ttl_every;
-        let mut next_ttl = start + ttl_every;
-        let mut next_txn = start + SCAN_EVERY;
-        let mut next_sample = start + diagnostic_capture::PERIOD;
+            (start + Keeper::reap_period(shared), start + self.refresh_every);
+        let mut next_ttl = start + self.ttl_every;
+        let mut next_txn = start + crate::backend::SCAN_EVERY;
+        let mut next_sample = start + crate::diagnostic_capture::PERIOD;
         // Sessions used from this cluster time on go in the next refresh.
         let mut since = 0;
-        while !self.stop.load(Ordering::Acquire) {
-            let now = Instant::now();
+        // The reapers look at a flag of their own to stop.
+        let stopped = AtomicBool::new(false);
+        while !stop.stopped() {
+            let now = std::time::Instant::now();
             if now >= next_reap {
-                reap(&self.shared, self.backend.now_ms());
-                next_reap = now + self.reap_period();
+                teseladb_wire::commands::reap(shared, backend.now_ms());
+                next_reap = now + Keeper::reap_period(shared);
             }
             if now >= next_refresh {
-                let at = self.backend.now_ms();
+                let at = backend.now_ms();
                 // A refresh that fails (no leader for the range) goes again at the next one.
-                if refresh(&mut self.backend, &self.shared, since, at).is_ok() {
+                if teseladb_wire::commands::registry::refresh(&mut backend, shared, since, at)
+                    .is_ok()
+                {
                     since = at;
                 }
-                self.backend.end_operation();
+                backend.end_operation();
                 next_refresh = now + self.refresh_every;
             }
             if now >= next_ttl {
-                let at = i64::try_from(self.backend.now_ms()).unwrap_or(i64::MAX);
+                let at = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
                 // A pass that fails (no leader for a range) goes again at the next one.
-                let _ = teseladb_wire::commands::ttl::pass(&mut self.backend, &self.shared, at);
+                let _ = teseladb_wire::commands::ttl::pass(&mut backend, shared, at);
                 // Its reads of the indexes no longer hold back their changes (009 FR-006).
-                self.backend.end_operation();
-                next_ttl = now + ttl_every;
+                backend.end_operation();
+                next_ttl = now + self.ttl_every;
             }
             if now >= next_txn {
-                self.backend.reap_transactions(&mut self.reapers, &self.stop);
+                stopped.store(stop.stopped(), Ordering::Release);
+                backend.reap_transactions(&mut reapers, &stopped);
                 // The heartbeats of the client transactions between their statements.
-                teseladb_wire::commands::txn::tick_idle(&mut self.backend, &self.shared);
-                self.backend.end_operation();
-                next_txn = now + SCAN_EVERY;
+                teseladb_wire::commands::txn::tick_idle(&mut backend, shared);
+                backend.end_operation();
+                next_txn = now + crate::backend::SCAN_EVERY;
             }
             if now >= next_sample {
-                self.sample();
-                next_sample = now + diagnostic_capture::PERIOD;
+                if let Some(c) = capture.as_mut() {
+                    Keeper::sample(&mut backend, shared, c);
+                }
+                next_sample = now + crate::diagnostic_capture::PERIOD;
             }
             let next = next_reap.min(next_refresh).min(next_ttl).min(next_txn).min(next_sample);
-            thread::park_timeout(next.saturating_duration_since(Instant::now()));
-        }
-    }
-}
-
-struct Acceptor {
-    poller: Poller,
-    listeners: Vec<TcpListener>,
-    /// What each connection's thread starts with.
-    parts: PortParts,
-    /// The wakers of the connections' threads, to stop them; a thread that ended leaves its
-    /// entry dead, dropped at the next connection.
-    live: Vec<std::sync::Weak<Waker>>,
-    max: usize,
-    open: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    next_id: Arc<std::sync::atomic::AtomicI32>,
-    diag: Arc<Diag>,
-    state: Arc<dyn NodeState>,
-}
-
-impl Acceptor {
-    fn run(mut self) {
-        let mut ready = Vec::new();
-        while !self.stop.load(Ordering::Acquire) {
-            match self.poller.poll(None) {
-                Ok(events) => ready.extend(events.iter().map(|e| e.token)),
-                Err(_) => break,
-            }
-            for token in ready.drain(..).filter(|&t| t != WAKE_TOKEN) {
-                self.accept(token as usize);
-            }
-        }
-        // The port stops: each connection's thread closes its connection.
-        for w in self.live.iter().filter_map(std::sync::Weak::upgrade) {
-            let _ = w.wake();
-        }
-    }
-
-    /// Accepts every pending connection of listener `i` (non-blocking: it stops when none is
-    /// left), each on a thread of its own.
-    fn accept(&mut self, i: usize) {
-        while let Ok((stream, _)) = self.listeners[i].accept() {
-            // A drained node's port takes no connection (007 FR-015).
-            if self.state.closed() {
-                continue;
-            }
-            // Over the limit the connection is closed at once, as the reference server does.
-            if self.open.load(Ordering::Acquire) >= self.max {
-                PortStats::add(&self.diag.stats.rejected, 1);
-                continue;
-            }
-            self.open.fetch_add(1, Ordering::AcqRel);
-            PortStats::add(&self.diag.stats.total_created, 1);
-            let id = next_connection_id(&self.next_id);
-            if let Some(waker) = self.parts.serve(stream, id) {
-                self.live.retain(|w| w.strong_count() > 0);
-                self.live.push(Arc::downgrade(&waker));
-            }
-        }
-    }
-}
-
-/// What a connection's thread needs besides its socket: the port's configuration and the node.
-struct PortParts {
-    state: Arc<dyn NodeState>,
-    shared: Arc<Shared>,
-    diag: Arc<Diag>,
-    kit: ClientKit,
-    open: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    spawn: SpawnFn,
-}
-
-/// What a new connection of the port starts with.
-#[derive(Clone)]
-pub(crate) struct ClientKit {
-    pub(crate) compressors: Vec<Compressor>,
-    pub(crate) tls: TlsPort,
-    /// Clients authenticate before running commands.
-    pub(crate) auth: bool,
-    /// `authenticationMechanisms`.
-    pub(crate) mechanisms: Vec<teseladb_auth::sasl::SaslMechanism>,
-    /// Where its connections keep the buffers of their requests (012 FR-032).
-    pub(crate) arena: Option<Arc<dyn RequestArena>>,
-    /// The port's counters.
-    pub(crate) diag: Arc<Diag>,
-}
-
-impl ClientKit {
-    /// Client `id` on `stream` (`None`: a socket a ring owns, 012 FR-024) from `peer` to `local`;
-    /// `None` if the randomness for TLS is not available.
-    pub(crate) fn client(
-        &self,
-        id: i32,
-        stream: Option<TcpStream>,
-        peer: Option<SocketAddr>,
-        local: Option<SocketAddr>,
-    ) -> Option<Client> {
-        let transport = Transport::new(&self.tls)?;
-        let mut conn = Connection::with_compressors(id, &self.compressors);
-        conn.arena.clone_from(&self.arena);
-        conn.peer = peer.map(|a| a.to_string());
-        conn.auth.required = self.auth;
-        conn.auth.mechanisms.clone_from(&self.mechanisms);
-        conn.auth.client_addr = conn.peer.clone();
-        conn.auth.server_addr = local.map(|a| a.to_string());
-        Some(Client {
-            stream,
-            transport,
-            conn: Some(conn),
-            backlog: Vec::new(),
-            handshake_from: Some(Instant::now()),
-            out: Vec::new(),
-            pos: 0,
-            watching_write: false,
-            waiting: false,
-            new_wait: None,
-            diag: self.diag.clone(),
-            member_subject: crate::cluster_auth::member_subject(&self.tls),
-            peer_ip: peer.map(|a| a.ip()),
-            admitted: false,
-            counted: None,
-        })
-    }
-}
-
-impl PortParts {
-    /// Starts the thread of connection `id` on `stream`: a [`Worker`] of that one connection that
-    /// reads it, runs its commands and writes their replies (H-013, the reference server's thread
-    /// per connection); its waker, to stop it. Without a thread the connection closes: the worker,
-    /// dropped without running, closes it.
-    fn serve(&self, stream: TcpStream, id: i32) -> Option<Arc<Waker>> {
-        let Ok(poller) = Poller::new() else {
-            self.open.fetch_sub(1, Ordering::AcqRel);
-            return None;
-        };
-        let waker = Arc::new(poller.waker());
-        let mut w = Worker {
-            poller,
-            waker: waker.clone(),
-            conns: BTreeMap::new(),
-            awaits: BTreeMap::new(),
-            seen: self.state.info().topology.counter,
-            next_token: 1,
-            state: self.state.clone(),
-            inline: self
-                .state
-                .handle()
-                .map(|h| ServerBackend::new(h, seed(id as u64)).with_diag(self.diag.clone())),
-            shared: self.shared.clone(),
-            kit: self.kit.clone(),
-            open: self.open.clone(),
-            stop: self.stop.clone(),
-            tenants_seen: None,
-        };
-        w.add(stream, id);
-        let run = with_command_stack(move || w.run());
-        (self.spawn)(format!("conn{id}"), Box::new(run)).ok().map(|()| waker)
-    }
-}
-
-/// What waits in a worker until its deadline.
-pub(crate) enum Pending {
-    /// An awaitable `hello` waiting for its answer.
-    Hello(HelloWait),
-    /// A request the failpoint holds (`blockConnection`), dispatched again at the deadline with
-    /// its connection, which waits with it.
-    Held { conn: Box<Connection>, req: Request, deadline: Instant },
-    /// The first request of a connection waiting in the queue of the limiter of new connections
-    /// for its token (006 FR-036), dispatched at the deadline as a held one.
-    Queued { conn: Box<Connection>, req: Request, deadline: Instant },
-}
-
-impl Pending {
-    pub(crate) fn deadline(&self) -> Instant {
-        match self {
-            Pending::Hello(h) => h.deadline,
-            Pending::Held { deadline, .. } | Pending::Queued { deadline, .. } => *deadline,
-        }
-    }
-}
-
-/// An awaitable `hello` waiting for its answer.
-pub(crate) struct HelloWait {
-    req: Request,
-    hello: HelloRequest,
-    deadline: Instant,
-    every: Duration,
-    exhaust: bool,
-    /// The message the next reply answers (the request, then the previous reply of the stream).
-    response_to: i32,
-    /// The error the failpoint holds the next reply of the stream for (`blockConnection`).
-    held: Option<teseladb_bson::Document>,
-}
-
-/// One client connection of a worker. Its socket is non-blocking: reads and writes end with
-/// `WouldBlock`, never with `Interrupted`.
-pub(crate) struct Client {
-    /// The socket its worker polls; `None` when a ring owns it (012 FR-024), which takes `out`
-    /// to send it.
-    stream: Option<TcpStream>,
-    /// Plain or TLS between the socket and `conn`.
-    transport: Transport,
-    /// The connection; `None` while the failpoint holds one of its requests.
-    conn: Option<Connection>,
-    /// What arrived while the failpoint held the connection's request.
-    backlog: Vec<u8>,
-    /// When it was accepted, until its TLS handshake is counted (`None` after, or in clear).
-    handshake_from: Option<Instant>,
-    out: Vec<u8>,
-    pos: usize,
-    /// Whether the poller watches it for writing.
-    watching_write: bool,
-    /// An awaitable `hello` is waiting: later requests wait behind it.
-    waiting: bool,
-    /// The awaitable `hello` [`Client::serve`] just found, for the worker to schedule.
-    new_wait: Option<Pending>,
-    /// The port's counters.
-    diag: Arc<Diag>,
-    /// The subject of the port's certificate, when it names an organization, unit or domain
-    /// component: a client certificate with the same ones is a member's (013 FR-034).
-    member_subject: Option<Arc<teseladb_x509::Name>>,
-    /// The client's address, which the bypass list of the limiter of new connections names.
-    peer_ip: Option<IpAddr>,
-    /// Whether the limiter of new connections let its first request through (006 FR-036).
-    admitted: bool,
-    /// The tenant whose connections on this node count this one, once its user signed in (007
-    /// FR-032).
-    counted: Option<u32>,
-}
-
-/// What the rings of the port (012 FR-024) ask of a client whose socket they own.
-#[cfg(target_os = "linux")]
-impl Client {
-    /// Bytes that arrived and wait for their command.
-    pub(crate) fn pending_in(&self) -> usize {
-        self.conn.as_ref().map_or(0, Connection::buffered) + self.backlog.len()
-    }
-
-    /// Whether an awaitable `hello`, a held request or the limiter's queue holds its requests.
-    pub(crate) fn is_waiting(&self) -> bool {
-        self.waiting
-    }
-
-    /// The bytes waiting to go out, for the ring that owns its socket (012 FR-024).
-    pub(crate) fn take_out(&mut self) -> Vec<u8> {
-        let out = std::mem::take(&mut self.out);
-        let pos = std::mem::take(&mut self.pos);
-        if pos == 0 { out } else { out[pos..].to_vec() }
-    }
-
-    /// The awaitable `hello`, held request or queued request it just met.
-    pub(crate) fn take_wait(&mut self) -> Option<Pending> {
-        self.new_wait.take()
-    }
-}
-
-/// Microseconds since the first connection's first request: the limiter's clock.
-fn limiter_now_us() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    let micros = START.get_or_init(Instant::now).elapsed().as_micros();
-    u64::try_from(micros).unwrap_or(u64::MAX)
-}
-
-impl Client {
-    /// Reads what arrived; `false` if the peer closed or the socket failed.
-    fn read(&mut self) -> bool {
-        let mut chunk = [0u8; READ_CHUNK];
-        loop {
-            let Some(stream) = self.stream.as_mut() else { return true };
-            match stream.read(&mut chunk) {
-                Ok(0) => return false,
-                Ok(n) => {
-                    if !self.take_in(&chunk[..n]) {
-                        // The TLS alert goes out before the connection closes.
-                        let _ = self.write();
-                        return false;
-                    }
-                    // A read that did not fill the chunk took what was there: the poller is
-                    // level-triggered and reports the socket again if more came, so a second
-                    // read that would only find it empty is not made (H-013).
-                    if n < chunk.len() {
-                        return true;
-                    }
-                }
-                Err(e) => return e.kind() == ErrorKind::WouldBlock,
-            }
-        }
-    }
-
-    /// Takes `bytes` that came from the socket; `false` if the connection must close.
-    pub(crate) fn take_in(&mut self, bytes: &[u8]) -> bool {
-        PortStats::add(&self.diag.stats.physical_in, bytes.len());
-        let mut plain = Vec::new();
-        if !self.transport.incoming(bytes, &mut plain, &mut self.out) {
-            return false;
-        }
-        match self.conn.as_mut() {
-            Some(conn) => conn.receive(&plain),
-            None => self.backlog.extend_from_slice(&plain),
-        }
-        self.note_handshake();
-        self.note_certificate();
-        true
-    }
-
-    /// Whether its connection belongs to a tenant that `states` has suspended.
-    pub(crate) fn is_suspended(&self, states: &crate::routes::TenantStates) -> bool {
-        self.conn.as_ref().is_some_and(|conn| suspended(conn, states))
-    }
-
-    /// Ends the connection: its tenant's count drops, and its `Connection`, if it has it, comes
-    /// back for the audit of the close.
-    pub(crate) fn end(self, state: &dyn NodeState) -> Option<Connection> {
-        if let (Some(tenant), Some(routes)) = (self.counted, state.routes()) {
-            routes.limiter().disconnect(tenant);
-        }
-        self.conn
-    }
-
-    /// Counts the TLS handshake once it has finished (`transportSecurity`).
-    fn note_handshake(&mut self) {
-        if let Some(from) = self.handshake_from
-            && self.transport.tls_established()
-        {
-            self.handshake_from = None;
-            let took = from.elapsed();
-            let ms = usize::try_from(took.as_millis()).unwrap_or(usize::MAX);
-            let micros = usize::try_from(took.as_micros()).unwrap_or(usize::MAX);
-            PortStats::add(&self.diag.stats.tls_handshakes, 1);
-            PortStats::add(&self.diag.stats.tls_handshake_ms, ms);
-            PortStats::add(&self.diag.stats.tls_handshake_micros, micros);
-        }
-    }
-
-    /// Records the X.509 authentication user of the client certificate once the TLS handshake has
-    /// it.
-    fn note_certificate(&mut self) {
-        if let Some(conn) = self.conn.as_mut() {
-            certify(conn, &self.transport, self.member_subject.as_deref());
-        }
-    }
-
-    /// Runs the requests that arrived, in order, until one waits; `false` if the connection
-    /// must close. The data commands run on `cmds`, waiting for the cores.
-    fn serve(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
-        while !self.waiting {
-            let Some(mut conn) = self.conn.take() else { return true };
-            let req = match conn.next_request() {
-                Ok(Some(r)) => r,
-                next => {
-                    self.conn = Some(conn);
-                    return next.is_ok();
-                }
-            };
-            if !self.admitted {
-                // The first request takes a token of the limiter of new connections, waits for
-                // one, or closes the connection without a reply (006 FR-036).
-                let peer = self.peer_ip;
-                match lock(cmds.shared).ingress.admit(peer, limiter_now_us()) {
-                    Admission::Go => self.admitted = true,
-                    Admission::Reject => {
-                        self.conn = Some(conn);
-                        return false;
-                    }
-                    Admission::Wait { micros } => {
-                        self.admitted = true;
-                        self.waiting = true;
-                        let deadline = Instant::now() + Duration::from_micros(micros);
-                        self.new_wait =
-                            Some(Pending::Queued { conn: Box::new(conn), req, deadline });
-                        return true;
-                    }
-                }
-            }
-            if !self.handle(conn, req, info, cmds) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Runs what arrived and writes the replies; the replies of the requests before a fault still
-    /// go out before the connection closes, as the reference server answers each message before
-    /// reading the next. `false` if the connection must close.
-    pub(crate) fn flush_after(&mut self, info: &NodeInfo, cmds: &mut Cmds<'_>) -> bool {
-        let served = self.serve(info, cmds);
-        self.write() && served
-    }
-
-    /// Runs request `req` of `conn` on this thread with the connection's backend, or without one
-    /// when no node is behind the port, and queues its action. A connection that just signed in
-    /// counts for its tenant, and past its limit closes without its answer (007 FR-032); one whose
-    /// tenant is suspended closes once answered. `false` if the connection must close.
-    fn handle(
-        &mut self,
-        mut conn: Connection,
-        req: Request,
-        info: &NodeInfo,
-        cmds: &mut Cmds<'_>,
-    ) -> bool {
-        let stats = &self.diag.stats;
-        PortStats::add(&stats.requests, 1);
-        PortStats::add(&stats.bytes_in, usize::try_from(req.header.length).unwrap_or(0));
-        // A drained node answers every request with `ShutdownInProgress` and closes the
-        // connection after the reply (007 FR-015), labelled by D-148 so that the
-        // driver retries a retryable write on another node (D-148).
-        if cmds.state.closed() {
-            let e = CommandError::new(SHUTDOWN_IN_PROGRESS, "the node is drained");
-            let e = teseladb_wire::error::with_retryable_labels(e, &req.command);
-            self.apply(conn, req, Action::Reply(e.to_document()));
-            return false;
-        }
-        if cmds.state.quiescing() && teseladb_wire::hello::is_hello(req.name()) {
-            let doc = quiesce_reply(&cmds.state.info());
-            return self.apply(conn, req, Action::Reply(doc));
-        }
-        cmds.state.note_command();
-        stats.active.fetch_add(1, Ordering::Relaxed);
-        let fresh;
-        let (info, commands) = match cmds.inline.as_deref_mut() {
-            Some(b) => {
-                // A write moves the cluster time: each reply reads it after its command.
-                fresh = cmds.state.info();
-                (&fresh, Some((b, cmds.shared)))
-            }
-            None => (info, None),
-        };
-        let action = dispatch_with(&mut conn, &req, info, commands);
-        stats.active.fetch_sub(1, Ordering::Relaxed);
-        certify(&mut conn, &self.transport, self.member_subject.as_deref());
-        let Some(routes) = cmds.state.routes() else { return self.apply(conn, req, action) };
-        // A command that ran while its tenant was suspended closes its connection once answered.
-        let held = suspended(&conn, &routes.tenants());
-        if self.counted.is_none() {
-            match count_connection(routes, &conn) {
-                Counted::Yes(tenant) => self.counted = Some(tenant),
-                Counted::Over => {
-                    self.conn = Some(conn);
-                    return false;
-                }
-                Counted::No => {}
-            }
-        }
-        self.apply(conn, req, action) && !held
-    }
-
-    /// Queues the reply of `conn`'s request `req`, or the wait it asks for, and keeps `conn`;
-    /// `false` if the connection must close.
-    fn apply(&mut self, mut conn: Connection, req: Request, action: Action) -> bool {
-        let alive = match action {
-            Action::Reply(doc) if req.more_to_come() => {
-                drop(doc);
-                true
-            }
-            Action::Reply(doc) if self.transport.is_plain() => {
-                let pieces = conn.reply_pieces(&req, &doc, false);
-                PortStats::add(&self.diag.stats.bytes_out, pieces.len());
-                match pieces {
-                    ReplyPieces::Pieces(f) if f.borrowed() > 0 => self.send_pieces(&f.slices()),
-                    ReplyPieces::Pieces(f) => {
-                        self.transport.outgoing_owned(f.into_vec(), &mut self.out)
-                    }
-                    ReplyPieces::Bytes(bytes) => {
-                        self.transport.outgoing_owned(bytes, &mut self.out)
-                    }
-                }
-            }
-            Action::Reply(doc) => {
-                let bytes = conn.reply(&req, &doc, false);
-                PortStats::add(&self.diag.stats.bytes_out, bytes.len());
-                self.transport.outgoing_owned(bytes, &mut self.out)
-            }
-            Action::Await { max_await_ms, exhaust, hello } => {
-                let every = Duration::from_millis(max_await_ms);
-                let response_to = req.header.request_id;
-                let deadline = Instant::now() + every;
-                self.waiting = true;
-                let wait =
-                    HelloWait { req, hello, deadline, every, exhaust, response_to, held: None };
-                self.new_wait = Some(Pending::Hello(wait));
-                true
-            }
-            Action::Delay { ms } => {
-                // What arrives meanwhile goes to the backlog, until the held request runs.
-                let deadline = Instant::now() + Duration::from_millis(ms);
-                self.waiting = true;
-                self.new_wait = Some(Pending::Held { conn: Box::new(conn), req, deadline });
-                return true;
-            }
-            Action::Close => false,
-        };
-        self.conn = Some(conn);
-        alive
-    }
-
-    /// Answers its awaitable `hello` `p`, due at `p.deadline`; with exhaust, the next one of the
-    /// stream, and whether the connection stays open. Each reply of a stream after the first is a
-    /// `hello` the failpoint acts on, as on a reference router 9.0.4 with `enableTestCommands`: it
-    /// holds it, answers its error and ends the stream, or closes the connection.
-    fn fire(
-        &mut self,
-        mut p: HelloWait,
-        info: &NodeInfo,
-        shared: &Shared,
-        quiescing: bool,
-    ) -> (Option<Pending>, bool) {
-        // A connection waiting for a `hello` has its connection.
-        let Some(conn) = self.conn.as_mut() else { return (None, true) };
-        let streamed = p.response_to != p.req.header.request_id;
-        let fault = match (&p.held, streamed) {
-            (None, true) => {
-                let app = conn.hello.app_name.clone();
-                lock(shared).failpoint.as_mut().and_then(|fp| {
-                    fp.check(teseladb_wire::concerns::canonical(p.req.name()), app.as_deref())
-                })
-            }
-            _ => None,
-        };
-        if let Some(f) = fault {
-            if f.close {
-                return (None, false);
-            }
-            match (f.block_ms, f.error) {
-                (0, None) => {}
-                (0, Some(e)) => p.held = Some(e),
-                (ms, error) => {
-                    p.deadline = Instant::now() + Duration::from_millis(ms);
-                    p.held = error;
-                    return (Some(Pending::Hello(p)), true);
-                }
-            }
-        }
-        if let Some(e) = p.held.take() {
-            let doc = teseladb_wire::hello::with_cluster_time(e, info);
-            let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
-            let _ = self.transport.outgoing_owned(bytes, &mut self.out);
-            self.waiting = false;
-            return (None, true);
-        }
-        if quiescing {
-            // The stream ends with the error: the driver marks the node unknown.
-            let doc = quiesce_reply(info);
-            let (bytes, _) = conn.reply_to(p.response_to, &p.req, &doc, false);
-            let _ = self.transport.outgoing_owned(bytes, &mut self.out);
-            self.waiting = false;
-            return (None, true);
-        }
-        let doc = hello_after_wait(conn, &p.hello, info);
-        let (bytes, id) = conn.reply_to(p.response_to, &p.req, &doc, p.exhaust);
-        // A TLS failure here shows on the next read, which closes the connection.
-        let _ = self.transport.outgoing_owned(bytes, &mut self.out);
-        self.waiting = p.exhaust;
-        p.response_to = id;
-        p.deadline += p.every;
-        (p.exhaust.then_some(Pending::Hello(p)), true)
-    }
-
-    /// Runs the request the failpoint held, on its connection with what arrived meanwhile;
-    /// `false` if the connection must close.
-    fn resume(
-        &mut self,
-        mut conn: Connection,
-        req: Request,
-        info: &NodeInfo,
-        cmds: &mut Cmds<'_>,
-    ) -> bool {
-        if !self.backlog.is_empty() {
-            conn.receive(&std::mem::take(&mut self.backlog));
-        }
-        self.waiting = false;
-        self.handle(conn, req, info, cmds)
-    }
-
-    /// Sends a plain reply in `pieces` behind the bytes still waiting, with vectored writes: its
-    /// stored documents go from their own buffers, and only what the socket does not take now is
-    /// copied to wait (006 FR-040). `false` if the socket failed.
-    fn send_pieces(&mut self, pieces: &[&[u8]]) -> bool {
-        let Some(stream) = self.stream.as_mut() else {
-            // A ring sends `out` (012 FR-024).
-            for p in pieces {
-                self.out.extend_from_slice(p);
-            }
-            return true;
-        };
-        let waiting = &self.out[self.pos..];
-        let all: Vec<&[u8]> = std::iter::once(waiting).chain(pieces.iter().copied()).collect();
-        match crate::vectored::write_pieces(stream, &all) {
-            Ok((n, rest)) => {
-                PortStats::add(&self.diag.stats.physical_out, n);
-                self.out = rest;
-                self.pos = 0;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Writes what it can; `false` if the socket failed.
-    fn write(&mut self) -> bool {
-        // A ring sends `out` (012 FR-024).
-        let Some(stream) = self.stream.as_mut() else { return true };
-        while self.pos < self.out.len() {
-            match stream.write(&self.out[self.pos..]) {
-                Ok(n) => {
-                    PortStats::add(&self.diag.stats.physical_out, n);
-                    self.pos += n;
-                }
-                Err(e) => return e.kind() == ErrorKind::WouldBlock,
-            }
-        }
-        self.out.clear();
-        self.pos = 0;
-        true
-    }
-
-    /// Watches the socket for writing while replies wait to go out; `false` if the poller
-    /// refused.
-    fn watch(&mut self, poller: &Poller, token: u64) -> bool {
-        let want = self.pos < self.out.len();
-        if want == self.watching_write {
-            return true;
-        }
-        self.watching_write = want;
-        let interest = if want { Interest::BOTH } else { Interest::READ };
-        self.stream.as_ref().is_none_or(|s| poller.reregister(s, token, interest).is_ok())
-    }
-}
-
-impl Drop for Worker {
-    /// Closes what is left: the connection of a port that stops, or one whose thread never ran.
-    fn drop(&mut self) {
-        let tokens: Vec<u64> = self.conns.keys().copied().collect();
-        for t in tokens {
-            self.close(t);
-        }
-        for p in std::mem::take(&mut self.awaits).into_values() {
-            if let Some(conn) = abandon(p, &self.shared) {
-                self.gone(conn);
-            }
+            stop.pause(next.saturating_duration_since(std::time::Instant::now()));
         }
     }
 }
 
 /// The answer of a `hello` while the node quiesces, as a reference router's: `ShutdownInProgress`
 /// with the node's `topologyVersion`.
-pub(crate) fn quiesce_reply(info: &NodeInfo) -> teseladb_bson::Document {
+pub fn quiesce_reply(info: &NodeInfo) -> teseladb_bson::Document {
     let e = CommandError::new(SHUTDOWN_IN_PROGRESS, QUIESCE_MESSAGE);
     let version = teseladb_bson::Document::new()
         .with("processId", teseladb_bson::Value::ObjectId(info.topology.process_id))
@@ -1606,338 +960,3 @@ pub(crate) fn quiesce_reply(info: &NodeInfo) -> teseladb_bson::Document {
 
 /// The message of [`quiesce_reply`], the reference router's.
 pub const QUIESCE_MESSAGE: &str = "The server is in quiesce mode and will shut down";
-
-/// The connection of a wait whose client closed: a held one's close is recorded by the caller, and
-/// one in the limiter's queue leaves it as interrupted (006 FR-036).
-pub(crate) fn abandon(p: Pending, shared: &Shared) -> Option<Connection> {
-    match p {
-        Pending::Held { conn, .. } => Some(*conn),
-        Pending::Queued { conn, .. } => {
-            lock(shared).ingress.abandon();
-            Some(*conn)
-        }
-        Pending::Hello(_) => None,
-    }
-}
-
-/// Runs wait `p` of client `c`, due now: answers its awaitable `hello` (and schedules the next of
-/// an exhaust stream in `c`), or runs the request the failpoint or the limiter held. `false` if
-/// the connection must close.
-pub(crate) fn run_pending(
-    c: &mut Client,
-    p: Pending,
-    info: &NodeInfo,
-    cmds: &mut Cmds<'_>,
-) -> bool {
-    match p {
-        Pending::Hello(p) => {
-            let (next, open) = c.fire(p, info, cmds.shared, cmds.state.quiescing());
-            c.new_wait = next;
-            open
-        }
-        // The held request runs now, with what the failpoint does next.
-        Pending::Held { conn, req, .. } => c.resume(*conn, req, info, cmds),
-        // Its turn in the limiter's queue came.
-        Pending::Queued { conn, req, .. } => {
-            lock(cmds.shared).ingress.dequeue();
-            c.resume(*conn, req, info, cmds)
-        }
-    }
-}
-
-/// Stops counting the connections of `clients` whose user is now its tenant's service user (007
-/// FR-032): a connection counts when it signs in, by this core's view of the tenants, which can
-/// name the service user later than Group 0 does, and a service user's connection counts for
-/// nothing.
-pub(crate) fn uncount_service_users<'a>(
-    clients: impl Iterator<Item = &'a mut Client>,
-    routes: &crate::routes::SharedRoutes,
-    states: &crate::routes::TenantStates,
-) {
-    for c in clients {
-        let Some(tenant) = c.counted else { continue };
-        let service = c.conn.as_ref().and_then(|conn| conn.auth.user.as_ref()).is_some_and(|u| {
-            states
-                .get(&tenant)
-                .is_some_and(|s| crate::tenant_limits::is_service_user(&s.limits, &u.name))
-        });
-        if service {
-            routes.limiter().disconnect(tenant);
-            c.counted = None;
-        }
-    }
-}
-
-/// Kills the cursors and change streams of the tenants `states` suspends and `seen` (the states
-/// the caller last looked at) did not; each worker does it, and a second time kills nothing.
-pub(crate) fn kill_suspended_cursors(
-    shared: &Shared,
-    seen: Option<&crate::routes::TenantStates>,
-    states: &crate::routes::TenantStates,
-) {
-    let before = |id: &u32| seen.and_then(|seen| seen.get(id)).is_some_and(|s| !s.admits_users());
-    let held: Vec<u32> = states
-        .iter()
-        .filter(|(id, s)| !s.admits_users() && !before(id))
-        .map(|(id, _)| *id)
-        .collect();
-    if !held.is_empty() {
-        let tenant_of = |ns: &str| {
-            let db = ns.split_once('.').map_or(ns, |(db, _)| db);
-            teseladb_meta::tenants::split_db(db).0
-        };
-        lock(shared).cursors.kill_namespaces(|ns| held.contains(&tenant_of(ns)));
-    }
-}
-
-/// Records on `conn` the X.509 authentication user of the client certificate `transport` received,
-/// if any and not yet recorded; a member's when its subject has the organization, unit or domain
-/// components of `member` (013 FR-034).
-fn certify(conn: &mut Connection, transport: &Transport, member: Option<&teseladb_x509::Name>) {
-    if conn.auth.peer_user.is_none()
-        && let Some(leaf) = transport.peer_certificates().first()
-    {
-        conn.auth.peer_user = Some(leaf.subject.x509_user_name());
-        conn.auth.peer_member =
-            member.is_some_and(|node| crate::cluster_auth::is_member(&leaf.subject, node));
-    }
-}
-
-struct Worker {
-    poller: Poller,
-    /// Its poller's waker, which the acceptor and the node's presence hold weakly: it lives while
-    /// the worker does, and the worker registers it with the node's presence when it starts.
-    waker: Arc<Waker>,
-    conns: BTreeMap<u64, Client>,
-    /// Deadlines of the awaitable `hello`s with their connection; an entry whose connection
-    /// closed or already answered is skipped.
-    awaits: BTreeMap<(Instant, u64), Pending>,
-    /// The `topologyVersion` counter the waiting `hello`s last saw: a change answers them.
-    seen: i64,
-    next_token: u64,
-    state: Arc<dyn NodeState>,
-    /// The backend of the connection's commands, if a node is behind the port.
-    inline: Option<ServerBackend>,
-    /// The node's cursors and sessions, shared by its workers.
-    shared: Arc<Shared>,
-    /// What its connection starts with.
-    kit: ClientKit,
-    open: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    /// The tenants' states the worker last closed connections for (007 FR-034).
-    tenants_seen: Option<Arc<crate::routes::TenantStates>>,
-}
-
-/// What signing in did to the count of a tenant's connections on this node.
-enum Counted {
-    /// Nothing: not signed in, of the default tenant or its service user.
-    No,
-    /// Counted for this tenant.
-    Yes(u32),
-    /// Past the tenant's `maxConnections`: the connection closes.
-    Over,
-}
-
-/// Counts connection `conn` for its tenant if its user just signed in (007 FR-032).
-fn count_connection(routes: &crate::routes::SharedRoutes, conn: &Connection) -> Counted {
-    let Some(user) = conn.auth.user.as_ref().filter(|u| u.tenant != 0) else { return Counted::No };
-    let states = routes.tenants();
-    let limits = states.get(&user.tenant).map(|s| s.limits.clone()).unwrap_or_default();
-    if crate::tenant_limits::is_service_user(&limits, &user.name) {
-        return Counted::No;
-    }
-    let wall_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-    if routes.limiter().connect(user.tenant, limits.max_connections, wall_ms) {
-        Counted::Yes(user.tenant)
-    } else {
-        Counted::Over
-    }
-}
-
-/// Whether connection `conn` belongs to a tenant that `states` has suspended.
-fn suspended(conn: &Connection, states: &crate::routes::TenantStates) -> bool {
-    conn.auth
-        .user
-        .as_ref()
-        .is_some_and(|u| u.tenant != 0 && states.get(&u.tenant).is_some_and(|s| !s.admits_users()))
-}
-
-impl Worker {
-    /// Closes the connections of the tenants suspended since the last look.
-    fn close_suspended(&mut self) {
-        let Some(routes) = self.state.routes() else { return };
-        let states = routes.tenants();
-        if self.tenants_seen.as_ref().is_some_and(|seen| Arc::ptr_eq(seen, &states)) {
-            return;
-        }
-        // The tenants changed (rare): the closes below borrow the worker.
-        let routes = routes.clone();
-        let gone: Vec<u64> =
-            self.conns.iter().filter(|(_, c)| c.is_suspended(&states)).map(|(t, _)| *t).collect();
-        for t in gone {
-            self.close(t);
-        }
-        uncount_service_users(self.conns.values_mut(), &routes, &states);
-        kill_suspended_cursors(&self.shared, self.tenants_seen.as_deref(), &states);
-        self.tenants_seen = Some(states);
-    }
-
-    /// Serves its connection until it closes or the port stops; dropping the worker closes what
-    /// is left ([`Drop`]).
-    fn run(mut self) {
-        // A change of the node's state wakes it, to answer the waiting `hello`s.
-        self.state.watch_topology(&self.waker);
-        let mut events = Vec::new();
-        while !self.stop.load(Ordering::Acquire) && !self.conns.is_empty() {
-            // Only an awaitable `hello` or a held request needs a deadline: an idle connection
-            // sleeps until its socket, a change of the node or the port's stop wakes it.
-            let timeout = self
-                .awaits
-                .first_key_value()
-                .map(|(&(d, _), _)| d.saturating_duration_since(Instant::now()));
-            // No spin before sleeping: polling the socket in a loop for the next request burned
-            // the CPU the clients need and made a lone connection slower (measured on
-            // 10-11-2026, H-013 of the native tests: YCSB-C with one connection went from 35 746
-            // to 39 070 op/s without it).
-            match self.poller.poll(timeout) {
-                Ok(ev) => events.extend(ev.iter().filter(|e| e.token != WAKE_TOKEN).copied()),
-                Err(_) => break,
-            }
-            let info = self.state.info();
-            if info.topology.counter != self.seen {
-                self.seen = info.topology.counter;
-                self.hasten_hellos();
-            }
-            let ran = !events.is_empty();
-            for e in events.drain(..) {
-                self.on_event(e.token, e.readable || e.hangup, &info);
-            }
-            self.fire_awaits(&info);
-            self.close_suspended();
-            // With the answers on their way, the intents of a transaction a command ended (008
-            // FR-005).
-            let resolved_apart = teseladb_wire::commands::hot::of(&self.shared).has_resolvers();
-            if ran
-                && !resolved_apart
-                && let Some(backend) = self.inline.as_mut()
-            {
-                teseladb_wire::commands::txn::resolve_queued(backend, &self.shared);
-            }
-        }
-    }
-
-    fn add(&mut self, stream: TcpStream, id: i32) {
-        let token = self.next_token;
-        self.next_token += 1;
-        let ready = stream
-            .set_nonblocking(true)
-            .and_then(|()| stream.set_nodelay(true))
-            .and_then(|()| self.poller.register(&stream, token, Interest::READ));
-        if ready.is_err() {
-            self.open.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        let (peer, local) = (stream.peer_addr().ok(), stream.local_addr().ok());
-        // Without a client the socket closes here, which also takes it out of the poller.
-        match self.kit.client(id, Some(stream), peer, local) {
-            Some(c) => {
-                self.conns.insert(token, c);
-            }
-            None => {
-                self.open.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-    }
-
-    /// Closes connection `token`; one held by the failpoint records its
-    /// close when its connection comes back ([`Worker::gone`]).
-    fn close(&mut self, token: u64) {
-        if let Some(mut c) = self.conns.remove(&token) {
-            if let Some(stream) = c.stream.take() {
-                let _ = self.poller.deregister(&stream);
-            }
-            if let Some(conn) = c.end(&*self.state) {
-                self.gone(conn);
-            }
-            self.open.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-
-    /// Records the close of a client's connection `conn` in the audit log (a logout, 013
-    /// FR-016); without a node behind the port there is none.
-    fn gone(&mut self, mut conn: Connection) {
-        if let Some(backend) = self.inline.as_mut() {
-            teseladb_wire::commands::audit::on_close(&self.shared, &mut conn, backend);
-        }
-    }
-
-    /// An event of connection `token` (one per token and wait): reads if `readable`, runs what
-    /// arrived and writes.
-    fn on_event(&mut self, token: u64, readable: bool, info: &NodeInfo) {
-        let poller = &self.poller;
-        let alive = self.conns.get_mut(&token).is_some_and(|c| {
-            let mut cmds =
-                Cmds { inline: self.inline.as_mut(), shared: &self.shared, state: &*self.state };
-            (!readable || c.read()) && c.flush_after(info, &mut cmds) && c.watch(poller, token)
-        });
-        self.settle(token, alive);
-    }
-
-    /// Closes connection `token` if it is not `alive`; otherwise schedules the awaitable `hello`
-    /// it just received, if any.
-    fn settle(&mut self, token: u64, alive: bool) {
-        match self.conns.get_mut(&token).filter(|_| alive) {
-            Some(c) => {
-                if let Some(p) = c.new_wait.take() {
-                    self.awaits.insert((p.deadline(), token), p);
-                }
-            }
-            None => self.close(token),
-        }
-    }
-
-    /// Makes every waiting `hello` due now: the node's state changed (018 FR-015, as a reference
-    /// replica set member answers them at a change of its `topologyVersion`).
-    fn hasten_hellos(&mut self) {
-        let now = Instant::now();
-        let due: Vec<(Instant, u64)> = self
-            .awaits
-            .iter()
-            .filter(|(_, p)| matches!(p, Pending::Hello(_)))
-            .map(|(k, _)| *k)
-            .collect();
-        for key in due {
-            if let Some(Pending::Hello(mut h)) = self.awaits.remove(&key) {
-                h.deadline = now;
-                self.awaits.insert((now, key.1), Pending::Hello(h));
-            }
-        }
-    }
-
-    /// Answers the awaitable `hello`s whose deadline passed (those of closed connections are
-    /// dropped).
-    fn fire_awaits(&mut self, info: &NodeInfo) {
-        let now = Instant::now();
-        while let Some(entry) = self.awaits.first_entry()
-            && entry.key().0 <= now
-        {
-            let ((_, token), p) = entry.remove_entry();
-            let poller = &self.poller;
-            let Some(c) = self.conns.get_mut(&token) else {
-                // Closed while it waited: a held connection's close is recorded now, and one in
-                // the limiter's queue leaves it as interrupted.
-                if let Some(conn) = abandon(p, &self.shared) {
-                    self.gone(conn);
-                }
-                continue;
-            };
-            let mut cmds =
-                Cmds { inline: self.inline.as_mut(), shared: &self.shared, state: &*self.state };
-            let resumed = run_pending(c, p, info, &mut cmds);
-            let alive = c.flush_after(info, &mut cmds) && resumed && c.watch(poller, token);
-            self.settle(token, alive);
-        }
-    }
-}

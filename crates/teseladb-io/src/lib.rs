@@ -22,14 +22,11 @@ mod io_class;
 pub mod io_uring_disk;
 mod log_chore;
 pub mod mailbox;
-#[cfg(target_os = "linux")]
-pub mod net_ring;
 pub mod node_disk;
 pub mod peer;
 pub mod poller;
 pub mod secure;
 pub mod service;
-pub mod spin;
 pub mod spsc;
 pub mod user_tcp;
 #[cfg(target_os = "linux")]

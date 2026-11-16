@@ -56,6 +56,8 @@ pub mod tls_stream;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 pub mod wait;
+#[cfg(target_os = "linux")]
+pub mod xdp_clients;
 
 pub use core_loop::{
     BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreInput, CoreLogic, CoreReceiver, CoreSender, CoreSenders,

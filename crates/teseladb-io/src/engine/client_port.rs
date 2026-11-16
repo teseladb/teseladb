@@ -30,7 +30,9 @@ use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::reactor::listen_with;
 use teseladb::engine::core::timer::Timer;
-use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig, ListenOptions, ServerSocket};
+use teseladb::engine::net::api::{
+    ConnectedSocket, ConnectedSocketInputStreamConfig, ListenOptions, ServerSocket,
+};
 use teseladb_x509::Certificate;
 
 use super::connect::socket_address;
@@ -203,9 +205,9 @@ pub fn stop_here(port: u64) {
 /// Wakes every connection of port `port` on this shard: the node's state changed, so each
 /// session looks at its waits and whether it must close.
 pub fn wake_here(port: u64) {
-    let conns: Vec<Rc<Conn>> =
-        PORTS.with(|p| p.borrow().get(&port).map(|h| h.conns.values().cloned().collect()))
-            .unwrap_or_default();
+    let conns: Vec<Rc<Conn>> = PORTS
+        .with(|p| p.borrow().get(&port).map(|h| h.conns.values().cloned().collect()))
+        .unwrap_or_default();
     for c in conns {
         c.wake.wake();
     }
@@ -214,6 +216,121 @@ pub fn wake_here(port: u64) {
 /// Connections of port `port` open on this shard.
 pub fn open_here(port: u64) -> usize {
     PORTS.with(|p| p.borrow().get(&port).map_or(0, |h| h.conns.len()))
+}
+
+/// Numbers the ports of the process.
+static NEXT_PORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Runs `f` on `shard` and waits for its result, from any thread (an engine thread parks).
+fn on_shard<R: Send + 'static>(shard: u32, f: Box<dyn FnOnce() -> R + Send>) -> io::Result<R> {
+    let (tx, rx) = super::answer::channel();
+    let posted = super::wait::post(
+        shard,
+        Box::new(move || {
+            let _ = tx.send(f());
+        }),
+    );
+    if !posted {
+        return Err(io::Error::other("no engine runs in this process"));
+    }
+    rx.recv().map_err(|_| io::Error::other("the engine stopped"))
+}
+
+/// A running port, usable from any thread: what [`start_port`] started on every shard.
+#[derive(Debug)]
+pub struct PortRef {
+    id: u64,
+    shards: u32,
+    addrs: Vec<SocketAddr>,
+}
+
+/// Starts a port at `addrs` on every shard of the engine, with `service` for its connections.
+/// Called from a thread that is not a shard, or from an engine thread.
+///
+/// # Errors
+///
+/// When no engine runs, or an address cannot be listened on (the port is then stopped where
+/// it started).
+pub fn start_port(addrs: &[SocketAddr], service: Arc<dyn Service>) -> io::Result<PortRef> {
+    let id = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let shards = on_shard(0, Box::new(teseladb::engine::core::smp::Smp::count))?;
+    let mut port = PortRef { id, shards, addrs: Vec::with_capacity(addrs.len()) };
+    for at in addrs {
+        // Shard 0 binds the address; the others take their part of its connections.
+        let svc = Arc::clone(&service);
+        let at = *at;
+        let bound = match on_shard(0, Box::new(move || listen_here(id, at, svc))) {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) | Err(e) => {
+                port.stop();
+                return Err(e);
+            }
+        };
+        for shard in 1..shards {
+            let svc = Arc::clone(&service);
+            if let Err(e) =
+                on_shard(shard, Box::new(move || listen_here(id, bound, svc))).and_then(|r| r)
+            {
+                port.stop();
+                return Err(e);
+            }
+        }
+        port.addrs.push(bound);
+    }
+    Ok(port)
+}
+
+impl PortRef {
+    /// The addresses it listens on, with the ports the system chose for port 0.
+    pub fn addrs(&self) -> &[SocketAddr] {
+        &self.addrs
+    }
+
+    /// Its number in the process.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The shards it runs on.
+    pub fn shards(&self) -> u32 {
+        self.shards
+    }
+
+    /// Wakes every connection of the port on every shard (the node's state changed); does not
+    /// wait.
+    pub fn wake(&self) {
+        wake_port(self.id, self.shards);
+    }
+
+    /// A function that wakes every connection of the port, for whoever publishes the node's
+    /// state.
+    pub fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let (id, shards) = (self.id, self.shards);
+        Arc::new(move || wake_port(id, shards))
+    }
+
+    /// Connections open on each shard, in shard order.
+    pub fn open_by_shard(&self) -> Vec<usize> {
+        let id = self.id;
+        (0..self.shards)
+            .map(|s| on_shard(s, Box::new(move || open_here(id))).unwrap_or(0))
+            .collect()
+    }
+
+    /// Stops the port on every shard and waits until each shard stopped accepting: its
+    /// connections close once what they answered went out.
+    pub fn stop(&self) {
+        let id = self.id;
+        for shard in 0..self.shards {
+            let _ = on_shard(shard, Box::new(move || stop_here(id)));
+        }
+    }
+}
+
+fn wake_port(id: u64, shards: u32) {
+    for shard in 0..shards {
+        let _ = super::wait::post(shard, Box::new(move || wake_here(id)));
+    }
 }
 
 /// A connection the engine handed to this shard: TLS as the service says, then its tasks.
@@ -228,7 +345,8 @@ async fn serve(
     let from = Instant::now();
     let sniff = service.sniff();
     let plain = matches!(sniff, Sniff::Plain);
-    let accepted = match tls_stream::accept(sock, sniff, (!plain).then_some(HANDSHAKE_LIMIT)).await {
+    let accepted = match tls_stream::accept(sock, sniff, (!plain).then_some(HANDSHAKE_LIMIT)).await
+    {
         Ok(a) => a,
         // A client that sent nothing in time or failed its handshake is closed.
         Err(_) => return Ok(()),
@@ -361,6 +479,11 @@ fn hand_out(conn: &Conn, session: &mut dyn Session, scratch: &mut Vec<u8>) {
     conn.out_wake.wake();
 }
 
+/// Ends `session` in an engine thread: its end may wait for the cores (the audit of a logout).
+async fn finish(session: Box<dyn Session>) {
+    let _ = stacks::run(Box::new(move || session.end())).await;
+}
+
 /// The driver of a connection: what arrives goes to the session, its work runs in an engine
 /// thread, its answers go to the writer, until it or the peer closes or the port stops.
 async fn drive(conn: &Rc<Conn>, session: Box<dyn Session>) {
@@ -383,7 +506,7 @@ async fn drive(conn: &Rc<Conn>, session: Box<dyn Session>) {
         }
         if conn.stopping.get() || conn.write_failed.get() || s.must_close() {
             hand_out(conn, s.as_mut(), &mut scratch);
-            s.end();
+            finish(s).await;
             return;
         }
         let now = Instant::now();
@@ -399,7 +522,7 @@ async fn drive(conn: &Rc<Conn>, session: Box<dyn Session>) {
             let Some(mut s) = slot.borrow_mut().take() else { return };
             hand_out(conn, s.as_mut(), &mut scratch);
             if ran.is_err() || !alive.get() {
-                s.end();
+                finish(s).await;
                 return;
             }
             *slot.borrow_mut() = Some(s);
@@ -408,7 +531,7 @@ async fn drive(conn: &Rc<Conn>, session: Box<dyn Session>) {
         }
         hand_out(conn, s.as_mut(), &mut scratch);
         if conn.eof.get() && conn.inbox.borrow().is_empty() {
-            s.end();
+            finish(s).await;
             return;
         }
         arm(&mut timer, s.deadline());

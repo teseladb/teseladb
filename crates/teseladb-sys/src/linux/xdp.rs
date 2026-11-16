@@ -527,6 +527,14 @@ impl AsRawFd for Xsk {
     }
 }
 
+impl std::os::fd::AsFd for Xsk {
+    /// The socket, for a reactor that waits on it (a copy of it, made with `try_clone_to_owned`,
+    /// is the engine's to close, 023 FR-021).
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.fd)
+    }
+}
+
 impl Xsk {
     /// A socket on queue `queue` of interface `ifindex`.
     pub fn open(ifindex: u32, queue: u32) -> io::Result<Xsk> {

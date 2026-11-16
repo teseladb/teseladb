@@ -26,7 +26,8 @@ pub mod checksums;
 pub mod cli;
 pub mod client_listener;
 #[cfg(target_os = "linux")]
-mod client_ring;
+mod client_session;
+pub mod client_tasks;
 mod client_xdp;
 pub mod clock;
 pub mod cluster_auth;
@@ -69,6 +70,7 @@ pub mod oidc_client;
 pub mod pki;
 pub mod pressure;
 pub mod procs;
+pub mod published;
 pub mod pushed;
 pub mod ranges;
 pub mod relocations;
@@ -87,7 +89,6 @@ pub mod tls_port;
 pub mod tls_stream;
 pub mod transfer;
 pub mod txn_wire;
-mod vectored;
 
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -504,7 +505,8 @@ fn js_clock_ms() -> u64 {
 /// The wait of `sleep(ms)` in a JavaScript call: its thread sleeps, as on a reference replica set
 /// member.
 fn js_sleep(ms: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(ms));
+    // A command on a shard parks its engine thread; any other thread sleeps (023 FR-018).
+    teseladb_io::engine::wait::sleep(std::time::Duration::from_millis(ms));
 }
 
 /// What the JavaScript calls of a server read from the process: the clock of their deadline and
@@ -674,11 +676,8 @@ pub fn start(
     };
     log.info(&choice.to_string(), &[]);
     cfg.direct_io = choice.direct;
-    // With io_uring the clients' port runs on a ring per core too (012 FR-024).
+    // The clients' port runs on the engine's shards (023 FR-018); AF_XDP as asked (FR-021).
     if let Some(client) = cfg.client.as_mut() {
-        let machine = std::thread::available_parallelism().map_or(1, |n| n.get().min(256));
-        let cores = cfg.cores.map_or(machine, usize::from);
-        client.rings = choice.uring.then_some(cores);
         client.xdp.clone_from(&o.net_xdp);
     }
     // Every core's disk is rooted at the data directory.
