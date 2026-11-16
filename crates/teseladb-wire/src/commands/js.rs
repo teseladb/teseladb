@@ -50,20 +50,61 @@ thread_local! {
     static STACK: Cell<usize> = const { Cell::new(teseladb_js::DEFAULT_STACK) };
     /// The globals the database's `system.js` stores, for the running command.
     static STORED: RefCell<Option<Document>> = const { RefCell::new(None) };
+}
+
+/// What the calls of the command running on this thread see ([`super::context`]).
+#[derive(Debug)]
+pub(crate) struct Context {
+    enabled: bool,
+    now_ms: i64,
+    deadline_ms: Option<u64>,
+    op_limit_ms: Option<u64>,
+    stack: usize,
+    stored: Option<Document>,
+    interrupt: crate::ops::Interrupt,
+}
+
+/// Takes the state of the running command, leaving a new thread's.
+pub(crate) fn take_context() -> Context {
+    Context {
+        enabled: ENABLED.replace(true),
+        now_ms: NOW_MS.replace(0),
+        deadline_ms: DEADLINE_MS.replace(None),
+        op_limit_ms: OP_LIMIT_MS.replace(None),
+        stack: STACK.get(),
+        stored: STORED.with(|s| s.borrow_mut().take()),
+        interrupt: INTERRUPT.with(|i| i.replace(crate::ops::Interrupt::default())),
+    }
+}
+
+/// Puts back what [`take_context`] took.
+pub(crate) fn put_context(c: Context) {
+    ENABLED.set(c.enabled);
+    NOW_MS.set(c.now_ms);
+    DEADLINE_MS.set(c.deadline_ms);
+    OP_LIMIT_MS.set(c.op_limit_ms);
+    STACK.set(c.stack);
+    STORED.with(|s| *s.borrow_mut() = c.stored);
+    INTERRUPT.with(|i| *i.borrow_mut() = c.interrupt);
+}
+
+thread_local! {
     /// What `killOp` raises for the operation running on this thread, one for the thread's
-    /// whole life: an operation takes it without allocating.
-    static INTERRUPT: crate::ops::Interrupt = crate::ops::Interrupt::default();
+    /// whole life (and one for each command that waits in an engine thread, which takes it with
+    /// its [`Context`]): an operation takes it without allocating.
+    static INTERRUPT: RefCell<crate::ops::Interrupt> =
+        RefCell::new(crate::ops::Interrupt::default());
 }
 
 /// This thread's interrupt flag, which the calls of the running operation read with their
 /// deadline, so that `killOp` stops a long script (019 FR-026).
 pub(crate) fn thread_interrupt() -> crate::ops::Interrupt {
-    INTERRUPT.with(Clone::clone)
+    INTERRUPT.with(|i| i.borrow().clone())
 }
 
 /// Whether `killOp` raised the running operation's flag.
 fn interrupted() -> bool {
-    INTERRUPT.with(crate::ops::Interrupt::raised)
+    INTERRUPT.with(|i| i.borrow().raised())
 }
 
 /// The operators that run JavaScript.

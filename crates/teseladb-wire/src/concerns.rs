@@ -553,6 +553,17 @@ std::thread_local! {
         const { std::cell::RefCell::new((None, None)) };
 }
 
+/// The cluster's default concerns of the command running on this thread, taken (the thread is
+/// left without), for [`crate::commands::context`].
+pub(crate) fn take_defaults() -> (Option<Level>, Option<WriteConcernArgs>) {
+    DEFAULTS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+/// Puts back what [`take_defaults`] took.
+pub(crate) fn put_defaults(v: (Option<Level>, Option<WriteConcernArgs>)) {
+    DEFAULTS.with(|d| *d.borrow_mut() = v);
+}
+
 /// Runs `f`, a command, with the cluster's default read level and write concern; the previous
 /// ones come back after it, also when it unwinds.
 pub fn with_defaults<T>(

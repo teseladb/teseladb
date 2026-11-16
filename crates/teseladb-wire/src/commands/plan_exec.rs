@@ -167,6 +167,17 @@ std::thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The indexes query settings allow for the command running on this thread, taken, for
+/// [`super::context`].
+pub(crate) fn take_allowed() -> Option<(u32, Vec<Value>)> {
+    ALLOWED.with(|a| a.borrow_mut().take())
+}
+
+/// Puts back what [`take_allowed`] took.
+pub(crate) fn put_allowed(v: Option<(u32, Vec<Value>)>) {
+    ALLOWED.with(|a| *a.borrow_mut() = v);
+}
+
 /// Runs `f` with only the indexes `allowed` (names or key patterns) plannable on collection
 /// `coll`.
 pub(crate) fn with_allowed_indexes<R>(coll: u32, allowed: Vec<Value>, f: impl FnOnce() -> R) -> R {
