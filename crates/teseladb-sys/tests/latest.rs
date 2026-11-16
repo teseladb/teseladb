@@ -1,6 +1,7 @@
 //! A value read by any thread and replaced now and then (012 FR-008): the newest value is read,
 //! every value set is dropped once with the holder, and readers on other threads see each value
 //! whole while one thread replaces it.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

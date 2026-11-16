@@ -1,5 +1,6 @@
 //! The list any thread adds to and one thread empties (012 FR-005): order, values left in it when
 //! it goes, and several threads adding while one takes.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

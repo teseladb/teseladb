@@ -1,5 +1,6 @@
 //! The ring of one producer and one consumer (012 FR-005): order, a full ring, values left in it
 //! when it goes, and two threads passing values through it.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

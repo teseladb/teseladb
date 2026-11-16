@@ -1,7 +1,8 @@
 //! Minimal FFI with the operating system for what `std` does not offer.
 //!
 //! Every `extern "C"` function is wrapped in a safe function that documents with `// SAFETY:` why
-//! the call is sound. Linux and macOS only.
+//! the call is sound. Linux only (D-177): on every other target the crate is empty.
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![allow(unsafe_code)]
 
@@ -10,81 +11,33 @@ use std::io;
 use std::os::fd::AsRawFd;
 
 pub mod aligned;
-pub mod alloc_count;
 pub mod handoff;
 pub mod host;
-pub mod huge_pool;
 pub mod latest;
-#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-/// io_uring (Linux only, 012 FR-001).
-#[cfg(target_os = "linux")]
+/// io_uring (012 FR-001).
 pub use linux::io_uring as uring;
-/// Network namespaces and `veth` pairs, for the tests of AF_XDP (Linux only, 012 FR-033).
-#[cfg(target_os = "linux")]
+/// Network namespaces and `veth` pairs, for the tests of AF_XDP (012 FR-033).
 pub use linux::netns;
-/// AF_XDP and its XDP program (Linux only, 012 FR-033).
-#[cfg(target_os = "linux")]
+/// AF_XDP and its XDP program (012 FR-033).
 pub use linux::xdp;
-pub mod memory_limit;
-pub mod numa;
 pub mod poll;
+pub mod process;
 pub mod ring;
-pub mod signal;
 
-#[cfg(target_os = "linux")]
 use linux as os;
-#[cfg(target_os = "macos")]
-use macos as os;
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("TeselaDB only builds for Linux and macOS");
-
-/// Durability on macOS, where `fsync(2)` leaves the data in the drive's cache and only
-/// `F_FULLFSYNC` makes it durable, at the cost of flushing the whole drive (H-015 of the native
-/// tests): a file is pushed with [`push_to_drive`] and then the drive flushed with
-/// [`flush_drive`].
-#[cfg(target_os = "macos")]
-pub mod drive {
-    use std::fs::File;
-    use std::io;
-
-    /// `fsync(2)`: the file's data and metadata go to the drive.
-    pub fn push_to_drive(file: &File) -> io::Result<()> {
-        crate::os::push_to_drive(file)
-    }
-
-    /// `fcntl(F_FULLFSYNC)`: the drive writes its whole cache to permanent storage.
-    pub fn flush_drive(file: &File) -> io::Result<()> {
-        crate::os::flush_drive(file)
-    }
-}
 
 /// Sends what `file` has written so far towards the device without waiting for a flush of the
-/// drive (`sync_file_range` with `SYNC_FILE_RANGE_WRITE` on Linux, `fsync` on macOS, which leaves
-/// the data in the drive's cache). A large file written this way as it grows leaves little for
-/// the sync that ends it, so that sync no longer holds the drive's flush, and every sync of the
-/// other logs behind it, for the time of the whole file (H-049 of the native tests).
+/// drive (`sync_file_range` with `SYNC_FILE_RANGE_WRITE`). A large file written this way as it
+/// grows leaves little for the sync that ends it, so that sync no longer holds the drive's flush,
+/// and every sync of the other logs behind it, for the time of the whole file (H-049 of the
+/// native tests).
 ///
 /// # Errors
 ///
 /// The error of the system call.
 pub fn write_behind(file: &std::fs::File) -> io::Result<()> {
     os::write_behind(file)
-}
-
-/// Asks the system to run the calling thread on its fastest cores. On macOS, whose scheduler
-/// places a thread by its quality-of-service class, the thread takes the highest class
-/// (`QOS_CLASS_USER_INTERACTIVE`), so that it is not left on an efficiency core while the
-/// others are busy; elsewhere it does nothing.
-///
-/// # Errors
-///
-/// The error of the system call.
-pub fn favor_current_thread() -> io::Result<()> {
-    os::favor_current_thread()
 }
 
 /// `flock(2)` operations.
@@ -107,7 +60,7 @@ pub fn effective_uid() -> u32 {
 /// Largest request `getentropy(3)` accepts at once.
 const GETENTROPY_MAX: usize = 256;
 
-/// Fills `buf` from the operating system's random generator (`getentropy(3)`, Linux and macOS):
+/// Fills `buf` from the operating system's random generator (`getentropy(3)`):
 /// the seed of the cryptographic generators of `teseladb-crypto` (013 FR-001).
 pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     for chunk in buf.chunks_mut(GETENTROPY_MAX) {

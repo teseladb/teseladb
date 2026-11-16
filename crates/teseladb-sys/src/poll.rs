@@ -1,5 +1,5 @@
-//! Waiting for I/O events: epoll (Linux) or kqueue (macOS), level-triggered, with a waker that can
-//! be used from other threads.
+//! Waiting for I/O events: epoll, level-triggered, with a waker that can be used from other
+//! threads.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -25,8 +25,7 @@ impl Interest {
     pub const BOTH: Interest = Interest { read: true, write: true };
 }
 
-/// Event of a registered descriptor. On macOS reading and writing of the same descriptor may
-/// arrive as two events.
+/// Event of a registered descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
     /// Token it was registered with.
@@ -114,14 +113,7 @@ fn check_token(token: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Pins the current thread to CPU `cpu`. Returns `false` where the system does not allow it (macOS).
-pub fn pin_to_cpu(cpu: usize) -> io::Result<bool> {
-    os::pin_to_cpu(cpu)
-}
-
-/// Milliseconds for the wait (rounded up so it never wakes early). Used by epoll; kqueue takes
-/// the exact duration.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Milliseconds for the wait (rounded up so it never wakes early).
 pub(crate) fn timeout_ms(timeout: Option<Duration>) -> i32 {
     match timeout {
         None => -1,
@@ -247,16 +239,5 @@ mod tests {
         // A wake-up before waiting is not lost.
         p.waker().wake().unwrap();
         assert!(woken(&p, &mut ev));
-    }
-
-    #[test]
-    fn pinning_does_not_fail() {
-        // On Linux it pins the thread to CPU 0; on macOS it is not available.
-        let r = std::thread::spawn(|| pin_to_cpu(0)).join().unwrap().unwrap();
-        assert_eq!(r, cfg!(target_os = "linux"));
-        assert!(
-            std::thread::spawn(|| pin_to_cpu(1 << 20)).join().unwrap().is_err()
-                || cfg!(target_os = "macos")
-        );
     }
 }
