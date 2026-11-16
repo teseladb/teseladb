@@ -67,10 +67,14 @@ const TIMESTAMP_BITS: usize = 63; // value bits of a signed 64-bit timestamp
 // The last bucket is reserved for active timers with timeout <= _last.
 const N_BUCKETS: usize = TIMESTAMP_BITS + 1;
 
-/// Number of leading zero bits of the timestamp as an unsigned 64-bit value.
+/// Number of leading zero bits of the timestamp among its value bits (the sign bit is not
+/// counted), as the reference's `bitsets::count_leading_zeros<long>` returns:
+/// `__builtin_clzl((unsigned long)value) - 1`. Bucket `i` then holds the timers whose deadline
+/// first differs from the last expiry in value bit `62 - i`, so a deadline one tick past an
+/// even last expiry goes to bucket 62, not to the last bucket (kept for deadlines already past).
 #[inline]
 fn count_leading_zeros(x: TimestampT) -> usize {
-    (x as u64).leading_zeros() as usize
+    ((x as u64).leading_zeros() as usize).wrapping_sub(1)
 }
 
 /// A data structure designed for holding and expiring timers. It's
@@ -382,5 +386,29 @@ where
             }
         }
         self.non_empty_buckets = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{N_BUCKETS, count_leading_zeros};
+
+    // The reference counts the value bits of the signed timestamp: `clzl(x) - 1`.
+    #[test]
+    fn leading_zeros_count_the_value_bits_of_a_signed_timestamp() {
+        assert_eq!(count_leading_zeros(1), 62);
+        assert_eq!(count_leading_zeros(3), 61);
+        assert_eq!(count_leading_zeros(i64::MAX), 0);
+        assert_eq!(count_leading_zeros(1 << 40), 22);
+    }
+
+    // A deadline one tick past an even last expiry differs from it in the lowest bit only: its
+    // bucket is a bucket of future deadlines, below the last one (kept for those already past).
+    #[test]
+    fn a_deadline_one_tick_after_the_last_expiry_has_a_bucket_of_its_own() {
+        for last in [0i64, 2, 1_000_000_000, 1 << 50] {
+            let index = count_leading_zeros((last + 1) ^ last);
+            assert!(index < N_BUCKETS - 1, "last {last}: index {index}");
+        }
     }
 }
