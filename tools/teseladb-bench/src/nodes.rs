@@ -44,7 +44,7 @@ pub fn config(a: &NodeArgs) -> Result<NodeConfig, String> {
 pub fn run_process(args: &[String]) -> i32 {
     let made = NodeArgs::parse(args).and_then(|a| config(&a));
     match made {
-        Ok(cfg) => run_node_process(args, &|_| cfg.clone()),
+        Ok(cfg) => run_node_process(args, &|_: &NodeArgs| cfg.clone()),
         Err(e) => {
             println!("error usage {e}");
             USAGE

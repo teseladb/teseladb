@@ -445,7 +445,7 @@ mod tests {
     /// The cases share the process's one engine (D4): they run in order in one test.
     #[test]
     fn the_generator_keeps_its_rate_counts_from_the_due_instant_and_reports_failures() {
-        let all_ok: Success = Arc::new(|_| true);
+        let all_ok: Success = Arc::new(|_: &[u8]| true);
         // A stall of the server shows in the latency and the client keeps its rate.
         let addr = server(Duration::from_millis(300), None);
         let m = run(addr, plan(1, 1), &ping(), &all_ok).unwrap();
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(m.answered + m.failed, m.sent);
 
         // Answers that are not a success count as failed.
-        let none_ok: Success = Arc::new(|_| false);
+        let none_ok: Success = Arc::new(|_: &[u8]| false);
         let m = run(addr, plan(1, 1), &ping(), &none_ok).unwrap();
         assert_eq!((m.answered, m.failed), (0, m.sent));
 
