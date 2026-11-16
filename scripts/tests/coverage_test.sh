@@ -10,7 +10,10 @@
 # `copies` alone, fail on the workspace naming `half`, fail naming the test binary of `failing` after
 # reporting its coverage, and give in show.txt the sum of the counts of every copy of a line (each
 # binary read with its own profile: a profile merged from all of them adds to each binary what the
-# others ran, and llvm-cov's own listing keeps one copy).
+# others ran, and llvm-cov's own listing keeps one copy). Two more crates check that a test program
+# with its own `main` (`ownmain`) is measured and that a crate is named by its folder (`renamed-dir`,
+# package `renamed`), as the engine is; an unknown crate and, outside Linux, a Linux-only one are
+# usage errors.
 #   scripts/tests/coverage_test.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -160,6 +163,20 @@ for t in a b; do
   printf '#[test]\nfn once_here() {\n    assert_eq!(copies::twice(2), 4);\n}\n' > "$WORK/crates/copies/tests/$t.rs"
 done
 
+# `ownmain`: its only test is a program with its own `main` (`harness = false`, 023 FR-040).
+mkdir -p "$WORK/crates/ownmain/src" "$WORK/crates/ownmain/tests"
+printf '[package]\nname = "ownmain"\nversion = "0.1.0"\nedition = "2024"\n\n[lints]\nworkspace = true\n\n[[test]]\nname = "prog"\nharness = false\n' \
+  > "$WORK/crates/ownmain/Cargo.toml"
+cp "$WORK/crates/full/src/lib.rs" "$WORK/crates/ownmain/src/lib.rs"
+printf 'fn main() {\n    assert_eq!(ownmain::sign(-3), -1);\n    assert_eq!(ownmain::sign(3), 1);\n}\n' \
+  > "$WORK/crates/ownmain/tests/prog.rs"
+# `renamed`: a crate whose folder is not its package's name, as the engine's (`teseladb-engine`,
+# package `teseladb`).
+mkdir -p "$WORK/crates/renamed-dir/src"
+printf '[package]\nname = "renamed"\nversion = "0.1.0"\nedition = "2024"\n\n[lints]\nworkspace = true\n' \
+  > "$WORK/crates/renamed-dir/Cargo.toml"
+cp "$WORK/crates/full/src/lib.rs" "$WORK/crates/renamed-dir/src/lib.rs"
+
 # expect NAME CODE PATTERN ARGS...: runs the script with ARGS and checks the exit code and output.
 expect() {
   local name=$1 code=$2 pattern=$3 out rc=0
@@ -197,6 +214,19 @@ else
   failed=$((failed + 1))
   echo "FAILED: show.txt sums the counts of the three copies of a line (3)"
   echo "  | ${detail//$'\n'/$'\n'  | }" | head -20
+fi
+expect "a program with its own main is measured" 0 \
+  "^ownmain +lines 100.00 % +functions 100.00 % +branches 100.00 %" ownmain
+expect "a crate is named by its folder and built by its package's name" 0 \
+  "^renamed-dir +lines 100.00 % +functions 100.00 % +branches 100.00 %" renamed-dir
+expect "an unknown crate is a usage error" 2 "^coverage: no crate nowhere in crates/ or tools/$" nowhere
+if [[ $(uname -s) != Linux ]]; then
+  mkdir -p "$WORK/crates/teseladb-io/src"
+  printf '[package]\nname = "teseladb-io"\nversion = "0.1.0"\nedition = "2024"\n' \
+    > "$WORK/crates/teseladb-io/Cargo.toml"
+  : > "$WORK/crates/teseladb-io/src/lib.rs"
+  expect "a Linux-only crate outside Linux is sent to TESELADB_COV_LINUX" 2 \
+    "^coverage: teseladb-io runs on Linux only: measure it with TESELADB_COV_LINUX=1$" teseladb-io
 fi
 expect "a failing test fails the run naming its binary" 1 "^coverage: tests failed: .*failing-[0-9a-f]+$" failing
 expect "the coverage of a run with a failing test is still reported" 1 "^failing +lines" failing
