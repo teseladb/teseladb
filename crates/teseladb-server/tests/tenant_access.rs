@@ -2,16 +2,24 @@
 //! the tenant does not sign in, with 18, also one that a user of the tenant created; from inside it
 //! signs in; and without a list anyone does.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
+#[cfg(target_os = "linux")]
 mod secured;
 
+#[cfg(target_os = "linux")]
 use common::{Client, batch, docs, ok, until};
+#[cfg(target_os = "linux")]
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -22,6 +30,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn code(r: &Document) -> Option<i32> {
     match r.get("code") {
         Some(Value::Int32(c)) => Some(*c),
@@ -30,6 +39,7 @@ fn code(r: &Document) -> Option<i32> {
 }
 
 /// Signs `name` in on every node and gives the code of the last answer: `None` when it signed in.
+#[cfg(target_os = "linux")]
 fn sign_in_everywhere(nodes: &[NodeProc], name: &str, want: Option<i32>) {
     for node in nodes {
         until("the access list on every node", || {
@@ -41,6 +51,7 @@ fn sign_in_everywhere(nodes: &[NodeProc], name: &str, want: Option<i32>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn only_the_sources_of_the_list_sign_in_on_any_node() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -82,3 +93,7 @@ fn only_the_sources_of_the_list_sign_in_on_any_node() {
         n.stop();
     }
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

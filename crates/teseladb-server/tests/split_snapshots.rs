@@ -8,6 +8,7 @@
 //! split over nothing. Every seed must end with every acknowledged write on every node.
 //!
 //! The run is deterministic for its seed; `TESELADB_SPLIT_SEEDS` sets how many seeds run.
+#![cfg(target_os = "linux")]
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

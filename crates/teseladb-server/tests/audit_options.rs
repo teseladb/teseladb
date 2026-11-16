@@ -2,6 +2,7 @@
 //! `--auditSchema` and `--setParameter auditAuthorizationSuccess`, their names in the
 //! configuration file and in `getCmdLineOpts`, and the reference server's enterprise edition
 //! 9.0.4's errors (measured on 31-10-2026).
+#![cfg(target_os = "linux")]
 
 use teseladb_auth::audit::Schema;
 use teseladb_server::cli::{Command, parse, parse_with};

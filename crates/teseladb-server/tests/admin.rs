@@ -2,15 +2,22 @@
 //! `setClusterParameter` replicated through Group 0 and read on every node, `currentOp` with the
 //! client's address, `killOp` and `maxTimeMS` checked by the node.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::MemDisk;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::Node;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -31,12 +38,14 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn parameter(r: &Document) -> Option<Value> {
     let Some(Value::Array(list)) = r.get("clusterParameters") else { return None };
     let Some(Value::Document(p)) = list.first() else { return None };
     p.get("readOperations").cloned()
 }
 
+#[cfg(target_os = "linux")]
 fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
     let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
@@ -69,6 +78,7 @@ fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
     assert!(first.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -93,6 +103,7 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn rotate_certificates_on_a_node_without_tls_has_nothing_to_load() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -101,3 +112,7 @@ fn rotate_certificates_on_a_node_without_tls_has_nothing_to_load() {
     assert!(ok(&r), "{r:?}");
     node.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

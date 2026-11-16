@@ -1,6 +1,7 @@
 //! `--keyFile` and `--clusterAuthMode` (013 T046, FR-034), as the reference server 9.0.4 checks
 //! them (measured on 31-10-2026; every fault stops the start with code 1), and the warning a node
 //! gives at start for each option that relaxes the secure default (constitution IX).
+#![cfg(target_os = "linux")]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

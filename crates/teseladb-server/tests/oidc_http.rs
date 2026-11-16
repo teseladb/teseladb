@@ -6,6 +6,7 @@
 //! The resource's URI never comes from the `Host` the client sends: it is `mcpOptions.resourceUri`
 //! or, without it, the address the HTTP port listens on; a node listening only on wildcard
 //! addresses takes no token on `/mcp` until `mcpOptions.resourceUri` is set.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

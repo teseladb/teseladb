@@ -2,6 +2,7 @@
 //! 005 FR-003, 007 T019 coverage): the disk of these tests fails every operation, or every read,
 //! on the files whose path holds a given text, the way a damaged or full disk fails, with
 //! [`MemDisk`] behind it for everything else.
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

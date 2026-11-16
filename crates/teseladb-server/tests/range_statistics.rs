@@ -2,6 +2,7 @@
 //! whose keys it rewrote, and the node's statistics thread reads their indexes and publishes
 //! their statistics; the planner then takes the plan the estimates find far cheaper without a
 //! trial.
+#![cfg(target_os = "linux")]
 
 mod common;
 

@@ -4,6 +4,7 @@
 //! reaches the audit log), a port that stops while a thread runs, and the keeper's TTL monitor and
 //! refresh on a short period. The threads start through [`Hooks`], which these tests make fail or
 //! start late.
+#![cfg(target_os = "linux")]
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};

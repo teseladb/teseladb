@@ -1,10 +1,11 @@
 //! The command line of the contract `cli-base.md` (001 FR-017): defaults, every option in both
 //! forms, `start` without `--insecure` until 013, the insecure-mode rules, the errors and the
 //! binary's exit codes.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::process::Command as Process;
-use teseladb_io::node_disk::{DirectIo, IoExecutor};
+use teseladb_io::engine::DirectIo;
 
 use teseladb_server::cli::{Command, StartOpts, USAGE, parse, parse_with};
 use teseladb_server::log::{Format, Level};
@@ -31,7 +32,7 @@ fn start_defaults() {
     assert_eq!(o.dbpath, PathBuf::from("./teseladb-data"));
     assert_eq!(o.cores, None, "the machine's logical cores");
     assert_eq!(o.memory_limit, None, "three quarters of the process's memory");
-    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Auto, DirectIo::Auto));
+    assert_eq!(o.direct_io, DirectIo::Auto);
     assert_eq!(o.cpu_list, None, "the CPUs the process may use");
     assert_eq!((o.bind_ip.as_str(), o.port), ("127.0.0.1", 27017));
     assert_eq!(o.peer_listen.to_string(), "127.0.0.1:27100");
@@ -64,17 +65,19 @@ fn every_start_option_in_both_forms() {
     assert_eq!(start("start --insecure --memory-limit 8G").memory_limit, Some(8 << 30));
     assert_eq!(start("start --insecure --memory-limit=1048576").memory_limit, Some(1 << 20));
     assert!(bad("start --insecure --memory-limit 3X").starts_with("--memory-limit: "));
-    // The disk executor, O_DIRECT and the cores' CPUs (012 FR-003, FR-006, FR-007).
-    let o = start("start --insecure --io-executor uring --direct-io off --cpu-list 0-2,7");
-    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Uring, DirectIo::Off));
+    // The engine's files and the cores' CPUs (012 FR-003, FR-006; 023 FR-027, FR-033).
+    let o = start("start --insecure --direct-io off --cpu-list 0-2,7");
+    assert_eq!(o.direct_io, DirectIo::Off);
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 7]));
-    assert_eq!(start("start --insecure --io-executor threads").io_executor, IoExecutor::Threads);
     assert_eq!(start("start --insecure --direct-io on").direct_io, DirectIo::On);
-    // 012 FR-025: off unless asked for.
-    assert!(!start("start --insecure").io_uring_sqpoll);
-    assert!(start("start --insecure --io-uring-sqpoll").io_uring_sqpoll);
-    assert!(bad("start --insecure --io-executor fast").starts_with("--io-executor: "));
     assert!(bad("start --insecure --direct-io yes").starts_with("--direct-io: "));
+    // The options that only chose between TeselaDB's own executors are gone (023 FR-033):
+    // unknown options, as any other.
+    let gone = bad("start --insecure --io-executor uring");
+    assert!(gone.contains("unknown option --io-executor"), "{gone}");
+    let gone = bad("start --insecure --io-uring-sqpoll");
+    assert!(gone.contains("unknown option --io-uring-sqpoll"), "{gone}");
+    assert!(!USAGE.contains("--io-executor") && !USAGE.contains("--io-uring-sqpoll"));
     assert!(bad("start --insecure --cpu-list 3-1").starts_with("--cpu-list: "));
     let few = bad("start --insecure --cores 4 --cpu-list 0-1");
     assert!(few.contains("--cpu-list names 2 CPUs for 4 cores"), "{few}");

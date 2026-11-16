@@ -1,4 +1,5 @@
 //! Log lines as text and JSON, level filter, escapes and timestamps.
+#![cfg(target_os = "linux")]
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};

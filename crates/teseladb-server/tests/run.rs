@@ -1,6 +1,7 @@
 //! `teseladb_server::run` end to end without a separate process (001 FR-017): `start` with a log
 //! file in JSON, replaced or appended, and every error with its exit code (1 execution, 2
 //! usage); the development cluster, whose nodes are processes of the binary, as a process too.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -142,7 +143,7 @@ fn version_help_and_the_development_cluster() {
         ready.push(line);
     }
     assert!(ready[0].starts_with("ready node_id=1 ") && ready[1].starts_with("ready node_id=2 "));
-    teseladb_sys::signal::send_stop(dev.id(), teseladb_sys::signal::Stop::Terminate).unwrap();
+    teseladb_sys::process::send_stop(dev.id(), teseladb_sys::process::Stop::Terminate).unwrap();
     assert_eq!(dev.wait().unwrap().code(), Some(0));
     let mut rest = String::new();
     std::io::Read::read_to_string(&mut out, &mut rest).unwrap();

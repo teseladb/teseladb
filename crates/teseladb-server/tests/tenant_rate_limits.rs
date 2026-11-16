@@ -4,21 +4,33 @@
 //! `IngressRequestRateLimitExceeded` and the labels `SystemOverloadedError` and `RetryableError`;
 //! each node applies the whole limits, and the service user is held by none of them.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
+#[cfg(target_os = "linux")]
 mod secured;
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, batch, docs, ok, until};
+#[cfg(target_os = "linux")]
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
+#[cfg(target_os = "linux")]
 use teseladb_server::tenant_limits::{RETRYABLE, SYSTEM_OVERLOADED};
+#[cfg(target_os = "linux")]
 use teseladb_wire::error::RETRYABLE_WRITE_ERROR;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(&[
 ("each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer", each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer),
@@ -27,8 +39,10 @@ fn main() {
 ], &[("secured", |a| secured::config(a.join.clone()))]);
 }
 
+#[cfg(target_os = "linux")]
 const RATE_LIMITED: i32 = 462;
 
+#[cfg(target_os = "linux")]
 fn code(r: &Document) -> Option<i32> {
     match r.get("code") {
         Some(Value::Int32(c)) => Some(*c),
@@ -36,6 +50,7 @@ fn code(r: &Document) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn labels(r: &Document) -> Vec<String> {
     match r.get("errorLabels") {
         Some(Value::Array(all)) => all
@@ -50,6 +65,7 @@ fn labels(r: &Document) -> Vec<String> {
 }
 
 /// Three secured nodes with tenant `acme`, its user `ann` and `root` signed in on the first.
+#[cfg(target_os = "linux")]
 fn cluster() -> (Vec<NodeProc>, Client) {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -70,6 +86,7 @@ fn cluster() -> (Vec<NodeProc>, Client) {
 
 /// Waits until `node` holds limit `key` of `acme` at `value`: a change reaches the other nodes a
 /// moment after the node that took it.
+#[cfg(target_os = "linux")]
 fn reached(node: &NodeProc, key: &str, value: u64) {
     let want = format!("\"{key}\":{value}");
     until(&format!("{key} {value} on the node"), || {
@@ -79,6 +96,7 @@ fn reached(node: &NodeProc, key: &str, value: u64) {
 }
 
 /// A connection of Ann on `node`, signed in once the user and the limits reached it.
+#[cfg(target_os = "linux")]
 fn ann(node: &NodeProc) -> Client {
     until("Ann signs in", || {
         let mut c = Client::new(node);
@@ -87,6 +105,7 @@ fn ann(node: &NodeProc) -> Client {
 }
 
 /// Whether the node closed `c` without answering.
+#[cfg(target_os = "linux")]
 fn closed(c: &mut Client) -> bool {
     c.s.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
     let mut b = [0u8; 1];
@@ -95,6 +114,7 @@ fn closed(c: &mut Client) -> bool {
 
 /// A connection of Ann on `node` that sends the last step of its sign-in without reading the
 /// answer.
+#[cfg(target_os = "linux")]
 fn third_sign_in(node: &NodeProc) -> Client {
     let mut third = Client::new(node);
     third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -117,12 +137,14 @@ fn third_sign_in(node: &NodeProc) -> Client {
     third
 }
 
+#[cfg(target_os = "linux")]
 fn stop(nodes: Vec<NodeProc>) {
     for n in nodes.into_iter().rev() {
         n.stop();
     }
 }
 
+#[cfg(target_os = "linux")]
 fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer() {
     let (nodes, _root) = cluster();
     admin(&nodes[0], &["tenant", "limits", "acme", "--max-connections", "2"]);
@@ -146,6 +168,7 @@ fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without
     stop(nodes);
 }
 
+#[cfg(target_os = "linux")]
 fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labels() {
     let (nodes, _root) = cluster();
     admin(&nodes[0], &["tenant", "limits", "acme", "--ops-per-second", "20"]);
@@ -264,6 +287,7 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
     stop(nodes);
 }
 
+#[cfg(target_os = "linux")]
 fn a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node() {
     let (nodes, _root) = cluster();
     let mut slow = ann(&nodes[0]);
@@ -295,3 +319,7 @@ fn a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node() {
     assert_eq!(batch(&r, "firstBatch").len(), 1, "{r:?}");
     stop(nodes);
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -1,6 +1,7 @@
 //! The `config` database (007 T031, FR-017, contract `config-db.md`): a node shows itself as a
 //! shard and a router, the catalog's databases and the cluster's identifier, generated from
 //! Group 0; it lists those collections and refuses to write them.
+#![cfg(target_os = "linux")]
 
 mod common;
 

@@ -3,6 +3,7 @@
 //! CA, `root` signs in with that password, a client certificate of `$external` signed by that CA
 //! enters the administration port with `clusterAdmin`, files that are not 0600 stop the start, and
 //! a later start with another directory changes nothing.
+#![cfg(target_os = "linux")]
 
 mod started;
 

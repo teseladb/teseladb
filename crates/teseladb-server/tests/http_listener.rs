@@ -2,6 +2,7 @@
 //! prior knowledge without TLS, HTTP/2 chosen by ALPN over TLS, answers in pieces (Server-Sent
 //! Events), the request limits with `429` and `Retry-After`, and CORS from
 //! `httpOptions.cors.allowedOrigins`.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

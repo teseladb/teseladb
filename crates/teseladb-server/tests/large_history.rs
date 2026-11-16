@@ -4,19 +4,29 @@
 //! the forward's 5 s with 89 «the range did not answer in time» (battery e2e, `replset-oplog`
 //! steps 8, 9 and 11; `cs-split-large` steps 6 to 9 came back empty).
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_lsm::LsmConfig;
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::MemDisk;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::{Node, NodeConfig};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -42,15 +52,20 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const DB: &str = "big";
 /// Bytes of the string each large document carries: two versions pass a frame's 16 MiB.
+#[cfg(target_os = "linux")]
 const LARGE: usize = 9 << 20;
 /// Longest a read of the history may take: under the forward's 5 s with room for a busy machine.
+#[cfg(target_os = "linux")]
 const ANSWER_WITHIN: Duration = Duration::from_secs(4);
 /// `maxTimeMS` of a stream's `getMore`, as in `cs-split-large`.
+#[cfg(target_os = "linux")]
 const GET_MORE_MS: i32 = 3_000;
 
 /// Three nodes of two cores, the second and third joining the first.
+#[cfg(target_os = "linux")]
 fn cluster() -> Vec<NodeProc> {
     let start = |join: Vec<String>| teseladb_server::procs::start_self("node", &join, None, &[]);
     let first = start(Vec::new());
@@ -64,10 +79,12 @@ fn cluster() -> Vec<NodeProc> {
     nodes
 }
 
+#[cfg(target_os = "linux")]
 fn large(id: i32, fill: char) -> Document {
     Document::new().with("_id", id).with("s", fill.to_string().repeat(LARGE))
 }
 
+#[cfg(target_os = "linux")]
 fn insert(c: &mut Client, coll: &str, d: Document) {
     let documents = Value::Array(vec![Value::Document(d)]);
     let r = c.run(DB, Document::new().with("insert", coll).with("documents", documents));
@@ -77,12 +94,14 @@ fn insert(c: &mut Client, coll: &str, d: Document) {
 /// Creates `coll` and gives the `operationTime` of the creation: the streams start there, so
 /// that a stream on any node has every write after it, whatever the node's clock (the clients of
 /// different nodes share no `clusterTime`).
+#[cfg(target_os = "linux")]
 fn create(c: &mut Client, cmd: Document) -> Value {
     let r = c.run(DB, cmd);
     assert!(ok(&r), "{r:?}");
     r.get("operationTime").cloned().expect("an operationTime")
 }
 
+#[cfg(target_os = "linux")]
 fn replace(c: &mut Client, coll: &str, d: Document) {
     let q = Document::new().with("_id", d.get("_id").cloned().expect("an _id"));
     let u = Document::new().with("q", q).with("u", d);
@@ -91,6 +110,7 @@ fn replace(c: &mut Client, coll: &str, d: Document) {
 }
 
 /// The first oplog entry of `ns` with operation `op`, and how long the read took.
+#[cfg(target_os = "linux")]
 fn first_entry(c: &mut Client, ns: &str, op: &str) -> (Document, Duration) {
     let filter = Document::new().with("ns", ns).with("op", op);
     let find = Document::new().with("find", "oplog.rs").with("filter", filter).with("limit", 1);
@@ -105,6 +125,7 @@ fn first_entry(c: &mut Client, ns: &str, op: &str) -> (Document, Duration) {
 }
 
 /// A stream on `coll` from mark `at`, and its cursor.
+#[cfg(target_os = "linux")]
 fn watch(c: &mut Client, coll: &str, at: &Value) -> i64 {
     let spec = Document::new().with("startAtOperationTime", at.clone());
     let stage = Document::new().with("$changeStream", spec);
@@ -125,6 +146,7 @@ fn watch(c: &mut Client, coll: &str, at: &Value) -> i64 {
 
 /// The events of `getMore`s on cursor `id` until `n` arrived; each `getMore` answers within its
 /// `maxTimeMS`.
+#[cfg(target_os = "linux")]
 fn events(c: &mut Client, coll: &str, id: i64, n: usize) -> Vec<Document> {
     let mut got = Vec::new();
     let end = Instant::now() + Duration::from_secs(30);
@@ -147,6 +169,7 @@ fn events(c: &mut Client, coll: &str, id: i64, n: usize) -> Vec<Document> {
     got
 }
 
+#[cfg(target_os = "linux")]
 fn kinds(events: &[Document]) -> Vec<String> {
     events
         .iter()
@@ -159,6 +182,7 @@ fn kinds(events: &[Document]) -> Vec<String> {
 
 /// Small documents and two versions of 9 MiB: every node reads the first insert and the
 /// replacement of the collection from the oplog in time.
+#[cfg(target_os = "linux")]
 fn every_node_reads_large_versions_from_the_oplog() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -180,6 +204,7 @@ fn every_node_reads_large_versions_from_the_oplog() {
 
 /// A stream on each node gets the insert and the replacement of 9 MiB written within a second,
 /// each `getMore` within its `maxTimeMS`.
+#[cfg(target_os = "linux")]
 fn a_stream_on_every_node_gets_large_events() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -201,12 +226,14 @@ fn a_stream_on_every_node_gets_large_events() {
     nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
+#[cfg(target_os = "linux")]
 fn lsid() -> Document {
     Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] })
 }
 
 /// Two documents of 9 MiB written by one transaction share their range's commit mark, so no
 /// answer cut by marks keeps them apart: a stream on every node still gets both.
+#[cfg(target_os = "linux")]
 fn a_stream_on_every_node_gets_a_transaction_s_large_writes() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -240,6 +267,7 @@ fn a_stream_on_every_node_gets_a_transaction_s_large_writes() {
 }
 
 /// The stream of `cs-split-large` on `coll`, with `$changeStreamSplitLargeEvent` if `split`.
+#[cfg(target_os = "linux")]
 fn watch_images(c: &mut Client, coll: &str, at: &Value, split: bool) -> i64 {
     let spec = Document::new()
         .with("fullDocument", "updateLookup")
@@ -268,6 +296,7 @@ fn watch_images(c: &mut Client, coll: &str, at: &Value, split: bool) -> i64 {
 
 /// One `getMore` of batch size 1 with the `maxTimeMS` of `cs-split-large`: its reply, which
 /// comes within that time.
+#[cfg(target_os = "linux")]
 fn one_more(c: &mut Client, coll: &str, id: i64) -> Document {
     let more = Document::new()
         .with("getMore", Value::Int64(id))
@@ -282,6 +311,7 @@ fn one_more(c: &mut Client, coll: &str, id: i64) -> Document {
 }
 
 /// The single event of a `getMore` of batch size 1.
+#[cfg(target_os = "linux")]
 #[track_caller]
 fn the_event(r: &Document) -> Document {
     assert!(ok(r), "{r:?}");
@@ -296,6 +326,7 @@ fn the_event(r: &Document) -> Document {
 /// its event within its `maxTimeMS` (before, the stream on a node that did not lead the range
 /// came back empty); without the stage the first `getMore` fails with 10334, as on a reference
 /// router.
+#[cfg(target_os = "linux")]
 fn every_node_gives_the_events_of_cs_split_large() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -370,14 +401,18 @@ fn every_node_gives_the_events_of_cs_split_large() {
 // `bytesFreed: 0` and left them on disk until their space asked for a compaction.
 
 /// The window of 1 s and a round of the threshold, which rises every second.
+#[cfg(target_os = "linux")]
 const HISTORY_SETTLE: Duration = Duration::from_secs(3);
 /// Fewest bytes the collection of the old versions frees: each is a delta of a few bytes against
 /// the next one (004 FR-035), with its key and mark, some 40 bytes of the 2 000 versions' 80 KB
 /// before compression. Whole they took 2 MB.
+#[cfg(target_os = "linux")]
 const HISTORY_FREED: i64 = 64 << 10;
 /// Most time the compactions may take to collect the versions.
+#[cfg(target_os = "linux")]
 const HISTORY_WAIT: Duration = Duration::from_secs(20);
 
+#[cfg(target_os = "linux")]
 fn compact_frees_the_versions_the_history_no_longer_keeps() {
     // Small memtables, so that the versions reach files; less than the space floor, so that no
     // compaction of everything runs by itself.
@@ -440,3 +475,7 @@ fn compact_frees_the_versions_the_history_no_longer_keeps() {
     );
     assert_eq!(r.get("n"), Some(&Value::Int32(200)), "{r:?}");
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

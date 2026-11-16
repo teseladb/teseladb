@@ -1,6 +1,7 @@
 //! `collStats` and `$collStats` from the counts each range keeps (007 FR-039, T073): after
 //! inserts, replacements that change a document's size and deletes, the documents, their bytes
 //! and the bytes of their keys come from the leaders' counts, and are those of the documents.
+#![cfg(target_os = "linux")]
 
 mod common;
 

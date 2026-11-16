@@ -2,6 +2,7 @@
 //! connections, `allowTLS` and `preferTLS` take both, `disabled` takes only plain; client
 //! certificates required, optional or not asked for, and the peer's certificate kept for
 //! X.509 authentication.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

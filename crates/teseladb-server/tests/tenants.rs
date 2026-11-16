@@ -1,5 +1,6 @@
 //! 007 T038 (FR-025): `teseladb admin tenant create|list|drop`, and a node that runs each request
 //! in its tenant: the one `$tenant` names on a connection of the default tenant.
+#![cfg(target_os = "linux")]
 
 mod common;
 

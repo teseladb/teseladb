@@ -7,21 +7,33 @@
 //! Linux the same runs on io_uring disks, where the pieces of the exported files go from the ring's
 //! registered buffers to the joining nodes (012 FR-026).
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_lsm::LsmConfig;
+#[cfg(target_os = "linux")]
 use teseladb_meta::bootstrap::DATA_START;
+#[cfg(target_os = "linux")]
 use teseladb_meta::group0::ReplicaRole;
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_server::data::DataStatus;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
+#[cfg(target_os = "linux")]
 fn main() {
     let first: procs::Test = (
         "nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder",
@@ -41,15 +53,20 @@ fn linux_tests() -> Vec<procs::Test> {
 }
 
 /// The tests of io_uring, which is Linux's: none here.
+#[cfg(target_os = "linux")]
 #[cfg(not(target_os = "linux"))]
 fn linux_tests() -> Vec<procs::Test> {
     Vec::new()
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
 const ASK: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
 const DOCS: u32 = 400;
 
+#[cfg(target_os = "linux")]
 fn config(join: Vec<String>) -> NodeConfig {
     NodeConfig {
         // Two cores: Group 0 on core 0 and the range on core 1, which talk through messages.
@@ -70,14 +87,17 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn key(i: u32) -> Vec<u8> {
     [&DATA_START[..], format!("doc-{i:05}").as_bytes()].concat()
 }
 
+#[cfg(target_os = "linux")]
 fn value(i: u32) -> Vec<u8> {
     format!("{i:05}-{}", "w".repeat(300)).into_bytes()
 }
 
+#[cfg(target_os = "linux")]
 fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + READY;
     loop {
@@ -89,15 +109,18 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn status(n: &NodeProc) -> DataStatus {
     n.data_status(ASK).expect("the range's core answers")
 }
 
 /// Writes `i` on whichever node leads the range.
+#[cfg(target_os = "linux")]
 fn put(nodes: &[&NodeProc], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
+#[cfg(target_os = "linux")]
 fn nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder() {
     join_and_lose_the_founder(|join| start_self("replicas", &join, None, &[]));
 }
@@ -122,6 +145,7 @@ fn nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers() {
 }
 
 /// The test with each node from `start`, which takes the addresses to join.
+#[cfg(target_os = "linux")]
 fn join_and_lose_the_founder(start: impl Fn(Vec<String>) -> NodeProc) {
     let n1 = start(Vec::new());
     assert!(n1.wait_ready(READY));
@@ -165,3 +189,7 @@ fn join_and_lose_the_founder(start: impl Fn(Vec<String>) -> NodeProc) {
     n2.stop();
     n3.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

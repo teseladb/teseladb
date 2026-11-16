@@ -1,5 +1,6 @@
 //! What a node reports to the diagnostic commands (006 FR-023): its options under the reference
 //! server's configuration names, its in-memory logs and the facts of the host and the process.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;

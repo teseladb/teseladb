@@ -5,6 +5,7 @@
 //! for that command forever: measured on 14-11-2026 with the shell of the chaos tests against a
 //! port that closes its connections, with `socketTimeoutMS` set). The quiesce ends once no client
 //! has started a command other than the handshake for a while, and never past its longest.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

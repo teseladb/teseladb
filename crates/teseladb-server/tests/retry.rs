@@ -2,6 +2,7 @@
 //! drops after sending a write sends it again on a new connection with the same `lsid` and
 //! `txnNumber`, and the range answers the first result without writing twice; a read sent again
 //! reads the same documents.
+#![cfg(target_os = "linux")]
 
 mod common;
 

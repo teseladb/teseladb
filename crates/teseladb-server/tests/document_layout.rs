@@ -1,6 +1,7 @@
 //! The key layout of new collections on a node (003 FR-012, D-153): every node of a fresh
 //! cluster records in Group 0 that it reads the `_id` order, so a collection created by an insert
 //! or by `create` keeps its documents in `_id` order and gives them so without a sort.
+#![cfg(target_os = "linux")]
 
 mod common;
 

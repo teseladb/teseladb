@@ -3,6 +3,7 @@
 //! merges their partial groups. The answer is the one of the same pipeline read and run in one
 //! place (a command with `let` variables never splits), the order of the groups, `$first` and
 //! `$last` included, and a pipeline whose sums do not merge exactly still answers the same.
+#![cfg(target_os = "linux")]
 
 mod common;
 

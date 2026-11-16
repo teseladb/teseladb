@@ -2,6 +2,7 @@
 //! `ping` over real sockets, compression, the awaitable `hello` with and without exhaust, the
 //! connection limit, faults that close a connection without touching the others, the options
 //! `--maxConns` and `--networkMessageCompressors`, and a node that opens the port.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

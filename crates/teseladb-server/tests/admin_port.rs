@@ -1,17 +1,25 @@
 //! The administration port and `teseladb admin` (007 FR-020, contract `admin-cli.md`): `/healthz`,
 //! `/metrics` and each subcommand against a running node, with the exit codes of the contract.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::Document;
+#[cfg(target_os = "linux")]
 use teseladb_server::admin_http::{Method, request};
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -43,11 +51,13 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn with_admin(join: Vec<String>) -> NodeConfig {
     NodeConfig { admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))), ..config(join) }
 }
 
 /// Runs `teseladb admin --node <at> <args>`: exit code, standard output and error.
+#[cfg(target_os = "linux")]
 fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
     let argv: Vec<String> =
         ["admin", "--node", at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -56,6 +66,7 @@ fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
+#[cfg(target_os = "linux")]
 fn health_and_metrics_are_served_on_the_administration_port() {
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
@@ -73,6 +84,7 @@ fn health_and_metrics_are_served_on_the_administration_port() {
     assert!(request(&at, Method::Get, "/healthz", b"").is_err(), "the port closes with the node");
 }
 
+#[cfg(target_os = "linux")]
 fn every_subcommand_works_against_a_node() {
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
@@ -160,6 +172,7 @@ fn every_subcommand_works_against_a_node() {
 
 /// What the port refuses, with the reason: a name that is not a namespace, a split key that is
 /// not a document's or falls outside the range, a merge of a range that does not exist.
+#[cfg(target_os = "linux")]
 fn refused_subcommands_say_why() {
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
@@ -199,6 +212,7 @@ fn refused_subcommands_say_why() {
     n.stop();
 }
 
+#[cfg(target_os = "linux")]
 fn usage_errors_exit_with_2() {
     for args in [
         &[][..],
@@ -219,6 +233,7 @@ fn usage_errors_exit_with_2() {
 
 /// `node drain` and `node remove` (007 T021, FR-015): a node is removed only once it holds
 /// nothing; a drained one gives its replicas to the others and closes its clients' port.
+#[cfg(target_os = "linux")]
 fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
     let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n1.wait_ready(READY));
@@ -276,6 +291,7 @@ fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
 /// A cluster of one node that changes it for another, as a dedicated cluster changes version or
 /// size (021 FR-040, FR-041): node 2 joins, node 1 drains until it is `removed` and stops, and node
 /// 2 alone answers for every document of node 1.
+#[cfg(target_os = "linux")]
 fn a_node_that_replaces_the_only_one_answers_alone_once_it_left() {
     let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n1.wait_ready(READY));
@@ -308,6 +324,7 @@ fn a_node_that_replaces_the_only_one_answers_alone_once_it_left() {
 
 /// The leaders of each range, from `teseladb admin --format json ranges`: the node each range's
 /// descriptor names (`leaderHint`).
+#[cfg(target_os = "linux")]
 fn leader_hints(at: &str) -> Vec<Option<i64>> {
     let (_, out, _) = admin(at, &["--format", "json", "ranges"]);
     let Ok(d) =
@@ -332,6 +349,7 @@ fn leader_hints(at: &str) -> Vec<Option<i64>> {
 
 /// The leaders of the ranges publish themselves in Group 0, and the balancer's moves spread them
 /// over the nodes until no node leads more than ⌈ranges / 10⌉ over another (007 T019, FR-010).
+#[cfg(target_os = "linux")]
 fn range_leaders_publish_themselves_and_spread_over_the_nodes() {
     let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n1.wait_ready(READY));
@@ -382,6 +400,7 @@ fn range_leaders_publish_themselves_and_spread_over_the_nodes() {
 /// A cluster that changes its nodes one at a time, as a change of size does (021 FR-040): a fourth node joins three,
 /// the first is drained until removed, and a fifth joins. Group 0 answers the administration port within moments of
 /// each change, through the node that stays.
+#[cfg(target_os = "linux")]
 fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
     const ANSWER: std::time::Duration = std::time::Duration::from_secs(15);
     let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
@@ -426,3 +445,7 @@ fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
         n.stop();
     }
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

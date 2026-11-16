@@ -2,6 +2,7 @@
 //! through a filter, by `_id` and by a range, an update and the sizes a client sees give the
 //! same documents and the BSON sizes, next to documents too small for a table. That they come
 //! back the same from the files after a restart is in `teseladb-lsm/tests/packed_documents.rs`.
+#![cfg(target_os = "linux")]
 
 mod common;
 

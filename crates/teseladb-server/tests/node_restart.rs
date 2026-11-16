@@ -1,6 +1,7 @@
 //! A node stopped and started again in the same process over its data directory serves reads as
 //! it serves writes (005 FR-012, 007): before, every `find` and `count` after the restart timed out
 //! with "the range did not answer in time", also over an empty collection.
+#![cfg(target_os = "linux")]
 
 mod common;
 

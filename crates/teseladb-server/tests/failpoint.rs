@@ -1,5 +1,6 @@
 //! `configureFailPoint` on a running node started with `enableTestCommands` (006 T056, FR-034):
 //! a closed connection, and a blocked one that holds only its own client.
+#![cfg(target_os = "linux")]
 
 mod common;
 

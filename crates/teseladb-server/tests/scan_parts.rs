@@ -4,6 +4,7 @@
 //! thread, so the core serves all of it. A scan on connections' threads that writes keep sending
 //! back goes in smaller parts, and each count while writers update the documents is the whole
 //! collection's.
+#![cfg(target_os = "linux")]
 
 mod common;
 

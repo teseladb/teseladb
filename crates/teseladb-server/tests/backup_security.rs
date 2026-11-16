@@ -2,6 +2,7 @@
 //! service users, and the users, roles and API keys; restored into a new cluster that already has
 //! its own `root`, the cluster has the same tenants, users, roles and keys, its users sign in with
 //! the credentials they had, and the new `root` gives way to the backup's.
+#![cfg(target_os = "linux")]
 
 mod common;
 

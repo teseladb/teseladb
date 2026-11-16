@@ -14,7 +14,7 @@ use teseladb_bson::{Document, Value};
 use teseladb_server::pki::ROOT_CREDENTIALS;
 use teseladb_server::procs::STOP_WAIT;
 use teseladb_server::run;
-use teseladb_sys::signal::{Stop, send_stop};
+use teseladb_sys::process::{Stop, send_stop};
 use teseladb_tls::{Connection, ENTROPY_LEN, Trust};
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::Certificate;

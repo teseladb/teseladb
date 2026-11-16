@@ -8,26 +8,43 @@
 //! collection go to the reference server's `rollback/<UUID>/`
 //! (`teseladb_server::rollback::reference_layout`).
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpListener};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_meta::bootstrap::{DATA_RANGE, DATA_START};
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_range::ack::{W, WriteConcern};
+#[cfg(target_os = "linux")]
 use teseladb_range::host::RangeError;
+#[cfg(target_os = "linux")]
 use teseladb_range::rollback::{ROLLBACK_DIR, RollbackDoc, read_rollback_file};
+#[cfg(target_os = "linux")]
 use teseladb_server::data::{DataError, DataStatus};
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
+#[cfg(target_os = "linux")]
 use teseladb_server::rollback::INTERNAL_DIR;
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -38,16 +55,21 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
 const ASK: Duration = Duration::from_secs(2);
 /// How long after losing its followers the leader gets its `w: 1` write: a client that takes its
 /// time, as the 002 battery's Python runner did in `rollback-w1`. A leader cut off keeps the role
 /// for 10 s, as a reference server primary does (`step_down_ticks`).
+#[cfg(target_os = "linux")]
 const LATE: Duration = Duration::from_secs(1);
 
 /// A data directory removed when the test ends.
+#[cfg(target_os = "linux")]
 struct Dir(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Dir {
     fn new(name: &str) -> Dir {
         let p =
@@ -57,6 +79,7 @@ impl Dir {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -64,25 +87,30 @@ impl Drop for Dir {
 }
 
 /// A port nobody listens on now, so that a node keeps its address across restarts.
+#[cfg(target_os = "linux")]
 fn free_port() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).expect("a free port")
 }
 
 /// A node process over the files of `dir`, listening between nodes at `peer` ([`node_config`]).
+#[cfg(target_os = "linux")]
 fn start(dir: &Dir, peer: SocketAddr, join: Vec<String>) -> NodeProc {
     start_self("node", &join, Some(&dir.0), &[&format!("peer={peer}")])
 }
 
 /// A node of one core at the inter-node address of its parameter `peer`.
+#[cfg(target_os = "linux")]
 fn node_config(a: &NodeArgs) -> NodeConfig {
     let peer = a.param("peer").and_then(|p| p.parse().ok()).expect("peer=");
     NodeConfig { cores: Some(1), listen_peer: peer, join: a.join.clone(), ..NodeConfig::default() }
 }
 
+#[cfg(target_os = "linux")]
 fn key(name: &str) -> Vec<u8> {
     [&DATA_START[..], name.as_bytes()].concat()
 }
 
+#[cfg(target_os = "linux")]
 fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + READY;
     loop {
@@ -96,15 +124,18 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 
 /// The range's status, or `None` if its core did not answer in time (a busy machine): the
 /// callers ask again.
+#[cfg(target_os = "linux")]
 fn status(n: &NodeProc) -> Option<DataStatus> {
     n.data_status(ASK)
 }
 
+#[cfg(target_os = "linux")]
 fn leads(n: &NodeProc) -> bool {
     status(n).is_some_and(|s| s.role == Some(Role::Leader))
 }
 
 /// The rollback files under `dir`.
+#[cfg(target_os = "linux")]
 fn rollback_files(dir: &Path) -> Vec<PathBuf> {
     let range = dir.join(ROLLBACK_DIR).join(INTERNAL_DIR).join(format!("range-{}", DATA_RANGE.0));
     fs::read_dir(range)
@@ -113,12 +144,14 @@ fn rollback_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Attempts at cutting a leader off before it takes the `w: 1` write.
+#[cfg(target_os = "linux")]
 const CUT_OFF_ATTEMPTS: usize = 5;
 
 /// The range's leader writes with the majority, loses its two followers and a second later
 /// confirms a `w: 1`, `j: false` write of `lost` that only its log has. Returns the leader and
 /// the followers, which are stopped. If an election moved the leadership before the followers
 /// went (heartbeats late on a busy machine), the followers come back and it starts again.
+#[cfg(target_os = "linux")]
 fn leader_takes_a_lost_write(
     nodes: &mut [Option<NodeProc>],
     dirs: &[Dir],
@@ -161,6 +194,7 @@ fn leader_takes_a_lost_write(
     panic!("the leader lost the leadership before its followers went, {CUT_OFF_ATTEMPTS} times");
 }
 
+#[cfg(target_os = "linux")]
 fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file() {
     let dirs = [Dir::new("1"), Dir::new("2"), Dir::new("3")];
     let ports = [free_port(), free_port(), free_port()];
@@ -224,3 +258,7 @@ fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file()
         n.stop();
     }
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -2,6 +2,7 @@
 //! TLS with client certificates and keeps its keys and their states: the first start creates and
 //! activates a key and seals the node's own key with it, the next ones open it, a rotation seals it
 //! under a new key, and a key that is not active, unknown or out of reach stops the start.
+#![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;

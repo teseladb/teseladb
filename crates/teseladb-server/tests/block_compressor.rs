@@ -1,6 +1,7 @@
 //! 004 FR-023, T057: the block compressor option and its key of the configuration file choose
 //! the codec of the new blocks of every core; `snappy`, which the node has not, is
 //! refused at start with the values it takes.
+#![cfg(target_os = "linux")]
 
 use teseladb_lsm::Codec;
 use teseladb_server::cli::{BLOCK_COMPRESSOR, Command, parse, parse_with};

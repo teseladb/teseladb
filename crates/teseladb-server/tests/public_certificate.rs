@@ -2,6 +2,7 @@
 //! serves its chain to a client that asks by SNI for one of its DNS names, and the usual identity
 //! to any other; the configuration file names it `net.tls.publicCertificateKeyFile`, a bad file
 //! names the option, and `rotateCertificates` reads it again.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

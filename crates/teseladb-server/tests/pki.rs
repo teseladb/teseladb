@@ -1,6 +1,7 @@
 //! The PKI of the first start (013 T011, FR-004): CA, node certificate, master key and root
 //! credentials in the data directory with mode 0600 for secrets, the same material on the next
 //! start, refusal when a piece is missing or does not fit, and no secret in what is shown.
+#![cfg(target_os = "linux")]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

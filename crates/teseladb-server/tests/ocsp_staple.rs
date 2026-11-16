@@ -2,6 +2,7 @@
 //! (measured): the answer of the responder that the certificate names, asked over HTTP and checked;
 //! a `good` answer with `nextUpdate` is stapled and asked again halfway to it; one without
 //! `nextUpdate` is not stapled; a responder out of reach is asked again a minute later.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

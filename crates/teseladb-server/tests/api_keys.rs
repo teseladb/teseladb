@@ -3,23 +3,36 @@
 //! keys over `/v1`; a key carries the roles of its user it was given and no more; and a revoked
 //! key is refused by every node in less than a second.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value, extjson};
+#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
 use teseladb_http::server::Settings;
 
+#[cfg(target_os = "linux")]
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
+#[cfg(target_os = "linux")]
 use teseladb_server::client_listener::ClientConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::http_listener::HttpPortConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -44,8 +57,10 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
 
+#[cfg(target_os = "linux")]
 fn config(join: Vec<String>) -> NodeConfig {
     NodeConfig {
         cores: Some(2),
@@ -59,6 +74,7 @@ fn config(join: Vec<String>) -> NodeConfig {
 }
 
 /// `f` until it gives a value, for at most [`READY`].
+#[cfg(target_os = "linux")]
 fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + READY;
     loop {
@@ -71,8 +87,10 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 /// SC-005.
+#[cfg(target_os = "linux")]
 const REVOCATION_BUDGET: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
 fn send(addr: SocketAddr, req: Request) -> Response {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -89,6 +107,7 @@ fn send(addr: SocketAddr, req: Request) -> Response {
 }
 
 /// `method target` with `key` as the Bearer credential: status and body.
+#[cfg(target_os = "linux")]
 fn call(addr: SocketAddr, key: &str, method: &str, target: &str, body: &str) -> (u16, Document) {
     let req = Request::new(method, target)
         .header("Authorization", &format!("Bearer {key}"))
@@ -99,6 +118,7 @@ fn call(addr: SocketAddr, key: &str, method: &str, target: &str, body: &str) -> 
 }
 
 /// The `root` user of a credentials file, as a first start creates it (013 FR-004).
+#[cfg(target_os = "linux")]
 fn root_user() -> Vec<u8> {
     let thread = format!("{:?}", std::thread::current().id())
         .replace(|c: char| !c.is_ascii_alphanumeric(), "");
@@ -116,11 +136,13 @@ fn root_user() -> Vec<u8> {
     doc
 }
 
+#[cfg(target_os = "linux")]
 fn start(join: Vec<String>) -> NodeProc {
     start_with(join, None)
 }
 
 /// A node process, with its audit log in JSON at `audit`.
+#[cfg(target_os = "linux")]
 fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeProc {
     let audit = audit.map(|p| format!("audit={}", p.display()));
     let params: Vec<&str> = audit.iter().map(String::as_str).collect();
@@ -130,6 +152,7 @@ fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeProc {
 }
 
 /// The configuration of a node, with its audit log in JSON at `audit`.
+#[cfg(target_os = "linux")]
 fn node_config(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
@@ -157,6 +180,7 @@ fn node_config(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeConfig
 }
 
 /// `teseladb admin --node <admin port> <args>`: exit code and output.
+#[cfg(target_os = "linux")]
 fn admin(node: &NodeProc, args: &[&str]) -> (i32, String, String) {
     let at = node.admin_addr().unwrap().to_string();
     let none = std::env::temp_dir().join("teseladb-apikeys-no-pki");
@@ -169,6 +193,7 @@ fn admin(node: &NodeProc, args: &[&str]) -> (i32, String, String) {
     (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
 }
 
+#[cfg(target_os = "linux")]
 fn text(d: &Document, f: &str) -> String {
     match d.get(f) {
         Some(Value::String(s)) => s.clone(),
@@ -176,6 +201,7 @@ fn text(d: &Document, f: &str) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_second() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -279,6 +305,7 @@ fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_secon
 /// 019 T022, FR-018: each REST and MCP request goes to the audit log as `httpRequest` with its
 /// transport, user, route or tool, status and the key's `keyId`; neither the key, a token nor a
 /// body is written there.
+#[cfg(target_os = "linux")]
 fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
     let dir = std::env::temp_dir().join(format!("teseladb-apikeys-audit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -329,6 +356,7 @@ fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
 
 /// 019 T025, FR-020: `teseladb mcp` relays stdio to `/mcp` with the key of `TESELADB_API_KEY`,
 /// keeps the session `initialize` opened and refuses to go on with a key the node refuses.
+#[cfg(target_os = "linux")]
 fn mcp_over_stdio_relays_each_message_with_the_key() {
     use teseladb_server::mcp_stdio::{McpOpts, run};
     let node = start(Vec::new());
@@ -377,6 +405,7 @@ fn mcp_over_stdio_relays_each_message_with_the_key() {
 
 /// 019 T031, FR-027: the metadata of `/mcp` is public, and a `401` of `/mcp` names it. The
 /// resource is the address the port listens on, not the `Host` the client sent (`h`).
+#[cfg(target_os = "linux")]
 fn the_mcp_resource_metadata_is_public_and_named_by_the_challenge() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -393,3 +422,7 @@ fn the_mcp_resource_metadata_is_public_and_named_by_the_challenge() {
     assert!(challenge.contains(&format!("resource_metadata=\"{url}\"")), "{challenge}");
     assert!(node.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

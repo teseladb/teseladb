@@ -2,25 +2,41 @@
 //! acceptance scenarios of story 1 over the HTTP port, run by the node's executor of the wire
 //! protocol, and the requests without a credential on a node with authentication.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value, extjson};
+#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
 use teseladb_http::server::Settings;
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::MemDisk;
+#[cfg(target_os = "linux")]
 use teseladb_rest::api::{AFTER_CLUSTER_TIME, OPERATION_TIME};
+#[cfg(target_os = "linux")]
 use teseladb_server::client_listener::ClientConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::http_listener::HttpPortConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::{Node, NodeConfig};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -38,6 +54,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn send(addr: SocketAddr, req: Request) -> Response {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
@@ -53,6 +70,7 @@ fn send(addr: SocketAddr, req: Request) -> Response {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn call(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, Document, Response) {
     let r = send(addr, Request::new(method, target).body(body.as_bytes().to_vec()));
     let doc = extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default();
@@ -60,6 +78,7 @@ fn call(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, Docum
 }
 
 /// A node with the HTTP port and the clients' port `client`.
+#[cfg(target_os = "linux")]
 fn http_config(client: ClientConfig, join: Vec<String>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
@@ -69,6 +88,7 @@ fn http_config(client: ClientConfig, join: Vec<String>) -> NodeConfig {
     NodeConfig { http: Some(http), client: Some(client), ..config(join) }
 }
 
+#[cfg(target_os = "linux")]
 fn start(client: ClientConfig) -> Node<MemDisk> {
     let node = Node::start(http_config(client, Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -76,22 +96,27 @@ fn start(client: ClientConfig) -> Node<MemDisk> {
 }
 
 /// A node process of [`http_config`] with [`plain_client`], ready.
+#[cfg(target_os = "linux")]
 fn start_process(join: &[String]) -> NodeProc {
     let node = start_self("plain", join, None, &[]);
     assert!(node.wait_ready(READY));
     node
 }
 
+#[cfg(target_os = "linux")]
 fn plain_client() -> ClientConfig {
     config(Vec::new()).client.unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn cursor(d: &Document) -> Document {
     d.get("cursor").and_then(Value::as_document).cloned().unwrap_or_else(|| panic!("{d:?}"))
 }
 
+#[cfg(target_os = "linux")]
 const C: &str = "/v1/databases/shop/collections/items";
 
+#[cfg(target_os = "linux")]
 fn story_one_over_the_http_port() {
     let node = start(plain_client());
     let at = node.http_addrs()[0];
@@ -199,6 +224,7 @@ fn story_one_over_the_http_port() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn a_node_with_authentication_refuses_requests_without_a_credential() {
     let node = start(ClientConfig { auth: true, ..plain_client() });
     let at = node.http_addrs()[0];
@@ -212,6 +238,7 @@ fn a_node_with_authentication_refuses_requests_without_a_credential() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn any_node_of_three_follows_a_cursor_another_opened() {
     let first = start_process(&[]);
     let seed = vec![first.peer_addr().to_string()];
@@ -253,3 +280,7 @@ fn any_node_of_three_follows_a_cursor_another_opened() {
     assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
     assert!(first.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

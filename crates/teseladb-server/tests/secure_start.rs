@@ -2,6 +2,7 @@
 //! creates the PKI and the `root` credentials, serves the clients' port with TLS only, asks every
 //! command but the handshake for authentication, lets `root` in with SCRAM-SHA-256 and the
 //! password of the credentials file, and on a restart loads the same PKI and keeps one `root`.
+#![cfg(target_os = "linux")]
 
 mod started;
 

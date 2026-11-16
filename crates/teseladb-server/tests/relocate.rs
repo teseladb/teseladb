@@ -2,6 +2,7 @@
 //! `teseladb admin range relocate` records the intent in Group 0, the range's log moves it, its
 //! documents stay readable and writable throughout, and Group 0's descriptor ends with the new
 //! core. Over real files the moved range survives a restart on its new core.
+#![cfg(target_os = "linux")]
 
 mod common;
 

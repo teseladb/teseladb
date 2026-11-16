@@ -1,5 +1,6 @@
 //! `count` without a filter from the counts the ranges keep (007 FR-039, H-004): exact after
 //! inserts and deletes, and without reading the documents once the leader counted them.
+#![cfg(target_os = "linux")]
 
 mod common;
 

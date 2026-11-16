@@ -1,5 +1,6 @@
 //! `POST /v1/transactions` on a running node (019 T017, FR-009): every operation or none, the
 //! result of each, and the retries of `withTransaction` with errors injected by `failCommand`.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

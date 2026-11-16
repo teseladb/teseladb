@@ -2,29 +2,46 @@
 //! the data directory's lock, refuses another number of cores, and joins a cluster with `--join`,
 //! also through a follower and after a restart.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::net::TcpListener;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_io::FileDisk;
+#[cfg(target_os = "linux")]
 use teseladb_io::handshake::JoinRequest;
 
+#[cfg(target_os = "linux")]
 use teseladb_io::peer::{Hello, PeerMsg, decode_frame, encode_frame};
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_server::logic::Group0View;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::{
     FOUNDER, JOIN_DEADLINE, JOIN_VOTERS, Node, NodeConfig, NodeError, join_cluster, lock_dir,
 };
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeArgs, NodeProc};
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -71,12 +88,16 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
 const ASK: Duration = Duration::from_secs(1);
 
 /// A data directory removed when the test ends.
+#[cfg(target_os = "linux")]
 struct Dir(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Dir {
     fn new(name: &str) -> Dir {
         let p = std::env::temp_dir().join(format!("teseladb-node-{name}-{}", std::process::id()));
@@ -85,6 +106,7 @@ impl Dir {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -93,12 +115,14 @@ impl Drop for Dir {
 
 /// Starts a node: a join waits as long as the product does (`JOIN_DEADLINE`) and ends as soon as
 /// the cluster accepts it, whatever the host's speed (a slow emulated host took more than 5 s).
+#[cfg(target_os = "linux")]
 fn start(dir: &Dir, cores: Option<u16>, join: Vec<String>) -> Result<Node<FileDisk>, NodeError> {
     start_within(dir, cores, join, JOIN_DEADLINE)
 }
 
 /// Starts a node whose join gives up after `deadline`: for a join the cluster refuses, which
 /// the node asks again until then.
+#[cfg(target_os = "linux")]
 fn start_within(
     dir: &Dir,
     cores: Option<u16>,
@@ -112,6 +136,7 @@ fn start_within(
 
 /// The node of a cluster's test, in a process of its own (D4: one process per node), over the
 /// files of `dir`: as [`start_within`] starts one, listening between nodes at `peer` if given.
+#[cfg(target_os = "linux")]
 fn spawn_within(
     dir: &Dir,
     cores: Option<u16>,
@@ -128,11 +153,13 @@ fn spawn_within(
 }
 
 /// [`spawn_within`] with the product's join deadline.
+#[cfg(target_os = "linux")]
 fn spawn(dir: &Dir, cores: Option<u16>, join: Vec<String>) -> Result<NodeProc, NodeError> {
     spawn_within(dir, cores, join, JOIN_DEADLINE, None)
 }
 
 /// The configuration of [`spawn_within`]'s node process.
+#[cfg(target_os = "linux")]
 fn files_config(a: &NodeArgs) -> NodeConfig {
     let number = |k: &str| a.param(k).map(|v| v.parse::<u64>().expect("a number"));
     NodeConfig {
@@ -147,11 +174,13 @@ fn files_config(a: &NodeArgs) -> NodeConfig {
 }
 
 /// A node in this process or in its own.
+#[cfg(target_os = "linux")]
 trait Views {
     fn view_within(&self, timeout: Duration) -> Option<Group0View>;
     fn ready_within(&self, timeout: Duration) -> bool;
 }
 
+#[cfg(target_os = "linux")]
 impl Views for Node<FileDisk> {
     fn view_within(&self, timeout: Duration) -> Option<Group0View> {
         self.view(timeout)
@@ -162,6 +191,7 @@ impl Views for Node<FileDisk> {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Views for NodeProc {
     fn view_within(&self, timeout: Duration) -> Option<Group0View> {
         self.view(timeout)
@@ -173,10 +203,12 @@ impl Views for NodeProc {
 }
 
 /// Waits for `n` to be ready; if it is not, fails with what its Group 0 looks like.
+#[cfg(target_os = "linux")]
 fn ready(n: &impl Views) {
     assert!(n.ready_within(READY), "not ready after {READY:?}: {:?}", n.view_within(ASK));
 }
 
+#[cfg(target_os = "linux")]
 fn wait_view(n: &impl Views, ok: impl Fn(&Group0View) -> bool) -> Group0View {
     let end = Instant::now() + READY;
     loop {
@@ -188,6 +220,7 @@ fn wait_view(n: &impl Views, ok: impl Fn(&Group0View) -> bool) -> Group0View {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_restarted_node_keeps_its_identity_and_group0() {
     let dir = Dir::new("restart");
     let n = start(&dir, Some(2), Vec::new()).unwrap();
@@ -210,6 +243,7 @@ fn a_restarted_node_keeps_its_identity_and_group0() {
     assert!(e.to_string().contains("created with 2 cores and 3 were requested"), "{e}");
 }
 
+#[cfg(target_os = "linux")]
 fn the_data_directory_has_one_owner() {
     let dir = Dir::new("lock");
     let n = start(&dir, Some(1), Vec::new()).unwrap();
@@ -220,6 +254,7 @@ fn the_data_directory_has_one_owner() {
     drop(lock_dir(&dir.0).expect("free once the node stopped"));
 }
 
+#[cfg(target_os = "linux")]
 fn nodes_join_with_join_also_through_a_follower_and_after_a_restart() {
     let (d1, d2, d3) = (Dir::new("join-1"), Dir::new("join-2"), Dir::new("join-3"));
     let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
@@ -248,6 +283,7 @@ fn nodes_join_with_join_also_through_a_follower_and_after_a_restart() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_joined_node_without_its_voters_does_not_start() {
     let (d1, d2) = (Dir::new("voters-1"), Dir::new("voters-2"));
     let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
@@ -264,6 +300,7 @@ fn a_joined_node_without_its_voters_does_not_start() {
 }
 
 /// `node.meta` as it is between `open_node` and the write of the node's identifier.
+#[cfg(target_os = "linux")]
 fn unassign(dir: &Dir) {
     let mut disk = FileDisk::open(&dir.0).unwrap();
     let mut meta = teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta");
@@ -272,6 +309,7 @@ fn unassign(dir: &Dir) {
     teseladb_raftlog::write_node_meta(&mut disk, &meta).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 fn a_node_that_stopped_before_its_identifier_joins_again_and_never_founds() {
     let (d1, d2) = (Dir::new("unassigned-1"), Dir::new("unassigned-2"));
     let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
@@ -292,6 +330,7 @@ fn a_node_that_stopped_before_its_identifier_joins_again_and_never_founds() {
     n1.stop();
 }
 
+#[cfg(target_os = "linux")]
 fn a_node_back_on_another_port_keeps_the_cluster_whole() {
     let (d1, d2, d3, d4) =
         (Dir::new("port-1"), Dir::new("port-2"), Dir::new("port-3"), Dir::new("port-4"));
@@ -319,6 +358,7 @@ fn a_node_back_on_another_port_keeps_the_cluster_whole() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn joining_fails_with_another_core_count_or_nobody_to_ask() {
     let (d1, d2) = (Dir::new("cores-1"), Dir::new("cores-2"));
     let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
@@ -341,6 +381,7 @@ fn joining_fails_with_another_core_count_or_nobody_to_ask() {
     assert!(e.to_string().starts_with("could not join the cluster: 127.0.0.1:1"), "{e}");
 }
 
+#[cfg(target_os = "linux")]
 fn errors_say_what_failed() {
     let io = NodeError::from(std::io::Error::other("disk gone"));
     assert_eq!(io.to_string(), "disk gone");
@@ -366,11 +407,13 @@ fn errors_say_what_failed() {
 
 /// A node that only answers joins, on a thread of the test: each joiner's `Hello` gets its own,
 /// and its `JoinRequest` the refusal `answer(own address)`.
+#[cfg(target_os = "linux")]
 struct FakeNode {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: thread::JoinHandle<()>,
 }
 
+#[cfg(target_os = "linux")]
 impl FakeNode {
     fn stop(self) {
         self.stop.store(true, Ordering::Release);
@@ -379,6 +422,7 @@ impl FakeNode {
 }
 
 /// Reads one frame from `s` (`buf` holds what came after the last one).
+#[cfg(target_os = "linux")]
 fn read_frame(s: &mut std::net::TcpStream, buf: &mut Vec<u8>) -> Option<PeerMsg> {
     let mut chunk = [0u8; 4096];
     loop {
@@ -391,12 +435,14 @@ fn read_frame(s: &mut std::net::TcpStream, buf: &mut Vec<u8>) -> Option<PeerMsg>
     }
 }
 
+#[cfg(target_os = "linux")]
 fn write_frame(s: &mut std::net::TcpStream, m: &PeerMsg) {
     let mut out = Vec::new();
     encode_frame(m, false, &mut out).unwrap();
     std::io::Write::write_all(s, &out).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (FakeNode, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -432,6 +478,7 @@ fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (FakeNode, 
     (FakeNode { stop, thread }, addr)
 }
 
+#[cfg(target_os = "linux")]
 fn a_join_round_follows_a_bounded_number_of_hints() {
     let req = JoinRequest {
         name: "x".into(),
@@ -456,6 +503,7 @@ fn a_join_round_follows_a_bounded_number_of_hints() {
     a.stop();
 }
 
+#[cfg(target_os = "linux")]
 fn a_damaged_node_meta_stops_the_node_without_touching_the_directory() {
     let dir = Dir::new("corrupt-meta");
     let n = start(&dir, Some(1), Vec::new()).unwrap();
@@ -472,21 +520,25 @@ fn a_damaged_node_meta_stops_the_node_without_touching_the_directory() {
     assert_eq!(fs::read(&meta).unwrap(), bytes);
 }
 
+#[cfg(target_os = "linux")]
 fn wall_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
+#[cfg(target_os = "linux")]
 fn bound_on_disk(dir: &Dir) -> u64 {
     let mut disk = FileDisk::open(&dir.0).unwrap();
     let (_, bound) = teseladb_server::hlc_bound::read_bound(&mut disk).unwrap().expect("hlc.bound");
     bound
 }
 
+#[cfg(target_os = "linux")]
 fn meta_bound(dir: &Dir) -> u64 {
     let mut disk = FileDisk::open(&dir.0).unwrap();
     teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta").hlc_upper_bound
 }
 
+#[cfg(target_os = "linux")]
 fn the_clock_bound_stays_ahead_and_a_restart_waits_past_it() {
     // 005 FR-003, D-158: no mark goes out above the bound in `hlc.bound`, which stays at most
     // `AHEAD_MS` ahead of the marks while the node runs; a node that stops cleanly writes the
@@ -542,3 +594,7 @@ fn the_clock_bound_stays_ahead_and_a_restart_waits_past_it() {
     assert!(bound_on_disk(&dir) > ahead, "a new bound once marks go out again");
     n.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

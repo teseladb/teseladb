@@ -2,6 +2,7 @@
 //! with its resume token as `id`, a client that drops the connection and comes back with
 //! `Last-Event-ID` gets every later change once, the heartbeat comment, and the streams of a
 //! database and of the cluster.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

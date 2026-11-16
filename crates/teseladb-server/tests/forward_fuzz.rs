@@ -3,6 +3,7 @@
 //! the way give a body or an error, never a panic. The frames around them are fuzzed in
 //! `teseladb-io` (`frames_survive_mutated_bytes`). A few seconds with fixed seeds;
 //! `TESELADB_FUZZ_SECS=<n>` runs `n` seconds with seeds that change every round.
+#![cfg(target_os = "linux")]
 
 use teseladb_hlc::Hlc;
 use teseladb_range::host::{RangeError, TxnOp};

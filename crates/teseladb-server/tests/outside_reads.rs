@@ -3,6 +3,7 @@
 //! the blocks the shared cache lacks the worker reads from the files itself. What it answers is
 //! what the core answers: the document, nothing for an `_id` that does not exist, and a write
 //! acknowledged before the read is seen.
+#![cfg(target_os = "linux")]
 
 mod common;
 

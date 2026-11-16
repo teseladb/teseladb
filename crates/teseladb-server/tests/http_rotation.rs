@@ -1,6 +1,7 @@
 //! 013 T052 (FR-036, SC-008): after `rotateCertificates` the HTTP port of 019 serves the new
 //! certificate to the new connections, and so does `teseladb admin cert rotate`, over HTTP/1.1 and HTTP/2 with their protocol still agreed,
 //! and a request on a connection open before the rotation still gets its answer.
+#![cfg(target_os = "linux")]
 
 mod started;
 

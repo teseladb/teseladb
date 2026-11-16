@@ -4,21 +4,32 @@
 //! of the history window however long ago it was written, and the newest entry is the last write
 //! already acknowledged.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::MemDisk;
+#[cfg(target_os = "linux")]
 use teseladb_server::cli::DevOpts;
+#[cfg(target_os = "linux")]
 use teseladb_server::dev;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::Node;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
 /// Writes spaced further apart than the one second a stream's read covers at a time.
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -40,12 +51,15 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const SPACING: Duration = Duration::from_millis(1_200);
 
+#[cfg(target_os = "linux")]
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
+#[cfg(target_os = "linux")]
 fn oplog(c: &mut Client, filter: Document) -> Vec<Document> {
     let find =
         Document::new().with("find", "oplog.rs").with("filter", filter).with("batchSize", 100_000);
@@ -62,6 +76,7 @@ fn oplog(c: &mut Client, filter: Document) -> Vec<Document> {
 
 /// The inserts into `ns` among `entries`, those an insert of several documents groups in an
 /// `applyOps` entry included.
+#[cfg(target_os = "linux")]
 fn inserts_of(entries: &[Document], ns: &str) -> usize {
     let insert = |e: &Document| {
         e.get("op") == Some(&Value::from("i")) && e.get("ns") == Some(&Value::from(ns))
@@ -82,6 +97,7 @@ fn inserts_of(entries: &[Document], ns: &str) -> usize {
 
 /// With a clients' port given, each node announces it as its host (`config.shards`), so the
 /// development cluster can present itself as a replica set (018 FR-007).
+#[cfg(target_os = "linux")]
 fn nodes_on_a_given_port_announce_their_clients_address() {
     let port = free_port();
     let o = DevOpts { nodes: 1, cores: 1, port, test_commands: false };
@@ -113,6 +129,7 @@ fn nodes_on_a_given_port_announce_their_clients_address() {
 
 /// Entries written seconds apart all come back from one `find`, with or without a lower bound
 /// on `ts` below them, and the newest entry is the last acknowledged write.
+#[cfg(target_os = "linux")]
 fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -159,6 +176,7 @@ fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
 
 /// `$natural: -1` with a limit reads back from the newest entries: the newest two of writes
 /// seconds apart, with a skip the ones before them, and with a filter the newest it matches.
+#[cfg(target_os = "linux")]
 fn the_newest_entries_come_first() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -195,13 +213,17 @@ fn the_newest_entries_come_first() {
 
 /// How long the writer of [`a_copy_with_the_oplog_replays_into_the_same_data`] writes, and the
 /// pause between its rounds.
+#[cfg(target_os = "linux")]
 const WRITING: Duration = Duration::from_millis(2_500);
+#[cfg(target_os = "linux")]
 const PACE: Duration = Duration::from_millis(5);
 /// Documents the copy starts from.
+#[cfg(target_os = "linux")]
 const COPIED: i32 = 300;
 
 /// The writes a client makes while the copy runs: updates, inserts, deletes, replacements and a
 /// transaction that creates a collection, as in the measurement with the real tools.
+#[cfg(target_os = "linux")]
 fn write_while_copying(node: &NodeProc) {
     let mut c = Client::new(node);
     let end = std::time::Instant::now() + WRITING;
@@ -244,6 +266,7 @@ fn write_while_copying(node: &NodeProc) {
 }
 
 /// The newest entry's `ts`, as the reference dump tool's `--oplog` reads it.
+#[cfg(target_os = "linux")]
 fn newest_ts(c: &mut Client) -> Value {
     let cmd = Document::new()
         .with("find", "oplog.rs")
@@ -257,6 +280,7 @@ fn newest_ts(c: &mut Client) -> Value {
 }
 
 /// Every document of `db.coll` in `_id` order, at `at` when given.
+#[cfg(target_os = "linux")]
 fn all_of(c: &mut Client, coll: &str, at: Option<&Value>) -> Vec<Value> {
     let mut find = Document::new()
         .with("find", coll)
@@ -274,6 +298,7 @@ fn all_of(c: &mut Client, coll: &str, at: Option<&Value>) -> Vec<Value> {
 /// One entry as the reference restore tool's `--oplogReplay` gives it to `applyOps` (captured on
 /// 02-11-2026 from the reference restore tool 100.20.0): without `ui`, and the operations of a
 /// transaction one by one with `ts: Timestamp(0, 0)`, `t: null` and `v: 0`.
+#[cfg(target_os = "linux")]
 fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
     let without_ui = |d: &Document| {
         d.iter().filter(|(k, _)| *k != "ui").fold(Document::new(), |o, (k, v)| o.with(k, v.clone()))
@@ -306,6 +331,7 @@ fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
 /// each of them given to `applyOps` on the second cluster. The second cluster ends with the first
 /// one's data at the last entry. The real tools in both directions with the reference server 9.0.4
 /// run in `tests/compat/tools/run.sh`.
+#[cfg(target_os = "linux")]
 fn a_copy_with_the_oplog_replays_into_the_same_data() {
     let source = teseladb_server::procs::start_self("node", &[], None, &[]);
     let target = teseladb_server::procs::start_self("node", &[], None, &[]);
@@ -368,3 +394,7 @@ fn a_copy_with_the_oplog_replays_into_the_same_data() {
     assert!(source.stop().success());
     assert!(target.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

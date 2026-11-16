@@ -1,5 +1,6 @@
 //! The commands' backend against scripted cores (006 FR-014, FR-027): what it retries, what it
 //! gives up on and how it reports each answer.
+#![cfg(target_os = "linux")]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

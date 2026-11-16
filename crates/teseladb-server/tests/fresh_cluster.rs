@@ -3,21 +3,31 @@
 //! a command's deadline, also with the machine busy, and each node reports its routing table whole
 //! (`getShardVersion`) instead of the part it has filled.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::cli::DevOpts;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
 /// Well inside the 30 s of a command: a change waits for Group 0 and the fence, not for a
 /// command's deadline.
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -38,14 +48,17 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const PROMPT: Duration = Duration::from_secs(10);
 
 /// Threads that keep every processor busy until dropped.
+#[cfg(target_os = "linux")]
 struct Load {
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(target_os = "linux")]
 impl Load {
     fn start() -> Load {
         let stop = Arc::new(AtomicBool::new(false));
@@ -65,6 +78,7 @@ impl Load {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Load {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -74,6 +88,7 @@ impl Drop for Load {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn index(field: &str) -> Value {
     let key = Document::new().with(field, 1);
     Value::Array(vec![Value::Document(
@@ -82,11 +97,13 @@ fn index(field: &str) -> Value {
 }
 
 /// Runs `cmd` and checks it answers ok within [`PROMPT`].
+#[cfg(target_os = "linux")]
 fn prompt(c: &mut Client, cmd: Document) {
     prompt_on(c, "fresh", cmd);
 }
 
 /// Runs `cmd` on `db` and checks it answers ok within [`PROMPT`]: the answer.
+#[cfg(target_os = "linux")]
 fn prompt_on(c: &mut Client, db: &str, cmd: Document) -> Document {
     let what = format!("{cmd:?}");
     let t = Instant::now();
@@ -98,6 +115,7 @@ fn prompt_on(c: &mut Client, db: &str, cmd: Document) -> Document {
 
 /// The routing table as each node reports it right away (`getShardVersion`): the whole of a
 /// collection just sharded, one chunk from `MinKey` to `MaxKey`, never a part of it.
+#[cfg(target_os = "linux")]
 fn routes_on_every_node(nodes: &[NodeProc]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
@@ -119,6 +137,7 @@ fn routes_on_every_node(nodes: &[NodeProc]) {
 }
 
 /// The catalog changes of a collection of its own on each node, right away.
+#[cfg(target_os = "linux")]
 fn changes_on_every_node(nodes: &[NodeProc]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
@@ -146,6 +165,7 @@ fn changes_on_every_node(nodes: &[NodeProc]) {
 
 /// As `teseladb dev` and the benchmarks start a cluster: the founder ready, the other two still
 /// joining.
+#[cfg(target_os = "linux")]
 fn dev_cluster(loaded: bool) {
     let load = loaded.then(Load::start);
     let opts = DevOpts { nodes: 3, cores: 1, port: 0, test_commands: false };
@@ -161,14 +181,17 @@ fn dev_cluster(loaded: bool) {
     assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
 
+#[cfg(target_os = "linux")]
 fn a_dev_cluster_takes_catalog_changes_at_once() {
     dev_cluster(false);
 }
 
+#[cfg(target_os = "linux")]
 fn a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once() {
     dev_cluster(true);
 }
 
+#[cfg(target_os = "linux")]
 fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
     let _load = Load::start();
     let first = teseladb_server::procs::start_self("node", &[], None, &[]);
@@ -184,3 +207,7 @@ fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
     changes_on_every_node(&nodes);
     assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}
