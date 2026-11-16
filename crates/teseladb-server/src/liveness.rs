@@ -9,7 +9,8 @@
 //! directory's disk when its heartbeat is due, not at every tick.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use teseladb_io::peer::PeerMsg;
 use teseladb_meta::clock::ClockSample;
@@ -55,13 +56,50 @@ const SLOT: usize = 4;
 pub struct SharedLoads {
     cores: Vec<[AtomicU64; SLOT]>,
     data_dir: Option<PathBuf>,
+    space: Arc<Space>,
+}
+
+/// The space of the data directory's disk as last measured (total 0: not yet, or not known),
+/// and whether a measure is under way.
+#[derive(Debug, Default)]
+struct Space {
+    used: AtomicU64,
+    total: AtomicU64,
+    measuring: AtomicBool,
+}
+
+/// Ends a measure of [`Space`], also one that never ran.
+struct Measuring(Arc<Space>);
+
+impl Drop for Measuring {
+    fn drop(&mut self) {
+        self.0.measuring.store(false, Ordering::Release);
+    }
 }
 
 impl SharedLoads {
     /// Slots for `cores` cores.
     pub fn new(cores: usize, data_dir: Option<PathBuf>) -> SharedLoads {
         let cores = (0..cores).map(|_| std::array::from_fn(|_| AtomicU64::new(0))).collect();
-        SharedLoads { cores, data_dir }
+        SharedLoads { cores, data_dir, space: Arc::default() }
+    }
+
+    /// The space of the data directory's disk: `(used, total)`. Its `statvfs` blocks, so on a
+    /// shard (core 0's tick) it runs on a thread that is not a shard and the answer is the last
+    /// measure, a heartbeat old; off a shard it is measured now.
+    fn space(&self) -> Option<(u64, u64)> {
+        let dir = self.data_dir.clone()?;
+        if !self.space.measuring.swap(true, Ordering::AcqRel) {
+            let done = Measuring(Arc::clone(&self.space));
+            teseladb_io::engine::wait::spawn_off_shard(move || {
+                let (used, total) = teseladb_sys::host::fs_usage(&dir).unwrap_or((0, 0));
+                done.0.used.store(used, Ordering::Relaxed);
+                done.0.total.store(total, Ordering::Release);
+                drop(done);
+            });
+        }
+        let total = self.space.total.load(Ordering::Acquire);
+        (total > 0).then(|| (self.space.used.load(Ordering::Relaxed), total))
     }
 
     /// Core `core` carries `l` now.
@@ -80,8 +118,7 @@ impl SharedLoads {
             let [groups, leaders, bytes, ops] = slot.each_ref().map(|a| a.load(Ordering::Relaxed));
             sum = sum.plus(NodeLoad { groups, leaders, bytes, ops, ..NodeLoad::default() });
         }
-        let space = self.data_dir.as_ref().and_then(|d| teseladb_sys::host::fs_usage(d).ok());
-        if let Some((used, total_bytes)) = space {
+        if let Some((used, total_bytes)) = self.space() {
             sum = NodeLoad { free_bytes: total_bytes.saturating_sub(used), total_bytes, ..sum };
         }
         sum
