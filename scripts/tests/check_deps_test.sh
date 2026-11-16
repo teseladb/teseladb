@@ -28,7 +28,8 @@ EOF
   printf '[package]\nname = "teseladb-types"\n' > "$dir/crates/teseladb-types/Cargo.toml"
   printf '#![forbid(unsafe_code)]\npub fn f() {}\n' > "$dir/crates/teseladb-types/src/lib.rs"
   printf '[package]\nname = "teseladb-io"\n' > "$dir/crates/teseladb-io/Cargo.toml"
-  printf '#![forbid(unsafe_code)]\nuse std::fs;\nuse std::net::TcpStream;\nuse std::thread;\n' \
+  # teseladb-io denies unsafe code: two of its modules may use it (UNSAFE_MODULES, 023 FR-016).
+  printf '#![deny(unsafe_code)]\nuse std::fs;\nuse std::net::TcpStream;\nuse std::thread;\n' \
     > "$dir/crates/teseladb-io/src/lib.rs"
   printf '[package]\nname = "teseladb-sim"\n' > "$dir/tools/teseladb-sim/Cargo.toml"
   printf '#![forbid(unsafe_code)]\nfn main() { std::process::exit(0) }\n' > "$dir/tools/teseladb-sim/src/main.rs"
