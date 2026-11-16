@@ -7,6 +7,9 @@
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
+// The reclaim tests are left out of default-allocator builds (see below), and with them some
+// of what they use.
+#![cfg_attr(engine_default_allocator, allow(unused_imports, dead_code))]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -308,6 +311,9 @@ engine_thread_test_case!(slab_metrics_count_operations_and_refuse_a_second_slab,
     assert_eq!(metric("slab_malloc_total_operations"), None, "unregistered with the slab");
 });
 
+// The engine allocator reclaims under memory pressure; the system allocator of a
+// `--cfg engine_default_allocator` build has no reclaim (nor has ANOTHERPRODUCT_DEFAULT_ALLOCATOR).
+#[cfg(not(engine_default_allocator))]
 thread_local! {
     /// Asynchronous reclaim rounds handed to the test's reclaim hook.
     static PENDING: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
@@ -315,6 +321,7 @@ thread_local! {
 
 /// Runs `body` with a low-memory threshold above the shard's free memory and a reclaim hook that
 /// queues the asynchronous rounds in `PENDING`; restores the reactor's behaviour afterwards.
+#[cfg(not(engine_default_allocator))]
 fn under_memory_pressure(body: impl FnOnce()) {
     let old_min = min_free_memory() / PAGE;
     let pressure = free_memory() / PAGE + 256;
@@ -336,6 +343,7 @@ fn under_memory_pressure(body: impl FnOnce()) {
 }
 
 /// Starts the reclaim the threshold calls for and runs the asynchronous rounds it scheduled.
+#[cfg(not(engine_default_allocator))]
 fn reclaim_now() {
     set_min_free_pages(min_free_memory() / PAGE).unwrap();
     let rounds = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
@@ -345,6 +353,7 @@ fn reclaim_now() {
     }
 }
 
+#[cfg(not(engine_default_allocator))]
 engine_thread_test_case!(reclaimers_run_by_scope_until_they_stop_progressing, {
     let sync_calls = Rc::new(Cell::new(0u32));
     let async_calls = Rc::new(Cell::new(0u32));
@@ -391,6 +400,7 @@ engine_thread_test_case!(reclaimers_run_by_scope_until_they_stop_progressing, {
     drop(asynchronous);
 });
 
+#[cfg(not(engine_default_allocator))]
 engine_thread_test_case!(unlimited_slabs_give_pages_back_under_pressure, {
     let (erased, eraser) = recording_eraser();
     // A limit of 0: unbounded, with a reclaimer.

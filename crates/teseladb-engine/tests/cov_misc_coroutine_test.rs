@@ -13,6 +13,7 @@ use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{
     ExceptionPtr, Future, RuntimeError, make_exception_future, make_ready_future,
 };
+use teseladb::engine::core::preempt::need_preempt;
 use teseladb::engine::core::reactor::later;
 use teseladb::engine::core::scheduling::current_scheduling_group;
 use teseladb::engine::coroutine::all::{All, is_future_v};
@@ -121,7 +122,9 @@ engine_test_case!(all_and_readiness_checks, {
         assert_eq!((two, three), (2, 3));
 
         let a = as_future(make_ready_future(5));
-        assert!(a.await_ready());
+        // A ready future is returned at once unless preemption is requested, which a build
+        // with `--cfg engine_debug` always reports (as as_future_awaiter::await_ready()).
+        assert_eq!(a.await_ready(), !need_preempt());
         assert_eq!(a.await.get()?, 5);
         let a = as_future_without_preemption_check(later());
         assert!(!a.await_ready());

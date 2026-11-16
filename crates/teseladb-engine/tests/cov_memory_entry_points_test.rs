@@ -3,7 +3,11 @@
 //! allocations), and the exported `operator new` and `operator delete` symbols in their plain,
 //! array, sized, non-throwing and aligned forms. Every allocation must come from the shard's
 //! pool and keep its contents and alignment.
-#![cfg(target_os = "linux")]
+//!
+//! The entry points exist only with the engine's own allocator, so a build with
+//! `--cfg engine_default_allocator` (the debug and sanitizer builds, as
+//! `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) leaves these tests out.
+#![cfg(all(target_os = "linux", not(engine_default_allocator)))]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

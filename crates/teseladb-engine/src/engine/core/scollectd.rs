@@ -1601,15 +1601,16 @@ impl Impl {
         let ctxt_stop = ctxt.clone();
         // SAFETY: a read of the shard's context between the loop's steps.
         let stop_when = move || unsafe { (*ctxt_stop.get()).mf == md_len };
-        let vals_ptr: *const ForeignPtrValues = &vals;
+        // The snapshot itself, as `auto& values = vals->values` in the original: it is on the
+        // heap, owned through `vals`, so the pointer stays valid when `vals` moves into the
+        // finally below. (A pointer to `vals` would not: `vals` is a local of this frame.)
+        let copy_ptr: *const mi::ValuesCopy = copy;
         // append as many values as we can fit into a packet (1024 bytes)
         let ctxt_send = ctxt.clone();
         let send_packet = move || -> Future<()> {
-            // SAFETY: `vals` is kept alive by the finally below, and only read on this shard.
-            let copy = match unsafe { (*vals_ptr).get_unchecked() } {
-                Some(c) => c,
-                None => return make_ready_future(()),
-            };
+            // SAFETY: the snapshot is kept alive by `vals`, which the finally below holds
+            // until the loop ends, and is only read on this shard.
+            let copy = unsafe { &*copy_ptr };
             let values = &copy.values;
             let Some(metadata) = copy.metadata.as_ref() else {
                 return make_ready_future(());
@@ -1723,8 +1724,6 @@ impl Impl {
         &self._host
     }
 }
-
-type ForeignPtrValues = crate::engine::core::sharded::ForeignPtr<mi::ValuesReference>;
 
 /// Registers the values `values` under `id` on this shard, enabled or not.
 pub fn add_polled(id: &TypeInstanceId, values: &SharedPtr<ValuesImpl>, enabled: bool) {
