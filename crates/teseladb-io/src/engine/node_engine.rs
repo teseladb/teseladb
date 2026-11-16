@@ -289,6 +289,19 @@ impl NodeEngine {
         }
     }
 
+    /// Reserves the node's peer port at `at` on shard 0 before its cores run (023 FR-015, T055):
+    /// the engine listens there, so the address (a port 0 picks one) is known before the node
+    /// joins, and [`NodeEngine::listen_peers`] at that address takes the socket over. Returns the
+    /// address taken.
+    ///
+    /// # Errors
+    ///
+    /// When the address cannot be listened on (its kind says why: an address in use is
+    /// [`io::ErrorKind::AddrInUse`]), or the engine stopped.
+    pub fn reserve_peers(&self, at: SocketAddr, base: u16, cores: u16) -> io::Result<SocketAddr> {
+        self.run_on(0, move || peers::reserve_here(at, cores, u32::from(base)))?
+    }
+
     /// Listens for the node's peers at `at` (023 FR-015): the shards `base..base + cores` hold
     /// the node's cores, and the engine hands each connection to the shard of the core the
     /// dialer's source port names (one core: to `base`). Returns the address listened on.
@@ -341,6 +354,9 @@ impl NodeEngine {
 
     fn shutdown(&mut self) {
         let Some(thread) = self.thread.take() else { return };
+        // A peer port reserved and never listened on goes while shard 0 still runs: queued
+        // before the stop below, it runs first.
+        let _ = self.post(0).post(peers::release_here);
         // No thread that is not a shard enters the engine any more.
         self.gate.close();
         #[allow(deprecated)]

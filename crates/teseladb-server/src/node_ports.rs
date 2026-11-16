@@ -19,6 +19,21 @@ use crate::http_service::NodeHttp;
 
 pub use on_linux::{AdminPort, HttpPort};
 
+/// The port the nodes talk to each other on (005), in the errors of a port that cannot open.
+pub const PEERS: &str = "peer port";
+/// The administration port (007).
+pub const ADMIN: &str = "administration port";
+/// The HTTP port of the REST API (019).
+pub const HTTP: &str = "HTTP port";
+
+/// The error of `port` that could not be opened at `addr`: it keeps the kind of `e` and names
+/// the port and its address, so whoever runs the node knows which one another process holds (as
+/// the reference server names the address it could not listen on).
+#[must_use]
+pub fn port_error(port: &str, addr: SocketAddr, e: &io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{port} {addr}: {e}"))
+}
+
 /// Starts the administration port at `at`, answering with `handler`, over TLS with `tls`; the
 /// port's TLS is rotated with the node's certificates, `certs`.
 ///
@@ -227,3 +242,22 @@ mod on_linux {
     }
 }
 
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_port_that_cannot_open_is_named_in_its_error() {
+        let addr: SocketAddr = "127.0.0.1:27018".parse().expect("an address");
+        let busy = io::Error::from(io::ErrorKind::AddrInUse);
+        let e = port_error(PEERS, addr, &busy);
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+        assert!(e.to_string().starts_with("peer port 127.0.0.1:27018: "), "{e}");
+        let e = port_error(HTTP, addr, &io::Error::other("no such address"));
+        assert_eq!(e.kind(), io::ErrorKind::Other);
+        assert_eq!(e.to_string(), "HTTP port 127.0.0.1:27018: no such address");
+        assert!(port_error(ADMIN, addr, &busy).to_string().starts_with("administration port "));
+    }
+}

@@ -930,6 +930,35 @@ fn advertised(advertise: Option<&str>, peer_addr: SocketAddr) -> Result<String, 
     }
 }
 
+/// A node's engine as [`start_engine`] started it.
+struct StartedEngine {
+    engine: NodeEngine,
+    cfg: teseladb_io::engine::EngineConfig,
+    /// Why its memory is in ordinary pages, if it is.
+    ordinary_pages: Option<String>,
+    /// The peer address it reserved.
+    peer_addr: SocketAddr,
+}
+
+/// Starts the node's engine for `cores` and reserves its peer port at `at` on shard 0 (023
+/// FR-015, T055): a shard per core where `--cpu-list` says, the node's memory split evenly between
+/// the shards, on huge pages when the system has them (023 FR-027, FR-028, FR-014).
+fn start_engine(cfg: &NodeConfig, cores: u16, at: SocketAddr) -> Result<StartedEngine, NodeError> {
+    let (engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
+        cores,
+        &cfg.placement,
+        cfg.memory_limit,
+        cfg.files,
+    )
+    .map_err(NodeError::Config)?;
+    let engine = NodeEngine::start(&engine_cfg)?;
+    // A port that cannot be opened names itself and its address, as before the engine started.
+    let peer_addr = engine
+        .reserve_peers(at, 0, cores)
+        .map_err(|e| crate::node_ports::port_error(crate::node_ports::PEERS, at, &e))?;
+    Ok(StartedEngine { engine, cfg: engine_cfg, ordinary_pages, peer_addr })
+}
+
 /// What a new node learns before it creates anything: the cluster it joined, if any.
 fn join_first(
     cfg: &NodeConfig,
@@ -982,18 +1011,25 @@ impl Node {
         // Every node's JavaScript reads the deadline of its command and waits in `sleep`, also
         // one a test or a tool starts without `teseladb start` (016 FR-007).
         crate::install_js_host();
-        // The peer port is taken now, so that its address (a port 0 picks one) names the node
-        // before it joins; the engine's listener takes it over once the cores run (023 FR-015).
-        let listener = crate::listen::bind(crate::listen::PEERS, cfg.listen_peer)?;
-        let peer_addr = listener.local_addr()?;
-        let advertised_peer = advertised(cfg.advertise.as_deref(), peer_addr)?;
         let log = cfg.startup_log.clone();
-        log.step("peer port open", &[("addr", &peer_addr)]);
-
         // `node.meta` and the data format size the engine: read before it starts.
         let mut meta_disk = place.startup_disk()?;
         let existing = read_node_meta(&mut meta_disk)?;
         let import_logs = check_data_format(&mut meta_disk, existing.is_some())?;
+        let machine = || thread::available_parallelism().map_or(1, |n| n.get().min(256) as u16);
+        // The cores it runs with, unless the cluster it joins says otherwise.
+        let first_cores = match (cfg.cores, &existing) {
+            (Some(c), _) => c,
+            (None, Some(m)) => m.cores as u16,
+            (None, None) => machine(),
+        };
+        // The engine starts first and reserves the peer port on shard 0, so that its address (a
+        // port 0 picks one) names the node before it joins; its listener takes the socket over
+        // once the cores run (023 FR-015, T055).
+        let mut started = start_engine(&cfg, first_cores, cfg.listen_peer)?;
+        let peer_addr = started.peer_addr;
+        let advertised_peer = advertised(cfg.advertise.as_deref(), peer_addr)?;
+        log.step("peer port open", &[("addr", &peer_addr)]);
         // A node without an identifier (a new directory, or one that stopped between `node.meta`
         // and the write of its identifier) joins with `--join` before creating anything: it adopts
         // the cluster's identifier and cores. One that had started joining never founds a cluster.
@@ -1019,23 +1055,18 @@ impl Node {
                 id
             }
         };
-        let machine = || thread::available_parallelism().map_or(1, |n| n.get().min(256) as u16);
         let cores = match (cfg.cores, &existing, &joined) {
-            (Some(c), _, _) => c,
-            (None, Some(m), _) => m.cores as u16,
             (None, None, Some(a)) => a.cores,
-            (None, None, None) => machine(),
+            _ => first_cores,
         };
-        // Its engine: a shard per core where `--cpu-list` says, the node's memory split evenly
-        // between the shards, on huge pages when the system has them (023 FR-027, FR-028,
-        // FR-014).
-        let (engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
-            cores,
-            &cfg.placement,
-            cfg.memory_limit,
-            cfg.files,
-        )
-        .map_err(NodeError::Config)?;
+        if cores != first_cores {
+            // The cluster it joined has another number of cores: an engine of as many shards,
+            // listening where the first one did.
+            log.step("engine restarted for the cluster's cores", &[("cores", &cores)]);
+            started.engine.stop();
+            started = start_engine(&cfg, cores, peer_addr)?;
+        }
+        let StartedEngine { engine, cfg: engine_cfg, ordinary_pages, .. } = started;
         // Its memory, split between its cores the way the engine splits it (012 FR-013).
         let memory = engine_cfg.memory.map(|total| crate::memory::MemoryBudget::new(total, cores));
         let lsm = memory.map_or_else(|| cfg.lsm.clone(), |m| m.lsm(&cfg.lsm));
@@ -1148,10 +1179,9 @@ impl Node {
         // Its records carry the HLC bound (005 FR-003, D-172): no core gives a mark before the
         // clock passes the highest bound the log kept.
         let log_bound = clock_keeper.log_bound();
-        // The engine of the node: one shard per core, core k on shard k (023 FR-008), and the
-        // line that says how it runs (`contracts/cli-engine.md`); the log's writer runs on shard 0
-        // (023 FR-013).
-        let engine = NodeEngine::start(&engine_cfg)?;
+        // The engine of the node (started above): one shard per core, core k on shard k (023
+        // FR-008), and the line that says how it runs (`contracts/cli-engine.md`); the log's
+        // writer runs on shard 0 (023 FR-013).
         // Server-side JavaScript of every port runs on stacks of its own (016 A016-3-18).
         crate::client_listener::set_deep_stack();
         // The keeper of the clock's bound, a task of shard 0 on the engine's disk executor.
@@ -1266,7 +1296,7 @@ impl Node {
             // A core that already stopped is noticed by whoever talks to it.
             let _ = s.send_waiting(CoreInput::App(NodeMsg::Cores(senders.clone())));
         }
-        // The acceptors of the shards share these handlers, which run in engine threads of the shards.
+        // The acceptors of the shards share these handlers, which run in their engine threads.
         let core0 = senders[0].senders();
         let join: JoinHandler = Arc::new(move |req| {
             let (tx, rx) = teseladb_io::engine::answer::channel();
@@ -1283,13 +1313,15 @@ impl Node {
             handler
         });
         let opts = AcceptorOptions { join: Some(join), enroll, tls: cfg.peer_tls.clone() };
-        // The engine listens where the reserved socket was: the engine hands each connection to
-        // the shard of the core it is for (023 FR-015).
-        drop(listener);
+        // Shard 0 takes over the socket it reserved: the engine hands each connection to the
+        // shard of the core it is for (023 FR-015).
         if let Err(e) = engine.listen_peers(peer_addr, &hello, &opts, 0, cores) {
             stop_cores(&senders, threads);
-            let named = format!("{} {peer_addr}: {e}", crate::listen::PEERS);
-            return Err(NodeError::Io(io::Error::new(e.kind(), named)));
+            return Err(NodeError::Io(crate::node_ports::port_error(
+                crate::node_ports::PEERS,
+                peer_addr,
+                &e,
+            )));
         }
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut replica_port = None;

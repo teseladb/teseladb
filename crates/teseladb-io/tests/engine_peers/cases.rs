@@ -38,6 +38,8 @@ pub fn run() {
         ("a_joiner_that_sends_something_else_is_closed", a_joiner_that_sends_something_else),
         ("each_connection_reaches_the_shard_of_its_core", each_connection_reaches_its_core),
         ("a_core_dials_from_a_port_of_its_own", a_core_dials_from_a_port_of_its_own),
+        ("a_reserved_peer_port_is_taken_over_by_the_listener", a_reserved_peer_port_is_taken_over),
+        ("a_peer_port_in_use_cannot_be_reserved", a_peer_port_in_use_cannot_be_reserved),
     ];
     // `CASES=a,b` runs only those.
     let only = std::env::var("CASES").ok();
@@ -263,6 +265,32 @@ fn an_accepted_join(e: &NodeEngine) {
     let a = acceptor_only(e, AcceptorOptions { join: Some(handler), ..AcceptorOptions::default() });
     assert_eq!(request_join(&a.0.to_string(), &join_request()).unwrap(), Ok(accepted));
     stop_acceptor(e, a);
+}
+
+/// The peer port is reserved on shard 0 before the node's cores run (023 FR-015, T055): port 0
+/// picks one, nobody else can take it, and the listener at that address takes the socket over.
+fn a_reserved_peer_port_is_taken_over(e: &NodeEngine) {
+    let at = e.reserve_peers("127.0.0.1:0".parse().unwrap(), 1, 1).unwrap();
+    assert_eq!(at.ip().to_string(), "127.0.0.1");
+    assert_ne!(at.port(), 0, "the address is known before the node listens");
+    assert!(std::net::TcpListener::bind(at).is_err(), "the reservation holds the port");
+    let h = hello(1, &at.to_string());
+    let core = start_core(e, 1, &h, Toy::default(), MemDisk::new(), Duration::from_millis(5), None);
+    let handler: JoinHandler = Arc::new(|_| Err("the cluster is full".into()));
+    let opts = AcceptorOptions { join: Some(handler), ..AcceptorOptions::default() };
+    assert_eq!(e.listen_peers(at, &h, &opts, 1, 1).unwrap(), at);
+    let got = request_join(&at.to_string(), &join_request()).unwrap();
+    assert_eq!(got, Err("the cluster is full".into()));
+    stop_acceptor(e, (at, Node { tx: core.sender(), addr: at, core }));
+}
+
+/// A peer port another process holds fails the reservation with the system's reason.
+fn a_peer_port_in_use_cannot_be_reserved(e: &NodeEngine) {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = held.local_addr().unwrap();
+    let busy = e.reserve_peers(at, 1, 1).unwrap_err();
+    assert_eq!(busy.kind(), std::io::ErrorKind::AddrInUse, "{busy}");
+    drop(held);
 }
 
 fn a_rejected_join(e: &NodeEngine) {

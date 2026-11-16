@@ -147,7 +147,7 @@ impl HttpPort {
             h
         });
         let port_cfg = PortConfig {
-            name: crate::listen::HTTP,
+            name: crate::node_ports::HTTP,
             addrs: cfg.addrs,
             tls: tls.clone(),
             handshake: Duration::from_millis(HEADER_TIMEOUT_MS),

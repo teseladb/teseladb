@@ -59,7 +59,7 @@ impl AdminPort {
     pub fn start(addr: SocketAddr, make: MakeHandler, tls: Option<AdminTls>) -> Future<AdminPort> {
         let shard_tls = tls.as_ref().map(|t| ShardTls::new(&t.port, None, Policy::FirstByte));
         let cfg = PortConfig {
-            name: crate::listen::ADMIN,
+            name: crate::node_ports::ADMIN,
             addrs: vec![addr],
             tls: shard_tls.clone().unwrap_or_else(ShardTls::plain),
             handshake: IO_TIMEOUT,

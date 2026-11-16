@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::future::ExceptionPtr;
+use teseladb::engine::core::future::{ExceptionPtr, SystemError};
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::reactor::{connect_from, listen_with};
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
@@ -324,23 +324,84 @@ thread_local! {
     static NEXT_RELAY: Cell<u64> = const { Cell::new(0) };
 }
 
+thread_local! {
+    /// The peer port this shard reserved before the node's cores ran, by the address it took.
+    static RESERVED: RefCell<Vec<(SocketAddr, ServerSocket)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How the node's peer port listens: spread by the dialer's source port over `cores` shards from
+/// `base`, or all on `base` with one core.
+fn peer_listen_options(cores: u16, base: u32) -> ListenOptions {
+    let mut opts = ListenOptions { reuse_address: true, ..ListenOptions::default() };
+    if cores > 1 {
+        opts.lba = LoadBalancingAlgorithm::Port;
+    } else {
+        opts.set_fixed_cpu(base);
+    }
+    opts
+}
+
+/// The [`std::io::Error`] of a listen that failed, with the system's kind when it has one (an
+/// address in use reads as [`std::io::ErrorKind::AddrInUse`]).
+fn listen_error(e: &ExceptionPtr) -> std::io::Error {
+    match e.downcast_ref::<SystemError>() {
+        Some(s) => {
+            let kind = std::io::Error::from_raw_os_error(s.code()).kind();
+            std::io::Error::new(kind, s.to_string())
+        }
+        None => std::io::Error::other(e.to_string()),
+    }
+}
+
+/// Reserves the node's peer port at `at` on this shard (shard 0, which owns the listening
+/// socket) before the node's cores run (023 FR-015, T055): the socket listens, so its address
+/// (a port 0 picks one) names the node when it joins, but nothing accepts until
+/// [`listen_here`] takes it; a peer that calls meanwhile waits in the backlog. Returns the
+/// address it took.
+pub(crate) fn reserve_here(at: SocketAddr, cores: u16, base: u32) -> std::io::Result<SocketAddr> {
+    let ss = listen_with(socket_address(at), peer_listen_options(cores, base))
+        .map_err(|e| listen_error(&e))?;
+    let addr = ss
+        .local_address()
+        .ok()
+        .and_then(|a| std_addr(&a))
+        .ok_or_else(|| std::io::Error::other("the listening socket has no address"))?;
+    RESERVED.with(|r| r.borrow_mut().push((addr, ss)));
+    Ok(addr)
+}
+
+/// Lets go of the ports this shard reserved and no listener took.
+pub(crate) fn release_here() {
+    let gone = RESERVED.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for (_, mut ss) in gone {
+        ss.abort_accept();
+    }
+}
+
 /// Listens for the node's peers on this shard: the shard that owns the listening socket (the
 /// first, `owner`) accepts and the engine hands each connection to a shard of the node's cores;
-/// every one of them accepts its own. Returns the address listened on (the owner's).
+/// every one of them accepts its own. The owner takes the socket it reserved at `at`
+/// ([`reserve_here`]) if it did. Returns the address listened on (the owner's).
 pub(crate) fn listen_here(
     at: SocketAddr,
     owner: bool,
     cores: u16,
     ctx: AcceptCtx,
 ) -> std::io::Result<Option<SocketAddr>> {
-    let mut opts = ListenOptions { reuse_address: true, ..ListenOptions::default() };
-    if cores > 1 {
-        opts.lba = LoadBalancingAlgorithm::Port;
-    } else {
-        opts.set_fixed_cpu(ctx.base);
-    }
-    let ss =
-        listen_with(socket_address(at), opts).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let reserved = owner
+        .then(|| {
+            RESERVED.with(|r| {
+                let mut r = r.borrow_mut();
+                let i = r.iter().position(|(a, _)| *a == at)?;
+                Some(r.swap_remove(i).1)
+            })
+        })
+        .flatten();
+    let ss = match reserved {
+        Some(ss) => ss,
+        None => listen_with(socket_address(at), peer_listen_options(cores, ctx.base))
+            .map_err(|e| listen_error(&e))?,
+    };
     let addr = owner.then(|| ss.local_address().ok().and_then(|a| std_addr(&a))).flatten();
     let ss = Rc::new(RefCell::new(ss));
     LISTENERS.with(|l| l.borrow_mut().push((at, ss.clone())));
