@@ -31,7 +31,6 @@ pub mod secure;
 pub mod service;
 pub mod spin;
 pub mod spsc;
-pub mod timer;
 pub mod user_tcp;
 #[cfg(target_os = "linux")]
 pub mod xdp_port;
