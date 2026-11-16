@@ -14,9 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_io::FileDisk;
-use teseladb_io::handshake::{Acceptor, Inbound, JoinHandler, JoinRequest};
-use teseladb_io::mailbox::{Notify, channel};
-use teseladb_io::peer::Hello;
+use teseladb_io::handshake::JoinRequest;
+
+use teseladb_io::peer::{Hello, PeerMsg, decode_frame, encode_frame};
 use teseladb_raft::Role;
 use teseladb_server::logic::Group0View;
 use teseladb_server::node::{
@@ -364,21 +364,44 @@ fn errors_say_what_failed() {
     assert!(lsm.to_string().starts_with("LSM: "), "{lsm}");
 }
 
-struct Quiet;
-
-impl Notify for Quiet {
-    fn notify(&self) {}
+/// A node that only answers joins, on a thread of the test: each joiner's `Hello` gets its own,
+/// and its `JoinRequest` the refusal `answer(own address)`.
+struct FakeNode {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: thread::JoinHandle<()>,
 }
 
-/// A node that only answers joins, with `answer(own address)`.
-fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (Acceptor, String) {
+impl FakeNode {
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        self.thread.join().unwrap();
+    }
+}
+
+/// Reads one frame from `s` (`buf` holds what came after the last one).
+fn read_frame(s: &mut std::net::TcpStream, buf: &mut Vec<u8>) -> Option<PeerMsg> {
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Ok(Some((m, used))) = decode_frame(buf) {
+            buf.drain(..used);
+            return Some(m);
+        }
+        let n = std::io::Read::read(s, &mut chunk).ok().filter(|n| *n > 0)?;
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+fn write_frame(s: &mut std::net::TcpStream, m: &PeerMsg) {
+    let mut out = Vec::new();
+    encode_frame(m, false, &mut out).unwrap();
+    std::io::Write::write_all(s, &out).unwrap();
+}
+
+fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (FakeNode, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let own = addr.clone();
-    let join: JoinHandler = Arc::new(move |_| {
-        asked.fetch_add(1, Ordering::Relaxed);
-        Err(answer(&own))
-    });
     let hello = Hello {
         cluster_id: [7; 16],
         node_id: NodeId(1),
@@ -389,9 +412,24 @@ fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (Acceptor, 
         native_addr: String::new(),
         versions: teseladb_io::peer::Versions::OWN,
     };
-    let (tx, _rx) = channel::<Inbound>(Arc::new(Quiet));
-    let a = Acceptor::spawn_with_join(listener, hello, vec![tx], |i| i, Some(join)).unwrap();
-    (a, addr)
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    let thread = thread::spawn(move || {
+        while !stopping.load(Ordering::Acquire) {
+            let Ok((mut s, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            s.set_nonblocking(false).unwrap();
+            let mut buf = Vec::new();
+            let Some(PeerMsg::Hello(_)) = read_frame(&mut s, &mut buf) else { continue };
+            write_frame(&mut s, &PeerMsg::Hello(hello.clone()));
+            let Some(PeerMsg::JoinRequest { .. }) = read_frame(&mut s, &mut buf) else { continue };
+            asked.fetch_add(1, Ordering::Relaxed);
+            write_frame(&mut s, &PeerMsg::JoinResponse(Err(answer(&own))));
+        }
+    });
+    (FakeNode { stop, thread }, addr)
 }
 
 fn a_join_round_follows_a_bounded_number_of_hints() {

@@ -100,7 +100,7 @@ impl ServerBackend {
         let (tx, _answer) = std::sync::mpsc::channel();
         if let Some(core) = self.cores.get(usize::from(entry.core)) {
             let msg = NodeMsg::Data(DataReq::Remote(g, req), tx);
-            let _ = core.send(teseladb_io::runtime::CoreInput::App(msg));
+            let _ = core.send(teseladb_io::engine::CoreInput::App(msg));
         }
     }
 
