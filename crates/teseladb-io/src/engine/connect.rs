@@ -13,7 +13,7 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,23 @@ pub fn socket_address(addr: SocketAddr) -> SocketAddress {
             sin6_addr: in6_addr { s6_addr: a.ip().octets() },
             sin6_scope_id: a.scope_id(),
         }),
+    }
+}
+
+/// The address of the engine's `sa`, if it is an IP one: the inverse of [`socket_address`].
+pub fn std_addr(sa: &SocketAddress) -> Option<SocketAddr> {
+    match sa.family() {
+        AF_INET => {
+            let a = sa.as_posix_sockaddr_in();
+            let ip = IpAddr::from(a.sin_addr.s_addr.to_ne_bytes());
+            Some(SocketAddr::new(ip, u16::from_be(a.sin_port)))
+        }
+        AF_INET6 => {
+            let a = sa.as_posix_sockaddr_in6();
+            let ip = IpAddr::from(a.sin6_addr.s6_addr);
+            Some(SocketAddr::new(ip, u16::from_be(a.sin6_port)))
+        }
+        _ => None,
     }
 }
 

@@ -1,15 +1,14 @@
-//! A clients' port on the engine's network (023 FR-018, FR-019): every shard listens on the
-//! port's addresses through the engine's POSIX stack, where shard 0 owns the listening socket
-//! (no `SO_REUSEPORT`) and the engine hands each accepted connection to a shard; the connection
-//! is a task of that shard from then on.
+//! A clients' port on the engine's network (023 FR-018, FR-019): it takes its connections the way
+//! every port of the node does ([`super::accept`]: shard 0 owns the listening socket, every shard
+//! takes its part of the connections, TLS first as `--tlsMode` says), and each connection is a
+//! task of the shard that took it from then on.
 //!
 //! The port knows bytes and time; what the bytes mean is the [`Session`] the port's [`Service`]
 //! makes for each connection (the wire protocol, in the server). A connection has three tasks:
 //! its reader, which reads the socket into the connection's inbox; its writer, which sends what
 //! the session answered; and its driver, which hands what arrived to the session and runs the
 //! session's work in an engine thread of [`super::stacks`] (a command waits for the cores without
-//! holding up the shard). TLS comes first: the first bytes choose it as `--tlsMode` says
-//! ([`tls_stream::accept`] with the [`Sniff`] the service gives).
+//! holding up the shard).
 //!
 //! A connection whose answers wait to go out past [`PAUSE_AT`] bytes is not read until they are
 //! below [`RESUME_AT`]: a client that does not read its answers stops being read.
@@ -26,20 +25,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::future::ExceptionPtr;
+use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
-use teseladb::engine::core::reactor::listen_with;
+use teseladb::engine::core::reactor::internal_misc::run_in_background;
 use teseladb::engine::core::timer::Timer;
-use teseladb::engine::net::api::{
-    ConnectedSocket, ConnectedSocketInputStreamConfig, ListenOptions, ServerSocket,
-};
+use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig};
 use teseladb_x509::Certificate;
 
-use super::connect::socket_address;
-use super::peers::std_addr;
+use super::accept::{AcceptConfig, Acceptor, MakeSide, Side, Taken};
 use super::post::Wake;
 use super::stacks;
-use super::tls_stream::{self, Sniff, TlsSession};
+use super::tls_stream::{Sniff, TlsSession};
 
 /// Answers waiting to go out past which a connection is not read (023 FR-018).
 pub const PAUSE_AT: usize = 4 << 20;
@@ -49,6 +45,8 @@ pub const RESUME_AT: usize = 2 << 20;
 const OUTPUT_BUFFER: usize = 64 << 10;
 /// How long a connection has to send its first bytes and end its TLS handshake.
 pub const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
+/// The port's name in errors.
+const NAME: &str = "clients";
 
 /// What the port knows of a connection when it opens it.
 #[derive(Clone, Debug)]
@@ -129,97 +127,73 @@ impl Conn {
     }
 }
 
-/// A port's listeners and connections on one shard.
-#[derive(Default)]
-struct PortHere {
-    listeners: Vec<Rc<RefCell<ServerSocket>>>,
-    next: u64,
-    conns: HashMap<u64, Rc<Conn>>,
+/// The port on one shard: its service and the connections open here.
+struct ClientSide {
+    id: u64,
+    service: Arc<dyn Service>,
+    next: Cell<u64>,
+    conns: RefCell<HashMap<u64, Rc<Conn>>>,
 }
 
 thread_local! {
-    /// The ports of this shard, by number.
-    static PORTS: RefCell<HashMap<u64, PortHere>> = RefCell::new(HashMap::new());
+    /// The ports of this shard, by the number of their [`Acceptor`].
+    static SIDES: RefCell<HashMap<u64, Rc<ClientSide>>> = RefCell::new(HashMap::new());
 }
 
-fn with_port<R>(port: u64, f: impl FnOnce(&mut PortHere) -> R) -> R {
-    PORTS.with(|p| f(p.borrow_mut().entry(port).or_default()))
+impl ClientSide {
+    /// The side of port `id` on this shard, registered so that [`wake_here`] finds it.
+    fn here(id: u64, service: Arc<dyn Service>) -> Rc<ClientSide> {
+        let side = Rc::new(ClientSide {
+            id,
+            service,
+            next: Cell::new(0),
+            conns: RefCell::new(HashMap::new()),
+        });
+        SIDES.with(|s| s.borrow_mut().insert(id, Rc::clone(&side)));
+        side
+    }
+
+    fn conns(&self) -> Vec<Rc<Conn>> {
+        self.conns.borrow().values().cloned().collect()
+    }
 }
 
-/// Listens for port `port` at `at` on this shard and accepts its connections here until
-/// [`stop_here`]; the address listened on. The first shard to listen at an address binds it;
-/// the others take their part of its connections, so they listen at the address the first one
-/// got (with the port the system chose for port 0).
-///
-/// # Errors
-///
-/// When the address cannot be listened on.
-pub fn listen_here(port: u64, at: SocketAddr, service: Arc<dyn Service>) -> io::Result<SocketAddr> {
-    let opts = ListenOptions { reuse_address: true, ..ListenOptions::default() };
-    let ss = listen_with(socket_address(at), opts).map_err(|e| io::Error::other(e.to_string()))?;
-    let bound = ss.local_address().ok().and_then(|a| std_addr(&a)).unwrap_or(at);
-    let ss = Rc::new(RefCell::new(ss));
-    with_port(port, |p| p.listeners.push(Rc::clone(&ss)));
-    drop(make_coroutine(accept_loop(port, ss, service)));
-    Ok(bound)
-}
+impl Side for ClientSide {
+    fn sniff(&self) -> Sniff {
+        self.service.sniff()
+    }
 
-async fn accept_loop(
-    port: u64,
-    ss: Rc<RefCell<ServerSocket>>,
-    service: Arc<dyn Service>,
-) -> Result<(), ExceptionPtr> {
-    loop {
-        let f = ss.borrow_mut().accept();
-        match f.await {
-            Ok(a) => {
-                let remote = std_addr(&a.remote_address);
-                drop(make_coroutine(serve(port, a.connection, remote, Arc::clone(&service))));
-            }
-            // An aborted listener ends the loop; a failed accept loses only that connection.
-            Err(_) if !listening(port, &ss) => return Ok(()),
-            Err(_) => {}
+    fn serve(self: Rc<Self>, conn: Taken) -> impl std::future::Future<Output = ()> + 'static {
+        serve(self, conn)
+    }
+
+    /// Its connections close: what they answered goes out first, and a command that runs ends
+    /// before its connection closes.
+    fn stop(&self) {
+        SIDES.with(|s| s.borrow_mut().remove(&self.id));
+        for c in self.conns() {
+            c.stopping.set(true);
+            c.wake.wake();
         }
     }
 }
 
-fn listening(port: u64, ss: &Rc<RefCell<ServerSocket>>) -> bool {
-    PORTS.with(|p| {
-        p.borrow().get(&port).is_some_and(|h| h.listeners.iter().any(|l| Rc::ptr_eq(l, ss)))
-    })
-}
-
-/// Stops port `port` on this shard: its listeners stop accepting and its connections close
-/// (what they answered goes out first; a command that runs ends before its connection closes).
-pub fn stop_here(port: u64) {
-    let Some(here) = PORTS.with(|p| p.borrow_mut().remove(&port)) else { return };
-    for l in here.listeners {
-        l.borrow_mut().abort_accept();
-    }
-    for c in here.conns.into_values() {
-        c.stopping.set(true);
-        c.wake.wake();
-    }
+fn side_here(port: u64) -> Option<Rc<ClientSide>> {
+    SIDES.with(|s| s.borrow().get(&port).cloned())
 }
 
 /// Wakes every connection of port `port` on this shard: the node's state changed, so each
 /// session looks at its waits and whether it must close.
 pub fn wake_here(port: u64) {
-    let conns: Vec<Rc<Conn>> = PORTS
-        .with(|p| p.borrow().get(&port).map(|h| h.conns.values().cloned().collect()))
-        .unwrap_or_default();
-    for c in conns {
+    for c in side_here(port).map(|s| s.conns()).unwrap_or_default() {
         c.wake.wake();
     }
 }
 
 /// Connections of port `port` open on this shard.
 pub fn open_here(port: u64) -> usize {
-    PORTS.with(|p| p.borrow().get(&port).map_or(0, |h| h.conns.len()))
+    side_here(port).map_or(0, |s| s.conns.borrow().len())
 }
-
-/// Numbers the ports of the process.
-static NEXT_PORT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Runs `f` on `shard` and waits for its result, from any thread (an engine thread parks).
 fn on_shard<R: Send + 'static>(shard: u32, f: Box<dyn FnOnce() -> R + Send>) -> io::Result<R> {
@@ -236,12 +210,40 @@ fn on_shard<R: Send + 'static>(shard: u32, f: Box<dyn FnOnce() -> R + Send>) -> 
     rx.recv().map_err(|_| io::Error::other("the engine stopped"))
 }
 
+/// Runs the future `f` makes on `shard` and waits until it resolves, from any thread (an engine
+/// thread parks); a failure keeps the kind of an [`io::Error`].
+fn on_shard_until<R: Send + 'static>(
+    shard: u32,
+    f: Box<dyn FnOnce() -> Future<R> + Send>,
+) -> io::Result<R> {
+    let (tx, rx) = super::answer::channel();
+    let posted = super::wait::post(
+        shard,
+        Box::new(move || {
+            run_in_background(f().then_wrapped(move |r: Future<R>| {
+                let _ = tx.send(r.get().map_err(|e| io_error(&e)));
+                make_ready_future(())
+            }));
+        }),
+    );
+    if !posted {
+        return Err(io::Error::other("no engine runs in this process"));
+    }
+    rx.recv().map_err(|_| io::Error::other("the engine stopped"))?
+}
+
+fn io_error(e: &ExceptionPtr) -> io::Error {
+    match e.downcast_ref::<io::Error>() {
+        Some(io) => io::Error::new(io.kind(), io.to_string()),
+        None => io::Error::other(e.to_string()),
+    }
+}
+
 /// A running port, usable from any thread: what [`start_port`] started on every shard.
 #[derive(Debug)]
 pub struct PortRef {
-    id: u64,
+    acceptor: Acceptor,
     shards: u32,
-    addrs: Vec<SocketAddr>,
 }
 
 /// Starts a port at `addrs` on every shard of the engine, with `service` for its connections.
@@ -249,46 +251,31 @@ pub struct PortRef {
 ///
 /// # Errors
 ///
-/// When no engine runs, or an address cannot be listened on (the port is then stopped where
-/// it started).
+/// When no engine runs, or an address cannot be listened on (nothing keeps listening then).
 pub fn start_port(addrs: &[SocketAddr], service: Arc<dyn Service>) -> io::Result<PortRef> {
-    let id = NEXT_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let shards = on_shard(0, Box::new(teseladb::engine::core::smp::Smp::count))?;
-    let mut port = PortRef { id, shards, addrs: Vec::with_capacity(addrs.len()) };
-    for at in addrs {
-        // Shard 0 binds the address; the others take their part of its connections.
-        let svc = Arc::clone(&service);
-        let at = *at;
-        let bound = match on_shard(0, Box::new(move || listen_here(id, at, svc))) {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) | Err(e) => {
-                port.stop();
-                return Err(e);
-            }
-        };
-        for shard in 1..shards {
-            let svc = Arc::clone(&service);
-            if let Err(e) =
-                on_shard(shard, Box::new(move || listen_here(id, bound, svc))).and_then(|r| r)
-            {
-                port.stop();
-                return Err(e);
-            }
-        }
-        port.addrs.push(bound);
-    }
-    Ok(port)
+    let cfg = AcceptConfig {
+        name: NAME,
+        addrs: addrs.to_vec(),
+        handshake: HANDSHAKE_LIMIT,
+        // The service bounds the connections (`--maxConns`).
+        max_connections: None,
+        local_address: true,
+    };
+    let make: MakeSide<ClientSide> = Arc::new(move |id| ClientSide::here(id, Arc::clone(&service)));
+    let acceptor = on_shard_until(0, Box::new(move || Acceptor::start(cfg, make)))?;
+    Ok(PortRef { acceptor, shards })
 }
 
 impl PortRef {
     /// The addresses it listens on, with the ports the system chose for port 0.
     pub fn addrs(&self) -> &[SocketAddr] {
-        &self.addrs
+        self.acceptor.addrs()
     }
 
     /// Its number in the process.
     pub fn id(&self) -> u64 {
-        self.id
+        self.acceptor.id()
     }
 
     /// The shards it runs on.
@@ -299,31 +286,29 @@ impl PortRef {
     /// Wakes every connection of the port on every shard (the node's state changed); does not
     /// wait.
     pub fn wake(&self) {
-        wake_port(self.id, self.shards);
+        wake_port(self.id(), self.shards);
     }
 
     /// A function that wakes every connection of the port, for whoever publishes the node's
     /// state.
     pub fn waker(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let (id, shards) = (self.id, self.shards);
+        let (id, shards) = (self.id(), self.shards);
         Arc::new(move || wake_port(id, shards))
     }
 
     /// Connections open on each shard, in shard order.
     pub fn open_by_shard(&self) -> Vec<usize> {
-        let id = self.id;
+        let id = self.id();
         (0..self.shards)
             .map(|s| on_shard(s, Box::new(move || open_here(id))).unwrap_or(0))
             .collect()
     }
 
-    /// Stops the port on every shard and waits until each shard stopped accepting: its
-    /// connections close once what they answered went out.
+    /// Stops the port on every shard and waits until its connections closed: what they
+    /// answered goes out first, and a command that runs ends before its connection closes.
     pub fn stop(&self) {
-        let id = self.id;
-        for shard in 0..self.shards {
-            let _ = on_shard(shard, Box::new(move || stop_here(id)));
-        }
+        let acceptor = self.acceptor.clone();
+        let _ = on_shard_until(0, Box::new(move || acceptor.stop()));
     }
 }
 
@@ -333,37 +318,21 @@ fn wake_port(id: u64, shards: u32) {
     }
 }
 
-/// A connection the engine handed to this shard: TLS as the service says, then its tasks.
-async fn serve(
-    port: u64,
-    mut sock: ConnectedSocket,
-    remote: Option<SocketAddr>,
-    service: Arc<dyn Service>,
-) -> Result<(), ExceptionPtr> {
-    let _ = sock.set_nodelay(true);
-    let local = std_addr(&sock.local_address());
-    let from = Instant::now();
-    let sniff = service.sniff();
-    let plain = matches!(sniff, Sniff::Plain);
-    let accepted = match tls_stream::accept(sock, sniff, (!plain).then_some(HANDSHAKE_LIMIT)).await
-    {
-        Ok(a) => a,
-        // A client that sent nothing in time or failed its handshake is closed.
-        Err(_) => return Ok(()),
-    };
-    let tls: Option<TlsSession> = accepted.tls;
+/// A connection the port took on this shard: its session, then its tasks.
+async fn serve(side: Rc<ClientSide>, taken: Taken) {
+    let tls: Option<TlsSession> = taken.tls;
     let info = ConnInfo {
-        peer: remote,
-        local,
+        peer: taken.peer,
+        local: taken.local,
         tls: tls.is_some(),
         peer_certificates: tls.as_ref().map(TlsSession::peer_certificates).unwrap_or_default(),
-        handshake: tls.as_ref().map(|_| from.elapsed()),
+        handshake: taken.handshake,
     };
-    let mut sock = accepted.socket;
-    let Some(session) = service.open(info) else {
+    let mut sock = taken.socket;
+    let Some(session) = side.service.open(info) else {
         sock.shutdown_input();
         sock.shutdown_output();
-        return Ok(());
+        return;
     };
     let input = sock.input(ConnectedSocketInputStreamConfig::default());
     let output = sock.output(OUTPUT_BUFFER);
@@ -380,23 +349,16 @@ async fn serve(
         write_failed: Cell::new(false),
         stopping: Cell::new(false),
     });
-    let id = with_port(port, |p| {
-        p.next += 1;
-        p.conns.insert(p.next, Rc::clone(&conn));
-        p.next
-    });
+    let id = side.next.get() + 1;
+    side.next.set(id);
+    side.conns.borrow_mut().insert(id, Rc::clone(&conn));
     drop(make_coroutine(reader(input, Rc::clone(&conn))));
     drop(make_coroutine(writer(output, Rc::clone(&conn))));
     drive(&conn, session).await;
-    PORTS.with(|p| {
-        if let Some(h) = p.borrow_mut().get_mut(&port) {
-            h.conns.remove(&id);
-        }
-    });
+    side.conns.borrow_mut().remove(&id);
     // The writer sends what is left, then closes.
     conn.closing.set(true);
     conn.out_wake.wake();
-    Ok(())
 }
 
 async fn reader(mut input: InputStream<u8>, conn: Rc<Conn>) -> Result<(), ExceptionPtr> {

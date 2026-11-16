@@ -12,7 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,12 +29,12 @@ use teseladb::engine::net::api::{
     ConnectedSocket, ConnectedSocketInputStreamConfig, ListenOptions, LoadBalancingAlgorithm,
     ServerSocket,
 };
-use teseladb::engine::net::socket_defs::{AF_INET, AF_INET6, SocketAddress, Transport};
+use teseladb::engine::net::socket_defs::{SocketAddress, Transport};
 use teseladb_tls::ClientConfig;
 use teseladb_types::{Nanos, NodeId, Rng};
 
 use super::blocking;
-use super::connect::socket_address;
+use super::connect::{socket_address, std_addr};
 use super::core_loop::{BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreLogic, MAX_PENDING};
 use super::post::{CoreIo, Gate, ShardPost, Wake};
 use super::tls_stream::{self, TlsSession};
@@ -181,23 +181,6 @@ fn certified(tls: Option<&TlsSession>) -> Result<(), HandshakeError> {
     match tls {
         Some(t) if t.peer_certificates().is_empty() => Err(HandshakeError::NoCertificate),
         _ => Ok(()),
-    }
-}
-
-/// The address of `sa` of the engine, if it is an IP one.
-pub(crate) fn std_addr(sa: &SocketAddress) -> Option<SocketAddr> {
-    match sa.family() {
-        AF_INET => {
-            let a = sa.as_posix_sockaddr_in();
-            let ip = IpAddr::from(a.sin_addr.s_addr.to_ne_bytes());
-            Some(SocketAddr::new(ip, u16::from_be(a.sin_port)))
-        }
-        AF_INET6 => {
-            let a = sa.as_posix_sockaddr_in6();
-            let ip = IpAddr::from(a.sin6_addr.s6_addr);
-            Some(SocketAddr::new(ip, u16::from_be(a.sin6_port)))
-        }
-        _ => None,
     }
 }
 

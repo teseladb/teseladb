@@ -1,6 +1,12 @@
 //! The audit log of a node (013 FR-016): `--auditDestination`, `--auditFormat`, `--auditPath`
 //! and `--auditFilter`, checked with the reference server's messages, and where the messages go: a
 //! file created with permissions 0600 and appended to, the standard output, or the system log.
+//!
+//! No shard waits for a write (023 FR-018): every shard hands its messages to the audit log's
+//! [`Outlet`], whose one writer on shard 0 appends them to the file through the engine's files,
+//! to the standard output through the engine as a non-blocking descriptor, or to the system log,
+//! keeping each shard's order and every message. An event of the node itself waits until it is
+//! written ([`AuditLog::system`]), and so can a caller with [`AuditLog::flush`].
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -8,7 +14,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use teseladb_auth::audit::{
     AuditType, Auditor, Client, Config, Destination, Event, Options, ProcessInfo,
@@ -16,6 +22,9 @@ use teseladb_auth::audit::{
 use teseladb_auth::audit_crypt::AuditEncryption;
 use teseladb_bson::Document;
 use teseladb_wire::commands::audit::{Audit, SharedAuditor, Sink};
+
+use crate::outlet::Outlet;
+use crate::outlet::dest::{Dest, FileDest, StreamDest, SyslogDest};
 
 /// Permissions of the audit file, as the reference server creates it.
 const FILE_MODE: u32 = 0o600;
@@ -81,11 +90,11 @@ impl AuditOpts {
     }
 }
 
-/// Where the bytes go.
+/// Where the bytes go, as opened at the start.
 enum Target {
-    File(File),
+    File(File, PathBuf),
     Console,
-    Syslog(UnixDatagram),
+    Syslog(UnixDatagram, PathBuf),
 }
 
 impl Target {
@@ -101,43 +110,48 @@ impl Target {
                     .append(true)
                     .mode(FILE_MODE)
                     .open(PathBuf::from(&path))
-                    .map(Target::File)
+                    .map(|f| Target::File(f, PathBuf::from(&path)))
                     .map_err(|e| format!("auditLog.path {path}: {e}"))
             }
             Destination::Console => Ok(Target::Console),
             Destination::Syslog => sockets
                 .iter()
-                .find_map(|p| UnixDatagram::unbound().and_then(|s| s.connect(p).map(|()| s)).ok())
-                .map(Target::Syslog)
+                .find_map(|p| {
+                    let s = UnixDatagram::unbound().and_then(|s| s.connect(p).map(|()| s)).ok()?;
+                    Some(Target::Syslog(s, PathBuf::from(p)))
+                })
                 .ok_or_else(|| "syslog: no system log socket".to_owned()),
         }
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        // An audit message that cannot be written is lost with the device; the node goes on, as
-        // the log does.
-        let _ = match self {
-            Target::File(f) => f.write_all(bytes).and_then(|()| f.flush()),
-            Target::Console => {
-                let mut out = std::io::stdout().lock();
-                out.write_all(bytes).and_then(|()| out.flush())
+    /// The destination of the outlet: written by one task on the home shard, which no shard
+    /// waits for (023 FR-018).
+    fn into_dest(self) -> Result<Box<dyn Dest>, String> {
+        match self {
+            Target::File(file, path) => FileDest::new(&path, file)
+                .map(|d| Box::new(d) as Box<dyn Dest>)
+                .map_err(|e| format!("auditLog.path {}: {e}", path.display())),
+            Target::Console => StreamDest::stdout()
+                .map(|d| Box::new(d) as Box<dyn Dest>)
+                .map_err(|e| format!("auditLog.destination console: {e}")),
+            Target::Syslog(sock, path) => {
+                let prefix = format!("<{SYSLOG_PRIORITY}>{SYSLOG_TAG}: ").into_bytes();
+                Ok(Box::new(SyslogDest::new(path, sock, prefix)))
             }
-            Target::Syslog(s) => {
-                let mut msg = format!("<{SYSLOG_PRIORITY}>{SYSLOG_TAG}: ").into_bytes();
-                msg.extend_from_slice(bytes);
-                s.send(&msg).map(|_| ())
-            }
-        };
+        }
     }
 }
 
-/// The sink of every worker of a node, shared.
+/// The sink of every worker of a node: the audit log's outlet. Every message is kept, in the
+/// order each shard produced it (an audit message is never dropped).
 #[derive(Clone)]
-struct Shared(Arc<Mutex<Target>>);
+struct Shared(Outlet);
 
 impl Sink for Shared {
     fn write(&mut self, bytes: &[u8]) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).write(bytes);
+        // A message that cannot be written is lost with the device; the node goes on, as the
+        // log does.
+        self.0.push(bytes);
     }
 }
 
@@ -216,7 +230,7 @@ impl fmt::Debug for AuditLog {
 impl PartialEq for AuditLog {
     /// The same open destination.
     fn eq(&self, other: &AuditLog) -> bool {
-        Arc::ptr_eq(&self.sink.0, &other.sink.0)
+        self.sink.0.same(&other.sink.0)
     }
 }
 
@@ -265,16 +279,25 @@ impl AuditLog {
             }
             _ => encryption(&config, teseladb_sys::fill_random)?,
         };
-        let mut target = Target::open(&config, sockets)?;
+        let target = Target::open(&config, sockets)?;
         let auditor = Auditor::new(config);
-        if let (Target::File(_), Some(header)) = (&target, auditor.encryption_header(now_ms())) {
-            target.write(&header);
+        // The header of an encrypted file goes first, before the node runs.
+        if let (Target::File(f, _), Some(header)) = (&target, auditor.encryption_header(now_ms())) {
+            // Lost with the device when it cannot be written, as any message.
+            let mut file = f;
+            let _ = file.write_all(&header);
         }
         Ok(Some(AuditLog {
             opts: opts.clone(),
             auditor: Arc::new(RwLock::new(auditor)),
-            sink: Shared(Arc::new(Mutex::new(target))),
+            sink: Shared(Outlet::new(target.into_dest()?, None)),
         }))
+    }
+
+    /// Waits until the messages recorded so far by the caller are written (013 FR-016): a node
+    /// that stops, an event of the node itself.
+    pub fn flush(&self) {
+        self.sink.0.flush();
     }
 
     /// The audit log of the node's commands: the same auditor and destination.
@@ -303,6 +326,7 @@ impl AuditLog {
         drop(auditor);
         if let Some(bytes) = bytes {
             self.sink.clone().write(&bytes);
+            self.flush();
         }
     }
 }
