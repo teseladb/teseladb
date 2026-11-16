@@ -10,6 +10,8 @@ use std::sync::OnceLock;
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::reactor::create_scheduling_group;
 use teseladb::engine::core::scheduling::SchedulingGroup;
+use teseladb::engine::core::shared_future::SharedFuture;
+use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
 
 use crate::IoClass;
@@ -32,13 +34,38 @@ pub struct IoGroups {
 /// The groups of the process, made once: the engine has a fixed number of scheduling groups.
 static GROUPS: OnceLock<IoGroups> = OnceLock::new();
 
+/// The shard that creates the groups: every first call, from any shard, waits for its one
+/// creation.
+const CREATING_SHARD: u32 = 0;
+
+thread_local! {
+    /// On [`CREATING_SHARD`], the creation under way or done, which later calls share.
+    static CREATION: std::cell::RefCell<Option<SharedFuture<IoGroups>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl IoGroups {
-    /// The groups of the process, creating them on every shard the first time. Call it from one
-    /// shard at a time, before the shards open their disks (the node does on shard 0 at start).
+    /// The groups of the process, creating them on every shard the first time. Callable from any
+    /// shard at any time: the first calls, wherever they run, share one creation on
+    /// [`CREATING_SHARD`]. Two creations would make two groups of each name, whose metrics the
+    /// engine refuses to register twice (the node's cores, its log and its outlets open their
+    /// disks at once on start).
     pub fn get_or_create() -> Future<IoGroups> {
         if let Some(g) = GROUPS.get() {
             return make_ready_future(*g);
         }
+        Smp::submit_to(CREATING_SHARD, || {
+            if let Some(g) = GROUPS.get() {
+                return make_ready_future(*g);
+            }
+            CREATION.with(|c| {
+                c.borrow_mut().get_or_insert_with(|| SharedFuture::new(Self::create())).get_future()
+            })
+        })
+    }
+
+    /// Creates the three groups on every shard; on [`CREATING_SHARD`] only, once.
+    fn create() -> Future<IoGroups> {
         let make = |name: &str, shares| {
             create_scheduling_group(Sstring::from(name), Sstring::from(name), shares)
         };
