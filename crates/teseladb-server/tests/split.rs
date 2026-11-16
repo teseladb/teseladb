@@ -5,16 +5,29 @@
 //! replicas of every range, those born from a split as a snapshot (their logs lack the data the
 //! split left in the founder's LSM), and losing the founder keeps every document and takes writes.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
 use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 use teseladb_router::table::RouteEntry;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeProc, start_self};
 use teseladb_types::NodeId;
+
+fn main() {
+    procs::main(
+        &[(
+            "a_range_splits_while_it_takes_writes_and_its_halves_get_replicas",
+            a_range_splits_while_it_takes_writes_and_its_halves_get_replicas,
+        )],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
 
 const READY: Duration = Duration::from_secs(60);
 const ASK: Duration = Duration::from_secs(2);
@@ -40,8 +53,9 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
-    Node::start(config(join), || Ok(MemDisk::new()), None).expect("the node starts")
+/// A node process of [`config`].
+fn start(join: Vec<String>) -> NodeProc {
+    start_self("node", &join, None, &[])
 }
 
 fn key(i: u32) -> Vec<u8> {
@@ -64,12 +78,12 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 /// Writes `i` on whichever node leads its range.
-fn put(nodes: &[&Node<MemDisk>], i: u32) {
+fn put(nodes: &[&NodeProc], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
 /// Reads `i` on whichever node leads its range.
-fn get(nodes: &[&Node<MemDisk>], i: u32) -> Option<Vec<u8>> {
+fn get(nodes: &[&NodeProc], i: u32) -> Option<Vec<u8>> {
     until(&format!("read {i}"), || nodes.iter().find_map(|n| n.get(&key(i), ASK).ok()))
 }
 
@@ -81,7 +95,6 @@ fn contiguous(ranges: &[RouteEntry]) -> bool {
     chained && first && last
 }
 
-#[test]
 fn a_range_splits_while_it_takes_writes_and_its_halves_get_replicas() {
     let n1 = start(Vec::new());
     assert!(n1.wait_ready(READY));

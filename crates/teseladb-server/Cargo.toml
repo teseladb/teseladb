@@ -117,6 +117,10 @@ harness = false
 name = "seed_failover"
 harness = false
 
+[[test]]
+name = "split"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
