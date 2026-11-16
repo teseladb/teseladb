@@ -1,8 +1,8 @@
-//! Real I/O for TeselaDB: [`FileDisk`], the executor of the engine's disk operations on real files
-//! the inter-node protocol ([`peer`], [`handshake`]) and the per-core event loop ([`runtime`])
-//! with its pieces.
+//! Real I/O for TeselaDB: [`FileDisk`], the executor of the engine's disk operations on real files,
+//! the inter-node protocol ([`peer`], [`handshake`]) and a node on the engine ([`engine`]: its
+//! shards, the task that drives each core and the connections between nodes).
 #![cfg_attr(coverage, feature(coverage_attribute))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod admission;
 pub mod bandwidth;
@@ -13,7 +13,6 @@ pub mod counters;
 pub mod device_log;
 pub mod disk_thread;
 mod drive_flush;
-#[cfg(target_os = "linux")]
 pub mod engine;
 mod file_disk;
 pub mod file_send;
@@ -28,7 +27,6 @@ pub mod net_ring;
 pub mod node_disk;
 pub mod peer;
 pub mod poller;
-pub mod runtime;
 pub mod secure;
 pub mod service;
 pub mod spin;

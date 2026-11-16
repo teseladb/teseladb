@@ -1,32 +1,29 @@
-//! Handshake of the inter-node protocol (contract `peer-frames.md` of specification 007) and the two helpers that do
-//! the blocking parts away from the cores: the acceptor (accepts connections, validates the
-//! peer's `Hello` and hands the stream to the core it names) and the connector (dials a node and
-//! hands the established stream back to the core that asked).
+//! Handshake of the inter-node protocol (contract `peer-frames.md` of specification 007): the
+//! validation of a peer's `Hello`, what an acceptor does with joins and enrollments, and the
+//! blocking sides a node uses before its engine runs (a node that joins or enrolls) and the tests
+//! use as fake peers. The nodes' own connections run on the engine ([`crate::engine`]).
 
 use std::fmt;
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use teseladb_types::NodeId;
 
 use teseladb_tls::ClientConfig;
 
-use crate::mailbox::MailboxSender;
 use crate::peer::{
     EnrollAccepted, EnrollRequest, FrameError, Hello, JoinAccepted, PeerMsg, Versions,
     decode_frame, encode_frame,
 };
 use crate::secure::{Channel, PeerTls};
 
-/// Answers a `JoinRequest` (the acceptor calls it in the connection's own thread, so it may block
-/// until the cluster decides).
+/// Answers a `JoinRequest` (the acceptor calls it off its shard, so it may block until the
+/// cluster decides).
 pub type JoinHandler = Arc<dyn Fn(JoinRequest) -> Result<JoinAccepted, String> + Send + Sync>;
 
-/// Answers an [`EnrollRequest`] (013 FR-005), in the connection's own thread like a join.
+/// Answers an [`EnrollRequest`] (013 FR-005), off the shard like a join.
 pub type EnrollHandler = Arc<dyn Fn(EnrollRequest) -> Result<EnrollAccepted, String> + Send + Sync>;
 
 /// What a node that joins says about itself (`JoinRequest`).
@@ -365,171 +362,6 @@ fn newcomer(
     send_frame(&mut stream, &mut ch, msg)?;
     stream.set_read_timeout(Some(JOIN_TIMEOUT + HANDSHAKE_TIMEOUT))?;
     Ok(read_frame(&mut stream, &mut ch, got.rest)?.0)
-}
-
-/// A connection established by the acceptor, for the core named in the peer's `Hello`.
-#[derive(Debug)]
-pub struct Inbound {
-    /// Stream (blocking mode; the core switches it to non-blocking).
-    pub stream: TcpStream,
-    /// Its channel, past the TLS handshake.
-    pub channel: Channel,
-    /// Handshake.
-    pub got: Handshaked,
-}
-
-/// Running acceptor.
-#[derive(Debug)]
-pub struct Acceptor {
-    addr: SocketAddr,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Acceptor {
-    /// Accepts on `listener` in a thread. Every connection is handshaked in its own short-lived
-    /// thread (a slow peer does not hold up the others) and handed to `cores[hello.core]`, wrapped
-    /// with `wrap`. Failed handshakes are closed, and so are joins (`node_id = 0`).
-    pub fn spawn<M: Send + 'static>(
-        listener: TcpListener,
-        local: Hello,
-        cores: Vec<MailboxSender<M>>,
-        wrap: fn(Inbound) -> M,
-    ) -> io::Result<Acceptor> {
-        Acceptor::spawn_with_join(listener, local, cores, wrap, None)
-    }
-
-    /// Like [`Acceptor::spawn`]; a peer whose `Hello` has `node_id = 0` is a node that joins: its
-    /// `JoinRequest` goes to `join` and the answer is sent back on the same connection, which is
-    /// then closed.
-    pub fn spawn_with_join<M: Send + 'static>(
-        listener: TcpListener,
-        local: Hello,
-        cores: Vec<MailboxSender<M>>,
-        wrap: fn(Inbound) -> M,
-        join: Option<JoinHandler>,
-    ) -> io::Result<Acceptor> {
-        let opts = AcceptorOptions { join, ..AcceptorOptions::default() };
-        Acceptor::spawn_with(listener, local, cores, wrap, opts)
-    }
-
-    /// Like [`Acceptor::spawn`], with joins, enrollments and TLS as `opts` says.
-    pub fn spawn_with<M: Send + 'static>(
-        listener: TcpListener,
-        local: Hello,
-        cores: Vec<MailboxSender<M>>,
-        wrap: fn(Inbound) -> M,
-        opts: AcceptorOptions,
-    ) -> io::Result<Acceptor> {
-        let addr = listener.local_addr()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let handle = thread::Builder::new().name("peer-accept".into()).spawn(move || {
-            // A failed accept (for example, the peer reset before it was taken) only loses that
-            // connection.
-            for mut stream in listener.incoming().flatten() {
-                if flag.load(Ordering::Acquire) {
-                    break;
-                }
-                let _ = stream.set_nodelay(true);
-                let local = local.clone();
-                // Each handshake thread sends through senders of its own (one ring each).
-                let cores = cores.clone();
-                let opts = opts.clone();
-                let _ = thread::Builder::new().name("peer-handshake".into()).spawn(move || {
-                    // A join or enrollment that was answered, or a failed handshake, closes the
-                    // connection.
-                    let Ok(mut channel) = Channel::accepted(opts.tls.as_ref()) else { return };
-                    if let Ok(Some(got)) = answer_or_join(&mut stream, &mut channel, &local, &opts)
-                    {
-                        let core = usize::from(got.hello.core);
-                        let _ = cores[core].send_waiting(wrap(Inbound { stream, channel, got }));
-                    }
-                });
-            }
-        })?;
-        Ok(Acceptor { addr, stop, handle: Some(handle) })
-    }
-
-    /// Address it listens on.
-    pub fn local_addr(&self) -> SocketAddr {
-        self.addr
-    }
-
-    /// Stops accepting (waits for the thread).
-    pub fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(h) = self.handle.take() {
-            self.stop.store(true, Ordering::Release);
-            // Unblocks the pending `accept`.
-            let _ = TcpStream::connect(self.addr);
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for Acceptor {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-/// Result of a dial, delivered to the core that asked for it.
-#[derive(Debug)]
-pub struct Outbound {
-    /// Dialed node.
-    pub node: NodeId,
-    /// Established stream, its channel and the handshake, or the error.
-    pub result: Result<(TcpStream, Channel, Handshaked), HandshakeError>,
-}
-
-/// Dials `node` at `addr` in a short-lived thread and sends the outcome to `reply`, wrapped with
-/// `wrap`.
-pub fn connect<M: Send + 'static>(
-    node: NodeId,
-    addr: String,
-    local: Hello,
-    reply: MailboxSender<M>,
-    wrap: fn(Outbound) -> M,
-) {
-    connect_with(node, addr, local, None, reply, wrap);
-}
-
-/// [`connect`] over TLS with `client` (`None` in clear).
-pub fn connect_with<M: Send + 'static>(
-    node: NodeId,
-    addr: String,
-    local: Hello,
-    client: Option<Arc<ClientConfig>>,
-    reply: MailboxSender<M>,
-    wrap: fn(Outbound) -> M,
-) {
-    let spawned = thread::Builder::new().name("peer-dial".into()).spawn(move || {
-        let result = dial_addr(&addr, &local, client.as_ref()).and_then(|(stream, ch, got)| {
-            if got.hello.node_id == node {
-                Ok((stream, ch, got))
-            } else {
-                Err(HandshakeError::UnexpectedNode { expected: node, got: got.hello.node_id })
-            }
-        });
-        let _ = reply.send_waiting(wrap(Outbound { node, result }));
-    });
-    // Without a thread there is no dial: the core sees nothing and retries after its backoff.
-    drop(spawned);
-}
-
-fn dial_addr(
-    addr: &str,
-    local: &Hello,
-    client: Option<&Arc<ClientConfig>>,
-) -> Result<(TcpStream, Channel, Handshaked), HandshakeError> {
-    let mut stream = connect_addr(addr)?;
-    let mut ch = Channel::dialed(client)?;
-    let got = dial_on(&mut stream, &mut ch, local)?;
-    Ok((stream, ch, got))
 }
 
 /// Resolves `addr` and connects to its first address within the handshake timeout.

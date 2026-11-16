@@ -22,12 +22,21 @@ teseladb-deflate = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-tls = { workspace = true }
 teseladb-x509 = { workspace = true }
-# The engine (023): every shard's I/O runs on it. Empty outside Linux.
-teseladb = { path = "../teseladb-engine" }
+# The engine (023): its package and library are `teseladb`; empty outside Linux.
+teseladb = { path = "../teseladb-engine", default-features = false }
 
 [dev-dependencies]
 teseladb-crypto = { workspace = true }
 teseladb-lsm = { path = "../teseladb-lsm" }
+
+# One engine per process (D4): its cases run in order in one `main`.
+[[test]]
+name = "engine_core_loop"
+harness = false
+
+[[test]]
+name = "engine_peers"
+harness = false
 
 [[test]]
 name = "crash_real"

@@ -40,7 +40,10 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   crates/teseladb-search/src/segment/lanes.rs
   crates/teseladb-search/src/byte_simd.rs
   crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs
-  crates/teseladb-keys/src/prefetch.rs)
+  crates/teseladb-keys/src/prefetch.rs
+  # 023 FR-016, FR-029: plaintext handed to the engine's streams in the vectors TLS made (no copy),
+  # and glibc's asynchronous resolver.
+  crates/teseladb-io/src/engine/tls_stream.rs crates/teseladb-io/src/engine/blocking.rs)
 
 fail=0
 finding() {
