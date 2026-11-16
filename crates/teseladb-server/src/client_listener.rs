@@ -18,7 +18,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use teseladb_hlc::to_timestamp;
@@ -481,21 +480,6 @@ impl Default for Hooks {
     }
 }
 
-/// A thread that runs commands outside the engine (the HTTP port's): with the stack the calls of
-/// server-side JavaScript need (016 A016-3-18), which the system reserves and only commits as it
-/// is used.
-pub(crate) fn command_thread(name: String) -> thread::Builder {
-    thread::Builder::new().name(name).stack_size(teseladb_wire::commands::js::COMMAND_STACK)
-}
-
-/// `run`, after telling the calls of JavaScript the stack of [`command_thread`].
-pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() -> T {
-    move || {
-        teseladb_wire::commands::js::set_stack(teseladb_wire::commands::js::COMMAND_STACK);
-        run()
-    }
-}
-
 /// The number of the port's next connection: one counter for every way the port takes them
 /// (the kernel's TCP and AF_XDP), so that no two connections share a number.
 pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
@@ -538,11 +522,9 @@ pub struct ClientListener {
     open: Arc<std::sync::atomic::AtomicUsize>,
     /// The port on AF_XDP (012 FR-033), or why it is not there.
     xdp: crate::client_xdp::XdpState,
-    /// The tasks of the port on the shards (023 FR-019).
+    /// The tasks of the port on the shards (023 FR-019), the builder of the search indexes among
+    /// them.
     tasks: Vec<crate::client_tasks::Task>,
-    /// The thread that builds the node's search indexes, with a node behind the port, and its
-    /// stop.
-    builder: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
 }
 
 impl std::fmt::Debug for ClientListener {
@@ -633,7 +615,7 @@ impl ClientListener {
         state.watch_topology(&wake);
         let shards = port.shards();
         let mut l =
-            ClientListener { addrs, port, wake, open, xdp, tasks: Vec::new(), builder: None };
+            ClientListener { addrs, port, wake, open, xdp, tasks: Vec::new() };
         if let Some(h) = state.handle()
             && let Err(e) = l.start_tasks(&h, cfg, &shared, &diag, hooks, shards)
         {
@@ -658,11 +640,11 @@ impl ClientListener {
 
         let shard = |k: usize| u32::try_from(k).unwrap_or(0) % shards.max(1);
         let gone = || io::Error::other("the engine stopped before the port's tasks started");
-        // The search builder stays a thread of its own until it moves to the engine (023 FR-025).
-        let stop = Arc::new(AtomicBool::new(false));
+        // The search builder, in the background's group of its shard (023 FR-025).
         let backend = ServerBackend::new(h.clone(), seed(u64::MAX - 1)).with_diag(diag.clone());
-        let t = crate::search_builder::spawn(backend, shared.clone(), stop.clone())?;
-        self.builder = Some((stop, t));
+        let builder = crate::search_builder::spawn(backend, shared.clone(), shard(3 + RESOLVERS))
+            .ok_or_else(gone)?;
+        self.tasks.push(builder);
         // The sessions' keeper.
         let keeper = Keeper {
             handle: h.clone(),
@@ -760,15 +742,6 @@ impl ClientListener {
         self.xdp.stop();
         for t in self.tasks {
             let _ = t.stop();
-        }
-        if let Some((stop, t)) = self.builder {
-            stop.store(true, Ordering::Release);
-            t.thread().unpark();
-            // A port stopped from a shard (the replica set port's keeper) does not hold the shard
-            // for the builder's pass: the thread ends on its own.
-            if !teseladb_io::engine::wait::in_engine_thread() {
-                let _ = t.join();
-            }
         }
     }
 }

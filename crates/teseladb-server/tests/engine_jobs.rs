@@ -59,3 +59,29 @@ fn a_spawned_job_runs_in_the_background() {
     // This thread is not a shard: the receiver blocks it until the job answers.
     assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok("done"));
 }
+
+#[test]
+fn a_background_task_runs_in_the_background_group_until_it_is_stopped() {
+    use teseladb::engine::core::scheduling::current_scheduling_group;
+    use teseladb_io::IoClass;
+    use teseladb_io::engine::disk::IoGroups;
+    use teseladb_server::client_tasks::spawn_background;
+
+    // The groups exist once the engine made them on a shard.
+    let groups = block_on(IoGroups::get_or_create).expect("the groups");
+    let (tx, rx) = answer::channel::<bool>();
+    let task = spawn_background(
+        0,
+        Box::new(move |stop| {
+            let _ = tx.send(current_scheduling_group() == groups.of(IoClass::Background));
+            while !stop.stopped() {
+                stop.pause(Duration::from_secs(10));
+            }
+        }),
+    )
+    .expect("an engine runs");
+    assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(true));
+    let start = Instant::now();
+    assert!(task.stop(), "it ended at the stop");
+    assert!(start.elapsed() < Duration::from_secs(5));
+}

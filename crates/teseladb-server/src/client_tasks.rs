@@ -10,7 +10,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use teseladb::engine::core::coroutine::make_coroutine;
+use teseladb::engine::core::future::{ExceptionPtr, Future, make_exception_future};
+use teseladb::engine::core::reactor::internal_misc::run_in_background;
+use teseladb::engine::core::scheduling::SchedulingGroup;
+use teseladb::engine::core::thread::{Thread, ThreadAttributes};
+use teseladb_io::IoClass;
 use teseladb_io::engine::answer;
+use teseladb_io::engine::disk::IoGroups;
+use teseladb_io::engine::stacks;
 use teseladb_io::engine::wait::Waiter;
 
 /// How long a stopping port waits for each of its tasks to end.
@@ -84,6 +92,51 @@ pub fn spawn(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task
         }),
     );
     posted.then_some(Task { stop, ended })
+}
+
+/// Runs `body` in an engine thread of `shard` in the background's scheduling group until it
+/// returns (023 FR-012, FR-025): long work, such as building search indexes, that takes the
+/// shard's CPU and disk only in the background's share, behind the clients' commands. `None` when
+/// no engine runs.
+pub fn spawn_background(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task> {
+    let stop = Arc::new(TaskStop::default());
+    let (tx, ended) = answer::channel::<()>();
+    let s = Arc::clone(&stop);
+    let posted = teseladb_io::engine::wait::post(
+        shard,
+        Box::new(move || {
+            let job: Box<dyn FnOnce()> = Box::new(move || {
+                body(&s);
+                let _ = tx.send(());
+            });
+            run_in_background(IoGroups::get_or_create().then(move |groups: IoGroups| {
+                in_group(groups.of(IoClass::Background), job)
+            }));
+        }),
+    );
+    posted.then_some(Task { stop, ended })
+}
+
+/// Runs `job` in an engine thread of its own in `group`: the pooled engine threads keep the group
+/// they were made in, so a job of another group gets a thread made for it. A thread that cannot
+/// be made drops `job`, whose task then reads as ended.
+fn in_group(group: SchedulingGroup, job: Box<dyn FnOnce()>) -> Future<()> {
+    let attr = ThreadAttributes { sched_group: Some(group), stack_size: stacks::stack_size() };
+    match Thread::with_attributes(attr, move || {
+        job();
+        Ok(())
+    }) {
+        Ok(mut th) => {
+            let joined = th.join();
+            // The thread object lives until its thread ends.
+            make_coroutine(async move {
+                let _ = joined.await;
+                drop(th);
+                Ok::<(), ExceptionPtr>(())
+            })
+        }
+        Err(e) => make_exception_future(e),
+    }
 }
 
 #[cfg(test)]
