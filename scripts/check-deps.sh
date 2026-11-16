@@ -16,7 +16,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Crates whose job is I/O. Every other crate of `crates/` is a logic crate.
-IO_CRATES=(teseladb-io teseladb-sys teseladb-server)
+IO_CRATES=(teseladb-io teseladb-sys teseladb-server teseladb-engine)
 # Tools: the benchmark measures the real system, the Unicode and time zone generators read the
 # official files and write their tables, and the battery's comparator reads the runners' output files
 # (constitution, principle II); the simulator is logic except these files (artifacts, histories
@@ -29,8 +29,9 @@ SIM_IO_FILES=(tools/teseladb-sim/src/main.rs tools/teseladb-sim/src/cli.rs)
 # every write.
 HOT_CRATES=(teseladb-sys teseladb-io teseladb-devlog teseladb-multiraft teseladb-lsm teseladb-range teseladb-hlc
   teseladb-txn teseladb-index teseladb-meta teseladb-search teseladb-crypto teseladb-raft teseladb-raftlog)
-# Crates that may use unsafe code: system calls and CPU intrinsics.
-UNSAFE_CRATES=(teseladb-sys)
+# Crates that may use unsafe code: system calls and CPU intrinsics, and the engine (023, D2), whose
+# reactor, allocator and I/O talk to the kernel and manage memory directly.
+UNSAFE_CRATES=(teseladb-sys teseladb-engine)
 # Modules that D-151 admits with unsafe code for a measured performance gain: their crate denies
 # it and only these files allow it; Miri runs their tests in the gates (scripts/ci.sh).
 UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shared.rs
@@ -264,7 +265,8 @@ check_unsafe_forbidden() {
   local f
   while IFS= read -r f; do
     contains "$f" "${UNSAFE_MODULES[@]}" || finding "$f: allows unsafe code outside the modules of D-151"
-  done < <(grep -rl '^#!\[allow(unsafe_code)\]' crates/*/src tools/*/src 2>/dev/null | grep -v '^crates/teseladb-sys/' | sort)
+  done < <(grep -rl '^#!\[allow(unsafe_code)\]' crates/*/src tools/*/src 2>/dev/null \
+    | grep -vE "^crates/($(IFS='|'; echo "${UNSAFE_CRATES[*]}"))/" | sort)
 }
 
 check_hot_path_locks() {

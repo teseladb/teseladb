@@ -1,0 +1,156 @@
+[package]
+name = "teseladb"
+version = "0.1.0"
+description = "TeselaDB's engine: a shared-nothing, thread-per-core asynchronous runtime (reactor, futures, per-core memory, disk and network I/O) and the services built on it. Linux only."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+# Derived from Apache-2.0 and BSD-2-Clause sources: see NOTICE and LICENSE-APACHE.
+license = "Apache-2.0 AND BSD-2-Clause"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[features]
+# The c-ares API used by net/dns.rs is not a feature: build.rs reads the installed
+# ares_version.h and sets `cfg(cares_dnsrec)` (c-ares >= 1.28) and `cfg(cares_process_fds)`
+# (c-ares >= 1.34).
+default = []
+# The DPDK network driver (net/dpdk.rs, net/dpdk_rte.rs) and the DPDK EAL setup of
+# core/dpdk_rte.rs; build.rs links libdpdk through pkg-config.
+dpdk = []
+# CPU and memory topology discovery through hwloc 2.x (>= 2.1, < 3.0) in core/resource.rs,
+# core/smp_options.rs and the reactor; without it a simpler built-in topology is used.
+hwloc = []
+# Per-segment trace output of the TCP state machine (net/tcp.rs).
+tcp_debug = []
+# Support for gnutls older than 3.5.6 in net/tls.rs: generates DH parameters explicitly.
+gnutls_legacy = []
+# Allocation failure injection (util/alloc_failure_injector.rs): allocation points can be
+# made to fail on demand, and critical allocation sections are tracked. For test builds.
+alloc_failure_injection = []
+
+# Tests that are programs with their own main(). Each program, bench and example is built from
+# a small entry file under `<dir>/entry/` that loads `<dir>/<name>.rs` as a module on Linux and
+# is an empty program on other targets, where the engine does not exist.
+[[test]]
+name = "smp_test"
+path = "tests/entry/smp_test.rs"
+harness = false
+
+# Its test cases depend on running in declaration order (a key whose constructor fails stays
+# registered for the following cases); libtest would run them by name.
+[[test]]
+name = "scheduling_group_test"
+path = "tests/entry/scheduling_group_test.rs"
+harness = false
+
+[[test]]
+name = "thread_context_switch_test"
+path = "tests/entry/thread_context_switch_test.rs"
+harness = false
+
+[[test]]
+name = "slab_test"
+path = "tests/entry/slab_test.rs"
+harness = false
+# Built but not run: the test trips an assertion of the slab allocator.
+test = false
+
+[[test]]
+name = "alien_test"
+path = "tests/entry/alien_test.rs"
+harness = false
+
+[[test]]
+name = "timer_test"
+path = "tests/entry/timer_test.rs"
+harness = false
+
+[[test]]
+name = "directory_test"
+path = "tests/entry/directory_test.rs"
+harness = false
+
+[[test]]
+name = "allocator_test"
+path = "tests/entry/allocator_test.rs"
+harness = false
+
+[[test]]
+name = "metrics_tester"
+path = "tests/entry/metrics_tester.rs"
+harness = false
+
+[[test]]
+name = "rest_api_httpd"
+path = "tests/entry/rest_api_httpd.rs"
+harness = false
+
+# The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints
+# its results table.
+[[bench]]
+name = "coroutine_perf"
+path = "benches/entry/coroutine_perf.rs"
+harness = false
+
+[[bench]]
+name = "perf_tests_perf"
+path = "benches/entry/perf_tests_perf.rs"
+harness = false
+
+[[bench]]
+name = "fstream_perf"
+path = "benches/entry/fstream_perf.rs"
+harness = false
+
+[[bench]]
+name = "fair_queue_perf"
+path = "benches/entry/fair_queue_perf.rs"
+harness = false
+
+[[bench]]
+name = "allocator_perf"
+path = "benches/entry/allocator_perf.rs"
+harness = false
+
+[[bench]]
+name = "http_client_perf"
+path = "benches/entry/http_client_perf.rs"
+harness = false
+
+[[bench]]
+name = "container_perf"
+path = "benches/entry/container_perf.rs"
+harness = false
+
+[[bench]]
+name = "smp_submit_to_perf"
+path = "benches/entry/smp_submit_to_perf.rs"
+harness = false
+
+[[bench]]
+name = "rpc_perf"
+path = "benches/entry/rpc_perf.rs"
+harness = false
+
+[[bench]]
+name = "shared_token_bucket"
+path = "benches/entry/shared_token_bucket.rs"
+harness = false
+
+[[bench]]
+name = "future_util_perf"
+path = "benches/entry/future_util_perf.rs"
+harness = false
+
+# The examples, as programs whose entry point is Linux-only like the tests'.
+[[example]]
+name = "hello_world"
+path = "examples/entry/hello_world.rs"
+
+[[example]]
+name = "lz4_compare"
+path = "examples/entry/lz4_compare.rs"
