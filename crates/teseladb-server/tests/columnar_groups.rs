@@ -3,6 +3,7 @@
 //! those blocks as their columns on the core, also in a collection of one range, and the answer
 //! is the one of the same pipeline read and run in one place (a command with `let` variables
 //! never splits).
+#![cfg(target_os = "linux")]
 
 mod common;
 

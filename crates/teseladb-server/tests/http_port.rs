@@ -2,6 +2,7 @@
 //! without credentials, an unknown path gets a `404` problem, and the origins set with
 //! `setClusterParameter` in `httpOptions.cors.allowedOrigins` reach the port's CORS answers, while
 //! the clients' port keeps answering.
+#![cfg(target_os = "linux")]
 
 mod common;
 

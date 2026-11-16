@@ -1,5 +1,6 @@
 //! `teseladb start --config <file.yaml>` (001 FR-021): the keys of the reference server file and
 //! the `teseladb.*` section, the command line over the file, and unknown keys as usage errors.
+#![cfg(target_os = "linux")]
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,7 @@ fn every_key_of_the_file() {
     assert_eq!((o.log_level, o.log_format), (Level::Debug, Format::Json));
     assert_eq!(o.cores, Some(4));
     assert_eq!(o.memory_limit, Some(6 << 30));
-    assert_eq!(o.direct_io, teseladb_io::DirectIo::Off);
+    assert_eq!(o.direct_io, teseladb_io::engine::DirectIo::Off);
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 3]));
     assert_eq!(o.peer_listen.to_string(), "127.0.0.1:7100");
     assert_eq!(o.admin_listen.to_string(), "127.0.0.1:7200");
@@ -93,7 +94,7 @@ fn bad_files_are_usage_errors_that_name_the_file() {
         ("net:\n  bindIpAll: true\n", "--config c.yaml: unknown key `net.bindIpAll`"),
         ("replication:\n  replSetName: rs0\n", "unknown key `replication.replSetName`"),
         ("net: 5\n", "unknown key `net`"),
-        // The engine runs every core's disk: no key chooses another executor (023 FR-033).
+        // It only chose between TeselaDB's own executors (023 FR-033).
         ("teseladb:\n  ioExecutor: threads\n", "unknown key `teseladb.ioExecutor`"),
         // An empty mapping is a value of its key, not a section.
         ("net: {}\n", "unknown key `net`"),

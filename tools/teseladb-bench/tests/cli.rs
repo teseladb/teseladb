@@ -1,4 +1,5 @@
 //! End to end: the `teseladb-bench` binary with its exit codes and its JSON output.
+#![cfg(target_os = "linux")]
 
 use std::process::Command;
 

@@ -24,8 +24,10 @@ use teseladb::engine::core::thread::async_ as in_thread;
 use super::core_loop::{CoreLogic, CoreSender};
 use super::disk_port::{CoreDisk, DiskWaker};
 use super::driver::Driver;
+use super::options::EngineConfig;
 use super::peers::{self, AcceptCtx, Net};
 use super::post::{self, CoreIo, Gate, Inbox, ShardPost, Wake};
+use super::stats::EngineProbe;
 use crate::device_log::LogPort;
 use crate::handshake::AcceptorOptions;
 use crate::peer::Hello;
@@ -33,40 +35,6 @@ use crate::secure::PeerTls;
 
 /// How long a start waits for the engine's shards to come up.
 const START_LIMIT: Duration = Duration::from_secs(60);
-
-/// How a node's engine starts.
-#[derive(Clone, Debug, Default)]
-pub struct EngineConfig {
-    /// Shards: the node's cores.
-    pub shards: u16,
-    /// The CPU of each shard, in shard order; empty: the shards are not pinned.
-    pub cpus: Vec<usize>,
-    /// Memory for all the shards, in bytes; `None`: the engine's default.
-    pub memory: Option<u64>,
-    /// Whether the files bypass the kernel's page cache (`--direct-io`, 023 FR-010).
-    pub direct_io: crate::DirectIo,
-}
-
-impl EngineConfig {
-    /// The engine's command line.
-    fn args(&self) -> Vec<String> {
-        let mut a = vec!["teseladb".to_owned(), "--smp".to_owned(), self.shards.max(1).to_string()];
-        match self.cpus.is_empty() {
-            true => a.extend(["--thread-affinity".to_owned(), "0".to_owned()]),
-            false => {
-                let list: Vec<String> = self.cpus.iter().map(ToString::to_string).collect();
-                a.extend(["--cpuset".to_owned(), list.join(",")]);
-            }
-        }
-        if let Some(m) = self.memory {
-            a.extend(["--memory".to_owned(), m.to_string()]);
-        }
-        a.extend(self.direct_io.engine_args());
-        // The node writes its own log; the engine says only what goes wrong.
-        a.extend(["--default-log-level".to_owned(), "error".to_owned()]);
-        a
-    }
-}
 
 /// What a core's task needs besides its logic and disk.
 #[derive(Clone, Debug)]
@@ -149,7 +117,7 @@ impl NodeEngine {
             return Err(io::Error::other("an engine already runs in this process"));
         }
         let args = cfg.args();
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<()>>(1);
         let thread = thread::Builder::new().name("engine".into()).spawn(move || {
             let config = Config {
                 name: "teseladb".into(),
@@ -160,7 +128,8 @@ impl NodeEngine {
             let code = app.run(args, move || {
                 let wake = Rc::new(Wake::default());
                 EXIT.with(|e| *e.borrow_mut() = Some(wake.clone()));
-                let _ = ready_tx.send(());
+                // SIGINT and SIGTERM through shard 0's reactor (023 FR-031).
+                let _ = ready_tx.send(super::signals::install_here());
                 make_coroutine(async move {
                     wake.wait().await;
                     Ok(())
@@ -172,11 +141,21 @@ impl NodeEngine {
             code
         })?;
         match ready_rx.recv_timeout(START_LIMIT) {
-            Ok(()) => Ok(NodeEngine {
+            Ok(Ok(())) => Ok(NodeEngine {
                 thread: Some(thread),
                 gate: Arc::default(),
                 shards: cfg.shards.max(1),
             }),
+            Ok(Err(e)) => {
+                // The engine runs: it is stopped like any other before the error goes back.
+                let failed = NodeEngine {
+                    thread: Some(thread),
+                    gate: Arc::default(),
+                    shards: cfg.shards.max(1),
+                };
+                failed.stop();
+                Err(e)
+            }
             Err(_) => {
                 let code = thread.join().unwrap_or(-1);
                 alien::internal::DEFAULT_INSTANCE.store(std::ptr::null_mut(), Ordering::Release);
@@ -188,6 +167,12 @@ impl NodeEngine {
     /// Its shards.
     pub fn shards(&self) -> u16 {
         self.shards
+    }
+
+    /// A way to its shards' metrics and allocator counters from other threads (FR-028, FR-030);
+    /// it reaches nothing once the engine stops.
+    pub fn probe(&self) -> EngineProbe {
+        EngineProbe::new(self.gate.clone(), self.shards)
     }
 
     fn post(&self, shard: u16) -> ShardPost {

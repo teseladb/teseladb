@@ -1,5 +1,6 @@
 //! `teseladb dev --nodes 3` (001 FR-018, SC-007): Group 0 has a leader in less than 1 s, the
 //! three nodes join the cluster and the learners become voters.
+#![cfg(target_os = "linux")]
 
 use std::path::Path;
 use std::process::Command;
@@ -257,7 +258,7 @@ fn the_development_cluster_that_cannot_start_ends_with_1() {
 fn the_nodes_go_when_the_development_cluster_stops_or_dies() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
-    use teseladb_sys::signal::{Stop, send_stop};
+    use teseladb_sys::process::{Stop, send_stop};
     for stop in [Some(Stop::Interrupt), Some(Stop::Terminate), None] {
         let mut dev = Command::new(teseladb())
             .args(["dev", "--nodes", "2", "--port", "0"])
@@ -300,5 +301,61 @@ fn the_nodes_go_when_the_development_cluster_stops_or_dies() {
                 thread::sleep(Duration::from_millis(20));
             }
         }
+    }
+}
+
+/// The node processes `teseladb dev` started, from `/proc` (Linux).
+fn children(pid: u32) -> Vec<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect()
+}
+
+/// A node of `teseladb dev` that dies stops the others, and the cluster ends with 1 (023
+/// FR-032); the nodes run on base port + k.
+#[test]
+fn a_node_that_dies_stops_the_development_cluster() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let _turn = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (base, busy) = two_ports();
+    drop(busy);
+    let mut dev = Command::new(teseladb())
+        .args(["dev", "--nodes", "3", "--cores", "1", "--port", &base.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(dev.stdout.take().unwrap());
+    for k in 1..=3 {
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        assert!(line.starts_with(&format!("ready node_id={k} ")), "{line}");
+    }
+    let err = BufReader::new(dev.stderr.take().unwrap());
+    let log = thread::spawn(move || err.lines().map_while(Result::ok).collect::<Vec<_>>());
+    let ports: Vec<String> = (0..3).map(|k| format!("127.0.0.1:{}", base + k)).collect();
+    for at in &ports {
+        assert!(std::net::TcpStream::connect(at.as_str()).is_ok(), "{at} serves");
+    }
+    let nodes = children(dev.id());
+    assert_eq!(nodes.len(), 3, "one process per node: {nodes:?}");
+    let killed = Command::new("kill").args(["-9", &nodes[1].to_string()]).status().unwrap();
+    assert!(killed.success());
+    let end = Instant::now() + Duration::from_secs(20);
+    let code = loop {
+        if let Some(s) = dev.try_wait().unwrap() {
+            break s.code();
+        }
+        assert!(Instant::now() < end, "the cluster still runs with a node dead");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(code, Some(1));
+    let log = log.join().unwrap();
+    assert!(log.iter().any(|l| l.contains("a node of the development cluster ended")), "{log:?}");
+    for at in &ports {
+        assert!(std::net::TcpStream::connect(at.as_str()).is_err(), "{at} still serves");
     }
 }

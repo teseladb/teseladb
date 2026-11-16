@@ -2,11 +2,7 @@
 //! A comparison with a baseline only means something on the same machine, so a report carries its
 //! fingerprint and a baseline of another one is refused.
 
-#[cfg(target_os = "linux")]
 #[path = "fingerprint/linux.rs"]
-mod platform;
-#[cfg(target_os = "macos")]
-#[path = "fingerprint/macos.rs"]
 mod platform;
 
 use teseladb_json::{Object, Value};

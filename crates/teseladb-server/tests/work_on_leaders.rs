@@ -11,18 +11,27 @@
 //! The counters are each node's, on its administration port's `/metrics`: a test adds them up over
 //! its three nodes ([`counter`]), all of them its own.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_server::admin_http::{Method, request};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -47,9 +56,11 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const DOCS: i32 = 3000;
 
 /// Counter `teseladb_pushed_<name>_total` added up over the `/metrics` of `nodes`.
+#[cfg(target_os = "linux")]
 fn counter(nodes: &[NodeProc], name: &str) -> u64 {
     let line = format!("teseladb_pushed_{name}_total");
     nodes
@@ -64,11 +75,13 @@ fn counter(nodes: &[NodeProc], name: &str) -> u64 {
         .sum()
 }
 
+#[cfg(target_os = "linux")]
 fn op(name: &str, arg: impl Into<Value>) -> Value {
     Value::Document(Document::new().with(name, arg.into()))
 }
 
 /// Three node processes of [`config`], the first one the seed; each has its administration port.
+#[cfg(target_os = "linux")]
 fn cluster() -> Vec<NodeProc> {
     let first = start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
@@ -84,6 +97,7 @@ fn cluster() -> Vec<NodeProc> {
 }
 
 /// A node that follows the data range, so that the ranges split from it are led elsewhere.
+#[cfg(target_os = "linux")]
 fn follower(nodes: &[NodeProc]) -> &NodeProc {
     until("a replica that follows", || {
         nodes.iter().find(|n| {
@@ -94,6 +108,7 @@ fn follower(nodes: &[NodeProc]) -> &NodeProc {
 
 /// `DOCS` documents with `v`, a fraction `x` and a key `k` of seven values, in a collection split
 /// in five ranges.
+#[cfg(target_os = "linux")]
 fn load(c: &mut Client) {
     for at in (0..DOCS).step_by(500) {
         let insert = Document::new().with("insert", "c").with("documents", docs(at..at + 500));
@@ -126,6 +141,7 @@ fn load(c: &mut Client) {
     until("five ranges", || (ranges(c) >= 5).then_some(()));
 }
 
+#[cfg(target_os = "linux")]
 fn aggregate(c: &mut Client, pipeline: &[Document], with_let: bool) -> Vec<Value> {
     let stages: Vec<Value> = pipeline.iter().cloned().map(Value::Document).collect();
     let mut cmd = Document::new()
@@ -140,6 +156,7 @@ fn aggregate(c: &mut Client, pipeline: &[Document], with_let: bool) -> Vec<Value
     batch(&r, "firstBatch")
 }
 
+#[cfg(target_os = "linux")]
 fn group(id: Value) -> Document {
     let spec = Document::new()
         .with("_id", id)
@@ -153,6 +170,7 @@ fn group(id: Value) -> Document {
     Document::new().with("$group", spec)
 }
 
+#[cfg(target_os = "linux")]
 fn an_aggregation_runs_its_partial_group_on_the_leaders_of_other_nodes() {
     let nodes = cluster();
     let mut c = Client::new(follower(&nodes));
@@ -202,6 +220,7 @@ fn an_aggregation_runs_its_partial_group_on_the_leaders_of_other_nodes() {
     assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
 
+#[cfg(target_os = "linux")]
 fn find(c: &mut Client, filter: Document, collation: bool) -> Vec<Value> {
     let mut cmd =
         Document::new().with("find", "c").with("filter", filter).with("batchSize", 10_000);
@@ -214,12 +233,14 @@ fn find(c: &mut Client, filter: Document, collation: bool) -> Vec<Value> {
 }
 
 /// `{field: value}` as `$expr`, which the leaders never evaluate: the usual path.
+#[cfg(target_os = "linux")]
 fn as_expr(field: &str, value: i32) -> Document {
     let eq = op("$eq", Value::Array(vec![format!("${field}").into(), value.into()]));
     Document::new().with("$expr", eq)
 }
 
 /// The ranges of collection `app.c` in key order, from the administration port of `at`.
+#[cfg(target_os = "linux")]
 fn ranges_of_c(at: &str) -> Vec<teseladb_types::GroupId> {
     let (status, body) = request(at, Method::Get, "/admin/ranges?collection=app.c", b"").unwrap();
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
@@ -244,6 +265,7 @@ fn ranges_of_c(at: &str) -> Vec<teseladb_types::GroupId> {
 }
 
 /// The leader of range `g`, as every node that has a replica of it says, when they agree.
+#[cfg(target_os = "linux")]
 fn leader_of(nodes: &[NodeProc], g: teseladb_types::GroupId) -> Option<teseladb_types::NodeId> {
     let said: Vec<teseladb_types::NodeId> = nodes
         .iter()
@@ -257,8 +279,10 @@ fn leader_of(nodes: &[NodeProc], g: teseladb_types::GroupId) -> Option<teseladb_
 
 /// Documents added past the five ranges' last cut, all in the last range: a scan reads that
 /// range in several parts of at most `SCAN_CHUNK` documents.
+#[cfg(target_os = "linux")]
 const TAIL: std::ops::Range<i32> = DOCS..DOCS + 4000;
 
+#[cfg(target_os = "linux")]
 fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
     let nodes = cluster();
     let mut c = Client::new(&nodes[0]);
@@ -368,10 +392,12 @@ fn a_filtered_scan_runs_its_filter_on_the_leaders_of_other_nodes() {
 }
 
 /// The value of the sample `line` (name and labels) in `text`.
+#[cfg(target_os = "linux")]
 fn sample(text: &str, line: &str) -> Option<u64> {
     text.lines().find_map(|l| l.strip_prefix(line)?.strip_prefix(' ')?.trim().parse().ok())
 }
 
+#[cfg(target_os = "linux")]
 fn the_work_sent_to_the_leaders_shows_in_the_metrics() {
     let nodes = cluster();
     let client = follower(&nodes);
@@ -410,6 +436,7 @@ fn the_work_sent_to_the_leaders_shows_in_the_metrics() {
 }
 
 /// The `_id`s of `docs`, sorted.
+#[cfg(target_os = "linux")]
 fn sorted_ids(docs: &[Value]) -> Vec<i32> {
     let mut ids: Vec<i32> = docs
         .iter()
@@ -427,6 +454,7 @@ fn sorted_ids(docs: &[Value]) -> Vec<i32> {
 
 /// A find of `filter` that reads the collection (`hint: {$natural: 1}`) or plans, with a
 /// collation when asked.
+#[cfg(target_os = "linux")]
 fn find_by(c: &mut Client, filter: &Document, (scan, collation): (bool, bool)) -> Vec<i32> {
     let mut cmd =
         Document::new().with("find", "c").with("filter", filter.clone()).with("batchSize", 10_000);
@@ -442,11 +470,13 @@ fn find_by(c: &mut Client, filter: &Document, (scan, collation): (bool, bool)) -
 }
 
 /// The lookup counters of `nodes`: batches, keys and keys sent with the filter.
+#[cfg(target_os = "linux")]
 fn lookups(nodes: &[NodeProc]) -> (u64, u64, u64) {
     let c = |name| counter(nodes, name);
     (c("lookup_batches_sent"), c("lookup_keys_sent"), c("lookup_keys_filtered"))
 }
 
+#[cfg(target_os = "linux")]
 fn the_documents_of_an_index_scan_go_by_batches_to_the_leaders_of_other_nodes() {
     let nodes = cluster();
     let mut c = Client::new(follower(&nodes));
@@ -516,3 +546,7 @@ fn the_documents_of_an_index_scan_go_by_batches_to_the_leaders_of_other_nodes() 
     assert_eq!(find_by(&mut c, &Document::new().with("w", 1), (true, false)), want);
     assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

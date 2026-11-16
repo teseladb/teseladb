@@ -2,6 +2,7 @@
 //! `progressToken` that accepts an event stream gets each `notifications/progress` as its batch
 //! is read, in a piece of the stream of its own before the result; and `notifications/cancelled`
 //! kills the operation of a call still running.
+#![cfg(target_os = "linux")]
 
 mod common;
 

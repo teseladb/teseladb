@@ -2,16 +2,24 @@
 //! every node, from the moment the command answers. 007 T040 (FR-027): a node keeps the cluster's
 //! feature compatibility version in Group 0 and shows it with `getParameter`.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_io::engine::disk::DiskPlace;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::Node;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::start_self;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -29,6 +37,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn write_error_code(r: &Document) -> Option<Value> {
     let Some(Value::Array(errors)) = r.get("writeErrors") else { return None };
     match errors.first() {
@@ -37,6 +46,7 @@ fn write_error_code(r: &Document) -> Option<Value> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
     let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
@@ -63,6 +73,7 @@ fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
 }
 
 /// [`joining`] whose node turns slowly: it publishes what Group 0 applied up to 300 ms late.
+#[cfg(target_os = "linux")]
 fn slow(join: Vec<String>) -> teseladb_server::node::NodeConfig {
     teseladb_server::node::NodeConfig {
         tick: std::time::Duration::from_millis(300),
@@ -71,11 +82,13 @@ fn slow(join: Vec<String>) -> teseladb_server::node::NodeConfig {
 }
 
 /// The node configuration of a test that starts several nodes.
+#[cfg(target_os = "linux")]
 fn joining(join: Vec<String>) -> teseladb_server::node::NodeConfig {
     let admin = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     teseladb_server::node::NodeConfig { admin_listen: Some(admin), ..config(join) }
 }
 
+#[cfg(target_os = "linux")]
 fn the_gates_hold_on_every_node_once_the_command_answers() {
     let n1 = start_self("joining", &[], None, &[]);
     assert!(n1.wait_ready(READY));
@@ -122,10 +135,12 @@ fn the_gates_hold_on_every_node_once_the_command_answers() {
 }
 
 /// Sets the cluster's feature compatibility version to `v`.
+#[cfg(target_os = "linux")]
 fn set_fcv(c: &mut Client, v: &str) -> Document {
     c.run("admin", Document::new().with("setFeatureCompatibilityVersion", v).with("confirm", true))
 }
 
+#[cfg(target_os = "linux")]
 fn the_version_lives_in_group0() {
     let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
@@ -137,3 +152,7 @@ fn the_version_lives_in_group0() {
     assert!(ok(&set_fcv(&mut c, "9.0")));
     node.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

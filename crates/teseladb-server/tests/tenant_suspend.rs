@@ -3,20 +3,30 @@
 //! close within the second after the entry applies, with their cursors; its data and users stay,
 //! the default tenant still works in it with `$tenant`, and after `resume` its users sign in again.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
+#[cfg(target_os = "linux")]
 mod secured;
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::{Client, batch, docs, ok, until};
+#[cfg(target_os = "linux")]
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
 /// The second within which a suspended tenant's connections close (FR-034).
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -27,8 +37,10 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
 fn code(r: &Document) -> Option<i32> {
     match r.get("code") {
         Some(Value::Int32(c)) => Some(*c),
@@ -37,6 +49,7 @@ fn code(r: &Document) -> Option<i32> {
 }
 
 /// Whether the server closed `c`: a read gives nothing.
+#[cfg(target_os = "linux")]
 fn closed(c: &mut Client) -> bool {
     c.s.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
     let mut b = [0u8; 1];
@@ -44,6 +57,7 @@ fn closed(c: &mut Client) -> bool {
 }
 
 /// The cursors open on `node`, as `serverStatus` counts them.
+#[cfg(target_os = "linux")]
 fn open_cursors(root: &mut Client) -> i64 {
     let s = root.run("admin", Document::new().with("serverStatus", 1));
     let Some(Value::Document(m)) = s.get("metrics") else { panic!("{s:?}") };
@@ -56,6 +70,7 @@ fn open_cursors(root: &mut Client) -> i64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_resume() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -117,3 +132,7 @@ fn a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_r
     }
     first.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

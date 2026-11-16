@@ -3,6 +3,7 @@
 //! twin collection with the same data; each answer and, every so often, both collections must
 //! match. `TESELADB_EQUIV_OPS=<n>` runs `n` operations (SC-001 asks for 100,000) and
 //! `TESELADB_EQUIV_SEED` replays one seed.
+#![cfg(target_os = "linux")]
 
 mod common;
 

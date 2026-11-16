@@ -15,7 +15,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64 | Linux-amd64) PLATFORM="linux-x86_64" ;;
   Linux-aarch64 | Linux-arm64) PLATFORM="linux-aarch64" ;;
-  Darwin-arm64) PLATFORM="macos-aarch64" ;;
   *) echo "test-install: no platform for $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 WORK=$(mktemp -d)
@@ -28,7 +27,7 @@ trap cleanup EXIT
 
 archive="teseladb-$VERSION-$PLATFORM.tar.gz"
 # The release as package.sh packs it, with this machine's binary standing in for every platform.
-for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
+for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
   mkdir -p "$WORK/target/$triple/dist"
   cp "$BINARY" "$WORK/target/$triple/dist/teseladb"
 done

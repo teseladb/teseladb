@@ -31,8 +31,7 @@ use teseladb_hlc::Hlc;
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogPort, PortDisk};
 use teseladb_io::engine::disk::{DiskPlace, ShardDisk};
 use teseladb_io::engine::{
-    CoreConfig as EngineCoreConfig, CoreHandle, CoreInput, CoreSender, CoreSenders, EngineConfig,
-    NodeEngine,
+    CoreConfig as EngineCoreConfig, CoreHandle, CoreInput, CoreSender, CoreSenders, NodeEngine,
 };
 use teseladb_io::handshake::{
     AcceptorOptions, EnrollHandler, JOIN_TIMEOUT, JoinHandler, JoinRequest, request_join_with,
@@ -290,14 +289,14 @@ pub struct NodeConfig {
     pub data_dir: Option<std::path::PathBuf>,
     /// The node's tags (`--tags`), sorted by name (007 FR-013).
     pub tags: Vec<(String, String)>,
-    /// Bytes of memory the node may use (`--memory-limit`, 012 FR-013); `None`: three quarters of
-    /// the memory the process has.
+    /// Bytes of memory the node may use (`--memory-limit`, 012 FR-013), the engine's memory split
+    /// evenly between its shards (023 FR-028); `None`: three quarters of the memory the process
+    /// has.
     pub memory_limit: Option<u64>,
-    /// Where the cores run (`--cpu-list`, 012 FR-006).
-    pub affinity: crate::affinity::Affinity,
-    /// Whether the engine's files bypass the kernel's page cache (`--direct-io`, 012 FR-003, 023
-    /// FR-010).
-    pub direct_io: teseladb_io::DirectIo,
+    /// Where the cores' shards run (`--cpu-list`, 012 FR-006, 023 FR-027).
+    pub placement: teseladb_io::engine::Placement,
+    /// The mode of the engine's files (`--direct-io`, 012 FR-003, 023 FR-010, FR-033).
+    pub files: teseladb_io::engine::DirectIo,
     /// The disks of the node's cores are one file system (the data directory): a range that
     /// changes core hands over its whole files as hard links (004 FR-033). A disk per core,
     /// as in memory, does not share its files.
@@ -344,8 +343,8 @@ impl Default for NodeConfig {
             data_dir: None,
             tags: Vec::new(),
             memory_limit: None,
-            affinity: crate::affinity::Affinity::Off,
-            direct_io: teseladb_io::DirectIo::Auto,
+            placement: teseladb_io::engine::Placement::Unpinned,
+            files: teseladb_io::engine::DirectIo::Off,
             shared_files: false,
             client_hooks: crate::client_listener::Hooks::default(),
             startup_log: StartupLog::default(),
@@ -1027,21 +1026,29 @@ impl Node {
             (None, None, Some(a)) => a.cores,
             (None, None, None) => machine(),
         };
-        // Its memory, split between its cores (012 FR-013).
-        let memory = cfg
-            .memory_limit
-            .or_else(teseladb_sys::memory_limit::host_default)
-            .map(|total| crate::memory::MemoryBudget::new(total, cores));
+        // Its engine: a shard per core where `--cpu-list` says, the node's memory split evenly
+        // between the shards, on huge pages when the system has them (023 FR-027, FR-028,
+        // FR-014).
+        let (engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
+            cores,
+            &cfg.placement,
+            cfg.memory_limit,
+            cfg.files,
+        )
+        .map_err(NodeError::Config)?;
+        // Its memory, split between its cores the way the engine splits it (012 FR-013).
+        let memory = engine_cfg.memory.map(|total| crate::memory::MemoryBudget::new(total, cores));
         let lsm = memory.map_or_else(|| cfg.lsm.clone(), |m| m.lsm(&cfg.lsm));
         // The memtables and the logs of every core, counted together (012 FR-018, FR-019).
         let memtables = memory.map_or(u64::MAX, |m| {
             m.part(crate::memory::Component::Memtables).saturating_mul(u64::from(cores))
         });
         let pressure = Arc::new(NodePressure::new(cores, cfg.storage.wal_segment_size, memtables));
-        // Where each core runs (012 FR-006).
-        let allowed = teseladb_sys::numa::allowed_cpus()?;
-        let cpus = crate::affinity::core_cpus(&cfg.affinity, cores, &allowed)
-            .map_err(NodeError::Config)?;
+        // Where each core runs (012 FR-006): shard k on the k-th CPU of the engine's cpuset.
+        let cpus: Vec<Option<usize>> = match engine_cfg.cpus.is_empty() {
+            true => vec![None; usize::from(cores)],
+            false => engine_cfg.cpus.iter().copied().map(Some).collect(),
+        };
         let mut meta = open_node(&mut meta_disk, u32::from(cores), cluster_id, now_ms())?;
         // A node that joins gets its identifier and cluster from the cluster; the node that creates
         // the cluster is node 1 (Group 0 `Bootstrap`).
@@ -1134,24 +1141,19 @@ impl Node {
         let mut senders = Vec::new();
         let mut threads = Vec::new();
         log.step("starting the cores", &[("node_id", &node_id.0), ("cores", &cores)]);
-        // Before the cores' threads allocate (012 FR-022).
-        let arenas = crate::allocator::bound(cores);
-        log.step("allocator", &[("arenas", &arenas)]);
         // The Raft logs of every core, in one log of the device (012 FR-035, D-154).
         // Its records carry the HLC bound (005 FR-003, D-172): no core gives a mark before the
         // clock passes the highest bound the log kept.
         let log_bound = clock_keeper.log_bound();
-        // The engine of the node: one shard per core, core k on shard k (023 FR-008); the log's
-        // writer runs on shard 0 (023 FR-013).
-        let pinned: Option<Vec<usize>> = cpus.iter().copied().collect();
-        let engine_cfg = EngineConfig {
-            shards: cores,
-            cpus: pinned.unwrap_or_default(),
-            memory: None,
-            direct_io: cfg.direct_io,
-        };
+        // The engine of the node: one shard per core, core k on shard k (023 FR-008), and the
+        // line that says how it runs (`contracts/cli-engine.md`); the log's writer runs on shard 0
+        // (023 FR-013).
         let engine = NodeEngine::start(&engine_cfg)?;
-        log.step("engine", &[("shards", &engine.shards()), ("disk", &cfg.direct_io.describe())]);
+        let backend = teseladb_io::engine::resources::backend_name();
+        log.step(&engine_cfg.describe(&backend).to_string(), &[("shards", &engine.shards())]);
+        if let Some(why) = &ordinary_pages {
+            log.step("engine memory in ordinary pages", &[("why", why)]);
+        }
         let (device_log, mut ports) = DeviceLog::start(
             &engine,
             place.log_disk()?,
@@ -1338,6 +1340,7 @@ impl Node {
                     memory,
                     http_metrics: Some(http_metrics.clone()),
                     data_dir: cfg.data_dir.clone(),
+                    engine: Some(engine.probe()),
                 };
                 let handler: Handler = Arc::new(move |req, caller| answer(req, caller, &backend));
                 let certs = cfg.client.as_ref().and_then(|c| c.certificates.as_deref());
@@ -1445,6 +1448,12 @@ impl Node {
     /// and the system did not say how much there is.
     pub fn memory(&self) -> Option<crate::memory::MemoryBudget> {
         self.memory
+    }
+
+    /// A way to the engine's metrics and allocator counters (023 FR-028, FR-030); `None` once the
+    /// node stopped.
+    pub fn engine_probe(&self) -> Option<teseladb_io::engine::EngineProbe> {
+        self.engine.as_ref().map(NodeEngine::probe)
     }
 
     /// The CPU each core is pinned to, by core (012 FR-006); `None` for a core left unpinned.

@@ -2,21 +2,33 @@
 //! have a voter on each node, the two that stay elect new leaders for Group 0 and for the ranges
 //! and answer reads and writes within the failover budget, without the seed they joined through.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value, extjson};
+#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
 use teseladb_http::server::Settings;
+#[cfg(target_os = "linux")]
 use teseladb_server::client_listener::ClientConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::http_listener::HttpPortConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -27,15 +39,20 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
 /// What a request may wait for its answer before the test counts it as unanswered.
+#[cfg(target_os = "linux")]
 const ANSWER: Duration = Duration::from_secs(5);
 /// The time the two nodes left may take to answer reads and writes again: a leader replaced in
 /// under a second (005 SC-004) plus the retry within server selection, 2 s (005 FR-019).
+#[cfg(target_os = "linux")]
 const FAILOVER: Duration = Duration::from_secs(3);
+#[cfg(target_os = "linux")]
 const C: &str = "/v1/databases/app/collections/c";
 
 /// A node process of [`node_config`], ready.
+#[cfg(target_os = "linux")]
 fn start(join: Vec<String>) -> NodeProc {
     let node = start_self("node", &join, None, &[]);
     assert!(node.wait_ready(READY));
@@ -43,6 +60,7 @@ fn start(join: Vec<String>) -> NodeProc {
 }
 
 /// A node of two cores with the HTTP port and the clients' port.
+#[cfg(target_os = "linux")]
 fn node_config(join: Vec<String>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
@@ -63,6 +81,7 @@ fn node_config(join: Vec<String>) -> NodeConfig {
 }
 
 /// The answer to one request, or `None` when none comes within [`ANSWER`].
+#[cfg(target_os = "linux")]
 fn send(addr: SocketAddr, method: &str, target: &str, body: &str) -> Option<Response> {
     let mut s = TcpStream::connect_timeout(&addr, ANSWER).ok()?;
     s.set_read_timeout(Some(ANSWER)).ok()?;
@@ -81,12 +100,14 @@ fn send(addr: SocketAddr, method: &str, target: &str, body: &str) -> Option<Resp
     }
 }
 
+#[cfg(target_os = "linux")]
 fn doc(r: &Response) -> Document {
     extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default()
 }
 
 /// The time from `since` until `f` answers `200`, or a panic naming the last answer once
 /// [`FAILOVER`] has passed.
+#[cfg(target_os = "linux")]
 fn answered_within(
     since: Instant,
     what: &str,
@@ -108,6 +129,7 @@ fn answered_within(
 
 /// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
 /// at most [`READY`].
+#[cfg(target_os = "linux")]
 fn replicated(node: &NodeProc) -> bool {
     let end = Instant::now() + READY;
     let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
@@ -125,6 +147,7 @@ fn replicated(node: &NodeProc) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -166,3 +189,7 @@ fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
     assert_eq!(ids, vec![Value::Int32(1), Value::Int32(10), Value::Int32(11)]);
     assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

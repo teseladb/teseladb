@@ -4,15 +4,65 @@
 //! more than a tenth above. Before the count came from the radix tree it was a fixed 64 bytes per
 //! version besides the key and the value, the figure of the skiplist, and with a leaf keeping the
 //! sort key and the internal key it was below what the memtable held.
+// The counting allocator of the test.
+#![allow(unsafe_code)]
 
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_raftlog::MemDisk;
-use teseladb_sys::alloc_count::{CountingAlloc, held_bytes};
 use teseladb_types::GroupId;
 
+/// The bytes the test process holds, counted by its allocator: the system's (this crate does not
+/// link the engine, whose allocator counts operations, not bytes).
+mod held {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static HELD: AtomicUsize = AtomicUsize::new(0);
+
+    /// The system's allocator, counting the bytes held.
+    pub struct Held;
+
+    /// The bytes held now.
+    pub fn bytes() -> usize {
+        HELD.load(Ordering::Relaxed)
+    }
+
+    // SAFETY: every call goes to `System` with the same arguments; counting does not allocate.
+    unsafe impl GlobalAlloc for Held {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's contract for `alloc` is `System::alloc`'s.
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                HELD.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from this allocator, which is `System`.
+            unsafe { System.dealloc(ptr, layout) };
+            HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: as `alloc`; `ptr` came from this allocator.
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            if !p.is_null() {
+                HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+                HELD.fetch_add(new_size, Ordering::Relaxed);
+            }
+            p
+        }
+    }
+}
+
 #[global_allocator]
-static ALLOC: CountingAlloc = CountingAlloc;
+static ALLOC: held::Held = held::Held;
+
+fn held_bytes() -> usize {
+    held::bytes()
+}
 
 /// Versions written in each case.
 const VERSIONS: usize = 20_000;

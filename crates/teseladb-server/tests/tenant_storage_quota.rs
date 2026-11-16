@@ -5,18 +5,27 @@
 //! `maxDatabases` and `maxSearchIndexes` refuse what goes past them, also a collection created by
 //! writing to it.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
+#[cfg(target_os = "linux")]
 mod secured;
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, batch, docs, ok, until};
+#[cfg(target_os = "linux")]
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -33,8 +42,10 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const OUT_OF_DISK_SPACE: i32 = 14031;
 
+#[cfg(target_os = "linux")]
 fn code(r: &Document) -> Option<i32> {
     match r.get("code") {
         Some(Value::Int32(c)) => Some(*c),
@@ -42,6 +53,7 @@ fn code(r: &Document) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn errmsg(r: &Document) -> String {
     match r.get("errmsg") {
         Some(Value::String(s)) => s.clone(),
@@ -49,6 +61,7 @@ fn errmsg(r: &Document) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn cluster() -> (Vec<NodeProc>, Client) {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -73,6 +86,7 @@ fn cluster() -> (Vec<NodeProc>, Client) {
     (nodes, root)
 }
 
+#[cfg(target_os = "linux")]
 fn ann(node: &NodeProc) -> Client {
     until("Ann signs in", || {
         let mut c = Client::new(node);
@@ -80,6 +94,7 @@ fn ann(node: &NodeProc) -> Client {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn big(from: i32, n: i32) -> Document {
     let docs: Vec<Value> = (from..from + n)
         .map(|i| Value::Document(Document::new().with("_id", i).with("f", "x".repeat(4_000))))
@@ -87,12 +102,14 @@ fn big(from: i32, n: i32) -> Document {
     Document::new().with("insert", "c").with("documents", Value::Array(docs))
 }
 
+#[cfg(target_os = "linux")]
 fn stop(nodes: Vec<NodeProc>) {
     for n in nodes.into_iter().rev() {
         n.stop();
     }
 }
 
+#[cfg(target_os = "linux")]
 fn writes_stop_at_the_storage_quota_and_deleting_frees_it() {
     let (nodes, mut root) = cluster();
     let mut c = ann(&nodes[1]);
@@ -158,6 +175,7 @@ fn writes_stop_at_the_storage_quota_and_deleting_frees_it() {
     stop(nodes);
 }
 
+#[cfg(target_os = "linux")]
 fn collections_databases_and_search_indexes_stop_at_their_limits() {
     let (nodes, _root) = cluster();
     admin(
@@ -216,3 +234,7 @@ fn collections_databases_and_search_indexes_stop_at_their_limits() {
     assert_eq!(errmsg(&r), "tenant acme is over its search index quota: 1 of 1");
     stop(nodes);
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

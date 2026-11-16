@@ -3,16 +3,24 @@
 //! it uses, equal on every node, and the connections, commands, seconds held back and last
 //! sign-in of that node, without its service user's. The default tenant has no series.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
+#[cfg(target_os = "linux")]
 mod secured;
 
+#[cfg(target_os = "linux")]
 use common::{Client, batch, docs, ok, until};
+#[cfg(target_os = "linux")]
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -29,10 +37,12 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn user(root: &mut Client, name: &str) {
     user_of(root, name, "acme");
 }
 
+#[cfg(target_os = "linux")]
 fn user_of(root: &mut Client, name: &str, tenant: &str) {
     let create = Document::new()
         .with("createUser", name)
@@ -43,6 +53,7 @@ fn user_of(root: &mut Client, name: &str, tenant: &str) {
     assert!(ok(&root.run("admin", create)));
 }
 
+#[cfg(target_os = "linux")]
 fn signed_in(node: &NodeProc, name: &str) -> Client {
     until("the user signs in", || {
         let mut c = Client::new(node);
@@ -51,10 +62,12 @@ fn signed_in(node: &NodeProc, name: &str) -> Client {
 }
 
 /// The value of `field` in the output of `tenant usage`.
+#[cfg(target_os = "linux")]
 fn field(out: &str, field: &str) -> String {
     out.lines().find_map(|l| l.strip_prefix(&format!("{field}\t"))).unwrap_or_default().to_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_user() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -138,6 +151,7 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
 }
 
 /// `teseladb admin <args>` on `node`: its error output when it fails.
+#[cfg(target_os = "linux")]
 fn admin_try(node: &NodeProc, args: &[&str]) -> Result<(), String> {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
@@ -150,6 +164,7 @@ fn admin_try(node: &NodeProc, args: &[&str]) -> Result<(), String> {
 }
 
 /// Splits the range that holds document `id` of `app.c` of the tenant numbered `tenant`.
+#[cfg(target_os = "linux")]
 fn split_at(node: &NodeProc, tenant: u32, id: i32) {
     let at = format!(r#"{{"ns": "\u0000{tenant}\u0000app.c", "_id": {id}}}"#);
     // A range still splitting refuses the next split (`RangeBusy`) until it is done.
@@ -163,6 +178,7 @@ fn split_at(node: &NodeProc, tenant: u32, id: i32) {
 /// FR-031: the data a tenant uses adds up the ranges of its keys when they are split around and
 /// inside its collections: one range wholly its own, ranges that hold another tenant's data
 /// too, and ranges before or after its keys, which count for nothing.
+#[cfg(target_os = "linux")]
 fn the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it() {
     let node = start(Vec::new());
     for t in ["acme", "beta"] {
@@ -198,3 +214,7 @@ fn the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it() {
     }
     node.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

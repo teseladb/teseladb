@@ -12,32 +12,50 @@
 //! The test runs the `main` of tests/common/procs.rs (`harness = false` in `Cargo.toml`) so that
 //! the same binary can be a node.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc::{self, Receiver};
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_meta::bootstrap::DATA_START;
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_server::cli::{self, Command as CliCommand};
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node_config;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
 /// Longest a node takes to print its ready line.
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
 /// The start of the line `teseladb start` writes to standard output once the node is ready.
+#[cfg(target_os = "linux")]
 const READY_LINE: &str = "ready node_id=";
 
 /// The options of `teseladb start` every node of these tests takes. Several nodes on one machine:
 /// none opens the HTTP port of 019.
+#[cfg(target_os = "linux")]
 const START: &[&str] = &[
     "start",
     "--admin-listen",
@@ -51,18 +69,23 @@ const START: &[&str] = &[
     "0",
 ];
 /// The inter-node port of most nodes of these tests.
+#[cfg(target_os = "linux")]
 const LOOPBACK_PEER: &[&str] = &["--peer-listen", "127.0.0.1:0"];
 /// Every address, with the one the other nodes call (001 T051): `--insecure` takes it only with
 /// `--insecure-allow-remote`.
+#[cfg(target_os = "linux")]
 const ANY_PEER: &[&str] =
     &["--insecure-allow-remote", "--peer-listen", "0.0.0.0:0", "--advertise", "127.0.0.1"];
 
 /// Deadline of a request inside the node.
+#[cfg(target_os = "linux")]
 const REQUEST: Duration = Duration::from_secs(2);
 
 /// What SC-004 allows between the leader's death and the next confirmed write.
+#[cfg(target_os = "linux")]
 const FAILOVER_BUDGET: Duration = Duration::from_secs(1);
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -86,6 +109,7 @@ fn main() {
 // ----- node mode -----
 
 /// The configuration `teseladb start` gives a node of these tests over its data directory.
+#[cfg(target_os = "linux")]
 fn start_config(a: &NodeArgs) -> NodeConfig {
     let dir = a.dir.as_ref().expect("a data directory");
     let mut args: Vec<String> =
@@ -99,8 +123,10 @@ fn start_config(a: &NodeArgs) -> NodeConfig {
 }
 
 /// A data directory, gone when the test ends.
+#[cfg(target_os = "linux")]
 struct DataDir(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl DataDir {
     fn new(name: &str) -> DataDir {
         let dir =
@@ -110,6 +136,7 @@ impl DataDir {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for DataDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -119,6 +146,7 @@ impl Drop for DataDir {
 // ----- processes -----
 
 /// A `teseladb start` process and its data directory, both gone when the test ends.
+#[cfg(target_os = "linux")]
 struct Proc {
     child: Child,
     lines: Receiver<String>,
@@ -126,6 +154,7 @@ struct Proc {
     _dir: DataDir,
 }
 
+#[cfg(target_os = "linux")]
 impl Proc {
     /// Starts `teseladb` with `start`'s options for data directory `name`, listening between
     /// nodes as `peer` says.
@@ -244,6 +273,7 @@ impl Proc {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -253,6 +283,7 @@ impl Drop for Proc {
 
 // ----- tests -----
 
+#[cfg(target_os = "linux")]
 fn three_processes_join_and_survive_the_loss_of_the_leader() {
     let p1 = Proc::start("1", None);
     let (id1, seed) = p1.ready();
@@ -289,6 +320,7 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
 /// Two nodes with `--peer-listen 0.0.0.0` (the guides of Docker Compose and systemd): each one
 /// advertises `127.0.0.1` with its own port, so the second joins as node 2 instead of taking the
 /// name of the first (001 T051).
+#[cfg(target_os = "linux")]
 fn two_nodes_on_every_address_join_with_the_address_they_advertise() {
     let p1 = Proc::start_anywhere("any1", None);
     let (id1, seed) = p1.ready();
@@ -301,6 +333,7 @@ fn two_nodes_on_every_address_join_with_the_address_they_advertise() {
     drop((p1, p2));
 }
 
+#[cfg(target_os = "linux")]
 fn a_write_is_confirmed_within_a_second_of_the_range_leaders_death() {
     let dirs = [DataDir::new("r1"), DataDir::new("r2"), DataDir::new("r3")];
     let node = |dir: &DataDir, join: &[String]| {
@@ -358,3 +391,7 @@ fn a_write_is_confirmed_within_a_second_of_the_range_leaders_death() {
     drop(dead);
     assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()), "the nodes stop cleanly");
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -1,4 +1,5 @@
 //! Operating-system randomness (013 FR-001).
+#![cfg(target_os = "linux")]
 
 #[test]
 fn fill_random_fills_buffers_longer_than_one_getentropy_call() {

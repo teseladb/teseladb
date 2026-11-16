@@ -2,17 +2,25 @@
 //! used to `config.system.sessions`, which every node reads, and `killSessions` or
 //! `killAllSessions` on one node kills the sessions' cursors on all of them.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -23,6 +31,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn fast(join: Vec<String>) -> NodeConfig {
     let mut cfg = config(join);
     if let Some(c) = cfg.client.as_mut() {
@@ -31,10 +40,12 @@ fn fast(join: Vec<String>) -> NodeConfig {
     cfg
 }
 
+#[cfg(target_os = "linux")]
 fn lsid(n: u8) -> Document {
     Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![n; 16] })
 }
 
+#[cfg(target_os = "linux")]
 fn cursor(r: &Document) -> i64 {
     let Some(Value::Document(c)) = r.get("cursor") else { panic!("no cursor in {r:?}") };
     let Some(Value::Int64(id)) = c.get("id") else { panic!("no id in {r:?}") };
@@ -42,16 +53,19 @@ fn cursor(r: &Document) -> i64 {
 }
 
 /// Opens a cursor of one document per batch in session `n` on `c`.
+#[cfg(target_os = "linux")]
 fn open(c: &mut Client, n: u8) -> i64 {
     let find = Document::new().with("find", "c").with("batchSize", 1).with("lsid", lsid(n));
     cursor(&c.run("app", find))
 }
 
+#[cfg(target_os = "linux")]
 fn get_more(c: &mut Client, id: i64, n: u8) -> Document {
     let cmd = Document::new().with("getMore", id).with("collection", "c").with("lsid", lsid(n));
     c.run("app", cmd)
 }
 
+#[cfg(target_os = "linux")]
 fn sessions_are_recorded_for_the_cluster_and_killed_on_every_node() {
     let first = start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
@@ -88,3 +102,7 @@ fn sessions_are_recorded_for_the_cluster_and_killed_on_every_node() {
     assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
     assert!(first.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

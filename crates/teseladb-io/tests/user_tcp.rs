@@ -1,6 +1,7 @@
 //! The TCP stack in user space of the clients' port on AF_XDP (012 FR-033): a client written
 //! here, with its own encoder of frames, talks to the stack through the frames it sends and the
 //! ones the stack gives back.
+#![cfg(target_os = "linux")]
 
 use std::net::{Ipv4Addr, SocketAddr};
 

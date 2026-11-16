@@ -165,50 +165,9 @@ mod rt {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-mod rt {
-    use std::time::Instant;
-
-    /// No engine runs outside Linux (D3): nothing parks.
-    pub(crate) enum Parking {}
-
-    impl Parking {
-        pub(super) fn id(&self) -> u64 {
-            match *self {}
-        }
-    }
-
-    pub(super) fn this_shard() -> Option<u32> {
-        None
-    }
-
-    pub(super) fn engine_thread_shard() -> Option<u32> {
-        None
-    }
-
-    pub(super) fn post(_shard: u32, _f: Box<dyn FnOnce() + Send>) -> bool {
-        false
-    }
-
-    pub(super) fn begin_park() -> Parking {
-        unreachable!("no engine thread runs outside Linux")
-    }
-
-    pub(super) fn wake_parked(_id: u64) {}
-
-    pub(super) fn finish_park(p: Parking, _until: Option<Instant>) {
-        match p {}
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn parking_id(p: &rt::Parking) -> u64 {
     p.id
-}
-
-#[cfg(not(target_os = "linux"))]
-fn parking_id(p: &rt::Parking) -> u64 {
-    p.id()
 }
 
 /// Who waits on a [`Waiter`].

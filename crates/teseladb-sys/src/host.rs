@@ -1,6 +1,6 @@
 //! What the operating system says of the host and of this process, for the diagnostic commands
-//! (`hostInfo`, `serverStatus`, `dbStats` of 006): POSIX calls common to Linux and macOS here,
-//! the rest in each system's module.
+//! (`hostInfo`, `serverStatus`, `dbStats` of 006): POSIX calls here, the rest in the Linux
+//! module.
 
 use std::ffi::CStr;
 use std::io;
@@ -13,13 +13,13 @@ use crate::os;
 /// The kernel's names (`uname(2)`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Uname {
-    /// Operating system (`Linux`, `Darwin`).
+    /// Operating system (`Linux`).
     pub sysname: String,
     /// Kernel release.
     pub release: String,
     /// Kernel version string.
     pub version: String,
-    /// Machine (`aarch64`, `x86_64`, `arm64`).
+    /// Machine (`aarch64`, `x86_64`).
     pub machine: String,
 }
 
@@ -55,7 +55,7 @@ pub struct Memory {
     pub virtual_size: u64,
     /// Threads.
     pub threads: u64,
-    /// The task's page-ins, which macOS counts apart from `getrusage(2)`; `None` on Linux.
+    /// The task's page-ins apart from `getrusage(2)`: always `None` on Linux.
     pub pageins: Option<i32>,
 }
 
@@ -64,7 +64,7 @@ const RUSAGE_SELF: i32 = 0;
 #[repr(C)]
 struct Timeval {
     sec: i64,
-    // `suseconds_t`: 64 bits on Linux, 32 bits padded to 64 on macOS; the value fits in both.
+    // `suseconds_t`: 64 bits.
     usec: os::Suseconds,
 }
 
@@ -206,26 +206,6 @@ pub fn memory() -> io::Result<Memory> {
     os::memory()
 }
 
-/// Bytes the process's allocator holds for live allocations (012 FR-016): what `malloc` handed
-/// out and nobody freed yet. `None` where the system does not say (glibc before 2.33).
-pub fn allocated() -> Option<u64> {
-    os::allocated()
-}
-
-/// Caps the arenas of glibc's allocator at `arenas` (`mallopt(M_ARENA_MAX)`, 012 FR-022), to be
-/// called before the threads that allocate start: by default glibc makes up to eight per CPU.
-/// `None` where the C library has no such setting (musl, macOS), else whether it took the value.
-pub fn limit_allocator_arenas(arenas: usize) -> Option<bool> {
-    os::limit_arenas(arenas)
-}
-
-/// Hands back to the system the free memory the allocator keeps (`malloc_trim(0)` with glibc,
-/// `malloc_zone_pressure_relief` on macOS; 012 FR-022). `None` where the C library cannot, else
-/// whether any memory went back.
-pub fn release_free_memory() -> Option<bool> {
-    os::release_free_memory()
-}
-
 /// Bytes used and total of the file system that holds `path`.
 pub fn fs_usage(path: &Path) -> io::Result<(u64, u64)> {
     let mut c = path.as_os_str().as_bytes().to_vec();
@@ -306,27 +286,5 @@ mod tests {
         assert_eq!(fs_usage(Path::new(bad)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(text(b"abc"), "abc");
         assert_eq!(text(b"ab\0c"), "ab");
-    }
-
-    #[test]
-    fn the_allocator_takes_an_arena_cap_and_gives_back_free_memory_where_its_library_can() {
-        let glibc = cfg!(all(target_os = "linux", target_env = "gnu"));
-        assert_eq!(limit_allocator_arenas(4), glibc.then_some(true));
-        assert_eq!(limit_allocator_arenas(0), glibc.then_some(false), "glibc refuses no arena");
-        // Memory freed by another thread stays in its arena until it is handed back.
-        let freed =
-            std::thread::spawn(|| drop((0..64).map(|_| vec![7u8; 1 << 20]).collect::<Vec<_>>()));
-        freed.join().unwrap();
-        let back = release_free_memory();
-        assert_eq!(back.is_some(), glibc || cfg!(target_os = "macos"), "{back:?}");
-    }
-
-    #[test]
-    fn the_allocator_counts_what_is_held() {
-        let Some(before) = allocated() else { return };
-        let held: Vec<u8> = vec![1; 64 << 20];
-        let after = allocated().expect("the allocator answered once");
-        assert!(after >= before + (32 << 20), "{before} then {after}");
-        drop(held);
     }
 }

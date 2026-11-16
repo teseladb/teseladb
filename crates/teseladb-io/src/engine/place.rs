@@ -11,8 +11,6 @@ use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp, MemDisk};
 
 #[cfg(target_os = "linux")]
 use super::disk::{IoGroups, ShardDisk};
-#[cfg(not(target_os = "linux"))]
-use super::unsupported::disk::ShardDisk;
 use crate::device_log::LogDisk;
 use crate::files::BlockingDisk;
 
@@ -67,16 +65,6 @@ impl DiskPlace {
             }
             other => Ok(ShardDisk::model(other.model()?)),
         }
-    }
-
-    /// Fails: the engine runs on Linux only (D3).
-    ///
-    /// # Errors
-    ///
-    /// Always.
-    #[cfg(not(target_os = "linux"))]
-    pub fn on_shard(&self) -> io::Result<ShardDisk> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "the server runs on Linux only"))
     }
 
     /// A disk for the node's start, before its engine runs (its identity and data format size the

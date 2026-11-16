@@ -6,32 +6,49 @@
 //! replica set port opens and closes without a restart; the limiter of new connections counts
 //! what it refused.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::READY;
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, RawDoc, Value};
+#[cfg(target_os = "linux")]
 use teseladb_io::engine::disk::DiskPlace;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::{Node, NodeConfig};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeArgs;
+#[cfg(target_os = "linux")]
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
+#[cfg(target_os = "linux")]
 /// A node of two cores with its clients' port.
 const CLIENTS: &str = "clients";
+#[cfg(target_os = "linux")]
 /// A node of one core without a clients' port.
 const PLAIN: &str = "plain";
+#[cfg(target_os = "linux")]
 /// A node of one core that announces `member.test:27017` as its client address.
 const MEMBER: &str = "member";
+#[cfg(target_os = "linux")]
 /// A node of two cores whose port takes [`LIMIT`] connections.
 const LIMITED: &str = "limited";
+#[cfg(target_os = "linux")]
 /// The `--maxConns` of [`LIMITED`].
 const LIMIT: usize = 3;
 
+#[cfg(target_os = "linux")]
 fn main() {
     // The engine runs on Linux only (D3).
     if cfg!(not(target_os = "linux")) {
@@ -86,11 +103,13 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn send(s: &mut TcpStream, request_id: i32, flag_bits: u32, cmd: &Document) {
     let msg = OpMsg::encode(request_id, 0, flag_bits, &cmd.to_bytes().unwrap());
     s.write_all(&msg).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 fn recv(s: &mut TcpStream) -> Option<(Header, u32, Document)> {
     let mut head = [0u8; HEADER_LEN];
     s.read_exact(&mut head).ok()?;
@@ -103,26 +122,31 @@ fn recv(s: &mut TcpStream) -> Option<(Header, u32, Document)> {
     Some((h, flag_bits, doc))
 }
 
+#[cfg(target_os = "linux")]
 fn closed(s: &mut TcpStream) -> bool {
     let mut b = [0u8; 1];
     matches!(s.read(&mut b), Ok(0) | Err(_))
 }
 
+#[cfg(target_os = "linux")]
 fn hello() -> Document {
     Document::new().with("hello", 1).with("$db", "admin")
 }
 
+#[cfg(target_os = "linux")]
 fn connect_to(at: SocketAddr) -> TcpStream {
     let s = TcpStream::connect(at).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     s
 }
 
+#[cfg(target_os = "linux")]
 /// The threads of process `pid`.
 fn threads_of(pid: u32) -> usize {
     std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, Iterator::count)
 }
 
+#[cfg(target_os = "linux")]
 fn a_node_opens_the_clients_port() {
     let node = teseladb_server::procs::start_self(CLIENTS, &[], None, &[]);
     assert!(node.wait_ready(READY));
@@ -150,6 +174,7 @@ fn a_node_opens_the_clients_port() {
     assert!(plain.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 fn serving_a_node_without_clients_port() {
     use teseladb_server::log::{Format, Level, Logger};
     // The only node of this test process: the others run in processes of their own (D4).
@@ -173,6 +198,7 @@ fn serving_a_node_without_clients_port() {
     assert!(String::from_utf8(out).unwrap().starts_with("ready "));
 }
 
+#[cfg(target_os = "linux")]
 /// A running node answers the `hello`s waiting on its `topologyVersion` as soon as it applies a
 /// change of `topologyPresentation` (018 FR-015, T016): the awaitable `hello` of a driver's
 /// monitor returns well before its `maxAwaitTimeMS` with the replica set presentation and a
@@ -231,6 +257,7 @@ fn a_presentation_change_wakes_the_waiting_hellos() {
     assert!(node.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// The replica set port (018 FR-016, T018): opened on the running node when Group 0 says so,
 /// it answers as a member of the replica set at that port while the main port keeps answering
 /// as a reference router, one application on each at the same time; 0 closes it.
@@ -300,6 +327,7 @@ fn the_replica_set_port_opens_and_closes_without_a_restart() {
     assert!(node.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// A replica set port that another program holds cannot open: the node goes on, and the next
 /// port Group 0 asks for opens (018 FR-016).
 fn a_replica_set_port_that_is_taken_waits_for_another() {
@@ -359,6 +387,7 @@ fn a_replica_set_port_that_is_taken_waits_for_another() {
     assert!(node.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// The limiter of new connections on a node (006 FR-036): `setParameter` turns it on, a client
 /// that leaves while it waits in the queue counts as interrupted when its turn comes, one that
 /// finds the queue full is closed, and `serverStatus` counts both.
@@ -407,6 +436,7 @@ fn a_node_s_limiter_counts_the_closed_connections_and_those_that_left_the_queue(
     assert!(node.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// `--maxConns` (023 FR-018, as the reference server's `net.maxIncomingConnections`): past it a
 /// new connection is closed at once, on whichever shard the engine hands it to, and one that
 /// closes makes room for the next.
@@ -442,6 +472,7 @@ fn max_conns_closes_the_connections_past_it() {
     assert!(node.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// Commands that wait (here `getMore`s of tailable cursors with `awaitData`, which wait for
 /// new documents until their `maxTimeMS`) hold up only their own connection: another connection
 /// of the same node is answered at once, and neither the open connections nor the waiting
@@ -508,3 +539,7 @@ fn waiting_commands_hold_up_only_their_connection_and_no_thread() {
     }
     assert!(node.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

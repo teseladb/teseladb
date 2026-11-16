@@ -2,6 +2,7 @@
 //! follower. With `maxTimeMS` the read waits until it ends (`MaxTimeMSExpired`); without it, the
 //! selection limit of a reference router 9.0.4 (15 s, measured), then
 //! `FailedToSatisfyReadPreference` naming the range's replica group.
+#![cfg(target_os = "linux")]
 
 mod common;
 

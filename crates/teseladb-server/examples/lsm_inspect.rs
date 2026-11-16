@@ -8,18 +8,26 @@
 //!
 //! `bytes` is how much of a data key names its group (13 by default: collection and index).
 
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
 use teseladb_hlc::Hlc;
+#[cfg(target_os = "linux")]
 use teseladb_io::files::BlockingDisk;
+#[cfg(target_os = "linux")]
 use teseladb_lsm::{Kind, Lsm, LsmConfig, Step};
+#[cfg(target_os = "linux")]
 use teseladb_types::Nanos;
 
 /// Bytes of the prefix that names a collection and an index in a data key.
+#[cfg(target_os = "linux")]
 const DATA_PREFIX: usize = 13;
 /// First byte of the data keys.
+#[cfg(target_os = "linux")]
 const DATA: u8 = 1;
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct Group {
     versions: u64,
@@ -29,6 +37,7 @@ struct Group {
     bytes: u64,
 }
 
+#[cfg(target_os = "linux")]
 fn prefix(key: &[u8], data: usize) -> Vec<u8> {
     match key.first() {
         Some(&DATA) => key[..key.len().min(data)].to_vec(),
@@ -36,10 +45,12 @@ fn prefix(key: &[u8], data: usize) -> Vec<u8> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
     let dir = std::env::args().nth(1).expect("usage: lsm_inspect <copy of core-NN> [bytes]");
     let data = std::env::args().nth(2).and_then(|b| b.parse().ok()).unwrap_or(DATA_PREFIX);
@@ -93,3 +104,7 @@ fn main() {
         );
     }
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

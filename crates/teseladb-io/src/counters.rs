@@ -14,7 +14,6 @@ static PEER_LINKS_FAILED: Line = Line(AtomicU64::new(0));
 
 /// Counts an outbound link to another node that went down (012 FR-015): what was queued on it
 /// is dropped and waits for the next connection.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn record_peer_link_failed() {
     PEER_LINKS_FAILED.0.fetch_add(1, Ordering::Relaxed);
 }
@@ -25,7 +24,6 @@ pub fn peer_links_failed() -> u64 {
 }
 
 /// Counts a sync of the node's Raft log (012 FR-035): one for every core's writes of a turn.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn record_log_sync() {
     LOG_SYNCS.0.fetch_add(1, Ordering::Relaxed);
 }

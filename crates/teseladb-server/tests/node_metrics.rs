@@ -1,7 +1,9 @@
 //! The state of the machine in `/metrics` (007 FR-038), which TeselaDB Cloud watches on a
 //! dedicated cluster (021 FR-048): the disk of the data directory, the process's resident memory
 //! the histogram of how long the clients' commands took on the node, and how long each stage of
-//! an operation took (012 FR-015).
+//! an operation took (012 FR-015); and the engine's memory and metrics (023 FR-030,
+//! `contracts/metrics.md`).
+#![cfg(target_os = "linux")]
 
 mod common;
 
@@ -91,8 +93,26 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     assert!(of_cores("teseladb_raft_log_memory_bytes") > 0.0, "{text}");
     assert!(text.contains("teseladb_lsm_write_amplification{core="), "{text}");
     assert!(text.contains("teseladb_lsm_history_bytes{core="), "{text}");
-    #[cfg(target_os = "macos")]
+    // What the engine's allocator holds for the shards, and the engine's own metrics with the
+    // label of each shard (023 FR-030, contracts/metrics.md).
     assert!(sample(&text, "teseladb_memory_allocated_bytes").expect("allocated") > 0.0);
+    for family in [
+        "teseladb_engine_reactor_utilization gauge",
+        "teseladb_engine_reactor_tasks_processed counter",
+        "teseladb_engine_memory_malloc_operations counter",
+        "teseladb_engine_memory_foreign_frees counter",
+    ] {
+        let help = format!("# TYPE {family}");
+        assert_eq!(text.matches(&help).count(), 1, "{help} once in {text}");
+    }
+    for series in [
+        "teseladb_engine_reactor_utilization{shard=\"0\"",
+        "teseladb_engine_memory_malloc_operations{shard=\"0\"",
+        "teseladb_engine_memory_foreign_frees{shard=\"0\"} ",
+    ] {
+        assert!(text.contains(series), "{series} in {text}");
+    }
+    assert!(!text.contains("teseladb_engine_http_"), "only the groups of the contract: {text}");
     let writes = "teseladb_stage_seconds_count{stage=\"write_range\"}";
     assert!(sample(&text, writes).expect("write_range") >= 1.0, "{text}");
     // The parts of a core's turn (012 FR-015): the insert arrived as a request, its entry came

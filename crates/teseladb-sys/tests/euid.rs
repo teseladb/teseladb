@@ -1,5 +1,6 @@
 //! `effective_uid`: the user id the process runs as, which decides the startup warning of a node
 //! run as `root` (measured on the reference server and the reference router 9.0.4).
+#![cfg(target_os = "linux")]
 
 use std::process::Command;
 

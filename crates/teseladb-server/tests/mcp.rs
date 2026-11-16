@@ -2,24 +2,39 @@
 //! opened on one node of three and used through the others, the stateless revision, and the
 //! read-only default that hides and refuses the tools that write.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value as Bson};
+#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
 use teseladb_http::server::Settings;
+#[cfg(target_os = "linux")]
 use teseladb_json::{Value, parse};
+#[cfg(target_os = "linux")]
 use teseladb_mcp::server::SESSION_HEADER;
+#[cfg(target_os = "linux")]
 use teseladb_server::http_listener::HttpPortConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -46,11 +61,13 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn start(join: Vec<String>) -> NodeProc {
     start_on(join, [127, 0, 0, 1])
 }
 
 /// [`start`], with the HTTP port on `ip`.
+#[cfg(target_os = "linux")]
 fn start_on(join: Vec<String>, ip: [u8; 4]) -> NodeProc {
     let ip = std::net::Ipv4Addr::from(ip);
     let node = teseladb_server::procs::start_self("http", &join, None, &[&format!("ip={ip}")]);
@@ -59,6 +76,7 @@ fn start_on(join: Vec<String>, ip: [u8; 4]) -> NodeProc {
 }
 
 /// A node with its HTTP port on `ip`.
+#[cfg(target_os = "linux")]
 fn http_config(join: Vec<String>, ip: std::net::Ipv4Addr) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from((ip, 0))],
@@ -68,6 +86,7 @@ fn http_config(join: Vec<String>, ip: std::net::Ipv4Addr) -> NodeConfig {
     NodeConfig { http: Some(http), ..config(join) }
 }
 
+#[cfg(target_os = "linux")]
 fn post(at: SocketAddr, body: &str, session: Option<&str>) -> (Response, Value) {
     let mut req = Request::new("POST", "/mcp").body(body.as_bytes().to_vec());
     if let Some(s) = session {
@@ -79,6 +98,7 @@ fn post(at: SocketAddr, body: &str, session: Option<&str>) -> (Response, Value) 
 }
 
 /// The answer to `req`.
+#[cfg(target_os = "linux")]
 fn send(at: SocketAddr, req: Request) -> Response {
     let req = req.header("Host", "h");
     let mut s = TcpStream::connect(at).unwrap();
@@ -95,16 +115,19 @@ fn send(at: SocketAddr, req: Request) -> Response {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn tool(id: u32, name: &str, args: &str) -> String {
     format!(
         r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{args}}}}}"#
     )
 }
 
+#[cfg(target_os = "linux")]
 fn structured(v: &Value) -> &Value {
     v.get("result").and_then(|r| r.get("structuredContent")).unwrap_or_else(|| panic!("{v:?}"))
 }
 
+#[cfg(target_os = "linux")]
 fn a_session_of_one_node_works_through_the_others() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -162,6 +185,7 @@ fn a_session_of_one_node_works_through_the_others() {
 }
 
 /// A value for argument `name` of schema `schema`, drawn with `r`.
+#[cfg(target_os = "linux")]
 fn argument(name: &str, schema: &Value, r: &mut u64) -> String {
     *r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     let pick = (*r >> 33) as usize;
@@ -193,6 +217,7 @@ fn argument(name: &str, schema: &Value, r: &mut u64) -> String {
 }
 
 /// The state a write would change: each collection's documents and indexes.
+#[cfg(target_os = "linux")]
 fn state(wire: &mut Client) -> Vec<Bson> {
     let mut out = Vec::new();
     let dbs = wire.run("admin", Document::new().with("listDatabases", 1).with("nameOnly", true));
@@ -215,6 +240,7 @@ fn state(wire: &mut Client) -> Vec<Bson> {
 
 /// SC-004 (019 T028, FR-023): every tool called with arguments drawn from its schema, under the
 /// default `mcpOptions` (`readOnly`), leaves the data as it was.
+#[cfg(target_os = "linux")]
 fn every_tool_in_read_only_mode_writes_nothing() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -262,6 +288,7 @@ fn every_tool_in_read_only_mode_writes_nothing() {
 
 /// `listChanged` (019 T028, FR-023): the server's stream of a session (`GET /mcp`) tells the
 /// client when `mcpOptions` changes the tools it sees.
+#[cfg(target_os = "linux")]
 fn the_session_stream_announces_a_change_of_the_tools() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -295,6 +322,7 @@ fn the_session_stream_announces_a_change_of_the_tools() {
 /// `/v1` and `/mcp` are `404`; batches and bodies that are not text are refused; a call with a
 /// `progressToken` that fails ends its stream with the error; and a session stream the client
 /// drops ends.
+#[cfg(target_os = "linux")]
 fn the_ports_routes_answer_what_they_do_not_serve() {
     let node = start_on(Vec::new(), [0, 0, 0, 0]);
     let at = SocketAddr::from(([127, 0, 0, 1], node.http_addrs()[0].port()));
@@ -346,3 +374,7 @@ fn the_ports_routes_answer_what_they_do_not_serve() {
     std::thread::sleep(Duration::from_millis(2_500));
     assert!(node.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

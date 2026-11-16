@@ -4,13 +4,13 @@
 //! field. The count of the earlier reading is measured here too, with the same calls it made, so
 //! the two stay comparable on any host.
 
+#![cfg(target_os = "linux")]
+
 use teseladb_bson::{Document, Limits, RawDoc, Value, validate_message};
-use teseladb_sys::alloc_count::{CountingAlloc, allocations};
+use teseladb_io::engine::stats::allocations_here;
+use teseladb_io::engine::{DirectIo, EngineConfig, NodeEngine};
 use teseladb_wire::connection::Connection;
 use teseladb_wire::msg::{HEADER_LEN, Header, opcode};
-
-#[global_allocator]
-static ALLOC: CountingAlloc = CountingAlloc;
 
 const DOCS: usize = 100;
 
@@ -65,38 +65,71 @@ fn earlier(docs: &[Vec<u8>]) -> Vec<Document> {
         .collect()
 }
 
+/// What the reading of the message gives: the allocations of the earlier reading and of the
+/// connection's, the documents read, whether they are in the order of the message, and the
+/// distance between the first and the last.
+#[derive(Debug)]
+struct Reading {
+    earlier: u64,
+    now: u64,
+    documents: usize,
+    in_order: bool,
+    span: usize,
+}
+
+/// Both readings of `message`, counted by the allocator of the shard they run on.
+fn read_on_shard(docs: &[Vec<u8>], message: &[u8]) -> Reading {
+    let before = allocations_here();
+    let read = earlier(docs);
+    let earlier_count = allocations_here() - before;
+    drop(read);
+
+    let mut conn = Connection::new(1);
+    let before = allocations_here();
+    conn.receive(message);
+    let req = conn.next_request().unwrap().unwrap();
+    let now = allocations_here() - before;
+    let Some(Value::Array(got)) = req.command.get("documents") else {
+        return Reading { earlier: earlier_count, now, documents: 0, in_order: false, span: 0 };
+    };
+    // 012 FR-027: the documents keep views of the request's one buffer, in message order.
+    let views: Vec<usize> = got
+        .iter()
+        .filter_map(|v| match v {
+            Value::Document(d) => Some(d.canonical_bytes()?.as_ptr() as usize),
+            _ => None,
+        })
+        .collect();
+    Reading {
+        earlier: earlier_count,
+        now,
+        documents: views.len(),
+        in_order: views.windows(2).all(|w| w[0] < w[1]),
+        span: views.last().zip(views.first()).map_or(usize::MAX, |(l, f)| l - f),
+    }
+}
+
 #[test]
 fn an_insert_of_canonical_documents_allocates_a_fraction_of_the_earlier_reading() {
     let docs: Vec<Vec<u8>> = (0..DOCS).map(|i| stored(i).to_bytes().unwrap()).collect();
     let message = insert_message(&docs);
+    let len = message.len();
+    // On a shard, where the engine's allocator counts every allocation (023 FR-030).
+    let engine = NodeEngine::start(&EngineConfig {
+        shards: 1,
+        memory: Some(256 << 20),
+        direct_io: DirectIo::Off,
+        ..EngineConfig::default()
+    })
+    .unwrap();
+    let r = engine.run_on(0, move || read_on_shard(&docs, &message)).unwrap();
+    engine.stop();
 
-    let before = allocations();
-    let read = earlier(&docs);
-    let earlier_count = allocations() - before;
-    drop(read);
-
-    let mut conn = Connection::new(1);
-    let before = allocations();
-    conn.receive(&message);
-    let req = conn.next_request().unwrap().unwrap();
-    let now = allocations() - before;
-    let Some(Value::Array(got)) = req.command.get("documents") else { panic!("documents") };
-    assert_eq!(got.len(), DOCS);
-
-    eprintln!("allocations reading {DOCS} documents: earlier {earlier_count}, now {now}");
-    // 012 FR-027: the documents keep views of the request's one buffer, in message order.
-    let views: Vec<*const u8> = got
-        .iter()
-        .map(|v| match v {
-            Value::Document(d) => d.canonical_bytes().expect("kept").as_ptr(),
-            _ => panic!("a document"),
-        })
-        .collect();
-    let first = views[0] as usize;
-    let last = views[DOCS - 1] as usize;
-    assert!(views.windows(2).all(|w| w[0] < w[1]), "in the order of the message");
-    assert!(last - first < message.len(), "inside the one buffer of the message");
+    eprintln!("allocations reading {DOCS} documents: earlier {}, now {}", r.earlier, r.now);
+    assert_eq!(r.documents, DOCS, "{r:?}");
+    assert!(r.in_order, "in the order of the message");
+    assert!(r.span < len, "inside the one buffer of the message: {r:?}");
     // Each canonical document is one copy of its bytes and its box; the earlier reading made a
     // string and a value for every field, nested ones included.
-    assert!(now * 10 < earlier_count, "now {now}, earlier {earlier_count}");
+    assert!(r.now > 0 && r.now * 10 < r.earlier, "{r:?}");
 }

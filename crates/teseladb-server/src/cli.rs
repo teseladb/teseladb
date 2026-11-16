@@ -91,8 +91,8 @@ pub struct StartOpts {
     /// Memory the node may use (`--memory-limit`, `teseladb.memoryLimit`; 012 FR-013); `None`:
     /// three quarters of the memory the process has.
     pub memory_limit: Option<u64>,
-    /// `O_DIRECT` (`--direct-io`, 012 FR-003, 023 FR-010).
-    pub direct_io: teseladb_io::DirectIo,
+    /// The mode of the engine's files (`--direct-io`, 012 FR-003, 023 FR-033).
+    pub direct_io: teseladb_io::engine::DirectIo,
     /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
     /// (`--net-xdp`, 012 FR-033); `None`: the kernel's TCP only.
     pub net_xdp: Option<String>,
@@ -992,8 +992,8 @@ fn no_positional(o: &Opts, sub: &str) -> Result<(), CliError> {
 /// `--cpu-list` (012 FR-006): fewer CPUs than `--cores` is a usage error.
 fn cpu_list(v: Option<&str>, cores: Option<u16>) -> Result<Option<Vec<usize>>, CliError> {
     let Some(v) = v else { return Ok(None) };
-    let list =
-        teseladb_sys::numa::parse_cpu_list(v).map_err(|e| CliError(format!("--cpu-list: {e}")))?;
+    let list = teseladb_io::engine::options::parse_cpu_list(v)
+        .map_err(|e| CliError(format!("--cpu-list: {e}")))?;
     if let Some(c) = cores
         && list.len() < usize::from(c)
     {
@@ -1143,8 +1143,8 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             })
             .transpose()?,
         direct_io: match o.get("direct-io") {
-            None => teseladb_io::DirectIo::Auto,
-            Some(v) => teseladb_io::DirectIo::parse(v)
+            None => teseladb_io::engine::DirectIo::Auto,
+            Some(v) => teseladb_io::engine::DirectIo::parse(v)
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
         net_xdp: match o.get(NET_XDP) {

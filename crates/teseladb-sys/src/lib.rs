@@ -1,7 +1,8 @@
 //! Minimal FFI with the operating system for what `std` does not offer.
 //!
 //! Every `extern "C"` function is wrapped in a safe function that documents with `// SAFETY:` why
-//! the call is sound. Linux and macOS only.
+//! the call is sound. Linux only (D-177): on every other target the crate is empty.
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![allow(unsafe_code)]
 
@@ -10,51 +11,23 @@ use std::io;
 use std::os::fd::AsRawFd;
 
 pub mod aligned;
-pub mod alloc_count;
-/// Safe forms of the engine's DMA file operations (Linux only, 023 FR-010).
-#[cfg(target_os = "linux")]
+/// Safe forms of the engine's DMA file operations (023 FR-010).
 pub mod dma;
 pub mod handoff;
 pub mod host;
 pub mod latest;
-#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-/// io_uring (Linux only, 012 FR-001).
-#[cfg(target_os = "linux")]
+/// io_uring (012 FR-001).
 pub use linux::io_uring as uring;
-/// Network namespaces and `veth` pairs, for the tests of AF_XDP (Linux only, 012 FR-033).
-#[cfg(target_os = "linux")]
+/// Network namespaces and `veth` pairs, for the tests of AF_XDP (012 FR-033).
 pub use linux::netns;
-/// AF_XDP and its XDP program (Linux only, 012 FR-033).
-#[cfg(target_os = "linux")]
+/// AF_XDP and its XDP program (012 FR-033).
 pub use linux::xdp;
-pub mod memory_limit;
-pub mod numa;
 pub mod poll;
+pub mod process;
 pub mod ring;
-pub mod signal;
 
-#[cfg(target_os = "linux")]
 use linux as os;
-#[cfg(target_os = "macos")]
-use macos as os;
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("TeselaDB only builds for Linux and macOS");
-
-/// Asks the system to run the calling thread on its fastest cores. On macOS, whose scheduler
-/// places a thread by its quality-of-service class, the thread takes the highest class
-/// (`QOS_CLASS_USER_INTERACTIVE`), so that it is not left on an efficiency core while the
-/// others are busy; elsewhere it does nothing.
-///
-/// # Errors
-///
-/// The error of the system call.
-pub fn favor_current_thread() -> io::Result<()> {
-    os::favor_current_thread()
-}
 
 /// `flock(2)` operations.
 const LOCK_EX: i32 = 2;
@@ -76,7 +49,7 @@ pub fn effective_uid() -> u32 {
 /// Largest request `getentropy(3)` accepts at once.
 const GETENTROPY_MAX: usize = 256;
 
-/// Fills `buf` from the operating system's random generator (`getentropy(3)`, Linux and macOS):
+/// Fills `buf` from the operating system's random generator (`getentropy(3)`):
 /// the seed of the cryptographic generators of `teseladb-crypto` (013 FR-001).
 pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     for chunk in buf.chunks_mut(GETENTROPY_MAX) {

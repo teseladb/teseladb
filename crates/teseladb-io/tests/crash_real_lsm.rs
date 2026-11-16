@@ -4,7 +4,11 @@
 #[path = "crash_real_lsm/linux.rs"]
 mod linux;
 
+#[cfg(target_os = "linux")]
 fn main() {
-    #[cfg(target_os = "linux")]
     linux::main();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

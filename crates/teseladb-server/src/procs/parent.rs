@@ -414,7 +414,8 @@ impl NodeProc {
         if let Some(s) = self.exited {
             return s;
         }
-        let _ = teseladb_sys::signal::send_stop(self.pid(), teseladb_sys::signal::Stop::Terminate);
+        let _ =
+            teseladb_sys::process::send_stop(self.pid(), teseladb_sys::process::Stop::Terminate);
         let end = Instant::now() + STOP_WAIT;
         let status = loop {
             match self.child.try_wait() {
@@ -428,6 +429,14 @@ impl NodeProc {
         };
         self.exited = Some(status);
         status
+    }
+
+    /// How the node's process ended, if it did, without waiting.
+    pub fn ended(&mut self) -> Option<ExitStatus> {
+        if self.exited.is_none() {
+            self.exited = self.child.try_wait().ok().flatten();
+        }
+        self.exited
     }
 
     /// Stops the node ([`Self::terminate`]) and returns how it ended.

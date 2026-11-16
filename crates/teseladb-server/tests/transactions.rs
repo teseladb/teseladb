@@ -4,16 +4,24 @@
 //! between two transactions; and the session rules with the errors the reference server 9.0.4
 //! gives.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_io::engine::disk::DiskPlace;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::Node;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -58,38 +66,46 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const DB: &str = "app";
 
+#[cfg(target_os = "linux")]
 fn lsid(n: u8) -> Document {
     Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![n; 16] })
 }
 
 /// `cmd` as a statement of transaction `txn` of session `s`, the first one with `start`.
+#[cfg(target_os = "linux")]
 fn stmt(cmd: Document, s: u8, txn: i64, start: bool) -> Document {
     let cmd = cmd.with("lsid", lsid(s)).with("txnNumber", Value::Int64(txn));
     let cmd = if start { cmd.with("startTransaction", true) } else { cmd };
     cmd.with("autocommit", false)
 }
 
+#[cfg(target_os = "linux")]
 fn end(name: &str, s: u8, txn: i64) -> Document {
     stmt(Document::new().with(name, 1), s, txn, false)
 }
 
+#[cfg(target_os = "linux")]
 fn find_all(c: &mut Client, cmd: Document) -> Vec<Value> {
     let r = c.run(DB, cmd);
     assert!(ok(&r), "{r:?}");
     batch(&r, "firstBatch")
 }
 
+#[cfg(target_os = "linux")]
 fn find() -> Document {
     Document::new().with("find", "c").with("filter", Document::new())
 }
 
+#[cfg(target_os = "linux")]
 fn insert(id: i32) -> Document {
     let d = Document::new().with("_id", id);
     Document::new().with("insert", "c").with("documents", vec![Value::Document(d)])
 }
 
+#[cfg(target_os = "linux")]
 fn set(id: i32, v: i32) -> Document {
     let u = Document::new()
         .with("q", Document::new().with("_id", id))
@@ -97,10 +113,12 @@ fn set(id: i32, v: i32) -> Document {
     Document::new().with("update", "c").with("updates", vec![Value::Document(u)])
 }
 
+#[cfg(target_os = "linux")]
 fn code(r: &Document) -> Option<&Value> {
     r.get("code")
 }
 
+#[cfg(target_os = "linux")]
 fn labels(r: &Document) -> Vec<Value> {
     match r.get("errorLabels") {
         Some(Value::Array(l)) => l.clone(),
@@ -108,6 +126,7 @@ fn labels(r: &Document) -> Vec<Value> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn node() -> Node {
     let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
@@ -115,12 +134,14 @@ fn node() -> Node {
 }
 
 /// A node process of [`config`] joining `join`, ready.
+#[cfg(target_os = "linux")]
 fn node_process(join: &[String]) -> NodeProc {
     let node = start_self("node", join, None, &[]);
     assert!(node.wait_ready(READY));
     node
 }
 
+#[cfg(target_os = "linux")]
 fn a_transaction_is_seen_whole_and_only_once_it_commits() {
     let node = node();
     let mut c = Client::new(&node);
@@ -159,6 +180,7 @@ fn a_transaction_is_seen_whole_and_only_once_it_commits() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn an_aborted_transaction_leaves_nothing_and_the_session_rules_hold() {
     let node = node();
     let mut c = Client::new(&node);
@@ -190,6 +212,7 @@ fn an_aborted_transaction_leaves_nothing_and_the_session_rules_hold() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn two_transactions_that_write_one_document_conflict() {
     let node = node();
     let mut c = Client::new(&node);
@@ -210,6 +233,7 @@ fn two_transactions_that_write_one_document_conflict() {
 
 /// Between its statements a transaction keeps its heartbeat (008 FR-007): idle for longer than the
 /// five seconds after which the reaper aborts an abandoned one, it still commits.
+#[cfg(target_os = "linux")]
 fn an_idle_transaction_keeps_beating_and_commits() {
     let node = node();
     let mut c = Client::new(&node);
@@ -222,6 +246,7 @@ fn an_idle_transaction_keeps_beating_and_commits() {
     drop(node.stop());
 }
 
+#[cfg(target_os = "linux")]
 fn listed(c: &mut Client, name: &str) -> usize {
     let filter = Document::new().with("name", name);
     let r = c.run(DB, Document::new().with("listCollections", 1).with("filter", filter));
@@ -232,6 +257,7 @@ fn listed(c: &mut Client, name: &str) -> usize {
 /// A collection a transaction creates on a node (008 FR-014, T019): no other client sees it
 /// until the commit, which gives it its name with the transaction's documents; an abort leaves
 /// nothing behind.
+#[cfg(target_os = "linux")]
 fn a_collection_created_in_a_transaction_shows_with_its_commit() {
     let node = node();
     let mut c = Client::new(&node);
@@ -260,6 +286,7 @@ fn a_collection_created_in_a_transaction_shows_with_its_commit() {
 
 /// A `snapshot` read at an earlier `atClusterTime` sees the documents as they were then, and its
 /// cursor gives that time (008 FR-012, T022).
+#[cfg(target_os = "linux")]
 fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
     let node = node();
     let mut c = Client::new(&node);
@@ -287,6 +314,7 @@ fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
 /// A read on another node with the `afterClusterTime` of a write, and the `$clusterTime` a driver
 /// sends with it, sees the write (008 FR-013, T020, T021): the second node serves it at its
 /// cluster time, at or above that time.
+#[cfg(target_os = "linux")]
 fn a_read_after_a_write_on_another_node_sees_it() {
     let first = node_process(&[]);
     let second = node_process(&[first.peer_addr().to_string()]);
@@ -315,6 +343,7 @@ fn a_read_after_a_write_on_another_node_sees_it() {
 /// A document whose write with its index entries passes a 64 MiB Raft entry (008 T036, FR-006;
 /// 005 FR-023): the range refuses the single entry with `TooLarge`, and the node writes it again
 /// as an internal transaction whose intents go in several `PutIntents`, all committed at once.
+#[cfg(target_os = "linux")]
 fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
     let node = node();
     let mut c = Client::new(&node);
@@ -362,6 +391,7 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
 /// one answers `ok`, also when it committed in one phase and its decision is in its range (FR-022);
 /// an open one is aborted and its own commit on its node fails after, and a record
 /// whose range cannot answer fails at the command's `maxTimeMS`.
+#[cfg(target_os = "linux")]
 fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
     let first = node_process(&[]);
     let second = node_process(&[first.peer_addr().to_string()]);
@@ -399,3 +429,7 @@ fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
     assert_eq!(code(&r), Some(&Value::Int32(50)), "{r:?}");
     assert!(second.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

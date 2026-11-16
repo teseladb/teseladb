@@ -4,38 +4,60 @@
 //! logged-in client that leaves while its command waits in its engine thread leaves its logout in
 //! the audit log. Each node runs in a process of its own (D4).
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::READY;
+#[cfg(target_os = "linux")]
 use teseladb_auth::scram::{ClientSession, Mechanism};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, RawDoc, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
+#[cfg(target_os = "linux")]
 use teseladb_server::client_listener::{ClientConfig, Hooks};
+#[cfg(target_os = "linux")]
 use teseladb_server::diag::ProcessConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
+#[cfg(target_os = "linux")]
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
+#[cfg(target_os = "linux")]
 /// A node whose keeper refreshes every millisecond.
 const REFRESH: &str = "refresh";
+#[cfg(target_os = "linux")]
 /// A node whose keeper refreshes every 10 ms and runs the TTL monitor every 10 ms.
 const KEEPER: &str = "keeper";
+#[cfg(target_os = "linux")]
 /// A node with an audit log at the path of its parameter [`AUDIT`].
 const AUDITED: &str = "audited";
+#[cfg(target_os = "linux")]
 /// A node whose diagnostic samples go to the data directory of its parameter [`DBPATH`].
 const SAMPLED: &str = "sampled";
+#[cfg(target_os = "linux")]
 /// The parameter of the audit log's path.
 const AUDIT: &str = "audit";
+#[cfg(target_os = "linux")]
 /// The parameter of the data directory the diagnostic commands report.
 const DBPATH: &str = "dbpath";
 
+#[cfg(target_os = "linux")]
 fn main() {
     // The engine runs on Linux only (D3).
     if cfg!(not(target_os = "linux")) {
@@ -88,6 +110,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 /// A node of one core, in memory, whose clients' port refreshes the sessions every
 /// `refresh_every` and runs its tasks with `hooks`.
 fn node_config(a: &NodeArgs, refresh_every: Duration, hooks: Hooks) -> NodeConfig {
@@ -104,17 +127,20 @@ fn node_config(a: &NodeArgs, refresh_every: Duration, hooks: Hooks) -> NodeConfi
     }
 }
 
+#[cfg(target_os = "linux")]
 fn connect(n: &NodeProc) -> TcpStream {
     let s = TcpStream::connect(n.client_addrs()[0]).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s
 }
 
+#[cfg(target_os = "linux")]
 fn send(s: &mut TcpStream, request_id: i32, cmd: Document) {
     let cmd = cmd.with("$db", "admin");
     s.write_all(&OpMsg::encode(request_id, 0, 0, &cmd.to_bytes().unwrap())).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 /// The `responseTo` and body of the next reply, or `None` once the connection closed.
 fn reply(s: &mut TcpStream) -> Option<(i32, Document)> {
     let mut head = [0u8; HEADER_LEN];
@@ -126,10 +152,12 @@ fn reply(s: &mut TcpStream) -> Option<(i32, Document)> {
     Some((h.response_to, Document::from(RawDoc::from_bytes(&body[5..]).unwrap())))
 }
 
+#[cfg(target_os = "linux")]
 fn ok(r: Option<(i32, Document)>) -> Option<(i32, Option<Value>)> {
     r.map(|(to, d)| (to, d.get("ok").cloned()))
 }
 
+#[cfg(target_os = "linux")]
 /// Waits until `ok` holds, for at most ten seconds.
 fn eventually(ok: impl Fn() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(10);
@@ -142,6 +170,7 @@ fn eventually(ok: impl Fn() -> bool) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 /// A keeper that refreshes before the node has a leader for `config.system.sessions` tries again
 /// on its period, and the sessions used meanwhile reach the collection.
 fn a_refresh_that_fails_goes_again() {
@@ -163,6 +192,7 @@ fn a_refresh_that_fails_goes_again() {
     assert!(n.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 fn the_keeper_runs_the_ttl_monitor_on_its_period() {
     let n = start_self(KEEPER, &[], None, &[]);
     assert!(n.wait_ready(READY));
@@ -173,6 +203,7 @@ fn the_keeper_runs_the_ttl_monitor_on_its_period() {
     assert!(n.stop().success());
 }
 
+#[cfg(target_os = "linux")]
 /// The body of the next reply, which has to come.
 fn answer(s: &mut TcpStream, request_id: i32, db: &str, cmd: Document) -> Document {
     s.write_all(&OpMsg::encode(request_id, 0, 0, &cmd.with("$db", db).to_bytes().unwrap()))
@@ -180,6 +211,7 @@ fn answer(s: &mut TcpStream, request_id: i32, db: &str, cmd: Document) -> Docume
     reply(s).expect("a reply").1
 }
 
+#[cfg(target_os = "linux")]
 fn payload(d: &Document) -> Vec<u8> {
     match d.get("payload") {
         Some(Value::Binary { bytes, .. }) => bytes.clone(),
@@ -187,6 +219,7 @@ fn payload(d: &Document) -> Vec<u8> {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Logs in on `s` as `user` of `admin` with SCRAM-SHA-256.
 fn log_in(s: &mut TcpStream, user: &str, password: &str) {
     let mech = Mechanism::ScramSha256;
@@ -211,6 +244,7 @@ fn log_in(s: &mut TcpStream, user: &str, password: &str) {
     assert_eq!(r.get("done"), Some(&Value::Boolean(true)), "{r:?}");
 }
 
+#[cfg(target_os = "linux")]
 /// A logged-in client that leaves while its thread runs its command (a `getMore` waiting for new
 /// documents of a capped collection): the thread closes the connection when the command ends, and
 /// its logout is recorded then, as the reference server's enterprise edition 9.0.4 records the
@@ -259,6 +293,7 @@ fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(target_os = "linux")]
 /// A node with a data directory writes its diagnostic sample each second to
 /// `<data>/diagnostic.data` (010 FR-024, T041): BSON documents `{_id, type: 1, data}` whose
 /// `data` is what `getDiagnosticData` gives.
@@ -290,3 +325,7 @@ fn the_node_writes_its_diagnostic_samples_to_its_data_directory() {
     assert!(n.stop().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -22,7 +22,7 @@ case "$STAGE" in
   *) echo "publish: unknown stage $STAGE" >&2; exit 2 ;;
 esac
 BUCKET="s3://teseladb-downloads-${STAGE}-${AWS_ACCOUNT_ID}"
-TRIPLES=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin)
+TRIPLES=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)
 VOLUME="teseladb-release-$VERSION-$$"
 
 step() { echo "== $*"; }
@@ -39,7 +39,7 @@ docker run --rm -v "$VOLUME:/work" -w /work/repo/src -e CARGO_TARGET_DIR=/work/t
   -e TESELADB_RELEASE_VERSION="$VERSION" -e PGO_SECONDS \
   "$ZIGBUILD_IMAGE" sh -c '
   set -e
-  rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
+  rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
   scripts/release/pgo.sh'
 mkdir -p target-release
 docker run --rm -v "$VOLUME:/work" "$ZIGBUILD_IMAGE" tar -cf - -C /work/out . | tar -xf - -C target-release

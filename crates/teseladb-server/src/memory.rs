@@ -1,6 +1,8 @@
-//! The node's memory (012 FR-013): `--memory-limit`, or three quarters of the memory the process
-//! has by default (the lowest of the physical memory and its cgroup's limit), split evenly between
-//! the cores and, in each core, between the parts that hold data in memory. Each part flushes or
+//! The node's memory (012 FR-013, 023 FR-028): `--memory-limit`, or three quarters of the memory
+//! the process has by default (the lowest of the physical memory and its cgroup's limit, within
+//! what the engine grants; `teseladb_io::engine::resources::node_memory`). It is the engine's
+//! memory, which the engine splits evenly between its shards, one per core; in each core it is
+//! split between the parts that hold data in memory. Each part flushes or
 //! drops what it holds when it reaches its share: the memtables freeze and flush to disk, the
 //! block cache evicts. The split is published in the metrics.
 

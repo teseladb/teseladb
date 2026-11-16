@@ -2,6 +2,7 @@
 //! written appears in clear in any file of the data directory (log, SST, manifests), each file has
 //! its own data key, the node restarts with the same key, and refuses to start without it or with
 //! another one. The options choose the cipher and where the key comes from.
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::path::{Path, PathBuf};

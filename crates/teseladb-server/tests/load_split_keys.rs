@@ -5,6 +5,7 @@
 //! found keys that no read or write could reach any more after such a split (11-11-2026). The cut
 //! falls between the two collections: it does not cut through the writes of a document and of its
 //! index entry (007 FR-006).
+#![cfg(target_os = "linux")]
 
 mod common;
 

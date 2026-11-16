@@ -10,10 +10,6 @@
 //! ([`client_port`]), their commands run in engine threads ([`stacks`]) and wait for the cores'
 //! answers ([`answer`], [`wait`]).
 //!
-//! Outside Linux there are the contract of the logic, the senders bound to a queue and an engine
-//! that does not start (D3).
-
-//!
 //! A deadline that passes fails the operation with an [`std::io::Error`] of kind
 //! [`TimedOut`](std::io::ErrorKind::TimedOut), as the blocking clients' socket timeouts did.
 
@@ -51,6 +47,7 @@ pub mod link;
 mod node_engine;
 #[cfg(target_os = "linux")]
 mod offload;
+pub mod options;
 #[cfg(target_os = "linux")]
 mod peers;
 mod place;
@@ -59,9 +56,13 @@ pub(crate) mod post;
 #[cfg(target_os = "linux")]
 pub mod stacks;
 #[cfg(target_os = "linux")]
+pub mod resources;
+#[cfg(target_os = "linux")]
+pub mod signals;
+#[cfg(target_os = "linux")]
+pub mod stats;
+#[cfg(target_os = "linux")]
 pub mod tls_stream;
-#[cfg(not(target_os = "linux"))]
-mod unsupported;
 pub mod wait;
 #[cfg(target_os = "linux")]
 pub mod xdp_clients;
@@ -74,9 +75,10 @@ pub use core_loop::{
 #[cfg(target_os = "linux")]
 pub use disk_port::{CoreDisk, DiskWaker};
 #[cfg(target_os = "linux")]
-pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, EnginePost, NodeEngine};
-#[cfg(not(target_os = "linux"))]
-pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, disk};
+pub use node_engine::{CoreConfig, CoreHandle, EnginePost, NodeEngine};
+pub use options::{DirectIo, EngineConfig, Placement};
+#[cfg(target_os = "linux")]
+pub use stats::EngineProbe;
 
 /// The deadline `timeout` from now on the steady clock.
 #[cfg(target_os = "linux")]

@@ -3,18 +3,25 @@
 //! the marks its leader closes as time goes by. On a cluster of three nodes whose data range has
 //! been idle for a while, a query answers within its `maxTimeMS` on every node.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
 /// The most a query on an idle range may take: its leader closes a mark at most 3 s behind its
 /// clock, every 200 ms, and 200 ms behind every 20 ms once something reads its changes.
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -25,8 +32,10 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const ANSWER_WITHIN: Duration = Duration::from_secs(8);
 
+#[cfg(target_os = "linux")]
 fn search(c: &mut Client, q: &str) -> Document {
     let spec = Document::new().with("text", Document::new().with("query", q).with("path", "t"));
     let cmd = Document::new()
@@ -40,6 +49,7 @@ fn search(c: &mut Client, q: &str) -> Document {
     c.run("db", cmd)
 }
 
+#[cfg(target_os = "linux")]
 fn queryable(c: &mut Client) -> bool {
     let r = c.run("db", Document::new().with("listSearchIndexes", "c"));
     batch(&r, "firstBatch").iter().any(
@@ -47,6 +57,7 @@ fn queryable(c: &mut Client) -> bool {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn a_search_on_an_idle_range_answers_on_every_node() {
     let first = start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
@@ -92,3 +103,7 @@ fn a_search_on_an_idle_range_answers_on_every_node() {
     assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
     assert!(first.stop().success());
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

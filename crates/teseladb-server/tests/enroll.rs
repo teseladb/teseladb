@@ -5,19 +5,29 @@
 //! the step and leave the data directory without a PKI; the token of a failed step 1 stays
 //! unspent.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_server::enroll::Token;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::pki::{self, MASTER_KEY, PkiParams};
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, STOP_WAIT};
+#[cfg(target_os = "linux")]
 use teseladb_server::run;
-use teseladb_sys::signal::{Stop, send_stop};
+#[cfg(target_os = "linux")]
+use teseladb_sys::process::{Stop, send_stop};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -43,16 +53,20 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const WAIT: Duration = Duration::from_secs(60);
 
+#[cfg(target_os = "linux")]
 struct Dir(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn dir(name: &str) -> Dir {
     let d = std::env::temp_dir().join(format!("teseladb-enroll-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -60,11 +74,13 @@ fn dir(name: &str) -> Dir {
     Dir(d)
 }
 
+#[cfg(target_os = "linux")]
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 /// The first member, a node process ([`member_config`]), ready.
+#[cfg(target_os = "linux")]
 fn member(data: &Path) -> NodeProc {
     let node = teseladb_server::procs::start_self(
         "member",
@@ -77,6 +93,7 @@ fn member(data: &Path) -> NodeProc {
 }
 
 /// The first member: a node with a fresh PKI in `data`, TLS between nodes and enrollments.
+#[cfg(target_os = "linux")]
 fn member_config(data: &Path) -> NodeConfig {
     let params = PkiParams { now: now(), node_names: Vec::new() };
     let mut random = |b: &mut [u8]| teseladb_sys::fill_random(b);
@@ -90,6 +107,7 @@ fn member_config(data: &Path) -> NodeConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn args(data: &Path, log: &Path, join: &str, token: &str) -> Vec<String> {
     [
         "start",
@@ -119,6 +137,7 @@ fn args(data: &Path, log: &Path, join: &str, token: &str) -> Vec<String> {
 }
 
 /// A start that is expected to fail: its exit code and standard error.
+#[cfg(target_os = "linux")]
 fn fails(data: &Path, log: &Path, join: &str, token: &str) -> (i32, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(&args(data, log, join, token), &mut out, &mut err, &|| true);
@@ -128,8 +147,10 @@ fn fails(data: &Path, log: &Path, join: &str, token: &str) -> (i32, String) {
 
 /// A node started by `teseladb start` in a process of its own, stopped with `SIGTERM` when
 /// dropped; it has to end with 0.
+#[cfg(target_os = "linux")]
 struct Started(std::process::Child);
 
+#[cfg(target_os = "linux")]
 impl Drop for Started {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -151,6 +172,7 @@ impl Drop for Started {
 }
 
 /// Starts a node that enrolls and waits for its clients' port; it runs until dropped.
+#[cfg(target_os = "linux")]
 fn enrolls(data: &Path, log: &Path, join: &str, token: &str) -> Started {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_teseladb"))
         .args(args(data, log, join, token))
@@ -176,6 +198,7 @@ fn enrolls(data: &Path, log: &Path, join: &str, token: &str) -> Started {
     Started(child)
 }
 
+#[cfg(target_os = "linux")]
 fn a_node_enrolls_with_a_token_once_and_joins_over_mtls() {
     let d = dir("cluster");
     let first = member(&d.0.join("n1"));
@@ -242,6 +265,7 @@ fn a_node_enrolls_with_a_token_once_and_joins_over_mtls() {
 
 /// `--join` is a list of seeds: a node enrolls through the first that accepts it, so a seed that is gone (a node
 /// drained and removed, a machine that left) does not stop it while another answers (013 FR-005, 021 FR-040).
+#[cfg(target_os = "linux")]
 fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
     let d = dir("seeds");
     let first = member(&d.0.join("n1"));
@@ -266,6 +290,7 @@ fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
 
 /// A node that leaves the cluster refuses an enrollment before it uses the token: the token still
 /// enrolls the node through the next seed (021 FR-040, a node in while another one leaves).
+#[cfg(target_os = "linux")]
 fn a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused() {
     let d = dir("drained-seed");
     let first = member(&d.0.join("n1"));
@@ -305,6 +330,7 @@ fn a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused() {
 
 /// `teseladb admin token create` (013 T017, FR-005): the token the administration port issues
 /// enrolls a new node, which joins over mTLS.
+#[cfg(target_os = "linux")]
 fn the_admin_command_issues_a_token_that_enrolls_a_node() {
     let d = dir("cli-token");
     let params = PkiParams { now: now(), node_names: Vec::new() };
@@ -335,6 +361,7 @@ fn the_admin_command_issues_a_token_that_enrolls_a_node() {
 
 /// Every step of a start that enrolls and joins leaves its line in the log before the node is
 /// ready, so that a start that hangs shows where; the token's secret never goes to the log.
+#[cfg(target_os = "linux")]
 fn a_node_logs_each_step_of_its_start() {
     let d = dir("steps");
     let first = member(&d.0.join("n1"));
@@ -370,3 +397,7 @@ fn a_node_logs_each_step_of_its_start() {
     drop(second);
     first.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

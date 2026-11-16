@@ -5,20 +5,31 @@
 //! replicas of every range, those born from a split as a snapshot (their logs lack the data the
 //! split left in the founder's LSM), and losing the founder keeps every document and takes writes.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_lsm::LsmConfig;
+#[cfg(target_os = "linux")]
 use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
+#[cfg(target_os = "linux")]
 use teseladb_raft::Role;
+#[cfg(target_os = "linux")]
 use teseladb_router::table::RouteEntry;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -29,12 +40,17 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(60);
+#[cfg(target_os = "linux")]
 const ASK: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
 const DOCS: u32 = 600;
 /// Split size: a few dozen documents.
+#[cfg(target_os = "linux")]
 const SPLIT_BYTES: u64 = 24 << 10;
 
+#[cfg(target_os = "linux")]
 fn config(join: Vec<String>) -> NodeConfig {
     NodeConfig {
         cores: Some(2),
@@ -54,18 +70,22 @@ fn config(join: Vec<String>) -> NodeConfig {
 }
 
 /// A node process of [`config`].
+#[cfg(target_os = "linux")]
 fn start(join: Vec<String>) -> NodeProc {
     start_self("node", &join, None, &[])
 }
 
+#[cfg(target_os = "linux")]
 fn key(i: u32) -> Vec<u8> {
     [&DATA_START[..], format!("doc-{i:05}").as_bytes()].concat()
 }
 
+#[cfg(target_os = "linux")]
 fn value(i: u32) -> Vec<u8> {
     format!("{i:05}-{}", "w".repeat(300)).into_bytes()
 }
 
+#[cfg(target_os = "linux")]
 fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let end = Instant::now() + READY;
     loop {
@@ -78,16 +98,19 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 /// Writes `i` on whichever node leads its range.
+#[cfg(target_os = "linux")]
 fn put(nodes: &[&NodeProc], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
 /// Reads `i` on whichever node leads its range.
+#[cfg(target_os = "linux")]
 fn get(nodes: &[&NodeProc], i: u32) -> Option<Vec<u8>> {
     until(&format!("read {i}"), || nodes.iter().find_map(|n| n.get(&key(i), ASK).ok()))
 }
 
 /// The ranges cover the data space, one after the other.
+#[cfg(target_os = "linux")]
 fn contiguous(ranges: &[RouteEntry]) -> bool {
     let chained = ranges.windows(2).all(|w| w[0].end == w[1].start);
     let first = ranges.first().is_some_and(|r| r.start == DATA_START);
@@ -95,6 +118,7 @@ fn contiguous(ranges: &[RouteEntry]) -> bool {
     chained && first && last
 }
 
+#[cfg(target_os = "linux")]
 fn a_range_splits_while_it_takes_writes_and_its_halves_get_replicas() {
     let n1 = start(Vec::new());
     assert!(n1.wait_ready(READY));
@@ -171,3 +195,7 @@ fn a_range_splits_while_it_takes_writes_and_its_halves_get_replicas() {
     n2.stop();
     n3.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -5,6 +5,7 @@
 //! command of the tenant's users runs for at most the tenant's `maxTimeMS`, the `getMore` of a
 //! plain cursor too, save the `getMore` of a change stream or a tailable cursor and the end of a
 //! transaction.
+#![cfg(target_os = "linux")]
 
 mod common;
 

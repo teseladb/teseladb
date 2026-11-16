@@ -3,6 +3,7 @@
 //! range from its flushed index and replays the log after it, with nothing lost. With two cores
 //! the range lives on core 1 and Group 0 on core 0. With a memory limit the memtables flush at
 //! their part of it (012 FR-013).
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::path::PathBuf;
@@ -179,7 +180,9 @@ fn a_restart_recovers_the_lsm_and_replays_the_log_from_the_flushed_index() {
 #[test]
 fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     let dir = Dir::new("memory");
-    let cfg = NodeConfig { cores: Some(2), memory_limit: Some(1 << 20), ..NodeConfig::default() };
+    // The engine's memory is the node's (023 FR-028): enough for the shards to run, small enough
+    // for the memtables to flush after a few thousand writes.
+    let cfg = NodeConfig { cores: Some(2), memory_limit: Some(64 << 20), ..NodeConfig::default() };
     let path = dir.0.clone();
     let n = Node::start(
         cfg,
@@ -188,7 +191,7 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     )
     .unwrap();
     let memory = n.memory().unwrap();
-    assert_eq!((memory.total, memory.cores), (1 << 20, 2));
+    assert_eq!((memory.total, memory.cores), (64 << 20, 2));
     let lsm = n.core_lsm();
     let tables = lsm.max_frozen as u64 + 1;
     assert_eq!(lsm.memtable_bytes, memory.part(Component::Memtables) / tables);
@@ -196,12 +199,18 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     assert_eq!(lsm.cache_bytes, memory.part(Component::BlockCache));
     assert!(n.wait_ready(READY));
     wait_status(&n, leads);
-    for i in 0..300 {
-        put(&n, i);
+    // A memtable holds about 1.3 MiB here: some 6 000 versions of these values.
+    const MOST: u32 = 20_000;
+    let mut written = 0;
+    while written < MOST && n.data_status(ASK).is_none_or(|s| s.flushed == 0) {
+        for i in written..written + 500 {
+            put(&n, i);
+        }
+        written += 500;
     }
     let s = wait_status(&n, |s| s.flushed > 0);
     assert!(s.flushed <= s.applied, "{s:?}");
-    for i in (0..300).step_by(37) {
+    for i in (0..written).step_by(997) {
         assert_eq!(get(&n, i), Some(value(i)), "document {i}");
     }
     n.stop();
@@ -215,8 +224,8 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
         Some(lock_dir(&dir.0).unwrap()),
     )
     .unwrap();
-    let host = teseladb_sys::memory_limit::host_default();
-    assert_eq!(n.memory().map(|m| m.total), host);
+    let host = teseladb_io::engine::resources::node_memory(None, 1);
+    assert_eq!(n.memory().map(|m| m.total), Some(host));
     n.stop();
 }
 

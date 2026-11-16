@@ -1,4 +1,4 @@
-//! Linux: epoll, eventfd, affinity and io_uring.
+//! Linux: epoll, eventfd and io_uring.
 
 pub mod io_uring;
 pub mod netns;
@@ -6,12 +6,7 @@ pub mod xdp;
 
 use std::io;
 
-/// Linux places threads by load, not by a class: nothing to ask.
-pub(crate) fn favor_current_thread() -> io::Result<()> {
-    Ok(())
-}
-
-// ----- epoll, eventfd and affinity -----
+// ----- epoll and eventfd -----
 
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -34,8 +29,6 @@ const EFD_NONBLOCK: i32 = 0o4000;
 const EINTR: i32 = 4;
 /// Events per `epoll_wait` call.
 const MAX_EVENTS: usize = 256;
-/// Bits of `cpu_set_t` (glibc and musl).
-const CPU_SETSIZE: usize = 1024;
 
 /// `struct epoll_event`: packed on x86_64 (12 bytes), aligned elsewhere (16 bytes).
 #[repr(C)]
@@ -51,7 +44,6 @@ unsafe extern "C" {
     fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
     fn epoll_wait(epfd: i32, events: *mut EpollEvent, maxevents: i32, timeout: i32) -> i32;
     fn eventfd(initval: u32, flags: i32) -> i32;
-    fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
 }
 
 fn cvt(rc: i32) -> std::io::Result<i32> {
@@ -179,28 +171,10 @@ impl Waker {
     }
 }
 
-pub(crate) fn pin_to_cpu(cpu: usize) -> std::io::Result<bool> {
-    if cpu >= CPU_SETSIZE {
-        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    }
-    let mut set = [0u64; CPU_SETSIZE / 64];
-    set[cpu / 64] |= 1 << (cpu % 64);
-    // SAFETY: `set` is a `cpu_set_t` of `CPU_SETSIZE` bits that lives during the call; pid 0 is
-    // the calling thread.
-    cvt(unsafe { sched_setaffinity(0, std::mem::size_of_val(&set), set.as_ptr()) })?;
-    Ok(true)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-
-    /// Linux has nothing to ask, and says so without an error.
-    #[test]
-    fn favoring_a_thread_asks_nothing() {
-        assert!(favor_current_thread().is_ok());
-    }
 
     /// Linux has no page-ins apart from `getrusage(2)`.
     #[test]
@@ -272,7 +246,6 @@ mod tests {
     fn struct_layouts_match_the_system_headers() {
         let expected = if cfg!(target_arch = "x86_64") { 12 } else { 16 };
         assert_eq!(std::mem::size_of::<EpollEvent>(), expected);
-        assert_eq!(std::mem::size_of::<[u64; CPU_SETSIZE / 64]>(), 128);
     }
 }
 
@@ -356,79 +329,6 @@ pub(crate) fn memory() -> io::Result<crate::host::Memory> {
     })
 }
 
-/// `struct mallinfo2` of glibc 2.33 and later.
-#[repr(C)]
-#[derive(Default)]
-struct MallInfo2 {
-    arena: usize,
-    ordblks: usize,
-    smblks: usize,
-    hblks: usize,
-    hblkhd: usize,
-    usmblks: usize,
-    fsmblks: usize,
-    uordblks: usize,
-    fordblks: usize,
-    keepcost: usize,
-}
-
-unsafe extern "C" {
-    fn dlsym(
-        handle: *mut std::ffi::c_void,
-        symbol: *const std::ffi::c_char,
-    ) -> *mut std::ffi::c_void;
-}
-
-/// Bytes in use of glibc's allocator (`mallinfo2`: the arenas' allocated chunks and the mapped
-/// ones), looked up at run time because the binaries are built against glibc 2.28, which lacks
-/// it; `None` without it.
-pub(crate) fn allocated() -> Option<u64> {
-    // `RTLD_DEFAULT`: every object the process loaded.
-    let sym = c"mallinfo2";
-    // SAFETY: a null handle is `RTLD_DEFAULT` on glibc; the name is a terminated string.
-    let f = unsafe { dlsym(std::ptr::null_mut(), sym.as_ptr()) };
-    if f.is_null() {
-        return None;
-    }
-    // SAFETY: glibc exports `mallinfo2` with this signature, returning the struct by value.
-    let mallinfo2: extern "C" fn() -> MallInfo2 = unsafe { std::mem::transmute(f) };
-    let m = mallinfo2();
-    u64::try_from(m.uordblks.saturating_add(m.hblkhd)).ok()
-}
-
-/// `M_ARENA_MAX` of glibc's `mallopt`.
-const M_ARENA_MAX: i32 = -8;
-
-/// A function of the C library looked up by name; null where it does not have it (musl, a
-/// static binary).
-fn libc_symbol(name: &std::ffi::CStr) -> *mut std::ffi::c_void {
-    // SAFETY: a null handle is `RTLD_DEFAULT` on glibc; the name is a terminated string.
-    unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) }
-}
-
-/// `mallopt(M_ARENA_MAX, arenas)` of glibc, looked up at run time like `mallinfo2`.
-pub(crate) fn limit_arenas(arenas: usize) -> Option<bool> {
-    let f = libc_symbol(c"mallopt");
-    if f.is_null() {
-        return None;
-    }
-    // SAFETY: glibc exports `int mallopt(int param, int value)`; the pointer is that function.
-    let mallopt: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(f) };
-    let value = i32::try_from(arenas).unwrap_or(i32::MAX);
-    Some(value > 0 && mallopt(M_ARENA_MAX, value) == 1)
-}
-
-/// `malloc_trim(0)` of glibc: the free memory of every arena goes back to the system.
-pub(crate) fn release_free_memory() -> Option<bool> {
-    let f = libc_symbol(c"malloc_trim");
-    if f.is_null() {
-        return None;
-    }
-    // SAFETY: glibc exports `int malloc_trim(size_t pad)`; the pointer is that function.
-    let malloc_trim: extern "C" fn(usize) -> i32 = unsafe { std::mem::transmute(f) };
-    Some(malloc_trim(0) == 1)
-}
-
 /// `NAME` and `VERSION_ID` of `/etc/os-release`, as the reference server shows them in `hostInfo`.
 pub(crate) fn distribution() -> (String, String) {
     let text = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
@@ -455,27 +355,15 @@ const HUGE_PROT: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
 const MAP_PRIVATE: i32 = 0x02;
 const MAP_ANONYMOUS: i32 = 0x20;
 const MAP_HUGETLB: i32 = 0x40000;
-/// The page size of a `MAP_HUGETLB` mapping, as its log2 in the bits from `MAP_HUGE_SHIFT` (26).
-const MAP_HUGE_1GB: i32 = 30 << 26;
 const MAP_FAILED: usize = usize::MAX;
 
 /// `len` zeroed bytes on 2 MiB pages (`MAP_HUGETLB`, 012 FR-032); `None` when the system has not
 /// enough huge pages reserved (`ENOMEM`) or refuses them.
 pub(crate) fn map_huge(len: usize) -> Option<std::ptr::NonNull<u8>> {
-    map_hugetlb(len, MAP_HUGETLB)
-}
-
-/// `len` zeroed bytes on 1 GiB pages (`MAP_HUGETLB | MAP_HUGE_1GB`, 012 FR-032); `None` when the
-/// system has not enough of them reserved, or none of that size.
-pub(crate) fn map_gigantic(len: usize) -> Option<std::ptr::NonNull<u8>> {
-    map_hugetlb(len, MAP_HUGETLB | MAP_HUGE_1GB)
-}
-
-fn map_hugetlb(len: usize, huge: i32) -> Option<std::ptr::NonNull<u8>> {
     // SAFETY: an anonymous private mapping at an address the kernel picks; no memory of the
     // process is touched.
     let p = unsafe {
-        mmap(std::ptr::null_mut(), len, HUGE_PROT, MAP_PRIVATE | MAP_ANONYMOUS | huge, -1, 0)
+        mmap(std::ptr::null_mut(), len, HUGE_PROT, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0)
     };
     if p as usize == MAP_FAILED {
         return None;
@@ -489,15 +377,6 @@ pub(crate) fn unmap(ptr: std::ptr::NonNull<u8>, len: usize) {
     // owner when nothing points into it any more. A failure leaves the mapping in place, which
     // only keeps its memory.
     unsafe { munmap(ptr.as_ptr(), len) };
-}
-
-/// The free 1 GiB pages the system has reserved (012 FR-032): `/proc/meminfo` counts only the
-/// pages of the default size, so they are read from their own directory of `/sys`.
-pub(crate) fn gigantic_pages_free() -> usize {
-    std::fs::read_to_string("/sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages")
-        .ok()
-        .and_then(|n| n.trim().parse().ok())
-        .unwrap_or(0)
 }
 
 /// The free huge pages the system has reserved (`HugePages_Free` of `/proc/meminfo`).

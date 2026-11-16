@@ -1,6 +1,7 @@
 //! The TLS options of `teseladb start` (013 T013, FR-007): their checks, their names in the
 //! configuration file, `getCmdLineOpts` without the password, and the port's TLS built from them
 //! or from the PKI of the data directory.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 

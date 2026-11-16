@@ -32,12 +32,10 @@ impl LogBound {
         self.durable.load(Ordering::Acquire)
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn offered(&self) -> u64 {
         self.offered.load(Ordering::Acquire)
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_durable(&self, bound: u64) {
         self.durable.fetch_max(bound, Ordering::AcqRel);
     }

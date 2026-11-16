@@ -2,6 +2,7 @@
 //! writes the validation line of a document without its values, and neither its log file nor what
 //! `getLog`, `serverStatus` and `currentOp` answer holds a value of the documents written.
 //! Alone in its test binary: the node's logger is the process's.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

@@ -2,17 +2,25 @@
 //! time, so some joins wait and try again; all of them end with distinct identifiers and Group 0
 //! with five voters and the rest learners.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_server::logic::GROUP0_MAX_VOTERS;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
+#[cfg(target_os = "linux")]
 use teseladb_types::NodeId;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[("six_nodes_joining_at_once_all_get_in", six_nodes_joining_at_once_all_get_in)],
@@ -20,8 +28,10 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const JOINERS: usize = 6;
 
+#[cfg(target_os = "linux")]
 fn config(join: Vec<String>) -> NodeConfig {
     NodeConfig {
         cores: Some(1),
@@ -31,6 +41,7 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn six_nodes_joining_at_once_all_get_in() {
     let founder = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(founder.wait_ready(Duration::from_secs(10)));
@@ -67,3 +78,7 @@ fn six_nodes_joining_at_once_all_get_in() {
     }
     founder.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

@@ -16,7 +16,8 @@ fail() {
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64 | Linux-amd64) PLATFORM="linux-x86_64" ;;
   Linux-aarch64 | Linux-arm64) PLATFORM="linux-aarch64" ;;
-  Darwin-arm64) PLATFORM="macos-aarch64" ;;
+  # The server is Linux only (D-177): on macOS it runs in Docker.
+  Darwin-*) fail "TeselaDB runs on Linux; on macOS run it with Docker: docker run teseladb/teseladb:latest" ;;
   *) fail "there is no binary for $(uname -s) $(uname -m); run it with Docker: docker run teseladb/teseladb:latest" ;;
 esac
 

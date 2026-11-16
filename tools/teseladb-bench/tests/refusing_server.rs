@@ -1,6 +1,7 @@
 //! The network scenarios against a remote server that refuses reads and updates: a server given
 //! by `--target`, with no administration port, whose failed operations count as errors and give
 //! the report its first error (002 FR-019) or end the scenario with it.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

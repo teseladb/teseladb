@@ -1,10 +1,11 @@
 //! The command line of the contract `cli-base.md` (001 FR-017): defaults, every option in both
 //! forms, `start` without `--insecure` until 013, the insecure-mode rules, the errors and the
 //! binary's exit codes.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::process::Command as Process;
-use teseladb_io::DirectIo;
+use teseladb_io::engine::DirectIo;
 use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_server::cli::{Command, StartOpts, USAGE, parse, parse_with};
@@ -65,18 +66,19 @@ fn every_start_option_in_both_forms() {
     assert_eq!(start("start --insecure --memory-limit 8G").memory_limit, Some(8 << 30));
     assert_eq!(start("start --insecure --memory-limit=1048576").memory_limit, Some(1 << 20));
     assert!(bad("start --insecure --memory-limit 3X").starts_with("--memory-limit: "));
-    // O_DIRECT and the cores' CPUs (012 FR-003, FR-006, 023 FR-010).
+    // The engine's files and the cores' CPUs (012 FR-003, FR-006; 023 FR-027, FR-033).
     let o = start("start --insecure --direct-io off --cpu-list 0-2,7");
     assert_eq!(o.direct_io, DirectIo::Off);
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 7]));
     assert_eq!(start("start --insecure --direct-io on").direct_io, DirectIo::On);
     assert!(bad("start --insecure --direct-io yes").starts_with("--direct-io: "));
-    // The engine runs every core's disk: the options that chose another executor are gone (023
-    // FR-033).
-    for gone in ["--io-executor uring", "--io-uring-sqpoll"] {
-        let e = bad(&format!("start --insecure {gone}"));
-        assert!(e.contains(gone.split(' ').next().unwrap()), "{gone}: {e}");
-    }
+    // The options that only chose between TeselaDB's own executors are gone (023 FR-033):
+    // unknown options, as any other.
+    let gone = bad("start --insecure --io-executor uring");
+    assert!(gone.contains("unknown option --io-executor"), "{gone}");
+    let gone = bad("start --insecure --io-uring-sqpoll");
+    assert!(gone.contains("unknown option --io-uring-sqpoll"), "{gone}");
+    assert!(!USAGE.contains("--io-executor") && !USAGE.contains("--io-uring-sqpoll"));
     assert!(bad("start --insecure --cpu-list 3-1").starts_with("--cpu-list: "));
     let few = bad("start --insecure --cores 4 --cpu-list 0-1");
     assert!(few.contains("--cpu-list names 2 CPUs for 4 cores"), "{few}");

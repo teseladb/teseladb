@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests of the platform check of scripts/release/install.sh with uname, getconf and curl played by stand-ins: a Linux
 # without glibc (musl, as in Alpine) or with a glibc older than 2.28 gets «there is no binary for» before anything is
-# downloaded, a Linux with glibc 2.28 or later and macOS on Apple Silicon go on to read the newest version, and an
-# unknown CPU is refused.
+# downloaded, a Linux with glibc 2.28 or later goes on to read the newest version, macOS is sent to the Docker image
+# (the server is Linux only, D-177) and an unknown CPU is refused.
 #   scripts/tests/install_platform_test.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -51,7 +51,8 @@ check "a glibc older than 2.28" Linux x86_64 2.17 "there is no binary for Linux 
 check "glibc 2.28" Linux x86_64 2.28 "could not read the newest version"
 check "a newer glibc" Linux aarch64 2.36 "could not read the newest version"
 check "glibc 3.0" Linux x86_64 3.0 "could not read the newest version"
-check "macOS on Apple Silicon" Darwin arm64 "" "could not read the newest version"
+check "macOS on Apple Silicon" Darwin arm64 "" "on macOS run it with Docker: docker run teseladb/teseladb:latest"
+check "macOS on Intel" Darwin x86_64 "" "on macOS run it with Docker"
 check "an unknown CPU" Linux riscv64 2.36 "there is no binary for Linux riscv64"
 
 echo "install_platform_test: $passed passed, $failed failed"

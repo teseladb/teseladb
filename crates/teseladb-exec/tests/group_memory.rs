@@ -3,6 +3,8 @@
 //! limit wait in memory only while they fit in what the groups leave of it, and the rest goes to
 //! the store as it comes. The test allocator counts the bytes the process holds; the input, built
 //! before the run, is the baseline, and the peak above it is what the stages took.
+// The counting allocator of the test.
+#![allow(unsafe_code)]
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -14,10 +16,69 @@ use teseladb_exec::expr::Ctx;
 use teseladb_exec::pipeline::spill::{Counting, SpillStats, SpillStore};
 use teseladb_exec::pipeline::{Env, Pipeline};
 use teseladb_mql::{Extensions, MqlError, NoExtensions, codes};
-use teseladb_sys::alloc_count::{CountingAlloc, peak_bytes, reset_peak};
+
+/// The bytes the test process holds and the most it held, counted by its allocator: the
+/// system's (this crate does not link the engine, whose allocator counts operations, not bytes).
+mod held {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static HELD: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    /// The system's allocator, counting the bytes held and their peak.
+    pub struct Held;
+
+    /// Starts a new peak from the bytes held now; their number.
+    pub fn reset_peak() -> usize {
+        let now = HELD.load(Ordering::Relaxed);
+        PEAK.store(now, Ordering::Relaxed);
+        now
+    }
+
+    /// The most bytes held since the last [`reset_peak`].
+    pub fn peak_bytes() -> usize {
+        PEAK.load(Ordering::Relaxed)
+    }
+
+    fn gained(size: usize) {
+        let now = HELD.fetch_add(size, Ordering::Relaxed) + size;
+        PEAK.fetch_max(now, Ordering::Relaxed);
+    }
+
+    // SAFETY: every call goes to `System` with the same arguments; counting does not allocate.
+    unsafe impl GlobalAlloc for Held {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's contract for `alloc` is `System::alloc`'s.
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                gained(layout.size());
+            }
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from this allocator, which is `System`.
+            unsafe { System.dealloc(ptr, layout) };
+            HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: as `alloc`; `ptr` came from this allocator.
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            if !p.is_null() {
+                HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+                gained(new_size);
+            }
+            p
+        }
+    }
+}
+
+use held::{peak_bytes, reset_peak};
 
 #[global_allocator]
-static ALLOC: CountingAlloc = CountingAlloc;
+static ALLOC: held::Held = held::Held;
 
 /// One test measures at a time, so that the other's memory does not count.
 static MEASURING: Mutex<()> = Mutex::new(());

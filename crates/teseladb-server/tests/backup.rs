@@ -4,23 +4,36 @@
 //! `manifest.bson`; `teseladb admin restore --from <dir>` brings them into a cluster without
 //! collections, and refuses a cluster that has any.
 
+#[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use common::{Client, READY, batch, config, docs, ok, until};
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, RawDoc, Value};
 
+#[cfg(target_os = "linux")]
 use teseladb_rest::media::{Format, decode};
+#[cfg(target_os = "linux")]
 use teseladb_server::admin_http::{Method, request};
+#[cfg(target_os = "linux")]
 use teseladb_server::backup::Cli;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::NodeProc;
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[
@@ -45,13 +58,16 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn joining(join: Vec<String>) -> NodeConfig {
     NodeConfig { admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))), ..config(join) }
 }
 
 /// How long a node's core may take to answer a test.
+#[cfg(target_os = "linux")]
 const ASK: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[cfg(target_os = "linux")]
 fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
     let argv: Vec<String> =
         ["admin", "--node", at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -61,8 +77,10 @@ fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
 }
 
 /// A directory of its own under the system's temporary one, removed at the end.
+#[cfg(target_os = "linux")]
 struct Dir(PathBuf);
 
+#[cfg(target_os = "linux")]
 impl Dir {
     fn new(name: &str) -> Dir {
         let p = std::env::temp_dir().join(format!("teseladb-backup-{name}-{}", std::process::id()));
@@ -71,6 +89,7 @@ impl Dir {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -78,6 +97,7 @@ impl Drop for Dir {
 }
 
 /// The SST files under `dir`, at any depth.
+#[cfg(target_os = "linux")]
 fn sst_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for e in std::fs::read_dir(dir).unwrap() {
@@ -92,6 +112,7 @@ fn sst_files(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// The count of `app.c`, or `None` while the cluster cannot answer it.
+#[cfg(target_os = "linux")]
 fn try_count(c: &mut Client) -> Option<i32> {
     match c.run("app", Document::new().with("count", "c")).get("n") {
         Some(Value::Int32(n)) => Some(*n),
@@ -99,6 +120,7 @@ fn try_count(c: &mut Client) -> Option<i32> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn count(c: &mut Client) -> i32 {
     let r = c.run("app", Document::new().with("count", "c"));
     match r.get("n") {
@@ -107,6 +129,7 @@ fn count(c: &mut Client) -> i32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster() {
     let out = Dir::new("out");
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
@@ -161,6 +184,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
     fresh.stop();
 }
 
+#[cfg(target_os = "linux")]
 fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     let out = Dir::new("three");
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
@@ -203,6 +227,7 @@ fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
 }
 
 /// What the CLI's restore calls the node's port with: the answer's document, or its error.
+#[cfg(target_os = "linux")]
 fn port(at: String) -> impl Fn(Method, &str, &[u8]) -> Result<Document, String> {
     move |method, target, body| {
         let (status, answer) = request(&at, method, target, body).map_err(|e| e.to_string())?;
@@ -217,6 +242,7 @@ fn port(at: String) -> impl Fn(Method, &str, &[u8]) -> Result<Document, String> 
 
 /// A restore cut while a replica ingests (its worker died, or it waited for nothing) leaves the
 /// cluster without collections, and the next restore into it brings every document (007 FR-021).
+#[cfg(target_os = "linux")]
 fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     let out = Dir::new("cut");
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
@@ -257,6 +283,7 @@ fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_torn() {
     let out = Dir::new("load");
     let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
@@ -305,3 +332,7 @@ fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_tor
     assert_eq!(batch(&r, "firstBatch").len(), 1, "{r:?}");
     fresh.stop();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

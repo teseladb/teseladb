@@ -3,21 +3,33 @@
 //! ranges elect another leader), answers the first answer and applies once; another request with
 //! the key gets `422`.
 
+#[cfg(target_os = "linux")]
 #[path = "common/procs.rs"]
 mod procs;
 
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use teseladb_bson::{Document, Value, extjson};
+#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
 use teseladb_http::server::Settings;
+#[cfg(target_os = "linux")]
 use teseladb_server::client_listener::ClientConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::http_listener::HttpPortConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
+#[cfg(target_os = "linux")]
 use teseladb_server::procs::{NodeProc, start_self};
 
+#[cfg(target_os = "linux")]
 fn main() {
     procs::main(
         &[(
@@ -28,12 +40,16 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const READY: Duration = Duration::from_secs(30);
 /// What a node may take to say how its replicas are.
+#[cfg(target_os = "linux")]
 const ANSWER: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
 const C: &str = "/v1/databases/app/collections/c";
 
 /// A node process of [`node_config`], ready.
+#[cfg(target_os = "linux")]
 fn start(join: Vec<String>) -> NodeProc {
     let node = start_self("node", &join, None, &[]);
     assert!(node.wait_ready(READY));
@@ -41,6 +57,7 @@ fn start(join: Vec<String>) -> NodeProc {
 }
 
 /// A node of two cores with the HTTP, administration and clients' ports.
+#[cfg(target_os = "linux")]
 fn node_config(join: Vec<String>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
@@ -61,6 +78,7 @@ fn node_config(join: Vec<String>) -> NodeConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn send(addr: SocketAddr, method: &str, target: &str, body: &str, key: Option<&str>) -> Response {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
@@ -80,11 +98,13 @@ fn send(addr: SocketAddr, method: &str, target: &str, body: &str, key: Option<&s
     }
 }
 
+#[cfg(target_os = "linux")]
 fn doc(r: &Response) -> Document {
     extjson::parse(std::str::from_utf8(&r.body).unwrap()).unwrap_or_default()
 }
 
 /// `f` until it answers below 500, for at most [`READY`].
+#[cfg(target_os = "linux")]
 fn settled(mut f: impl FnMut() -> Response) -> Response {
     let end = Instant::now() + READY;
     loop {
@@ -96,6 +116,7 @@ fn settled(mut f: impl FnMut() -> Response) -> Response {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn counts(at: SocketAddr) -> Vec<Value> {
     let r =
         send(at, "POST", &format!("{C}/find"), r#"{"sort":{"v":1},"projection":{"_id":0}}"#, None);
@@ -106,6 +127,7 @@ fn counts(at: SocketAddr) -> Vec<Value> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -164,6 +186,7 @@ fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
 
 /// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
 /// at most [`READY`].
+#[cfg(target_os = "linux")]
 fn replicated(node: &NodeProc) -> bool {
     let end = Instant::now() + READY;
     let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
@@ -182,6 +205,7 @@ fn replicated(node: &NodeProc) -> bool {
 }
 
 /// `teseladb admin` on `node`'s administration port: its exit code, its output and its errors.
+#[cfg(target_os = "linux")]
 fn admin_run(node: &NodeProc, args: &[&str]) -> (i32, String, String) {
     let none = std::env::temp_dir().join("teseladb-idempotency-no-pki");
     let mut all = vec!["--node".to_owned(), node.admin_addr().unwrap().to_string()];
@@ -194,6 +218,7 @@ fn admin_run(node: &NodeProc, args: &[&str]) -> (i32, String, String) {
 }
 
 /// `teseladb admin` on `node`'s administration port: its output.
+#[cfg(target_os = "linux")]
 fn admin(node: &NodeProc, args: &[&str]) -> String {
     let (code, out, err) = admin_run(node, args);
     assert_eq!(code, 0, "{err}");
@@ -202,6 +227,7 @@ fn admin(node: &NodeProc, args: &[&str]) -> String {
 
 /// [`admin`] for a change of a range, asked again while Group 0 answers that the range is busy
 /// with another change (a replica it is still adding, say), for at most [`READY`].
+#[cfg(target_os = "linux")]
 fn admin_once_free(node: &NodeProc, args: &[&str]) -> String {
     let busy = format!("{:?}", teseladb_meta::group0::Group0Error::RangeBusy);
     let end = Instant::now() + READY;
@@ -217,6 +243,7 @@ fn admin_once_free(node: &NodeProc, args: &[&str]) -> String {
 
 /// Moves each range of collection `ns` to the other core of its node (007 FR-011): its Raft
 /// group starts again there and elects a new leader.
+#[cfg(target_os = "linux")]
 fn relocate(node: &NodeProc, ns: &str) {
     let text = admin(node, &["--format", "json", "ranges", "--collection", ns]);
     let d = extjson::parse(&text).unwrap();
@@ -235,3 +262,7 @@ fn relocate(node: &NodeProc, ns: &str) {
         admin_once_free(node, &["range", "relocate", &id, "--core", &core.to_string()]);
     }
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

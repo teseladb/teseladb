@@ -20,7 +20,6 @@ ROOT=$(cd "$HERE/../.." && pwd)
 PLATFORMS=(
   "linux-x86_64=x86_64-unknown-linux-gnu"
   "linux-aarch64=aarch64-unknown-linux-gnu"
-  "macos-aarch64=aarch64-apple-darwin"
 )
 
 sha256() {
