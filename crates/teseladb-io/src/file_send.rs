@@ -1,10 +1,10 @@
-//! A forwarded answer whose body ends with bytes of a file of the core's disk (012 FR-026): the
-//! pieces of a range's files that a replica fetches (007). The logic says which bytes of which
-//! open file end the body ([`FileSend`]) instead of reading them; on a core with an io_uring disk
-//! and plaintext links, the runtime reads them into the ring's registered buffers and sends the
-//! frame's head and those buffers with one `IORING_OP_SENDMSG_ZC`, so the bytes never pass
-//! through memory the process copies. A core told otherwise ([`crate::engine::CoreLogic`]'s
-//! `file_sends`) reads the piece and answers it whole, as before.
+//! A forwarded answer whose body ends with bytes of a file of the core's disk (012 FR-026, 023
+//! FR-017): the pieces of a range's files that a replica fetches (007). The logic says which bytes
+//! of which open file end the body ([`FileSend`]) instead of reading them; on plaintext links the
+//! core's task reads them with the engine's DMA read of the core's disk executor
+//! (`engine::disk::ShardDisk::read_for_send`) and writes the frame's head and those bytes to the
+//! connection. A core told otherwise (`CoreLogic`'s `file_sends`) reads the piece and answers it
+//! whole, as before.
 
 use teseladb_keys::Hlc;
 use teseladb_raftlog::FileId;
@@ -12,9 +12,8 @@ use teseladb_types::{Bytes, Encoder};
 
 use crate::peer::{CLOCKED_FORWARD_VERSION, LEN_COVERED, MAX_FRAME_LEN, PeerMsg};
 
-/// Most file bytes one [`FileSend`] carries: four of a core's registered buffers, the size of a
-/// range file's piece.
-pub const MAX_FILE_SEND: u32 = 4 * crate::buffers::BUFFER_BYTES as u32;
+/// Most file bytes one [`FileSend`] carries: the size of a range file's piece.
+pub const MAX_FILE_SEND: u32 = 1 << 20;
 
 /// A `ForwardResp` for request `req` whose body is `head` followed by `len` bytes of `file` at
 /// `offset`.

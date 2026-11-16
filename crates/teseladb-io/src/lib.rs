@@ -1,30 +1,23 @@
-//! Real I/O for TeselaDB: [`FileDisk`], the executor of the engine's disk operations on real files,
-//! the inter-node protocol ([`peer`], [`handshake`]) and a node on the engine ([`engine`]: its
-//! shards, the task that drives each core and the connections between nodes).
+//! Real I/O for TeselaDB: a node on the engine ([`engine`]: its shards, the task that drives each
+//! core, each shard's disk operations and the connections between nodes), the node's device log
+//! ([`device_log`]) and the inter-node protocol ([`peer`], [`handshake`]).
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![deny(unsafe_code)]
 
 pub mod admission;
-pub mod bandwidth;
-pub mod buffers;
 #[cfg(target_os = "linux")]
 pub mod conn_port;
 pub mod counters;
 pub mod device_log;
-pub mod disk_thread;
-mod drive_flush;
+mod direct_io;
 pub mod engine;
-mod file_disk;
 pub mod file_send;
+pub mod files;
 pub mod handshake;
 mod io_class;
-#[cfg(target_os = "linux")]
-pub mod io_uring_disk;
-mod log_chore;
 pub mod mailbox;
 #[cfg(target_os = "linux")]
 pub mod net_ring;
-pub mod node_disk;
 pub mod peer;
 pub mod poller;
 pub mod secure;
@@ -35,9 +28,5 @@ pub mod user_tcp;
 #[cfg(target_os = "linux")]
 pub mod xdp_port;
 
-pub use file_disk::{FileDisk, direct_io_supported, read_up_to, sync_dir, write_whole};
-pub use io_class::IoClass;
-#[cfg(target_os = "linux")]
-pub use io_uring_disk::IoUringDisk;
-pub use log_chore::{answered_apart, log_chore};
-pub use node_disk::NodeDisk;
+pub use direct_io::DirectIo;
+pub use io_class::{CLASSES, IoClass, answered_apart, log_chore};

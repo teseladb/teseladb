@@ -117,11 +117,6 @@ impl ShardPost {
         Ok(())
     }
 
-    /// Hands a result of the core's disk executor to the core of the shard.
-    pub(crate) fn post_disk(&self, done: IoDone) -> bool {
-        self.post(move || with_slot(|s| s.io.push_disk(done)))
-    }
-
     /// Hands a result of the node's device log to the core of the shard.
     pub(crate) fn post_log(&self, at: Instant, done: IoDone) -> bool {
         self.post(move || with_slot(|s| s.io.push_log(at, done)))
@@ -162,12 +157,12 @@ impl Wake {
     }
 }
 
-/// What reaches a core's task besides its messages: the results of its disk executor and of the
-/// node's device log, and what happens on its connections to other nodes.
+/// What reaches a core's task besides its messages: the results of the node's device log and what
+/// happens on its connections to other nodes. The disk executor runs on the shard and wakes the
+/// task itself.
 #[derive(Default)]
 pub(crate) struct CoreIo {
     pub(crate) wake: Wake,
-    disk: RefCell<Vec<IoDone>>,
     log: RefCell<Vec<(Instant, IoDone)>>,
     net: RefCell<VecDeque<NetEvent>>,
 }
@@ -184,19 +179,9 @@ impl CoreIo {
         out.append(&mut self.net.borrow_mut());
     }
 
-    fn push_disk(&self, done: IoDone) {
-        self.disk.borrow_mut().push(done);
-        self.wake.wake();
-    }
-
     fn push_log(&self, at: Instant, done: IoDone) {
         self.log.borrow_mut().push((at, done));
         self.wake.wake();
-    }
-
-    /// Moves the disk results that arrived to `out`.
-    pub(crate) fn take_disk(&self, out: &mut Vec<IoDone>) {
-        out.append(&mut self.disk.borrow_mut());
     }
 
     /// Moves the device log's results that arrived to `out`.
@@ -296,7 +281,9 @@ mod tests {
             p.post_input(Instant::now(), CoreInput::App(1u8)),
             Err(SendError::Closed(CoreInput::App(1)))
         ));
-        assert!(!p.post_disk(IoDone::Read { token: 1, data: Ok(Default::default()) }));
+        assert!(
+            !p.post_log(Instant::now(), IoDone::Read { token: 1, data: Ok(Default::default()) })
+        );
     }
 
     #[test]
@@ -312,15 +299,12 @@ mod tests {
         with_slot(|s| {
             s.io.push_log(Instant::now(), IoDone::Read { token: 4, data: Ok(Default::default()) })
         });
-        with_slot(|s| s.io.push_disk(IoDone::Read { token: 5, data: Ok(Default::default()) }));
         assert!(!inbox.is_empty());
         let mut got = Vec::new();
         inbox.drain_into(&mut got);
         assert!(matches!(got.as_slice(), [(_, CoreInput::App(2))]));
-        let (mut disk, mut log) = (Vec::new(), Vec::new());
-        io.take_disk(&mut disk);
+        let mut log = Vec::new();
         io.take_log(&mut log);
-        assert_eq!(disk.len(), 1);
         assert_eq!(log.len(), 1);
         assert!(io.wake.set.get());
         uninstall();

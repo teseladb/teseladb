@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use teseladb_raftlog::{Disk, IoDone, IoOp};
+use teseladb_raftlog::{IoDone, IoOp};
 
 use super::core_loop::{CoreLogic, CoreSender};
 use crate::IoClass;
@@ -26,6 +26,8 @@ pub struct EngineConfig {
     pub cpus: Vec<usize>,
     /// Memory for all the shards, in bytes; `None`: the engine's default.
     pub memory: Option<u64>,
+    /// Whether the files bypass the kernel's page cache.
+    pub direct_io: crate::DirectIo,
 }
 
 /// What a core's task needs besides its logic and disk.
@@ -51,31 +53,31 @@ pub trait CoreDisk: 'static {
     fn reap(&mut self, out: &mut Vec<(IoDone, IoClass)>);
 }
 
-/// Runs a [`Disk`] on the core's disk thread (Linux only).
-pub struct ThreadDisk<D> {
-    never: Infallible,
-    _disk: PhantomData<D>,
-}
+/// Each shard's disk operations: an executor that does not exist outside Linux.
+pub mod disk {
+    use std::convert::Infallible;
 
-impl<D: Disk + Send + 'static> ThreadDisk<D> {
-    /// Never made outside Linux: it needs an engine.
-    pub fn new(_name: String, _disk: D) -> ThreadDisk<D> {
-        unreachable!("the engine runs on Linux only")
+    use teseladb_raftlog::{IoDone, IoOp};
+
+    use super::CoreDisk;
+    use crate::IoClass;
+
+    pub use super::super::place::{DiskMaker, DiskPlace, StartupDisk};
+
+    /// The executor of a shard's disk operations (Linux only).
+    #[derive(Debug)]
+    pub struct ShardDisk {
+        never: Infallible,
     }
 
-    /// Unreachable.
-    pub fn into_disk(self) -> Option<D> {
-        match self.never {}
-    }
-}
+    impl CoreDisk for ShardDisk {
+        fn submit(&mut self, _op: IoOp, _class: IoClass) -> bool {
+            match self.never {}
+        }
 
-impl<D: Disk + Send + 'static> CoreDisk for ThreadDisk<D> {
-    fn submit(&mut self, _op: IoOp, _class: IoClass) -> bool {
-        match self.never {}
-    }
-
-    fn reap(&mut self, _out: &mut Vec<(IoDone, IoClass)>) {
-        match self.never {}
+        fn reap(&mut self, _out: &mut Vec<(IoDone, IoClass)>) {
+            match self.never {}
+        }
     }
 }
 

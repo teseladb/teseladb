@@ -45,8 +45,9 @@ mod node_engine;
 mod offload;
 #[cfg(target_os = "linux")]
 mod peers;
+mod place;
 #[cfg(target_os = "linux")]
-mod post;
+pub(crate) mod post;
 #[cfg(target_os = "linux")]
 pub mod tls_stream;
 #[cfg(not(target_os = "linux"))]
@@ -58,11 +59,11 @@ pub use core_loop::{
     core_channel_with,
 };
 #[cfg(target_os = "linux")]
-pub use disk_port::{CoreDisk, DiskWaker, ThreadDisk};
+pub use disk_port::{CoreDisk, DiskWaker};
 #[cfg(target_os = "linux")]
 pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
 #[cfg(not(target_os = "linux"))]
-pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, ThreadDisk};
+pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, disk};
 
 /// The deadline `timeout` from now on the steady clock.
 #[cfg(target_os = "linux")]

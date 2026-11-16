@@ -45,3 +45,7 @@ harness = false
 [[test]]
 name = "crash_real_lsm"
 harness = false
+
+[[test]]
+name = "device_log"
+harness = false

@@ -8,7 +8,8 @@
 //!
 //! - [`IoGroups::get_or_create`] once per process, on shard 0 before the shards open their disks:
 //!   the scheduling groups of the three classes.
-//! - [`ShardDisk::open`] (the files under a data directory) or [`ShardDisk::mem`] (a [`MemDisk`],
+//! - [`ShardDisk::open`] (the files under a data directory), or [`ShardDisk::mem`] (a [`MemDisk`]
+//!   or any other model of a disk, [`ShardDisk::model`],
 //!   for `teseladb dev` and the tests), with the same contract.
 //! - [`ShardDisk::submit`]`(op, class)` for each `(op, class)` that `CoreLogic::poll_io` gives; it
 //!   never blocks and never runs the operation inline.
@@ -21,6 +22,9 @@
 //!   the tools, and only inside an engine thread (`thread::async_`), as it waits with `get()`.
 //! - [`ShardDisk::read_for_send`] reads the bytes of an open file that end an answer to another
 //!   node (012 FR-026, 023 FR-017).
+//! - [`ShardDisk`] implements `CoreDisk`, the interface of the core's task (`engine::driver`):
+//!   `attach` gives it the task's waker, which it calls when results arrive.
+//! - [`DiskPlace`] says where a node's disks are.
 //!
 //! # Order of the results
 //!
@@ -50,9 +54,11 @@ use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::with_scheduling_group::with_scheduling_group;
 use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp, MemDisk};
 
+pub use super::place::{DiskMaker, DiskPlace, StartupDisk};
 pub use groups::{BACKGROUND_SHARES, DATA_SHARES, IoGroups, LOG_SHARES};
 pub use rules::MAX_SYNCS;
 
+use super::disk_port::{CoreDisk, DiskWaker};
 use crate::IoClass;
 use crate::io_class::CLASSES;
 use ops::{Effect, Finished, OpenFile};
@@ -77,8 +83,9 @@ enum Backend {
         /// identifiers has one length.
         sizes: HashMap<(u64, u64), u64>,
     },
-    /// A disk in memory: each operation runs when it is handed out, in submission order.
-    Mem(Box<MemDisk>),
+    /// A disk in memory or another model of one (a disk that fails on purpose in the tests):
+    /// each operation runs when it is handed out, in submission order.
+    Mem(Box<dyn Disk + Send>),
 }
 
 /// An operation waiting to start.
@@ -121,6 +128,12 @@ struct Inner {
     /// Promises to keep once the state is no longer borrowed.
     to_fire: Vec<(Promise<IoDone>, IoDone)>,
     next_seq: u64,
+    /// The core's task, woken when results for it arrive ([`CoreDisk::attach`]).
+    waker: Option<DiskWaker>,
+    /// Whether results arrived since the task was last woken.
+    to_wake: bool,
+    /// The class of the operations of the synchronous [`Disk`].
+    sync_class: IoClass,
     /// Whether a turn of [`drive`] is on the stack: a result that comes inline waits for it.
     driving: bool,
 }
@@ -150,6 +163,9 @@ impl ShardDisk {
             idle_waiters: Vec::new(),
             to_fire: Vec::new(),
             next_seq: 0,
+            waker: None,
+            to_wake: false,
+            sync_class: IoClass::Data,
             driving: false,
         };
         ShardDisk { inner: Rc::new(RefCell::new(inner)) }
@@ -170,7 +186,30 @@ impl ShardDisk {
     /// The executor of a disk in memory.
     #[must_use]
     pub fn mem(disk: MemDisk) -> ShardDisk {
-        ShardDisk::with_backend(Backend::Mem(Box::new(disk)))
+        ShardDisk::model(Box::new(disk))
+    }
+
+    /// The executor of a model of a disk, with the contract of [`ShardDisk::mem`].
+    #[must_use]
+    pub fn model(disk: Box<dyn Disk + Send>) -> ShardDisk {
+        ShardDisk::with_backend(Backend::Mem(disk))
+    }
+
+    /// The model of a disk it ran on, once nothing else holds the executor and nothing runs;
+    /// `None` for the files.
+    #[must_use]
+    pub fn into_model(self) -> Option<Box<dyn Disk + Send>> {
+        let inner = Rc::try_unwrap(self.inner).ok()?.into_inner();
+        match inner.backend {
+            Backend::Mem(m) => Some(m),
+            Backend::Files { .. } => None,
+        }
+    }
+
+    /// Runs the operations of the synchronous [`Disk`] in `class` (the data's unless set): the
+    /// device log's writer runs its rarer steps in the log's.
+    pub fn set_sync_class(&self, class: IoClass) {
+        self.inner.borrow_mut().sync_class = class;
     }
 
     /// The directory of the files, `None` for a disk in memory.
@@ -280,21 +319,26 @@ impl ShardDisk {
 /// state (a continuation may run inline and submit again).
 fn drive(inner: &Rc<RefCell<Inner>>) {
     loop {
-        let (launch, fire, ready, idle) = {
+        let (launch, fire, ready, idle, wake) = {
             let mut i = inner.borrow_mut();
             i.driving = true;
             let launch = i.startable();
+            let wake = if std::mem::take(&mut i.to_wake) { i.waker.clone() } else { None };
             let fire = std::mem::take(&mut i.to_fire);
             let ready =
                 if i.done.is_empty() { Vec::new() } else { std::mem::take(&mut i.ready_waiters) };
             let idle =
                 if i.replies.is_empty() { std::mem::take(&mut i.idle_waiters) } else { Vec::new() };
-            if launch.is_empty() && fire.is_empty() && ready.is_empty() && idle.is_empty() {
+            let quiet = launch.is_empty() && fire.is_empty() && ready.is_empty() && idle.is_empty();
+            if quiet && wake.is_none() {
                 i.driving = false;
                 return;
             }
-            (launch, fire, ready, idle)
+            (launch, fire, ready, idle, wake)
         };
+        if let Some(w) = wake {
+            w.wake();
+        }
         for (mut p, d) in fire {
             p.set_value(d);
         }
@@ -507,7 +551,10 @@ impl Inner {
     fn hand_out(&mut self, seq: u64, class: IoClass, done: IoDone) {
         match self.replies.remove(&seq) {
             Some(Reply::Caller(p)) => self.to_fire.push((p, done)),
-            Some(Reply::Core) | None => self.done.push_back((done, class)),
+            Some(Reply::Core) | None => {
+                self.done.push_back((done, class));
+                self.to_wake = true;
+            }
         }
     }
 }
@@ -574,7 +621,52 @@ impl Disk for ShardDisk {
 
     fn execute(&mut self, op: IoOp) -> IoDone {
         let fallback = ops::fail(&op, IoErrno::Io);
-        self.call(op, IoClass::Data).get().unwrap_or(fallback)
+        let class = self.inner.borrow().sync_class;
+        self.call(op, class).get().unwrap_or(fallback)
+    }
+}
+
+/// The executor of a core's task (023 FR-010): each operation starts as soon as the rules let it,
+/// so a turn has nothing left to send; the engine hands what started to the kernel once per poll.
+impl CoreDisk for ShardDisk {
+    fn attach(&mut self, waker: DiskWaker) {
+        let mut i = self.inner.borrow_mut();
+        i.to_wake |= !i.done.is_empty();
+        i.waker = Some(waker);
+    }
+
+    fn submit(&mut self, op: IoOp, class: IoClass) -> bool {
+        ShardDisk::submit(self, op, class);
+        true
+    }
+
+    fn flush(&mut self) -> bool {
+        true
+    }
+
+    fn reap(&mut self, out: &mut Vec<(IoDone, IoClass)>) {
+        self.take_done(out);
+    }
+
+    fn ready(&self) -> bool {
+        !self.inner.borrow().done.is_empty()
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn sends_files(&self) -> bool {
+        true
+    }
+
+    fn read_for_send(
+        &self,
+        file: FileId,
+        offset: u64,
+        len: u32,
+    ) -> Option<Future<Option<TemporaryBuffer<u8>>>> {
+        Some(ShardDisk::read_for_send(self, file, offset, len))
     }
 }
 
@@ -586,7 +678,7 @@ mod tests {
     /// The state of an executor with operations `ops` handed out, each in its class, none
     /// finished.
     fn handed_out(ops: &[(IoOp, IoClass)]) -> Inner {
-        let disk = ShardDisk::with_backend(Backend::Mem(Box::default()));
+        let disk = ShardDisk::mem(MemDisk::new());
         let mut i = Rc::try_unwrap(disk.inner).ok().expect("one handle").into_inner();
         for (seq, (op, class)) in ops.iter().enumerate() {
             let seq = seq as u64;
