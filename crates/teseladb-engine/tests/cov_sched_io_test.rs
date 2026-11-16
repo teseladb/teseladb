@@ -18,22 +18,9 @@ use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::core::with_scheduling_group::with_scheduling_group;
 use teseladb::engine::util::internal::iovec_utils::Iovec;
-use teseladb::engine_test_case;
+use teseladb::engine_thread_test_case;
 
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
-
-thread_case!(groups_have_names_shares_and_bandwidth, {
+engine_thread_test_case!(groups_have_names_shares_and_bandwidth, {
     let sg = create_scheduling_group(Sstring::from("cov-group"), Sstring::from("cov"), 100.0)
         .get()
         .unwrap();

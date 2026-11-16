@@ -10,23 +10,8 @@
 
 use std::ffi::c_void;
 
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::memory::{get_memory_layout, stats};
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 unsafe extern "C" {
     fn __libc_malloc(n: usize) -> *mut c_void;
@@ -109,7 +94,7 @@ fn check(p: *mut c_void, len: usize, align: usize) -> *mut c_void {
     p
 }
 
-thread_case!(c_library_entry_points_allocate_from_the_pool, {
+engine_thread_test_case!(c_library_entry_points_allocate_from_the_pool, {
     let mallocs = stats().mallocs();
     // SAFETY: each allocation is checked, used within its size and freed once.
     unsafe {
@@ -149,7 +134,7 @@ thread_case!(c_library_entry_points_allocate_from_the_pool, {
     assert!(stats().mallocs() >= mallocs + 8);
 });
 
-thread_case!(new_and_delete_operators_allocate_from_the_pool, {
+engine_thread_test_case!(new_and_delete_operators_allocate_from_the_pool, {
     let tag = std::ptr::null();
     // SAFETY: each allocation is checked, used within its size and released by the matching
     // operator once.

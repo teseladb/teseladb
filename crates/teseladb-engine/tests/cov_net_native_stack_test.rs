@@ -32,6 +32,7 @@ use teseladb::engine::net::proxy::{ProxyNetDevice, create_proxy_net_device};
 use teseladb::engine::net::socket_defs::{AF_INET, AF_INET6, Ipv4Addr, SocketAddress, Transport};
 use teseladb::engine::util::program_options::AsOptionGroup;
 
+use teseladb::engine_thread_test_case;
 use wire::*;
 
 /// Options for a stack at 10.0.0.2/24 with gateway 10.0.0.254.
@@ -84,11 +85,7 @@ fn handshake_in(wire: &Wire, pport: u16, lport: u16) -> u32 {
     next
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(native_stack_serves_a_connection, {
+engine_thread_test_case!(native_stack_serves_a_connection, {
     let (wire, ns) = native_stack();
     assert!(ns.has_per_core_namespace());
     wait(ns.initialize()).expect("a static stack is ready at once");
@@ -172,7 +169,7 @@ thread_case!(native_stack_serves_a_connection, {
     assert!(wait(accepting).is_err());
 });
 
-thread_case!(native_stack_opens_connections, {
+engine_thread_test_case!(native_stack_opens_connections, {
     let (wire, ns) = native_stack();
     wire.inject(&hello_from(PEER_IP, PEER_MAC));
     wire.clear();
@@ -211,7 +208,7 @@ thread_case!(native_stack_opens_connections, {
     assert!(wait(refused).is_err());
 });
 
-thread_case!(native_stack_datagram_channels, {
+engine_thread_test_case!(native_stack_datagram_channels, {
     let (wire, ns) = native_stack();
     #[allow(deprecated)]
     let mut a = ns.make_udp_channel(&sockaddr(0, 5353)).expect("bound");
@@ -230,7 +227,7 @@ thread_case!(native_stack_datagram_channels, {
     assert_eq!(f.udp().payload, b"answer");
 });
 
-thread_case!(native_stack_reports_its_interface, {
+engine_thread_test_case!(native_stack_reports_its_interface, {
     let (_wire, ns) = native_stack();
     let ifs = ns.network_interfaces().expect("interfaces");
     assert_eq!(ifs.len(), 1);
@@ -248,7 +245,7 @@ thread_case!(native_stack_reports_its_interface, {
     assert!(!ns.supports_ipv6());
 });
 
-thread_case!(native_stack_options_and_registration, {
+engine_thread_test_case!(native_stack_options_and_registration, {
     let o = NativeStackOptions::default();
     assert_eq!(o.tap_device.get_value(), "tap0");
     assert_eq!(o.host_ipv4_addr.get_value(), "192.168.122.2");
@@ -279,7 +276,7 @@ thread_case!(native_stack_options_and_registration, {
     std::mem::forget(dhcp);
 });
 
-thread_case!(device_creation_needs_a_supported_driver, {
+engine_thread_test_case!(device_creation_needs_a_supported_driver, {
     // The configuration format names devices only DPDK can drive.
     let config = "{eth0: {pci-address: 0000:06:00.0, ip: 192.168.100.10, gateway: 192.168.100.1, netmask: 255.255.255.0}}";
     let mut o = NativeStackOptions::new();
@@ -313,7 +310,7 @@ thread_case!(device_creation_needs_a_supported_driver, {
     create_native_stack(&static_options(), wire.dev.clone());
 });
 
-thread_case!(proxy_queue_forwards_to_the_owning_shard, {
+engine_thread_test_case!(proxy_queue_forwards_to_the_owning_shard, {
     let mut weights = BTreeMap::new();
     weights.insert(this_shard_id(), 1.0f32);
     weights.insert(this_shard_id() + 1, 0.0f32);

@@ -21,6 +21,7 @@ use teseladb::engine::net::tls::{
     X509CrtFormat, error_category, format_as,
 };
 
+use teseladb::engine_thread_test_case;
 use tls_certs::certfile;
 
 fn s(x: &str) -> Sstring {
@@ -35,14 +36,10 @@ fn message(e: &ExceptionPtr) -> String {
     e.get().map(|x| x.what()).unwrap_or_default()
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
 const GARBAGE: &[u8] =
     b"-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n";
 
-thread_case!(dh_parameters_from_levels_bytes_and_files, {
+engine_thread_test_case!(dh_parameters_from_levels_bytes_and_files, {
     for lvl in [DhLevel::LEGACY, DhLevel::MEDIUM, DhLevel::HIGH, DhLevel::ULTRA] {
         let _ = DhParams::new(lvl);
     }
@@ -61,7 +58,7 @@ thread_case!(dh_parameters_from_levels_bytes_and_files, {
     }
 });
 
-thread_case!(certificates_from_bytes_and_files, {
+engine_thread_test_case!(certificates_from_bytes_and_files, {
     let crt = read("test.crt");
     assert!(X509Cert::new(&crt, X509CrtFormat::PEM).is_ok());
     assert!(X509Cert::new(GARBAGE, X509CrtFormat::PEM).is_err());
@@ -74,7 +71,7 @@ thread_case!(certificates_from_bytes_and_files, {
     assert!(!message(&e).is_empty());
 });
 
-thread_case!(credentials_reject_malformed_inputs, {
+engine_thread_test_case!(credentials_reject_malformed_inputs, {
     let mut c = CertificateCredentials::new();
     let ca = read("tls-ca-bundle.pem");
     c.set_x509_trust(&ca, X509CrtFormat::PEM).expect("trust");
@@ -121,7 +118,7 @@ thread_case!(credentials_reject_malformed_inputs, {
     );
 });
 
-thread_case!(credentials_settings, {
+engine_thread_test_case!(credentials_settings, {
     let mut c = CertificateCredentials::default();
     c.set_priority_string(&s("NORMAL")).expect("a valid priority string");
     let e = c.set_priority_string(&s("NORMAL:+BOGUS-THING")).expect_err("invalid");
@@ -143,7 +140,7 @@ thread_case!(credentials_settings, {
     sc.base.set_priority_string(&s("SECURE256")).expect("priority");
 });
 
-thread_case!(builder_builds_and_applies, {
+engine_thread_test_case!(builder_builds_and_applies, {
     let mut b = CredentialsBuilder::default();
     b.set_dh_level(DhLevel::MEDIUM);
     b.set_client_auth(ClientAuth::REQUEST);

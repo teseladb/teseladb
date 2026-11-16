@@ -9,21 +9,7 @@
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::reactor::engine;
 use teseladb::engine::core::smp::{Smp, SpscQueue};
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 #[test]
 fn spsc_rings_hold_their_capacity_and_wrap() {
@@ -61,7 +47,7 @@ fn spsc_rings_hold_their_capacity_and_wrap() {
     assert_eq!(fresh.pop(), Some(7));
 }
 
-thread_case!(local_submissions_that_panic_fail_their_future, {
+engine_thread_test_case!(local_submissions_that_panic_fail_their_future, {
     let e = Smp::submit_to(0, || -> Result<u32, ExceptionPtr> { panic!("cov local panic") })
         .get()
         .unwrap_err();
@@ -70,7 +56,7 @@ thread_case!(local_submissions_that_panic_fail_their_future, {
     assert_eq!(Smp::submit_to(0, || Ok::<u32, ExceptionPtr>(5)).get().unwrap(), 5);
 });
 
-thread_case!(main_thread_and_numa_table, {
+engine_thread_test_case!(main_thread_and_numa_table, {
     // Shard 0 runs on the thread that configured the shards; the others do not.
     assert!(Smp::main_thread());
     if Smp::count() > 1 {

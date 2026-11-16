@@ -9,7 +9,6 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::internal::estimated_histogram::TimeEstimatedHistogram;
 use teseladb::engine::core::metrics::{
     Description, Label, make_counter, make_gauge, make_histogram, make_summary,
@@ -21,24 +20,10 @@ use teseladb::engine::core::prometheus::{self, is_accept_protobuf, pm};
 use teseladb::engine::core::relabel_config::metrics::MetricFamilyConfig;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::http::httpd::httpd::HttpServerControl;
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::socket_defs::SocketAddress;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 // ---------------------------------------------------------------------------------------------
 // A minimal protobuf reader.
@@ -380,7 +365,7 @@ fn register(groups: &mut MetricGroups) {
     set_metric_family_configs(&configs);
 }
 
-thread_case!(metrics_endpoint_serves_text_and_protobuf, {
+engine_thread_test_case!(metrics_endpoint_serves_text_and_protobuf, {
     let mut groups = MetricGroups::default();
     register(&mut groups);
 
@@ -537,7 +522,7 @@ fn check_endpoint(port: u16) {
     assert!(r.body.is_empty(), "{} bytes", r.body.len());
 }
 
-thread_case!(protobuf_is_served_only_when_allowed, {
+engine_thread_test_case!(protobuf_is_served_only_when_allowed, {
     let mut groups = MetricGroups::default();
     groups
         .add_group("covprom2", vec![make_gauge("g", || 7, Description::new("g"), vec![])])

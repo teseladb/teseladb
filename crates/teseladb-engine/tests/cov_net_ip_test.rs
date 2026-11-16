@@ -37,6 +37,7 @@ use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, in_addr};
 use teseladb::engine::net::toeplitz::{DEFAULT_RSSKEY_40BYTES, toeplitz_hash};
 
+use teseladb::engine_thread_test_case;
 use wire::*;
 
 /// An echo request from the peer with `payload`.
@@ -62,11 +63,7 @@ fn ip_frames(st: &IpStack) -> Vec<Frame> {
     st.wire.drain().into_iter().filter(|f| f.is_ipv4()).collect()
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(echo_requests_are_answered, {
+engine_thread_test_case!(echo_requests_are_answered, {
     let st = IpStack::new(HwFeatures::default());
     st.wire.inject(&echo_request(7, b"ping"));
     assert_echo_reply(&st.wire.next_ip(), 7, b"ping");
@@ -92,7 +89,7 @@ thread_case!(echo_requests_are_answered, {
     assert!(ip_frames(&st).is_empty());
 });
 
-thread_case!(invalid_packets_are_dropped, {
+engine_thread_test_case!(invalid_packets_are_dropped, {
     let st = IpStack::new(HwFeatures::default());
     let icmp = icmp_message(8, 1, 1, b"x");
     // A wrong header checksum.
@@ -124,7 +121,7 @@ thread_case!(invalid_packets_are_dropped, {
     assert_echo_reply(&off.wire.next_ip(), 1, b"x");
 });
 
-thread_case!(fragments_are_reassembled_and_large_replies_fragmented, {
+engine_thread_test_case!(fragments_are_reassembled_and_large_replies_fragmented, {
     let st = IpStack::new(HwFeatures::default());
     let payload: Vec<u8> = (0..2000u32).map(|i| (i * 7 % 256) as u8).collect();
     let msg = icmp_message(8, 42, 1, &payload);
@@ -156,7 +153,7 @@ thread_case!(fragments_are_reassembled_and_large_replies_fragmented, {
     assert_eq!(&reply[8..], &payload[..]);
 });
 
-thread_case!(reassembly_memory_is_bounded, {
+engine_thread_test_case!(reassembly_memory_is_bounded, {
     let st = IpStack::new(HwFeatures::default());
     // Thousands of first fragments that never complete: more than the high threshold.
     for id in 0..3500u16 {
@@ -172,7 +169,7 @@ thread_case!(reassembly_memory_is_bounded, {
     assert_echo_reply(&st.wire.next_ip(), 5, b"after the flood");
 });
 
-thread_case!(arp_requests_are_answered, {
+engine_thread_test_case!(arp_requests_are_answered, {
     let st = IpStack::new(HwFeatures::default());
     st.wire.inject(&eth(
         BCAST_MAC,
@@ -229,7 +226,7 @@ thread_case!(arp_requests_are_answered, {
     assert_eq!(st.wire.next_arp().arp().spa, 0x0a00_0005);
 });
 
-thread_case!(lookups_resolve_time_out_and_overflow, {
+engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     let st = IpStack::new(HwFeatures::default());
     let target = Ipv4Address::from_u32(0x0a00_0009);
     let mac9 = [0x02, 0, 0, 0, 0, 0x09];
@@ -286,7 +283,7 @@ thread_case!(lookups_resolve_time_out_and_overflow, {
     let _ = (ArpTimeoutError::default(), ArpQueueFullError::default());
 });
 
-thread_case!(off_subnet_traffic_goes_through_the_gateway, {
+engine_thread_test_case!(off_subnet_traffic_goes_through_the_gateway, {
     let st = IpStack::new(HwFeatures::default());
     let far = 0xc0a8_0105;
     let far2 = 0xc0a8_0106;
@@ -368,7 +365,7 @@ impl IpPacketFilter for PortFilter {
     }
 }
 
-thread_case!(packet_filters_see_packets_first, {
+engine_thread_test_case!(packet_filters_see_packets_first, {
     let st = IpStack::new(HwFeatures::default());
     let filter: &'static PortFilter = Box::leak(Box::new(PortFilter {
         port: 7777,
@@ -398,7 +395,7 @@ thread_case!(packet_filters_see_packets_first, {
     assert!(st.ipv4().packet_filter().is_none());
 });
 
-thread_case!(transmit_queues_have_a_budget, {
+engine_thread_test_case!(transmit_queues_have_a_budget, {
     let st = IpStack::new(HwFeatures::default());
     // Echo replies beyond the ICMP queue budget are dropped.
     let payload = vec![0x55u8; 1400];
@@ -415,7 +412,7 @@ thread_case!(transmit_queues_have_a_budget, {
     assert!(resets > 10000 && resets < 11000, "{resets} resets");
 });
 
-thread_case!(l4_providers_and_direct_sends, {
+engine_thread_test_case!(l4_providers_and_direct_sends, {
     let st = IpStack::new(HwFeatures { tx_csum_ip_offload: true, ..HwFeatures::default() });
     st.teach_peer();
     // An extra provider of the UDP view: its packets get the protocol number of the view.
@@ -470,7 +467,7 @@ impl ArpForProtocol for CountingArp {
     }
 }
 
-thread_case!(standalone_arp_layer_and_custom_protocols, {
+engine_thread_test_case!(standalone_arp_layer_and_custom_protocols, {
     let wire = Wire::new(HwFeatures::default());
     let netif = Interface::new(wire.dev.clone()).into_raw();
     let arp: *mut Arp = Box::into_raw(Box::<Arp>::new_uninit()).cast();
@@ -521,7 +518,7 @@ thread_case!(standalone_arp_layer_and_custom_protocols, {
     assert_eq!(got.get(), 1);
 });
 
-thread_case!(software_redirection_hashes_every_protocol, {
+engine_thread_test_case!(software_redirection_hashes_every_protocol, {
     let mut weights = BTreeMap::new();
     weights.insert(this_shard_id(), 1.0f32);
     weights.insert(this_shard_id() + 1, 0.0f32);
@@ -572,7 +569,7 @@ thread_case!(software_redirection_hashes_every_protocol, {
     assert!(stats.tx.good.last_bunch >= 1);
 });
 
-thread_case!(device_and_interface_accessors, {
+engine_thread_test_case!(device_and_interface_accessors, {
     let wire = Wire::with_queues(HwFeatures { mtu: 9000, ..HwFeatures::default() }, 2);
     let st = IpStack::on(wire);
     // SAFETY: the interface is leaked; a short shared access.

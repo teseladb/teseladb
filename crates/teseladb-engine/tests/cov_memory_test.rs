@@ -21,25 +21,11 @@ use teseladb::engine::core::memory::{
     set_large_allocation_warning_threshold, set_min_free_pages, stats,
 };
 use teseladb::engine::core::smp::Smp;
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 const PAGE: usize = 4096;
 
-thread_case!(statistics_count_allocations_and_pages, {
+engine_thread_test_case!(statistics_count_allocations_and_pages, {
     let before = stats();
     let blocks: Vec<Box<[u8; 256]>> = (0..100).map(|_| Box::new([1u8; 256])).collect();
     let during = stats();
@@ -70,7 +56,7 @@ thread_case!(statistics_count_allocations_and_pages, {
     assert!((layout.start..layout.end).contains(&addr), "the shard allocates from its pool");
 });
 
-thread_case!(minimum_free_memory_is_adjustable, {
+engine_thread_test_case!(minimum_free_memory_is_adjustable, {
     let old = min_free_memory() / PAGE;
     set_min_free_pages(old + 16).unwrap();
     assert_eq!(min_free_memory(), (old + 16) * PAGE);
@@ -80,7 +66,7 @@ thread_case!(minimum_free_memory_is_adjustable, {
     assert!(set_min_free_pages(usize::MAX / PAGE).is_err());
 });
 
-thread_case!(large_allocation_warning_thresholds_nest, {
+engine_thread_test_case!(large_allocation_warning_thresholds_nest, {
     let original = get_large_allocation_warning_threshold();
     set_large_allocation_warning_threshold(1 << 20);
     assert_eq!(get_large_allocation_warning_threshold(), 1 << 20);
@@ -103,7 +89,7 @@ thread_case!(large_allocation_warning_thresholds_nest, {
     set_large_allocation_warning_threshold(original);
 });
 
-thread_case!(diagnostics_report_includes_the_producer, {
+engine_thread_test_case!(diagnostics_report_includes_the_producer, {
     let calls = Rc::new(Cell::new(0));
     let c = calls.clone();
     set_additional_diagnostics_producer(Box::new(move |w| {
@@ -123,7 +109,7 @@ thread_case!(diagnostics_report_includes_the_producer, {
     set_additional_diagnostics_producer(Box::new(|_| {}));
 });
 
-thread_case!(allocation_failure_settings, {
+engine_thread_test_case!(allocation_failure_settings, {
     let was = is_abort_on_allocation_failure();
     set_abort_on_allocation_failure(true);
     assert!(is_abort_on_allocation_failure());
@@ -159,7 +145,7 @@ unsafe extern "C" {
     fn realloc(p: *mut c_void, size: usize) -> *mut c_void;
 }
 
-thread_case!(malloc_family_uses_the_shard_allocator, {
+engine_thread_test_case!(malloc_family_uses_the_shard_allocator, {
     // SAFETY: plain allocation calls, each pointer freed once.
     unsafe {
         let p = malloc(100);
@@ -173,7 +159,7 @@ thread_case!(malloc_family_uses_the_shard_allocator, {
     }
 });
 
-thread_case!(memory_freed_on_another_shard_returns_home, {
+engine_thread_test_case!(memory_freed_on_another_shard_returns_home, {
     if Smp::count() < 2 {
         return;
     }

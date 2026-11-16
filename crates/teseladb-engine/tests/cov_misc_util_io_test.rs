@@ -13,9 +13,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use teseladb::engine::core::file_types::FilePermissions;
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::util::file::util::read_entire_file;
 use teseladb::engine::util::file::{
     chown, file_size, file_system_at, fs_avail, fs_free, link_file, recursive_remove_directory,
@@ -25,20 +23,7 @@ use teseladb::engine::util::process::experimental::{
     SpawnParameters, WaitStatus, spawn_process_with,
 };
 use teseladb::engine::util::short_streams::util::read_entire_stream_contiguous;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// A fresh directory under the system's temporary directory, removed when dropped.
 struct TmpDir(PathBuf);
@@ -66,7 +51,7 @@ fn ss(s: &str) -> Sstring {
     Sstring::from(s)
 }
 
-thread_case!(file_system_queries_links_and_whole_file_reads, {
+engine_thread_test_case!(file_system_queries_links_and_whole_file_reads, {
     let d = TmpDir::new("io");
     let f = d.path("data.txt");
     std::fs::write(&f, "0123456789").unwrap();
@@ -93,7 +78,7 @@ thread_case!(file_system_queries_links_and_whole_file_reads, {
     assert!(read_entire_file(PathBuf::from(d.path("missing"))).get().is_err());
 });
 
-thread_case!(directories_are_created_recursively_from_any_path, {
+engine_thread_test_case!(directories_are_created_recursively_from_any_path, {
     let d = TmpDir::new("dirs");
     // A trailing double slash ends the path.
     let nested = format!("{}/a/b//", d.0.display());
@@ -116,7 +101,7 @@ thread_case!(directories_are_created_recursively_from_any_path, {
     assert!(recursive_remove_directory(bad).get().is_err());
 });
 
-thread_case!(processes_take_input_report_errors_and_die_by_signal, {
+engine_thread_test_case!(processes_take_input_report_errors_and_die_by_signal, {
     let params = SpawnParameters {
         argv: vec![ss("sh"), ss("-c"), ss("echo oops >&2; cat > /dev/null; exit 3")],
         env: vec![],

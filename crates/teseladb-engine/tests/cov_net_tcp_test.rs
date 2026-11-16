@@ -27,6 +27,7 @@ use teseladb::engine::net::tcp::{
     tcp_connect_error, tcp_error, tcp_refused_error, tcp_reset_error,
 };
 
+use teseladb::engine_thread_test_case;
 use wire::*;
 
 type Conn = Connection<Ipv4Traits>;
@@ -182,11 +183,7 @@ fn pattern(n: usize) -> Vec<u8> {
     (0..n).map(|i| (i % 251) as u8).collect()
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(passive_open_exchanges_data_and_closes, {
+engine_thread_test_case!(passive_open_exchanges_data_and_closes, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     // The peer offered both options, so the SYN-ACK carries both: our MSS (MTU less the
     // headers) and our window scale.
@@ -243,7 +240,7 @@ thread_case!(passive_open_exchanges_data_and_closes, {
     assert_eq!(rst.seq, s.sseq);
 });
 
-thread_case!(active_open_negotiates_and_transfers, {
+engine_thread_test_case!(active_open_negotiates_and_transfers, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     let mut s = Session::active_on(st, 8080, &mss_ws_options(1200, 2), 60000);
@@ -284,7 +281,7 @@ thread_case!(active_open_negotiates_and_transfers, {
     s.expect_ack(s.pseq);
 });
 
-thread_case!(syn_sent_rejects_bad_acks_and_resets, {
+engine_thread_test_case!(syn_sent_rejects_bad_acks_and_resets, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // SAFETY: the layer is live and no reference into it is live.
@@ -311,7 +308,7 @@ thread_case!(syn_sent_rejects_bad_acks_and_resets, {
     assert_eq!(errno_of(&err), Some(111));
 });
 
-thread_case!(simultaneous_open_goes_through_syn_received, {
+engine_thread_test_case!(simultaneous_open_goes_through_syn_received, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // SAFETY: the layer is live and no reference into it is live.
@@ -333,7 +330,7 @@ thread_case!(simultaneous_open_goes_through_syn_received, {
     st.wire.assert_no_tcp_for(Duration::from_millis(20));
 });
 
-thread_case!(segments_for_unknown_connections_are_reset, {
+engine_thread_test_case!(segments_for_unknown_connections_are_reset, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // A SYN to a closed port: RST+ACK acknowledging the SYN.
@@ -386,7 +383,7 @@ thread_case!(segments_for_unknown_connections_are_reset, {
     assert_eq!(errno_of(&wait(accepting).err().expect("a failure")), Some(103));
 });
 
-thread_case!(malformed_segments_are_dropped, {
+engine_thread_test_case!(malformed_segments_are_dropped, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // SAFETY: the layer is live and no reference into it is live.
@@ -422,7 +419,7 @@ thread_case!(malformed_segments_are_dropped, {
     assert!(off.wire.next_tcp().has(SYN | ACK));
 });
 
-thread_case!(out_of_order_and_duplicate_data_are_reassembled, {
+engine_thread_test_case!(out_of_order_and_duplicate_data_are_reassembled, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     let base = s.pseq;
 
@@ -465,7 +462,7 @@ thread_case!(out_of_order_and_duplicate_data_are_reassembled, {
     assert_eq!(s.read(), b"abcdefghijk");
 });
 
-thread_case!(established_control_edge_cases, {
+engine_thread_test_case!(established_control_edge_cases, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     // Data without the ACK flag is dropped.
     let spec = s.spec(PSH);
@@ -493,7 +490,7 @@ thread_case!(established_control_edge_cases, {
     );
 });
 
-thread_case!(peer_reset_fails_pending_operations, {
+engine_thread_test_case!(peer_reset_fails_pending_operations, {
     let mut s = Session::passive(&[]);
     // Without options the peer's MSS defaults to 536 and no window scale is used.
     assert_eq!(s.syn.mss(), None);
@@ -508,7 +505,7 @@ thread_case!(peer_reset_fails_pending_operations, {
     s.conn.shutdown_connect();
 });
 
-thread_case!(unacknowledged_data_is_retransmitted, {
+engine_thread_test_case!(unacknowledged_data_is_retransmitted, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     wait(s.conn.send(Packet::from_data(&pattern(100)))).expect("send");
     let first = s.expect_data();
@@ -528,7 +525,7 @@ thread_case!(unacknowledged_data_is_retransmitted, {
     s.peer_ack(s.sseq + 200);
 });
 
-thread_case!(fast_retransmit_and_recovery, {
+engine_thread_test_case!(fast_retransmit_and_recovery, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     let una = s.sseq;
     wait(s.conn.send(Packet::from_data(&pattern(4000)))).expect("send");
@@ -555,7 +552,7 @@ thread_case!(fast_retransmit_and_recovery, {
     s.st.wire.assert_no_tcp_for(Duration::from_millis(50));
 });
 
-thread_case!(zero_window_is_probed_until_it_opens, {
+engine_thread_test_case!(zero_window_is_probed_until_it_opens, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     wait(s.conn.send(Packet::from_data(&pattern(100)))).expect("send");
     s.expect_data();
@@ -580,7 +577,7 @@ thread_case!(zero_window_is_probed_until_it_opens, {
     s.peer_ack(s.sseq + 500);
 });
 
-thread_case!(closing_waits_for_data_and_handles_simultaneous_close, {
+engine_thread_test_case!(closing_waits_for_data_and_handles_simultaneous_close, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     wait(s.conn.send(Packet::from_data(b"0123456789"))).expect("send");
     s.expect_data();
@@ -601,7 +598,7 @@ thread_case!(closing_waits_for_data_and_handles_simultaneous_close, {
     s.st.wire.assert_no_tcp_for(Duration::from_millis(30));
 });
 
-thread_case!(unacknowledged_fin_is_retransmitted, {
+engine_thread_test_case!(unacknowledged_fin_is_retransmitted, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     s.conn.close_write();
     let fin = s.st.wire.next_tcp_where(|t| t.has(FIN));
@@ -614,7 +611,7 @@ thread_case!(unacknowledged_fin_is_retransmitted, {
     s.st.wire.clear();
 });
 
-thread_case!(close_wait_ignores_data_and_last_ack_accepts_reset, {
+engine_thread_test_case!(close_wait_ignores_data_and_last_ack_accepts_reset, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     // FIN with data: both delivered, acknowledged together.
     s.peer_send(FIN | PSH | ACK, b"bye");
@@ -635,7 +632,7 @@ thread_case!(close_wait_ignores_data_and_last_ack_accepts_reset, {
     assert!(s.st.wire.next_tcp_where(|t| t.has(RST)).has(RST));
 });
 
-thread_case!(closing_state_accepts_reset, {
+engine_thread_test_case!(closing_state_accepts_reset, {
     let mut s = Session::passive(&mss_ws_options(1000, 0));
     s.conn.close_write();
     s.st.wire.next_tcp_where(|t| t.has(FIN));
@@ -648,7 +645,7 @@ thread_case!(closing_state_accepts_reset, {
     assert!(s.st.wire.next_tcp_where(|t| t.has(RST)).has(RST));
 });
 
-thread_case!(syn_received_handles_bad_ack_and_reset, {
+engine_thread_test_case!(syn_received_handles_bad_ack_and_reset, {
     let st = IpStack::new(HwFeatures::default());
     // SAFETY: the layer is live and no reference into it is live.
     let _l = unsafe { (*st.tcp()).listen(LPORT, 8) };
@@ -663,7 +660,7 @@ thread_case!(syn_received_handles_bad_ack_and_reset, {
     st.wire.assert_no_tcp_for(Duration::from_millis(30));
 });
 
-thread_case!(syn_is_retransmitted_and_connect_can_be_cancelled, {
+engine_thread_test_case!(syn_is_retransmitted_and_connect_can_be_cancelled, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // SAFETY: the layer is live and no reference into it is live.
@@ -678,7 +675,7 @@ thread_case!(syn_is_retransmitted_and_connect_can_be_cancelled, {
     assert_eq!(errno_of(&wait(connected).expect_err("a failure")), Some(111));
 });
 
-thread_case!(connect_fails_when_the_address_does_not_resolve, {
+engine_thread_test_case!(connect_fails_when_the_address_does_not_resolve, {
     let st = IpStack::new(HwFeatures::default());
     let unknown = 0x0a00_004d;
     // SAFETY: the layer is live and no reference into it is live.
@@ -692,7 +689,7 @@ thread_case!(connect_fails_when_the_address_does_not_resolve, {
     assert!(err.downcast_ref::<ArpTimeoutError>().is_some());
 });
 
-thread_case!(connect_retries_after_a_full_resolution_queue, {
+engine_thread_test_case!(connect_retries_after_a_full_resolution_queue, {
     let st = IpStack::new(HwFeatures::default());
     let target = 0x0a00_0042;
     let target_mac = [0x02, 0, 0, 0, 0, 0x42];
@@ -716,7 +713,7 @@ thread_case!(connect_retries_after_a_full_resolution_queue, {
     assert!(wait(connected).is_err());
 });
 
-thread_case!(checksum_and_segmentation_offloads, {
+engine_thread_test_case!(checksum_and_segmentation_offloads, {
     let hw = HwFeatures { tx_csum_l4_offload: true, tx_tso: true, ..HwFeatures::default() };
     let mut s = Session::passive_on(IpStack::new(hw), &mss_ws_options(1000, 0), 60000);
     wait(s.conn.send(Packet::from_data(&pattern(3000)))).expect("send");
@@ -743,7 +740,7 @@ thread_case!(checksum_and_segmentation_offloads, {
     assert!(f.oi.needs_csum);
 });
 
-thread_case!(dropping_a_connection_closes_it, {
+engine_thread_test_case!(dropping_a_connection_closes_it, {
     let s = Session::passive(&mss_ws_options(1000, 0));
     let Session { st, conn, _listener, .. } = s;
     drop(conn);

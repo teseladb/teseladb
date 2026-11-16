@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
+use teseladb::engine::core::future::{Future, make_ready_future};
 use teseladb::engine::core::idle_cpu_handler::{IdleCpuHandler, IdleCpuHandlerResult};
 use teseladb::engine::core::reactor::{
     self, BacktraceBuffer, Reactor, SchedDuration, SchedTimePoint, TaskHistogram, engine,
@@ -21,22 +21,8 @@ use teseladb::engine::core::reactor::{
 };
 use teseladb::engine::core::signal::handle_signal;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::util::noncopyable_function::NoncopyableFunction;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 fn r() -> &'static mut Reactor {
     // SAFETY: called on a reactor thread; the reference is used for one call at a time.
@@ -127,7 +113,7 @@ fn task_histograms_and_backtrace_printers_write_to_the_terminal() {
     immediate.flush();
 }
 
-thread_case!(reactor_clock_statistics_and_settings, {
+engine_thread_test_case!(reactor_clock_statistics_and_settings, {
     let up = r().uptime();
     assert!(up > SchedDuration::default());
     sleep(Duration::from_millis(5)).get().unwrap();
@@ -153,7 +139,7 @@ thread_case!(reactor_clock_statistics_and_settings, {
     assert!(!r().file_exists("/no/such/cov/path").get().unwrap());
 });
 
-thread_case!(idle_cpu_handlers_run_while_the_shard_is_idle, {
+engine_thread_test_case!(idle_cpu_handlers_run_while_the_shard_is_idle, {
     let calls = Rc::new(Cell::new(0u32));
     let c = calls.clone();
     set_idle_cpu_handler(IdleCpuHandler::new(move |work_waiting| {
@@ -170,7 +156,7 @@ thread_case!(idle_cpu_handlers_run_while_the_shard_is_idle, {
     r().set_idle_cpu_handler(IdleCpuHandler::new(|_| IdleCpuHandlerResult::NoMoreWork));
 });
 
-thread_case!(exit_and_destroy_hooks_are_accepted, {
+engine_thread_test_case!(exit_and_destroy_hooks_are_accepted, {
     // They run when the test reactor stops, after the test.
     reactor::internal::at_exit(NoncopyableFunction::<fn() -> Future<()>>::new(|| {
         make_ready_future(())
@@ -190,7 +176,7 @@ unsafe extern "C" {
 
 const SIGUSR2: i32 = 12;
 
-thread_case!(signals_handled_once_run_their_handler_once, {
+engine_thread_test_case!(signals_handled_once_run_their_handler_once, {
     let calls = Rc::new(Cell::new(0u32));
     let c = calls.clone();
     handle_signal(SIGUSR2, NoncopyableFunction::<fn()>::new(move || c.set(c.get() + 1)), true)

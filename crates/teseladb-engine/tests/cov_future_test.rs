@@ -20,27 +20,13 @@ use teseladb::engine::core::future::{
     ReadyFutureMarker, RuntimeError, as_ready_future, current_exception_as_future,
     make_exception_future_ref, make_ready_future,
 };
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 fn runtime(msg: &str) -> ExceptionPtr {
     ExceptionPtr::new(RuntimeError(msg.into()))
 }
 
-thread_case!(error_pointers_compare_print_and_come_from_panics, {
+engine_thread_test_case!(error_pointers_compare_print_and_come_from_panics, {
     let a = runtime("first");
     let same = a.clone();
     assert!(a == same, "clones share the object");
@@ -67,7 +53,7 @@ thread_case!(error_pointers_compare_print_and_come_from_panics, {
     assert!(unknown.to_string().contains("unknown panic"));
 });
 
-thread_case!(standard_errors_describe_themselves, {
+engine_thread_test_case!(standard_errors_describe_themselves, {
     assert_eq!(BadFunctionCall.to_string(), "call to an empty function");
     assert_eq!(BadAlloc.to_string(), "memory allocation failed");
     assert_eq!(BrokenPromise::default().to_string(), "broken promise");
@@ -90,7 +76,7 @@ thread_case!(standard_errors_describe_themselves, {
     assert_eq!(nested.to_string(), nested.what());
 });
 
-thread_case!(internal_helpers_hold_values, {
+engine_thread_test_case!(internal_helpers_hold_values, {
     assert_eq!(get0(7), 7);
     let mut w = UninitializedWrapper::<String>::default();
     w.uninitialized_set("abc".to_string());
@@ -112,7 +98,7 @@ thread_case!(internal_helpers_hold_values, {
     assert!(current_exception_as_future::<u32>(e.clone()).get().unwrap_err() == e);
 });
 
-thread_case!(future_states_hold_values_and_errors, {
+engine_thread_test_case!(future_states_hold_values_and_errors, {
     let pending = FutureState::<String>::new();
     assert!(pending.valid() && !pending.available());
     let ready = FutureState::ready(ReadyFutureMarker, "value".to_string());
@@ -142,7 +128,7 @@ thread_case!(future_states_hold_values_and_errors, {
     current.ignore();
 });
 
-thread_case!(promises_fail_with_built_errors_and_know_their_waiter, {
+engine_thread_test_case!(promises_fail_with_built_errors_and_know_their_waiter, {
     let mut p = Promise::<u32>::new();
     assert!(p.waiting_task().is_none(), "no future yet");
     let f = p.get_future();
@@ -163,7 +149,7 @@ thread_case!(promises_fail_with_built_errors_and_know_their_waiter, {
     assert_eq!(f.get().unwrap(), 2);
 });
 
-thread_case!(continuations_attach_to_futures_held_by_reference, {
+engine_thread_test_case!(continuations_attach_to_futures_held_by_reference, {
     let mut ready = make_ready_future(4u32);
     let doubled = ready.then_wrapped_ref(|f: Future<u32>| f.get().map(|v| v * 2));
     assert_eq!(doubled.get().unwrap(), 8);

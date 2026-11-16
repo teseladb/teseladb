@@ -23,21 +23,7 @@ use teseladb::engine::core::smp::{
     Smp, SmpServiceGroupConfig, create_smp_service_group, destroy_smp_service_group,
 };
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 fn set(v: &[u32]) -> Cpuset {
     v.iter().copied().collect()
@@ -81,7 +67,7 @@ fn cgroup_readers_report_this_container() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-thread_case!(invoke_on_others_skips_the_caller, {
+engine_thread_test_case!(invoke_on_others_skips_the_caller, {
     let calls = Arc::new(AtomicU32::new(0));
     let me = this_shard_id();
     let c = calls.clone();
@@ -110,7 +96,7 @@ thread_local! {
     static MAX_RUNNING: Cell<u32> = const { Cell::new(0) };
 }
 
-thread_case!(service_groups_bound_cross_shard_concurrency, {
+engine_thread_test_case!(service_groups_bound_cross_shard_concurrency, {
     let cfg = SmpServiceGroupConfig {
         max_nonlocal_requests: 1,
         group_name: Some(Sstring::from("cov_group")),
@@ -150,7 +136,7 @@ struct Single {
 
 impl ShardedService for Single {}
 
-thread_case!(single_instance_services_live_on_shard_zero, {
+engine_thread_test_case!(single_instance_services_live_on_shard_zero, {
     let mut s = pin!(Sharded::<Single>::new());
     s.as_mut().start_single(|| Single { value: 7, shard: this_shard_id() }).get().unwrap();
     assert!(s.local_is_initialized());

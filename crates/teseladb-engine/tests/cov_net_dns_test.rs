@@ -17,6 +17,7 @@ use teseladb::engine::net::dns::{
     DnsError, DnsResolver, DnsResolverOptions, OptFamilyDisplay, SrvProto, SrvRecord, dns,
 };
 use teseladb::engine::net::inet_address::{Family, InetAddress};
+use teseladb::engine_thread_test_case;
 
 const T_A: u16 = 1;
 const T_CNAME: u16 = 5;
@@ -221,11 +222,7 @@ fn dns_code(e: &ExceptionPtr) -> Option<i32> {
     e.downcast_ref::<DnsError>().map(|d| d.code)
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(names_and_addresses_resolve_over_udp, {
+engine_thread_test_case!(names_and_addresses_resolve_over_udp, {
     let server = Server::start();
     let mut r = DnsResolver::with_options(&server.options()).expect("a resolver");
     let h = r.get_host_by_name(&s("host.test"), Some(Family::INET)).get().expect("found");
@@ -262,7 +259,7 @@ thread_case!(names_and_addresses_resolve_over_udp, {
     r.close().get().expect("closed");
 });
 
-thread_case!(truncated_answers_are_retried_over_tcp, {
+engine_thread_test_case!(truncated_answers_are_retried_over_tcp, {
     let server = Server::start();
     let mut r = DnsResolver::with_options(&server.options()).expect("a resolver");
     let h = r.get_host_by_name(&s("big.test"), Some(Family::INET)).get().expect("found");
@@ -283,7 +280,7 @@ thread_case!(truncated_answers_are_retried_over_tcp, {
     r.close().get().expect("closed");
 });
 
-thread_case!(srv_records_and_search_domains, {
+engine_thread_test_case!(srv_records_and_search_domains, {
     let server = Server::start();
     let mut opts = server.options();
     opts.domains = Some(vec![s("search.test")]);
@@ -305,7 +302,7 @@ thread_case!(srv_records_and_search_domains, {
     r.close().get().expect("closed");
 });
 
-thread_case!(silent_servers_time_out, {
+engine_thread_test_case!(silent_servers_time_out, {
     let server = Server::start();
     let mut opts = server.options();
     opts.timeout = Some(Duration::from_millis(100));
@@ -318,7 +315,7 @@ thread_case!(silent_servers_time_out, {
     assert!(pending.get().is_err());
 });
 
-thread_case!(resolver_options_are_validated, {
+engine_thread_test_case!(resolver_options_are_validated, {
     let opts =
         DnsResolverOptions { servers: Some(vec![inet("::1")]), ..DnsResolverOptions::default() };
     assert!(DnsResolver::with_options(&opts).is_err());

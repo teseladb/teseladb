@@ -26,22 +26,8 @@ use teseladb::engine::core::sharded::{
 use teseladb::engine::core::shared_ptr::SharedPtr;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::smp::Smp;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::util::closeable::Stoppable;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// A service that knows its container and reports its destruction.
 struct Peer {
@@ -65,7 +51,7 @@ thread_local! {
     static HELD: RefCell<Option<SharedPtr<Peer>>> = const { RefCell::new(None) };
 }
 
-thread_case!(services_see_their_container_and_delay_the_stop, {
+engine_thread_test_case!(services_see_their_container_and_delay_the_stop, {
     let mut s = pin!(Sharded::<Peer>::new());
     let addr = &*s as *const Sharded<Peer> as usize;
     s.as_mut()
@@ -119,7 +105,7 @@ struct Plain {
 
 impl ShardedService for Plain {}
 
-thread_case!(a_failing_constructor_stops_the_built_instances, {
+engine_thread_test_case!(a_failing_constructor_stops_the_built_instances, {
     let last = Smp::count() - 1;
     let mut s = pin!(Sharded::<Plain>::new());
     let e = s
@@ -137,7 +123,7 @@ thread_case!(a_failing_constructor_stops_the_built_instances, {
     assert!(!s.local_is_initialized(), "the instances built were stopped");
 });
 
-thread_case!(calls_to_missing_or_invalid_shards_fail, {
+engine_thread_test_case!(calls_to_missing_or_invalid_shards_fail, {
     let mut s = pin!(Sharded::<Plain>::new());
     // Not started: no local instance.
     // SAFETY: nothing is borrowed from the (missing) instance.
@@ -197,7 +183,7 @@ thread_case!(calls_to_missing_or_invalid_shards_fail, {
     }
 });
 
-thread_case!(parameters_and_wrappers_resolve_on_the_shard, {
+engine_thread_test_case!(parameters_and_wrappers_resolve_on_the_shard, {
     let param = ShardedParameter::new(|| this_shard_id() * 10);
     assert_eq!(param.clone().evaluate(), 0);
     assert_eq!(unwrap_sharded_parameter(&param), 0);
@@ -249,7 +235,7 @@ thread_case!(parameters_and_wrappers_resolve_on_the_shard, {
     );
 });
 
-thread_case!(foreign_pointers_copy_and_release_on_their_owner, {
+engine_thread_test_case!(foreign_pointers_copy_and_release_on_their_owner, {
     let p = ForeignPtr::new(std::sync::Arc::new(5u32));
     assert_eq!(p.get_owner_shard(), 0);
     // SAFETY: on the owner shard the copy is made at once.

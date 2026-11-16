@@ -15,7 +15,6 @@ use teseladb::engine::core::future::{
 };
 use teseladb::engine::core::iostream::OutputStream;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::http::api_docs::{
     ApiDoc, ApiDocs, ApiRegistryBuilder, ApiRegistryBuilder20, ApiRegistryBuilderBase, DEFAULT_DIR,
     DEFAULT_PATH, DocEntry,
@@ -42,20 +41,7 @@ use teseladb::engine::http::transformers::ContentReplace;
 use teseladb::engine::http::url::internal::{path_decode, url_decode};
 use teseladb::engine::json::json_elements::{JsonBase, JsonReturnType, Jsonable};
 use teseladb::engine::net::socket_defs::SocketAddress;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 fn ss(s: &str) -> Sstring {
     Sstring::from(s)
@@ -365,7 +351,7 @@ fn text_handler(text: &'static str) -> Box<dyn HandlerBase> {
     ))
 }
 
-thread_case!(function_handlers_of_every_form_fill_the_reply, {
+engine_thread_test_case!(function_handlers_of_every_form_fill_the_reply, {
     let mut routes = Routes::default();
     routes.put(OperationType::Get, "/handle", text_handler("handled")).unwrap();
     routes
@@ -455,7 +441,7 @@ thread_case!(function_handlers_of_every_form_fill_the_reply, {
     assert_eq!(route(&mut routes, "POST", "/handle")._status, StatusType::NOT_FOUND);
 });
 
-thread_case!(mandatory_parameters_and_exception_handlers_shape_errors, {
+engine_thread_test_case!(mandatory_parameters_and_exception_handlers_shape_errors, {
     let mut routes = Routes::new();
     let mut h = text_handler("with id");
     h.mandatory(&ss("id"));
@@ -519,7 +505,7 @@ thread_case!(mandatory_parameters_and_exception_handlers_shape_errors, {
     assert!(content(&rep).contains("direct"));
 });
 
-thread_case!(default_handler_and_rules_catch_other_paths, {
+engine_thread_test_case!(default_handler_and_rules_catch_other_paths, {
     let mut routes = Routes::new();
     let mut fallback = text_handler("fallback");
     // SAFETY: `fallback` outlives the routes' use of it (the routes are dropped first).
@@ -540,7 +526,7 @@ thread_case!(default_handler_and_rules_catch_other_paths, {
     assert!(rule.get(&ss("/whatever"), &mut params).is_some());
 });
 
-thread_case!(aliases_copy_function_handlers, {
+engine_thread_test_case!(aliases_copy_function_handlers, {
     let mut routes = Routes::new();
     let old = PathDescription::new(&ss("/old"), OperationType::Get, &ss("old"), &[], &[]);
     old.set_json_request_function(
@@ -674,7 +660,7 @@ fn api_doc_objects_format_as_json() {
     assert_eq!(b._base_path, DEFAULT_PATH);
 }
 
-thread_case!(api_registries_list_their_apis, {
+engine_thread_test_case!(api_registries_list_their_apis, {
     let mut routes = Routes::new();
     let builder = ApiRegistryBuilder::new(&ss("/docs/"), &ss("/api-doc"));
     // Without a registry, registering a function does nothing.
@@ -767,7 +753,7 @@ impl FileTransformer for CountingTransformer {
     }
 }
 
-thread_case!(file_handlers_choose_the_file_and_the_reply_kind, {
+engine_thread_test_case!(file_handlers_choose_the_file_and_the_reply_kind, {
     let d = TmpDir::new("files");
     std::fs::write(d.0.join("page.HTML"), "<p>hi</p>").unwrap();
     std::fs::create_dir(d.0.join("sub")).unwrap();

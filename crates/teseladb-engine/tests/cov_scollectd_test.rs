@@ -11,7 +11,6 @@
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::metrics::impl_::DataType;
 use teseladb::engine::core::scollectd::send_notification;
 use teseladb::engine::core::scollectd::{
@@ -25,21 +24,7 @@ use teseladb::engine::core::scollectd::{
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 fn snake_case(variant: &str) -> String {
     let mut out = String::new();
@@ -347,7 +332,7 @@ fn typed_values_carry_their_type_and_instance() {
     assert_eq!(v.values().size(), 1);
 }
 
-thread_case!(polled_metrics_are_queried_enabled_and_removed, {
+engine_thread_test_case!(polled_metrics_are_queried_enabled_and_removed, {
     let gauge_id = id("covquery", "gauge", "level");
     add_polled_metric(&gauge_id, Description::new("the level"), DataType::Gauge, || 4.25f64, true)
         .unwrap();
@@ -396,7 +381,7 @@ thread_case!(polled_metrics_are_queried_enabled_and_removed, {
     assert!(listed("covquery", "registered").is_none());
 });
 
-thread_case!(plugin_instance_metrics_bind_their_ids, {
+engine_thread_test_case!(plugin_instance_metrics_bind_their_ids, {
     let values = [typed_value_impl(
         KnownType::Objects,
         &"live".into(),
@@ -493,7 +478,7 @@ fn has_str(parts: &[Part], type_: u16, s: &str) -> bool {
     parts.contains(&Part::Str(type_, s.to_string()))
 }
 
-thread_case!(senders_send_notifications_explicit_values_and_series, {
+engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, {
     let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     sock.set_nonblocking(true).unwrap();
     let port = sock.local_addr().unwrap().port();
@@ -574,7 +559,7 @@ thread_case!(senders_send_notifications_explicit_values_and_series, {
     assert!(sock.recv(&mut buf).is_err(), "a stopped sender still sends");
 });
 
-thread_case!(disabled_or_bad_options_start_nothing, {
+engine_thread_test_case!(disabled_or_bad_options_start_nothing, {
     let opts = Options::default();
     assert!(!*opts.collectd.get_value());
     assert_eq!(opts.collectd_address.get_value(), "239.192.74.66:25826");

@@ -11,28 +11,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::memory::{
     self, AllocationSite, DisableAbortOnAllocFailureTemporarily, DisableBacktraceTemporarily,
     MallocAllocator, ScopedHeapProfiling, get_heap_profiling_sample_rate,
     is_abort_on_allocation_failure, set_abort_on_allocation_failure,
     set_heap_profiling_sampling_rate, stats,
 };
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 const PAGE: usize = 4096;
 /// A request no shard can meet.
@@ -48,7 +33,7 @@ fn hash_of(site: &AllocationSite) -> u64 {
     h.finish()
 }
 
-thread_case!(byte_allocator_and_guards, {
+engine_thread_test_case!(byte_allocator_and_guards, {
     let a = MallocAllocator;
     let empty = a.allocate(0);
     assert!(!empty.is_null(), "a zero-byte request returns a dangling pointer");
@@ -81,7 +66,7 @@ thread_case!(byte_allocator_and_guards, {
     let _no_backtrace = DisableBacktraceTemporarily::default();
 });
 
-thread_case!(allocation_sites_compare_by_backtrace, {
+engine_thread_test_case!(allocation_sites_compare_by_backtrace, {
     let a = AllocationSite::default();
     let b = a.clone();
     b.count.set(10);
@@ -91,7 +76,7 @@ thread_case!(allocation_sites_compare_by_backtrace, {
     assert!(a.next.get().is_null() && a.prev.get().is_null());
 });
 
-thread_case!(heap_profiling_is_absent_from_this_build, {
+engine_thread_test_case!(heap_profiling_is_absent_from_this_build, {
     set_heap_profiling_sampling_rate(1000);
     {
         let _scope = ScopedHeapProfiling::new(100);
@@ -104,7 +89,7 @@ thread_case!(heap_profiling_is_absent_from_this_build, {
     set_heap_profiling_sampling_rate(0);
 });
 
-thread_case!(page_arithmetic_and_large_allocations, {
+engine_thread_test_case!(page_arithmetic_and_large_allocations, {
     assert!(memory::is_page_aligned(0));
     assert!(memory::is_page_aligned(3 * PAGE));
     assert!(!memory::is_page_aligned(PAGE + 1));

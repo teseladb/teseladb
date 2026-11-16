@@ -9,10 +9,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::http::api_docs::{ApiRegistryBuilder, ApiRegistryBuilder20, DocEntry};
 use teseladb::engine::http::common::httpd::OperationType;
 use teseladb::engine::http::file_handler::{DirectoryHandler, FileHandler};
@@ -21,20 +19,7 @@ use teseladb::engine::http::routes::{Routes, Url};
 use teseladb::engine::http::transformers::ContentReplace;
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::socket_defs::SocketAddress;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 struct Response {
     head: String,
@@ -167,7 +152,7 @@ fn install(routes: &mut Routes, root: &str) {
     b12.register_function(routes, &ss("api1"), &ss("first"), &Sstring::new()).unwrap();
 }
 
-thread_case!(files_and_api_documents_are_streamed, {
+engine_thread_test_case!(files_and_api_documents_are_streamed, {
     let d = TmpDir::new("srv");
     d.write("page.html", "<p>hi</p>");
     std::fs::create_dir(d.0.join("sub")).unwrap();

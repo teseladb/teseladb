@@ -27,21 +27,7 @@ use teseladb::engine::core::reactor_backend::Iovec;
 use teseladb::engine::core::shared_ptr::{make_shared, static_pointer_cast};
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 const BLOCK: usize = 4096;
 
@@ -80,7 +66,7 @@ fn r() -> &'static mut teseladb::engine::core::reactor::Reactor {
     unsafe { &mut *engine() }
 }
 
-thread_case!(files_without_ioctl_fcntl_or_dup_say_so, {
+engine_thread_test_case!(files_without_ioctl_fcntl_or_dup_say_so, {
     let mock = make_shared(MockReadOnlyFile::new(8192));
     // SAFETY: the cast keeps the pointer into the same object.
     let mut f = File::from_impl(unsafe { static_pointer_cast(&mock, |x| x as *mut dyn FileImpl) });
@@ -120,7 +106,7 @@ thread_case!(files_without_ioctl_fcntl_or_dup_say_so, {
     assert_eq!(CancelledError.to_string(), "cancelled");
 });
 
-thread_case!(file_handles_reopen_the_file_on_any_shard, {
+engine_thread_test_case!(file_handles_reopen_the_file_on_any_shard, {
     let d = TmpDir::new("handles");
     let name = d.path("data");
     std::fs::write(&name, vec![b'h'; BLOCK]).unwrap();
@@ -148,7 +134,7 @@ thread_case!(file_handles_reopen_the_file_on_any_shard, {
     f.close().get().unwrap();
 });
 
-thread_case!(append_challenged_files_grow_speculatively_and_trim_on_close, {
+engine_thread_test_case!(append_challenged_files_grow_speculatively_and_trim_on_close, {
     let d = TmpDir::new("sloppy");
     let name = d.path("log");
     let options = FileOpenOptions {
@@ -218,7 +204,7 @@ thread_case!(append_challenged_files_grow_speculatively_and_trim_on_close, {
     assert!(bytes[BLOCK..].iter().all(|&c| c == b'2'));
 });
 
-thread_case!(directory_listings_report_entry_types, {
+engine_thread_test_case!(directory_listings_report_entry_types, {
     let d = TmpDir::new("types");
     std::fs::write(d.path("file"), b"x").unwrap();
     std::os::unix::fs::symlink(d.path("file"), d.path("link")).unwrap();
@@ -265,7 +251,7 @@ unsafe extern "C" {
     fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
 }
 
-thread_case!(block_devices_open_read_only, {
+engine_thread_test_case!(block_devices_open_read_only, {
     // The first block device this process may open, if any (a container may have none).
     let device = std::fs::read_dir("/dev").unwrap().flatten().find_map(|e| {
         let p = e.path();
@@ -289,7 +275,7 @@ thread_case!(block_devices_open_read_only, {
     f.close().get().unwrap();
 });
 
-thread_case!(strict_dma_and_fsync_bypass_settings, {
+engine_thread_test_case!(strict_dma_and_fsync_bypass_settings, {
     // tmpfs has no direct I/O: with strict DMA the open still succeeds there.
     let shm = std::path::Path::new("/dev/shm");
     if shm.is_dir() {

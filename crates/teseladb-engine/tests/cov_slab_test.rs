@@ -12,7 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use teseladb::engine::core::future::{BadAlloc, ExceptionPtr};
+use teseladb::engine::core::future::BadAlloc;
 use teseladb::engine::core::make_task::make_task_ptr;
 use teseladb::engine::core::memory::{
     self, Reclaimer, ReclaimerScope, ReclaimingResult, free_memory, min_free_memory,
@@ -25,21 +25,7 @@ use teseladb::engine::core::slab::{
     IntrusiveList, ListHook, SLAB_MAGIC_NUMBER, SlabAllocator, SlabClass, SlabItem, SlabItemBase,
     SlabPageDesc,
 };
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// Size of a slab page in these tests.
 const SLAB_PAGE: u64 = 64 * 1024;
@@ -186,7 +172,7 @@ fn an_empty_class_has_nothing_to_evict() {
     assert!(e.downcast_ref::<BadAlloc>().is_some());
 }
 
-thread_case!(limited_slabs_fill_their_pages, {
+engine_thread_test_case!(limited_slabs_fill_their_pages, {
     let mut slab = SlabAllocator::<Entry>::new(1.25, 4 * SLAB_PAGE, SLAB_PAGE).unwrap();
     slab.print_slab_classes();
     // Classes start at 96 bytes and are aligned for the entry.
@@ -247,7 +233,7 @@ thread_case!(limited_slabs_fill_their_pages, {
     }
 });
 
-thread_case!(full_classes_evict_their_least_recently_used_item, {
+engine_thread_test_case!(full_classes_evict_their_least_recently_used_item, {
     let (erased, eraser) = recording_eraser();
     let mut slab =
         SlabAllocator::<Entry>::with_erase_func(1.25, SLAB_PAGE, SLAB_PAGE, eraser).unwrap();
@@ -278,7 +264,7 @@ thread_case!(full_classes_evict_their_least_recently_used_item, {
     assert_eq!(erased.borrow().len(), 2);
 });
 
-thread_case!(pinned_classes_get_pages_past_the_limit, {
+engine_thread_test_case!(pinned_classes_get_pages_past_the_limit, {
     // A growth factor of 100 gives the classes 96, 9600 and the page size.
     let (erased, eraser) = recording_eraser();
     let mut slab =
@@ -304,7 +290,7 @@ thread_case!(pinned_classes_get_pages_past_the_limit, {
     }
 });
 
-thread_case!(slab_metrics_count_operations_and_refuse_a_second_slab, {
+engine_thread_test_case!(slab_metrics_count_operations_and_refuse_a_second_slab, {
     let mut slab = SlabAllocator::<Entry>::new(1.25, 2 * SLAB_PAGE, SLAB_PAGE).unwrap();
     let a = slab.create(100, 1).unwrap();
     let b = slab.create(100, 2).unwrap();
@@ -359,7 +345,7 @@ fn reclaim_now() {
     }
 }
 
-thread_case!(reclaimers_run_by_scope_until_they_stop_progressing, {
+engine_thread_test_case!(reclaimers_run_by_scope_until_they_stop_progressing, {
     let sync_calls = Rc::new(Cell::new(0u32));
     let async_calls = Rc::new(Cell::new(0u32));
     let (s, a) = (sync_calls.clone(), async_calls.clone());
@@ -405,7 +391,7 @@ thread_case!(reclaimers_run_by_scope_until_they_stop_progressing, {
     drop(asynchronous);
 });
 
-thread_case!(unlimited_slabs_give_pages_back_under_pressure, {
+engine_thread_test_case!(unlimited_slabs_give_pages_back_under_pressure, {
     let (erased, eraser) = recording_eraser();
     // A limit of 0: unbounded, with a reclaimer.
     let mut slab = SlabAllocator::<Entry>::with_erase_func(1.25, 0, SLAB_PAGE, eraser).unwrap();

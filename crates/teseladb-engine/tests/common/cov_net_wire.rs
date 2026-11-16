@@ -17,7 +17,7 @@
 //! stack against an independent encoding.
 //!
 //! Every waiting helper sleeps on the reactor, so they must run inside an engine thread
-//! (the `thread_case!` of `cov_thread_case.rs`).
+//! (`engine_thread_test_case!`).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};

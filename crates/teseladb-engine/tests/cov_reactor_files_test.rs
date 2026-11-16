@@ -13,23 +13,8 @@ use std::path::PathBuf;
 
 use teseladb::engine::core::api::FollowSymlink;
 use teseladb::engine::core::file_types::{AccessFlags, DirectoryEntryType, FilePermissions};
-use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::reactor::{self, check_direct_io_support, engine};
-use teseladb::engine::core::thread::async_ as thread_async;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// A fresh directory under the system's temporary directory, removed when dropped.
 struct TmpDir(PathBuf);
@@ -58,7 +43,7 @@ fn r() -> &'static mut reactor::Reactor {
     unsafe { &mut *engine() }
 }
 
-thread_case!(hard_links_share_the_inode, {
+engine_thread_test_case!(hard_links_share_the_inode, {
     let d = TmpDir::new("link");
     let a = d.path("a");
     std::fs::write(&a, b"data").unwrap();
@@ -72,7 +57,7 @@ thread_case!(hard_links_share_the_inode, {
     assert!(r().link_file(&d.path("missing"), &d.path("c")).get().is_err());
 });
 
-thread_case!(entry_types_follow_links_on_request, {
+engine_thread_test_case!(entry_types_follow_links_on_request, {
     let d = TmpDir::new("types");
     let f = d.path("file");
     std::fs::write(&f, b"x").unwrap();
@@ -112,7 +97,7 @@ unsafe extern "C" {
     fn dup(fd: i32) -> i32;
 }
 
-thread_case!(ownership_permissions_and_access, {
+engine_thread_test_case!(ownership_permissions_and_access, {
     let d = TmpDir::new("perm");
     let f = d.path("f");
     std::fs::write(&f, b"abc").unwrap();
@@ -134,7 +119,7 @@ thread_case!(ownership_permissions_and_access, {
     assert!(r().file_size(&d.path("missing")).get().is_err());
 });
 
-thread_case!(file_system_information, {
+engine_thread_test_case!(file_system_information, {
     let d = TmpDir::new("fs");
     let p = d.path("");
     let space = r().file_system_space(&p).get().unwrap();
@@ -155,7 +140,7 @@ thread_case!(file_system_information, {
     assert!(check_direct_io_support(&d.path("missing/deeper")).get().is_err());
 });
 
-thread_case!(pipes_carry_bytes, {
+engine_thread_test_case!(pipes_carry_bytes, {
     let (rd, wr) = r().make_pipe().get().unwrap();
     // SAFETY: the duplicated descriptors are owned by the files from here on.
     let mut w = unsafe { std::fs::File::from_raw_fd(dup(wr.get())) };
@@ -172,7 +157,7 @@ thread_case!(pipes_carry_bytes, {
     assert_ne!(a.get(), b.get());
 });
 
-thread_case!(groups_are_looked_up_by_name, {
+engine_thread_test_case!(groups_are_looked_up_by_name, {
     let root = r().getgrnam("root").get().unwrap().expect("the root group exists");
     assert_eq!(root.group_id, 0);
     assert_eq!(root.group_name.as_str(), "root");

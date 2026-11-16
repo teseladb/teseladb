@@ -23,6 +23,7 @@ use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, SocketAddress};
 use teseladb::engine::net::udp::{NativeDatagram, UdpChannelState};
 
+use teseladb::engine_thread_test_case;
 use wire::*;
 
 /// The errno an I/O error carried by `e` holds.
@@ -56,11 +57,7 @@ fn receive(ch: &mut UdpChannel) -> Datagram {
     wait(ch.receive()).expect("a datagram")
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(channels_receive_and_send_datagrams, {
+engine_thread_test_case!(channels_receive_and_send_datagrams, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     let mut ch = bind(&st, 5000).expect("bound");
@@ -109,7 +106,7 @@ thread_case!(channels_receive_and_send_datagrams, {
     assert_eq!(v4(&b.local_address()).1, Ipv4Udp::MIN_ANONYMOUS_PORT + 1);
 });
 
-thread_case!(receive_queues_shutdown_and_close, {
+engine_thread_test_case!(receive_queues_shutdown_and_close, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     // A queue of one datagram drops what arrives while it is full.
@@ -139,7 +136,7 @@ thread_case!(receive_queues_shutdown_and_close, {
     let _ = bind(&st, 6001).expect("free after drop");
 });
 
-thread_case!(large_datagrams_are_fragmented, {
+engine_thread_test_case!(large_datagrams_are_fragmented, {
     let st = IpStack::new(HwFeatures::default());
     st.teach_peer();
     let mut ch = bind(&st, 7000).expect("bound");
@@ -154,7 +151,7 @@ thread_case!(large_datagrams_are_fragmented, {
     assert_eq!(&whole[8..], &payload[..]);
 });
 
-thread_case!(checksum_offload_applies_to_unfragmented_datagrams, {
+engine_thread_test_case!(checksum_offload_applies_to_unfragmented_datagrams, {
     let st = IpStack::new(HwFeatures { tx_csum_l4_offload: true, ..HwFeatures::default() });
     st.teach_peer();
     let mut ch = bind(&st, 7100).expect("bound");
@@ -169,7 +166,7 @@ thread_case!(checksum_offload_applies_to_unfragmented_datagrams, {
     assert!(!f.oi.needs_csum);
 });
 
-thread_case!(sends_wait_for_address_resolution, {
+engine_thread_test_case!(sends_wait_for_address_resolution, {
     let st = IpStack::new(HwFeatures::default());
     let target = 0x0a00_0014;
     let mac = [0x02, 0, 0, 0, 0, 0x14];
@@ -183,7 +180,7 @@ thread_case!(sends_wait_for_address_resolution, {
     assert_eq!(f.udp().payload, b"query");
 });
 
-thread_case!(anonymous_ports_wrap_and_run_out, {
+engine_thread_test_case!(anonymous_ports_wrap_and_run_out, {
     let st = IpStack::new(HwFeatures::default());
     st.ipv4().get_udp().set_queue_size(1);
     let n = (u16::MAX - Ipv4Udp::MIN_ANONYMOUS_PORT) as usize + 1;
@@ -202,7 +199,7 @@ thread_case!(anonymous_ports_wrap_and_run_out, {
     );
 });
 
-thread_case!(channel_state_counts_send_space, {
+engine_thread_test_case!(channel_state_counts_send_space, {
     let mut s = UdpChannelState::new(4);
     assert_eq!(s._queue.max_size(), 4);
     assert!(s.wait_for_send_buffer(100).available());
@@ -211,7 +208,7 @@ thread_case!(channel_state_counts_send_space, {
     assert_eq!(s._user_queue_space.available_units(), 212992);
 });
 
-thread_case!(native_datagrams_parse_their_header, {
+engine_thread_test_case!(native_datagrams_parse_their_header, {
     let dg = udp_datagram(PEER_IP, STACK_IP, 1111, 2222, b"payload");
     let mut d = Datagram::new(Box::new(NativeDatagram::new(
         Ipv4Address::from_u32(PEER_IP),
@@ -338,7 +335,7 @@ fn client(st: &IpStack) -> Dhcp {
     d
 }
 
-thread_case!(dhcp_obtains_a_lease, {
+engine_thread_test_case!(dhcp_obtains_a_lease, {
     let st = IpStack::unconfigured(HwFeatures::default());
     let mut d = client(&st);
     // Before the exchange starts the filter lets every packet through.
@@ -372,7 +369,7 @@ thread_case!(dhcp_obtains_a_lease, {
     drop(d);
 });
 
-thread_case!(dhcp_restarts_on_nak_and_times_out, {
+engine_thread_test_case!(dhcp_restarts_on_nak_and_times_out, {
     let st = IpStack::unconfigured(HwFeatures::default());
     let mut d = client(&st);
     let lease = d.discover(Duration::from_millis(1500));
@@ -407,7 +404,7 @@ thread_case!(dhcp_restarts_on_nak_and_times_out, {
     st.ipv4().set_packet_filter(None);
 });
 
-thread_case!(dhcp_repeats_the_discover_until_the_timeout, {
+engine_thread_test_case!(dhcp_repeats_the_discover_until_the_timeout, {
     let st = IpStack::unconfigured(HwFeatures::default());
     let mut d = client(&st);
     let lease = d.discover(Duration::from_millis(2500));
@@ -419,7 +416,7 @@ thread_case!(dhcp_repeats_the_discover_until_the_timeout, {
     st.ipv4().set_packet_filter(None);
 });
 
-thread_case!(dhcp_renews_a_lease, {
+engine_thread_test_case!(dhcp_renews_a_lease, {
     let st = IpStack::unconfigured(HwFeatures::default());
     let mut d = client(&st);
     let old = Lease { ip: Ipv4Address::from_u32(OFFERED_IP), ..Lease::default() };

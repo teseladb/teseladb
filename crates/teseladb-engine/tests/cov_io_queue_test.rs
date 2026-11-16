@@ -17,25 +17,12 @@ use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::core::with_scheduling_group::with_scheduling_group;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 const CHUNK: usize = 64 * 1024;
 const CHUNKS: usize = 32;
 
-thread_case!(bandwidth_limits_refuse_huge_rates_and_throttle_writes, {
+engine_thread_test_case!(bandwidth_limits_refuse_huge_rates_and_throttle_writes, {
     let sg = create_scheduling_group(Sstring::from("cov-throttle"), Sstring::from("thr"), 100.0)
         .get()
         .unwrap();
@@ -76,7 +63,7 @@ thread_case!(bandwidth_limits_refuse_huge_rates_and_throttle_writes, {
     destroy_scheduling_group(sg).get().unwrap();
 });
 
-thread_case!(io_queues_expose_their_counters_and_groups, {
+engine_thread_test_case!(io_queues_expose_their_counters_and_groups, {
     // SAFETY: on this shard's reactor thread; the queue is the reactor's and outlives the test.
     let q = unsafe { &*(*engine()).get_io_queue(0) };
     #[allow(deprecated)]

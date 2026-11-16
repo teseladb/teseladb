@@ -40,6 +40,7 @@ use teseladb::engine::net::socket_defs::{
     in6_is_addr_v4mapped, sockaddr_un,
 };
 use teseladb::engine::net::unix_address::UnixDomainAddr;
+use teseladb::engine_thread_test_case;
 
 /// The bytes of `p`, fragment after fragment.
 fn bytes(p: &Packet) -> Vec<u8> {
@@ -301,11 +302,7 @@ fn packets_print_as_text_or_hex() {
     assert!(s.starts_with("packet{\"A\\x"), "{s}");
 }
 
-#[macro_use]
-#[path = "common/cov_thread_case.rs"]
-mod thread_case;
-
-thread_case!(packets_are_freed_on_their_home_shard, {
+engine_thread_test_case!(packets_are_freed_on_their_home_shard, {
     let runs = Arc::new(AtomicU32::new(0));
     let r = runs.clone();
     let mut p = Packet::from_data(b"home");

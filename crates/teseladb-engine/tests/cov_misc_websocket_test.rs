@@ -14,12 +14,11 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
+use teseladb::engine::core::future::{Future, make_ready_future};
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::loop_::{StopIteration, repeat};
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine::websocket::common::websocket::{
@@ -27,20 +26,7 @@ use teseladb::engine::websocket::common::websocket::{
 };
 use teseladb::engine::websocket::parser::websocket::{FrameHeader, Opcodes, WebsocketParser};
 use teseladb::engine::websocket::server::websocket::Server;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// A client frame (masked with a zero key) carrying `payload`, with the length field in
 /// the 7-, 16- or 64-bit form as the size requires.
@@ -242,7 +228,7 @@ fn off_reactor<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     }
 }
 
-thread_case!(a_tcp_server_echoes_long_messages_and_closes, {
+engine_thread_test_case!(a_tcp_server_echoes_long_messages_and_closes, {
     let mut server = Box::pin(Server::default());
     // SAFETY: the server is not moved out of its pin.
     unsafe { server.as_mut().get_unchecked_mut() }.register_handler("", echo_handler());

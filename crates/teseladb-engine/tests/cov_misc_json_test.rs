@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use teseladb::engine::core::future::{ExceptionPtr, Future, RuntimeError};
 use teseladb::engine::core::iostream::{DataSink, OutputStream, OutputStreamOptions};
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::core::vector_data_sink::VectorDataSink;
 use teseladb::engine::json::formatter::{
     DateTime, Formatter, JsonPair, JsonWrite, JsonWriteIn, State, ToJson,
@@ -22,20 +21,7 @@ use teseladb::engine::json::json_elements::{
     JsonVoid, Jsonable, json_base_add, stream_object,
 };
 use teseladb::engine::net::packet::Packet;
-use teseladb::engine_test_case;
-
-/// A test case whose body runs in an engine thread, where it can wait on futures with `get()`.
-macro_rules! thread_case {
-    ($name:ident, $body:block) => {
-        engine_test_case!($name, {
-            thread_async(move || {
-                // A failed assertion is caught on the thread's own stack and fails the test.
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || $body))
-                    .map_err(ExceptionPtr::from_panic)
-            })
-        });
-    };
-}
+use teseladb::engine_thread_test_case;
 
 /// Runs `f` on a stream that collects what is written into memory, closes the stream when
 /// `close` is set, and returns `f`'s result with the text written.
@@ -172,7 +158,7 @@ fn objects_check_mandatory_members_and_skip_unset_ones() {
     drop(bw);
 }
 
-thread_case!(unformattable_values_fail_their_writes, {
+engine_thread_test_case!(unformattable_values_fail_their_writes, {
     let (r, _) = with_stream(|out| f64::NAN.write_json(out).get(), true);
     assert!(r.is_err());
 
@@ -204,7 +190,7 @@ thread_case!(unformattable_values_fail_their_writes, {
     assert_eq!(text, "\"custom\"");
 });
 
-thread_case!(objects_and_empty_values_stream_to_the_output, {
+engine_thread_test_case!(objects_and_empty_values_stream_to_the_output, {
     // The empty object closes the stream itself.
     let (r, text) = with_stream(|out| Box::new(JsonVoid).write(out).get(), false);
     assert!(r.is_ok());
