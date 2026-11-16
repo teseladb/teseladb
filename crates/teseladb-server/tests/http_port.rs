@@ -80,7 +80,7 @@ fn a_node_serves_healthz_and_cors_from_its_cluster_parameter() {
     // The clients' port answers beside it.
     assert!(ok(&c.run("db", Document::new().with("insert", "c").with("documents", docs(0..2)))));
     assert_eq!(batch(&c.run("db", Document::new().with("find", "c")), "firstBatch").len(), 2);
-    drop(node.stop());
+    node.stop();
 }
 
 /// An HTTP port that cannot be bound stops the node's start: the administration and clients'

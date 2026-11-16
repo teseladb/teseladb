@@ -142,8 +142,8 @@ fn made<D: Disk + Send + 'static>(
 
 /// Starts a node whose every disk fails as `fails` says on `text`; the error it gives.
 fn start_failing(text: &'static str, fails: Fails) -> NodeError {
-    let made = Arc::new(Mutex::new(0u32));
-    let count = made.clone();
+    let opened = Arc::new(Mutex::new(0u32));
+    let count = opened.clone();
     let open = move || {
         *count.lock().unwrap() += 1;
         Ok(FaultyDisk::new(text, fails))

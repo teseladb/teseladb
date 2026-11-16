@@ -240,7 +240,7 @@ fn a_dropped_stream_resumes_after_its_last_event_without_losing_or_repeating_a_c
     let (st, _) =
         call(at, "GET", "/v1/databases/app/collections/c/changeStream?fullDocument=bogus", "");
     assert_eq!(st, 400);
-    drop(node.stop());
+    node.stop();
 }
 
 /// A stream ends when its cursor does: dropping the collection sends `invalidate` and the last
@@ -316,5 +316,5 @@ fn a_stream_ends_with_its_cursor_or_with_an_error_event() {
         assert!(Instant::now() < end, "the stream's cursor was never killed");
         std::thread::sleep(Duration::from_millis(200));
     }
-    drop(node.stop());
+    node.stop();
 }

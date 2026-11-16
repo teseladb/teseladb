@@ -116,6 +116,18 @@ impl TlsStream {
         }
     }
 
+    /// Every byte from the peer until it closes.
+    pub fn recv_to_end(&mut self) -> Result<Vec<u8>, String> {
+        let mut all = Vec::new();
+        loop {
+            let piece = self.recv()?;
+            if piece.is_empty() {
+                return Ok(all);
+            }
+            all.extend_from_slice(&piece);
+        }
+    }
+
     /// Sends `close_notify`.
     pub fn close(&mut self) {
         if self.conn.close().is_ok() {

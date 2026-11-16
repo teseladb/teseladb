@@ -575,10 +575,10 @@ fn a_rotation_reaches_every_shard_before_it_resolves() {
         make_coroutine(async move {
             let (port, _, _) = start(Some(port_tls.clone())).await?;
             let at = port.addrs()[0];
-            let c = cc.clone();
+            let (c, first_leaf) = (cc.clone(), o.clone());
             let open = off_shard(move || {
                 for _ in 0..8 {
-                    assert_eq!(served_leaf(at, &c), o);
+                    assert_eq!(served_leaf(at, &c), first_leaf);
                 }
                 let mut s = connect(at);
                 let conn = handshake(&mut s, c.clone(), 8);

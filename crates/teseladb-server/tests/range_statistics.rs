@@ -93,5 +93,5 @@ fn a_compaction_gives_the_planner_statistics_and_it_picks_without_a_trial() {
     let r = run(&mut c, Document::new().with("find", "c").with("filter", filter()));
     let found = batch(&r, "firstBatch");
     assert_eq!(found.len(), 1, "{found:?}");
-    drop(n.stop());
+    n.stop();
 }

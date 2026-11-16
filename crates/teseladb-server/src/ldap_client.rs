@@ -127,10 +127,14 @@ fn host_port(text: &str, default: u16) -> Result<(String, u16), String> {
 /// error that ended it.
 type Ended = Result<Option<Vec<String>>, LdapError>;
 
+/// A PLAIN login's start: its conversation, the first request, and the groups the cache
+/// already has.
+type LoginStart = (Login, Vec<u8>, Option<Vec<String>>);
+
 /// How the groups' search of a user starts.
 enum GroupsStart {
-    /// The conversation and its first request.
-    Ask(Login, Vec<u8>),
+    /// The conversation and its first request (the conversation boxed: it is large).
+    Ask(Box<Login>, Vec<u8>),
     /// The answer, without a server: no template, the cache's, or a name the mapping does not
     /// take.
     Answered(Option<Vec<RoleName>>),
@@ -253,11 +257,7 @@ impl LdapServer {
     }
 
     /// The conversation of a PLAIN login of `user`, and the groups the cache already has.
-    fn login_start(
-        &self,
-        user: &str,
-        password: &[u8],
-    ) -> Result<Option<(Login, Vec<u8>, Option<Vec<String>>)>, String> {
+    fn login_start(&self, user: &str, password: &[u8]) -> Result<Option<LoginStart>, String> {
         let (mut login, first) =
             match Login::start(&self.inner.mapping, user, password, self.query()) {
                 Ok(l) => l,
@@ -303,7 +303,7 @@ impl LdapServer {
             return Ok(GroupsStart::Answered(Some(as_roles(g))));
         }
         match Login::groups_of(&self.inner.mapping, user, self.query(), template) {
-            Ok((login, first)) => Ok(GroupsStart::Ask(login, first)),
+            Ok((login, first)) => Ok(GroupsStart::Ask(Box::new(login), first)),
             Err(LdapError::NoUser) => Ok(GroupsStart::Answered(Some(Vec::new()))),
             Err(e) => Err(e.to_string()),
         }
@@ -399,7 +399,7 @@ mod on_engine {
 
         async fn groups_async(&self, user: &str) -> Result<Option<Vec<RoleName>>, String> {
             let (mut login, first) = match self.groups_start(user)? {
-                GroupsStart::Ask(login, first) => (login, first),
+                GroupsStart::Ask(login, first) => (*login, first),
                 GroupsStart::Answered(answer) => return Ok(answer),
             };
             let mut last = String::from(NO_SERVER);

@@ -236,7 +236,7 @@ fn the_switches_close_each_part_of_the_http_port_and_the_service_user_passes() {
     // The default tenant is held by no switch of a tenant.
     let own = key_of(&create_key(&mut root, "root", false));
     assert_eq!((rest(at, &own), mcp(at, &own)), (200, 200));
-    drop(node.stop());
+    node.stop();
 }
 
 /// The body of `r` as text.
@@ -272,7 +272,7 @@ fn a_tenant_users_rest_cursor_follows_its_next_link() {
     let cursor = next.split('?').next().unwrap().to_owned();
     let closed = send(at, Request::new("DELETE", &cursor).header("Authorization", &bearer));
     assert_eq!(closed.status, 200, "{}", text(&closed));
-    drop(node.stop());
+    node.stop();
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn the_key_past_max_api_keys_is_refused_whoever_asks_and_the_service_user_has_no
     limits(&node, &["--max-api-keys", "3"]);
     becomes("the higher cap", &true, || ok(&create_key(&mut ann, "ann", false)));
     assert_eq!(code(&create_key(&mut ann, "ann", false)), Some(UNAUTHORIZED));
-    drop(node.stop());
+    node.stop();
 }
 
 /// The `$where` that runs [`TURNS`] turns for each document.
@@ -410,5 +410,5 @@ fn the_tenant_max_time_ms_caps_its_commands_but_not_a_change_stream_or_a_commit(
         .with("maxTimeMS", LARGE_MAX_TIME_MS);
     let r = ann.run("admin", commit);
     assert!(ok(&r), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }

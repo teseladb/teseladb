@@ -271,5 +271,5 @@ fn rest_and_wire_answer_the_same() {
         }
     }
     pair.same_contents(&format!("seed {seed}, at the end"));
-    drop(node.stop());
+    node.stop();
 }

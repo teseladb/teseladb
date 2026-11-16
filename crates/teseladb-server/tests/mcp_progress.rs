@@ -124,7 +124,7 @@ fn each_batch_read_sends_its_progress_before_the_result() {
     assert_eq!(batch(&all_docs, "firstBatch").len(), 3000, "the call wrote nothing");
     let result = last.get("result").and_then(|r| r.get("structuredContent")).unwrap();
     assert_eq!(result.get("queryResultsCount").and_then(Value::as_i64), Some(3000));
-    drop(node.stop());
+    node.stop();
 }
 
 #[test]
@@ -178,5 +178,5 @@ fn a_cancelled_call_has_its_operation_killed() {
     let text = String::from_utf8_lossy(&raw);
     assert!(text.contains("interrupted") || text.contains("Interrupted"), "{text}");
     assert!(started.elapsed() < READY);
-    drop(node.stop());
+    node.stop();
 }

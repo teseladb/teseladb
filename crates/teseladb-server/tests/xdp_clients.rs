@@ -22,7 +22,7 @@ mod linux {
     use teseladb_bson::{Document, RawDoc, Value};
     use teseladb_crypto::ec::NamedCurve;
     use teseladb_io::engine::disk::DiskPlace;
-    use teseladb_server::client_listener::{ClientConfig, ClientListener, NodeState};
+    use teseladb_server::client_listener::{ClientConfig, NodeState};
     use teseladb_server::node::{Node, NodeConfig};
     use teseladb_server::tls_port::{TlsMode, TlsPort};
     use teseladb_sys::netns::{self, NetNs};

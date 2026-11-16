@@ -159,7 +159,7 @@ fn a_single_node_runs_the_crud_commands() {
     assert_eq!(r.get("n"), Some(&Value::Int32(0)));
     let r = c.run("app", Document::new().with("nosuch", 1));
     assert_eq!(r.get("code"), Some(&Value::Int32(59)));
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -194,7 +194,7 @@ fn the_node_reaps_idle_cursors_and_expired_sessions() {
     assert_eq!(r.get("code"), Some(&Value::Int32(43)), "{r:?}");
     let r = c.run("app", more(kept));
     assert_eq!(batch(&r, "nextBatch").len(), 4, "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -253,7 +253,7 @@ fn an_undecodable_mutation_is_refused_by_the_range() {
         }
     });
     assert!(matches!(r, Err(DataError::Range(RangeError::Mutation(_)))), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// A write or a transaction's request that reaches the range's leader after its deadline is not
@@ -307,7 +307,7 @@ fn a_request_past_its_deadline_is_refused_by_the_range() {
     };
     let r = node.data(DataReq::Remote(DATA_RANGE, push), READY);
     assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Record(_)))), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// Two clients that increment the same document at once (006 T023, FR-014): each update is
@@ -345,7 +345,7 @@ fn concurrent_updates_of_one_document_are_both_applied() {
         panic!("{r:?}")
     };
     assert_eq!(d.get("n"), Some(&Value::Int32(2 * EACH)));
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -383,7 +383,7 @@ fn writes_that_match_nothing_in_an_empty_collection_answer_at_once() {
         assert!(ok(&r) && r.get("writeErrors").is_none(), "{cmd:?}: {r:?}");
         assert!(started.elapsed() < Duration::from_secs(2), "{cmd:?} took {:?}", started.elapsed());
     }
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -496,7 +496,7 @@ fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
     assert!(matches!(r, Ok(DataReply::Remote(RemoteReply::Intents { .. }))), "{r:?}");
     let r = c.run("held", update);
     assert_eq!(r.get("nModified"), Some(&Value::Int32(1)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// A plain insert that runs into an intent on another key than its document's, the entry of a
@@ -578,7 +578,7 @@ fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
     let Some(Value::Array(errors)) = r.get("writeErrors") else { panic!("{r:?}") };
     let Value::Document(e) = &errors[0] else { panic!("{r:?}") };
     assert_eq!(e.get("code"), Some(&Value::Int32(11000)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// The reaper of abandoned transactions (008 FR-007, T011): a transaction whose coordinator died
@@ -648,7 +648,7 @@ fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
         .with("maxTimeMS", 200);
     let r = c.run("held", update);
     assert_eq!(r.get("nModified"), Some(&Value::Int32(1)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// A read that meets the intent of a live transaction (008 FR-003, T013) does not wait: it pushes
@@ -714,7 +714,7 @@ fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     };
     assert_eq!(done.status, TxnStatus::Committed);
     assert!(done.commit_ts > hlc(read_at), "the commit went below the read: {done:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// What a plain insert answers when a transaction holds an intent that adds the entry of a unique
@@ -811,7 +811,7 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
         assert!(matches!(ender.join().expect("the ender"), Ok(DataReply::Remote(_))));
         r
     });
-    drop(node.stop());
+    node.stop();
     r
 }
 
@@ -928,7 +928,7 @@ fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
     let r = c.run("joins", aggregate);
     assert_eq!(r.get("code"), Some(&Value::Int32(MAX_TIME_MS_EXPIRED)), "{r:?}");
     assert!(started.elapsed() < Duration::from_secs(5), "it ran {:?}", started.elapsed());
-    drop(node.stop());
+    node.stop();
 }
 
 /// The reads of users and roles of a command see what any node wrote before them (013 T058, FR-009), as
@@ -1058,7 +1058,7 @@ fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
         assert_eq!(batch(&r, "firstBatch").len(), 1, "the version below the intent: {r:?}");
     }
     assert_eq!(applied(), before, "the pushes wrote to the range");
-    drop(node.stop());
+    node.stop();
 }
 
 /// The tests run on Linux only (D-177): elsewhere the program does nothing.

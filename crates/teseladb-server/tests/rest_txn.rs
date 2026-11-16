@@ -149,5 +149,5 @@ fn a_transaction_applies_every_operation_or_none_and_retries_like_with_transacti
     ] {
         assert_eq!(call(at, "POST", TXN, bad).0, 400, "{bad}");
     }
-    drop(node.stop());
+    node.stop();
 }

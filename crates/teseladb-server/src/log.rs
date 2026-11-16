@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::outlet::Outlet;
-use crate::outlet::dest::{Dest, StreamDest, WriterDest};
+use crate::outlet::dest::{StreamDest, WriterDest};
+use crate::outlet::{Dest, Outlet};
 
 /// Lines `getLog` keeps of each log, as the reference server's in-memory logs do.
 pub const RAM_LOG_LINES: usize = 1024;

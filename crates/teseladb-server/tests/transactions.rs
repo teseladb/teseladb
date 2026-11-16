@@ -177,7 +177,7 @@ fn a_transaction_is_seen_whole_and_only_once_it_commits() {
     // An abort after the commit is refused.
     let r = c.run("admin", end("abortTransaction", 5, 1));
     assert_eq!(code(&r), Some(&Value::Int32(256)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -209,7 +209,7 @@ fn an_aborted_transaction_leaves_nothing_and_the_session_rules_hold() {
     // Its statements are over.
     let r = c.run(DB, stmt(insert(2), 6, 3, false));
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -228,7 +228,7 @@ fn two_transactions_that_write_one_document_conflict() {
     assert_eq!(code(&r), Some(&Value::Int32(251)), "{r:?}");
     let r = c.run("admin", end("commitTransaction", 7, 1));
     assert!(ok(&r), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// Between its statements a transaction keeps its heartbeat (008 FR-007): idle for longer than the
@@ -243,7 +243,7 @@ fn an_idle_transaction_keeps_beating_and_commits() {
     let r = c.run("admin", end("commitTransaction", 9, 1));
     assert!(ok(&r), "{r:?}");
     assert_eq!(find_all(&mut c, find()).len(), 1);
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -281,7 +281,7 @@ fn a_collection_created_in_a_transaction_shows_with_its_commit() {
     let r = c.run("admin", end("abortTransaction", 9, 2));
     assert!(ok(&r), "{r:?}");
     assert_eq!(listed(&mut other, "never"), 0);
-    drop(node.stop());
+    node.stop();
 }
 
 /// A `snapshot` read at an earlier `atClusterTime` sees the documents as they were then, and its
@@ -308,7 +308,7 @@ fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
     let at = Document::new().with("level", "snapshot").with("atClusterTime", early);
     let r = c.run(DB, find().with("readConcern", at));
     assert_eq!(code(&r), Some(&Value::Int32(272)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 /// A read on another node with the `afterClusterTime` of a write, and the `$clusterTime` a driver

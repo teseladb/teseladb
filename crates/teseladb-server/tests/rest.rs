@@ -221,7 +221,7 @@ fn story_one_over_the_http_port() {
     });
     let (st, _, r) = call(at, "GET", "/v1/openapi.json", "");
     assert_eq!((st, r.header("content-type")), (200, Some("application/json")));
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]
@@ -235,7 +235,7 @@ fn a_node_with_authentication_refuses_requests_without_a_credential() {
     assert_eq!(send(at, req).status, 401);
     // `/healthz` needs none.
     assert_eq!(call(at, "GET", "/healthz", "").0, 200);
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]

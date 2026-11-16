@@ -260,6 +260,7 @@ fn ca_only(ca: &std::path::Path) -> Result<Arc<ClientConfig>, String> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_owned()).collect()

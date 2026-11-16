@@ -100,7 +100,7 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     assert!(ok(&r), "{r:?}");
     let r = c.run("db", Document::new().with("find", "c").with("maxTimeMS", -1));
     assert_eq!(r.get("code"), Some(&Value::Int32(2)), "{r:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 #[cfg(target_os = "linux")]

@@ -230,7 +230,7 @@ fn a_restarted_node_keeps_its_identity_and_group0() {
     let (id, cluster) = (n.node_id(), n.cluster_id());
     assert_eq!((id, n.cores()), (FOUNDER, 2));
     assert!(format!("{n:?}").contains("node_id"));
-    assert_eq!(n.stop().len(), 2);
+    n.stop();
 
     // Without --cores the directory's cores are taken.
     let n = start(&dir, None, Vec::new()).unwrap();

@@ -397,7 +397,7 @@ fn tokens_of_the_provider_open_rest_and_mcp_each_with_its_own_audience() {
     assert_eq!(r.status, 200);
     assert!(String::from_utf8_lossy(&r.body).contains("notifications/progress"));
     assert_eq!(progress(&rest_token).status, 401);
-    drop(node.stop());
+    node.stop();
 }
 
 /// A node whose HTTP port listens only on a wildcard address does not know the URI clients reach
@@ -443,7 +443,7 @@ fn without_a_known_uri_mcp_takes_no_token_until_the_resource_is_set() {
     let (st, meta) = metadata(at);
     assert_eq!(st, 200);
     assert_eq!(meta.get("resource"), Some(&Bson::from(fixed)));
-    drop(node.stop());
+    node.stop();
 }
 
 /// 019 FR-020: `teseladb mcp --uri https://…` reaches a node whose HTTP port has TLS, trusting
@@ -484,7 +484,7 @@ fn mcp_over_stdio_reaches_a_node_over_tls() {
     assert!(code == 1 && msg.contains("--tlsCAFile"), "{msg}");
     let (code, msg) = fails(&McpOpts { uri: "ftp://h".to_owned(), ..o.clone() });
     assert!(code == 1 && msg.contains("https:// or http://"), "{msg}");
-    drop(node.stop());
+    node.stop();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -599,6 +599,6 @@ fn a_client_certificate_logs_in_as_its_x509_user_on_the_http_port() {
     let refused = McpOpts { certificate_key_file: Some(pem_of("nobody.pem", &nobody)), ..o };
     let (code, _, err) = relay(&refused);
     assert_eq!((code, err.as_str()), (1, "teseladb mcp: the node refused the credential (401)\n"));
-    drop(node.stop());
+    node.stop();
     std::fs::remove_dir_all(&dir).unwrap();
 }

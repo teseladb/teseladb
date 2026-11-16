@@ -226,7 +226,7 @@ pub fn run(
 
 /// Where the log goes: standard error, or `--logpath` (replaced unless `--logappend`), written by
 /// the log's writer on shard 0 without holding any shard (023 FR-018).
-fn log_output(o: &StartOpts) -> io::Result<Box<dyn outlet::dest::Dest>> {
+fn log_output(o: &StartOpts) -> io::Result<Box<dyn outlet::Dest>> {
     let Some(path) = &o.logpath else { return Ok(Box::new(outlet::dest::StreamDest::stderr()?)) };
     if !o.logappend {
         drop(File::create(path)?);
@@ -725,7 +725,7 @@ pub fn start(
     {
         Some(Err(e)) => {
             let _ = writeln!(err, "teseladb: {e}");
-            drop(node.stop());
+            node.stop();
             return 1;
         }
         p => p.and_then(Result::ok),

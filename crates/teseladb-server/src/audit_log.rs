@@ -23,8 +23,8 @@ use teseladb_auth::audit_crypt::AuditEncryption;
 use teseladb_bson::Document;
 use teseladb_wire::commands::audit::{Audit, SharedAuditor, Sink};
 
-use crate::outlet::Outlet;
-use crate::outlet::dest::{Dest, FileDest, StreamDest, SyslogDest};
+use crate::outlet::dest::{FileDest, StreamDest, SyslogDest};
+use crate::outlet::{Dest, Outlet};
 
 /// Permissions of the audit file, as the reference server creates it.
 const FILE_MODE: u32 = 0o600;

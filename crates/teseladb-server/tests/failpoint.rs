@@ -102,7 +102,7 @@ fn a_failpoint_closes_or_holds_only_its_connection() {
     drop(gone);
     std::thread::sleep(Duration::from_millis(400));
     assert!(ok(&admin.run("admin", Document::new().with("ping", 1))));
-    drop(node.stop());
+    node.stop();
 }
 
 /// `POST target` with `body` on the HTTP port at `at`: status and body.
@@ -192,5 +192,5 @@ fn a_failpoint_holds_or_fails_a_rest_request() {
     std::thread::sleep(Duration::from_millis(100));
     drop(given_up);
     std::thread::sleep(Duration::from_millis(900));
-    drop(node.stop());
+    node.stop();
 }

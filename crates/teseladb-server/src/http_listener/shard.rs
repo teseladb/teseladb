@@ -425,11 +425,11 @@ fn start(ctx: &Rc<Ctx>, incoming: Incoming) {
     // A service that panics answers `503`, as one whose future fails.
     let reply = catch_unwind(AssertUnwindSafe(move || service.serve(request, caller, c)))
         .unwrap_or_else(|p| make_exception_future(ExceptionPtr::from_panic(p)));
-    run_in_background(request(ctx.clone(), id, reply, cors_fields, cancel));
+    run_in_background(answer_request(ctx.clone(), id, reply, cors_fields, cancel));
 }
 
 /// One request: its answer, whole or in pieces, delivered to the connection.
-fn request(
+fn answer_request(
     ctx: Rc<Ctx>,
     id: u32,
     reply: Future<Reply>,

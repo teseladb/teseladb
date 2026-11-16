@@ -565,5 +565,5 @@ fn the_tenant_subcommands_take_every_option_as_text_and_json() {
     let (code, _, err) = admin(&at, &["tenant", "limits", "nobody"]);
     assert_eq!(code, 1);
     assert!(err.contains("nobody"), "{err}");
-    drop(node.stop());
+    node.stop();
 }

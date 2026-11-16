@@ -252,7 +252,7 @@ impl Pollable {
     /// Writes `bytes` whole; a failure loses them.
     fn send(self: &Rc<Self>, bytes: Vec<u8>) -> Future<()> {
         let mut p = Box::new(packet(bytes));
-        let sent = self.fd.borrow_mut().write_all(&mut *p);
+        let sent = self.fd.borrow_mut().write_all(&mut p);
         let keep = Rc::clone(self);
         sent.then_wrapped(move |r: Future<()>| {
             drop((p, keep));

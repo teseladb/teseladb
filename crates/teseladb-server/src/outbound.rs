@@ -10,7 +10,7 @@
 //! [`NO_ENGINE`].
 
 use std::sync::mpsc;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
@@ -166,13 +166,14 @@ pub fn future<T: 'static>(
 /// Background work started by [`spawn`].
 #[derive(Debug)]
 pub struct Spawned {
-    done: mpsc::Receiver<()>,
+    /// In a mutex only so that a node holding it can be shared between threads; `join` takes it.
+    done: Mutex<mpsc::Receiver<()>>,
 }
 
 impl Spawned {
     /// Waits until the work ended (or the engine dropped it).
     pub fn join(self) {
-        let _ = self.done.recv();
+        let _ = self.done.into_inner().unwrap_or_else(PoisonError::into_inner).recv();
     }
 }
 
@@ -192,7 +193,7 @@ pub fn spawn(f: impl FnOnce() -> Future<()> + Send + 'static) -> Result<Spawned,
     if !runner()?.post(task, Class::Background) {
         return Err(STOPPED.to_owned());
     }
-    Ok(Spawned { done })
+    Ok(Spawned { done: Mutex::new(done) })
 }
 
 /// The engine of a test process: the engine's test runner, whose reactor runs on a thread of its

@@ -171,7 +171,7 @@ fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
         }
         other => panic!("{other:?}"),
     }
-    drop(node.stop());
+    node.stop();
 }
 
 /// `$natural: -1` with a limit reads back from the newest entries: the newest two of writes
@@ -208,7 +208,7 @@ fn the_newest_entries_come_first() {
     assert_eq!(newest(&mut c, Document::new(), 2, 1), [o(1), o(0)]);
     let inserts = Document::new().with("op", "i");
     assert_eq!(newest(&mut c, inserts, 5, 2), [o(0)]);
-    drop(node.stop());
+    node.stop();
 }
 
 /// How long the writer of [`a_copy_with_the_oplog_replays_into_the_same_data`] writes, and the

@@ -1,6 +1,9 @@
 //! What the client-port tests share: a node's configuration and a client that sends commands
 //! as `OP_MSG` and reads the replies.
 
+// Each test binary that includes this module uses only part of it.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};

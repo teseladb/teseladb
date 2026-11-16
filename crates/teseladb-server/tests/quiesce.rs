@@ -195,7 +195,7 @@ mod linux {
 
     /// The tests in order: the node first, with its own engine, stopped when the test ends (D4:
     /// one engine per process), then the ports on the engine the process starts for them.
-    pub fn run() {
+    pub fn run_all() {
         the_quiesce_of_a_node_ends_once_its_clients_go_quiet_and_never_past_its_longest();
         a_quiescing_port_answers_every_hello_with_shutdown_in_progress_and_runs_the_rest();
         a_waiting_hello_answers_at_once_when_the_quiesce_starts();
@@ -204,5 +204,5 @@ mod linux {
 
 fn main() {
     #[cfg(target_os = "linux")]
-    linux::run();
+    linux::run_all();
 }

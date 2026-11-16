@@ -80,7 +80,7 @@ fn a_write_whose_connection_drops_applies_once_when_retried() {
     let second = Client::new(&node).run("app", insert());
     assert_eq!(first.get("n"), second.get("n"));
     assert!(second.get("writeErrors").is_none(), "{second:?}");
-    drop(node.stop());
+    node.stop();
 }
 
 #[test]
@@ -97,5 +97,5 @@ fn a_read_sent_again_reads_the_same_documents() {
     let b = batch(&Client::new(&node).run("app", find()), "firstBatch");
     assert_eq!(a.len(), 4);
     assert_eq!(a, b);
-    drop(node.stop());
+    node.stop();
 }

@@ -111,18 +111,16 @@ impl Side for PortSide {
         self.tls.sniff()
     }
 
-    fn serve(self: Rc<Self>, conn: Taken) -> impl std::future::Future<Output = ()> + 'static {
-        async move {
-            let socket = Rc::new(RefCell::new(conn.socket));
-            let key = self.next.get();
-            self.next.set(key + 1);
-            self.open.borrow_mut().push((key, Rc::clone(&socket)));
-            let peer = conn.peer.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-            let link = Link { socket, peer, tls: conn.tls };
-            // A connection that fails only loses itself.
-            let _ = (self.handler)(link).await;
-            self.open.borrow_mut().retain(|(k, _)| *k != key);
-        }
+    async fn serve(self: Rc<Self>, conn: Taken) {
+        let socket = Rc::new(RefCell::new(conn.socket));
+        let key = self.next.get();
+        self.next.set(key + 1);
+        self.open.borrow_mut().push((key, Rc::clone(&socket)));
+        let peer = conn.peer.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
+        let link = Link { socket, peer, tls: conn.tls };
+        // A connection that fails only loses itself.
+        let _ = (self.handler)(link).await;
+        self.open.borrow_mut().retain(|(k, _)| *k != key);
     }
 
     /// Shuts the open connections down, which ends what their handlers wait for.
