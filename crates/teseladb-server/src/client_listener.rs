@@ -501,12 +501,6 @@ impl Default for Hooks {
 
 /// A named thread that is not joined.
 fn spawn_thread(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    let run: Box<dyn FnOnce() + Send> = Box::new(move || {
-        // A connection's commands run on this thread: on the fast cores, not left on an
-        // efficiency core while the node's other threads are busy (H-049 of the native tests).
-        let _ = teseladb_sys::favor_current_thread();
-        run();
-    });
     command_thread(name).spawn(with_command_stack(run)).map(drop)
 }
 
@@ -636,7 +630,9 @@ impl ClientListener {
                 tls: cfg.tls.clone(),
                 auth: cfg.auth,
                 mechanisms: cfg.mechanisms.clone(),
-                arena: crate::block_memory::HugeRequests::for_port(),
+                // Requests are read into the engine's memory, on huge pages when the system
+                // has them (023 FR-014).
+                arena: None,
                 diag: diag.clone(),
             },
             open: open.clone(),
@@ -656,12 +652,8 @@ impl ClientListener {
         };
         #[cfg(target_os = "linux")]
         let xdp = crate::client_xdp::start(cfg, &addrs, xdp_parts);
-        #[cfg(not(target_os = "linux"))]
-        let xdp = crate::client_xdp::unsupported(cfg);
         #[cfg(target_os = "linux")]
         let rings = ring_count(cfg);
-        #[cfg(not(target_os = "linux"))]
-        let rings: Option<usize> = None;
         let acceptor = match rings {
             #[cfg(target_os = "linux")]
             Some(n) => {

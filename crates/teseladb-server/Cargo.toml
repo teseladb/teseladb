@@ -135,6 +135,10 @@ harness = false
 name = "write_block"
 harness = false
 
+[[test]]
+name = "stop"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

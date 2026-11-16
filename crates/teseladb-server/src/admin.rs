@@ -324,11 +324,19 @@ pub struct NodeAdmin {
     /// The data directory, whose file system `/metrics` measures (FR-038); `None` for a node kept
     /// in memory.
     pub data_dir: Option<std::path::PathBuf>,
+    /// The node's engine, whose metrics and allocator `/metrics` shows (023 FR-028, FR-030,
+    /// `contracts/metrics.md`); `None` for a backend without one.
+    pub engine: Option<teseladb_io::engine::EngineProbe>,
 }
 
 /// Writes the state of the machine (007 FR-038): the disk of `data_dir`, the process's resident
-/// memory and how long the clients' commands took.
-fn machine_metrics(out: &mut String, data_dir: Option<&std::path::Path>) {
+/// memory and how long the clients' commands took; with `engine`, the memory its allocator holds
+/// (`teseladb_memory_allocated_bytes`) and its own metrics.
+fn machine_metrics(
+    out: &mut String,
+    data_dir: Option<&std::path::Path>,
+    engine: Option<&teseladb_io::engine::EngineProbe>,
+) {
     if let Some((used, total)) = data_dir.and_then(|d| teseladb_sys::host::fs_usage(d).ok()) {
         let rows = [
             (
@@ -360,14 +368,17 @@ fn machine_metrics(out: &mut String, data_dir: Option<&std::path::Path>) {
             teseladb_wire::commands::agg_memory::held(),
         ),
     ];
-    if let Some(bytes) = teseladb_sys::host::allocated() {
-        let help = "Bytes the process's allocator holds for live allocations.";
-        parts.push(("teseladb_memory_allocated_bytes", help, bytes));
+    if let Some(e) = engine {
+        let help = "Bytes the engine's allocator holds for the shards.";
+        parts.push(("teseladb_memory_allocated_bytes", help, e.allocated_bytes()));
     }
     for (name, help, n) in parts {
         let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {n}");
     }
     teseladb_wire::commands::durations::render(out);
+    if let Some(e) = engine {
+        out.push_str(&e.metrics());
+    }
 }
 
 impl NodeAdmin {
@@ -876,7 +887,7 @@ impl AdminBackend for NodeAdmin {
         lsm_metrics(&mut out, &lsm);
         crate::pushed::metrics(&mut out);
         crate::tenant_limits::metrics(&self.handle.routes, &mut out);
-        machine_metrics(&mut out, self.data_dir.as_deref());
+        machine_metrics(&mut out, self.data_dir.as_deref(), self.engine.as_ref());
         if let Some(h) = &self.http_metrics {
             out.push_str(&h.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render());
         }

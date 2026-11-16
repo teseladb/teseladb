@@ -1,6 +1,9 @@
 //! The `teseladb` binary as a library (specification 001, FR-017 and FR-018): command line,
 //! logging, a core's logic over the I/O runtime, node start-up, and the development cluster and
 //! the tests' nodes as processes of their own ([`procs`]). `main.rs` only calls [`run`].
+//!
+//! Linux only (D-177): on every other target the crate is empty and the binary says so.
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
@@ -12,14 +15,11 @@ pub mod admin_apikeys;
 pub mod admin_http;
 pub mod admin_tenant_state;
 pub mod admin_tenants;
-pub mod affinity;
-pub mod allocator;
 pub mod at_rest;
 pub mod audit_log;
 pub mod authz_lease;
 pub mod backend;
 pub mod backup;
-pub mod block_memory;
 pub mod catalog_ops;
 pub mod certs;
 pub mod checksums;
@@ -142,8 +142,10 @@ pub fn ready_line(format: Format, node_id: u64, cluster_id: &[u8; 16], peer: &st
     }
 }
 
-/// The program `teseladb`: installs the stop handler with `install`, then runs `args` (see [`run`]);
-/// a handler that cannot be installed ends it with 1.
+/// The program `teseladb`: for a command that runs an engine ([`runs_engine`]) it first readies
+/// the stop signals with `install` (they are blocked until the engine's shard 0 takes them, 023
+/// FR-031), then runs `args` (see [`run`]); signals that cannot be readied end it with 1. The
+/// other commands keep the system's default: a stop signal ends them.
 pub fn program(
     args: &[String],
     out: &mut dyn Write,
@@ -151,11 +153,19 @@ pub fn program(
     install: &dyn Fn() -> io::Result<()>,
     stop: &dyn Fn() -> bool,
 ) -> i32 {
-    if let Err(e) = install() {
+    if runs_engine(args)
+        && let Err(e) = install()
+    {
         let _ = writeln!(err, "teseladb: cannot handle stop signals: {e}");
         return 1;
     }
     run(args, out, err, stop)
+}
+
+/// Whether the command line `args` runs an engine, whose shard 0 handles the stop signals:
+/// `start`, `dev` (its parent keeps a one-shard engine for them) and the nodes of `dev`.
+pub fn runs_engine(args: &[String]) -> bool {
+    matches!(cli::parse(args), Ok(Command::Start(_) | Command::Dev(_) | Command::DevMember(_)))
 }
 
 /// Runs the command line `args` (without the program name) and returns the exit code: 0 correct,
@@ -237,10 +247,12 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
         data_dir: Some(o.dbpath.clone()),
         tags: o.tags.clone(),
         memory_limit: o.memory_limit,
-        affinity: match &o.cpu_list {
-            Some(l) => affinity::Affinity::List(l.clone()),
-            None => affinity::Affinity::Allowed,
+        // The shards on `--cpu-list`, or on the CPUs the process may use (023 FR-027).
+        placement: match &o.cpu_list {
+            Some(l) => teseladb_io::engine::Placement::List(l.clone()),
+            None => teseladb_io::engine::Placement::Allowed,
         },
+        files: o.direct_io,
         // The block cache takes its whole part of the node's memory (012 FR-013), and the new
         // blocks go with the codec asked for or the default one (004 FR-023).
         lsm: teseladb_lsm::LsmConfig {
@@ -659,13 +671,15 @@ pub fn start(
         client.kerberos = kerberos;
     }
     let data = o.dbpath.clone();
-    // The disk executor and O_DIRECT (012 FR-003, FR-007), decided once and logged.
-    let choice = match teseladb_io::node_disk::choose(
-        o.io_executor,
-        o.direct_io,
-        o.io_uring_sqpoll,
-        &data,
-    ) {
+    // O_DIRECT (012 FR-003), decided once and logged; the engine picks its own backend (023
+    // FR-033).
+    let direct = match o.direct_io {
+        teseladb_io::engine::DirectIo::Auto => teseladb_io::node_disk::DirectIo::Auto,
+        teseladb_io::engine::DirectIo::On => teseladb_io::node_disk::DirectIo::On,
+        teseladb_io::engine::DirectIo::Off => teseladb_io::node_disk::DirectIo::Off,
+    };
+    let auto = teseladb_io::node_disk::IoExecutor::Auto;
+    let choice = match teseladb_io::node_disk::choose(auto, direct, false, &data) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");
@@ -800,7 +814,7 @@ fn secure(
             candidates.clone().find(|c| leaf.verify_signed_by(&c.public_key).is_ok()).cloned()
         });
         if let Some(issuer) = issuer {
-            ocsp_staple::spawn(tls.clone(), issuer, teseladb_sys::signal::stop_requested);
+            ocsp_staple::spawn(tls.clone(), issuer, teseladb_io::engine::signals::stop_requested);
         }
     }
     let peer_tls = pki::peer_tls(&pki, o.tls.fips_mode);
@@ -960,7 +974,7 @@ pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
     let _ = out.write_all(ready_line(format, id, &node.cluster_id(), &peer).as_bytes());
     let _ = out.flush();
     log.info("node ready", &[("node_id", &id), ("cores", &node.cores())]);
-    // Where the cores run (012 FR-006): every core is pinned or none is (`affinity::core_cpus`).
+    // Where the cores run (012 FR-006): every shard is pinned or none is (`engine::shard_cpus`).
     let cpus: Vec<String> = node.cpus().iter().flatten().map(ToString::to_string).collect();
     if !cpus.is_empty() {
         log.info("cores' CPUs", &[("cpus", &cpus.join(","))]);

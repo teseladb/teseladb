@@ -58,6 +58,11 @@ fn node_config(
         // The administration port on a loopback port the system chooses, which the log names:
         // what splits and merges ranges by hand (007 FR-020).
         admin_listen: Some(SocketAddr::from((LOOPBACK, 0))),
+        // The machine's default memory of a node, shared by the cluster's nodes: each process
+        // has an engine of its own (023 FR-028).
+        memory_limit: Some(
+            teseladb_io::engine::resources::node_memory(None, o.cores) / u64::from(o.nodes.max(1)),
+        ),
         ..NodeConfig::default()
     }
 }
@@ -150,7 +155,24 @@ pub fn member(m: &DevMember, out: &mut dyn Write, stop: &dyn Fn() -> bool) -> i3
     }
 }
 
-/// Runs the development cluster, its nodes processes of `program`, until `stop()` says so.
+/// Memory of the parent's engine, which only takes the stop signals.
+const SIGNAL_ENGINE_MEMORY: u64 = 64 << 20;
+
+/// The parent's engine (023 FR-031, FR-032): one shard, unpinned, that takes `SIGINT` and
+/// `SIGTERM` for the parent, which runs no node.
+fn signal_engine() -> io::Result<teseladb_io::engine::NodeEngine> {
+    let cfg = teseladb_io::engine::EngineConfig {
+        shards: 1,
+        memory: Some(SIGNAL_ENGINE_MEMORY),
+        direct_io: teseladb_io::engine::DirectIo::Off,
+        ..teseladb_io::engine::EngineConfig::default()
+    };
+    teseladb_io::engine::NodeEngine::start(&cfg)
+}
+
+/// Runs the development cluster, its nodes processes of `program`, until `stop()` says so (the
+/// parent's stop signals, which it passes to its nodes by stopping them) or one of its nodes
+/// ends: then it stops the others and ends with 1 (023 FR-032).
 pub fn run(
     program: &Path,
     o: &DevOpts,
@@ -160,13 +182,22 @@ pub fn run(
 ) -> i32 {
     let log = Logger::new(Level::Info, Format::Text, Box::new(io::stderr()));
     log.warn("development cluster: nothing is durable", &[]);
-    let nodes = match start(program, o, None) {
-        Ok(n) => n,
+    let signals = match signal_engine() {
+        Ok(e) => e,
         Err(e) => {
-            let _ = writeln!(err, "teseladb: {e}");
+            let _ = writeln!(err, "teseladb: cannot handle stop signals: {e}");
             return 1;
         }
     };
+    let mut nodes = match start(program, o, None) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = writeln!(err, "teseladb: {e}");
+            signals.stop();
+            return 1;
+        }
+    };
+    let ids: Vec<u64> = nodes.iter().map(|n| n.node_id().0).collect();
     for n in &nodes {
         let id = n.node_id();
         let line =
@@ -178,12 +209,24 @@ pub fn run(
         }
     }
     let _ = out.flush();
-    while !stop() {
+    let code = loop {
+        if stop() {
+            break 0;
+        }
+        let ended = nodes.iter_mut().zip(&ids).find_map(|(n, id)| Some((*id, n.ended()?)));
+        if let Some((id, status)) = ended {
+            log.error(
+                "a node of the development cluster ended",
+                &[("node_id", &id), ("status", &status)],
+            );
+            break 1;
+        }
         std::thread::sleep(crate::STOP_POLL);
-    }
+    };
     log.info("stopping", &[]);
     for n in nodes {
         n.stop();
     }
-    0
+    signals.stop();
+    code
 }

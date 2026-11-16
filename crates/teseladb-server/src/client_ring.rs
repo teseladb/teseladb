@@ -241,8 +241,6 @@ impl Pool {
 
     /// A pool thread: runs jobs with its own backend until idle too long.
     fn work(self: Arc<Self>) {
-        // Commands run on the fast cores (H-049 of the native tests).
-        let _ = teseladb_sys::favor_current_thread();
         let parts = &self.parts;
         let n = self.made.load(Ordering::Relaxed) as u64;
         let mut backend = parts

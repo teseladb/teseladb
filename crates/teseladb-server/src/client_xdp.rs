@@ -141,12 +141,6 @@ pub(crate) fn start(cfg: &ClientConfig, addrs: &[SocketAddr], parts: XdpParts) -
     }
 }
 
-/// The port of `cfg` on a system without AF_XDP: the reason, if it asked for one.
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn unsupported(cfg: &ClientConfig) -> XdpState {
-    XdpState { status: cfg.xdp.as_ref().map(|i| Err(format!("{i}: AF_XDP is Linux only"))) }
-}
-
 #[cfg(all(test, target_os = "linux"))]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {

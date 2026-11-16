@@ -216,12 +216,13 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
             return 2;
         }
     };
-    if let Err(e) = teseladb_sys::signal::install_stop_handler() {
+    // The stop signals wait for the engine's shard 0 (023 FR-031).
+    if let Err(e) = teseladb_sys::process::block_stop_signals() {
         println!("{ERROR} io cannot handle stop signals: {e}");
         return 1;
     }
     let cfg = a.apply(recipe(&a));
-    let stop = teseladb_sys::signal::stop_requested;
+    let stop = teseladb_io::engine::signals::stop_requested;
     let input = Box::new(BufReader::new(io::stdin()));
     let out = &mut io::stdout();
     let served = match (&a.dir, a.param(DISK)) {
