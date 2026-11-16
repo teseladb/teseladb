@@ -129,6 +129,11 @@ harness = false
 name = "search"
 harness = false
 
+# Its own `main`: the segments' files written from engine threads, in one engine (D4).
+[[test]]
+name = "search_segments_engine"
+harness = false
+
 [[test]]
 name = "sessions"
 harness = false

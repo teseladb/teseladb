@@ -185,6 +185,10 @@ const DUMP_EVERY: usize = 1024;
 /// Where a node keeps the segments of its search indexes, one immutable file per index (FR-012):
 /// the server writes them under `<dbpath>/search`; the logic only hands over the bytes, as
 /// [`Shipped::encode`] makes them.
+///
+/// `put` and `remove` are called with the lock of the node's sessions held, so they must not
+/// wait for the disk: a store may write later, in their order, as long as `get` gives what the
+/// last of them left. `get` is called without that lock and may wait.
 pub trait SegmentStore: Send + Sync + std::fmt::Debug {
     /// Replaces the file of index `id` with `bytes`, whole or not at all.
     fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String>;
@@ -333,11 +337,12 @@ impl SearchIndexes {
         }
     }
 
-    /// The file of index `id` when it was written out of memory, which then comes back.
-    fn read_back(&mut self, id: &[u8; 12]) -> Option<Shipped> {
-        self.out.remove(id)?;
-        let bytes = self.store.as_ref()?.get(id).ok()??;
-        Shipped::decode(&bytes).ok().map(|(_, s)| s)
+    /// Takes index `id` out of those written out of memory, with what it serves and the store
+    /// its file comes back from ([`read_back`]), which the caller reads without the lock of the
+    /// node's sessions: a read may wait for the disk.
+    fn take_out(&mut self, id: &[u8; 12]) -> Option<(Served, std::sync::Arc<dyn SegmentStore>)> {
+        let served = self.out.remove(id)?;
+        Some((served, std::sync::Arc::clone(self.store.as_ref()?)))
     }
 
     /// Keeps the segments of each index in `store` from now on (FR-012).
@@ -475,6 +480,14 @@ fn definition_of(
     Ok((segments, completed, view))
 }
 
+/// The segments of index `id` in its file of `store`, written there when the index went out of
+/// memory (012 FR-013). Called without the lock of the node's sessions: the store may wait for
+/// the disk.
+fn read_back(store: &dyn SegmentStore, id: &[u8; 12]) -> Option<Shipped> {
+    let bytes = store.get(id).ok()??;
+    Shipped::decode(&bytes).ok().map(|(_, s)| s)
+}
+
 /// Brings the segments of `entry` on `coll` (of namespace `ns`) up to the read's mark and runs
 /// `f` over them. Without a builder (FR-014), it first builds them when this node
 /// has none for the definition version; with one, it serves what the builder built, an older
@@ -495,14 +508,32 @@ pub fn with_index<B: Backend + ?Sized, R>(
     let mut built = match borrow(backend, shared, &entry.id)? {
         Some(b) => b,
         None => {
-            // An index written out of memory comes back from its file (012 FR-013).
-            let mut indexes = lock(shared);
-            let Some(shipped) = indexes.search.read_back(&entry.id) else {
-                return Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC")));
+            // An index written out of memory comes back from its file (012 FR-013), read
+            // without the lock; meanwhile it counts as held, so another query waits for it.
+            let out = {
+                let mut indexes = lock(shared);
+                let out = indexes.search.take_out(&entry.id);
+                if let Some((served, _)) = &out {
+                    indexes.search.borrowed.insert(entry.id, served.clone());
+                }
+                out
             };
-            let built = fresh(coll, entry, Some(shipped))?;
-            indexes.search.borrowed.insert(entry.id, built.served());
-            built
+            let shipped = out.and_then(|(_, store)| read_back(&*store, &entry.id));
+            let built = match shipped {
+                Some(s) => fresh(coll, entry, Some(s)),
+                None => Err(query_error(state_message(entry, coll, ns, "INITIAL_SYNC"))),
+            };
+            let mut indexes = lock(shared);
+            match built {
+                Ok(b) => {
+                    indexes.search.borrowed.insert(entry.id, b.served());
+                    b
+                }
+                Err(e) => {
+                    indexes.search.borrowed.remove(&entry.id);
+                    return Err(e);
+                }
+            }
         }
     };
     let caught =
@@ -657,17 +688,19 @@ fn with_built<B: Backend + ?Sized, R>(
     synonyms: &[(String, Vec<Document>)],
     f: impl FnOnce(&Segments, &BTreeMap<Vec<u8>, Document>) -> R,
 ) -> Result<R, CommandError> {
-    let (taken, received) = {
+    let (taken, received, out) = {
         let mut indexes = lock(shared);
         let taken = indexes.search.built.remove(&entry.id);
         let received = indexes.search.received.remove(&entry.id);
-        // An index written out of memory comes back from its file (012 FR-013).
-        let received = match (&taken, received) {
-            (None, None) => indexes.search.read_back(&entry.id),
-            (_, r) => r,
+        let out = match (&taken, &received) {
+            (None, None) => indexes.search.take_out(&entry.id),
+            _ => None,
         };
-        (taken, received)
+        (taken, received, out)
     };
+    // An index written out of memory comes back from its file (012 FR-013), read without the
+    // lock.
+    let received = received.or_else(|| out.and_then(|(_, store)| read_back(&*store, &entry.id)));
     let (mut built, fresh_build) = match taken {
         Some(b) if b.version == entry.version => (b, false),
         _ => (fresh(coll, entry, received)?, true),
