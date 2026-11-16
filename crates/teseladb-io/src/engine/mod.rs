@@ -8,7 +8,8 @@
 //! optionally with TLS ([`connect`]), and a conversation of requests and answers over one
 //! ([`link`]). The clients' port runs on it too: its connections are tasks of the shards
 //! ([`client_port`]), their commands run in engine threads ([`stacks`]) and wait for the cores'
-//! answers ([`answer`], [`wait`]).
+//! answers ([`answer`], [`wait`]). Every port of the node takes its connections the same way
+//! ([`accept`]).
 //!
 //! A deadline that passes fails the operation with an [`std::io::Error`] of kind
 //! [`TimedOut`](std::io::ErrorKind::TimedOut), as the blocking clients' socket timeouts did.
@@ -27,6 +28,8 @@ use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint};
 #[cfg(target_os = "linux")]
 use teseladb::engine::core::with_timeout::with_timeout;
 
+#[cfg(target_os = "linux")]
+pub mod accept;
 pub mod answer;
 #[cfg(target_os = "linux")]
 pub mod blocking;
