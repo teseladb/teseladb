@@ -12,11 +12,11 @@
 //! their keys, every [`REPORT_OPS`] reads or [`REPORT_AGE`].
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::block_files::BlockFiles;
 use teseladb_io::engine::wait;
 
 use teseladb_hlc::Hlc;
@@ -89,8 +89,6 @@ const MAX_BLOCKS: usize = 8;
 /// Blocks one part of a scan reads from their files before it stops at the documents it has
 /// and the scan goes on with another part (005 FR-033): a megabyte of blocks at a time.
 const MAX_SCAN_BLOCKS: usize = 64;
-/// Files a worker keeps open between reads.
-const MAX_FILES: usize = 64;
 /// The longest a scan waits on its thread for a view that holds the writes answered before it
 /// began (005 FR-034); past it the scan goes to the core, and the worker does not wait for that
 /// range again for as long.
@@ -184,8 +182,9 @@ fn look_until<T>(
 pub(super) struct Outside {
     /// The LSM version of each core this worker read last (by core).
     caches: Vec<ViewCache>,
-    /// Files it read blocks from, by the path the core's disk names them with.
-    files: BTreeMap<String, File>,
+    /// Files it read blocks from: in an engine thread, its holds of its shard's open files,
+    /// read with the engine's DMA reads (023 FR-010).
+    files: BlockFiles,
     /// Reads served and not reported yet, by core and range.
     tallies: BTreeMap<(usize, GroupId), Tally>,
     /// The routing table as this worker last read it.
@@ -199,7 +198,7 @@ impl Outside {
     /// Drops the LSM versions and the open files this worker kept (see `release_outside`).
     fn release(&mut self) {
         self.caches.iter_mut().for_each(ViewCache::release);
-        self.files.clear();
+        self.files.release();
     }
 }
 
@@ -212,20 +211,12 @@ struct Tally {
     since: Instant,
 }
 
-/// The bytes of the block `need` names, from its file under `dir`, keeping the file open in
-/// `files`; `None` if they cannot be read here.
-fn block(files: &mut BTreeMap<String, File>, dir: &Path, need: &BlockNeed) -> Option<Vec<u8>> {
-    if !files.contains_key(&need.path) {
-        if files.len() >= MAX_FILES {
-            files.clear();
-        }
-        let file = File::open(dir.join(&need.path)).ok()?;
-        files.insert(need.path.clone(), file);
-    }
-    let file = files.get(&need.path)?;
-    let mut buf = vec![0; usize::try_from(need.len).ok()?];
-    let got = teseladb_io::files::read_up_to(file, &mut buf, need.offset).ok()?;
-    buf.truncate(got);
+/// The bytes of the block `need` names, from its file under `dir`, holding the file in `files`;
+/// `None` if they cannot be read here. In an engine thread the read goes through the engine's
+/// I/O queue and parks the thread, not its shard (023 FR-010).
+fn block(files: &mut BlockFiles, dir: &Path, need: &BlockNeed) -> Option<Vec<u8>> {
+    let len = usize::try_from(need.len).ok()?;
+    let buf = files.read(dir, &need.path, need.offset, len).ok()?;
     BLOCKS.fetch_add(1, Ordering::Relaxed);
     Some(buf)
 }
@@ -624,12 +615,13 @@ mod release_tests {
         outside.caches.resize_with(2, ViewCache::default);
         shared.view_cached(&mut outside.caches[1]);
         let file = std::env::current_exe().expect("this test's file");
-        let open = File::open(&file).expect("open");
-        outside.files.insert(file.display().to_string(), open);
+        let (dir, name) = (file.parent().unwrap(), file.file_name().unwrap().to_str().unwrap());
+        outside.files.read(dir, name, 0, 16).expect("a block of a file");
         assert!(outside.caches[1].holds());
+        assert_eq!(outside.files.held(), 1);
         outside.release();
         assert!(outside.caches.iter().all(|c| !c.holds()), "no version held");
-        assert!(outside.files.is_empty(), "no file open");
+        assert_eq!(outside.files.held(), 0, "no file open");
     }
 }
 

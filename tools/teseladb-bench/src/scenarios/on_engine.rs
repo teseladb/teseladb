@@ -16,6 +16,11 @@ pub use other::{BenchDisk, run, sleep};
 /// one process (the tests) take turns instead of failing.
 static ENGINE_TURN: Mutex<()> = Mutex::new(());
 
+/// The variable that sets the mode of the scenarios' engine files (`auto`, `on` or `off`, as a
+/// node's `--direct-io`): `off` keeps the kernel's page cache, so the reads of the files compare
+/// with reads that do not go through the engine.
+pub const DIRECT_IO_VAR: &str = "TESELADB_BENCH_DIRECT_IO";
+
 /// The process's turn to run an engine, held until dropped.
 pub fn engine_turn() -> MutexGuard<'static, ()> {
     ENGINE_TURN.lock().unwrap_or_else(PoisonError::into_inner)
@@ -40,9 +45,10 @@ mod linux {
     use teseladb::engine::core::thread::async_ as in_thread;
     use teseladb_io::IoClass;
     use teseladb_io::engine::disk::{DiskPlace, ShardDisk};
-    use teseladb_io::engine::{EngineConfig, NodeEngine};
+    use teseladb_io::engine::{DirectIo, EngineConfig, NodeEngine};
     use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
 
+    use super::DIRECT_IO_VAR;
     use crate::scenarios::msg;
 
     /// Runs `scenario` in an engine thread of shard 0 of an engine of its own, and stops the
@@ -55,8 +61,8 @@ mod linux {
         scenario: impl FnOnce() -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
         let _turn = super::engine_turn();
-        let e = NodeEngine::start(&EngineConfig { shards: 1, ..EngineConfig::default() })
-            .map_err(msg)?;
+        let cfg = EngineConfig { shards: 1, direct_io: direct_io()?, ..EngineConfig::default() };
+        let e = NodeEngine::start(&cfg).map_err(msg)?;
         let (tx, rx) = mpsc::sync_channel(1);
         let ran = e.run_on(0, move || {
             drop(in_thread(move || {
@@ -69,6 +75,16 @@ mod linux {
         };
         e.stop();
         result
+    }
+
+    /// The mode of the engine's files, as a node's `--direct-io` (023 FR-033): from
+    /// [`DIRECT_IO_VAR`], `auto` without it.
+    fn direct_io() -> Result<DirectIo, String> {
+        match std::env::var(DIRECT_IO_VAR) {
+            Err(_) => Ok(DirectIo::Auto),
+            Ok(v) => DirectIo::parse(&v)
+                .ok_or_else(|| format!("{DIRECT_IO_VAR}: {v:?} is not auto, on or off")),
+        }
     }
 
     /// Waits `d` in the scenario's engine thread, letting the shard run meanwhile.

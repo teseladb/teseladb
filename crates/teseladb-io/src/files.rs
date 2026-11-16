@@ -1,8 +1,9 @@
 //! Blocking file access for the node's code that runs before its engine or on threads of its own,
 //! off the shards: the node's identity and data format, read before the engine starts because they
-//! size it ([`BlockingDisk`]); the client workers that read a block outside the cores (005
-//! FR-028); the files of the search segments (011 FR-012); the spilled runs of aggregations (010
-//! FR-010). The cores' files and the device log go through the engine (`engine::disk`); the
+//! size it ([`BlockingDisk`]); a block read outside the cores by a thread that is not a shard
+//! (005 FR-028, `engine::block_files`, which reads with the engine in an engine thread); the
+//! writer of the search segments' files, which runs off the shards (011 FR-012); the spilled
+//! runs of aggregations (010 FR-010). The cores' files and the device log go through the engine (`engine::disk`); the
 //! callers on threads of their own move onto the shards with their phases of 023.
 
 use std::collections::HashMap;

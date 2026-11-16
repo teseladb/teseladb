@@ -32,6 +32,8 @@ use teseladb::engine::core::with_timeout::with_timeout;
 pub mod accept;
 pub mod answer;
 #[cfg(target_os = "linux")]
+pub mod block_files;
+#[cfg(target_os = "linux")]
 pub mod blocking;
 #[cfg(target_os = "linux")]
 pub mod client_port;
