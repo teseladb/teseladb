@@ -842,14 +842,8 @@ fn secure(
         let issuer = chain.first().and_then(|leaf| {
             candidates.clone().find(|c| leaf.verify_signed_by(&c.public_key).is_ok()).cloned()
         });
-        if let Some(issuer) = issuer {
-            ocsp_staple::spawn(
-                tls.clone(),
-                issuer,
-                teseladb_io::engine::signals::stop_requested,
-                Some(certificates.clone()),
-            );
-        }
+        // The node keeps the staple fresh on its engine once it runs.
+        cfg.ocsp_issuer = issuer;
     }
     cfg.admin_tls = Some(admin_http::AdminTls {
         port: admin_tls,

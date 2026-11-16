@@ -167,39 +167,44 @@ pub fn stapled(port: &TlsPort, staple: Option<Vec<u8>>) -> Option<TlsPort> {
     Some(TlsPort::new(port.mode, Some(with)))
 }
 
-/// Keeps `port`'s staple fresh in a thread of its own while `stop` says no, for a certificate
-/// that names a responder; each new staple goes to the shards of the ports `certs` rotates.
-pub fn spawn(
-    port: TlsPort,
-    issuer: Certificate,
-    stop: fn() -> bool,
-    certs: Option<std::sync::Arc<crate::certs::Certificates>>,
-) {
-    let Some(leaf) = port.config().and_then(|c| c.identity.chain.first().cloned()) else { return };
-    if ocsp::responder_urls(&leaf).is_empty() {
-        return;
-    }
-    std::thread::spawn(move || {
-        let ask = |url: &str, id: &CertId| fetch(url, id, FETCH_TIMEOUT);
-        while !stop() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-            let r = round(&leaf, &issuer, now, &ask);
-            if let Some(next) = stapled(&port, r.staple) {
-                port.replace(&next);
-                // A port of an engine that stopped serves nothing more.
-                let _ = certs.as_ref().map(|c| c.publish());
-            }
-            let wait = (r.next_secs - now).clamp(1, RETRY_SECS * 60);
-            for _ in 0..wait {
-                if stop() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
+/// What a node stapler publishes to after each new staple: the ports on the engine's shards now,
+/// each with the settings it serves.
+pub type ShardPorts =
+    std::sync::Arc<dyn Fn() -> Vec<(crate::shard_tls::ShardTls, TlsPort)> + Send + Sync>;
+
+thread_local! {
+    /// The node's stapler, on shard 0.
+    static NODE_STAPLER: std::cell::RefCell<Option<on_shard::Stapler>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts the node's stapler of `port` as a task of shard 0 of the process's engine (023
+/// FR-023): each new staple goes in `port` and to the shards of `ports()`. Whether it started:
+/// not for a certificate that names no responder, a port without TLS or without an engine.
+pub fn start_node_stapler(port: TlsPort, issuer: Certificate, ports: ShardPorts) -> bool {
+    let started = crate::shard_client::block_on(move || {
+        let provider: Box<dyn Fn() -> Vec<(crate::shard_tls::ShardTls, TlsPort)>> =
+            Box::new(move || ports());
+        let stapler = on_shard::Stapler::start_with(port, issuer, provider, None);
+        let started = stapler.is_some();
+        NODE_STAPLER.with(|n| *n.borrow_mut() = stapler);
+        teseladb::engine::core::future::make_ready_future(started)
     });
+    started.unwrap_or(false)
+}
+
+/// Stops the node's stapler and waits for its round in progress.
+pub fn stop_node_stapler() {
+    let _ = crate::shard_client::block_on(|| match NODE_STAPLER.with(|n| n.borrow_mut().take()) {
+        Some(s) => s.stop(),
+        None => teseladb::engine::core::future::make_ready_future(()),
+    });
+}
+
+/// [`start_node_stapler`] for the clients' port of `certs`, publishing to its shard ports.
+pub fn start_for(certs: std::sync::Arc<crate::certs::Certificates>, issuer: &Certificate) -> bool {
+    let port = certs.client_port().clone();
+    start_node_stapler(port, issuer.clone(), std::sync::Arc::new(move || certs.shard_ports_now()))
 }
 
 /// The stapler as a task of shard 0 (023 FR-023): each round asks the responder with the engine,
@@ -251,6 +256,21 @@ pub mod on_shard {
             shards: Vec<ShardTls>,
             fetch_timeout: Option<Duration>,
         ) -> Option<Stapler> {
+            let same = port.clone();
+            let ports: Box<dyn Fn() -> Vec<(ShardTls, TlsPort)>> =
+                Box::new(move || shards.iter().map(|t| (t.clone(), same.clone())).collect());
+            Stapler::start_with(port, issuer, ports, fetch_timeout)
+        }
+
+        /// [`Stapler::start`] publishing each new staple to the ports `ports()` gives then, each
+        /// with the settings it serves.
+        #[must_use]
+        pub fn start_with(
+            port: TlsPort,
+            issuer: Certificate,
+            ports: Box<dyn Fn() -> Vec<(ShardTls, TlsPort)>>,
+            fetch_timeout: Option<Duration>,
+        ) -> Option<Stapler> {
             let leaf = port.config().and_then(|c| c.identity.chain.first().cloned())?;
             if ocsp::responder_urls(&leaf).is_empty() {
                 return None;
@@ -271,8 +291,8 @@ pub mod on_shard {
                     };
                     if let Some(next) = stapled(&port, r.staple) {
                         port.replace(&next);
-                        for t in &shards {
-                            t.publish_port(&port).await?;
+                        for (t, p) in ports() {
+                            t.publish_port(&p).await?;
                         }
                     }
                     let secs = (r.next_secs - now).clamp(1, RETRY_SECS * 60);

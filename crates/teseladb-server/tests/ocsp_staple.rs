@@ -7,11 +7,14 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use teseladb_crypto::ec::NamedCurve;
 
-use teseladb_server::ocsp_staple::{FETCH_TIMEOUT, RETRY_SECS, fetch, round, spawn, stapled};
+use teseladb_server::ocsp_staple::{
+    FETCH_TIMEOUT, RETRY_SECS, fetch, round, stapled, start_node_stapler, stop_node_stapler,
+};
+use teseladb_server::shard_tls::ShardTls;
 use teseladb_server::tls_port::{TlsMode, TlsPort};
 use teseladb_tls::{CertifiedKey, ServerConfig};
 use teseladb_x509::ext::Extension;
@@ -177,19 +180,14 @@ fn fetch_reads_answers_in_parts_and_until_close_and_refuses_the_rest() {
     assert_eq!((r.staple, r.next_secs), (None, NOW + RETRY_SECS));
 }
 
-static STOP: AtomicBool = AtomicBool::new(false);
-
-fn stop() -> bool {
-    STOP.load(Ordering::SeqCst)
-}
-
-fn never() -> bool {
-    false
+/// No port on the engine's shards to publish a staple to.
+fn no_ports() -> Vec<(ShardTls, TlsPort)> {
+    Vec::new()
 }
 
 #[test]
-fn the_stapling_thread_staples_the_port_and_stops() {
-    // A real responder of a certificate valid now: the thread asks it and staples its answer.
+fn the_stapler_on_shard_0_staples_the_port_and_stops() {
+    // A real responder of a certificate valid now: the stapler asks it and staples its answer.
     let now = i64::try_from(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
     )
@@ -231,23 +229,26 @@ fn the_stapling_thread_staples_the_port_and_stops() {
     });
     let config = ServerConfig::new(CertifiedKey { chain: vec![leaf], key });
     let port = TlsPort::new(TlsMode::RequireTls, Some(config));
-    spawn(port.clone(), ca.clone(), stop, None);
+    // No shard port to publish to: the shared port alone takes the staple.
+    assert!(start_node_stapler(port.clone(), ca.clone(), Arc::new(no_ports)));
     let end = Instant::now() + Duration::from_secs(20);
     while port.config().unwrap().ocsp_staple.is_none() {
         assert!(Instant::now() < end, "the port was never stapled");
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(port.config().unwrap().ocsp_staple.as_deref(), Some(answer.as_slice()));
-    // The thread waits a second at a time for the next round, then stops when told.
-    std::thread::sleep(Duration::from_millis(1200));
-    STOP.store(true, Ordering::SeqCst);
-    // A certificate that names no responder, or a port without TLS, starts no thread.
+    // It waits on the engine's timers for the next round; a stop ends the wait at once.
+    let start = Instant::now();
+    stop_node_stapler();
+    assert!(start.elapsed() < Duration::from_secs(10));
+    // A certificate that names no responder, or a port without TLS, starts no stapler.
     let (ca2, _, _, key2) = certs("http://127.0.0.1:1/");
     let plain = TlsPort::new(
         TlsMode::RequireTls,
         Some(ServerConfig::new(CertifiedKey { chain: vec![ca2.clone()], key: key2 })),
     );
-    spawn(plain.clone(), ca2.clone(), never, None);
-    spawn(TlsPort::new(TlsMode::Disabled, None), ca2, never, None);
+    assert!(!start_node_stapler(plain.clone(), ca2.clone(), Arc::new(no_ports)));
+    assert!(!start_node_stapler(TlsPort::new(TlsMode::Disabled, None), ca2, Arc::new(no_ports)));
+    stop_node_stapler();
     assert!(plain.config().unwrap().ocsp_staple.is_none());
 }

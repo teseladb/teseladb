@@ -186,8 +186,8 @@ mod on_linux {
             )
         }
 
-        /// The options this shard read last; read again in an engine thread, in the background, once
-        /// they are older than a second (the service reads `httpOptions` from Group 0).
+        /// The options this shard read last; read again in an engine thread, in the background,
+        /// once they are older than a second (the service reads `httpOptions` from Group 0).
         fn options(&self) -> HttpOptions {
             let (at, current) = self.options.borrow().clone();
             let stale = at.is_none_or(|t| t.elapsed() >= OPTIONS_TTL);

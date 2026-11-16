@@ -285,6 +285,9 @@ pub struct NodeConfig {
     pub http_advertise: Option<String>,
     /// TLS on the administration port, on a node with a PKI (013 FR-017).
     pub admin_tls: Option<crate::admin_http::AdminTls>,
+    /// The issuer of the clients' certificate when it names an OCSP responder: the node keeps
+    /// its staple fresh on shard 0 while it runs (013 FR-031, 023 FR-023).
+    pub ocsp_issuer: Option<teseladb_x509::Certificate>,
     /// The data directory, whose disk space the heartbeats carry (007 FR-010); `None`: unknown.
     pub data_dir: Option<std::path::PathBuf>,
     /// The node's tags (`--tags`), sorted by name (007 FR-013).
@@ -340,6 +343,7 @@ impl Default for NodeConfig {
             http: None,
             http_advertise: None,
             admin_tls: None,
+            ocsp_issuer: None,
             data_dir: None,
             tags: Vec::new(),
             memory_limit: None,
@@ -763,6 +767,8 @@ pub struct Node {
     roles: Arc<NodeRoles>,
     /// The Raft log of the node's cores (012 FR-035).
     device_log: Option<DeviceLog>,
+    /// Whether the OCSP stapler runs on shard 0.
+    stapling: bool,
     _lock: Option<FileLock>,
     /// The engine its cores run on, one shard each (023 FR-008); dropped last, once nothing
     /// talks to its shards.
@@ -1168,6 +1174,12 @@ impl Node {
         }
         // The outbound clients (LDAP, KMIP, HTTPS) run on it from now on (023 FR-024).
         crate::outbound::install(Arc::new(crate::outbound::NodeRunner(engine.poster())));
+        // The OCSP stapler of the clients' certificate, as a task of shard 0 (023 FR-023).
+        let certs = cfg.client.as_ref().and_then(|c| c.certificates.clone());
+        let stapling = match (&cfg.ocsp_issuer, certs) {
+            (Some(issuer), Some(certs)) => crate::ocsp_staple::start_for(certs, issuer),
+            _ => false,
+        };
         let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
@@ -1432,6 +1444,7 @@ impl Node {
             presence,
             roles,
             device_log: Some(device_log),
+            stapling,
             _lock: lock,
             engine: Some(engine),
         })
@@ -1679,6 +1692,9 @@ impl Node {
         // Once the cores stopped, the log's writer has nothing more to make durable.
         if let Some(l) = self.device_log.take() {
             l.stop();
+        }
+        if self.stapling {
+            crate::ocsp_staple::stop_node_stapler();
         }
         // Nothing reaches the shards any more.
         crate::outbound::uninstall();

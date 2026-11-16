@@ -77,6 +77,19 @@ impl Certificates {
         self.shard_ports().push((slot, port));
     }
 
+    /// The settings of the clients' port.
+    #[must_use]
+    pub fn client_port(&self) -> &TlsPort {
+        &self.port
+    }
+
+    /// The ports on the engine's shards now, each with the settings it serves; a copy, so that
+    /// nothing holds the list while it publishes.
+    #[must_use]
+    pub fn shard_ports_now(&self) -> Vec<(crate::shard_tls::ShardTls, TlsPort)> {
+        self.shard_ports().clone()
+    }
+
     fn shard_ports(&self) -> std::sync::MutexGuard<'_, Vec<ShardPort>> {
         self.shards.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
