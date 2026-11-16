@@ -1,18 +1,17 @@
 //! HTTPS requests of the node to the services that authentication needs (013 FR-025): the STS
 //! of AWS IAM authentication and the JWKS of OIDC authentication. Each request goes on its own
-//! connection with [`teseladb_http`]'s messages over [`TlsStream`], trusting the system's
-//! certificate authorities.
+//! engine connection under TLS (023 FR-024) with [`teseladb_http`]'s messages, trusting the
+//! system's certificate authorities.
 
-use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb_http::client::{Scheme, Url};
-use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(target_os = "linux")]
+use teseladb_http::http1::{Limits, ResponseReader};
+use teseladb_http::http1::{Request, Response};
 use teseladb_tls::{ClientConfig, Trust};
 use teseladb_x509::Certificate;
-
-use crate::tls_stream::TlsStream;
 
 /// The system's bundles of certificate authorities, the first that exists.
 const SYSTEM_CAS: [&str; 4] = [
@@ -74,39 +73,70 @@ impl Https {
         Https { tls: Arc::new(self.tls.as_ref().clone().fips()), ..self }
     }
 
-    /// Sends `req` to `url` (HTTPS only) and reads the whole answer.
-    pub fn send(&self, url: &Url, req: &Request) -> Result<Response, String> {
+    /// The bytes of `req` to `url`, which has to be HTTPS.
+    fn encode(url: &Url, req: &Request) -> Result<Vec<u8>, String> {
         if url.scheme != Scheme::Https {
             return Err(format!("{}: not HTTPS", url.authority()));
         }
-        let bytes = req.encode().map_err(crate::error_debug)?;
-        let addrs = (url.host.as_str(), url.port).to_socket_addrs().map_err(crate::error_text)?;
-        let mut last = format!("{}: no address", url.authority());
-        let mut sock = None;
-        for addr in addrs {
-            match TcpStream::connect_timeout(&addr, self.timeout) {
-                Ok(s) => {
-                    sock = Some(s);
-                    break;
-                }
-                Err(e) => last = format!("{addr}: {e}"),
-            }
-        }
-        let sock = sock.ok_or(last)?;
-        sock.set_read_timeout(Some(self.timeout)).map_err(crate::error_text)?;
-        sock.set_write_timeout(Some(self.timeout)).map_err(crate::error_text)?;
-        let mut tls = TlsStream::client(sock, self.tls.clone(), &url.host)?;
-        tls.send(&bytes)?;
+        req.encode().map_err(crate::error_debug)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Https {
+    /// Sends `req` to `url` (HTTPS only) over an engine connection and reads the whole answer;
+    /// runs on the shard that awaits it.
+    pub fn request(
+        &self,
+        url: &Url,
+        req: &Request,
+    ) -> teseladb::engine::core::future::Future<Response> {
+        let (https, url, bytes) = (self.clone(), url.clone(), Https::encode(url, req));
+        crate::outbound::future(async move { https.exchange(&url, bytes?).await })
+    }
+
+    /// [`Https::request`] from a thread that is not a shard: run on the node's engine.
+    pub fn send(&self, url: &Url, req: &Request) -> Result<Response, String> {
+        let (https, url, bytes) = (self.clone(), url.clone(), Https::encode(url, req)?);
+        crate::outbound::call(move || {
+            crate::outbound::future(async move { https.exchange(&url, bytes).await })
+        })
+    }
+
+    async fn exchange(&self, url: &Url, bytes: Vec<u8>) -> Result<Response, String> {
+        use crate::outbound::text;
+        use teseladb_io::engine::connect::TlsClient;
+        use teseladb_io::engine::link::Link;
+
+        let tls = TlsClient {
+            config: self.tls.clone(),
+            server_name: Some(url.host.clone()),
+            resume: None,
+        };
+        let mut link =
+            Link::dial(&url.host, url.port, Some(tls), self.timeout).await.map_err(|e| text(&e))?;
+        link.send(&bytes).await.map_err(|e| text(&e))?;
         let mut reader = ResponseReader::new(Limits::default());
-        loop {
-            let data = tls.recv()?;
-            if data.is_empty() {
-                return reader.finish().map_err(crate::error_debug);
+        let answer = loop {
+            let data = link.recv().await.map_err(|e| text(&e))?;
+            if data.empty() {
+                break reader.finish().map_err(crate::error_debug)?;
             }
-            if let Some(r) = reader.feed(&data).map_err(crate::error_debug)? {
-                return Ok(r);
+            if let Some(r) = reader.feed(data.as_slice()).map_err(crate::error_debug)? {
+                break r;
             }
-        }
+        };
+        link.close().await;
+        Ok(answer)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Https {
+    /// The outbound clients run on the engine, which only Linux has (023 D3).
+    pub fn send(&self, url: &Url, req: &Request) -> Result<Response, String> {
+        Https::encode(url, req)?;
+        Err(crate::LINUX_ONLY.into())
     }
 }
 
@@ -114,8 +144,13 @@ impl Https {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::tls_stream::TlsStream;
+    #[cfg(target_os = "linux")]
     use std::net::TcpListener;
+    #[cfg(target_os = "linux")]
     use teseladb_tls::{CertifiedKey, ServerConfig};
+    #[cfg(target_os = "linux")]
     use teseladb_x509::ext::GeneralName;
 
     #[test]
@@ -148,7 +183,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn outside_linux_a_request_says_so() {
+        let https = Https::new(Trust::anchors(Vec::new()), Duration::from_secs(1));
+        let url = Url::parse("https://localhost:1/").unwrap();
+        let req = teseladb_http::client::get(&url, crate::USER_AGENT);
+        assert_eq!(https.send(&url, &req).unwrap_err(), crate::LINUX_ONLY);
+        let plain = Url::parse("http://localhost:1/").unwrap();
+        assert!(https.send(&plain, &req).unwrap_err().contains("not HTTPS"));
+    }
+
     /// A server that answers each request with `answer` over TLS.
+    #[cfg(target_os = "linux")]
     fn server(config: Arc<ServerConfig>, answer: &'static [u8]) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -173,8 +220,10 @@ mod tests {
         port
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn requests_go_over_tls_and_answers_are_read_whole() {
+        crate::outbound::test_engine::install();
         let dir = std::env::temp_dir().join(format!("teseladb-https-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()
@@ -209,6 +258,15 @@ mod tests {
         assert!(https.send(&nowhere, &req(&nowhere)).is_err());
         let bad = Request::new("GET", "/");
         assert!(https.send(&url(dead), &bad).is_err());
+        // A server that accepts and never answers: the step's deadline on the engine's timers.
+        let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+        let quiet = silent.local_addr().unwrap().port();
+        let quick = Https::new(Trust::anchors(vec![pki.ca.clone()]), Duration::from_millis(200));
+        let began = std::time::Instant::now();
+        let e = quick.send(&url(quiet), &req(&url(quiet))).unwrap_err();
+        assert!(e.contains("timed out"), "{e}");
+        assert!(began.elapsed() < Duration::from_secs(5), "{:?}", began.elapsed());
+        drop(silent);
         assert!(
             system_trust().is_ok() || SYSTEM_CAS.iter().all(|p| !std::path::Path::new(p).exists())
         );

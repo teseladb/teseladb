@@ -10,7 +10,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -101,6 +101,23 @@ impl std::fmt::Debug for NodeEngine {
     }
 }
 
+/// Queues closures on the shards of a running engine, from any thread, each on the next shard in
+/// turn; its clones share the turn.
+#[derive(Clone, Debug)]
+pub struct EnginePost {
+    gate: Arc<Gate>,
+    shards: u16,
+    next: Arc<AtomicU16>,
+}
+
+impl EnginePost {
+    /// Queues `f` on a shard; `false` (and `f` dropped) once the engine stopped.
+    pub fn post(&self, f: impl FnOnce() + Send + 'static) -> bool {
+        let shard = self.next.fetch_add(1, Ordering::Relaxed) % self.shards.max(1);
+        ShardPost::new(u32::from(shard), self.gate.clone()).post(f)
+    }
+}
+
 /// A core running on its shard.
 pub struct CoreHandle<M, R> {
     sender: CoreSender<M>,
@@ -180,6 +197,16 @@ impl NodeEngine {
     /// What posts to `shard` while the engine runs (the device log's writer on shard 0).
     pub(crate) fn post_to(&self, shard: u16) -> ShardPost {
         self.post(shard)
+    }
+
+    /// A handle that queues closures on the shards from any thread while the engine runs (the
+    /// node's outbound clients, 023 FR-024).
+    pub fn poster(&self) -> EnginePost {
+        EnginePost {
+            gate: self.gate.clone(),
+            shards: self.shards,
+            next: Arc::new(AtomicU16::new(0)),
+        }
     }
 
     /// Runs `f` on `shard` and waits for its result (from a thread that is not a shard).

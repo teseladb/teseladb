@@ -899,7 +899,9 @@ fn the_node_s_services_answer_with_or_without_them() {
     assert_eq!(b.ldap_groups("u"), Ok(None));
     b.invalidate_user_cache();
     assert_eq!(b.rotate_certificates(None), Ok(()));
-    // Services on a port nothing listens on.
+    // Services on a port nothing listens on, reached on the engine (023 FR-024).
+    #[cfg(target_os = "linux")]
+    teseladb_server::outbound::test_engine::install();
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     let opts = LdapOpts {
         servers: Some(closed.to_string()),

@@ -1170,6 +1170,9 @@ impl Node {
             write_atomic(&mut disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
             log.step("raft logs moved to the device log", &[("cores", &cores)]);
         }
+        // The outbound clients (LDAP, KMIP, HTTPS) run on it from now on (023 FR-024).
+        #[cfg(target_os = "linux")]
+        crate::outbound::install(Arc::new(crate::outbound::NodeRunner(engine.poster())));
         let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
@@ -1676,6 +1679,8 @@ impl Node {
             l.stop();
         }
         // Nothing reaches the shards any more.
+        #[cfg(target_os = "linux")]
+        crate::outbound::uninstall();
         engine.stop();
         // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
         self.clock.stop();

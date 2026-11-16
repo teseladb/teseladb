@@ -5,7 +5,8 @@
 //! every network service of a node builds on: TLS over the engine's connected sockets
 //! ([`tls_stream`]), the work that would block a shard done off it ([`blocking`]: name
 //! resolution, configuration and certificate files), and outbound connections with a deadline,
-//! optionally with TLS ([`connect`]).
+//! optionally with TLS ([`connect`]), and a conversation of requests and answers over one
+//! ([`link`]).
 //!
 //! Outside Linux there are the contract of the logic, the senders bound to a queue and an engine
 //! that does not start (D3).
@@ -40,6 +41,8 @@ mod disk_port;
 #[cfg(target_os = "linux")]
 mod driver;
 #[cfg(target_os = "linux")]
+pub mod link;
+#[cfg(target_os = "linux")]
 mod node_engine;
 #[cfg(target_os = "linux")]
 mod offload;
@@ -61,7 +64,7 @@ pub use core_loop::{
 #[cfg(target_os = "linux")]
 pub use disk_port::{CoreDisk, DiskWaker};
 #[cfg(target_os = "linux")]
-pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
+pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, EnginePost, NodeEngine};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, disk};
 

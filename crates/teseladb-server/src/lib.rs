@@ -7,6 +7,11 @@
 /// The `User-Agent` of the node's own HTTP requests (OCSP, OIDC, STS).
 pub const USER_AGENT: &str = "teseladb";
 
+/// The error of an outbound client outside Linux: the clients run on the engine, which only
+/// Linux has (023 D3).
+#[cfg(not(target_os = "linux"))]
+pub const LINUX_ONLY: &str = "the node's outbound clients run on the engine, on Linux only";
+
 pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
@@ -66,6 +71,8 @@ pub mod node_ports;
 pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
+#[cfg(target_os = "linux")]
+pub mod outbound;
 pub mod pki;
 pub mod pressure;
 pub mod procs;
@@ -572,7 +579,9 @@ pub fn start(
     // server.
     let kmip = match o.at_rest.kmip.as_ref() {
         None => None,
-        Some(k) => match kmip::master_key(k, &o.dbpath, &mut |b| teseladb_sys::fill_random(b)) {
+        Some(k) => match with_start_engine(|| {
+            kmip::master_key(k, &o.dbpath, &mut |b| teseladb_sys::fill_random(b))
+        }) {
             Ok(m) => {
                 for line in &m.log {
                     log.info(line, &[]);
@@ -609,7 +618,13 @@ pub fn start(
             }
         }
     }
-    let audit = match audit_log::AuditLog::open(&o.audit) {
+    // The audit log's key wrapped by the KMIP server asks it now (013 T042).
+    let audit = if o.audit.encryption_key_uid.is_some() && o.audit.kmip.is_some() {
+        with_start_engine(|| audit_log::AuditLog::open(&o.audit))
+    } else {
+        audit_log::AuditLog::open(&o.audit)
+    };
+    let audit = match audit {
         Ok(a) => a,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");
@@ -693,13 +708,21 @@ pub fn start(
     });
     let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let poller =
-        polling.clone().map(|(id, k, every)| kmip::poll(k, id, every, done.clone(), lost.clone()));
+    let poller = match polling.clone().map(|(id, k, every)| {
+        kmip::poll(k, id, every, done.clone(), lost.clone())
+    }) {
+        Some(Err(e)) => {
+            let _ = writeln!(err, "teseladb: {e}");
+            drop(node.stop());
+            return 1;
+        }
+        p => p.and_then(Result::ok),
+    };
     let lost_or_stop = || stop() || lost.load(std::sync::atomic::Ordering::Relaxed);
     let mut code = serve(node, o.log_format, &log, out, &lost_or_stop, READY_TIMEOUT);
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(p) = poller {
-        let _ = p.join();
+        p.join();
     }
     if let Some((id, _, _)) = polling.filter(|_| lost.load(std::sync::atomic::Ordering::Relaxed)) {
         log.error(&kmip::lost_message(&id), &[]);
@@ -709,6 +732,19 @@ pub fn start(
         a.system(AuditType::Shutdown, teseladb_auth::audit_param::shutdown());
     }
     code
+}
+
+/// Runs `f`, which asks the KMIP server, where the outbound clients have an engine: before the
+/// node's engine runs, one of its own for the duration of `f` (023 FR-024).
+#[cfg(target_os = "linux")]
+fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    outbound::with_engine(f)?
+}
+
+/// Outside Linux the clients answer that they run on Linux only.
+#[cfg(not(target_os = "linux"))]
+fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    f()
 }
 
 /// The prefix of the KMIP options, `--kmip<Name>` for `security.kmip.<name>`.
