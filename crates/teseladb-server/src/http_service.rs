@@ -62,23 +62,29 @@ impl NodeHttp {
     /// `httpOptions` and `mcpOptions`, read from Group 0 at most once a second; with Group 0 out
     /// of reach, the last ones read or the defaults.
     fn parameters(&self) -> (HttpOptions, McpOptions) {
-        let mut cached = self.options.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((at, o)) = cached.as_ref()
-            && at.elapsed() < OPTIONS_TTL
-        {
-            return o.clone();
-        }
+        let last = {
+            let cached = self.options.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((at, o)) = cached.as_ref()
+                && at.elapsed() < OPTIONS_TTL
+            {
+                return o.clone();
+            }
+            cached.as_ref().map(|(_, o)| o.clone())
+        };
+        // Read without the lock: the read parks this engine thread until Group 0 answers, and
+        // another handler of the shard that took the lock meanwhile would block the shard.
         let mut backend =
             ServerBackend::new(self.handle.clone(), self.handle.node.0).with_deadline(OPTIONS_WAIT);
         let read = backend.cluster_parameters().map(|all| {
             let http = http_options(all.get(HTTP_OPTIONS).map(Vec::as_slice));
             (http, mcp_options(all.get(MCP_OPTIONS).map(Vec::as_slice)))
         });
-        let o = match (read, cached.as_ref()) {
+        let o = match (read, last) {
             (Ok(o), _) => o,
-            (Err(_), Some((_, last))) => last.clone(),
+            (Err(_), Some(last)) => last,
             (Err(_), None) => (http_options(None), mcp_options(None)),
         };
+        let mut cached = self.options.lock().unwrap_or_else(PoisonError::into_inner);
         *cached = Some((Instant::now(), o.clone()));
         o
     }
