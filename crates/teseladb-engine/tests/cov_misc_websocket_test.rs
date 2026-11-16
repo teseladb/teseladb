@@ -4,6 +4,9 @@
 //! port that echoes long messages, ignores pings and pongs, answers a close frame, and copes
 //! with a client that leaves before its upgrade request.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

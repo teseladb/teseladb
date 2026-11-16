@@ -2,6 +2,9 @@
 //! symbolic links, ownership and permissions, statistics, file-system information, pipes,
 //! groups, and the direct-I/O check.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;

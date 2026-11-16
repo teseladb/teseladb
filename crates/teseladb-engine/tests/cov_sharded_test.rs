@@ -3,6 +3,9 @@
 //! instance or outside the shard range, mappers that fail, shard-dependent parameters, the
 //! stop helper on an object that never started, and foreign pointers copied from another shard.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::RefCell;
 use std::pin::pin;
@@ -74,7 +77,11 @@ thread_case!(services_see_their_container_and_delay_the_stop, {
         .get()
         .unwrap();
     // Every instance holds the address of the one container.
-    let containers = s.as_mut().map(|p: &mut Peer| p.peer.container() as usize).get().unwrap();
+    let containers = s
+        .as_mut()
+        .map(|p: &mut Peer| Ok::<usize, ExceptionPtr>(p.peer.container() as usize))
+        .get()
+        .unwrap();
     assert_eq!(containers, vec![addr; Smp::count() as usize]);
     s.as_mut()
         .invoke_on(0, |p: &mut Peer| {
@@ -172,9 +179,20 @@ thread_case!(calls_to_missing_or_invalid_shards_fail, {
         // A single instance lives on shard 0 only: a call to shard 1 has no instance.
         let mut single = pin!(Sharded::<Plain>::new());
         single.as_mut().start_single(|| Plain { shard: this_shard_id() }).get().unwrap();
-        let e = single.as_mut().invoke_on(1, |p: &mut Plain| p.shard).get().unwrap_err();
+        let e = single
+            .as_mut()
+            .invoke_on(1, |p: &mut Plain| Ok::<u32, ExceptionPtr>(p.shard))
+            .get()
+            .unwrap_err();
         assert!(e.downcast_ref::<NoShardedInstanceException>().is_some());
-        assert_eq!(single.as_mut().invoke_on(0, |p: &mut Plain| p.shard).get().unwrap(), 0);
+        assert_eq!(
+            single
+                .as_mut()
+                .invoke_on(0, |p: &mut Plain| Ok::<u32, ExceptionPtr>(p.shard))
+                .get()
+                .unwrap(),
+            0
+        );
         single.as_mut().stop().get().unwrap();
     }
 });
@@ -247,7 +265,7 @@ thread_case!(foreign_pointers_copy_and_release_on_their_owner, {
             unsafe { p.copy() }.then(|c: ForeignPtr<std::sync::Arc<u32>>| {
                 let r = (c.get_owner_shard(), *c.get().unwrap());
                 drop(c);
-                r
+                Ok::<(u32, u32), ExceptionPtr>(r)
             })
         })
         .get()

@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 // Each test binary that includes this harness uses only part of it.
 #![allow(dead_code)]
 //! A wire-level harness for the native network stack.
@@ -14,7 +17,7 @@
 //! stack against an independent encoding.
 //!
 //! Every waiting helper sleeps on the reactor, so they must run inside an engine thread
-//! (`engine_thread_test_case!`).
+//! (the `thread_case!` of `cov_thread_case.rs`).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -551,7 +554,7 @@ impl IpSpec {
 
 /// An IPv4 packet with a correct header checksum (unless `spec.bad_csum`).
 pub fn ipv4_packet(spec: &IpSpec, payload: &[u8]) -> Vec<u8> {
-    assert!(spec.options.len() % 4 == 0);
+    assert!(spec.options.len().is_multiple_of(4));
     let hlen = 20 + spec.options.len();
     let total = spec.len_override.unwrap_or((hlen + payload.len()) as u16);
     let mut h = Vec::with_capacity(hlen + payload.len());
@@ -634,7 +637,7 @@ impl TcpSpec {
 /// `spec.bad_csum`).
 pub fn tcp_segment(src: u32, dst: u32, spec: &TcpSpec, payload: &[u8]) -> Vec<u8> {
     let mut opts = spec.options.clone();
-    while opts.len() % 4 != 0 {
+    while !opts.len().is_multiple_of(4) {
         opts.push(0);
     }
     let hlen = 20 + opts.len();

@@ -1,6 +1,9 @@
 //! Tests of scheduling groups and their I/O classes: names, shares, I/O bandwidth limits,
 //! file I/O issued from a group, and the names of the I/O request operations.
 #![cfg(target_os = "linux")]
+// The DMA reads and writes are unsafe engine interfaces; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::ffi::c_void;
 
@@ -78,9 +81,8 @@ thread_case!(groups_have_names_shares_and_bandwidth, {
             assert_eq!(exact.size(), align);
             // Reading exactly past the end fails.
             // SAFETY: no intent.
-            assert!(
-                unsafe { f.dma_read_exactly::<u8>(4 * align as u64, align, null) }.get().is_err()
-            );
+            let past = unsafe { f.dma_read_exactly::<u8>(4 * align as u64, align, null) };
+            assert!(past.get().is_err());
             let data = bulk;
             f.close().get()?;
             Ok::<Vec<u8>, ExceptionPtr>(data.as_slice().to_vec())

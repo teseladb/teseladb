@@ -4,6 +4,9 @@
 //! and cleared by hand, promises that fail with a built error, and continuations attached to a
 //! future held by reference.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::any::Any;
 use std::path::Path;
@@ -154,7 +157,7 @@ thread_case!(promises_fail_with_built_errors_and_know_their_waiter, {
 
     // A continuation waits on the promise until the value arrives.
     let mut p = Promise::<u32>::new();
-    let f = p.get_future().then(|v: u32| v + 1);
+    let f = p.get_future().then(|v: u32| Ok::<u32, ExceptionPtr>(v + 1));
     assert!(p.waiting_task().is_some());
     p.set_value(1);
     assert_eq!(f.get().unwrap(), 2);
@@ -162,16 +165,17 @@ thread_case!(promises_fail_with_built_errors_and_know_their_waiter, {
 
 thread_case!(continuations_attach_to_futures_held_by_reference, {
     let mut ready = make_ready_future(4u32);
-    let doubled = ready.then_wrapped_ref(|f: Future<u32>| f.get().unwrap() * 2);
+    let doubled = ready.then_wrapped_ref(|f: Future<u32>| f.get().map(|v| v * 2));
     assert_eq!(doubled.get().unwrap(), 8);
 
     let mut p = Promise::<u32>::new();
     let mut pending = p.get_future();
-    let tripled = pending.then_wrapped_ref(|f: Future<u32>| f.get().unwrap() * 3);
+    let tripled = pending.then_wrapped_ref(|f: Future<u32>| f.get().map(|v| v * 3));
     p.set_value(5);
     assert_eq!(tripled.get().unwrap(), 15);
 
     let mut failing = current_exception_as_future::<u32>(runtime("wrapped"));
-    let seen = failing.then_wrapped_ref(|f: Future<u32>| f.get().is_err());
+    let seen =
+        failing.then_wrapped_ref(|f: Future<u32>| Ok::<bool, ExceptionPtr>(f.get().is_err()));
     assert!(seen.get().unwrap());
 });

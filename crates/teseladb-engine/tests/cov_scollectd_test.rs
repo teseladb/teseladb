@@ -3,6 +3,9 @@
 //! the packets the per-shard senders send to a UDP socket: the start notification, explicit
 //! values and the polled series.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 #![allow(deprecated)]
 
 use std::net::UdpSocket;

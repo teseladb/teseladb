@@ -3,6 +3,9 @@
 //! memory mappings, socket options, addresses, listening and accepting, signal masks, kernel
 //! errors and threads with their own stack and affinity.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -165,11 +168,8 @@ fn sockets_options_addresses_and_connections() {
     client.shutdown(SHUT_WR).unwrap();
     let mut buf = [0u8; 4];
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { server.read(buf.as_mut_ptr().cast(), 4) }.unwrap(),
-        Some(0),
-        "end of stream"
-    );
+    let end = unsafe { server.read(buf.as_mut_ptr().cast(), 4) };
+    assert_eq!(end.unwrap(), Some(0), "end of stream");
     // A socket that is not connected cannot be connected to an unbound port twice.
     let refused = FileDesc::socket(AF_INET, SOCK_STREAM, 0).unwrap();
     let closed = loopback();

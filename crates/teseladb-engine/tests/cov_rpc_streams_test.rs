@@ -67,6 +67,20 @@ macro_rules! arithmetic_serializer {
 
 arithmetic_serializer!(i32, u32, u64);
 
+impl Write<bool> for Serializer {
+    fn write<O: SerializerOutput>(&self, out: &mut O, v: &bool) -> Result<(), ExceptionPtr> {
+        out.write(&[u8::from(*v)])
+    }
+}
+
+impl Read<bool> for Serializer {
+    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<bool>) -> Result<bool, ExceptionPtr> {
+        let mut b = [0u8; 1];
+        in_.read(&mut b)?;
+        Ok(b[0] != 0)
+    }
+}
+
 impl Write<Sstring> for Serializer {
     fn write<O: SerializerOutput>(&self, out: &mut O, v: &Sstring) -> Result<(), ExceptionPtr> {
         out.write(&(v.size() as u32).to_ne_bytes())?;

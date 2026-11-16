@@ -4,6 +4,9 @@
 //! reads past the logical size, allocation, hole punching and the final trim), directory
 //! entry types, block devices, the strict-DMA and fsync-bypass settings, and the error types.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 #[path = "common/mock_file.rs"]
 mod mock_file;
@@ -12,6 +15,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 
 use mock_file::MockReadOnlyFile;
+use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::file::{
     CancelledError, EofError, File, FileHandle, FileImpl, FileOpenOptions, open_directory,
     open_file_dma, open_file_dma_with_options,
@@ -135,7 +139,7 @@ thread_case!(file_handles_reopen_the_file_on_any_shard, {
     let target = Smp::count() - 1;
     let size = Smp::submit_to(target, move || {
         let mut f = copy.into_file();
-        f.size().then(move |s: u64| f.close().then(move |()| s))
+        f.size().then(move |s: u64| f.close().then(move |()| Ok::<u64, ExceptionPtr>(s)))
     })
     .get()
     .unwrap();
@@ -225,13 +229,22 @@ thread_case!(directory_listings_report_entry_types, {
     let mut seen = std::collections::BTreeMap::new();
     for dir in [d.0.display().to_string(), "/dev".to_string()] {
         let mut f = open_directory(&dir).get().unwrap();
-        {
-            let mut lister = f.experimental_list_directory();
-            while let Some(de) = lister.next().get().unwrap() {
-                seen.insert(format!("{dir}/{}", de.name), de.type_);
+        let entries = make_coroutine(async move {
+            let mut found = Vec::new();
+            {
+                let mut lister = f.experimental_list_directory();
+                while let Some(de) = lister.next().await? {
+                    found.push((de.name.to_string(), de.type_));
+                }
             }
+            f.close().await?;
+            Ok::<_, ExceptionPtr>(found)
+        })
+        .get()
+        .unwrap();
+        for (name, type_) in entries {
+            seen.insert(format!("{dir}/{name}"), type_);
         }
-        f.close().get().unwrap();
     }
     let at = |p: &str| seen.get(p).copied().flatten();
     assert_eq!(at(&d.path("file")), Some(DirectoryEntryType::Regular));

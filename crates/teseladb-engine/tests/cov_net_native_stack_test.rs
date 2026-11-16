@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::time::Duration;
 
-use teseladb::engine::core::future::{Exception, ExceptionPtr};
+use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::scheduling::max_scheduling_groups;
 use teseladb::engine::core::shard_id::this_shard_id;
 use teseladb::engine::net::api::{
@@ -31,7 +31,6 @@ use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::proxy::{ProxyNetDevice, create_proxy_net_device};
 use teseladb::engine::net::socket_defs::{AF_INET, AF_INET6, Ipv4Addr, SocketAddress, Transport};
 use teseladb::engine::util::program_options::AsOptionGroup;
-use teseladb::engine_thread_test_case;
 
 use wire::*;
 
@@ -85,7 +84,11 @@ fn handshake_in(wire: &Wire, pport: u16, lport: u16) -> u32 {
     next
 }
 
-engine_thread_test_case!(native_stack_serves_a_connection, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(native_stack_serves_a_connection, {
     let (wire, ns) = native_stack();
     assert!(ns.has_per_core_namespace());
     wait(ns.initialize()).expect("a static stack is ready at once");
@@ -123,10 +126,10 @@ engine_thread_test_case!(native_stack_serves_a_connection, {
     let mut v = [0u8; 4];
     // SAFETY: the buffer holds 4 bytes; the native stack does not touch it anyway.
     let set = unsafe { c.set_sockopt(6, 1, v.as_ptr(), v.len()) };
-    assert!(message(&set.err().expect("unsupported")).contains("not supported"));
+    assert!(message(&set.expect_err("unsupported")).contains("not supported"));
     // SAFETY: as above.
     let got = unsafe { c.get_sockopt(6, 1, v.as_mut_ptr(), v.len()) };
-    assert!(message(&got.err().expect("unsupported")).contains("not supported"));
+    assert!(message(&got.expect_err("unsupported")).contains("not supported"));
 
     // Reading: two segments read together come back one fragment at a time.
     let mut input = c.input(Default::default());
@@ -169,7 +172,7 @@ engine_thread_test_case!(native_stack_serves_a_connection, {
     assert!(wait(accepting).is_err());
 });
 
-engine_thread_test_case!(native_stack_opens_connections, {
+thread_case!(native_stack_opens_connections, {
     let (wire, ns) = native_stack();
     wire.inject(&hello_from(PEER_IP, PEER_MAC));
     wire.clear();
@@ -208,7 +211,7 @@ engine_thread_test_case!(native_stack_opens_connections, {
     assert!(wait(refused).is_err());
 });
 
-engine_thread_test_case!(native_stack_datagram_channels, {
+thread_case!(native_stack_datagram_channels, {
     let (wire, ns) = native_stack();
     #[allow(deprecated)]
     let mut a = ns.make_udp_channel(&sockaddr(0, 5353)).expect("bound");
@@ -227,7 +230,7 @@ engine_thread_test_case!(native_stack_datagram_channels, {
     assert_eq!(f.udp().payload, b"answer");
 });
 
-engine_thread_test_case!(native_stack_reports_its_interface, {
+thread_case!(native_stack_reports_its_interface, {
     let (_wire, ns) = native_stack();
     let ifs = ns.network_interfaces().expect("interfaces");
     assert_eq!(ifs.len(), 1);
@@ -245,7 +248,7 @@ engine_thread_test_case!(native_stack_reports_its_interface, {
     assert!(!ns.supports_ipv6());
 });
 
-engine_thread_test_case!(native_stack_options_and_registration, {
+thread_case!(native_stack_options_and_registration, {
     let o = NativeStackOptions::default();
     assert_eq!(o.tap_device.get_value(), "tap0");
     assert_eq!(o.host_ipv4_addr.get_value(), "192.168.122.2");
@@ -276,13 +279,13 @@ engine_thread_test_case!(native_stack_options_and_registration, {
     std::mem::forget(dhcp);
 });
 
-engine_thread_test_case!(device_creation_needs_a_supported_driver, {
+thread_case!(device_creation_needs_a_supported_driver, {
     // The configuration format names devices only DPDK can drive.
     let config = "{eth0: {pci-address: 0000:06:00.0, ip: 192.168.100.10, gateway: 192.168.100.1, netmask: 255.255.255.0}}";
     let mut o = NativeStackOptions::new();
     o.net_config.set_value(config.to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
-    let e = create_native_net_device(o).err().expect("no device");
+    let e = create_native_net_device(o).expect_err("no device");
     assert_eq!(message(&e), "no network device");
     // The same through the stack's factory path on this shard.
     if this_shard_id() == 0 {
@@ -296,10 +299,7 @@ engine_thread_test_case!(device_creation_needs_a_supported_driver, {
     let mut o = NativeStackOptions::new();
     o.net_config_file.set_value(path.display().to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
-    assert_eq!(
-        message(&create_native_net_device(o).err().expect("no device")),
-        "no network device"
-    );
+    assert_eq!(message(&create_native_net_device(o).expect_err("no device")), "no network device");
     let _ = std::fs::remove_file(&path);
 
     // A configuration that does not parse.
@@ -313,7 +313,7 @@ engine_thread_test_case!(device_creation_needs_a_supported_driver, {
     create_native_stack(&static_options(), wire.dev.clone());
 });
 
-engine_thread_test_case!(proxy_queue_forwards_to_the_owning_shard, {
+thread_case!(proxy_queue_forwards_to_the_owning_shard, {
     let mut weights = BTreeMap::new();
     weights.insert(this_shard_id(), 1.0f32);
     weights.insert(this_shard_id() + 1, 0.0f32);

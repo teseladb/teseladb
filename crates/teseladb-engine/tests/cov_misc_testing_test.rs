@@ -61,7 +61,7 @@ impl PerfTestBody for AsyncMixed {
     type Ret = Future<()>;
     fn run(&mut self) -> Future<()> {
         self.0 += 1;
-        if self.0 % 2 == 0 { make_ready_future(()) } else { yield_() }
+        if self.0.is_multiple_of(2) { make_ready_future(()) } else { yield_() }
     }
 }
 
@@ -86,7 +86,7 @@ impl PerfTestBody for IterMixed {
     type Ret = Future<usize>;
     fn run(&mut self) -> Future<usize> {
         self.0 += 1;
-        if self.0 % 2 == 0 {
+        if self.0.is_multiple_of(2) {
             return make_ready_future(2);
         }
         make_coroutine(async move {

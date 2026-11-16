@@ -2,6 +2,9 @@
 //! from either side), checked pointers, the thread CPU-time clock and its arithmetic, and
 //! scattered messages (fragments, callbacks, deleters).
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -49,7 +52,7 @@ fn circular_buffer_grows_at_both_ends() {
     assert_eq!(cb.back(), "c!");
     assert_eq!(cb[1], "a");
     cb[1] = "A".into();
-    assert_eq!(cb.iter().rev().next().unwrap(), "c!");
+    assert_eq!(cb.iter().next_back().unwrap(), "c!");
     assert_eq!(cb.iter().len(), 4);
     cb.pop_front();
     cb.pop_back();

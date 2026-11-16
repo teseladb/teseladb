@@ -12,13 +12,16 @@ use teseladb::engine::net::inet_address::{
 use teseladb::engine::net::ipv4_address::Ipv4Address;
 use teseladb::engine::net::ipv6_address::Ipv6Address;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, Ipv6Addr, SocketAddress, in6_addr};
-use teseladb::engine_thread_test_case;
 
 fn ia(s: &str) -> InetAddress {
     InetAddress::from_sstring(&Sstring::from(s)).expect("a numerical address")
 }
 
-engine_thread_test_case!(internet_addresses_parse_convert_and_print, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(internet_addresses_parse_convert_and_print, {
     let v4 = ia("192.168.1.2");
     assert!(v4.is_ipv4() && !v4.is_ipv6());
     assert_eq!(v4.in_family(), Family::INET);
@@ -116,7 +119,7 @@ fn ipv6_wire_addresses() {
     assert!(Ipv6Address::default().is_unspecified());
 }
 
-engine_thread_test_case!(socket_addresses_and_ipv6_socket_addresses, {
+thread_case!(socket_addresses_and_ipv6_socket_addresses, {
     let a = Ipv6Addr::new(&ia("2001:db8::9").to_ipv6_address().bytes(), 443);
     assert_eq!(a.port, 443);
     assert!(!a.is_ip_unspecified());

@@ -510,10 +510,8 @@ fn verb_types_convert_to_and_from_the_wire() {
 #[test]
 fn a_verb_client_can_be_copied() {
     let h = send_helper::<Serializer, u32, Future<i32>, (i32,)>(3);
-    let copy = h.clone();
     // Both copies are callables of the same verb; they carry no other state.
-    drop(h);
-    drop(copy);
+    let _copy = h.clone();
 }
 
 teseladb::engine_test_case!(relative_deadlines_are_capped_at_the_end_of_time, {

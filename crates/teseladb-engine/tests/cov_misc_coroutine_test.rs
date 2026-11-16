@@ -111,7 +111,11 @@ engine_test_case!(all_and_readiness_checks, {
         let (one, ()) = ready.await?;
         assert_eq!(one, 1);
 
-        let pending = All::new((make_ready_future(2), later().then(|()| 3), later()));
+        let pending = All::new((
+            make_ready_future(2),
+            later().then(|()| Ok::<i32, ExceptionPtr>(3)),
+            later(),
+        ));
         assert!(!pending.await_ready());
         let (two, three, ()) = pending.await?;
         assert_eq!((two, three), (2, 3));
@@ -157,9 +161,7 @@ engine_test_case!(awaited_exceptions_fail_the_coroutine, {
         let e = r.unwrap_err();
         assert_eq!(e.downcast_ref::<RuntimeError>().unwrap().0, "x");
         let failing = make_coroutine(async move {
-            if let Err(e) = return_exception(RuntimeError::new("from the body")).await {
-                return Err(e);
-            }
+            return_exception(RuntimeError::new("from the body")).await?;
             Ok(1)
         });
         let e = failing.await.unwrap_err();

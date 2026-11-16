@@ -4,6 +4,9 @@
 //! here hold at least two objects per page: a class of one object per page (the largest class)
 //! is not exercised.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -74,8 +77,11 @@ fn id_of(e: *mut Entry) -> u32 {
     unsafe { (*e).id }
 }
 
+/// The erase callback of a slab.
+type Eraser = Option<Box<dyn FnMut(&mut Entry)>>;
+
 /// An erase callback that records the ids of the evicted entries.
-fn recording_eraser() -> (Rc<RefCell<Vec<u32>>>, Option<Box<dyn FnMut(&mut Entry)>>) {
+fn recording_eraser() -> (Rc<RefCell<Vec<u32>>>, Eraser) {
     let erased = Rc::new(RefCell::new(Vec::new()));
     let sink = erased.clone();
     (erased, Some(Box::new(move |e: &mut Entry| sink.borrow_mut().push(e.id))))
@@ -187,7 +193,7 @@ thread_case!(limited_slabs_fill_their_pages, {
     assert_eq!(slab.class_size(1), 96);
     assert_eq!(slab.class_size(96), 96);
     let second = slab.class_size(97);
-    assert!(second > 96 && second % std::mem::align_of::<Entry>() == 0);
+    assert!(second > 96 && second.is_multiple_of(std::mem::align_of::<Entry>()));
     assert_eq!(slab.class_size(SLAB_PAGE as usize), SLAB_PAGE as usize);
     assert_eq!(slab.class_size(SLAB_PAGE as usize + 1), 0);
     let e = slab.create(SLAB_PAGE as usize + 1, 0).unwrap_err();

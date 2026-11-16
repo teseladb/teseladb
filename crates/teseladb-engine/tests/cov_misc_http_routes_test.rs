@@ -337,8 +337,7 @@ fn requests_report_addresses_urls_and_body_kinds() {
 
 #[test]
 fn keep_alive_depends_on_the_version_and_connection_header() {
-    let mut req = Request::default();
-    req._version = ss("0.9");
+    let mut req = Request { _version: ss("0.9"), ..Request::default() };
     assert!(!req.should_keep_alive());
     req._version = ss("1.0");
     assert!(!req.should_keep_alive());

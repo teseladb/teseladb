@@ -11,7 +11,7 @@ mod tls_certs;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use teseladb::engine::core::future::{Exception, ExceptionPtr};
+use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::tls::{
@@ -20,7 +20,6 @@ use teseladb::engine::net::tls::{
     SubjectAltNameType, SubjectAltNameValue, TlsError, TlsOptions, VerificationError, X509Cert,
     X509CrtFormat, error_category, format_as,
 };
-use teseladb::engine_thread_test_case;
 
 use tls_certs::certfile;
 
@@ -36,10 +35,14 @@ fn message(e: &ExceptionPtr) -> String {
     e.get().map(|x| x.what()).unwrap_or_default()
 }
 
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
 const GARBAGE: &[u8] =
     b"-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n";
 
-engine_thread_test_case!(dh_parameters_from_levels_bytes_and_files, {
+thread_case!(dh_parameters_from_levels_bytes_and_files, {
     for lvl in [DhLevel::LEGACY, DhLevel::MEDIUM, DhLevel::HIGH, DhLevel::ULTRA] {
         let _ = DhParams::new(lvl);
     }
@@ -58,7 +61,7 @@ engine_thread_test_case!(dh_parameters_from_levels_bytes_and_files, {
     }
 });
 
-engine_thread_test_case!(certificates_from_bytes_and_files, {
+thread_case!(certificates_from_bytes_and_files, {
     let crt = read("test.crt");
     assert!(X509Cert::new(&crt, X509CrtFormat::PEM).is_ok());
     assert!(X509Cert::new(GARBAGE, X509CrtFormat::PEM).is_err());
@@ -71,7 +74,7 @@ engine_thread_test_case!(certificates_from_bytes_and_files, {
     assert!(!message(&e).is_empty());
 });
 
-engine_thread_test_case!(credentials_reject_malformed_inputs, {
+thread_case!(credentials_reject_malformed_inputs, {
     let mut c = CertificateCredentials::new();
     let ca = read("tls-ca-bundle.pem");
     c.set_x509_trust(&ca, X509CrtFormat::PEM).expect("trust");
@@ -118,10 +121,10 @@ engine_thread_test_case!(credentials_reject_malformed_inputs, {
     );
 });
 
-engine_thread_test_case!(credentials_settings, {
+thread_case!(credentials_settings, {
     let mut c = CertificateCredentials::default();
     c.set_priority_string(&s("NORMAL")).expect("a valid priority string");
-    let e = c.set_priority_string(&s("NORMAL:+BOGUS-THING")).err().expect("invalid");
+    let e = c.set_priority_string(&s("NORMAL:+BOGUS-THING")).expect_err("invalid");
     assert!(!message(&e).is_empty());
     assert!(c.set_priority_string(&s("NOR\0MAL")).is_err());
     c.set_enable_certificate_verification(false);
@@ -140,7 +143,7 @@ engine_thread_test_case!(credentials_settings, {
     sc.base.set_priority_string(&s("SECURE256")).expect("priority");
 });
 
-engine_thread_test_case!(builder_builds_and_applies, {
+thread_case!(builder_builds_and_applies, {
     let mut b = CredentialsBuilder::default();
     b.set_dh_level(DhLevel::MEDIUM);
     b.set_client_auth(ClientAuth::REQUEST);
@@ -234,6 +237,6 @@ fn verification_callbacks_may_fail() {
             Err(ExceptionPtr::from(VerificationError(subject.to_string())))
         },
     );
-    let e = no.call(SessionType::SERVER, s("cn=x"), s("cn=y")).err().expect("refused");
+    let e = no.call(SessionType::SERVER, s("cn=x"), s("cn=y")).expect_err("refused");
     assert_eq!(message(&e), "cn=x");
 }

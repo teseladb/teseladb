@@ -17,7 +17,6 @@ use teseladb::engine::net::dns::{
     DnsError, DnsResolver, DnsResolverOptions, OptFamilyDisplay, SrvProto, SrvRecord, dns,
 };
 use teseladb::engine::net::inet_address::{Family, InetAddress};
-use teseladb::engine_thread_test_case;
 
 const T_A: u16 = 1;
 const T_CNAME: u16 = 5;
@@ -222,7 +221,11 @@ fn dns_code(e: &ExceptionPtr) -> Option<i32> {
     e.downcast_ref::<DnsError>().map(|d| d.code)
 }
 
-engine_thread_test_case!(names_and_addresses_resolve_over_udp, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(names_and_addresses_resolve_over_udp, {
     let server = Server::start();
     let mut r = DnsResolver::with_options(&server.options()).expect("a resolver");
     let h = r.get_host_by_name(&s("host.test"), Some(Family::INET)).get().expect("found");
@@ -250,8 +253,7 @@ engine_thread_test_case!(names_and_addresses_resolve_over_udp, {
     assert!(h.names.iter().any(|n| n.as_str() == "host.test" || n.as_str() == "alias.test"));
 
     // Unknown names and addresses fail with the server's answer.
-    let e =
-        r.get_host_by_name(&s("missing.test"), Some(Family::INET)).get().err().expect("missing");
+    let e = r.get_host_by_name(&s("missing.test"), Some(Family::INET)).get().expect_err("missing");
     assert!(dns_code(&e).is_some());
     assert!(r.get_host_by_addr(&inet("10.9.8.7")).get().is_err());
     assert!(r.get_host_by_addr(&inet("2001:db8::5")).get().is_err());
@@ -260,7 +262,7 @@ engine_thread_test_case!(names_and_addresses_resolve_over_udp, {
     r.close().get().expect("closed");
 });
 
-engine_thread_test_case!(truncated_answers_are_retried_over_tcp, {
+thread_case!(truncated_answers_are_retried_over_tcp, {
     let server = Server::start();
     let mut r = DnsResolver::with_options(&server.options()).expect("a resolver");
     let h = r.get_host_by_name(&s("big.test"), Some(Family::INET)).get().expect("found");
@@ -281,7 +283,7 @@ engine_thread_test_case!(truncated_answers_are_retried_over_tcp, {
     r.close().get().expect("closed");
 });
 
-engine_thread_test_case!(srv_records_and_search_domains, {
+thread_case!(srv_records_and_search_domains, {
     let server = Server::start();
     let mut opts = server.options();
     opts.domains = Some(vec![s("search.test")]);
@@ -303,12 +305,12 @@ engine_thread_test_case!(srv_records_and_search_domains, {
     r.close().get().expect("closed");
 });
 
-engine_thread_test_case!(silent_servers_time_out, {
+thread_case!(silent_servers_time_out, {
     let server = Server::start();
     let mut opts = server.options();
     opts.timeout = Some(Duration::from_millis(100));
     let mut r = DnsResolver::with_options(&opts).expect("a resolver");
-    let e = r.get_host_by_name(&s("slow.test"), Some(Family::INET)).get().err().expect("timeout");
+    let e = r.get_host_by_name(&s("slow.test"), Some(Family::INET)).get().expect_err("timeout");
     assert!(dns_code(&e).is_some());
     // A lookup still pending when the resolver closes fails.
     let pending = r.get_host_by_name(&s("slow.test"), Some(Family::INET));
@@ -316,7 +318,7 @@ engine_thread_test_case!(silent_servers_time_out, {
     assert!(pending.get().is_err());
 });
 
-engine_thread_test_case!(resolver_options_are_validated, {
+thread_case!(resolver_options_are_validated, {
     let opts =
         DnsResolverOptions { servers: Some(vec![inet("::1")]), ..DnsResolverOptions::default() };
     assert!(DnsResolver::with_options(&opts).is_err());

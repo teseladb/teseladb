@@ -326,10 +326,10 @@ fn spinlock_try_lock_fails_while_held() {
 
 #[test]
 fn critical_alloc_sections_nest() {
-    let outer = ScopedCriticalAllocSection::default();
-    let inner = ScopedCriticalAllocSection::new();
-    drop(inner);
-    drop(outer);
+    let _outer = ScopedCriticalAllocSection::default();
+    {
+        let _inner = ScopedCriticalAllocSection::new();
+    }
 }
 
 struct KeepInts;

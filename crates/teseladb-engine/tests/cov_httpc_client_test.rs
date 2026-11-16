@@ -15,7 +15,6 @@ use std::cell::{Cell, RefCell};
 use std::io::Read as _;
 use std::io::Write as _;
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -160,11 +159,11 @@ fn listener() -> Result<(TcpListener, SocketAddress), ExceptionPtr> {
     Ok((l, make_ipv4_address_ip_port(0x7f00_0001, p)))
 }
 
+/// What the server does with one accepted connection.
+type Script = Box<dyn FnOnce(&mut TcpStream) -> PeerResult<()> + Send>;
+
 /// Serves the connections `l` accepts one after the other, each with its script.
-fn sequential_server(
-    l: TcpListener,
-    scripts: Vec<Box<dyn FnOnce(&mut TcpStream) -> PeerResult<()> + Send>>,
-) -> JoinHandle<PeerResult<()>> {
+fn sequential_server(l: TcpListener, scripts: Vec<Script>) -> JoinHandle<PeerResult<()>> {
     std::thread::spawn(move || {
         for script in scripts {
             let (mut s, _) = io(l.accept())?;

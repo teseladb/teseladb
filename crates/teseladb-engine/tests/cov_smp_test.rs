@@ -2,6 +2,9 @@
 //! wrapping, partial reads, draining), a function that panics when submitted to the local
 //! shard, the main-thread check, and the shard-to-NUMA-node table.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::reactor::engine;

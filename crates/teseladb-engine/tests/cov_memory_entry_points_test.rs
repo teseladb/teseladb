@@ -4,6 +4,9 @@
 //! array, sized, non-throwing and aligned forms. Every allocation must come from the shard's
 //! pool and keep its contents and alignment.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::ffi::c_void;
 

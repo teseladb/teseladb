@@ -3,6 +3,9 @@
 //! profiling interface of a build without it, page-size arithmetic, and large allocations
 //! taken and returned directly.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;

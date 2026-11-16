@@ -3,6 +3,9 @@
 //! options, notifiers, help text) and of the option values of the option groups (string maps,
 //! switches, selections).
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::Cell;
 use std::rc::Rc;

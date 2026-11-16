@@ -167,6 +167,8 @@ fn simple_backtraces_keep_their_delimiter_and_hash() {
     let mut frames = SimpleBacktraceVectorType::new();
     frames.push_back(Frame { addr: 0x10, ..Frame::default() });
     frames.push_back(Frame { addr: 0x20, ..Frame::default() });
+    // The deprecated constructor is the one that sets a delimiter; this test covers it.
+    #[allow(deprecated)]
     let a = SimpleBacktrace::with_delimeter(frames.clone(), b'\n');
     let b = SimpleBacktrace::new(frames);
     assert_eq!(a.delimeter(), b'\n');
@@ -176,6 +178,8 @@ fn simple_backtraces_keep_their_delimiter_and_hash() {
     assert_eq!(hash_of(&a), hash_of(&b));
     assert_eq!(b.to_string(), "0x10 0x20");
 
+    // The deprecated constructor is the one that sets a delimiter; this test covers it.
+    #[allow(deprecated)]
     let e = SimpleBacktrace::empty_with_delimeter(b'|');
     assert_eq!(e.delimeter(), b'|');
     assert_eq!(e.hash(), 0);
@@ -210,6 +214,8 @@ fn task_traces_compare_entries_and_print_them() {
     let mut prev = TasktraceVectorType::new();
     prev.push_back(eb.clone());
     prev.push_back(et.clone());
+    // The deprecated constructor is the one that sets a delimiter; this test covers it.
+    #[allow(deprecated)]
     let main = SimpleBacktrace::with_delimeter(SimpleBacktraceVectorType::new(), b'#');
     let tt = Tasktrace::new(main.clone(), prev.clone(), 5, SchedulingGroup::default());
     assert_eq!(tt.hash(), main.hash().wrapping_mul(31) ^ 5);

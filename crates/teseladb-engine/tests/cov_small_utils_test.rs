@@ -3,6 +3,9 @@
 //! function input iterator, the printing helpers, the estimated histogram and the prefetch
 //! hints.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 #![allow(deprecated)]
 
 use std::fmt;
@@ -68,7 +71,7 @@ fn exponential_distribution_has_the_expected_mean() {
 
 #[test]
 fn random_device_reads_the_kernel_generator() {
-    let mut rd = RandomDevice::default();
+    let mut rd = RandomDevice;
     // Sixteen 32-bit draws are not all equal unless the device is broken.
     let draws: Vec<u32> = (0..16).map(|_| rd.call()).collect();
     assert!(draws.iter().any(|&d| d != draws[0]));

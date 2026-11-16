@@ -4,6 +4,9 @@
 //! fixed-size array map, the timeout error, temporary buffers from a custom allocator, aligned
 //! buffers, the default reactor configuration, and the file-system AIO check.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::Cell;
 use std::time::Duration;
@@ -82,7 +85,8 @@ fn trailing_arrays_units_and_unaligned_values() {
     let mut u = Unaligned::new(5u32);
     assert_eq!(u.get(), 5);
     u.set(9);
-    assert_eq!(u.raw, 9);
+    let raw = u.raw;
+    assert_eq!(raw, 9);
     let from: Unaligned<u16> = 7u16.into();
     assert_eq!(from.get(), 7);
     let mut bytes = [0u8; 9];

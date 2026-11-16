@@ -2,6 +2,9 @@
 //! bucket, writes throttled by a small bandwidth (the class waits for its tokens to be
 //! replenished), and the queue's counters and fair groups.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::time::Instant;
 

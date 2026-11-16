@@ -32,11 +32,10 @@ use teseladb::engine::net::ip::{
 };
 use teseladb::engine::net::ip_checksum::Checksummer;
 use teseladb::engine::net::ipv4_address::Ipv4Address;
-use teseladb::engine::net::net::{Device, ForwardHash, HwFeatures, Interface, Qp, QpStats};
+use teseladb::engine::net::net::{ForwardHash, HwFeatures, Interface, QpStats};
 use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, in_addr};
 use teseladb::engine::net::toeplitz::{DEFAULT_RSSKEY_40BYTES, toeplitz_hash};
-use teseladb::engine_thread_test_case;
 
 use wire::*;
 
@@ -63,7 +62,11 @@ fn ip_frames(st: &IpStack) -> Vec<Frame> {
     st.wire.drain().into_iter().filter(|f| f.is_ipv4()).collect()
 }
 
-engine_thread_test_case!(echo_requests_are_answered, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(echo_requests_are_answered, {
     let st = IpStack::new(HwFeatures::default());
     st.wire.inject(&echo_request(7, b"ping"));
     assert_echo_reply(&st.wire.next_ip(), 7, b"ping");
@@ -89,7 +92,7 @@ engine_thread_test_case!(echo_requests_are_answered, {
     assert!(ip_frames(&st).is_empty());
 });
 
-engine_thread_test_case!(invalid_packets_are_dropped, {
+thread_case!(invalid_packets_are_dropped, {
     let st = IpStack::new(HwFeatures::default());
     let icmp = icmp_message(8, 1, 1, b"x");
     // A wrong header checksum.
@@ -121,7 +124,7 @@ engine_thread_test_case!(invalid_packets_are_dropped, {
     assert_echo_reply(&off.wire.next_ip(), 1, b"x");
 });
 
-engine_thread_test_case!(fragments_are_reassembled_and_large_replies_fragmented, {
+thread_case!(fragments_are_reassembled_and_large_replies_fragmented, {
     let st = IpStack::new(HwFeatures::default());
     let payload: Vec<u8> = (0..2000u32).map(|i| (i * 7 % 256) as u8).collect();
     let msg = icmp_message(8, 42, 1, &payload);
@@ -153,7 +156,7 @@ engine_thread_test_case!(fragments_are_reassembled_and_large_replies_fragmented,
     assert_eq!(&reply[8..], &payload[..]);
 });
 
-engine_thread_test_case!(reassembly_memory_is_bounded, {
+thread_case!(reassembly_memory_is_bounded, {
     let st = IpStack::new(HwFeatures::default());
     // Thousands of first fragments that never complete: more than the high threshold.
     for id in 0..3500u16 {
@@ -169,7 +172,7 @@ engine_thread_test_case!(reassembly_memory_is_bounded, {
     assert_echo_reply(&st.wire.next_ip(), 5, b"after the flood");
 });
 
-engine_thread_test_case!(arp_requests_are_answered, {
+thread_case!(arp_requests_are_answered, {
     let st = IpStack::new(HwFeatures::default());
     st.wire.inject(&eth(
         BCAST_MAC,
@@ -226,7 +229,7 @@ engine_thread_test_case!(arp_requests_are_answered, {
     assert_eq!(st.wire.next_arp().arp().spa, 0x0a00_0005);
 });
 
-engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
+thread_case!(lookups_resolve_time_out_and_overflow, {
     let st = IpStack::new(HwFeatures::default());
     let target = Ipv4Address::from_u32(0x0a00_0009);
     let mac9 = [0x02, 0, 0, 0, 0, 0x09];
@@ -261,7 +264,7 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     // An address nobody answers for: the query is repeated every second and the waiters fail.
     let silent = Ipv4Address::from_u32(0x0a00_000a);
     let lost = st.ipv4().get_l2_dst_address(silent);
-    let err = wait(lost).err().expect("a timeout");
+    let err = wait(lost).expect_err("a timeout");
     assert!(err.downcast_ref::<ArpTimeoutError>().is_some());
     assert_eq!(format!("{}", ArpTimeoutError::new()), "ARP timeout");
     let queries =
@@ -272,7 +275,7 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     let crowded = Ipv4Address::from_u32(0x0a00_000b);
     let waiting: Vec<_> = (0..512).map(|_| st.ipv4().get_l2_dst_address(crowded)).collect();
     let refused = st.ipv4().get_l2_dst_address(crowded);
-    let err = wait(refused).err().expect("queue full");
+    let err = wait(refused).expect_err("queue full");
     assert!(err.downcast_ref::<ArpQueueFullError>().is_some());
     assert_eq!(format!("{}", ArpQueueFullError::new()), "ARP waiter's queue is full");
     st.ipv4().learn(EthernetAddress { mac: [0x02, 0, 0, 0, 0, 0x0b] }, crowded);
@@ -283,7 +286,7 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     let _ = (ArpTimeoutError::default(), ArpQueueFullError::default());
 });
 
-engine_thread_test_case!(off_subnet_traffic_goes_through_the_gateway, {
+thread_case!(off_subnet_traffic_goes_through_the_gateway, {
     let st = IpStack::new(HwFeatures::default());
     let far = 0xc0a8_0105;
     let far2 = 0xc0a8_0106;
@@ -365,7 +368,7 @@ impl IpPacketFilter for PortFilter {
     }
 }
 
-engine_thread_test_case!(packet_filters_see_packets_first, {
+thread_case!(packet_filters_see_packets_first, {
     let st = IpStack::new(HwFeatures::default());
     let filter: &'static PortFilter = Box::leak(Box::new(PortFilter {
         port: 7777,
@@ -395,7 +398,7 @@ engine_thread_test_case!(packet_filters_see_packets_first, {
     assert!(st.ipv4().packet_filter().is_none());
 });
 
-engine_thread_test_case!(transmit_queues_have_a_budget, {
+thread_case!(transmit_queues_have_a_budget, {
     let st = IpStack::new(HwFeatures::default());
     // Echo replies beyond the ICMP queue budget are dropped.
     let payload = vec![0x55u8; 1400];
@@ -412,7 +415,7 @@ engine_thread_test_case!(transmit_queues_have_a_budget, {
     assert!(resets > 10000 && resets < 11000, "{resets} resets");
 });
 
-engine_thread_test_case!(l4_providers_and_direct_sends, {
+thread_case!(l4_providers_and_direct_sends, {
     let st = IpStack::new(HwFeatures { tx_csum_ip_offload: true, ..HwFeatures::default() });
     st.teach_peer();
     // An extra provider of the UDP view: its packets get the protocol number of the view.
@@ -467,7 +470,7 @@ impl ArpForProtocol for CountingArp {
     }
 }
 
-engine_thread_test_case!(standalone_arp_layer_and_custom_protocols, {
+thread_case!(standalone_arp_layer_and_custom_protocols, {
     let wire = Wire::new(HwFeatures::default());
     let netif = Interface::new(wire.dev.clone()).into_raw();
     let arp: *mut Arp = Box::into_raw(Box::<Arp>::new_uninit()).cast();
@@ -518,7 +521,7 @@ engine_thread_test_case!(standalone_arp_layer_and_custom_protocols, {
     assert_eq!(got.get(), 1);
 });
 
-engine_thread_test_case!(software_redirection_hashes_every_protocol, {
+thread_case!(software_redirection_hashes_every_protocol, {
     let mut weights = BTreeMap::new();
     weights.insert(this_shard_id(), 1.0f32);
     weights.insert(this_shard_id() + 1, 0.0f32);
@@ -569,7 +572,7 @@ engine_thread_test_case!(software_redirection_hashes_every_protocol, {
     assert!(stats.tx.good.last_bunch >= 1);
 });
 
-engine_thread_test_case!(device_and_interface_accessors, {
+thread_case!(device_and_interface_accessors, {
     let wire = Wire::with_queues(HwFeatures { mtu: 9000, ..HwFeatures::default() }, 2);
     let st = IpStack::on(wire);
     // SAFETY: the interface is leaked; a short shared access.

@@ -391,7 +391,7 @@ thread_case!(metrics_endpoint_serves_text_and_protobuf, {
         allow_protobuf: true,
         ..prometheus::Config::default()
     };
-    with_server("covprom", ctx, |port| check_endpoint(port));
+    with_server("covprom", ctx, check_endpoint);
     set_metric_family_configs(&[]);
     drop(groups);
 });

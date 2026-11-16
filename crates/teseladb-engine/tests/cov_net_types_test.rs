@@ -40,7 +40,6 @@ use teseladb::engine::net::socket_defs::{
     in6_is_addr_v4mapped, sockaddr_un,
 };
 use teseladb::engine::net::unix_address::UnixDomainAddr;
-use teseladb::engine_thread_test_case;
 
 /// The bytes of `p`, fragment after fragment.
 fn bytes(p: &Packet) -> Vec<u8> {
@@ -302,7 +301,11 @@ fn packets_print_as_text_or_hex() {
     assert!(s.starts_with("packet{\"A\\x"), "{s}");
 }
 
-engine_thread_test_case!(packets_are_freed_on_their_home_shard, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(packets_are_freed_on_their_home_shard, {
     let runs = Arc::new(AtomicU32::new(0));
     let r = runs.clone();
     let mut p = Packet::from_data(b"home");
@@ -403,10 +406,8 @@ fn checksums_agree_with_the_reference() {
         c.sum_bytes(&data[..len]);
         assert_eq!(u16::from_be(c.get()), reference(&data[..len]), "len {len}");
         // SAFETY: the slice has `len` readable bytes.
-        assert_eq!(
-            u16::from_be(unsafe { ip_checksum(data.as_ptr(), len) }),
-            reference(&data[..len])
-        );
+        let sum = unsafe { ip_checksum(data.as_ptr(), len) };
+        assert_eq!(u16::from_be(sum), reference(&data[..len]));
     }
     // Byte-wise, word-wise and odd-aligned sums are the same as the bytes.
     let mut a = Checksummer::default();

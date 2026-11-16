@@ -3,6 +3,9 @@
 //! cursors and their visitors, copies into other sinks, and the overflow and underflow errors
 //! of every cursor.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::rc::Rc;
 
@@ -78,7 +81,7 @@ fn simple_output_cursors_skip_fill_and_split() {
     // SAFETY: `buf` outlives the cursors and is read only after they are done.
     let mut out: SimpleOutputStream =
         unsafe { SimpleMemoryOutputStream::new(buf.as_mut_ptr(), 10, 2) };
-    assert!(!SimpleMemoryOutputStream::HAS_WITH_STREAM);
+    const { assert!(!SimpleMemoryOutputStream::HAS_WITH_STREAM) };
     assert_eq!(out.begin(), buf.as_mut_ptr().wrapping_add(2));
     out.write(b"").unwrap();
     out.fill(b'z', 0).unwrap();
@@ -108,7 +111,7 @@ fn simple_input_cursors_skip_split_and_copy() {
     let data = *b"0123456789";
     // SAFETY: `data` outlives the cursors and is never written.
     let mut input: SimpleInputStream = unsafe { SimpleMemoryInputStream::new(data.as_ptr(), 10) };
-    assert!(!SimpleMemoryInputStream::HAS_WITH_STREAM);
+    const { assert!(!SimpleMemoryInputStream::HAS_WITH_STREAM) };
     assert_eq!(input.begin(), data.as_ptr());
     input.skip(1).unwrap();
     let mut sub = input.read_substream(3).unwrap();
@@ -147,7 +150,7 @@ fn simple_input_cursors_skip_split_and_copy() {
 fn fragmented_output_cursors_cross_fragments() {
     let s = Storage::new();
     let mut out = FragmentedMemoryOutputStream::new(s.it.clone(), TOTAL);
-    assert!(!FragmentedMemoryOutputStream::<Frags>::HAS_WITH_STREAM);
+    const { assert!(!FragmentedMemoryOutputStream::<Frags>::HAS_WITH_STREAM) };
     out.fill(b'a', 2).unwrap();
     // One byte left in the first fragment: a two-byte sub-stream spans the empty fragment.
     let mut spanning = out.write_substream(2).unwrap();
@@ -175,7 +178,7 @@ fn fragmented_input_cursors_cross_fragments() {
     s.bufs[2].copy_from_slice(b"defg");
     s.bufs[3].copy_from_slice(b"hi");
     let mut input = FragmentedMemoryInputStream::new(s.it.clone(), TOTAL);
-    assert!(!FragmentedMemoryInputStream::<Frags>::HAS_WITH_STREAM);
+    const { assert!(!FragmentedMemoryInputStream::<Frags>::HAS_WITH_STREAM) };
     input.skip(1).unwrap();
     assert_eq!(input.first_fragment_size(), 2);
     assert_eq!(input.first_fragment_data(), s.bufs[0][1..].as_ptr());
@@ -250,7 +253,7 @@ impl StreamVisitor<SimpleMemoryInputStream, FragmentedMemoryInputStream<Frags>> 
 
 #[test]
 fn type_erased_output_cursors_dispatch_each_call() {
-    assert!(MemoryOutputStream::<Frags>::HAS_WITH_STREAM);
+    const { assert!(MemoryOutputStream::<Frags>::HAS_WITH_STREAM) };
     let mut default = MemoryOutputStream::<Frags>::default();
     assert_eq!(default.size(), 0);
     assert_eq!(default.with_stream(Which), ("simple", 0));
@@ -281,12 +284,12 @@ fn type_erased_output_cursors_dispatch_each_call() {
     assert_eq!(frag.size(), 2);
     assert_eq!(frag.with_stream(Which), ("fragmented", 2));
     assert_out_of_range(frag.skip(3), "overflow");
-    assert_eq!(s.bytes(), b"123\0567\0\0");
+    assert_eq!(s.bytes(), b"123\x00567\0\0");
 }
 
 #[test]
 fn type_erased_input_cursors_dispatch_each_call() {
-    assert!(MemoryInputStream::<Frags>::HAS_WITH_STREAM);
+    const { assert!(MemoryInputStream::<Frags>::HAS_WITH_STREAM) };
     let data = *b"abcdefgh";
     // SAFETY: `data` outlives the cursor and is never written.
     let mut simple: MemoryInputStream<Frags> =

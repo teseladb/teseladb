@@ -118,9 +118,11 @@ fn allocation_gives_each_cpu_a_shard_and_one_io_group() {
 
 #[test]
 fn io_queue_topologies_move_their_contents() {
-    let mut a = IoQueueTopology::default();
-    a.shard_to_group = vec![0, 1, 1];
-    a.shards_in_group = vec![1, 2];
+    let mut a = IoQueueTopology {
+        shard_to_group: vec![0, 1, 1],
+        shards_in_group: vec![1, 2],
+        ..IoQueueTopology::default()
+    };
     a.queues.resize_with(3, || std::cell::UnsafeCell::new(None));
     a.groups.get_mut().resize_with(2, || None);
     let mut b = IoQueueTopology::take_from(&mut a);

@@ -6,6 +6,9 @@
 //! values, unknown options). A program with its own `main` (`harness = false`): one engine per
 //! process, so each case runs this program again with `COV_REACTOR_CASE` naming it.
 #![cfg(target_os = "linux")]
+// The DMA reads and writes are unsafe engine interfaces; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -186,7 +189,7 @@ fn workload(dir: PathBuf, stall: bool) -> Result<(), ExceptionPtr> {
     let back = unsafe { f.dma_read_bulk::<u8>(0, BLOCK, std::ptr::null_mut()) }.get()?;
     assert!(back.as_slice()[..BLOCK].iter().all(|&c| c == b'w'));
     f.close().get()?;
-    std::fs::remove_file(&name).map_err(|e| ExceptionPtr::new(e))?;
+    std::fs::remove_file(&name).map_err(ExceptionPtr::new)?;
     sleep(Duration::from_millis(30)).get()?;
     let last = Smp::count() - 1;
     assert_eq!(Smp::submit_to(last, || Ok::<u32, ExceptionPtr>(this_shard_id())).get()?, last);

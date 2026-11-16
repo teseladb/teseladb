@@ -30,7 +30,6 @@ use teseladb::engine::net::virtio_interface::{
     VRING_USED_F_NO_NOTIFY,
 };
 use teseladb::engine::util::program_options::Value;
-use teseladb::engine_thread_test_case;
 
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
@@ -168,7 +167,11 @@ fn buf(addr: u64, len: u32, writeable: bool) -> Buffer {
     Buffer { addr, len, writeable }
 }
 
-engine_thread_test_case!(vring_posts_chains_and_completes_them, {
+#[macro_use]
+#[path = "common/cov_thread_case.rs"]
+mod thread_case;
+
+thread_case!(vring_posts_chains_and_completes_them, {
     let mem = RingMem::new(8, false);
     let completed = Rc::new(RefCell::new(Vec::new()));
     let bunches = Rc::new(Cell::new(0));
@@ -228,7 +231,7 @@ engine_thread_test_case!(vring_posts_chains_and_completes_them, {
     assert_eq!(notified.get(), 1);
 });
 
-engine_thread_test_case!(vring_event_index_suppresses_kicks, {
+thread_case!(vring_event_index_suppresses_kicks, {
     let mem = RingMem::new(4, true);
     let ring: *mut Vring<Chain, Done> = Box::into_raw(Box::new(Vring::new(
         mem.cfg,
@@ -248,7 +251,7 @@ engine_thread_test_case!(vring_event_index_suppresses_kicks, {
     assert_eq!(notified.get(), 1);
 });
 
-engine_thread_test_case!(device_features_follow_the_options, {
+thread_case!(device_features_follow_the_options, {
     let mut opts = VirtioOptions::default();
     let lro = Value::new("lro", Some("on".to_string()), "LRO");
     let dev = VirtioDevice::new(&opts, &lro);
@@ -288,7 +291,7 @@ engine_thread_test_case!(device_features_follow_the_options, {
     // Without a vhost-net device (and a tap device) the queue cannot be created; with one,
     // it is created and released.
     let net_opts = NativeStackOptions::new();
-    let _ = boxed.init_local_queue(&net_opts, 0).map(|q| drop(q));
+    let _ = boxed.init_local_queue(&net_opts, 0).map(drop);
 });
 
 #[test]
@@ -326,7 +329,7 @@ fn malloc_buffers_free_what_they_own() {
     assert_eq!(virt_to_phys(&mut x), &mut x as *mut u8 as usize as u64);
 }
 
-engine_thread_test_case!(vhost_notifier_signals_its_eventfd, {
+thread_case!(vhost_notifier_signals_its_eventfd, {
     let kick = WriteableEventfd::new(0).expect("an eventfd");
     let fd = kick.get_read_fd();
     let mut n = NotifierVhost::new(kick);

@@ -2,6 +2,9 @@
 //! named service groups that bound the concurrency of cross-shard calls, and sharded services
 //! with a single instance.
 #![cfg(target_os = "linux")]
+// This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
+// sound in a `// SAFETY:` comment.
+#![allow(unsafe_code)]
 
 use std::cell::Cell;
 use std::io::Write;
@@ -186,8 +189,7 @@ thread_case!(single_instance_services_live_on_shard_zero, {
             Err(ExceptionPtr::new(std::io::Error::other("ctor failed")))
         })
         .get()
-        .err()
-        .expect("the constructor failed");
+        .expect_err("the constructor failed");
     assert!(err.to_string().contains("ctor failed"), "{err}");
     assert!(!f.local_is_initialized());
 });
