@@ -329,10 +329,12 @@ fn concurrent_updates_of_one_document_are_both_applied() {
             .with("u", Document::new().with("$inc", Document::new().with("n", 1)));
         Document::new().with("update", "k").with("updates", vec![Value::Document(u)])
     };
+    // The node stays on this thread: the clients reach it by its address.
+    let port = node.client_addrs()[0];
     std::thread::scope(|s| {
         for _ in 0..2 {
             s.spawn(|| {
-                let mut c = Client::new(&node);
+                let mut c = Client::new(&port);
                 for _ in 0..EACH {
                     let r = c.run("app", inc());
                     assert_eq!(r.get("nModified"), Some(&Value::Int32(1)), "{r:?}");
@@ -797,19 +799,19 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
     } else {
         RecordOp::Abort { lsid: 1, txn_number: 1, spans }
     };
+    // The insert runs on a thread of its own and the transaction ends here, where the node is.
     let r = std::thread::scope(|s| {
-        let ender = s.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            ask(TxnOp::EndTxn { txn, op: end })
+        let inserting = s.spawn(move || {
+            let two = Document::new().with("_id", 2).with("u", 7);
+            let insert = Document::new()
+                .with("insert", "c")
+                .with("documents", vec![two.into()])
+                .with("maxTimeMS", 5_000);
+            c.run("held", insert)
         });
-        let two = Document::new().with("_id", 2).with("u", 7);
-        let insert = Document::new()
-            .with("insert", "c")
-            .with("documents", vec![two.into()])
-            .with("maxTimeMS", 5_000);
-        let r = c.run("held", insert);
-        assert!(matches!(ender.join().expect("the ender"), Ok(DataReply::Remote(_))));
-        r
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(matches!(ask(TxnOp::EndTxn { txn, op: end }), Ok(DataReply::Remote(_))));
+        inserting.join().expect("the insert")
     });
     node.stop();
     r

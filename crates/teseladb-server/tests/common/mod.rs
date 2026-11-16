@@ -50,6 +50,12 @@ impl<T: ClientPort> ClientPort for &T {
     }
 }
 
+impl ClientPort for SocketAddr {
+    fn client_port(&self) -> SocketAddr {
+        *self
+    }
+}
+
 impl ClientPort for teseladb_server::procs::NodeProc {
     fn client_port(&self) -> SocketAddr {
         self.client_addrs()[0]

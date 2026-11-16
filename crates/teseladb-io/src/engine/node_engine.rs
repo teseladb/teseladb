@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -89,9 +89,7 @@ impl EnginePost {
 /// A core running on its shard.
 pub struct CoreHandle<M, R> {
     sender: CoreSender<M>,
-    /// In a mutex only so that a node holding its cores can be shared between threads; `join`
-    /// takes it.
-    done: Mutex<Receiver<R>>,
+    done: Receiver<R>,
 }
 
 impl<M: Send + 'static, R> CoreHandle<M, R> {
@@ -103,7 +101,7 @@ impl<M: Send + 'static, R> CoreHandle<M, R> {
     /// Waits for the core's task to end (after a [`crate::engine::CoreInput::Stop`]) and returns
     /// what its `finish` made; `None` if the engine stopped first.
     pub fn join(self) -> Option<R> {
-        self.done.into_inner().unwrap_or_else(PoisonError::into_inner).recv().ok()
+        self.done.recv().ok()
     }
 }
 
@@ -283,10 +281,9 @@ impl NodeEngine {
             return Err(E::from(io::Error::other("the engine stopped")));
         }
         match built_rx.recv() {
-            Ok(Ok(())) => Ok(CoreHandle {
-                sender: CoreSender::on_shard(self.post(shard)),
-                done: Mutex::new(done_rx),
-            }),
+            Ok(Ok(())) => {
+                Ok(CoreHandle { sender: CoreSender::on_shard(self.post(shard)), done: done_rx })
+            }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(E::from(io::Error::other("the engine stopped"))),
         }
