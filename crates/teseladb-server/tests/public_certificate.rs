@@ -2,7 +2,10 @@
 //! serves its chain to a client that asks by SNI for one of its DNS names, and the usual identity
 //! to any other; the configuration file names it `net.tls.publicCertificateKeyFile`, a bad file
 //! names the option, and `rotateCertificates` reads it again.
+#![cfg(target_os = "linux")]
 
+#[path = "common/port_engine.rs"]
+mod port_engine;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -109,7 +112,7 @@ fn listener(port: TlsPort) -> ClientListener {
         tls: port,
         ..ClientConfig::new(Vec::new())
     };
-    ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap()
+    port_engine::spawn_port(&cfg, Arc::new(Fixed)).unwrap()
 }
 
 /// The leaf the server sends to a client that asks for `host` and trusts `anchor`, or the error

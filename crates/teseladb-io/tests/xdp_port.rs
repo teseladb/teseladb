@@ -6,15 +6,14 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use teseladb_io::conn_port::{ConnPort, NetHandler, PortDriver};
+use teseladb_io::conn_port::{ConnPort, NetHandler};
 use teseladb_io::xdp_port::{Flows, XdpListener};
 use teseladb_sys::netns::{self, NetNs};
-use teseladb_sys::uring::Part;
 
 const SERVER: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 const CLIENT: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
@@ -44,7 +43,7 @@ impl NetHandler for Echo {
             net.close(token);
             return;
         }
-        assert!(net.send(token, Part::new(bytes.to_vec())));
+        assert!(net.send(token, bytes));
     }
 
     fn sent(&mut self, _net: &mut dyn ConnPort, _token: u64) {}
@@ -76,19 +75,36 @@ fn pair(prefix: &str, queues: u32, ns: &NetNs) -> String {
     here
 }
 
-/// Runs every port of `listener` on a thread of its own until `stop`; the closes each saw.
+/// The frames each queue's port got for another queue's connections, by queue.
+type Inboxes = Arc<Vec<Mutex<Vec<Vec<u8>>>>>;
+
+/// Runs every port of `listener` on a thread of its own until `stop`, rounds a couple of
+/// milliseconds apart (on the engine, the shard's reactor waits on the socket instead); a frame
+/// of another queue's connection goes to that queue's inbox. The closes each saw.
 fn serve(listener: XdpListener, stop: Arc<AtomicBool>) -> Vec<thread::JoinHandle<usize>> {
     let XdpListener { program, ports } = listener;
     let program = Arc::new(program);
+    let inboxes: Inboxes = Arc::new(ports.iter().map(|_| Mutex::new(Vec::new())).collect());
     ports
         .into_iter()
         .map(|mut port| {
-            let (stop, keep) = (stop.clone(), program.clone());
+            let (stop, keep, inboxes) = (stop.clone(), program.clone(), inboxes.clone());
             thread::spawn(move || {
                 let _program = keep;
                 let mut echo = Echo::default();
+                let q = port.queue() as usize;
                 while !stop.load(Ordering::Acquire) {
-                    port.run_once(&mut echo, Duration::from_millis(20)).unwrap();
+                    let forwarded = std::mem::take(
+                        &mut *inboxes[q].lock().unwrap_or_else(PoisonError::into_inner),
+                    );
+                    let mut forward = |owner: u32, frame: Vec<u8>| {
+                        inboxes[owner as usize]
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(frame);
+                    };
+                    port.round(&mut echo, forwarded, &mut forward).unwrap();
+                    thread::sleep(port.wait_at_most(Duration::from_millis(2)));
                 }
                 echo.closed
             })

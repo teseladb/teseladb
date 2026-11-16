@@ -6,6 +6,8 @@
 //! port that closes its connections, with `socketTimeoutMS` set). The quiesce ends once no client
 //! has started a command other than the handshake for a while, and never past its longest.
 
+#[path = "common/port_engine.rs"]
+mod port_engine;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -45,8 +47,8 @@ impl NodeState for Stopping {
         }
     }
 
-    fn watch_topology(&self, waker: &Arc<teseladb_io::poller::Waker>) {
-        self.0.watch(waker);
+    fn watch_topology(&self, wake: &Arc<dyn Fn() + Send + Sync>) {
+        self.0.watch(wake);
     }
 }
 
@@ -55,7 +57,7 @@ fn listener(presence: &Arc<NodePresence>) -> ClientListener {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         ..ClientConfig::new(Vec::new())
     };
-    ClientListener::spawn(&cfg, Arc::new(Stopping(presence.clone()))).unwrap()
+    port_engine::spawn_port(&cfg, Arc::new(Stopping(presence.clone()))).unwrap()
 }
 
 fn run(s: &mut TcpStream, id: i32, cmd: Document) -> Document {
@@ -82,7 +84,6 @@ fn counter(reply: &Document) -> i64 {
     }
 }
 
-#[test]
 fn a_quiescing_port_answers_every_hello_with_shutdown_in_progress_and_runs_the_rest() {
     let presence = Arc::new(NodePresence::default());
     let l = listener(&presence);
@@ -105,7 +106,6 @@ fn a_quiescing_port_answers_every_hello_with_shutdown_in_progress_and_runs_the_r
     l.stop();
 }
 
-#[test]
 fn a_waiting_hello_answers_at_once_when_the_quiesce_starts() {
     let presence = Arc::new(NodePresence::default());
     let l = listener(&presence);
@@ -136,7 +136,6 @@ fn a_waiting_hello_answers_at_once_when_the_quiesce_starts() {
     l.stop();
 }
 
-#[test]
 fn the_quiesce_of_a_node_ends_once_its_clients_go_quiet_and_never_past_its_longest() {
     let node = teseladb_server::node::Node::start(
         common_config(),
@@ -184,4 +183,16 @@ fn common_config() -> teseladb_server::node::NodeConfig {
         }),
         ..teseladb_server::node::NodeConfig::default()
     }
+}
+
+/// The tests in order: the node first, with its own engine, stopped when the test ends (D4: one engine per process), then the ports on the engine the process
+/// starts for them.
+fn main() {
+    // The engine runs on Linux only (D3).
+    if cfg!(not(target_os = "linux")) {
+        return;
+    }
+    the_quiesce_of_a_node_ends_once_its_clients_go_quiet_and_never_past_its_longest();
+    a_quiescing_port_answers_every_hello_with_shutdown_in_progress_and_runs_the_rest();
+    a_waiting_hello_answers_at_once_when_the_quiesce_starts();
 }

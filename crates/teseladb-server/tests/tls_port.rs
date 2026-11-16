@@ -2,7 +2,10 @@
 //! connections, `allowTLS` and `preferTLS` take both, `disabled` takes only plain; client
 //! certificates required, optional or not asked for, and the peer's certificate kept for
 //! X.509 authentication.
+#![cfg(target_os = "linux")]
 
+#[path = "common/port_engine.rs"]
+mod port_engine;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -80,7 +83,7 @@ fn listener(mode: TlsMode, auth: ClientAuth, pki: &Pki) -> ClientListener {
         tls: TlsPort::new(mode, Some(sc)),
         ..ClientConfig::new(Vec::new())
     };
-    ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap()
+    port_engine::spawn_port(&cfg, Arc::new(Fixed)).unwrap()
 }
 
 fn ping() -> Vec<u8> {
