@@ -1,5 +1,5 @@
-//! `tls-handshake` and `scram` scenarios (013 FR-021, SC-006), against a secure node this process
-//! starts with `teseladb start` (its own PKI and `root`): the complete TLS 1.3 handshake over
+//! `tls-handshake` and `scram` scenarios (013 FR-021, SC-006), against a secure node the scenario
+//! starts with `teseladb start` in a process of its own (D4; its own PKI and `root`): the complete TLS 1.3 handshake over
 //! loopback, connection included (under 2 ms at p50), and a SCRAM-SHA-256 login of `root` with
 //! `speculativeAuthenticate` and `skipEmptyExchange`, which takes two round trips (`hello` and one
 //! `saslContinue`) and no more.
@@ -7,13 +7,13 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
+use teseladb_sys::process::{Stop, send_stop};
 use teseladb_tls::{ClientConfig, Connection, ENTROPY_LEN, Trust};
 use teseladb_types::Histogram;
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
@@ -21,7 +21,7 @@ use teseladb_x509::Certificate;
 
 use super::{DataDir, at, keep_going, msg, warm_up};
 use crate::cli::Args;
-use crate::client::debug;
+use crate::client::{debug, teseladb_binary};
 use crate::report::{Report, Target};
 
 /// SC-006: a complete TLS handshake under 2 ms at p50.
@@ -32,6 +32,10 @@ const LOGIN_ROUND_TRIPS: f64 = 2.0;
 const MIN_RUNS: u64 = 50;
 /// Longest wait for the node to start.
 const START_WAIT: Duration = Duration::from_secs(60);
+/// Longest wait for the node to stop after `SIGTERM` before it is killed.
+const STOP_WAIT: Duration = Duration::from_secs(30);
+/// How often the scenario looks at the node's log and process.
+const POLL: Duration = Duration::from_millis(20);
 /// Longest wait for an answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// The log line that gives the clients' port.
@@ -41,10 +45,9 @@ const CREDENTIALS: &str = "root-credentials.txt";
 const ADMIN: &str = "admin";
 const SERVER_NAME: &str = "localhost";
 
-/// A secure node started by `teseladb start` in a thread, stopped when dropped.
+/// A secure node started by `teseladb start` in a process of its own (D4), stopped when dropped.
 struct SecureNode {
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<i32>>,
+    child: Child,
     port: u16,
     ca: Arc<ClientConfig>,
     user: String,
@@ -54,9 +57,17 @@ struct SecureNode {
 
 impl Drop for SecureNode {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        // The thread is there until the node is dropped.
-        let _ = self.thread.take().map(JoinHandle::join);
+        // `SIGTERM`, as an operator stops a node; past [`STOP_WAIT`] it is killed.
+        let _ = send_stop(self.child.id(), Stop::Terminate);
+        let until = Instant::now() + STOP_WAIT;
+        while Instant::now() < until {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -91,15 +102,15 @@ impl SecureNode {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let thread = std::thread::spawn(move || {
-            let (mut out, mut err) = (Vec::new(), Vec::new());
-            teseladb_server::run(&args, &mut out, &mut err, &|| flag.load(Ordering::Relaxed))
-        });
+        let child = Command::new(teseladb_binary()?)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(msg)?;
         let mut node = SecureNode {
-            stop,
-            thread: Some(thread),
+            child,
             port: 0,
             ca: Arc::new(ClientConfig::new(Trust::anchors(Vec::new()))),
             user: String::new(),
@@ -115,10 +126,11 @@ impl SecureNode {
             if let Some(p) = port {
                 break p;
             }
-            if node.thread.as_ref().is_some_and(JoinHandle::is_finished) || Instant::now() > until {
+            let ended = !matches!(node.child.try_wait(), Ok(None));
+            if ended || Instant::now() > until {
                 return Err(format!("the secure node did not start: {text}"));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(POLL);
         };
         let ca = Certificate::from_pem_all(&read(&db.join(CA_FILE))?).map_err(debug)?;
         node.ca = Arc::new(ClientConfig::new(Trust::anchors(ca)));

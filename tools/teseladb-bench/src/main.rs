@@ -18,6 +18,8 @@ mod fingerprint;
 #[cfg(target_os = "linux")]
 mod load;
 #[cfg(target_os = "linux")]
+mod nodes;
+#[cfg(target_os = "linux")]
 mod open_loop;
 #[cfg(target_os = "linux")]
 mod report;
@@ -120,7 +122,13 @@ fn run(args: &Args) -> Result<bool, String> {
 
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
-    let args = match cli::parse(std::env::args().skip(1)) {
+    // A node of a scenario, in a process of its own (D4): see `nodes`.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|a| a == nodes::NODE_PROCESS) {
+        let code = nodes::run_process(&argv[1..]);
+        return ExitCode::from(u8::try_from(code).unwrap_or(ERROR));
+    }
+    let args = match cli::parse(argv.into_iter()) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("{msg}");

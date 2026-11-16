@@ -48,7 +48,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_server::node::Node;
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
@@ -61,15 +60,6 @@ const MIN_BATCHES: u64 = 20;
 /// Temporary data folders made by this process so far: each one gets the next number, so that
 /// scenarios running at once in one process (the tests) never share one.
 static TEMPORARY_DIRS: AtomicU64 = AtomicU64::new(0);
-
-/// `node` once it serves, within `within`; otherwise it is stopped and the error is `failure`.
-pub fn ready(node: Node, within: Duration, failure: &str) -> Result<Node, String> {
-    if node.wait_ready(within) {
-        return Ok(node);
-    }
-    node.stop();
-    Err(failure.to_owned())
-}
 
 /// Whether a measuring loop goes on: fewer than `min` operations, or its end not `reached`.
 pub(crate) fn keep_going(done: u64, min: u64, reached: bool) -> bool {
@@ -232,19 +222,6 @@ pub fn run(args: &Args) -> Result<Report, String> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_node_not_ready_in_time_is_stopped_with_the_error() {
-        use teseladb_io::engine::disk::DiskPlace;
-        use teseladb_server::node::NodeConfig;
-        let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-        let start = || Node::start(cfg.clone(), DiskPlace::Memory, None).unwrap();
-        // No time at all: `wait_ready` gives up before asking.
-        let err = ready(start(), Duration::ZERO, "the node did not start").unwrap_err();
-        assert_eq!(err, "the node did not start");
-        let node = ready(start(), Duration::from_secs(30), "the node did not start").unwrap();
-        node.stop();
-    }
 
     #[test]
     fn a_loop_goes_on_until_its_minimum_and_its_end() {

@@ -1,5 +1,5 @@
-//! `noisy-tenant` scenario (007 SC-010): two tenants on one node this process starts with
-//! authentication. `noisy` has a cap of 100 commands per second and a `maxTimeMS` of 30 s, and
+//! `noisy-tenant` scenario (007 SC-010): two tenants on one node the scenario starts in a process
+//! of its own (D4) with authentication. `noisy` has a cap of 100 commands per second and a `maxTimeMS` of 30 s, and
 //! tries as many commands as its connections can send; `quiet` has no cap and reads one document
 //! at a time. The scenario times the reads of `quiet` alone, then while `noisy` sends cheap
 //! commands, then while it sends aggregations and `$where`; the p99 of `quiet` with `noisy` may
@@ -13,15 +13,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::client_listener::ClientConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeArgs, NodeProc};
 use teseladb_types::Histogram;
 
-use super::{DataDir, at, ready};
+use super::{DataDir, at};
 use crate::cli::Args;
 use crate::client::{Client, context, debug, panicked};
 use crate::report::{Report, Target};
@@ -87,31 +87,41 @@ enum Noise {
     Heavy,
 }
 
-/// The node with its two tenants and their users.
+/// The recipe of this scenario's node ([`crate::nodes`]).
+pub const RECIPE: &str = "noisy-tenant";
+
+/// The configuration of the node of [`RECIPE`]: [`CORES`] cores, authentication with the root
+/// user [`ROOT`], and an administration port.
+///
+/// # Errors
+///
+/// When the root user cannot be made.
+pub fn node_config(_a: &NodeArgs) -> Result<NodeConfig, String> {
+    let scratch = DataDir::new(None, "noisy-tenant-root")?;
+    let root_user = root_user(&scratch)?;
+    let client = ClientConfig {
+        addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
+        auth: true,
+        ..ClientConfig::new(Vec::new())
+    };
+    Ok(NodeConfig {
+        cores: Some(CORES),
+        client: Some(client),
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        root_user: Some(root_user),
+        ..NodeConfig::default()
+    })
+}
+
+/// The node, in a process of its own (D4), with its two tenants and their users.
 struct Cluster {
-    node: Node,
-    _dir: DataDir,
+    node: NodeProc,
 }
 
 impl Cluster {
-    fn start(args: &Args) -> Result<Cluster, String> {
-        let dir = DataDir::new(args.data.as_deref(), "noisy-tenant")?;
-        let root_user = root_user(&dir)?;
-        let client = ClientConfig {
-            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
-            auth: true,
-            ..ClientConfig::new(Vec::new())
-        };
-        let cfg = NodeConfig {
-            cores: Some(CORES),
-            client: Some(client),
-            admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-            root_user: Some(root_user),
-            ..NodeConfig::default()
-        };
-        let node = Node::start(cfg, DiskPlace::Memory, None).map_err(debug)?;
-        let node = ready(node, READY, "the node did not start")?;
-        let cluster = Cluster { node, _dir: dir };
+    fn start() -> Result<Cluster, String> {
+        let node = crate::nodes::start(RECIPE, &[], None, &[], READY, "the node did not start")?;
+        let cluster = Cluster { node };
         for tenant in [NOISY, QUIET] {
             cluster.admin(&["tenant", "create", tenant])?;
         }
@@ -373,7 +383,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     if args.target.is_some() {
         return Err("noisy-tenant measures a node it starts; it takes no --target".into());
     }
-    let cluster = Cluster::start(args)?;
+    let cluster = Cluster::start()?;
     let mut quiet = cluster.login(QUIET, PASSWORD)?;
     let alone = quiet_reads(args, &mut quiet).map_err(context("quiet alone"))?;
     let mut report = Report::new("noisy-tenant");

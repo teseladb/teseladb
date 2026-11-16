@@ -1,5 +1,5 @@
 //! `rest` scenario (019 SC-002): reading a document by `_id` through the REST API with HTTP/2
-//! over TLS on a local cluster of three nodes, one connection, each request timed alone (p50
+//! over TLS on a local cluster of three nodes, each in a process of its own (D4), one connection, each request timed alone (p50
 //! under 1 ms and p99 under 3 ms), and the same read with `find` over the wire protocol of the
 //! `crud` scenario: the REST API reaches at least 70 % of its throughput.
 
@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
-use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::Value;
 use teseladb_crypto::ec::NamedCurve;
@@ -16,7 +15,8 @@ use teseladb_http::http2::{self, PREFACE, flag, kind};
 use teseladb_http::server::Settings;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeArgs, NodeProc};
 use teseladb_server::tls_port::{TlsMode, TlsPort};
 use teseladb_tls::{CertifiedKey, Connection, ENTROPY_LEN, ServerConfig, Trust};
 use teseladb_x509::ext::GeneralName;
@@ -43,18 +43,29 @@ const READY: Duration = Duration::from_secs(30);
 /// The window the client gives the server: answers never wait for a `WINDOW_UPDATE`.
 const WINDOW: u32 = (1 << 31) - 1 - 65_535;
 
+/// The recipe of this scenario's nodes ([`crate::nodes`]).
+pub const RECIPE: &str = "rest";
+/// The parameter of [`RECIPE`]: the instant, in seconds since the epoch, the certificates count
+/// from; the scenario and its node processes make the same CA and certificate from it.
+const NOW: &str = "now";
+
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
-    let (ca, server) = certificates()?;
-    let nodes = cluster(&server)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(crate::client::text)?
+        .as_secs();
+    let now = i64::try_from(now).map_err(crate::client::text)?;
+    let (ca, _) = certificates(now)?;
+    let nodes = cluster(now)?;
     let result = measure(args, &nodes, &ca);
     for n in nodes {
-        drop(n.stop());
+        n.stop();
     }
     result
 }
 
-fn measure(args: &Args, nodes: &[Node], ca: &Certificate) -> Result<Report, String> {
+fn measure(args: &Args, nodes: &[NodeProc], ca: &Certificate) -> Result<Report, String> {
     let first = nodes.first().ok_or("an empty cluster")?;
     let wire_addr = *first.client_addrs().first().ok_or("no clients' port")?;
     let mut wire = Client::connect(wire_addr)?;
@@ -101,13 +112,10 @@ fn measure(args: &Args, nodes: &[Node], ca: &Certificate) -> Result<Report, Stri
     Ok(report)
 }
 
-/// A CA and the certificate of `localhost` it signed, with its key.
-fn certificates() -> Result<(Certificate, CertifiedKey), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(crate::client::text)?
-        .as_secs();
-    let now = i64::try_from(now).map_err(crate::client::text)?;
+/// A CA and the certificate of `localhost` it signed, with its key, valid a day around `now`
+/// (seconds since the epoch). Their keys come from fixed seeds, so the same `now` makes the same
+/// CA in the scenario and in its node processes.
+fn certificates(now: i64) -> Result<(Certificate, CertifiedKey), String> {
     let key = |seed: u8| {
         PrivateKey::generate_ec(NamedCurve::P256, &[seed; 40]).map_err(crate::client::debug)
     };
@@ -134,26 +142,47 @@ fn certificates() -> Result<(Certificate, CertifiedKey), String> {
     Ok((ca, CertifiedKey { chain: vec![cert], key: node_key }))
 }
 
-/// Three nodes in this process, each with an HTTP port over TLS with `server`'s certificate.
-fn cluster(server: &CertifiedKey) -> Result<Vec<Node>, String> {
+/// The configuration of a node of [`RECIPE`]: one core, the clients' port and an HTTP port over
+/// TLS with the certificate of `localhost` made at its `now` parameter.
+///
+/// # Errors
+///
+/// When the parameter is missing or the certificates cannot be made.
+pub fn node_config(a: &NodeArgs) -> Result<NodeConfig, String> {
+    let now: i64 = crate::nodes::param(a, NOW)?.parse().map_err(crate::client::text)?;
+    let (_, server) = certificates(now)?;
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
-    let mut nodes: Vec<Node> = Vec::new();
+    let tls = TlsPort::new(TlsMode::RequireTls, Some(ServerConfig::new(server)));
+    Ok(NodeConfig {
+        cores: Some(1),
+        join: a.join.clone(),
+        client: Some(ClientConfig { addrs: vec![loopback], ..ClientConfig::new(Vec::new()) }),
+        http: Some(HttpPortConfig {
+            addrs: vec![loopback],
+            tls: Some(tls),
+            settings: Settings::default(),
+        }),
+        ..NodeConfig::default()
+    })
+}
+
+/// Three nodes of [`RECIPE`], each in a process of its own (D4); the first creates the cluster.
+fn cluster(now: i64) -> Result<Vec<NodeProc>, String> {
+    let params = [format!("{NOW}={now}")];
+    let mut nodes: Vec<NodeProc> = Vec::new();
     for _ in 0..3 {
         let join = nodes.first().map(|n| vec![n.peer_addr().to_string()]).unwrap_or_default();
-        let tls = TlsPort::new(TlsMode::RequireTls, Some(ServerConfig::new(server.clone())));
-        let cfg = NodeConfig {
-            cores: Some(1),
-            join,
-            client: Some(ClientConfig { addrs: vec![loopback], ..ClientConfig::new(Vec::new()) }),
-            http: Some(HttpPortConfig {
-                addrs: vec![loopback],
-                tls: Some(tls),
-                settings: Settings::default(),
-            }),
-            ..NodeConfig::default()
-        };
-        let n = Node::start(cfg, DiskPlace::Memory, None).map_err(crate::client::debug)?;
-        nodes.push(super::ready(n, READY, "a node did not start")?);
+        let started =
+            crate::nodes::start(RECIPE, &join, None, &params, READY, "a node did not start");
+        match started {
+            Ok(n) => nodes.push(n),
+            Err(e) => {
+                for n in nodes {
+                    n.stop();
+                }
+                return Err(e);
+            }
+        }
     }
     Ok(nodes)
 }
@@ -388,6 +417,30 @@ mod tests {
         for k in [kind::GOAWAY, kind::RST_STREAM] {
             assert!(step(&mut b, k, 0, 1, b"").unwrap_err().contains("ended the stream"));
         }
+    }
+
+    #[test]
+    fn the_node_processes_certificate_is_signed_by_the_scenarios_ca() {
+        let now = 1_800_000_000;
+        let (ca, _) = certificates(now).unwrap();
+        let (again, server) = certificates(now).unwrap();
+        assert_eq!(ca.tbs(), again.tbs(), "the same CA from the same instant");
+        let leaf = server.chain.first().unwrap();
+        leaf.verify_signed_by(&ca.public_key).unwrap();
+        assert_eq!((leaf.not_before, leaf.not_after), (now - 86_400, now + 86_400));
+        let cfg = node_config(&NodeArgs {
+            recipe: RECIPE.into(),
+            params: vec![format!("{NOW}={now}")],
+            ..NodeArgs::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.cores, Some(1));
+        let bad = NodeArgs {
+            recipe: RECIPE.into(),
+            params: vec![format!("{NOW}=soon")],
+            ..NodeArgs::default()
+        };
+        assert!(node_config(&bad).is_err());
     }
 
     #[test]

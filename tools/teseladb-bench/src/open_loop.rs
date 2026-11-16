@@ -1,25 +1,50 @@
-//! Open-loop load generator on `teseladb-io`'s event selector (002 FR-035): `threads` threads,
-//! each with its own [`Poller`] and its share of non-blocking connections, send requests at a
-//! fixed rate with several in flight per connection, without waiting for the answers. Each request
-//! is due at an instant of the schedule, and its latency counts from that instant to its answer,
-//! so a server that stalls is not measured as if the clients had paused with it (coordinated
-//! omission). Answers come back in order on each connection, so each one is matched with the
-//! oldest request in flight there. The outcome says whether the client kept the rate.
+//! Open-loop load generator on the engine (002 FR-035, 023 FR-042): an engine of its own with
+//! `threads` shards, each with its share of the connections on the engine's network stack, sends
+//! requests at a fixed rate with several in flight per connection, without waiting for the
+//! answers. Each request is due at an instant of the schedule, and its latency counts from that
+//! instant to its answer, so a server that stalls is not measured as if the clients had paused
+//! with it (coordinated omission). Answers come back in order on each connection, so each one is
+//! matched with the oldest request in flight there. The outcome says whether the client kept the
+//! rate.
+//!
+//! On each shard a task keeps the schedule and queues the requests due; each connection has a
+//! writer task, which sends what was queued for it in one write, and a reader task, which takes
+//! the answers. One engine runs per process (D4): the generator's nodes, when it starts them, are
+//! processes of their own.
 
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::thread;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use teseladb_io::poller::{Interest, Poller};
+use teseladb::engine::core::condition_variable::ConditionVariable;
+use teseladb::engine::core::coroutine::make_coroutine;
+use teseladb::engine::core::future::{ExceptionPtr, Future};
+use teseladb::engine::core::iostream::{InputStream, OutputStream};
+use teseladb::engine::core::sleep::sleep_steady;
+use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig};
+use teseladb_io::engine::connect::connect;
+use teseladb_io::engine::{EngineConfig, NodeEngine};
 use teseladb_types::Histogram;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
+
+use crate::client::text;
 
 /// Share of the requested rate the client must reach for its measure to count (FR-035).
 pub const KEPT_RATE: f64 = 0.99;
 /// Longest wait for the answers still in flight when the timed part ends.
 const DRAIN: Duration = Duration::from_secs(5);
+/// How often the schedule looks at the answers in flight while it drains.
+const DRAIN_STEP: Duration = Duration::from_millis(10);
+/// Longest a connection takes to open.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// What the shards take to open their connections before the schedule starts.
+const LEAD: Duration = Duration::from_millis(50);
+/// Bytes an output stream buffers before it writes.
+const OUTPUT_BUFFER: usize = 64 * 1024;
 
 /// What one run asks for.
 #[derive(Clone, Copy, Debug)]
@@ -55,180 +80,190 @@ impl Measured {
             kept_rate: false,
         }
     }
-}
 
-/// One connection: what to send, what came back and the due instants of its requests in flight.
-struct Conn {
-    stream: TcpStream,
-    out: Vec<u8>,
-    sent_at: usize,
-    inbox: Vec<u8>,
-    due: VecDeque<(Instant, bool)>,
+    fn add(&mut self, m: &Measured) {
+        self.latency.merge(&m.latency);
+        self.sent += m.sent;
+        self.answered += m.answered;
+        self.failed += m.failed;
+        self.sent_rate += m.sent_rate;
+    }
 }
 
 /// The body of request `i` (an `OP_MSG` body with its `$db`).
-pub type Request<'a> = dyn Fn(u64) -> Vec<u8> + Sync + 'a;
+pub type Request = Arc<dyn Fn(u64) -> Vec<u8> + Send + Sync>;
 /// Whether an answer's body is a success.
-pub type Success<'a> = dyn Fn(&[u8]) -> bool + Sync + 'a;
+pub type Success = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
-/// Runs `plan` against `addr`.
+/// Runs `plan` against `addr` on an engine of its own, stopped after the run.
+///
+/// # Errors
+///
+/// When the engine does not start, a connection cannot be opened, or the server closes one.
 pub fn run(
     addr: SocketAddr,
     plan: Plan,
-    request: &Request<'_>,
-    ok: &Success<'_>,
+    request: &Request,
+    ok: &Success,
 ) -> Result<Measured, String> {
     let threads = plan.threads.max(1);
+    let shards = u16::try_from(threads).map_err(text)?;
     let share = Plan {
         rate: plan.rate / threads as f64,
         connections: (plan.connections / threads).max(1),
         ..plan
     };
-    let start = Instant::now() + Duration::from_millis(50);
-    let results: Vec<Result<Measured, String>> = thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                let lane = (t as u64, threads as u64);
-                s.spawn(move || one_thread(addr, share, start, lane, request, ok))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err("a thread of the generator panicked".into())))
-            .collect()
-    });
+    let _turn = crate::scenarios::on_engine::engine_turn();
+    let engine = NodeEngine::start(&EngineConfig { shards, ..EngineConfig::default() })
+        .map_err(|e| format!("the generator's engine: {e}"))?;
+    let start = Instant::now() + LEAD;
+    let (tx, rx) = mpsc::channel();
+    for shard in 0..shards {
+        let (tx, request, ok) = (tx.clone(), Arc::clone(request), Arc::clone(ok));
+        let lane = (u64::from(shard), threads as u64);
+        let posted = engine.run_on(shard, move || {
+            drop(make_coroutine(async move {
+                let measured = one_shard(addr, share, start, lane, request, ok).await;
+                let _ = tx.send(measured);
+                Ok(())
+            }));
+        });
+        if let Err(e) = posted {
+            engine.stop();
+            return Err(e.to_string());
+        }
+    }
+    drop(tx);
+    let results: Vec<Result<Measured, String>> = (0..threads)
+        .map(|_| rx.recv().unwrap_or_else(|_| Err("the generator's engine stopped".into())))
+        .collect();
+    engine.stop();
     let mut all = Measured::empty();
     for r in results {
-        let m = r?;
-        all.latency.merge(&m.latency);
-        all.sent += m.sent;
-        all.answered += m.answered;
-        all.failed += m.failed;
-        all.sent_rate += m.sent_rate;
+        all.add(&r?);
     }
     all.kept_rate = all.sent_rate >= plan.rate * KEPT_RATE;
     Ok(all)
 }
 
-fn connect(addr: SocketAddr, poller: &Poller, n: usize) -> Result<Vec<Conn>, String> {
-    let mut conns = Vec::with_capacity(n);
-    for token in 0..n {
-        let stream = TcpStream::connect(addr).map_err(|e| format!("{addr}: {e}"))?;
-        stream.set_nodelay(true).map_err(|e| e.to_string())?;
-        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
-        poller.register(&stream, token as u64, Interest::READ).map_err(|e| e.to_string())?;
-        conns.push(Conn {
-            stream,
-            out: Vec::new(),
-            sent_at: 0,
-            inbox: Vec::new(),
-            due: VecDeque::new(),
-        });
-    }
-    Ok(conns)
+/// One connection of a shard: what its writer sends next, the due instants of its requests in
+/// flight, and how it ended.
+struct Conn {
+    sock: RefCell<ConnectedSocket>,
+    out: RefCell<Vec<u8>>,
+    wake: Pin<Rc<ConditionVariable>>,
+    closed: Cell<bool>,
+    due: RefCell<VecDeque<(Instant, bool)>>,
+    failure: RefCell<Option<String>>,
 }
 
-fn one_thread(
-    addr: SocketAddr,
-    plan: Plan,
-    start: Instant,
-    (thread, threads): (u64, u64),
-    request: &Request<'_>,
-    ok: &Success<'_>,
-) -> Result<Measured, String> {
-    let mut poller = Poller::new().map_err(|e| e.to_string())?;
-    let mut conns = connect(addr, &poller, plan.connections)?;
-    let interval = Duration::from_secs_f64(1.0 / plan.rate.max(f64::MIN_POSITIVE));
-    let timed_from = start + plan.warmup;
-    let stop = timed_from + plan.duration;
-    let (mut next, mut i, mut rr) = (start, 0u64, 0usize);
-    let mut out = Measured::empty();
-    loop {
-        let now = Instant::now();
-        // Every request due by now goes out, each on the next connection.
-        while next <= now && next < stop {
-            let id = i32::try_from(i & 0x7fff_ffff).unwrap_or(0);
-            let c = &mut conns[rr];
-            c.out.extend_from_slice(&OpMsg::encode(id, 0, 0, &request(i * threads + thread)));
-            c.due.push_back((next, next >= timed_from));
-            out.sent += u64::from(next >= timed_from);
-            (rr, i, next) = ((rr + 1) % conns.len(), i + 1, next + interval);
+impl Conn {
+    fn fail(&self, why: String) {
+        self.failure.borrow_mut().get_or_insert(why);
+    }
+
+    /// Ends both directions: a pending read returns the end of the stream.
+    fn shut(&self) {
+        self.closed.set(true);
+        self.wake.signal();
+        if let Ok(mut s) = self.sock.try_borrow_mut() {
+            s.shutdown_input();
+            s.shutdown_output();
         }
-        for (token, c) in conns.iter_mut().enumerate() {
-            if c.sent_at < c.out.len() {
-                write_some(c)?;
-                let interest =
-                    if c.sent_at < c.out.len() { Interest::BOTH } else { Interest::READ };
-                poller.reregister(&c.stream, token as u64, interest).map_err(|e| e.to_string())?;
-            }
+    }
+}
+
+/// What a shard measured, shared by its readers.
+type Tally = Rc<RefCell<Measured>>;
+
+async fn open(addr: SocketAddr) -> Result<(Rc<Conn>, InputStream<u8>, OutputStream<u8>), String> {
+    let mut sock = connect(addr, CONNECT_TIMEOUT).await.map_err(|e| format!("{addr}: {e}"))?;
+    sock.set_nodelay(true).map_err(|e| format!("{addr}: {e}"))?;
+    let input = sock.input(ConnectedSocketInputStreamConfig::default());
+    let output = sock.output(OUTPUT_BUFFER);
+    let conn = Rc::new(Conn {
+        sock: RefCell::new(sock),
+        out: RefCell::new(Vec::new()),
+        wake: Rc::pin(ConditionVariable::new()),
+        closed: Cell::new(false),
+        due: RefCell::new(VecDeque::new()),
+        failure: RefCell::new(None),
+    });
+    Ok((conn, input, output))
+}
+
+/// Sends what the schedule queued on `c`, in one write each time, until it closes.
+async fn writer(c: Rc<Conn>, mut output: OutputStream<u8>) -> Result<(), ExceptionPtr> {
+    let mut batch = Vec::new();
+    while !c.closed.get() {
+        if c.out.borrow().is_empty() {
+            let _ = c.wake.as_ref().wait().await;
+            continue;
         }
-        let in_flight: usize = conns.iter().map(|c| c.due.len()).sum();
-        if now >= stop && (in_flight == 0 || now >= stop + DRAIN) {
+        std::mem::swap(&mut *c.out.borrow_mut(), &mut batch);
+        let sent = async {
+            output.write(&batch).await?;
+            output.flush().await
+        }
+        .await;
+        batch.clear();
+        if let Err(e) = sent {
+            c.fail(format!("a write: {e}"));
             break;
         }
-        let wait = if now < stop {
-            next.saturating_duration_since(now)
-        } else {
-            Duration::from_millis(10)
-        };
-        let events = poller.poll(Some(wait)).map_err(|e| e.to_string())?.to_vec();
-        for e in events {
-            let Some(c) = usize::try_from(e.token).ok().and_then(|t| conns.get_mut(t)) else {
-                continue;
-            };
-            if e.writable {
-                write_some(c)?;
-            }
-            if e.readable || e.hangup {
-                read_answers(c, &mut out, ok)?;
-            }
-        }
     }
-    out.sent_rate = out.sent as f64 / plan.duration.as_secs_f64();
-    // What never came back within the drain counts as failed.
-    out.failed +=
-        conns.iter().map(|c| c.due.iter().filter(|(_, t)| *t).count() as u64).sum::<u64>();
-    Ok(out)
+    let _ = output.close().await;
+    Ok(())
 }
 
-fn write_some(c: &mut Conn) -> Result<(), String> {
-    while c.sent_at < c.out.len() {
-        match c.stream.write(&c.out[c.sent_at..]) {
-            Ok(0) => return Err("the server closed the connection".into()),
-            Ok(n) => c.sent_at += n,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e.to_string()),
+/// Takes the answers of `c` until its end, each matched with its oldest request in flight.
+async fn reader(
+    c: Rc<Conn>,
+    mut input: InputStream<u8>,
+    tally: Tally,
+    ok: Success,
+) -> Result<(), ExceptionPtr> {
+    let mut inbox = Vec::new();
+    loop {
+        let b = match input.read().await {
+            Ok(b) if !b.empty() => b,
+            Ok(_) => {
+                if !c.closed.get() {
+                    c.fail("the server closed the connection".into());
+                }
+                break;
+            }
+            Err(e) => {
+                if !c.closed.get() {
+                    c.fail(format!("a read: {e}"));
+                }
+                break;
+            }
+        };
+        inbox.extend_from_slice(b.as_slice());
+        if let Err(why) = take_answers(&c, &mut inbox, &tally, &ok) {
+            c.fail(why);
+            break;
         }
-    }
-    if c.sent_at == c.out.len() {
-        c.out.clear();
-        c.sent_at = 0;
     }
     Ok(())
 }
 
-fn read_answers(c: &mut Conn, out: &mut Measured, ok: &Success<'_>) -> Result<(), String> {
-    let mut buf = [0u8; 64 << 10];
-    loop {
-        match c.stream.read(&mut buf) {
-            Ok(0) => return Err("the server closed the connection".into()),
-            Ok(n) => c.inbox.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e.to_string()),
-        }
-    }
+/// The whole answers at the start of `inbox`, taken out and counted.
+fn take_answers(c: &Conn, inbox: &mut Vec<u8>, tally: &Tally, ok: &Success) -> Result<(), String> {
     let now = Instant::now();
     let mut at = 0;
-    while c.inbox.len() - at >= HEADER_LEN {
-        let len = usize::try_from(Header::parse(&c.inbox[at..at + HEADER_LEN]).length)
+    let mut t = tally.borrow_mut();
+    while inbox.len() - at >= HEADER_LEN {
+        let len = usize::try_from(Header::parse(&inbox[at..at + HEADER_LEN]).length)
             .map_err(|_| "an answer of negative length")?
             .max(HEADER_LEN);
-        if c.inbox.len() - at < len {
+        if inbox.len() - at < len {
             break;
         }
-        let msg = &c.inbox[at..at + len];
+        let msg = &inbox[at..at + len];
         at += len;
-        let Some((due, timed)) = c.due.pop_front() else {
+        let Some((due, timed)) = c.due.borrow_mut().pop_front() else {
             return Err("an answer to nothing".into());
         };
         if !timed {
@@ -236,31 +271,125 @@ fn read_answers(c: &mut Conn, out: &mut Measured, ok: &Success<'_>) -> Result<()
         }
         let body = OpMsg::parse(msg).ok().and_then(|m| m.body).and_then(|b| b.to_bytes().ok());
         if body.is_some_and(|b| ok(&b)) {
-            out.answered += 1;
-            out.latency
-                .record(u64::try_from(now.duration_since(due).as_nanos()).unwrap_or(u64::MAX));
+            t.answered += 1;
+            t.latency.record(u64::try_from(now.duration_since(due).as_nanos()).unwrap_or(u64::MAX));
         } else {
-            out.failed += 1;
+            t.failed += 1;
         }
     }
-    c.inbox.drain(..at);
+    inbox.drain(..at);
     Ok(())
+}
+
+/// Waits `d` on the shard's timers.
+async fn pause(d: Duration) {
+    let _ = sleep_steady(d).await;
+}
+
+/// The first failure of the shard's connections.
+fn failure(conns: &[Rc<Conn>]) -> Option<String> {
+    conns.iter().find_map(|c| c.failure.borrow().clone())
+}
+
+/// One shard's share of the plan, on the shard.
+async fn one_shard(
+    addr: SocketAddr,
+    plan: Plan,
+    start: Instant,
+    (lane, lanes): (u64, u64),
+    request: Request,
+    ok: Success,
+) -> Result<Measured, String> {
+    let tally: Tally = Rc::new(RefCell::new(Measured::empty()));
+    let mut conns = Vec::with_capacity(plan.connections);
+    let mut tasks: Vec<Future<()>> = Vec::new();
+    let mut opened = Ok(());
+    for _ in 0..plan.connections {
+        match open(addr).await {
+            Ok((c, input, output)) => {
+                tasks.push(make_coroutine(writer(Rc::clone(&c), output)));
+                tasks.push(make_coroutine(reader(Rc::clone(&c), input, tally.clone(), ok.clone())));
+                conns.push(c);
+            }
+            Err(e) => {
+                opened = Err(e);
+                break;
+            }
+        }
+    }
+    let sent = match opened {
+        Ok(()) => schedule(&conns, &plan, start, (lane, lanes), &request, &tally).await,
+        Err(e) => Err(e),
+    };
+    for c in &conns {
+        c.shut();
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
+    sent?;
+    let mut out = std::mem::replace(&mut *tally.borrow_mut(), Measured::empty());
+    out.sent_rate = out.sent as f64 / plan.duration.as_secs_f64();
+    // What never came back within the drain counts as failed.
+    out.failed +=
+        conns.iter().map(|c| c.due.borrow().iter().filter(|(_, t)| *t).count() as u64).sum::<u64>();
+    Ok(out)
+}
+
+/// Queues every request when it is due, each on the next connection, then waits for the answers
+/// in flight for at most [`DRAIN`].
+async fn schedule(
+    conns: &[Rc<Conn>],
+    plan: &Plan,
+    start: Instant,
+    (lane, lanes): (u64, u64),
+    request: &Request,
+    tally: &Tally,
+) -> Result<(), String> {
+    let interval = Duration::from_secs_f64(1.0 / plan.rate.max(f64::MIN_POSITIVE));
+    let timed_from = start + plan.warmup;
+    let stop = timed_from + plan.duration;
+    let (mut next, mut i, mut rr) = (start, 0u64, 0usize);
+    loop {
+        if let Some(why) = failure(conns) {
+            return Err(why);
+        }
+        let now = Instant::now();
+        while next <= now && next < stop {
+            let id = i32::try_from(i & 0x7fff_ffff).unwrap_or(0);
+            let c = &conns[rr];
+            let bytes = OpMsg::encode(id, 0, 0, &request(i * lanes + lane));
+            c.out.borrow_mut().extend_from_slice(&bytes);
+            c.due.borrow_mut().push_back((next, next >= timed_from));
+            c.wake.signal();
+            tally.borrow_mut().sent += u64::from(next >= timed_from);
+            (rr, i, next) = ((rr + 1) % conns.len(), i + 1, next + interval);
+        }
+        let in_flight: usize = conns.iter().map(|c| c.due.borrow().len()).sum();
+        if now >= stop && (in_flight == 0 || now >= stop + DRAIN) {
+            return Ok(());
+        }
+        let wait = if now < stop { next.saturating_duration_since(now) } else { DRAIN_STEP };
+        pause(wait).await;
+    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
+    use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
 
     use teseladb_bson::Value;
 
     use super::*;
     use crate::client::doc;
 
-    /// A server that answers `{ok: 1}` to every message and stalls once for `stall`.
-    fn server(stall: Duration) -> SocketAddr {
+    /// A server that answers `{ok: 1}` to every message and stalls once for `stall`; with
+    /// `close_after`, it closes each connection after that many answers.
+    fn server(stall: Duration, close_after: Option<u32>) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let stalled = Arc::new(AtomicBool::new(false));
@@ -277,6 +406,9 @@ mod tests {
                         let mut rest = vec![0u8; len - HEADER_LEN];
                         s.read_exact(&mut rest).unwrap();
                         n += 1;
+                        if close_after.is_some_and(|c| n > c) {
+                            return;
+                        }
                         if n == 200 && !stalled.swap(true, Ordering::SeqCst) {
                             thread::sleep(stall);
                         }
@@ -290,23 +422,50 @@ mod tests {
         addr
     }
 
-    #[test]
-    fn a_stall_of_the_server_shows_in_the_latency_and_the_client_keeps_its_rate() {
-        let addr = server(Duration::from_millis(300));
-        let plan = Plan {
-            rate: 1000.0,
-            threads: 1,
-            connections: 1,
-            warmup: Duration::ZERO,
-            duration: Duration::from_secs(1),
-        };
+    fn ping() -> Request {
         let body = doc(vec![("ping", Value::Int32(1)), ("$db", Value::String("admin".into()))]);
         let bytes = body.to_bytes().unwrap();
-        let m = run(addr, plan, &|_| bytes.clone(), &|_| true).unwrap();
+        Arc::new(move |_| bytes.clone())
+    }
+
+    fn plan(threads: usize, connections: usize) -> Plan {
+        Plan {
+            rate: 1000.0,
+            threads,
+            connections,
+            warmup: Duration::ZERO,
+            duration: Duration::from_secs(1),
+        }
+    }
+
+    /// The cases share the process's one engine (D4): they run in order in one test.
+    #[test]
+    fn the_generator_keeps_its_rate_counts_from_the_due_instant_and_reports_failures() {
+        let all_ok: Success = Arc::new(|_| true);
+        // A stall of the server shows in the latency and the client keeps its rate.
+        let addr = server(Duration::from_millis(300), None);
+        let m = run(addr, plan(1, 1), &ping(), &all_ok).unwrap();
         assert!(m.kept_rate, "{} op/s", m.sent_rate);
         assert_eq!(m.answered + m.failed, m.sent);
-        // The requests due during the stall waited for it, from their due instant.
         assert!(m.latency.percentile(99.0) >= 200_000_000, "{}", m.latency.percentile(99.0));
         assert!(m.latency.percentile(50.0) < 50_000_000, "{}", m.latency.percentile(50.0));
+
+        // Two shards with two connections each share the rate.
+        let addr = server(Duration::ZERO, None);
+        let m = run(addr, plan(2, 4), &ping(), &all_ok).unwrap();
+        assert!(m.kept_rate, "{} op/s", m.sent_rate);
+        assert_eq!(m.answered + m.failed, m.sent);
+
+        // Answers that are not a success count as failed.
+        let none_ok: Success = Arc::new(|_| false);
+        let m = run(addr, plan(1, 1), &ping(), &none_ok).unwrap();
+        assert_eq!((m.answered, m.failed), (0, m.sent));
+
+        // A server that closes the connection fails the run, and one that is not there too.
+        let closing = server(Duration::ZERO, Some(10));
+        let e = run(closing, plan(1, 1), &ping(), &all_ok).unwrap_err();
+        assert!(e.contains("closed the connection") || e.starts_with("a write"), "{e}");
+        let gone = SocketAddr::from(([127, 0, 0, 1], 1));
+        assert!(run(gone, plan(1, 1), &ping(), &all_ok).is_err());
     }
 }

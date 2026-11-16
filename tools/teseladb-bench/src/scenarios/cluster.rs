@@ -1,5 +1,5 @@
 //! The cluster's scenarios of 007 (FR-024), on a local cluster of three node processes, and a fourth
-//! node in this process where a scenario adds one:
+//! node process where a scenario adds one (one node per process, D4):
 //!
 //! - `split`: one writer inserts documents of 1 KiB one at a time while the data range splits in
 //!   two by the administration port; `split.write` is the latency of the inserts from the split's
@@ -19,16 +19,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::Value;
-use teseladb_server::client_listener::ClientConfig;
-use teseladb_server::data::{DataReply, DataReq};
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::procs::NodeProc;
 use teseladb_types::Histogram;
 
 use crate::cli::Args;
-use crate::client::{Client, Target, check, debug, doc};
+use crate::client::{Client, Target, check, doc};
 use crate::report::{Report, Target as Goal};
 
 /// Database and collection of the documents.
@@ -167,7 +164,7 @@ pub(crate) fn when_free(
 }
 
 /// The local cluster's nodes (a remote server has none to change).
-fn nodes(target: &Target) -> Result<&Vec<teseladb_server::procs::NodeProc>, String> {
+fn nodes(target: &Target) -> Result<&Vec<NodeProc>, String> {
     match target {
         Target::Local(nodes) => Ok(nodes),
         Target::Remote(_) => {
@@ -206,31 +203,19 @@ pub fn split(args: &Args) -> Result<Report, String> {
     Ok(report)
 }
 
-/// A node that joins the local cluster of `target`.
-fn join(target: &Target) -> Result<Node, String> {
-    let founder = nodes(target)?.first().ok_or("an empty cluster")?;
-    let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
-    let cfg = NodeConfig {
-        cores: Some(1),
-        join: vec![founder.peer_addr().to_string()],
-        client: Some(ClientConfig { addrs: vec![loopback], ..ClientConfig::new(Vec::new()) }),
-        admin_listen: Some(loopback),
-        ..NodeConfig::default()
-    };
-    let n = Node::start(cfg, DiskPlace::Memory, None).map_err(debug)?;
-    super::ready(n, READY, "the new node did not join")
+/// A node that joins the local cluster of `target`, in a process of its own (D4).
+fn join(target: &Target) -> Result<NodeProc, String> {
+    nodes(target)?;
+    target.add_member(READY)
 }
 
 /// The ranges of which node `n` holds a replica, and whether every one of them has its data
 /// (none waits for a snapshot's data from another node).
-fn replicas(n: &Node) -> (usize, bool) {
+fn replicas(n: &NodeProc) -> (usize, bool) {
     let statuses: Vec<_> = n
         .ranges()
         .iter()
-        .filter_map(|e| match n.data(DataReq::Status(e.group), ASK) {
-            Ok(DataReply::Status(s)) => Some(s),
-            _ => None,
-        })
+        .filter_map(|e| n.range_status(e.group, ASK))
         .filter(|s| s.role.is_some())
         .collect();
     let ready = statuses.iter().all(|s| !s.waiting_data);
@@ -265,7 +250,7 @@ fn split_load(target: &Target, records: u64) -> Result<(), String> {
 /// The load, a fourth node and the time until it holds a replica with its data: the new node,
 /// the copy's time, and the inserts before and during the copy.
 struct Added {
-    node: Node,
+    node: NodeProc,
     took: Duration,
     before: Histogram,
     during: Histogram,

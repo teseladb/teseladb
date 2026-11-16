@@ -4,11 +4,22 @@
 //! (D3): elsewhere these scenarios say so.
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 #[cfg(target_os = "linux")]
 pub use linux::{BenchDisk, run, sleep};
 #[cfg(not(target_os = "linux"))]
 pub use other::{BenchDisk, run, sleep};
+
+/// One engine runs in a process at a time (D4): whoever starts one (a disk scenario here, the
+/// open-loop generator) holds this turn until it stopped it, so the scenarios that run at once in
+/// one process (the tests) take turns instead of failing.
+static ENGINE_TURN: Mutex<()> = Mutex::new(());
+
+/// The process's turn to run an engine, held until dropped.
+pub fn engine_turn() -> MutexGuard<'static, ()> {
+    ENGINE_TURN.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The executor of the files under `path`, on the calling shard.
 ///
@@ -43,6 +54,7 @@ mod linux {
     pub fn run<T: Send + 'static>(
         scenario: impl FnOnce() -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
+        let _turn = super::engine_turn();
         let e = NodeEngine::start(&EngineConfig { shards: 1, ..EngineConfig::default() })
             .map_err(msg)?;
         let (tx, rx) = mpsc::sync_channel(1);
