@@ -218,7 +218,10 @@ enum Parked {
     /// An ordinary thread, on the condition variable.
     Thread,
     /// An engine thread of `shard`, parked as `id`.
-    Shard { shard: u32, id: u64 },
+    Shard {
+        shard: u32,
+        id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -239,7 +242,10 @@ pub struct Waiter {
 
 impl Default for Waiter {
     fn default() -> Waiter {
-        Waiter { st: Mutex::new(State { ready: false, parked: Parked::Nobody }), cv: Condvar::new() }
+        Waiter {
+            st: Mutex::new(State { ready: false, parked: Parked::Nobody }),
+            cv: Condvar::new(),
+        }
     }
 }
 

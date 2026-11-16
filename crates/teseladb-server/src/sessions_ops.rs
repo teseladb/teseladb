@@ -4,7 +4,7 @@
 //! forward of one ended without an answer.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::Sender;
+use teseladb_io::engine::answer::Sender;
 
 use teseladb_multiraft::OpId;
 
@@ -116,7 +116,7 @@ impl NodeQueries {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use teseladb_io::engine::answer as mpsc;
 
     #[test]
     fn a_kill_ends_when_every_forward_ended() {

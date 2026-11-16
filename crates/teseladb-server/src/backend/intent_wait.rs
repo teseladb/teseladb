@@ -10,9 +10,8 @@
 //! with what it learned. The node's readers share their pushes (`PushCache`, SC-005): one push
 //! goes for all of them, and those that meet the owner while it is on the way wait for it.
 
-use std::sync::PoisonError;
-use std::thread;
 use std::time::Instant;
+use teseladb_io::engine::wait;
 
 use teseladb_hlc::Hlc;
 use teseladb_range::host::TxnOp;
@@ -108,7 +107,7 @@ impl ServerBackend {
         {
             return;
         }
-        thread::sleep(RETRY_PAUSE);
+        wait::sleep(RETRY_PAUSE);
     }
 
     /// Pushes the owner of the intent a read at `at` met above that mark: what the read knows of
@@ -159,22 +158,20 @@ impl ServerBackend {
         at: Hlc,
         until: Instant,
     ) -> Option<Result<Known, Hlc>> {
-        let sessions = self.h.sessions.clone();
-        let cv = lock(&sessions).push_settled.clone();
-        let mut g = lock(&sessions);
         loop {
-            match g.pushes.lookup(owner.txn, at) {
+            match lock(&self.h.sessions).pushes.lookup(owner.txn, at) {
                 Lookup::Known(known) => return Some(Ok(known)),
                 Lookup::Push(to) => return Some(Err(to)),
-                Lookup::Wait => {
-                    let left = until.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return None;
-                    }
-                    let waited = cv.wait_timeout(g, left.min(RETRY_PAUSE));
-                    g = waited.unwrap_or_else(PoisonError::into_inner).0;
-                }
+                Lookup::Wait => {}
             }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            // The reader whose push this one waits for may run on the same shard: the wait
+            // parks this command's engine thread with the lock released (023 FR-018), and looks
+            // again after a pause.
+            wait::sleep(left.min(RETRY_PAUSE));
         }
     }
 }

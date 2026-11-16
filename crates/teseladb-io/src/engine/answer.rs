@@ -9,8 +9,10 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{RecvError, RecvTimeoutError, SendError, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
+
+/// The errors of the standard library's channel, which this one gives the same way.
+pub use std::sync::mpsc::{RecvError, RecvTimeoutError, SendError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use super::wait::Waiter;
