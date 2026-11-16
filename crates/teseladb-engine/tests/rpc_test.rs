@@ -148,6 +148,37 @@ impl<T> AssertSend<T> {
     }
 }
 
+/// A reference to a value of the test body, for the handlers the environment registers on
+/// every shard, as the reference tests capture such values by reference (`[&]`). Every shard
+/// clones the handler and drops its copy, at the same time as the others: copying or dropping
+/// a `ByRef` touches nothing, where an `Rc` clone or drop would update a count that is not
+/// atomic from several threads at once (a data race that corrupted the heap).
+struct ByRef<T>(*const T);
+
+impl<T> Clone for ByRef<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ByRef<T> {}
+
+impl<T> ByRef<T> {
+    fn new(v: &T) -> Self {
+        ByRef(v)
+    }
+}
+
+impl<T> std::ops::Deref for ByRef<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: the value lives in the test body, which outlives every call of the handlers
+        // (they run on the shard of the body, only while it waits on them); the copies kept by
+        // the other shards are never dereferenced.
+        unsafe { &*self.0 }
+    }
+}
+
 /// The IPv4 wildcard address with port 0.
 fn any_addr() -> SocketAddress {
     make_ipv4_address(&Ipv4Addr::default())
@@ -673,7 +704,7 @@ teseladb::engine_test_case!(test_rpc_cancel, {
         let mut good = 0;
         let handler_called = Rc::new(RefCell::new(Promise::<()>::new()));
         let f_handler_called = handler_called.borrow_mut().get_future();
-        let (re, hc) = (rpc_executed.clone(), handler_called.clone());
+        let (re, hc) = (ByRef::new(&rpc_executed), ByRef::new(&handler_called));
         env.register_handler(1, move || {
             hc.borrow_mut().set_value(());
             re.set(true);
@@ -730,7 +761,7 @@ teseladb::engine_test_case!(test_message_to_big, {
     };
     RpcTestEnv::<u32>::do_with_thread_client(cfg, |env, c| {
         let good = Rc::new(Cell::new(true));
-        let g = good.clone();
+        let g = ByRef::new(&good);
         env.register_handler(1, move |_payload: Sstring| {
             g.set(false);
         })
@@ -794,7 +825,7 @@ fn stream_test_func(
         let r = Rc::new(RefCell::new(StreamTestResult::default()));
         let mut c = env_client(env)?;
         let server_done: Rc<RefCell<Future<()>>> = Rc::new(RefCell::new(make_ready_future(())));
-        let (r1, sd) = (r.clone(), server_done.clone());
+        let (r1, sd) = (ByRef::new(&r), ByRef::new(&server_done));
         env.register_handler(
             1,
             move |i: i32, source: Source<(i32,)>| -> Future<Sink<(Sstring,)>> {
@@ -1879,7 +1910,8 @@ teseladb::engine_test_case!(test_unregister_handler, {
             Ok(())
         };
 
-        let (hc1, re1, rc1) = (handler_called.clone(), rpc_executed.clone(), rpc_completed.clone());
+        let (hc1, re1, rc1) =
+            (ByRef::new(&handler_called), ByRef::new(&rpc_executed), ByRef::new(&rpc_completed));
         let get_handler = move || {
             let (hc, re, rc) = (hc1.clone(), re1.clone(), rc1.clone());
             move || {
@@ -1960,9 +1992,9 @@ teseladb::engine_test_case!(test_unregister_handler, {
             let handler_go_promise = Rc::new(RefCell::new(Promise::<()>::new()));
             let value_to_return = Rc::new(RefCell::new(Sstring::from("before_unregister")));
             let (hr, hg, v) = (
-                handler_reached_promise.clone(),
-                handler_go_promise.clone(),
-                value_to_return.clone(),
+                ByRef::new(&handler_reached_promise),
+                ByRef::new(&handler_go_promise),
+                ByRef::new(&value_to_return),
             );
             env.register_handler(1, move || -> Future<Sstring> {
                 hr.borrow_mut().set_value(());
@@ -2104,7 +2136,7 @@ teseladb::engine_test_case!(test_rpc_abort_connection, {
     RpcTestEnv::<u32>::do_with_thread(RpcTestConfig::default(), |env| {
         let mut c1 = env_client(env)?;
         let arrived = Rc::new(Cell::new(0i32));
-        let a = arrived.clone();
+        let a = ByRef::new(&arrived);
         // `rpc::client_info&`: the handler form that takes the client info (spelled out, as
         // a closure over a reference also fits the general form).
         env.register_handler::<_, rpc_impl::HandlerSignature<
@@ -2446,7 +2478,7 @@ teseladb::engine_test_case!(test_timeout_cancel, {
         let cond = Rc::new(RefCell::new(
             teseladb::engine::core::condition_variable::ConditionVariable::default(),
         ));
-        let (r, cv) = (received.clone(), cond.clone());
+        let (r, cv) = (ByRef::new(&received), ByRef::new(&cond));
         env.register_handler(id, move |x: i32| -> Future<i32> {
             eprintln!("received value={}", x);
             r.set(x);

@@ -1,30 +1,29 @@
-//! The disk classes' scheduling groups made once per process (023 FR-012), however many shards
-//! ask for them at once: the node's cores, its log and its outlets open their disks together on
-//! start. Its own test binary, so that its case is the first to ask for the groups.
+//! The disk classes' scheduling groups asked for by several callers before they exist (023
+//! FR-012): a node's start asks for them from the clock's keeper and from the device log's writer
+//! at once, both on shard 0. Each caller gets the same groups, made once; a second creation would
+//! register the groups' metrics again under the same names, which the engine refuses. A process
+//! of its own, so that no other test has made the groups before. Linux only: the engine runs on
+//! Linux.
 #![cfg(target_os = "linux")]
 
-use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future};
-use teseladb::engine::core::smp::Smp;
 use teseladb::engine_test_case;
-use teseladb_io::engine::disk::IoGroups;
+use teseladb_io::IoClass;
+use teseladb_io::engine::disk::{IoGroups, LOG_SHARES};
 
-// Every shard asks for the groups at the same time before any exist: each gets the same groups,
-// and no group is made twice (two of one name make the engine refuse its metrics).
-engine_test_case!(the_groups_asked_for_by_every_shard_at_once_are_made_once, {
-    make_coroutine(async move {
-        assert!(Smp::count() >= 2, "the case needs a second shard");
-        let asked: Vec<Future<IoGroups>> =
-            (0..Smp::count()).map(|s| Smp::submit_to(s, IoGroups::get_or_create)).collect();
-        let mut got = Vec::new();
-        for f in asked {
-            got.push(f.await);
-        }
-        let first = got[0].as_ref().map(|g| *g).map_err(ToString::to_string);
-        for g in &got {
-            assert_eq!(g.as_ref().map(|g| *g).map_err(ToString::to_string), first);
-        }
-        assert!(first.is_ok(), "the groups were made: {first:?}");
-        Ok::<(), ExceptionPtr>(())
+engine_test_case!(groups_asked_for_at_once_are_made_once, {
+    // Both asked before either creation ends, as the keeper and the writer ask.
+    let first: Future<IoGroups> = IoGroups::get_or_create();
+    let second: Future<IoGroups> = IoGroups::get_or_create();
+    first.then(move |a: IoGroups| {
+        second.then(move |b: IoGroups| {
+            assert_eq!(a, b, "one set of groups for every caller");
+            assert_eq!(a.of(IoClass::Log).get_shares(), LOG_SHARES);
+            // Once made, a later caller gets them at once.
+            let third = IoGroups::get_or_create();
+            assert!(third.available());
+            assert_eq!(third.get().expect("the groups"), a);
+            Ok::<_, ExceptionPtr>(())
+        })
     })
 });

@@ -352,16 +352,13 @@ mod engine_allocator_tests {
         assert!(alien_cross_frees == 1);
     }
 
-    // The 12-byte size class lays its objects every 12 bytes, so every other one is only
-    // 4-aligned. Freeing them from another shard links them into the owner's cross-shard list
-    // through the objects themselves, and the owner's drain walks those links back.
-    engine_test_case!(test_cross_cpu_free_of_objects_not_pointer_aligned, {
+    /// One exchange of the test below: shard 1 allocates COUNT objects of 12 bytes, this
+    /// shard frees them, and shard 1 drains its cross-shard list and allocates COUNT objects
+    /// again. Returns how many of those are the objects freed here.
+    fn cross_cpu_exchange() -> teseladb::engine::core::future::Future<usize> {
         use teseladb::engine::core::smp::Smp;
         const OBJECT_SIZE: usize = 12;
         const COUNT: usize = 64;
-        if Smp::count() < 2 {
-            return make_ready_future(());
-        }
         Smp::submit_to(1, || {
             // SAFETY: malloc has no preconditions.
             let addrs: Vec<usize> =
@@ -379,7 +376,6 @@ mod engine_allocator_tests {
             Smp::submit_to(1, move || {
                 // The reactor's poller may have drained the list already.
                 memory::drain_cross_cpu_freelist();
-                // The drained objects are back in their pool, which hands them out again.
                 // SAFETY: malloc has no preconditions.
                 let again: Vec<usize> =
                     (0..COUNT).map(|_| unsafe { malloc(OBJECT_SIZE) } as usize).collect();
@@ -388,9 +384,26 @@ mod engine_allocator_tests {
                     // SAFETY: a live block of this shard, freed once.
                     unsafe { free(a as *mut c_void) };
                 }
-                assert!(reused > COUNT / 2, "only {reused} of {COUNT} objects came back");
-                make_ready_future(())
+                make_ready_future(reused)
             })
+        })
+    }
+
+    // The 12-byte size class lays its objects every 12 bytes, so every other one is only
+    // 4-aligned. Freeing them from another shard links them into the owner's cross-shard list
+    // through the objects themselves, and the owner's drain walks those links back into the
+    // pool, which hands them out again. Not on the first exchange: the pool then holds the
+    // objects of a whole new span, and the drained ones, at the head of its free list, take it
+    // past its limit, so trimming it gives exactly them back to their span (the reference does
+    // the same: none of the 64 comes back on its first exchange, all 64 on the next ones).
+    engine_test_case!(test_cross_cpu_free_of_objects_not_pointer_aligned, {
+        use teseladb::engine::core::smp::Smp;
+        if Smp::count() < 2 {
+            return make_ready_future(());
+        }
+        cross_cpu_exchange().then(|_| cross_cpu_exchange()).then(|reused: usize| {
+            assert_eq!(reused, 64, "only {reused} of 64 objects came back");
+            make_ready_future(())
         })
     });
 

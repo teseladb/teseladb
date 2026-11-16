@@ -475,6 +475,41 @@ fn wait_for_packet(sock: &UdpSocket, mut found: impl FnMut(&[Part]) -> bool) -> 
     panic!("no matching collectd packet");
 }
 
+/// The senders' poll period, in milliseconds. A shard's first round must not start while its
+/// start notification is still being sent on the same channel (see `stop_senders`), so the
+/// period leaves the notification ample time even on a loaded machine.
+const POLL_PERIOD_MS: u64 = 200;
+
+/// How long the socket must stay silent for the senders to count as stopped: five poll
+/// periods.
+const QUIET: Duration = Duration::from_millis(5 * POLL_PERIOD_MS);
+
+/// Stops the sender of every shard and waits until none of them sends any more.
+///
+/// A datagram channel takes one send at a time: a second send issued before the first
+/// completes shares its message header and its poll completion (the original aborts or
+/// hangs the same way). A sender's round already running when `stop()` cancels its timer
+/// re-arms the timer when it ends, so `stop()` is repeated until the socket stays quiet;
+/// after that no round runs, and the test's own sends on the channel cannot overlap one.
+fn stop_senders(sock: &UdpSocket) {
+    let mut buf = [0u8; 2048];
+    for _ in 0..20 {
+        Smp::invoke_on_all(|| {
+            // SAFETY: a synchronous call on that shard with no other reference to its sender.
+            unsafe { get_impl() }.stop();
+        })
+        .get()
+        .unwrap();
+        sleep(QUIET).get().unwrap();
+        while sock.recv(&mut buf).is_ok() {}
+        sleep(QUIET).get().unwrap();
+        if sock.recv(&mut buf).is_err() {
+            return;
+        }
+    }
+    panic!("a stopped sender still sends");
+}
+
 fn has_str(parts: &[Part], type_: u16, s: &str) -> bool {
     parts.contains(&Part::Str(type_, s.to_string()))
 }
@@ -491,7 +526,7 @@ engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, 
     let mut opts = Options::new();
     opts.collectd.set_value(true);
     opts.collectd_address.set_value(format!("127.0.0.1:{port}"));
-    opts.collectd_poll_period.set_value(20);
+    opts.collectd_poll_period.set_value(POLL_PERIOD_MS as u32);
     opts.collectd_hostname.set_value("covhost".to_string());
     configure(&opts).unwrap();
     // SAFETY: a synchronous call on this shard with no other reference to the sender.
@@ -510,10 +545,15 @@ engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, 
     assert!(has_str(&series, HOST, "covhost"));
     assert!(series.iter().any(|p| matches!(p, Part::Number(TIME, t) if *t > 0)));
     // The interval is the poll period in units of 2^-30 seconds.
-    let period = (20u64 << 30) / 1000;
+    let period = (POLL_PERIOD_MS << 30) / 1000;
     assert!(series.contains(&Part::Number(INTERVAL_HR, period)));
     assert!(series.iter().any(|p| matches!(p, Part::Values(v)
         if v.iter().any(|(_, bytes)| *bytes == 21.5f64.to_le_bytes()))));
+
+    // The explicit sends below share the shard's channel with the polling rounds, so the
+    // rounds are stopped first (see `stop_senders`).
+    stop_senders(&sock);
+    remove_polled_metric(&series_id);
 
     // An explicit value list is sent at once, with its own types.
     let explicit_id = id("covexplicit", "derive", "events");
@@ -543,18 +583,9 @@ engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, 
     msg.get().unwrap();
     wait_for_packet(&sock, |p| has_str(p, PLUGIN, "covmsg") && has_str(p, MESSAGE, "hello"));
 
-    // Stop every sender: no packet arrives after a few periods.
-    Smp::invoke_on_all(|| {
-        // SAFETY: a synchronous call on that shard with no other reference to its sender.
-        unsafe { get_impl() }.stop();
-    })
-    .get()
-    .unwrap();
-    remove_polled_metric(&series_id);
-    sleep(Duration::from_millis(100)).get().unwrap();
+    // The stopped senders send nothing more after a few periods.
     let mut buf = [0u8; 2048];
-    while sock.recv(&mut buf).is_ok() {}
-    sleep(Duration::from_millis(100)).get().unwrap();
+    sleep(QUIET).get().unwrap();
     assert!(sock.recv(&mut buf).is_err(), "a stopped sender still sends");
 });
 

@@ -180,8 +180,10 @@ engine_thread_test_case!(append_challenged_files_grow_speculatively_and_trim_on_
     let n = unsafe { f.dma_read_iov(BLOCK as u64, iov, std::ptr::null_mut()) }.get().unwrap();
     assert_eq!(n, BLOCK, "the second written block");
     assert!(a.as_slice().iter().all(|&c| c == b'2'));
-    // Space can be reserved and holes punched.
-    f.allocate(0, 2 * BLOCK as u64).get().unwrap();
+    // Space can be reserved and holes punched. `allocate` is fallocate(FALLOC_FL_ZERO_RANGE |
+    // FALLOC_FL_KEEP_SIZE), as in the reference: it zeroes the range where the file system
+    // supports it, so it reserves the blocks past the data.
+    f.allocate(2 * BLOCK as u64, 2 * BLOCK as u64).get().unwrap();
     // Punching holes needs file-system support; without it the error is the system's.
     let punched = match f.discard(0, BLOCK as u64).get() {
         Ok(()) => true,

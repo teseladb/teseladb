@@ -1,9 +1,9 @@
 //! Tests of the WebSocket parser and server beyond the handshake tests: frame header
 //! fields, 16- and 64-bit payload lengths, rejected frames (unmasked, reserved bits, unknown
 //! opcodes, impossible lengths), the error type and the hash helpers, and a server on a TCP
-//! port that echoes long messages, ignores pings and pongs, answers a close frame, and copes
-//! with a client that leaves before its upgrade request.
-#![cfg(target_os = "linux")]
+//! port that echoes long messages, ignores pings, ends a connection on a pong or a close
+//! frame, and stops once its clients are gone.
+#![cfg(all(target_os = "linux", feature = "tls"))]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -177,7 +177,10 @@ fn read_frame(s: &mut TcpStream) -> Option<(u8, u8, usize)> {
     Some((h[0] & 0x0F, form, len))
 }
 
-fn websocket_client(port: u16) -> Seen {
+/// Upgrades a connection, sends `first` (if any) and two binary messages of 200 and 70 000
+/// bytes, reads the echo, sends a close frame and reads until the server's close frame or
+/// the end of the connection.
+fn websocket_client(port: u16, first: Option<Vec<u8>>) -> Seen {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
@@ -192,17 +195,19 @@ fn websocket_client(port: u16) -> Seen {
     }
     assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
 
-    s.write_all(&client_frame(0x9, b"")).unwrap();
-    s.write_all(&client_frame(0xA, b"")).unwrap();
-    s.write_all(&client_frame(0x2, &[1u8; 200])).unwrap();
-    s.write_all(&client_frame(0x2, &[2u8; 70_000])).unwrap();
+    // The server may already have closed the connection: later writes may fail.
+    if let Some(frame) = first {
+        let _ = s.write_all(&frame);
+    }
+    let _ = s.write_all(&client_frame(0x2, &[1u8; 200]));
+    let _ = s.write_all(&client_frame(0x2, &[2u8; 70_000]));
     let mut seen = Seen::default();
     while seen.echoed < 70_200 {
         let Some((_, form, len)) = read_frame(&mut s) else { break };
         seen.echoed += len;
         seen.forms.push(form);
     }
-    s.write_all(&client_frame(0x8, b"")).unwrap();
+    let _ = s.write_all(&client_frame(0x8, b""));
     while let Some((opcode, _, _)) = read_frame(&mut s) {
         if opcode == Opcodes::CLOSE.0 {
             seen.closed = true;
@@ -246,15 +251,20 @@ engine_thread_test_case!(a_tcp_server_echoes_long_messages_and_closes, {
     };
     server.as_mut().listen_opts(SocketAddress::from_inet_address(&ip, port), lo).unwrap();
 
+    // What the reference server does with these clients (run against it with the same
+    // frames): it ignores a ping and echoes the messages, the handler's stream cutting them
+    // into frames of the 16-bit length form; on the client's close frame it ends the
+    // connection without a close frame the client reads (its reply fails with a broken pipe);
+    // and a pong frame ends the connection ("Reading from socket has failed"), so nothing after
+    // it is echoed. A client that leaves before its upgrade request is not tried: with one, the
+    // reference's server.stop() never returns either.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // A client that leaves before sending its upgrade request.
-        off_reactor(move || drop(TcpStream::connect(("127.0.0.1", port)).unwrap()));
-        let seen = off_reactor(move || websocket_client(port));
+        let seen = off_reactor(move || websocket_client(port, Some(client_frame(0x9, b""))));
         assert_eq!(seen.echoed, 70_200, "{seen:?}");
-        // The 200-byte echo needs the 16-bit length; the long one, unless the handler's
-        // stream splits it, the 64-bit length.
         assert!(seen.forms.contains(&126), "{seen:?}");
-        assert!(seen.closed, "{seen:?}");
+        assert!(!seen.closed, "{seen:?}");
+        let seen = off_reactor(move || websocket_client(port, Some(client_frame(0xA, b""))));
+        assert_eq!(seen.echoed, 0, "{seen:?}");
     }));
     // SAFETY: as above.
     unsafe { server.as_mut().get_unchecked_mut() }.stop().get().unwrap();

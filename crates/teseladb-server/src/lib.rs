@@ -980,8 +980,16 @@ pub fn serve(
 ) -> i32 {
     log.info("waiting for the cluster to be ready", &[]);
     let report = |v: Option<&logic::Group0View>| {
-        let missing = node::not_ready(v, node.clock_error().as_ref());
-        log.info("not ready yet", &[("missing", &missing)]);
+        let missing = node::not_ready(v);
+        // A clock whose bound cannot be written gives no marks, so nothing is proposed: the line
+        // says why instead of only what is missing.
+        match node.clock_error() {
+            Some(e) => log.info(
+                "not ready yet",
+                &[("missing", &missing), ("clockBoundError", &format!("{e:?}"))],
+            ),
+            None => log.info("not ready yet", &[("missing", &missing)]),
+        }
     };
     if !node.wait_ready_reporting(ready_timeout, node::READY_REPORT, report) {
         log.error("the cluster did not become ready", &[]);

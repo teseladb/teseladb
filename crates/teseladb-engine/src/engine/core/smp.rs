@@ -614,7 +614,15 @@ where
         // The `FnOnce` is consumed by its call, so what it captures is released here, on the
         // target shard (it is `Send`).
         let Some(func) = (unsafe { (*this)._func.take() }) else { return };
-        let _ = crate::engine::core::future::futurize_invoke(func).then_wrapped(
+        // futurize::invoke of the original turns a throw of the function into a failed
+        // future, sent back like any result; a panic here does the same (as the local path
+        // of submit_to_with), instead of unwinding through the reactor of this shard, where
+        // nothing catches it and the process aborts.
+        let invoked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            crate::engine::core::future::futurize_invoke(func)
+        }))
+        .unwrap_or_else(|e| make_exception_future(ExceptionPtr::from_panic(e)));
+        let _ = invoked.then_wrapped(
             move |f: Future<<R as Futurize>::Output>| {
                 // SAFETY: the work item stays alive until the origin shard deletes it after
                 // complete(); the target shard alone touches it until respond() hands it back.

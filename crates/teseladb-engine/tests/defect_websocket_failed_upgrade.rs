@@ -1,4 +1,5 @@
-#![cfg(target_os = "linux")]
+// The WebSocket server exists only with the tls feature (its handshake key uses gnutls).
+#![cfg(all(target_os = "linux", feature = "tls"))]
 //! A WebSocket connection whose upgrade request is refused (here, a plain HTTP request
 //! without `Upgrade: websocket`) ends: the server stops both its loops and closes the
 //! socket, so the client reads the end of the stream. It does not stay open until the

@@ -224,6 +224,34 @@ fn stack_for(size: usize) -> usize {
     size.saturating_sub(STACK_SPARE).max(teseladb_js::DEFAULT_STACK)
 }
 
+/// The free memory of the thread that runs a call, when its memory is a pool of its own that a
+/// failed allocation ends the process on (a shard of the engine); `None` elsewhere.
+pub type MemoryRoom = fn() -> Option<usize>;
+
+static MEMORY_ROOM: std::sync::OnceLock<MemoryRoom> = std::sync::OnceLock::new();
+
+/// Sets the [`MemoryRoom`] of the process, once.
+pub fn set_memory_room(room: MemoryRoom) {
+    let _ = MEMORY_ROOM.set(room);
+}
+
+/// The parts of the room a call may take. While a value is made the call holds its live values,
+/// the new value's bytes and the interpreter's copy of them (a joined string is built, then
+/// copied into the interpreter's own string): at most twice the limit in bytes. A shard's pool
+/// serves a large allocation with a power-of-two run of pages, up to twice its bytes (measured:
+/// a string of 2^28 bytes and 16 more failed for want of a 512 MiB run), so that is four times
+/// the limit in pages, and the other half of the room is left for the runs the shard's other work
+/// splits.
+const ROOM_PARTS: usize = 8;
+
+/// The bytes of this process a call may take ([`teseladb_js::Limits::memory`]) with `room` bytes
+/// free on its thread: a part of the room, so that what the call makes fits in it and passing
+/// the limit ends the call with an error instead of a failed allocation; without a pool of its
+/// own, the interpreter's limit.
+fn memory_limit(room: Option<usize>) -> usize {
+    room.map_or(teseladb_js::MEMORY, |free| (free / ROOM_PARTS).min(teseladb_js::MEMORY))
+}
+
 /// Tells the calls on this thread that it has a stack of `size` bytes ([`COMMAND_STACK`] for the
 /// threads that run commands); without it a call takes the 1 MiB that any thread has.
 pub fn set_stack(size: usize) {
@@ -316,6 +344,7 @@ fn run_full(
         passed()
     };
     let thread_stack = STACK.with(Cell::get);
+    let memory = memory_limit(MEMORY_ROOM.get().and_then(|room| room()));
     let (now_ms, seed) = (NOW_MS.with(Cell::get), super::engines::next_seed());
     let sleep = sleeper.map(|_| &wait as &dyn Fn(u64) -> bool);
     let mut emit = emit;
@@ -324,7 +353,7 @@ fn run_full(
         // On a stack of its own the call has all of it; otherwise what this thread gives.
         let stack = deep.map_or(thread_stack, stack_for);
         let mut ctx = JsCtx {
-            limits: teseladb_js::Limits { stack, ..Default::default() },
+            limits: teseladb_js::Limits { stack, memory, ..Default::default() },
             now_ms,
             seed,
             deadline: Some(&passed),
@@ -591,6 +620,14 @@ pub(crate) fn engine() -> Rc<dyn JsEngine> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_takes_an_eighth_of_its_threads_free_memory_and_at_most_the_interpreters_limit() {
+        assert_eq!(memory_limit(None), teseladb_js::MEMORY);
+        assert_eq!(memory_limit(Some(1600 << 20)), 200 << 20);
+        assert_eq!(memory_limit(Some(usize::MAX)), teseladb_js::MEMORY);
+        assert_eq!(memory_limit(Some(0)), 0);
+    }
 
     static DEEP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

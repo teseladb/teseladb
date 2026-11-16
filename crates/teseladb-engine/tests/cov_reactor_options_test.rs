@@ -139,15 +139,23 @@ fn cases(dir: &Path) -> Vec<Case> {
             exit_codes: INVALID,
             stall: false,
         },
+        // One byte and one request per second. The properties parse and the start succeeds, as
+        // in the reference (which only warns of the latency goal). Without hwloc, as in the
+        // reference built without it
+        // (resource.cc, allocate() without hwloc), only the default queue exists and the disk's
+        // queue is never built, so the workload's I/O runs unthrottled and the case exits 0.
+        // With hwloc the disk's queue is built and the workload's one-block write waits for
+        // tokens the 1 B/s rate takes days to give, as the reference does: the case is left
+        // out there.
+        #[cfg(not(feature = "hwloc"))]
         Case {
-            // One byte and one request per second: no request fits the group's capacity.
             name: "disk_too_slow_for_any_request",
             args: vec![format!(
                 "--io-properties={{disks: [{{mountpoint: {}, read_iops: 1, read_bandwidth: 1, \
                  write_iops: 1, write_bandwidth: 1}}]}}",
                 dir.display()
             )],
-            exit_codes: INVALID,
+            exit_codes: OK,
             stall: false,
         },
         case("unavailable_cpu", &["--cpuset=4095"], INVALID),
