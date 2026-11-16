@@ -3,7 +3,7 @@
 //! open file end the body ([`FileSend`]) instead of reading them; on a core with an io_uring disk
 //! and plaintext links, the runtime reads them into the ring's registered buffers and sends the
 //! frame's head and those buffers with one `IORING_OP_SENDMSG_ZC`, so the bytes never pass
-//! through memory the process copies. A core told otherwise ([`crate::runtime::CoreLogic`]'s
+//! through memory the process copies. A core told otherwise ([`crate::engine::CoreLogic`]'s
 //! `file_sends`) reads the piece and answers it whole, as before.
 
 use teseladb_keys::Hlc;

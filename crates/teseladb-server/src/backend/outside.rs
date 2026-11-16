@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_hlc::Hlc;
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::CoreInput;
 use teseladb_lsm::{BlockNeed, ViewCache};
 use teseladb_range::HISTORY_VALUE;
 use teseladb_range::command::DedupKey;

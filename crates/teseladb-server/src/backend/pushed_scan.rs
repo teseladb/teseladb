@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::CoreInput;
 use teseladb_range::host::RangeError;
 use teseladb_range::read::ReadConcern;
 use teseladb_wire::commands::Matching;

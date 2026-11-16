@@ -43,7 +43,7 @@ use teseladb_keys::stored;
 use teseladb_stages::Stage;
 
 use teseladb_hlc::Hlc;
-use teseladb_io::runtime::{CoreInput, CoreSender, CoreSenders};
+use teseladb_io::engine::{CoreInput, CoreSender, CoreSenders};
 use teseladb_meta::bootstrap::{DATA_END, DATA_START};
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::command::Group0Command;

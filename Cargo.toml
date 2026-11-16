@@ -46,6 +46,17 @@ unimplemented = "deny"
 # assertions.
 opt-level = 1
 
+[profile.dev.package.teseladb]
+# The engine runs as its battery proved it, without debug assertions: one of them (`link_awaiter`
+# in core/future.rs) fails on every await of a pending engine future in a coroutine, since the
+# awaiter marks its state pending right before the check that it is not (023 R11). The check is
+# compiled where the await is, so teseladb-io, whose non-generic code does every await of an
+# engine future, goes without them too.
+debug-assertions = false
+
+[profile.dev.package.teseladb-io]
+debug-assertions = false
+
 [profile.dev.package.teseladb-crypto]
 # teseladb-crypto is optimized in the tests too, as the crate always was (013 T005): the key derivations of
 # SCRAM and the at-rest encryption run on every authenticated or encrypted operation of the tests.
