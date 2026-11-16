@@ -2,7 +2,8 @@
 //! (016 FR-007, 023 FR-014): the call ends with an error and the node goes on. A shard's memory is
 //! a pool of its own, and an allocation it cannot serve ends the process; a call bounded only by
 //! the interpreter's 2 GiB ended the node there (compatibility battery, `js-function` step 14).
-//! The node runs in a process of its own (`teseladb start`), with one core and 1 GiB.
+//! The node runs in a process of its own (`teseladb start`), with one core and the memory a shard
+//! had in the battery (1.6 GB: 4.8 GB between three shards).
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
@@ -16,8 +17,10 @@ use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 
 /// How long the node may take to be ready.
 const READY_WAIT: Duration = Duration::from_secs(60);
-/// The memory of the node: one shard with 1 GiB, less than a string that doubles reaches.
-const MEMORY_LIMIT: &str = "1G";
+/// The memory of the node: one shard with less than a string that doubles reaches.
+const MEMORY_LIMIT: &str = "1600M";
+/// Calls in a row: each one leaves the shard's free memory split as it left it.
+const CALLS: usize = 3;
 
 struct Node {
     child: Child,
@@ -112,10 +115,12 @@ fn a_string_that_grows_without_end_ends_its_call_and_not_the_node() {
             Value::Array(vec![Value::Document(Document::new().with("$project", project))]),
         )
         .with("cursor", Document::new());
-    let Some(reply) = command(&mut sock, "js_memory", aggregate) else {
-        panic!("the node closed the connection: {}", read(&node, "node.out"));
-    };
-    assert_eq!(reply.get("ok"), Some(&Value::Double(0.0)), "{reply:?}");
+    for call in 1..=CALLS {
+        let Some(reply) = command(&mut sock, "js_memory", aggregate.clone()) else {
+            panic!("the node closed the connection at call {call}: {}", read(&node, "node.out"));
+        };
+        assert_eq!(reply.get("ok"), Some(&Value::Double(0.0)), "call {call}: {reply:?}");
+    }
     // The node still answers, on a new connection.
     let mut again = connect(port);
     let ping =

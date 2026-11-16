@@ -235,10 +235,14 @@ pub fn set_memory_room(room: MemoryRoom) {
     let _ = MEMORY_ROOM.set(room);
 }
 
-/// What a value takes at most while it is made, in parts of the room: the call's live values,
+/// The parts of the room a call may take. While a value is made the call holds its live values,
 /// the new value's bytes and the interpreter's copy of them (a joined string is built, then
-/// copied into the interpreter's own string).
-const ROOM_PARTS: usize = 3;
+/// copied into the interpreter's own string): at most twice the limit in bytes. A shard's pool
+/// serves a large allocation with a power-of-two run of pages, up to twice its bytes (measured:
+/// a string of 2^28 bytes and 16 more failed for want of a 512 MiB run), so that is four times
+/// the limit in pages, and the other half of the room is left for the runs the shard's other work
+/// splits.
+const ROOM_PARTS: usize = 8;
 
 /// The bytes of this process a call may take ([`teseladb_js::Limits::memory`]) with `room` bytes
 /// free on its thread: a part of the room, so that what the call makes fits in it and passing
@@ -618,9 +622,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_call_takes_a_third_of_its_threads_free_memory_and_at_most_the_interpreters_limit() {
+    fn a_call_takes_an_eighth_of_its_threads_free_memory_and_at_most_the_interpreters_limit() {
         assert_eq!(memory_limit(None), teseladb_js::MEMORY);
-        assert_eq!(memory_limit(Some(900 << 20)), 300 << 20);
+        assert_eq!(memory_limit(Some(1600 << 20)), 200 << 20);
         assert_eq!(memory_limit(Some(usize::MAX)), teseladb_js::MEMORY);
         assert_eq!(memory_limit(Some(0)), 0);
     }
