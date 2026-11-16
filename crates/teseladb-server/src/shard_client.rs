@@ -20,6 +20,7 @@ use teseladb::engine::core::app_template::{AppTemplate, Config};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future};
 use teseladb::engine::core::reactor::engine_is_ready;
+use teseladb::engine::core::reactor::internal_misc::run_in_background;
 use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig};
 use teseladb_http::http1::{Limits, Response, ResponseReader};
 use teseladb_io::engine::connect::{TlsClient, dial, dial_tls};
@@ -141,15 +142,29 @@ fn start_client_engine() -> Result<(), String> {
 }
 
 /// Runs `f` on shard 0 of the process's engine from a thread that is not a shard, and waits for
-/// its result. Without an engine in the process it starts one of a single shard.
+/// its result. Without an engine in the process it starts one of a single shard. In an engine
+/// thread (a handler of the node's ports) `f` runs on its own shard and the thread parks until
+/// its future resolves (023 FR-018).
 ///
 /// # Errors
 ///
-/// When called on a shard (it would block it), when the engine does not start, or with the
-/// error `f`'s future failed with.
+/// When called on a shard outside an engine thread (it would block it), when the engine does not
+/// start, or with the error `f`'s future failed with.
 pub fn block_on<T: Send + 'static>(
     f: impl FnOnce() -> Future<T> + Send + 'static,
 ) -> io::Result<T> {
+    if teseladb_io::engine::wait::in_engine_thread() {
+        let (tx, rx) = teseladb_io::engine::answer::channel::<Result<T, ExceptionPtr>>();
+        run_in_background(f().then_wrapped(move |r: Future<T>| {
+            let _ = tx.send(r.get());
+            teseladb::engine::core::future::make_ready_future(())
+        }));
+        return match rx.recv() {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(to_io(&e)),
+            Err(_) => Err(io::Error::other("the engine stopped")),
+        };
+    }
     if engine_is_ready() {
         return Err(io::Error::other("a shard cannot wait for an exchange"));
     }
