@@ -5,16 +5,43 @@
 //! the step and leave the data directory without a PKI; the token of a failed step 1 stays
 //! unspent.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::enroll::Token;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
 use teseladb_server::pki::{self, MASTER_KEY, PkiParams};
+use teseladb_server::procs::{NodeProc, STOP_WAIT};
 use teseladb_server::run;
+use teseladb_sys::signal::{Stop, send_stop};
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_node_enrolls_with_a_token_once_and_joins_over_mtls",
+                a_node_enrolls_with_a_token_once_and_joins_over_mtls,
+            ),
+            (
+                "a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer",
+                a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer,
+            ),
+            (
+                "a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused",
+                a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused,
+            ),
+            (
+                "the_admin_command_issues_a_token_that_enrolls_a_node",
+                the_admin_command_issues_a_token_that_enrolls_a_node,
+            ),
+            ("a_node_logs_each_step_of_its_start", a_node_logs_each_step_of_its_start),
+        ],
+        &[("member", |a| member_config(std::path::Path::new(a.param("pki").expect("pki="))))],
+    );
+}
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -37,21 +64,25 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-/// The first member: a node with a fresh PKI, TLS between nodes and enrollments.
-fn member(data: &Path) -> Node<MemDisk> {
+/// The first member, a node process ([`member_config`]), ready.
+fn member(data: &Path) -> NodeProc {
+    let node = procs::node("member", &[], None, &[&format!("pki={}", data.display())]);
+    assert!(node.wait_ready(WAIT));
+    node
+}
+
+/// The first member: a node with a fresh PKI in `data`, TLS between nodes and enrollments.
+fn member_config(data: &Path) -> NodeConfig {
     let params = PkiParams { now: now(), node_names: Vec::new() };
     let mut random = |b: &mut [u8]| teseladb_sys::fill_random(b);
     let pki = pki::load_or_create(data, &params, &mut random).unwrap();
-    let cfg = NodeConfig {
+    NodeConfig {
         cores: Some(1),
         peer_tls: Some(pki::peer_tls(&pki, false)),
         enroller: Some(teseladb_server::enroll::Enroller::new(&pki)),
         admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
-    assert!(node.wait_ready(WAIT));
-    node
+    }
 }
 
 fn args(data: &Path, log: &Path, join: &str, token: &str) -> Vec<String> {
@@ -90,47 +121,56 @@ fn fails(data: &Path, log: &Path, join: &str, token: &str) -> (i32, String) {
     (code, text)
 }
 
-/// A node started by `teseladb start`, stopped when dropped.
-struct Started {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<(i32, String)>>,
-}
+/// A node started by `teseladb start` in a process of its own, stopped with `SIGTERM` when
+/// dropped; it has to end with 0.
+struct Started(std::process::Child);
 
 impl Drop for Started {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            assert_eq!(t.join().unwrap().0, 0);
+        if std::thread::panicking() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            return;
         }
+        send_stop(self.0.id(), Stop::Terminate).unwrap();
+        let until = Instant::now() + STOP_WAIT;
+        while self.0.try_wait().unwrap().is_none() {
+            if Instant::now() >= until {
+                let _ = self.0.kill();
+                panic!("the node did not stop in {STOP_WAIT:?}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(self.0.wait().unwrap().code(), Some(0));
     }
 }
 
 /// Starts a node that enrolls and waits for its clients' port; it runs until dropped.
 fn enrolls(data: &Path, log: &Path, join: &str, token: &str) -> Started {
-    let stop = Arc::new(AtomicBool::new(false));
-    let s = stop.clone();
-    let a = args(data, log, join, token);
-    let t = std::thread::spawn(move || {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run(&a, &mut out, &mut err, &|| s.load(Ordering::Relaxed));
-        (code, String::from_utf8(err).unwrap())
-    });
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_teseladb"))
+        .args(args(data, log, join, token))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     let until = Instant::now() + WAIT;
     loop {
         let text = std::fs::read_to_string(log).unwrap_or_default();
         if text.contains("clients' port") {
             break;
         }
-        if t.is_finished() {
-            panic!("the node stopped: {:?} {text}", t.join().unwrap());
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut err = String::new();
+            let _ = std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err);
+            panic!("the node stopped: {status} {err} {text}");
         }
         assert!(Instant::now() < until, "the node did not start: {text}");
         std::thread::sleep(Duration::from_millis(50));
     }
-    Started { stop, thread: Some(t) }
+    Started(child)
 }
 
-#[test]
 fn a_node_enrolls_with_a_token_once_and_joins_over_mtls() {
     let d = dir("cluster");
     let first = member(&d.0.join("n1"));
@@ -197,7 +237,6 @@ fn a_node_enrolls_with_a_token_once_and_joins_over_mtls() {
 
 /// `--join` is a list of seeds: a node enrolls through the first that accepts it, so a seed that is gone (a node
 /// drained and removed, a machine that left) does not stop it while another answers (013 FR-005, 021 FR-040).
-#[test]
 fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
     let d = dir("seeds");
     let first = member(&d.0.join("n1"));
@@ -222,7 +261,6 @@ fn a_node_enrolls_through_the_next_seed_when_the_first_does_not_answer() {
 
 /// A node that leaves the cluster refuses an enrollment before it uses the token: the token still
 /// enrolls the node through the next seed (021 FR-040, a node in while another one leaves).
-#[test]
 fn a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused() {
     let d = dir("drained-seed");
     let first = member(&d.0.join("n1"));
@@ -262,7 +300,6 @@ fn a_drained_node_refuses_an_enrollment_and_leaves_the_token_unused() {
 
 /// `teseladb admin token create` (013 T017, FR-005): the token the administration port issues
 /// enrolls a new node, which joins over mTLS.
-#[test]
 fn the_admin_command_issues_a_token_that_enrolls_a_node() {
     let d = dir("cli-token");
     let params = PkiParams { now: now(), node_names: Vec::new() };
@@ -270,15 +307,8 @@ fn the_admin_command_issues_a_token_that_enrolls_a_node() {
     let pki = pki::load_or_create(&d.0.join("n1"), &params, &mut random).unwrap();
     // Its debug form leaves the keys out.
     assert_eq!(format!("{:?}", teseladb_server::enroll::Enroller::new(&pki)), "Enroller");
-    let cfg = NodeConfig {
-        cores: Some(1),
-        peer_tls: Some(pki::peer_tls(&pki, false)),
-        enroller: Some(teseladb_server::enroll::Enroller::new(&pki)),
-        admin_listen: Some("127.0.0.1:0".parse().unwrap()),
-        ..NodeConfig::default()
-    };
-    let first = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
-    assert!(first.wait_ready(WAIT));
+    // The node process loads the PKI just created.
+    let first = member(&d.0.join("n1"));
     let admin = first.admin_addr().expect("an administration port").to_string();
     let args: Vec<String> = ["admin", "--node", &admin, "token", "create", "--ttl", "10m"]
         .iter()
@@ -300,7 +330,6 @@ fn the_admin_command_issues_a_token_that_enrolls_a_node() {
 
 /// Every step of a start that enrolls and joins leaves its line in the log before the node is
 /// ready, so that a start that hangs shows where; the token's secret never goes to the log.
-#[test]
 fn a_node_logs_each_step_of_its_start() {
     let d = dir("steps");
     let first = member(&d.0.join("n1"));
