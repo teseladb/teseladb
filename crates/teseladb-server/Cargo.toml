@@ -53,6 +53,26 @@ harness = false
 name = "oplog_tools"
 harness = false
 
+[[test]]
+name = "tenant_access"
+harness = false
+
+[[test]]
+name = "tenant_rate_limits"
+harness = false
+
+[[test]]
+name = "tenant_storage_quota"
+harness = false
+
+[[test]]
+name = "tenant_suspend"
+harness = false
+
+[[test]]
+name = "tenant_usage"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

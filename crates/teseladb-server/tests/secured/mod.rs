@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::NodeProc;
 
-use crate::common::{Client, READY, config, ok};
+use crate::common::{Client, READY, config as common_config, ok};
 
 /// The password of `root` in the nodes [`secured`] starts.
 pub const ROOT_PASSWORD: &str = "root-pw-31";
@@ -33,24 +33,29 @@ pub fn root_user() -> Vec<u8> {
     doc
 }
 
-pub fn secured(join: Vec<String>) -> Node<MemDisk> {
-    let base = config(join.clone());
-    let client = teseladb_server::client_listener::ClientConfig {
-        auth: true,
-        ..base.client.clone().unwrap()
-    };
-    let cfg = NodeConfig {
-        client: Some(client),
-        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
-        root_user: join.is_empty().then(root_user),
-        ..base
-    };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+/// A node process of the recipe `secured` ([`config`]), ready.
+pub fn secured(join: Vec<String>) -> NodeProc {
+    let node = crate::procs::node("secured", &join, None, &[]);
     assert!(node.wait_ready(READY));
     node
 }
 
-pub fn admin_out(node: &Node<MemDisk>, args: &[&str]) -> String {
+/// Three nodes' configuration: authentication, the administration port, and `root` on the first.
+pub fn config(join: Vec<String>) -> NodeConfig {
+    let base = common_config(join.clone());
+    let client = teseladb_server::client_listener::ClientConfig {
+        auth: true,
+        ..base.client.clone().unwrap()
+    };
+    NodeConfig {
+        client: Some(client),
+        admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+        root_user: join.is_empty().then(root_user),
+        ..base
+    }
+}
+
+pub fn admin_out(node: &NodeProc, args: &[&str]) -> String {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
