@@ -1837,7 +1837,13 @@ mod engine_allocator {
         );
     };
 
-    #[repr(C)]
+    /// An object freed by another thread, waiting in its owner's cross-shard list: the link to
+    /// the next one, stored in the object itself. As with `FreeObject`, objects of size
+    /// classes such as 12 bytes are not always pointer-aligned, so the struct is `packed`:
+    /// every `next` read and write is an unaligned access, which costs the same as an aligned
+    /// one on x86-64 and aarch64 and is defined behaviour in Rust. The field is only ever
+    /// copied, never borrowed.
+    #[repr(C, packed)]
     struct CrossCpuFreeItem {
         next: *mut CrossCpuFreeItem,
     }

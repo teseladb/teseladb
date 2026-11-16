@@ -2,7 +2,8 @@
 //! services built on it.
 //!
 //! The engine runs on Linux only: it is built on epoll, io_uring, linux-aio, `accept4` and ELF
-//! thread-local sections, and links gnutls and c-ares. On every other target the crate is empty.
+//! thread-local sections. It links gnutls with the feature `tls` and c-ares with the feature
+//! `dns`, both on by default. On every other target the crate is empty.
 //!
 #![cfg_attr(
     target_os = "linux",
@@ -18,7 +19,7 @@ allocator ([`engine::core::memory`]) unless it is built with
 `--cfg engine_default_allocator`."
 )]
 // The engine is a runtime over raw system interfaces (syscalls, io_uring rings, its own memory
-// allocator, FFI to gnutls and c-ares); every `unsafe` block carries a `// SAFETY:` comment.
+// allocator, FFI to gnutls and c-ares when their features are on); every `unsafe` block carries a `// SAFETY:` comment.
 #![allow(unsafe_code)]
 #![warn(missing_docs)]
 

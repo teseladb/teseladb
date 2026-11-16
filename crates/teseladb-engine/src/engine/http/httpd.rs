@@ -38,6 +38,7 @@ pub mod httpd {
     use crate::engine::core::metrics::{self as sm, MetricGroups};
     use crate::engine::core::queue::Queue;
     use crate::engine::core::sharded::Sharded;
+    #[cfg(feature = "tls")]
     use crate::engine::core::shared_ptr::SharedPtr;
     use crate::engine::core::sstring::Sstring;
     use crate::engine::core::temporary_buffer::TemporaryBuffer;
@@ -53,6 +54,7 @@ pub mod httpd {
     use crate::engine::http::routes::Routes;
     use crate::engine::net::api::{AcceptResult, ConnectedSocket, ListenOptions, ServerSocket};
     use crate::engine::net::socket_defs::SocketAddress;
+    #[cfg(feature = "tls")]
     use crate::engine::net::tls::ServerCredentials;
     use crate::engine::util::short_streams::util::read_entire_stream_contiguous;
     use crate::engine::util::string_utils::internal::{CaseInsensitiveCmp, CaseInsensitiveKey};
@@ -766,6 +768,7 @@ pub mod httpd {
     }
 
     /// The tls credentials of a server.
+    #[cfg(feature = "tls")]
     pub type ServerCredentialsPtr = Option<SharedPtr<ServerCredentials>>;
 
     /// The interval of the refresh of the cached date.
@@ -786,6 +789,7 @@ pub mod httpd {
         _requests_served: u64,
         _read_errors: u64,
         _respond_errors: u64,
+        #[cfg(feature = "tls")]
         _credentials: ServerCredentialsPtr,
         _date: Sstring,
         _date_format_timer: Timer,
@@ -828,6 +832,7 @@ pub mod httpd {
                 _requests_served: 0,
                 _read_errors: 0,
                 _respond_errors: 0,
+                #[cfg(feature = "tls")]
                 _credentials: None,
                 _date: Self::http_date(),
                 _date_format_timer: Timer::default(),
@@ -870,6 +875,7 @@ pub mod httpd {
         /// pass the result of its `build_server_credentials` to this method. Prefer
         /// [`HttpServer::listen_creds`], which takes the credentials per listener.
         #[deprecated(note = "pass the credentials per listener with HttpServer::listen_creds")]
+        #[cfg(feature = "tls")]
         pub fn set_tls_credentials(&mut self, credentials: ServerCredentialsPtr) {
             self._credentials = credentials;
         }
@@ -895,30 +901,40 @@ pub mod httpd {
         }
 
         /// Listens on `addr` with options `lo`, over tls when credentials are given.
+        #[cfg(feature = "tls")]
         pub fn listen_with(
-            mut self: Pin<&mut Self>,
+            self: Pin<&mut Self>,
             addr: SocketAddress,
             lo: ListenOptions,
             listener_credentials: ServerCredentialsPtr,
         ) -> Future<()> {
             let with_tls = listener_credentials.is_some();
+            let listener = match listener_credentials {
+                Some(c) => crate::engine::net::tls::listen(c, addr, lo),
+                None => crate::engine::core::api::listen_with(addr, lo),
+            };
+            self.add_listener(listener, with_tls)
+        }
+
+        /// Keeps `listener` and accepts its connections in the background, as tls
+        /// connections when `with_tls`; a failed listen gives its error.
+        fn add_listener(
+            mut self: Pin<&mut Self>,
+            listener: Result<ServerSocket, ExceptionPtr>,
+            with_tls: bool,
+        ) -> Future<()> {
             // SAFETY: only the listener list changes; the server is not moved.
             let listeners = unsafe { &mut self.as_mut().get_unchecked_mut()._listeners };
-            match listener_credentials {
-                Some(c) => match crate::engine::net::tls::listen(c, addr, lo) {
-                    Ok(listener) => listeners.push(listener),
-                    Err(e) => return make_exception_future(e),
-                },
-                None => match crate::engine::core::api::listen_with(addr, lo) {
-                    Ok(listener) => listeners.push(listener),
-                    Err(e) => return make_exception_future(e),
-                },
+            match listener {
+                Ok(listener) => listeners.push(listener),
+                Err(e) => return make_exception_future(e),
             }
             let which = listeners.len() - 1;
             self.do_accepts_tls(which, with_tls)
         }
 
         /// Listens on `addr` with options `lo` and the server credentials.
+        #[cfg(feature = "tls")]
         pub fn listen_opts(
             self: Pin<&mut Self>,
             addr: SocketAddress,
@@ -928,7 +944,19 @@ pub mod httpd {
             self.listen_with(addr, lo, c)
         }
 
+        /// Listens on `addr` with options `lo`.
+        #[cfg(not(feature = "tls"))]
+        pub fn listen_opts(
+            self: Pin<&mut Self>,
+            addr: SocketAddress,
+            lo: ListenOptions,
+        ) -> Future<()> {
+            let listener = crate::engine::core::api::listen_with(addr, lo);
+            self.add_listener(listener, false)
+        }
+
         /// Listens on `addr`, reusing the address, with the given credentials.
+        #[cfg(feature = "tls")]
         pub fn listen_creds(
             self: Pin<&mut Self>,
             addr: SocketAddress,
@@ -981,7 +1009,10 @@ pub mod httpd {
 
         /// Accepts connections of listener `which`, over tls when the server has credentials.
         pub fn do_accepts(self: Pin<&mut Self>, which: usize) -> Future<()> {
+            #[cfg(feature = "tls")]
             let tls = self._credentials.is_some();
+            #[cfg(not(feature = "tls"))]
+            let tls = false;
             self.do_accepts_tls(which, tls)
         }
 
@@ -1132,6 +1163,7 @@ pub mod httpd {
         _server_dist: Pin<Box<Sharded<HttpServer>>>,
         /// Tells a listen that resumes after a wait whether the control, and so the servers,
         /// still exist: it holds a weak reference to this token.
+        #[cfg(feature = "tls")]
         _alive: std::rc::Rc<()>,
     }
 
@@ -1158,6 +1190,7 @@ pub mod httpd {
         pub fn new() -> Self {
             HttpServerControl {
                 _server_dist: Box::pin(Sharded::new()),
+                #[cfg(feature = "tls")]
                 _alive: std::rc::Rc::new(()),
             }
         }
@@ -1217,6 +1250,7 @@ pub mod httpd {
         /// Each shard gets credentials of its own over the same gnutls objects (see
         /// `ServerCredentials::share_with_shards`), since the credentials pointer is not
         /// thread-safe.
+        #[cfg(feature = "tls")]
         pub fn listen_creds(
             &mut self,
             addr: SocketAddress,
@@ -1234,6 +1268,7 @@ pub mod httpd {
         }
 
         /// Listens on `addr` with options `lo` over tls on every shard.
+        #[cfg(feature = "tls")]
         pub fn listen_with(
             &mut self,
             addr: SocketAddress,

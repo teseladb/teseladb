@@ -761,6 +761,7 @@ pub mod internal {
                     // The state of the linked future is `invalid` and owns nothing; it
                     // becomes `future`, and link_awaiter points the promise at it.
                     let st = Future::state_ptr(f);
+                    debug_assert!(!(*st).valid());
                     st.write(FutureState::new());
                     (*this).node = (*f).link_awaiter(t, st);
                 } else {

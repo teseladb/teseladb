@@ -24,6 +24,7 @@ use std::time::Duration;
 use minstd::{DefaultRandomEngine, UniformIntDistribution};
 use teseladb::engine::core::coroutine::coroutine::{Lambda, WithoutPreemptionCheck};
 use teseladb::engine::core::coroutine::make_coroutine;
+use teseladb::engine::core::memory;
 use teseladb::engine::core::future::{
     BrokenPromise, ExceptionPtr, Future, InvalidArgument, LogicError, OutOfRange, Promise,
     RuntimeError, make_exception_future, make_exception_ptr, make_ready_future,
@@ -1416,5 +1417,77 @@ engine_test_case!(test_coroutine_std_waker_outlives_coroutine, {
             drop(w);
         }
         drop(immediate);
+    })
+});
+
+thread_local! {
+    static SUSPEND_DROPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A value whose drops are counted in `SUSPEND_DROPS`.
+struct DropCounted(u64);
+
+impl Drop for DropCounted {
+    fn drop(&mut self) {
+        SUSPEND_DROPS.with(|d| d.set(d.get() + 1));
+    }
+}
+
+/// Awaits `n` promises, each fulfilled by a task that runs after the coroutine suspended on
+/// it, so that every await takes the suspend path. Returns the sum of the values received.
+async fn suspend_on_promises(n: u64) -> Result<u64, ExceptionPtr> {
+    let mut sum = 0;
+    for i in 0..n {
+        let mut p = Promise::<DropCounted>::new();
+        let f = p.get_future();
+        let setter = yield_().then(move |()| p.set_value(DropCounted(i)));
+        let v = f.await?;
+        assert_eq!(v.0, i);
+        sum += v.0;
+        drop(v);
+        setter.await?;
+    }
+    Ok(sum)
+}
+
+engine_test_case!(test_suspended_awaiter_gets_the_value_once, {
+    make_coroutine(async move {
+        let before = SUSPEND_DROPS.with(Cell::get);
+        let sum = suspend_on_promises(100).await?;
+        assert_eq!(sum, (0..100).sum::<u64>());
+        // Each value is delivered and dropped exactly once.
+        assert_eq!(SUSPEND_DROPS.with(Cell::get) - before, 100);
+        Ok(())
+    })
+});
+
+engine_test_case!(test_suspended_awaiter_gets_a_broken_promise, {
+    make_coroutine(async move {
+        let mut p = Promise::<DropCounted>::new();
+        let f = p.get_future();
+        let breaker = yield_().then(move |()| drop(p));
+        assert!(matches!(f.await, Err(ref e) if e.is::<BrokenPromise>()));
+        breaker.await?;
+        Ok(())
+    })
+});
+
+engine_test_case!(test_suspended_awaiter_leaks_nothing, {
+    make_coroutine(async move {
+        // Warm up the pools so that the measures do not count their refills.
+        suspend_on_promises(64).await?;
+        let s0 = memory::stats();
+        suspend_on_promises(100).await?;
+        let s1 = memory::stats();
+        suspend_on_promises(10_000).await?;
+        let s2 = memory::stats();
+        let live_100 = s1.live_objects() as i64 - s0.live_objects() as i64;
+        let live_10000 = s2.live_objects() as i64 - s1.live_objects() as i64;
+        // Every round allocates and frees its promise node and continuation: nothing stays
+        // live, whatever the number of rounds.
+        assert!(live_100.abs() <= 2, "live objects after 100 rounds: {live_100}");
+        assert!(live_10000.abs() <= 2, "live objects after 10000 rounds: {live_10000}");
+        assert!(s2.mallocs() - s1.mallocs() >= 10_000);
+        Ok(())
     })
 });

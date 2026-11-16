@@ -1,7 +1,7 @@
 //! Tests of the WebSocket server: the opening handshake (with and without a subprotocol),
 //! echo through a registered handler, and frame parsing.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "tls"))]
 // This file calls unsafe engine, libc or FFI interfaces directly; every `unsafe` block
 // states why it is sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

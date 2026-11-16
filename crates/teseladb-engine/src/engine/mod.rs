@@ -14,8 +14,8 @@
 //! * [`net`]: networking: the POSIX stack over the kernel's sockets and a native user-space
 //!   TCP/IP stack (Ethernet, ARP, IPv4, TCP, UDP, DHCP) over DPDK or virtio devices, plus DNS
 //!   resolution, TLS and socket addresses.
-//! * [`http`], [`websocket`], [`rpc`] and [`json`]: protocol servers and clients built on the
-//!   streams of `core` and the sockets of `net`.
+//! * [`http`], `websocket` (feature `tls`), [`rpc`] and [`json`]: protocol servers and
+//!   clients built on the streams of `core` and the sockets of `net`.
 //! * [`lz4`]: the LZ4 block and stream compressor used by the RPC layer.
 //! * [`util`]: logging, backtraces, program options, closeable resources and other support
 //!   code.
@@ -32,4 +32,5 @@ pub mod net;
 pub mod rpc;
 pub mod testing;
 pub mod util;
+#[cfg(feature = "tls")]
 pub mod websocket;

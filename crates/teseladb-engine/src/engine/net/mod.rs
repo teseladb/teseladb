@@ -8,8 +8,8 @@
 //!   [`dhcp`], with the [`virtio`] and [`dpdk`] devices) runs TCP/IP in user space, one
 //!   queue per shard, steering each flow to the shard that owns it.
 //! - [`inet_address`], [`socket_address`], [`socket_defs`] and the wire address types give
-//!   the address model; [`dns`] resolves names with c-ares and [`tls`] layers GnuTLS sessions
-//!   over connected sockets.
+//!   the address model; `dns` resolves names with c-ares (feature `dns`) and `tls` layers
+//!   GnuTLS sessions over connected sockets (feature `tls`).
 //!
 //! Every object belongs to the shard that created it; moving data between shards goes
 //! through explicit cross-shard submission.
@@ -20,6 +20,7 @@ pub mod byteorder;
 pub mod config;
 pub mod const_;
 pub mod dhcp;
+#[cfg(feature = "dns")]
 pub mod dns;
 pub mod dpdk;
 #[cfg(feature = "dpdk")]
@@ -31,6 +32,8 @@ pub mod ip;
 pub mod ip_checksum;
 pub mod ipv4_address;
 pub mod ipv6_address;
+#[cfg(any(test, not(feature = "tls")))]
+mod md5;
 pub mod native_stack;
 pub mod native_stack_impl;
 // The link layer of the native stack keeps the name `net` inside `net`.
@@ -47,6 +50,7 @@ pub mod socket_defs;
 pub mod stack;
 pub mod tcp;
 pub mod tcp_stack;
+#[cfg(feature = "tls")]
 pub mod tls;
 pub mod toeplitz;
 pub mod udp;

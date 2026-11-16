@@ -2556,6 +2556,7 @@ impl<T: TcpInetTraits> Tcb<T> {
 }
 
 // gnutls_hash_* are declared, with `#[link(name = "gnutls")]`, in `net/tls.rs`.
+#[cfg(feature = "tls")]
 use crate::engine::net::tls::{
     GNUTLS_DIG_MD5, GnutlsHashHdT, gnutls_hash, gnutls_hash_deinit, gnutls_hash_get_len,
     gnutls_hash_init,
@@ -3076,8 +3077,10 @@ impl<T: TcpInetTraits> Tcb<T> {
         hash[0] = self._local_ip.ip;
         hash[1] = self._foreign_ip.ip;
         hash[2] = ((self._local_port as u32) << 16) + self._foreign_port as u32;
-        let mut md5_hash_handle: GnutlsHashHdT = std::ptr::null_mut();
         let key = &isn_secret().key;
+        #[cfg(feature = "tls")]
+        let mut md5_hash_handle: GnutlsHashHdT = std::ptr::null_mut();
+        #[cfg(feature = "tls")]
         // SAFETY: the buffers passed are valid for the lengths given; the digest of MD5 is
         // 16 bytes, the size of `hash` (asserted below).
         unsafe {
@@ -3088,6 +3091,23 @@ impl<T: TcpInetTraits> Tcb<T> {
             // reuse "hash" for the output of digest
             assert!(std::mem::size_of_val(&hash) == gnutls_hash_get_len(GNUTLS_DIG_MD5) as usize);
             gnutls_hash_deinit(md5_hash_handle, hash.as_mut_ptr() as *mut _);
+        }
+        // The same digest without gnutls: the bytes of the first three words as they lie in
+        // memory, then those of the key, and the 16 bytes of output read back as `hash`.
+        #[cfg(not(feature = "tls"))]
+        {
+            let mut input = [0u8; 3 * std::mem::size_of::<u32>()];
+            for (chunk, word) in input.as_chunks_mut::<4>().0.iter_mut().zip(&hash[..3]) {
+                *chunk = word.to_ne_bytes();
+            }
+            let mut key_bytes = [0u8; std::mem::size_of::<[u32; 16]>()];
+            for (chunk, word) in key_bytes.as_chunks_mut::<4>().0.iter_mut().zip(key) {
+                *chunk = word.to_ne_bytes();
+            }
+            let digest = crate::engine::net::md5::digest(&[&input, &key_bytes]);
+            for (word, chunk) in hash.iter_mut().zip(digest.as_chunks::<4>().0) {
+                *word = u32::from_ne_bytes(*chunk);
+            }
         }
         let mut seq = hash[0];
         let m = LowresClock::now().time_since_epoch().as_micros() as u64;

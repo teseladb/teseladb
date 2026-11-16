@@ -3611,11 +3611,12 @@ impl<T: 'static> Future<T> {
 
     /// Suspends a coroutine awaiter on this future: the promise is pointed
     /// at `state` (in the pinned awaiter) with `coroutine` as its task, and this future is
-    /// detached and left invalid. Returns the node, for [`Future::unlink_awaiter`].
+    /// detached. Returns the node, for [`Future::unlink_awaiter`].
     ///
     /// # Safety
     /// The future must be unavailable and linked; `state` must stay in place until the
-    /// coroutine runs or `unlink_awaiter` is called.
+    /// coroutine runs or `unlink_awaiter` is called. The awaiter passes this future's own
+    /// state, which it has already set to `future` (no result yet, owns nothing).
     #[inline(always)]
     pub(crate) unsafe fn link_awaiter(
         &mut self,
@@ -3624,14 +3625,17 @@ impl<T: 'static> Future<T> {
     ) -> *mut internal::PromiseNode<T> {
         // detach_promise() of an unavailable future, without its general cases: the node's
         // local state is `future` and owns nothing, so there is nothing to move into this
-        // future (whose own state stays invalid while it is linked), and the writer is
-        // alive (a writer that goes breaks the promise into the state, which would make it
-        // available), so the node cannot be freed here.
+        // future (whose own state the awaiter has already set to `future`, the value the
+        // general path would move here), and the writer is alive (a writer that goes breaks
+        // the promise into the state, which would make it available), so the node cannot be
+        // freed here.
         let p = mem::replace(&mut self.promise, ptr::null_mut());
         assert!(!p.is_null());
         // SAFETY: p is alive (its writer refers to it); guaranteed by the caller.
         unsafe {
-            debug_assert!(!(*p).local_state.available() && (*p).writer_ref && !self.state.valid());
+            debug_assert!(
+                !(*p).local_state.available() && (*p).writer_ref && !self.state.available()
+            );
             (*p).future = false;
             (*p).future_ref = false;
             (*p).state = state;

@@ -698,8 +698,9 @@ engine_test_case!(test_request_iovec_split, {
 
     let ensure = |parts: &[Part], req: &IoRequest, idx: usize, pos: u64| {
         assert!(parts[idx].req.opcode() == req.opcode());
-        let op = req.as_writev();
-        let sub_op = parts[idx].req.as_writev();
+        // The request split here is a readv.
+        let op = req.as_readv();
+        let sub_op = parts[idx].req.as_readv();
         assert_eq!(sub_op.fd, op.fd);
         assert_eq!(sub_op.pos, pos);
         assert_eq!(sub_op.iov_len, parts[idx].iovecs.len());

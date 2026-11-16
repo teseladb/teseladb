@@ -32,7 +32,10 @@ use teseladb::engine::core::iostream::{
     DataSink, DataSinkImpl, InputStream, OutputStream, OutputStreamOptions, OutputStreamState,
 };
 use teseladb::engine::core::loop_::{StopIteration, do_for_each, do_until, repeat};
-use teseladb::engine::core::reactor::{listen_with, yield_};
+#[cfg(feature = "tls")]
+use teseladb::engine::core::reactor::listen_with;
+use teseladb::engine::core::reactor::yield_;
+#[cfg(feature = "tls")]
 use teseladb::engine::core::shard_id::this_shard_id;
 use teseladb::engine::core::shared_future::SharedPromise;
 use teseladb::engine::core::smp::Smp;
@@ -65,12 +68,13 @@ use teseladb::engine::json::formatter::{JsonWrite, ToJson};
 use teseladb::engine::json::json_elements::{
     JsonBase, JsonBaseElement, JsonElement, JsonReturnType, JsonVoid, Jsonable, stream_object,
 };
-use teseladb::engine::net::api::{
-    AcceptResult, ConnectedSocket, ListenOptions, make_ipv4_address, make_ipv4_address_ip_port,
-};
+use teseladb::engine::net::api::{AcceptResult, ConnectedSocket, make_ipv4_address};
+#[cfg(feature = "tls")]
+use teseladb::engine::net::api::{ListenOptions, make_ipv4_address_ip_port};
 use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, SocketAddress, Transport};
 use teseladb::engine::net::stack::SocketImpl;
+#[cfg(feature = "tls")]
 use teseladb::engine::net::tls;
 use teseladb::engine::util::closeable::{Closeable, DeferredClose};
 use teseladb::engine::util::short_streams::util;
@@ -117,7 +121,19 @@ fn system_error_code(e: &ExceptionPtr) -> Option<i32> {
 
 /// Whether `e` is a system error; gnutls errors count as system errors too.
 fn is_system_error(e: &ExceptionPtr) -> bool {
-    system_error_code(e).is_some() || e.is::<tls::TlsError>()
+    system_error_code(e).is_some() || is_tls_error(e)
+}
+
+/// Whether `e` is a gnutls error.
+#[cfg(feature = "tls")]
+fn is_tls_error(e: &ExceptionPtr) -> bool {
+    e.is::<tls::TlsError>()
+}
+
+/// Without the feature `tls` there are no gnutls errors.
+#[cfg(not(feature = "tls"))]
+fn is_tls_error(_e: &ExceptionPtr) -> bool {
+    false
 }
 
 /// Whether `e` is a runtime error, or one of the library errors built on it.
@@ -3148,6 +3164,7 @@ fn test_http_status_classification() {
 
 // Check that trying a http connection with a wire error
 // can be handled.
+#[cfg(feature = "tls")]
 teseladb::engine_test_case!(test_http_with_broken_wire, {
     teseladb::engine::core::thread::async_(|| {
         let b = tls::CredentialsBuilder::default();

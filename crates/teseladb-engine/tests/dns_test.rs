@@ -2,7 +2,7 @@
 //! refused connections, SRV records and parallel lookups. The cases that need the network
 //! carry `#[cfg_attr(not(engine_testing_with_networking), ignore)]`.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "dns"))]
 // This file calls unsafe engine, libc or FFI interfaces directly; every `unsafe` block
 // states why it is sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

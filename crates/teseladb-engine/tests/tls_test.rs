@@ -7,7 +7,7 @@
 //! `enable_if_with_networking` run only with `--cfg engine_testing_with_networking`; the ones
 //! marked `enable_if_without_networking` only without it.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "tls"))]
 // This file calls unsafe engine, libc or FFI interfaces directly; every `unsafe` block
 // states why it is sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -54,7 +54,9 @@ use teseladb::engine::net::api::{
     make_ipv4_address_ip_port,
 };
 use teseladb::engine::net::api::{ConnectedSocketInputStreamConfig, KeepaliveParams};
+#[cfg(feature = "dns")]
 use teseladb::engine::net::dns;
+#[cfg(feature = "dns")]
 use teseladb::engine::net::inet_address::Family;
 use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::{Ipv4Addr, SocketAddress};
@@ -187,13 +189,16 @@ fn connect_to_ssl_addr(
     .discard_result()
 }
 
+#[cfg(feature = "dns")]
 const GOOGLE_NAME: &str = "www.google.com";
 
+#[cfg(feature = "dns")]
 thread_local! {
     static GOOGLE: RefCell<SocketAddress> = RefCell::new(SocketAddress::default());
 }
 
 // broken out from below. to allow pre-lookup
+#[cfg(feature = "dns")]
 fn google_address() -> Future<SocketAddress> {
     if GOOGLE.with(|g| g.borrow().is_unspecified()) {
         return dns::dns::resolve_name(&ss(GOOGLE_NAME), Some(Family::INET)).then(|addr| {
@@ -204,11 +209,13 @@ fn google_address() -> Future<SocketAddress> {
     make_ready_future(GOOGLE.with(|g| *g.borrow()))
 }
 
+#[cfg(feature = "dns")]
 fn connect_to_ssl_google(certs: SharedPtr<tls::CertificateCredentials>) -> Future<()> {
     google_address()
         .then(move |addr: SocketAddress| connect_to_ssl_addr(certs, addr, ss(GOOGLE_NAME)))
 }
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_simple_x509_client_with_google,
@@ -221,6 +228,7 @@ teseladb::engine_test_case!(
     }
 );
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_x509_client_with_system_trust,
@@ -231,6 +239,7 @@ teseladb::engine_test_case!(
     }
 );
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_x509_client_with_builder_system_trust,
@@ -244,6 +253,7 @@ teseladb::engine_test_case!(
     }
 );
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_x509_client_with_builder_system_trust_multiple,
@@ -263,6 +273,7 @@ teseladb::engine_test_case!(
     }
 );
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_x509_client_with_system_trust_and_priority_strings,
@@ -298,6 +309,7 @@ teseladb::engine_test_case!(
     }
 );
 
+#[cfg(feature = "dns")]
 teseladb::engine_test_case!(
     #[cfg_attr(not(engine_testing_with_networking), ignore)]
     test_x509_client_with_system_trust_and_priority_strings_fail,

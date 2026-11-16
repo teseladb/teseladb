@@ -352,6 +352,48 @@ mod engine_allocator_tests {
         assert!(alien_cross_frees == 1);
     }
 
+    // The 12-byte size class lays its objects every 12 bytes, so every other one is only
+    // 4-aligned. Freeing them from another shard links them into the owner's cross-shard list
+    // through the objects themselves, and the owner's drain walks those links back.
+    engine_test_case!(test_cross_cpu_free_of_objects_not_pointer_aligned, {
+        use teseladb::engine::core::smp::Smp;
+        const OBJECT_SIZE: usize = 12;
+        const COUNT: usize = 64;
+        if Smp::count() < 2 {
+            return make_ready_future(());
+        }
+        Smp::submit_to(1, || {
+            // SAFETY: malloc has no preconditions.
+            let addrs: Vec<usize> =
+                (0..COUNT).map(|_| unsafe { malloc(OBJECT_SIZE) } as usize).collect();
+            make_ready_future(addrs)
+        })
+        .then(|addrs: Vec<usize>| {
+            assert!(addrs.iter().any(|a| a % 8 != 0), "every object is pointer-aligned");
+            let before = memory::stats().cross_cpu_frees();
+            for &a in &addrs {
+                // SAFETY: a live block of shard 1, freed once.
+                unsafe { free(a as *mut c_void) };
+            }
+            assert_eq!(memory::stats().cross_cpu_frees() - before, COUNT as u64);
+            Smp::submit_to(1, move || {
+                // The reactor's poller may have drained the list already.
+                memory::drain_cross_cpu_freelist();
+                // The drained objects are back in their pool, which hands them out again.
+                // SAFETY: malloc has no preconditions.
+                let again: Vec<usize> =
+                    (0..COUNT).map(|_| unsafe { malloc(OBJECT_SIZE) } as usize).collect();
+                let reused = again.iter().filter(|a| addrs.contains(a)).count();
+                for &a in &again {
+                    // SAFETY: a live block of this shard, freed once.
+                    unsafe { free(a as *mut c_void) };
+                }
+                assert!(reused > COUNT / 2, "only {reused} of {COUNT} objects came back");
+                make_ready_future(())
+            })
+        })
+    });
+
     engine_test_case!(test_foreign_function_use_glibc_malloc, {
         // SAFETY: the allocation functions have no preconditions for these arguments.
         test_allocation_function(|| unsafe { malloc(1) });

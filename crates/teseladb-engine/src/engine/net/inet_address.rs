@@ -8,7 +8,7 @@
 //! [`Ipv4Addr`]/[`Ipv6Addr`] pairs of [`socket_defs`](crate::engine::net::socket_defs),
 //! their text parsing (through `inet_pton`), `Display` (through `inet_ntop`) and `Hash`.
 //!
-//! Host-name resolution is in [`dns`](crate::engine::net::dns); this module only parses
+//! Host-name resolution is in `net::dns` (feature `dns`); this module only parses
 //! numerical addresses. Parsing a `%scope` suffix asks the current shard's network stack for
 //! its interfaces, so it must run on a reactor thread.
 

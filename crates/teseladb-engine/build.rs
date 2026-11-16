@@ -1,6 +1,7 @@
 //! Links the native libraries that are not named by a `#[link]` attribute.
 //!
-//! gnutls, c-ares, lz4 and hwloc carry `#[link(name = ..)]` on their `extern "C"` blocks. DPDK
+//! gnutls, c-ares, lz4 and hwloc carry `#[link(name = ..)]` on their `extern "C"` blocks;
+//! gnutls is linked only with the feature `tls` and c-ares only with the feature `dns`. DPDK
 //! is a set of libraries whose names and order depend on how it was built, so with the
 //! feature `dpdk` the link line comes from `pkg-config --libs --static libdpdk`.
 //!
@@ -64,10 +65,14 @@ fn main() {
 /// (`ares_query_dnsrec`) and `cares_process_fds` from 1.34 (`ares_process_fds`), from the
 /// version in the installed `ares_version.h` (include dirs of `pkg-config libcares`, then /usr/include and
 /// /usr/local/include). Without the header (a host that only checks the crate) neither is set,
-/// the branches every supported c-ares takes.
+/// the branches every supported c-ares takes. Without the feature `dns` nothing uses c-ares
+/// and its headers are not looked for.
 fn detect_cares_version() {
     println!("cargo::rustc-check-cfg=cfg(cares_dnsrec)");
     println!("cargo::rustc-check-cfg=cfg(cares_process_fds)");
+    if env::var_os("CARGO_FEATURE_DNS").is_none() {
+        return;
+    }
     let mut dirs: Vec<String> = Command::new("pkg-config")
         .args(["--cflags-only-I", "libcares"])
         .output()

@@ -14,10 +14,17 @@ workspace = true
 [dependencies]
 
 [features]
-# The c-ares API used by net/dns.rs is not a feature: build.rs reads the installed
-# ares_version.h and sets `cfg(cares_dnsrec)` (c-ares >= 1.28) and `cfg(cares_process_fds)`
-# (c-ares >= 1.34).
-default = []
+default = ["tls", "dns"]
+# TLS over gnutls: net/tls.rs, the TLS listeners, connections and credentials of the HTTP
+# server and client, and the WebSocket server (its handshake key is a gnutls SHA-1 and
+# base64). Without it nothing links gnutls, and the native TCP stack computes the MD5 of its
+# initial sequence numbers with net/md5.rs instead of gnutls.
+tls = []
+# DNS resolution over c-ares: net/dns.rs. Without it nothing links c-ares and build.rs does
+# not look for its headers. The c-ares API used is not a feature: build.rs reads the
+# installed ares_version.h and sets `cfg(cares_dnsrec)` (c-ares >= 1.28) and
+# `cfg(cares_process_fds)` (c-ares >= 1.34).
+dns = []
 # The DPDK network driver (net/dpdk.rs, net/dpdk_rte.rs) and the DPDK EAL setup of
 # core/dpdk_rte.rs; build.rs links libdpdk through pkg-config.
 dpdk = []
@@ -27,7 +34,7 @@ hwloc = []
 # Per-segment trace output of the TCP state machine (net/tcp.rs).
 tcp_debug = []
 # Support for gnutls older than 3.5.6 in net/tls.rs: generates DH parameters explicitly.
-gnutls_legacy = []
+gnutls_legacy = ["tls"]
 # Allocation failure injection (util/alloc_failure_injector.rs): allocation points can be
 # made to fail on demand, and critical allocation sections are tracked. For test builds.
 alloc_failure_injection = []
@@ -87,6 +94,12 @@ harness = false
 [[test]]
 name = "rest_api_httpd"
 path = "tests/entry/rest_api_httpd.rs"
+harness = false
+
+# Starts the engine once per group of reactor options, each in a process of its own.
+[[test]]
+name = "cov_reactor_options_test"
+path = "tests/entry/cov_reactor_options_test.rs"
 harness = false
 
 # The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints

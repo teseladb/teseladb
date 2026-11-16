@@ -3,18 +3,20 @@
 //! The client asks a [`ConnectionFactory`](experimental::ConnectionFactory) for a new
 //! connected socket whenever it needs another connection to the server.
 //! [`BasicConnectionFactory`](experimental::BasicConnectionFactory) opens plain TCP
-//! connections to one address and
-//! [`TlsConnectionFactory`](experimental::TlsConnectionFactory) opens TLS connections with
-//! the given credentials and server name.
+//! connections to one address and, with the feature `tls`, `TlsConnectionFactory` opens TLS
+//! connections with the given credentials and server name.
 
 /// The connection factories of the HTTP client (interface still subject to change).
 pub mod experimental {
     use crate::engine::core::abort_source::AbortSource;
     use crate::engine::core::future::Future;
+    #[cfg(feature = "tls")]
     use crate::engine::core::shared_ptr::SharedPtr;
+    #[cfg(feature = "tls")]
     use crate::engine::core::sstring::Sstring;
     use crate::engine::net::api::{ConnectedSocket, Transport};
     use crate::engine::net::socket_defs::SocketAddress;
+    #[cfg(feature = "tls")]
     use crate::engine::net::tls::{CertificateCredentials, TlsOptions};
 
     /// A factory of transport sockets for the HTTP client.
@@ -52,12 +54,14 @@ pub mod experimental {
     }
 
     /// A factory of tls connections to one address.
+    #[cfg(feature = "tls")]
     pub struct TlsConnectionFactory {
         _addr: SocketAddress,
         _creds: SharedPtr<CertificateCredentials>,
         _host: Sstring,
     }
 
+    #[cfg(feature = "tls")]
     impl TlsConnectionFactory {
         /// Tls connections to `addr` with `creds`, naming `host` to the server.
         pub fn new(
@@ -69,6 +73,7 @@ pub mod experimental {
         }
     }
 
+    #[cfg(feature = "tls")]
     impl ConnectionFactory for TlsConnectionFactory {
         fn make(&mut self, _as: *mut AbortSource) -> Future<ConnectedSocket> {
             crate::engine::net::tls::connect(

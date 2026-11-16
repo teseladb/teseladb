@@ -81,8 +81,10 @@ pub mod experimental {
         make_http_chunked_output_stream, make_http_content_length_output_stream,
     };
     use crate::engine::http::common::support::{RawBox, u64_to_sstring};
+    #[cfg(feature = "tls")]
+    use crate::engine::http::connection_factory::experimental::TlsConnectionFactory;
     use crate::engine::http::connection_factory::experimental::{
-        BasicConnectionFactory, ConnectionFactory, TlsConnectionFactory,
+        BasicConnectionFactory, ConnectionFactory,
     };
     use crate::engine::http::exception::{
         BaseException, ExceptionKind, response_parsing_exception, unexpected_status_error,
@@ -95,6 +97,7 @@ pub mod experimental {
     use crate::engine::http::response_parser::HttpResponseParser;
     use crate::engine::net::api::ConnectedSocket;
     use crate::engine::net::socket_defs::SocketAddress;
+    #[cfg(feature = "tls")]
     use crate::engine::net::tls::{CertificateCredentials, ERROR_PREMATURE_TERMINATION, TlsError};
     use crate::engine::util::bool_class::BoolClass;
     use crate::engine::util::log::LogLevel;
@@ -521,7 +524,7 @@ pub mod experimental {
     /// An HTTP client: makes requests to one server and handles the replies.
     ///
     /// The caller provides the transport through a [`ConnectionFactory`], though
-    /// [`Client::new`] and [`Client::with_tls`] cover the simple cases. Over a bare
+    /// [`Client::new`] and `Client::with_tls` (feature `tls`) cover the simple cases. Over a bare
     /// [`Connection`], the client adds transparent reuse of keep-alive connections from a
     /// pool.
     ///
@@ -633,6 +636,7 @@ pub mod experimental {
         /// credentials `creds`, with the default limits and without retries.
         ///
         /// `host` is the server name expected by TLS; it may be empty.
+        #[cfg(feature = "tls")]
         pub fn with_tls(
             addr: SocketAddress,
             creds: SharedPtr<CertificateCredentials>,
@@ -1113,7 +1117,35 @@ pub mod experimental {
         if let Some(e) = ex.downcast_ref::<SystemError>() {
             return Some(e.code());
         }
+        tls_error_code(ex)
+    }
+
+    /// The GnuTLS code of a `TlsError`.
+    #[cfg(feature = "tls")]
+    #[inline]
+    fn tls_error_code(ex: &ExceptionPtr) -> Option<i32> {
         ex.downcast_ref::<TlsError>().map(|e| e.code)
+    }
+
+    /// Without the feature `tls` no error is a `TlsError`.
+    #[cfg(not(feature = "tls"))]
+    #[inline]
+    fn tls_error_code(_ex: &ExceptionPtr) -> Option<i32> {
+        None
+    }
+
+    /// Whether `code` is the GnuTLS code of a peer that closed without ending the session.
+    #[cfg(feature = "tls")]
+    #[inline]
+    fn is_tls_premature_termination(code: i32) -> bool {
+        code == ERROR_PREMATURE_TERMINATION
+    }
+
+    /// Without the feature `tls` there are no GnuTLS codes.
+    #[cfg(not(feature = "tls"))]
+    #[inline]
+    fn is_tls_premature_termination(_code: i32) -> bool {
+        false
     }
 
     fn is_retryable_exception(ex: &ExceptionPtr) -> bool {
@@ -1123,7 +1155,7 @@ pub mod experimental {
                 if code == errno::EPIPE
                     || code == errno::ECONNABORTED
                     || code == errno::ECONNRESET
-                    || code == ERROR_PREMATURE_TERMINATION
+                    || is_tls_premature_termination(code)
                 {
                     return true;
                 }
