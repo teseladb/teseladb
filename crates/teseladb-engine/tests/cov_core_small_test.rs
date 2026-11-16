@@ -236,15 +236,19 @@ fn scattered_messages_collect_fragments() {
     m.append_buffer(TemporaryBuffer::new(0));
     m.append_sstring(Sstring::from("owned "));
     m.append_sstring(Sstring::new());
-    let kept: &'static Sstring = Box::leak(Box::new(Sstring::from("kept ")));
-    // SAFETY: the string is leaked, so it outlives the packet.
+    let kept_box = Box::into_raw(Box::new(Sstring::from("kept ")));
+    // SAFETY: the string is freed only after the packet is gone (below).
+    let kept: &'static Sstring = unsafe { &*kept_box };
+    // SAFETY: the string outlives the packet.
     unsafe { m.append_static_sstring(kept) };
     // SAFETY: a zero-length append does nothing with the pointer.
     unsafe { m.append_static_raw(std::ptr::null(), 0) };
     let released = Rc::new(Cell::new(0));
     let r = released.clone();
-    let cb_text: &'static Sstring = Box::leak(Box::new(Sstring::from("callback")));
-    // SAFETY: the string is leaked; the callback runs when the packet is dropped.
+    let cb_box = Box::into_raw(Box::new(Sstring::from("callback")));
+    // SAFETY: the string is freed only after the packet is gone (below).
+    let cb_text: &'static Sstring = unsafe { &*cb_box };
+    // SAFETY: the string outlives the packet; the callback runs when the packet is dropped.
     unsafe { m.append_with_callback(cb_text, move || r.set(r.get() + 1)) };
     // SAFETY: an empty string appends nothing, and its callback is dropped unrun.
     unsafe { m.append_with_callback(&Sstring::new(), || panic!("never run")) };
@@ -257,4 +261,10 @@ fn scattered_messages_collect_fragments() {
     assert_eq!(frags, 6);
     // The packet was dropped with the bytes copied out: both deleters ran.
     assert_eq!(released.get(), 11);
+    // The packet is gone: the two strings it borrowed are freed (LeakSanitizer flags them).
+    // SAFETY: both came from Box::into_raw above and nothing refers to them any more.
+    unsafe {
+        drop(Box::from_raw(kept_box));
+        drop(Box::from_raw(cb_box));
+    }
 }

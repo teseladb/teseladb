@@ -127,12 +127,12 @@ fn filesystem_errors_carry_their_paths() {
     assert!(text.starts_with("filesystem error: open: "), "{text}");
     assert!(text.ends_with("[/no/such]"), "{text}");
 
-    // The two-path form records the first path twice and ignores the second.
+    // The two-path form records both paths, in order.
     let e2 = make_filesystem_error2("rename", PathBuf::from("/a"), PathBuf::from("/b"), 17);
     assert_eq!(e2.code(), 17);
     assert_eq!(e2.path1(), Path::new("/a"));
-    assert_eq!(e2.path2(), Some(Path::new("/a")));
-    assert!(e2.to_string().ends_with("[/a] [/a]"), "{e2}");
+    assert_eq!(e2.path2(), Some(Path::new("/b")));
+    assert!(e2.to_string().ends_with("[/a] [/b]"), "{e2}");
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn signal_safe_conversions_write_digits() {
     convert_zero_padded_hex_safe(&mut buf, 0xbeefu16);
     assert_eq!(&buf, b"beef");
 
-    // The size argument is the type's digit capacity (three per byte).
+    // The size argument is the room for the digits.
     let mut buf = [0u8; 48];
     let n = convert_decimal_safe(&mut buf, 4 * 3, 1234567u32);
     assert_eq!(&buf[..n], b"1234567");

@@ -561,8 +561,9 @@ pub mod httpd {
                         // SAFETY: the connection outlives process(); the write has finished.
                         let c = unsafe { &mut *this };
                         if f.failed() {
-                            // In case of an error during the write close the connection
-                            c.server()._respond_errors += 1;
+                            // In case of an error during the write close the connection. The
+                            // error is counted once, by respond(): closing aborts the reply
+                            // queue, which fails the response loop.
                             c.close_on_body_error();
                             f.ignore_ready_future();
                             return make_ready_future(());

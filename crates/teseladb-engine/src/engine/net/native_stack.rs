@@ -436,7 +436,25 @@ impl NetworkStack for NativeNetworkStack {
 impl NativeNetworkStack {
     /// Builds the stack over `dev` with `opts`; the IPv4 layer is constructed in place, in
     /// the stack's node, since it points to the interface and to itself.
+    ///
+    /// # Errors
+    /// Fails if a static address option does not parse. The options are checked before the
+    /// interface is built, because the interface registers itself with `dev` (its receive
+    /// callback and its packet provider) and nothing could take that back.
     pub fn new(opts: &NativeStackOptions, dev: Arc<dyn Device>) -> Result<Self, ExceptionPtr> {
+        let dhcp = opts.host_ipv4_addr.defaulted()
+            && opts.gw_ipv4_addr.defaulted()
+            && opts.netmask_ipv4_addr.defaulted()
+            && *opts.dhcp.get_value();
+        let static_addresses = if dhcp {
+            None
+        } else {
+            Some((
+                Ipv4Address::from_string(opts.host_ipv4_addr.get_value())?,
+                Ipv4Address::from_string(opts.gw_ipv4_addr.get_value())?,
+                Ipv4Address::from_string(opts.netmask_ipv4_addr.get_value())?,
+            ))
+        };
         let raw: *mut MaybeUninit<NativeNetworkStackImpl> = Box::into_raw(Box::new_uninit());
         let p = raw.cast::<NativeNetworkStackImpl>();
         // SAFETY: every field is written before the node is used; `_inet` is constructed in
@@ -456,15 +474,11 @@ impl NativeNetworkStack {
         let mut this = NativeNetworkStack { _impl: node };
         let st = this.st();
         st._inet.get_udp().set_queue_size(*opts.udpv4_queue_size.get_value());
-        st._dhcp = opts.host_ipv4_addr.defaulted()
-            && opts.gw_ipv4_addr.defaulted()
-            && opts.netmask_ipv4_addr.defaulted()
-            && *opts.dhcp.get_value();
-        if !st._dhcp {
-            st._inet.set_host_address(Ipv4Address::from_string(opts.host_ipv4_addr.get_value())?);
-            st._inet.set_gw_address(Ipv4Address::from_string(opts.gw_ipv4_addr.get_value())?);
-            st._inet
-                .set_netmask_address(Ipv4Address::from_string(opts.netmask_ipv4_addr.get_value())?);
+        st._dhcp = dhcp;
+        if let Some((host, gw, netmask)) = static_addresses {
+            st._inet.set_host_address(host);
+            st._inet.set_gw_address(gw);
+            st._inet.set_netmask_address(netmask);
         }
         Ok(this)
     }

@@ -415,8 +415,15 @@ impl<Item: SlabItem> SlabClass<Item> {
             self._slab_class_id,
             slab_page_index,
         )));
+        // Only a page with objects left after the first one goes on the list of pages with
+        // free objects; with one object per page, free_item() links the page when that
+        // object comes back.
         // SAFETY: the descriptor is heap-allocated and lives until the page is freed.
-        unsafe { self._free_slab_pages.push_front(desc) };
+        unsafe {
+            if !(*desc).empty() {
+                self._free_slab_pages.push_front(desc);
+            }
+        }
         insert_slab_page_desc(desc);
         // first object from the allocated slab page is returned.
         Ok(self.create_item(slab_page, slab_page_index, args))

@@ -78,11 +78,13 @@ fn measuring_streams_count_bytes() {
 #[test]
 fn simple_output_cursors_skip_fill_and_split() {
     let mut buf = [0u8; 12];
+    // One pointer for the cursor and the comparison: a second `as_mut_ptr()` would reborrow
+    // `buf` and invalidate the cursor's pointer (Miri flags the later writes).
+    let base = buf.as_mut_ptr();
     // SAFETY: `buf` outlives the cursors and is read only after they are done.
-    let mut out: SimpleOutputStream =
-        unsafe { SimpleMemoryOutputStream::new(buf.as_mut_ptr(), 10, 2) };
+    let mut out: SimpleOutputStream = unsafe { SimpleMemoryOutputStream::new(base, 10, 2) };
     const { assert!(!SimpleMemoryOutputStream::HAS_WITH_STREAM) };
-    assert_eq!(out.begin(), buf.as_mut_ptr().wrapping_add(2));
+    assert_eq!(out.begin(), base.wrapping_add(2));
     out.write(b"").unwrap();
     out.fill(b'z', 0).unwrap();
     out.fill(b'-', 2).unwrap();

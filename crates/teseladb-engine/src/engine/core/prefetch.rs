@@ -37,7 +37,7 @@ pub fn builtin_prefetch<const RW: i32, const LOC: i32>(ptr: *const u8) {
     // SAFETY: prefetch instructions never fault, whatever the address, and have no
     // architectural effect; the asm reads no memory and touches no flags or stack.
     unsafe {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
         {
             if RW == 1 {
                 std::arch::asm!("prefetchw [{0}]", in(reg) ptr, options(nostack, preserves_flags, readonly));
@@ -58,7 +58,7 @@ pub fn builtin_prefetch<const RW: i32, const LOC: i32>(ptr: *const u8) {
                 }
             }
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
             match (RW, LOC) {
                 (1, 0) => {
@@ -87,7 +87,7 @@ pub fn builtin_prefetch<const RW: i32, const LOC: i32>(ptr: *const u8) {
                 }
             }
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(any(miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
         {
             let _ = ptr;
         }

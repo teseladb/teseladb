@@ -168,8 +168,8 @@ engine_thread_test_case!(append_challenged_files_grow_speculatively_and_trim_on_
     // SAFETY: as above.
     let n = unsafe { f.dma_read_iov(4 * BLOCK as u64, iov, std::ptr::null_mut()) }.get().unwrap();
     assert_eq!(n, 0);
-    // A gathered read that crosses the logical size is cut there (see the report: the cut
-    // keeps the part past the size, which a file grown speculatively fills with zeros).
+    // A gathered read that crosses the logical size is cut there: here the size falls at
+    // the end of the first buffer, so only that one is read.
     let mut a = block(0, BLOCK);
     let mut b = block(0, 2 * BLOCK);
     let iov = vec![
@@ -178,7 +178,7 @@ engine_thread_test_case!(append_challenged_files_grow_speculatively_and_trim_on_
     ];
     // SAFETY: as above.
     let n = unsafe { f.dma_read_iov(BLOCK as u64, iov, std::ptr::null_mut()) }.get().unwrap();
-    assert!(n >= BLOCK, "at least the second written block");
+    assert_eq!(n, BLOCK, "the second written block");
     assert!(a.as_slice().iter().all(|&c| c == b'2'));
     // Space can be reserved and holes punched.
     f.allocate(0, 2 * BLOCK as u64).get().unwrap();

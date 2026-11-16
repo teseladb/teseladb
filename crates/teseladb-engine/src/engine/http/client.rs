@@ -801,7 +801,15 @@ pub mod experimental {
             let me = unsafe { self.get_unchecked_mut() };
             // SAFETY: the client is pinned (above).
             let pending = unsafe { PendingRef::new(me) };
-            me.set_maximum_connections_impl(nr).finally(move || drop(pending))
+            let f = me.set_maximum_connections_impl(nr);
+            // A raised limit returns a ready future, as client::set_maximum_connections()
+            // does: a continuation would make it pending wherever ready futures do not run
+            // their continuations inline (always under `engine_debug`, as ANOTHERPRODUCT_DEBUG).
+            if f.available() {
+                drop(pending);
+                return f;
+            }
+            f.finally(move || drop(pending))
         }
 
         fn set_maximum_connections_impl(&mut self, nr: u32) -> Future<()> {

@@ -239,12 +239,14 @@ impl Diag {
         let s = &self.stats;
         let load = |c: &AtomicI64| c.load(Ordering::Relaxed);
         let current = int(self.open.load(Ordering::Acquire) as u64);
-        let (fs_used, fs_total) = self
-            .process
-            .dbpath
-            .as_deref()
-            .and_then(|p| teseladb_sys::host::fs_usage(p).ok())
-            .unwrap_or((0, 0));
+        // `statvfs` blocks: off the shard of the command that asked.
+        let dbpath = self.process.dbpath.clone();
+        let (fs_used, fs_total) = teseladb_io::engine::wait::off_shard(move || {
+            dbpath.as_deref().and_then(|p| teseladb_sys::host::fs_usage(p).ok())
+        })
+        .ok()
+        .flatten()
+        .unwrap_or((0, 0));
         let (log_total, log_lines) = log::recent();
         let (warn_total, warn_lines) = log::startup_warnings();
         ProcessFacts {

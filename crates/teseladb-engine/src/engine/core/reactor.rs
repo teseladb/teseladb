@@ -8749,7 +8749,8 @@ impl Smp {
         {
             // SAFETY: no reactor thread runs yet.
             let m = unsafe { &mut *self._shard_to_numa_node_mapping.get() };
-            m.resize(count as usize, 0);
+            m.clear();
+            m.reserve(count as usize);
             for a in allocations.iter().take(count as usize) {
                 m.push(if !a.mem.is_empty() { a.mem[0].nodeid } else { 0 });
             }

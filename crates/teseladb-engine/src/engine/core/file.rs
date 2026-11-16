@@ -22,7 +22,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::ptr;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 
 use crate::engine::core::align::align_up;
@@ -1170,18 +1170,20 @@ impl PosixFileImpl {
     }
 
     /// Allocates a range with `fallocate(FALLOC_FL_ZERO_RANGE)`; succeeds without doing
-    /// anything where that is not supported.
+    /// anything on a file system that does not support it. Each shard learns which devices
+    /// do not support it (see `ZERO_RANGE_UNSUPPORTED`), so one such file system does not
+    /// turn the allocation off for the others.
     pub(crate) fn allocate(&self, position: u64, length: u64) -> Future<()> {
         // FALLOC_FL_ZERO_RANGE is fairly new, so a missing implementation is not an error.
-        static SUPPORTED: AtomicBool = AtomicBool::new(true);
-        if !SUPPORTED.load(Ordering::Relaxed) {
+        let device = self._device_id;
+        if ZERO_RANGE_UNSUPPORTED.with(|s| s.borrow().contains(&device)) {
             return make_ready_future(());
         }
         let fd = self._fd.get();
         thread_pool()
             .submit::<SyscallResult<i32>, _>(move || {
                 // SAFETY: plain system call on our descriptor.
-                let mut ret = unsafe {
+                let ret = unsafe {
                     c_fallocate(
                         fd,
                         FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE,
@@ -1189,13 +1191,15 @@ impl PosixFileImpl {
                         length as i64,
                     )
                 };
-                if ret == -1 && errno() == EOPNOTSUPP {
-                    ret = 0;
-                    SUPPORTED.store(false, Ordering::Relaxed); // Racy, but harmless.  At most we issue an extra call or two.
-                }
                 wrap_syscall::<i32>(ret)
             })
-            .then(|sr: SyscallResult<i32>| sr.throw_if_error())
+            .then(move |sr: SyscallResult<i32>| {
+                if sr.result == -1 && sr.error == EOPNOTSUPP {
+                    ZERO_RANGE_UNSUPPORTED.with(|s| s.borrow_mut().insert(device));
+                    return Ok(());
+                }
+                sr.throw_if_error()
+            })
     }
 
     /// The file size, from `fstat`.
@@ -2200,9 +2204,11 @@ impl AppendChallengedPosixFileImpl {
             i += 1;
         }
         if i != iov.len() {
-            let last_len = pos + len as u64 + iov[i].iov_len as u64 - aligned_logical_size;
+            // The buffer that crosses the size keeps the part before it.
+            let last_len = aligned_logical_size - (pos + len as u64);
             if last_len != 0 {
                 iov[i].iov_len = last_len as usize;
+                len += last_len as usize;
                 i += 1;
             }
             iov.truncate(i);
@@ -2462,6 +2468,13 @@ fn xfs_concurrency_from_kernel_version() -> u32 {
 
 /// The XFS concurrency of the running kernel, computed once.
 static XFS_CONCURRENCY: LazyLock<u32> = LazyLock::new(xfs_concurrency_from_kernel_version);
+
+thread_local! {
+    /// The devices whose file system rejected `FALLOC_FL_ZERO_RANGE` with `EOPNOTSUPP`, per
+    /// thread: allocations on their files succeed without a system call.
+    static ZERO_RANGE_UNSUPPORTED: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
 
 thread_local! {
     /// Filesystem information cached per device, per thread.

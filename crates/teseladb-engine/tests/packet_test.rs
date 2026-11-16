@@ -104,3 +104,15 @@ fn test_headers_are_contiguous_even_with_many_fragments() {
     p.prepend_header::<IpHeader>(0);
     assert_eq!(p.nr_frags(), 9u32);
 }
+
+// Linearizing an empty packet copies no fragment: the packet is left with one empty fragment,
+// as packet::linearize() leaves it (its fragment count drops by `nr_frags - 1` in unsigned
+// arithmetic, one more here). With overflow checks the count update panicked instead.
+#[test]
+fn test_linearize_empty_packet() {
+    let mut p = Packet::default();
+    p.linearize_all();
+    assert_eq!(p.len(), 0u32);
+    assert_eq!(p.nr_frags(), 1u32);
+    assert_eq!(p.frag(0).size, 0);
+}

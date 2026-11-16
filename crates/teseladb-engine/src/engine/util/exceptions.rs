@@ -22,16 +22,11 @@ pub fn make_filesystem_error(what: &str, path: PathBuf, error: i32) -> Filesyste
 /// - `what`: describes the action that failed;
 /// - `path1`, `path2`: the files involved;
 /// - `error`: the system error number (see `errno(3)`).
-///
-/// Note: both operands of the returned error are `path1`; `path2` is accepted and ignored.
-/// Callers that need the second path in the message must build the error themselves.
 pub fn make_filesystem_error2(
     what: &str,
     path1: PathBuf,
     path2: PathBuf,
     error: i32,
 ) -> FilesystemError {
-    // Both operands are deliberately `path1` (see the doc comment); `path2` is unused.
-    let _ = path2;
-    FilesystemError::new(what, &path1, Some(&path1), error)
+    FilesystemError::new(what, &path1, Some(&path2), error)
 }

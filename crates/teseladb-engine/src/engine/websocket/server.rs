@@ -126,6 +126,16 @@ pub mod websocket {
             // awaits this loop, at a fixed heap address.
             // SAFETY: the contract of this function.
             unsafe { self.read_http_upgrade_request() }
+                .then_wrapped(move |f: Future<()>| {
+                    // SAFETY: the connection outlives its processing; the upgrade has finished.
+                    let c = unsafe { &mut *this };
+                    // A refused upgrade, or a client gone before it, leaves no handler to
+                    // feed the response loop.
+                    if f.failed() || c.conn._handler.is_none() {
+                        c.conn.end_response_loop();
+                    }
+                    f
+                })
                 .then(move |()| {
                     // SAFETY: the connection outlives its processing; the upgrade has finished.
                     let c = unsafe { &mut *this };

@@ -48,11 +48,14 @@ engine_thread_test_case!(byte_allocator_and_guards, {
         a.deallocate(p, 64);
     }
 
-    // With abort-on-failure on, a guard keeps a failed allocation from aborting.
+    // With abort-on-failure on, a guard keeps a failed allocation from aborting. The system
+    // allocator of a `--cfg engine_default_allocator` build never aborts and counts no
+    // failure (as with ANOTHERPRODUCT_DEFAULT_ALLOCATOR).
+    let engine_allocator = cfg!(not(engine_default_allocator));
     let was = is_abort_on_allocation_failure();
     #[allow(deprecated)]
     memory::enable_abort_on_allocation_failure();
-    assert!(is_abort_on_allocation_failure());
+    assert_eq!(is_abort_on_allocation_failure(), engine_allocator);
     let failed = stats().failed_allocations();
     {
         let _outer = DisableAbortOnAllocFailureTemporarily::default();
@@ -62,7 +65,9 @@ engine_thread_test_case!(byte_allocator_and_guards, {
         assert!(q.is_null());
     }
     set_abort_on_allocation_failure(was);
-    assert!(stats().failed_allocations() > failed);
+    if engine_allocator {
+        assert!(stats().failed_allocations() > failed);
+    }
     let _no_backtrace = DisableBacktraceTemporarily::default();
 });
 
@@ -89,6 +94,10 @@ engine_thread_test_case!(heap_profiling_is_absent_from_this_build, {
     set_heap_profiling_sampling_rate(0);
 });
 
+// The page arithmetic and the direct large allocations belong to the engine's own allocator:
+// a build with `--cfg engine_default_allocator` (the debug and sanitizer builds, as
+// `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) has none of them.
+#[cfg(not(engine_default_allocator))]
 engine_thread_test_case!(page_arithmetic_and_large_allocations, {
     assert!(memory::is_page_aligned(0));
     assert!(memory::is_page_aligned(3 * PAGE));

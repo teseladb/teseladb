@@ -313,9 +313,12 @@ teseladb::engine_test_case!(sinks_and_sources_travel_as_arguments_and_close_once
         assert_eq!(unsafe { ssrc.call() }.get()?, None);
 
         // Both sides of the server's end are closed now, so it closed the connection; the
-        // client's end drops what it had queued, and its source reports the closed stream.
+        // end of the stream that verb 2 sent before still reaches the client's source.
         sleep(Duration::from_millis(100)).get()?;
         // SAFETY: `source` lives in this frame until the end of the test.
+        assert_eq!(unsafe { source.call() }.get()?, None);
+        // Once it has ended, the source reports the closed stream.
+        // SAFETY: as above.
         let r = unsafe { source.call() }.get();
         assert!(r.is_err_and(|e| is_rpc_error(&e, ErrorKind::StreamClosed)));
         cm(&mut c).stop().get()?;

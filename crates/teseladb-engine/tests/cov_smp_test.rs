@@ -67,6 +67,6 @@ engine_thread_test_case!(main_thread_and_numa_table, {
     // SAFETY: on this shard's reactor thread; the reference is used for this call only.
     let smp = unsafe { (*engine()).smp() };
     let table = smp.shard_to_numa_node_mapping();
-    // Every shard has an entry (see the report about the table's length).
-    assert!(table.len() >= Smp::count() as usize, "{table:?}");
+    // One entry per shard.
+    assert_eq!(table.len(), Smp::count() as usize, "{table:?}");
 });

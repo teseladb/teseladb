@@ -961,7 +961,10 @@ impl Packet {
                 nr - (at_frag + nr_frags),
             )
         };
-        im._nr_frags -= (nr_frags - 1) as u16;
+        // `_nr_frags -= nr_frags - 1` in unsigned arithmetic: with no fragment copied (an
+        // empty packet) the count grows by one, the new empty fragment. Written as a sum so
+        // that it never wraps.
+        im._nr_frags = (nr + 1 - nr_frags) as u16;
         *im.frag_mut(at_frag) = Fragment { base: new_frag.cast::<u8>(), size: accum_size };
         if at_frag == 0 && desired_size == total {
             // We can drop the old buffer safely
@@ -1035,8 +1038,7 @@ impl fmt::Display for Packet {
                     } else if c == b'\t' {
                         os.write_str("\\t")?;
                     } else {
-                        let b: u8 = c;
-                        write!(os, "\\x{}{}", b / 16, b % 16)?;
+                        write!(os, "\\x{c:02x}")?;
                     }
                 }
                 os.write_str("\"")?;

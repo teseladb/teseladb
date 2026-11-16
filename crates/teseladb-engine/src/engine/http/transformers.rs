@@ -235,8 +235,17 @@ impl ContentReplaceDataSinkImpl {
 }
 
 impl DataSinkImpl for ContentReplaceDataSinkImpl {
-    fn put(&mut self, _data: Packet) -> Future<()> {
-        make_ready_future(())
+    /// A packet (a zero-copy write) goes through the same replacement as a buffer, as one
+    /// contiguous buffer.
+    fn put(&mut self, mut data: Packet) -> Future<()> {
+        if !data.is_valid() || data.len() == 0 {
+            return make_ready_future(());
+        }
+        data.linearize_all();
+        match data.release().pop() {
+            Some(buf) => self.put_buffer(buf),
+            None => make_ready_future(()),
+        }
     }
 
     fn put_buffer(&mut self, buf: TemporaryBuffer<u8>) -> Future<()> {
@@ -269,6 +278,8 @@ impl DataSinkImpl for ContentReplaceDataSinkImpl {
         self._out.flush()
     }
 
+    /// Writes what is left of a key being matched, then closes the wrapped stream (which
+    /// flushes it).
     fn close(&mut self) -> Future<()> {
         // if we are in the middle of a consuming a key
         // there will be no match, write the remaining.
@@ -279,10 +290,10 @@ impl DataSinkImpl for ContentReplaceDataSinkImpl {
                 // SAFETY: the sink outlives its close and do_with keeps the buffer alive.
                 let s = unsafe { &mut *this };
                 // SAFETY: the sink outlives its close; the write has finished with the stream.
-                s._out.write(buf.as_slice()).then(move |()| unsafe { (*this)._out.flush() })
+                s._out.write(buf.as_slice()).then(move |()| unsafe { (*this)._out.close() })
             });
         }
-        self._out.flush()
+        self._out.close()
     }
 }
 

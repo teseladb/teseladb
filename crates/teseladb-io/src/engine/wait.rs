@@ -75,6 +75,26 @@ pub fn sleep(d: Duration) {
     rt::finish_park(p, Some(Instant::now() + d));
 }
 
+/// Runs `f`, which blocks (a file system call, a file written and synced), without blocking a
+/// shard: an engine thread hands it to the process's threads that are not shards
+/// ([`super::blocking::offload`]) and parks until it ends; any other thread that is not a shard
+/// runs it itself.
+///
+/// # Errors
+///
+/// [`std::io::ErrorKind::WouldBlock`] on a shard outside an engine thread, which cannot wait (it
+/// awaits `offload` instead); an error when `f` panicked or the engine stopped first.
+pub fn off_shard<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+    rt::off_shard(Box::new(f))
+}
+
+/// Runs `f`, which blocks, without waiting for it: on a shard (in an engine thread or not) it goes
+/// to the process's threads that are not shards ([`super::blocking::offload`]), and any other
+/// thread runs it before this returns. `f` is dropped unrun when those threads cannot take it.
+pub fn spawn_off_shard(f: impl FnOnce() + Send + 'static) {
+    rt::spawn_off_shard(Box::new(f));
+}
+
 /// An engine thread about to park, by its number on its shard.
 pub(crate) use rt::Parking;
 
@@ -116,6 +136,7 @@ mod rt {
     use teseladb::engine::core::coroutine::make_coroutine;
     use teseladb::engine::core::future::ExceptionPtr;
     use teseladb::engine::core::reactor::engine_is_ready;
+    use teseladb::engine::core::reactor::internal_misc::run_in_background;
     use teseladb::engine::core::shard_id::this_shard_id;
     use teseladb::engine::core::smp::Smp;
     use teseladb::engine::core::thread::Thread;
@@ -130,6 +151,35 @@ mod rt {
 
     pub(super) fn engine_thread_shard() -> Option<u32> {
         (engine_is_ready() && Thread::running_in_thread()).then(this_shard_id)
+    }
+
+    pub(super) fn off_shard<T: Send + 'static>(
+        f: Box<dyn FnOnce() -> T + Send>,
+    ) -> std::io::Result<T> {
+        if engine_thread_shard().is_some() {
+            return super::super::blocking::offload(f).get().map_err(|e| {
+                let text = match e.downcast_ref::<std::io::Error>() {
+                    Some(io) => io.to_string(),
+                    None => format!("{e:?}"),
+                };
+                std::io::Error::other(text)
+            });
+        }
+        if this_shard().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a shard's task cannot wait for a blocking call",
+            ));
+        }
+        Ok(f())
+    }
+
+    pub(super) fn spawn_off_shard(f: Box<dyn FnOnce() + Send>) {
+        if this_shard().is_none() {
+            f();
+            return;
+        }
+        run_in_background(super::super::blocking::offload(f));
     }
 
     pub(super) fn post(shard: u32, f: Box<dyn FnOnce() + Send>) -> bool {
@@ -224,6 +274,14 @@ mod rt {
 
     pub(super) fn post(_shard: u32, _f: Box<dyn FnOnce() + Send>) -> bool {
         false
+    }
+
+    pub(super) fn off_shard<T>(f: Box<dyn FnOnce() -> T + Send>) -> std::io::Result<T> {
+        Ok(f())
+    }
+
+    pub(super) fn spawn_off_shard(f: Box<dyn FnOnce() + Send>) {
+        f();
     }
 
     /// Never made: no thread is an engine thread.

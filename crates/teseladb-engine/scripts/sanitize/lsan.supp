@@ -1,0 +1,19 @@
+# Leaks LeakSanitizer reports that are not the engine's:
+# coverage tests that leak on purpose (objects handed to the engine as &'static or raw pointers)
+leak:cov_net_types_test::leaked
+leak:packet_filters_see_packets_first
+leak:vring_event_index_suppresses_kicks
+# gnutls keeps a certificate on the error path of gnutls_certificate_set_x509_key_mem
+# (the call is the same as tls.cc:408 of the original)
+leak:gnutls_x509_crt_init
+# The cpu set glibc copies into a pthread_attr_t: the original never calls
+# pthread_attr_destroy either (posix.cc:100-128)
+leak:pthread_attr_setaffinity_np
+# cov_rpc_tcp_test hands the RPC client a compressor factory it leaks on purpose
+leak:leak_factory
+# httpd_test parses responses from buffers it leaks so that they outlive the parsed response
+leak:httpd_test::parse_all
+# rpc_test hands the RPC server and client compressor factories it leaks on purpose
+leak:test_rpc_connect_multi_compression_algo
+# rpc_test hands the RPC options compressor trackers and factories it leaks on purpose
+leak:test_compressor_empty_frames
