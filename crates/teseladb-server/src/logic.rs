@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use teseladb_io::engine::SendError;
+use teseladb_io::engine::{CoreInput, CoreLogic, CoreSender};
 use teseladb_io::handshake::JoinRequest;
-use teseladb_io::mailbox::SendError;
 use teseladb_io::peer::{JoinAccepted, PeerMsg};
-use teseladb_io::runtime::{CoreInput, CoreLogic, CoreSender};
 use teseladb_io::service::ServiceClass;
 use teseladb_io::{IoClass, answered_apart};
 use teseladb_meta::balancer::{BALANCE_EVERY, Decision, View, plan};
@@ -2354,13 +2354,6 @@ mod tests {
         }
     }
 
-    /// A core that wakes nobody: the test drains its mailbox by hand.
-    struct Quiet;
-
-    impl teseladb_io::mailbox::Notify for Quiet {
-        fn notify(&self) {}
-    }
-
     /// Core 0 never waits for another core (012 FR-005): when the other core's mailbox is full it
     /// keeps what did not go and sends it on a later turn.
     #[test]
@@ -2368,10 +2361,10 @@ mod tests {
         let mut c = Cluster::new();
         c.found();
         c.run_until(|c| c.logic(1).view().bootstrapped);
-        let (own, _own_rx) = teseladb_io::mailbox::channel(std::sync::Arc::new(Quiet));
+        // Queues the test drains by hand.
+        let (own, _own_rx) = teseladb_io::engine::core_channel();
         // Room for one message: the ranges go, the peers come back full.
-        let (other, mut other_rx) =
-            teseladb_io::mailbox::channel_with(1, std::sync::Arc::new(Quiet));
+        let (other, mut other_rx) = teseladb_io::engine::core_channel_with(1);
         let now = c.now;
         c.logic(1).on_message(NodeMsg::Cores(vec![own, other]), now);
         let mut got = Vec::new();
@@ -3039,7 +3032,7 @@ mod tests {
                 *to == NodeId(2) && matches!(m, PeerMsg::ForwardResp { req: r, .. } if *r == req)
             })
         };
-        let (own, mut own_rx) = teseladb_io::mailbox::channel(std::sync::Arc::new(Quiet));
+        let (own, mut own_rx) = teseladb_io::engine::core_channel();
         let now = c.now;
         c.logic(1).on_message(NodeMsg::Cores(vec![own]), now);
         let mut ignored = Vec::new();

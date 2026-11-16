@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use teseladb_hlc::Hlc;
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::CoreInput;
 use teseladb_range::push::TxnView;
 use teseladb_range::read::ReadConcern;
 use teseladb_wire::commands::{Backend, point_end};

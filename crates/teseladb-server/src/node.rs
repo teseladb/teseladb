@@ -1,10 +1,11 @@
 //! Start-up of a node (001 FR-018, 005 FR-015 and FR-016, 007 FR-003): the data directory's
 //! `LOCK`, `node.meta`, the recovery of every core's log, Group 0 on core 0 (created by the
-//! founder, received by a node that joins), every core's LSM and data ranges, one thread per core
-//! running its loop, and the acceptor of the inter-node port.
+//! founder, received by a node that joins), every core's LSM and data ranges, the engine of the
+//! node with one shard per core, each running its core's task (023 FR-008), and the listener of
+//! the inter-node port on the engine (023 FR-015).
 //!
-//! A core's state lives on its thread: the thread recovers its log and its LSM, and only then runs
-//! its loop; the data ranges Group 0 places on the core open there as core 0 hands them over
+//! A core's state lives on its shard: the shard recovers its log and its LSM, and only then runs
+//! its task; the data ranges Group 0 places on the core open there as core 0 hands them over
 //! ([`crate::ranges`]). The node talks to the ranges through [`Node::put`], [`Node::get`] and
 //! [`Node::data_status`], each request sent to the core of its range (006 brings the reference
 //! server's protocol).
@@ -22,18 +23,20 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_auth::clustertime::KeySealer;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogPort, PortDisk};
+use teseladb_io::engine::{
+    CoreConfig as EngineCoreConfig, CoreHandle, CoreInput, CoreSender, CoreSenders, EngineConfig,
+    NodeEngine, ThreadDisk,
+};
 use teseladb_io::handshake::{
-    Acceptor, AcceptorOptions, EnrollHandler, JOIN_TIMEOUT, JoinHandler, JoinRequest,
-    request_join_with,
+    AcceptorOptions, EnrollHandler, JOIN_TIMEOUT, JoinHandler, JoinRequest, request_join_with,
 };
 use teseladb_io::peer::{EnrollAccepted, EnrollRequest, Hello, JoinAccepted};
-use teseladb_io::runtime::{CoreInput, CoreRuntime, CoreSender, CoreSenders, RuntimeConfig};
 use teseladb_io::secure::PeerTls;
 use teseladb_lsm::{Lsm, LsmConfig, LsmError};
 use teseladb_meta::bootstrap::{DATA_RANGE, data_range_core};
@@ -550,7 +553,8 @@ pub fn lock_dir(dir: &Path) -> Result<FileLock, NodeError> {
     })
 }
 
-type CoreThread<D> = JoinHandle<io::Result<Option<D>>>;
+/// A core on its shard; it gives its disk back when it stops (`None` if the disk's thread died).
+type CoreRun<D> = CoreHandle<NodeMsg, Option<D>>;
 
 /// What core 0 adds: Group 0.
 struct Group0Spec {
@@ -566,7 +570,7 @@ struct Group0Spec {
     tags: Vec<(String, String)>,
 }
 
-/// What a core's thread needs to build its state.
+/// What a core needs to build its state on its shard.
 struct CoreSpec {
     core: u16,
     /// Its part of the node's device log, where its WAL is (012 FR-035).
@@ -614,8 +618,6 @@ struct CoreSpec {
     http_forwards: Option<crate::logic::HttpForwards>,
     /// Which cores of the node hold each range (007 FR-011).
     hosting: Hosting,
-    /// The CPU the core's thread is pinned to (012 FR-006).
-    cpu: Option<usize>,
     /// Where the core publishes the views of the ranges it leads (005 FR-028).
     views: RangeViews,
     /// Where the monotonic time of every core of the node starts (005 FR-028).
@@ -643,7 +645,7 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     Ok(data.with_relocations(dir.join("relocate"), spec.hosting.clone(), spec.shared_files))
 }
 
-/// A core's state, built on its thread.
+/// A core's state, built on its shard.
 fn build_core<D: Disk>(
     spec: &CoreSpec,
     port: &mut LogPort,
@@ -708,51 +710,28 @@ fn build_core<D: Disk>(
     Ok(logic)
 }
 
-/// A core's thread: builds its state, hands its mailbox to `ready` and runs its loop. Returns its
-/// disk when it stops (`None` if its state could not be built).
-fn run_core<D: Disk + Send + 'static>(
-    spec: CoreSpec,
-    mut disk: D,
-    ready: mpsc::Sender<Result<CoreSender<NodeMsg>, NodeError>>,
-) -> io::Result<Option<D>> {
-    // Every request of its ranges goes through this thread: on the fast cores.
-    let _ = teseladb_sys::favor_current_thread();
-    // Pinned before it allocates anything, so that its memory is on its CPU's node.
-    if let Some(cpu) = spec.cpu
-        && let Err(e) = crate::affinity::place_current(cpu)
-    {
-        let _ = ready.send(Err(NodeError::Config(format!("core {}: CPU {cpu}: {e}", spec.core))));
-        return Ok(None);
-    }
-    let mut spec = spec;
-    let Some(mut port) = spec.log.take() else {
-        let _ = ready.send(Err(NodeError::Config(format!("core {}: no raft log", spec.core))));
-        return Ok(None);
-    };
-    let logic = match build_core(&spec, &mut port, &mut disk) {
-        Ok(l) => l,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return Ok(None);
-        }
-    };
-    let rcfg = RuntimeConfig {
+/// What a core's task takes from its spec (023 FR-009).
+fn task_config(spec: &CoreSpec) -> EngineCoreConfig {
+    EngineCoreConfig {
+        hello: spec.hello.clone(),
         tick: spec.tick,
         seed: spec.seed ^ 0x5eed,
         tls: spec.peer_tls.clone(),
-        origin: Some(spec.origin),
-    };
-    match CoreRuntime::new(logic, disk, spec.hello, rcfg) {
-        Ok((mut rt, tx)) => {
-            rt.attach_log(port);
-            let _ = ready.send(Ok(tx));
-            rt.run().map(|(_, d)| d)
-        }
-        Err(e) => {
-            let _ = ready.send(Err(NodeError::Io(e)));
-            Ok(None)
-        }
+        origin: spec.origin,
     }
+}
+
+/// A core on its shard (023 FR-008): recovers its log and its LSM there and gives its task the
+/// logic, the executor of its disk and its part of the node's device log.
+fn open_core<D: Disk + Send + 'static>(
+    mut spec: CoreSpec,
+    mut disk: D,
+) -> Result<(NodeLogic, ThreadDisk<D>, Option<LogPort>), NodeError> {
+    let Some(mut port) = spec.log.take() else {
+        return Err(NodeError::Config(format!("core {}: no raft log", spec.core)));
+    };
+    let logic = build_core(&spec, &mut port, &mut disk)?;
+    Ok((logic, ThreadDisk::new(format!("disk-{}", spec.core), disk), Some(port)))
 }
 
 /// A running node.
@@ -766,8 +745,7 @@ pub struct Node<D> {
     /// What makes senders of the cores' mailboxes: the node is shared between threads, and each
     /// call makes its own sender (012 FR-005).
     senders: Vec<CoreSenders<NodeMsg>>,
-    threads: Vec<CoreThread<D>>,
-    acceptor: Acceptor,
+    cores_run: Vec<CoreRun<D>>,
     client: Option<ClientListener>,
     /// What opens and closes the replica set port as Group 0 says (018 FR-016).
     replica_port: Option<crate::replica_port::PortKeeper>,
@@ -793,6 +771,9 @@ pub struct Node<D> {
     /// The Raft log of the node's cores (012 FR-035).
     device_log: Option<DeviceLog<D>>,
     _lock: Option<FileLock>,
+    /// The engine its cores run on, one shard each (023 FR-008); dropped last, once nothing
+    /// talks to its shards.
+    engine: Option<NodeEngine>,
 }
 
 impl<D> fmt::Debug for Node<D> {
@@ -1001,6 +982,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         // Every node's JavaScript reads the deadline of its command and waits in `sleep`, also
         // one a test or a tool starts without `teseladb start` (016 FR-007).
         crate::install_js_host();
+        // The peer port is taken now, so that its address (a port 0 picks one) names the node
+        // before it joins; the engine's listener takes it over once the cores run (023 FR-015).
         let listener = crate::listen::bind(crate::listen::PEERS, cfg.listen_peer)?;
         let peer_addr = listener.local_addr()?;
         let advertised_peer = advertised(cfg.advertise.as_deref(), peer_addr)?;
@@ -1173,6 +1156,12 @@ impl<D: Disk + Send + 'static> Node<D> {
             write_atomic(&mut disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
             log.step("raft logs moved to the device log", &[("cores", &cores)]);
         }
+        // The engine of the node: one shard per core, core k on shard k (023 FR-008).
+        let pinned: Option<Vec<usize>> = cpus.iter().copied().collect();
+        let engine_cfg =
+            EngineConfig { shards: cores, cpus: pinned.unwrap_or_default(), memory: None };
+        let engine = NodeEngine::start(&engine_cfg)?;
+        log.step("engine", &[("shards", &engine.shards())]);
         let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
@@ -1218,26 +1207,23 @@ impl<D: Disk + Send + 'static> Node<D> {
                 presence: (k == 0).then(|| presence.clone()),
                 http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
                 hosting: hosting.clone(),
-                cpu: cpus[usize::from(k)],
                 views: views[usize::from(k)].clone(),
                 origin,
             };
-            let (tx, rx) = mpsc::channel();
-            let spawned = thread::Builder::new()
-                .name(format!("core-{k}"))
-                .spawn(move || run_core(spec, disk, tx));
-            let built = match spawned {
-                Ok(t) => {
-                    threads.push(t);
-                    rx.recv().unwrap_or_else(|_| Err(NodeError::Config(format!("core {k} failed"))))
-                }
-                Err(e) => Err(NodeError::Io(e)),
-            };
+            // Its log and its LSM recover on its shard, where its state lives.
+            let task = task_config(&spec);
+            let built = engine.start_core(
+                k,
+                task,
+                move || open_core(spec, disk),
+                |_logic, disk: ThreadDisk<D>, _gone| disk.into_disk(),
+            );
             match built {
-                Ok(sender) => {
+                Ok(core) => {
                     let ms = began.elapsed().as_millis();
                     log.step("core started", &[("core", &k), ("ms", &ms)]);
-                    senders.push(sender);
+                    senders.push(core.sender());
+                    threads.push(core);
                 }
                 Err(e) => {
                     stop_cores(&senders, threads);
@@ -1249,7 +1235,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             // A core that already stopped is noticed by whoever talks to it.
             let _ = s.send_waiting(CoreInput::App(NodeMsg::Cores(senders.clone())));
         }
-        // The handshake threads share these handlers: each call makes its own sender.
+        // The acceptors of the shards share these handlers, which run off the shards.
         let core0 = senders[0].senders();
         let join: JoinHandler = Arc::new(move |req| {
             let (tx, rx) = mpsc::channel();
@@ -1266,19 +1252,14 @@ impl<D: Disk + Send + 'static> Node<D> {
             handler
         });
         let opts = AcceptorOptions { join: Some(join), enroll, tls: cfg.peer_tls.clone() };
-        let acceptor = match Acceptor::spawn_with(
-            listener,
-            hello,
-            senders.clone(),
-            CoreInput::Inbound,
-            opts,
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                stop_cores(&senders, threads);
-                return Err(NodeError::Io(e));
-            }
-        };
+        // The engine listens where the reserved socket was: the engine hands each connection to
+        // the shard of the core it is for (023 FR-015).
+        drop(listener);
+        if let Err(e) = engine.listen_peers(peer_addr, &hello, &opts, 0, cores) {
+            stop_cores(&senders, threads);
+            let named = format!("{} {peer_addr}: {e}", crate::listen::PEERS);
+            return Err(NodeError::Io(io::Error::new(e.kind(), named)));
+        }
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut replica_port = None;
         let client = match &cfg.client {
@@ -1318,7 +1299,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                         Some(l)
                     }
                     Err(e) => {
-                        acceptor.stop();
+                        engine.stop_peers(None);
                         stop_cores(&senders, threads);
                         return Err(NodeError::Io(e));
                     }
@@ -1358,7 +1339,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                         if let Some(c) = client {
                             c.stop();
                         }
-                        acceptor.stop();
+                        engine.stop_peers(None);
                         stop_cores(&senders, threads);
                         return Err(NodeError::Io(e));
                     }
@@ -1417,7 +1398,7 @@ impl<D: Disk + Send + 'static> Node<D> {
                         if let Some(c) = client {
                             c.stop();
                         }
-                        acceptor.stop();
+                        engine.stop_peers(None);
                         stop_cores(&senders, threads);
                         return Err(NodeError::Io(e));
                     }
@@ -1431,8 +1412,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             peer_addr,
             advertised_peer,
             senders: senders.iter().map(CoreSender::senders).collect(),
-            threads,
-            acceptor,
+            cores_run: threads,
             client,
             replica_port,
             admin,
@@ -1448,6 +1428,7 @@ impl<D: Disk + Send + 'static> Node<D> {
             roles,
             device_log: Some(device_log),
             _lock: lock,
+            engine: Some(engine),
         })
     }
 
@@ -1666,9 +1647,9 @@ impl<D: Disk + Send + 'static> Node<D> {
         }
     }
 
-    /// Stops the cores and the acceptor. Returns each core's disk (`None` for a core whose thread
-    /// failed).
-    pub fn stop(self) -> Vec<Option<D>> {
+    /// Stops the cores, the peers' listener and the engine. Returns each core's disk (`None` for a
+    /// core whose disk thread failed).
+    pub fn stop(mut self) -> Vec<Option<D>> {
         if let Some(p) = self.replica_port {
             p.stop();
         }
@@ -1681,25 +1662,28 @@ impl<D: Disk + Send + 'static> Node<D> {
         if let Some(h) = self.http {
             h.stop();
         }
-        self.acceptor.stop();
+        let engine = self.engine.take().expect("a running node has its engine");
+        engine.stop_peers(None);
         let senders: Vec<_> = self.senders.iter().map(CoreSenders::sender).collect();
-        let disks = stop_cores(&senders, self.threads);
+        let disks = stop_cores(&senders, std::mem::take(&mut self.cores_run));
         // Once the cores stopped, the log's writer has nothing more to make durable.
-        if let Some(l) = self.device_log {
+        if let Some(l) = self.device_log.take() {
             l.stop();
         }
+        // Nothing reaches the shards any more.
+        engine.stop();
         // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
         self.clock.stop();
         disks
     }
 }
 
-/// Stops the cores of `senders` and waits for their threads; each core's disk.
-fn stop_cores<D>(senders: &[CoreSender<NodeMsg>], threads: Vec<CoreThread<D>>) -> Vec<Option<D>> {
+/// Stops the cores of `senders` and waits for their tasks; each core's disk.
+fn stop_cores<D>(senders: &[CoreSender<NodeMsg>], cores: Vec<CoreRun<D>>) -> Vec<Option<D>> {
     for s in senders {
         let _ = s.send_waiting(CoreInput::Stop);
     }
-    threads.into_iter().map(|t| t.join().ok().and_then(Result::ok).flatten()).collect()
+    cores.into_iter().map(|c| c.join().flatten()).collect()
 }
 
 #[cfg(test)]
@@ -1707,7 +1691,7 @@ fn stop_cores<D>(senders: &[CoreSender<NodeMsg>], threads: Vec<CoreThread<D>>) -
 mod tests {
     use std::sync::Arc;
 
-    use teseladb_io::mailbox::{Notify, channel};
+    use teseladb_io::engine::core_channel;
 
     use super::*;
 
@@ -1727,12 +1711,6 @@ mod tests {
         }
     }
 
-    struct Quiet;
-
-    impl Notify for Quiet {
-        fn notify(&self) {}
-    }
-
     /// A core 0 that answers the first catalog request it gets with `answer`.
     fn answering(answer: fn() -> CatalogAnswer) -> CoreSender<NodeMsg> {
         answering_in_turn(vec![answer])
@@ -1740,7 +1718,7 @@ mod tests {
 
     /// A core 0 that answers its catalog requests with `answers`, one each, in turn.
     fn answering_in_turn(answers: Vec<fn() -> CatalogAnswer>) -> CoreSender<NodeMsg> {
-        let (tx, mut mailbox) = channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+        let (tx, mut mailbox) = core_channel::<NodeMsg>();
         thread::spawn(move || {
             let mut got = Vec::new();
             let mut answers = answers.into_iter();
@@ -1886,7 +1864,7 @@ mod tests {
 
     #[test]
     fn a_group0_change_to_a_core_that_stopped_says_so() {
-        let (tx, mailbox) = channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+        let (tx, mailbox) = core_channel::<NodeMsg>();
         drop(mailbox);
         let cmd = Group0Command::ClusterTick { cluster_time_ms: 1 };
         assert_eq!(group0_change(&tx, cmd), Err("the node is stopping".to_owned()));

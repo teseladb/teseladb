@@ -15,7 +15,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use teseladb_exec::pipeline::{PartialGroups, Program};
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::CoreInput;
 use teseladb_range::host::RangeError;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::view::RangeViews;
