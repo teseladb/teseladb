@@ -2,12 +2,10 @@
 //! started from the node's start-up thread on shard 0, which listens and has every other shard
 //! listen too, and stopped before the engine stops.
 //!
-//! The node's services ([`NodeHttp`], the administration handler) still wait for the cores on
-//! channels: each of their calls runs off the shards through [`crate::shard_bridge`] until the
-//! backend answers with futures (023 T049). The port itself (connections, TLS, the protocols,
-//! deadlines, limits, CORS) runs on the shards.
-//!
-//! Outside Linux the engine does not exist and no port starts (D3).
+//! The node's services ([`NodeHttp`], the administration handler) wait for the cores on the
+//! engine's answer channel: each of their calls runs in an engine thread of the shard that took
+//! the request ([`crate::engine_jobs`], 023 T049), as a client's command does. The port itself
+//! (connections, TLS, the protocols, deadlines, limits, CORS) runs on the shards.
 
 use std::io;
 use std::net::SocketAddr;
@@ -56,7 +54,7 @@ mod on_linux {
     use std::io;
     use std::net::SocketAddr;
     use std::rc::Rc;
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use teseladb::engine::core::future::{Future, make_ready_future};
@@ -70,10 +68,10 @@ mod on_linux {
     use crate::http_listener::shard::{self as http, Cancel, MakeService, Reply};
     use crate::http_listener::{self as threaded, Caller, HttpPortConfig, HttpService};
     use crate::http_service::NodeHttp;
-    use crate::shard_bridge;
+    use crate::engine_jobs;
     use crate::shard_client::block_on;
 
-    /// How long a stop waits for the calls of the ports still running off the shards.
+    /// How long a stop waits for the calls of the ports still running.
     const DRAIN: Duration = Duration::from_secs(10);
     /// How long a shard keeps the options it read.
     const OPTIONS_TTL: Duration = Duration::from_secs(1);
@@ -93,7 +91,7 @@ mod on_linux {
                 let handler = handler.clone();
                 Rc::new(move |req: HttpRequest, caller: AdminCaller| {
                     let h = handler.clone();
-                    shard_bridge::run(move || h(&req, &caller))
+                    engine_jobs::run(move || h(&req, &caller))
                 })
             });
             let port_tls = tls.as_ref().map(|t| t.port.clone());
@@ -114,7 +112,7 @@ mod on_linux {
         pub fn stop(self) {
             let port = self.0;
             let _ = block_on(move || port.stop());
-            let _ = block_on(|| shard_bridge::drain(DRAIN));
+            let _ = block_on(|| engine_jobs::drain(DRAIN));
         }
     }
 
@@ -150,11 +148,11 @@ mod on_linux {
         pub fn stop(self) {
             let port = self.0;
             let _ = block_on(move || port.stop());
-            let _ = block_on(|| shard_bridge::drain(DRAIN));
+            let _ = block_on(|| engine_jobs::drain(DRAIN));
         }
     }
 
-    /// The node's service on a shard: its calls run off the shard.
+    /// The node's service on a shard: its calls run in engine threads of the shard.
     struct Bridged {
         service: Arc<NodeHttp>,
         /// The options last read, and when.
@@ -176,7 +174,7 @@ mod on_linux {
     impl http::HttpService for Bridged {
         fn serve(&self, request: Request, caller: Caller, cancel: Cancel) -> Future<Reply> {
             let (service, flag) = (self.service.clone(), cancel.flag());
-            shard_bridge::run(move || service.serve(&request, &caller, &flag)).then(
+            engine_jobs::run(move || service.serve(&request, &caller, &flag)).then(
                 move |reply| -> Result<Reply, teseladb::engine::core::future::ExceptionPtr> {
                     Ok(match reply {
                         threaded::Reply::Whole(r) => Reply::Whole(r),
@@ -188,7 +186,7 @@ mod on_linux {
             )
         }
 
-        /// The options this shard read last; read again off the shard, in the background, once
+        /// The options this shard read last; read again in an engine thread, in the background, once
         /// they are older than a second (the service reads `httpOptions` from Group 0).
         fn options(&self) -> HttpOptions {
             let (at, current) = self.options.borrow().clone();
@@ -196,7 +194,7 @@ mod on_linux {
             if stale && !self.reading.replace(true) {
                 let (service, slot, reading) =
                     (self.service.clone(), self.options.clone(), self.reading.clone());
-                let read = shard_bridge::run(move || service.options());
+                let read = engine_jobs::run(move || service.options());
                 run_in_background(read.then_wrapped(move |f: Future<HttpOptions>| {
                     if let Ok(o) = f.get() {
                         *slot.borrow_mut() = (Some(Instant::now()), o);
@@ -213,13 +211,16 @@ mod on_linux {
         }
     }
 
-    /// The pieces of a stream of the node's service, each read off the shard.
+    /// The pieces of a stream of the node's service, each read in an engine thread of the shard.
+    /// The port asks for a piece once the one before it was sent, so no two reads of the stream
+    /// run at once.
     fn bridged_pieces(pieces: threaded::Pieces) -> http::Pieces {
-        let pieces = Arc::new(Mutex::new(pieces));
+        let pieces = Rc::new(RefCell::new(pieces));
         Box::new(move |cancel: &Cancel| {
             let (pieces, flag) = (pieces.clone(), cancel.flag());
-            shard_bridge::run(move || {
-                let mut p = pieces.lock().unwrap_or_else(PoisonError::into_inner);
+            engine_jobs::run(move || {
+                // Taken out while it reads: nothing else holds the stream across a wait.
+                let Ok(mut p) = pieces.try_borrow_mut() else { return None };
                 p(&flag)
             })
         })
