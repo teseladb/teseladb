@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the command-line and configuration-file option parser (long and short options,
 //! inline and implicit values, multi-token vectors, positional arguments, defaults, required
 //! options, notifiers, help text) and of the option values of the option groups (string maps,
 //! switches, selections).
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::rc::Rc;

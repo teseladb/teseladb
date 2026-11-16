@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of small reactor interfaces: the scheduler clock types, IPv4 address hashing, the
 //! descriptor-misuse switch, the high resolution timer signal, the task histogram and the
 //! backtrace printers, and, on a running reactor, its uptime and statistics, the stop wait,
 //! the idle CPU handler, the exit and destroy hooks, preemption, the current task, and a
 //! signal handled once.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::rc::Rc;

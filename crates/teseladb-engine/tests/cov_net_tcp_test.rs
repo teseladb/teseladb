@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of the native TCP layer driven over a fake device: passive and active opens, option
 //! negotiation, data transfer with delayed, immediate and duplicate acknowledgments,
 //! out-of-order reassembly, retransmission on timeout, fast retransmit and recovery,
@@ -6,6 +5,7 @@
 //! connections and listeners, malformed segments, checksum and segmentation offloads, and
 //! address-resolution failures during a connect. Also unit tests of the header, sequence
 //! number and option helpers.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -229,7 +229,10 @@ engine_thread_test_case!(passive_open_exchanges_data_and_closes, {
     s.st.wire.assert_no_tcp_for(Duration::from_millis(50));
 
     // Nothing can be sent once closed.
-    assert_eq!(errno_of(&wait(s.conn.send(Packet::from_data(b"x"))).err().expect("a failure")), Some(104));
+    assert_eq!(
+        errno_of(&wait(s.conn.send(Packet::from_data(b"x"))).err().expect("a failure")),
+        Some(104)
+    );
     // The connection is gone: the layer resets a segment for it.
     let spec = s.spec(ACK);
     s.inject(&spec, b"");
@@ -299,7 +302,8 @@ engine_thread_test_case!(syn_sent_rejects_bad_acks_and_resets, {
     assert!(!connected.available());
 
     // An acceptable reset refuses the connection.
-    st.wire.inject(&tcp_frame(&TcpSpec::new(22, syn.sport, 7, iss.wrapping_add(1), RST | ACK), b""));
+    st.wire
+        .inject(&tcp_frame(&TcpSpec::new(22, syn.sport, 7, iss.wrapping_add(1), RST | ACK), b""));
     let err = wait(connected).err().expect("a failure");
     assert_eq!(errno_of(&err), Some(111));
 });
@@ -385,7 +389,8 @@ engine_thread_test_case!(malformed_segments_are_dropped, {
     // SAFETY: the layer is live and no reference into it is live.
     let _l = unsafe { (*st.tcp()).listen(LPORT, 8) };
     let seg = |spec: &TcpSpec| tcp_segment(PEER_IP, STACK_IP, spec, b"");
-    let send = |seg: &[u8]| st.wire.inject(&ip_frame(&IpSpec::new(PEER_IP, STACK_IP, PROTO_TCP), seg));
+    let send =
+        |seg: &[u8]| st.wire.inject(&ip_frame(&IpSpec::new(PEER_IP, STACK_IP, PROTO_TCP), seg));
 
     // Shorter than a header.
     send(&seg(&TcpSpec::new(1, LPORT, 1, 0, SYN))[..12]);
@@ -479,7 +484,10 @@ engine_thread_test_case!(established_control_edge_cases, {
     s.inject(&spec, b"");
     assert!(s.st.wire.next_tcp_where(|t| t.has(RST)).has(RST));
     assert_eq!(errno_of(&wait(reading).err().expect("a failure")), Some(104));
-    assert_eq!(errno_of(&wait(s.conn.send(Packet::from_data(b"x"))).err().expect("a failure")), Some(104));
+    assert_eq!(
+        errno_of(&wait(s.conn.send(Packet::from_data(b"x"))).err().expect("a failure")),
+        Some(104)
+    );
 });
 
 engine_thread_test_case!(peer_reset_fails_pending_operations, {
@@ -644,7 +652,8 @@ engine_thread_test_case!(syn_received_handles_bad_ack_and_reset, {
     st.wire.inject(&tcp_frame(&TcpSpec::new(PPORT, LPORT, 10, 0, SYN), b""));
     let synack = st.wire.next_tcp();
     // An ACK outside SND.UNA..SND.NXT is reset.
-    st.wire.inject(&tcp_frame(&TcpSpec::new(PPORT, LPORT, 11, synack.seq.wrapping_add(50), ACK), b""));
+    st.wire
+        .inject(&tcp_frame(&TcpSpec::new(PPORT, LPORT, 11, synack.seq.wrapping_add(50), ACK), b""));
     assert_eq!(st.wire.next_tcp_where(|t| t.has(RST)).seq, synack.seq.wrapping_add(50));
     // A reset in SYN_RECEIVED drops the half-open connection.
     st.wire.inject(&tcp_frame(&TcpSpec::new(PPORT, LPORT, 11, 0, RST), b""));
@@ -658,7 +667,8 @@ engine_thread_test_case!(syn_is_retransmitted_and_connect_can_be_cancelled, {
     let mut conn = unsafe { Tcp::connect_raw(st.tcp(), sockaddr(PEER_IP, 9999)) };
     let connected = conn.connected();
     let syn = st.wire.next_tcp();
-    let again = st.wire.next_where(Duration::from_secs(4), |f| f.is_ipv4() && f.ip().proto == PROTO_TCP);
+    let again =
+        st.wire.next_where(Duration::from_secs(4), |f| f.is_ipv4() && f.ip().proto == PROTO_TCP);
     assert_eq!(again.tcp().seq, syn.seq);
     assert!(again.tcp().has(SYN));
     conn.shutdown_connect();
@@ -695,7 +705,8 @@ engine_thread_test_case!(connect_retries_after_a_full_resolution_queue, {
         assert_eq!(wait(w).expect("resolved").mac, target_mac);
     }
     // The connect retries from its timer once the queue has room.
-    let syn = st.wire.next_where(Duration::from_secs(4), |f| f.is_ipv4() && f.ip().proto == PROTO_TCP);
+    let syn =
+        st.wire.next_where(Duration::from_secs(4), |f| f.is_ipv4() && f.ip().proto == PROTO_TCP);
     assert_eq!(syn.dst_mac(), target_mac);
     assert!(syn.tcp().has(SYN));
     conn.shutdown_connect();
@@ -706,7 +717,9 @@ engine_thread_test_case!(checksum_and_segmentation_offloads, {
     let hw = HwFeatures { tx_csum_l4_offload: true, tx_tso: true, ..HwFeatures::default() };
     let mut s = Session::passive_on(IpStack::new(hw), &mss_ws_options(1000, 0), 60000);
     wait(s.conn.send(Packet::from_data(&pattern(3000)))).expect("send");
-    let f = s.st.wire.next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP && !f.tcp().payload.is_empty());
+    let f = s.st.wire.next_where(WAIT, |f| {
+        f.is_ipv4() && f.ip().proto == PROTO_TCP && !f.tcp().payload.is_empty()
+    });
     // One segment for the device to split by the peer's MSS.
     assert_eq!(f.tcp().payload.len(), 3000);
     assert!(f.oi.needs_csum);
@@ -714,12 +727,16 @@ engine_thread_test_case!(checksum_and_segmentation_offloads, {
     // A small segment with checksum offload only.
     s.peer_ack(s.sseq + 3000);
     wait(s.conn.send(Packet::from_data(b"tiny"))).expect("send");
-    let f = s.st.wire.next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP && !f.tcp().payload.is_empty());
+    let f = s.st.wire.next_where(WAIT, |f| {
+        f.is_ipv4() && f.ip().proto == PROTO_TCP && !f.tcp().payload.is_empty()
+    });
     assert!(f.oi.needs_csum);
     assert_eq!(f.oi.tso_seg_size, 0);
     // A reset from the layer with checksum offload.
     s.st.wire.inject(&tcp_frame(&TcpSpec::new(5, 6, 1, 0, SYN), b""));
-    let f = s.st.wire.next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP && f.tcp().has(RST));
+    let f =
+        s.st.wire
+            .next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP && f.tcp().has(RST));
     assert!(f.oi.needs_csum);
 });
 
@@ -795,7 +812,10 @@ fn header_reads_and_writes_the_wire_layout() {
     assert_eq!(&buf[16..18], &[0xbe, 0xef]);
     // SAFETY: as above.
     let r = unsafe { TcpHdr::read(buf.as_ptr()) };
-    assert_eq!((r.src_port, r.dst_port, r.window, r.urgent, r.checksum), (0x1234, 0x5678, 0x9abc, 7, 0xbeef));
+    assert_eq!(
+        (r.src_port, r.dst_port, r.window, r.urgent, r.checksum),
+        (0x1234, 0x5678, 0x9abc, 7, 0xbeef)
+    );
     assert_eq!(r.data_offset(), 6);
     assert!(r.f_fin() && r.f_syn() && !r.f_rst() && r.f_psh() && r.f_ack() && r.f_urg());
     assert_eq!(r.rsvd1(), 0);

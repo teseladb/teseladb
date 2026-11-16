@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of every allocation entry point the engine allocator exports: the C library family
 //! under its public and internal names (zeroing, resizing up, down and to nothing, aligned
 //! allocations), and the exported `operator new` and `operator delete` symbols in their plain,
 //! array, sized, non-throwing and aligned forms. Every allocation must come from the shard's
 //! pool and keep its contents and alignment.
+#![cfg(target_os = "linux")]
 
 use std::ffi::c_void;
 

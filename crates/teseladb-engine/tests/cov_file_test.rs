@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of files beyond plain reads and writes: the defaults of a file implementation that
 //! supports neither ioctl, fcntl nor duplication, uninitialized files, handles that carry a
 //! file to another shard, append-challenged files with a sloppy size (speculative growth,
 //! reads past the logical size, allocation, hole punching and the final trim), directory
 //! entry types, block devices, the strict-DMA and fsync-bypass settings, and the error types.
+#![cfg(target_os = "linux")]
 
 #[path = "common/mock_file.rs"]
 mod mock_file;

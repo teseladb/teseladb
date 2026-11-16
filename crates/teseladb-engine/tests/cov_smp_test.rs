@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the inter-shard plumbing: the single-producer single-consumer ring (filling,
 //! wrapping, partial reads, draining), a function that panics when submitted to the local
 //! shard, the main-thread check, and the shard-to-NUMA-node table.
+#![cfg(target_os = "linux")]
 
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::reactor::engine;

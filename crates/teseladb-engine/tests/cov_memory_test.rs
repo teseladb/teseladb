@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the per-shard allocator's statistics and controls: allocation counters, free and
 //! minimum free memory, the memory layout, large-allocation warning thresholds, the
 //! diagnostics report with an application producer, the allocation-failure settings, the
 //! `malloc` family entry points, and cross-shard frees.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::ffi::c_void;

@@ -626,8 +626,7 @@ impl ClientListener {
         }) as Arc<dyn Fn() + Send + Sync>;
         state.watch_topology(&wake);
         let shards = port.shards();
-        let mut l =
-            ClientListener { addrs, port, wake, open, xdp, tasks: Vec::new() };
+        let mut l = ClientListener { addrs, port, wake, open, xdp, tasks: Vec::new() };
         if let Some(h) = state.handle()
             && let Err(e) = l.start_tasks(&h, cfg, &shared, &diag, hooks, shards)
         {

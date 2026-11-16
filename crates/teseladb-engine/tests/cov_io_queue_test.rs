@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the I/O queue beyond the class settings: a bandwidth too large for the token
 //! bucket, writes throttled by a small bandwidth (the class waits for its tokens to be
 //! replenished), and the queue's counters and fair groups.
+#![cfg(target_os = "linux")]
 
 use std::time::Instant;
 

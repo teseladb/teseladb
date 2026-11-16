@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the test and benchmark support: benchmark runs of every body kind (synchronous,
 //! with an iteration count, ready and pending futures, failures), manually measured
 //! iterations, benchmark statistics and registration, the optimisation barrier, the
 //! performance counters, test registration and filtering, exception predicates and the
 //! blocking exchanger.
+#![cfg(target_os = "linux")]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;

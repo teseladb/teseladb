@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the Prometheus exporter: the protobuf encoding of metric families, and the
 //! `/metrics` endpoint served over TCP in the text and protobuf formats, with the name, label
 //! and aggregation query parameters, help lines, a global label, histograms (bucketed and
 //! native) and summaries.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

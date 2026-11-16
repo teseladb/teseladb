@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of small core types: the fixed-capacity circular buffer (both ends, erasing ranges
 //! from either side), checked pointers, the thread CPU-time clock and its arithmetic, and
 //! scattered messages (fragments, callbacks, deleters).
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::collections::HashSet;

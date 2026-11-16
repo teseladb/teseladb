@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the reactor's file-system calls: hard links, entry types with and without following
 //! symbolic links, ownership and permissions, statistics, file-system information, pipes,
 //! groups, and the direct-I/O check.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;

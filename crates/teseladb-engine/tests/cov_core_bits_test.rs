@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the small core modules: internal error reporting without aborting, the printing
 //! helpers, structures with a trailing array, size units, unaligned values, two-pass
 //! relocation, histogram arithmetic, enum hashing, formatting into an `Sstring`, the
 //! fixed-size array map, the timeout error, temporary buffers from a custom allocator, aligned
 //! buffers, the default reactor configuration, and the file-system AIO check.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::time::Duration;

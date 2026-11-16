@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of the HTTP client against servers written by hand over TCP: keep-alive
 //! connections pooled and reused, replies of an older protocol version or with
 //! `Connection: close`, content lengths with a sign, an unexpected status whose body is read
@@ -9,7 +8,7 @@
 //!
 //! The raw servers run in plain threads with blocking sockets; the client runs in an engine
 //! thread that polls for them.
-
+#![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
@@ -32,7 +31,9 @@ use teseladb::engine::core::reactor::connect;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::thread::async_;
-use teseladb::engine::http::client::experimental::{Client, Connection, ReplyHandler, RetryRequests};
+use teseladb::engine::http::client::experimental::{
+    Client, Connection, ReplyHandler, RetryRequests,
+};
 use teseladb::engine::http::client::internal::ClientRef;
 use teseladb::engine::http::connection_factory::experimental::BasicConnectionFactory;
 use teseladb::engine::http::exception::{BaseException, ExceptionKind};
@@ -126,7 +127,11 @@ fn read_request(s: &mut TcpStream) -> PeerResult<Option<String>> {
         .lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            if k.eq_ignore_ascii_case("content-length") { v.trim().parse::<usize>().ok() } else { None }
+            if k.eq_ignore_ascii_case("content-length") {
+                v.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
         })
         .unwrap_or(0);
     if len > 0 && !text.to_ascii_lowercase().contains("expect: 100-continue") {
@@ -243,7 +248,8 @@ fn collector(seen: &Seen) -> ReplyHandler {
         do_with(body, move |b: &mut InputStream<u8>| {
             // SAFETY: do_with keeps the stream alive and in place until the read resolves.
             unsafe { read_entire_stream_contiguous(b) }.then(move |s: Sstring| {
-                seen.borrow_mut().push((status, String::from_utf8_lossy(s.as_bytes()).into_owned()));
+                seen.borrow_mut()
+                    .push((status, String::from_utf8_lossy(s.as_bytes()).into_owned()));
                 make_ready_future(())
             })
         })
@@ -320,11 +326,13 @@ teseladb::engine_test_case!(an_unexpected_status_is_read_for_the_debug_log, {
         let http = Sstring::from("http");
         let before = global_logger_registry().get_logger_level(&http).unwrap_or(LogLevel::Info);
         global_logger_registry().set_logger_level(&http, LogLevel::Debug)?;
-        let r = cl.as_mut().make_request(get("/missing"), collector(&seen), Some(StatusType::OK)).get();
+        let r =
+            cl.as_mut().make_request(get("/missing"), collector(&seen), Some(StatusType::OK)).get();
         global_logger_registry().set_logger_level(&http, before)?;
-        assert!(r.is_err_and(|e| e
-            .downcast_ref::<BaseException>()
-            .is_some_and(|b| *b.kind() == ExceptionKind::UnexpectedStatus)));
+        assert!(r.is_err_and(|e| {
+            e.downcast_ref::<BaseException>()
+                .is_some_and(|b| *b.kind() == ExceptionKind::UnexpectedStatus)
+        }));
         assert!(logged("request finished with"));
         assert!(logged("nope"));
         // The handler never saw the unexpected reply.
@@ -453,13 +461,17 @@ teseladb::engine_test_case!(a_request_without_its_body_fails_and_an_early_reply_
         );
         let mut cl = Box::pin(Client::new(addr));
         let seen: Seen = Rc::new(RefCell::new(Vec::new()));
-        let mut post = Request::make(Sstring::from("POST"), Sstring::from("test"), Sstring::from("/x"));
+        let mut post =
+            Request::make(Sstring::from("POST"), Sstring::from("test"), Sstring::from("/x"));
         post.content_length = 5;
         let r = cl.as_mut().make_request(post, collector(&seen), None).get();
-        assert!(r.is_err_and(|e| exc_what(&e) == "Request body writer not set and content is empty"));
+        assert!(
+            r.is_err_and(|e| exc_what(&e) == "Request body writer not set and content is empty")
+        );
         wait_until("the failed connection to close", || cl.connections_nr() == 0)?;
 
-        let mut put = Request::make(Sstring::from("PUT"), Sstring::from("test"), Sstring::from("/y"));
+        let mut put =
+            Request::make(Sstring::from("PUT"), Sstring::from("test"), Sstring::from("/y"));
         put.write_body("txt", Sstring::from("data!"));
         put.set_expects_continue();
         cl.as_mut().make_request(put, collector(&seen), None).get()?;
@@ -496,7 +508,12 @@ teseladb::engine_test_case!(requests_by_reference_and_errors_that_are_not_retrie
         let mut handler = collector(&seen);
         // SAFETY: the request and the handler live in this frame until the call resolves.
         unsafe {
-            cl.as_mut().make_request_ref(&mut req, &mut handler, Some(StatusType::OK), std::ptr::null_mut())
+            cl.as_mut().make_request_ref(
+                &mut req,
+                &mut handler,
+                Some(StatusType::OK),
+                std::ptr::null_mut(),
+            )
         }
         .get()?;
         assert_eq!(bodies(&seen), ["abc"]);
@@ -504,10 +521,11 @@ teseladb::engine_test_case!(requests_by_reference_and_errors_that_are_not_retrie
         // A handler error is not a connection error: it is returned, not retried.
         let calls = Rc::new(Cell::new(0));
         let c = calls.clone();
-        let failing = ReplyHandler::new(move |_rep: &Reply, _body: InputStream<u8>| -> Future<()> {
-            c.set(c.get() + 1);
-            make_exception_future(ExceptionPtr::new(RuntimeError("handler failed".to_string())))
-        });
+        let failing =
+            ReplyHandler::new(move |_rep: &Reply, _body: InputStream<u8>| -> Future<()> {
+                c.set(c.get() + 1);
+                make_exception_future(ExceptionPtr::new(RuntimeError("handler failed".to_string())))
+            });
         let r = cl.as_mut().make_request(get("/fail"), failing, Some(StatusType::OK)).get();
         assert!(r.is_err_and(|e| exc_what(&e) == "handler failed"));
         assert_eq!(calls.get(), 1);

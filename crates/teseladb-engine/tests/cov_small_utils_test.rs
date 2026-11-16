@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of small helpers that need no reactor: the 64-bit Mersenne Twister and the
 //! allocation sampler, the bit operations, the boolean class, the optimized optional, the
 //! function input iterator, the printing helpers, the estimated histogram and the prefetch
 //! hints.
+#![cfg(target_os = "linux")]
 #![allow(deprecated)]
 
 use std::fmt;

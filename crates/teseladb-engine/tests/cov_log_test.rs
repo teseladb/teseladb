@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the loggers outside a reactor: levels and their names, the message format with
 //! and without colour and timestamps, rate limiting, runtime format strings and their errors,
 //! log writers, the registry, the logging settings and their command-line options, and the
 //! formatting of exceptions.
+#![cfg(target_os = "linux")]
 
 use std::fmt::Write as _;
 use std::io::Write;

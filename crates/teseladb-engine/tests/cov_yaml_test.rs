@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the YAML subset read for the I/O properties (block and flow collections, quoted
 //! scalars and escapes, comments, nulls, conversions, parse errors with their position) and of
 //! the decoding of one disk's properties.
+#![cfg(target_os = "linux")]
 
 use teseladb::engine::core::reactor::yaml::{self, Node};
 use teseladb::engine::core::reactor::{DiskParams, decode_disk_params};

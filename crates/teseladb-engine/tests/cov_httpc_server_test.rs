@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of the HTTP server over real TCP connections: the control object that runs a
 //! server on every shard and listens with options, without and with TLS; a single server
 //! with its TLS credentials set beforehand; listen errors with and without TLS; a request
@@ -7,7 +6,7 @@
 //!
 //! Plain requests come from plain threads with blocking sockets; TLS requests come from the
 //! engine's HTTP client. The reactor runs two shards (set before `main`).
-
+#![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
 
 #[path = "common/tls_certs.rs"]
@@ -28,8 +27,8 @@ use teseladb::engine::core::future::{
     ExceptionPtr, Future, RuntimeError, make_exception_future, make_ready_future,
 };
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
-use teseladb::engine::core::shared_ptr::SharedPtr;
 use teseladb::engine::core::sharded::this_shard_id;
+use teseladb::engine::core::shared_ptr::SharedPtr;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::thread::async_;
@@ -149,7 +148,10 @@ fn credentials()
 }
 
 /// A GET of `/hello` over TLS to `addr` with the engine's client; returns the body.
-fn https_hello(addr: SocketAddress, creds: SharedPtr<CertificateCredentials>) -> Result<String, ExceptionPtr> {
+fn https_hello(
+    addr: SocketAddress,
+    creds: SharedPtr<CertificateCredentials>,
+) -> Result<String, ExceptionPtr> {
     let mut c = Box::pin(Client::with_tls(addr, creds, ss("test.example.org")));
     let got = Rc::new(RefCell::new(String::new()));
     let g = got.clone();
@@ -260,11 +262,13 @@ teseladb::engine_test_case!(a_server_handles_bad_requests_unread_bodies_and_fail
                 Rc::new(|mut req: Box<Request>, mut rep: Box<Reply>| -> Future<Box<Reply>> {
                     let stream = req.content_stream;
                     // SAFETY: the server keeps the content stream alive while the handler runs.
-                    unsafe { read_entire_stream_contiguous(&mut *stream) }.then(move |body: Sstring| {
-                        rep._content = body;
-                        req.content = Sstring::new();
-                        make_ready_future(rep)
-                    })
+                    unsafe { read_entire_stream_contiguous(&mut *stream) }.then(
+                        move |body: Sstring| {
+                            rep._content = body;
+                            req.content = Sstring::new();
+                            make_ready_future(rep)
+                        },
+                    )
                 }),
                 &ss("txt"),
             )),

@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the file-descriptor wrapper and the POSIX helpers outside a reactor: temporary
 //! files, duplication and reassignment, sizes and truncation, positional and gathered I/O,
 //! memory mappings, socket options, addresses, listening and accepting, signal masks, kernel
 //! errors and threads with their own stack and affinity.
+#![cfg(target_os = "linux")]
 
 use std::ffi::c_void;
 use std::sync::Arc;

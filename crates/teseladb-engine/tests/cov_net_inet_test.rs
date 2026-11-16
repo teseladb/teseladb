@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the address model: IPv4 and IPv6 internet addresses (parsing, scopes, mapped
 //! addresses, conversions, loopback and wildcard tests, printing and hashing), IPv6 wire and
 //! socket addresses, and the socket-address accessors.
+#![cfg(target_os = "linux")]
 
 use std::collections::HashSet;
 

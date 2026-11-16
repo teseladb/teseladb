@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the HTTP handlers whose body is streamed when the reply is written: files and
 //! directory indexes served from disk, the streamed API documentation with entries read
 //! from files, and the JSON errors, all fetched over TCP from a real server.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

@@ -162,9 +162,8 @@ fn stack_address() -> usize {
 /// made. A panic of `call` comes back here.
 pub fn run(size: usize, call: &mut dyn FnMut(Option<usize>)) {
     let here = stack_address();
-    let nested = POOL.with(|p| {
-        p.borrow().busy.iter().any(|&(base, len)| here >= base && here < base + len)
-    });
+    let nested =
+        POOL.with(|p| p.borrow().busy.iter().any(|&(base, len)| here >= base && here < base + len));
     if nested {
         call(None);
         return;

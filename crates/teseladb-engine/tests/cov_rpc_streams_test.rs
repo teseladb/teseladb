@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of RPC streams over real TCP connections: sources and sinks passed as arguments
 //! in both directions, a sink closed twice or written after its close, values queued with
 //! the end of the stream before they are read, a source that cannot read what it receives,
@@ -6,7 +5,7 @@
 //!
 //! The reactor runs two shards (set before `main`): the cross-shard sink and the stop cases
 //! run on two shards here.
-
+#![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
 #![allow(clippy::type_complexity)]
 
@@ -76,7 +75,11 @@ impl Write<Sstring> for Serializer {
 }
 
 impl Read<Sstring> for Serializer {
-    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<Sstring>) -> Result<Sstring, ExceptionPtr> {
+    fn read<I: SerializerInput>(
+        &self,
+        in_: &mut I,
+        _: Type<Sstring>,
+    ) -> Result<Sstring, ExceptionPtr> {
         let mut l = [0u8; 4];
         in_.read(&mut l)?;
         let mut s = uninitialized_string(u32::from_ne_bytes(l) as usize);
@@ -111,9 +114,8 @@ fn capture_logs() {
     Logger::set_ostream(Ostream::Custom(Box::new(SharedBuf(LOG_BUF.clone()))));
 }
 
-static RPC_LOG: LazyLock<Pin<Box<Logger>>> = LazyLock::new(|| {
-    Logger::new("cov_rpc_streams").unwrap_or_else(|e| panic!("{}", exc_what(&e)))
-});
+static RPC_LOG: LazyLock<Pin<Box<Logger>>> =
+    LazyLock::new(|| Logger::new("cov_rpc_streams").unwrap_or_else(|e| panic!("{}", exc_what(&e))));
 
 fn exc_what(e: &ExceptionPtr) -> String {
     e.get().map(|x| x.what()).unwrap_or_default()
@@ -245,15 +247,18 @@ teseladb::engine_test_case!(sinks_and_sources_travel_as_arguments_and_close_once
         let mut env = Env::new(31)?;
         let kept = register_keeper::<(i32,), (Sstring,)>(&mut env, 1)?;
         // Verb 2 gets a sink from the source the client passes, and closes it.
-        env.proto.as_mut().register_handler(2, move |mut sink: Sink<(Sstring,)>| -> Future<u64> {
-            let id = sink.get_id().id();
-            let keep = sink.clone();
-            // SAFETY: `keep`, a copy of the sink, lives until the close resolves.
-            unsafe { sink.close() }.then(move |()| {
-                drop(keep);
-                make_ready_future(id)
-            })
-        })?;
+        env.proto.as_mut().register_handler(
+            2,
+            move |mut sink: Sink<(Sstring,)>| -> Future<u64> {
+                let id = sink.get_id().id();
+                let keep = sink.clone();
+                // SAFETY: `keep`, a copy of the sink, lives until the close resolves.
+                unsafe { sink.close() }.then(move |()| {
+                    drop(keep);
+                    make_ready_future(id)
+                })
+            },
+        )?;
         let mut c = env.client()?;
         let mut sink = cm(&mut c).make_stream_sink::<Serializer, (i32,)>().get()?;
         let open = env.proto.make_client::<fn(Sink<(i32,)>) -> Future<Source<(Sstring,)>>>(1);

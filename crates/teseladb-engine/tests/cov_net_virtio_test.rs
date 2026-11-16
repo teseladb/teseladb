@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the virtio parts that run without a vhost-net device: the split virtqueue
 //! (descriptor allocation and chaining, the available ring, host notification with and
 //! without event index, completions read from the used ring by its poller), the feature
 //! negotiation of the device from its options, the options themselves and the small owned
 //! buffer and notifier types.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -273,9 +273,14 @@ engine_thread_test_case!(device_features_follow_the_options, {
     let mut lro_off = Value::new("lro", Some("on".to_string()), "LRO");
     lro_off.set_value("off".to_string());
     let dev = VirtioDevice::new(&opts, &lro_off);
-    assert_eq!(dev.features(), VIRTIO_RING_F_INDIRECT_DESC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_MAC);
+    assert_eq!(
+        dev.features(),
+        VIRTIO_RING_F_INDIRECT_DESC | VIRTIO_NET_F_MRG_RXBUF | VIRTIO_NET_F_MAC
+    );
     let hw = dev.hw_features();
-    assert!(!hw.tx_csum_l4_offload && !hw.rx_csum_offload && !hw.tx_tso && !hw.rx_lro && !hw.tx_ufo);
+    assert!(
+        !hw.tx_csum_l4_offload && !hw.rx_csum_offload && !hw.tx_tso && !hw.rx_lro && !hw.tx_ufo
+    );
 
     let boxed = create_virtio_net_device(&opts, &lro_off).expect("a device");
     assert!(!boxed.hw_features().tx_tso);
@@ -298,7 +303,9 @@ fn virtio_options_defaults_and_linking() {
     // SAFETY: the options stay in their box, which is not moved afterwards.
     unsafe { Pin::new_unchecked(&mut *linked) }.link(None);
     let d = RingConfig::default();
-    assert!(d.descs.is_null() && d.size == 0 && !d.event_index && !d.indirect && !d.mergable_buffers);
+    assert!(
+        d.descs.is_null() && d.size == 0 && !d.event_index && !d.indirect && !d.mergable_buffers
+    );
     let b = Buffer::default();
     assert_eq!((b.addr, b.len, b.writeable), (0, 0, false));
 }

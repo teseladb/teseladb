@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the error and future plumbing that the other tests leave out: identity and
 //! printing of error pointers, the errors made from panics, the standard error types and the
 //! file-system error with its paths, the helpers of the internal module, future states built
 //! and cleared by hand, promises that fail with a built error, and continuations attached to a
 //! future held by reference.
+#![cfg(target_os = "linux")]
 
 use std::any::Any;
 use std::path::Path;

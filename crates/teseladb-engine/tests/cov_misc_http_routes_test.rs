@@ -1,10 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the HTTP routing layer driven without a connection: status lines and classes,
 //! MIME types, the HTTP error varieties and their replies, request helpers (addresses, URLs,
 //! keep-alive, query strings), path parameters, function handlers of every form, mandatory
 //! parameters, exception handlers, the default handler, aliases, path descriptions, the
 //! API documentation registries and the file and directory handlers up to the body writer.
-
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

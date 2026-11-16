@@ -1189,10 +1189,9 @@ impl Node {
         clock_keeper.run_on(
             0,
             Box::new(move || {
-                let disk = keeper_place.on_shard().map_err(|_| StorageError::Io {
-                    op: "open",
-                    errno: IoErrno::Io,
-                })?;
+                let disk = keeper_place
+                    .on_shard()
+                    .map_err(|_| StorageError::Io { op: "open", errno: IoErrno::Io })?;
                 Ok(Box::new(disk) as Box<dyn Disk>)
             }),
         )?;

@@ -24,12 +24,12 @@ use std::time::Duration;
 use minstd::{DefaultRandomEngine, UniformIntDistribution};
 use teseladb::engine::core::coroutine::coroutine::{Lambda, WithoutPreemptionCheck};
 use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::memory;
 use teseladb::engine::core::future::{
     BrokenPromise, ExceptionPtr, Future, InvalidArgument, LogicError, OutOfRange, Promise,
     RuntimeError, make_exception_future, make_exception_ptr, make_ready_future,
 };
 use teseladb::engine::core::loop_::{max_concurrent_for_each, parallel_for_each};
+use teseladb::engine::core::memory;
 use teseladb::engine::core::preempt::need_preempt;
 use teseladb::engine::core::reactor::{
     create_scheduling_group_with_shares as create_scheduling_group, destroy_scheduling_group,

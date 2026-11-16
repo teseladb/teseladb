@@ -80,10 +80,10 @@ mod on_linux {
 
     use crate::admin_http::shard as admin;
     use crate::admin_http::{AdminTls, Caller as AdminCaller, Handler, HttpRequest};
+    use crate::engine_jobs;
     use crate::http_listener::shard::{self as http, Cancel, MakeService, Reply};
     use crate::http_listener::{self as threaded, Caller, HttpPortConfig, HttpService};
     use crate::http_service::NodeHttp;
-    use crate::engine_jobs;
     use crate::shard_client::block_on;
 
     /// How long a stop waits for the calls of the ports still running.
@@ -241,7 +241,6 @@ mod on_linux {
         })
     }
 }
-
 
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]

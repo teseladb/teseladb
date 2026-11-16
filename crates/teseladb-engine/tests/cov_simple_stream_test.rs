@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the in-memory serialization cursors beyond plain writes and reads: skipping,
 //! sub-streams (contiguous and spanning fragments), fills, empty fragments, the type-erased
 //! cursors and their visitors, copies into other sinks, and the overflow and underflow errors
 //! of every cursor.
+#![cfg(target_os = "linux")]
 
 use std::rc::Rc;
 

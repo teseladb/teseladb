@@ -1,7 +1,7 @@
-#![cfg(target_os = "linux")]
 //! Tests of the CPU-set parser and the cgroup readers, cross-shard calls to the other shards,
 //! named service groups that bound the concurrency of cross-shard calls, and sharded services
 //! with a single instance.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::io::Write;

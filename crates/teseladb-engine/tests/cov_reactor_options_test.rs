@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Starts the engine with each group of reactor and SMP options in a process of its own and
 //! checks the exit code: polling modes, overprovisioning, memory limits and locking (with the
 //! memory prefaulter), the tuning switches with a stalled reactor, disk properties given inline
@@ -6,6 +5,7 @@
 //! must stop the start (malformed or contradictory disk properties, unavailable CPUs, bad
 //! values, unknown options). A program with its own `main` (`harness = false`): one engine per
 //! process, so each case runs this program again with `COV_REACTOR_CASE` naming it.
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

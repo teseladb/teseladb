@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the wire-level helpers of the native stack: packets (construction, sharing,
 //! prepending into the headroom, trimming, linearizing, releasing, freeing on another shard,
 //! printing), the out-of-order packet merger, the Internet checksum, byte-order conversion,
 //! Ethernet, IPv4, IPv6 and UNIX-domain addresses, the hashers, protocol numbers and the
 //! cross-shard wrapper.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -22,9 +22,9 @@ use teseladb::engine::core::sleep::sleep_steady;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::unaligned::Unaligned;
 use teseladb::engine::net::byteorder::{
-    AdjustEndianness, HtonInplace, NtohInplace, consume_be_slice, hton, hton_packed,
-    hton_struct, htonl, htonq, htons, ntoh, ntoh_packed, ntoh_struct, ntohl, ntohq, ntohs,
-    produce_be_slice, read_be_slice, write_be_slice,
+    AdjustEndianness, HtonInplace, NtohInplace, consume_be_slice, hton, hton_packed, hton_struct,
+    htonl, htonq, htons, ntoh, ntoh_packed, ntoh_struct, ntohl, ntohq, ntohs, produce_be_slice,
+    read_be_slice, write_be_slice,
 };
 use teseladb::engine::net::const_::{EthProtocolNum, IpProtocolNum};
 use teseladb::engine::net::ethernet::{EthHdr, Ethernet, EthernetAddress, parse_ethernet_address};
@@ -135,7 +135,11 @@ fn zero_copy_constructors_run_their_deleters() {
     drop(p);
     assert_eq!(runs.get(), 2);
 
-    let p = Packet::prepend_zero_copy(frag(leaked(b"head")), counting(&runs), Packet::from_data(b"tail"));
+    let p = Packet::prepend_zero_copy(
+        frag(leaked(b"head")),
+        counting(&runs),
+        Packet::from_data(b"tail"),
+    );
     assert_eq!(bytes(&p), b"headtail");
     let p = Packet::append_zero_copy(p, frag(leaked(b"!")), counting(&runs));
     assert_eq!(bytes(&p), b"headtail!");
@@ -252,7 +256,12 @@ fn appending_to_an_empty_packet_takes_the_other() {
 fn shares_cover_ranges_and_keep_offload_info() {
     let mut p = Packet::from_static_data(b"0123");
     p.append(Packet::from_static_data(b"4567"));
-    let oi = OffloadInfo { needs_csum: true, tso_seg_size: 9, protocol: IpProtocolNum::tcp, ..OffloadInfo::default() };
+    let oi = OffloadInfo {
+        needs_csum: true,
+        tso_seg_size: 9,
+        protocol: IpProtocolNum::tcp,
+        ..OffloadInfo::default()
+    };
     p.set_offload_info(oi);
     p.offload_info_ref().reassembled = true;
     let mut s = p.share_range(3, 3);
@@ -394,7 +403,10 @@ fn checksums_agree_with_the_reference() {
         c.sum_bytes(&data[..len]);
         assert_eq!(u16::from_be(c.get()), reference(&data[..len]), "len {len}");
         // SAFETY: the slice has `len` readable bytes.
-        assert_eq!(u16::from_be(unsafe { ip_checksum(data.as_ptr(), len) }), reference(&data[..len]));
+        assert_eq!(
+            u16::from_be(unsafe { ip_checksum(data.as_ptr(), len) }),
+            reference(&data[..len])
+        );
     }
     // Byte-wise, word-wise and odd-aligned sums are the same as the bytes.
     let mut a = Checksummer::default();
@@ -541,7 +553,10 @@ fn ethernet_addresses() {
     e.adjust_endianness(&mut HtonInplace);
     assert_eq!(e.mac, a.mac);
 
-    assert_eq!(parse_ethernet_address("0a:0B:0x0c:d:+e:ff".to_string()).expect("valid").mac, [10, 11, 12, 13, 14, 255]);
+    assert_eq!(
+        parse_ethernet_address("0a:0B:0x0c:d:+e:ff".to_string()).expect("valid").mac,
+        [10, 11, 12, 13, 14, 255]
+    );
     assert!(parse_ethernet_address("1:2:3".to_string()).is_err());
     assert!(parse_ethernet_address("1:2:3:4:5:zz".to_string()).is_err());
     assert!(parse_ethernet_address("1:2:3:4:5:fffffffff".to_string()).is_err());

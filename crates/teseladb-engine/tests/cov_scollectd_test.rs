@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the collectd exporter: the names of the known types, the truncation of long ids,
 //! the wire encoding of values, the query interface (ids, values, descriptions, enabling), and
 //! the packets the per-shard senders send to a UDP socket: the start notification, explicit
 //! values and the polled series.
+#![cfg(target_os = "linux")]
 #![allow(deprecated)]
 
 use std::net::UdpSocket;

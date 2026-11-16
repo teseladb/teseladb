@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the regular-expression engine of the metrics relabelling: the syntax (escapes,
 //! classes, bracket expressions, groups, back-references, assertions, lookaheads, greedy and
 //! lazy repetitions), whole-subject matching, leftmost search, `$` substitution, the error
 //! codes of malformed expressions and the size limits, and the relabel configuration types.
+#![cfg(target_os = "linux")]
 
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::relabel_config::metrics::{

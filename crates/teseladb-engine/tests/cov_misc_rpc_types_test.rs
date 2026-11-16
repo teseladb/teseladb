@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the RPC value types and the LZ4 frame compressor without a connection: error
 //! kinds and messages, optional values, cancellation handles, tuples, compression round
 //! trips with head space, short, empty and corrupt frames, the periodic release of the
 //! reusable buffers, and negotiation through the LZ4 and multi-algorithm factories.
+#![cfg(target_os = "linux")]
 
 use std::pin::pin;
 

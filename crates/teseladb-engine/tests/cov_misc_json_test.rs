@@ -1,9 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the JSON formatter and object model beyond the common paths: string escapes,
 //! dates, slices and hash maps, non-finite numbers, mandatory members, objects with unset or
 //! failing members, the default and empty object writers, copied body writers, a streamed
 //! object written twice, and every write that fails on an unformattable value.
-
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

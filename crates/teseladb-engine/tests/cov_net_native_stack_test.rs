@@ -1,10 +1,10 @@
-#![cfg(target_os = "linux")]
 //! Tests of the native network stack object and its socket adapters over a fake device: a
 //! statically configured stack serving and opening TCP connections through the generic
 //! socket API (server sockets, client sockets, connected-socket streams and options),
 //! datagram channels, the interface it reports, its byte counters, its options and
 //! registration, the device creation from a configuration without a supported driver, and
 //! the proxy queue that forwards packets to the shard owning the hardware queue.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -20,8 +20,7 @@ use teseladb::engine::core::future::{Exception, ExceptionPtr};
 use teseladb::engine::core::scheduling::max_scheduling_groups;
 use teseladb::engine::core::shard_id::this_shard_id;
 use teseladb::engine::net::api::{
-    AcceptResult, ConnectedSocket, KeepaliveParams, ListenOptions, NetworkStack,
-    TcpKeepaliveParams,
+    AcceptResult, ConnectedSocket, KeepaliveParams, ListenOptions, NetworkStack, TcpKeepaliveParams,
 };
 use teseladb::engine::net::native_stack::{
     NativeNetworkStack, NativeStackOptions, create_native_net_device, create_native_stack,
@@ -75,7 +74,10 @@ fn totals(ns: &mut NativeNetworkStack) -> (u64, u64) {
 /// Completes the passive handshake of a SYN from the peer's `pport` to `lport`; returns the
 /// stack's next sequence number.
 fn handshake_in(wire: &Wire, pport: u16, lport: u16) -> u32 {
-    wire.inject(&tcp_frame(&TcpSpec::new(pport, lport, 100, 0, SYN).options(&mss_ws_options(1000, 0)), b""));
+    wire.inject(&tcp_frame(
+        &TcpSpec::new(pport, lport, 100, 0, SYN).options(&mss_ws_options(1000, 0)),
+        b"",
+    ));
     let synack = wire.next_tcp();
     assert!(synack.has(SYN | ACK));
     let next = synack.seq.wrapping_add(1);
@@ -113,7 +115,9 @@ engine_thread_test_case!(native_stack_serves_a_connection, {
     });
     c.set_keepalive_parameters(&params).expect("parameters");
     match c.get_keepalive_parameters().expect("parameters") {
-        KeepaliveParams::Tcp(p) => assert_eq!((p.idle, p.interval, p.count), (Duration::ZERO, Duration::ZERO, 0)),
+        KeepaliveParams::Tcp(p) => {
+            assert_eq!((p.idle, p.interval, p.count), (Duration::ZERO, Duration::ZERO, 0))
+        }
         other => panic!("unexpected parameters {other:?}"),
     }
     let mut v = [0u8; 4];
@@ -178,7 +182,10 @@ engine_thread_test_case!(native_stack_opens_connections, {
     let connecting = sock.connect(sockaddr(PEER_IP, 8080), sockaddr(0, 0), Transport::TCP);
     let syn = wire.next_tcp();
     assert!(syn.has(SYN));
-    wire.inject(&tcp_frame(&TcpSpec::new(8080, syn.sport, 900, syn.seq.wrapping_add(1), SYN | ACK), b""));
+    wire.inject(&tcp_frame(
+        &TcpSpec::new(8080, syn.sport, 900, syn.seq.wrapping_add(1), SYN | ACK),
+        b"",
+    ));
     let mut c = wait(connecting).expect("connected");
     assert_eq!(v4(&c.remote_address()), (PEER_IP, 8080));
     assert_eq!(v4(&c.local_address()).1, syn.sport);
@@ -194,7 +201,10 @@ engine_thread_test_case!(native_stack_opens_connections, {
     // The stack's own connect; the peer refuses.
     let refused = ns.connect(sockaddr(PEER_IP, 8081), sockaddr(0, 0), Transport::TCP);
     let syn = wire.next_tcp_where(|t| t.has(SYN) && t.dport == 8081);
-    wire.inject(&tcp_frame(&TcpSpec::new(8081, syn.sport, 0, syn.seq.wrapping_add(1), RST | ACK), b""));
+    wire.inject(&tcp_frame(
+        &TcpSpec::new(8081, syn.sport, 0, syn.seq.wrapping_add(1), RST | ACK),
+        b"",
+    ));
     assert!(wait(refused).is_err());
 });
 
@@ -261,7 +271,8 @@ engine_thread_test_case!(native_stack_options_and_registration, {
 
     // A stack configured for DHCP takes no static address.
     let wire = Wire::new(HwFeatures::default());
-    let dhcp = NativeNetworkStack::new(&NativeStackOptions::new(), wire.dev.clone()).expect("a DHCP stack");
+    let dhcp = NativeNetworkStack::new(&NativeStackOptions::new(), wire.dev.clone())
+        .expect("a DHCP stack");
     std::mem::forget(dhcp);
 });
 
@@ -280,15 +291,15 @@ engine_thread_test_case!(device_creation_needs_a_supported_driver, {
 
     // Two interfaces, read from a file.
     let path = std::env::temp_dir().join(format!("cov-net-config-{}.yaml", std::process::id()));
-    std::fs::write(
-        &path,
-        "{eth0: {port-index: 0, dhcp: true}, eth1: {port-index: 1, dhcp: true}}",
-    )
-    .expect("written");
+    std::fs::write(&path, "{eth0: {port-index: 0, dhcp: true}, eth1: {port-index: 1, dhcp: true}}")
+        .expect("written");
     let mut o = NativeStackOptions::new();
     o.net_config_file.set_value(path.display().to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
-    assert_eq!(message(&create_native_net_device(o).err().expect("no device")), "no network device");
+    assert_eq!(
+        message(&create_native_net_device(o).err().expect("no device")),
+        "no network device"
+    );
     let _ = std::fs::remove_file(&path);
 
     // A configuration that does not parse.

@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of sharded services beyond the common calls: services that see their container and
 //! delay their stop while referenced, constructors that fail, calls to shards without an
 //! instance or outside the shard range, mappers that fail, shard-dependent parameters, the
 //! stop helper on an object that never started, and foreign pointers copied from another shard.
+#![cfg(target_os = "linux")]
 
 use std::cell::RefCell;
 use std::pin::pin;

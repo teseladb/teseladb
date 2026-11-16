@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the allocator's smaller controls: the byte allocator over the global allocator,
 //! the guard that suspends abort-on-failure, the backtrace guard, allocation sites, the heap
 //! profiling interface of a build without it, page-size arithmetic, and large allocations
 //! taken and returned directly.
+#![cfg(target_os = "linux")]
 
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;

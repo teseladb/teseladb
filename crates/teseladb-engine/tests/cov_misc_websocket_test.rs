@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the WebSocket parser and server beyond the handshake tests: frame header
 //! fields, 16- and 64-bit payload lengths, rejected frames (unmasked, reserved bits, unknown
 //! opcodes, impossible lengths), the error type and the hash helpers, and a server on a TCP
 //! port that echoes long messages, ignores pings and pongs, answers a close frame, and copes
 //! with a client that leaves before its upgrade request.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

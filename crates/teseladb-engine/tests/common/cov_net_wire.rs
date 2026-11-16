@@ -197,7 +197,8 @@ impl Qp for FakeQp {
         &mut self.base
     }
     fn send(&mut self, p: Packet) -> Future<()> {
-        let frame = Frame { bytes: packet_bytes(&p), oi: p.get_offload_info(), nr_frags: p.nr_frags() };
+        let frame =
+            Frame { bytes: packet_bytes(&p), oi: p.get_offload_info(), nr_frags: p.nr_frags() };
         self.base._stats.tx.good.update_frags_stats(p.nr_frags() as u64, p.len() as u64);
         lock(&self.sent).push_back(frame);
         make_ready_future(())
@@ -238,7 +239,11 @@ impl Device for FakeDevice {
     fn hw_queues_count(&self) -> u16 {
         self.queues
     }
-    fn init_local_queue(&self, _opts: &NativeStackOptions, qid: u16) -> Result<QpPtr, ExceptionPtr> {
+    fn init_local_queue(
+        &self,
+        _opts: &NativeStackOptions,
+        qid: u16,
+    ) -> Result<QpPtr, ExceptionPtr> {
         Ok(make_qp(qid, self.sent.clone()))
     }
 }
@@ -364,8 +369,11 @@ impl Wire {
     /// Asserts that no TCP segment is sent within `d`.
     pub fn assert_no_tcp_for(&self, d: Duration) {
         let frames = self.quiet_for(d);
-        let tcp: Vec<TcpView> =
-            frames.iter().filter(|f| f.is_ipv4() && f.ip().proto == PROTO_TCP).map(|f| f.tcp()).collect();
+        let tcp: Vec<TcpView> = frames
+            .iter()
+            .filter(|f| f.is_ipv4() && f.ip().proto == PROTO_TCP)
+            .map(|f| f.tcp())
+            .collect();
         assert!(tcp.is_empty(), "unexpected TCP segments: {tcp:?}");
     }
 }
@@ -456,7 +464,11 @@ pub fn sockaddr(ip: u32, port: u16) -> SocketAddress {
 pub fn checksum(data: &[u8]) -> u16 {
     let mut s: u32 = 0;
     for c in data.chunks(2) {
-        let w = if c.len() == 2 { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], 0]) };
+        let w = if c.len() == 2 {
+            u16::from_be_bytes([c[0], c[1]])
+        } else {
+            u16::from_be_bytes([c[0], 0])
+        };
         s += w as u32;
     }
     while s >> 16 != 0 {

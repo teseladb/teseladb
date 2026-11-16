@@ -65,8 +65,7 @@ fn vanished_as_none<T>(r: std::io::Result<T>, may_vanish: bool) -> std::io::Resu
 pub fn run(args: &Args) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "disk-usage")?;
     let path = dir.path.clone();
-    let node =
-        crate::nodes::start(RECIPE, &[], Some(&path), &[], READY, "the node did not start")?;
+    let node = crate::nodes::start(RECIPE, &[], Some(&path), &[], READY, "the node did not start")?;
     let measured = measure(args, &node, &path);
     node.stop();
     let (bson, sst, total) = measured?;

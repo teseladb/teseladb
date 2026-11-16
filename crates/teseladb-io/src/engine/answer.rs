@@ -103,10 +103,8 @@ mod slots {
     /// Opens a slot on this shard; its number.
     pub(super) fn open<T: 'static>() -> u64 {
         let parked = Rc::new(Cell::new(0));
-        let slot = Rc::new(Slot::<T> {
-            queue: RefCell::new(VecDeque::new()),
-            parked: Rc::clone(&parked),
-        });
+        let slot =
+            Rc::new(Slot::<T> { queue: RefCell::new(VecDeque::new()), parked: Rc::clone(&parked) });
         SLOTS.with(|s| {
             let mut s = s.borrow_mut();
             s.0 += 1;

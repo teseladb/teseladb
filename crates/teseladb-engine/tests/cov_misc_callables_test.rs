@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the type-erased callables, the backtrace types and the allocation failure
 //! injector: empty and boxed functions taking borrowed arguments, assignment, backtrace
 //! frames, vectors, task traces and their comparisons, and failures injected at counted
 //! allocation points, with custom callbacks, nested runs and trace logging.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};

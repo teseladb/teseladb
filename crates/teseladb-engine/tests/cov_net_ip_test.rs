@@ -1,10 +1,10 @@
-#![cfg(target_os = "linux")]
 //! Tests of the native IPv4 layer, ICMP, ARP and the link layer over a fake device: echo
 //! replies, header validation, fragment reassembly and its memory bound, fragmentation of
 //! large replies, the gateway for off-subnet destinations, address resolution (requests,
 //! replies, timeouts, queue limits, standalone ARP layers and custom protocol handlers),
 //! packet filters, the software redirection table and its forwarding hashes, the proxy
 //! queue, transmit queue budgets, and the pure helpers of these layers.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -81,7 +81,10 @@ engine_thread_test_case!(echo_requests_are_answered, {
     assert_echo_reply(&st.wire.next_ip(), 9, b"pad");
 
     // Other ICMP messages and messages shorter than the header are not answered.
-    st.wire.inject(&ip_frame(&IpSpec::new(PEER_IP, STACK_IP, PROTO_ICMP), &icmp_message(13, 1, 1, b"")));
+    st.wire.inject(&ip_frame(
+        &IpSpec::new(PEER_IP, STACK_IP, PROTO_ICMP),
+        &icmp_message(13, 1, 1, b""),
+    ));
     st.wire.inject(&ip_frame(&IpSpec::new(PEER_IP, STACK_IP, PROTO_ICMP), &[8, 0, 0]));
     assert!(ip_frames(&st).is_empty());
 });
@@ -168,7 +171,12 @@ engine_thread_test_case!(reassembly_memory_is_bounded, {
 
 engine_thread_test_case!(arp_requests_are_answered, {
     let st = IpStack::new(HwFeatures::default());
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP),
+    ));
     let f = st.wire.next_arp();
     assert_eq!(f.dst_mac(), PEER_MAC);
     let a = f.arp();
@@ -184,17 +192,37 @@ engine_thread_test_case!(arp_requests_are_answered, {
     let mut unknown_type = arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP);
     unknown_type[2..4].copy_from_slice(&0x86ddu16.to_be_bytes());
     st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &unknown_type));
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(3, PEER_MAC, PEER_IP, [0; 6], STACK_IP)));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(3, PEER_MAC, PEER_IP, [0; 6], STACK_IP),
+    ));
     st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &[0, 1]));
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)[..10]));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)[..10],
+    ));
     assert!(st.wire.drain().is_empty());
 
     // A new host address is answered for, the old one no longer.
     st.ipv4().set_host_address(Ipv4Address::from_u32(0x0a00_0005));
     assert_eq!({ st.ipv4().host_address().ip }, 0x0a00_0005);
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP),
+    ));
     assert!(st.wire.drain().is_empty());
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], 0x0a00_0005)));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], 0x0a00_0005),
+    ));
     assert_eq!(st.wire.next_arp().arp().spa, 0x0a00_0005);
 });
 
@@ -210,7 +238,12 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     if Smp::count() == 1 {
         // A reply resolves the lookup (the other shards would learn it through their own
         // native stacks, which a single shard does not have).
-        st.wire.inject(&eth(STACK_MAC, mac9, ETH_ARP, &arp_packet(2, mac9, 0x0a00_0009, STACK_MAC, STACK_IP)));
+        st.wire.inject(&eth(
+            STACK_MAC,
+            mac9,
+            ETH_ARP,
+            &arp_packet(2, mac9, 0x0a00_0009, STACK_MAC, STACK_IP),
+        ));
     } else {
         st.wire.inject(&hello_from(0x0a00_0009, mac9));
     }
@@ -220,7 +253,10 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     assert!(known.available());
     assert_eq!(known.get().expect("known").mac, mac9);
     // The broadcast address is always known.
-    assert_eq!(wait(st.ipv4().get_l2_dst_address(Ipv4::broadcast_address())).expect("bcast").mac, BCAST_MAC);
+    assert_eq!(
+        wait(st.ipv4().get_l2_dst_address(Ipv4::broadcast_address())).expect("bcast").mac,
+        BCAST_MAC
+    );
 
     // An address nobody answers for: the query is repeated every second and the waiters fail.
     let silent = Ipv4Address::from_u32(0x0a00_000a);
@@ -228,12 +264,8 @@ engine_thread_test_case!(lookups_resolve_time_out_and_overflow, {
     let err = wait(lost).err().expect("a timeout");
     assert!(err.downcast_ref::<ArpTimeoutError>().is_some());
     assert_eq!(format!("{}", ArpTimeoutError::new()), "ARP timeout");
-    let queries = st
-        .wire
-        .drain()
-        .into_iter()
-        .filter(|f| f.is_arp() && f.arp().tpa == 0x0a00_000a)
-        .count();
+    let queries =
+        st.wire.drain().into_iter().filter(|f| f.is_arp() && f.arp().tpa == 0x0a00_000a).count();
     assert!(queries >= 1);
 
     // At most 512 lookups wait for one address.
@@ -258,9 +290,19 @@ engine_thread_test_case!(off_subnet_traffic_goes_through_the_gateway, {
     // A SYN to a closed port and an echo request from beyond the gateway: the answers wait
     // for the gateway's address.
     let syn = tcp_segment(far2, STACK_IP, &TcpSpec::new(5, 81, 1, 0, SYN), b"");
-    st.wire.inject(&eth(STACK_MAC, GW_MAC, ETH_IPV4, &ipv4_packet(&IpSpec::new(far2, STACK_IP, PROTO_TCP), &syn)));
+    st.wire.inject(&eth(
+        STACK_MAC,
+        GW_MAC,
+        ETH_IPV4,
+        &ipv4_packet(&IpSpec::new(far2, STACK_IP, PROTO_TCP), &syn),
+    ));
     let echo = icmp_message(8, 3, 1, b"far");
-    st.wire.inject(&eth(STACK_MAC, GW_MAC, ETH_IPV4, &ipv4_packet(&IpSpec::new(far, STACK_IP, PROTO_ICMP), &echo)));
+    st.wire.inject(&eth(
+        STACK_MAC,
+        GW_MAC,
+        ETH_IPV4,
+        &ipv4_packet(&IpSpec::new(far, STACK_IP, PROTO_ICMP), &echo),
+    ));
     let q = st.wire.next_arp().arp();
     assert_eq!(q.tpa, GW_IP);
     // The gateway shows up.
@@ -299,7 +341,13 @@ struct PortFilter {
 }
 
 impl IpPacketFilter for PortFilter {
-    fn handle(&self, p: &mut Packet, iph: &mut IpHdr, _from: EthernetAddress, handled: &mut bool) -> Future<()> {
+    fn handle(
+        &self,
+        p: &mut Packet,
+        iph: &mut IpHdr,
+        _from: EthernetAddress,
+        handled: &mut bool,
+    ) -> Future<()> {
         if iph.ip_proto != PROTO_UDP {
             return make_ready_future(());
         }
@@ -319,8 +367,11 @@ impl IpPacketFilter for PortFilter {
 
 engine_thread_test_case!(packet_filters_see_packets_first, {
     let st = IpStack::new(HwFeatures::default());
-    let filter: &'static PortFilter =
-        Box::leak(Box::new(PortFilter { port: 7777, hits: Cell::new(0), hold: RefCell::new(None) }));
+    let filter: &'static PortFilter = Box::leak(Box::new(PortFilter {
+        port: 7777,
+        hits: Cell::new(0),
+        hold: RefCell::new(None),
+    }));
     let fp = filter as *const PortFilter as *mut PortFilter as *mut dyn IpPacketFilter;
     st.ipv4().set_packet_filter(Some(fp));
     assert!(st.ipv4().packet_filter().is_some());
@@ -370,7 +421,10 @@ engine_thread_test_case!(l4_providers_and_direct_sends, {
     assert_eq!({ l4.host_address().ip }, STACK_IP);
     assert!(l4.hw_features().tx_csum_ip_offload);
     assert_eq!(l4.netif(), st.netif);
-    assert_eq!(wait(l4.get_l2_dst_address(Ipv4Address::from_u32(PEER_IP))).expect("known").mac, PEER_MAC);
+    assert_eq!(
+        wait(l4.get_l2_dst_address(Ipv4Address::from_u32(PEER_IP))).expect("known").mac,
+        PEER_MAC
+    );
     l4.register_packet_provider(Box::new(move || {
         once.take().map(|d| L4Packet {
             to: Ipv4Address::from_u32(PEER_IP),
@@ -388,7 +442,12 @@ engine_thread_test_case!(l4_providers_and_direct_sends, {
 
     // A direct send larger than the MTU is fragmented.
     let big = vec![0xabu8; 3000];
-    st.ipv4().send(Ipv4Address::from_u32(PEER_IP), IpProtocolNum::udp, Packet::from_data(&big), EthernetAddress { mac: PEER_MAC });
+    st.ipv4().send(
+        Ipv4Address::from_u32(PEER_IP),
+        IpProtocolNum::udp,
+        Packet::from_data(&big),
+        EthernetAddress { mac: PEER_MAC },
+    );
     let parts: Vec<IpView> = (0..3).map(|_| st.wire.next_ip().ip()).collect();
     assert_eq!(parts.iter().map(|p| p.offset()).collect::<Vec<_>>(), vec![0, 1480, 2960]);
     assert_eq!(parts.iter().map(|p| p.mf()).collect::<Vec<_>>(), vec![true, true, false]);
@@ -432,7 +491,12 @@ engine_thread_test_case!(standalone_arp_layer_and_custom_protocols, {
     assert_eq!(wait(pending).expect("learned").mac, PEER_MAC);
     // Requests for our address are answered.
     wire.clear();
-    wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)));
+    wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP),
+    ));
     assert_eq!(wire.next_arp().arp().oper, 2);
 
     // A handler for another protocol type gets that type's packets until it is dropped.
@@ -466,7 +530,12 @@ engine_thread_test_case!(software_redirection_hashes_every_protocol, {
     st.wire.inject(&tcp_frame(&TcpSpec::new(5, 81, 1, 0, SYN), b""));
     assert!(st.wire.next_tcp().has(RST));
     st.wire.inject(&udp_frame(5, 9, b"udp"));
-    st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP)));
+    st.wire.inject(&eth(
+        BCAST_MAC,
+        PEER_MAC,
+        ETH_ARP,
+        &arp_packet(1, PEER_MAC, PEER_IP, [0; 6], STACK_IP),
+    ));
     assert_eq!(st.wire.next_arp().arp().oper, 2);
     // Too short for an ARP header or an IP header: hashed on what there is, then dropped.
     st.wire.inject(&eth(BCAST_MAC, PEER_MAC, ETH_ARP, &[0, 1]));
@@ -569,7 +638,10 @@ fn address_parsing_and_constants() {
     assert_eq!(Ipv4::arp_protocol_type(), 0x0800);
     assert_eq!(Ipv4Traits::IP_HDR_LEN_MIN, 20);
     assert_eq!(<Ipv4Traits as InetTraits>::IP_HDR_LEN_MIN, 20);
-    assert_eq!(<Ipv4Traits as InetTraits>::hton_ip(&Ipv4Address::from_u32(0x0102_0304)), 0x0102_0304u32.to_be());
+    assert_eq!(
+        <Ipv4Traits as InetTraits>::hton_ip(&Ipv4Address::from_u32(0x0102_0304)),
+        0x0102_0304u32.to_be()
+    );
 }
 
 #[test]
@@ -598,16 +670,31 @@ fn ipv4_socket_addresses_parse_with_and_without_port() {
 fn pseudo_header_checksums_match_the_wire() {
     let seg = tcp_segment(PEER_IP, STACK_IP, &TcpSpec::new(1, 2, 3, 4, SYN), b"abc");
     let mut c = Checksummer::default();
-    Ipv4Traits::tcp_pseudo_header_checksum(&mut c, Ipv4Address::from_u32(PEER_IP), Ipv4Address::from_u32(STACK_IP), seg.len() as u16);
+    Ipv4Traits::tcp_pseudo_header_checksum(
+        &mut c,
+        Ipv4Address::from_u32(PEER_IP),
+        Ipv4Address::from_u32(STACK_IP),
+        seg.len() as u16,
+    );
     c.sum_bytes(&seg);
     assert_eq!(c.get(), 0);
     let dg = udp_datagram(PEER_IP, STACK_IP, 1, 2, b"abcd");
     let mut c = Checksummer::default();
-    <Ipv4Traits as InetTraits>::udp_pseudo_header_checksum(&mut c, Ipv4Address::from_u32(PEER_IP), Ipv4Address::from_u32(STACK_IP), dg.len() as u16);
+    <Ipv4Traits as InetTraits>::udp_pseudo_header_checksum(
+        &mut c,
+        Ipv4Address::from_u32(PEER_IP),
+        Ipv4Address::from_u32(STACK_IP),
+        dg.len() as u16,
+    );
     c.sum_bytes(&dg);
     assert_eq!(c.get(), 0);
     let mut c = Checksummer::default();
-    <Ipv4Traits as InetTraits>::tcp_pseudo_header_checksum(&mut c, Ipv4Address::from_u32(PEER_IP), Ipv4Address::from_u32(STACK_IP), seg.len() as u16);
+    <Ipv4Traits as InetTraits>::tcp_pseudo_header_checksum(
+        &mut c,
+        Ipv4Address::from_u32(PEER_IP),
+        Ipv4Address::from_u32(STACK_IP),
+        seg.len() as u16,
+    );
     c.sum_bytes(&seg);
     assert_eq!(c.get(), 0);
 }
@@ -657,7 +744,10 @@ fn forward_hash_collects_bytes_low_first() {
     assert_eq!(h.size(), 7);
     assert_eq!((0..7).map(|i| h[i]).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7]);
     let bytes: Vec<u8> = (1..=7).collect();
-    assert_eq!(toeplitz_hash(DEFAULT_RSSKEY_40BYTES, &h), toeplitz_hash(DEFAULT_RSSKEY_40BYTES, &bytes));
+    assert_eq!(
+        toeplitz_hash(DEFAULT_RSSKEY_40BYTES, &h),
+        toeplitz_hash(DEFAULT_RSSKEY_40BYTES, &bytes)
+    );
 }
 
 #[test]

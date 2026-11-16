@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of RPC servers and clients over real TCP connections on the loopback interface:
 //! every way a protocol makes servers and clients, the handler forms with client info and
 //! deadlines, optional arguments, no-wait verbs, values that fail to serialize or to
@@ -8,7 +7,7 @@
 //!
 //! The reactor runs two shards (set before `main`); the servers listen on shard 0 only, so
 //! their listening sockets send every connection to shard 0.
-
+#![cfg(target_os = "linux")]
 // The tests reach pinned engine objects through raw pointers; every `unsafe` block states
 // why it is sound.
 #![allow(unsafe_code)]
@@ -37,13 +36,13 @@ use teseladb::engine::net::api::{
 };
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine::rpc::rpc::{
-    Client, ClientOptions, Protocol, ReplyHandlerBase, ReplyHandlerData, ResourceLimits,
-    Server, ServerOptions, StreamingDomainType,
+    Client, ClientOptions, Protocol, ReplyHandlerBase, ReplyHandlerData, ResourceLimits, Server,
+    ServerOptions, StreamingDomainType,
 };
 use teseladb::engine::rpc::rpc_impl::{
-    DoWantClientInfo, DoWantClientInfoMut, DoWantTimePoint, DontWantClientInfo,
-    DontWantTimePoint, HandlerSignature, REQUEST_FRAME_HEADROOM, Read, SerializerInput,
-    SerializerOutput, Write, marshall,
+    DoWantClientInfo, DoWantClientInfoMut, DoWantTimePoint, DontWantClientInfo, DontWantTimePoint,
+    HandlerSignature, REQUEST_FRAME_HEADROOM, Read, SerializerInput, SerializerOutput, Write,
+    marshall,
 };
 use teseladb::engine::rpc::rpc_types::{
     Bufs, Cancellable, ClientInfo, Compressor, CompressorFactory, ConnectionId, ErrorKind,
@@ -95,7 +94,11 @@ impl Write<Sstring> for Serializer {
 }
 
 impl Read<Sstring> for Serializer {
-    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<Sstring>) -> Result<Sstring, ExceptionPtr> {
+    fn read<I: SerializerInput>(
+        &self,
+        in_: &mut I,
+        _: Type<Sstring>,
+    ) -> Result<Sstring, ExceptionPtr> {
         let mut l = [0u8; 4];
         in_.read(&mut l)?;
         let mut s = uninitialized_string(u32::from_ne_bytes(l) as usize);
@@ -111,7 +114,11 @@ struct Unserializable;
 teseladb::rpc_plain_type!(Unserializable);
 
 impl Write<Unserializable> for Serializer {
-    fn write<O: SerializerOutput>(&self, _: &mut O, _: &Unserializable) -> Result<(), ExceptionPtr> {
+    fn write<O: SerializerOutput>(
+        &self,
+        _: &mut O,
+        _: &Unserializable,
+    ) -> Result<(), ExceptionPtr> {
         Err(ExceptionPtr::new(RuntimeError("cannot serialize".to_string())))
     }
 }
@@ -229,8 +236,7 @@ impl Env {
         let mut proto = Box::pin(Proto::new(Serializer));
         proto.as_mut().set_logger(Some(&**RPC_LOG));
         let (ss, addr) = fixed_listen()?;
-        let mut server =
-            Box::pin(proto.as_mut().new_server_with_options_socket(so, ss, limits));
+        let mut server = Box::pin(proto.as_mut().new_server_with_options_socket(so, ss, limits));
         server.as_mut().start()?;
         Ok(Env { server, proto, addr })
     }
@@ -285,7 +291,11 @@ teseladb::engine_test_case!(protocols_make_servers_and_clients_every_way, {
         assert!(
             proto
                 .as_mut()
-                .new_server_with_options(ServerOptions::default(), &foreign, ResourceLimits::default())
+                .new_server_with_options(
+                    ServerOptions::default(),
+                    &foreign,
+                    ResourceLimits::default()
+                )
                 .is_err()
         );
 
@@ -343,8 +353,11 @@ teseladb::engine_test_case!(protocols_make_servers_and_clients_every_way, {
             load_balancing_algorithm: LoadBalancingAlgorithm::Fixed,
             ..ServerOptions::default()
         };
-        let mut s2 =
-            Box::pin(proto.as_mut().new_server_with_options(so, &addr2, ResourceLimits::default())?);
+        let mut s2 = Box::pin(proto.as_mut().new_server_with_options(
+            so,
+            &addr2,
+            ResourceLimits::default(),
+        )?);
         s2.as_mut().start()?;
         let mut c4 = Box::pin(proto.as_mut().new_client(&addr2, &local));
         c4.as_mut().start()?;
@@ -403,10 +416,11 @@ teseladb::engine_test_case!(handlers_take_client_info_deadlines_and_optional_arg
         >>(4, |tp: OptTimePoint, x: i32| -> Result<i32, ExceptionPtr> {
             Ok(if tp.0.is_some() { x } else { -x })
         })?;
-        env.proto.as_mut().register_handler(
-            5,
-            |x: i32, y: Optional<i32>| -> Result<i32, ExceptionPtr> { Ok(x + y.0.unwrap_or(100)) },
-        )?;
+        env.proto
+            .as_mut()
+            .register_handler(5, |x: i32, y: Optional<i32>| -> Result<i32, ExceptionPtr> {
+                Ok(x + y.0.unwrap_or(100))
+            })?;
 
         let mut c = env.client(ClientOptions::default())?;
         let second = Duration::from_secs(1).as_nanos() as i64;
@@ -419,7 +433,10 @@ teseladb::engine_test_case!(handlers_take_client_info_deadlines_and_optional_arg
         assert_eq!(v3.call(cm(&mut c), &(2,)).get()?, 20);
         assert_eq!(v3.call_for(cm(&mut c), second, &(2,)).get()?, 121);
         let v4 = env.proto.make_client::<fn(i32) -> Future<i32>>(4);
-        assert_eq!(v4.call_until(cm(&mut c), LowresClock::now() + Duration::from_secs(1), &(8,)).get()?, 8);
+        assert_eq!(
+            v4.call_until(cm(&mut c), LowresClock::now() + Duration::from_secs(1), &(8,)).get()?,
+            8
+        );
         assert_eq!(v4.call(cm(&mut c), &(8,)).get()?, -8);
 
         // An older client that does not send the optional argument, and a newer one that does.
@@ -557,9 +574,9 @@ teseladb::engine_test_case!(values_that_fail_to_serialize_or_deserialize, {
     async_(|| -> Result<(), ExceptionPtr> {
         capture_logs();
         let mut env = Env::plain()?;
-        env.proto
-            .as_mut()
-            .register_handler(22, || -> Result<Unserializable, ExceptionPtr> { Ok(Unserializable) })?;
+        env.proto.as_mut().register_handler(22, || -> Result<Unserializable, ExceptionPtr> {
+            Ok(Unserializable)
+        })?;
         let ran = Rc::new(Cell::new(0));
         let r = ran.clone();
         env.proto.as_mut().register_handler(23, move |x: i64| -> Result<i64, ExceptionPtr> {
@@ -586,9 +603,8 @@ teseladb::engine_test_case!(values_that_fail_to_serialize_or_deserialize, {
         // The server cannot read the arguments (4 bytes for an i64): it logs and drops the
         // request, and the call times out.
         let short = env.proto.make_client::<fn(i32) -> Future<i64>>(23);
-        let e = short
-            .call_for(cm(&mut c), Duration::from_millis(300).as_nanos() as i64, &(1,))
-            .get();
+        let e =
+            short.call_for(cm(&mut c), Duration::from_millis(300).as_nanos() as i64, &(1,)).get();
         assert!(e.is_err_and(|e| is_rpc_error(&e, ErrorKind::Timeout)));
         assert!(logged("caught exception while processing a message"));
         assert_eq!(ran.get(), 0);
@@ -611,7 +627,12 @@ impl ReplyHandlerBase for Recording {
     fn data(&mut self) -> &mut ReplyHandlerData {
         &mut self.base
     }
-    fn call(&mut self, _client: &mut Client, msg_id: i64, data: RcvBuf) -> Result<(), ExceptionPtr> {
+    fn call(
+        &mut self,
+        _client: &mut Client,
+        msg_id: i64,
+        data: RcvBuf,
+    ) -> Result<(), ExceptionPtr> {
         *self.got.borrow_mut() = Some((msg_id, bufs_bytes(&data.bufs)));
         Ok(())
     }
@@ -637,7 +658,9 @@ fn recording() -> (Box<Recording>, Rc<RefCell<Option<(i64, Vec<u8>)>>>, Rc<Cell<
 teseladb::engine_test_case!(requests_and_reply_handlers_driven_by_hand, {
     async_(|| -> Result<(), ExceptionPtr> {
         let mut env = Env::plain()?;
-        env.proto.as_mut().register_handler(30, |x: i32| -> Result<i32, ExceptionPtr> { Ok(x * 2) })?;
+        env.proto
+            .as_mut()
+            .register_handler(30, |x: i32| -> Result<i32, ExceptionPtr> { Ok(x * 2) })?;
         let mut c = env.client(ClientOptions::default())?;
         // The first call negotiates the connection.
         let v = env.proto.make_client::<fn(i32) -> Future<i32>>(30);
@@ -659,7 +682,12 @@ teseladb::engine_test_case!(requests_and_reply_handlers_driven_by_hand, {
         // A wait that times out: the default timeout() of the handler runs, and it is dropped.
         let timeouts = cm(&mut c).get_stats().timeout;
         let (h, got, dropped) = recording();
-        cm(&mut c).wait_for_reply(9_999, h, Some(LowresClock::now() + Duration::from_millis(20)), None);
+        cm(&mut c).wait_for_reply(
+            9_999,
+            h,
+            Some(LowresClock::now() + Duration::from_millis(20)),
+            None,
+        );
         wait_until("the timeout", || dropped.get())?;
         assert!(got.borrow().is_none());
         assert_eq!(cm(&mut c).get_stats().timeout, timeouts + 1);
@@ -714,7 +742,10 @@ teseladb::engine_test_case!(client_gauges_count_queued_and_waiting_calls, {
         env.proto.as_mut().register_handler(40, move |x: i32| -> Future<i32> {
             rel.borrow_mut().get_future().then(move |()| make_ready_future(x))
         })?;
-        let co = ClientOptions { metrics_domain: Sstring::from("cov_gauges"), ..ClientOptions::default() };
+        let co = ClientOptions {
+            metrics_domain: Sstring::from("cov_gauges"),
+            ..ClientOptions::default()
+        };
         let mut c = env.client(co)?;
         let v = env.proto.make_client::<fn(i32) -> Future<i32>>(40);
         let pending = v.call(cm(&mut c), &(9,));
@@ -765,7 +796,11 @@ impl Compressor for TestCompressor {
         let mut out = TemporaryBuffer::<u8>::new(head_space + bytes.len());
         // SAFETY: the buffer holds `head_space + bytes.len()` bytes.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.get_write().add(head_space), bytes.len())
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                out.get_write().add(head_space),
+                bytes.len(),
+            )
         };
         Ok(SndBuf::from_buffer(out))
     }
@@ -894,18 +929,25 @@ teseladb::engine_test_case!(a_streaming_domain_belongs_to_one_server_per_shard, 
         let so = ServerOptions { streaming_domain: Some(domain), ..ServerOptions::default() };
         let mut env = Env::new(so.clone(), ResourceLimits::default())?;
         let (ss, _) = fixed_listen()?;
-        let mut second =
-            Box::pin(env.proto.as_mut().new_server_with_options_socket(so, ss, ResourceLimits::default()));
+        let mut second = Box::pin(env.proto.as_mut().new_server_with_options_socket(
+            so,
+            ss,
+            ResourceLimits::default(),
+        ));
         let r = second.as_mut().start();
-        assert!(r.is_err_and(|e| exc_what(&e)
-            == "An RPC server with the streaming domain 4242 is already exist"));
+        assert!(r.is_err_and(
+            |e| exc_what(&e) == "An RPC server with the streaming domain 4242 is already exist"
+        ));
         drop(second);
         // The first server keeps the domain until it shuts down; then the name is free.
         env.server().shutdown().get()?;
         let (ss, _) = fixed_listen()?;
         let so = ServerOptions { streaming_domain: Some(domain), ..ServerOptions::default() };
-        let mut third =
-            Box::pin(env.proto.as_mut().new_server_with_options_socket(so, ss, ResourceLimits::default()));
+        let mut third = Box::pin(env.proto.as_mut().new_server_with_options_socket(
+            so,
+            ss,
+            ResourceLimits::default(),
+        ));
         third.as_mut().start()?;
         // SAFETY: the server is not moved out of its pin.
         unsafe { third.as_mut().get_unchecked_mut() }.stop().get()?;

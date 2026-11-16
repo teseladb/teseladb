@@ -10,10 +10,10 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 
-/// Safe forms of the engine's DMA file operations (023 FR-010).
-pub mod dma;
 /// Native stacks of their own for calls that nest deep (016 A016-3-18).
 pub mod deep_stack;
+/// Safe forms of the engine's DMA file operations (023 FR-010).
+pub mod dma;
 pub mod host;
 mod linux;
 /// Network namespaces and `veth` pairs, for the tests of AF_XDP (012 FR-033).

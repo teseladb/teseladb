@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of the RPC building blocks that need no connection: frames of one and of several
 //! chunks, frames handed between shards, the marshalling of plain values, smart pointers,
 //! references, tuples and optional values, the decoding of error replies, the protocol
@@ -7,7 +6,7 @@
 //!
 //! The test program runs its reactor with two shards (set before `main`), so that a frame
 //! can be made on one shard and copied on the other.
-
+#![cfg(target_os = "linux")]
 // The tests write into engine buffers through raw pointers; every `unsafe` block states why
 // it is sound.
 #![allow(unsafe_code)]
@@ -28,21 +27,20 @@ use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::thread::async_;
 use teseladb::engine::net::api::make_ipv4_address_ip_port;
 use teseladb::engine::net::socket_defs::SocketAddress;
+use teseladb::engine::rpc::rpc::Client;
 use teseladb::engine::rpc::rpc::{
     Connection, ConnectionFilterFn, CopyableFn, IsolationConfig, Logger as RpcLogger,
     ProtocolFeatures, ReplyHandlerBase, ReplyHandlerData, ResourceLimits, RpcTimePoint,
     ShardLocalBuffer, StreamingDomainType, default_isolate_connection, estimate_request_size,
     make_shard_local_buffer_copy,
 };
-use teseladb::engine::rpc::rpc::Client;
 use teseladb::engine::rpc::rpc_impl::{
     ExceptionType, Read, RpcMsgType, SerializerInput, SerializerOutput, Write,
     deserialize_connection_id, marshall, relative_timeout_to_absolute, send_helper,
     serialize_connection_id, unmarshal_exception,
 };
 use teseladb::engine::rpc::rpc_types::{
-    Bufs, ClientInfo, ConnectionId, ErrorKind, NoWaitType, Optional, RcvBuf, SndBuf, Tuple,
-    Type,
+    Bufs, ClientInfo, ConnectionId, ErrorKind, NoWaitType, Optional, RcvBuf, SndBuf, Tuple, Type,
 };
 use teseladb::engine::testing::test_runner::testing::global_test_runner;
 use teseladb::engine::util::log::{LogLevel, Logger, Ostream};
@@ -191,7 +189,8 @@ fn shard_local_buffers_report_their_size_and_buffers() {
 
     let mut r = <RcvBuf as ShardLocalBuffer>::sized(9);
     assert_eq!(r.size_of(), 9);
-    *r.bufs_mut() = Bufs::Many(vec![TemporaryBuffer::copy_from(b"ab"), TemporaryBuffer::copy_from(b"c")]);
+    *r.bufs_mut() =
+        Bufs::Many(vec![TemporaryBuffer::copy_from(b"ab"), TemporaryBuffer::copy_from(b"c")]);
     assert_eq!(bufs_bytes(r.bufs()), b"abc");
 }
 
@@ -268,8 +267,8 @@ fn marshalled_values_and_pointers_have_the_same_bytes() {
     let boxed =
         marshall(&Serializer, 0, &(Box::new(5i32),)).unwrap_or_else(|e| panic!("{}", exc_what(&e)));
     assert_eq!(bufs_bytes(&boxed.bufs), expected);
-    let shared =
-        marshall(&Serializer, 0, &(make_shared(5i32),)).unwrap_or_else(|e| panic!("{}", exc_what(&e)));
+    let shared = marshall(&Serializer, 0, &(make_shared(5i32),))
+        .unwrap_or_else(|e| panic!("{}", exc_what(&e)));
     assert_eq!(bufs_bytes(&shared.bufs), expected);
     let lw = marshall(&Serializer, 0, &(make_lw_shared(5i32),))
         .unwrap_or_else(|e| panic!("{}", exc_what(&e)));
@@ -484,7 +483,8 @@ fn filters_and_isolation_functions_are_copyable() {
 
 #[test]
 fn limits_estimate_the_memory_of_a_request() {
-    let lim = ResourceLimits { basic_request_size: 100, bloat_factor: 3, ..ResourceLimits::default() };
+    let lim =
+        ResourceLimits { basic_request_size: 100, bloat_factor: 3, ..ResourceLimits::default() };
     assert_eq!(estimate_request_size(&lim, 10), 130);
     assert_eq!(StreamingDomainType::new(77).to_string(), "77");
     assert!(ProtocolFeatures::COMPRESS < ProtocolFeatures::HANDLER_DURATION);
@@ -546,7 +546,12 @@ impl ReplyHandlerBase for DefaultsHandler {
     fn data(&mut self) -> &mut ReplyHandlerData {
         &mut self.base
     }
-    fn call(&mut self, _client: &mut Client, _msg_id: i64, _data: RcvBuf) -> Result<(), ExceptionPtr> {
+    fn call(
+        &mut self,
+        _client: &mut Client,
+        _msg_id: i64,
+        _data: RcvBuf,
+    ) -> Result<(), ExceptionPtr> {
         self.calls.set(self.calls.get() + 1);
         Ok(())
     }

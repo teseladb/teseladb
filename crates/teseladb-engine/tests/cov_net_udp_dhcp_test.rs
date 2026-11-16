@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the native UDP layer and the DHCP client over a fake device: binding explicit
 //! and anonymous ports (until none is left), receiving and sending datagrams, receive-queue
 //! limits, shutdown and close, checksum offload, fragmentation of large datagrams, sends that
 //! wait for address resolution, and the DHCP discover / offer / request / acknowledge
 //! exchange with its NAK restart, timeout, retries, renewal and packet filtering.
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]
@@ -94,7 +94,10 @@ engine_thread_test_case!(channels_receive_and_send_datagrams, {
     // Binding errors.
     assert_eq!(message(&bind(&st, 5000).err().expect("in use")), "Address already in use");
     let specific = st.ipv4().get_udp().make_channel(Ipv4Addr { ip: STACK_IP, port: 5002 });
-    assert_eq!(message(&specific.err().expect("specific IP")), "Binding to specific IP not supported yet");
+    assert_eq!(
+        message(&specific.err().expect("specific IP")),
+        "Binding to specific IP not supported yet"
+    );
 
     // Anonymous ports start at 32768.
     let a = bind(&st, 0).expect("anonymous");
@@ -190,7 +193,10 @@ engine_thread_test_case!(anonymous_ports_wrap_and_run_out, {
     // Freeing one makes it the next anonymous port, after wrapping around.
     let freed = channels.swap_remove(5);
     drop(freed);
-    assert_eq!(v4(&bind(&st, 0).expect("the freed port").local_address()).1, Ipv4Udp::MIN_ANONYMOUS_PORT + 5);
+    assert_eq!(
+        v4(&bind(&st, 0).expect("the freed port").local_address()).1,
+        Ipv4Udp::MIN_ANONYMOUS_PORT + 5
+    );
 });
 
 engine_thread_test_case!(channel_state_counts_send_space, {
@@ -305,7 +311,9 @@ fn next_client_message(st: &IpStack) -> ClientMessage {
 
 /// The next message the client broadcasts, within `limit`.
 fn next_client_message_within(st: &IpStack, limit: Duration) -> ClientMessage {
-    let f = st.wire.next_where(limit, |f| f.is_ipv4() && f.ip().proto == PROTO_UDP && f.udp().dport == 67);
+    let f = st
+        .wire
+        .next_where(limit, |f| f.is_ipv4() && f.ip().proto == PROTO_UDP && f.udp().dport == 67);
     assert_eq!(f.dst_mac(), BCAST_MAC);
     let ip = f.ip();
     assert_eq!((ip.src, ip.dst), (0, 0xffff_ffff));

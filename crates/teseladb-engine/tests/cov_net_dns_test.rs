@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the DNS resolver against a small DNS server on the loopback interface (a
 //! thread with plain UDP and TCP sockets), so that no outside network is needed: name and
 //! address lookups over UDP, truncated answers retried over TCP, queries over TCP only,
 //! aliases, search domains, SRV records, missing names, timeouts, closing, option errors,
 //! and the error texts.
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -100,7 +100,9 @@ fn answer(q: &[u8], over_tcp: bool, log: &Mutex<Vec<(String, u16, bool)>>) -> Op
             answers.push(rr(Some("host.test"), T_A, &[10, 1, 2, 3]));
         }
         ("short.search.test", T_A) => answers.push(rr(None, T_A, &[10, 7, 7, 7])),
-        ("3.2.1.10.in-addr.arpa", T_PTR) => answers.push(rr(None, T_PTR, &encode_name("host.test"))),
+        ("3.2.1.10.in-addr.arpa", T_PTR) => {
+            answers.push(rr(None, T_PTR, &encode_name("host.test")))
+        }
         ("_svc._tcp.srv.test", T_SRV) => {
             answers.push(rr(None, T_SRV, &srv_rdata(10, 5, 8080, "a.srv.test")));
             answers.push(rr(None, T_SRV, &srv_rdata(20, 0, 8081, "b.srv.test")));
@@ -113,7 +115,11 @@ fn answer(q: &[u8], over_tcp: bool, log: &Mutex<Vec<(String, u16, bool)>>) -> Op
     }
     let mut r = Vec::new();
     r.extend_from_slice(&q[..2]);
-    let flags = 0x8000 | (u16::from_be_bytes([q[2], q[3]]) & 0x0100) | 0x0080 | rcode | if truncated { 0x0200 } else { 0 };
+    let flags = 0x8000
+        | (u16::from_be_bytes([q[2], q[3]]) & 0x0100)
+        | 0x0080
+        | rcode
+        | if truncated { 0x0200 } else { 0 };
     r.extend_from_slice(&flags.to_be_bytes());
     r.extend_from_slice(&1u16.to_be_bytes());
     r.extend_from_slice(&(answers.len() as u16).to_be_bytes());
@@ -244,7 +250,8 @@ engine_thread_test_case!(names_and_addresses_resolve_over_udp, {
     assert!(h.names.iter().any(|n| n.as_str() == "host.test" || n.as_str() == "alias.test"));
 
     // Unknown names and addresses fail with the server's answer.
-    let e = r.get_host_by_name(&s("missing.test"), Some(Family::INET)).get().err().expect("missing");
+    let e =
+        r.get_host_by_name(&s("missing.test"), Some(Family::INET)).get().err().expect("missing");
     assert!(dns_code(&e).is_some());
     assert!(r.get_host_by_addr(&inet("10.9.8.7")).get().is_err());
     assert!(r.get_host_by_addr(&inet("2001:db8::5")).get().is_err());
@@ -310,9 +317,13 @@ engine_thread_test_case!(silent_servers_time_out, {
 });
 
 engine_thread_test_case!(resolver_options_are_validated, {
-    let opts = DnsResolverOptions { servers: Some(vec![inet("::1")]), ..DnsResolverOptions::default() };
+    let opts =
+        DnsResolverOptions { servers: Some(vec![inet("::1")]), ..DnsResolverOptions::default() };
     assert!(DnsResolver::with_options(&opts).is_err());
-    let opts = DnsResolverOptions { domains: Some(vec![s("bad\0domain")]), ..DnsResolverOptions::default() };
+    let opts = DnsResolverOptions {
+        domains: Some(vec![s("bad\0domain")]),
+        ..DnsResolverOptions::default()
+    };
     assert!(DnsResolver::with_options(&opts).is_err());
 });
 
@@ -327,7 +338,10 @@ fn error_texts() {
         assert_ne!(c.message(code), "Unknown error", "code {code}");
     }
     assert_eq!(format!("{}", DnsError { code: 12, what: String::new() }), "Timeout");
-    assert_eq!(format!("{}", DnsError { code: 4, what: "lookup".to_string() }), "lookup: Not found");
+    assert_eq!(
+        format!("{}", DnsError { code: 4, what: "lookup".to_string() }),
+        "lookup: Not found"
+    );
     assert_eq!(format!("{}", OptFamilyDisplay(&None)), "ANY");
     assert_eq!(format!("{}", OptFamilyDisplay(&Some(Family::INET))), format!("{}", Family::INET));
 }

@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Tests of the RPC wire handling against peers that write the frames by hand over TCP:
 //! negotiation frames with a wrong magic, cut short, with malformed features or features
 //! nobody knows; request, response, compressed and stream frames cut short; requests split
@@ -9,7 +8,7 @@
 //! The raw peers run in plain threads with blocking sockets; the engine side runs in an
 //! engine thread that polls for them, so the reactor never blocks. The reactor runs two
 //! shards (set before `main`).
-
+#![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
 
 use std::io::Read as _;
@@ -80,7 +79,11 @@ impl Write<Sstring> for Serializer {
 }
 
 impl Read<Sstring> for Serializer {
-    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<Sstring>) -> Result<Sstring, ExceptionPtr> {
+    fn read<I: SerializerInput>(
+        &self,
+        in_: &mut I,
+        _: Type<Sstring>,
+    ) -> Result<Sstring, ExceptionPtr> {
         let mut l = [0u8; 4];
         in_.read(&mut l)?;
         let mut s = uninitialized_string(u32::from_ne_bytes(l) as usize);
@@ -574,7 +577,9 @@ teseladb::engine_test_case!(the_server_drops_short_and_corrupt_compressed_frames
         assert!(logged(
             "unexpected eof on a server while reading compression header: expected 4 got 2"
         ));
-        assert!(logged("unexpected eof on a server while reading compressed data: expected 50 got 10"));
+        assert!(logged(
+            "unexpected eof on a server while reading compressed data: expected 50 got 10"
+        ));
         assert!(logged("server connection dropped"));
         env.finish()
     })
@@ -739,7 +744,11 @@ teseladb::engine_test_case!(a_client_rejects_a_compression_it_does_not_support, 
         let with_lz4 = ClientOptions { compressor_factory: Some(&LZ4), ..ClientOptions::default() };
         for (co, answer, expected) in [
             (with_lz4, "ZSTD", "RPC server responded with compression ZSTD - unsupported"),
-            (ClientOptions::default(), "LZ4", "RPC server responded with compression LZ4 - unsupported"),
+            (
+                ClientOptions::default(),
+                "LZ4",
+                "RPC server responded with compression LZ4 - unsupported",
+            ),
         ] {
             let (l, port) = raw_listener()?;
             let h = raw_server(l, move |s| {
@@ -827,10 +836,14 @@ teseladb::engine_test_case!(a_client_drops_a_connection_whose_replies_are_cut_sh
         // The payload is cut short, then the header.
         let cuts: [(Vec<u8>, &str); 2] = [
             (
-                [7i64.to_le_bytes().as_slice(), &10u32.to_le_bytes()[..], &[1u8, 2, 3][..]].concat(),
+                [7i64.to_le_bytes().as_slice(), &10u32.to_le_bytes()[..], &[1u8, 2, 3][..]]
+                    .concat(),
                 "unexpected eof on a client while reading data: expected 10 got 3",
             ),
-            (vec![1, 2, 3, 4, 5], "unexpected eof on a client while reading header: expected 12 got 5"),
+            (
+                vec![1, 2, 3, 4, 5],
+                "unexpected eof on a client while reading header: expected 12 got 5",
+            ),
         ];
         for (cut, log) in cuts {
             let (l, port) = raw_listener()?;

@@ -1,9 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the file-system and process helpers that need a reactor: file-system type and
 //! space, ownership, sizes, hard links, whole-file reads, recursive directory creation with
 //! relative paths and trailing slashes, an invalid path for recursive removal, and child
 //! processes fed a large input, read from their error stream and killed by a signal.
-
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

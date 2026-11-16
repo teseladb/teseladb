@@ -157,9 +157,10 @@ pub fn spawn_background(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> 
                 let _ended = guard;
                 body(&s);
             });
-            run_in_background(IoGroups::get_or_create().then(move |groups: IoGroups| {
-                in_group(groups.of(IoClass::Background), job)
-            }));
+            run_in_background(
+                IoGroups::get_or_create()
+                    .then(move |groups: IoGroups| in_group(groups.of(IoClass::Background), job)),
+            );
         }),
     );
     posted.then_some(task)

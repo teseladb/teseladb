@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the TLS credential objects without a handshake: Diffie-Hellman parameters,
 //! certificates from bytes and files (valid, malformed, missing), trust anchors, revocation
 //! lists, key pairs and PKCS#12 bundles given in the wrong form, priority strings, client
 //! authentication and session resumption settings, the credentials builder, the verification
 //! callback, and the error and name texts.
+#![cfg(target_os = "linux")]
 
 #[path = "common/tls_certs.rs"]
 mod tls_certs;
@@ -15,10 +15,10 @@ use teseladb::engine::core::future::{Exception, ExceptionPtr};
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::tls::{
-    AbstractCredentials, CertificateCredentials, ClientAuth, CredentialsBuilder, DhLevel,
-    DhParams, DnCallback, GnutlsDatum, ServerCredentials, SessionResumeMode, SessionType,
-    SubjectAltName, SubjectAltNameType, SubjectAltNameValue, TlsError, TlsOptions,
-    VerificationError, X509Cert, X509CrtFormat, error_category, format_as,
+    AbstractCredentials, CertificateCredentials, ClientAuth, CredentialsBuilder, DhLevel, DhParams,
+    DnCallback, GnutlsDatum, ServerCredentials, SessionResumeMode, SessionType, SubjectAltName,
+    SubjectAltNameType, SubjectAltNameValue, TlsError, TlsOptions, VerificationError, X509Cert,
+    X509CrtFormat, error_category, format_as,
 };
 use teseladb::engine_thread_test_case;
 
@@ -36,7 +36,8 @@ fn message(e: &ExceptionPtr) -> String {
     e.get().map(|x| x.what()).unwrap_or_default()
 }
 
-const GARBAGE: &[u8] = b"-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n";
+const GARBAGE: &[u8] =
+    b"-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n";
 
 engine_thread_test_case!(dh_parameters_from_levels_bytes_and_files, {
     for lvl in [DhLevel::LEGACY, DhLevel::MEDIUM, DhLevel::HIGH, DhLevel::ULTRA] {
@@ -63,7 +64,10 @@ engine_thread_test_case!(certificates_from_bytes_and_files, {
     assert!(X509Cert::new(GARBAGE, X509CrtFormat::PEM).is_err());
     assert!(X509Cert::new(b"\x30\x03\x02\x01\x00", X509CrtFormat::DER).is_err());
     assert!(X509Cert::from_file(&s(&certfile("test.crt")), X509CrtFormat::PEM).get().is_ok());
-    let e = X509Cert::from_file(&s("/nonexistent/cert.pem"), X509CrtFormat::PEM).get().err().expect("missing");
+    let e = X509Cert::from_file(&s("/nonexistent/cert.pem"), X509CrtFormat::PEM)
+        .get()
+        .err()
+        .expect("missing");
     assert!(!message(&e).is_empty());
 });
 
@@ -83,17 +87,35 @@ engine_thread_test_case!(credentials_reject_malformed_inputs, {
     assert!(c.set_simple_pkcs12(b"not pkcs12", X509CrtFormat::PEM, &s("")).is_err());
 
     // Files.
-    c.set_x509_trust_file(&s(&certfile("tls-ca-bundle.pem")), X509CrtFormat::PEM).get().expect("trust file");
+    c.set_x509_trust_file(&s(&certfile("tls-ca-bundle.pem")), X509CrtFormat::PEM)
+        .get()
+        .expect("trust file");
     assert!(c.set_x509_trust_file(&s("/nonexistent/ca.pem"), X509CrtFormat::PEM).get().is_err());
     assert!(c.set_x509_crl_file(&s("/nonexistent/crl.pem"), X509CrtFormat::PEM).get().is_err());
     assert!(c.set_x509_crl_file(&s(&certfile("test.crt")), X509CrtFormat::PEM).get().is_err());
     c.set_x509_key_file(&s(&certfile("test.crt")), &s(&certfile("test.key")), X509CrtFormat::PEM)
         .get()
         .expect("key files");
-    assert!(c.set_x509_key_file(&s("/nonexistent/c"), &s("/nonexistent/k"), X509CrtFormat::PEM).get().is_err());
-    assert!(c.set_x509_key_file(&s(&certfile("test.crt")), &s("/nonexistent/k"), X509CrtFormat::PEM).get().is_err());
-    assert!(c.set_simple_pkcs12_file(&s("/nonexistent/x.p12"), X509CrtFormat::DER, &s("")).get().is_err());
-    assert!(c.set_simple_pkcs12_file(&s(&certfile("test.crt")), X509CrtFormat::DER, &s("")).get().is_err());
+    assert!(
+        c.set_x509_key_file(&s("/nonexistent/c"), &s("/nonexistent/k"), X509CrtFormat::PEM)
+            .get()
+            .is_err()
+    );
+    assert!(
+        c.set_x509_key_file(&s(&certfile("test.crt")), &s("/nonexistent/k"), X509CrtFormat::PEM)
+            .get()
+            .is_err()
+    );
+    assert!(
+        c.set_simple_pkcs12_file(&s("/nonexistent/x.p12"), X509CrtFormat::DER, &s(""))
+            .get()
+            .is_err()
+    );
+    assert!(
+        c.set_simple_pkcs12_file(&s(&certfile("test.crt")), X509CrtFormat::DER, &s(""))
+            .get()
+            .is_err()
+    );
 });
 
 engine_thread_test_case!(credentials_settings, {
@@ -146,7 +168,9 @@ engine_thread_test_case!(builder_builds_and_applies, {
     let mut c = CertificateCredentials::new();
     good.apply_to(&mut c).expect("applied");
     let _ = good.set_system_trust().get();
-    good.set_x509_trust_file(&s(&certfile("tls-ca-bundle.pem")), X509CrtFormat::PEM).get().expect("file");
+    good.set_x509_trust_file(&s(&certfile("tls-ca-bundle.pem")), X509CrtFormat::PEM)
+        .get()
+        .expect("file");
     assert!(good.set_x509_trust_file(&s("/nonexistent"), X509CrtFormat::PEM).get().is_err());
 });
 
@@ -173,10 +197,16 @@ fn texts_and_small_types() {
         assert_eq!(format_as(t), n);
         assert_eq!(format!("{t}"), n);
     }
-    let a = SubjectAltName { type_: SubjectAltNameType::dnsname, value: SubjectAltNameValue::String(s("x.org")) };
+    let a = SubjectAltName {
+        type_: SubjectAltNameType::dnsname,
+        value: SubjectAltNameValue::String(s("x.org")),
+    };
     assert_eq!(format!("{a}"), "DNS=x.org");
     let ip = InetAddress::from_sstring(&s("10.0.0.1")).expect("an address");
-    let b = SubjectAltName { type_: SubjectAltNameType::ipaddress, value: SubjectAltNameValue::Address(ip) };
+    let b = SubjectAltName {
+        type_: SubjectAltNameType::ipaddress,
+        value: SubjectAltNameValue::Address(ip),
+    };
     assert_eq!(format!("{b}"), "IP=10.0.0.1");
 
     let o = TlsOptions::default();
@@ -198,10 +228,12 @@ fn texts_and_small_types() {
 fn verification_callbacks_may_fail() {
     let mut ok = DnCallback::new(|_t: SessionType, _s: Sstring, _i: Sstring| ());
     assert!(ok.call(SessionType::CLIENT, s("cn=a"), s("cn=b")).is_ok());
-    let mut no = DnCallback::new(|t: SessionType, subject: Sstring, _i: Sstring| -> Result<(), ExceptionPtr> {
-        assert_eq!(t, SessionType::SERVER);
-        Err(ExceptionPtr::from(VerificationError(subject.to_string())))
-    });
+    let mut no = DnCallback::new(
+        |t: SessionType, subject: Sstring, _i: Sstring| -> Result<(), ExceptionPtr> {
+            assert_eq!(t, SessionType::SERVER);
+            Err(ExceptionPtr::from(VerificationError(subject.to_string())))
+        },
+    );
     let e = no.call(SessionType::SERVER, s("cn=x"), s("cn=y")).err().expect("refused");
     assert_eq!(message(&e), "cn=x");
 }

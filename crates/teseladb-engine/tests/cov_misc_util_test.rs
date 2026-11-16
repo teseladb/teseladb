@@ -1,10 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the small utility modules that need no reactor: reference wrappers, lazy values,
 //! transforming iterators, memory-size parsing, file-system errors, source locations, the
 //! signal-safe printers, indirect comparisons, deferred actions, iovec lengths, the
 //! case-insensitive hasher, the spinlock, critical allocation sections, tuple helpers, the
 //! capped token bucket and the deferred close and stop guards.
-
+#![cfg(target_os = "linux")]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

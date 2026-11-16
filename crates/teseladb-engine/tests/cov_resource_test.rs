@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the resource planner without a reactor: the identity hash of its maps, the memory
 //! the shards get (reserves, the low-memory floor, an explicit total and its errors), the
 //! allocation of CPUs, memory and I/O queues to shards, the I/O queue topology, and the cgroup
 //! settings of this process.
+#![cfg(target_os = "linux")]
 
 use std::hash::{BuildHasher, Hasher};
 

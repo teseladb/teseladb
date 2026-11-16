@@ -1,8 +1,8 @@
-#![cfg(target_os = "linux")]
 //! Tests of the coroutine awaiters beyond the common paths: `parallel_for_each` over more
 //! pending futures than its inline slots, with failures, dropped unawaited, and interrupted
 //! by a panic while launching; `all` with ready and pending futures; the readiness checks of
 //! `as_future`, `maybe_yield` and `switch_to`; and the coroutine exception helpers.
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::future::IntoFuture;

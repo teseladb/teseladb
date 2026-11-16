@@ -1,6 +1,6 @@
-#![cfg(target_os = "linux")]
 //! Tests of scheduling groups and their I/O classes: names, shares, I/O bandwidth limits,
 //! file I/O issued from a group, and the names of the I/O request operations.
+#![cfg(target_os = "linux")]
 
 use std::ffi::c_void;
 

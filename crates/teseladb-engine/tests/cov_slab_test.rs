@@ -1,9 +1,9 @@
-#![cfg(target_os = "linux")]
 //! Tests of the slab allocator: the intrusive lists and page descriptors it is built from, size
 //! classes, page limits, the LRU eviction of unlocked items through the erase callback, item
 //! locking, its metrics, and the reclaim of whole pages under memory pressure. The classes used
 //! here hold at least two objects per page: a class of one object per page (the largest class)
 //! is not exercised.
+#![cfg(target_os = "linux")]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
