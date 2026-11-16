@@ -163,6 +163,10 @@ impl<T> Clone for ByRef<T> {
 
 impl<T> Copy for ByRef<T> {}
 
+// SAFETY: copies go to every shard, but only the shard of the test body dereferences one (see
+// `Deref`), as with the reference tests' references.
+unsafe impl<T> Send for ByRef<T> {}
+
 impl<T> ByRef<T> {
     fn new(v: &T) -> Self {
         ByRef(v)
@@ -470,21 +474,24 @@ impl<M: RpcMsgType + Send> RpcTestEnv<M> {
     fn register_handler_sg<F, Mk>(&mut self, t: M, sg: SchedulingGroup, func: F) -> Future<()>
     where
         Serializer: Write<<F::Ret as Futurize>::Output>,
-        F: RpcHandlerFn<Mk> + Clone,
+        // `Send`: every shard gets a copy of the handler (made on this shard, as the
+        // reference's invoke_on_all copies its function here) and drops it on its own when the
+        // handler is unregistered, so what the handler captures must be safe to copy and drop
+        // away from this shard; values of the test body are captured with `ByRef`. Without the
+        // bound an `Rc` capture compiles and corrupts the heap at run time.
+        F: RpcHandlerFn<Mk> + Clone + Send,
         F::Args: UnmarshallArgs<Serializer> + RemoveOptionalTuple,
         Mk: 'static,
     {
-        let func = AssertSend(func);
-        self._service.as_mut().invoke_on_all(move |s: &mut RpcTestService<M>| {
-            let func = func.clone();
-            s.register_handler(t, sg, func.0)
-        })
+        self._service
+            .as_mut()
+            .invoke_on_all(move |s: &mut RpcTestService<M>| s.register_handler(t, sg, func))
     }
 
     fn register_handler<F, Mk>(&mut self, t: M, func: F) -> Future<()>
     where
         Serializer: Write<<F::Ret as Futurize>::Output>,
-        F: RpcHandlerFn<Mk> + Clone,
+        F: RpcHandlerFn<Mk> + Clone + Send,
         F::Args: UnmarshallArgs<Serializer> + RemoveOptionalTuple,
         Mk: 'static,
     {
@@ -850,7 +857,7 @@ fn stream_test_func(
                     drop(s4);
                 });
 
-                let r2 = r1.clone();
+                let r2 = r1;
                 let mut source = source;
                 let source_loop = async_(move || -> Result<(), ExceptionPtr> {
                     while !r2.borrow().server_source_closed {
@@ -1705,6 +1712,44 @@ teseladb::engine_test_case!(test_lz4_fragmented_compressor, {
     teseladb::engine::core::thread::async_(|| test_compressor(|| Box::new(Lz4FragmentedCompressor)))
 });
 
+/// The stack of an engine thread, where the RPC compressors run (`anotherproduct::thread`'s 128 KiB).
+const ENGINE_THREAD_STACK: usize = 128 * 1024;
+
+// The LZ4 block compressor, as the RPC frame compressor calls it, fits the stack of an engine
+// thread, with every kind of table it may use: an input under 4 KiB (the kept table), under
+// 64 KiB (a cleared 16-bit table), larger (a cleared 32-bit table), with and without room for
+// the whole bound. Run on a thread with that stack, where overflowing it is a crash; each block
+// decompresses back to its input.
+#[test]
+fn test_lz4_block_compressor_fits_an_engine_thread_stack() {
+    use teseladb::engine::lz4;
+    let run = || {
+        for len in [1usize, 3000, 16 * 1024, 1024 * 1024 + 1] {
+            let src: Vec<u8> = (0..len).map(|i| (i % 251) as u8 ^ (i / 4093) as u8).collect();
+            let bound = lz4::compress_bound(len);
+            let mut whole = vec![0u8; bound];
+            // SAFETY: `src` holds `len` bytes and `whole` the bound; they do not overlap.
+            let exact =
+                unsafe { lz4::compress_default(src.as_ptr(), whole.as_mut_ptr(), len, bound) };
+            // The exact size is below the bound: the second pass takes the limited path.
+            for capacity in [bound, exact] {
+                let mut dst = vec![0u8; capacity];
+                // SAFETY: `src` holds `len` bytes and `dst` `capacity`; they do not overlap.
+                let n =
+                    unsafe { lz4::compress_default(src.as_ptr(), dst.as_mut_ptr(), len, capacity) };
+                assert!(n > 0, "{len} bytes into {capacity}");
+                let mut back = vec![0u8; len];
+                // SAFETY: `dst` holds the `n` bytes of the block and `back` has room for `len`.
+                let m = unsafe { lz4::decompress_safe(dst.as_ptr(), back.as_mut_ptr(), n, len) };
+                assert_eq!(m, Ok(len), "{len} bytes into {capacity}");
+                assert!(back == src, "{len} bytes into {capacity}: the block decompresses back");
+            }
+        }
+    };
+    let t = std::thread::Builder::new().stack_size(ENGINE_THREAD_STACK).spawn(run).unwrap();
+    t.join().unwrap();
+}
+
 use teseladb::engine::core::abort_source::AbortSource;
 use teseladb::engine::core::future_util::sleep_abortable_with;
 use teseladb::engine::core::lowres_clock::LowresClock;
@@ -1913,11 +1958,10 @@ teseladb::engine_test_case!(test_unregister_handler, {
         let (hc1, re1, rc1) =
             (ByRef::new(&handler_called), ByRef::new(&rpc_executed), ByRef::new(&rpc_completed));
         let get_handler = move || {
-            let (hc, re, rc) = (hc1.clone(), re1.clone(), rc1.clone());
+            let (hc, re, rc) = (hc1, re1, rc1);
             move || {
                 hc.borrow_mut().set_value(());
                 re.set(true);
-                let rc = rc.clone();
                 sleep(Duration::from_millis(1)).then(move |()| {
                     rc.set(true);
                 })
@@ -1998,7 +2042,6 @@ teseladb::engine_test_case!(test_unregister_handler, {
             );
             env.register_handler(1, move || -> Future<Sstring> {
                 hr.borrow_mut().set_value(());
-                let v = v.clone();
                 let f = hg.borrow_mut().get_future();
                 f.then(move |()| make_ready_future(v.borrow().clone()))
             })

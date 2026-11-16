@@ -337,6 +337,25 @@ impl Table for Large {
     }
 }
 
+/// Runs `f` with a cleared [`Small`] table on the stack.
+///
+/// The 16 KiB tables are made in frames of their own, these two functions, never inlined: a
+/// caller that makes several of them in different branches (as [`compress_default`] does, one
+/// per kind of table and limit) would otherwise get a slot for each, and an unoptimized build
+/// does not share them. `compress_default` then needed a frame of 128 KiB, the whole stack of
+/// an engine thread, and wrote past its end. The reference makes one table on the stack per
+/// block, the `LZ4_stream_t` of `LZ4_compress_fast`; so do these, one frame at a time.
+#[inline(never)]
+fn with_fresh_small<R>(f: impl FnOnce(&mut Small) -> R) -> R {
+    f(&mut Small([0; SMALL_TABLE_SIZE]))
+}
+
+/// Runs `f` with a cleared [`Large`] table on the stack (see [`with_fresh_small`]).
+#[inline(never)]
+fn with_fresh_large<R>(f: impl FnOnce(&mut Large) -> R) -> R {
+    f(&mut Large([0; 1 << HASH_LOG]))
+}
+
 /// The inputs below which a block reuses the [`Small`] table of the block before instead of
 /// clearing one.
 const KEPT_TABLE_LIMIT: usize = KB4;
@@ -402,7 +421,7 @@ unsafe fn with_small_table<R>(
     reused: impl FnOnce(&mut Reused<'_>) -> R,
 ) -> R {
     if len >= KEPT_TABLE_LIMIT {
-        return fresh(&mut Small([0; SMALL_TABLE_SIZE]));
+        return with_fresh_small(fresh);
     }
     KEPT_SMALL.with(|kept| {
         // SAFETY: the table is this thread's, and the caller's promise keeps this the only
@@ -630,7 +649,7 @@ pub fn compress_block_into(input: &[u8], out: &mut Vec<u8>) {
                 |t| compress_generic::<_, false>(input, dst, bound, t),
             )
         } else {
-            compress_generic::<_, false>(input, dst, bound, &mut Large([0; 1 << HASH_LOG]))
+            with_fresh_large(|t| compress_generic::<_, false>(input, dst, bound, t))
         };
         out.set_len(len + written);
     }
@@ -672,23 +691,17 @@ pub unsafe fn compress_default(
                 |t| compress_generic::<_, false>(input, dst, dst_capacity, t),
                 |t| compress_generic::<_, false>(input, dst, dst_capacity, t),
             ),
-            (false, false) => compress_generic::<_, false>(
-                input,
-                dst,
-                dst_capacity,
-                &mut Large([0; 1 << HASH_LOG]),
-            ),
+            (false, false) => {
+                with_fresh_large(|t| compress_generic::<_, false>(input, dst, dst_capacity, t))
+            }
             (true, true) => with_small_table(
                 src_size,
                 |t| compress_generic::<_, true>(input, dst, dst_capacity, t),
                 |t| compress_generic::<_, true>(input, dst, dst_capacity, t),
             ),
-            (true, false) => compress_generic::<_, true>(
-                input,
-                dst,
-                dst_capacity,
-                &mut Large([0; 1 << HASH_LOG]),
-            ),
+            (true, false) => {
+                with_fresh_large(|t| compress_generic::<_, true>(input, dst, dst_capacity, t))
+            }
         }
     }
 }

@@ -407,6 +407,93 @@ mod engine_allocator_tests {
         })
     });
 
+    /// Allocates `count` blocks of `size` bytes on this shard, each filled with a byte derived
+    /// from its index, and returns their addresses.
+    fn alloc_filled(size: usize, count: usize, seed: u8) -> Vec<usize> {
+        (0..count)
+            .map(|i| {
+                // SAFETY: malloc has no preconditions.
+                let p = unsafe { malloc(size) } as *mut u8;
+                assert!(!p.is_null());
+                // SAFETY: `p` is a fresh block of `size` bytes.
+                unsafe { std::ptr::write_bytes(p, seed.wrapping_add(i as u8), size) };
+                p as usize
+            })
+            .collect()
+    }
+
+    /// Checks that every block still holds the bytes `alloc_filled` wrote and that no two
+    /// blocks overlap.
+    fn check_filled(addrs: &[usize], size: usize, seed: u8, ctx: &str) {
+        let mut sorted = addrs.to_vec();
+        sorted.sort_unstable();
+        for w in sorted.windows(2) {
+            assert!(w[0] + size <= w[1], "{ctx}: blocks {:#x} and {:#x} overlap", w[0], w[1]);
+        }
+        for (i, &a) in addrs.iter().enumerate() {
+            // SAFETY: a live block of `size` bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(a as *const u8, size) };
+            let want = seed.wrapping_add(i as u8);
+            assert!(bytes.iter().all(|&b| b == want), "{ctx}: block {i} at {a:#x} overwritten");
+        }
+    }
+
+    // The same exchange for several size classes (10, 12 and 14 bytes give objects that are
+    // not pointer-aligned), four rounds each, checking every block's contents: shard 1
+    // allocates and fills 64 blocks, this shard frees them, shard 1 drains its cross-shard list
+    // and allocates and fills 64 again. The blocks must be intact and disjoint, and from the
+    // second round on they are exactly the drained ones. The reference, run the same way, gives
+    // 64 of 64 in every round except the first round of the 12-byte class (0 of 64, the trim
+    // described above).
+    engine_test_case!(test_cross_cpu_free_reuse_and_integrity_by_size, {
+        use teseladb::engine::core::smp::Smp;
+        use teseladb::engine::core::thread::async_ as thread_async;
+        const COUNT: usize = 64;
+        const ROUNDS: usize = 4;
+        if Smp::count() < 2 {
+            return make_ready_future(());
+        }
+        thread_async(|| {
+            for size in [10usize, 12, 14, 20, 24, 40] {
+                for round in 0..ROUNDS {
+                    let ctx = format!("size {size} round {round}");
+                    let seed = (size * 31 + round * 7) as u8;
+                    let addrs = Smp::submit_to(1, move || {
+                        make_ready_future(alloc_filled(size, COUNT, seed))
+                    })
+                    .get()?;
+                    if size < 16 && size % 8 != 0 {
+                        assert!(addrs.iter().any(|a| a % 8 != 0), "{ctx}: all pointer-aligned");
+                    }
+                    check_filled(&addrs, size, seed, &ctx);
+                    let before = memory::stats().cross_cpu_frees();
+                    for &a in &addrs {
+                        // SAFETY: a live block of shard 1, freed once.
+                        unsafe { free(a as *mut c_void) };
+                    }
+                    assert_eq!(memory::stats().cross_cpu_frees() - before, COUNT as u64, "{ctx}");
+                    let reused = Smp::submit_to(1, move || {
+                        // The reactor's poller may have drained the list already.
+                        memory::drain_cross_cpu_freelist();
+                        let again = alloc_filled(size, COUNT, !seed);
+                        check_filled(&again, size, !seed, &ctx);
+                        let reused = again.iter().filter(|a| addrs.contains(a)).count();
+                        for &a in &again {
+                            // SAFETY: a live block of this shard, freed once.
+                            unsafe { free(a as *mut c_void) };
+                        }
+                        make_ready_future(reused)
+                    })
+                    .get()?;
+                    if round > 0 {
+                        assert_eq!(reused, COUNT, "size {size} round {round}: objects came back");
+                    }
+                }
+            }
+            Ok(())
+        })
+    });
+
     engine_test_case!(test_foreign_function_use_glibc_malloc, {
         // SAFETY: the allocation functions have no preconditions for these arguments.
         test_allocation_function(|| unsafe { malloc(1) });
