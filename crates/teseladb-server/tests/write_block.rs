@@ -3,11 +3,31 @@
 //! feature compatibility version in Group 0 and shows it with `getParameter`.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
+use teseladb_server::procs::start_self;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_lock_holds_the_other_connections_writes_and_a_block_refuses_them",
+                a_lock_holds_the_other_connections_writes_and_a_block_refuses_them,
+            ),
+            (
+                "the_gates_hold_on_every_node_once_the_command_answers",
+                the_gates_hold_on_every_node_once_the_command_answers,
+            ),
+            ("the_version_lives_in_group0", the_version_lives_in_group0),
+        ],
+        &[("joining", |a| joining(a.join.clone())), ("slow", |a| slow(a.join.clone()))],
+    );
+}
 
 fn write_error_code(r: &Document) -> Option<Value> {
     let Some(Value::Array(errors)) = r.get("writeErrors") else { return None };
@@ -17,7 +37,6 @@ fn write_error_code(r: &Document) -> Option<Value> {
     }
 }
 
-#[test]
 fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -43,24 +62,27 @@ fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
     node.stop();
 }
 
+/// [`joining`] whose node turns slowly: it publishes what Group 0 applied up to 300 ms late.
+fn slow(join: Vec<String>) -> teseladb_server::node::NodeConfig {
+    teseladb_server::node::NodeConfig {
+        tick: std::time::Duration::from_millis(300),
+        ..joining(join)
+    }
+}
+
 /// The node configuration of a test that starts several nodes.
 fn joining(join: Vec<String>) -> teseladb_server::node::NodeConfig {
     let admin = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     teseladb_server::node::NodeConfig { admin_listen: Some(admin), ..config(join) }
 }
 
-#[test]
 fn the_gates_hold_on_every_node_once_the_command_answers() {
-    let n1 = Node::start(joining(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = start_self("joining", &[], None, &[]);
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(joining(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = start_self("joining", &seed, None, &[]);
     // The third node turns slowly: it publishes what Group 0 applied up to 300 ms late.
-    let slow = teseladb_server::node::NodeConfig {
-        tick: std::time::Duration::from_millis(300),
-        ..joining(seed)
-    };
-    let n3 = Node::start(slow, || Ok(MemDisk::new()), None).unwrap();
+    let n3 = start_self("slow", &seed, None, &[]);
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let mut admin = Client::new(&n1);
     let mut others = [Client::new(&n2), Client::new(&n3)];
@@ -104,7 +126,6 @@ fn set_fcv(c: &mut Client, v: &str) -> Document {
     c.run("admin", Document::new().with("setFeatureCompatibilityVersion", v).with("confirm", true))
 }
 
-#[test]
 fn the_version_lives_in_group0() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
