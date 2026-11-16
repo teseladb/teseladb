@@ -1,32 +1,34 @@
 //! The bench's client of the wire protocol (002 FR-019): `OP_MSG` messages built and read with
 //! `teseladb-wire`, so that TeselaDB and the reference server are measured with the same client and
 //! not with a different driver on each side. `--target host:port` names the
-//! server; without it the scenario starts a development cluster of three nodes in this process
-//! (`teseladb dev`).
+//! server; without it the scenario starts a development cluster of three nodes, each in a process of
+//! its own (`teseladb dev`, D4): the `teseladb` binary next to this one, or the one
+//! `TESELADB_BIN` names.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
-use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
 /// Longest a request waits for its answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// How often [`Target::wait_ranges`] looks at the routing table.
 const RANGE_POLL: Duration = Duration::from_millis(10);
-/// Nodes of the cluster started in this process without `--target`.
+/// Nodes of the local cluster started without `--target`.
 const LOCAL_NODES: u16 = 3;
+/// The variable that names the `teseladb` binary of a local cluster's nodes.
+const BIN_VAR: &str = "TESELADB_BIN";
 
 /// Where a scenario sends its requests.
 pub enum Target {
     /// A server by address.
     Remote(SocketAddr),
-    /// A development cluster in this process, stopped when this is dropped.
-    Local(Vec<Node<MemDisk>>),
+    /// A development cluster of node processes, stopped when this is dropped.
+    Local(Vec<NodeProc>),
 }
 
 impl Target {
@@ -45,10 +47,10 @@ impl Target {
         Ok(Target::Remote(addr))
     }
 
-    /// A cluster of `nodes` nodes of `cores` cores in this process.
+    /// A cluster of `nodes` nodes of `cores` cores, each in a process of its own.
     pub fn local(nodes: u16, cores: u16) -> Result<Target, String> {
         let opts = DevOpts { nodes, cores, port: 0, test_commands: false };
-        match teseladb_server::dev::start(&opts, None) {
+        match teseladb_server::dev::start(&teseladb_binary()?, &opts, None) {
             Ok(nodes) => Ok(Target::Local(nodes)),
             Err(e) => Err(format!("local cluster: {e:?}")),
         }
@@ -71,7 +73,7 @@ impl Target {
     pub fn admin_addr(&self) -> Option<SocketAddr> {
         match self {
             Target::Remote(_) => None,
-            Target::Local(nodes) => nodes.first().and_then(Node::admin_addr),
+            Target::Local(nodes) => nodes.first().and_then(NodeProc::admin_addr),
         }
     }
 
@@ -96,10 +98,27 @@ impl Drop for Target {
     fn drop(&mut self) {
         if let Target::Local(nodes) = self {
             for n in nodes.drain(..) {
-                drop(n.stop());
+                n.stop();
             }
         }
     }
+}
+
+/// The `teseladb` binary of a local cluster's nodes: [`BIN_VAR`], or the one next to this binary
+/// (`cargo build -p teseladb-server` puts it there).
+fn teseladb_binary() -> Result<std::path::PathBuf, String> {
+    if let Some(p) = std::env::var_os(BIN_VAR) {
+        return Ok(p.into());
+    }
+    let me = std::env::current_exe().map_err(text)?;
+    let bin = me.with_file_name("teseladb");
+    if bin.is_file() {
+        return Ok(bin);
+    }
+    Err(format!(
+        "no {}: build it with `cargo build -p teseladb-server` or name it with {BIN_VAR}",
+        bin.display()
+    ))
 }
 
 /// One connection.

@@ -384,6 +384,7 @@ fn dev_cluster_with_a_busy_clients_port_fails() {
     let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = busy.local_addr().unwrap().port() - 1;
     let r = teseladb_server::dev::start(
+        std::path::Path::new(env!("CARGO_BIN_EXE_teseladb")),
         &DevOpts { nodes: 2, cores: 1, port: base, test_commands: false },
         Some(3),
     );
@@ -400,13 +401,18 @@ fn dev_cluster_with_test_commands_answers_configure_fail_point() {
         .with("$db", "admin");
     for (test_commands, ok) in [(true, 1.0), (false, 0.0)] {
         let o = DevOpts { nodes: 1, cores: 1, port: 0, test_commands };
-        let nodes = teseladb_server::dev::start(&o, Some(5)).unwrap();
+        let nodes = teseladb_server::dev::start(
+            std::path::Path::new(env!("CARGO_BIN_EXE_teseladb")),
+            &o,
+            Some(5),
+        )
+        .unwrap();
         let mut c = TcpStream::connect(nodes[0].client_addrs()[0]).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         send(&mut c, 1, 0, &fail_point);
         let (_, _, reply) = recv(&mut c).expect("a reply");
         assert_eq!(reply.get("ok"), Some(&Value::Double(ok)), "{reply:?}");
-        nodes.into_iter().for_each(|n| drop(n.stop()));
+        nodes.into_iter().for_each(|n| assert!(n.stop().success()));
     }
 }
 

@@ -4,13 +4,30 @@
 //! sign-in of that node, without its service user's. The default tenant has no series.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 mod secured;
 
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_user",
+                each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_user,
+            ),
+            (
+                "the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it",
+                the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it,
+            ),
+        ],
+        &[("secured", |a| secured::config(a.join.clone()))],
+    );
+}
 
 fn user(root: &mut Client, name: &str) {
     user_of(root, name, "acme");
@@ -26,7 +43,7 @@ fn user_of(root: &mut Client, name: &str, tenant: &str) {
     assert!(ok(&root.run("admin", create)));
 }
 
-fn signed_in(node: &Node<MemDisk>, name: &str) -> Client {
+fn signed_in(node: &NodeProc, name: &str) -> Client {
     until("the user signs in", || {
         let mut c = Client::new(node);
         ok(&login(&mut c, name, PASSWORD)).then_some(c)
@@ -38,7 +55,6 @@ fn field(out: &str, field: &str) -> String {
     out.lines().find_map(|l| l.strip_prefix(&format!("{field}\t"))).unwrap_or_default().to_owned()
 }
 
-#[test]
 fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_user() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
@@ -122,7 +138,7 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
 }
 
 /// `teseladb admin <args>` on `node`: its error output when it fails.
-fn admin_try(node: &Node<MemDisk>, args: &[&str]) -> Result<(), String> {
+fn admin_try(node: &NodeProc, args: &[&str]) -> Result<(), String> {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -134,7 +150,7 @@ fn admin_try(node: &Node<MemDisk>, args: &[&str]) -> Result<(), String> {
 }
 
 /// Splits the range that holds document `id` of `app.c` of the tenant numbered `tenant`.
-fn split_at(node: &Node<MemDisk>, tenant: u32, id: i32) {
+fn split_at(node: &NodeProc, tenant: u32, id: i32) {
     let at = format!(r#"{{"ns": "\u0000{tenant}\u0000app.c", "_id": {id}}}"#);
     // A range still splitting refuses the next split (`RangeBusy`) until it is done.
     until("the split", || {
@@ -147,7 +163,6 @@ fn split_at(node: &Node<MemDisk>, tenant: u32, id: i32) {
 /// FR-031: the data a tenant uses adds up the ranges of its keys when they are split around and
 /// inside its collections: one range wholly its own, ranges that hold another tenant's data
 /// too, and ranges before or after its keys, which count for nothing.
-#[test]
 fn the_data_of_a_tenant_adds_up_its_ranges_split_around_and_inside_it() {
     let node = start(Vec::new());
     for t in ["acme", "beta"] {
