@@ -7,6 +7,9 @@
 //! Linux the same runs on io_uring disks, where the pieces of the exported files go from the ring's
 //! registered buffers to the joining nodes (012 FR-026).
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,10 +17,34 @@ use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::DATA_START;
 use teseladb_meta::group0::ReplicaRole;
 use teseladb_raft::Role;
-use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_server::data::DataStatus;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeProc, start_self};
 use teseladb_types::NodeId;
+
+fn main() {
+    let first: procs::Test = (
+        "nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder",
+        nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder,
+    );
+    let tests: Vec<procs::Test> = std::iter::once(first).chain(linux_tests()).collect();
+    procs::main(&tests, &[("replicas", |a| config(a.join.clone()))]);
+}
+
+/// The tests of io_uring, which is Linux's.
+#[cfg(target_os = "linux")]
+fn linux_tests() -> Vec<procs::Test> {
+    vec![(
+        "nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers",
+        nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers,
+    )]
+}
+
+/// The tests of io_uring, which is Linux's: none here.
+#[cfg(not(target_os = "linux"))]
+fn linux_tests() -> Vec<procs::Test> {
+    Vec::new()
+}
 
 const READY: Duration = Duration::from_secs(30);
 const ASK: Duration = Duration::from_secs(2);
@@ -43,13 +70,6 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
-fn start<D: Disk + Send + 'static>(
-    join: Vec<String>,
-    open: impl FnMut() -> std::io::Result<D>,
-) -> Node<D> {
-    Node::start(config(join), open, None).expect("the node starts")
-}
-
 fn key(i: u32) -> Vec<u8> {
     [&DATA_START[..], format!("doc-{i:05}").as_bytes()].concat()
 }
@@ -69,49 +89,49 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn status<D: Disk + Send + 'static>(n: &Node<D>) -> DataStatus {
+fn status(n: &NodeProc) -> DataStatus {
     n.data_status(ASK).expect("the range's core answers")
 }
 
 /// Writes `i` on whichever node leads the range.
-fn put<D: Disk + Send + 'static>(nodes: &[&Node<D>], i: u32) {
+fn put(nodes: &[&NodeProc], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
-#[test]
 fn nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder() {
-    join_and_lose_the_founder(|| Ok(MemDisk::new()));
+    join_and_lose_the_founder(|join| start_self("replicas", &join, None, &[]));
 }
 
 #[cfg(target_os = "linux")]
-#[test]
 fn nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use teseladb_io::NodeDisk;
     use teseladb_io::node_disk::{DirectIo, IoExecutor, choose};
+    use teseladb_server::procs::{DISK, URING};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let base = std::env::temp_dir().join(format!("teseladb-replicas-uring-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
     assert!(choice.uring, "{choice}");
-    join_and_lose_the_founder(|| {
-        NodeDisk::open(base.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string()), &choice)
+    // Each node process on io_uring disks in a directory of its own.
+    let uring = format!("{DISK}={URING}");
+    join_and_lose_the_founder(|join| {
+        let dir = base.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+        start_self("replicas", &join, Some(&dir), &[&uring])
     });
     std::fs::remove_dir_all(&base).unwrap();
 }
 
-fn join_and_lose_the_founder<D: Disk + Send + 'static>(
-    open: impl FnMut() -> std::io::Result<D> + Clone,
-) {
-    let n1 = start(Vec::new(), open.clone());
+/// The test with each node from `start`, which takes the addresses to join.
+fn join_and_lose_the_founder(start: impl Fn(Vec<String>) -> NodeProc) {
+    let n1 = start(Vec::new());
     assert!(n1.wait_ready(READY));
     until("a leader", || (status(&n1).role == Some(Role::Leader)).then_some(()));
     for i in 0..DOCS {
         put(&[&n1], i);
     }
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = start(seed.clone(), open.clone());
-    let n3 = start(seed, open);
+    let n2 = start(seed.clone());
+    let n3 = start(seed);
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let three = [NodeId(1), NodeId(2), NodeId(3)];
     for n in [&n1, &n2, &n3] {

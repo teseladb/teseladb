@@ -26,7 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_hlc::Hlc;
-use teseladb_io::FileDisk;
+use teseladb_io::{FileDisk, NodeDisk};
 use teseladb_meta::command::NodeState;
 use teseladb_meta::group0::{RangeDesc, ReplicaRole};
 use teseladb_raft::Role;
@@ -48,6 +48,11 @@ pub const PORTS: &str = "--ports";
 const MEMBER: &str = "member";
 /// The line a node process writes when it could not start.
 const ERROR: &str = "error";
+/// The parameter that chooses the disks of a node process with a data directory: [`URING`], or
+/// files by default.
+pub const DISK: &str = "disk";
+/// [`DISK`]: io_uring disks (Linux).
+pub const URING: &str = "uring";
 /// An empty list or a missing value in a line.
 const NONE: &str = "-";
 /// Longest a node process takes to open its ports or say why it could not.
@@ -66,7 +71,8 @@ const LOG_TAIL: usize = 40;
 // ----- the node process -----
 
 /// What a node process takes after [`NODE_PROCESS`]: `<recipe> [--join a,b] [--dir path]
-/// [--param p]... [--ports peer;clients;admin;http]`.
+/// [--param p]... [--ports peer;clients;admin;http]`. With `--dir` its disks are files there, or
+/// io_uring disks with `--param disk=uring`; without it, memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeArgs {
     /// The name of the test's configuration.
@@ -210,11 +216,22 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
     let stop = teseladb_sys::signal::stop_requested;
     let input = Box::new(BufReader::new(io::stdin()));
     let out = &mut io::stdout();
-    let served = match &a.dir {
-        Some(dir) => lock_dir(dir)
+    let served = match (&a.dir, a.param(DISK)) {
+        (Some(dir), Some(URING)) => {
+            let exec = teseladb_io::node_disk::IoExecutor::Uring;
+            let direct = teseladb_io::node_disk::DirectIo::Auto;
+            teseladb_io::node_disk::choose(exec, direct, false, dir)
+                .map_err(NodeError::Config)
+                .and_then(|choice| {
+                    let lock = lock_dir(dir)?;
+                    Node::start(cfg, || NodeDisk::open(dir, &choice), Some(lock))
+                })
+                .map(|node| serve(node, input, out, &stop))
+        }
+        (Some(dir), _) => lock_dir(dir)
             .and_then(|lock| Node::start(cfg, || FileDisk::open(dir), Some(lock)))
             .map(|node| serve(node, input, out, &stop)),
-        None => {
+        (None, _) => {
             Node::start(cfg, || Ok(MemDisk::new()), None).map(|node| serve(node, input, out, &stop))
         }
     };
