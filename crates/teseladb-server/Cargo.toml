@@ -97,6 +97,10 @@ harness = false
 name = "rest"
 harness = false
 
+[[test]]
+name = "rest_idempotency"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
