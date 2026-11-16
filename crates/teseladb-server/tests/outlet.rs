@@ -2,7 +2,8 @@
 //! FR-016): every shard's messages reach the destination whole and in that shard's order, all
 //! written by shard 0; a flush from an engine thread waits until its message is written; past
 //! the bound messages are dropped and counted; a file is appended to through the engine's files;
-//! a pipe whose reader stalls does not hold the shard; the audit log keeps each shard's events.
+//! a pipe whose reader stalls does not hold the shard; the audit log keeps each shard's events; the
+//! node's log keeps each shard's lines in order and counts the lines it dropped past its bound.
 #![cfg(target_os = "linux")]
 
 mod engine_util;
@@ -294,3 +295,74 @@ fn the_audit_log_keeps_every_shard_s_events() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A buffer the logger writes to.
+#[derive(Clone, Default)]
+struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Buffer {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Buffer {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+// The node's log on the shards: every shard's lines whole and in its order; a shard that logs
+// more than the bound in one go loses the rest, and the next line says how many.
+#[test]
+fn the_log_keeps_each_shard_s_order_and_counts_what_it_dropped() {
+    use teseladb_server::log::{DROPPED, Format as LogFormat, LOG_BOUND, Level, Logger};
+    let buf = Buffer::default();
+    let log = Arc::new(Logger::new(Level::Info, LogFormat::Text, Box::new(buf.clone())));
+    let shown = buf.clone();
+    let (ordered, dropped_line) = on_engine(move || {
+        make_coroutine(async move {
+            let l = Arc::clone(&log);
+            Smp::invoke_on_all(move || {
+                let s = this_shard_id();
+                for i in 0..EACH {
+                    l.info("line", &[("s", &s), ("i", &i)]);
+                }
+            })
+            .await?;
+            let want = EACH * shards();
+            let b = shown.clone();
+            assert!(until(move || b.text().lines().count() >= want).await);
+            let lines: Vec<(u32, usize)> = shown
+                .text()
+                .lines()
+                .map(|l| {
+                    let field = |k: &str| {
+                        l.split(' ').find_map(|f| f.strip_prefix(k)).expect("a whole line")
+                    };
+                    (field("s=").parse().unwrap(), field("i=").parse().unwrap())
+                })
+                .collect();
+            let ordered = in_order(&lines, EACH);
+            // Twice the bound in one task: about half is dropped.
+            let long = "z".repeat(1000);
+            for _ in 0..(2 * LOG_BOUND / 1000) {
+                log.info(&long, &[]);
+            }
+            sleep_steady(Duration::from_millis(50)).await?;
+            log.info("after", &[]);
+            let b = shown.clone();
+            assert!(until(move || b.text().contains(" info after")).await);
+            let text = shown.text();
+            let dropped = text.lines().find(|l| l.contains(DROPPED)).map(str::to_owned);
+            Ok::<_, ExceptionPtr>((ordered, dropped))
+        })
+    });
+    assert!(ordered, "every line whole, once, in its shard's order");
+    let line = dropped_line.expect("a line counts the dropped ones");
+    let count: usize = line.rsplit("count=").next().unwrap().parse().unwrap();
+    assert!(count > 0 && count < 2 * LOG_BOUND / 1000, "{line}");
+}

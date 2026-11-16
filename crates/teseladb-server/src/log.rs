@@ -1,5 +1,9 @@
 //! Our own logger: one line per event, as text or JSON, with a level filter that is
-//! checked before formatting anything (a disabled level allocates nothing).
+//! checked before formatting anything (a disabled level allocates nothing). The lines are
+//! written by the log's writer on shard 0 ([`crate::outlet`]): a shard that logs never waits for
+//! the standard error or the log file, a line is never split, and each shard's lines keep their
+//! order. A shard holds at most [`LOG_BOUND`] bytes of lines; past it lines are dropped and the
+//! next line written counts them ([`DROPPED`]).
 
 use std::collections::VecDeque;
 use std::fmt::{self, Display, Write as _};
@@ -8,6 +12,9 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::outlet::Outlet;
+use crate::outlet::dest::{Dest, StreamDest, WriterDest};
 
 /// Lines `getLog` keeps of each log, as the reference server's in-memory logs do.
 pub const RAM_LOG_LINES: usize = 1024;
@@ -158,11 +165,19 @@ impl FromStr for Format {
     }
 }
 
-/// Destination of the lines, shared by every thread.
+/// Most bytes of lines a shard holds before they leave, and the writer holds before it writes
+/// them: past it a line is dropped and counted, and the next line written says how many were.
+pub const LOG_BOUND: usize = 1 << 20;
+/// The message of the line that counts the dropped lines.
+pub const DROPPED: &str = "log lines dropped";
+
+/// Destination of the lines, shared by every thread. No shard waits for a write (023 FR-018):
+/// each line is handed whole to the log's [`Outlet`], whose one writer on shard 0 writes the
+/// lines of every shard, each shard's in order.
 pub struct Logger {
     level: Level,
     format: Format,
-    out: Mutex<Box<dyn Write + Send>>,
+    out: Outlet,
 }
 
 impl fmt::Debug for Logger {
@@ -172,9 +187,27 @@ impl fmt::Debug for Logger {
 }
 
 impl Logger {
-    /// Logger that writes to `out`.
+    /// Logger that writes to `out`, as it is (a test's buffer, a tool's stream).
     pub fn new(level: Level, format: Format, out: Box<dyn Write + Send>) -> Logger {
-        Logger { level, format, out: Mutex::new(out) }
+        Logger::to(level, format, Box::new(WriterDest::new(out)))
+    }
+
+    /// Logger that writes to `dest`: the standard error or the log file of a node.
+    pub fn to(level: Level, format: Format, dest: Box<dyn Dest>) -> Logger {
+        Logger { level, format, out: Outlet::new(dest, Some(LOG_BOUND)) }
+    }
+
+    /// Logger that writes to the standard error without holding a shard.
+    pub fn to_stderr(level: Level, format: Format) -> Logger {
+        match StreamDest::stderr() {
+            Ok(d) => Logger::to(level, format, Box::new(d)),
+            Err(_) => Logger::new(level, format, Box::new(std::io::stderr())),
+        }
+    }
+
+    /// Waits until the lines the caller logged are written ([`Outlet::flush`]).
+    pub fn flush(&self) {
+        self.out.flush();
     }
 
     /// Whether lines of `level` are written.
@@ -188,10 +221,15 @@ impl Logger {
         if !self.enabled(level) {
             return;
         }
-        let line = self.format_line(now_ms(), level, msg, fields);
+        let now = now_ms();
+        let dropped = self.out.take_dropped();
+        if dropped > 0 {
+            let note = self.format_line(now, Level::Warn, DROPPED, &[("count", &dropped)]);
+            self.out.push(note.as_bytes());
+        }
+        let line = self.format_line(now, level, msg, fields);
         remember(level, &line);
-        let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+        self.out.push(line.as_bytes());
     }
 
     /// The line `log` would write at `ts_ms` (milliseconds since the Unix epoch).

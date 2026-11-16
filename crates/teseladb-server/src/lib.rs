@@ -225,15 +225,16 @@ pub fn run(
     }
 }
 
-/// Where the log goes: standard error, or `--logpath` (replaced unless `--logappend`).
-fn log_output(o: &StartOpts) -> io::Result<Box<dyn Write + Send>> {
-    let Some(path) = &o.logpath else { return Ok(Box::new(io::stderr())) };
-    let file: File = if o.logappend {
-        OpenOptions::new().create(true).append(true).open(path)?
-    } else {
-        File::create(path)?
-    };
-    Ok(Box::new(file))
+/// Where the log goes: standard error, or `--logpath` (replaced unless `--logappend`), written by
+/// the log's writer on shard 0 without holding any shard (023 FR-018).
+fn log_output(o: &StartOpts) -> io::Result<Box<dyn outlet::dest::Dest>> {
+    let Some(path) = &o.logpath else { return Ok(Box::new(outlet::dest::StreamDest::stderr()?)) };
+    if !o.logappend {
+        drop(File::create(path)?);
+    }
+    // Appended to whatever wrote it before, so that the writer's offset is the file's end.
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(Box::new(outlet::dest::FileDest::new(path, file)?))
 }
 
 /// The codec of the new blocks of a node started without the block compressor option
@@ -555,7 +556,7 @@ pub fn start(
 ) -> i32 {
     install_js_host();
     let log = match log_output(o) {
-        Ok(w) => std::sync::Arc::new(Logger::new(o.log_level, o.log_format, w)),
+        Ok(w) => std::sync::Arc::new(Logger::to(o.log_level, o.log_format, w)),
         Err(e) => {
             let _ = writeln!(err, "teseladb: --logpath {}: {e}", display(o.logpath.as_deref()));
             return 1;

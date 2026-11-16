@@ -127,7 +127,7 @@ pub fn start_within(
 /// Runs one node of the development cluster ([`DEV_MEMBER`]): it writes its member line and
 /// answers its parent on standard input until that ends or `stop()` says so (`crate::procs`).
 pub fn member(m: &DevMember, out: &mut dyn Write, stop: &dyn Fn() -> bool) -> i32 {
-    let log = Logger::new(Level::Info, Format::Text, Box::new(io::stderr()));
+    let log = Logger::to_stderr(Level::Info, Format::Text);
     let at = SocketAddr::from((LOOPBACK, client_port(m.dev.port, m.member)));
     let cfg = node_config(&m.dev, m.seed, m.join.clone(), m.member, at);
     let node = match Node::start(cfg, DiskPlace::Memory, None) {
@@ -180,7 +180,7 @@ pub fn run(
     err: &mut dyn Write,
     stop: &dyn Fn() -> bool,
 ) -> i32 {
-    let log = Logger::new(Level::Info, Format::Text, Box::new(io::stderr()));
+    let log = Logger::to_stderr(Level::Info, Format::Text);
     log.warn("development cluster: nothing is durable", &[]);
     let signals = match signal_engine() {
         Ok(e) => e,
