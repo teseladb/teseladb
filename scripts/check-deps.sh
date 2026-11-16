@@ -10,6 +10,8 @@
 #    (FR-001);
 #  - the crates of the hot path share no lock between threads: no `Mutex`, `RwLock` or `Condvar`
 #    (012 FR-008);
+#  - the I/O crates start no thread of their own outside the admitted files: everything runs on the
+#    engine's shards and engine threads (023 T067);
 #   scripts/check-deps.sh
 # Bash 3.2 (macOS) or later.
 set -euo pipefail
@@ -288,6 +290,52 @@ check_hot_path_locks() {
   ' "${files[@]}")
 }
 
+# Crates whose code runs on the engine (023 T067): no thread of their own (`std::thread::spawn`,
+# `thread::Builder`) outside the tests and the files below.
+ENGINE_CRATES=(teseladb-io teseladb-sys teseladb-server)
+# Threads admitted on the engine (023 T067): the thread an engine runs on (the node's, the one of a
+# command-line process), the peer layer's short-lived calls until they move to the engine, and the
+# process harness that reads a child's standard input and output (one process per node, D4), and
+# the network namespaces of the AF_XDP tests (a namespace belongs to a thread).
+THREAD_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-io/src/engine/offload.rs
+  crates/teseladb-server/src/shard_client.rs crates/teseladb-server/src/procs.rs
+  crates/teseladb-server/src/procs/parent.rs crates/teseladb-sys/src/linux/netns.rs)
+
+# Prints `file:line: text` for every thread started outside the tests in the given sources. Code
+# after a `#[cfg(test)]` at the start of a line is a test's up to the end of its item: the next `}`
+# at the start of a line, or the item's own line when it ends with `;`.
+thread_spawns() {
+  [[ $# -gt 0 ]] || return 0
+  awk '
+    FNR == 1 { test = 0; attr = 0 }
+    /^#\[cfg\(test\)\]/ { attr = 1; next }
+    attr && /^#\[/ { next }
+    attr {
+      attr = 0
+      if ($0 !~ /;[[:space:]]*$/) test = 1
+      next
+    }
+    test { if ($0 ~ /^}/) test = 0; next }
+    { code = $0; sub(/\/\/.*/, "", code) }
+    code ~ /thread::spawn|thread::Builder|Builder::new\(\)\.name/ {
+      printf "%s:%d: %s\n", FILENAME, FNR, $0
+    }
+  ' "$@"
+}
+
+check_engine_threads() {
+  local crate f files=()
+  for crate in "${ENGINE_CRATES[@]}"; do
+    [[ -d crates/$crate/src ]] || continue
+    while IFS= read -r f; do
+      contains "$f" "${THREAD_FILES[@]}" || files+=("$f")
+    done < <(rust_sources "crates/$crate/src")
+  done
+  grep_findings "a thread of its own in an I/O crate: run it on the engine (023 T067)" < <(
+    thread_spawns ${files[@]+"${files[@]}"}
+  )
+}
+
 check_lock
 check_logic_crates
 check_tools
@@ -295,6 +343,7 @@ check_engine_has_no_git
 check_testkv_not_linked
 check_unsafe_forbidden
 check_hot_path_locks
+check_engine_threads
 
 [[ $fail -eq 0 ]] || exit 1
 echo "check-deps: OK"
