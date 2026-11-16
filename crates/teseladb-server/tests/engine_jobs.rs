@@ -120,3 +120,24 @@ fn a_job_runs_deeper_than_its_engine_thread_on_a_stack_of_its_own_and_parks_ther
     assert!(size.expect("a stack of its own") >= COMMAND_STACK);
     assert_eq!(reached, 64 << 10);
 }
+
+#[test]
+fn an_outbound_call_from_an_engine_thread_waits_on_its_own_shard() {
+    use teseladb::engine::core::sleep::sleep_steady;
+    use teseladb_server::outbound;
+
+    let got = block_on(|| {
+        engine_jobs::run(|| {
+            // A handler or a command calls an outbound client: no runner is needed, the work
+            // runs on this shard while the engine thread parks.
+            outbound::call(|| {
+                make_coroutine(async {
+                    sleep_steady(Duration::from_millis(5)).await?;
+                    Ok::<u32, ExceptionPtr>(5)
+                })
+            })
+        })
+    })
+    .expect("the engine ran the job");
+    assert_eq!(got, Ok(5));
+}

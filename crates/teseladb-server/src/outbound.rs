@@ -15,6 +15,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::reactor::engine_is_ready;
+use teseladb::engine::core::reactor::internal_misc::run_in_background;
 use teseladb_io::engine::{EngineConfig, EnginePost, NodeEngine};
 
 /// The error of [`call`] and [`spawn`] when no engine runs in the process.
@@ -103,15 +104,21 @@ pub fn text(e: &ExceptionPtr) -> String {
     }
 }
 
-/// Runs the future `f` makes on a shard of the node's engine and waits for its result.
+/// Runs the future `f` makes on a shard of the node's engine and waits for its result. In an
+/// engine thread (a command, a handler of the node's ports) the future runs on its own shard and
+/// the wait parks the thread on the engine's answer channel (023 FR-018), with the command's
+/// state saved meanwhile.
 ///
 /// # Errors
 ///
-/// [`NO_ENGINE`] without an engine, [`ON_SHARD`] on a shard, [`STOPPED`] when the engine stops
-/// first, and the text of the future's own error.
+/// [`NO_ENGINE`] without an engine, [`ON_SHARD`] on a shard outside an engine thread, [`STOPPED`]
+/// when the engine stops first, and the text of the future's own error.
 pub fn call<T: Send + 'static>(
     f: impl FnOnce() -> Future<T> + Send + 'static,
 ) -> Result<T, String> {
+    if teseladb_io::engine::wait::in_engine_thread() {
+        return call_here(f());
+    }
     if engine_is_ready() {
         return Err(ON_SHARD.to_owned());
     }
@@ -125,6 +132,19 @@ pub fn call<T: Send + 'static>(
     if !runner()?.post(task, Class::Foreground) {
         return Err(STOPPED.to_owned());
     }
+    match rx.recv() {
+        Ok(r) => r.map_err(|e| text(&e)),
+        Err(_) => Err(STOPPED.to_owned()),
+    }
+}
+
+/// Waits in an engine thread for `work`, which runs on this shard.
+fn call_here<T: Send + 'static>(work: Future<T>) -> Result<T, String> {
+    let (tx, rx) = teseladb_io::engine::answer::channel::<Result<T, ExceptionPtr>>();
+    run_in_background(work.then_wrapped(move |r: Future<T>| {
+        let _ = tx.send(r.get());
+        make_ready_future(())
+    }));
     match rx.recv() {
         Ok(r) => r.map_err(|e| text(&e)),
         Err(_) => Err(STOPPED.to_owned()),
