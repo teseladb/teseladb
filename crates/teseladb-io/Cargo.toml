@@ -22,6 +22,8 @@ teseladb-deflate = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-tls = { workspace = true }
 teseladb-x509 = { workspace = true }
+# The engine (023): every shard's I/O runs on it. Empty outside Linux.
+teseladb = { path = "../teseladb-engine" }
 
 [dev-dependencies]
 teseladb-crypto = { workspace = true }

@@ -13,6 +13,8 @@ pub mod counters;
 pub mod device_log;
 pub mod disk_thread;
 mod drive_flush;
+#[cfg(target_os = "linux")]
+pub mod engine;
 mod file_disk;
 pub mod file_send;
 pub mod handshake;

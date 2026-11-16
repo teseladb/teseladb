@@ -9,3 +9,7 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The engine (023): its file API behind the safe forms of `dma`. Empty outside Linux.
+teseladb = { path = "../teseladb-engine" }

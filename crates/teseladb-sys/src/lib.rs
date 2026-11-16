@@ -11,6 +11,9 @@ use std::os::fd::AsRawFd;
 
 pub mod aligned;
 pub mod alloc_count;
+/// Safe forms of the engine's DMA file operations (Linux only, 023 FR-010).
+#[cfg(target_os = "linux")]
+pub mod dma;
 pub mod handoff;
 pub mod host;
 pub mod huge_pool;
