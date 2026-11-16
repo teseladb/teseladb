@@ -343,7 +343,7 @@ pub fn run_op(a: &NodeAdmin, op: Op) -> Answer {
             let until = Instant::now() + crate::admin::CORE_WAIT;
             let mut ranges = data_ranges(a);
             while ranges.is_empty() && Instant::now() < until {
-                std::thread::sleep(PAUSE);
+                teseladb_io::engine::wait::sleep(PAUSE);
                 ranges = data_ranges(a);
             }
             let [only] = ranges.as_slice() else {

@@ -119,7 +119,9 @@ impl NodeHttp {
 
     /// A `tools/call` with a `progressToken` that accepts an event stream (FR-026): the stream
     /// opens at once, and each `notifications/progress` goes in it as its batch is read, before
-    /// the result. The call runs on a thread of its own, which also writes the audit event.
+    /// the result. The call runs in an engine thread of its own on the request's shard (023
+    /// FR-019), which also writes the audit event; the stream's pieces wait for it on the
+    /// engine's answer channel.
     fn mcp_progress(&self, request: &Request, who: &Credential) -> Reply {
         let mut exec = self.executor(self.backend());
         let key_id = match self.mcp_login(&mut exec, request, who, self.resource()) {
@@ -133,9 +135,9 @@ impl NodeHttp {
                 return Reply::Whole(r);
             }
         };
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = teseladb_io::engine::answer::channel::<Vec<u8>>();
         let (mcp, options, request) = (self.mcp.clone(), self.mcp_options(), request.clone());
-        std::thread::spawn(move || {
+        crate::engine_jobs::spawn_or_run(move || {
             let notes = tx.clone();
             let mut send = |note: teseladb_json::Value| {
                 let data = teseladb_json::to_string(&note).unwrap_or_default();
@@ -161,7 +163,7 @@ impl NodeHttp {
             loop {
                 match rx.recv_timeout(PROGRESS_POLL) {
                     Ok(piece) => return Some(piece),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    Err(teseladb_io::engine::answer::RecvTimeoutError::Timeout)
                         if !cancelled.load(Ordering::Relaxed) => {}
                     Err(_) => return None,
                 }
@@ -441,7 +443,7 @@ fn options_stream(mut exec: NodeExecutor, first: McpOptions) -> crate::http_list
             if cancelled.load(Ordering::Relaxed) {
                 return None;
             }
-            std::thread::sleep(OPTIONS_POLL);
+            teseladb_io::engine::wait::sleep(OPTIONS_POLL);
             let stored = exec.cluster_parameters().ok().and_then(|p| p.get(MCP_OPTIONS).cloned());
             let now = tool_view(&mcp_options(stored.as_deref()));
             if now != seen {

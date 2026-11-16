@@ -383,7 +383,7 @@ fn propose(
         if Instant::now() >= until {
             return None;
         }
-        std::thread::sleep(RETRY_PAUSE);
+        teseladb_io::engine::wait::sleep(RETRY_PAUSE);
     }
 }
 

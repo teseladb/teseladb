@@ -4,7 +4,6 @@
 //! A request for a cursor another node opened goes to that node with the caller's credential
 //! ([`Forwarded`], 019 FR-008).
 
-use std::thread;
 use std::time::Duration;
 
 use teseladb_auth::apikey::ApiKey;
@@ -207,8 +206,8 @@ impl NodeExecutor {
     }
 }
 
-/// Moves the `lastUsedAt` of `key` (at most once a minute) on a thread of its own, so that the
-/// request does not wait for the change in Group 0.
+/// Moves the `lastUsedAt` of `key` (at most once a minute) in an engine thread of its own on the
+/// request's shard (023 FR-019), so that the request does not wait for the change in Group 0.
 pub fn touch_later(exec: &mut NodeExecutor, key: ApiKey) {
     let now =
         i64::try_from(teseladb_wire::commands::Backend::wall_ms(&exec.backend)).unwrap_or(i64::MAX);
@@ -216,7 +215,7 @@ pub fn touch_later(exec: &mut NodeExecutor, key: ApiKey) {
         return;
     }
     let mut backend = exec.backend.fresh();
-    let _ = thread::Builder::new().name("apikey-touch".into()).spawn(move || {
+    crate::engine_jobs::spawn_or_run(move || {
         let _ = teseladb_wire::commands::api_keys::touch(&mut backend, &key);
     });
 }
@@ -327,7 +326,7 @@ impl Executor for NodeExecutor {
             match action {
                 Action::Reply(d) => return d,
                 // `failCommand` with `blockConnection`: hold the request, then run it again.
-                Action::Delay { ms } => thread::sleep(Duration::from_millis(ms)),
+                Action::Delay { ms } => teseladb_io::engine::wait::sleep(Duration::from_millis(ms)),
                 Action::Close | Action::Await { .. } => {
                     return CommandError::new(INTERNAL_ERROR, "the command closed the request")
                         .to_document();
