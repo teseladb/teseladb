@@ -187,6 +187,23 @@ fn dev_version_and_help() {
         other => panic!("{other:?}"),
     }
     assert!(parse(&args("dev --setParameter other=1")).is_err());
+    // A node of the development cluster, as `teseladb dev` starts its child processes.
+    let member = "dev-member --nodes 3 --cores 2 --port 0 --member 2 --join 127.0.0.1:7,127.0.0.1:8 \
+                  --seed 9 --setParameter enableTestCommands=1";
+    match parse(&args(member)).unwrap() {
+        Command::DevMember(m) => {
+            assert_eq!((m.dev.nodes, m.dev.cores, m.dev.port, m.member), (3, 2, 0, 2));
+            assert_eq!(m.join, ["127.0.0.1:7", "127.0.0.1:8"]);
+            assert_eq!((m.seed, m.dev.test_commands), (Some(9), true));
+        }
+        other => panic!("{other:?}"),
+    }
+    match parse(&args("dev-member")).unwrap() {
+        Command::DevMember(m) => assert_eq!((m.member, m.join.len(), m.seed), (0, 0, None)),
+        other => panic!("{other:?}"),
+    }
+    assert!(parse(&args("dev-member --seed x")).unwrap_err().0.contains("--seed"));
+    assert!(parse(&args("dev-member --member 7")).unwrap_err().0.contains("--member"));
     assert_eq!(parse(&args("--version")).unwrap(), Command::Version);
     assert_eq!(parse(&args("--help")).unwrap(), Command::Help);
     assert_eq!(parse(&args("-h")).unwrap(), Command::Help);

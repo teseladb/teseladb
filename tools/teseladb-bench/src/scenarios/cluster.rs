@@ -1,4 +1,5 @@
-//! The cluster's scenarios of 007 (FR-024), on a local cluster of three nodes in this process:
+//! The cluster's scenarios of 007 (FR-024), on a local cluster of three node processes, and a fourth
+//! node in this process where a scenario adds one:
 //!
 //! - `split`: one writer inserts documents of 1 KiB one at a time while the data range splits in
 //!   two by the administration port; `split.write` is the latency of the inserts from the split's
@@ -166,7 +167,7 @@ pub(crate) fn when_free(
 }
 
 /// The local cluster's nodes (a remote server has none to change).
-fn nodes(target: &Target) -> Result<&Vec<Node<MemDisk>>, String> {
+fn nodes(target: &Target) -> Result<&Vec<teseladb_server::procs::NodeProc>, String> {
     match target {
         Target::Local(nodes) => Ok(nodes),
         Target::Remote(_) => {

@@ -928,7 +928,7 @@ fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }
-    let mut clients: Vec<Client> = nodes.iter().map(|n| Client::new(n)).collect();
+    let mut clients: Vec<Client> = nodes.iter().map(Client::new).collect();
     for round in 0..PRINCIPAL_ROUNDS {
         let writer = round % clients.len();
         let role = format!("r{round}");

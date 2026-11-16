@@ -45,8 +45,10 @@ fn err<T>(msg: impl Into<String>) -> Result<T, CliError> {
 pub enum Command {
     /// Starts a node.
     Start(Box<StartOpts>),
-    /// Starts a cluster of nodes in this process.
+    /// Starts a cluster of nodes, each in a process of its own.
     Dev(DevOpts),
+    /// One node of `teseladb dev`, a child process of the development cluster (not in the usage).
+    DevMember(DevMember),
     /// Administers a node through its administration port (007 FR-020).
     Admin(crate::admin::AdminOpts),
     /// MCP over stdio, relayed to a node's HTTP port (019 FR-020).
@@ -355,6 +357,23 @@ pub struct DevOpts {
     pub test_commands: bool,
 }
 
+/// The subcommand `teseladb dev` runs each node of its cluster with, in a child process.
+pub const DEV_MEMBER: &str = "dev-member";
+
+/// Options of a node of `teseladb dev` (`teseladb dev-member`): the cluster's options, which node
+/// it is, whom it joins and the seed of its elections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevMember {
+    /// The development cluster's options.
+    pub dev: DevOpts,
+    /// Which node of the cluster it is, from 0 (`--member`).
+    pub member: u16,
+    /// Inter-node addresses of the cluster to join (`--join`); none: it creates the cluster.
+    pub join: Vec<String>,
+    /// Seed of the elections (`--seed`); `None`: random.
+    pub seed: Option<u64>,
+}
+
 /// One option of a subcommand: its name and whether it is a flag (it takes no value).
 type Spec = (&'static str, bool);
 
@@ -640,7 +659,7 @@ fn kmip_opts(o: &Opts, fips: bool) -> Result<Option<crate::kmip::KmipOpts>, CliE
 }
 
 /// `--setParameter <name>=<value>`, which may come several times.
-const SET_PARAMETER: &str = "setParameter";
+pub(crate) const SET_PARAMETER: &str = "setParameter";
 
 /// The values of `--setParameter <name>=<value>` for `name`, in order. An item without `=` is
 /// refused by [`test_commands`]' check of every item, so here it names nothing.
@@ -745,7 +764,7 @@ fn integer_parameter(o: &Opts, name: &str, default: i64, least: i64) -> Result<i
 }
 
 /// The startup parameter that enables the test commands.
-const ENABLE_TEST_COMMANDS: &str = "enableTestCommands";
+pub(crate) const ENABLE_TEST_COMMANDS: &str = "enableTestCommands";
 /// A parameter that exists and cannot be set at startup (013 FR-030).
 const AUTH_SCHEMA_VERSION: &str = teseladb_wire::commands::server_params::AUTH_SCHEMA_VERSION;
 
@@ -820,6 +839,15 @@ fn startup_parameters(o: &Opts) -> Result<Vec<server_params::Startup>, CliError>
 }
 
 const DEV: &[Spec] = &[("nodes", VALUE), ("cores", VALUE), ("port", VALUE), (SET_PARAMETER, VALUE)];
+const DEV_MEMBER_OPTS: &[Spec] = &[
+    ("nodes", VALUE),
+    ("cores", VALUE),
+    ("port", VALUE),
+    (SET_PARAMETER, VALUE),
+    ("member", VALUE),
+    ("join", VALUE),
+    ("seed", VALUE),
+];
 
 /// Value of `--networkMessageCompressors` that turns compression off.
 const COMPRESSION_DISABLED: &str = "disabled";
@@ -1200,6 +1228,19 @@ fn dev(o: &Opts) -> Result<DevOpts, CliError> {
     })
 }
 
+fn dev_member(o: &Opts) -> Result<DevMember, CliError> {
+    let seed = match o.get("seed") {
+        None => None,
+        Some(s) => Some(s.parse().map_err(|_| CliError(format!("--seed: `{s}` is not a number")))?),
+    };
+    Ok(DevMember {
+        dev: dev(o)?,
+        member: o.range("member", 0, 0, 6)?,
+        join: o.get("join").map(|j| j.split(',').map(str::to_owned).collect()).unwrap_or_default(),
+        seed,
+    })
+}
+
 /// Parses `args` (without the program name), reading `--config` from the disk.
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     parse_with(args, &|p| std::fs::read(p))
@@ -1225,6 +1266,7 @@ pub fn parse_with(
             Ok(Command::Start(Box::new(start(&o)?)))
         }
         "dev" => Ok(Command::Dev(dev(&parse_opts(rest, DEV)?)?)),
+        DEV_MEMBER => dev_member(&parse_opts(rest, DEV_MEMBER_OPTS)?).map(Command::DevMember),
         "admin" => crate::admin::parse(rest).map(Command::Admin).map_err(CliError),
         "mcp" => crate::mcp_stdio::parse(rest).map(Command::Mcp).map_err(CliError),
         "--version" => Ok(Command::Version),

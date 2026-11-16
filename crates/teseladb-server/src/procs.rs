@@ -14,7 +14,7 @@
 //! what [`NodeArgs`] holds.
 
 use std::fmt::Write as _;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -416,10 +416,13 @@ pub struct NodeProc {
     lines: Mutex<Receiver<String>>,
     program: PathBuf,
     args: Vec<String>,
-    log: PathBuf,
+    /// Its log file; `None`: its standard error is this process's.
+    log: Option<PathBuf>,
     ports: Ports,
     cores: u16,
     exited: Option<ExitStatus>,
+    /// An earlier run [`Self::restart`] replaced: it owns neither the process nor the log.
+    replaced: bool,
 }
 
 static LOGS: AtomicU64 = AtomicU64::new(0);
@@ -432,21 +435,33 @@ pub fn log_path(name: &str) -> PathBuf {
 }
 
 impl NodeProc {
-    /// Starts `program` with `args` (a node process), its log in `log`, and waits for its member
-    /// line.
-    pub fn spawn(program: &Path, args: &[String], log: &Path) -> Result<NodeProc, StartError> {
+    /// Starts `program` with `args` (a node process), its log in `log` (`None`: on this process's
+    /// standard error), and waits for its member line.
+    pub fn spawn(
+        program: &Path,
+        args: &[String],
+        log: Option<&Path>,
+    ) -> Result<NodeProc, StartError> {
         let fail = |kind: &str, message: String| StartError {
             kind: kind.to_owned(),
             message,
-            log: fs::read_to_string(log).unwrap_or_default(),
+            log: log.and_then(|l| fs::read_to_string(l).ok()).unwrap_or_default(),
         };
-        let file =
-            File::create(log).map_err(|e| fail("exit", format!("{}: {e}", log.display())))?;
+        let stderr = match log {
+            Some(l) => Stdio::from(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(l)
+                    .map_err(|e| fail("exit", format!("{}: {e}", l.display())))?,
+            ),
+            None => Stdio::inherit(),
+        };
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(file)
+            .stderr(stderr)
             .spawn()
             .map_err(|e| fail("exit", format!("{} does not start: {e}", program.display())))?;
         let out = child.stdout.take().expect("piped standard output");
@@ -499,10 +514,11 @@ impl NodeProc {
             lines: Mutex::new(lines),
             program: program.to_owned(),
             args: args.to_vec(),
-            log: log.to_owned(),
+            log: log.map(Path::to_owned),
             ports,
             cores,
             exited: None,
+            replaced: false,
         })
     }
 
@@ -542,16 +558,16 @@ impl NodeProc {
         self.cores
     }
 
-    /// Where its log goes.
+    /// Where its log goes (`None`: this process's standard error).
     #[must_use]
-    pub fn log_path(&self) -> &Path {
-        &self.log
+    pub fn log_path(&self) -> Option<&Path> {
+        self.log.as_deref()
     }
 
     /// What its log holds so far.
     #[must_use]
     pub fn log_text(&self) -> String {
-        fs::read_to_string(&self.log).unwrap_or_default()
+        self.log.as_ref().and_then(|l| fs::read_to_string(l).ok()).unwrap_or_default()
     }
 
     /// Sends `request` and returns its answer line; `wait` is the request's own deadline.
@@ -734,22 +750,18 @@ impl NodeProc {
             }
         }
         args.extend([PORTS.to_owned(), self.ports.to_arg()]);
-        let old = fs::read_to_string(&self.log).unwrap_or_default();
-        let next = NodeProc::spawn(&self.program, &args, &self.log);
-        // The log of the earlier run stays at the head of the file.
-        let new = fs::read_to_string(&self.log).unwrap_or_default();
-        let _ = fs::write(&self.log, format!("{old}{new}"));
-        let mut next = next?;
+        // The new run's log goes after the earlier one's, in the same file.
+        let mut next = NodeProc::spawn(&self.program, &args, self.log.as_deref())?;
         std::mem::swap(self, &mut next);
         // `next` is the earlier run, already waited for; the log file is the new run's now.
-        next.log = PathBuf::new();
+        next.replaced = true;
         Ok(())
     }
 }
 
 impl Drop for NodeProc {
     fn drop(&mut self) {
-        if self.log.as_os_str().is_empty() {
+        if self.replaced {
             return;
         }
         if thread::panicking() {
@@ -757,12 +769,15 @@ impl Drop for NodeProc {
             let text = self.log_text();
             let lines: Vec<&str> = text.lines().collect();
             let tail = &lines[lines.len().saturating_sub(LOG_TAIL)..];
-            eprintln!("--- log of node process {} ({}):", self.pid(), self.log.display());
+            let at = self.log.as_ref().map_or_else(String::new, |l| l.display().to_string());
+            eprintln!("--- log of node process {} ({at}):", self.pid());
             tail.iter().for_each(|l| eprintln!("{l}"));
             return;
         }
         self.terminate();
-        let _ = fs::remove_file(&self.log);
+        if let Some(l) = &self.log {
+            let _ = fs::remove_file(l);
+        }
     }
 }
 
@@ -779,7 +794,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     if s == NONE {
         return Some(Vec::new());
     }
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()

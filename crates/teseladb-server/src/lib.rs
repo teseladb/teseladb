@@ -183,7 +183,14 @@ pub fn run(
             let _ = out.write_all(version_text().as_bytes());
             0
         }
-        Command::Dev(o) => dev::run(&o, out, err, stop),
+        Command::Dev(o) => match std::env::current_exe() {
+            Ok(me) => dev::run(&me, &o, out, err, stop),
+            Err(e) => {
+                let _ = writeln!(err, "teseladb: the path of this program: {e}");
+                1
+            }
+        },
+        Command::DevMember(m) => dev::member(&m, out, stop),
         Command::Admin(o) => admin::run(&o, out, err),
         Command::Mcp(o) => {
             let key = std::env::var(mcp_stdio::API_KEY_VAR).ok().filter(|k| !k.is_empty());

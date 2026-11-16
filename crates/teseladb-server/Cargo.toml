@@ -45,6 +45,14 @@ harness = false
 name = "crud"
 harness = false
 
+[[test]]
+name = "fresh_cluster"
+harness = false
+
+[[test]]
+name = "oplog_tools"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

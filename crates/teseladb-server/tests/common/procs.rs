@@ -131,7 +131,7 @@ pub fn spawn(
         ports: None,
     };
     let me = std::env::current_exe().expect("this test's binary");
-    NodeProc::spawn(&me, &a.to_args(), &log_path(recipe))
+    NodeProc::spawn(&me, &a.to_args(), Some(&log_path(recipe)))
 }
 
 /// [`spawn`], which has to start.
