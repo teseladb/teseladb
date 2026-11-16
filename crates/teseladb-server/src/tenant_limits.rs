@@ -3,49 +3,70 @@
 //! bytes written per second with a bucket like the commands', and what `/metrics` and `GET
 //! /admin/tenants/<name>/usage` count of it here. Each node applies the whole limits (D-129).
 //! The buckets take the time as an argument, so the rules run in tests without a clock.
+//!
+//! On the engine (023 FR-019) the counts are each shard's: a shard writes only its own counters
+//! and a limit of the whole node adds those of its shards, so no lock is shared between shards.
+//! The buckets are one atomic each (the time the bucket is next empty at, as in GCRA), which every
+//! shard takes from without a lock. The tenants' table is published like the routing table
+//! ([`crate::published`]); a tenant is added to it the first time this node sees it.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use teseladb_meta::tenant_quota::{NodeReading, QuotaRefusal, QuotaWindow, Reading};
 use teseladb_meta::tenants::TenantLimits;
 
+use crate::published::Published;
+
 /// The longest a command waits for its token, its slot or its bytes before it fails (FR-032).
 pub const MAX_WAIT: Duration = Duration::from_millis(100);
 
-/// A bucket of `rate` per second that holds one second of them.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// What a bucket holds: one second of its rate.
+const BUCKET_SPAN: Duration = Duration::from_secs(1);
+
+/// A bucket of `rate` per second that holds one second of them, kept as the instant it will be
+/// full again (its "theoretical arrival time"); 0 is a bucket never used, which starts full.
+#[derive(Debug, Default)]
 pub struct Bucket {
-    /// What it holds; below zero, what was lent to the commands that waited.
-    tokens: f64,
-    /// When it was last filled, from the limiter's start.
-    at: Duration,
-    /// Whether it was ever used: a new bucket starts full.
-    used: bool,
+    /// Nanoseconds of the limiter's time at which the bucket is full again.
+    full_at: AtomicU64,
+}
+
+fn nanos(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl Bucket {
     /// Takes `cost` at `now` from a bucket of `rate` per second: the wait before the command may
     /// run, or `None` if it would wait more than [`MAX_WAIT`]. A full bucket lets a command
     /// bigger than a second's worth through and goes below zero.
-    pub fn take(&mut self, rate: f64, cost: f64, now: Duration) -> Option<Duration> {
-        if !self.used {
-            *self = Bucket { tokens: rate, at: now, used: true };
+    pub fn take(&self, rate: f64, cost: f64, now: Duration) -> Option<Duration> {
+        let now_ns = nanos(now);
+        let span = nanos(BUCKET_SPAN);
+        let cost_ns = nanos(Duration::from_secs_f64(cost / rate));
+        let mut seen = self.full_at.load(Ordering::Acquire);
+        loop {
+            let full = seen <= now_ns;
+            let from = seen.max(now_ns);
+            let next = from.saturating_add(cost_ns);
+            // What the bucket lacks for this command, past the second it holds.
+            let wait = if full { 0 } else { next.saturating_sub(span).saturating_sub(now_ns) };
+            let wait = Duration::from_nanos(wait);
+            if wait > MAX_WAIT {
+                return None;
+            }
+            match self.full_at.compare_exchange_weak(
+                seen,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(wait),
+                Err(now_seen) => seen = now_seen,
+            }
         }
-        let elapsed = now.saturating_sub(self.at).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * rate).min(rate);
-        self.at = now;
-        if self.tokens >= cost || self.tokens >= rate {
-            self.tokens -= cost;
-            return Some(Duration::ZERO);
-        }
-        let wait = Duration::from_secs_f64((cost - self.tokens) / rate);
-        if wait > MAX_WAIT {
-            return None;
-        }
-        self.tokens -= cost;
-        Some(wait)
     }
 }
 
@@ -62,14 +83,94 @@ pub struct NodeUsage {
     pub last_auth_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default)]
+/// One shard's counts of a tenant, on a cache line of its own.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct ShardCounts {
+    connections: AtomicU32,
+    running: AtomicU32,
+    ops_total: AtomicU64,
+    throttled_nanos: AtomicU64,
+}
+
+/// Lowers `a` by one, not below zero.
+fn decrement(a: &AtomicU32) {
+    let _ = a.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1));
+}
+
+/// What a node keeps of a tenant.
+#[derive(Debug)]
 struct Tenant {
-    usage: NodeUsage,
-    /// The bytes this node let the tenant write since the last read of its data (FR-031).
-    window: QuotaWindow,
-    running: u32,
+    /// The counts of each shard, and last those of the threads that are not shards.
+    shards: Box<[ShardCounts]>,
+    /// When one of its users last signed in, in milliseconds since the epoch; 0: never.
+    last_auth_ms: AtomicU64,
     ops: Bucket,
     bytes: Bucket,
+    /// The bytes this node let the tenant write since the last read of its data (FR-031): only
+    /// the writes of a tenant with a storage quota take it.
+    window: Mutex<QuotaWindow>,
+}
+
+impl Tenant {
+    fn new() -> Tenant {
+        let shards = std::thread::available_parallelism().map_or(1, std::num::NonZero::get) + 1;
+        Tenant {
+            shards: (0..shards).map(|_| ShardCounts::default()).collect(),
+            last_auth_ms: AtomicU64::new(0),
+            ops: Bucket::default(),
+            bytes: Bucket::default(),
+            window: Mutex::new(QuotaWindow::default()),
+        }
+    }
+
+    /// The counts this thread writes: its shard's, or those of the threads that are not shards.
+    fn here(&self) -> &ShardCounts {
+        let outside = self.shards.len() - 1;
+        let i = teseladb_io::engine::wait::this_shard().map_or(outside, |s| s as usize % outside);
+        &self.shards[i]
+    }
+
+    fn connections(&self) -> u32 {
+        self.shards.iter().map(|s| s.connections.load(Ordering::Acquire)).sum()
+    }
+
+    fn running(&self) -> u32 {
+        self.shards.iter().map(|s| s.running.load(Ordering::Acquire)).sum()
+    }
+
+    fn throttle(&self, wait: Duration) {
+        self.here().throttled_nanos.fetch_add(nanos(wait), Ordering::Relaxed);
+    }
+
+    fn usage(&self) -> NodeUsage {
+        let last = self.last_auth_ms.load(Ordering::Acquire);
+        NodeUsage {
+            connections: self.connections(),
+            ops_total: self.shards.iter().map(|s| s.ops_total.load(Ordering::Relaxed)).sum(),
+            throttled_seconds: Duration::from_nanos(
+                self.shards.iter().map(|s| s.throttled_nanos.load(Ordering::Relaxed)).sum(),
+            )
+            .as_secs_f64(),
+            last_auth_ms: (last > 0).then_some(last),
+        }
+    }
+}
+
+/// A tenant in a thread's copy of the table: reading it touches no reference count that other
+/// shards write.
+struct TenantRef {
+    all: Arc<BTreeMap<u32, Arc<Tenant>>>,
+    id: u32,
+}
+
+impl std::ops::Deref for TenantRef {
+    type Target = Tenant;
+
+    fn deref(&self) -> &Tenant {
+        // The table never loses a tenant, and this copy was taken with it.
+        &self.all[&self.id]
+    }
 }
 
 /// Why a command of a tenant does not run.
@@ -86,11 +187,11 @@ pub enum Refused {
 /// The limits of every tenant on this node.
 #[derive(Debug, Default)]
 pub struct TenantLimiter {
-    tenants: Mutex<BTreeMap<u32, Tenant>>,
+    tenants: Published<BTreeMap<u32, Arc<Tenant>>>,
     /// The start of the buckets' time on this node.
     epoch: std::sync::OnceLock<std::time::Instant>,
     /// The node's last readings of the tenants' data (FR-031).
-    readings: Mutex<Vec<NodeReading>>,
+    readings: Published<Vec<NodeReading>>,
     /// The first window this node counts whole: the one after the window it started in.
     since: std::sync::OnceLock<u64>,
 }
@@ -101,27 +202,38 @@ impl TenantLimiter {
         self.epoch.get_or_init(std::time::Instant::now).elapsed()
     }
 
-    fn with<T>(&self, tenant: u32, f: impl FnOnce(&mut Tenant) -> T) -> T {
-        let mut g = self.tenants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(g.entry(tenant).or_default())
+    /// Tenant `id` in this thread's copy of the table, added the first time this node sees it.
+    fn tenant(&self, id: u32) -> TenantRef {
+        let all = self.tenants.get();
+        if all.contains_key(&id) {
+            return TenantRef { all, id };
+        }
+        self.tenants.update(|all| {
+            if all.contains_key(&id) {
+                return (false, ());
+            }
+            all.insert(id, Arc::new(Tenant::new()));
+            (true, ())
+        });
+        TenantRef { all: self.tenants.get(), id }
     }
 
     /// Takes a connection of `tenant` that just signed in at `wall_ms`, if it has fewer than
-    /// `max` (0: no limit); `false` closes it.
+    /// `max` (0: no limit) on the whole node; `false` closes it.
     pub fn connect(&self, tenant: u32, max: u32, wall_ms: u64) -> bool {
-        self.with(tenant, |t| {
-            if max > 0 && t.usage.connections >= max {
-                return false;
-            }
-            t.usage.connections += 1;
-            t.usage.last_auth_ms = Some(wall_ms);
-            true
-        })
+        let t = self.tenant(tenant);
+        if max > 0 && t.connections() >= max {
+            return false;
+        }
+        t.here().connections.fetch_add(1, Ordering::AcqRel);
+        t.last_auth_ms.store(wall_ms.max(1), Ordering::Release);
+        true
     }
 
-    /// A connection of `tenant` that [`TenantLimiter::connect`] took closed.
+    /// A connection of `tenant` that [`TenantLimiter::connect`] took closed (on the same shard,
+    /// where the connection lives).
     pub fn disconnect(&self, tenant: u32) {
-        self.with(tenant, |t| t.usage.connections = t.usage.connections.saturating_sub(1));
+        decrement(&self.tenant(tenant).here().connections);
     }
 
     /// Lets a command of `tenant` that writes `bytes` begin at `now` under `limits`: the wait
@@ -133,33 +245,33 @@ impl TenantLimiter {
         bytes: u64,
         now: Duration,
     ) -> Result<Duration, Refused> {
-        self.with(tenant, |t| {
-            // The caller waits for a slot and counts that wait itself ([`TenantLimiter::throttle`]).
-            if limits.max_concurrent_ops > 0 && t.running >= limits.max_concurrent_ops {
-                return Err(Refused::Concurrent);
-            }
-            let mut wait = Duration::ZERO;
-            if limits.ops_per_second > 0 {
-                let rate = f64::from(limits.ops_per_second);
-                let Some(w) = t.ops.take(rate, 1.0, now) else {
-                    t.usage.throttled_seconds += MAX_WAIT.as_secs_f64();
-                    return Err(Refused::Ops);
-                };
-                wait = wait.max(w);
-            }
-            if limits.max_write_bytes_per_second > 0 && bytes > 0 {
-                let rate = limits.max_write_bytes_per_second as f64;
-                let Some(w) = t.bytes.take(rate, bytes as f64, now) else {
-                    t.usage.throttled_seconds += MAX_WAIT.as_secs_f64();
-                    return Err(Refused::Bytes);
-                };
-                wait = wait.max(w);
-            }
-            t.running += 1;
-            t.usage.ops_total += 1;
-            t.usage.throttled_seconds += wait.as_secs_f64();
-            Ok(wait)
-        })
+        let t = self.tenant(tenant);
+        // The caller waits for a slot and counts that wait itself ([`TenantLimiter::throttle`]).
+        if limits.max_concurrent_ops > 0 && t.running() >= limits.max_concurrent_ops {
+            return Err(Refused::Concurrent);
+        }
+        let mut wait = Duration::ZERO;
+        if limits.ops_per_second > 0 {
+            let rate = f64::from(limits.ops_per_second);
+            let Some(w) = t.ops.take(rate, 1.0, now) else {
+                t.throttle(MAX_WAIT);
+                return Err(Refused::Ops);
+            };
+            wait = wait.max(w);
+        }
+        if limits.max_write_bytes_per_second > 0 && bytes > 0 {
+            let rate = limits.max_write_bytes_per_second as f64;
+            let Some(w) = t.bytes.take(rate, bytes as f64, now) else {
+                t.throttle(MAX_WAIT);
+                return Err(Refused::Bytes);
+            };
+            wait = wait.max(w);
+        }
+        let here = t.here();
+        here.running.fetch_add(1, Ordering::AcqRel);
+        here.ops_total.fetch_add(1, Ordering::Relaxed);
+        t.throttle(wait);
+        Ok(wait)
     }
 
     /// This node starts counting at wall-clock `now_ms`: what it let through before is unknown,
@@ -171,19 +283,23 @@ impl TenantLimiter {
     /// Keeps `r` among the node's last three readings: a write goes by those of the two epochs
     /// before its own.
     pub fn record(&self, r: NodeReading) {
-        let mut g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        g.retain(|x| x.epoch != r.epoch);
-        g.push(r);
-        g.sort_by_key(|x| x.epoch);
-        let extra = g.len().saturating_sub(KEPT_READINGS);
-        g.drain(..extra);
+        self.readings.update(|g| {
+            g.retain(|x| x.epoch != r.epoch);
+            g.push(r);
+            g.sort_by_key(|x| x.epoch);
+            let extra = g.len().saturating_sub(KEPT_READINGS);
+            g.drain(..extra);
+            (true, ())
+        });
     }
 
     /// Keeps what a reading of `tenant` alone gave for epoch `epoch` (FR-031,
     /// [`teseladb_meta::tenant_quota::base_epoch`]).
     pub fn record_tenant(&self, epoch: u64, tenant: u32, used: u64) {
-        let mut g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        teseladb_meta::tenant_quota::note(&mut g, epoch, tenant, used, KEPT_READINGS);
+        self.readings.update(|g| {
+            teseladb_meta::tenant_quota::note(g, epoch, tenant, used, KEPT_READINGS);
+            (true, ())
+        });
     }
 
     /// The first window this node counts whole.
@@ -201,33 +317,31 @@ impl TenantLimiter {
         now_ms: u64,
         bytes: u64,
     ) -> Result<(), QuotaRefusal> {
-        let readings: Vec<Reading> = {
-            let g = self.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            g.iter().map(|r| r.of(tenant)).collect()
-        };
+        let readings: Vec<Reading> = self.readings.get().iter().map(|r| r.of(tenant)).collect();
         let since = self.since();
-        self.with(tenant, |t| t.window.admit(limit, nodes, since, now_ms, &readings, bytes))
+        let t = self.tenant(tenant);
+        let mut window = t.window.lock().unwrap_or_else(PoisonError::into_inner);
+        window.admit(limit, nodes, since, now_ms, &readings, bytes)
     }
 
     /// Counts `wait` as time `tenant` was held back.
     pub fn throttle(&self, tenant: u32, wait: Duration) {
-        self.with(tenant, |t| t.usage.throttled_seconds += wait.as_secs_f64());
+        self.tenant(tenant).throttle(wait);
     }
 
-    /// A command [`TenantLimiter::begin`] let run ended.
+    /// A command [`TenantLimiter::begin`] let run ended (on the shard where it began).
     pub fn end(&self, tenant: u32) {
-        self.with(tenant, |t| t.running = t.running.saturating_sub(1));
+        decrement(&self.tenant(tenant).here().running);
     }
 
     /// What this node counted of `tenant`.
     pub fn usage(&self, tenant: u32) -> NodeUsage {
-        self.with(tenant, |t| t.usage)
+        self.tenant(tenant).usage()
     }
 
     /// What this node counted of every tenant it saw, by number.
     pub fn all(&self) -> Vec<(u32, NodeUsage)> {
-        let g = self.tenants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        g.iter().map(|(id, t)| (*id, t.usage)).collect()
+        self.tenants.get().iter().map(|(id, t)| (*id, t.usage())).collect()
     }
 }
 
@@ -330,33 +444,29 @@ pub fn reading_due(now_ms: u64) -> (u64, Duration) {
     (epoch, Duration::from_millis(reading_at(epoch + 1).saturating_sub(now_ms)))
 }
 
-/// The thread of each node that reads the tenants' data once in each epoch, as soon as it may
-/// start, until `stop` (FR-031): on its own, so that no other periodic task of the node holds it
-/// back. A reading that starts late still counts for its epoch.
-pub fn spawn_reader(
+/// The task of each node that reads the tenants' data once in each epoch, as soon as it may
+/// start, until `stop` (FR-031): an engine thread of a shard of its own (023 FR-019), so that no
+/// other periodic task of the node holds it back. A reading that starts late still counts for its
+/// epoch.
+pub fn run_reader(
     mut backend: crate::backend::ServerBackend,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
+    stop: &crate::client_tasks::TaskStop,
+) {
     backend.routes().limiter().start_counting(crate::clock::wall_ms());
-    std::thread::Builder::new().name("tenant-usage".into()).spawn(move || {
-        let mut done = None;
-        while !stop.load(std::sync::atomic::Ordering::Acquire) {
-            let (epoch, wait) = reading_due(crate::clock::wall_ms());
-            if done != Some(epoch) {
-                read_usage(&mut backend, epoch);
-                done = Some(epoch);
-                continue;
-            }
-            std::thread::park_timeout(wait.min(STOP_POLL));
+    let mut done = None;
+    while !stop.stopped() {
+        let (epoch, wait) = reading_due(crate::clock::wall_ms());
+        if done != Some(epoch) {
+            read_usage(&mut backend, epoch);
+            done = Some(epoch);
+            continue;
         }
-    })
+        stop.pause(wait);
+    }
 }
 
 /// The readings a node keeps: those of the epoch it is in and the two before.
 const KEPT_READINGS: usize = 3;
-
-/// How often the reader looks at its stop flag while it waits for the next epoch.
-const STOP_POLL: Duration = Duration::from_millis(250);
 
 /// A tenant's name as the value of a Prometheus label: backslash, quote and line break escaped.
 pub fn label(name: &str) -> String {
@@ -519,11 +629,13 @@ pub fn begin(
         match limiter.begin(tenant, &state.limits, bytes, limiter.now()) {
             Ok(wait) => {
                 limiter.throttle(tenant, slot_wait);
-                std::thread::sleep(wait);
+                teseladb_io::engine::wait::sleep(wait);
                 let waited = limiter.now().saturating_sub(started);
                 return Ok(Some(u64::try_from(waited.as_millis()).unwrap_or(u64::MAX)));
             }
-            Err(Refused::Concurrent) if slot_wait < MAX_WAIT => std::thread::sleep(SLOT_POLL),
+            Err(Refused::Concurrent) if slot_wait < MAX_WAIT => {
+                teseladb_io::engine::wait::sleep(SLOT_POLL);
+            }
             Err(why) => {
                 limiter.throttle(tenant, slot_wait);
                 return Err(refusal(why));
@@ -541,7 +653,7 @@ mod tests {
 
     #[test]
     fn a_bucket_lets_a_second_through_then_lends_up_to_the_wait() {
-        let mut b = Bucket::default();
+        let b = Bucket::default();
         let t0 = Duration::from_secs(10);
         // Full at first: 100 at once.
         for _ in 0..100 {
@@ -557,7 +669,7 @@ mod tests {
         assert_eq!(b.take(100.0, 100.0, t1), Some(Duration::ZERO));
         assert_eq!(b.take(100.0, 1.0, t1), Some(10 * MS));
         // A full bucket lets a bigger command through.
-        let mut big = Bucket::default();
+        let big = Bucket::default();
         assert_eq!(big.take(10.0, 50.0, t0), Some(Duration::ZERO));
         assert_eq!(big.take(10.0, 1.0, t0), None);
     }
