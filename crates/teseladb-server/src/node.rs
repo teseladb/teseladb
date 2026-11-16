@@ -1104,10 +1104,13 @@ impl Node {
             // The segments of the search indexes, one file per index (011 FR-012).
             crate::search_segments::open(dir, &mut tables.search)?;
             // What aggregation stages write past their memory (010 FR-010).
-            let disk = teseladb_io::files::BlockingDisk::open(dir.join(crate::spill::SPILL_DIR))?;
-            let spill =
-                crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
-            tables.spill.store = Some(Arc::new(spill));
+            // The runs a previous process left go now, before the engine runs; from then on each
+            // shard's disk executor writes them (023 FR-010).
+            let root = dir.join(crate::spill::SPILL_DIR);
+            let mut disk = teseladb_io::files::BlockingDisk::open(root.clone())?;
+            crate::spill::clear(&mut disk).map_err(|e| io::Error::other(e.message))?;
+            let shards = crate::spill::ShardSpillDisk::new(root);
+            tables.spill.store = Some(Arc::new(crate::spill::DiskSpill::new(shards)));
         }
         // The search segments in memory stay within the cores' parts for them (D-105): past
         // them, indexes go to their files until a query needs them again.
