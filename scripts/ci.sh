@@ -124,9 +124,6 @@ miri_arch() { # [target]
 }
 gate "1. Miri on the arch modules of hash, crypto and BSON (host)" miri_arch
 gate "1. Miri on the arch modules of hash, crypto and BSON (x86_64)" miri_arch x86_64-unknown-linux-gnu
-# The pool that carves blocks out of one mapping of huge pages (012 FR-032), on normal pages.
-gate "1. Miri on the huge page pool" env MIRIFLAGS=-Zmiri-disable-isolation \
-  "${MIRI_TEST[@]}" -q -p teseladb-sys --lib -- huge_pool::
 gate "2. tests of check-deps" scripts/tests/check_deps_test.sh
 gate "2. tests of fetch-pinned" scripts/tests/fetch_pinned_test.sh
 gate "2. tests of the check of the release images" scripts/tests/check_image_test.sh

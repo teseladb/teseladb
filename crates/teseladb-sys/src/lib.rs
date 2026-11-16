@@ -16,7 +16,6 @@ pub mod alloc_count;
 pub mod dma;
 pub mod handoff;
 pub mod host;
-pub mod huge_pool;
 pub mod latest;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -44,39 +43,6 @@ use macos as os;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("TeselaDB only builds for Linux and macOS");
-
-/// Durability on macOS, where `fsync(2)` leaves the data in the drive's cache and only
-/// `F_FULLFSYNC` makes it durable, at the cost of flushing the whole drive (H-015 of the native
-/// tests): a file is pushed with [`push_to_drive`] and then the drive flushed with
-/// [`flush_drive`].
-#[cfg(target_os = "macos")]
-pub mod drive {
-    use std::fs::File;
-    use std::io;
-
-    /// `fsync(2)`: the file's data and metadata go to the drive.
-    pub fn push_to_drive(file: &File) -> io::Result<()> {
-        crate::os::push_to_drive(file)
-    }
-
-    /// `fcntl(F_FULLFSYNC)`: the drive writes its whole cache to permanent storage.
-    pub fn flush_drive(file: &File) -> io::Result<()> {
-        crate::os::flush_drive(file)
-    }
-}
-
-/// Sends what `file` has written so far towards the device without waiting for a flush of the
-/// drive (`sync_file_range` with `SYNC_FILE_RANGE_WRITE` on Linux, `fsync` on macOS, which leaves
-/// the data in the drive's cache). A large file written this way as it grows leaves little for
-/// the sync that ends it, so that sync no longer holds the drive's flush, and every sync of the
-/// other logs behind it, for the time of the whole file (H-049 of the native tests).
-///
-/// # Errors
-///
-/// The error of the system call.
-pub fn write_behind(file: &std::fs::File) -> io::Result<()> {
-    os::write_behind(file)
-}
 
 /// Asks the system to run the calling thread on its fastest cores. On macOS, whose scheduler
 /// places a thread by its quality-of-service class, the thread takes the highest class
@@ -158,23 +124,10 @@ impl Drop for FileLock {
     }
 }
 
-/// Reserves `len` bytes from the start of the file so that later writes do not fail for lack of
-/// space (`ENOSPC` shows up here, before anything is written). The logical size becomes at least
-/// `len` and the new part reads as zeros.
-pub fn preallocate(file: &File, len: u64) -> io::Result<()> {
-    os::preallocate(file, len)
-}
-
-/// Tells whether the error is "no space left on device".
-pub fn is_no_space(e: &io::Error) -> bool {
-    e.raw_os_error() == Some(os::ENOSPC)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    use std::io::{Read, Seek, SeekFrom};
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
@@ -194,39 +147,6 @@ mod tests {
         let l2 = FileLock::try_lock(open()).unwrap();
         drop(l2);
         std::fs::remove_file(&p).unwrap();
-    }
-
-    #[test]
-    fn preallocate_extends_with_zeros() {
-        let p = temp_path("prealloc");
-        let mut f =
-            File::options().create(true).truncate(true).read(true).write(true).open(&p).unwrap();
-        preallocate(&f, 1 << 20).unwrap();
-        assert!(f.metadata().unwrap().len() >= 1 << 20);
-        f.seek(SeekFrom::Start((1 << 20) - 16)).unwrap();
-        let mut buf = [1u8; 16];
-        f.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, [0; 16]);
-        // Reserving less than what is already there does not shrink the file.
-        preallocate(&f, 4096).unwrap();
-        assert!(f.metadata().unwrap().len() >= 1 << 20);
-        std::fs::remove_file(&p).unwrap();
-    }
-
-    #[test]
-    fn preallocate_fails_on_read_only_descriptor() {
-        let p = temp_path("ro-prealloc");
-        std::fs::write(&p, b"").unwrap();
-        let f = File::open(&p).unwrap();
-        assert!(preallocate(&f, 1 << 16).is_err());
-        std::fs::remove_file(&p).unwrap();
-    }
-
-    #[test]
-    fn classifies_no_space() {
-        assert!(is_no_space(&io::Error::from_raw_os_error(os::ENOSPC)));
-        assert!(!is_no_space(&io::Error::from_raw_os_error(1)));
-        assert!(!is_no_space(&io::Error::other("x")));
     }
 
     #[test]

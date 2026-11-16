@@ -35,8 +35,6 @@ pub enum Stage {
     WriteProposeToApplied,
     /// A write in its range, from its arrival on the core to its answer.
     WriteRange,
-    /// A sync's wait for the shared flush of its drive.
-    DriveFlushWait,
     /// The busy part of one turn of a core's loop.
     CoreStep,
     /// A tick of a core: its periodic duties, with the step of its data that ends them.
@@ -125,11 +123,10 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 42] = [
+    pub const ALL: [Stage; 41] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
-        Stage::DriveFlushWait,
         Stage::CoreStep,
         Stage::CoreTick,
         Stage::CoreLogDone,
@@ -176,7 +173,6 @@ impl Stage {
             Stage::WriteLatchWait => "write_latch_wait",
             Stage::WriteProposeToApplied => "write_propose_to_applied",
             Stage::WriteRange => "write_range",
-            Stage::DriveFlushWait => "drive_flush_wait",
             Stage::CoreStep => "core_step",
             Stage::CoreTick => "core_tick",
             Stage::CoreLogDone => "core_log_done",

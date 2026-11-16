@@ -1,82 +1,7 @@
-//! macOS: `fcntl(F_PREALLOCATE)` + `ftruncate`.
+//! macOS: the thread classes, kqueue and the task's memory.
 
-use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
-
-pub(crate) const ENOSPC: i32 = 28;
-
-const F_PREALLOCATE: i32 = 42;
-const F_ALLOCATECONTIG: u32 = 0x2;
-const F_ALLOCATEALL: u32 = 0x4;
-const F_PEOFPOSMODE: i32 = 3;
-
-/// `fstore_t` from `<sys/fcntl.h>`.
-#[repr(C)]
-struct FStore {
-    flags: u32,
-    posmode: i32,
-    offset: i64,
-    length: i64,
-    bytesalloc: i64,
-}
-
-unsafe extern "C" {
-    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-}
-
-pub(crate) fn preallocate(file: &File, len: u64) -> io::Result<()> {
-    let current = file.metadata()?.len();
-    if len <= current {
-        return Ok(());
-    }
-    let extra =
-        i64::try_from(len - current).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let mut st = FStore {
-        flags: F_ALLOCATECONTIG | F_ALLOCATEALL,
-        posmode: F_PEOFPOSMODE,
-        offset: 0,
-        length: extra,
-        bytesalloc: 0,
-    };
-    // SAFETY: `st` is a valid `fstore_t` that lives during the call; the descriptor is valid.
-    let mut rc = unsafe { fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut st as *mut FStore) };
-    if rc == -1 {
-        // No contiguous space: retry without requiring contiguity.
-        st.flags = F_ALLOCATEALL;
-        // SAFETY: same as above.
-        rc = unsafe { fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut st as *mut FStore) };
-    }
-    if rc == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    file.set_len(len)
-}
-
-// ----- durability -----
-
-/// `F_FULLFSYNC` of `<sys/fcntl.h>`: flush the file to the drive and then the drive's cache.
-const F_FULLFSYNC: i32 = 51;
-
-unsafe extern "C" {
-    fn fsync(fd: i32) -> i32;
-}
-
-/// `fsync(2)`: the file's data and metadata go to the drive, which may still hold them in its
-/// cache.
-pub(crate) fn push_to_drive(file: &File) -> io::Result<()> {
-    // SAFETY: the descriptor is valid while `file` lives; `fsync` touches no memory of the caller.
-    if unsafe { fsync(file.as_raw_fd()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Sends what the file has written to the drive without asking it to flush its cache: on macOS,
-/// [`push_to_drive`].
-pub(crate) fn write_behind(file: &File) -> io::Result<()> {
-    push_to_drive(file)
-}
 
 /// `QOS_CLASS_USER_INTERACTIVE` of `<sys/qos.h>`.
 const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
@@ -90,16 +15,6 @@ pub(crate) fn favor_current_thread() -> io::Result<()> {
     let rc = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
     if rc != 0 {
         return Err(io::Error::from_raw_os_error(rc));
-    }
-    Ok(())
-}
-
-/// `fcntl(F_FULLFSYNC)`: the file goes to the drive and the drive writes its whole cache to
-/// permanent storage, so everything any file sent to that drive before is durable.
-pub(crate) fn flush_drive(file: &File) -> io::Result<()> {
-    // SAFETY: the descriptor is valid while `file` lives; `F_FULLFSYNC` takes no argument.
-    if unsafe { fcntl(file.as_raw_fd(), F_FULLFSYNC) } == -1 {
-        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -318,6 +233,7 @@ pub(crate) fn pin_to_cpu(_cpu: usize) -> std::io::Result<bool> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     unsafe extern "C" {
         fn pthread_self() -> usize;
@@ -363,16 +279,6 @@ mod tests {
     extern "C" fn ignore(_sig: i32) {}
 
     #[test]
-    fn preallocate_rejects_a_size_beyond_i64() {
-        let path =
-            std::env::temp_dir().join(format!("teseladb-sys-prealloc-{}", std::process::id()));
-        let file = File::create(&path).unwrap();
-        let err = preallocate(&file, u64::MAX).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
     fn system_call_errors_are_returned() {
         // A negative descriptor is the error of the call that returned it.
         assert!(owned(-1).is_err());
@@ -414,27 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn a_file_goes_to_the_drive_and_the_drive_flushes_its_cache() {
-        let path =
-            std::env::temp_dir().join(format!("teseladb-sys-durable-{}", std::process::id()));
-        let mut file = File::create(&path).unwrap();
-        std::io::Write::write_all(&mut file, b"durable").unwrap();
-        push_to_drive(&file).unwrap();
-        flush_drive(&file).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        // A descriptor that is not a file of a drive is an error of each call.
-        let pipe = std::process::Command::new("true").stdout(std::process::Stdio::piped()).spawn();
-        let out = pipe.unwrap().stdout.take().unwrap();
-        let not_a_drive = File::from(std::os::fd::OwnedFd::from(out));
-        assert!(flush_drive(&not_a_drive).is_err());
-    }
-
-    #[test]
     fn struct_layouts_match_the_system_headers() {
         assert_eq!(std::mem::size_of::<KEvent>(), 32);
         assert_eq!(std::mem::align_of::<KEvent>(), 8);
         assert_eq!(std::mem::size_of::<Timespec>(), 16);
-        assert_eq!(std::mem::size_of::<FStore>(), 32);
     }
 }
 
