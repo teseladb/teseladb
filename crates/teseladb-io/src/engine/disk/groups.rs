@@ -6,15 +6,19 @@
 //! compaction. The groups also account the CPU time of the operations' continuations.
 //!
 //! The groups belong to the engine that runs: a scheduling group exists on the shards of the
-//! engine that created it, and its number stays taken until it is destroyed. They are made once
-//! per engine and destroyed before it stops ([`IoGroups::release`], which the node's engine
-//! does), so that the next engine of the process makes its own.
+//! engine that created it. They are made once per engine and forgotten when it stops
+//! ([`IoGroups::release`], which the node's engine does), so that the next engine of the process
+//! makes its own. They are not destroyed: tasks of a stopping node (an engine thread parked on a
+//! timer) may still run in them, and a destroyed group's tasks have no queue. Their numbers stay
+//! taken, as in a process of the reference, which runs one engine; a process that starts more
+//! engines than the engine has groups for runs the disk classes of the later ones in the default
+//! group.
 
 use std::sync::{Mutex, PoisonError};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
-use teseladb::engine::core::reactor::{create_scheduling_group, destroy_scheduling_group};
-use teseladb::engine::core::scheduling::SchedulingGroup;
+use teseladb::engine::core::reactor::create_scheduling_group;
+use teseladb::engine::core::scheduling::{SchedulingGroup, default_scheduling_group};
 use teseladb::engine::core::sstring::Sstring;
 
 use crate::IoClass;
@@ -42,10 +46,16 @@ fn current() -> Option<IoGroups> {
     *GROUPS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Keeps `g` as the groups of the running engine, unless another call kept some first.
+fn keep(g: IoGroups) -> IoGroups {
+    *GROUPS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(g)
+}
+
 impl IoGroups {
     /// The groups of the running engine, creating them on every shard the first time. Call it
     /// from one shard at a time, before the shards open their disks (the node does on shard 0 at
-    /// start).
+    /// start). When the engine has no scheduling groups left, every class runs in the default
+    /// group.
     pub fn get_or_create() -> Future<IoGroups> {
         if let Some(g) = current() {
             return make_ready_future(g);
@@ -53,27 +63,27 @@ impl IoGroups {
         let make = |name: &str, shares| {
             create_scheduling_group(Sstring::from(name), Sstring::from(name), shares)
         };
-        make("disk-log", LOG_SHARES).then(move |log: SchedulingGroup| {
+        let made = make("disk-log", LOG_SHARES).then(move |log: SchedulingGroup| {
             make("disk-data", DATA_SHARES).then(move |data: SchedulingGroup| {
                 make("disk-background", BACKGROUND_SHARES).then(
                     move |background: SchedulingGroup| {
-                        let mut g = GROUPS.lock().unwrap_or_else(PoisonError::into_inner);
-                        Ok::<_, ExceptionPtr>(*g.get_or_insert(IoGroups { log, data, background }))
+                        Ok::<_, ExceptionPtr>(IoGroups { log, data, background })
                     },
                 )
             })
+        });
+        made.then_wrapped(|f: Future<IoGroups>| {
+            let g = f.get().unwrap_or_else(|_| {
+                let d = default_scheduling_group();
+                IoGroups { log: d, data: d, background: d }
+            });
+            Ok::<_, ExceptionPtr>(keep(g))
         })
     }
 
-    /// Destroys the groups of the running engine, if it made them, once nothing runs in them:
-    /// on a shard, before the engine stops.
-    pub fn release() -> Future<()> {
-        let Some(g) = GROUPS.lock().unwrap_or_else(PoisonError::into_inner).take() else {
-            return make_ready_future(());
-        };
-        destroy_scheduling_group(g.background).then(move |()| {
-            destroy_scheduling_group(g.data).then(move |()| destroy_scheduling_group(g.log))
-        })
+    /// Forgets the groups of the running engine, before it stops: the next engine makes its own.
+    pub fn release() {
+        GROUPS.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
 
     /// The scheduling group of `class`.

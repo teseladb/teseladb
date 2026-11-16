@@ -133,8 +133,9 @@ impl NodeEngine {
                 make_coroutine(async move {
                     wake.wait().await;
                     // The disk classes are this engine's: the next engine of the process makes
-                    // its own (their numbers are free again).
-                    super::disk::IoGroups::release().await
+                    // its own.
+                    super::disk::IoGroups::release();
+                    Ok(())
                 })
             });
             drop(app);

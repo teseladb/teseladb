@@ -1,6 +1,7 @@
 //! Engines started one after the other in one process (D4: one engine at a time): each makes
 //! its own disk classes (023 FR-012) and runs work in them, as many times as a process restarts
-//! its node; the scheduling groups of an engine that stopped are neither used again nor kept.
+//! its node; the scheduling groups of an engine that stopped are not used again (past the
+//! engine's number of groups, the classes of a later engine run in its default group).
 //!
 //! It has its own `main`: it starts and stops engines in sequence.
 
@@ -16,7 +17,7 @@ use teseladb_io::IoClass;
 use teseladb_io::engine::disk::IoGroups;
 use teseladb_io::engine::{EngineConfig, NodeEngine, wait};
 
-/// More engines than the engine has scheduling groups for three classes each, had they stayed.
+/// More engines than the engine has scheduling groups for three classes each.
 const ENGINES: usize = 8;
 const T: Duration = Duration::from_secs(10);
 
