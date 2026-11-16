@@ -46,6 +46,12 @@ pub fn run(args: &Args) -> Result<Report, String> {
 }
 
 fn run_with(args: &Args, min_reads: u64) -> Result<Report, String> {
+    let args = args.clone();
+    super::on_engine::run(move || run_here(&args, min_reads))
+}
+
+/// [`run_with`] in an engine thread: the replicas' disks are the engine's.
+fn run_here(args: &Args, min_reads: u64) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "read")?;
     let mut c = Cluster::open(&dir.path, 0, true)?;
     let leader = c.elect()?;
