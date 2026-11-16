@@ -3,7 +3,7 @@
 //! lists, key pairs and PKCS#12 bundles given in the wrong form, priority strings, client
 //! authentication and session resumption settings, the credentials builder, the verification
 //! callback, and the error and name texts.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "tls"))]
 
 #[path = "common/tls_certs.rs"]
 mod tls_certs;

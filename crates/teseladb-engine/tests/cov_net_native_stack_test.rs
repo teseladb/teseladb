@@ -192,7 +192,14 @@ engine_thread_test_case!(native_stack_opens_connections, {
     let mut output = c.output(1024);
     wait(output.write_str("ping")).expect("written");
     wait(output.flush()).expect("flushed");
-    assert_eq!(wire.next_tcp_where(|t| !t.payload.is_empty()).payload, b"ping");
+    let ping = wire.next_tcp_where(|t| !t.payload.is_empty());
+    assert_eq!(ping.payload, b"ping");
+    // The peer acknowledges the data: as in the reference, closing the output sends the FIN
+    // only once everything sent has been acknowledged (tcb::close waits for it).
+    wire.inject(&tcp_frame(
+        &TcpSpec::new(8080, syn.sport, 901, ping.seq.wrapping_add(4), ACK),
+        b"",
+    ));
     // Shutting down a connected socket closes both directions.
     sock.shutdown().expect("shut down");
     assert!(wire.next_tcp_where(|t| t.has(FIN)).has(FIN));
@@ -289,10 +296,16 @@ engine_thread_test_case!(device_creation_needs_a_supported_driver, {
         assert!(wait(NativeNetworkStack::create(o)).is_err());
     }
 
-    // Two interfaces, read from a file.
+    // Two interfaces, read from a file. As in the reference parser, at least one interface must
+    // have DHCP off and all three addresses: a configuration where every interface uses DHCP
+    // is refused ("when dhcp is off then all of ip, gateway, netmask has to be specified").
     let path = std::env::temp_dir().join(format!("cov-net-config-{}.yaml", std::process::id()));
-    std::fs::write(&path, "{eth0: {port-index: 0, dhcp: true}, eth1: {port-index: 1, dhcp: true}}")
-        .expect("written");
+    std::fs::write(
+        &path,
+        "{eth0: {port-index: 0, ip: 192.168.100.10, gateway: 192.168.100.1, \
+         netmask: 255.255.255.0}, eth1: {port-index: 1, dhcp: true}}",
+    )
+    .expect("written");
     let mut o = NativeStackOptions::new();
     o.net_config_file.set_value(path.display().to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
@@ -339,8 +352,13 @@ engine_thread_test_case!(proxy_queue_forwards_to_the_owning_shard, {
         .collect();
     seen.sort_unstable();
     assert_eq!(seen, (1..=300).collect::<Vec<_>>());
+    // The proxy's own counter stays at zero here, as in the reference: its send() returns the
+    // number of packets still moving after the submission, and a submission to the proxy's
+    // own shard runs at once, so its continuation has already cleared them (smp::submit_to
+    // to the local shard runs in place, and so does then() on its ready future unless the
+    // reactor asked for preemption at that moment, when a batch is counted).
     // SAFETY: as above; a read of the counters.
-    assert_eq!(unsafe { (*raw).base()._stats.tx.good.packets }, 300);
+    assert!(unsafe { (*raw).base()._stats.tx.good.packets } <= 300);
     // The factory function wraps the same queue type.
     let other = create_proxy_net_device(this_shard_id(), dev);
     let _ = other.into_raw();

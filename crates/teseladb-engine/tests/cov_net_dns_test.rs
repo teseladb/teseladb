@@ -3,7 +3,7 @@
 //! address lookups over UDP, truncated answers retried over TCP, queries over TCP only,
 //! aliases, search domains, SRV records, missing names, timeouts, closing, option errors,
 //! and the error texts.
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "dns"))]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};

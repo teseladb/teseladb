@@ -8,7 +8,11 @@
 //! engine's HTTP client. The reactor runs two shards (set before `main`).
 #![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
+// Without the tls feature only the plain-HTTP case is built; the helpers it shares with the
+// TLS cases stay.
+#![cfg_attr(not(feature = "tls"), allow(unused_imports, dead_code))]
 
+#[cfg(feature = "tls")]
 #[path = "common/tls_certs.rs"]
 mod tls_certs;
 
@@ -41,11 +45,13 @@ use teseladb::engine::http::request::Request;
 use teseladb::engine::http::routes::Routes;
 use teseladb::engine::net::api::{ListenOptions, make_ipv4_address_ip_port};
 use teseladb::engine::net::socket_defs::SocketAddress;
+#[cfg(feature = "tls")]
 use teseladb::engine::net::tls::{
     self, AbstractCredentials, CertificateCredentials, ServerCredentials, X509CrtFormat,
 };
 use teseladb::engine::testing::test_runner::testing::global_test_runner;
 use teseladb::engine::util::short_streams::util::read_entire_stream_contiguous;
+#[cfg(feature = "tls")]
 use tls_certs::certfile;
 
 /// Starts the test reactor with two shards before `main`.
@@ -67,6 +73,7 @@ fn ss(s: &str) -> Sstring {
     Sstring::from(s)
 }
 
+#[cfg(feature = "tls")]
 fn cf(file: &str) -> Sstring {
     Sstring::from(certfile(file).as_str())
 }
@@ -137,6 +144,7 @@ fn add_hello(r: &mut Routes) {
     let _ = r.put(OperationType::Get, "/hello", Box::new(h));
 }
 
+#[cfg(feature = "tls")]
 /// Client and server credentials over the generated test certificate and its CA.
 fn credentials()
 -> Result<(SharedPtr<CertificateCredentials>, SharedPtr<ServerCredentials>), ExceptionPtr> {
@@ -147,6 +155,7 @@ fn credentials()
     Ok((b.build_certificate_credentials()?, b.build_server_credentials()?))
 }
 
+#[cfg(feature = "tls")]
 /// A GET of `/hello` over TLS to `addr` with the engine's client; returns the body.
 fn https_hello(
     addr: SocketAddress,
@@ -177,6 +186,7 @@ fn plain_get(path: &str) -> Vec<u8> {
     format!("GET {} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", path).into_bytes()
 }
 
+#[cfg(feature = "tls")]
 teseladb::engine_test_case!(a_server_control_listens_on_every_shard_with_and_without_tls, {
     async_(|| -> Result<(), ExceptionPtr> {
         let (client_creds, server_creds) = credentials()?;
@@ -213,6 +223,7 @@ fn fixed_options() -> ListenOptions {
     lo
 }
 
+#[cfg(feature = "tls")]
 /// Sets the credentials every later listener of `s` uses (the older way to serve HTTPS).
 #[allow(deprecated)]
 fn set_credentials(s: &mut HttpServer, creds: SharedPtr<ServerCredentials>) {
@@ -224,6 +235,7 @@ fn server_mut(s: &mut Pin<Box<HttpServer>>) -> &mut HttpServer {
     unsafe { s.as_mut().get_unchecked_mut() }
 }
 
+#[cfg(feature = "tls")]
 teseladb::engine_test_case!(a_server_with_credentials_set_beforehand_serves_https, {
     async_(|| -> Result<(), ExceptionPtr> {
         let (client_creds, server_creds) = credentials()?;
@@ -302,7 +314,7 @@ teseladb::engine_test_case!(a_server_handles_bad_requests_unread_bodies_and_fail
         )?;
         let port = free_port()?;
         s.as_mut()
-            .listen_with(make_ipv4_address_ip_port(LOCALHOST, port), fixed_options(), None)
+            .listen_opts(make_ipv4_address_ip_port(LOCALHOST, port), fixed_options())
             .get()?;
 
         // A request line that cannot be parsed: the reply uses version 1.1.

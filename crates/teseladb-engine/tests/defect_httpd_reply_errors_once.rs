@@ -88,7 +88,9 @@ teseladb::engine_test_case!(a_failing_body_writer_counts_one_reply_error, {
             .port();
         let mut lo = ListenOptions { reuse_address: true, ..ListenOptions::default() };
         lo.set_fixed_cpu(this_shard_id());
-        s.as_mut().listen_with(make_ipv4_address_ip_port(LOCALHOST, port), lo, None).get()?;
+        // listen_opts, not listen_with: the latter takes TLS credentials and exists only with
+        // the tls feature.
+        s.as_mut().listen_opts(make_ipv4_address_ip_port(LOCALHOST, port), lo).get()?;
 
         let before = s.reply_errors();
         let peer = raw_exchange(port, b"GET /broken HTTP/1.1\r\nHost: t\r\n\r\n");
