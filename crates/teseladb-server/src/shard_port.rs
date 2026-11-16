@@ -124,6 +124,8 @@ pub type MakeHandler = Arc<dyn Fn() -> Handler + Send + Sync>;
 /// How a port takes its connections.
 #[derive(Clone)]
 pub struct PortConfig {
+    /// The port's name in errors (`crate::listen::HTTP`, `crate::listen::ADMIN`).
+    pub name: &'static str,
     /// Addresses to listen on.
     pub addrs: Vec<SocketAddr>,
     /// Its TLS on each shard.
@@ -233,8 +235,10 @@ fn listen_here(
     let mut listeners = Vec::new();
     let mut bound = Vec::new();
     for a in addrs {
-        let l = listen_with(socket_address(*a), options.clone())
-            .map_err(|e| io_error(format!("{a}: {e}")))?;
+        let l = listen_with(socket_address(*a), options.clone()).map_err(|e| {
+            let kind = e.downcast_ref::<io::Error>().map_or(io::ErrorKind::Other, io::Error::kind);
+            ExceptionPtr::from(io::Error::new(kind, format!("{} {a}: {e}", cfg.name)))
+        })?;
         let at = l.local_address().ok().as_ref().and_then(std_addr).unwrap_or(*a);
         bound.push(at);
         listeners.push(Rc::new(RefCell::new(l)));

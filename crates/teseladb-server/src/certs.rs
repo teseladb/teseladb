@@ -23,8 +23,12 @@ pub struct Certificates {
     admin: Option<TlsPort>,
     /// The ports on the engine's shards and the settings each serves (023 FR-023).
     #[cfg(target_os = "linux")]
-    shards: Vec<(crate::shard_tls::ShardTls, TlsPort)>,
+    shards: std::sync::Mutex<Vec<ShardPort>>,
 }
+
+/// A port of the engine and the settings it serves.
+#[cfg(target_os = "linux")]
+type ShardPort = (crate::shard_tls::ShardTls, TlsPort);
 
 impl std::fmt::Debug for Certificates {
     /// Without the keys.
@@ -60,7 +64,7 @@ impl Certificates {
             names,
             admin: None,
             #[cfg(target_os = "linux")]
-            shards: Vec::new(),
+            shards: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -70,21 +74,25 @@ impl Certificates {
         Certificates { admin: Some(admin), ..self }
     }
 
-    /// Puts every rotation in place on the shards of the ports `shards` too: each port's shard
-    /// copies take the settings of the [`TlsPort`] paired with it (023 FR-023).
+    /// Puts every later rotation in place on the shards of a port of the engine too: its shard
+    /// copies take the settings of `port` (023 FR-023).
     #[cfg(target_os = "linux")]
-    #[must_use]
-    pub fn with_shard_ports(self, shards: Vec<(crate::shard_tls::ShardTls, TlsPort)>) -> Self {
-        Certificates { shards, ..self }
+    pub fn add_shard_port(&self, slot: crate::shard_tls::ShardTls, port: TlsPort) {
+        self.shard_ports().push((slot, port));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shard_ports(&self) -> std::sync::MutexGuard<'_, Vec<ShardPort>> {
+        self.shards.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// [`Certificates::reload`] from a shard: the new settings are on every shard of every
-    /// port before the future resolves; on error nothing changes.
+    /// port of the engine before the future resolves; on error nothing changes.
     #[cfg(target_os = "linux")]
     pub fn rotate(&self) -> teseladb::engine::core::future::Future<Result<(), String>> {
         use teseladb::engine::core::coroutine::make_coroutine;
-        let reloaded = self.reload();
-        let shards = self.shards.clone();
+        let reloaded = self.load_and_replace();
+        let shards = self.shard_ports().clone();
         make_coroutine(async move {
             if let Err(e) = reloaded {
                 return Ok(Err(e));
@@ -98,7 +106,30 @@ impl Certificates {
 
     /// `rotateCertificates`: loads the PKI and the `--tls*` files again and serves the new
     /// connections with them; on error nothing changes and the error says which file failed.
+    /// From a thread that is not a shard: the ports of the engine have the new settings on
+    /// every shard when it returns (023 FR-023).
     pub fn reload(&self) -> Result<(), String> {
+        self.load_and_replace()?;
+        self.publish()
+    }
+
+    /// Puts the settings the shared [`TlsPort`]s hold now on every shard of the ports of the
+    /// engine (a rotation, a new OCSP staple). From a thread that is not a shard.
+    ///
+    /// # Errors
+    ///
+    /// When the engine stopped.
+    pub fn publish(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        for (slot, port) in self.shard_ports().clone() {
+            crate::shard_client::block_on(move || slot.publish_port(&port))
+                .map_err(crate::error_text)?;
+        }
+        Ok(())
+    }
+
+    /// Loads the files and puts their settings in the shared [`TlsPort`]s.
+    fn load_and_replace(&self) -> Result<(), String> {
         let pki = pki::load(&self.dir).map_err(crate::error_text)?;
         let port = tls_port::build(&self.opts, &pki)?;
         let peer = pki::peer_tls(&pki, self.opts.fips_mode);

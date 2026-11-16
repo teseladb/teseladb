@@ -63,6 +63,7 @@ impl AdminPort {
     ) -> Future<AdminPort> {
         let shard_tls = tls.as_ref().map(|t| ShardTls::new(&t.port, None, Policy::FirstByte));
         let cfg = PortConfig {
+            name: crate::listen::ADMIN,
             addrs: vec![addr],
             tls: shard_tls.clone().unwrap_or_else(ShardTls::plain),
             handshake: IO_TIMEOUT,
@@ -71,7 +72,7 @@ impl AdminPort {
         let handler = Arc::new(move || {
             let (handler, tls) = (make(), tls.clone().map(Rc::new));
             let h: crate::shard_port::Handler =
-                Rc::new(move |link| serve(link, handler.clone(), tls.clone()));
+                Rc::new(move |link: Link| serve(link, handler.clone(), tls.clone()));
             h
         });
         Port::start(cfg, handler).then(move |port| -> Result<AdminPort, ExceptionPtr> {

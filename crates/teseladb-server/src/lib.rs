@@ -63,6 +63,7 @@ pub mod memory;
 pub mod merges;
 pub mod meta2_ops;
 pub mod node;
+pub mod node_ports;
 pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
@@ -79,6 +80,8 @@ pub mod routes;
 pub mod search_builder;
 pub mod search_segments;
 pub mod sessions_ops;
+#[cfg(target_os = "linux")]
+pub mod shard_bridge;
 #[cfg(target_os = "linux")]
 pub mod shard_client;
 #[cfg(target_os = "linux")]
@@ -786,6 +789,17 @@ fn secure(
     let pki = pki::load_or_create_with(&o.dbpath, &params, bootstrap.as_ref(), &mut random)
         .map_err(|e| e.to_string())?;
     let tls = tls_port::build_at_start(&o.tls, &pki)?;
+    let peer_tls = pki::peer_tls(&pki, o.tls.fips_mode);
+    let admin_tls = tls_port::admin(&o.tls, &pki)?;
+    let certificates = certs::Certificates::new(
+        o.dbpath.clone(),
+        o.tls.clone(),
+        tls.clone(),
+        peer_tls.clone(),
+        params.node_names.clone(),
+    )
+    .with_admin(admin_tls.clone());
+    let certificates = std::sync::Arc::new(certificates);
     // A certificate that names an OCSP responder gets its answer stapled (013 FR-031).
     if !o.tls.ocsp_disabled {
         // The issuer: the next certificate of the chain, an authority of --tlsCAFile or the
@@ -798,19 +812,14 @@ fn secure(
             candidates.clone().find(|c| leaf.verify_signed_by(&c.public_key).is_ok()).cloned()
         });
         if let Some(issuer) = issuer {
-            ocsp_staple::spawn(tls.clone(), issuer, teseladb_sys::signal::stop_requested);
+            ocsp_staple::spawn(
+                tls.clone(),
+                issuer,
+                teseladb_sys::signal::stop_requested,
+                Some(certificates.clone()),
+            );
         }
     }
-    let peer_tls = pki::peer_tls(&pki, o.tls.fips_mode);
-    let admin_tls = tls_port::admin(&o.tls, &pki)?;
-    let certificates = certs::Certificates::new(
-        o.dbpath.clone(),
-        o.tls.clone(),
-        tls.clone(),
-        peer_tls.clone(),
-        params.node_names.clone(),
-    )
-    .with_admin(admin_tls.clone());
     cfg.admin_tls = Some(admin_http::AdminTls {
         port: admin_tls,
         ca: pki.ca.clone(),
@@ -824,7 +833,7 @@ fn secure(
     cfg.client = Some(ClientConfig {
         tls,
         auth: true,
-        certificates: Some(std::sync::Arc::new(certificates)),
+        certificates: Some(certificates),
         ..client_config(o)
     });
     cfg.clustertime_sealer = teseladb_auth::clustertime::KeySealer::new(&pki.master_key.0);

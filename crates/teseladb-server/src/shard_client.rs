@@ -109,6 +109,9 @@ pub fn exchange(target: Target, request: Vec<u8>) -> Future<Response> {
     })
 }
 
+/// The memory of a command-line process's engine, in bytes.
+const CLIENT_MEMORY: &str = "268435456";
+
 /// The engine of a command-line process, once started.
 static CLIENT_ENGINE: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -123,7 +126,8 @@ fn start_client_engine() -> Result<(), String> {
         };
         let mut app = AppTemplate::new(config);
         let args = ["teseladb", "--smp", "1", "--thread-affinity", "0"];
-        let args = args.iter().chain(&["--default-log-level", "error"]);
+        // A client needs little: the engine does not take the machine's memory for it.
+        let args = args.iter().chain(&["--memory", CLIENT_MEMORY, "--default-log-level", "error"]);
         app.run(args.map(ToString::to_string).collect(), move || {
             let _ = ready_tx.send(());
             // The engine serves the process's requests until it ends.

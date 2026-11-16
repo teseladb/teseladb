@@ -230,7 +230,7 @@ fn the_stapling_thread_staples_the_port_and_stops() {
     });
     let config = ServerConfig::new(CertifiedKey { chain: vec![leaf], key });
     let port = TlsPort::new(TlsMode::RequireTls, Some(config));
-    spawn(port.clone(), ca.clone(), stop);
+    spawn(port.clone(), ca.clone(), stop, None);
     let end = Instant::now() + Duration::from_secs(20);
     while port.config().unwrap().ocsp_staple.is_none() {
         assert!(Instant::now() < end, "the port was never stapled");
@@ -246,7 +246,7 @@ fn the_stapling_thread_staples_the_port_and_stops() {
         TlsMode::RequireTls,
         Some(ServerConfig::new(CertifiedKey { chain: vec![ca2.clone()], key: key2 })),
     );
-    spawn(plain.clone(), ca2.clone(), never);
-    spawn(TlsPort::new(TlsMode::Disabled, None), ca2, never);
+    spawn(plain.clone(), ca2.clone(), never, None);
+    spawn(TlsPort::new(TlsMode::Disabled, None), ca2, never, None);
     assert!(plain.config().unwrap().ocsp_staple.is_none());
 }

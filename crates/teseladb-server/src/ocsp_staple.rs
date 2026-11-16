@@ -202,8 +202,13 @@ pub fn stapled(port: &TlsPort, staple: Option<Vec<u8>>) -> Option<TlsPort> {
 }
 
 /// Keeps `port`'s staple fresh in a thread of its own while `stop` says no, for a certificate
-/// that names a responder.
-pub fn spawn(port: TlsPort, issuer: Certificate, stop: fn() -> bool) {
+/// that names a responder; each new staple goes to the shards of the ports `certs` rotates.
+pub fn spawn(
+    port: TlsPort,
+    issuer: Certificate,
+    stop: fn() -> bool,
+    certs: Option<std::sync::Arc<crate::certs::Certificates>>,
+) {
     let Some(leaf) = port.config().and_then(|c| c.identity.chain.first().cloned()) else { return };
     if ocsp::responder_urls(&leaf).is_empty() {
         return;
@@ -217,6 +222,8 @@ pub fn spawn(port: TlsPort, issuer: Certificate, stop: fn() -> bool) {
             let r = round(&leaf, &issuer, now, &ask);
             if let Some(next) = stapled(&port, r.staple) {
                 port.replace(&next);
+                // A port of an engine that stopped serves nothing more.
+                let _ = certs.as_ref().map(|c| c.publish());
             }
             let wait = (r.next_secs - now).clamp(1, RETRY_SECS * 60);
             for _ in 0..wait {

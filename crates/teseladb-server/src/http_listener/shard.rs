@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,19 +41,26 @@ use crate::shard_port::{Link, Port, PortConfig, packet};
 use crate::shard_tls::{Policy, ShardTls};
 
 /// A request's cancellation: set when its client gives it up (the connection closed, or an
-/// HTTP/2 `RST_STREAM`). The clones share it.
+/// HTTP/2 `RST_STREAM`). The clones share it; [`Cancel::flag`] hands it to work done off the
+/// shard.
 #[derive(Clone, Debug, Default)]
-pub struct Cancel(Rc<Cell<bool>>);
+pub struct Cancel(Arc<AtomicBool>);
 
 impl Cancel {
     /// Whether the client gave the request up.
     #[must_use]
     pub fn is_set(&self) -> bool {
-        self.0.get()
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// The flag itself.
+    #[must_use]
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        self.0.clone()
     }
 
     fn set(&self) {
-        self.0.set(true);
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -134,10 +142,12 @@ impl HttpPort {
                 limiter: limiter.clone(),
                 metrics: metrics.clone(),
             });
-            let h: crate::shard_port::Handler = Rc::new(move |link| serve(link, shared.clone()));
+            let h: crate::shard_port::Handler =
+                Rc::new(move |link: Link| serve(link, shared.clone()));
             h
         });
         let port_cfg = PortConfig {
+            name: crate::listen::HTTP,
             addrs: cfg.addrs,
             tls: tls.clone(),
             handshake: Duration::from_millis(HEADER_TIMEOUT_MS),
