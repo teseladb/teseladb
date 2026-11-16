@@ -391,6 +391,8 @@ mod tests {
 
     #[test]
     fn without_an_engine_a_message_is_written_when_pushed() {
+        // In its turn: no engine runs in the process meanwhile.
+        let _turn = crate::outbound::test_engine::exclusive();
         let kept = Arc::new(Mutex::new(Vec::new()));
         let o = Outlet::new(Box::new(Kept(Arc::clone(&kept))), Some(8));
         o.push(b"a\n");

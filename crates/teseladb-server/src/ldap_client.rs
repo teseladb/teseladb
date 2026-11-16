@@ -537,7 +537,7 @@ mod tests {
     /// without a template or of a name the mapping does not take.
     #[test]
     fn answers_without_a_server() {
-        crate::outbound::test_engine::install();
+        let _engine = crate::outbound::test_engine::scoped();
         let s = LdapServer::from_opts(&opts(1)).unwrap().unwrap();
         assert_eq!(s.login("jane", b""), Ok(LdapLogin::Refused));
         assert_eq!(s.groups("jane"), Ok(None));

@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn requests_go_over_tls_and_answers_are_read_whole() {
-        crate::outbound::test_engine::install();
+        let _engine = crate::outbound::test_engine::scoped();
         let dir = std::env::temp_dir().join(format!("teseladb-https-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()

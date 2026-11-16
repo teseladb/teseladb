@@ -195,36 +195,85 @@ pub fn spawn(f: impl FnOnce() -> Future<()> + Send + 'static) -> Result<Spawned,
     Ok(Spawned { done })
 }
 
-/// The engine of a test process: the engine's test runner, whose reactor runs on a thread of its
-/// own, as the runner of the clients of the tests that run no node engine.
+/// The engine of a test process, as the runner of the clients of the tests that run no node.
+///
+/// It is not the engine's test runner: that runner's reactor waits for its next job inside a
+/// task (as the reference's `test_runner` does), so the futures a task started would only go on
+/// while another job runs, and a client's exchange would wait forever. It is a node engine of one
+/// shard: for a test binary, [`install`] starts one that runs until the process ends (D4: one
+/// engine per process); the unit tests of this crate, which share one process with tests that
+/// need no engine or start their own, take turns instead ([`scoped`], [`exclusive`]).
 pub mod test_engine {
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
-    use teseladb::engine::core::future::make_ready_future;
-    use teseladb::engine::testing::test_runner::testing::global_test_runner;
+    use teseladb_io::engine::{EngineConfig, NodeEngine};
 
-    use super::{Class, Runner};
+    use super::{NodeRunner, START_ENGINE_MEMORY};
 
-    /// The test runner's reactor as a [`Runner`]: one shard, every class in its default group.
-    #[derive(Debug)]
-    pub struct TestEngine;
+    fn config() -> EngineConfig {
+        EngineConfig { shards: 1, memory: Some(START_ENGINE_MEMORY), ..EngineConfig::default() }
+    }
 
-    impl Runner for TestEngine {
-        fn post(&self, task: Box<dyn FnOnce() + Send>, _class: Class) -> bool {
-            let runner = global_test_runner();
-            // Runs `task` (which only starts its futures) and returns; the futures go on.
-            let posted = runner.run_sync(Box::new(move || {
-                task();
-                make_ready_future(())
-            }));
-            posted.is_ok() && !runner.reactor_failed()
+    static ENGINE: OnceLock<NodeEngine> = OnceLock::new();
+
+    /// The engine of the test process, started the first time.
+    ///
+    /// # Panics
+    ///
+    /// When it does not start (another engine runs in the process).
+    pub fn engine() -> &'static NodeEngine {
+        ENGINE.get_or_init(|| NodeEngine::start(&config()).expect("the test engine starts"))
+    }
+
+    /// Installs the engine of the test process as the runner, started the first time.
+    pub fn install() {
+        super::install(Arc::new(NodeRunner(engine().poster())));
+    }
+
+    /// The turn of the unit tests that depend on the process's engine or on what a node's
+    /// start-up takes from the whole process (its pending log lines).
+    #[cfg(test)]
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Waits for the turn of a unit test that starts its own engine, needs none to run, or
+    /// reads the process's pending log lines; the turn ends when the guard goes.
+    #[cfg(test)]
+    pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        TURN.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An engine of one shard installed as the runner for one unit test, in its turn; it stops
+    /// when the guard goes.
+    #[cfg(test)]
+    pub(crate) struct Scoped {
+        engine: Option<NodeEngine>,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(test)]
+    impl Scoped {
+        /// The engine.
+        pub(crate) fn engine(&self) -> &NodeEngine {
+            self.engine.as_ref().expect("the engine runs until the guard goes")
         }
     }
 
-    /// Starts the test runner's reactor (once per process) and installs it as the runner.
-    pub fn install() {
-        let args: Vec<String> = std::env::args().take(1).collect();
-        global_test_runner().start(&args);
-        super::install(Arc::new(TestEngine));
+    #[cfg(test)]
+    impl Drop for Scoped {
+        fn drop(&mut self) {
+            super::uninstall();
+            if let Some(e) = self.engine.take() {
+                e.stop();
+            }
+        }
+    }
+
+    /// Starts an engine for this unit test once it has its turn, and installs it as the runner.
+    #[cfg(test)]
+    pub(crate) fn scoped() -> Scoped {
+        let turn = exclusive();
+        let engine = NodeEngine::start(&config()).expect("the test engine starts");
+        super::install(Arc::new(NodeRunner(engine.poster())));
+        Scoped { engine: Some(engine), _turn: turn }
     }
 }

@@ -203,6 +203,8 @@ mod tests {
 
     #[test]
     fn a_renewal_rotates_both_sides_and_a_failure_changes_nothing() {
+        // In its turn: no engine runs in the process meanwhile.
+        let _turn = crate::outbound::test_engine::exclusive();
         let dir = std::env::temp_dir().join(format!("teseladb-certs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let params = pki::PkiParams { now: 1_800_000_000, node_names: names() };

@@ -786,6 +786,8 @@ mod tests {
 
     #[test]
     fn the_cli_reports_a_node_it_cannot_reach_and_a_folder_it_cannot_make() {
+        // Its exchanges run on an engine of its own, in its turn.
+        let _engine = crate::outbound::test_engine::scoped();
         let dir = Dir::new("cli");
         let file = dir.0.join("plain");
         std::fs::write(&file, b"").unwrap();

@@ -2146,6 +2146,8 @@ mod tests {
 
     #[test]
     fn run_reports_what_keeps_it_from_the_node() {
+        // Its exchanges run on an engine of its own, in its turn.
+        let _engine = crate::outbound::test_engine::scoped();
         let dir = std::env::temp_dir().join(format!("teseladb-admin-run-{}", std::process::id()));
         let tls = AdminCredentials {
             dbpath: dir.join("none"),
