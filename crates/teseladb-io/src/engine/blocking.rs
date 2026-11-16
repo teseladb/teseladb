@@ -25,6 +25,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use teseladb::engine::core::alien;
@@ -34,6 +35,7 @@ use teseladb::engine::core::file_types::OpenFlags;
 use teseladb::engine::core::future::{
     ExceptionPtr, Future, Promise, make_exception_future, make_ready_future,
 };
+use teseladb::engine::core::reactor::internal;
 use teseladb::engine::core::shard_id::this_shard_id;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 
@@ -118,8 +120,41 @@ struct Request {
     /// The shard that waits, and the instance whose queue reaches it.
     shard: u32,
     instance: *const alien::Instance,
+    /// Whether that shard's reactor still runs, and so whether `instance` is still alive.
+    live: Arc<ShardLive>,
     /// The shard's side, as `Rc::into_raw`: only the shard turns it back.
     waiter: *const RefCell<Waiter>,
+}
+
+/// Whether a shard's reactor still runs, shared with glibc's threads.
+///
+/// A lookup glibc has started cannot be cancelled, and its completion may come after the engine
+/// that asked stopped and freed its `alien` queues (and another engine may have taken their
+/// memory). The flag goes false at the end of the shard's reactor loop
+/// ([`internal::at_destroy`]), while the engine's `alien` instance still lives; glibc's thread
+/// posts a completion only while it holds the flag true, so the instance cannot go meanwhile.
+struct ShardLive(Mutex<bool>);
+
+thread_local! {
+    /// This shard's flag, made by its first lookup.
+    static LIVE: RefCell<Option<Arc<ShardLive>>> = const { RefCell::new(None) };
+}
+
+/// This shard's flag; the first call registers its clearing at the end of the reactor.
+fn shard_live() -> Arc<ShardLive> {
+    LIVE.with(|l| {
+        let mut l = l.borrow_mut();
+        let live = l.get_or_insert_with(|| {
+            let live = Arc::new(ShardLive(Mutex::new(true)));
+            let ended = Arc::clone(&live);
+            internal::at_destroy(move || {
+                *ended.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
+                LIVE.with(|l| l.borrow_mut().take());
+            });
+            live
+        });
+        Arc::clone(live)
+    })
 }
 
 /// A pointer handed from glibc's thread to the shard.
@@ -135,19 +170,38 @@ impl Posted {
     }
 }
 
-/// glibc's notification, on one of its threads: posts the completion to the shard.
+/// glibc's notification, on one of its threads: posts the completion to the shard, or frees the
+/// request when the shard's reactor ended (nobody waits for it any more).
 unsafe extern "C" fn on_resolved(value: *mut c_void) {
     let req = value.cast::<Request>();
     // SAFETY: `value` is the request given to getaddrinfo_a, alive until the shard frees it,
-    // which happens only after this posting; `shard` and `instance` do not change after the
-    // submission, and glibc's own lock orders the submission before this notification.
-    let (shard, instance) = unsafe { ((*req).shard, &*(*req).instance) };
+    // which happens only after this posting; `shard`, `instance` and `live` do not change after
+    // the submission, and glibc's own lock orders the submission before this notification.
+    let (shard, live) = unsafe { ((*req).shard, Arc::clone(&(*req).live)) };
+    let running = live.0.lock().unwrap_or_else(PoisonError::into_inner);
+    if !*running {
+        drop(running);
+        // SAFETY: the shard is gone, so nothing else reaches the request: it is freed here,
+        // with glibc's result, but not the shard's side (an `Rc` of the gone shard's thread,
+        // left as it is).
+        unsafe {
+            let req = Box::from_raw(req);
+            if !req.cb.ar_result.is_null() {
+                freeaddrinfo(req.cb.ar_result);
+            }
+        }
+        return;
+    }
+    // SAFETY: the flag is held true, so the shard's reactor has not ended and the engine's
+    // `alien` instance it was submitted through is alive until the flag is released.
+    let instance = unsafe { &*(*req).instance };
     let posted = Posted(req);
     alien::run_on(instance, shard, move || {
         // SAFETY: on the shard that made the request, which nothing freed yet (a request is
         // freed by its completion or by a cancellation that glibc confirmed, never both).
         unsafe { completed(posted.get()) }
     });
+    drop(running);
 }
 
 /// Frees `req` and its shard-side reference.
@@ -279,6 +333,7 @@ fn submit(name: CString, port: u16, waiter: &Rc<RefCell<Waiter>>) -> Result<(), 
         port,
         shard: this_shard_id(),
         instance: instance.cast_const(),
+        live: shard_live(),
         waiter: Rc::into_raw(Rc::clone(waiter)),
     }));
     // SAFETY: `req` was just boxed and is only reached through this pointer; the name and the

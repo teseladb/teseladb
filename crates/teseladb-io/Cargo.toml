@@ -50,6 +50,11 @@ harness = false
 name = "device_log"
 harness = false
 
+# Engines started and stopped one after the other in one process.
+[[test]]
+name = "engine_late_lookup"
+harness = false
+
 # TLS on the engine against the blocking implementation (023 FR-016): a program with its own main
 # that runs inside the engine; empty outside Linux.
 [[bench]]
