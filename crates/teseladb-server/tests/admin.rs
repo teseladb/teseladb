@@ -3,11 +3,33 @@
 //! client's address, `killOp` and `maxTimeMS` checked by the node.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_cluster_parameter_set_on_one_node_is_read_on_every_node",
+                a_cluster_parameter_set_on_one_node_is_read_on_every_node,
+            ),
+            (
+                "current_op_shows_the_running_command_and_kill_op_takes_numbers",
+                current_op_shows_the_running_command_and_kill_op_takes_numbers,
+            ),
+            (
+                "rotate_certificates_on_a_node_without_tls_has_nothing_to_load",
+                rotate_certificates_on_a_node_without_tls_has_nothing_to_load,
+            ),
+        ],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
 
 fn parameter(r: &Document) -> Option<Value> {
     let Some(Value::Array(list)) = r.get("clusterParameters") else { return None };
@@ -15,12 +37,11 @@ fn parameter(r: &Document) -> Option<Value> {
     p.get("readOperations").cloned()
 }
 
-#[test]
 fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let other = Node::start(config(seed), || Ok(MemDisk::new()), None).unwrap();
+    let other = teseladb_server::procs::start_self("node", &seed, None, &[]);
     assert!(other.wait_ready(READY));
     let mut a = Client::new(&first);
     let get = Document::new().with("getClusterParameter", "defaultMaxTimeMS");
@@ -44,11 +65,10 @@ fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
     // go to the range's leader.
     let r = b.run("db", Document::new().with("find", "c"));
     assert_eq!(batch(&r, "firstBatch").len(), 3, "{r:?}");
-    drop(other.stop());
-    drop(first.stop());
+    assert!(other.stop().success());
+    assert!(first.stop().success());
 }
 
-#[test]
 fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -73,7 +93,6 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
     drop(node.stop());
 }
 
-#[test]
 fn rotate_certificates_on_a_node_without_tls_has_nothing_to_load() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));

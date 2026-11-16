@@ -3,6 +3,8 @@
 //! protocol, and the requests without a credential on a node with authentication.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -17,6 +19,24 @@ use teseladb_rest::api::{AFTER_CLUSTER_TIME, OPERATION_TIME};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::procs::{NodeProc, start_self};
+
+fn main() {
+    procs::main(
+        &[
+            ("story_one_over_the_http_port", story_one_over_the_http_port),
+            (
+                "a_node_with_authentication_refuses_requests_without_a_credential",
+                a_node_with_authentication_refuses_requests_without_a_credential,
+            ),
+            (
+                "any_node_of_three_follows_a_cursor_another_opened",
+                any_node_of_three_follows_a_cursor_another_opened,
+            ),
+        ],
+        &[("plain", |a| http_config(plain_client(), a.join.clone()))],
+    );
+}
 
 fn send(addr: SocketAddr, req: Request) -> Response {
     let mut s = TcpStream::connect(addr).unwrap();
@@ -39,21 +59,27 @@ fn call(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, Docum
     (r.status, doc, r)
 }
 
-fn start_joining(client: ClientConfig, join: Vec<String>) -> Node<MemDisk> {
+/// A node with the HTTP port and the clients' port `client`.
+fn http_config(client: ClientConfig, join: Vec<String>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
         settings: Settings::default(),
     };
-    let base = config(join);
-    let cfg = NodeConfig { http: Some(http), client: Some(client), ..base };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    NodeConfig { http: Some(http), client: Some(client), ..config(join) }
+}
+
+fn start(client: ClientConfig) -> Node<MemDisk> {
+    let node = Node::start(http_config(client, Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
-fn start(client: ClientConfig) -> Node<MemDisk> {
-    start_joining(client, Vec::new())
+/// A node process of [`http_config`] with [`plain_client`], ready.
+fn start_process(join: &[String]) -> NodeProc {
+    let node = start_self("plain", join, None, &[]);
+    assert!(node.wait_ready(READY));
+    node
 }
 
 fn plain_client() -> ClientConfig {
@@ -66,7 +92,6 @@ fn cursor(d: &Document) -> Document {
 
 const C: &str = "/v1/databases/shop/collections/items";
 
-#[test]
 fn story_one_over_the_http_port() {
     let node = start(plain_client());
     let at = node.http_addrs()[0];
@@ -174,7 +199,6 @@ fn story_one_over_the_http_port() {
     drop(node.stop());
 }
 
-#[test]
 fn a_node_with_authentication_refuses_requests_without_a_credential() {
     let node = start(ClientConfig { auth: true, ..plain_client() });
     let at = node.http_addrs()[0];
@@ -188,13 +212,11 @@ fn a_node_with_authentication_refuses_requests_without_a_credential() {
     drop(node.stop());
 }
 
-#[test]
 fn any_node_of_three_follows_a_cursor_another_opened() {
-    let first = start(plain_client());
+    let first = start_process(&[]);
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> =
-        (0..2).map(|_| start_joining(plain_client(), seed.clone())).collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start_process(&seed)).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     let at: Vec<SocketAddr> = nodes.iter().map(|n| n.http_addrs()[0]).collect();
     let items: Vec<String> = (0..30).map(|k| format!("{{\"_id\":{k}}}")).collect();
     let body = format!("{{\"documents\":[{}]}}", items.join(","));
@@ -228,6 +250,6 @@ fn any_node_of_three_follows_a_cursor_another_opened() {
     assert_eq!(call(at[1], "DELETE", &next, "").0, 200);
     let (st, d, _) = call(at[2], "GET", &next, "");
     assert_eq!((st, d.get("code")), (404, Some(&Value::Int32(43))), "{d:?}");
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }

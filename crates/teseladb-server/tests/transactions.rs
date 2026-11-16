@@ -5,11 +5,58 @@
 //! gives.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
+use teseladb_server::procs::{NodeProc, start_self};
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_transaction_is_seen_whole_and_only_once_it_commits",
+                a_transaction_is_seen_whole_and_only_once_it_commits,
+            ),
+            (
+                "an_aborted_transaction_leaves_nothing_and_the_session_rules_hold",
+                an_aborted_transaction_leaves_nothing_and_the_session_rules_hold,
+            ),
+            (
+                "two_transactions_that_write_one_document_conflict",
+                two_transactions_that_write_one_document_conflict,
+            ),
+            (
+                "an_idle_transaction_keeps_beating_and_commits",
+                an_idle_transaction_keeps_beating_and_commits,
+            ),
+            (
+                "a_collection_created_in_a_transaction_shows_with_its_commit",
+                a_collection_created_in_a_transaction_shows_with_its_commit,
+            ),
+            (
+                "a_snapshot_read_sees_the_documents_at_its_cluster_time",
+                a_snapshot_read_sees_the_documents_at_its_cluster_time,
+            ),
+            (
+                "a_read_after_a_write_on_another_node_sees_it",
+                a_read_after_a_write_on_another_node_sees_it,
+            ),
+            (
+                "a_document_whose_index_entries_pass_one_entry_is_written_in_parts",
+                a_document_whose_index_entries_pass_one_entry_is_written_in_parts,
+            ),
+            (
+                "a_commit_on_another_node_recovers_the_decision_from_the_token",
+                a_commit_on_another_node_recovers_the_decision_from_the_token,
+            ),
+        ],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
 
 const DB: &str = "app";
 
@@ -67,7 +114,13 @@ fn node() -> Node<MemDisk> {
     node
 }
 
-#[test]
+/// A node process of [`config`] joining `join`, ready.
+fn node_process(join: &[String]) -> NodeProc {
+    let node = start_self("node", join, None, &[]);
+    assert!(node.wait_ready(READY));
+    node
+}
+
 fn a_transaction_is_seen_whole_and_only_once_it_commits() {
     let node = node();
     let mut c = Client::new(&node);
@@ -106,7 +159,6 @@ fn a_transaction_is_seen_whole_and_only_once_it_commits() {
     drop(node.stop());
 }
 
-#[test]
 fn an_aborted_transaction_leaves_nothing_and_the_session_rules_hold() {
     let node = node();
     let mut c = Client::new(&node);
@@ -138,7 +190,6 @@ fn an_aborted_transaction_leaves_nothing_and_the_session_rules_hold() {
     drop(node.stop());
 }
 
-#[test]
 fn two_transactions_that_write_one_document_conflict() {
     let node = node();
     let mut c = Client::new(&node);
@@ -159,7 +210,6 @@ fn two_transactions_that_write_one_document_conflict() {
 
 /// Between its statements a transaction keeps its heartbeat (008 FR-007): idle for longer than the
 /// five seconds after which the reaper aborts an abandoned one, it still commits.
-#[test]
 fn an_idle_transaction_keeps_beating_and_commits() {
     let node = node();
     let mut c = Client::new(&node);
@@ -182,7 +232,6 @@ fn listed(c: &mut Client, name: &str) -> usize {
 /// A collection a transaction creates on a node (008 FR-014, T019): no other client sees it
 /// until the commit, which gives it its name with the transaction's documents; an abort leaves
 /// nothing behind.
-#[test]
 fn a_collection_created_in_a_transaction_shows_with_its_commit() {
     let node = node();
     let mut c = Client::new(&node);
@@ -211,7 +260,6 @@ fn a_collection_created_in_a_transaction_shows_with_its_commit() {
 
 /// A `snapshot` read at an earlier `atClusterTime` sees the documents as they were then, and its
 /// cursor gives that time (008 FR-012, T022).
-#[test]
 fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
     let node = node();
     let mut c = Client::new(&node);
@@ -239,13 +287,9 @@ fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
 /// A read on another node with the `afterClusterTime` of a write, and the `$clusterTime` a driver
 /// sends with it, sees the write (008 FR-013, T020, T021): the second node serves it at its
 /// cluster time, at or above that time.
-#[test]
 fn a_read_after_a_write_on_another_node_sees_it() {
-    let first = node();
-    let second =
-        Node::start(config(vec![first.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-            .unwrap();
-    assert!(second.wait_ready(READY));
+    let first = node_process(&[]);
+    let second = node_process(&[first.peer_addr().to_string()]);
     let mut a = Client::new(&first);
     let mut b = Client::new(&second);
     for i in 0..5 {
@@ -264,14 +308,13 @@ fn a_read_after_a_write_on_another_node_sees_it() {
         let rows = find_all(&mut b, read);
         assert_eq!(rows.len(), 1, "write {i} unseen on the other node: {rows:?}");
     }
-    drop(second.stop());
-    drop(first.stop());
+    assert!(second.stop().success());
+    assert!(first.stop().success());
 }
 
 /// A document whose write with its index entries passes a 64 MiB Raft entry (008 T036, FR-006;
 /// 005 FR-023): the range refuses the single entry with `TooLarge`, and the node writes it again
 /// as an internal transaction whose intents go in several `PutIntents`, all committed at once.
-#[test]
 fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
     let node = node();
     let mut c = Client::new(&node);
@@ -319,13 +362,9 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
 /// one answers `ok`, also when it committed in one phase and its decision is in its range (FR-022);
 /// an open one is aborted and its own commit on its node fails after, and a record
 /// whose range cannot answer fails at the command's `maxTimeMS`.
-#[test]
 fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
-    let first = node();
-    let second =
-        Node::start(config(vec![first.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-            .unwrap();
-    assert!(second.wait_ready(READY));
+    let first = node_process(&[]);
+    let second = node_process(&[first.peer_addr().to_string()]);
     let (mut a, mut b) = (Client::new(&first), Client::new(&second));
     let r = a.run(DB, stmt(insert(1), 60, 1, true));
     assert!(ok(&r), "{r:?}");
@@ -354,9 +393,9 @@ fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
     assert_eq!(find_all(&mut b, find()).len(), 1, "2 never wrote");
     // The first node is gone: the question waits until the command's limit.
     assert!(ok(&a.run(DB, stmt(insert(3), 62, 1, true))));
-    drop(first.stop());
+    assert!(first.stop().success());
     let limited = with(end("commitTransaction", 62, 1), &token).with("maxTimeMS", 2_000);
     let r = b.run("admin", limited);
     assert_eq!(code(&r), Some(&Value::Int32(50)), "{r:?}");
-    drop(second.stop());
+    assert!(second.stop().success());
 }

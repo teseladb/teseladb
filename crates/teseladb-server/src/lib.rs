@@ -1,6 +1,6 @@
 //! The `teseladb` binary as a library (specification 001, FR-017 and FR-018): command line,
-//! logging, a core's logic over the I/O runtime, node start-up and the in-process development
-//! cluster. `main.rs` only calls [`run`].
+//! logging, a core's logic over the I/O runtime, node start-up, and the development cluster and
+//! the tests' nodes as processes of their own ([`procs`]). `main.rs` only calls [`run`].
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
@@ -68,6 +68,7 @@ pub mod ocsp_staple;
 pub mod oidc_client;
 pub mod pki;
 pub mod pressure;
+pub mod procs;
 pub mod pushed;
 pub mod ranges;
 pub mod relocations;
@@ -182,7 +183,14 @@ pub fn run(
             let _ = out.write_all(version_text().as_bytes());
             0
         }
-        Command::Dev(o) => dev::run(&o, out, err, stop),
+        Command::Dev(o) => match std::env::current_exe() {
+            Ok(me) => dev::run(&me, &o, out, err, stop),
+            Err(e) => {
+                let _ = writeln!(err, "teseladb: the path of this program: {e}");
+                1
+            }
+        },
+        Command::DevMember(m) => dev::member(&m, out, stop),
         Command::Admin(o) => admin::run(&o, out, err),
         Command::Mcp(o) => {
             let key = std::env::var(mcp_stdio::API_KEY_VAR).ok().filter(|k| !k.is_empty());

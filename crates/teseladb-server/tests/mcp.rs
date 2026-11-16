@@ -3,6 +3,8 @@
 //! read-only default that hides and refuses the tools that write.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -14,26 +16,56 @@ use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
 use teseladb_mcp::server::SESSION_HEADER;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::NodeProc;
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_session_of_one_node_works_through_the_others",
+                a_session_of_one_node_works_through_the_others,
+            ),
+            (
+                "every_tool_in_read_only_mode_writes_nothing",
+                every_tool_in_read_only_mode_writes_nothing,
+            ),
+            (
+                "the_session_stream_announces_a_change_of_the_tools",
+                the_session_stream_announces_a_change_of_the_tools,
+            ),
+            (
+                "the_ports_routes_answer_what_they_do_not_serve",
+                the_ports_routes_answer_what_they_do_not_serve,
+            ),
+        ],
+        &[("http", |a| {
+            http_config(a.join.clone(), a.param("ip").and_then(|i| i.parse().ok()).expect("ip="))
+        })],
+    );
+}
+
+fn start(join: Vec<String>) -> NodeProc {
     start_on(join, [127, 0, 0, 1])
 }
 
 /// [`start`], with the HTTP port on `ip`.
-fn start_on(join: Vec<String>, ip: [u8; 4]) -> Node<MemDisk> {
+fn start_on(join: Vec<String>, ip: [u8; 4]) -> NodeProc {
+    let ip = std::net::Ipv4Addr::from(ip);
+    let node = teseladb_server::procs::start_self("http", &join, None, &[&format!("ip={ip}")]);
+    assert!(node.wait_ready(READY));
+    node
+}
+
+/// A node with its HTTP port on `ip`.
+fn http_config(join: Vec<String>, ip: std::net::Ipv4Addr) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from((ip, 0))],
         tls: None,
         settings: Settings::default(),
     };
-    let node =
-        Node::start(NodeConfig { http: Some(http), ..config(join) }, || Ok(MemDisk::new()), None)
-            .unwrap();
-    assert!(node.wait_ready(READY));
-    node
+    NodeConfig { http: Some(http), ..config(join) }
 }
 
 fn post(at: SocketAddr, body: &str, session: Option<&str>) -> (Response, Value) {
@@ -73,11 +105,10 @@ fn structured(v: &Value) -> &Value {
     v.get("result").and_then(|r| r.get("structuredContent")).unwrap_or_else(|| panic!("{v:?}"))
 }
 
-#[test]
 fn a_session_of_one_node_works_through_the_others() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> =
         std::iter::once(&first).chain(others.iter()).map(|n| n.http_addrs()[0]).collect();
     let mut wire = Client::new(&first);
@@ -126,8 +157,8 @@ fn a_session_of_one_node_works_through_the_others() {
     let (r, v) = post(at[0], &body, None);
     assert_eq!(r.status, 200, "{v:?}");
     assert_eq!(structured(&v).get("count").and_then(Value::as_i64), Some(6));
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }
 
 /// A value for argument `name` of schema `schema`, drawn with `r`.
@@ -184,7 +215,6 @@ fn state(wire: &mut Client) -> Vec<Bson> {
 
 /// SC-004 (019 T028, FR-023): every tool called with arguments drawn from its schema, under the
 /// default `mcpOptions` (`readOnly`), leaves the data as it was.
-#[test]
 fn every_tool_in_read_only_mode_writes_nothing() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -227,12 +257,11 @@ fn every_tool_in_read_only_mode_writes_nothing() {
     }
     assert_eq!(calls, 8 * 25);
     assert_eq!(state(&mut wire), before);
-    drop(node.stop());
+    assert!(node.stop().success());
 }
 
 /// `listChanged` (019 T028, FR-023): the server's stream of a session (`GET /mcp`) tells the
 /// client when `mcpOptions` changes the tools it sees.
-#[test]
 fn the_session_stream_announces_a_change_of_the_tools() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -257,7 +286,7 @@ fn the_session_stream_announces_a_change_of_the_tools() {
         seen.extend_from_slice(&buf[..n]);
     }
     assert!(String::from_utf8_lossy(&seen).starts_with("HTTP/1.1 200"));
-    drop(node.stop());
+    assert!(node.stop().success());
 }
 
 /// What the port's routes do with requests they do not serve, on a node without credentials
@@ -266,7 +295,6 @@ fn the_session_stream_announces_a_change_of_the_tools() {
 /// `/v1` and `/mcp` are `404`; batches and bodies that are not text are refused; a call with a
 /// `progressToken` that fails ends its stream with the error; and a session stream the client
 /// drops ends.
-#[test]
 fn the_ports_routes_answer_what_they_do_not_serve() {
     let node = start_on(Vec::new(), [0, 0, 0, 0]);
     let at = SocketAddr::from(([127, 0, 0, 1], node.http_addrs()[0].port()));
@@ -316,5 +344,5 @@ fn the_ports_routes_answer_what_they_do_not_serve() {
     assert!(s.read(&mut buf).unwrap() > 0);
     drop(s);
     std::thread::sleep(Duration::from_millis(2_500));
-    drop(node.stop());
+    assert!(node.stop().success());
 }

@@ -5,6 +5,8 @@
 //! already acknowledged.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::time::Duration;
 
@@ -14,8 +16,30 @@ use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::dev;
 use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 
 /// Writes spaced further apart than the one second a stream's read covers at a time.
+fn main() {
+    procs::main(
+        &[
+            (
+                "nodes_on_a_given_port_announce_their_clients_address",
+                nodes_on_a_given_port_announce_their_clients_address,
+            ),
+            (
+                "a_find_reads_the_whole_window_and_ends_at_the_last_write",
+                a_find_reads_the_whole_window_and_ends_at_the_last_write,
+            ),
+            ("the_newest_entries_come_first", the_newest_entries_come_first),
+            (
+                "a_copy_with_the_oplog_replays_into_the_same_data",
+                a_copy_with_the_oplog_replays_into_the_same_data,
+            ),
+        ],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
+
 const SPACING: Duration = Duration::from_millis(1_200);
 
 fn free_port() -> u16 {
@@ -58,11 +82,11 @@ fn inserts_of(entries: &[Document], ns: &str) -> usize {
 
 /// With a clients' port given, each node announces it as its host (`config.shards`), so the
 /// development cluster can present itself as a replica set (018 FR-007).
-#[test]
 fn nodes_on_a_given_port_announce_their_clients_address() {
     let port = free_port();
     let o = DevOpts { nodes: 1, cores: 1, port, test_commands: false };
-    let nodes = dev::start(&o, Some(5)).expect("dev cluster");
+    let nodes = dev::start(std::path::Path::new(env!("CARGO_BIN_EXE_teseladb")), &o, Some(5))
+        .expect("dev cluster");
     let mut c = Client::new(&nodes[0]);
     let host = format!("127.0.0.1:{port}");
     let shards = until("the node in config.shards", || {
@@ -84,12 +108,11 @@ fn nodes_on_a_given_port_announce_their_clients_address() {
         (h.get("setName") == Some(&Value::from("rs0"))).then_some(h)
     });
     assert_eq!(hello.get("hosts"), Some(&Value::Array(vec![Value::from(host.as_str())])));
-    nodes.into_iter().for_each(|n| drop(n.stop()));
+    nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
 /// Entries written seconds apart all come back from one `find`, with or without a lower bound
 /// on `ts` below them, and the newest entry is the last acknowledged write.
-#[test]
 fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -136,7 +159,6 @@ fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
 
 /// `$natural: -1` with a limit reads back from the newest entries: the newest two of writes
 /// seconds apart, with a skip the ones before them, and with a filter the newest it matches.
-#[test]
 fn the_newest_entries_come_first() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -180,7 +202,7 @@ const COPIED: i32 = 300;
 
 /// The writes a client makes while the copy runs: updates, inserts, deletes, replacements and a
 /// transaction that creates a collection, as in the measurement with the real tools.
-fn write_while_copying(node: &Node<MemDisk>) {
+fn write_while_copying(node: &NodeProc) {
     let mut c = Client::new(node);
     let end = std::time::Instant::now() + WRITING;
     let mut i = 0;
@@ -284,10 +306,9 @@ fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
 /// each of them given to `applyOps` on the second cluster. The second cluster ends with the first
 /// one's data at the last entry. The real tools in both directions with the reference server 9.0.4
 /// run in `tests/compat/tools/run.sh`.
-#[test]
 fn a_copy_with_the_oplog_replays_into_the_same_data() {
-    let source = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
-    let target = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let source = teseladb_server::procs::start_self("node", &[], None, &[]);
+    let target = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(source.wait_ready(READY) && target.wait_ready(READY));
     let mut s = Client::new(&source);
     let mut t = Client::new(&target);
@@ -344,6 +365,6 @@ fn a_copy_with_the_oplog_replays_into_the_same_data() {
             );
         }
     });
-    drop(source.stop());
-    drop(target.stop());
+    assert!(source.stop().success());
+    assert!(target.stop().success());
 }

@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-server"
 version = "0.1.13"
-description = "The teseladb binary: command line, logging, node start-up with Group 0 on core 0 and the data range over its core's LSM, the inter-node port, joins, snapshot transfers and the in-process development cluster."
+description = "The teseladb binary: command line, logging, node start-up with Group 0 on core 0 and the data range over its core's LSM, the inter-node port, joins, snapshot transfers and the development cluster, each of its nodes a process of its own."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
@@ -19,6 +19,120 @@ doc = false
 # Its own `main`: the same binary is the test and, in node mode, the cluster's processes.
 [[test]]
 name = "cluster_local"
+harness = false
+
+# Their own `main` (tests/common/procs.rs): every node of a test runs in a process of its own, one
+# process per node (D4), and the binary is that process in node mode.
+[[test]]
+name = "admin"
+harness = false
+
+[[test]]
+name = "admin_port"
+harness = false
+
+[[test]]
+name = "api_keys"
+harness = false
+
+[[test]]
+name = "backup"
+harness = false
+
+[[test]]
+name = "concurrent_joins"
+harness = false
+
+[[test]]
+name = "crud"
+harness = false
+
+[[test]]
+name = "fresh_cluster"
+harness = false
+
+[[test]]
+name = "oplog_tools"
+harness = false
+
+[[test]]
+name = "tenant_access"
+harness = false
+
+[[test]]
+name = "tenant_rate_limits"
+harness = false
+
+[[test]]
+name = "tenant_storage_quota"
+harness = false
+
+[[test]]
+name = "tenant_suspend"
+harness = false
+
+[[test]]
+name = "tenant_usage"
+harness = false
+
+[[test]]
+name = "enroll"
+harness = false
+
+[[test]]
+name = "mcp"
+harness = false
+
+[[test]]
+name = "large_history"
+harness = false
+
+[[test]]
+name = "node"
+harness = false
+
+[[test]]
+name = "replicas"
+harness = false
+
+[[test]]
+name = "rest"
+harness = false
+
+[[test]]
+name = "rest_idempotency"
+harness = false
+
+[[test]]
+name = "rollback"
+harness = false
+
+[[test]]
+name = "search"
+harness = false
+
+[[test]]
+name = "sessions"
+harness = false
+
+[[test]]
+name = "seed_failover"
+harness = false
+
+[[test]]
+name = "split"
+harness = false
+
+[[test]]
+name = "transactions"
+harness = false
+
+[[test]]
+name = "work_on_leaders"
+harness = false
+
+[[test]]
+name = "write_block"
 harness = false
 
 [dependencies]

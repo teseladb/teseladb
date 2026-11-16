@@ -2,13 +2,23 @@
 //! time, so some joins wait and try again; all of them end with distinct identifiers and Group 0
 //! with five voters and the rest learners.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::logic::GROUP0_MAX_VOTERS;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::NodeProc;
 use teseladb_types::NodeId;
+
+fn main() {
+    procs::main(
+        &[("six_nodes_joining_at_once_all_get_in", six_nodes_joining_at_once_all_get_in)],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
 
 const JOINERS: usize = 6;
 
@@ -21,19 +31,17 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
-#[test]
 fn six_nodes_joining_at_once_all_get_in() {
-    let founder = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let founder = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(founder.wait_ready(Duration::from_secs(10)));
     let seed = founder.peer_addr().to_string();
     let joiners: Vec<_> = (0..JOINERS)
         .map(|_| {
             let seeds = vec![seed.clone()];
-            thread::spawn(move || Node::start(config(seeds), || Ok(MemDisk::new()), None))
+            thread::spawn(move || teseladb_server::procs::spawn_self("node", &seeds, None, &[]))
         })
         .collect();
-    let nodes: Vec<Node<MemDisk>> =
-        joiners.into_iter().map(|j| j.join().unwrap().unwrap()).collect();
+    let nodes: Vec<NodeProc> = joiners.into_iter().map(|j| j.join().unwrap().unwrap()).collect();
     let mut ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
     ids.sort_unstable();
     ids.dedup();

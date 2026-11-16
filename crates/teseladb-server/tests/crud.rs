@@ -4,6 +4,8 @@
 //! as forwarded requests.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::time::Duration;
 
@@ -12,9 +14,92 @@ use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
 use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 use teseladb_wire::commands::Timeouts;
 
-#[test]
+fn main() {
+    procs::main(
+        &[
+            ("a_single_node_runs_the_crud_commands", a_single_node_runs_the_crud_commands),
+            (
+                "the_node_reaps_idle_cursors_and_expired_sessions",
+                the_node_reaps_idle_cursors_and_expired_sessions,
+            ),
+            (
+                "every_node_of_a_cluster_takes_the_commands",
+                every_node_of_a_cluster_takes_the_commands,
+            ),
+            (
+                "an_undecodable_mutation_is_refused_by_the_range",
+                an_undecodable_mutation_is_refused_by_the_range,
+            ),
+            (
+                "a_request_past_its_deadline_is_refused_by_the_range",
+                a_request_past_its_deadline_is_refused_by_the_range,
+            ),
+            (
+                "concurrent_updates_of_one_document_are_both_applied",
+                concurrent_updates_of_one_document_are_both_applied,
+            ),
+            (
+                "writes_that_match_nothing_in_an_empty_collection_answer_at_once",
+                writes_that_match_nothing_in_an_empty_collection_answer_at_once,
+            ),
+            (
+                "a_command_that_waits_does_not_hold_up_the_other_connections",
+                a_command_that_waits_does_not_hold_up_the_other_connections,
+            ),
+            (
+                "a_plain_write_waits_for_the_transaction_that_holds_its_document",
+                a_plain_write_waits_for_the_transaction_that_holds_its_document,
+            ),
+            (
+                "a_plain_write_resolves_the_intent_on_the_index_entry_it_read",
+                a_plain_write_resolves_the_intent_on_the_index_entry_it_read,
+            ),
+            (
+                "an_abandoned_transaction_is_aborted_and_its_intents_resolved",
+                an_abandoned_transaction_is_aborted_and_its_intents_resolved,
+            ),
+            (
+                "a_read_pushes_a_live_transaction_and_reads_below_its_intent",
+                a_read_pushes_a_live_transaction_and_reads_below_its_intent,
+            ),
+            (
+                "a_unique_insert_waits_for_a_transaction_that_aborts_and_goes_on",
+                a_unique_insert_waits_for_a_transaction_that_aborts_and_goes_on,
+            ),
+            (
+                "a_unique_insert_waits_for_a_transaction_that_commits_and_is_a_duplicate",
+                a_unique_insert_waits_for_a_transaction_that_commits_and_is_a_duplicate,
+            ),
+            (
+                "concurrent_unique_inserts_from_every_node_keep_one_document_per_value",
+                concurrent_unique_inserts_from_every_node_keep_one_document_per_value,
+            ),
+            (
+                "an_aggregation_in_memory_stops_at_its_max_time_ms",
+                an_aggregation_in_memory_stops_at_its_max_time_ms,
+            ),
+            (
+                "a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others",
+                a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others,
+            ),
+            (
+                "readers_that_meet_a_pending_intent_write_nothing_to_the_range",
+                readers_that_meet_a_pending_intent_write_nothing_to_the_range,
+            ),
+        ],
+        &[
+            ("node", |a| config(a.join.clone())),
+            ("one_core", |a| teseladb_server::node::NodeConfig {
+                cores: Some(1),
+                ..config(a.join.clone())
+            }),
+        ],
+    );
+}
+
 fn a_single_node_runs_the_crud_commands() {
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
     assert!(node.wait_ready(READY));
@@ -71,7 +156,6 @@ fn cursor_of(r: &Document) -> i64 {
     *id
 }
 
-#[test]
 fn the_node_reaps_idle_cursors_and_expired_sessions() {
     let mut cfg = config(Vec::new());
     if let Some(c) = cfg.client.as_mut() {
@@ -99,15 +183,13 @@ fn the_node_reaps_idle_cursors_and_expired_sessions() {
     drop(node.stop());
 }
 
-#[test]
 fn every_node_of_a_cluster_takes_the_commands() {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }
@@ -128,11 +210,10 @@ fn every_node_of_a_cluster_takes_the_commands() {
         let r = c.run("db", Document::new().with("count", "c"));
         assert_eq!(r.get("n"), Some(&Value::Int32(20)), "{r:?}");
     }
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }
 
-#[test]
 fn an_undecodable_mutation_is_refused_by_the_range() {
     use teseladb_meta::bootstrap::DATA_RANGE;
     use teseladb_range::ack::{W, WriteConcern};
@@ -162,7 +243,6 @@ fn an_undecodable_mutation_is_refused_by_the_range() {
 /// A write or a transaction's request that reaches the range's leader after its deadline is not
 /// evaluated (009 FR-006): the operation that sent it may have ended and released its read of the
 /// indexes, so an index change may already count on no write with the old list.
-#[test]
 fn a_request_past_its_deadline_is_refused_by_the_range() {
     use teseladb_meta::bootstrap::DATA_RANGE;
     use teseladb_range::ack::{W, WriteConcern};
@@ -215,7 +295,6 @@ fn a_request_past_its_deadline_is_refused_by_the_range() {
 
 /// Two clients that increment the same document at once (006 T023, FR-014): each update is
 /// evaluated by the range's leader on the document it holds, so none is lost.
-#[test]
 fn concurrent_updates_of_one_document_are_both_applied() {
     const EACH: i32 = 100;
     let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
@@ -251,7 +330,6 @@ fn concurrent_updates_of_one_document_are_both_applied() {
     drop(node.stop());
 }
 
-#[test]
 fn writes_that_match_nothing_in_an_empty_collection_answer_at_once() {
     // A delete, update or `findAndModify` without candidates used to send a write without keys,
     // which no range holds: it waited for the 30 s request deadline and failed with 89.
@@ -289,23 +367,19 @@ fn writes_that_match_nothing_in_an_empty_collection_answer_at_once() {
     drop(node.stop());
 }
 
-#[test]
 fn a_command_that_waits_does_not_hold_up_the_other_connections() {
     // One core, so one client worker serves every connection of the node. A catalog change that
     // cannot reach a majority of Group 0 waits for its `maxTimeMS`; meanwhile another connection
     // of the same worker gets its `ping` and `hello` answered.
-    let one_core =
-        |join: Vec<String>| teseladb_server::node::NodeConfig { cores: Some(1), ..config(join) };
-    let first = Node::start(one_core(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("one_core", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(one_core(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("one_core", &seed, None, &[])).collect();
     for n in &others {
         assert!(n.wait_ready(READY));
     }
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
     let mut slow = Client::new(&first);
     let create = Document::new().with("create", "d").with("maxTimeMS", Value::Int32(4000));
     let started = std::time::Instant::now();
@@ -321,13 +395,12 @@ fn a_command_that_waits_does_not_hold_up_the_other_connections() {
     let r = slow.receive();
     assert!(!ok(&r), "{r:?}");
     assert!(started.elapsed() >= Duration::from_secs(3), "the change did not wait: {r:?}");
-    drop(first.stop());
+    assert!(first.stop().success());
 }
 
 /// A write outside a transaction that finds a transaction's intent (008 T032, FR-002) waits for
 /// its owner, as the reference server 9.0 does: with `maxTimeMS` it ends with `MaxTimeMSExpired`
 /// (50) in `writeErrors`, and once the owner is resolved the same update goes through.
-#[test]
 fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
     use teseladb_meta::bootstrap::DATA_RANGE;
     use teseladb_range::host::TxnOp;
@@ -410,7 +483,6 @@ fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
 /// it. Here the intent belongs to an aborted transaction, so the insert goes on at once and meets
 /// the entry of the document that holds the value: `DuplicateKey` (11000), never a wait until
 /// `maxTimeMS`.
-#[test]
 fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
     use teseladb_meta::bootstrap::DATA_RANGE;
     use teseladb_range::host::TxnOp;
@@ -490,7 +562,6 @@ fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
 /// The reaper of abandoned transactions (008 FR-007, T011): a transaction whose coordinator died
 /// (its record pending, with no heartbeat for more than five seconds) is aborted by the node that
 /// leads its record's range, and its intents are resolved, so a plain write no longer waits.
-#[test]
 fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
     use std::time::Instant;
     use teseladb_hlc::Hlc;
@@ -560,7 +631,6 @@ fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
 /// A read that meets the intent of a live transaction (008 FR-003, T013) does not wait: it pushes
 /// the transaction above its mark and reads the version below the intent, as a read outside a
 /// transaction in the reference server 9.0 sees the last committed document.
-#[test]
 fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     use std::time::Instant;
     use teseladb_hlc::Hlc;
@@ -720,13 +790,11 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
     r
 }
 
-#[test]
 fn a_unique_insert_waits_for_a_transaction_that_aborts_and_goes_on() {
     let r = insert_after_pending_unique_entry(false);
     assert_eq!((r.get("n"), r.get("writeErrors")), (Some(&Value::Int32(1)), None), "{r:?}");
 }
 
-#[test]
 fn a_unique_insert_waits_for_a_transaction_that_commits_and_is_a_duplicate() {
     let r = insert_after_pending_unique_entry(true);
     let Some(Value::Array(errors)) = r.get("writeErrors") else { panic!("{r:?}") };
@@ -736,16 +804,14 @@ fn a_unique_insert_waits_for_a_transaction_that_commits_and_is_a_duplicate() {
 
 /// Inserts of the same values of a unique index from every node of a cluster at once (009 FR-004,
 /// T009): each value ends in one document, and `null` and a missing field are one value.
-#[test]
 fn concurrent_unique_inserts_from_every_node_keep_one_document_per_value() {
     const VALUES: i32 = 15;
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }
@@ -797,15 +863,14 @@ fn concurrent_unique_inserts_from_every_node_keep_one_document_per_value() {
     assert_eq!(inserted.iter().sum::<i32>(), VALUES + 1, "{inserted:?}");
     let r = c.run("uniq", Document::new().with("count", "c"));
     assert_eq!(r.get("n"), Some(&Value::Int32(VALUES + 1)), "{r:?}");
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }
 
 /// An aggregation that works in memory stops at its `maxTimeMS` (006 FR-012): a `$lookup` of
 /// every document with every other reads its collection once, and then it and the `$unwind` after
 /// it spread a million pairs without reading again, which ran past the limit before the stages
 /// asked the operation whether to stop.
-#[test]
 fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
     const DOCUMENTS: i32 = 1_000;
     const MAX_TIME_MS: i32 = 50;
@@ -857,19 +922,17 @@ fn users_of(r: &Document) -> usize {
     }
 }
 
-#[test]
 fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }
-    let mut clients: Vec<Client> = nodes.iter().map(|n| Client::new(n)).collect();
+    let mut clients: Vec<Client> = nodes.iter().map(Client::new).collect();
     for round in 0..PRINCIPAL_ROUNDS {
         let writer = round % clients.len();
         let role = format!("r{round}");
@@ -897,14 +960,13 @@ fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
             assert_eq!(users_of(&r), 1, "round {round}, node {i}: {r:?}");
         }
     }
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }
 
 /// Readers that meet a live transaction's intent push it by reading its record (008 T042, T043):
 /// they all read the version below the intent and the range's log does not grow. Before, each
 /// push was a Raft proposal that raised the record's `min_commit_ts`.
-#[test]
 fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
     use teseladb_meta::bootstrap::DATA_RANGE;
     use teseladb_range::host::TxnOp;

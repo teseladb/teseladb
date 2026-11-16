@@ -4,6 +4,8 @@
 //! the default tenant still works in it with `$tenant`, and after `resume` its users sign in again.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 mod secured;
 
 use std::io::Read;
@@ -12,10 +14,19 @@ use std::time::{Duration, Instant};
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 
 /// The second within which a suspended tenant's connections close (FR-034).
+fn main() {
+    procs::main(
+        &[(
+            "a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_resume",
+            a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_resume,
+        )],
+        &[("secured", |a| secured::config(a.join.clone()))],
+    );
+}
+
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
 fn code(r: &Document) -> Option<i32> {
@@ -45,12 +56,11 @@ fn open_cursors(root: &mut Client) -> i64 {
     }
 }
 
-#[test]
 fn a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_resume() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start(seed.clone())).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     admin(&first, &["tenant", "create", "acme"]);
     let mut root = Client::new(&first);
     assert!(ok(&login(&mut root, "root", ROOT_PASSWORD)));

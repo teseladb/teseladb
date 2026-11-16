@@ -1,6 +1,6 @@
 //! `teseladb_server::run` end to end without a separate process (001 FR-017): `start` with a log
-//! file in JSON, replaced or appended, the development cluster, and every error with its exit
-//! code (1 execution, 2 usage).
+//! file in JSON, replaced or appended, and every error with its exit code (1 execution, 2
+//! usage); the development cluster, whose nodes are processes of the binary, as a process too.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,12 +125,28 @@ fn version_help_and_the_development_cluster() {
     assert_eq!(run_args(&["--version"]), (0, version_text(), String::new()));
     assert_eq!(version_text(), format!("teseladb {}\n", teseladb_server::VERSION));
     assert_eq!(run_args(&["--help"]), (0, (*USAGE).to_owned(), String::new()));
-    // On ports the system chooses: a node of this machine may already hold the default ones.
-    let (code, out, _) = run_args(&["dev", "--nodes", "2", "--port", "0"]);
-    assert_eq!(code, 0);
-    let ready: Vec<&str> = out.lines().collect();
-    assert_eq!(ready.len(), 2, "{out}");
+    // On ports the system chooses: a node of this machine may already hold the default ones. The
+    // development cluster's nodes are processes of the binary (D4), so it runs as one: it prints
+    // a ready line per node and ends with 0 on `SIGTERM`.
+    let mut dev = std::process::Command::new(env!("CARGO_BIN_EXE_teseladb"))
+        .args(["dev", "--nodes", "2", "--port", "0"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(dev.stdout.take().unwrap());
+    let mut ready = Vec::new();
+    for _ in 0..2 {
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+        ready.push(line);
+    }
     assert!(ready[0].starts_with("ready node_id=1 ") && ready[1].starts_with("ready node_id=2 "));
+    teseladb_sys::signal::send_stop(dev.id(), teseladb_sys::signal::Stop::Terminate).unwrap();
+    assert_eq!(dev.wait().unwrap().code(), Some(0));
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+    assert!(rest.is_empty(), "{rest}");
 }
 
 #[test]

@@ -4,6 +4,8 @@
 //! (`getShardVersion`) instead of the part it has filled.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,12 +13,31 @@ use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
-use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 
 /// Well inside the 30 s of a command: a change waits for Group 0 and the fence, not for a
 /// command's deadline.
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_dev_cluster_takes_catalog_changes_at_once",
+                a_dev_cluster_takes_catalog_changes_at_once,
+            ),
+            (
+                "a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once",
+                a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once,
+            ),
+            (
+                "a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once",
+                a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once,
+            ),
+        ],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
+
 const PROMPT: Duration = Duration::from_secs(10);
 
 /// Threads that keep every processor busy until dropped.
@@ -77,7 +98,7 @@ fn prompt_on(c: &mut Client, db: &str, cmd: Document) -> Document {
 
 /// The routing table as each node reports it right away (`getShardVersion`): the whole of a
 /// collection just sharded, one chunk from `MinKey` to `MaxKey`, never a part of it.
-fn routes_on_every_node(nodes: &[Node<MemDisk>]) {
+fn routes_on_every_node(nodes: &[NodeProc]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
         let ns = format!("fresh.s{k}");
@@ -98,7 +119,7 @@ fn routes_on_every_node(nodes: &[Node<MemDisk>]) {
 }
 
 /// The catalog changes of a collection of its own on each node, right away.
-fn changes_on_every_node(nodes: &[Node<MemDisk>]) {
+fn changes_on_every_node(nodes: &[NodeProc]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
         let coll = format!("c{k}");
@@ -128,36 +149,38 @@ fn changes_on_every_node(nodes: &[Node<MemDisk>]) {
 fn dev_cluster(loaded: bool) {
     let load = loaded.then(Load::start);
     let opts = DevOpts { nodes: 3, cores: 1, port: 0, test_commands: false };
-    let nodes = teseladb_server::dev::start(&opts, None).unwrap();
+    let nodes = teseladb_server::dev::start(
+        std::path::Path::new(env!("CARGO_BIN_EXE_teseladb")),
+        &opts,
+        None,
+    )
+    .unwrap();
     routes_on_every_node(&nodes);
     changes_on_every_node(&nodes);
     drop(load);
-    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+    assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
 
-#[test]
 fn a_dev_cluster_takes_catalog_changes_at_once() {
     dev_cluster(false);
 }
 
-#[test]
 fn a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once() {
     dev_cluster(true);
 }
 
-#[test]
 fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
     let _load = Load::start();
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        let n = Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+        let n = teseladb_server::procs::start_self("node", &seed, None, &[]);
         until("a node that joined", || n.wait_ready(Duration::from_millis(100)).then_some(()));
         nodes.push(n);
     }
     routes_on_every_node(&nodes);
     changes_on_every_node(&nodes);
-    drop(nodes.into_iter().map(Node::stop).collect::<Vec<_>>());
+    assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }
