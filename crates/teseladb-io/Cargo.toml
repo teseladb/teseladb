@@ -29,6 +29,15 @@ teseladb = { path = "../teseladb-engine", default-features = false }
 teseladb-crypto = { workspace = true }
 teseladb-lsm = { path = "../teseladb-lsm" }
 
+# One engine per process (D4): its cases run in order in one `main`.
+[[test]]
+name = "engine_core_loop"
+harness = false
+
+[[test]]
+name = "engine_peers"
+harness = false
+
 [[test]]
 name = "crash_real"
 harness = false

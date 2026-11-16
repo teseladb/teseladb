@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
 use teseladb_io::disk_thread::DiskThread;
-use teseladb_io::mailbox::{Notify, channel};
 use teseladb_raftlog::format::wal::EntryKind;
 use teseladb_raftlog::{CoreStore, LogEntry, LogGap, SnapshotMeta, StorageConfig};
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, Rng};
@@ -84,13 +83,6 @@ fn child(dir: &str) {
     }
 }
 
-/// Nobody waits on the mailbox: the child looks at it in a loop.
-struct Polled;
-
-impl Notify for Polled {
-    fn notify(&self) {}
-}
-
 /// Child process of the `pipelined` mode: appends through a disk thread, several entries and
 /// batches at once, and prints "ok <index>" as each is acknowledged.
 fn child_pipelined(dir: &str) {
@@ -101,8 +93,10 @@ fn child_pipelined(dir: &str) {
         s.create_group(G, Bytes::new(), Durability::Strict).unwrap();
         s.run_io(&mut disk, Nanos::ZERO);
     }
-    let (tx, mut rx) = channel(Arc::new(Polled));
-    let thread = DiskThread::spawn("disk-crash".into(), disk, tx, |d| d).unwrap();
+    // Nobody waits on the results: the child looks at them in a loop.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sink: teseladb_io::disk_thread::DoneSink = Arc::new(move |d| tx.send(d).is_ok());
+    let thread = DiskThread::spawn("disk-crash".into(), disk, sink).unwrap();
     let out = std::io::stdout();
     let mut out = out.lock();
     let mut index = s.group(G).unwrap().last_index() + 1;
@@ -118,7 +112,7 @@ fn child_pipelined(dir: &str) {
         while let Some(op) = s.poll_io(Nanos::ZERO) {
             thread.submit(op).unwrap();
         }
-        rx.drain_into(&mut done);
+        done.extend(rx.try_iter());
         for d in done.drain(..) {
             for (t, r) in s.on_io_done(d, Nanos::ZERO).tickets {
                 r.unwrap();

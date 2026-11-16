@@ -175,7 +175,9 @@ impl Channel {
             if !out.is_empty() {
                 stream.write_all(&out)?;
             }
-            if !open {
+            // What came before the peer's `close_notify` is still delivered; the next read
+            // finds the end.
+            if !open && plain.len() == before {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "TLS read"));
             }
         }

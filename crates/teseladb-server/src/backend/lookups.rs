@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::CoreInput;
 use teseladb_range::read::ReadConcern;
 use teseladb_types::GroupId;
 use teseladb_wire::commands::Fetched;
