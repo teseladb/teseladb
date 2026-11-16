@@ -31,11 +31,13 @@ use teseladb_meta::command::NodeState;
 use teseladb_meta::group0::{RangeDesc, ReplicaRole};
 use teseladb_raft::Role;
 use teseladb_raftlog::{Disk, MemDisk};
+use teseladb_range::ack::{W, WriteConcern};
+use teseladb_range::host::RangeError;
 use teseladb_router::table::RouteEntry;
 use teseladb_types::{GroupId, NodeId};
 
 use crate::admin_http::{self, Method};
-use crate::data::DataStatus;
+use crate::data::{DataError, DataStatus};
 use crate::logic::Group0View;
 use crate::node::{Node, NodeConfig, NodeError, lock_dir};
 
@@ -335,20 +337,20 @@ fn answer<D: Disk + Send + 'static>(node: &Node<D>, line: &str) -> String {
             let entries: Vec<String> = node.ranges().iter().map(route_text).collect();
             format!("ok {}", entries.join(" "))
         }
-        ["put", k, v, rest @ ..] => match (unhex(k), unhex(v)) {
-            (Some(k), Some(v)) => match node.put(&k, &v, ms(rest.first())) {
+        ["put", k, v, w, j, rest @ ..] => match (unhex(k), unhex(v), parse_wc(w, j)) {
+            (Some(k), Some(v), Some(wc)) => match node.put_with(&k, &v, wc, ms(rest.first())) {
                 Ok(h) => format!("ok {} {}", h.physical, h.logical),
-                Err(e) => format!("err {e:?}"),
+                Err(e) => data_error_text(&e),
             },
-            _ => "err the key and the value go in hexadecimal".to_owned(),
+            _ => "err other the key and the value in hexadecimal, w and j".to_owned(),
         },
         ["get", k, rest @ ..] => match unhex(k) {
             Some(k) => match node.get(&k, ms(rest.first())) {
                 Ok(Some(v)) => format!("ok {}", hex(&v)),
                 Ok(None) => "none".to_owned(),
-                Err(e) => format!("err {e:?}"),
+                Err(e) => data_error_text(&e),
             },
-            None => "err the key goes in hexadecimal".to_owned(),
+            None => "err other the key goes in hexadecimal".to_owned(),
         },
         ["token", secs] => match secs.parse() {
             Ok(s) => match node.create_enroll_token(Duration::from_secs(s)) {
@@ -723,24 +725,38 @@ impl NodeProc {
             .collect()
     }
 
-    /// Writes `value` at `key` through the node; the error is its text.
-    pub fn put(&self, key: &[u8], value: &[u8], timeout: Duration) -> Result<Hlc, String> {
-        let req = format!("put {} {} {}", hex(key), hex(value), timeout.as_millis());
+    /// Writes `value` at `key` through the node with the majority, as [`Node::put`].
+    pub fn put(&self, key: &[u8], value: &[u8], timeout: Duration) -> Result<Hlc, DataError> {
+        self.put_with(key, value, WriteConcern { w: W::Majority, j: true }, timeout)
+    }
+
+    /// Writes `value` at `key` through the node with `wc`, as [`Node::put_with`]. An error comes
+    /// back as [`DataError::NoAnswer`], a [`DataError::Range`] of a range error without fields or
+    /// [`RangeError::NotLeader`], or else [`DataError::Unexpected`] with its text.
+    pub fn put_with(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        wc: WriteConcern,
+        timeout: Duration,
+    ) -> Result<Hlc, DataError> {
+        let req =
+            format!("put {} {} {} {}", hex(key), hex(value), wc_text(wc), timeout.as_millis());
         let a = self.ask(&req, timeout);
         let mut w = a.split_whitespace();
         match (w.next(), w.next().map(str::parse), w.next().map(str::parse)) {
             (Some("ok"), Some(Ok(physical)), Some(Ok(logical))) => Ok(Hlc { physical, logical }),
-            _ => Err(a),
+            _ => Err(parse_data_error(&a)),
         }
     }
 
-    /// Reads `key` through the node; the error is its text.
-    pub fn get(&self, key: &[u8], timeout: Duration) -> Result<Option<Vec<u8>>, String> {
+    /// Reads `key` through the node, as [`Node::get`]; errors as [`Self::put_with`]'s.
+    pub fn get(&self, key: &[u8], timeout: Duration) -> Result<Option<Vec<u8>>, DataError> {
         let a = self.ask(&format!("get {} {}", hex(key), timeout.as_millis()), timeout);
         match a.split_once(' ') {
-            Some(("ok", v)) => unhex(v).map(Some).ok_or(a),
+            Some(("ok", v)) => unhex(v).map(Some).ok_or_else(|| parse_data_error(&a)),
             _ if a == "none" => Ok(None),
-            _ => Err(a),
+            _ => Err(parse_data_error(&a)),
         }
     }
 
@@ -833,6 +849,62 @@ impl Drop for NodeProc {
 }
 
 // ----- the lines -----
+
+/// The range errors without fields, which cross a line by name.
+const RANGE_ERRORS: &[RangeError] = &[
+    RangeError::Timeout,
+    RangeError::Overloaded,
+    RangeError::OutOfRange,
+    RangeError::Unsatisfiable,
+    RangeError::TooLarge,
+    RangeError::Unavailable,
+    RangeError::SnapshotTooOld,
+];
+
+fn data_error_text(e: &DataError) -> String {
+    let code = match e {
+        DataError::NoAnswer => "noanswer".to_owned(),
+        DataError::Range(RangeError::NotLeader { hint }) => format!("notleader:{}", hint.0),
+        DataError::Range(r) if RANGE_ERRORS.contains(r) => format!("range:{r:?}"),
+        DataError::Range(_) | DataError::Unexpected(_) => "other".to_owned(),
+    };
+    format!("err {code} {e:?}")
+}
+
+fn parse_data_error(line: &str) -> DataError {
+    let mut w = line.splitn(3, ' ');
+    let (Some("err"), Some(code)) = (w.next(), w.next()) else {
+        return DataError::Unexpected(line.to_owned());
+    };
+    if code == "noanswer" {
+        return DataError::NoAnswer;
+    }
+    if let Some(hint) = code.strip_prefix("notleader:").and_then(|h| h.parse().ok()) {
+        return DataError::Range(RangeError::NotLeader { hint: NodeId(hint) });
+    }
+    let named = code.strip_prefix("range:").and_then(|n| {
+        RANGE_ERRORS.iter().find(|r| format!("{r:?}") == n).cloned().map(DataError::Range)
+    });
+    named.unwrap_or_else(|| DataError::Unexpected(w.next().unwrap_or(line).to_owned()))
+}
+
+fn wc_text(wc: WriteConcern) -> String {
+    let w = match wc.w {
+        W::Zero => "0".to_owned(),
+        W::Nodes(n) => n.to_string(),
+        W::Majority => "majority".to_owned(),
+    };
+    format!("{w} {}", u8::from(wc.j))
+}
+
+fn parse_wc(w: &str, j: &str) -> Option<WriteConcern> {
+    let w = match w {
+        "majority" => W::Majority,
+        "0" => W::Zero,
+        n => W::Nodes(n.parse().ok()?),
+    };
+    Some(WriteConcern { w, j: j == "1" })
+}
 
 fn hex(b: &[u8]) -> String {
     b.iter().fold(String::with_capacity(b.len() * 2), |mut s, x| {
@@ -1168,6 +1240,31 @@ mod tests {
             moved_ms: 5,
         };
         assert_eq!(parse_route(&route_text(&r)), Some(r));
+    }
+
+    #[test]
+    fn write_concerns_and_data_errors_cross_a_line() {
+        for w in [W::Zero, W::Nodes(2), W::Majority] {
+            for j in [false, true] {
+                let wc = WriteConcern { w, j };
+                let text = wc_text(wc);
+                let (w, j) = text.split_once(' ').unwrap();
+                assert_eq!(parse_wc(w, j), Some(wc));
+            }
+        }
+        assert_eq!(parse_wc("x", "1"), None);
+        let mut errors = vec![
+            DataError::NoAnswer,
+            DataError::Range(RangeError::NotLeader { hint: NodeId(3) }),
+        ];
+        errors.extend(RANGE_ERRORS.iter().cloned().map(DataError::Range));
+        for e in errors {
+            assert_eq!(parse_data_error(&data_error_text(&e)), e);
+        }
+        let other = DataError::Unexpected("a reply of another kind".into());
+        let text = data_error_text(&other);
+        assert_eq!(parse_data_error(&text), DataError::Unexpected(format!("{other:?}")));
+        assert_eq!(parse_data_error("none"), DataError::Unexpected("none".into()));
     }
 
     #[test]
