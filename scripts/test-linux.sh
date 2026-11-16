@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Runs the tests of the given crates (default: teseladb-sys and teseladb-io) on the Linux kernel of
-# the local Docker engine, natively (no emulation): what only a real Linux kernel has, io_uring
-# above all (012), runs here. The tests are built for `<arch>-unknown-linux-musl` (static, linked
-# with rust-lld) and run inside the image of scripts/docker/x86_64-qemu.Dockerfile, without the
-# seccomp profile (Docker's default one refuses the io_uring calls) and with a 1 MiB tmpfs at
-# `TESELADB_FULL_DIR`, the full disk of the executors' equivalence battery. The container has
-# CAP_NET_ADMIN, CAP_BPF, CAP_SYS_ADMIN and CAP_IPC_LOCK, which the tests of the port on AF_XDP
-# (012 FR-033) need to make `veth` pairs and namespaces inside it, load the XDP program and lock
-# the UMEM; the pairs live in the container's own network namespace and go with it.
-# With --huge-pages the engine's kernel first reserves 2 MiB pages, and 1 GiB pages where it can,
-# so the tests of 012 FR-032 map their pools on them, and gets its own counts back at the end.
+# the local Docker engine, natively (no emulation): the server, its I/O crates and the engine are
+# Linux only (023 FR-007, D-177), and io_uring above all runs here. The tests are built and run
+# inside a container for `<arch>-unknown-linux-gnu`, the target of the release binaries (023 R10):
+# the engine is tested and measured with glibc. The image (`TESELADB_LINUX_IMAGE`, by default
+# `anotherproduct-rs-bench:1.98.0`) has the pinned Rust toolchain, glibc and the libraries the engine's
+# battery links; the build goes to the volume `TESELADB_LINUX_VOLUME` (default
+# `teseladb-linux-target`) under `TESELADB_LINUX_TARGET_DIR`, and the crates come from the host's
+# Cargo registry (offline). `TESELADB_LINUX_CPUS` pins the container to a cpuset.
+# The container is privileged (io_uring, the engine's huge pages and NUMA binding, and the tests of
+# the port on AF_XDP, 012 FR-033, which make `veth` pairs and namespaces inside it, load the XDP
+# program and lock the UMEM), with a 1 MiB tmpfs at `TESELADB_FULL_DIR`, the full disk of the
+# executors' equivalence battery.
+# With --huge-pages the engine's kernel first reserves 2 MiB pages, so the engine's memory goes on
+# them (023 FR-014), and gets its own counts back at the end.
 # With --test <name> (once or more) only those test files of the crates are built and run.
 #   scripts/test-linux.sh [--huge-pages] [--test <name>]... [crate...]
 set -euo pipefail
@@ -27,53 +31,53 @@ while [[ ${1:-} == --test ]]; do
 done
 
 case $(uname -m) in
-  arm64 | aarch64) TARGET=aarch64-unknown-linux-musl ;;
-  *) TARGET=x86_64-unknown-linux-musl ;;
+  arm64 | aarch64) TARGET=aarch64-unknown-linux-gnu ;;
+  *) TARGET=x86_64-unknown-linux-gnu ;;
 esac
-IMAGE=teseladb-x86_64-qemu
+IMAGE=${TESELADB_LINUX_IMAGE:-anotherproduct-rs-bench:1.98.0}
+VOLUME=${TESELADB_LINUX_VOLUME:-teseladb-linux-target}
+TARGET_DIR=${TESELADB_LINUX_TARGET_DIR:-/target/test-linux}
+REGISTRY=${CARGO_HOME:-$HOME/.cargo}/registry
 crates=("$@")
 [[ ${#crates[@]} -gt 0 ]] || crates=(teseladb-sys teseladb-io)
-pkgs=()
-for c in "${crates[@]}"; do pkgs+=(-p "$c"); done
-
-linker_var=CARGO_TARGET_$(echo "$TARGET" | tr 'a-z-' 'A-Z_')_LINKER
-export "$linker_var"=rust-lld
-docker build -q -t "$IMAGE" -f scripts/docker/x86_64-qemu.Dockerfile scripts/docker >/dev/null
+args=()
+for c in "${crates[@]}"; do args+=(-p "$c"); done
+args+=(${only[@]+"${only[@]}"})
+cpuset=()
+[[ -n ${TESELADB_LINUX_CPUS:-} ]] && cpuset=(--cpuset-cpus "$TESELADB_LINUX_CPUS")
 
 # The kernel's pools of huge pages: /sys/kernel/mm is the engine's, reached from a privileged
-# container. 256 pages of 2 MiB, and two of 1 GiB (a test maps one while a cache maps another)
-# where the kernel can make them after boot: one without CONFIG_CONTIG_ALLOC only has the 1 GiB
-# pages its command line reserved, and the tests then take the path of a host without them.
-HUGE_DIR=/sys/kernel/mm/hugepages
+# container.
+HUGE_DIR=/sys/kernel/mm/hugepages/hugepages-2048kB
 set_huge() {
   docker run --rm --privileged "$IMAGE" sh -c \
-    "echo $2 > $HUGE_DIR/hugepages-2048kB/nr_hugepages; echo $1 > $HUGE_DIR/hugepages-1048576kB/nr_hugepages 2>/dev/null;
-     echo \$(cat $HUGE_DIR/hugepages-1048576kB/nr_hugepages $HUGE_DIR/hugepages-2048kB/nr_hugepages)"
+    "echo $1 > $HUGE_DIR/nr_hugepages; cat $HUGE_DIR/nr_hugepages"
 }
 if [[ $huge == 1 ]]; then
-  read -r before_1g before_2m < <(docker run --rm "$IMAGE" sh -c \
-    "echo \$(cat $HUGE_DIR/hugepages-1048576kB/nr_hugepages $HUGE_DIR/hugepages-2048kB/nr_hugepages)")
-  trap 'set_huge "$before_1g" "$before_2m" >/dev/null' EXIT
-  read -r got_1g got_2m < <(set_huge 2 256)
-  [[ $got_2m == 256 ]] || { echo "test-linux: the kernel reserved $got_2m of 256 pages of 2 MiB" >&2; exit 1; }
-  echo "test-linux: reserved $got_2m pages of 2 MiB and $got_1g of 1 GiB"
+  before=$(docker run --rm "$IMAGE" cat "$HUGE_DIR/nr_hugepages")
+  trap 'set_huge "$before" >/dev/null' EXIT
+  got=$(set_huge 1024)
+  [[ $got == 1024 ]] || { echo "test-linux: the kernel reserved $got of 1024 pages of 2 MiB" >&2; exit 1; }
+  echo "test-linux: reserved $got pages of 2 MiB"
 fi
+
+# --dns 127.0.0.1: the container's resolver asks loopback, where engine_blocking's test of a slow
+# lookup (023 T033) runs a DNS server that never answers; nothing else resolves names off the host.
+docker run --rm -i --privileged --dns 127.0.0.1 ${cpuset[@]+"${cpuset[@]}"} \
+  --tmpfs /full:rw,size=1m --ulimit memlock=-1 -e TESELADB_FULL_DIR=/full \
+  -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR="$TARGET_DIR" -e TARGET="$TARGET" \
+  -v "$REGISTRY:/cargo-home/registry" -v "$VOLUME:/target" -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
+  bash -s -- "${args[@]}" <<'SH'
+set -uo pipefail
 runs=()
 while IFS= read -r run; do runs+=("$run"); done < <(
-  cargo test --offline --target "$TARGET" "${pkgs[@]}" ${only[@]+"${only[@]}"} --no-run --message-format=json 2>/dev/null |
+  cargo test --offline --target "$TARGET" "$@" --no-run --message-format=json 2>/dev/null |
     grep -E '"profile":\{[^}]*"test":true' |
     sed -n 's/.*"manifest_path":"\([^"]*\)\/Cargo.toml".*"executable":"\([^"]*\)".*/\1:\2/p'
 )
 [[ ${#runs[@]} -gt 0 ]] || { echo "test-linux: nothing was built" >&2; exit 1; }
-
-# --dns 127.0.0.1: the container's resolver asks loopback, where engine_blocking's test of a slow
-# lookup (023 T033) runs a DNS server that never answers; nothing else resolves names off the host.
-docker run --rm -i --dns 127.0.0.1 --security-opt seccomp=unconfined --tmpfs /full:rw,size=1m \
-  --cap-add NET_ADMIN --cap-add BPF --cap-add SYS_ADMIN --cap-add IPC_LOCK --ulimit memlock=-1 \
-  -e TESELADB_FULL_DIR=/full -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
-  sh -s -- "${runs[@]}" <<'SH'
 fail=0
-for run in "$@"; do
+for run in "${runs[@]}"; do
   dir=${run%%:*}
   bin=${run#*:}
   name=$(basename "$bin")

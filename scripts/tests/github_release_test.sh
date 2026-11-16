@@ -23,8 +23,7 @@ case "$1 $2" in
   "release view")
     if [[ " $* " == *" --json "* ]]; then
       printf '%s\n' teseladb-0.2.0-linux-x86_64.tar.gz teseladb-0.2.0-linux-x86_64.tar.gz.sha256 \
-        teseladb-0.2.0-linux-aarch64.tar.gz teseladb-0.2.0-linux-aarch64.tar.gz.sha256 \
-        teseladb-0.2.0-macos-aarch64.tar.gz teseladb-0.2.0-macos-aarch64.tar.gz.sha256
+        teseladb-0.2.0-linux-aarch64.tar.gz teseladb-0.2.0-linux-aarch64.tar.gz.sha256
       exit 0
     fi
     [[ ${GH_RELEASE_EXISTS:-no} == yes ]] ;;
@@ -48,7 +47,7 @@ chmod +x "$WORK/bin/gh" "$WORK/bin/docker"
 
 dist() {
   rm -rf "$WORK/dist" && mkdir -p "$WORK/dist/v0.2.0"
-  for p in linux-x86_64 linux-aarch64 macos-aarch64; do
+  for p in linux-x86_64 linux-aarch64; do
     touch "$WORK/dist/v0.2.0/teseladb-0.2.0-$p.tar.gz" "$WORK/dist/v0.2.0/teseladb-0.2.0-$p.tar.gz.sha256"
   done
   printf -- '- Faster reads.\n' >"$WORK/notes.md"
@@ -71,8 +70,8 @@ check() {
 }
 
 dist
-rm "$WORK/dist/v0.2.0/teseladb-0.2.0-macos-aarch64.tar.gz.sha256"
-check "a missing archive" 1 "teseladb-0.2.0-macos-aarch64.tar.gz.sha256 is missing"
+rm "$WORK/dist/v0.2.0/teseladb-0.2.0-linux-aarch64.tar.gz.sha256"
+check "a missing archive" 1 "teseladb-0.2.0-linux-aarch64.tar.gz.sha256 is missing"
 if grep -q '^gh release' "$WORK/calls"; then
   failed=$((failed + 1)); echo "FAIL a missing archive reached GitHub" >&2
 else
@@ -81,7 +80,7 @@ fi
 
 dist
 check "a new release" 0 "gh release create v0.2.0 --repo teseladb/teseladb --target main --title TeselaDB 0.2.0"
-check "the six files of a new release" 0 "teseladb-0.2.0-macos-aarch64.tar.gz.sha256 --latest"
+check "the four files of a new release" 0 "teseladb-0.2.0-linux-aarch64.tar.gz.sha256 --latest"
 if grep -qF -- '- Faster reads.' "$WORK/notes-sent.md" && grep -qF 'docker pull teseladb/teseladb:0.2.0' "$WORK/notes-sent.md"; then
   passed=$((passed + 1))
 else

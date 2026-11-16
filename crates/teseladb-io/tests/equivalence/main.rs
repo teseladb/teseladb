@@ -2,6 +2,7 @@
 //! same results and leave the same files with `FileDisk` (buffered and with `O_DIRECT`) and, on
 //! Linux, with `IoUringDisk` (buffered and with `O_DIRECT`, one operation at a time and in
 //! batches submitted together). `FileDisk` buffered is the reference.
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 

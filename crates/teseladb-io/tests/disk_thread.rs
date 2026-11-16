@@ -1,5 +1,6 @@
 //! The disk thread executes in submission order, answers through its sink, returns the disk on
 //! shutdown and stops when nobody listens.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::sync::Arc;

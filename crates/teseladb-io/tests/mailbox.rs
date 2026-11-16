@@ -1,6 +1,7 @@
 //! Mailboxes between cores (012 FR-005): order, a single wake-up per drain, closing, a full ring
 //! that gives its sender's message back while the other senders go on, concurrent senders and
 //! waking a real poller.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

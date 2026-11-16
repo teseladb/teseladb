@@ -1,6 +1,7 @@
 //! The joining side of the inter-node protocol: a node without an id sends `Hello` with
 //! `node_id = 0` and a `JoinRequest`, and waits for the cluster's decision on the same connection.
 //! The acceptor's side runs on the engine (`engine_peers`).
+#![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

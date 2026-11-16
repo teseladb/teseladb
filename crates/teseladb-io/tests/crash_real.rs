@@ -13,32 +13,50 @@
 //! Without the test harness: the same binary is the parent and, with `TESELADB_CHILD_DIR`, the
 //! child. `TESELADB_KILL_ROUNDS` (10 by default) sets the number of kills.
 
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
 use std::collections::VecDeque;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
+#[cfg(target_os = "linux")]
 use teseladb_io::disk_thread::DiskThread;
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::format::wal::EntryKind;
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::{CoreStore, LogEntry, LogGap, SnapshotMeta, StorageConfig};
+#[cfg(target_os = "linux")]
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, Rng};
 
+#[cfg(target_os = "linux")]
 const G: GroupId = GroupId(1);
 /// A snapshot every this many entries, so that WAL segments are released while writing.
+#[cfg(target_os = "linux")]
 const SNAPSHOT_EVERY: u64 = 100;
 /// Variable that tells the child to write through the disk thread with batches in flight.
+#[cfg(target_os = "linux")]
 const MODE_VAR: &str = "TESELADB_CHILD_MODE";
+#[cfg(target_os = "linux")]
 const PIPELINED: &str = "pipelined";
+#[cfg(target_os = "linux")]
 const SHARED: &str = "shared";
 /// Cores writing to the device log at once in the `shared` mode.
+#[cfg(target_os = "linux")]
 const SHARED_CORES: u16 = 4;
 /// Batches in flight in the `pipelined` mode, as the server has them.
+#[cfg(target_os = "linux")]
 const INFLIGHT: usize = 4;
 /// Entries the `pipelined` child keeps waiting for their acknowledgement.
+#[cfg(target_os = "linux")]
 const OUTSTANDING: usize = 8;
 
+#[cfg(target_os = "linux")]
 fn cfg() -> StorageConfig {
     StorageConfig {
         wal_segment_size: 1 << 20,
@@ -48,6 +66,7 @@ fn cfg() -> StorageConfig {
 }
 
 /// Entry `index`: its content depends only on the index, so every life writes the same one.
+#[cfg(target_os = "linux")]
 fn entry(index: u64) -> LogEntry {
     let mut rng = Rng::new(index);
     let mut data = vec![0u8; rng.range(1, 8000) as usize];
@@ -57,6 +76,7 @@ fn entry(index: u64) -> LogEntry {
 
 /// Child process: appends non-stop after the last durable entry and prints "ok <index>" for every
 /// acknowledged one.
+#[cfg(target_os = "linux")]
 fn child(dir: &str) {
     let mut disk = disks::open(dir, disks::from_env());
     let mut s = CoreStore::recover(&cfg(), 0, &mut disk).unwrap().0;
@@ -85,6 +105,7 @@ fn child(dir: &str) {
 
 /// Child process of the `pipelined` mode: appends through a disk thread, several entries and
 /// batches at once, and prints "ok <index>" as each is acknowledged.
+#[cfg(target_os = "linux")]
 fn child_pipelined(dir: &str) {
     let cfg = StorageConfig { max_inflight_batches: INFLIGHT, ..cfg() };
     let mut disk = disks::open(dir, teseladb_io::node_disk::IoExecutor::Threads);
@@ -128,6 +149,7 @@ fn child_pipelined(dir: &str) {
 
 /// Child process of the `shared` mode: every core appends from its own thread through the device
 /// log and prints "ok <core> <index>" for every acknowledged entry.
+#[cfg(target_os = "linux")]
 fn child_shared(dir: &str) {
     let exec = disks::from_env();
     let (_log, ports) = DeviceLog::start(
@@ -170,9 +192,11 @@ fn child_shared(dir: &str) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[path = "common/disks.rs"]
 mod disks;
 
+#[cfg(target_os = "linux")]
 fn main() {
     match std::env::var("TESELADB_CHILD_DIR") {
         Ok(dir) if std::env::var(MODE_VAR).as_deref() == Ok(PIPELINED) => child_pipelined(&dir),
@@ -192,6 +216,7 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn sigkill_never_loses_confirmed_entries(
     name: &str,
     exec: teseladb_io::node_disk::IoExecutor,
@@ -277,3 +302,7 @@ fn sigkill_never_loses_confirmed_entries(
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

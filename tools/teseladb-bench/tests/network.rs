@@ -1,5 +1,6 @@
 //! The network scenarios end to end (002 FR-018, FR-019, FR-020): YCSB and `reference` against a
 //! local cluster started in the process, and the errors of `--target`.
+#![cfg(target_os = "linux")]
 
 use std::process::{Command, Output};
 

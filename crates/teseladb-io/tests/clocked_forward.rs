@@ -5,6 +5,7 @@
 //! followed committed at the leader's lower clock, and the stream resumed past it (the reference
 //! Python driver's `change-streams-resume-allowlist`, e2e of 04-11-2026). To a node of an older
 //! protocol the frame goes as before, without the clock.
+#![cfg(target_os = "linux")]
 
 use teseladb_io::peer::{
     CLOCKED_FORWARD_VERSION, FORWARD_CHUNK_VERSION, HEADER_LEN, PROTOCOL_VERSION, PeerMsg,

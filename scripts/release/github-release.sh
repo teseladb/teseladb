@@ -20,7 +20,7 @@ CHANGES=${3:-}
 REPO=${GITHUB_REPO:-teseladb/teseladb}
 GHCR=${GHCR_IMAGE:-ghcr.io/teseladb/teseladb}
 TAG=v$VERSION
-PLATFORMS=(linux-x86_64 linux-aarch64 macos-aarch64)
+PLATFORMS=(linux-x86_64 linux-aarch64)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -37,8 +37,8 @@ done
 [[ -z $CHANGES || -r $CHANGES ]] || fail "the changes file $CHANGES cannot be read"
 
 notes() {
-  echo "TeselaDB $VERSION has binaries for Linux on x86_64 and aarch64 and for macOS on Apple Silicon. Its Docker image"
-  echo "is on Docker Hub and on GitHub."
+  echo "TeselaDB $VERSION has binaries for Linux on x86_64 and aarch64. Its Docker image is on"
+  echo "Docker Hub and on GitHub, and it is how TeselaDB runs on macOS."
   echo
   if [[ -n $CHANGES ]]; then cat "$CHANGES" && echo; fi
   cat <<EOF
@@ -64,7 +64,6 @@ shell session on it in about five minutes.
 | --- | --- |
 | \`teseladb-$VERSION-linux-x86_64.tar.gz\` | Linux x86_64 |
 | \`teseladb-$VERSION-linux-aarch64.tar.gz\` | Linux aarch64 |
-| \`teseladb-$VERSION-macos-aarch64.tar.gz\` | macOS on Apple Silicon |
 
 Each file has its \`.sha256\`. To check a download, run \`shasum -a 256 -c <file>.sha256\` in the folder where you
 saved both files. TeselaDB is source-available under the

@@ -2,6 +2,7 @@
 //! messages over frames of at most 1 MiB, cuts a message that does not fit one into `RaftChunk`
 //! pieces, and the decoder gives the batch back whole once its last piece is in the buffer.
 //! Interrupted, out of order, oversized and damaged sequences are rejected without a panic.
+#![cfg(target_os = "linux")]
 
 use teseladb_io::peer::{
     CHUNKED_FORWARD_VERSION, FORWARD_CHUNK_VERSION, FrameError, HEADER_LEN, MAX_CHUNKED_LEN,

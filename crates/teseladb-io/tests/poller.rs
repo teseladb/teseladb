@@ -1,5 +1,6 @@
 //! `Poller` over loopback TCP sockets: accept, read, write until the buffer fills,
 //! close, waker from another thread and one event per token.
+#![cfg(target_os = "linux")]
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};

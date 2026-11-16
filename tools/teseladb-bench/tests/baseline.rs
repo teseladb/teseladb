@@ -2,6 +2,7 @@
 //! with 1, within 10 % with 0, and a baseline of another machine (another fingerprint) or of another
 //! scenario with 2. `--compare <report>` checks a saved report without running the scenario, so the
 //! percentages here are exact; `--save-baseline` writes the report with this machine's fingerprint.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::process::{Command, Output};

@@ -7,13 +7,13 @@
 #      each;
 #   2. llvm-profdata of the pinned toolchain (rustup's llvm-tools component, the LLVM rustc was
 #      built with) merges the profiles, and every target is built with -Cprofile-use on them: the
-#      profile is of the source, so the aarch64 and macOS builds take the x86_64 run's (functions
+#      profile is of the source, so the aarch64 build takes the x86_64 run's (functions
 #      whose code differs between architectures keep no profile).
 # BOLT is not used: the pinned toolchain does not ship it and the project adds no outside tools.
 # Leaves $PGO_OUT/<triple>/dist/teseladb for each target, as publish.sh expects them.
 #   scripts/release/pgo.sh
 # A dry run on a workstation profiles and builds only its own target with cargo, for a short load:
-#   PGO_HOST=aarch64-apple-darwin PGO_TARGETS=aarch64-apple-darwin PGO_BUILD=build \
+#   PGO_HOST=x86_64-unknown-linux-gnu PGO_TARGETS=x86_64-unknown-linux-gnu PGO_BUILD=build \
 #   PGO_SECONDS=5 PGO_SCENARIOS=crud PGO_WORK=/tmp/pgo PGO_OUT=/tmp/pgo-out \
 #   TESELADB_RELEASE_VERSION=0.0.0-dry CARGO_TARGET_DIR=target scripts/release/pgo.sh
 set -eu
@@ -24,7 +24,7 @@ WORK=${PGO_WORK:-/work/pgo}
 OUT=${PGO_OUT:-/work/out}
 HOST=${PGO_HOST:-x86_64-unknown-linux-gnu}
 # Each Linux target with zigbuild's glibc suffix: 2.28 (Debian 10, RHEL 8 and later).
-TARGETS=${PGO_TARGETS:-x86_64-unknown-linux-gnu.2.28 aarch64-unknown-linux-gnu.2.28 aarch64-apple-darwin}
+TARGETS=${PGO_TARGETS:-x86_64-unknown-linux-gnu.2.28 aarch64-unknown-linux-gnu.2.28}
 # `zigbuild` cross-compiles every target; `build` builds the workstation's own.
 BUILD=${PGO_BUILD:-zigbuild}
 SCENARIOS=${PGO_SCENARIOS:-ycsb-a ycsb-b ycsb-c ycsb-d ycsb-e ycsb-f crud aggregate txn}

@@ -1,6 +1,7 @@
 //! The device log on the node's writer thread (012 FR-035, D-154): cores writing at once share its
 //! syncs and find their entries again after a restart, and the writer counts each part of a sync's
 //! wait as its stage.
+#![cfg(target_os = "linux")]
 
 use std::thread;
 

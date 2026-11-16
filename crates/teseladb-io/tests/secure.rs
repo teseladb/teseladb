@@ -1,6 +1,7 @@
 //! The blocking side of a peer connection's channel (013 FR-006): in clear it passes the bytes as
 //! they are. TLS between nodes, enrollments and their refusals run on the engine
 //! (`engine_peers`).
+#![cfg(target_os = "linux")]
 
 use std::net::TcpListener;
 

@@ -2,6 +2,7 @@
 //! <reports>` takes the repeats of each side, and ends with 1 when a TeselaDB median of the
 //! throughput or of a p50, p99 or p99.9 is worse than the reference's by more than the larger
 //! spread of the two sides, with 0 when it is not, and with 2 when the reports do not compare.
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::process::{Command, Output};

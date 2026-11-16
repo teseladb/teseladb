@@ -7,21 +7,33 @@
 //! Without the test harness: the same binary is the parent and, with `TESELADB_CHILD_DIR`, the
 //! child. `TESELADB_KILL_ROUNDS` (10 by default) sets the number of kills.
 
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
 use teseladb_io::NodeDisk;
+#[cfg(target_os = "linux")]
 use teseladb_keys::Hlc;
+#[cfg(target_os = "linux")]
 use teseladb_lsm::{Lookup, Lsm, LsmConfig};
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::format::wal::EntryKind;
+#[cfg(target_os = "linux")]
 use teseladb_raftlog::{CoreStore, LogEntry, ReleaseProvider, SnapshotMeta, StorageConfig};
+#[cfg(target_os = "linux")]
 use teseladb_types::{Bytes, Durability, GroupId, Nanos, Rng};
 
+#[cfg(target_os = "linux")]
 const G: GroupId = GroupId(1);
+#[cfg(target_os = "linux")]
 const KEYS: u64 = 500;
 /// A snapshot attempt every this many entries.
+#[cfg(target_os = "linux")]
 const SNAPSHOT_EVERY: u64 = 50;
 
+#[cfg(target_os = "linux")]
 fn store_cfg() -> StorageConfig {
     StorageConfig {
         wal_segment_size: 1 << 20,
@@ -30,6 +42,7 @@ fn store_cfg() -> StorageConfig {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn lsm_cfg() -> LsmConfig {
     LsmConfig {
         dir: "core-00/lsm".into(),
@@ -43,6 +56,7 @@ fn lsm_cfg() -> LsmConfig {
 }
 
 /// The value of entry `index`: it depends only on the index.
+#[cfg(target_os = "linux")]
 fn value(index: u64) -> Vec<u8> {
     let mut rng = Rng::new(index);
     let mut v = vec![0u8; rng.range(1, 3000) as usize];
@@ -50,15 +64,18 @@ fn value(index: u64) -> Vec<u8> {
     v
 }
 
+#[cfg(target_os = "linux")]
 fn key(index: u64) -> Vec<u8> {
     format!("k{:04}", index % KEYS).into_bytes()
 }
 
+#[cfg(target_os = "linux")]
 fn at(index: u64) -> Hlc {
     Hlc { physical: index, logical: 0 }
 }
 
 /// Child process: writes, applies and prints "ok <index>" until the parent kills it.
+#[cfg(target_os = "linux")]
 fn child(dir: &str) {
     let mut disk = disks::open(dir, disks::from_env());
     let mut s = CoreStore::recover(&store_cfg(), 0, &mut disk).unwrap().0;
@@ -106,9 +123,11 @@ fn child(dir: &str) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[path = "common/disks.rs"]
 mod disks;
 
+#[cfg(target_os = "linux")]
 fn main() {
     match std::env::var("TESELADB_CHILD_DIR") {
         Ok(dir) => child(&dir),
@@ -121,6 +140,7 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read(lsm: &mut Lsm, disk: &mut NodeDisk, index: u64) -> Option<Vec<u8>> {
     let v = lsm.view();
     loop {
@@ -134,6 +154,7 @@ fn read(lsm: &mut Lsm, disk: &mut NodeDisk, index: u64) -> Option<Vec<u8>> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn sigkill_never_loses_applied_entries(name: &str, exec: teseladb_io::node_disk::IoExecutor) {
     let dir =
         std::env::temp_dir().join(format!("teseladb-crash-real-lsm-{name}-{}", std::process::id()));
@@ -186,3 +207,7 @@ fn sigkill_never_loses_applied_entries(name: &str, exec: teseladb_io::node_disk:
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}

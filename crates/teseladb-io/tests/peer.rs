@@ -1,5 +1,6 @@
 //! Frames of the inter-node protocol: round trip of every kind, incremental reads,
 //! 16 MiB limits, unknown `kind`, flags, compression and damaged payloads.
+#![cfg(target_os = "linux")]
 
 use teseladb_io::peer::{
     EnrollAccepted, EnrollRequest, FLAG_DEFLATE, FrameError, GroupHeartbeat, GroupHeartbeatResp,

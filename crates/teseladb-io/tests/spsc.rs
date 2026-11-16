@@ -1,6 +1,7 @@
 //! Channels of one sender and one receiver between cores (012 FR-005, SC-002): order, a full
 //! channel that gives the message back (back-pressure), one wake-up per drain, closing, a real
 //! poller woken from another thread, and two threads passing messages under load.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
