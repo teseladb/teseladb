@@ -305,7 +305,8 @@ fn values_impl_lays_out_types_and_values() {
     assert_eq!(list.desc().str().as_str(), "two values");
     let mut types = [0xffu8; 2];
     list.types(&mut types);
-    assert_eq!(types, [DataType::Counter as u8, DataType::Gauge as u8]);
+    // The collectd codes: COUNTER (0) for the integer, GAUGE (1) for the double.
+    assert_eq!(types, [0, 1]);
     let mut values = [0u8; 16];
     list.values(&mut values);
     assert_eq!(&values[..8], &9u64.to_be_bytes());
@@ -523,10 +524,8 @@ engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, 
     .get()
     .unwrap();
     let explicit = wait_for_packet(&sock, |p| has_str(p, PLUGIN, "covexplicit"));
-    let expected = Part::Values(vec![
-        (DataType::Counter as u8, 77u64.to_be_bytes()),
-        (DataType::Gauge as u8, 0.25f64.to_le_bytes()),
-    ]);
+    // The collectd codes: COUNTER (0) and GAUGE (1).
+    let expected = Part::Values(vec![(0, 77u64.to_be_bytes()), (1, 0.25f64.to_le_bytes())]);
     assert!(explicit.contains(&expected), "{explicit:?}");
     assert!(has_str(&explicit, TYPE_INSTANCE, "events"));
     // A sender with no values sends nothing and completes at once.
@@ -538,7 +537,7 @@ engine_thread_test_case!(senders_send_notifications_explicit_values_and_series, 
     );
     notify();
     let notified = wait_for_packet(&sock, |p| has_str(p, PLUGIN, "covnotify"));
-    assert!(notified.contains(&Part::Values(vec![(DataType::Counter as u8, 5u64.to_be_bytes())])));
+    assert!(notified.contains(&Part::Values(vec![(0, 5u64.to_be_bytes())])));
 
     let msg = send_notification(&id("covmsg", "derive", "x"), &Sstring::from("hello"));
     msg.get().unwrap();

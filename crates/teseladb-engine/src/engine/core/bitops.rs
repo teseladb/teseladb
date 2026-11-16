@@ -43,9 +43,11 @@ pub const fn count_trailing_zeros_ull(x: u64) -> u32 {
 }
 
 /// The integer types [`log2ceil`] and [`log2floor`] accept: every primitive signed and unsigned
-/// integer.
+/// integer. Signed values must be positive.
 pub trait Integral: Copy {
-    /// Number of value bits, excluding the sign bit (so 31 for `i32`, 32 for `u32`).
+    /// Bit width of the type, sign bit included (32 for `i32` and `u32`): `leading_zeros`
+    /// of a positive signed value counts the sign bit, so the logarithms subtract from the
+    /// full width.
     const DIGITS: u32;
     /// Whether the value is 1.
     fn is_one(self) -> bool;
@@ -70,7 +72,7 @@ macro_rules! impl_integral {
 }
 
 impl_integral!(u8 => 8, u16 => 16, u32 => 32, u64 => 64, u128 => 128, usize => usize::BITS,
-    i8 => 7, i16 => 15, i32 => 31, i64 => 63, i128 => 127, isize => isize::BITS - 1);
+    i8 => 8, i16 => 16, i32 => 32, i64 => 64, i128 => 128, isize => isize::BITS);
 
 /// Smallest `k` such that `2^k >= n`; `n` must be positive (0 for `n == 1`).
 #[inline]

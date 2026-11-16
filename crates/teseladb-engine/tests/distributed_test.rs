@@ -444,8 +444,13 @@ engine_test_case!(test_smp_service_groups, {
         };
         let ssg2 = create_smp_service_group(ssgc2).get()?;
         let other_shard: ShardId = Smp::count() - 1;
+        // A group's limit is shared out among the shards that can send to a shard: each of
+        // the other shards gets max_nonlocal_requests / (shards - 1) concurrent requests, so
+        // that is the most this one shard can have running at once on the other.
+        let senders = (Smp::count() - 1).max(1);
+        let ssg2_share = 1000 / senders;
         let mut rm1 = RemoteWorker::new(1);
-        let mut rm2 = RemoteWorker::new(1000);
+        let mut rm2 = RemoteWorker::new(ssg2_share);
         let (p1, p2): (*mut RemoteWorker, *mut RemoteWorker) = (&mut rm1, &mut rm2);
         // SAFETY: both workers outlive the bunches, waited for below.
         let bunch1 = parallel_for_each(0..20, move |_ignore: i32| unsafe {
@@ -459,7 +464,7 @@ engine_test_case!(test_smp_service_groups, {
         bunch2.get()?;
         if Smp::count() > 1 {
             assert!(rm1.max_concurrent_observed == 1);
-            assert!(rm2.max_concurrent_observed == 1000);
+            assert!(rm2.max_concurrent_observed == ssg2_share);
         }
         destroy_smp_service_group(ssg1).get()?;
         destroy_smp_service_group(ssg2).get()?;

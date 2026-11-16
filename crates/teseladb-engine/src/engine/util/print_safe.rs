@@ -138,26 +138,25 @@ pub fn print_zero_padded_hex_safe<Integral: SafeIntegral>(n: Integral) {
 /// Writes the decimal representation of `n` at the start of `buf` and returns its length.
 /// For example, `12` writes `"12"` and returns 2.
 ///
-/// The digits are produced right to left in a scratch buffer of `bufsz` positions and
-/// then copied out, so `bufsz` must be `3 * size_of::<Integral>()` (as
-/// [`print_decimal_safe`] passes); `buf` must have room for the digits. Negative values
-/// are not supported.
+/// `bufsz` is the room for the digits: at most `bufsz` bytes of `buf` are written. The
+/// digits are produced right to left in a scratch buffer and then copied out. Negative
+/// values are not supported.
 ///
 /// # Panics
 ///
 /// Aborts the process (via [`engine_assert!`](crate::engine_assert)) if the digits do not
-/// fit in `bufsz`; panics if `buf` is too short.
+/// fit in `bufsz`; panics if `buf` is shorter than the digits.
 pub fn convert_decimal_safe<Integral: SafeIntegral>(
     buf: &mut [u8],
     bufsz: usize,
     n: Integral,
 ) -> usize {
+    // Three digits per byte hold any value of the type.
     let mut tmp = [0u8; 48];
     let tmp_len = Integral::SIZE * 3;
-    let mut i = bufsz;
+    let mut i = tmp_len;
     let mut n = n;
     loop {
-        crate::engine_assert!(i > 0);
         i -= 1;
         tmp[i] = b'0' + n.mod10();
         n = n.div10();
@@ -165,8 +164,10 @@ pub fn convert_decimal_safe<Integral: SafeIntegral>(
             break;
         }
     }
-    buf[..tmp_len - i].copy_from_slice(&tmp[i..tmp_len]);
-    tmp_len - i
+    let len = tmp_len - i;
+    crate::engine_assert!(len <= bufsz);
+    buf[..len].copy_from_slice(&tmp[i..tmp_len]);
+    len
 }
 
 /// Prints the decimal representation of `n` to standard error. For example, `12` prints

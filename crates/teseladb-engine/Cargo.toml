@@ -63,8 +63,6 @@ harness = false
 name = "slab_test"
 path = "tests/entry/slab_test.rs"
 harness = false
-# Built but not run: the test trips an assertion of the slab allocator.
-test = false
 
 [[test]]
 name = "alien_test"

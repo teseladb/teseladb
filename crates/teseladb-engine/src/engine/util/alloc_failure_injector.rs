@@ -79,10 +79,14 @@ pub mod memory {
             }
             // The action is taken out while it runs, so a nested run_with_callback() from it
             // cannot replace the function being called; it goes back even when it panics
-            // (the default action does).
+            // (the default action does). A failure injected while the action runs finds the
+            // slot empty and takes the default action.
             let action = self._on_alloc_failure.replace(NoncopyableFunction::<fn()>::empty());
             let mut restore = RestoreAction(Some(action), &self._on_alloc_failure);
             if let Some(f) = &mut restore.0 {
+                if !f.is_some() {
+                    std::panic::panic_any(BadAlloc);
+                }
                 f.call();
             }
         }

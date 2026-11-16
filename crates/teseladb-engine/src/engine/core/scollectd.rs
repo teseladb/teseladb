@@ -646,11 +646,11 @@ impl TypeInstanceId {
                 c.set(c.get() + 1);
                 c.get()
             });
-            let suffix_len = (idx as f64).log10().ceil() as usize + 1;
-            let keep = &field.as_bytes()[..MAX_COLLECTD_FIELD_TEXT_LEN - suffix_len];
+            let suffix = format!("~{}", idx);
+            let keep = &field.as_bytes()[..MAX_COLLECTD_FIELD_TEXT_LEN - suffix.len()];
             // The kept bytes are copied as they are, even if that splits a UTF-8 sequence.
             let mut new_field = Sstring::from_bytes(keep);
-            new_field.append_bytes(format!("~{}", idx).as_bytes());
+            new_field.append_bytes(suffix.as_bytes());
             log_warn!(
                 LOGGER,
                 "Truncating \"{}\" to {} chars: \"{}\" -> \"{}\"",
@@ -938,7 +938,7 @@ impl ValueList for ValuesImpl {
 
     fn types(&self, p: &mut [u8]) {
         for (dst, v) in p.iter_mut().zip(&self._values) {
-            *dst = v.type_() as u8;
+            *dst = collectd_type_code(v.type_());
         }
     }
 
@@ -1156,6 +1156,21 @@ enum PartType {
     Encryption = 0x0210, // Encryption (AES-256/OFB
 }
 
+/// Wire code of a collectd GAUGE value: 8 bytes holding a little-endian double.
+const COLLECTD_TYPE_GAUGE: u8 = 1;
+/// Wire code of a collectd COUNTER value: 8 bytes holding a big-endian unsigned integer.
+const COLLECTD_TYPE_COUNTER: u8 = 0;
+
+/// The collectd type code of a value of data type `t`, matching how its 8 bytes are
+/// written: a gauge as a double, every other type as an unsigned integer.
+fn collectd_type_code(t: DataType) -> u8 {
+    if t == DataType::Gauge {
+        COLLECTD_TYPE_GAUGE
+    } else {
+        COLLECTD_TYPE_COUNTER
+    }
+}
+
 /// "Time is defined in 2^–30 seconds since epoch. New in Version 5.0."
 fn collectd_hres(period: std::time::Duration) -> u64 {
     ((period.as_nanos() << 30) / 1_000_000_000) as u64
@@ -1314,7 +1329,7 @@ impl Cpwriter {
             self.write_u16(type_ as u16);
             self.write_u16(sz as u16);
             self.write_u16(1);
-            self.write_u8(v.type_() as u8);
+            self.write_u8(collectd_type_code(v.type_()));
             self.write_value(v);
         }
         self

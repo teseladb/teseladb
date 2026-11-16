@@ -1009,6 +1009,10 @@ impl Ipv4 {
         let ip_hdr_len = h.ihl() as u32 * 4;
         let pkt_len = p.len();
         let offset = h.offset();
+        // Drop a header length below the minimum header or past the total length.
+        if ip_hdr_len < std::mem::size_of::<IpHdr>() as u32 || ip_hdr_len > ip_len {
+            return make_ready_future(());
+        }
         if pkt_len > ip_len {
             // Trim extra data in the packet beyond IP total length
             p.trim_back((pkt_len - ip_len) as usize);

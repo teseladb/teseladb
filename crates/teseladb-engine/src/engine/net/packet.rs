@@ -1035,8 +1035,7 @@ impl fmt::Display for Packet {
                     } else if c == b'\t' {
                         os.write_str("\\t")?;
                     } else {
-                        let b: u8 = c;
-                        write!(os, "\\x{}{}", b / 16, b % 16)?;
+                        write!(os, "\\x{c:02x}")?;
                     }
                 }
                 os.write_str("\"")?;
