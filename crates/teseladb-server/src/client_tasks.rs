@@ -94,6 +94,20 @@ pub fn spawn(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task
     posted.then_some(Task { stop, ended })
 }
 
+/// Runs `body` on a thread of the unit tests, which have no engine: the same [`Task`] a shard's
+/// gives.
+#[cfg(test)]
+pub(crate) fn on_thread(body: Box<dyn FnOnce(&TaskStop) + Send>) -> Task {
+    let stop = Arc::new(TaskStop::default());
+    let (tx, ended) = answer::channel::<()>();
+    let s = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        body(&s);
+        let _ = tx.send(());
+    });
+    Task { stop, ended }
+}
+
 /// Runs `body` in an engine thread of `shard` in the background's scheduling group until it
 /// returns (023 FR-012, FR-025): long work, such as building search indexes, that takes the
 /// shard's CPU and disk only in the background's share, behind the clients' commands. `None` when

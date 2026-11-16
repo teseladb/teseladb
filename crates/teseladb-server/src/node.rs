@@ -1073,7 +1073,7 @@ impl Node {
             }
         };
         // One clock for the node's cores, under the bound in `node.meta` (005 FR-003).
-        let (clock, clock_keeper) = start_clock(meta_disk, meta.clone())?;
+        let (clock, mut clock_keeper) = start_clock(&mut meta_disk, &meta)?;
         let addrs = NodeAddrs {
             // The name identifies the node in the cluster: its advertised inter-node address.
             name: advertised_peer.clone().into_bytes(),
@@ -1149,6 +1149,18 @@ impl Node {
         // line that says how it runs (`contracts/cli-engine.md`); the log's writer runs on shard 0
         // (023 FR-013).
         let engine = NodeEngine::start(&engine_cfg)?;
+        // The keeper of the clock's bound, a task of shard 0 on the engine's disk executor.
+        let keeper_place = place.clone();
+        clock_keeper.run_on(
+            0,
+            Box::new(move || {
+                let disk = keeper_place.on_shard().map_err(|_| StorageError::Io {
+                    op: "open",
+                    errno: IoErrno::Io,
+                })?;
+                Ok(Box::new(disk) as Box<dyn Disk>)
+            }),
+        )?;
         let backend = teseladb_io::engine::resources::backend_name();
         log.step(&engine_cfg.describe(&backend).to_string(), &[("shards", &engine.shards())]);
         if let Some(why) = &ordinary_pages {
@@ -1696,11 +1708,12 @@ impl Node {
         if self.stapling {
             crate::ocsp_staple::stop_node_stapler();
         }
+        // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158), by
+        // the keeper on its shard, before the engine stops.
+        self.clock.stop();
         // Nothing reaches the shards any more.
         crate::outbound::uninstall();
         engine.stop();
-        // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
-        self.clock.stop();
     }
 }
 
