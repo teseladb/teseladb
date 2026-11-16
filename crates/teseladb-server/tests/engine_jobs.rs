@@ -141,3 +141,15 @@ fn an_outbound_call_from_an_engine_thread_waits_on_its_own_shard() {
     .expect("the engine ran the job");
     assert_eq!(got, Ok(5));
 }
+
+#[test]
+fn block_on_from_an_engine_thread_runs_on_its_own_shard() {
+    let got = block_on(|| {
+        engine_jobs::run(|| {
+            block_on(|| teseladb::engine::core::future::make_ready_future(9_u8))
+                .map_err(|e| e.to_string())
+        })
+    })
+    .expect("the engine ran the job");
+    assert_eq!(got, Ok(9));
+}
