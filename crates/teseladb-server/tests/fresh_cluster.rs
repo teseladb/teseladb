@@ -8,10 +8,10 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::node::Node;
 
@@ -77,7 +77,7 @@ fn prompt_on(c: &mut Client, db: &str, cmd: Document) -> Document {
 
 /// The routing table as each node reports it right away (`getShardVersion`): the whole of a
 /// collection just sharded, one chunk from `MinKey` to `MaxKey`, never a part of it.
-fn routes_on_every_node(nodes: &[Node<MemDisk>]) {
+fn routes_on_every_node(nodes: &[Node]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
         let ns = format!("fresh.s{k}");
@@ -98,7 +98,7 @@ fn routes_on_every_node(nodes: &[Node<MemDisk>]) {
 }
 
 /// The catalog changes of a collection of its own on each node, right away.
-fn changes_on_every_node(nodes: &[Node<MemDisk>]) {
+fn changes_on_every_node(nodes: &[Node]) {
     for (k, n) in nodes.iter().enumerate() {
         let mut c = Client::new(n);
         let coll = format!("c{k}");
@@ -148,12 +148,12 @@ fn a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once() {
 #[test]
 fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
     let _load = Load::start();
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        let n = Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+        let n = Node::start(config(seed.clone()), DiskPlace::Memory, None).unwrap();
         until("a node that joined", || n.wait_ready(Duration::from_millis(100)).then_some(()));
         nodes.push(n);
     }

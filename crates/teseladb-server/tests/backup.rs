@@ -9,10 +9,10 @@ mod common;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_rest::media::{Format, decode};
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backup::Cli;
@@ -87,7 +87,7 @@ fn count(c: &mut Client) -> i32 {
 #[test]
 fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster() {
     let out = Dir::new("out");
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -112,7 +112,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
     assert_eq!(count(&mut c), 25);
     n.stop();
     // An empty cluster takes it: the catalog and the documents up to the mark.
-    let fresh = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let fresh = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(fresh.wait_ready(READY));
     let at = fresh.admin_addr().unwrap().to_string();
     let (code, text, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);
@@ -129,7 +129,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
     let mut bytes = std::fs::read(&file).unwrap();
     bytes[0] ^= 0xff;
     std::fs::write(&file, bytes).unwrap();
-    let other = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let other = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(other.wait_ready(READY));
     let at = other.admin_addr().unwrap().to_string();
     let (code, _, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);
@@ -142,7 +142,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
 #[test]
 fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     let out = Dir::new("three");
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..30)));
@@ -152,13 +152,13 @@ fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
     // A cluster of three nodes, its data range on all three.
-    let n1 = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(joining(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
-    let n3 = Node::start(joining(seed), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = Node::start(joining(seed.clone()), DiskPlace::Memory, None).unwrap();
+    let n3 = Node::start(joining(seed), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
-    let voters = |n: &Node<MemDisk>| n.data_status(ASK).map_or(0, |s| s.voters.len());
+    let voters = |n: &Node| n.data_status(ASK).map_or(0, |s| s.voters.len());
     until("three replicas", || (voters(&n1) == 3).then_some(()));
     let at = n1.admin_addr().unwrap().to_string();
     let (code, text, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);
@@ -167,9 +167,8 @@ fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     // every document.
     let mut nodes = vec![n1, n2, n3];
     until("three replicas again", || nodes.iter().all(|n| voters(n) == 3).then_some(()));
-    let leads = |n: &Node<MemDisk>| {
-        n.data_status(ASK).is_some_and(|s| s.role == Some(teseladb_raft::Role::Leader))
-    };
+    let leads =
+        |n: &Node| n.data_status(ASK).is_some_and(|s| s.role == Some(teseladb_raft::Role::Leader));
     let leader = until("a leader", || nodes.iter().position(leads));
     let mut c = Client::new(&nodes[(leader + 1) % 3]);
     until("the restored documents", || (try_count(&mut c) == Some(30)).then_some(()));
@@ -199,7 +198,7 @@ fn port(at: String) -> impl Fn(Method, &str, &[u8]) -> Result<Document, String> 
 #[test]
 fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     let out = Dir::new("cut");
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..30)));
@@ -208,13 +207,13 @@ fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     let (code, text, err) = admin(&at, &["backup", "--out", out.0.to_str().unwrap()]);
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
-    let n1 = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(joining(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
-    let n3 = Node::start(joining(seed), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = Node::start(joining(seed.clone()), DiskPlace::Memory, None).unwrap();
+    let n3 = Node::start(joining(seed), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
-    let voters = |n: &Node<MemDisk>| n.data_status(ASK).map_or(0, |s| s.voters.len());
+    let voters = |n: &Node| n.data_status(ASK).map_or(0, |s| s.voters.len());
     until("three replicas", || (voters(&n1) == 3).then_some(()));
     let call = port(n1.admin_addr().unwrap().to_string());
     let prepared = call(Method::Post, "/admin/restore/prepare", b"{}").unwrap();
@@ -240,7 +239,7 @@ fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
 #[test]
 fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_torn() {
     let out = Dir::new("load");
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -269,7 +268,7 @@ fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_tor
     writer.join().unwrap();
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
-    let fresh = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let fresh = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(fresh.wait_ready(READY));
     let at = fresh.admin_addr().unwrap().to_string();
     let (code, text, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);

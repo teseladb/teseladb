@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 /// The second within which a suspended tenant's connections close (FR-034).
@@ -49,8 +48,8 @@ fn open_cursors(root: &mut Client) -> i64 {
 fn a_suspended_tenant_signs_nobody_in_closes_its_connections_and_comes_back_on_resume() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<Node> = (0..2).map(|_| start(seed.clone())).collect();
+    let nodes: Vec<&Node> = std::iter::once(&first).chain(others.iter()).collect();
     admin(&first, &["tenant", "create", "acme"]);
     let mut root = Client::new(&first);
     assert!(ok(&login(&mut root, "root", ROOT_PASSWORD)));

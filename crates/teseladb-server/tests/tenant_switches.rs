@@ -11,13 +11,13 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
@@ -55,7 +55,7 @@ fn root_user() -> Vec<u8> {
 }
 
 /// A node that asks for authentication, with the HTTP port and the administration port.
-fn start() -> Node<MemDisk> {
+fn start() -> Node {
     let base = config(Vec::new());
     let client = teseladb_server::client_listener::ClientConfig {
         auth: true,
@@ -73,12 +73,12 @@ fn start() -> Node<MemDisk> {
         root_user: Some(root_user()),
         ..base
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
+fn admin(node: &Node, args: &[&str]) -> String {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -89,7 +89,7 @@ fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
 }
 
 /// `tenant limits acme` with `opts`.
-fn limits(node: &Node<MemDisk>, opts: &[&str]) {
+fn limits(node: &Node, opts: &[&str]) {
     let args: Vec<&str> = ["tenant", "limits", TENANT].iter().chain(opts).copied().collect();
     admin(node, &args);
 }
@@ -194,7 +194,7 @@ fn becomes<T: PartialEq>(what: &str, want: &T, mut f: impl FnMut() -> T) {
 }
 
 /// A node with tenant `acme`, its users `ann` and `svc`, and `root` signed in.
-fn tenant_node() -> (Node<MemDisk>, Client) {
+fn tenant_node() -> (Node, Client) {
     let node = start();
     admin(&node, &["tenant", "create", TENANT]);
     let mut root = Client::new(&node);

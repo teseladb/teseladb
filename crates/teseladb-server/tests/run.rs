@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_server::cli::USAGE;
 use teseladb_server::log::{Format, Level, Logger};
@@ -151,8 +152,7 @@ fn the_ready_line_in_both_formats() {
 
 #[test]
 fn a_node_that_is_not_ready_in_time_gives_up() {
-    let node =
-        Node::start(NodeConfig::default(), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node = Node::start(NodeConfig::default(), DiskPlace::Memory, None).unwrap();
     let log = Logger::new(Level::Info, Format::Text, Box::new(std::io::sink()));
     let mut out = Vec::new();
     assert_eq!(serve(node, Format::Text, &log, &mut out, &|| true, Duration::ZERO), 1);

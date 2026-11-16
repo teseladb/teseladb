@@ -12,10 +12,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 const WRITERS: i32 = 8;
@@ -62,11 +62,7 @@ fn value_of(r: &Document) -> Option<Value> {
 
 /// One writer: inserts a document, increments it and reads it back until `stop`; how many it
 /// wrote, and the operations that failed or took longer than `SLOW`.
-fn writer(
-    n: &Node<MemDisk>,
-    w: i32,
-    stop: Arc<AtomicBool>,
-) -> thread::JoinHandle<(usize, Vec<String>)> {
+fn writer(n: &Node, w: i32, stop: Arc<AtomicBool>) -> thread::JoinHandle<(usize, Vec<String>)> {
     let mut c = Client::new(n);
     thread::spawn(move || {
         let (mut written, mut bad) = (0, Vec::new());
@@ -94,7 +90,7 @@ fn writer(
 
 #[test]
 fn every_key_answers_after_splits_by_load() {
-    let n = Node::start(config(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(config(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     let ops = Document::new().with("opsPerSecond", SPLIT_OPS);

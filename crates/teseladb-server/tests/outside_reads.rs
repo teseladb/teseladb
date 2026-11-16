@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_lsm::LsmConfig;
 use teseladb_server::backend::{blocks_read_outside, served_outside};
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
@@ -62,7 +62,7 @@ fn find(c: &mut Client, id: i32) -> Vec<Value> {
 /// Waits until the reads served outside the cores since `before` reach `least`. A connection's
 /// worker reports what it served every 64 reads of a range or 10 ms, and the rest when it ends:
 /// `c` gets a new connection so that the last reads of the old one are reported too.
-fn served_at_least(node: &Node<FileDisk>, c: &mut Client, before: u64, least: u64) {
+fn served_at_least(node: &Node, c: &mut Client, before: u64, least: u64) {
     *c = Client::new(node);
     until("the reads served outside reported", || {
         (served_outside() - before >= least).then_some(())
@@ -81,7 +81,8 @@ fn a_read_by_id_is_served_without_the_core_also_from_the_files() {
     let cfg = NodeConfig { data_dir: Some(dir.0.clone()), lsm, ..config(Vec::new()) };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("locks the directory");
-    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    let node = Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("starts");
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     for from in (0..DOCS).step_by(1_000) {
@@ -138,7 +139,8 @@ fn scans_by_id_are_served_without_the_core_also_from_the_files() {
     let cfg = NodeConfig { data_dir: Some(dir.0.clone()), lsm, ..config(Vec::new()) };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("locks the directory");
-    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    let node = Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("starts");
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     for from in (0..DOCS).step_by(1_000) {
@@ -190,7 +192,8 @@ fn a_scan_right_after_a_write_answered_from_the_log_sees_it() {
     let cfg = NodeConfig { data_dir: Some(dir.0.clone()), ..config(Vec::new()) };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("locks the directory");
-    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    let node = Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("starts");
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let served = served_outside();
@@ -223,7 +226,8 @@ fn increments_from_several_connections_all_count() {
     let cfg = NodeConfig { data_dir: Some(dir.0.clone()), ..config(Vec::new()) };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("locks the directory");
-    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    let node = Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("starts");
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let counter = Document::new().with("_id", 1).with("n", 0);
@@ -263,8 +267,7 @@ fn increments_from_several_connections_all_count() {
 /// core.
 #[test]
 fn an_in_of_ids_examines_the_keys_the_reference_examines() {
-    let node =
-        Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..100)));
@@ -322,8 +325,7 @@ fn delete_once(c: &mut Client, id: i32, txn: i64) -> Document {
 /// core and deletes it.
 #[test]
 fn a_write_of_an_absent_id_is_answered_without_the_core() {
-    let node =
-        Node::start(config(Vec::new()), || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run(DB, Document::new().with("insert", COLL).with("documents", docs(0..10)));

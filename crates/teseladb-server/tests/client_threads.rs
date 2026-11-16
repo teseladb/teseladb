@@ -9,10 +9,10 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::{ClientConfig, Hooks};
 use teseladb_server::diag::ProcessConfig;
@@ -24,12 +24,12 @@ const LATE: Duration = Duration::from_millis(300);
 
 /// A node of one core, everything in memory, whose clients' port starts its threads with
 /// `hooks` and refreshes the sessions every 10 ms.
-fn node(hooks: Hooks) -> Node<MemDisk> {
+fn node(hooks: Hooks) -> Node {
     node_with(hooks, ClientConfig::new(Vec::new()))
 }
 
 /// [`node`] with the rest of the port's configuration from `client`.
-fn node_with(hooks: Hooks, client: ClientConfig) -> Node<MemDisk> {
+fn node_with(hooks: Hooks, client: ClientConfig) -> Node {
     let cfg = NodeConfig {
         cores: Some(1),
         client: Some(ClientConfig {
@@ -40,7 +40,7 @@ fn node_with(hooks: Hooks, client: ClientConfig) -> Node<MemDisk> {
         client_hooks: hooks,
         ..NodeConfig::default()
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(Duration::from_secs(10)));
     n
 }
@@ -65,7 +65,7 @@ fn late(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
     thread::Builder::new().name(name).spawn(delayed).map(drop)
 }
 
-fn connect(n: &Node<MemDisk>) -> TcpStream {
+fn connect(n: &Node) -> TcpStream {
     let s = TcpStream::connect(n.client_addrs()[0]).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s
@@ -96,7 +96,7 @@ fn ok(r: Option<(i32, Document)>) -> Option<(i32, Option<Value>)> {
 }
 
 /// The connections open on the node's clients' port, this one asking included.
-fn open_connections(n: &Node<MemDisk>) -> i64 {
+fn open_connections(n: &Node) -> i64 {
     let mut c = connect(n);
     send(&mut c, 1, Document::new().with("serverStatus", 1));
     let (_, d) = reply(&mut c).expect("a reply");
@@ -169,7 +169,7 @@ fn a_refresh_that_fails_goes_again() {
         ..NodeConfig::default()
     };
     // Not waited for: the first refreshes find no leader.
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(Duration::from_secs(10)));
     let mut c = connect(&n);
     let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![7; 16] });

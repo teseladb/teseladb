@@ -7,10 +7,10 @@
 mod common;
 
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::dev;
 use teseladb_server::node::Node;
@@ -91,7 +91,7 @@ fn nodes_on_a_given_port_announce_their_clients_address() {
 /// on `ts` below them, and the newest entry is the last acknowledged write.
 #[test]
 fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let first = c.run("dump", Document::new().with("insert", "a").with("documents", docs(0..3)));
@@ -138,7 +138,7 @@ fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
 /// seconds apart, with a skip the ones before them, and with a filter the newest it matches.
 #[test]
 fn the_newest_entries_come_first() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     for i in 0..3 {
@@ -180,7 +180,7 @@ const COPIED: i32 = 300;
 
 /// The writes a client makes while the copy runs: updates, inserts, deletes, replacements and a
 /// transaction that creates a collection, as in the measurement with the real tools.
-fn write_while_copying(node: &Node<MemDisk>) {
+fn write_while_copying(node: &Node) {
     let mut c = Client::new(node);
     let end = std::time::Instant::now() + WRITING;
     let mut i = 0;
@@ -286,8 +286,8 @@ fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
 /// run in `tests/compat/tools/run.sh`.
 #[test]
 fn a_copy_with_the_oplog_replays_into_the_same_data() {
-    let source = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
-    let target = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let source = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
+    let target = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(source.wait_ready(READY) && target.wait_ready(READY));
     let mut s = Client::new(&source);
     let mut t = Client::new(&target);

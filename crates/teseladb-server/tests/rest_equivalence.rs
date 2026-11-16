@@ -9,12 +9,12 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_rest::media::CANONICAL_JSON;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -240,7 +240,7 @@ fn rest_and_wire_answer_the_same() {
         settings: Settings::default(),
     };
     let cfg = NodeConfig { http: Some(http), ..config(Vec::new()) };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut wire = Client::new(&node);
     // Both collections start with the same documents, written through each path.

@@ -4,8 +4,8 @@
 
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::logic::GROUP0_MAX_VOTERS;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::NodeId;
@@ -23,17 +23,16 @@ fn config(join: Vec<String>) -> NodeConfig {
 
 #[test]
 fn six_nodes_joining_at_once_all_get_in() {
-    let founder = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let founder = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(founder.wait_ready(Duration::from_secs(10)));
     let seed = founder.peer_addr().to_string();
     let joiners: Vec<_> = (0..JOINERS)
         .map(|_| {
             let seeds = vec![seed.clone()];
-            thread::spawn(move || Node::start(config(seeds), || Ok(MemDisk::new()), None))
+            thread::spawn(move || Node::start(config(seeds), DiskPlace::Memory, None))
         })
         .collect();
-    let nodes: Vec<Node<MemDisk>> =
-        joiners.into_iter().map(|j| j.join().unwrap().unwrap()).collect();
+    let nodes: Vec<Node> = joiners.into_iter().map(|j| j.join().unwrap().unwrap()).collect();
     let mut ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
     ids.sort_unstable();
     ids.dedup();

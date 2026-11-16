@@ -7,11 +7,11 @@
 
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
 use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 use teseladb_router::table::RouteEntry;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::NodeId;
@@ -40,8 +40,8 @@ fn config(join: Vec<String>) -> NodeConfig {
     }
 }
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
-    Node::start(config(join), || Ok(MemDisk::new()), None).expect("the node starts")
+fn start(join: Vec<String>) -> Node {
+    Node::start(config(join), DiskPlace::Memory, None).expect("the node starts")
 }
 
 fn key(i: u32) -> Vec<u8> {
@@ -64,12 +64,12 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 }
 
 /// Writes `i` on whichever node leads its range.
-fn put(nodes: &[&Node<MemDisk>], i: u32) {
+fn put(nodes: &[&Node], i: u32) {
     until(&format!("write {i}"), || nodes.iter().find_map(|n| n.put(&key(i), &value(i), ASK).ok()));
 }
 
 /// Reads `i` on whichever node leads its range.
-fn get(nodes: &[&Node<MemDisk>], i: u32) -> Option<Vec<u8>> {
+fn get(nodes: &[&Node], i: u32) -> Option<Vec<u8>> {
     until(&format!("read {i}"), || nodes.iter().find_map(|n| n.get(&key(i), ASK).ok()))
 }
 

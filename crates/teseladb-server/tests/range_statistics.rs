@@ -6,22 +6,22 @@
 mod common;
 
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::Hooks;
 use teseladb_server::node::{Node, NodeConfig};
 
 const DB: &str = "stats";
 const DOCS: i32 = 2000;
 
-fn node() -> Node<MemDisk> {
+fn node() -> Node {
     let cfg = NodeConfig {
         client_hooks: Hooks { stats_every: Duration::from_millis(50), ..Hooks::default() },
         ..config(Vec::new())
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).expect("starts");
+    let n = Node::start(cfg, DiskPlace::Memory, None).expect("starts");
     assert!(n.wait_ready(common::READY));
     n
 }

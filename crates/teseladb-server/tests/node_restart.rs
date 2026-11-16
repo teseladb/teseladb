@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
 
 const DB: &str = "restart";
@@ -32,12 +32,13 @@ impl Drop for Dir {
     }
 }
 
-fn start(dir: &Dir, cores: u16) -> Node<FileDisk> {
+fn start(dir: &Dir, cores: u16) -> Node {
     let cfg =
         NodeConfig { data_dir: Some(dir.0.clone()), cores: Some(cores), ..config(Vec::new()) };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("locks the directory");
-    let node = Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("starts");
+    let node = Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("starts");
     assert!(node.wait_ready(READY));
     node
 }

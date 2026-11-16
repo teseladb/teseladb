@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_auth::sasl::SaslMechanism;
 use teseladb_bson::{Document, Value as Bson, extjson};
@@ -19,7 +20,6 @@ use teseladb_crypto::rsa::RsaPrivateKey;
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::https::Https;
@@ -159,7 +159,7 @@ fn start(
     ca: teseladb_x509::Certificate,
     http: SocketAddr,
     tls: Option<teseladb_server::tls_port::TlsPort>,
-) -> Node<MemDisk> {
+) -> Node {
     let json = format!(
         r#"[{{"issuer": "{issuer}", "audience": "{AUDIENCE}", "authNamePrefix": "idp", "clientId": "cid", "requestScopes": ["db.read"], "useAuthorizationClaim": true, "authorizationClaim": "groups", "supportsHumanFlows": false}}]"#
     );
@@ -181,7 +181,7 @@ fn start(
         root_user: Some(root_user()),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
@@ -241,7 +241,7 @@ fn found(v: &Value) -> Option<i64> {
 }
 
 /// The first key of `root`, from the administration port.
-fn root_key(node: &Node<MemDisk>) -> String {
+fn root_key(node: &Node) -> String {
     let at = node.admin_addr().unwrap().to_string();
     let none = std::env::temp_dir().join("teseladb-oidc-no-pki");
     let args = ["--node", &at, "--dbpath", none.to_str().unwrap(), "apikey", "create"];
@@ -256,7 +256,7 @@ fn root_key(node: &Node<MemDisk>) -> String {
 
 /// The provider's test PKI, the provider and a node with its HTTP port on `http`: the node, the
 /// address its HTTP port answers on over loopback, and the issuer.
-fn setup(http: SocketAddr) -> (Node<MemDisk>, SocketAddr, String) {
+fn setup(http: SocketAddr) -> (Node, SocketAddr, String) {
     let (node, at, issuer, _) = setup_with(http, false);
     (node, at, issuer)
 }
@@ -265,7 +265,7 @@ fn setup(http: SocketAddr) -> (Node<MemDisk>, SocketAddr, String) {
 fn setup_with(
     http: SocketAddr,
     tls: bool,
-) -> (Node<MemDisk>, SocketAddr, String, teseladb_server::pki::Pki) {
+) -> (Node, SocketAddr, String, teseladb_server::pki::Pki) {
     let pki = pki();
     let config = Arc::new(ServerConfig::new(CertifiedKey {
         chain: pki.node_chain.clone(),

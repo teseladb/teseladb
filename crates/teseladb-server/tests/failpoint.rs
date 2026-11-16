@@ -5,10 +5,10 @@ mod common;
 
 use std::io::Read;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 fn fail(data: Document) -> Document {
@@ -28,7 +28,7 @@ fn a_failpoint_closes_or_holds_only_its_connection() {
     if let Some(c) = cfg.client.as_mut() {
         c.test_commands = true;
     }
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut admin = Client::new(&node);
     let r = admin.run("app", Document::new().with("insert", "c").with("documents", docs(0..2)));
@@ -146,7 +146,7 @@ fn a_failpoint_holds_or_fails_a_rest_request() {
         tls: None,
         settings: teseladb_http::server::Settings::default(),
     });
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.http_addrs()[0];
     let mut admin = Client::new(&node);

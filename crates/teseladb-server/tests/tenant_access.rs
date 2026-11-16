@@ -8,7 +8,6 @@ mod secured;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 fn code(r: &Document) -> Option<i32> {
@@ -19,7 +18,7 @@ fn code(r: &Document) -> Option<i32> {
 }
 
 /// Signs `name` in on every node and gives the code of the last answer: `None` when it signed in.
-fn sign_in_everywhere(nodes: &[Node<MemDisk>], name: &str, want: Option<i32>) {
+fn sign_in_everywhere(nodes: &[Node], name: &str, want: Option<i32>) {
     for node in nodes {
         until("the access list on every node", || {
             let mut c = Client::new(node);

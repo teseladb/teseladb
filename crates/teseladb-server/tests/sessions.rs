@@ -5,10 +5,10 @@
 mod common;
 
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 fn fast(join: Vec<String>) -> NodeConfig {
@@ -42,12 +42,11 @@ fn get_more(c: &mut Client, id: i64, n: u8) -> Document {
 
 #[test]
 fn sessions_are_recorded_for_the_cluster_and_killed_on_every_node() {
-    let first = Node::start(fast(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = Node::start(fast(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(fast(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
+    let others: Vec<Node> =
+        (0..2).map(|_| Node::start(fast(seed.clone()), DiskPlace::Memory, None).unwrap()).collect();
     for n in std::iter::once(&first).chain(others.iter()) {
         assert!(n.wait_ready(READY));
     }

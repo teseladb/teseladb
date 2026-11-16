@@ -11,10 +11,10 @@
 mod common;
 
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, docs, ok, until};
 use teseladb_bson::Document;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 use teseladb_sys::alloc_count::{CountingAlloc, allocations};
 
@@ -72,7 +72,7 @@ fn per_op(c: &mut Client, first: i32, n: i32, idle: f64) -> u64 {
 
 #[test]
 fn an_operation_of_the_reference_scenario_makes_a_bounded_number_of_allocations() {
-    let node = Node::start(common::config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(common::config(Vec::new()), DiskPlace::Memory, None).unwrap();
     until("the node to be ready", || node.wait_ready(READY).then_some(()));
     let mut c = Client::new(&node);
     per_op(&mut c, 0, 200, 0.0);

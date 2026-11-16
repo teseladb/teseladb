@@ -6,7 +6,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::backend::tallied_from_counts;
 use teseladb_server::node::Node;
 
@@ -21,7 +21,7 @@ fn int(v: Option<&Value>) -> Option<i64> {
 
 #[test]
 fn coll_stats_adds_up_the_counts_of_the_ranges() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let insert = Document::new().with("insert", "k").with("documents", docs(0..40));

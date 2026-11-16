@@ -9,7 +9,7 @@ mod common;
 
 use common::{Client, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 /// Documents in the collection: several of the core's parts.
@@ -26,7 +26,7 @@ fn int(v: Option<&Value>) -> Option<i64> {
 
 #[test]
 fn a_scan_the_core_serves_in_parts_gives_every_document_once_in_order() {
-    let n = Node::start(common::config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(common::config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     for at in (0..DOCS).step_by(500) {

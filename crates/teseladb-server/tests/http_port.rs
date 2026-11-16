@@ -8,12 +8,12 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
 use teseladb_http::http1::{Limits, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -42,7 +42,7 @@ fn a_node_serves_healthz_and_cors_from_its_cluster_parameter() {
     };
     let admin = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
     let cfg = NodeConfig { http: Some(http), admin_listen: admin, ..config(Vec::new()) };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.http_addrs()[0];
     let r = get(at, "GET /healthz HTTP/1.1\r\nHost: h\r\n\r\n");
@@ -93,7 +93,7 @@ fn a_taken_http_port_stops_the_start_and_closes_what_it_opened() {
     let full = NodeConfig { http: Some(http()), admin_listen: admin, ..config(Vec::new()) };
     let bare = NodeConfig { http: Some(http()), client: None, ..config(Vec::new()) };
     for cfg in [full, bare] {
-        let Err(e) = Node::start(cfg, || Ok(MemDisk::new()), None) else {
+        let Err(e) = Node::start(cfg, DiskPlace::Memory, None) else {
             panic!("the node started on a taken HTTP port");
         };
         assert!(matches!(e, teseladb_server::node::NodeError::Io(_)), "{e:?}");

@@ -5,7 +5,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 fn count(c: &mut Client) -> i64 {
@@ -32,7 +32,7 @@ fn scans(c: &mut Client) -> i64 {
 
 #[test]
 fn a_count_without_a_filter_adds_up_the_ranges_counts() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let insert = Document::new().with("insert", "c").with("documents", docs(0..300));
@@ -65,7 +65,7 @@ fn a_count_without_a_filter_adds_up_the_ranges_counts() {
 /// once (H-004 of the native tests).
 #[test]
 fn a_count_adds_up_the_counts_of_every_range_of_the_collection() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let insert = Document::new().with("insert", "c").with("documents", docs(0..300));

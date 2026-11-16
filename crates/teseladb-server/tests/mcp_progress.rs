@@ -8,26 +8,26 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
 const META: &str =
     r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","progressToken":"p1"}"#;
 
-fn start() -> Node<MemDisk> {
+fn start() -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
         settings: Settings::default(),
     };
     let cfg = NodeConfig { http: Some(http), ..config(Vec::new()) };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }

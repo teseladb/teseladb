@@ -6,7 +6,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::Disk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
@@ -31,7 +30,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new<D: Disk + Send + 'static>(node: &Node<D>) -> Client {
+    pub fn new(node: &Node) -> Client {
         let s = TcpStream::connect(node.client_addrs()[0]).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(40))).unwrap();
         Client { s, next: 1 }

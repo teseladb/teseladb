@@ -13,7 +13,6 @@ use std::time::Duration;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 const OUT_OF_DISK_SPACE: i32 = 14031;
@@ -32,7 +31,7 @@ fn errmsg(r: &Document) -> String {
     }
 }
 
-fn cluster() -> (Vec<Node<MemDisk>>, Client) {
+fn cluster() -> (Vec<Node>, Client) {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
@@ -56,7 +55,7 @@ fn cluster() -> (Vec<Node<MemDisk>>, Client) {
     (nodes, root)
 }
 
-fn ann(node: &Node<MemDisk>) -> Client {
+fn ann(node: &Node) -> Client {
     until("Ann signs in", || {
         let mut c = Client::new(node);
         ok(&login(&mut c, "ann", PASSWORD)).then_some(c)
@@ -70,7 +69,7 @@ fn big(from: i32, n: i32) -> Document {
     Document::new().with("insert", "c").with("documents", Value::Array(docs))
 }
 
-fn stop(nodes: Vec<Node<MemDisk>>) {
+fn stop(nodes: Vec<Node>) {
     for n in nodes.into_iter().rev() {
         n.stop();
     }

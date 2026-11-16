@@ -8,7 +8,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 const DB: &str = "app";
@@ -61,8 +61,8 @@ fn labels(r: &Document) -> Vec<Value> {
     }
 }
 
-fn node() -> Node<MemDisk> {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+fn node() -> Node {
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
@@ -243,8 +243,7 @@ fn a_snapshot_read_sees_the_documents_at_its_cluster_time() {
 fn a_read_after_a_write_on_another_node_sees_it() {
     let first = node();
     let second =
-        Node::start(config(vec![first.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-            .unwrap();
+        Node::start(config(vec![first.peer_addr().to_string()]), DiskPlace::Memory, None).unwrap();
     assert!(second.wait_ready(READY));
     let mut a = Client::new(&first);
     let mut b = Client::new(&second);
@@ -323,8 +322,7 @@ fn a_document_whose_index_entries_pass_one_entry_is_written_in_parts() {
 fn a_commit_on_another_node_recovers_the_decision_from_the_token() {
     let first = node();
     let second =
-        Node::start(config(vec![first.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-            .unwrap();
+        Node::start(config(vec![first.peer_addr().to_string()]), DiskPlace::Memory, None).unwrap();
     assert!(second.wait_ready(READY));
     let (mut a, mut b) = (Client::new(&first), Client::new(&second));
     let r = a.run(DB, stmt(insert(1), 60, 1, true));

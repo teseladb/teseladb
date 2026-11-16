@@ -4,10 +4,10 @@
 mod common;
 
 use std::net::SocketAddr;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::node::{Node, NodeConfig};
 
@@ -26,7 +26,7 @@ fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
 
 #[test]
 fn health_and_metrics_are_served_on_the_administration_port() {
-    let n = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     assert_eq!(request(&at, Method::Get, "/healthz", b"").unwrap(), (200, Vec::new()));
@@ -44,7 +44,7 @@ fn health_and_metrics_are_served_on_the_administration_port() {
 
 #[test]
 fn every_subcommand_works_against_a_node() {
-    let n = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let (code, out, _) = admin(&at, &["nodes"]);
@@ -132,7 +132,7 @@ fn every_subcommand_works_against_a_node() {
 /// not a document's or falls outside the range, a merge of a range that does not exist.
 #[test]
 fn refused_subcommands_say_why() {
-    let n = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -193,11 +193,11 @@ fn usage_errors_exit_with_2() {
 /// nothing; a drained one gives its replicas to the others and closes its clients' port.
 #[test]
 fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
-    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
-    let n3 = Node::start(with_admin(seed), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = Node::start(with_admin(seed.clone()), DiskPlace::Memory, None).unwrap();
+    let n3 = Node::start(with_admin(seed), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let three = [n1.node_id(), n2.node_id(), n3.node_id()];
     until("three replicas", || {
@@ -251,12 +251,12 @@ fn a_drained_node_gives_its_replicas_away_and_closes_its_clients_port() {
 /// 2 alone answers for every document of node 1.
 #[test]
 fn a_node_that_replaces_the_only_one_answers_alone_once_it_left() {
-    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let mut c1 = Client::new(&n1);
     assert!(ok(&c1.run("db", Document::new().with("insert", "c").with("documents", docs(0..50)))));
-    let n2 = Node::start(with_admin(vec![n1.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-        .unwrap();
+    let n2 =
+        Node::start(with_admin(vec![n1.peer_addr().to_string()]), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY));
     let at = n2.admin_addr().unwrap().to_string();
     let one = n1.node_id().0.to_string();
@@ -309,11 +309,11 @@ fn leader_hints(at: &str) -> Vec<Option<i64>> {
 /// over the nodes until no node leads more than ⌈ranges / 10⌉ over another (007 T019, FR-010).
 #[test]
 fn range_leaders_publish_themselves_and_spread_over_the_nodes() {
-    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
-    let n3 = Node::start(with_admin(seed), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = Node::start(with_admin(seed.clone()), DiskPlace::Memory, None).unwrap();
+    let n3 = Node::start(with_admin(seed), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let at = n1.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n1);
@@ -361,11 +361,11 @@ fn range_leaders_publish_themselves_and_spread_over_the_nodes() {
 #[test]
 fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
     const ANSWER: std::time::Duration = std::time::Duration::from_secs(15);
-    let n1 = Node::start(with_admin(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let n1 = Node::start(with_admin(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
-    let n3 = Node::start(with_admin(seed.clone()), || Ok(MemDisk::new()), None).unwrap();
+    let n2 = Node::start(with_admin(seed.clone()), DiskPlace::Memory, None).unwrap();
+    let n3 = Node::start(with_admin(seed.clone()), DiskPlace::Memory, None).unwrap();
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let at2 = n2.admin_addr().unwrap().to_string();
     let answers = |at: &str, what: &str| {
@@ -380,7 +380,7 @@ fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
         }
     };
     answers(&at2, "with three nodes");
-    let n4 = Node::start(with_admin(seed), || Ok(MemDisk::new()), None).unwrap();
+    let n4 = Node::start(with_admin(seed), DiskPlace::Memory, None).unwrap();
     assert!(n4.wait_ready(READY));
     answers(&at2, "after a fourth node joined");
     let id1 = n1.node_id().0.to_string();
@@ -396,8 +396,8 @@ fn group_0_keeps_answering_while_nodes_join_and_leave_one_at_a_time() {
         .then_some(())
     });
     answers(&at2, "after node 1 left");
-    let n5 = Node::start(with_admin(vec![n2.peer_addr().to_string()]), || Ok(MemDisk::new()), None)
-        .unwrap();
+    let n5 =
+        Node::start(with_admin(vec![n2.peer_addr().to_string()]), DiskPlace::Memory, None).unwrap();
     assert!(n5.wait_ready(READY));
     answers(&at2, "after a fifth node joined");
     for n in [n5, n4, n3, n2, n1] {

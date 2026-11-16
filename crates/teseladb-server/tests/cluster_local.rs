@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_meta::bootstrap::DATA_START;
 use teseladb_raft::Role;
 use teseladb_server::cli::{self, Command as CliCommand};
@@ -88,7 +88,9 @@ fn node_process(args: &[String]) {
     let Ok(CliCommand::Start(o)) = cli::parse(args) else { panic!("start options: {args:?}") };
     let lock = lock_dir(&o.dbpath).expect("the data directory");
     let data = o.dbpath.clone();
-    let node = Node::start(node_config(&o), || FileDisk::open(&data), Some(lock)).expect("start");
+    let node =
+        Node::start(node_config(&o), DiskPlace::Files(std::path::PathBuf::from(&data)), Some(lock))
+            .expect("start");
     assert!(node.wait_ready(READY), "the cluster did not become ready");
     let mut out = std::io::stdout();
     let peer = node.peer_addr().to_string();

@@ -224,7 +224,7 @@ fn block(files: &mut BTreeMap<String, File>, dir: &Path, need: &BlockNeed) -> Op
     }
     let file = files.get(&need.path)?;
     let mut buf = vec![0; usize::try_from(need.len).ok()?];
-    let got = teseladb_io::read_up_to(file, &mut buf, need.offset).ok()?;
+    let got = teseladb_io::files::read_up_to(file, &mut buf, need.offset).ok()?;
     buf.truncate(got);
     BLOCKS.fetch_add(1, Ordering::Relaxed);
     Some(buf)

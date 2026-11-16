@@ -2,10 +2,10 @@
 //! authentication, with `root` from a credentials file, the administration port, and SCRAM-SHA-256.
 
 use std::net::SocketAddr;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 use crate::common::{Client, READY, config, ok};
@@ -33,7 +33,7 @@ pub fn root_user() -> Vec<u8> {
     doc
 }
 
-pub fn secured(join: Vec<String>) -> Node<MemDisk> {
+pub fn secured(join: Vec<String>) -> Node {
     let base = config(join.clone());
     let client = teseladb_server::client_listener::ClientConfig {
         auth: true,
@@ -45,12 +45,12 @@ pub fn secured(join: Vec<String>) -> Node<MemDisk> {
         root_user: join.is_empty().then(root_user),
         ..base
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
-pub fn admin_out(node: &Node<MemDisk>, args: &[&str]) -> String {
+pub fn admin_out(node: &Node, args: &[&str]) -> String {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();

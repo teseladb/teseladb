@@ -7,11 +7,11 @@
 mod common;
 
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_lsm::LsmConfig;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 const DB: &str = "big";
@@ -23,8 +23,8 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(4);
 const GET_MORE_MS: i32 = 3_000;
 
 /// Three nodes of two cores, the second and third joining the first.
-fn cluster() -> Vec<Node<MemDisk>> {
-    let start = |join| Node::start(config(join), || Ok(MemDisk::new()), None).expect("starts");
+fn cluster() -> Vec<Node> {
+    let start = |join| Node::start(config(join), DiskPlace::Memory, None).expect("starts");
     let first = start(Vec::new());
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
@@ -360,7 +360,7 @@ fn compact_frees_the_versions_the_history_no_longer_keeps() {
     // compaction of everything runs by itself.
     let lsm = LsmConfig { memtable_bytes: 64 << 10, ..LsmConfig::default() };
     let node =
-        Node::start(NodeConfig { lsm, ..config(Vec::new()) }, || Ok(MemDisk::new()), None).unwrap();
+        Node::start(NodeConfig { lsm, ..config(Vec::new()) }, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let mut retain = |seconds: i32| {

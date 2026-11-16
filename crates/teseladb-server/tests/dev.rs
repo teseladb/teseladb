@@ -12,13 +12,13 @@ use teseladb_types::NodeId;
 
 const ASK: Duration = Duration::from_secs(1);
 
-fn views(nodes: &[teseladb_server::node::Node<teseladb_raftlog::MemDisk>]) -> Vec<Group0View> {
+fn views(nodes: &[teseladb_server::node::Node]) -> Vec<Group0View> {
     nodes.iter().map(|n| n.view(ASK).expect("core 0 answers")).collect()
 }
 
 /// Waits until `ok` holds for the views of every node.
 fn wait_until(
-    nodes: &[teseladb_server::node::Node<teseladb_raftlog::MemDisk>],
+    nodes: &[teseladb_server::node::Node],
     timeout: Duration,
     ok: impl Fn(&[Group0View]) -> bool,
 ) -> Vec<Group0View> {

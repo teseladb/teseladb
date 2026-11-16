@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_meta::bootstrap::{DATA_RANGE, DATA_START};
 use teseladb_raft::Role;
 use teseladb_range::ack::{W, WriteConcern};
@@ -55,11 +55,12 @@ fn free_port() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).expect("a free port")
 }
 
-fn start(dir: &Dir, peer: SocketAddr, join: Vec<String>) -> Node<FileDisk> {
+fn start(dir: &Dir, peer: SocketAddr, join: Vec<String>) -> Node {
     let cfg = NodeConfig { cores: Some(1), listen_peer: peer, join, ..NodeConfig::default() };
     let path = dir.0.clone();
     let lock = lock_dir(&dir.0).expect("the data directory");
-    Node::start(cfg, || FileDisk::open(&path), Some(lock)).expect("the node starts")
+    Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock))
+        .expect("the node starts")
 }
 
 fn key(name: &str) -> Vec<u8> {
@@ -79,11 +80,11 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 
 /// The range's status, or `None` if its core did not answer in time (a busy machine): the
 /// callers ask again.
-fn status(n: &Node<FileDisk>) -> Option<DataStatus> {
+fn status(n: &Node) -> Option<DataStatus> {
     n.data_status(ASK)
 }
 
-fn leads(n: &Node<FileDisk>) -> bool {
+fn leads(n: &Node) -> bool {
     status(n).is_some_and(|s| s.role == Some(Role::Leader))
 }
 
@@ -103,7 +104,7 @@ const CUT_OFF_ATTEMPTS: usize = 5;
 /// the followers, which are stopped. If an election moved the leadership before the followers
 /// went (heartbeats late on a busy machine), the followers come back and it starts again.
 fn leader_takes_a_lost_write(
-    nodes: &mut [Option<Node<FileDisk>>],
+    nodes: &mut [Option<Node>],
     dirs: &[Dir],
     ports: &[SocketAddr],
     lost: &[u8],
@@ -148,7 +149,7 @@ fn leader_takes_a_lost_write(
 fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file() {
     let dirs = [Dir::new("1"), Dir::new("2"), Dir::new("3")];
     let ports = [free_port(), free_port(), free_port()];
-    let mut nodes: Vec<Option<Node<FileDisk>>> = Vec::new();
+    let mut nodes: Vec<Option<Node>> = Vec::new();
     nodes.push(Some(start(&dirs[0], ports[0], Vec::new())));
     let seed = vec![ports[0].to_string()];
     for i in 1..3 {
@@ -168,7 +169,7 @@ fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file()
     for &i in &others {
         nodes[i] = Some(start(&dirs[i], ports[i], Vec::new()));
     }
-    let alive: Vec<&Node<FileDisk>> = others.iter().filter_map(|&i| nodes[i].as_ref()).collect();
+    let alive: Vec<&Node> = others.iter().filter_map(|&i| nodes[i].as_ref()).collect();
     until("a write after the rollback", || {
         alive.iter().find_map(|n| n.put(&key("kept-after"), b"2", ASK).ok())
     });
@@ -195,7 +196,7 @@ fn a_write_acknowledged_with_w1_and_lost_in_a_rollback_goes_to_a_rollback_file()
     for &i in &others {
         assert!(rollback_files(&dirs[i].0).is_empty());
     }
-    let alive: Vec<&Node<FileDisk>> = nodes.iter().flatten().collect();
+    let alive: Vec<&Node> = nodes.iter().flatten().collect();
     // The leader may change while the old one comes back (an election on a busy machine): each
     // read goes to the node that leads at that moment.
     let get = |k: &[u8]| {

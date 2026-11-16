@@ -6,11 +6,11 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
@@ -88,12 +88,12 @@ fn root_user() -> Vec<u8> {
     doc
 }
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn start(join: Vec<String>) -> Node {
     start_with(join, None)
 }
 
 /// A node, with its audit log in JSON at `audit`.
-fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node<MemDisk> {
+fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -117,13 +117,13 @@ fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node<MemDis
         root_user: join.is_empty().then(root_user),
         ..base
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
 /// `teseladb admin --node <admin port> <args>`: exit code and output.
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> (i32, String, String) {
+fn admin(node: &Node, args: &[&str]) -> (i32, String, String) {
     let at = node.admin_addr().unwrap().to_string();
     let none = std::env::temp_dir().join("teseladb-apikeys-no-pki");
     let mut all = vec!["--node".to_owned(), at, "--dbpath".to_owned()];
@@ -146,7 +146,7 @@ fn text(d: &Document, f: &str) -> String {
 fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_second() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<Node> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> =
         std::iter::once(&first).chain(others.iter()).map(|n| n.http_addrs()[0]).collect();
     // The first key comes from the administration port, printed once.

@@ -6,11 +6,11 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -20,7 +20,7 @@ const READY: Duration = Duration::from_secs(30);
 const ANSWER: Duration = Duration::from_secs(5);
 const C: &str = "/v1/databases/app/collections/c";
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn start(join: Vec<String>) -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -38,7 +38,7 @@ fn start(join: Vec<String>) -> Node<MemDisk> {
         client: Some(client),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
@@ -92,7 +92,7 @@ fn counts(at: SocketAddr) -> Vec<Value> {
 fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<Node> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> =
         std::iter::once(&first).chain(others.iter()).map(|n| n.http_addrs()[0]).collect();
     let (st, d) = {
@@ -147,7 +147,7 @@ fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
 
 /// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
 /// at most [`READY`].
-fn replicated(node: &Node<MemDisk>) -> bool {
+fn replicated(node: &Node) -> bool {
     let end = Instant::now() + READY;
     let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
     while Instant::now() < end {
@@ -165,7 +165,7 @@ fn replicated(node: &Node<MemDisk>) -> bool {
 }
 
 /// `teseladb admin` on `node`'s administration port: its exit code, its output and its errors.
-fn admin_run(node: &Node<MemDisk>, args: &[&str]) -> (i32, String, String) {
+fn admin_run(node: &Node, args: &[&str]) -> (i32, String, String) {
     let none = std::env::temp_dir().join("teseladb-idempotency-no-pki");
     let mut all = vec!["--node".to_owned(), node.admin_addr().unwrap().to_string()];
     all.extend(["--dbpath".to_owned(), none.to_str().unwrap().to_owned()]);
@@ -177,7 +177,7 @@ fn admin_run(node: &Node<MemDisk>, args: &[&str]) -> (i32, String, String) {
 }
 
 /// `teseladb admin` on `node`'s administration port: its output.
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
+fn admin(node: &Node, args: &[&str]) -> String {
     let (code, out, err) = admin_run(node, args);
     assert_eq!(code, 0, "{err}");
     out
@@ -185,7 +185,7 @@ fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
 
 /// [`admin`] for a change of a range, asked again while Group 0 answers that the range is busy
 /// with another change (a replica it is still adding, say), for at most [`READY`].
-fn admin_once_free(node: &Node<MemDisk>, args: &[&str]) -> String {
+fn admin_once_free(node: &Node, args: &[&str]) -> String {
     let busy = format!("{:?}", teseladb_meta::group0::Group0Error::RangeBusy);
     let end = Instant::now() + READY;
     loop {
@@ -200,7 +200,7 @@ fn admin_once_free(node: &Node<MemDisk>, args: &[&str]) -> String {
 
 /// Moves each range of collection `ns` to the other core of its node (007 FR-011): its Raft
 /// group starts again there and elects a new leader.
-fn relocate(node: &Node<MemDisk>, ns: &str) {
+fn relocate(node: &Node, ns: &str) {
     let text = admin(node, &["--format", "json", "ranges", "--collection", ns]);
     let d = extjson::parse(&text).unwrap();
     let Some(Value::Array(ranges)) = d.get("ranges") else { panic!("{text}") };

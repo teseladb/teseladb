@@ -5,11 +5,11 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -22,7 +22,7 @@ const ANSWER: Duration = Duration::from_secs(5);
 const FAILOVER: Duration = Duration::from_secs(3);
 const C: &str = "/v1/databases/app/collections/c";
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn start(join: Vec<String>) -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -39,7 +39,7 @@ fn start(join: Vec<String>) -> Node<MemDisk> {
         client: Some(client),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
@@ -90,7 +90,7 @@ fn answered_within(
 
 /// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
 /// at most [`READY`].
-fn replicated(node: &Node<MemDisk>) -> bool {
+fn replicated(node: &Node) -> bool {
     let end = Instant::now() + READY;
     let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
     while Instant::now() < end {
@@ -111,7 +111,7 @@ fn replicated(node: &Node<MemDisk>) -> bool {
 fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<Node> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> = others.iter().map(|n| n.http_addrs()[0]).collect();
     let made =
         send(first.http_addrs()[0], "POST", "/v1/databases/app/collections", r#"{"name":"c"}"#)

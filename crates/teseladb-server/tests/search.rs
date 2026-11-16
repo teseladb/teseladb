@@ -6,10 +6,10 @@
 mod common;
 
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 /// The most a query on an idle range may take: its leader closes a mark at most 3 s behind its
@@ -38,13 +38,13 @@ fn queryable(c: &mut Client) -> bool {
 
 #[test]
 fn a_search_on_an_idle_range_answers_on_every_node() {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
+    let others: Vec<Node> = (0..2)
+        .map(|_| Node::start(config(seed.clone()), DiskPlace::Memory, None).unwrap())
         .collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let nodes: Vec<&Node> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }

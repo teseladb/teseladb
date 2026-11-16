@@ -16,11 +16,11 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::backend::{
     filtered_parts_sent, lookup_batches_sent, lookup_keys_filtered, lookup_keys_sent,
@@ -42,18 +42,18 @@ fn op(name: &str, arg: impl Into<Value>) -> Value {
 }
 
 /// Three nodes, the first one the seed.
-fn cluster() -> Vec<Node<MemDisk>> {
+fn cluster() -> Vec<Node> {
     cluster_with(config)
 }
 
 /// Three nodes with the configuration `cfg` gives for their seeds, the first one the seed.
-fn cluster_with(cfg: impl Fn(Vec<String>) -> NodeConfig) -> Vec<Node<MemDisk>> {
-    let first = Node::start(cfg(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+fn cluster_with(cfg: impl Fn(Vec<String>) -> NodeConfig) -> Vec<Node> {
+    let first = Node::start(cfg(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        nodes.push(Node::start(cfg(seed.clone()), || Ok(MemDisk::new()), None).unwrap());
+        nodes.push(Node::start(cfg(seed.clone()), DiskPlace::Memory, None).unwrap());
     }
     for n in &nodes {
         assert!(n.wait_ready(READY));
@@ -62,7 +62,7 @@ fn cluster_with(cfg: impl Fn(Vec<String>) -> NodeConfig) -> Vec<Node<MemDisk>> {
 }
 
 /// A node that follows the data range, so that the ranges split from it are led elsewhere.
-fn follower(nodes: &[Node<MemDisk>]) -> &Node<MemDisk> {
+fn follower(nodes: &[Node]) -> &Node {
     until("a replica that follows", || {
         nodes.iter().find(|n| {
             n.data_status(Duration::from_secs(2)).is_some_and(|s| s.role == Some(Role::Follower))
@@ -223,10 +223,7 @@ fn ranges_of_c(at: &str) -> Vec<teseladb_types::GroupId> {
 }
 
 /// The leader of range `g`, as every node that has a replica of it says, when they agree.
-fn leader_of(
-    nodes: &[Node<MemDisk>],
-    g: teseladb_types::GroupId,
-) -> Option<teseladb_types::NodeId> {
+fn leader_of(nodes: &[Node], g: teseladb_types::GroupId) -> Option<teseladb_types::NodeId> {
     let said: Vec<teseladb_types::NodeId> = nodes
         .iter()
         .filter_map(|n| n.range_status(g, Duration::from_secs(2)))

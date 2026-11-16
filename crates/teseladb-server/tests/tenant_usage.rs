@@ -9,7 +9,6 @@ mod secured;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 fn user(root: &mut Client, name: &str) {
@@ -26,7 +25,7 @@ fn user_of(root: &mut Client, name: &str, tenant: &str) {
     assert!(ok(&root.run("admin", create)));
 }
 
-fn signed_in(node: &Node<MemDisk>, name: &str) -> Client {
+fn signed_in(node: &Node, name: &str) -> Client {
     until("the user signs in", || {
         let mut c = Client::new(node);
         ok(&login(&mut c, name, PASSWORD)).then_some(c)
@@ -122,7 +121,7 @@ fn each_node_reports_the_tenant_usage_and_its_own_counters_without_the_service_u
 }
 
 /// `teseladb admin <args>` on `node`: its error output when it fails.
-fn admin_try(node: &Node<MemDisk>, args: &[&str]) -> Result<(), String> {
+fn admin_try(node: &Node, args: &[&str]) -> Result<(), String> {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -134,7 +133,7 @@ fn admin_try(node: &Node<MemDisk>, args: &[&str]) -> Result<(), String> {
 }
 
 /// Splits the range that holds document `id` of `app.c` of the tenant numbered `tenant`.
-fn split_at(node: &Node<MemDisk>, tenant: u32, id: i32) {
+fn split_at(node: &Node, tenant: u32, id: i32) {
     let at = format!(r#"{{"ns": "\u0000{tenant}\u0000app.c", "_id": {id}}}"#);
     // A range still splitting refuses the next split (`RangeBusy`) until it is done.
     until("the split", || {

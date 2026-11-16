@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
-use teseladb_raftlog::MemDisk;
 use teseladb_server::enroll::Token;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pki::{self, MASTER_KEY, PkiParams};
@@ -38,7 +38,7 @@ fn now() -> i64 {
 }
 
 /// The first member: a node with a fresh PKI, TLS between nodes and enrollments.
-fn member(data: &Path) -> Node<MemDisk> {
+fn member(data: &Path) -> Node {
     let params = PkiParams { now: now(), node_names: Vec::new() };
     let mut random = |b: &mut [u8]| teseladb_sys::fill_random(b);
     let pki = pki::load_or_create(data, &params, &mut random).unwrap();
@@ -49,7 +49,7 @@ fn member(data: &Path) -> Node<MemDisk> {
         admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(WAIT));
     node
 }
@@ -277,7 +277,7 @@ fn the_admin_command_issues_a_token_that_enrolls_a_node() {
         admin_listen: Some("127.0.0.1:0".parse().unwrap()),
         ..NodeConfig::default()
     };
-    let first = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let first = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(first.wait_ready(WAIT));
     let admin = first.admin_addr().expect("an administration port").to_string();
     let args: Vec<String> = ["admin", "--node", &admin, "token", "create", "--ttl", "10m"]

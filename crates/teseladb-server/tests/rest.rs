@@ -7,12 +7,12 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_rest::api::{AFTER_CLUSTER_TIME, OPERATION_TIME};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
@@ -39,7 +39,7 @@ fn call(addr: SocketAddr, method: &str, target: &str, body: &str) -> (u16, Docum
     (r.status, doc, r)
 }
 
-fn start_joining(client: ClientConfig, join: Vec<String>) -> Node<MemDisk> {
+fn start_joining(client: ClientConfig, join: Vec<String>) -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -47,12 +47,12 @@ fn start_joining(client: ClientConfig, join: Vec<String>) -> Node<MemDisk> {
     };
     let base = config(join);
     let cfg = NodeConfig { http: Some(http), client: Some(client), ..base };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
-fn start(client: ClientConfig) -> Node<MemDisk> {
+fn start(client: ClientConfig) -> Node {
     start_joining(client, Vec::new())
 }
 
@@ -192,9 +192,8 @@ fn a_node_with_authentication_refuses_requests_without_a_credential() {
 fn any_node_of_three_follows_a_cursor_another_opened() {
     let first = start(plain_client());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> =
-        (0..2).map(|_| start_joining(plain_client(), seed.clone())).collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<Node> = (0..2).map(|_| start_joining(plain_client(), seed.clone())).collect();
+    let nodes: Vec<&Node> = std::iter::once(&first).chain(others.iter()).collect();
     let at: Vec<SocketAddr> = nodes.iter().map(|n| n.http_addrs()[0]).collect();
     let items: Vec<String> = (0..30).map(|k| format!("{{\"_id\":{k}}}")).collect();
     let body = format!("{{\"documents\":[{}]}}", items.join(","));

@@ -13,7 +13,6 @@ use std::time::Duration;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 use teseladb_server::tenant_limits::{RETRYABLE, SYSTEM_OVERLOADED};
 use teseladb_wire::error::RETRYABLE_WRITE_ERROR;
@@ -41,7 +40,7 @@ fn labels(r: &Document) -> Vec<String> {
 }
 
 /// Three secured nodes with tenant `acme`, its user `ann` and `root` signed in on the first.
-fn cluster() -> (Vec<Node<MemDisk>>, Client) {
+fn cluster() -> (Vec<Node>, Client) {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
@@ -61,7 +60,7 @@ fn cluster() -> (Vec<Node<MemDisk>>, Client) {
 
 /// Waits until `node` holds limit `key` of `acme` at `value`: a change reaches the other nodes a
 /// moment after the node that took it.
-fn reached(node: &Node<MemDisk>, key: &str, value: u64) {
+fn reached(node: &Node, key: &str, value: u64) {
     let want = format!("\"{key}\":{value}");
     until(&format!("{key} {value} on the node"), || {
         let out = admin(node, &["--format", "json", "tenant", "limits", "acme"]);
@@ -70,7 +69,7 @@ fn reached(node: &Node<MemDisk>, key: &str, value: u64) {
 }
 
 /// A connection of Ann on `node`, signed in once the user and the limits reached it.
-fn ann(node: &Node<MemDisk>) -> Client {
+fn ann(node: &Node) -> Client {
     until("Ann signs in", || {
         let mut c = Client::new(node);
         ok(&login(&mut c, "ann", PASSWORD)).then_some(c)
@@ -86,7 +85,7 @@ fn closed(c: &mut Client) -> bool {
 
 /// A connection of Ann on `node` that sends the last step of its sign-in without reading the
 /// answer.
-fn third_sign_in(node: &Node<MemDisk>) -> Client {
+fn third_sign_in(node: &Node) -> Client {
     let mut third = Client::new(node);
     third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mech = teseladb_auth::scram::Mechanism::ScramSha256;
@@ -108,7 +107,7 @@ fn third_sign_in(node: &Node<MemDisk>) -> Client {
     third
 }
 
-fn stop(nodes: Vec<Node<MemDisk>>) {
+fn stop(nodes: Vec<Node>) {
     for n in nodes.into_iter().rev() {
         n.stop();
     }

@@ -41,7 +41,12 @@ impl<D: Disk> DiskSpill<D> {
     /// The store over `disk`, rooted at its directory of runs, without the runs a previous
     /// process left.
     pub fn open(mut disk: D) -> Result<DiskSpill<D>, MqlError> {
-        let left = disk.list(&PathBuf::new()).map_err(|e| failed("list", e))?;
+        // A directory not made yet holds no runs; the first one makes it.
+        let left = match disk.list(&PathBuf::new()) {
+            Ok(left) => left,
+            Err(IoErrno::NotFound) => Vec::new(),
+            Err(e) => return Err(failed("list", e)),
+        };
         for p in left {
             done(disk.execute(IoOp::Remove { path: p }), "remove")?;
         }
@@ -88,36 +93,45 @@ impl<D: Disk + std::fmt::Debug> SpillStore for DiskSpill<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teseladb_raftlog::MemDisk;
 
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("teseladb-spill-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+    /// The names of the runs on the store's disk.
+    fn names(s: &DiskSpill<MemDisk>) -> Vec<PathBuf> {
+        s.lock().0.list(&PathBuf::new()).unwrap_or_default()
+    }
+
+    /// A disk in memory with a run a previous process left.
+    fn left_behind() -> MemDisk {
+        let mut d = MemDisk::new();
+        let left = PathBuf::from("spill-9.bson");
+        let ops = [
+            IoOp::Create { file: FileId(1), path: left.clone(), prealloc: 0 },
+            IoOp::WriteAt { file: FileId(1), offset: 0, data: b"left".as_slice().into(), batch: 0 },
+            IoOp::Close { file: FileId(1) },
+        ];
+        for op in ops {
+            assert!(matches!(d.execute(op), IoDone::Ok(_)));
+        }
         d
     }
 
     #[test]
     fn runs_are_files_read_in_pieces_and_removed() {
-        let d = dir("runs");
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("spill-9.bson"), b"left").unwrap();
-        let s = DiskSpill::open(teseladb_io::FileDisk::open(&d).unwrap()).unwrap();
-        assert!(!d.join("spill-9.bson").exists());
+        let s = DiskSpill::open(left_behind()).unwrap();
+        assert!(names(&s).is_empty(), "what a previous process left goes");
         let a = s.write(b"hello world").unwrap();
         let b = s.write(b"xyz").unwrap();
         assert_eq!(s.read(a, 6, 100).unwrap(), b"world");
         assert_eq!(s.read(b, 0, 2).unwrap(), b"xy");
         s.remove(a);
-        assert!(!d.join("spill-0.bson").exists());
+        assert_eq!(names(&s), [PathBuf::from("spill-1.bson")]);
         assert!(s.read(a, 0, 1).is_err());
-        assert!(d.join("spill-1.bson").exists());
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn a_sort_past_its_limit_goes_through_the_files() {
         use teseladb_bson::{Document, RawDoc};
-        let d = dir("sort");
-        let s = DiskSpill::open(teseladb_io::FileDisk::open(&d).unwrap()).unwrap();
+        let s = DiskSpill::open(MemDisk::new()).unwrap();
         let spec = Document::new().with("s", Document::new().with("k", -1));
         let bytes = spec.to_bytes().unwrap();
         let raw = RawDoc::from_bytes(&bytes).unwrap();
@@ -127,7 +141,6 @@ mod tests {
         let expected = spec.sort(docs.clone(), None).unwrap();
         let out = teseladb_exec::pipeline::spill::sort_runs(&spec, docs, None, 4_096, &s).unwrap();
         assert_eq!(out, expected);
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
-        std::fs::remove_dir_all(&d).unwrap();
+        assert!(names(&s).is_empty(), "every run is removed");
     }
 }

@@ -6,10 +6,10 @@
 mod common;
 
 use std::net::SocketAddr;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::admin_http::{Method, request};
 use teseladb_server::node::{Node, NodeConfig};
 
@@ -27,7 +27,7 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         data_dir: Some(dir.clone()),
         ..config(Vec::new())
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     assert!(ok(&c.run("app", Document::new().with("insert", "c").with("documents", docs(0..5)))));
@@ -61,7 +61,6 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     for stage in [
         "write_latch_wait",
         "write_range",
-        "drive_flush_wait",
         "core_step",
         "core_data_done",
         "core_lsm_work",

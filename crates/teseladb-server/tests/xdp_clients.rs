@@ -11,10 +11,10 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_crypto::ec::NamedCurve;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::{ClientConfig, ClientListener, NodeState};
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::tls_port::{TlsMode, TlsPort};
@@ -205,8 +205,7 @@ fn a_node_serves_its_commands_on_af_xdp() {
         ..base.client.clone().unwrap()
     };
     let node =
-        Node::start(NodeConfig { client: Some(client), ..base }, || Ok(MemDisk::new()), None)
-            .unwrap();
+        Node::start(NodeConfig { client: Some(client), ..base }, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let to = node.client_addrs()[0];
     let cmds = vec![

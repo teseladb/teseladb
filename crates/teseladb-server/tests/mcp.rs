@@ -7,6 +7,7 @@ mod common;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value as Bson};
@@ -14,23 +15,22 @@ use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_json::{Value, parse};
 use teseladb_mcp::server::SESSION_HEADER;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn start(join: Vec<String>) -> Node {
     start_on(join, [127, 0, 0, 1])
 }
 
 /// [`start`], with the HTTP port on `ip`.
-fn start_on(join: Vec<String>, ip: [u8; 4]) -> Node<MemDisk> {
+fn start_on(join: Vec<String>, ip: [u8; 4]) -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from((ip, 0))],
         tls: None,
         settings: Settings::default(),
     };
     let node =
-        Node::start(NodeConfig { http: Some(http), ..config(join) }, || Ok(MemDisk::new()), None)
+        Node::start(NodeConfig { http: Some(http), ..config(join) }, DiskPlace::Memory, None)
             .unwrap();
     assert!(node.wait_ready(READY));
     node
@@ -77,7 +77,7 @@ fn structured(v: &Value) -> &Value {
 fn a_session_of_one_node_works_through_the_others() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<Node> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> =
         std::iter::once(&first).chain(others.iter()).map(|n| n.http_addrs()[0]).collect();
     let mut wire = Client::new(&first);

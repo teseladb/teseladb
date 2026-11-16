@@ -89,12 +89,8 @@ pub struct StartOpts {
     /// Memory the node may use (`--memory-limit`, `teseladb.memoryLimit`; 012 FR-013); `None`:
     /// three quarters of the memory the process has.
     pub memory_limit: Option<u64>,
-    /// Who executes the disk operations (`--io-executor`, 012 FR-007).
-    pub io_executor: teseladb_io::node_disk::IoExecutor,
-    /// `O_DIRECT` (`--direct-io`, 012 FR-003).
-    pub direct_io: teseladb_io::node_disk::DirectIo,
-    /// A kernel thread polls each core's ring (`--io-uring-sqpoll`, 012 FR-025).
-    pub io_uring_sqpoll: bool,
+    /// `O_DIRECT` (`--direct-io`, 012 FR-003, 023 FR-010).
+    pub direct_io: teseladb_io::DirectIo,
     /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
     /// (`--net-xdp`, 012 FR-033); `None`: the kernel's TCP only.
     pub net_xdp: Option<String>,
@@ -358,8 +354,6 @@ pub struct DevOpts {
 /// One option of a subcommand: its name and whether it is a flag (it takes no value).
 type Spec = (&'static str, bool);
 
-/// `--io-uring-sqpoll` (012 FR-025).
-const IO_URING_SQPOLL: &str = "io-uring-sqpoll";
 /// `--net-xdp <interface>` (012 FR-033).
 pub(crate) const NET_XDP: &str = "net-xdp";
 const VALUE: bool = false;
@@ -369,9 +363,7 @@ const START: &[Spec] = &[
     ("dbpath", VALUE),
     ("cores", VALUE),
     ("memory-limit", VALUE),
-    ("io-executor", VALUE),
     ("direct-io", VALUE),
-    (IO_URING_SQPOLL, FLAG),
     (NET_XDP, VALUE),
     (BLOCK_COMPRESSOR, VALUE),
     ("cpu-list", VALUE),
@@ -1122,18 +1114,11 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
                 crate::memory::parse_size(v).map_err(|e| CliError(format!("--memory-limit: {e}")))
             })
             .transpose()?,
-        io_executor: match o.get("io-executor") {
-            None => teseladb_io::node_disk::IoExecutor::Auto,
-            Some(v) => teseladb_io::node_disk::IoExecutor::parse(v).ok_or_else(|| {
-                CliError(format!("--io-executor: {v:?} is not auto, uring or threads"))
-            })?,
-        },
         direct_io: match o.get("direct-io") {
-            None => teseladb_io::node_disk::DirectIo::Auto,
-            Some(v) => teseladb_io::node_disk::DirectIo::parse(v)
+            None => teseladb_io::DirectIo::Auto,
+            Some(v) => teseladb_io::DirectIo::parse(v)
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
-        io_uring_sqpoll: o.flag(IO_URING_SQPOLL)?,
         net_xdp: match o.get(NET_XDP) {
             Some("") => return Err(CliError("--net-xdp: no interface given".to_owned())),
             v => v.map(str::to_owned),
@@ -1258,8 +1243,7 @@ pub static USAGE: std::sync::LazyLock<&'static str> =
 const USAGE_TEXT: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
-                 [--io-executor auto|uring|threads] [--direct-io auto|on|off] [--cpu-list <cpus>]
-                 [--io-uring-sqpoll] [--net-xdp <interface>]
+                 [--direct-io auto|on|off] [--cpu-list <cpus>] [--net-xdp <interface>]
                  [--${name:OPTION_BLOCK_COMPRESSOR} none|zlib|zstd|lz4]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]

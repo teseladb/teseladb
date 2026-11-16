@@ -255,9 +255,11 @@ mod tests {
 
     /// While the node's shared log writes, the bound renews in its records (005 FR-003, D-172): it
     /// keeps ahead of the marks with hardly any write of `hlc.bound`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_writing_log_renews_the_bound_in_its_records() {
-        use teseladb_io::device_log::{DeviceLog, DeviceLogConfig};
+        use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogDisk};
+        use teseladb_io::engine::{EngineConfig, NodeEngine};
         use teseladb_raftlog::format::wal::EntryKind;
         use teseladb_raftlog::{CoreStore, LogEntry, StorageConfig};
         use teseladb_types::{Bytes, Durability, GroupId, Nanos};
@@ -269,8 +271,12 @@ mod tests {
         let disk = Counting { inner, syncs: syncs.clone(), renames };
         let (clock, keeper) = start_clock(disk, meta).unwrap();
         let cfg = DeviceLogConfig { file_bytes: 1 << 20 };
+        // The log's writer runs on shard 0 of an engine (023 FR-013).
+        let engine = NodeEngine::start(&EngineConfig { shards: 1, ..EngineConfig::default() })
+            .expect("the engine starts");
+        let log_disk = LogDisk::Memory(Box::new(MemDisk::new()));
         let (log, mut ports) =
-            DeviceLog::start_with_bound(MemDisk::new(), 1, cfg, keeper.log_bound()).unwrap();
+            DeviceLog::start(&engine, log_disk, 1, cfg, keeper.log_bound()).unwrap();
         let mut port = ports.pop().expect("a port");
         let mut own = MemDisk::new();
         let store_cfg = StorageConfig {
@@ -310,7 +316,8 @@ mod tests {
         let own_syncs = syncs.load(Ordering::Relaxed) - base_syncs;
         assert!(own_syncs <= 1, "{own_syncs} syncs of hlc.bound");
         drop(port);
-        drop(log);
+        let _ = log.stop();
+        engine.stop();
         keeper.stop();
     }
 

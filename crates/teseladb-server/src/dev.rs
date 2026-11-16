@@ -6,8 +6,6 @@ use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use teseladb_raftlog::MemDisk;
-
 use crate::cli::DevOpts;
 use crate::client_listener::ClientConfig;
 use crate::log::{Format, Level, Logger};
@@ -20,7 +18,7 @@ const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Starts the development cluster; `seed` fixes the elections.
-pub fn start(o: &DevOpts, seed: Option<u64>) -> Result<Vec<Node<MemDisk>>, NodeError> {
+pub fn start(o: &DevOpts, seed: Option<u64>) -> Result<Vec<Node>, NodeError> {
     start_within(o, seed, READY_TIMEOUT)
 }
 
@@ -62,13 +60,14 @@ pub fn start_within(
     o: &DevOpts,
     seed: Option<u64>,
     ready: Duration,
-) -> Result<Vec<Node<MemDisk>>, NodeError> {
+) -> Result<Vec<Node>, NodeError> {
     let cfg = |join: Vec<String>, k: u16| {
         let at = SocketAddr::from((LOOPBACK, client_port(o.port, k)));
         node_config(o, seed, join, k, at)
     };
 
-    let founder = Node::start(cfg(Vec::new(), 0), || Ok(MemDisk::new()), None)?;
+    let founder =
+        Node::start(cfg(Vec::new(), 0), teseladb_io::engine::disk::DiskPlace::Memory, None)?;
     if !founder.wait_ready(ready) {
         founder.stop();
         return Err(NodeError::Join("the first node did not create the cluster".into()));
@@ -76,7 +75,8 @@ pub fn start_within(
     let seeds = vec![founder.peer_addr().to_string()];
     let mut nodes = vec![founder];
     for k in 1..o.nodes {
-        match Node::start(cfg(seeds.clone(), k), || Ok(MemDisk::new()), None) {
+        match Node::start(cfg(seeds.clone(), k), teseladb_io::engine::disk::DiskPlace::Memory, None)
+        {
             Ok(n) => nodes.push(n),
             Err(e) => {
                 nodes.into_iter().for_each(|n| drop(n.stop()));

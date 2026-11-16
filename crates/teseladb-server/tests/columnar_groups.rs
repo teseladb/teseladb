@@ -8,7 +8,7 @@ mod common;
 
 use common::{Client, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::pushed::column_batches;
 
@@ -35,7 +35,7 @@ fn aggregate(c: &mut Client, pipeline: &[Document], with_let: bool) -> Vec<Value
 #[test]
 fn an_aggregation_takes_the_compacted_blocks_as_columns_and_answers_as_in_one_place() {
     let config = NodeConfig { cores: Some(1), ..common::config(Vec::new()) };
-    let node = Node::start(config, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     for at in (0..DOCS).step_by(500) {

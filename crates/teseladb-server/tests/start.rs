@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
+use teseladb_io::files::BlockingDisk;
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START, data_range_core};
 use teseladb_meta::group0::ReplicaRole;
@@ -55,10 +56,10 @@ fn small_lsm() -> LsmConfig {
     }
 }
 
-fn start(dir: &Dir, cores: u16) -> Result<Node<FileDisk>, NodeError> {
+fn start(dir: &Dir, cores: u16) -> Result<Node, NodeError> {
     let cfg = NodeConfig { cores: Some(cores), lsm: small_lsm(), ..NodeConfig::default() };
     let path = dir.0.clone();
-    Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0)?))
+    Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock_dir(&dir.0)?))
 }
 
 fn key(i: u32) -> Vec<u8> {
@@ -70,7 +71,7 @@ fn value(i: u32) -> Vec<u8> {
 }
 
 /// Waits until the status of the range satisfies `ok`.
-fn wait_status(n: &Node<FileDisk>, ok: impl Fn(&DataStatus) -> bool) -> DataStatus {
+fn wait_status(n: &Node, ok: impl Fn(&DataStatus) -> bool) -> DataStatus {
     let end = Instant::now() + READY;
     loop {
         let s = n.data_status(ASK).expect("the range's core answers");
@@ -83,7 +84,7 @@ fn wait_status(n: &Node<FileDisk>, ok: impl Fn(&DataStatus) -> bool) -> DataStat
 }
 
 /// Writes until the range takes it (it may not lead yet right after a start).
-fn put(n: &Node<FileDisk>, i: u32) {
+fn put(n: &Node, i: u32) {
     let end = Instant::now() + READY;
     loop {
         match n.put(&key(i), &value(i), ASK) {
@@ -96,7 +97,7 @@ fn put(n: &Node<FileDisk>, i: u32) {
 
 /// Reads document `i`, asking again while the range answers that it is busy (`Overloaded` when
 /// the machine is loaded), as `put` writes.
-fn get(n: &Node<FileDisk>, i: u32) -> Option<Vec<u8>> {
+fn get(n: &Node, i: u32) -> Option<Vec<u8>> {
     let end = Instant::now() + READY;
     loop {
         match n.get(&key(i), ASK) {
@@ -180,7 +181,12 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     let dir = Dir::new("memory");
     let cfg = NodeConfig { cores: Some(2), memory_limit: Some(1 << 20), ..NodeConfig::default() };
     let path = dir.0.clone();
-    let n = Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap())).unwrap();
+    let n = Node::start(
+        cfg,
+        DiskPlace::Files(std::path::PathBuf::from(&path)),
+        Some(lock_dir(&dir.0).unwrap()),
+    )
+    .unwrap();
     let memory = n.memory().unwrap();
     assert_eq!((memory.total, memory.cores), (1 << 20, 2));
     let lsm = n.core_lsm();
@@ -203,7 +209,12 @@ fn the_memtables_flush_at_their_part_of_the_memory_limit() {
     let dir = Dir::new("memory-default");
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
     let path = dir.0.clone();
-    let n = Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap())).unwrap();
+    let n = Node::start(
+        cfg,
+        DiskPlace::Files(std::path::PathBuf::from(&path)),
+        Some(lock_dir(&dir.0).unwrap()),
+    )
+    .unwrap();
     let host = teseladb_sys::memory_limit::host_default();
     assert_eq!(n.memory().map(|m| m.total), host);
     n.stop();
@@ -249,7 +260,7 @@ fn a_directory_of_another_data_format_refuses_to_start_and_says_so() {
 /// removes the device log.
 fn back_to_per_core_logs(dir: &Dir, cores: u16) {
     use teseladb_io::device_log::state::LogState;
-    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut disk = BlockingDisk::open(&dir.0).unwrap();
     let mut log = LogState::recover(&mut disk, 64 << 20).unwrap();
     for core in 0..cores {
         for seq in log.segments_of(core) {

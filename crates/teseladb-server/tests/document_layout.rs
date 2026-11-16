@@ -6,7 +6,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 /// Documents 0 to `n - 1` of [`docs`], in `_id` order.
@@ -22,7 +22,7 @@ fn natural(c: &mut Client, coll: &str) -> Vec<Value> {
 
 #[test]
 fn new_collections_keep_their_documents_in_id_order() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&c.run("app", Document::new().with("create", "made"))));
