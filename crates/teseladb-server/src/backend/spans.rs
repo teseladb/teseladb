@@ -4,8 +4,9 @@
 //! with a read preference, and a read that does not come back with rows (an intent, a range that
 //! moved, a leader that changed) go on their own with every rule of [`Backend::scan`].
 
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Instant;
+use teseladb_io::engine::answer as mpsc;
 
 use teseladb_io::engine::CoreInput;
 use teseladb_range::host::RangeError;

@@ -6,8 +6,8 @@
 //! did not answer, is read on its own with every rule of a single read.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::time::Instant;
+use teseladb_io::engine::answer as mpsc;
 
 use teseladb_io::engine::CoreInput;
 use teseladb_range::read::ReadConcern;

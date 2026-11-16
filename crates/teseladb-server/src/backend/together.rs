@@ -3,8 +3,8 @@
 //! instead of one round each. A read that does not come back with an answer (an intent, a range
 //! that moved, a leader that changed) goes again on its own with every rule of a single read.
 
-use std::sync::mpsc;
 use std::time::Instant;
+use teseladb_io::engine::answer as mpsc;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::engine::CoreInput;

@@ -1,71 +1,110 @@
-//! The connections' threads of the clients' port of a node (006 FR-014, T046 coverage; one thread
-//! per connection since H-013): a connection whose thread cannot start, a request that arrives
-//! while its thread runs the one before, a client that is gone before its reply (its logout still
-//! reaches the audit log), a port that stops while a thread runs, and the keeper's TTL monitor and
-//! refresh on a short period. The threads start through [`Hooks`], which these tests make fail or
-//! start late.
+//! The periodic work of the clients' port on the engine (006 FR-014, 023 FR-019, T051): the
+//! sessions' keeper refreshes `config.system.sessions` and tries a failed refresh again, runs the
+//! TTL monitor on its period and writes the diagnostic samples, as tasks of the shards; and a
+//! logged-in client that leaves while its command waits in its engine thread leaves its logout in
+//! the audit log. Each node runs in a process of its own (D4).
 
-use std::io::{self, Read, Write};
+mod common;
+#[path = "common/procs.rs"]
+mod procs;
+
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
-use teseladb_io::engine::disk::DiskPlace;
 
+use common::READY;
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::{ClientConfig, Hooks};
 use teseladb_server::diag::ProcessConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
-/// How long a thread of [`late`] waits before it runs.
-const LATE: Duration = Duration::from_millis(300);
+/// A node whose keeper refreshes every millisecond.
+const REFRESH: &str = "refresh";
+/// A node whose keeper refreshes every 10 ms and runs the TTL monitor every 10 ms.
+const KEEPER: &str = "keeper";
+/// A node with an audit log at the path of its parameter [`AUDIT`].
+const AUDITED: &str = "audited";
+/// A node whose diagnostic samples go to the data directory of its parameter [`DBPATH`].
+const SAMPLED: &str = "sampled";
+/// The parameter of the audit log's path.
+const AUDIT: &str = "audit";
+/// The parameter of the data directory the diagnostic commands report.
+const DBPATH: &str = "dbpath";
 
-/// A node of one core, everything in memory, whose clients' port starts its threads with
-/// `hooks` and refreshes the sessions every 10 ms.
-fn node(hooks: Hooks) -> Node {
-    node_with(hooks, ClientConfig::new(Vec::new()))
+fn main() {
+    // The engine runs on Linux only (D3).
+    if cfg!(not(target_os = "linux")) {
+        return;
+    }
+    procs::main(
+        &[
+            ("a_refresh_that_fails_goes_again", a_refresh_that_fails_goes_again),
+            (
+                "the_keeper_runs_the_ttl_monitor_on_its_period",
+                the_keeper_runs_the_ttl_monitor_on_its_period,
+            ),
+            (
+                "a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log",
+                a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log,
+            ),
+            (
+                "the_node_writes_its_diagnostic_samples_to_its_data_directory",
+                the_node_writes_its_diagnostic_samples_to_its_data_directory,
+            ),
+        ],
+        &[
+            (REFRESH, |a: &NodeArgs| node_config(a, Duration::from_millis(1), Hooks::default())),
+            (KEEPER, |a: &NodeArgs| {
+                let hooks = Hooks { ttl_every: Duration::from_millis(10), ..Hooks::default() };
+                node_config(a, Duration::from_millis(10), hooks)
+            }),
+            (AUDITED, |a: &NodeArgs| {
+                let mut cfg = node_config(a, Duration::from_millis(10), Hooks::default());
+                let opts = AuditOpts {
+                    destination: Some("file".into()),
+                    format: Some("JSON".into()),
+                    path: a.param(AUDIT).map(str::to_owned),
+                    ..AuditOpts::default()
+                };
+                if let Some(c) = cfg.client.as_mut() {
+                    c.audit = AuditLog::open(&opts).expect("the audit log");
+                }
+                cfg
+            }),
+            (SAMPLED, |a: &NodeArgs| {
+                let mut cfg = node_config(a, Duration::from_millis(10), Hooks::default());
+                if let Some(c) = cfg.client.as_mut() {
+                    let dbpath = a.param(DBPATH).map(std::path::PathBuf::from);
+                    c.process = ProcessConfig { dbpath, ..ProcessConfig::default() };
+                }
+                cfg
+            }),
+        ],
+    );
 }
 
-/// [`node`] with the rest of the port's configuration from `client`.
-fn node_with(hooks: Hooks, client: ClientConfig) -> Node {
-    let cfg = NodeConfig {
+/// A node of one core, in memory, whose clients' port refreshes the sessions every
+/// `refresh_every` and runs its tasks with `hooks`.
+fn node_config(a: &NodeArgs, refresh_every: Duration, hooks: Hooks) -> NodeConfig {
+    NodeConfig {
         cores: Some(1),
+        join: a.join.clone(),
         client: Some(ClientConfig {
             addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
-            refresh_every: Duration::from_millis(10),
-            ..client
+            refresh_every,
+            ..ClientConfig::new(Vec::new())
         }),
         client_hooks: hooks,
         ..NodeConfig::default()
-    };
-    let n = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(n.wait_ready(Duration::from_secs(10)));
-    n
+    }
 }
 
-/// A connection's thread that cannot start.
-fn refused(_: String, _: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    Err(io::Error::other("no thread"))
-}
-
-/// A connection's thread that ends before it runs anything.
-fn dropped(_: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    drop(run);
-    Ok(())
-}
-
-/// A connection's thread that starts [`LATE`] late.
-fn late(name: String, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    let delayed = move || {
-        thread::sleep(LATE);
-        run();
-    };
-    thread::Builder::new().name(name).spawn(delayed).map(drop)
-}
-
-fn connect(n: &Node) -> TcpStream {
+fn connect(n: &NodeProc) -> TcpStream {
     let s = TcpStream::connect(n.client_addrs()[0]).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s
@@ -74,10 +113,6 @@ fn connect(n: &Node) -> TcpStream {
 fn send(s: &mut TcpStream, request_id: i32, cmd: Document) {
     let cmd = cmd.with("$db", "admin");
     s.write_all(&OpMsg::encode(request_id, 0, 0, &cmd.to_bytes().unwrap())).unwrap();
-}
-
-fn build_info(s: &mut TcpStream, request_id: i32) {
-    send(s, request_id, Document::new().with("buildInfo", 1));
 }
 
 /// The `responseTo` and body of the next reply, or `None` once the connection closed.
@@ -95,21 +130,6 @@ fn ok(r: Option<(i32, Document)>) -> Option<(i32, Option<Value>)> {
     r.map(|(to, d)| (to, d.get("ok").cloned()))
 }
 
-/// The connections open on the node's clients' port, this one asking included.
-fn open_connections(n: &Node) -> i64 {
-    let mut c = connect(n);
-    send(&mut c, 1, Document::new().with("serverStatus", 1));
-    let (_, d) = reply(&mut c).expect("a reply");
-    match d.get("connections") {
-        Some(Value::Document(conns)) => match conns.get("current") {
-            Some(Value::Int32(k)) => i64::from(*k),
-            Some(Value::Int64(k)) => *k,
-            other => panic!("{other:?}"),
-        },
-        other => panic!("{other:?}"),
-    }
-}
-
 /// Waits until `ok` holds, for at most ten seconds.
 fn eventually(ok: impl Fn() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(10);
@@ -122,55 +142,12 @@ fn eventually(ok: impl Fn() -> bool) -> bool {
     false
 }
 
-#[test]
-fn a_connection_whose_thread_cannot_start_is_closed() {
-    let n = node(Hooks { spawn_connection: refused, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    assert_eq!(ok(reply(&mut c)), None);
-    drop(n.stop());
-}
-
-#[test]
-fn a_connection_whose_thread_is_gone_is_closed() {
-    let n = node(Hooks { spawn_connection: dropped, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    assert_eq!(ok(reply(&mut c)), None);
-    drop(n.stop());
-}
-
-/// Bytes that are no message, arriving while the thread runs the request before them: its reply
-/// goes out, then the connection closes.
-#[test]
-fn a_fault_behind_a_running_request_closes_after_the_reply() {
-    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    thread::sleep(LATE / 3);
-    // A header whose length is below a header's.
-    c.write_all(&[4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0xdd, 7, 0, 0]).unwrap();
-    assert_eq!(ok(reply(&mut c)), Some((1, Some(Value::Double(1.0)))));
-    assert_eq!(ok(reply(&mut c)), None);
-    drop(n.stop());
-}
-
 /// A keeper that refreshes before the node has a leader for `config.system.sessions` tries again
 /// on its period, and the sessions used meanwhile reach the collection.
-#[test]
 fn a_refresh_that_fails_goes_again() {
-    let cfg = NodeConfig {
-        cores: Some(1),
-        client: Some(ClientConfig {
-            addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
-            refresh_every: Duration::from_millis(1),
-            ..ClientConfig::new(Vec::new())
-        }),
-        ..NodeConfig::default()
-    };
     // Not waited for: the first refreshes find no leader.
-    let n = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(n.wait_ready(Duration::from_secs(10)));
+    let n = start_self(REFRESH, &[], None, &[]);
+    assert!(n.wait_ready(READY));
     let mut c = connect(&n);
     let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![7; 16] });
     send(&mut c, 1, Document::new().with("ping", 1).with("lsid", lsid));
@@ -183,55 +160,17 @@ fn a_refresh_that_fails_goes_again() {
         format!("{d:?}").contains("Binary")
     };
     assert!(eventually(found), "the session reached config.system.sessions");
-    drop(n.stop());
+    assert!(n.stop().success());
 }
 
-#[test]
-fn a_request_that_arrives_while_the_one_before_runs_follows_it() {
-    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    // The first request waits for its connection's thread, which has not started yet.
-    thread::sleep(LATE / 3);
-    build_info(&mut c, 2);
-    assert_eq!(ok(reply(&mut c)), Some((1, Some(Value::Double(1.0)))));
-    assert_eq!(ok(reply(&mut c)), Some((2, Some(Value::Double(1.0)))));
-    drop(n.stop());
-}
-
-#[test]
-fn a_client_gone_before_its_reply_is_closed() {
-    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    c.shutdown(std::net::Shutdown::Both).unwrap();
-    drop(c);
-    thread::sleep(LATE);
-    // Only the connection that asks is left.
-    assert!(eventually(|| open_connections(&n) == 1));
-    drop(n.stop());
-}
-
-#[test]
-fn a_node_that_stops_while_a_thread_runs_does_not_wait_for_it() {
-    let n = node(Hooks { spawn_connection: late, ..Hooks::default() });
-    let mut c = connect(&n);
-    build_info(&mut c, 1);
-    thread::sleep(LATE / 3);
-    drop(n.stop());
-    // The thread starts after the port stopped, sees it and closes its connection.
-    thread::sleep(LATE);
-    assert_eq!(ok(reply(&mut c)), None);
-}
-
-#[test]
 fn the_keeper_runs_the_ttl_monitor_on_its_period() {
-    let n = node(Hooks { ttl_every: Duration::from_millis(10), ..Hooks::default() });
+    let n = start_self(KEEPER, &[], None, &[]);
+    assert!(n.wait_ready(READY));
     thread::sleep(Duration::from_millis(200));
     let mut c = connect(&n);
-    build_info(&mut c, 1);
+    send(&mut c, 1, Document::new().with("buildInfo", 1));
     assert_eq!(ok(reply(&mut c)), Some((1, Some(Value::Double(1.0)))));
-    drop(n.stop());
+    assert!(n.stop().success());
 }
 
 /// The body of the next reply, which has to come.
@@ -276,22 +215,15 @@ fn log_in(s: &mut TcpStream, user: &str, password: &str) {
 /// documents of a capped collection): the thread closes the connection when the command ends, and
 /// its logout is recorded then, as the reference server's enterprise edition 9.0.4 records the
 /// logout of every authenticated client that disconnects.
-#[test]
 fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
     let dir = std::env::temp_dir().join(format!("teseladb-threads-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("audit.json");
-    let opts = AuditOpts {
-        destination: Some("file".into()),
-        format: Some("JSON".into()),
-        path: Some(path.to_str().unwrap().into()),
-        ..AuditOpts::default()
-    };
     // Without required logins, so that the test creates its user; it logs in all the same.
-    let client =
-        ClientConfig { audit: AuditLog::open(&opts).unwrap(), ..ClientConfig::new(Vec::new()) };
-    let n = node_with(Hooks::default(), client);
+    let param = format!("{AUDIT}={}", path.display());
+    let n = start_self(AUDITED, &[], None, &[param.as_str()]);
+    assert!(n.wait_ready(READY));
     let mut c = connect(&n);
     let roles = Value::Array(vec![Value::Document(
         Document::new().with("role", "root").with("db", "admin"),
@@ -316,27 +248,27 @@ fn a_client_gone_while_its_command_runs_leaves_its_logout_in_the_audit_log() {
         Document::new().with("getMore", id).with("collection", "log").with("maxTimeMS", 2_000);
     let more = more.with("$db", "app").to_bytes().unwrap();
     c.write_all(&OpMsg::encode(5, 0, 0, &more)).unwrap();
-    // The `getMore` waits on its thread when the client leaves.
-    thread::sleep(LATE);
+    // The `getMore` waits in its engine thread when the client leaves.
+    thread::sleep(Duration::from_millis(300));
     c.shutdown(std::net::Shutdown::Both).unwrap();
     drop(c);
     let logout = r#"{ "atype" : "logout""#;
     let logged = || std::fs::read_to_string(&path).is_ok_and(|t| t.contains(logout));
     assert!(eventually(logged), "{:?}", std::fs::read_to_string(&path));
-    drop(n.stop());
+    assert!(n.stop().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A node with a data directory writes its diagnostic sample each second to
 /// `<data>/diagnostic.data` (010 FR-024, T041): BSON documents `{_id, type: 1, data}` whose
 /// `data` is what `getDiagnosticData` gives.
-#[test]
 fn the_node_writes_its_diagnostic_samples_to_its_data_directory() {
     let dir = std::env::temp_dir().join(format!("teseladb-ftdc-node-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let process = ProcessConfig { dbpath: Some(dir.clone()), ..ProcessConfig::default() };
-    let n = node_with(Hooks::default(), ClientConfig { process, ..ClientConfig::new(Vec::new()) });
+    let param = format!("{DBPATH}={}", dir.display());
+    let n = start_self(SAMPLED, &[], None, &[param.as_str()]);
+    assert!(n.wait_ready(READY));
     let samples = dir.join("diagnostic.data");
     let first = || {
         let file = std::fs::read_dir(&samples).ok()?.filter_map(Result::ok).next()?;
@@ -355,6 +287,6 @@ fn the_node_writes_its_diagnostic_samples_to_its_data_directory() {
         }
         other => panic!("{other:?}"),
     }
-    drop(n.stop());
+    assert!(n.stop().success());
     let _ = std::fs::remove_dir_all(&dir);
 }

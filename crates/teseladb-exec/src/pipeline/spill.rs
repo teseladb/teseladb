@@ -27,6 +27,12 @@ pub fn runs_written() -> u64 {
     WRITTEN.with(std::cell::Cell::get)
 }
 
+/// Sets the runs this thread wrote to `n` and gives the count it had: a command that waits in an
+/// engine thread keeps its own count while others run on the same thread (023 FR-018).
+pub fn swap_runs_written(n: u64) -> u64 {
+    WRITTEN.with(|w| w.replace(n))
+}
+
 /// The most bytes a merge reads from a run at a time.
 const READ_BYTES: usize = 64 * 1024;
 

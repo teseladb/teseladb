@@ -6,7 +6,9 @@
 //! ([`tls_stream`]), the work that would block a shard done off it ([`blocking`]: name
 //! resolution, configuration and certificate files), and outbound connections with a deadline,
 //! optionally with TLS ([`connect`]), and a conversation of requests and answers over one
-//! ([`link`]).
+//! ([`link`]). The clients' port runs on it too: its connections are tasks of the shards
+//! ([`client_port`]), their commands run in engine threads ([`stacks`]) and wait for the cores'
+//! answers ([`answer`], [`wait`]).
 //!
 //! Outside Linux there are the contract of the logic, the senders bound to a queue and an engine
 //! that does not start (D3).
@@ -29,8 +31,11 @@ use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint};
 #[cfg(target_os = "linux")]
 use teseladb::engine::core::with_timeout::with_timeout;
 
+pub mod answer;
 #[cfg(target_os = "linux")]
 pub mod blocking;
+#[cfg(target_os = "linux")]
+pub mod client_port;
 #[cfg(target_os = "linux")]
 pub mod connect;
 mod core_loop;
@@ -52,9 +57,14 @@ mod place;
 #[cfg(target_os = "linux")]
 pub(crate) mod post;
 #[cfg(target_os = "linux")]
+pub mod stacks;
+#[cfg(target_os = "linux")]
 pub mod tls_stream;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
+pub mod wait;
+#[cfg(target_os = "linux")]
+pub mod xdp_clients;
 
 pub use core_loop::{
     BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreInput, CoreLogic, CoreReceiver, CoreSender, CoreSenders,

@@ -267,7 +267,7 @@ fn the_catalog_is_read_and_changed_through_core_zero() {
 #[test]
 fn forwarded_catalog_answers_wait_for_this_copy() {
     let mut ops = CatalogOps::default();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = teseladb_io::engine::answer::channel();
     ops.local(Ok(OpId(1)), true, tx);
     assert!(ops.owns(OpId(1)));
     let body = encode_applied(Some(&Applied { index: 10, result: Ok(None) }));
@@ -278,10 +278,10 @@ fn forwarded_catalog_answers_wait_for_this_copy() {
     ops.poll(10, 0);
     assert_eq!(rx.try_recv(), Ok(CatalogAnswer::Done(None)));
     // A refused proposal, a local one, another node's and one that is not this module's.
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = teseladb_io::engine::answer::channel();
     ops.local(Err(OpError::Overloaded), false, tx);
     assert_eq!(rx.try_recv(), Ok(CatalogAnswer::Unavailable));
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = teseladb_io::engine::answer::channel();
     ops.local(Ok(OpId(2)), false, tx);
     let applied = Ok(Done::Applied(CoreOutput::Group0(teseladb_meta::group0::Group0Result::Err(
         Group0Error::NamespaceExists,
@@ -296,7 +296,7 @@ fn forwarded_catalog_answers_wait_for_this_copy() {
     let out = ops.on_done(OpId(3), Err(OpError::Timeout), 4);
     assert!(matches!(out, Some(Some((NodeId(2), 1, _)))));
     assert_eq!(ops.on_done(OpId(9), Err(OpError::Timeout), 4), None);
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = teseladb_io::engine::answer::channel();
     ops.local(Ok(OpId(4)), true, tx);
     assert_eq!(ops.on_done(OpId(4), Err(OpError::Timeout), 4), Some(None));
     assert_eq!(rx.try_recv(), Ok(CatalogAnswer::Unavailable));

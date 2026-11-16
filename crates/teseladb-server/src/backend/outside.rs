@@ -16,8 +16,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::wait;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::engine::CoreInput;
@@ -170,7 +170,7 @@ fn look_until<T>(
     }
     let began = Instant::now();
     while began.elapsed() < most {
-        thread::sleep(every);
+        wait::sleep(every);
         seen = look()?;
         if serves(&seen) {
             break;

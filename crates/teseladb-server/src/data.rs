@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use teseladb_io::engine::answer::Sender;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::IoClass;
@@ -421,7 +421,7 @@ pub struct DataCore {
     live_at: Nanos,
     /// The compactions `compact` asked for (DV-017): the bytes of the files when each was asked,
     /// and who waits for the bytes it freed.
-    compactions: BTreeMap<u64, (u64, std::sync::mpsc::Sender<u64>)>,
+    compactions: BTreeMap<u64, (u64, teseladb_io::engine::answer::Sender<u64>)>,
     /// Its part in what the node's cores hold together (012 FR-018, FR-019), and when it counts
     /// it next.
     pressure: Option<(CorePressure, Nanos)>,
@@ -489,7 +489,7 @@ impl DataCore {
 
     /// Compacts the core's LSM for `compact` (DV-017, H-054): `reply` gets the bytes of files it
     /// freed once the memtable is in files and every file was compacted.
-    pub fn compact(&mut self, reply: std::sync::mpsc::Sender<u64>) {
+    pub fn compact(&mut self, reply: teseladb_io::engine::answer::Sender<u64>) {
         let mut lsm = self.lsm.borrow_mut();
         let before = lsm.metrics().level_bytes.iter().sum::<u64>();
         let id = lsm.compact_now();
@@ -1740,7 +1740,7 @@ fn remote_reply(reply: Reply) -> Result<RemoteReply, RangeError> {
 mod tests {
     use super::*;
     use crate::ranges::Ranges;
-    use std::sync::mpsc::{Receiver, channel};
+    use teseladb_io::engine::answer::{Receiver, channel};
     use teseladb_lsm::LsmConfig;
     use teseladb_meta::group0::{RangeDesc, ReplicaRole};
     use teseladb_multiraft::CoreConfig;

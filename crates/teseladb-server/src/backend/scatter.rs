@@ -10,9 +10,10 @@
 //! and answers the partial groups in bytes, which merge with those of this node's cores.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::answer as mpsc;
 
 use teseladb_exec::pipeline::{PartialGroups, Program};
 use teseladb_io::engine::CoreInput;

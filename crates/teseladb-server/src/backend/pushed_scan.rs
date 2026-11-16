@@ -11,8 +11,8 @@
 //! flight, and so does the end of the operation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
+use teseladb_io::engine::answer::Receiver;
 
 use teseladb_io::engine::CoreInput;
 use teseladb_range::host::RangeError;
@@ -173,7 +173,7 @@ impl ServerBackend {
             concern: scan.concern,
             work: Work::Filter(scan.filter.clone()),
         };
-        let (tx, answer) = std::sync::mpsc::channel();
+        let (tx, answer) = teseladb_io::engine::answer::channel();
         let msg = NodeMsg::Data(DataReq::Remote(e.group, req), tx);
         self.cores.get(usize::from(e.core))?.send(CoreInput::App(msg)).ok()?;
         SENT.fetch_add(1, Ordering::Relaxed);

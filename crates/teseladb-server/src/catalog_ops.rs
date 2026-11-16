@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::answer::Sender;
 
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry};
 use teseladb_meta::command::Group0Command;
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn a_change_that_waits_too_long_is_reported_once() {
         let mut ops = CatalogOps::default();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = teseladb_io::engine::answer::channel();
         ops.local(Ok(OpId(7)), true, tx.clone());
         let long_ago = Instant::now().checked_sub(STALL).unwrap();
         ops.since.insert(OpId(7), (long_ago, false));
@@ -445,7 +445,7 @@ mod tests {
         // `poll` runs after that publication, so every answer waits for it (a resharding read
         // its new collection right after creating it and did not find it).
         let mut ops = CatalogOps::default();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = teseladb_io::engine::answer::channel();
         ops.local(Ok(OpId(5)), false, tx);
         let done = Ok(Done::Applied(CoreOutput::Group0(Group0Result::Ok)));
         assert_eq!(ops.on_done(OpId(5), done, 10), Some(None));
@@ -453,7 +453,7 @@ mod tests {
         ops.poll(10, 0);
         assert!(rx.try_recv().is_ok());
         // A change forwarded to the leader, already applied here, waits for the same poll.
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = teseladb_io::engine::answer::channel();
         ops.local(Ok(OpId(6)), true, tx);
         let body = encode_applied(Some(&Applied { index: 11, result: Ok(None) }));
         let done = Ok(Done::Forwarded(Bytes::from_vec(body)));

@@ -25,6 +25,17 @@ pub fn hold(bytes: u64) {
     MINE.with(|m| m.set(m.get().saturating_add(bytes)));
 }
 
+/// Takes what the aggregation of this thread holds (the thread is left with nothing), for
+/// [`super::context`].
+pub(crate) fn take_mine() -> u64 {
+    MINE.with(|m| m.replace(0))
+}
+
+/// Puts back what [`take_mine`] took.
+pub(crate) fn put_mine(bytes: u64) {
+    MINE.with(|m| m.set(bytes));
+}
+
 /// An aggregation command: when it ends, what its reads held stops counting.
 #[derive(Debug)]
 pub struct Scope(());

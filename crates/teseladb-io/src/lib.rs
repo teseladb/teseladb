@@ -16,13 +16,10 @@ pub mod files;
 pub mod handshake;
 mod io_class;
 pub mod mailbox;
-#[cfg(target_os = "linux")]
-pub mod net_ring;
 pub mod peer;
 pub mod poller;
 pub mod secure;
 pub mod service;
-pub mod spin;
 pub mod spsc;
 pub mod user_tcp;
 #[cfg(target_os = "linux")]

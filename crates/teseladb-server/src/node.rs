@@ -851,7 +851,7 @@ fn group0_ask(
     let deadline = Instant::now() + wait;
     let mut retried = false;
     loop {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = teseladb_io::engine::answer::channel();
         let req = CatalogReq::Security(cmd.clone());
         core0
             .send_waiting(CoreInput::App(NodeMsg::Catalog(req, tx)))
@@ -885,7 +885,7 @@ fn refusal_text(e: &Group0Error) -> String {
 /// Whether node `me` is an active member as its copy of Group 0 sees it. A node that drains or was
 /// removed no longer hears from Group 0: a change it asked for could be taken without its knowing.
 fn active_member(core0: &CoreSender<NodeMsg>, me: NodeId) -> bool {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = teseladb_io::engine::answer::channel();
     if core0.send_waiting(CoreInput::App(NodeMsg::View(tx))).is_err() {
         return false;
     }
@@ -1245,7 +1245,7 @@ impl Node {
         // The acceptors of the shards share these handlers, which run off the shards.
         let core0 = senders[0].senders();
         let join: JoinHandler = Arc::new(move |req| {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = teseladb_io::engine::answer::channel();
             core0
                 .sender()
                 .send_waiting(CoreInput::App(NodeMsg::Join(req, tx)))
@@ -1530,7 +1530,7 @@ impl Node {
 
     /// Core 0's view of Group 0; `None` if it does not answer within `timeout`.
     pub fn view(&self, timeout: Duration) -> Option<Group0View> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = teseladb_io::engine::answer::channel();
         self.senders[0].sender().send(CoreInput::App(NodeMsg::View(tx))).ok()?;
         rx.recv_timeout(timeout).ok()
     }
@@ -1588,7 +1588,7 @@ impl Node {
             | DataReq::Partial(g, ..) => Some(*g),
             DataReq::Lsm => None,
         };
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = teseladb_io::engine::answer::channel();
         let core = usize::from(self.core_of(g.unwrap_or(DATA_RANGE)));
         self.senders[core]
             .sender()

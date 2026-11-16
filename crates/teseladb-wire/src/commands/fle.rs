@@ -204,6 +204,17 @@ thread_local! {
     static IN_SUB_COMMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Whether the command running on this thread is a sub-command, taken (the thread is left
+/// with none), for [`super::context`].
+pub(crate) fn take_in_sub_command() -> bool {
+    IN_SUB_COMMAND.replace(false)
+}
+
+/// Puts back what [`take_in_sub_command`] took.
+pub(crate) fn put_in_sub_command(v: bool) {
+    IN_SUB_COMMAND.set(v);
+}
+
 /// Runs `cmd` on the database of `ctx` as a command of the node, without the encryption step.
 pub fn sub_command<B: Backend + ?Sized>(
     ctx: &mut Ctx<'_, B>,

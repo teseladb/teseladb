@@ -1,8 +1,8 @@
 //! The clients' port on AF_XDP (012 FR-033): one [`XdpPort`] per receive queue of the interface,
 //! each with its AF_XDP socket and UMEM ([`teseladb_sys::xdp::Xsk`]) and its own TCP stack in
-//! user space ([`crate::user_tcp`]). Its thread waits on the socket with `epoll`, takes the
-//! frames that arrived, runs the stack's timers and sends what the stack has, with no system
-//! call per connection and none per frame.
+//! user space ([`crate::user_tcp`]). On the engine (023 FR-021) a task of the queue's shard
+//! waits on the socket with the shard's reactor, takes the frames that arrived, runs the stack's
+//! timers and sends what the stack has, with no system call per connection and none per frame.
 //!
 //! The handler of [`crate::conn_port`] sees the same connections as on the io_uring rings. A
 //! paused connection keeps what arrives in its stack, whose window closes once the buffer of
@@ -12,8 +12,8 @@
 //! interface whose queue follows the sender's choice (a `veth`, whose sender picks another queue
 //! after a retransmission timeout) can move it. The ports of a listener share a table of the
 //! flows each one has ([`Flows`], without a lock): a frame of no connection of its port goes to
-//! the port that has its flow, through that port's mailbox, and only a frame no port has is the
-//! port's own (a `SYN` opens a connection, anything else is reset).
+//! the port that has its flow, as a message to that port's shard, and only a frame no port has is
+//! the port's own (a `SYN` opens a connection, anything else is reset).
 //!
 //! [`XdpListener::open`] loads and attaches the XDP program and makes one port per queue; it
 //! fails with what is missing (the kernel, the interface, the driver or the permissions), and the
@@ -26,12 +26,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_sys::uring::Part;
+use std::os::fd::{AsFd, OwnedFd};
+
 use teseladb_sys::xdp::{AttachMode, XdpProgram, Xsk, XskStats};
 
-use crate::conn_port::{ConnPort, NetHandler, PortDriver};
-use crate::mailbox::{self, Mailbox, MailboxSender};
-use crate::poller::{Interest, Poller, Waker};
+use crate::conn_port::{ConnPort, NetHandler};
 use crate::user_tcp::{Arrival, Event, TcpStack, flow_of};
 
 /// Slots of the table of flows: a power of two, eight bytes each.
@@ -120,8 +119,6 @@ impl Flows {
     }
 }
 
-/// The token of the socket in the port's poller.
-const XSK_TOKEN: u64 = 1;
 /// Longest wait while frames wait for room in the transmit ring.
 const TX_RETRY: Duration = Duration::from_micros(200);
 
@@ -165,12 +162,7 @@ impl XdpListener {
             program.insert(q, &xsk).map_err(what("the socket map"))?;
             // Each queue's stack numbers its connections apart, with a secret of its own.
             let stack = TcpStack::new(port, address, mtu, max_connections, secret ^ u64::from(q));
-            ports.push(XdpPort::new(xsk, stack, q, flows.clone())?);
-        }
-        // Each port's mailbox, and a sender to it in every other port.
-        let senders: Vec<_> = ports.iter().map(|p| p.inbox.sender().senders()).collect();
-        for p in &mut ports {
-            p.peers = senders.iter().map(|s| s.sender()).collect();
+            ports.push(XdpPort::new(xsk, stack, q, flows.clone()));
         }
         program.attach(ifindex).map_err(what("attaching the XDP program"))?;
         Ok(XdpListener { program, ports })
@@ -182,12 +174,13 @@ impl XdpListener {
     }
 }
 
-/// One queue of the port: its socket, its TCP stack and its poller.
+/// One queue of the port: its socket and its TCP stack. Whoever runs it waits on its socket
+/// ([`XdpPort::socket`]) and calls [`XdpPort::round`] when frames came or its wait ended; on the
+/// engine, a task of the queue's shard (023 FR-021).
 #[derive(Debug)]
 pub struct XdpPort {
     xsk: Xsk,
     stack: TcpStack,
-    poller: Poller,
     queue: u32,
     paused: HashSet<u64>,
     /// Connections resumed with bytes in their stack, handed over at the next round.
@@ -196,32 +189,22 @@ pub struct XdpPort {
     /// A frame the transmit ring had no room for: the next round waits less.
     backlog: bool,
     flows: Arc<Flows>,
-    /// Frames other ports got for this port's connections.
-    inbox: Mailbox<Vec<u8>>,
-    /// A sender to each port's mailbox, by queue.
-    peers: Vec<MailboxSender<Vec<u8>>>,
     strangers: Vec<Vec<u8>>,
 }
 
 impl XdpPort {
-    fn new(xsk: Xsk, stack: TcpStack, queue: u32, flows: Arc<Flows>) -> io::Result<XdpPort> {
-        let poller = Poller::new()?;
-        poller.register(&xsk, XSK_TOKEN, Interest::READ)?;
-        let (_, inbox) = mailbox::channel(Arc::new(poller.waker()));
-        Ok(XdpPort {
+    fn new(xsk: Xsk, stack: TcpStack, queue: u32, flows: Arc<Flows>) -> XdpPort {
+        XdpPort {
             flows,
-            inbox,
-            peers: Vec::new(),
             strangers: Vec::new(),
             xsk,
             stack,
-            poller,
             queue,
             paused: HashSet::new(),
             resumed: Vec::new(),
             started: Instant::now(),
             backlog: false,
-        })
+        }
     }
 
     /// The queue it serves.
@@ -248,8 +231,54 @@ impl XdpPort {
         self.xsk.stats()
     }
 
+    /// A copy of its socket, for a reactor to wait on until frames arrive.
+    ///
+    /// # Errors
+    ///
+    /// The error of `dup`.
+    pub fn socket(&self) -> io::Result<OwnedFd> {
+        self.xsk.as_fd().try_clone_to_owned()
+    }
+
     fn now(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// How long it may wait for frames before its next round, at most `timeout`: less while
+    /// its stack has a timer due or frames wait for room in the transmit ring.
+    pub fn wait_at_most(&self, timeout: Duration) -> Duration {
+        let now = self.now();
+        let mut wait = timeout;
+        if let Some(d) = self.stack.next_deadline() {
+            wait = wait.min(Duration::from_micros(d.saturating_sub(now)));
+        }
+        if self.backlog || self.xsk.sending() > 0 {
+            wait = wait.min(TX_RETRY);
+        }
+        wait
+    }
+
+    /// One round: takes the frames of the socket and `forwarded` (those other ports got for
+    /// this port's connections), hands a frame of another port's connection to `forward` with
+    /// that port's queue, runs the stack's timers, hands what happened to `handler`, then sends
+    /// what the stack has.
+    ///
+    /// # Errors
+    ///
+    /// The error of the socket's send; the port is then unusable.
+    pub fn round(
+        &mut self,
+        handler: &mut dyn NetHandler,
+        forwarded: Vec<Vec<u8>>,
+        forward: &mut dyn FnMut(u32, Vec<u8>),
+    ) -> io::Result<()> {
+        let now = self.now();
+        self.take_frames(now, forwarded, forward);
+        self.stack.tick(now);
+        self.deliver(handler);
+        handler.woken(self);
+        self.deliver(handler);
+        self.transmit(now)
     }
 
     /// Hands the stack's events to `handler` until none is left.
@@ -287,9 +316,14 @@ impl XdpPort {
         }
     }
 
-    /// Gives the stack the frames of the socket and of the mailbox; a frame of a connection of
-    /// another port goes to it.
-    fn take_frames(&mut self, now: u64) {
+    /// Gives the stack the frames of the socket and those other ports forwarded; a frame of a
+    /// connection of another port goes to it.
+    fn take_frames(
+        &mut self,
+        now: u64,
+        forwarded: Vec<Vec<u8>>,
+        forward: &mut dyn FnMut(u32, Vec<u8>),
+    ) {
         let (stack, strangers) = (&mut self.stack, &mut self.strangers);
         self.xsk.receive(&mut |frame| {
             if stack.receive(frame, now) == Arrival::Stranger {
@@ -297,15 +331,11 @@ impl XdpPort {
             }
         });
         for frame in std::mem::take(&mut self.strangers) {
-            let owner = flow_of(&frame).and_then(|f| self.flows.owner(f));
-            match owner.and_then(|o| self.peers.get(o as usize).filter(|_| o != self.queue)) {
-                // A full mailbox drops the frame, as a full queue of the NIC does.
-                Some(peer) => drop(peer.send(frame)),
+            match flow_of(&frame).and_then(|f| self.flows.owner(f)).filter(|o| *o != self.queue) {
+                Some(owner) => forward(owner, frame),
                 None => self.stack.adopt(&frame, now),
             }
         }
-        let mut forwarded = Vec::new();
-        self.inbox.drain_into(&mut forwarded);
         for frame in forwarded {
             if self.stack.receive(&frame, now) == Arrival::Stranger {
                 self.stack.adopt(&frame, now);
@@ -341,8 +371,8 @@ impl XdpPort {
 }
 
 impl ConnPort for XdpPort {
-    fn send(&mut self, token: u64, bytes: Part) -> bool {
-        self.stack.send(token, bytes.bytes())
+    fn send(&mut self, token: u64, bytes: &[u8]) -> bool {
+        self.stack.send(token, bytes)
     }
 
     fn queued(&self, token: u64) -> usize {
@@ -370,31 +400,5 @@ impl ConnPort for XdpPort {
 
     fn connections(&self) -> usize {
         self.stack.open()
-    }
-}
-
-impl PortDriver for XdpPort {
-    fn run_once(&mut self, handler: &mut dyn NetHandler, timeout: Duration) -> io::Result<()> {
-        let now = self.now();
-        let mut wait = timeout;
-        if let Some(d) = self.stack.next_deadline() {
-            wait = wait.min(Duration::from_micros(d.saturating_sub(now)));
-        }
-        if self.backlog || self.xsk.sending() > 0 {
-            wait = wait.min(TX_RETRY);
-        }
-        // The socket's frames and the waker both end the wait; what came is read below.
-        self.poller.poll(Some(wait))?;
-        let now = self.now();
-        self.take_frames(now);
-        self.stack.tick(now);
-        self.deliver(handler);
-        handler.woken(self);
-        self.deliver(handler);
-        self.transmit(now)
-    }
-
-    fn waker(&self) -> Waker {
-        self.poller.waker()
     }
 }

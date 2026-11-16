@@ -15,8 +15,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::time::Instant;
+use teseladb_io::engine::answer::Sender;
 
 use teseladb_io::engine::SendError;
 use teseladb_io::engine::{CoreInput, CoreLogic, CoreSender};
@@ -623,7 +623,7 @@ impl NodeLogic {
             return;
         };
         self.root_user = Some((doc.clone(), self.now + ROOT_RETRY));
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = teseladb_io::engine::answer::channel();
         self.catalog_change(Group0Command::Security(vec![op]).encode(), tx);
     }
 
@@ -2132,7 +2132,7 @@ fn apart(op: &IoOp) -> Option<IoOp> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::mpsc::{Receiver, channel};
+    use teseladb_io::engine::answer::{Receiver, channel};
 
     use teseladb_auth::fence::AUTH_LEASE_MS;
     use teseladb_meta::group0::{GROUP0, Group0Error};

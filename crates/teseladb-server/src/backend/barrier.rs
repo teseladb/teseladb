@@ -4,8 +4,8 @@
 //! for a barrier with them at the command's write concern.
 
 use std::collections::BTreeMap;
-use std::thread;
 use std::time::Instant;
+use teseladb_io::engine::wait;
 
 use teseladb_range::ack::{EntryId, W, WriteConcern};
 use teseladb_range::host::RangeError;
@@ -102,7 +102,7 @@ impl ServerBackend {
                     e => e,
                 }));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 

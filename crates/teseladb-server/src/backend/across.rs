@@ -18,8 +18,8 @@ use crate::data::{DataReply, DataReq};
 use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
 use crate::routes::SharedRoutes;
-use std::thread;
 use std::time::Instant;
+use teseladb_io::engine::wait;
 
 /// The node's routing table as the coordinator asks it.
 pub(super) struct Routes<'a>(pub(super) &'a SharedRoutes);
@@ -65,7 +65,7 @@ pub(super) fn reply_of(r: RemoteReply) -> Result<Reply, RangeError> {
 /// A conflict: after a pause, so that the transaction it met can end before the statement
 /// starts again.
 fn conflict() -> CommandError {
-    thread::sleep(RETRY_PAUSE);
+    wait::sleep(RETRY_PAUSE);
     CommandError::new(WRITE_CONFLICT, "the write conflicted with another one across ranges")
 }
 
@@ -97,7 +97,7 @@ impl ServerBackend {
     pub(super) fn tell_range(&mut self, g: GroupId, op: TxnOp) {
         let Some(entry) = self.h.routes.entry(g) else { return };
         let req = RemoteReq::Txn { op, deadline: Some(self.deadline_of(self.until())) };
-        let (tx, _answer) = std::sync::mpsc::channel();
+        let (tx, _answer) = teseladb_io::engine::answer::channel();
         if let Some(core) = self.cores.get(usize::from(entry.core)) {
             let msg = NodeMsg::Data(DataReq::Remote(g, req), tx);
             let _ = core.send(teseladb_io::engine::CoreInput::App(msg));
@@ -132,7 +132,7 @@ impl ServerBackend {
             if !again || Instant::now() >= until {
                 return Err(e);
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -223,7 +223,7 @@ impl ServerBackend {
                     Some(ms) => {
                         super::wait_clock(ms, until);
                     }
-                    None => thread::sleep(RETRY_PAUSE),
+                    None => wait::sleep(RETRY_PAUSE),
                 }
                 c.tick(&route, now(), crate::clock::wall_ms());
                 continue;

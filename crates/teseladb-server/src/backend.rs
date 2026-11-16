@@ -1,7 +1,8 @@
 //! The commands' [`Backend`] on a running node (006 FR-014, FR-027): the catalog through core 0's
 //! copy of Group 0 and its leader, the data range through its core, which runs the request if it
-//! leads the range and forwards it to the leader otherwise. A client worker waits for each
-//! answer; a request the range did not take (no leader yet, overloaded) is tried again until
+//! leads the range and forwards it to the leader otherwise. A command waits for each answer
+//! ([`teseladb_io::engine::answer`]): on a shard its engine thread parks and the shard serves its
+//! other connections (023 FR-018); a request the range did not take (no leader yet, overloaded) is tried again until
 //! [`REQUEST_DEADLINE`], and a write that may have been proposed only if it is retryable.
 
 mod across;
@@ -36,9 +37,10 @@ pub(crate) use txn_reaper::SCAN_EVERY;
 use crate::authz_lease::{AuthGate, DEADLINE_SKEW};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::answer::{self as mpsc, Receiver, RecvTimeoutError};
+use teseladb_io::engine::wait;
 use teseladb_keys::stored;
 use teseladb_stages::Stage;
 
@@ -99,7 +101,7 @@ fn wait_clock(until_ms: u64, deadline: Instant) -> bool {
         return true;
     }
     let left = deadline.saturating_duration_since(Instant::now());
-    thread::sleep(Duration::from_millis(until_ms - wall).min(left));
+    wait::sleep(Duration::from_millis(until_ms - wall).min(left));
     crate::clock::wall_ms() >= until_ms
 }
 
@@ -171,9 +173,6 @@ pub struct ServerBackend {
     statements: Option<barrier::Statements>,
     /// The parts of a filtered scan asked for ahead from the leaders of their ranges (010 FR-027).
     ahead: pushed_scan::ReadAhead,
-    /// How long it spins for a core's answer before it sleeps, after the answers it waited for
-    /// (H-042).
-    spin: std::cell::Cell<teseladb_io::spin::AdaptiveSpin>,
 }
 
 impl ServerBackend {
@@ -210,7 +209,6 @@ impl ServerBackend {
             outside: outside::Outside::default(),
             statements: None,
             ahead: pushed_scan::ReadAhead::default(),
-            spin: std::cell::Cell::default(),
         }
     }
 
@@ -397,7 +395,7 @@ impl ServerBackend {
                         if Instant::now() >= until {
                             return Err(self.range_timeout());
                         }
-                        thread::sleep(RETRY_PAUSE);
+                        wait::sleep(RETRY_PAUSE);
                         continue;
                     }
                     rows.extend(more);
@@ -468,21 +466,10 @@ impl ServerBackend {
         until: Instant,
     ) -> Option<T> {
         let (tx, rx): (mpsc::Sender<T>, Receiver<T>) = mpsc::channel();
-        let asked = Instant::now();
         self.cores.get(core)?.send(CoreInput::App(msg(tx))).ok()?;
-        // Most answers come within a short spin, which saves the wake-up of this thread (H-013);
-        // the spin follows how long the last answers took (H-042).
-        let mut spin = self.spin.get();
-        let mut answer = None;
-        teseladb_io::spin::spin_until(spin.window(), || {
-            answer = rx.try_recv().ok();
-            answer.is_some()
-        });
-        let answer = answer
-            .or_else(|| rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok());
-        spin.observe(asked.elapsed());
-        self.spin.set(spin);
-        answer
+        // On a shard the command's engine thread parks until the answer comes back as one
+        // message (023 FR-018); the shard runs its other connections meanwhile.
+        rx.recv_deadline(until).ok()
     }
 
     fn catalog(&mut self) -> Result<Arc<Catalog>, CommandError> {
@@ -501,7 +488,7 @@ impl ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -517,7 +504,7 @@ impl ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -551,7 +538,7 @@ impl ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, no_leader));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -642,7 +629,7 @@ impl ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -725,7 +712,7 @@ impl ServerBackend {
                 // its writes until its commit (008 FR-022); the lock goes with its commit or
                 // abort, or when it stays idle.
                 RangeError::KeyLocked if plain_write => {
-                    thread::sleep(RETRY_PAUSE);
+                    wait::sleep(RETRY_PAUSE);
                     paused = true;
                     true
                 }
@@ -739,7 +726,7 @@ impl ServerBackend {
                         Some(k) => {
                             view.known.insert(owner.txn, k);
                         }
-                        None => thread::sleep(RETRY_PAUSE),
+                        None => wait::sleep(RETRY_PAUSE),
                     }
                     paused = true;
                     true
@@ -776,7 +763,7 @@ impl ServerBackend {
                 return Err(from_range(&e, ctx));
             }
             if !paused {
-                thread::sleep(RETRY_PAUSE);
+                wait::sleep(RETRY_PAUSE);
             }
         }
     }
@@ -1269,7 +1256,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1479,7 +1466,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(self.range_timeout());
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1629,7 +1616,7 @@ impl Backend for ServerBackend {
     }
 
     fn txn_pause(&mut self) -> bool {
-        thread::sleep(RETRY_PAUSE);
+        wait::sleep(RETRY_PAUSE);
         Instant::now() < self.until()
     }
 
@@ -1774,7 +1761,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1797,7 +1784,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1835,7 +1822,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1876,7 +1863,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -1893,7 +1880,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(self.range_timeout());
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 
@@ -2062,7 +2049,7 @@ impl Backend for ServerBackend {
             if Instant::now() >= until {
                 return Err(catalog_gave_up(self.max_until, false));
             }
-            thread::sleep(RETRY_PAUSE);
+            wait::sleep(RETRY_PAUSE);
         }
     }
 

@@ -1,20 +1,26 @@
-//! The clients' port (006 T009, FR-005): connections spread over the workers, the handshake and
-//! `ping` over real sockets, compression, the awaitable `hello` with and without exhaust, the
-//! connection limit, faults that close a connection without touching the others, the options
-//! `--maxConns` and `--networkMessageCompressors`, and a node that opens the port.
+//! The clients' port on the engine (006 T009, FR-005; 023 FR-018, FR-019, T051): the handshake
+//! and `ping` over real sockets, compression, the awaitable `hello` with and without exhaust, the
+//! connection limit, faults that close a connection without touching the others, a drained or
+//! quiescing node, the limiter of new connections, and the options `--maxConns` and
+//! `--networkMessageCompressors`. The ports run on one engine of two shards that the test process
+//! starts once (D4); the cases with a node behind the port are in `client_port_engine.rs`, each
+//! node in a process of its own.
+#![cfg(target_os = "linux")]
+
+#[path = "common/port_engine.rs"]
+mod port_engine;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use teseladb_io::engine::disk::DiskPlace;
 
+use port_engine::spawn_port;
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::cli::{Command, DEFAULT_COMPRESSORS, parse_with};
 use teseladb_server::client_listener::{
     ClientConfig, ClientListener, DEFAULT_MAX_CONNECTIONS, NodeClockState, NodePresence, NodeState,
 };
-use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::compressed::{self, Compressor};
 use teseladb_wire::dispatch::{ClusterTime, NodeInfo, Topology};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg, flags, opcode};
@@ -44,7 +50,7 @@ fn config(max_connections: usize) -> ClientConfig {
 }
 
 fn listener(max: usize) -> ClientListener {
-    ClientListener::spawn(&config(max), Arc::new(Fixed)).unwrap()
+    spawn_port(&config(max), Arc::new(Fixed)).unwrap()
 }
 
 fn connect(l: &ClientListener) -> TcpStream {
@@ -222,7 +228,7 @@ fn faults_close_only_their_connection() {
 fn spawn_fails_on_a_busy_address() {
     let first = listener(1);
     let cfg = ClientConfig { addrs: first.addrs().to_vec(), ..config(1) };
-    assert!(ClientListener::spawn(&cfg, Arc::new(Fixed)).is_err());
+    assert!(spawn_port(&cfg, Arc::new(Fixed)).is_err());
     first.stop();
 }
 
@@ -281,43 +287,6 @@ fn client_options() {
         .map(String::from)
         .collect();
     assert!(parse_with(&args, &|_| Ok(Vec::new())).is_err());
-}
-
-#[test]
-fn a_node_opens_the_clients_port() {
-    let cfg = NodeConfig {
-        cores: Some(2),
-        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
-        ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(node.wait_ready(Duration::from_secs(10)));
-    let mut c = TcpStream::connect(node.client_addrs()[0]).unwrap();
-    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    send(&mut c, 1, 0, &hello());
-    let (_, _, d) = recv(&mut c).unwrap();
-    let Some(Value::Document(ct)) = d.get("$clusterTime") else { panic!("no $clusterTime") };
-    assert!(matches!(ct.get("clusterTime"), Some(Value::Timestamp { time, .. }) if *time > 0));
-    // The diagnostic commands see the port's counters and the process (006 FR-023).
-    let status = Document::new().with("serverStatus", 1).with("$db", "admin");
-    send(&mut c, 2, 0, &status);
-    let (_, _, d) = recv(&mut c).unwrap();
-    let Some(Value::Document(conns)) = d.get("connections") else { panic!("{d:?}") };
-    assert_eq!(conns.get("current"), Some(&Value::Int32(1)));
-    assert_eq!(d.get("pid"), Some(&Value::Int64(i64::from(std::process::id()))));
-    let Some(Value::Document(net)) = d.get("network") else { panic!("{d:?}") };
-    assert!(matches!(net.get("numRequests"), Some(Value::Int64(n)) if *n >= 2));
-    drop(node.stop());
-    assert!(closed(&mut c));
-    // Without a clients' port, there are no addresses.
-    let plain = Node::start(
-        NodeConfig { cores: Some(1), ..NodeConfig::default() },
-        DiskPlace::Memory,
-        None,
-    )
-    .unwrap();
-    assert!(plain.client_addrs().is_empty());
-    drop(plain.stop());
 }
 
 #[test]
@@ -438,29 +407,6 @@ fn a_waiting_client_that_hangs_up_is_closed_before_its_deadline() {
 }
 
 #[test]
-fn serving_a_node_without_clients_port() {
-    use teseladb_server::log::{Format, Level, Logger};
-    let node = Node::start(
-        NodeConfig { cores: Some(1), ..NodeConfig::default() },
-        DiskPlace::Memory,
-        None,
-    )
-    .unwrap();
-    let log = Logger::new(Level::Info, Format::Text, Box::new(std::io::sink()));
-    let mut out = Vec::new();
-    let code = teseladb_server::serve(
-        node,
-        Format::Text,
-        &log,
-        &mut out,
-        &|| true,
-        Duration::from_secs(10),
-    );
-    assert_eq!(code, 0);
-    assert!(String::from_utf8(out).unwrap().starts_with("ready "));
-}
-
-#[test]
 fn a_client_that_closes_with_replies_unread_is_closed() {
     // The client pipelines requests and closes without reading: the worker's writes fail
     // (connection reset) and it closes the connection.
@@ -532,7 +478,7 @@ fn a_drained_node_closes_its_clients_port() {
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
     assert_eq!(state.info().topology.counter, 0);
-    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
+    let l = spawn_port(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
     let mut s = connect(&l);
     send(&mut s, 1, 0, &hello());
     let (_, _, d) = recv(&mut s).unwrap();
@@ -569,7 +515,7 @@ fn a_drained_node_labels_its_shutdown_as_the_driver_retries_it() {
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
-    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
+    let l = spawn_port(&config(DEFAULT_MAX_CONNECTIONS), Arc::new(state)).unwrap();
     // A drained node drops new connections and closes each open one after its answer: one
     // connection per command, opened while the node still serves.
     let mut open: Vec<_> = (0..3)
@@ -607,245 +553,40 @@ fn a_drained_node_labels_its_shutdown_as_the_driver_retries_it() {
     l.stop();
 }
 
-/// A running node answers the `hello`s waiting on its `topologyVersion` as soon as it applies a
-/// change of `topologyPresentation` (018 FR-015, T016): the awaitable `hello` of a driver's
-/// monitor returns well before its `maxAwaitTimeMS` with the replica set presentation and a
-/// higher counter.
+/// The node's presence wakes each port at a change of `topologyVersion` (or of the tenants'
+/// states), and the port wakes its connections on every shard; a port that stops leaves the
+/// list, so opening and closing the replica set port again and again keeps nothing (018 FR-016,
+/// 023 FR-019). Connections are no watchers of their own: opening and closing them keeps the
+/// list as it is.
 #[test]
-fn a_presentation_change_wakes_the_waiting_hellos() {
-    // The member's host is the client address the node announces.
-    let cfg = NodeConfig {
-        cores: Some(1),
-        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
-        native_addr: "member.test:27017".into(),
-        ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(node.wait_ready(Duration::from_secs(10)));
-    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
-    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let mut monitor = TcpStream::connect(node.client_addrs()[0]).unwrap();
-    monitor.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    send(&mut monitor, 1, 0, &hello());
-    let (_, _, first) = recv(&mut monitor).unwrap();
-    let Some(Value::Document(tv)) = first.get("topologyVersion").cloned() else {
-        panic!("{first:?}")
-    };
-    let counter = |d: &Document| match d.get("topologyVersion") {
-        Some(Value::Document(t)) => match t.get("counter") {
-            Some(Value::Int64(n)) => *n,
-            other => panic!("{other:?}"),
-        },
-        other => panic!("{other:?}"),
-    };
-    let wait =
-        |tv: &Document| hello().with("topologyVersion", tv.clone()).with("maxAwaitTimeMS", 15_000);
-    send(&mut monitor, 2, 0, &wait(&tv));
-    let started = Instant::now();
-    let present = Document::new()
-        .with(
-            "setClusterParameter",
-            Document::new().with(
-                "topologyPresentation",
-                Document::new().with("mode", "replicaset").with("setName", "rs0"),
-            ),
-        )
-        .with("$db", "admin");
-    // The node's client address reaches `config.shards` once it is announced to Group 0.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        send(&mut admin, 3, 0, &present);
-        let (_, _, set) = recv(&mut admin).unwrap();
-        if set.get("ok") == Some(&Value::Double(1.0)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "{set:?}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let (h, _, woken) = recv(&mut monitor).unwrap();
-    assert_eq!(h.response_to, 2);
-    assert!(started.elapsed() < Duration::from_secs(5), "woken after {:?}", started.elapsed());
-    assert_eq!(woken.get("setName"), Some(&Value::from("rs0")), "{woken:?}");
-    assert_eq!(woken.get("isWritablePrimary"), Some(&Value::Boolean(true)), "{woken:?}");
-    assert_eq!(woken.get("me"), Some(&Value::from("member.test:27017")));
-    assert!(counter(&woken) > counter(&first));
-    drop(node.stop());
-}
-
-/// The replica set port (018 FR-016, T018): opened on the running node when Group 0 says so,
-/// it answers as a member of the replica set at that port while the main port keeps answering
-/// as a reference router, one application on each at the same time; 0 closes it.
-#[test]
-fn the_replica_set_port_opens_and_closes_without_a_restart() {
-    let cfg = NodeConfig {
-        cores: Some(1),
-        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
-        native_addr: "member.test:27017".into(),
-        ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(node.wait_ready(Duration::from_secs(10)));
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
-    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let set = |admin: &mut TcpStream, id: i32, port: i32| {
-        let value = Document::new()
-            .with("mode", teseladb_names::ROUTER)
-            .with("setName", "rs0")
-            .with("replicaSetPort", port);
-        let cmd = Document::new()
-            .with("setClusterParameter", Document::new().with("topologyPresentation", value))
-            .with("$db", "admin");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            send(admin, id, 0, &cmd);
-            let (_, _, r) = recv(admin).unwrap();
-            if r.get("ok") == Some(&Value::Double(1.0)) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "{r:?}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
-    set(&mut admin, 1, i32::from(port));
-    let started = Instant::now();
-    let mut member = loop {
-        if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
-            break s;
-        }
-        assert!(started.elapsed() < Duration::from_secs(5), "the port never opened");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    member.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    send(&mut member, 2, 0, &hello());
-    let (_, _, h) = recv(&mut member).unwrap();
-    let me = format!("member.test:{port}");
-    assert_eq!(h.get("setName"), Some(&Value::from("rs0")), "{h:?}");
-    assert_eq!(h.get("me"), Some(&Value::from(me.as_str())));
-    assert_eq!(h.get("hosts"), Some(&Value::Array(vec![Value::from(me.as_str())])));
-    assert_eq!(h.get("isWritablePrimary"), Some(&Value::Boolean(true)));
-    send(&mut admin, 3, 0, &hello());
-    let (_, _, main) = recv(&mut admin).unwrap();
-    assert_eq!(main.get("msg"), Some(&Value::from("isdbgrid")), "{main:?}");
-    // Both applications write and read the same data.
-    let ins = Document::new()
-        .with("insert", "c")
-        .with("documents", vec![Value::Document(Document::new().with("_id", 1))])
-        .with("$db", "dual");
-    send(&mut member, 4, 0, &ins);
-    let (_, _, r) = recv(&mut member).unwrap();
-    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
-    let count = Document::new().with("count", "c").with("$db", "dual");
-    send(&mut admin, 5, 0, &count);
-    let (_, _, r) = recv(&mut admin).unwrap();
-    assert_eq!(r.get("n"), Some(&Value::Int32(1)), "{r:?}");
-    set(&mut admin, 6, 0);
-    let started = Instant::now();
-    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
-        assert!(started.elapsed() < Duration::from_secs(5), "the port never closed");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    drop(node.stop());
-}
-
-/// A replica set port that another program holds cannot open: the node goes on, and the next
-/// port Group 0 asks for opens (018 FR-016).
-#[test]
-fn a_replica_set_port_that_is_taken_waits_for_another() {
-    let cfg = NodeConfig {
-        cores: Some(1),
-        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
-        native_addr: "member.test:27017".into(),
-        ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(node.wait_ready(Duration::from_secs(10)));
-    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let busy = taken.local_addr().unwrap().port();
-    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
-    admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let mut id = 0;
-    let mut set = |admin: &mut TcpStream, port: u16| {
-        let value = Document::new()
-            .with("mode", teseladb_names::ROUTER)
-            .with("setName", "rs0")
-            .with("replicaSetPort", i32::from(port));
-        let cmd = Document::new()
-            .with("setClusterParameter", Document::new().with("topologyPresentation", value))
-            .with("$db", "admin");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            id += 1;
-            send(admin, id, 0, &cmd);
-            let (_, _, r) = recv(admin).unwrap();
-            if r.get("ok") == Some(&Value::Double(1.0)) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "{r:?}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
-    set(&mut admin, busy);
-    // The keeper says why the port is closed (written by the node's loop, or drained here).
-    use teseladb_server::log::{Format, Level, Logger, drain, recent};
-    let why = format!("cannot open the replica set port {busy}");
-    let started = Instant::now();
-    while !recent().1.iter().any(|l| l.contains(&why)) {
-        drain(&Logger::new(Level::Warn, Format::Text, Box::new(std::io::sink())));
-        assert!(started.elapsed() < Duration::from_secs(5), "no warning for the taken port");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    send(&mut admin, 100, 0, &hello());
-    let (_, _, main) = recv(&mut admin).unwrap();
-    assert_eq!(main.get("msg"), Some(&Value::from("isdbgrid")), "{main:?}");
-    set(&mut admin, free);
-    let started = Instant::now();
-    let mut member = loop {
-        if let Ok(s) = TcpStream::connect(("127.0.0.1", free)) {
-            break s;
-        }
-        assert!(started.elapsed() < Duration::from_secs(5), "the free port never opened");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    member.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    send(&mut member, 101, 0, &hello());
-    let (_, _, h) = recv(&mut member).unwrap();
-    assert_eq!(h.get("setName"), Some(&Value::from("rs0")), "{h:?}");
-    drop(taken);
-    drop(node.stop());
-}
-
-/// Each connection's thread is woken at a change of `topologyVersion` (or of the tenants'
-/// states); a connection that closes leaves the list, and so do those of a port that stops, so
-/// opening and closing connections or the replica set port again and again keeps nothing (018
-/// FR-016, H-013).
-#[test]
-fn a_closed_connection_is_no_longer_woken() {
+fn a_stopped_port_is_no_longer_woken() {
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = Arc::new(NodeClockState::new(clock, 7).with_presence(presence.clone()));
-    let l = ClientListener::spawn(&config(DEFAULT_MAX_CONNECTIONS), state).unwrap();
-    assert_eq!(presence.watchers(), 0, "no connection, no thread");
+    assert_eq!(presence.watchers(), 0);
+    let l = spawn_port(&config(DEFAULT_MAX_CONNECTIONS), state.clone()).unwrap();
+    assert_eq!(presence.watchers(), 1, "the port");
     let mut a = connect(&l);
     let mut b = connect(&l);
     for (id, s) in [(1, &mut a), (2, &mut b)] {
         send(s, id, 0, &hello());
         assert!(recv(s).is_some());
     }
-    assert_eq!(presence.watchers(), 2);
     drop(a);
-    let settled = |want: usize| {
-        let until = Instant::now() + Duration::from_secs(5);
-        while presence.watchers() != want && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        presence.watchers()
-    };
-    assert_eq!(settled(1), 1, "the closed connection's thread ended");
+    assert_eq!(presence.watchers(), 1, "connections are not watchers");
+    let other = spawn_port(&config(DEFAULT_MAX_CONNECTIONS), state).unwrap();
+    assert_eq!(presence.watchers(), 2);
+    other.stop();
     presence.set(1, false);
+    assert_eq!(presence.watchers(), 1, "the stopped port left at the change");
+    // The open connection still answers, with the new counter.
+    send(&mut b, 3, 0, &hello());
+    let (_, _, d) = recv(&mut b).unwrap();
+    let Some(Value::Document(tv)) = d.get("topologyVersion") else { panic!("{d:?}") };
+    assert_eq!(tv.get("counter"), Some(&Value::Int64(1)));
     l.stop();
-    assert_eq!(settled(0), 0, "the port's stop ends the others");
+    presence.set(2, false);
+    assert_eq!(presence.watchers(), 0);
     drop(b);
 }
 
@@ -863,7 +604,7 @@ fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_buck
         Setting::QueueDepth(1),
         Setting::Enabled(true),
     ];
-    let l = ClientListener::spawn(&cfg, Arc::new(Fixed)).unwrap();
+    let l = spawn_port(&cfg, Arc::new(Fixed)).unwrap();
     let mut silent = connect(&l);
     let start = Instant::now();
     let mut clients: Vec<TcpStream> = (0..5).map(|_| connect(&l)).collect();
@@ -893,56 +634,99 @@ fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_buck
     l.stop();
 }
 
-/// The limiter of new connections on a node (006 FR-036): `setParameter` turns it on, a client
-/// that leaves while it waits in the queue counts as interrupted when its turn comes, one that
-/// finds the queue full is closed, and `serverStatus` counts both.
+/// The threads of this process.
+fn threads() -> usize {
+    std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count)
+}
+
+/// The engine hands each connection to a shard (023 FR-018): one listening socket, the
+/// connections spread over the shards, each a task of its shard, and no thread made for any of
+/// them, open or answering.
 #[test]
-fn a_node_s_limiter_counts_the_closed_connections_and_those_that_left_the_queue() {
-    use teseladb_wire::ingress::{BURST_CAPACITY_SECS, ENABLED, MAX_QUEUE_DEPTH, RATE_PER_SEC};
-    let cfg = NodeConfig {
-        cores: Some(2),
-        client: Some(config(DEFAULT_MAX_CONNECTIONS)),
-        ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
-    assert!(node.wait_ready(Duration::from_secs(10)));
-    let open = || {
-        let s = TcpStream::connect(node.client_addrs()[0]).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        s
-    };
-    let mut admin = open();
-    let params = [(RATE_PER_SEC, 1), (BURST_CAPACITY_SECS, 1), (MAX_QUEUE_DEPTH, 1), (ENABLED, 1)];
-    for (k, (name, v)) in params.into_iter().enumerate() {
-        let cmd = Document::new().with("setParameter", 1).with(name, v).with("$db", "admin");
-        send(&mut admin, k as i32 + 1, 0, &cmd);
-        assert_eq!(recv(&mut admin).unwrap().2.get("ok"), Some(&Value::Double(1.0)));
+fn connections_spread_over_the_shards_without_a_thread_each() {
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
+    assert_eq!(l.shards(), 2, "the shards of the process's engine");
+    // A first command warms the shards' pools of stacks.
+    let mut warm: Vec<TcpStream> = (0..4).map(|_| connect(&l)).collect();
+    for (k, c) in warm.iter_mut().enumerate() {
+        send(c, k as i32, 0, &hello());
+        assert!(recv(c).is_some());
     }
-    let (mut first, mut queued, mut late) = (open(), open(), open());
-    send(&mut first, 1, 0, &hello());
-    assert!(recv(&mut first).is_some(), "the bucket's token");
-    send(&mut queued, 1, 0, &hello());
-    // `late` knocks once `queued` holds the only place in the queue, whatever the load.
-    let mut id = 8;
-    let mut connections = |admin: &mut TcpStream| {
-        id += 1;
-        let status = Document::new().with("serverStatus", 1).with("$db", "admin");
-        send(admin, id, 0, &status);
-        let (_, _, d) = recv(admin).unwrap();
-        let Some(Value::Document(conns)) = d.get("connections") else { panic!("{d:?}") };
-        conns.clone()
-    };
-    while connections(&mut admin).get("queuedForEstablishment") != Some(&Value::Int32(1)) {
-        std::thread::sleep(Duration::from_millis(5));
+    let before = threads();
+    let mut clients: Vec<TcpStream> = (0..64).map(|_| connect(&l)).collect();
+    for (k, c) in clients.iter_mut().enumerate() {
+        send(c, k as i32 + 1, 0, &Document::new().with("ping", 1).with("$db", "admin"));
     }
-    send(&mut late, 1, 0, &hello());
-    assert!(recv(&mut late).is_none(), "the queue is full");
-    drop(queued);
-    std::thread::sleep(Duration::from_millis(1300));
-    let conns = connections(&mut admin);
-    assert_eq!(conns.get("queuedForEstablishment"), Some(&Value::Int32(0)), "{conns:?}");
-    let Some(Value::Document(limit)) = conns.get("establishmentRateLimit") else { panic!() };
-    assert_eq!(limit.get("rejected"), Some(&Value::Int32(1)), "{limit:?}");
-    assert_eq!(limit.get("interruptedDueToClientDisconnect"), Some(&Value::Int32(1)));
-    drop(node.stop());
+    for (k, c) in clients.iter_mut().enumerate() {
+        assert_eq!(recv(c).unwrap().0.response_to, k as i32 + 1);
+    }
+    let by_shard = l.open_by_shard();
+    assert_eq!(by_shard.iter().sum::<usize>(), 68, "{by_shard:?}");
+    assert!(by_shard.iter().all(|n| *n >= 20), "spread over the shards: {by_shard:?}");
+    assert_eq!(threads(), before, "no thread per connection");
+    drop(clients);
+    drop(warm);
+    l.stop();
+}
+
+/// A connection whose replies the client does not read stops being read past 4 MiB of replies
+/// waiting to go out, and is read again once they go (023 FR-018): the client's writes block
+/// while the port holds its replies, and every reply arrives, in order, once it reads them.
+#[test]
+fn replies_not_read_stop_the_reading_until_they_go() {
+    let l = listener(DEFAULT_MAX_CONNECTIONS);
+    let mut c = connect(&l);
+    // Each request names an unknown command of 256 KiB, which its reply names again: without
+    // the pause the port would read every request and hold every reply.
+    let name = "x".repeat(256 << 10);
+    let big = Document::new().with(name.as_str(), 1).with("$db", "admin");
+    let msg = |id: i32| OpMsg::encode(id, 0, 0, &big.to_bytes().unwrap());
+    c.set_nonblocking(true).unwrap();
+    let mut sent = 0;
+    let mut blocked = false;
+    let start = Instant::now();
+    // 256 requests of 256 KiB: 64 MiB, far past what the kernel's buffers hold.
+    'outer: for id in 1..=256 {
+        let m = msg(id);
+        let mut at = 0;
+        while at < m.len() {
+            match c.write(&m[at..]) {
+                Ok(n) => at += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    blocked = true;
+                    // The rest of this request goes once the client reads.
+                    c.set_nonblocking(false).unwrap();
+                    let rest = m[at..].to_vec();
+                    let reader = c.try_clone().unwrap();
+                    let n = id;
+                    let collector = std::thread::spawn(move || {
+                        let mut r = reader;
+                        r.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                        let mut got = Vec::new();
+                        while let Some((h, _, _)) = recv(&mut r) {
+                            got.push(h.response_to);
+                            if h.response_to == 256 {
+                                break;
+                            }
+                        }
+                        got
+                    });
+                    c.write_all(&rest).unwrap();
+                    for later in n + 1..=256 {
+                        c.write_all(&msg(later)).unwrap();
+                    }
+                    let got = collector.join().unwrap();
+                    assert_eq!(got, (1..=256).collect::<Vec<i32>>(), "every reply, in order");
+                    sent = 256;
+                    break 'outer;
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        sent = id;
+    }
+    assert!(blocked, "the port stopped reading a client that does not read");
+    assert_eq!(sent, 256);
+    assert!(start.elapsed() < Duration::from_secs(60));
+    l.stop();
 }

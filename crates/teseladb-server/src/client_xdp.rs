@@ -1,32 +1,25 @@
 //! The clients' port on AF_XDP (012 FR-033, `--net-xdp <interface>`): the IPv4 TCP segments to
 //! the port that arrive on the interface go to an AF_XDP socket per queue with a TCP stack of its
-//! own (`teseladb_io::xdp_port`), and their connections are served as on the io_uring rings
-//! (`client_ring`), with a command pool. The kernel's listener of the port stays: it serves the
-//! clients of the other interfaces, of loopback and of IPv6. An interface that cannot take AF_XDP
-//! (no such interface, a kernel without AF_XDP or `bpf_link`, no `CAP_NET_ADMIN` and `CAP_BPF`,
-//! or macOS) leaves the clients to the kernel's listener, and the node says why.
+//! own (`teseladb_io::xdp_port`). On the engine (023 FR-021) the socket of queue `q` is waited on
+//! by the reactor of shard `q mod n` and its connections are served by the same sessions as the
+//! kernel's (`teseladb_io::engine::xdp_clients`), with no thread per queue. The kernel's
+//! listener of the port stays: it serves the clients of the other interfaces, of loopback and of
+//! IPv6. An interface that cannot take AF_XDP (no such interface, a kernel without AF_XDP or
+//! `bpf_link`, no `CAP_NET_ADMIN` and `CAP_BPF`, or macOS) leaves the clients to the kernel's
+//! listener, and the node says why.
 
 #[cfg(target_os = "linux")]
 use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
-
-#[cfg(target_os = "linux")]
-use teseladb_wire::commands::Shared;
 
 use crate::client_listener::ClientConfig;
-#[cfg(target_os = "linux")]
-use crate::client_listener::{ClientKit, NodeState};
-#[cfg(target_os = "linux")]
-use crate::diag::Diag;
 
 /// The port on AF_XDP of a clients' port.
 pub(crate) struct XdpState {
     status: Option<Result<String, String>>,
     #[cfg(target_os = "linux")]
-    running: Option<(crate::client_ring::RingPort, teseladb_sys::xdp::XdpProgram)>,
+    running: Option<(teseladb_io::engine::xdp_clients::XdpRun, teseladb_sys::xdp::XdpProgram)>,
 }
 
 impl XdpState {
@@ -37,13 +30,27 @@ impl XdpState {
 }
 
 #[cfg(target_os = "linux")]
+impl XdpState {
+    /// What wakes every connection on AF_XDP (the node's state changed), if the port runs.
+    pub(crate) fn waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let (run, _) = self.running.as_ref()?;
+        let run = run.clone();
+        Some(Arc::new(move || run.wake()))
+    }
+
+    /// Stops the queues and takes the program off the interface.
+    pub(crate) fn stop(self) {
+        drop(self);
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Drop for XdpState {
-    /// Stops the queues' threads (the port's stop flag is set), then takes the program off the
-    /// interface.
+    /// Stops the queues on their shards, then takes the program off the interface.
     fn drop(&mut self) {
-        if let Some((port, program)) = self.running.take() {
-            // The threads first: the program sends frames to their sockets until it goes.
-            port.stop();
+        if let Some((run, program)) = self.running.take() {
+            // The queues first: the program sends frames to their sockets until it goes.
+            run.stop();
             drop(program);
         }
     }
@@ -70,74 +77,55 @@ fn secret() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-/// What the port's connections on AF_XDP share with the rest of the port.
-pub(crate) struct XdpParts {
-    pub(crate) state: Arc<dyn NodeState>,
-    pub(crate) shared: Arc<Shared>,
-    pub(crate) kit: ClientKit,
-    pub(crate) diag: Arc<Diag>,
-    pub(crate) open: Arc<AtomicUsize>,
-    pub(crate) stop: Arc<AtomicBool>,
-    pub(crate) ids: Arc<AtomicI32>,
-}
-
-#[cfg(target_os = "linux")]
 /// Starts the port on AF_XDP of `cfg`, if it asks for one, on the listener's addresses `addrs`
-/// (with the ports the system chose).
-pub(crate) fn start(cfg: &ClientConfig, addrs: &[SocketAddr], parts: XdpParts) -> XdpState {
+/// (with the ports the system chose), with the sessions of `core`.
+pub(crate) fn start(
+    cfg: &ClientConfig,
+    addrs: &[SocketAddr],
+    core: Arc<crate::client_session::PortCore>,
+) -> XdpState {
     let Some(interface) = &cfg.xdp else { return XdpState { status: None, running: None } };
-    {
-        let Some((address, port)) = target(addrs) else {
-            return XdpState {
-                status: Some(Err(format!("{interface}: the port has no IPv4 address"))),
-                running: None,
-            };
+    let Some((address, port)) = target(addrs) else {
+        return XdpState {
+            status: Some(Err(format!("{interface}: the port has no IPv4 address"))),
+            running: None,
         };
-        let listener = teseladb_io::xdp_port::XdpListener::open(
-            interface,
-            port,
-            address,
-            cfg.max_connections,
-            secret(),
-        );
-        let listener = match listener {
-            Ok(l) => l,
-            Err(e) => {
-                return XdpState { status: Some(Err(format!("{interface}: {e}"))), running: None };
-            }
-        };
-        let describe = |l: &teseladb_io::xdp_port::XdpListener| {
-            let mode = match l.mode() {
-                Some(teseladb_sys::xdp::AttachMode::Driver) => "driver",
-                _ => "generic",
-            };
-            let copy = if l.ports.iter().all(|p| p.zerocopy()) { "zero-copy" } else { "copy" };
-            let huge = l.ports.iter().all(|p| p.on_huge_pages());
-            format!(
-                "{interface}: {} queues, XDP in {mode} mode, {copy}, UMEM on {} pages",
-                l.ports.len(),
-                if huge { "2 MiB" } else { "normal" }
-            )
-        };
-        let text = describe(&listener);
-        let parts = crate::client_ring::RingParts {
-            state: parts.state,
-            shared: parts.shared,
-            kit: parts.kit,
-            diag: parts.diag,
-            open: parts.open,
-            stop: parts.stop,
-            max: cfg.max_connections,
-            next_id: parts.ids,
-        };
-        let teseladb_io::xdp_port::XdpListener { program, ports } = listener;
-        match crate::client_ring::spawn_xdp(parts, ports) {
-            Ok(port) => XdpState { status: Some(Ok(text)), running: Some((port, program)) },
-            Err(e) => XdpState {
-                status: Some(Err(format!("{interface}: the queues' threads: {e}"))),
-                running: None,
-            },
+    };
+    let listener = teseladb_io::xdp_port::XdpListener::open(
+        interface,
+        port,
+        address,
+        cfg.max_connections,
+        secret(),
+    );
+    let listener = match listener {
+        Ok(l) => l,
+        Err(e) => {
+            return XdpState { status: Some(Err(format!("{interface}: {e}"))), running: None };
         }
+    };
+    let describe = |l: &teseladb_io::xdp_port::XdpListener| {
+        let mode = match l.mode() {
+            Some(teseladb_sys::xdp::AttachMode::Driver) => "driver",
+            _ => "generic",
+        };
+        let copy = if l.ports.iter().all(|p| p.zerocopy()) { "zero-copy" } else { "copy" };
+        let huge = l.ports.iter().all(|p| p.on_huge_pages());
+        format!(
+            "{interface}: {} queues, XDP in {mode} mode, {copy}, UMEM on {} pages",
+            l.ports.len(),
+            if huge { "2 MiB" } else { "normal" }
+        )
+    };
+    let text = describe(&listener);
+    let teseladb_io::xdp_port::XdpListener { program, ports } = listener;
+    let service: Arc<dyn teseladb_io::engine::client_port::Service> = core;
+    match teseladb_io::engine::xdp_clients::start_xdp(ports, service) {
+        Ok(run) => XdpState { status: Some(Ok(text)), running: Some((run, program)) },
+        Err(e) => XdpState {
+            status: Some(Err(format!("{interface}: the queues on the shards: {e}"))),
+            running: None,
+        },
     }
 }
 

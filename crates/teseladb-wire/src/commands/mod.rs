@@ -35,6 +35,7 @@ mod min_max;
 pub(crate) use command_list::in_api_v1;
 mod coll_stats_shards;
 pub mod config_db;
+pub mod context;
 pub mod config_settings;
 pub mod cross_range;
 pub mod crud;

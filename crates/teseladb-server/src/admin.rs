@@ -5,8 +5,9 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Duration;
+use teseladb_io::engine::answer as mpsc;
 
 use teseladb_auth::authz;
 use teseladb_auth::privileges::{self, Privilege};

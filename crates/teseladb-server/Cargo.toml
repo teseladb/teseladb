@@ -28,6 +28,24 @@ name = "admin"
 harness = false
 
 [[test]]
+name = "client_port_engine"
+harness = false
+
+[[test]]
+name = "client_tasks"
+harness = false
+
+# A node with its own engine, then ports on the engine the process starts for them: in order, in
+# one `main` (D4).
+[[test]]
+name = "quiesce"
+harness = false
+
+[[test]]
+name = "xdp_clients"
+harness = false
+
+[[test]]
 name = "admin_port"
 harness = false
 

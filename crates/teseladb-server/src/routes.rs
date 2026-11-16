@@ -1,12 +1,14 @@
-//! The node's routing table for the client workers (007 FR-003): core 0 writes it from its copy
-//! of Group 0 whenever the ranges change, and a worker reads it to send each request to the core
-//! of the range that holds its key. That core's router finds the range's leader. Core 0 also
-//! publishes every node's tags, which reads with a `readPreference` match (FR-013), and the
+//! The node's routing table for the client connections (007 FR-003): core 0 writes it from its
+//! copy of Group 0 whenever the ranges change, and a connection reads it to send each request to
+//! the core of the range that holds its key. That core's router finds the range's leader. Core 0
+//! also publishes every node's tags, which reads with a `readPreference` match (FR-013), and the
 //! cluster's write gates, which every write looks at (FR-029).
+//!
+//! Each shard reads its own copy of what core 0 published, without a lock, and takes the new one
+//! once core 0 publishes again (023 FR-020, [`Published`]).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use teseladb_meta::group0::RangeDesc;
 use teseladb_router::table::{RouteEntry, RouteTable};
@@ -14,6 +16,7 @@ use teseladb_types::{GroupId, NodeId};
 use teseladb_wire::commands::write_block::WriteGate;
 
 use crate::hosting::Hosting;
+use crate::published::Published;
 
 /// The routing table and the cores of its ranges as one worker last read them
 /// ([`SharedRoutes::route_of`]).
@@ -30,38 +33,37 @@ pub type NodeTags = BTreeMap<NodeId, Vec<(String, String)>>;
 /// The routing table shared by core 0 and the client workers, and the nodes' tags.
 #[derive(Clone, Debug, Default)]
 pub struct SharedRoutes {
-    table: Arc<RwLock<Arc<RouteTable>>>,
-    /// Grows after every new table: a worker keeps the table it read until it moves.
-    table_version: Arc<AtomicU64>,
-    tags: Arc<RwLock<Arc<NodeTags>>>,
+    /// Its version grows after every new table: a worker keeps the table it read until it moves.
+    table: Published<RouteTable>,
+    tags: Published<NodeTags>,
     /// Which cores of the node hold each range: a range on its way to another core is sent to
     /// the core that holds it (007 FR-011).
     hosting: Hosting,
     /// The `fsync` locks and the user write block as this node's copy of Group 0 has them.
-    gate: Arc<RwLock<Arc<WriteGate>>>,
+    gate: Published<WriteGate>,
     /// The highest feature compatibility version every node runs, when one runs less than this
     /// binary's latest (FR-027).
-    fcv_limit: Arc<RwLock<Arc<Option<String>>>>,
+    fcv_limit: Published<Option<String>>,
     /// Every node keeps the documents of a new collection in `_id` order (D-153).
     ordered_ids: Arc<std::sync::atomic::AtomicBool>,
     /// The state of each tenant but the default one: its limits, its access list and whether it
     /// is suspended (FR-030, FR-034, FR-035).
-    tenants: Arc<RwLock<Arc<TenantStates>>>,
+    tenants: Published<TenantStates>,
     /// What this node counts and limits of each tenant (FR-032, FR-033).
     limiter: Arc<crate::tenant_limits::TenantLimiter>,
     /// The tenants' names, for the messages of their quotas.
-    tenant_names: Arc<RwLock<Arc<BTreeMap<u32, String>>>>,
+    tenant_names: Published<BTreeMap<u32, String>>,
     /// The data each tenant uses in the cluster, as this node last read it (FR-031).
-    usage: Arc<RwLock<Arc<BTreeMap<u32, u64>>>>,
+    usage: Published<BTreeMap<u32, u64>>,
     /// The nodes of the cluster that are not removed, among which a tenant's margin is shared.
     nodes: Arc<std::sync::atomic::AtomicUsize>,
     /// This node's copy of the catalog, which core 0 publishes before it answers any change of
     /// it: the workers read it here instead of asking core 0 on every command (H-017 of the
     /// native tests against the reference server, whose operations take the latest catalog the same
     /// way).
-    catalog: Arc<RwLock<Arc<Option<Arc<teseladb_meta::catalog::Catalog>>>>>,
+    catalog: Published<Option<Arc<teseladb_meta::catalog::Catalog>>>,
     /// This node's copy of the cluster settings, published the same way (H-017).
-    settings: Arc<RwLock<Arc<Option<Arc<Settings>>>>>,
+    settings: Published<Option<Arc<Settings>>>,
 }
 
 /// The cluster settings by key, as Group 0 has them.
@@ -70,21 +72,14 @@ pub type Settings = BTreeMap<Vec<u8>, Vec<u8>>;
 /// The state of each tenant, by number.
 pub type TenantStates = BTreeMap<u32, teseladb_meta::tenants::TenantState>;
 
-/// Replaces what `lock` holds with `v`; a writer that panicked left a whole value behind, which
-/// is replaced all the same.
-fn replace<T>(lock: &RwLock<Arc<T>>, v: Arc<T>) {
-    match lock.write() {
-        Ok(mut g) => *g = v,
-        Err(p) => *p.into_inner() = v,
-    }
+/// Publishes `v` in place of what `p` holds; the shards take it at their next read (023 FR-020).
+fn replace<T>(p: &Published<T>, v: Arc<T>) {
+    p.publish(v);
 }
 
-/// What `lock` holds.
-fn read<T>(lock: &RwLock<Arc<T>>) -> Arc<T> {
-    match lock.read() {
-        Ok(g) => g.clone(),
-        Err(p) => p.into_inner().clone(),
-    }
+/// This thread's copy of what `p` holds, read without a lock.
+fn read<T: Clone + 'static>(p: &Published<T>) -> Arc<T> {
+    p.get()
 }
 
 impl SharedRoutes {
@@ -106,7 +101,6 @@ impl SharedRoutes {
         let mut t = RouteTable::default();
         t.refresh_ranges(ranges.iter());
         replace(&self.table, Arc::new(t));
-        self.table_version.fetch_add(1, Ordering::Release);
     }
 
     /// The range that holds `key` and the core of this node that holds it, from the table and
@@ -143,7 +137,7 @@ impl SharedRoutes {
 
     /// Takes again into `cache` the table or the cores that changed since it read them.
     fn refresh(&self, cache: &mut RouteCache) {
-        let tv = self.table_version.load(Ordering::Acquire);
+        let tv = self.table.version();
         if cache.table.as_ref().is_none_or(|(v, _)| *v != tv) {
             cache.table = Some((tv, self.table()));
         }
@@ -332,8 +326,7 @@ mod tests {
         routes.publish(&[range(1, &[1], &[2])]);
         let held = routes.clone();
         let poisoned = std::thread::spawn(move || {
-            let _guard = held.table.write();
-            panic!("a writer dies holding the lock");
+            held.table.update(|_| -> (bool, ()) { panic!("a writer dies holding the lock") });
         });
         assert!(poisoned.join().is_err());
         assert_eq!(routes.lookup(&[1, 5]).map(|e| e.group), Some(GroupId(1)));
