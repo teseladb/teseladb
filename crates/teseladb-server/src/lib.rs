@@ -1,6 +1,6 @@
 //! The `teseladb` binary as a library (specification 001, FR-017 and FR-018): command line,
-//! logging, a core's logic over the I/O runtime, node start-up and the in-process development
-//! cluster. `main.rs` only calls [`run`].
+//! logging, a core's logic over the I/O runtime, node start-up, and the development cluster and
+//! the tests' nodes as processes of their own ([`procs`]). `main.rs` only calls [`run`].
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 
