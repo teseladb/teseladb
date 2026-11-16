@@ -66,7 +66,9 @@ while IFS= read -r run; do runs+=("$run"); done < <(
 )
 [[ ${#runs[@]} -gt 0 ]] || { echo "test-linux: nothing was built" >&2; exit 1; }
 
-docker run --rm -i --security-opt seccomp=unconfined --tmpfs /full:rw,size=1m \
+# --dns 127.0.0.1: the container's resolver asks loopback, where engine_blocking's test of a slow
+# lookup (023 T033) runs a DNS server that never answers; nothing else resolves names off the host.
+docker run --rm -i --dns 127.0.0.1 --security-opt seccomp=unconfined --tmpfs /full:rw,size=1m \
   --cap-add NET_ADMIN --cap-add BPF --cap-add SYS_ADMIN --cap-add IPC_LOCK --ulimit memlock=-1 \
   -e TESELADB_FULL_DIR=/full -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
   sh -s -- "${runs[@]}" <<'SH'

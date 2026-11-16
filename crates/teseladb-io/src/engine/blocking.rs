@@ -85,6 +85,9 @@ const EAI_CANCELED: c_int = -101;
 const EAI_SYSTEM: c_int = -11;
 const EAI_NONAME: c_int = -2;
 
+// The asynchronous lookups are in libc since glibc 2.34 and in libanl before; from 2.34 libanl is
+// an empty library kept for this link, so naming it builds against the release's glibc 2.28 too.
+#[link(name = "anl")]
 unsafe extern "C" {
     fn getaddrinfo_a(
         mode: c_int,

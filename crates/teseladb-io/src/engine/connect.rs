@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::future::{ExceptionPtr, Future};
+use teseladb::engine::core::future::{ExceptionPtr, Future, SystemError};
 use teseladb::engine::core::reactor::make_socket;
 use teseladb::engine::net::api::ConnectedSocket;
 use teseladb::engine::net::socket_defs::{
@@ -52,14 +52,28 @@ pub fn socket_address(addr: SocketAddr) -> SocketAddress {
     }
 }
 
+/// The engine's error `e` of a connection to `addr` as an [`io::Error`] that names the address:
+/// a system error keeps its kind (`ConnectionRefused`, `NetworkUnreachable`…).
+fn connect_error(addr: SocketAddr, e: &ExceptionPtr) -> ExceptionPtr {
+    let (kind, text) = match (e.downcast_ref::<SystemError>(), e.downcast_ref::<io::Error>()) {
+        (Some(s), _) => (io::Error::from_raw_os_error(s.code()).kind(), s.to_string()),
+        (None, Some(io)) => (io.kind(), io.to_string()),
+        (None, None) => (io::ErrorKind::Other, format!("{e:?}")),
+    };
+    ExceptionPtr::from(io::Error::new(kind, format!("{addr}: {text}")))
+}
+
 /// A TCP connection to `addr`, made within `timeout`; past it the attempt is cancelled and the
-/// result fails with [`io::ErrorKind::TimedOut`].
+/// result fails with [`io::ErrorKind::TimedOut`]. Other failures are [`io::Error`]s of the
+/// system's kind that name the address.
 pub fn connect(addr: SocketAddr, timeout: Duration) -> Future<ConnectedSocket> {
     let sock = Rc::new(RefCell::new(make_socket()));
     let attempt =
         sock.borrow_mut().connect(socket_address(addr), SocketAddress::default(), Transport::TCP);
     let keep = Rc::clone(&sock);
-    let attempt = attempt.finally(move || drop(keep));
+    let attempt = attempt
+        .finally(move || drop(keep))
+        .handle_exception(move |e: ExceptionPtr| Err(connect_error(addr, &e)));
     within(timeout, attempt, format!("{addr}: connection timed out"), move || {
         // Cancels the attempt still in flight.
         let _ = sock.borrow_mut().shutdown();
