@@ -12,6 +12,8 @@ use std::os::fd::AsRawFd;
 
 /// Safe forms of the engine's DMA file operations (023 FR-010).
 pub mod dma;
+/// Native stacks of their own for calls that nest deep (016 A016-3-18).
+pub mod deep_stack;
 pub mod handoff;
 pub mod host;
 pub mod latest;

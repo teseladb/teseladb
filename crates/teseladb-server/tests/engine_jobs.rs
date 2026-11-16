@@ -85,3 +85,38 @@ fn a_background_task_runs_in_the_background_group_until_it_is_stopped() {
     assert!(task.stop(), "it ended at the stop");
     assert!(start.elapsed() < Duration::from_secs(5));
 }
+
+/// Recurses `depth` times with a frame of about 1 KiB each.
+#[inline(never)]
+fn deep(depth: usize) -> usize {
+    let frame = std::hint::black_box([u8::try_from(depth % 256).unwrap_or(0); 1024]);
+    if depth == 0 {
+        return usize::from(frame[0]);
+    }
+    1 + deep(std::hint::black_box(depth - 1))
+}
+
+#[test]
+fn a_job_runs_deeper_than_its_engine_thread_on_a_stack_of_its_own_and_parks_there() {
+    use teseladb_io::engine::stacks;
+    use teseladb_server::client_listener::ENGINE_COMMAND_STACK;
+    use teseladb_wire::commands::js::COMMAND_STACK;
+
+    stacks::set_stack_size(ENGINE_COMMAND_STACK);
+    let got = block_on(|| {
+        engine_jobs::run(|| {
+            let mut got = None;
+            teseladb_sys::deep_stack::run(COMMAND_STACK, &mut |size| {
+                // A wait on the deep stack parks the engine thread and comes back to it.
+                teseladb_io::engine::wait::sleep(Duration::from_millis(5));
+                // 64 MiB of frames: four times the engine thread's stack.
+                got = Some((size, deep(64 << 10)));
+            });
+            got
+        })
+    })
+    .expect("the engine ran the job");
+    let (size, reached) = got.expect("the call ran");
+    assert!(size.expect("a stack of its own") >= COMMAND_STACK);
+    assert_eq!(reached, 64 << 10);
+}

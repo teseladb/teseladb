@@ -1149,6 +1149,8 @@ impl Node {
         // line that says how it runs (`contracts/cli-engine.md`); the log's writer runs on shard 0
         // (023 FR-013).
         let engine = NodeEngine::start(&engine_cfg)?;
+        // Server-side JavaScript of every port runs on stacks of its own (016 A016-3-18).
+        crate::client_listener::set_deep_stack();
         // The keeper of the clock's bound, a task of shard 0 on the engine's disk executor.
         let keeper_place = place.clone();
         clock_keeper.run_on(

@@ -36,10 +36,21 @@ use crate::tls_port::TlsPort;
 
 /// The reference server's default `net.maxIncomingConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
-/// The stack of the engine threads that run a connection's commands. It is smaller than the
-/// `COMMAND_STACK` a thread of its own reserved, since a shard keeps its idle stacks for the
-/// next commands; the calls of server-side JavaScript are told what it has (016 A016-3-18).
+/// The stack of the engine threads that run a connection's commands: it comes from the shard's
+/// memory and a shard keeps its idle ones for the next commands, so it is far smaller than the
+/// `COMMAND_STACK` of server-side JavaScript. A call of JavaScript runs on a stack of its own of
+/// that size instead ([`set_deep_stack`], 016 A016-3-18).
 pub const ENGINE_COMMAND_STACK: usize = 16 << 20;
+
+/// Runs each call of server-side JavaScript on a native stack of its own of `COMMAND_STACK`
+/// bytes, reserved and committed as it is used (016 A016-3-18, 023 FR-018): the 51 000 nested
+/// calls of the reference router fit, whatever the stack of the thread that runs the command.
+pub fn set_deep_stack() {
+    fn runner(call: &mut dyn FnMut(Option<usize>)) {
+        teseladb_sys::deep_stack::run(teseladb_wire::commands::js::COMMAND_STACK, call);
+    }
+    teseladb_wire::commands::js::set_deep_stack(runner);
+}
 
 /// What the clients' port needs to know.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -565,6 +576,7 @@ impl ClientListener {
         use crate::diag::Diag;
 
         set_switch_hooks();
+        set_deep_stack();
         teseladb_io::engine::stacks::set_stack_size(ENGINE_COMMAND_STACK);
         let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let port_no = cfg.addrs.first().map_or(0, SocketAddr::port);

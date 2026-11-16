@@ -206,10 +206,28 @@ pub const COMMAND_STACK: usize = 256 << 20;
 /// What a thread that runs commands keeps of its stack for the frames below the calls.
 const STACK_SPARE: usize = 8 << 20;
 
+/// What runs a call on a native stack of its own (016 A016-3-18): it calls the function it is given
+/// once, with `Some(bytes)` on a fresh stack of that size, or with `None` on the caller's stack
+/// (the caller already runs on such a stack, or none could be made). A process whose threads have
+/// small stacks (the engine's) sets one so that a call keeps the depth of [`COMMAND_STACK`].
+pub type DeepStack = fn(&mut dyn FnMut(Option<usize>));
+
+static DEEP_STACK: std::sync::OnceLock<DeepStack> = std::sync::OnceLock::new();
+
+/// Sets the [`DeepStack`] of the process, once.
+pub fn set_deep_stack(runner: DeepStack) {
+    let _ = DEEP_STACK.set(runner);
+}
+
+/// The native stack a call takes on a stack of `size` bytes.
+fn stack_for(size: usize) -> usize {
+    size.saturating_sub(STACK_SPARE).max(teseladb_js::DEFAULT_STACK)
+}
+
 /// Tells the calls on this thread that it has a stack of `size` bytes ([`COMMAND_STACK`] for the
 /// threads that run commands); without it a call takes the 1 MiB that any thread has.
 pub fn set_stack(size: usize) {
-    STACK.with(|s| s.set(size.saturating_sub(STACK_SPARE).max(teseladb_js::DEFAULT_STACK)));
+    STACK.with(|s| s.set(stack_for(size)));
 }
 
 /// What the calls of the command about to run see: whether JavaScript is enabled
@@ -297,20 +315,34 @@ fn run_full(
         }
         passed()
     };
-    let limits = teseladb_js::Limits { stack: STACK.with(Cell::get), ..Default::default() };
-    let mut ctx = JsCtx {
-        limits,
-        now_ms: NOW_MS.with(Cell::get),
-        seed: super::engines::next_seed(),
-        deadline: Some(&passed),
-        sleep: sleeper.map(|_| &wait as &dyn Fn(u64) -> bool),
-        emit: match emit {
-            Some(e) => Some(&mut *e),
-            None => None,
-        },
-        scope,
+    let thread_stack = STACK.with(Cell::get);
+    let (now_ms, seed) = (NOW_MS.with(Cell::get), super::engines::next_seed());
+    let sleep = sleeper.map(|_| &wait as &dyn Fn(u64) -> bool);
+    let mut emit = emit;
+    let mut result = None;
+    let mut call = |deep: Option<usize>| {
+        // On a stack of its own the call has all of it; otherwise what this thread gives.
+        let stack = deep.map_or(thread_stack, stack_for);
+        let mut ctx = JsCtx {
+            limits: teseladb_js::Limits { stack, ..Default::default() },
+            now_ms,
+            seed,
+            deadline: Some(&passed),
+            sleep,
+            emit: match emit.as_mut() {
+                Some(e) => Some(&mut **e),
+                None => None,
+            },
+            scope,
+        };
+        result = Some(p.call(this, args, &mut ctx));
     };
-    p.call(this, args, &mut ctx)
+    match DEEP_STACK.get() {
+        Some(deep) => deep(&mut call),
+        None => call(None),
+    }
+    // A runner calls it once; one that did not leaves the call unmade, as out of memory.
+    result.unwrap_or(Err(JsError::OutOfMemory))
 }
 
 /// The error of a call that failed, as the reference server words it after `what` (`Failed to
@@ -559,6 +591,29 @@ pub(crate) fn engine() -> Rc<dyn JsEngine> {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    static DEEP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A runner that counts its calls and runs each on the caller's stack, as the process's
+    /// runner does on a stack that is already its own: the other tests see no change.
+    fn counting_runner(call: &mut dyn FnMut(Option<usize>)) {
+        DEEP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        call(None);
+    }
+
+    /// Every call goes through the process's runner, and a stack of its own gives the call all of
+    /// it but the spare.
+    #[test]
+    fn calls_go_through_the_deep_stack_runner() {
+        set_deep_stack(counting_runner);
+        let before = DEEP_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let p = program("function(a) { return a + 1; }").unwrap();
+        let v = run(&p, None, &[Value::Int32(1)]).unwrap();
+        assert!(matches!(v, Value::Int32(2) | Value::Double(_)), "{v:?}");
+        assert!(DEEP_CALLS.load(std::sync::atomic::Ordering::SeqCst) > before);
+        assert_eq!(stack_for(COMMAND_STACK), COMMAND_STACK - STACK_SPARE);
+        assert_eq!(stack_for(0), teseladb_js::DEFAULT_STACK);
+    }
 
     /// The limit of an operation run inside another comes back when the inner one ends.
     #[test]
