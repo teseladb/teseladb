@@ -190,10 +190,11 @@ impl NodeEngine {
         rx.recv().map_err(|_| io::Error::other("the engine stopped"))
     }
 
-    /// Opens a core on `shard`: `build` makes its logic and disk executor there (its state is
-    /// built on its shard, so it need not be `Send`), the task drives it with `cfg` and `log`
-    /// (its part of the node's device log, 012 FR-035) until a stop, and `finish` turns the logic
-    /// and the executor into what [`CoreHandle::join`] gives back.
+    /// Opens a core on `shard`: `build` makes its logic, its disk executor and its part of the
+    /// node's device log (012 FR-035) there, after the recovery of its log and LSM (its state is
+    /// built on its shard, so it need not be `Send`); the task drives it with `cfg` until a stop,
+    /// and `finish` turns the logic and the executor (and whether the executor died) into what
+    /// [`CoreHandle::join`] gives back.
     ///
     /// # Errors
     ///
@@ -202,7 +203,6 @@ impl NodeEngine {
         &self,
         shard: u16,
         cfg: CoreConfig,
-        log: Option<LogPort>,
         build: B,
         finish: F,
     ) -> Result<CoreHandle<L::Msg, R>, E>
@@ -211,7 +211,7 @@ impl NodeEngine {
         X: CoreDisk,
         R: Send + 'static,
         E: Send + 'static + From<io::Error>,
-        B: FnOnce() -> Result<(L, X), E> + Send + 'static,
+        B: FnOnce() -> Result<(L, X, Option<LogPort>), E> + Send + 'static,
         F: FnOnce(L, X, bool) -> R + Send + 'static,
     {
         let (built_tx, built_rx) = mpsc::sync_channel::<Result<(), E>>(1);
@@ -219,14 +219,13 @@ impl NodeEngine {
         let post = self.post(shard);
         let gate = self.gate.clone();
         let sent = post.clone().post(move || {
-            let (logic, mut disk) = match build() {
+            let (logic, mut disk, mut log) = match build() {
                 Ok(v) => v,
                 Err(e) => return drop(built_tx.send(Err(e))),
             };
             let io = Rc::new(CoreIo::default());
             let inbox = Rc::new(Inbox::<L::Msg>::new());
             disk.attach(DiskWaker::new(io.clone(), post.clone()));
-            let mut log = log;
             if let Some(port) = log.as_mut() {
                 let back = post.clone();
                 port.attach(Box::new(move |d| back.post_log(Instant::now(), d)));

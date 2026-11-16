@@ -12,7 +12,7 @@ use teseladb_auth::authz;
 use teseladb_auth::privileges::{self, Privilege};
 use teseladb_auth::users::{EXTERNAL_DB, RoleName, UserName};
 use teseladb_bson::{Document, Value};
-use teseladb_io::runtime::{CoreInput, CoreSender, CoreSenders};
+use teseladb_io::engine::{CoreInput, CoreSender, CoreSenders};
 use teseladb_meta::catalog::{Catalog, Namespace};
 use teseladb_meta::command::Group0Command;
 use teseladb_meta::drain::DrainError;

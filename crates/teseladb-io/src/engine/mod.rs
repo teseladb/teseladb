@@ -7,7 +7,8 @@
 //! resolution, configuration and certificate files), and outbound connections with a deadline,
 //! optionally with TLS ([`connect`]).
 //!
-//! Outside Linux only the contract of the logic and the senders bound to a queue exist.
+//! Outside Linux there are the contract of the logic, the senders bound to a queue and an engine
+//! that does not start (D3).
 
 //!
 //! A deadline that passes fails the operation with an [`std::io::Error`] of kind
@@ -48,6 +49,8 @@ mod peers;
 mod post;
 #[cfg(target_os = "linux")]
 pub mod tls_stream;
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
 
 pub use core_loop::{
     BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreInput, CoreLogic, CoreReceiver, CoreSender, CoreSenders,
@@ -58,6 +61,8 @@ pub use core_loop::{
 pub use disk_port::{CoreDisk, DiskWaker, ThreadDisk};
 #[cfg(target_os = "linux")]
 pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, ThreadDisk};
 
 /// The deadline `timeout` from now on the steady clock.
 #[cfg(target_os = "linux")]

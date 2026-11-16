@@ -271,8 +271,7 @@ pub fn start_core<D: Disk + Send + 'static>(
         .start_core(
             shard,
             cfg,
-            None,
-            move || Ok::<_, std::io::Error>((toy, ThreadDisk::new(name, disk))),
+            move || Ok::<_, std::io::Error>((toy, ThreadDisk::new(name, disk), None)),
             |toy, disk: ThreadDisk<D>, gone| (toy, disk.into_disk(), gone),
         )
         .unwrap()
