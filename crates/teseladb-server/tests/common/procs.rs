@@ -78,6 +78,10 @@ pub fn main(tests: &[Test], recipes: &[Recipe]) {
         return;
     }
     println!("\nrunning {} tests", chosen.len());
+    // One test runs here; several run each in a process of its own (this binary with `--exact`
+    // and its name), since a test may start a node in this process and a process has one engine
+    // at a time (D4).
+    let alone = chosen.len() == 1;
     let queue = Arc::new(Mutex::new(chosen.iter().copied().collect::<VecDeque<Test>>()));
     let failed = Arc::new(Mutex::new(Vec::new()));
     let workers: Vec<_> = (0..threads.min(chosen.len().max(1)))
@@ -87,12 +91,7 @@ pub fn main(tests: &[Test], recipes: &[Recipe]) {
                 while let Some((name, f)) =
                     queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front()
                 {
-                    let ok = thread::Builder::new()
-                        .name(name.to_owned())
-                        .spawn(f)
-                        .expect("a test thread")
-                        .join()
-                        .is_ok();
+                    let ok = if alone { in_a_thread(name, f) } else { in_a_process(name) };
                     println!("test {name} ... {}", if ok { "ok" } else { "FAILED" });
                     if !ok {
                         failed.lock().unwrap_or_else(PoisonError::into_inner).push(name);
@@ -112,4 +111,15 @@ pub fn main(tests: &[Test], recipes: &[Recipe]) {
     failed.iter().for_each(|n| println!("    {n}"));
     println!("\ntest result: FAILED. {passed} passed; {} failed; 0 ignored\n", failed.len());
     std::process::exit(101);
+}
+
+/// Runs test `f` in a thread of this process; whether it passed.
+fn in_a_thread(name: &str, f: fn()) -> bool {
+    thread::Builder::new().name(name.to_owned()).spawn(f).expect("a test thread").join().is_ok()
+}
+
+/// Runs test `name` alone in a process of its own, this binary with its name; whether it passed.
+fn in_a_process(name: &str) -> bool {
+    let exe = std::env::current_exe().expect("the test binary");
+    std::process::Command::new(exe).args(["--exact", name]).status().is_ok_and(|s| s.success())
 }
