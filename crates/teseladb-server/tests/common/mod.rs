@@ -42,6 +42,12 @@ impl<D: Disk + Send + 'static> ClientPort for Node<D> {
     }
 }
 
+impl<T: ClientPort> ClientPort for &T {
+    fn client_port(&self) -> SocketAddr {
+        (*self).client_port()
+    }
+}
+
 impl ClientPort for teseladb_server::procs::NodeProc {
     fn client_port(&self) -> SocketAddr {
         self.client_addrs()[0]

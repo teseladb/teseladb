@@ -37,6 +37,14 @@ harness = false
 name = "backup"
 harness = false
 
+[[test]]
+name = "concurrent_joins"
+harness = false
+
+[[test]]
+name = "crud"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
