@@ -15,7 +15,6 @@ pub mod dma;
 /// Native stacks of their own for calls that nest deep (016 A016-3-18).
 pub mod deep_stack;
 pub mod host;
-pub mod latest;
 mod linux;
 /// Network namespaces and `veth` pairs, for the tests of AF_XDP (012 FR-033).
 pub use linux::netns;

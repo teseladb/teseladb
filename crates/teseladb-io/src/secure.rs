@@ -4,32 +4,50 @@
 //! that asks to join before its own starts ([`crate::handshake`]); on the shards the connections
 //! are the engine's streams ([`crate::engine::tls_stream`]).
 //!
-//! The settings are read without a lock by every shard and replaced by a certificate rotation
-//! ([`PeerTls`]); the engine has no such cell, so they keep `teseladb_sys::latest`.
+//! The settings are read without a lock: each shard holds its own copy ([`PeerTls`]), and a
+//! certificate rotation, a task of shard 0, puts a copy of the new ones on every shard with `smp`
+//! before it counts as done (023 FR-023).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use teseladb_sys::latest::Latest;
 use teseladb_tls::{ClientConfig, Connection, ENTROPY_LEN, ServerConfig};
 use teseladb_x509::Certificate;
 
 /// A node's TLS settings between nodes: as a server (its chain with the CA, client certificates
-/// asked for and checked against the CA) and as a client (its chain, the CA as the anchor). The
-/// clones share the settings: [`PeerTls::replace`] rotates them for every connection that comes
-/// after (013 FR-006), and those already open keep theirs. Reading them takes no lock (012
-/// FR-008): each rotation keeps its settings until the last clone goes.
+/// asked for and checked against the CA) and as a client (its chain, the CA as the anchor).
+///
+/// Each shard (and each thread that is not one) reads its own copy, without a lock (012 FR-008):
+/// the settings it was made with until a rotation puts others there. [`PeerTls::publish`] puts
+/// new settings on every shard of the engine (013 FR-006, 023 FR-023) and
+/// [`PeerTls::replace_here`] on this thread only; the connections already open keep theirs. The
+/// clones share the copies.
 #[derive(Clone)]
 pub struct PeerTls {
-    sides: Arc<Latest<Sides>>,
+    /// The number of these settings in the process: what the copies are kept under.
+    id: u64,
+    /// The settings it was made with, for a thread that has no copy yet.
+    first: Arc<Sides>,
 }
 
+#[derive(Clone)]
 struct Sides {
     server: Arc<ServerConfig>,
     client: Arc<ClientConfig>,
+}
+
+/// The numbers of the settings of the process.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// This thread's copy of each [`PeerTls`] a rotation replaced, by number.
+    static COPIES: RefCell<HashMap<u64, Arc<Sides>>> = RefCell::new(HashMap::new());
 }
 
 impl fmt::Debug for PeerTls {
@@ -43,28 +61,50 @@ impl PeerTls {
     /// The settings `server` for the connections the node accepts and `client` for those it
     /// dials.
     pub fn new(server: ServerConfig, client: ClientConfig) -> PeerTls {
-        let sides = Sides { server: Arc::new(server), client: Arc::new(client) };
-        PeerTls { sides: Arc::new(Latest::new(sides)) }
+        let first = Arc::new(Sides { server: Arc::new(server), client: Arc::new(client) });
+        PeerTls { id: NEXT_ID.fetch_add(1, Ordering::Relaxed), first }
     }
 
-    fn read(&self) -> &Sides {
-        self.sides.get()
+    /// What `f` reads of this thread's copy.
+    fn read<R>(&self, f: impl FnOnce(&Sides) -> R) -> R {
+        COPIES.with(|c| match c.borrow().get(&self.id) {
+            Some(sides) => f(sides),
+            None => f(&self.first),
+        })
     }
 
     /// For the connections the node accepts.
     pub fn server(&self) -> Arc<ServerConfig> {
-        self.read().server.clone()
+        self.read(|s| s.server.clone())
     }
 
     /// For the connections the node dials.
     pub fn client(&self) -> Arc<ClientConfig> {
-        self.read().client.clone()
+        self.read(|s| s.client.clone())
     }
 
-    /// Puts the settings of `other` in place of these, in every clone.
-    pub fn replace(&self, other: &PeerTls) {
-        let (server, client) = (other.server(), other.client());
-        self.sides.set(Sides { server, client });
+    /// The settings of `other` as this thread reads them now, to be copied elsewhere.
+    fn sides_of(other: &PeerTls) -> Arc<Sides> {
+        other.read(|s| Arc::new(s.clone()))
+    }
+
+    /// Puts the settings of `other` in place of these on this thread: on a shard, for the
+    /// connections it accepts and dials from now on; on a thread that is not a shard (a process
+    /// without an engine), for what that thread does.
+    pub fn replace_here(&self, other: &PeerTls) {
+        let sides = PeerTls::sides_of(other);
+        COPIES.with(|c| c.borrow_mut().insert(self.id, sides));
+    }
+
+    /// Puts the settings of `other` in place of these on every shard of the engine, each its own
+    /// copy (023 FR-023); called on a shard (the rotation's task on shard 0), it resolves once
+    /// every shard has them.
+    #[cfg(target_os = "linux")]
+    pub fn publish(&self, other: &PeerTls) -> teseladb::engine::core::future::Future<()> {
+        let (id, sides) = (self.id, PeerTls::sides_of(other));
+        teseladb::engine::core::smp::Smp::invoke_on_all(move || {
+            COPIES.with(|c| c.borrow_mut().insert(id, Arc::clone(&sides)));
+        })
     }
 }
 

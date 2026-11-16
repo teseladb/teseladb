@@ -213,8 +213,27 @@ fn replaced_settings_serve_the_next(e: &NodeEngine) {
     let leaf = |ch: &Channel| ch.peer_certificates()[0].public_key.clone();
     let (mut first, mut first_ch) = dial(a.addr, 5, Some(dialer.client())).unwrap();
     assert_eq!(leaf(&first_ch), ec(2).public_key());
-    // The node rotates: a clone of the settings is enough.
-    tls.clone().replace(&peer_tls(&the_ca, 6));
+    // The node rotates: shard 0 puts a copy of the new settings on every shard (023 FR-023).
+    let (mine, next) = (tls.clone(), peer_tls(&the_ca, 6));
+    e.run_on(0, move || {
+        drop(mine.publish(&next));
+    })
+    .unwrap();
+    // Each shard has its copy once shard 0's messages reached it.
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    for shard in 0..e.shards() {
+        loop {
+            let t = tls.clone();
+            let fresh = e.run_on(shard, move || t.server()).unwrap();
+            if fresh.identity.key.public_key() == ec(6).public_key() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "shard {shard} kept the old settings");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    // The test's thread is no shard: it keeps the settings it read.
+    assert_eq!(tls.server().identity.key.public_key(), ec(2).public_key());
     let (_s, ch) = dial(a.addr, 6, Some(dialer.client())).unwrap();
     assert_eq!(leaf(&ch), ec(6).public_key());
     // The first connection still carries frames.

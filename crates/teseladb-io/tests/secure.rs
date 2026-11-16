@@ -7,6 +7,35 @@ use std::net::TcpListener;
 
 use teseladb_io::secure::Channel;
 
+#[path = "common/tls.rs"]
+#[allow(dead_code, reason = "the helpers the other suites use too")]
+mod tls;
+
+/// Each thread reads its own copy of the settings between nodes (023 FR-023): a replacement on
+/// one thread serves what that thread does next, in every clone, and leaves the others with the
+/// settings they had; nothing is shared between threads but the settings first given.
+#[test]
+fn a_replacement_reaches_this_thread_and_every_clone_on_it() {
+    let the_ca = tls::ca(1);
+    let peer = tls::peer_tls(&the_ca, 2);
+    let clone = peer.clone();
+    let key = |t: &teseladb_io::secure::PeerTls| t.server().identity.key.public_key();
+    assert_eq!(key(&peer), tls::ec(2).public_key());
+    assert_eq!(format!("{peer:?}"), "PeerTls");
+    peer.replace_here(&tls::peer_tls(&the_ca, 3));
+    assert_eq!(key(&peer), tls::ec(3).public_key());
+    assert_eq!(key(&clone), tls::ec(3).public_key(), "the clones share the copy");
+    let id = clone.client().identity.clone().expect("a client identity");
+    assert_eq!(id.key.public_key(), tls::ec(3).public_key());
+    // Another thread never saw the replacement.
+    let other = clone.clone();
+    let there = std::thread::spawn(move || key(&other)).join().unwrap();
+    assert_eq!(there, tls::ec(2).public_key());
+    // Settings made apart do not share copies.
+    let apart = tls::peer_tls(&the_ca, 4);
+    assert_eq!(key(&apart), tls::ec(4).public_key());
+}
+
 /// A channel in clear passes the bytes as they are, and says so in its debug form.
 #[test]
 fn a_plain_channel_reads_until_the_peer_closes() {

@@ -95,15 +95,19 @@ impl Certificates {
     }
 
     /// [`Certificates::reload`] from a shard: the new settings are on every shard of every
-    /// port of the engine before the future resolves; on error nothing changes.
+    /// port of the engine and between nodes before the future resolves; on error nothing
+    /// changes.
     pub fn rotate(&self) -> teseladb::engine::core::future::Future<Result<(), String>> {
         use teseladb::engine::core::coroutine::make_coroutine;
         let reloaded = self.load_and_replace();
         let shards = self.shard_ports().clone();
+        let mine = self.peer.clone();
         make_coroutine(async move {
-            if let Err(e) = reloaded {
-                return Ok(Err(e));
-            }
+            let peer = match reloaded {
+                Ok(peer) => peer,
+                Err(e) => return Ok(Err(e)),
+            };
+            publish_peer_from_shard0(mine, peer).await?;
             for (slot, port) in &shards {
                 slot.publish_port(port).await?;
             }
@@ -113,11 +117,26 @@ impl Certificates {
 
     /// `rotateCertificates`: loads the PKI and the `--tls*` files again and serves the new
     /// connections with them; on error nothing changes and the error says which file failed.
-    /// From a thread that is not a shard: the ports of the engine have the new settings on
-    /// every shard when it returns (023 FR-023).
+    /// From a thread that is not a shard: the ports of the engine and the shards' settings
+    /// between nodes are the new ones on every shard when it returns (023 FR-023).
     pub fn reload(&self) -> Result<(), String> {
-        self.load_and_replace()?;
+        let peer = self.load_and_replace()?;
+        self.publish_peer(peer)?;
         self.publish()
+    }
+
+    /// Puts the settings between nodes `peer` in place: on every shard, by a task of shard 0,
+    /// while an engine runs; on this thread in a process without one (a node that has not
+    /// started its engine, the unit tests).
+    fn publish_peer(&self, peer: PeerTls) -> Result<(), String> {
+        use teseladb::engine::core::{alien, reactor::engine_is_ready};
+        if !engine_is_ready() && alien::internal::default_instance().is_null() {
+            self.peer.replace_here(&peer);
+            return Ok(());
+        }
+        let mine = self.peer.clone();
+        crate::shard_client::block_on(move || publish_peer_from_shard0(mine, peer))
+            .map_err(crate::error_text)
     }
 
     /// Puts the settings the shared [`TlsPort`]s hold now on every shard of the ports of the
@@ -134,8 +153,9 @@ impl Certificates {
         Ok(())
     }
 
-    /// Loads the files and puts their settings in the shared [`TlsPort`]s.
-    fn load_and_replace(&self) -> Result<(), String> {
+    /// Loads the files and puts their settings in the shared [`TlsPort`]s; the settings between
+    /// nodes it gives back for the shards (they hold a copy each).
+    fn load_and_replace(&self) -> Result<PeerTls, String> {
         let pki = pki::load(&self.dir).map_err(crate::error_text)?;
         let port = tls_port::build(&self.opts, &pki)?;
         let peer = pki::peer_tls(&pki, self.opts.fips_mode);
@@ -143,8 +163,7 @@ impl Certificates {
             admin.replace(&tls_port::admin(&self.opts, &pki)?);
         }
         self.port.replace(&port);
-        self.peer.replace(&peer);
-        Ok(())
+        Ok(peer)
     }
 
     /// `teseladb admin cert rotate`: a new node key and certificate valid from `now` (seconds),
@@ -157,6 +176,15 @@ impl Certificates {
         pki::renew_node(&self.dir, self.names.clone(), now, random).map_err(crate::error_text)?;
         self.reload()
     }
+}
+
+/// The rotation's task on shard 0: it puts a copy of `peer` in place of `mine` on every shard
+/// (023 FR-023) and resolves once each has it.
+fn publish_peer_from_shard0(
+    mine: PeerTls,
+    peer: PeerTls,
+) -> teseladb::engine::core::future::Future<()> {
+    teseladb::engine::core::smp::Smp::submit_to(0, move || mine.publish(&peer))
 }
 
 #[cfg(test)]
