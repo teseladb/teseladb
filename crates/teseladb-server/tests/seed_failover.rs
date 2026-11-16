@@ -2,6 +2,9 @@
 //! have a voter on each node, the two that stay elect new leaders for Group 0 and for the ranges
 //! and answer reads and writes within the failover budget, without the seed they joined through.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -9,10 +12,20 @@ use std::time::{Duration, Instant};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeProc, start_self};
+
+fn main() {
+    procs::main(
+        &[(
+            "the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops",
+            the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops,
+        )],
+        &[("node", |a| node_config(a.join.clone()))],
+    );
+}
 
 const READY: Duration = Duration::from_secs(30);
 /// What a request may wait for its answer before the test counts it as unanswered.
@@ -22,7 +35,15 @@ const ANSWER: Duration = Duration::from_secs(5);
 const FAILOVER: Duration = Duration::from_secs(3);
 const C: &str = "/v1/databases/app/collections/c";
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+/// A node process of [`node_config`], ready.
+fn start(join: Vec<String>) -> NodeProc {
+    let node = start_self("node", &join, None, &[]);
+    assert!(node.wait_ready(READY));
+    node
+}
+
+/// A node of two cores with the HTTP port and the clients' port.
+fn node_config(join: Vec<String>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -32,16 +53,13 @@ fn start(join: Vec<String>) -> Node<MemDisk> {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         ..ClientConfig::new(Vec::new())
     };
-    let cfg = NodeConfig {
+    NodeConfig {
         cores: Some(2),
         join,
         http: Some(http),
         client: Some(client),
         ..NodeConfig::default()
-    };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
-    assert!(node.wait_ready(READY));
-    node
+    }
 }
 
 /// The answer to one request, or `None` when none comes within [`ANSWER`].
@@ -90,7 +108,7 @@ fn answered_within(
 
 /// Whether Group 0 and each range `node` routes have a voter on each of the three nodes, waiting
 /// at most [`READY`].
-fn replicated(node: &Node<MemDisk>) -> bool {
+fn replicated(node: &NodeProc) -> bool {
     let end = Instant::now() + READY;
     let three = |v: &[teseladb_types::NodeId]| v.len() == 3;
     while Instant::now() < end {
@@ -107,11 +125,10 @@ fn replicated(node: &Node<MemDisk>) -> bool {
     false
 }
 
-#[test]
 fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> = others.iter().map(|n| n.http_addrs()[0]).collect();
     let made =
         send(first.http_addrs()[0], "POST", "/v1/databases/app/collections", r#"{"name":"c"}"#)
@@ -124,7 +141,7 @@ fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
     // joins or starts, and again as each change settles).
     assert!(replicated(&first), "{:?}", first.ranges());
     let stopped = Instant::now();
-    drop(first.stop());
+    assert!(first.stop().success());
     for (i, node) in at.iter().enumerate() {
         let id = 10 + i32::try_from(i).unwrap();
         let write = format!(r#"{{"document":{{"_id":{id}}}}}"#);
@@ -147,5 +164,5 @@ fn the_two_nodes_left_answer_reads_and_writes_soon_after_the_seed_stops() {
         other => panic!("{other:?}"),
     };
     assert_eq!(ids, vec![Value::Int32(1), Value::Int32(10), Value::Int32(11)]);
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
 }

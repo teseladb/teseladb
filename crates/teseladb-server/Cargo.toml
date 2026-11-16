@@ -105,6 +105,18 @@ harness = false
 name = "rollback"
 harness = false
 
+[[test]]
+name = "search"
+harness = false
+
+[[test]]
+name = "sessions"
+harness = false
+
+[[test]]
+name = "seed_failover"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

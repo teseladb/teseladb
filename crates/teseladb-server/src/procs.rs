@@ -1253,10 +1253,8 @@ mod tests {
             }
         }
         assert_eq!(parse_wc("x", "1"), None);
-        let mut errors = vec![
-            DataError::NoAnswer,
-            DataError::Range(RangeError::NotLeader { hint: NodeId(3) }),
-        ];
+        let mut errors =
+            vec![DataError::NoAnswer, DataError::Range(RangeError::NotLeader { hint: NodeId(3) })];
         errors.extend(RANGE_ERRORS.iter().cloned().map(DataError::Range));
         for e in errors {
             assert_eq!(parse_data_error(&data_error_text(&e)), e);
