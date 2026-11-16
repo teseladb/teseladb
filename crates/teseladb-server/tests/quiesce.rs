@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, RawDoc, Value};
 use teseladb_server::client_listener::{
@@ -138,12 +139,8 @@ fn a_waiting_hello_answers_at_once_when_the_quiesce_starts() {
 
 #[test]
 fn the_quiesce_of_a_node_ends_once_its_clients_go_quiet_and_never_past_its_longest() {
-    let node = teseladb_server::node::Node::start(
-        common_config(),
-        || Ok(teseladb_raftlog::MemDisk::new()),
-        None,
-    )
-    .unwrap();
+    let node =
+        teseladb_server::node::Node::start(common_config(), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(30)));
     let log = Logger::new(Level::Info, Format::Text, Box::new(std::io::sink()));
     // Nobody sends: it ends after the quiet time.

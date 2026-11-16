@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::Value;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::data::{DataReply, DataReq};
 use teseladb_server::node::{Node, NodeConfig};
@@ -207,7 +207,7 @@ pub fn split(args: &Args) -> Result<Report, String> {
 }
 
 /// A node that joins the local cluster of `target`.
-fn join(target: &Target) -> Result<Node<MemDisk>, String> {
+fn join(target: &Target) -> Result<Node, String> {
     let founder = nodes(target)?.first().ok_or("an empty cluster")?;
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
     let cfg = NodeConfig {
@@ -217,13 +217,13 @@ fn join(target: &Target) -> Result<Node<MemDisk>, String> {
         admin_listen: Some(loopback),
         ..NodeConfig::default()
     };
-    let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(debug)?;
+    let n = Node::start(cfg, DiskPlace::Memory, None).map_err(debug)?;
     super::ready(n, READY, "the new node did not join")
 }
 
 /// The ranges of which node `n` holds a replica, and whether every one of them has its data
 /// (none waits for a snapshot's data from another node).
-fn replicas(n: &Node<MemDisk>) -> (usize, bool) {
+fn replicas(n: &Node) -> (usize, bool) {
     let statuses: Vec<_> = n
         .ranges()
         .iter()
@@ -265,7 +265,7 @@ fn split_load(target: &Target, records: u64) -> Result<(), String> {
 /// The load, a fourth node and the time until it holds a replica with its data: the new node,
 /// the copy's time, and the inserts before and during the copy.
 struct Added {
-    node: Node<MemDisk>,
+    node: Node,
     took: Duration,
     before: Histogram,
     during: Histogram,

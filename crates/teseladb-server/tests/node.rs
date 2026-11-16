@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
+use teseladb_io::files::BlockingDisk;
 use teseladb_io::handshake::JoinRequest;
 
 use teseladb_io::peer::{Hello, PeerMsg, decode_frame, encode_frame};
@@ -93,7 +94,7 @@ impl Drop for Dir {
 
 /// Starts a node: a join waits as long as the product does (`JOIN_DEADLINE`) and ends as soon as
 /// the cluster accepts it, whatever the host's speed (a slow emulated host took more than 5 s).
-fn start(dir: &Dir, cores: Option<u16>, join: Vec<String>) -> Result<Node<FileDisk>, NodeError> {
+fn start(dir: &Dir, cores: Option<u16>, join: Vec<String>) -> Result<Node, NodeError> {
     start_within(dir, cores, join, JOIN_DEADLINE)
 }
 
@@ -104,10 +105,10 @@ fn start_within(
     cores: Option<u16>,
     join: Vec<String>,
     deadline: Duration,
-) -> Result<Node<FileDisk>, NodeError> {
+) -> Result<Node, NodeError> {
     let cfg = NodeConfig { cores, join, join_deadline: deadline, ..NodeConfig::default() };
     let path = dir.0.clone();
-    Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0)?))
+    Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock_dir(&dir.0)?))
 }
 
 /// The node of a cluster's test, in a process of its own (D4: one process per node), over the
@@ -152,7 +153,7 @@ trait Views {
     fn ready_within(&self, timeout: Duration) -> bool;
 }
 
-impl Views for Node<FileDisk> {
+impl Views for Node {
     fn view_within(&self, timeout: Duration) -> Option<Group0View> {
         self.view(timeout)
     }
@@ -265,7 +266,7 @@ fn a_joined_node_without_its_voters_does_not_start() {
 
 /// `node.meta` as it is between `open_node` and the write of the node's identifier.
 fn unassign(dir: &Dir) {
-    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut disk = BlockingDisk::open(&dir.0).unwrap();
     let mut meta = teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta");
     meta.node_id = 0;
     meta.cluster_id = [9; 16];
@@ -348,17 +349,23 @@ fn errors_say_what_failed() {
     assert!(st.to_string().starts_with("storage: FormatVersion"), "{st}");
     let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let cfg = NodeConfig { listen_peer: busy.local_addr().unwrap(), ..NodeConfig::default() };
-    let e = Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap_err();
+    let e = Node::start(cfg, DiskPlace::Memory, None).unwrap_err();
     assert!(matches!(e, NodeError::Io(_)), "{e}");
     // No disk to open, and a disk whose first write fails (the data format file).
-    let open_failed = || Err::<teseladb_raftlog::MemDisk, _>(std::io::Error::other("no disk"));
-    let e = Node::start(NodeConfig::default(), open_failed, None);
+    let open_failed: teseladb_io::engine::disk::DiskMaker =
+        Arc::new(|| Err(std::io::Error::other("no disk")));
+    let e = Node::start(NodeConfig::default(), DiskPlace::Made(open_failed), None);
     assert_eq!(e.map(|_| ()).unwrap_err().to_string(), "no disk");
-    let mut full = teseladb_raftlog::MemDisk::new();
-    full.inject_error("write", teseladb_raftlog::IoErrno::NoSpace);
-    let mut disks = vec![full];
-    let open = || Ok(disks.pop().unwrap_or_default());
-    let e = Node::start(NodeConfig::default(), open, None).map(|_| ()).unwrap_err();
+    let first = Arc::new(std::sync::Mutex::new(true));
+    let open: teseladb_io::engine::disk::DiskMaker = Arc::new(move || {
+        let mut disk = teseladb_raftlog::MemDisk::new();
+        if std::mem::take(&mut *first.lock().unwrap()) {
+            disk.inject_error("write", teseladb_raftlog::IoErrno::NoSpace);
+        }
+        Ok(Box::new(disk) as Box<dyn teseladb_raftlog::Disk + Send>)
+    });
+    let e =
+        Node::start(NodeConfig::default(), DiskPlace::Made(open), None).map(|_| ()).unwrap_err();
     assert!(matches!(e, NodeError::Storage(_)), "{e}");
     let lsm = NodeError::Lsm(teseladb_lsm::LsmError::IngestOverlap);
     assert!(lsm.to_string().starts_with("LSM: "), "{lsm}");
@@ -477,13 +484,13 @@ fn wall_ms() -> u64 {
 }
 
 fn bound_on_disk(dir: &Dir) -> u64 {
-    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut disk = BlockingDisk::open(&dir.0).unwrap();
     let (_, bound) = teseladb_server::hlc_bound::read_bound(&mut disk).unwrap().expect("hlc.bound");
     bound
 }
 
 fn meta_bound(dir: &Dir) -> u64 {
-    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut disk = BlockingDisk::open(&dir.0).unwrap();
     teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta").hlc_upper_bound
 }
 
@@ -526,7 +533,7 @@ fn the_clock_bound_stays_ahead_and_a_restart_waits_past_it() {
 
     // The bound is ahead of the clock, as after the clock went back.
     let ahead = wall_ms() + 700;
-    let mut disk = FileDisk::open(&dir.0).unwrap();
+    let mut disk = BlockingDisk::open(&dir.0).unwrap();
     teseladb_server::hlc_bound::BoundFile::open(&mut disk, ahead).unwrap();
     drop(disk);
     let n = start(&dir, None, Vec::new()).unwrap();

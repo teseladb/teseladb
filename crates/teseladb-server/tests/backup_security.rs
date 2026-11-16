@@ -7,11 +7,11 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 const OLD_ROOT: &str = "old-root-pw-31";
@@ -36,7 +36,7 @@ fn root_user(password: &str) -> Vec<u8> {
 }
 
 /// A node that asks for authentication, whose `root` has `password`.
-fn start(password: &str) -> Node<MemDisk> {
+fn start(password: &str) -> Node {
     let base = config(Vec::new());
     let client = teseladb_server::client_listener::ClientConfig {
         auth: true,
@@ -48,12 +48,12 @@ fn start(password: &str) -> Node<MemDisk> {
         root_user: Some(root_user(password)),
         ..base
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }
 
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> String {
+fn admin(node: &Node, args: &[&str]) -> String {
     let at = node.admin_addr().unwrap().to_string();
     let argv: Vec<String> =
         ["admin", "--node", &at].iter().chain(args).map(|s| (*s).to_owned()).collect();
@@ -85,7 +85,7 @@ fn login(c: &mut Client, user: &str, password: &str) -> Document {
     c.run("admin", next)
 }
 
-fn signed_in(node: &Node<MemDisk>, user: &str, password: &str) -> Client {
+fn signed_in(node: &Node, user: &str, password: &str) -> Client {
     let mut c = Client::new(node);
     let r = login(&mut c, user, password);
     assert!(ok(&r), "{user}: {r:?}");

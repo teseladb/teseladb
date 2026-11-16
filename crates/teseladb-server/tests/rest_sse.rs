@@ -6,12 +6,12 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, ResponseReader};
 use teseladb_http::server::Settings;
 use teseladb_http::sse::{Event, HEARTBEAT, Reader};
-use teseladb_raftlog::MemDisk;
 use teseladb_rest::changestream::HEARTBEAT_MS;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
@@ -20,7 +20,7 @@ use teseladb_server::node::{Node, NodeConfig};
 const READY: Duration = Duration::from_secs(30);
 const WAIT: Duration = Duration::from_secs(30);
 
-fn start() -> Node<MemDisk> {
+fn start() -> Node {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -36,7 +36,7 @@ fn start() -> Node<MemDisk> {
         client: Some(client),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }

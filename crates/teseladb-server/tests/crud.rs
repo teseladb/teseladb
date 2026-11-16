@@ -8,11 +8,11 @@ mod common;
 mod procs;
 
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_raft::Role;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 use teseladb_server::procs::NodeProc;
 use teseladb_wire::commands::Timeouts;
@@ -101,7 +101,7 @@ fn main() {
 }
 
 fn a_single_node_runs_the_crud_commands() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("app", Document::new().with("insert", "people").with("documents", docs(0..5)));
@@ -162,7 +162,7 @@ fn the_node_reaps_idle_cursors_and_expired_sessions() {
         c.timeouts = Timeouts { cursor_ms: 300, session_ms: 600 };
         c.reap_every = Duration::from_millis(50);
     }
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..5)));
@@ -220,7 +220,7 @@ fn an_undecodable_mutation_is_refused_by_the_range() {
     use teseladb_range::host::RangeError;
     use teseladb_server::data::{DataError, DataReq};
     use teseladb_server::data_wire::RemoteReq;
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let req = RemoteReq::Write {
         keys: vec![vec![1, 2]],
@@ -250,7 +250,7 @@ fn a_request_past_its_deadline_is_refused_by_the_range() {
     use teseladb_range::intents::{Push, TxnId};
     use teseladb_server::data::{DataError, DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let write = RemoteReq::Write {
         keys: vec![vec![1, 2]],
@@ -297,7 +297,7 @@ fn a_request_past_its_deadline_is_refused_by_the_range() {
 /// evaluated by the range's leader on the document it holds, so none is lost.
 fn concurrent_updates_of_one_document_are_both_applied() {
     const EACH: i32 = 100;
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let doc = Document::new().with("_id", 1).with("n", 0);
@@ -333,7 +333,7 @@ fn concurrent_updates_of_one_document_are_both_applied() {
 fn writes_that_match_nothing_in_an_empty_collection_answer_at_once() {
     // A delete, update or `findAndModify` without candidates used to send a write without keys,
     // which no range holds: it waited for the 30 s request deadline and failed with 89.
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&c.run("app", Document::new().with("create", "empty"))));
@@ -408,7 +408,7 @@ fn a_plain_write_waits_for_the_transaction_that_holds_its_document() {
     use teseladb_range::read::ReadConcern;
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
@@ -490,7 +490,7 @@ fn a_plain_write_resolves_the_intent_on_the_index_entry_it_read() {
     use teseladb_range::read::ReadConcern;
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let rows = || {
@@ -571,7 +571,7 @@ fn an_abandoned_transaction_is_aborted_and_its_intents_resolved() {
     use teseladb_range::read::ReadConcern;
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
@@ -640,7 +640,7 @@ fn a_read_pushes_a_live_transaction_and_reads_below_its_intent() {
     use teseladb_range::read::ReadConcern;
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));
@@ -705,7 +705,7 @@ fn insert_after_pending_unique_entry(commit: bool) -> Document {
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
     use teseladb_wire::commands::index_maintenance::INDEX_ENTRY;
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let rows = || {
@@ -875,7 +875,7 @@ fn an_aggregation_in_memory_stops_at_its_max_time_ms() {
     const DOCUMENTS: i32 = 1_000;
     const MAX_TIME_MS: i32 = 50;
     const MAX_TIME_MS_EXPIRED: i32 = 50;
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let rows: Vec<Value> =
@@ -974,7 +974,7 @@ fn readers_that_meet_a_pending_intent_write_nothing_to_the_range() {
     use teseladb_range::read::ReadConcern;
     use teseladb_server::data::{DataReply, DataReq};
     use teseladb_server::data_wire::{RemoteReply, RemoteReq};
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("held", Document::new().with("insert", "c").with("documents", docs(1..2)));

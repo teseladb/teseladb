@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use teseladb_io::IoClass;
 use teseladb_io::engine::{
-    CoreConfig, CoreHandle, CoreInput, CoreLogic, CoreSender, NodeEngine, ThreadDisk,
+    CoreConfig, CoreDisk, CoreHandle, CoreInput, CoreLogic, CoreSender, DiskWaker, NodeEngine,
 };
 use teseladb_io::handshake::{self, AcceptorOptions};
 use teseladb_io::peer::{Hello, PeerMsg, Versions};
@@ -266,15 +266,68 @@ pub fn start_core<D: Disk + Send + 'static>(
 ) -> CoreHandle<Cmd, Stopped<D>> {
     let seed = h.node_id.0 * 16 + u64::from(h.core);
     let cfg = CoreConfig { hello: h.clone(), tick, seed, tls, origin: Instant::now() };
-    let name = format!("disk-{seed}");
     engine
         .start_core(
             shard,
             cfg,
-            move || Ok::<_, std::io::Error>((toy, ThreadDisk::new(name, disk), None)),
-            |toy, disk: ThreadDisk<D>, gone| (toy, disk.into_disk(), gone),
+            move || Ok::<_, std::io::Error>((toy, InlineDisk::new(disk), None)),
+            |toy, disk: InlineDisk<D>, gone| (toy, disk.disk, gone),
         )
         .unwrap()
+}
+
+/// The disk executor of the toy cores: runs each operation of `D` on the shard when the task
+/// hands it out, and gives its result at the next reap. A disk that panics is gone: it completes
+/// nothing more and is not given back.
+pub struct InlineDisk<D> {
+    disk: Option<D>,
+    done: Vec<(IoDone, IoClass)>,
+    waker: Option<DiskWaker>,
+}
+
+impl<D> InlineDisk<D> {
+    pub fn new(disk: D) -> InlineDisk<D> {
+        InlineDisk { disk: Some(disk), done: Vec::new(), waker: None }
+    }
+}
+
+impl<D: Disk + Send + 'static> CoreDisk for InlineDisk<D> {
+    fn attach(&mut self, waker: DiskWaker) {
+        self.waker = Some(waker);
+    }
+
+    fn submit(&mut self, op: IoOp, class: IoClass) -> bool {
+        let Some(d) = self.disk.as_mut() else { return false };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.execute(op))) {
+            Ok(done) => {
+                self.done.push((done, class));
+                if let Some(w) = &self.waker {
+                    w.wake();
+                }
+                true
+            }
+            Err(_) => {
+                self.disk = None;
+                false
+            }
+        }
+    }
+
+    fn flush(&mut self) -> bool {
+        self.disk.is_some()
+    }
+
+    fn reap(&mut self, out: &mut Vec<(IoDone, IoClass)>) {
+        out.append(&mut self.done);
+    }
+
+    fn ready(&self) -> bool {
+        !self.done.is_empty()
+    }
+
+    fn alive(&self) -> bool {
+        self.disk.is_some()
+    }
 }
 
 /// Starts node `id` on `shard` with `toy`, its disk and `tick`.

@@ -19,6 +19,7 @@ use teseladb::engine::core::alien;
 use teseladb::engine::core::app_template::{AppTemplate, Config};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::ExceptionPtr;
+use teseladb::engine::core::thread::async_ as in_thread;
 
 use super::core_loop::{CoreLogic, CoreSender};
 use super::disk_port::{CoreDisk, DiskWaker};
@@ -42,6 +43,8 @@ pub struct EngineConfig {
     pub cpus: Vec<usize>,
     /// Memory for all the shards, in bytes; `None`: the engine's default.
     pub memory: Option<u64>,
+    /// Whether the files bypass the kernel's page cache (`--direct-io`, 023 FR-010).
+    pub direct_io: crate::DirectIo,
 }
 
 impl EngineConfig {
@@ -58,6 +61,7 @@ impl EngineConfig {
         if let Some(m) = self.memory {
             a.extend(["--memory".to_owned(), m.to_string()]);
         }
+        a.extend(self.direct_io.engine_args());
         // The node writes its own log; the engine says only what goes wrong.
         a.extend(["--default-log-level".to_owned(), "error".to_owned()]);
         a
@@ -173,6 +177,11 @@ impl NodeEngine {
         ShardPost::new(u32::from(shard), self.gate.clone())
     }
 
+    /// What posts to `shard` while the engine runs (the device log's writer on shard 0).
+    pub(crate) fn post_to(&self, shard: u16) -> ShardPost {
+        self.post(shard)
+    }
+
     /// Runs `f` on `shard` and waits for its result (from a thread that is not a shard).
     ///
     /// # Errors
@@ -192,7 +201,8 @@ impl NodeEngine {
 
     /// Opens a core on `shard`: `build` makes its logic, its disk executor and its part of the
     /// node's device log (012 FR-035) there, after the recovery of its log and LSM (its state is
-    /// built on its shard, so it need not be `Send`); the task drives it with `cfg` until a stop,
+    /// built on its shard, so it need not be `Send`, in an engine thread, so it may wait on the
+    /// shard's futures with `get()`); the task drives it with `cfg` until a stop,
     /// and `finish` turns the logic and the executor (and whether the executor died) into what
     /// [`CoreHandle::join`] gives back.
     ///
@@ -218,30 +228,42 @@ impl NodeEngine {
         let (done_tx, done_rx) = mpsc::sync_channel::<R>(1);
         let post = self.post(shard);
         let gate = self.gate.clone();
+        // `build` runs in an engine thread of the shard: the recovery of the core's log and LSM
+        // waits on the shard's disk executor through the synchronous `Disk` (023 FR-010).
         let sent = post.clone().post(move || {
-            let (logic, mut disk, mut log) = match build() {
-                Ok(v) => v,
-                Err(e) => return drop(built_tx.send(Err(e))),
-            };
-            let io = Rc::new(CoreIo::default());
-            let inbox = Rc::new(Inbox::<L::Msg>::new());
-            disk.attach(DiskWaker::new(io.clone(), post.clone()));
-            if let Some(port) = log.as_mut() {
-                let back = post.clone();
-                port.attach(Box::new(move |d| back.post_log(Instant::now(), d)));
-            }
-            let net = Net::new(cfg.hello, cfg.tls, cfg.seed, io.clone(), gate, cfg.origin);
-            let mut driver =
-                Driver::new(logic, disk, net, io.clone(), inbox.clone(), log, cfg.tick, cfg.origin);
-            post::install(io, inbox);
-            let _ = built_tx.send(Ok(()));
-            drop(make_coroutine(async move {
-                driver.run().await;
-                post::uninstall();
-                let Driver { logic, disk, disk_gone, .. } = driver;
-                let _ = done_tx.send(finish(logic, disk, disk_gone));
-                Ok::<(), ExceptionPtr>(())
-            }));
+            drop(in_thread(move || {
+                let (logic, mut disk, mut log) = match build() {
+                    Ok(v) => v,
+                    Err(e) => return drop(built_tx.send(Err(e))),
+                };
+                let io = Rc::new(CoreIo::default());
+                let inbox = Rc::new(Inbox::<L::Msg>::new());
+                disk.attach(DiskWaker::new(io.clone()));
+                if let Some(port) = log.as_mut() {
+                    let back = post.clone();
+                    port.attach(Box::new(move |d| back.post_log(Instant::now(), d)));
+                }
+                let net = Net::new(cfg.hello, cfg.tls, cfg.seed, io.clone(), gate, cfg.origin);
+                let mut driver = Driver::new(
+                    logic,
+                    disk,
+                    net,
+                    io.clone(),
+                    inbox.clone(),
+                    log,
+                    cfg.tick,
+                    cfg.origin,
+                );
+                post::install(io, inbox);
+                let _ = built_tx.send(Ok(()));
+                drop(make_coroutine(async move {
+                    driver.run().await;
+                    post::uninstall();
+                    let Driver { logic, disk, disk_gone, .. } = driver;
+                    let _ = done_tx.send(finish(logic, disk, disk_gone));
+                    Ok::<(), ExceptionPtr>(())
+                }));
+            }))
         });
         if !sent {
             return Err(E::from(io::Error::other("the engine stopped")));

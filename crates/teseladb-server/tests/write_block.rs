@@ -8,7 +8,7 @@ mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 use teseladb_server::procs::start_self;
 
@@ -38,7 +38,7 @@ fn write_error_code(r: &Document) -> Option<Value> {
 }
 
 fn a_lock_holds_the_other_connections_writes_and_a_block_refuses_them() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut admin = Client::new(&node);
     let mut app = Client::new(&node);
@@ -127,7 +127,7 @@ fn set_fcv(c: &mut Client, v: &str) -> Document {
 }
 
 fn the_version_lives_in_group0() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&set_fcv(&mut c, "8.0")));

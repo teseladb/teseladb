@@ -1,7 +1,6 @@
-//! A full disk (Linux): the battery's file system of fixed size, a 1 MiB tmpfs that
-//! `scripts/test-linux.sh` mounts at `TESELADB_FULL_DIR`, fills up in the middle of the sequence.
-//! Every executor runs out of space at the same operation, with `NoSpace`, and leaves the same
-//! files.
+//! A full disk: a small file system that `scripts/test-linux.sh` mounts at `TESELADB_FULL_DIR` (a
+//! 1 MiB tmpfs) fills up in the middle of the sequence. The executor fails the write that does not
+//! fit with `NoSpace`, keeps every byte it confirmed, and writes again once a removal frees space.
 
 use std::path::PathBuf;
 
@@ -15,60 +14,42 @@ fn full_dir() -> PathBuf {
     PathBuf::from(dir)
 }
 
-#[test]
-fn a_full_disk_fails_the_same_way_on_every_executor() {
-    let base = full_dir();
-    let mut ops = vec![
-        IoOp::Create { file: FileId(1), path: "wal/a".into(), prealloc: 0 },
-        IoOp::Create { file: FileId(2), path: "wal/b".into(), prealloc: 4 << 20 },
-    ];
-    for i in 0..8u64 {
-        ops.push(write(1, i * (192 << 10), vec![i as u8; 192 << 10]));
-        ops.push(IoOp::Sync { file: FileId(1), batch: i });
-    }
-    ops.push(read(1, 0, 4096, 1));
-    ops.push(IoOp::Truncate { file: FileId(1), len: 4096 });
-    ops.push(write(1, 4096, vec![9; 8192]));
-    ops.push(IoOp::Close { file: FileId(1) });
-    ops.push(IoOp::Remove { path: "wal/a".into() });
-    // Each executor runs alone on the tmpfs, so each starts with all its space.
-    let mut reference: Option<Outcome> = None;
-    for direct in [false, true] {
-        for uring in [false, true] {
-            let dir = Dir::new(&base, "full");
-            let mut disk: Box<dyn Disk> = if uring {
-                Box::new(teseladb_io::IoUringDisk::open(&dir.0, direct).unwrap())
-            } else {
-                let mut d = FileDisk::open(&dir.0).unwrap();
-                d.set_direct_io(direct);
-                Box::new(d)
-            };
-            let results: Vec<IoDone> = ops.iter().map(|op| disk.execute(op.clone())).collect();
-            drop(disk);
-            let files = snapshot(&dir.0);
-            match &reference {
-                None => {
-                    let no_space =
-                        |d: &IoDone| matches!(d, IoDone::Err { errno: IoErrno::NoSpace, .. });
-                    assert!(
-                        no_space(&results[1]),
-                        "the reservation does not fit: {:?}",
-                        results[1]
-                    );
-                    assert!(results.iter().skip(2).any(no_space), "the writes fill the disk");
-                    reference = Some((results, files));
+engine_test_case!(a_full_disk_fails_with_no_space_and_keeps_what_it_confirmed, {
+    on_engine(|g| {
+        let dir = Dir::new(&full_dir(), "full");
+        let mut d = files(&dir.0, g);
+        let ok = |d: &mut ShardDisk, op: IoOp| {
+            let r = d.execute(op.clone());
+            assert_eq!(r, IoDone::Ok(op.without_data()), "{op:?}");
+        };
+        ok(&mut d, IoOp::Create { file: FileId(1), path: "wal/a".into(), prealloc: 0 });
+        let chunk = 192 << 10;
+        let mut written = Vec::new();
+        let mut no_space = false;
+        for i in 0..8u64 {
+            let op = write(1, i * chunk as u64, vec![i as u8 + 1; chunk]);
+            match d.execute(op) {
+                IoDone::Ok(_) => written.push(i),
+                IoDone::Err { errno: IoErrno::NoSpace, .. } => {
+                    no_space = true;
+                    break;
                 }
-                Some((r, f)) => {
-                    for (i, (a, b)) in r.iter().zip(&results).enumerate() {
-                        assert_eq!(
-                            a, b,
-                            "direct={direct} uring={uring}: operation {i}: {:?}",
-                            ops[i]
-                        );
-                    }
-                    assert!(*f == files, "direct={direct} uring={uring} leaves other files");
-                }
+                other => panic!("write {i}: {other:?}"),
             }
         }
-    }
-}
+        assert!(no_space, "the writes fill the disk");
+        assert!(!written.is_empty(), "some writes fit");
+        ok(&mut d, IoOp::Sync { file: FileId(1), batch: 1 });
+        for i in &written {
+            let r = d.execute(read(1, i * chunk as u64, chunk as u32, *i));
+            let want = Bytes::from_vec(vec![*i as u8 + 1; chunk]);
+            assert_eq!(r, IoDone::Read { token: *i, data: Ok(want) }, "write {i} stays");
+        }
+        ok(&mut d, IoOp::Close { file: FileId(1) });
+        ok(&mut d, IoOp::Remove { path: "wal/a".into() });
+        // With the space back, a new file takes a write again.
+        ok(&mut d, IoOp::Create { file: FileId(2), path: "wal/b".into(), prealloc: 0 });
+        ok(&mut d, write(2, 0, vec![9; 8192]));
+        ok(&mut d, IoOp::Close { file: FileId(2) });
+    })
+});

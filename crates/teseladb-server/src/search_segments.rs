@@ -1,9 +1,8 @@
 //! The files of the search indexes' segments (011 FR-012): one immutable file per index,
 //! `<dbpath>/search/<id>.seg`, written whole under another name, synced and renamed, so that a
 //! crash leaves one whole file or the other. At start the node reads them back and serves each
-//! index from the mark its file covers instead of analyzing every document again. The files are
-//! written with `O_DIRECT` where the node uses it (012 FR-003), and the directory is synced after
-//! each rename and removal so that they survive a crash.
+//! index from the mark its file covers instead of analyzing every document again. The directory is
+//! synced after each rename and removal so that they survive a crash.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,8 +22,6 @@ const WRITING_EXT: &str = "tmp";
 #[derive(Debug)]
 pub struct SegmentDir {
     dir: PathBuf,
-    /// Whether whole blocks are written with `O_DIRECT`.
-    direct: bool,
 }
 
 impl SegmentDir {
@@ -39,9 +36,9 @@ impl SegmentStore for SegmentDir {
     fn put(&self, id: &[u8; 12], bytes: &[u8]) -> Result<(), String> {
         let path = self.file_of(id);
         let tmp = path.with_extension(WRITING_EXT);
-        let written = teseladb_io::write_whole(&tmp, bytes, self.direct)
+        let written = teseladb_io::files::write_whole(&tmp, bytes)
             .and_then(|()| std::fs::rename(&tmp, &path))
-            .and_then(|()| teseladb_io::sync_dir(&self.dir));
+            .and_then(|()| teseladb_io::files::sync_dir(&self.dir));
         written.map_err(|e| format!("{}: {e}", path.display()))
     }
 
@@ -58,7 +55,7 @@ impl SegmentStore for SegmentDir {
         let path = self.file_of(id);
         let removed = match std::fs::remove_file(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            r => r.and_then(|()| teseladb_io::sync_dir(&self.dir)),
+            r => r.and_then(|()| teseladb_io::files::sync_dir(&self.dir)),
         };
         removed.map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -66,9 +63,8 @@ impl SegmentStore for SegmentDir {
 
 /// Opens the segment files of `data`'s directory for `indexes`: creates the directory, gives
 /// `indexes` every file already there and removes those that cannot be read (their index is
-/// built again), and keeps the segments in that directory from now on, written with `O_DIRECT`
-/// when `direct`.
-pub fn open(data: &Path, indexes: &mut SearchIndexes, direct: bool) -> std::io::Result<()> {
+/// built again), and keeps the segments in that directory from now on.
+pub fn open(data: &Path, indexes: &mut SearchIndexes) -> std::io::Result<()> {
     let dir = data.join(DIRECTORY);
     std::fs::create_dir_all(&dir)?;
     for entry in std::fs::read_dir(&dir)? {
@@ -84,7 +80,7 @@ pub fn open(data: &Path, indexes: &mut SearchIndexes, direct: bool) -> std::io::
             _ => {}
         }
     }
-    indexes.set_store(Arc::new(SegmentDir { dir, direct }));
+    indexes.set_store(Arc::new(SegmentDir { dir }));
     Ok(())
 }
 
@@ -107,18 +103,15 @@ mod tests {
     fn files_are_written_read_back_and_removed() {
         let data = scratch("rw");
         let mut indexes = SearchIndexes::default();
-        open(&data, &mut indexes, false).expect("open");
-        let store = SegmentDir { dir: data.join(DIRECTORY), direct: false };
+        open(&data, &mut indexes).expect("open");
+        let store = SegmentDir { dir: data.join(DIRECTORY) };
         let id = [1u8; 12];
         let bytes = shipped().encode(&id);
         store.put(&id, &bytes).expect("put");
         let file = data.join(DIRECTORY).join("010101010101010101010101.seg");
         assert_eq!(std::fs::read(&file).unwrap(), bytes);
-        // With O_DIRECT where the file system takes it, the same bytes (012 FR-003).
-        let direct = teseladb_io::direct_io_supported(&data).unwrap();
-        let store = SegmentDir { dir: data.join(DIRECTORY), direct };
         let big: Vec<u8> = (0..20_000u32).map(|i| i as u8).collect();
-        store.put(&id, &big).expect("put with O_DIRECT");
+        store.put(&id, &big).expect("put a larger one");
         assert_eq!(std::fs::read(&file).unwrap(), big);
         store.put(&id, &bytes).expect("put");
 
@@ -128,7 +121,7 @@ mod tests {
         std::fs::write(data.join(DIRECTORY).join("half.tmp"), b"half").unwrap();
         std::fs::write(data.join(DIRECTORY).join("notes.txt"), b"other").unwrap();
         let mut restarted = SearchIndexes::default();
-        open(&data, &mut restarted, false).expect("reopen");
+        open(&data, &mut restarted).expect("reopen");
         assert!(!data.join(DIRECTORY).join("broken.seg").exists());
         assert!(!data.join(DIRECTORY).join("half.tmp").exists());
         assert!(data.join(DIRECTORY).join("notes.txt").exists());
@@ -147,12 +140,12 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         // The directory cannot be made under a file.
         std::fs::write(data.join("file"), b"x").unwrap();
-        assert!(open(&data.join("file"), &mut SearchIndexes::default(), false).is_err());
+        assert!(open(&data.join("file"), &mut SearchIndexes::default()).is_err());
         // A store whose directory is missing cannot write.
-        let store = SegmentDir { dir: data.join("missing"), direct: false };
+        let store = SegmentDir { dir: data.join("missing") };
         assert!(store.put(&[2u8; 12], b"x").unwrap_err().contains("missing"));
         // A directory where the file should be cannot be removed as a file.
-        let store = SegmentDir { dir: data.clone(), direct: false };
+        let store = SegmentDir { dir: data.clone() };
         std::fs::create_dir_all(store.file_of(&[3u8; 12])).unwrap();
         assert!(store.remove(&[3u8; 12]).is_err());
         assert!(store.get(&[3u8; 12]).is_err(), "a directory is not a file");

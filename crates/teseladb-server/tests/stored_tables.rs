@@ -7,7 +7,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 /// Fields of each document of `wide`: enough for a table, and at least the `in3` the reads
@@ -55,7 +55,7 @@ fn reads(c: &mut Client) -> (Vec<Value>, Vec<Value>, Vec<Value>, Value) {
 
 #[test]
 fn documents_with_tables_read_the_same_with_the_sizes_of_their_bson() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let many: Vec<Value> = (0..20).map(|i| Value::Document(wide(i))).collect();
@@ -112,7 +112,7 @@ fn documents_with_tables_read_the_same_with_the_sizes_of_their_bson() {
 
 /// The dictionary of the table of the stored document `_id: id` equal to `want`, found by its
 /// key among the collections the node may have given it.
-fn dictionary_of(node: &Node<MemDisk>, id: i32, want: &Document) -> Option<u32> {
+fn dictionary_of(node: &Node, id: i32, want: &Document) -> Option<u32> {
     use teseladb_keys::space::KeyBuilder;
     let holder = Document::new().with("_id", id).to_bytes().unwrap();
     let raw = teseladb_bson::RawDoc::from_bytes(&holder).unwrap();
@@ -139,7 +139,7 @@ fn insert(c: &mut Client, coll: &str, docs: Vec<Document>) {
 /// collection, which a rename keeps and a drop takes, and the reads give the same documents.
 #[test]
 fn the_dictionary_of_field_names_follows_its_collection() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     insert(&mut c, "wide", (0..20).map(wide).collect());

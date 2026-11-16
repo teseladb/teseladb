@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_types::Histogram;
@@ -89,7 +89,7 @@ enum Noise {
 
 /// The node with its two tenants and their users.
 struct Cluster {
-    node: Node<MemDisk>,
+    node: Node,
     _dir: DataDir,
 }
 
@@ -109,7 +109,7 @@ impl Cluster {
             root_user: Some(root_user),
             ..NodeConfig::default()
         };
-        let node = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(debug)?;
+        let node = Node::start(cfg, DiskPlace::Memory, None).map_err(debug)?;
         let node = ready(node, READY, "the node did not start")?;
         let cluster = Cluster { node, _dir: dir };
         for tenant in [NOISY, QUIET] {

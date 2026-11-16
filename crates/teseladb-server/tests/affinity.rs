@@ -1,7 +1,7 @@
 //! Where the cores run (012 FR-006, acceptance scenario 1 of story 3): core `k` runs on the
 //! `k`-th CPU of `--cpu-list`, and a list shorter than the cores does not start a node.
 
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::affinity::Affinity;
 use teseladb_server::node::{Node, NodeConfig};
 
@@ -38,7 +38,7 @@ fn core_k_runs_on_the_kth_cpu_of_the_list() {
         affinity: Affinity::List(list.clone()),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert_eq!(node.cpus(), [Some(list[0]), Some(list[1])]);
     #[cfg(target_os = "linux")]
     {
@@ -53,7 +53,7 @@ fn a_list_shorter_than_the_cores_is_refused() {
     let _one = one_node_at_a_time();
     let cfg =
         NodeConfig { cores: Some(3), affinity: Affinity::List(vec![0]), ..NodeConfig::default() };
-    let Err(e) = Node::start(cfg, || Ok(MemDisk::new()), None) else { panic!("started") };
+    let Err(e) = Node::start(cfg, DiskPlace::Memory, None) else { panic!("started") };
     assert!(e.to_string().contains("--cpu-list names 1 CPUs for 3 cores"), "{e}");
 }
 
@@ -61,7 +61,7 @@ fn a_list_shorter_than_the_cores_is_refused() {
 fn unpinned_cores_by_default_in_a_library_node() {
     let _one = one_node_at_a_time();
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert_eq!(node.cpus(), [None]);
     node.stop();
 }

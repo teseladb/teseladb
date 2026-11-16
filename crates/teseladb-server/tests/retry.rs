@@ -7,7 +7,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 fn lsid(n: u8) -> Document {
@@ -38,7 +38,7 @@ fn inc(n: i64) -> Document {
 
 #[test]
 fn a_write_whose_connection_drops_applies_once_when_retried() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut reader = Client::new(&node);
     assert!(ok(
@@ -84,7 +84,7 @@ fn a_write_whose_connection_drops_applies_once_when_retried() {
 
 #[test]
 fn a_read_sent_again_reads_the_same_documents() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&c.run("app", Document::new().with("insert", "c").with("documents", docs(0..4)))));

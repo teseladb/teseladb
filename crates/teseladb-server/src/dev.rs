@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 
 use crate::cli::{DEV_MEMBER, DevMember, DevOpts, ENABLE_TEST_COMMANDS, SET_PARAMETER};
 use crate::client_listener::ClientConfig;
@@ -125,7 +125,7 @@ pub fn member(m: &DevMember, out: &mut dyn Write, stop: &dyn Fn() -> bool) -> i3
     let log = Logger::new(Level::Info, Format::Text, Box::new(io::stderr()));
     let at = SocketAddr::from((LOOPBACK, client_port(m.dev.port, m.member)));
     let cfg = node_config(&m.dev, m.seed, m.join.clone(), m.member, at);
-    let node = match Node::start(cfg, || Ok(MemDisk::new()), None) {
+    let node = match Node::start(cfg, DiskPlace::Memory, None) {
         Ok(n) => n,
         Err(e) => {
             let _ = writeln!(out, "{}", crate::procs::error_line(&e));

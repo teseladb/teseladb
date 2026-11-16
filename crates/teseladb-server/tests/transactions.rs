@@ -10,7 +10,7 @@ mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 use teseladb_server::procs::{NodeProc, start_self};
 
@@ -108,8 +108,8 @@ fn labels(r: &Document) -> Vec<Value> {
     }
 }
 
-fn node() -> Node<MemDisk> {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+fn node() -> Node {
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }

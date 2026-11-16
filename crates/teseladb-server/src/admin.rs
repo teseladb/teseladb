@@ -633,22 +633,9 @@ fn node_value(n: NodeId) -> Value {
     Value::Int64(i64::try_from(n.0).unwrap_or(i64::MAX))
 }
 
-/// The disk's metrics: its syncs, which bound what a confirmed write costs (H-008 of the native
-/// tests against the reference server).
-fn disk_metrics(out: &mut String, syncs: u64, flushes: u64, (flush_micros, log_syncs): (u64, u64)) {
-    let name = "teseladb_disk_syncs_total";
-    let _ = writeln!(out, "# HELP {name} Syncs of files and folders to the disk.");
-    let _ = writeln!(out, "# TYPE {name} counter\n{name} {syncs}");
-    let name = "teseladb_disk_device_flushes_total";
-    let _ = writeln!(out, "# HELP {name} Flushes of a drive's cache.");
-    let _ = writeln!(out, "# TYPE {name} counter\n{name} {flushes}");
-    let name = "teseladb_disk_device_flush_micros_total";
-    let _ = writeln!(
-        out,
-        "# HELP {name} Microseconds the flushes of the drives' caches took: with the flushes, their \
-         mean, which grows with what the drive has waiting in its cache."
-    );
-    let _ = writeln!(out, "# TYPE {name} counter\n{name} {flush_micros}");
+/// The syncs of the node's Raft log. The disk's own syncs are the engine's (`fsyncs` of its
+/// reactor, 023 FR-042).
+fn log_metrics(out: &mut String, log_syncs: u64) {
     let name = "teseladb_raftlog_syncs_total";
     let _ = writeln!(
         out,
@@ -844,12 +831,7 @@ impl AdminBackend for NodeAdmin {
             &self.handle.sessions,
         ));
         txn_metrics(&mut out, &status.txn);
-        disk_metrics(
-            &mut out,
-            teseladb_io::counters::syncs(),
-            teseladb_io::counters::device_flushes(),
-            (teseladb_io::counters::device_flush_micros(), teseladb_io::counters::log_syncs()),
-        );
+        log_metrics(&mut out, teseladb_io::counters::log_syncs());
         peer_metrics(&mut out, teseladb_io::counters::peer_links_failed());
         let outside = (
             crate::backend::served_outside(),
@@ -1713,14 +1695,12 @@ mod tests {
     }
 
     #[test]
-    fn the_disk_metrics_give_the_syncs() {
+    fn the_log_metrics_give_the_syncs_of_the_raft_log() {
         let mut out = String::new();
-        disk_metrics(&mut out, 7, 3, (9_000, 5));
-        assert!(out.lines().any(|l| l == "teseladb_disk_syncs_total 7"), "{out}");
-        assert!(out.lines().any(|l| l == "teseladb_disk_device_flush_micros_total 9000"), "{out}");
-        assert!(out.lines().any(|l| l == "teseladb_disk_device_flushes_total 3"), "{out}");
+        log_metrics(&mut out, 5);
         assert!(out.lines().any(|l| l == "teseladb_raftlog_syncs_total 5"), "{out}");
-        assert!(out.lines().any(|l| l == "# TYPE teseladb_disk_syncs_total counter"), "{out}");
+        assert!(out.lines().any(|l| l == "# TYPE teseladb_raftlog_syncs_total counter"), "{out}");
+        assert!(!out.contains("teseladb_disk_"), "the disk's syncs are the engine's: {out}");
     }
 
     #[test]

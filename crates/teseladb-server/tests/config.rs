@@ -22,7 +22,6 @@ systemLog:
 teseladb:
   cores: 4
   memoryLimit: 6G
-  ioExecutor: threads
   directIo: off
   cpuList: 0-3
   peerListen: 127.0.0.1:7100
@@ -54,8 +53,7 @@ fn every_key_of_the_file() {
     assert_eq!((o.log_level, o.log_format), (Level::Debug, Format::Json));
     assert_eq!(o.cores, Some(4));
     assert_eq!(o.memory_limit, Some(6 << 30));
-    assert_eq!(o.io_executor, teseladb_io::node_disk::IoExecutor::Threads);
-    assert_eq!(o.direct_io, teseladb_io::node_disk::DirectIo::Off);
+    assert_eq!(o.direct_io, teseladb_io::DirectIo::Off);
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 3]));
     assert_eq!(o.peer_listen.to_string(), "127.0.0.1:7100");
     assert_eq!(o.admin_listen.to_string(), "127.0.0.1:7200");
@@ -95,6 +93,8 @@ fn bad_files_are_usage_errors_that_name_the_file() {
         ("net:\n  bindIpAll: true\n", "--config c.yaml: unknown key `net.bindIpAll`"),
         ("replication:\n  replSetName: rs0\n", "unknown key `replication.replSetName`"),
         ("net: 5\n", "unknown key `net`"),
+        // The engine runs every core's disk: no key chooses another executor (023 FR-033).
+        ("teseladb:\n  ioExecutor: threads\n", "unknown key `teseladb.ioExecutor`"),
         // An empty mapping is a value of its key, not a section.
         ("net: {}\n", "unknown key `net`"),
         ("teseladb:\n  cores: [1, 2]\n", "`teseladb.cores` takes one value"),

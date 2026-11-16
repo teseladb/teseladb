@@ -4,7 +4,8 @@
 //! time spent in the disk.
 //!
 //! The three replicas run in this process on one thread ([`Cluster`]), each one over its own folder
-//! of the data directory through `FileDisk`, with its `MultiRaftCore`, its LSM and its host; their
+//! of the data directory through the engine's disk executor (023 FR-010; the cluster runs in an
+//! engine thread), with its `MultiRaftCore`, its LSM and its host; their
 //! messages go from one core to another in memory. There is no network, and the syncs of the three
 //! replicas run one after another, where in a cluster the leader's sync runs while the followers'
 //! do: the numbers measure the code and the disk, and the targets (loopback and NVMe) are
@@ -17,7 +18,6 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Lsm, LsmConfig};
 use teseladb_multiraft::{CoreConfig, GroupDesc, MultiRaftCore, NodeClock, Observation};
@@ -33,7 +33,8 @@ use teseladb_range::read::ReadConcern;
 use teseladb_range::sm::RangeSm;
 use teseladb_types::{GroupId, Histogram, Nanos, NodeId};
 
-use super::{DataDir, at, keep_going, msg, warm_up};
+use super::on_engine::BenchDisk;
+use super::{DataDir, keep_going, msg, warm_up};
 use crate::cli::Args;
 use crate::report::Report;
 
@@ -80,7 +81,7 @@ impl Mutation for SetDoc {
 /// A replica: its disk, its core with the range and the core's host.
 struct Replica {
     id: NodeId,
-    disk: FileDisk,
+    disk: BenchDisk,
     core: MultiRaftCore<RangeSm>,
     host: RangeHost,
     replies: Vec<(ReqId, Result<Reply, RangeError>)>,
@@ -106,7 +107,7 @@ impl Cluster {
         let mut replicas = Vec::new();
         for &id in &voters {
             let path = dir.join(format!("node-{}", id.0));
-            let mut disk = FileDisk::open(&path).map_err(at(&path))?;
+            let mut disk = super::on_engine::disk(&path)?;
             let store = CoreStore::recover(&StorageConfig::default(), 0, &mut disk).map_err(msg)?.0;
             let clock = NodeClock::for_node(id);
             let cfg = CoreConfig {
@@ -337,6 +338,12 @@ pub fn run(args: &Args) -> Result<Report, String> {
 }
 
 fn run_with(args: &Args, min_writes: u64) -> Result<Report, String> {
+    let args = args.clone();
+    super::on_engine::run(move || run_here(&args, min_writes))
+}
+
+/// [`run_with`] in an engine thread.
+fn run_here(args: &Args, min_writes: u64) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "write")?;
     let mut c = Cluster::open(&dir.path, 0, false)?;
     let leader = c.elect()?;

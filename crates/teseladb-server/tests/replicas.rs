@@ -3,9 +3,9 @@
 //! as learners and promotes them, and Group 0 records the change as settled. The founder's log is
 //! compacted before they join, so each one receives the range by export and ingestion from
 //! another replica. Losing the founder then leaves a range that elects a leader, keeps every
-//! document and takes writes. With two cores, Group 0 and the range are on different cores. On
-//! Linux the same runs on io_uring disks, where the pieces of the exported files go from the ring's
-//! registered buffers to the joining nodes (012 FR-026).
+//! document and takes writes. With two cores, Group 0 and the range are on different cores. The
+//! same runs on the engine's files, where the pieces of the exported files go from the disk
+//! executor's reads to the joining nodes (012 FR-026, 023 FR-017).
 
 #[path = "common/procs.rs"]
 mod procs;
@@ -31,16 +31,16 @@ fn main() {
     procs::main(&tests, &[("replicas", |a| config(a.join.clone()))]);
 }
 
-/// The tests of io_uring, which is Linux's.
+/// The tests on the engine's files, which run on Linux.
 #[cfg(target_os = "linux")]
 fn linux_tests() -> Vec<procs::Test> {
     vec![(
-        "nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers",
-        nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers,
+        "nodes_on_the_engine_s_files_receive_the_range_from_its_reads",
+        nodes_on_the_engine_s_files_receive_the_range_from_its_reads,
     )]
 }
 
-/// The tests of io_uring, which is Linux's: none here.
+/// The tests on the engine's files, which run on Linux: none here.
 #[cfg(not(target_os = "linux"))]
 fn linux_tests() -> Vec<procs::Test> {
     Vec::new()
@@ -103,20 +103,15 @@ fn nodes_that_join_receive_the_range_and_survive_the_loss_of_the_founder() {
 }
 
 #[cfg(target_os = "linux")]
-fn nodes_on_io_uring_disks_receive_the_range_from_the_ring_s_buffers() {
+fn nodes_on_the_engine_s_files_receive_the_range_from_its_reads() {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use teseladb_io::node_disk::{DirectIo, IoExecutor, choose};
-    use teseladb_server::procs::{DISK, URING};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let base = std::env::temp_dir().join(format!("teseladb-replicas-uring-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("teseladb-replicas-files-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let choice = choose(IoExecutor::Uring, DirectIo::Auto, false, &std::env::temp_dir()).unwrap();
-    assert!(choice.uring, "{choice}");
-    // Each node process on io_uring disks in a directory of its own.
-    let uring = format!("{DISK}={URING}");
+    // Each node process on the engine's files, in a directory of its own.
     join_and_lose_the_founder(|join| {
         let dir = base.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
-        start_self("replicas", &join, Some(&dir), &[&uring])
+        start_self("replicas", &join, Some(&dir), &[])
     });
     std::fs::remove_dir_all(&base).unwrap();
 }

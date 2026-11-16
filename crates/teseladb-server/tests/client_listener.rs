@@ -7,9 +7,9 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::{Command, DEFAULT_COMPRESSORS, parse_with};
 use teseladb_server::client_listener::{
     ClientConfig, ClientListener, DEFAULT_MAX_CONNECTIONS, NodeClockState, NodePresence, NodeState,
@@ -290,7 +290,7 @@ fn a_node_opens_the_clients_port() {
         client: Some(config(DEFAULT_MAX_CONNECTIONS)),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(10)));
     let mut c = TcpStream::connect(node.client_addrs()[0]).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -312,7 +312,7 @@ fn a_node_opens_the_clients_port() {
     // Without a clients' port, there are no addresses.
     let plain = Node::start(
         NodeConfig { cores: Some(1), ..NodeConfig::default() },
-        || Ok(MemDisk::new()),
+        DiskPlace::Memory,
         None,
     )
     .unwrap();
@@ -442,7 +442,7 @@ fn serving_a_node_without_clients_port() {
     use teseladb_server::log::{Format, Level, Logger};
     let node = Node::start(
         NodeConfig { cores: Some(1), ..NodeConfig::default() },
-        || Ok(MemDisk::new()),
+        DiskPlace::Memory,
         None,
     )
     .unwrap();
@@ -620,7 +620,7 @@ fn a_presentation_change_wakes_the_waiting_hellos() {
         native_addr: "member.test:27017".into(),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(10)));
     let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
     admin.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -683,7 +683,7 @@ fn the_replica_set_port_opens_and_closes_without_a_restart() {
         native_addr: "member.test:27017".into(),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(10)));
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let mut admin = TcpStream::connect(node.client_addrs()[0]).unwrap();
@@ -758,7 +758,7 @@ fn a_replica_set_port_that_is_taken_waits_for_another() {
         native_addr: "member.test:27017".into(),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(10)));
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let busy = taken.local_addr().unwrap().port();
@@ -904,7 +904,7 @@ fn a_node_s_limiter_counts_the_closed_connections_and_those_that_left_the_queue(
         client: Some(config(DEFAULT_MAX_CONNECTIONS)),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(Duration::from_secs(10)));
     let open = || {
         let s = TcpStream::connect(node.client_addrs()[0]).unwrap();

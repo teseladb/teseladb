@@ -7,13 +7,13 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_bson::Value;
 use teseladb_crypto::ec::NamedCurve;
 use teseladb_http::hpack::{Decoder, Encoder, Field};
 use teseladb_http::http2::{self, PREFACE, flag, kind};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::node::{Node, NodeConfig};
@@ -54,7 +54,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     result
 }
 
-fn measure(args: &Args, nodes: &[Node<MemDisk>], ca: &Certificate) -> Result<Report, String> {
+fn measure(args: &Args, nodes: &[Node], ca: &Certificate) -> Result<Report, String> {
     let first = nodes.first().ok_or("an empty cluster")?;
     let wire_addr = *first.client_addrs().first().ok_or("no clients' port")?;
     let mut wire = Client::connect(wire_addr)?;
@@ -135,9 +135,9 @@ fn certificates() -> Result<(Certificate, CertifiedKey), String> {
 }
 
 /// Three nodes in this process, each with an HTTP port over TLS with `server`'s certificate.
-fn cluster(server: &CertifiedKey) -> Result<Vec<Node<MemDisk>>, String> {
+fn cluster(server: &CertifiedKey) -> Result<Vec<Node>, String> {
     let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
-    let mut nodes: Vec<Node<MemDisk>> = Vec::new();
+    let mut nodes: Vec<Node> = Vec::new();
     for _ in 0..3 {
         let join = nodes.first().map(|n| vec![n.peer_addr().to_string()]).unwrap_or_default();
         let tls = TlsPort::new(TlsMode::RequireTls, Some(ServerConfig::new(server.clone())));
@@ -152,7 +152,7 @@ fn cluster(server: &CertifiedKey) -> Result<Vec<Node<MemDisk>>, String> {
             }),
             ..NodeConfig::default()
         };
-        let n = Node::start(cfg, || Ok(MemDisk::new()), None).map_err(crate::client::debug)?;
+        let n = Node::start(cfg, DiskPlace::Memory, None).map_err(crate::client::debug)?;
         nodes.push(super::ready(n, READY, "a node did not start")?);
     }
     Ok(nodes)

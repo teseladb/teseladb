@@ -1,6 +1,7 @@
 //! A node on the engine (023): the engine of a node with one shard per core and the task that
 //! drives each core's logic ([`NodeEngine`], [`CoreLogic`], FR-008, FR-009), the way other threads
-//! reach a core ([`CoreSender`], FR-011), the connections between nodes (FR-015), and the pieces
+//! reach a core ([`CoreSender`], FR-011), each shard's disk operations ([`disk`], FR-010, FR-012),
+//! the connections between nodes (FR-015), and the pieces
 //! every network service of a node builds on: TLS over the engine's connected sockets
 //! ([`tls_stream`]), the work that would block a shard done off it ([`blocking`]: name
 //! resolution, configuration and certificate files), and outbound connections with a deadline,
@@ -33,6 +34,8 @@ pub mod blocking;
 pub mod connect;
 mod core_loop;
 #[cfg(target_os = "linux")]
+pub mod disk;
+#[cfg(target_os = "linux")]
 mod disk_port;
 #[cfg(target_os = "linux")]
 mod driver;
@@ -42,8 +45,9 @@ mod node_engine;
 mod offload;
 #[cfg(target_os = "linux")]
 mod peers;
+mod place;
 #[cfg(target_os = "linux")]
-mod post;
+pub(crate) mod post;
 #[cfg(target_os = "linux")]
 pub mod tls_stream;
 #[cfg(not(target_os = "linux"))]
@@ -55,11 +59,11 @@ pub use core_loop::{
     core_channel_with,
 };
 #[cfg(target_os = "linux")]
-pub use disk_port::{CoreDisk, DiskWaker, ThreadDisk};
+pub use disk_port::{CoreDisk, DiskWaker};
 #[cfg(target_os = "linux")]
 pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
 #[cfg(not(target_os = "linux"))]
-pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, ThreadDisk};
+pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, disk};
 
 /// The deadline `timeout` from now on the steady clock.
 #[cfg(target_os = "linux")]

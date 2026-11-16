@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_raftlog::{
     Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, open_node, write_atomic, write_node_meta,
@@ -131,6 +132,13 @@ impl Disk for FaultyDisk {
     }
 }
 
+/// The place of the disks `open` makes, each run on the node as a disk in memory is.
+fn made<D: Disk + Send + 'static>(
+    open: impl Fn() -> std::io::Result<D> + Send + Sync + 'static,
+) -> DiskPlace {
+    DiskPlace::Made(Arc::new(move || open().map(|d| Box::new(d) as Box<dyn Disk + Send>)))
+}
+
 /// Starts a node whose every disk fails as `fails` says on `text`; the error it gives.
 fn start_failing(text: &'static str, fails: Fails) -> NodeError {
     let made = Arc::new(Mutex::new(0u32));
@@ -139,7 +147,7 @@ fn start_failing(text: &'static str, fails: Fails) -> NodeError {
         *count.lock().unwrap() += 1;
         Ok(FaultyDisk::new(text, fails))
     };
-    match Node::start(NodeConfig::default(), open, None) {
+    match Node::start(NodeConfig::default(), made(open), None) {
         Ok(n) => {
             n.stop();
             panic!("a node started over a disk that fails on {text}");
@@ -181,7 +189,7 @@ fn a_core_disk_that_cannot_be_opened_stops_the_start() {
         }
     };
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-    let Err(e) = Node::start(cfg, open, None) else { panic!("started without a core disk") };
+    let Err(e) = Node::start(cfg, made(open), None) else { panic!("started without a core disk") };
     assert!(matches!(e, NodeError::Io(_)), "{e}");
 }
 
@@ -204,14 +212,14 @@ fn a_group0_whose_voters_name_this_node_as_a_learner_too_stops_the_start() {
     let first = Arc::new(Mutex::new(Some(meta)));
     let open = move || Ok(first.lock().unwrap().take().unwrap_or_default());
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-    let Err(e) = Node::start(cfg, open, None) else { panic!("started with that Group 0") };
+    let Err(e) = Node::start(cfg, made(open), None) else { panic!("started with that Group 0") };
     assert!(e.to_string().starts_with("Group 0"), "{e}");
 }
 
 #[test]
 fn a_memory_limit_is_split_between_the_cores() {
     let cfg = NodeConfig { cores: Some(2), memory_limit: Some(1 << 30), ..NodeConfig::default() };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     let budget = node.memory().expect("a budget from the limit");
     assert_eq!(budget.per_core(), 1 << 29);
     node.stop();
@@ -225,7 +233,7 @@ fn a_core_whose_log_fails_after_the_start_acknowledges_no_write() {
     let log = teseladb_io::device_log::format::DIR;
     let open = move || Ok(FaultyDisk::over(MemDisk::new(), log, Fails::Broken, on.clone()));
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-    let node = Node::start(cfg, open, None).unwrap();
+    let node = Node::start(cfg, made(open), None).unwrap();
     assert!(node.wait_ready(READY));
     // The first write waits for the data range to have its leader.
     let deadline = std::time::Instant::now() + READY;
@@ -263,7 +271,7 @@ fn an_administration_port_already_taken_stops_the_start_and_closes_the_client_po
     for client in [None, Some(client)] {
         let cfg =
             NodeConfig { cores: Some(1), admin_listen: Some(at), client, ..NodeConfig::default() };
-        let Err(e) = Node::start(cfg, || Ok(MemDisk::new()), None) else {
+        let Err(e) = Node::start(cfg, DiskPlace::Memory, None) else {
             panic!("started on a port already taken");
         };
         assert!(matches!(e, NodeError::Io(_)), "{e}");
@@ -277,7 +285,7 @@ fn a_disk_that_fills_up_at_any_write_of_node_meta_stops_the_start_or_lets_it_end
     for n in 0..40 {
         let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
         let open = move || Ok(FaultyDisk::new_from("node.meta", n));
-        match Node::start(cfg, open, None) {
+        match Node::start(cfg, made(open), None) {
             Ok(node) => {
                 node.stop();
             }
@@ -307,14 +315,14 @@ fn a_node_that_cannot_reach_the_cluster_to_join_does_not_start() {
         join_deadline: Duration::ZERO,
         ..NodeConfig::default()
     };
-    let Err(e) = Node::start(cfg, || Ok(MemDisk::new()), None) else { panic!("joined nobody") };
+    let Err(e) = Node::start(cfg, DiskPlace::Memory, None) else { panic!("joined nobody") };
     assert!(matches!(e, NodeError::Join(_)), "{e}");
 }
 
 #[test]
 fn an_insecure_node_issues_no_token_and_a_status_asked_without_time_is_not_waited_for() {
     let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.create_enroll_token(Duration::from_secs(60)).unwrap_err().contains("PKI"));
     // Without time it does not wait: `None`, or the status when the core answered within the
     // microseconds between the request and the look at its channel (asserting `None` made the

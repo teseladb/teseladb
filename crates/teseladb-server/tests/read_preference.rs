@@ -6,10 +6,10 @@
 mod common;
 
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::Node;
 
 fn secondary() -> Document {
@@ -18,7 +18,7 @@ fn secondary() -> Document {
 
 #[test]
 fn a_preference_no_replica_satisfies_waits_and_then_fails() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&c.run("app", Document::new().with("insert", "c").with("documents", docs(0..2)))));

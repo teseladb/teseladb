@@ -9,10 +9,10 @@ mod common;
 mod procs;
 
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::dev;
 use teseladb_server::node::Node;
@@ -114,7 +114,7 @@ fn nodes_on_a_given_port_announce_their_clients_address() {
 /// Entries written seconds apart all come back from one `find`, with or without a lower bound
 /// on `ts` below them, and the newest entry is the last acknowledged write.
 fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let first = c.run("dump", Document::new().with("insert", "a").with("documents", docs(0..3)));
@@ -160,7 +160,7 @@ fn a_find_reads_the_whole_window_and_ends_at_the_last_write() {
 /// `$natural: -1` with a limit reads back from the newest entries: the newest two of writes
 /// seconds apart, with a skip the ones before them, and with a filter the newest it matches.
 fn the_newest_entries_come_first() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     for i in 0..3 {

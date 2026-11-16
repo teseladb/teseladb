@@ -8,7 +8,7 @@ mod procs;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 fn main() {
@@ -70,7 +70,7 @@ fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
 }
 
 fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("admin", Document::new().with("currentOp", 1).with("command.currentOp", 1));
@@ -94,7 +94,7 @@ fn current_op_shows_the_running_command_and_kill_op_takes_numbers() {
 }
 
 fn rotate_certificates_on_a_node_without_tls_has_nothing_to_load() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let r = c.run("admin", Document::new().with("rotateCertificates", 1));

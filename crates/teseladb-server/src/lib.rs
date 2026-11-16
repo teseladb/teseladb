@@ -19,7 +19,6 @@ pub mod audit_log;
 pub mod authz_lease;
 pub mod backend;
 pub mod backup;
-pub mod block_memory;
 pub mod catalog_ops;
 pub mod certs;
 pub mod checksums;
@@ -95,7 +94,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use teseladb_io::NodeDisk;
+use teseladb_io::engine::disk::DiskPlace;
 
 use crate::cli::{Command, StartOpts, USAGE, USAGE_EXIT};
 use crate::client_listener::ClientConfig;
@@ -659,31 +658,15 @@ pub fn start(
         client.kerberos = kerberos;
     }
     let data = o.dbpath.clone();
-    // The disk executor and O_DIRECT (012 FR-003, FR-007), decided once and logged.
-    let choice = match teseladb_io::node_disk::choose(
-        o.io_executor,
-        o.direct_io,
-        o.io_uring_sqpoll,
-        &data,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(err, "teseladb: {e}");
-            return 1;
-        }
-    };
-    log.info(&choice.to_string(), &[]);
-    cfg.direct_io = choice.direct;
-    // With io_uring the clients' port runs on a ring per core too (012 FR-024).
+    // The engine's files and O_DIRECT (012 FR-003, 023 FR-010): the engine runs every core's
+    // disk; `--direct-io` says what it does where the file system has no O_DIRECT.
+    cfg.direct_io = o.direct_io;
     if let Some(client) = cfg.client.as_mut() {
-        let machine = std::thread::available_parallelism().map_or(1, |n| n.get().min(256));
-        let cores = cfg.cores.map_or(machine, usize::from);
-        client.rings = choice.uring.then_some(cores);
         client.xdp.clone_from(&o.net_xdp);
     }
     // Every core's disk is rooted at the data directory.
     cfg.shared_files = true;
-    let node = match Node::start(cfg, || NodeDisk::open(&data, &choice), Some(lock)) {
+    let node = match Node::start(cfg, DiskPlace::Files(data.clone()), Some(lock)) {
         Ok(n) => n,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");
@@ -937,8 +920,8 @@ fn display(p: Option<&Path>) -> String {
 
 /// Waits for the node to be ready, prints the ready line and runs until `stop()`; gives up if
 /// the cluster is not ready within `ready_timeout`.
-pub fn serve<D: teseladb_raftlog::Disk + Send + 'static>(
-    node: Node<D>,
+pub fn serve(
+    node: Node,
     format: Format,
     log: &Logger,
     out: &mut dyn Write,
@@ -1019,12 +1002,7 @@ pub const QUIESCE_QUIET: Duration = Duration::from_secs(1);
 /// stop choosing the node while its connections still answer, so that none of them closes under
 /// a command a driver is starting, which some drivers then wait for forever. It lasts until no
 /// client started a command other than the handshake for `quiet`, and never past `longest`.
-pub fn quiesce<D: teseladb_raftlog::Disk + Send + 'static>(
-    node: &Node<D>,
-    log: &Logger,
-    longest: Duration,
-    quiet: Duration,
-) {
+pub fn quiesce(node: &Node, log: &Logger, longest: Duration, quiet: Duration) {
     let started = std::time::Instant::now();
     node.quiesce();
     log.info("quiesce", &[]);

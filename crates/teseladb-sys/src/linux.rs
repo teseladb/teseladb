@@ -1,47 +1,13 @@
-//! Linux: `posix_fallocate`, epoll, eventfd, affinity and io_uring.
+//! Linux: epoll, eventfd, affinity and io_uring.
 
 pub mod io_uring;
 pub mod netns;
 pub mod xdp;
 
-use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
 
-pub(crate) const ENOSPC: i32 = 28;
-
-unsafe extern "C" {
-    fn posix_fallocate(fd: i32, offset: i64, len: i64) -> i32;
-    fn sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) -> i32;
-}
-
-/// `SYNC_FILE_RANGE_WRITE`: start the write of the dirty pages, without waiting for it.
-const SYNC_FILE_RANGE_WRITE: u32 = 2;
-
-/// Starts writing the file's dirty pages to the device without waiting (`sync_file_range` with
-/// `SYNC_FILE_RANGE_WRITE` over the whole file).
 /// Linux places threads by load, not by a class: nothing to ask.
 pub(crate) fn favor_current_thread() -> io::Result<()> {
-    Ok(())
-}
-
-pub(crate) fn write_behind(file: &File) -> io::Result<()> {
-    // SAFETY: valid descriptor during the call; no pointers.
-    let rc = unsafe { sync_file_range(file.as_raw_fd(), 0, 0, SYNC_FILE_RANGE_WRITE) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-pub(crate) fn preallocate(file: &File, len: u64) -> io::Result<()> {
-    let len = i64::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: valid descriptor during the call; no pointers. `posix_fallocate` returns the error
-    // code instead of using `errno`.
-    let rc = unsafe { posix_fallocate(file.as_raw_fd(), 0, len) };
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(rc));
-    }
     Ok(())
 }
 
@@ -250,16 +216,6 @@ mod tests {
     const SIGUSR1: i32 = 10;
 
     extern "C" fn ignore(_sig: i32) {}
-
-    #[test]
-    fn preallocate_rejects_a_size_beyond_i64() {
-        let path =
-            std::env::temp_dir().join(format!("teseladb-sys-prealloc-{}", std::process::id()));
-        let file = File::create(&path).unwrap();
-        let err = preallocate(&file, u64::MAX).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        std::fs::remove_file(&path).unwrap();
-    }
 
     #[test]
     fn system_call_errors_are_returned() {

@@ -437,6 +437,9 @@ version = "0.1.0"
 [[package]]
 name = "teseladb-sys"
 version = "0.1.0"
+dependencies = [
+ "teseladb",
+]
 
 [[package]]
 name = "teseladb-testkv"

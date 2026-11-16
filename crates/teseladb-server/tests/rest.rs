@@ -9,12 +9,12 @@ mod procs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
 use teseladb_rest::api::{AFTER_CLUSTER_TIME, OPERATION_TIME};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
@@ -69,8 +69,8 @@ fn http_config(client: ClientConfig, join: Vec<String>) -> NodeConfig {
     NodeConfig { http: Some(http), client: Some(client), ..config(join) }
 }
 
-fn start(client: ClientConfig) -> Node<MemDisk> {
-    let node = Node::start(http_config(client, Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+fn start(client: ClientConfig) -> Node {
+    let node = Node::start(http_config(client, Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     node
 }

@@ -636,7 +636,9 @@ impl ClientListener {
                 tls: cfg.tls.clone(),
                 auth: cfg.auth,
                 mechanisms: cfg.mechanisms.clone(),
-                arena: crate::block_memory::HugeRequests::for_port(),
+                // Requests are read into the engine's memory, on huge pages where the system has
+                // them (023 FR-014).
+                arena: None,
                 diag: diag.clone(),
             },
             open: open.clone(),

@@ -9,11 +9,11 @@ mod common;
 mod procs;
 
 use std::time::{Duration, Instant};
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_lsm::LsmConfig;
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::procs::NodeProc;
 
@@ -383,7 +383,7 @@ fn compact_frees_the_versions_the_history_no_longer_keeps() {
     // compaction of everything runs by itself.
     let lsm = LsmConfig { memtable_bytes: 64 << 10, ..LsmConfig::default() };
     let node =
-        Node::start(NodeConfig { lsm, ..config(Vec::new()) }, || Ok(MemDisk::new()), None).unwrap();
+        Node::start(NodeConfig { lsm, ..config(Vec::new()) }, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let mut retain = |seconds: i32| {

@@ -29,9 +29,10 @@ use teseladb_auth::clustertime::KeySealer;
 
 use teseladb_hlc::Hlc;
 use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogPort, PortDisk};
+use teseladb_io::engine::disk::{DiskPlace, ShardDisk};
 use teseladb_io::engine::{
     CoreConfig as EngineCoreConfig, CoreHandle, CoreInput, CoreSender, CoreSenders, EngineConfig,
-    NodeEngine, ThreadDisk,
+    NodeEngine,
 };
 use teseladb_io::handshake::{
     AcceptorOptions, EnrollHandler, JOIN_TIMEOUT, JoinHandler, JoinRequest, request_join_with,
@@ -294,9 +295,9 @@ pub struct NodeConfig {
     pub memory_limit: Option<u64>,
     /// Where the cores run (`--cpu-list`, 012 FR-006).
     pub affinity: crate::affinity::Affinity,
-    /// Whether the files the node writes outside its cores' disks (the search segments) use
-    /// `O_DIRECT` (012 FR-003): what `--direct-io` decided for the cores' disks.
-    pub direct_io: bool,
+    /// Whether the engine's files bypass the kernel's page cache (`--direct-io`, 012 FR-003, 023
+    /// FR-010).
+    pub direct_io: teseladb_io::DirectIo,
     /// The disks of the node's cores are one file system (the data directory): a range that
     /// changes core hands over its whole files as hard links (004 FR-033). A disk per core,
     /// as in memory, does not share its files.
@@ -344,7 +345,7 @@ impl Default for NodeConfig {
             tags: Vec::new(),
             memory_limit: None,
             affinity: crate::affinity::Affinity::Off,
-            direct_io: false,
+            direct_io: teseladb_io::DirectIo::Auto,
             shared_files: false,
             client_hooks: crate::client_listener::Hooks::default(),
             startup_log: StartupLog::default(),
@@ -553,8 +554,8 @@ pub fn lock_dir(dir: &Path) -> Result<FileLock, NodeError> {
     })
 }
 
-/// A core on its shard; it gives its disk back when it stops (`None` if the disk's thread died).
-type CoreRun<D> = CoreHandle<NodeMsg, Option<D>>;
+/// A core on its shard.
+type CoreRun = CoreHandle<NodeMsg, ()>;
 
 /// What core 0 adds: Group 0.
 struct Group0Spec {
@@ -629,11 +630,9 @@ struct CoreSpec {
 fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeError> {
     let dir = core_dir(spec.core);
     let cfg = LsmConfig { dir: dir.join("lsm"), ..spec.lsm.clone() };
-    let (mut lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
-    // The core's blocks on 2 MiB pages when the system has them reserved (012 FR-032).
-    if let Some(memory) = crate::block_memory::HugeBlocks::for_cache(cfg.cache_bytes) {
-        lsm.place_blocks(memory);
-    }
+    // The core's blocks are the engine's memory, on huge pages where the system has them
+    // reserved (023 FR-014).
+    let (lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
     let lsm = Rc::new(RefCell::new(lsm));
     let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64())
         .with_segments(spec.search.clone());
@@ -723,19 +722,21 @@ fn task_config(spec: &CoreSpec) -> EngineCoreConfig {
 
 /// A core on its shard (023 FR-008): recovers its log and its LSM there and gives its task the
 /// logic, the executor of its disk and its part of the node's device log.
-fn open_core<D: Disk + Send + 'static>(
+fn open_core(
     mut spec: CoreSpec,
-    mut disk: D,
-) -> Result<(NodeLogic, ThreadDisk<D>, Option<LogPort>), NodeError> {
+    place: &DiskPlace,
+) -> Result<(NodeLogic, ShardDisk, Option<LogPort>), NodeError> {
     let Some(mut port) = spec.log.take() else {
         return Err(NodeError::Config(format!("core {}: no raft log", spec.core)));
     };
+    // The executor of the core's disk on its shard (023 FR-010): the recovery waits on it.
+    let mut disk = place.on_shard()?;
     let logic = build_core(&spec, &mut port, &mut disk)?;
-    Ok((logic, ThreadDisk::new(format!("disk-{}", spec.core), disk), Some(port)))
+    Ok((logic, disk, Some(port)))
 }
 
 /// A running node.
-pub struct Node<D> {
+pub struct Node {
     node_id: NodeId,
     cluster_id: [u8; 16],
     cores: u16,
@@ -745,7 +746,7 @@ pub struct Node<D> {
     /// What makes senders of the cores' mailboxes: the node is shared between threads, and each
     /// call makes its own sender (012 FR-005).
     senders: Vec<CoreSenders<NodeMsg>>,
-    cores_run: Vec<CoreRun<D>>,
+    cores_run: Vec<CoreRun>,
     client: Option<ClientListener>,
     /// What opens and closes the replica set port as Group 0 says (018 FR-016).
     replica_port: Option<crate::replica_port::PortKeeper>,
@@ -769,14 +770,14 @@ pub struct Node<D> {
     /// The roles the cores publish (H-039).
     roles: Arc<NodeRoles>,
     /// The Raft log of the node's cores (012 FR-035).
-    device_log: Option<DeviceLog<D>>,
+    device_log: Option<DeviceLog>,
     _lock: Option<FileLock>,
     /// The engine its cores run on, one shard each (023 FR-008); dropped last, once nothing
     /// talks to its shards.
     engine: Option<NodeEngine>,
 }
 
-impl<D> fmt::Debug for Node<D> {
+impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("node_id", &self.node_id)
@@ -971,14 +972,14 @@ fn join_first(
     Ok(Some(a))
 }
 
-impl<D: Disk + Send + 'static> Node<D> {
-    /// Starts a node. `open_disk` gives a disk rooted at the data directory (one per core and
-    /// one for `node.meta`); `lock` is the data directory's lock, held while the node runs.
+impl Node {
+    /// Starts a node with its disks at `place` (its data directory, or in memory); `lock` is the
+    /// data directory's lock, held while the node runs.
     pub fn start(
         cfg: NodeConfig,
-        mut open_disk: impl FnMut() -> io::Result<D>,
+        place: DiskPlace,
         lock: Option<FileLock>,
-    ) -> Result<Node<D>, NodeError> {
+    ) -> Result<Node, NodeError> {
         // Every node's JavaScript reads the deadline of its command and waits in `sleep`, also
         // one a test or a tool starts without `teseladb start` (016 FR-007).
         crate::install_js_host();
@@ -990,7 +991,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         let log = cfg.startup_log.clone();
         log.step("peer port open", &[("addr", &peer_addr)]);
 
-        let mut meta_disk = open_disk()?;
+        // `node.meta` and the data format size the engine: read before it starts.
+        let mut meta_disk = place.startup_disk()?;
         let existing = read_node_meta(&mut meta_disk)?;
         let import_logs = check_data_format(&mut meta_disk, existing.is_some())?;
         // A node without an identifier (a new directory, or one that stopped between `node.meta`
@@ -1093,9 +1095,9 @@ impl<D: Disk + Send + 'static> Node<D> {
             // What the host has of the settings of a data node (012 FR-036).
             crate::host_settings::HostSettings::read(dir).log();
             // The segments of the search indexes, one file per index (011 FR-012).
-            crate::search_segments::open(dir, &mut tables.search, cfg.direct_io)?;
+            crate::search_segments::open(dir, &mut tables.search)?;
             // What aggregation stages write past their memory (010 FR-010).
-            let disk = teseladb_io::FileDisk::open(dir.join(crate::spill::SPILL_DIR))?;
+            let disk = teseladb_io::files::BlockingDisk::open(dir.join(crate::spill::SPILL_DIR))?;
             let spill =
                 crate::spill::DiskSpill::open(disk).map_err(|e| io::Error::other(e.message))?;
             tables.spill.store = Some(Arc::new(spill));
@@ -1139,8 +1141,20 @@ impl<D: Disk + Send + 'static> Node<D> {
         // Its records carry the HLC bound (005 FR-003, D-172): no core gives a mark before the
         // clock passes the highest bound the log kept.
         let log_bound = clock_keeper.log_bound();
-        let (device_log, mut ports) = DeviceLog::start_with_bound(
-            open_disk()?,
+        // The engine of the node: one shard per core, core k on shard k (023 FR-008); the log's
+        // writer runs on shard 0 (023 FR-013).
+        let pinned: Option<Vec<usize>> = cpus.iter().copied().collect();
+        let engine_cfg = EngineConfig {
+            shards: cores,
+            cpus: pinned.unwrap_or_default(),
+            memory: None,
+            direct_io: cfg.direct_io,
+        };
+        let engine = NodeEngine::start(&engine_cfg)?;
+        log.step("engine", &[("shards", &engine.shards()), ("disk", &cfg.direct_io.describe())]);
+        let (device_log, mut ports) = DeviceLog::start(
+            &engine,
+            place.log_disk()?,
             cores,
             DeviceLogConfig::default(),
             log_bound.clone(),
@@ -1148,7 +1162,7 @@ impl<D: Disk + Send + 'static> Node<D> {
         crate::clock::wait_past(&clock, log_bound.durable());
         log.step("raft log", &[("files", &device_log.recovered_files())]);
         if import_logs {
-            let mut disk = open_disk()?;
+            let mut disk = place.startup_disk()?;
             for port in &mut ports {
                 import_wal(port, &mut disk)?;
             }
@@ -1156,22 +1170,9 @@ impl<D: Disk + Send + 'static> Node<D> {
             write_atomic(&mut disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
             log.step("raft logs moved to the device log", &[("cores", &cores)]);
         }
-        // The engine of the node: one shard per core, core k on shard k (023 FR-008).
-        let pinned: Option<Vec<usize>> = cpus.iter().copied().collect();
-        let engine_cfg =
-            EngineConfig { shards: cores, cpus: pinned.unwrap_or_default(), memory: None };
-        let engine = NodeEngine::start(&engine_cfg)?;
-        log.step("engine", &[("shards", &engine.shards())]);
         let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
-            let disk = match open_disk() {
-                Ok(d) => d,
-                Err(e) => {
-                    stop_cores(&senders, threads);
-                    return Err(NodeError::Io(e));
-                }
-            };
             let group0 = (k == 0).then(|| Group0Spec {
                 desc: group0.clone(),
                 founder: (node_id == FOUNDER).then(|| (meta.cluster_id, addrs.clone())),
@@ -1215,8 +1216,11 @@ impl<D: Disk + Send + 'static> Node<D> {
             let built = engine.start_core(
                 k,
                 task,
-                move || open_core(spec, disk),
-                |_logic, disk: ThreadDisk<D>, _gone| disk.into_disk(),
+                {
+                    let place = place.clone();
+                    move || open_core(spec, &place)
+                },
+                |_logic, _disk: ShardDisk, _gone| (),
             );
             match built {
                 Ok(core) => {
@@ -1647,9 +1651,8 @@ impl<D: Disk + Send + 'static> Node<D> {
         }
     }
 
-    /// Stops the cores, the peers' listener and the engine. Returns each core's disk (`None` for a
-    /// core whose disk thread failed).
-    pub fn stop(mut self) -> Vec<Option<D>> {
+    /// Stops the cores, the peers' listener, the device log and the engine.
+    pub fn stop(mut self) {
         if let Some(p) = self.replica_port {
             p.stop();
         }
@@ -1665,7 +1668,7 @@ impl<D: Disk + Send + 'static> Node<D> {
         let engine = self.engine.take().expect("a running node has its engine");
         engine.stop_peers(None);
         let senders: Vec<_> = self.senders.iter().map(CoreSenders::sender).collect();
-        let disks = stop_cores(&senders, std::mem::take(&mut self.cores_run));
+        stop_cores(&senders, std::mem::take(&mut self.cores_run));
         // Once the cores stopped, the log's writer has nothing more to make durable.
         if let Some(l) = self.device_log.take() {
             l.stop();
@@ -1674,16 +1677,17 @@ impl<D: Disk + Send + 'static> Node<D> {
         engine.stop();
         // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
         self.clock.stop();
-        disks
     }
 }
 
-/// Stops the cores of `senders` and waits for their tasks; each core's disk.
-fn stop_cores<D>(senders: &[CoreSender<NodeMsg>], cores: Vec<CoreRun<D>>) -> Vec<Option<D>> {
+/// Stops the cores of `senders` and waits for their tasks.
+fn stop_cores(senders: &[CoreSender<NodeMsg>], cores: Vec<CoreRun>) {
     for s in senders {
         let _ = s.send_waiting(CoreInput::Stop);
     }
-    cores.into_iter().map(|c| c.join().flatten()).collect()
+    for c in cores {
+        let _ = c.join();
+    }
 }
 
 #[cfg(test)]
@@ -1819,9 +1823,7 @@ mod tests {
             startup_log: log,
             ..NodeConfig::default()
         };
-        let Err(NodeError::Join(e)) =
-            Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None)
-        else {
+        let Err(NodeError::Join(e)) = Node::start(cfg, DiskPlace::Memory, None) else {
             panic!("the join should fail");
         };
         assert!(e.contains(&dead), "{e}");

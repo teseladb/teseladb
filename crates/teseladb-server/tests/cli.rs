@@ -4,7 +4,8 @@
 
 use std::path::PathBuf;
 use std::process::Command as Process;
-use teseladb_io::node_disk::{DirectIo, IoExecutor};
+use teseladb_io::DirectIo;
+use teseladb_io::engine::disk::DiskPlace;
 
 use teseladb_server::cli::{Command, StartOpts, USAGE, parse, parse_with};
 use teseladb_server::log::{Format, Level};
@@ -31,7 +32,7 @@ fn start_defaults() {
     assert_eq!(o.dbpath, PathBuf::from("./teseladb-data"));
     assert_eq!(o.cores, None, "the machine's logical cores");
     assert_eq!(o.memory_limit, None, "three quarters of the process's memory");
-    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Auto, DirectIo::Auto));
+    assert_eq!(o.direct_io, DirectIo::Auto);
     assert_eq!(o.cpu_list, None, "the CPUs the process may use");
     assert_eq!((o.bind_ip.as_str(), o.port), ("127.0.0.1", 27017));
     assert_eq!(o.peer_listen.to_string(), "127.0.0.1:27100");
@@ -64,17 +65,18 @@ fn every_start_option_in_both_forms() {
     assert_eq!(start("start --insecure --memory-limit 8G").memory_limit, Some(8 << 30));
     assert_eq!(start("start --insecure --memory-limit=1048576").memory_limit, Some(1 << 20));
     assert!(bad("start --insecure --memory-limit 3X").starts_with("--memory-limit: "));
-    // The disk executor, O_DIRECT and the cores' CPUs (012 FR-003, FR-006, FR-007).
-    let o = start("start --insecure --io-executor uring --direct-io off --cpu-list 0-2,7");
-    assert_eq!((o.io_executor, o.direct_io), (IoExecutor::Uring, DirectIo::Off));
+    // O_DIRECT and the cores' CPUs (012 FR-003, FR-006, 023 FR-010).
+    let o = start("start --insecure --direct-io off --cpu-list 0-2,7");
+    assert_eq!(o.direct_io, DirectIo::Off);
     assert_eq!(o.cpu_list, Some(vec![0, 1, 2, 7]));
-    assert_eq!(start("start --insecure --io-executor threads").io_executor, IoExecutor::Threads);
     assert_eq!(start("start --insecure --direct-io on").direct_io, DirectIo::On);
-    // 012 FR-025: off unless asked for.
-    assert!(!start("start --insecure").io_uring_sqpoll);
-    assert!(start("start --insecure --io-uring-sqpoll").io_uring_sqpoll);
-    assert!(bad("start --insecure --io-executor fast").starts_with("--io-executor: "));
     assert!(bad("start --insecure --direct-io yes").starts_with("--direct-io: "));
+    // The engine runs every core's disk: the options that chose another executor are gone (023
+    // FR-033).
+    for gone in ["--io-executor uring", "--io-uring-sqpoll"] {
+        let e = bad(&format!("start --insecure {gone}"));
+        assert!(e.contains(gone.split(' ').next().unwrap()), "{gone}: {e}");
+    }
     assert!(bad("start --insecure --cpu-list 3-1").starts_with("--cpu-list: "));
     let few = bad("start --insecure --cores 4 --cpu-list 0-1");
     assert!(few.contains("--cpu-list names 2 CPUs for 4 cores"), "{few}");
@@ -478,7 +480,7 @@ fn the_tenant_subcommands_take_every_option_as_text_and_json() {
         admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
         ..NodeConfig::default()
     };
-    let node = Node::start(cfg, || Ok(teseladb_raftlog::MemDisk::new()), None).unwrap();
+    let node = Node::start(cfg, DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(std::time::Duration::from_secs(30)));
     let at = node.admin_addr().unwrap().to_string();
     assert!(admin_ok(&at, &["tenant", "create", "acme"]).starts_with("tenant acme: "));

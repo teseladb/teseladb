@@ -6,7 +6,7 @@ mod common;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::Node;
 
 fn find(c: &mut Client, coll: &str) -> Vec<Value> {
@@ -25,7 +25,7 @@ fn field<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
 
 #[test]
 fn config_shows_the_cluster_from_group0() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(ok(&c.run("app", Document::new().with("insert", "c").with("documents", docs(0..2)))));
@@ -65,7 +65,7 @@ fn config_shows_the_cluster_from_group0() {
 
 #[test]
 fn shutdown_asks_the_node_to_stop() {
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     assert!(!node.shutdown_requested());
@@ -87,7 +87,7 @@ fn config_settings_takes_the_documents_its_validator_lets_through() {
     use teseladb_wire::commands::config_settings::{
         AUTO_MERGE, BALANCER, CHUNK_SIZE, RW_CONCERN_DEFAULTS,
     };
-    let node = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(config(Vec::new()), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let mut c = Client::new(&node);
     let insert = |c: &mut Client, d: Document| {

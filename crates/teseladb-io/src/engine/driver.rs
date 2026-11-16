@@ -4,12 +4,15 @@
 //! task waits on an engine timer at the logic's next deadline or until something arrives. With
 //! the same inputs the logic gets the same calls in the same order as with the loop this replaces.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use teseladb::engine::core::future::{ExceptionPtr, Future};
 use teseladb::engine::core::reactor::yield_;
+use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint, Timer};
 use teseladb_raftlog::IoDone;
 use teseladb_types::{Nanos, NodeId};
@@ -45,6 +48,9 @@ fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// The bytes of a file read for an answer to a node.
+type FileRead = (NodeId, FileSend, Option<TemporaryBuffer<u8>>);
+
 /// The state of a core's task.
 pub(crate) struct Driver<L: CoreLogic, X: CoreDisk> {
     pub(crate) logic: L,
@@ -73,6 +79,9 @@ pub(crate) struct Driver<L: CoreLogic, X: CoreDisk> {
     logs: Vec<(Instant, IoDone)>,
     outbox: Vec<(NodeId, PeerMsg)>,
     file_outbox: Vec<(NodeId, FileSend)>,
+    /// The bytes of the answers that end with a file's (023 FR-017) read by the disk executor
+    /// since the last turn: each with its node and answer, `None` when they could not be read.
+    file_reads: Rc<RefCell<Vec<FileRead>>>,
     timer: Pin<Box<Timer>>,
     /// Where the timer is armed, in the core's clock.
     armed: Option<Nanos>,
@@ -92,9 +101,9 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
     ) -> Driver<L, X> {
         let wake = io.clone();
         let timer = Box::pin(Timer::with_callback(move || wake.wake.wake()));
-        // The runtime does not send the bytes of files itself (023 FR-017 waits for the engine's
-        // disk executor): the logic answers them whole.
-        logic.file_sends(false);
+        // The task sends the bytes of files itself where its disk executor reads them and the
+        // links to other nodes are plaintext (023 FR-017); over TLS the logic answers whole.
+        logic.file_sends(disk.sends_files() && net.plaintext());
         let step = Nanos(nanos(tick));
         let now = Nanos(nanos(origin.elapsed()));
         Driver {
@@ -118,6 +127,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             logs: Vec::new(),
             outbox: Vec::new(),
             file_outbox: Vec::new(),
+            file_reads: Rc::default(),
             timer,
             armed: None,
         }
@@ -193,6 +203,14 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         // What the connections read goes first, as a poller's reads did.
         let mut worked = self.net.read(&mut self.logic, woke);
         self.disk.reap(&mut self.reaped);
+        let file_reads = std::mem::take(&mut *self.file_reads.borrow_mut());
+        worked |= !file_reads.is_empty();
+        for (node, send, data) in file_reads {
+            match data {
+                Some(d) => self.net.send_file_bytes(node, &send, d.as_slice(), &mut self.logic),
+                None => self.net.send_to(node, &send.fallback(), &mut self.logic),
+            }
+        }
         self.io.take_log(&mut self.logs);
         self.inbox.drain_into(&mut self.inputs);
         worked |= !self.reaped.is_empty()
@@ -303,8 +321,21 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             self.busy_at = now;
         }
         for (node, send) in std::mem::take(&mut self.file_outbox) {
-            self.net.send_file_to(node, &send, &mut self.logic);
+            match self.disk.read_for_send(send.file, send.offset, send.len) {
+                Some(read) => self.read_file(read, node, send),
+                None => self.net.send_to(node, &send.fallback(), &mut self.logic),
+            }
         }
+    }
+
+    /// When the bytes of `send` are read, they go to `node` with its answer in the next turn.
+    fn read_file(&self, read: Future<Option<TemporaryBuffer<u8>>>, node: NodeId, send: FileSend) {
+        let (reads, io) = (self.file_reads.clone(), self.io.clone());
+        drop(read.then(move |data: Option<TemporaryBuffer<u8>>| {
+            reads.borrow_mut().push((node, send, data));
+            io.wake.wake();
+            Ok::<_, ExceptionPtr>(())
+        }));
     }
 
     /// Hands the logic's disk operations to their executor: how many, and `false` if the disk

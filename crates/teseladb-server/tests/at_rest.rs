@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teseladb_crypto::at_rest::CipherMode;
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_lsm::LsmConfig;
 use teseladb_meta::bootstrap::DATA_START;
 use teseladb_raft::Role;
@@ -53,16 +53,16 @@ fn config(key: Option<&[u8; 32]>, mode: CipherMode) -> NodeConfig {
     cfg
 }
 
-fn start(dir: &Dir, cfg: NodeConfig) -> Result<Node<FileDisk>, NodeError> {
+fn start(dir: &Dir, cfg: NodeConfig) -> Result<Node, NodeError> {
     let path = dir.0.clone();
-    Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0)?))
+    Node::start(cfg, DiskPlace::Files(std::path::PathBuf::from(&path)), Some(lock_dir(&dir.0)?))
 }
 
 fn key(i: u32) -> Vec<u8> {
     [&DATA_START[..], format!("doc-{i:05}").as_bytes()].concat()
 }
 
-fn put(n: &Node<FileDisk>, i: u32) {
+fn put(n: &Node, i: u32) {
     let end = Instant::now() + READY;
     let value = format!("{SECRET}-{i:05}");
     while n.put(&key(i), value.as_bytes(), ASK).is_err() {
@@ -71,7 +71,7 @@ fn put(n: &Node<FileDisk>, i: u32) {
     }
 }
 
-fn wait_flushed(n: &Node<FileDisk>) {
+fn wait_flushed(n: &Node) {
     let end = Instant::now() + READY;
     loop {
         let s = n.data_status(ASK).expect("the range's core answers");

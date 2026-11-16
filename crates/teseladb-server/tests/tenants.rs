@@ -4,10 +4,10 @@
 mod common;
 
 use std::net::SocketAddr;
+use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
 
 fn admin(at: &str, args: &[&str]) -> (i32, String, String) {
@@ -28,7 +28,7 @@ fn found(r: &Document) -> usize {
 
 #[test]
 fn tenants_are_created_listed_and_dropped_and_each_sees_its_databases() {
-    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.admin_addr().unwrap().to_string();
     let (code, out, err) = admin(&at, &["tenant", "create", "acme"]);
@@ -73,7 +73,7 @@ fn tenants_are_created_listed_and_dropped_and_each_sees_its_databases() {
 /// through `teseladb admin tenant limits|access|suspend|resume`, and what `tenant list` shows.
 #[test]
 fn a_tenant_gets_limits_an_access_list_and_a_suspension_through_the_port() {
-    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.admin_addr().unwrap().to_string();
     let run = |args: &[&str]| {
@@ -150,7 +150,7 @@ fn a_tenant_gets_limits_an_access_list_and_a_suspension_through_the_port() {
 /// tenant).
 #[test]
 fn users_merged_in_a_tenant_belong_to_it() {
-    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.admin_addr().unwrap().to_string();
     let (code, _, err) = admin(&at, &["tenant", "create", "acme"]);
@@ -209,7 +209,7 @@ fn users_merged_in_a_tenant_belong_to_it() {
 /// `createUser`, at once and with nothing written (021 FR-047).
 #[test]
 fn a_merged_role_or_user_whose_name_another_tenant_holds_is_refused_at_once() {
-    let node = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let node = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(node.wait_ready(READY));
     let at = node.admin_addr().unwrap().to_string();
     for t in ["acme", "beta"] {

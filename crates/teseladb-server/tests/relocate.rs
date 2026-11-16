@@ -11,8 +11,7 @@ use std::path::PathBuf;
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::Document;
-use teseladb_io::FileDisk;
-use teseladb_raftlog::MemDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
 
 fn with_admin() -> NodeConfig {
@@ -51,7 +50,7 @@ fn all(c: &mut Client) -> usize {
 
 #[test]
 fn a_range_moves_to_another_core_with_its_documents() {
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -148,7 +147,12 @@ fn a_moved_range_survives_a_restart_on_its_new_core() {
     let start = || {
         let path = dir.0.clone();
         let cfg = NodeConfig { shared_files: true, lsm: lsm.clone(), ..with_admin() };
-        Node::start(cfg, move || FileDisk::open(&path), Some(lock_dir(&dir.0).unwrap())).unwrap()
+        Node::start(
+            cfg,
+            DiskPlace::Files(std::path::PathBuf::from(&path)),
+            Some(lock_dir(&dir.0).unwrap()),
+        )
+        .unwrap()
     };
     let n = start();
     assert!(n.wait_ready(READY));
@@ -205,7 +209,7 @@ fn a_moved_range_survives_a_restart_on_its_new_core() {
 /// shutdown» under YCSB-A while the ranges moved).
 #[test]
 fn writes_keep_answering_while_their_range_changes_cores() {
-    let n = Node::start(with_admin(), || Ok(MemDisk::new()), None).unwrap();
+    let n = Node::start(with_admin(), DiskPlace::Memory, None).unwrap();
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);

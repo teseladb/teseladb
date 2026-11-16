@@ -6,7 +6,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use teseladb_bson::{Document, RawDoc, Value};
-use teseladb_raftlog::Disk;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
@@ -36,7 +35,7 @@ pub trait ClientPort {
     fn client_port(&self) -> SocketAddr;
 }
 
-impl<D: Disk + Send + 'static> ClientPort for Node<D> {
+impl ClientPort for Node {
     fn client_port(&self) -> SocketAddr {
         self.client_addrs()[0]
     }

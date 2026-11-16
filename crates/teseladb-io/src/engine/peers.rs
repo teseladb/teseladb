@@ -900,15 +900,31 @@ impl Net {
         }
     }
 
-    /// An answer that ends with a file's bytes goes as its fallback: this runtime does not send
-    /// them itself ([`CoreLogic::file_sends`] is `false`).
-    pub(crate) fn send_file_to<L: CoreLogic>(
+    /// Whether the links to other nodes are plaintext: only then does the task send the bytes of
+    /// files itself (023 FR-017).
+    pub(crate) fn plaintext(&self) -> bool {
+        self.tls.is_none()
+    }
+
+    /// An answer that ends with `data`, the bytes of a file the disk executor read (023 FR-017):
+    /// its head and the bytes go as one frame; one that would pass the frame's limit goes as its
+    /// fallback.
+    pub(crate) fn send_file_bytes<L: CoreLogic>(
         &mut self,
         node: NodeId,
         send: &FileSend,
+        data: &[u8],
         logic: &mut L,
     ) {
-        self.send_to(node, &send.fallback(), logic);
+        let version = self.links.get(&node).map_or(0, |l| l.version);
+        match send.frame_head(version) {
+            Some(head) if data.len() == send.len as usize => {
+                let mut frame = head;
+                frame.extend_from_slice(data);
+                self.send_bytes(node, &frame, logic);
+            }
+            _ => self.send_to(node, &send.fallback(), logic),
+        }
     }
 
     /// Queues `bytes` on connection `token`: its writer sends what a turn queued in one write.

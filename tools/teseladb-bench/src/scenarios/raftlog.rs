@@ -2,18 +2,17 @@
 //! a `strict` append until it is pending, reads of the log from memory and recovery of the WAL. The
 //! targets were set for Linux with NVMe; in other environments the numbers are indicative. The
 //! warm-up (`--warmup`) runs the groups phase, the one timed by `--duration`; the other phases
-//! run a number of operations (`--records`) and have none.
+//! run a number of operations (`--records`) and have none. The log's files go through the engine's
+//! disk executor, in an engine thread ([`super::on_engine`], 023 FR-010).
 
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
 use std::time::Instant;
 
-use teseladb_io::FileDisk;
 use teseladb_raftlog::format::wal::EntryKind;
-use teseladb_raftlog::{CoreStore, Disk, IoDone, IoOp, LogEntry, StorageConfig, open_node};
+use teseladb_raftlog::{CoreStore, LogEntry, StorageConfig, open_node};
 use teseladb_types::{Bytes, Durability, GroupId, Histogram, Nanos, Rng};
 
+use super::on_engine::{self, BenchDisk};
 use super::{DataDir, at, msg};
 use crate::cli::Args;
 use crate::report::{Report, Target};
@@ -23,8 +22,8 @@ const LOG_GROUP: GroupId = GroupId(1);
 /// Size of the appended entries.
 const ENTRY_LEN: usize = 1024;
 
-fn disk(path: &Path) -> Result<FileDisk, String> {
-    FileDisk::open(path).map_err(at(path))
+fn disk(path: &Path) -> Result<BenchDisk, String> {
+    on_engine::disk(path)
 }
 
 fn entry(index: u64, rng: &mut Rng) -> LogEntry {
@@ -34,7 +33,7 @@ fn entry(index: u64, rng: &mut Rng) -> LogEntry {
 }
 
 /// Runs all the available I/O synchronously.
-fn drain(s: &mut CoreStore, disk: &mut FileDisk, clock: &Instant) {
+fn drain(s: &mut CoreStore, disk: &mut BenchDisk, clock: &Instant) {
     loop {
         let now = Nanos(clock.elapsed().as_nanos() as u64);
         s.run_io(disk, now);
@@ -42,30 +41,23 @@ fn drain(s: &mut CoreStore, disk: &mut FileDisk, clock: &Instant) {
             None => break,
             Some(d) => {
                 let wait = d.saturating_since(Nanos(clock.elapsed().as_nanos() as u64));
-                thread::sleep(std::time::Duration::from_nanos(wait.0));
+                on_engine::sleep(std::time::Duration::from_nanos(wait.0));
             }
         }
     }
 }
 
-/// Groups phase: every group always has a `strict` request in progress (closed loop) and a disk
-/// thread runs the operations, like 002's core loop. Once `until` (time elapsed, requests answered)
-/// says so it makes no more requests and returns when those in flight are answered.
+/// Groups phase: every group always has a `strict` request in progress (closed loop) and the
+/// engine's executor runs the operations while the store goes on, like a core's task. Once `until`
+/// (time elapsed, requests answered) says so it makes no more requests and returns when those in
+/// flight are answered.
 fn groups_phase(
     s: &mut CoreStore,
-    disk: FileDisk,
+    disk: BenchDisk,
     groups: u64,
     until: impl Fn(std::time::Duration, u64) -> bool,
     clock: &Instant,
-) -> Result<(FileDisk, u64), String> {
-    let (op_tx, op_rx) = mpsc::channel::<IoOp>();
-    let (done_tx, done_rx) = mpsc::channel::<IoDone>();
-    let worker = thread::spawn(move || {
-        let mut disk = disk;
-        // A send fails only once the phase stopped listening: nothing else to execute.
-        let _ = op_rx.into_iter().try_for_each(|op| done_tx.send(disk.execute(op)));
-        disk
-    });
+) -> Result<(BenchDisk, u64), String> {
     let now = || Nanos(clock.elapsed().as_nanos() as u64);
     let mut next_index = vec![1u64; groups as usize];
     let mut owner = std::collections::HashMap::new();
@@ -90,10 +82,11 @@ fn groups_phase(
     let start = Instant::now();
     let mut outstanding = 0usize;
     let mut completed = 0u64;
+    let mut results = Vec::new();
     loop {
         let stop = until(start.elapsed(), completed);
         while let Some(op) = s.poll_io(now()) {
-            op_tx.send(op).map_err(|_| "disk thread down")?;
+            disk.submit(op);
             outstanding += 1;
         }
         if outstanding == 0 {
@@ -102,25 +95,25 @@ fn groups_phase(
             // answered: no more come after the stop.
             let Some(d) = s.next_deadline() else { break };
             let wait = d.saturating_since(now());
-            thread::sleep(std::time::Duration::from_nanos(wait.0));
+            on_engine::sleep(std::time::Duration::from_nanos(wait.0));
             continue;
         }
-        let done = done_rx.recv().map_err(|_| "disk thread down")?;
-        outstanding -= 1;
-        let c = s.on_io_done(done, now());
-        for (t, r) in c.tickets {
-            r.map_err(msg)?;
-            if let Some(g) = owner.remove(&t) {
-                completed += 1;
-                if !stop {
-                    let t = append(s, g, &mut next_index)?;
-                    owner.insert(t, g);
+        disk.wait_done(&mut results);
+        for done in results.drain(..) {
+            outstanding -= 1;
+            let c = s.on_io_done(done, now());
+            for (t, r) in c.tickets {
+                r.map_err(msg)?;
+                if let Some(g) = owner.remove(&t) {
+                    completed += 1;
+                    if !stop {
+                        let t = append(s, g, &mut next_index)?;
+                        owner.insert(t, g);
+                    }
                 }
             }
         }
     }
-    drop(op_tx);
-    let disk = worker.join().map_err(|_| "disk thread down")?;
     Ok((disk, completed))
 }
 
@@ -163,6 +156,12 @@ fn measure_recovery(path: &Path, core: u16) -> Result<(f64, u64, u64), String> {
 /// Runs the scenario. Core 1 holds the many groups and core 0 the single group of the append and
 /// read phases, to measure batching and recovery separately.
 pub fn run(args: &Args) -> Result<Report, String> {
+    let args = args.clone();
+    on_engine::run(move || run_here(&args))
+}
+
+/// [`run`] in an engine thread.
+fn run_here(args: &Args) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "raftlog")?;
     let mut report = Report::new("raftlog");
     report.notes.push(format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
@@ -176,7 +175,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         warm_groups(&dir.path.join("warmup"), args, &clock)?;
     }
 
-    // 1. Requests per batch and sync latency with many groups (core 1, with a disk thread).
+    // 1. Requests per batch and sync latency with many groups (core 1, operations in flight).
     let (mut g, _) = CoreStore::recover(&cfg, 1, &mut d).map_err(msg)?;
     let until = |elapsed, _| elapsed >= args.duration;
     let (mut d, completed) = groups_phase(&mut g, d, args.groups, until, &clock)?;
@@ -242,6 +241,12 @@ pub fn run(args: &Args) -> Result<Report, String> {
 /// `raftlog --data dir`) several times and measures each core's recovery. It modifies nothing that
 /// normal recovery would not modify.
 pub fn recover_existing(args: &Args) -> Result<Report, String> {
+    let args = args.clone();
+    on_engine::run(move || recover_here(&args))
+}
+
+/// [`recover_existing`] in an engine thread.
+fn recover_here(args: &Args) -> Result<Report, String> {
     let path = args.data.as_deref().ok_or("raftlog-recover needs --data")?;
     let mut report = Report::new("raftlog-recover");
     let mut core = 0u16;
@@ -275,12 +280,17 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg =
             StorageConfig { group_commit_delay: Nanos::from_millis(1), ..StorageConfig::default() };
-        let mut d = disk(&tmp).unwrap();
-        let (mut s, _) = CoreStore::recover(&cfg, 0, &mut d).unwrap();
-        let clock = Instant::now();
-        // It returns (it used to hang waiting with nothing in flight), and once it stops it answers
-        // the requests it had made and makes no more: 20 groups, a request each in flight.
-        let (_, completed) = groups_phase(&mut s, d, 20, |_, n| n >= 100, &clock).unwrap();
+        let dir = tmp.clone();
+        let completed = on_engine::run(move || {
+            let mut d = disk(&dir)?;
+            let (mut s, _) = CoreStore::recover(&cfg, 0, &mut d).map_err(msg)?;
+            let clock = Instant::now();
+            // It returns (it used to hang waiting with nothing in flight), and once it stops it
+            // answers the requests it had made and makes no more: 20 groups, a request each in
+            // flight.
+            groups_phase(&mut s, d, 20, |_, n| n >= 100, &clock).map(|(_, n)| n)
+        })
+        .unwrap();
         // The stop is read once per round of answers: at most two rounds of 20 past the 100.
         assert!((100..=140).contains(&completed), "{completed}");
         std::fs::remove_dir_all(&tmp).unwrap();

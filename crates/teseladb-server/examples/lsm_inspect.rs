@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use teseladb_hlc::Hlc;
-use teseladb_io::FileDisk;
+use teseladb_io::files::BlockingDisk;
 use teseladb_lsm::{Kind, Lsm, LsmConfig, Step};
 use teseladb_types::Nanos;
 
@@ -43,7 +43,7 @@ fn hex(b: &[u8]) -> String {
 fn main() {
     let dir = std::env::args().nth(1).expect("usage: lsm_inspect <copy of core-NN> [bytes]");
     let data = std::env::args().nth(2).and_then(|b| b.parse().ok()).unwrap_or(DATA_PREFIX);
-    let mut disk = FileDisk::open(&dir).expect("the core's directory");
+    let mut disk = BlockingDisk::open(&dir).expect("the core's directory");
     let cfg = LsmConfig::default();
     let (mut lsm, _) = Lsm::recover(&cfg, &mut disk).expect("the LSM");
     println!("levels (bytes): {:?}", lsm.metrics().level_bytes);

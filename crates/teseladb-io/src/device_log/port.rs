@@ -1,79 +1,75 @@
-//! A core's side of the device log on the node: its [`PortBook`] (which operations are its WAL's and
-//! what each becomes) with a link to the writer thread. Requests go on a lock-free SPSC ring; what
-//! does not fit waits in the port and goes first on the next turn.
+//! A core's side of the device log on the node: its [`PortBook`] (which operations are its WAL's
+//! and what each becomes) with a link to the writer, a task of shard 0 (023 FR-013). What a core
+//! asks during a turn waits in its port and reaches the writer in one message when the turn ends
+//! ([`LogPort::pump`]), with `smp` from a shard or `alien` from another thread.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 use teseladb_devlog::port::{LogLink, LogReq, PortBook};
 use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
 
-use super::writer::{Req, Shared, Sink};
-use crate::spsc::{SendError, SpscSender};
+use teseladb::engine::core::thread::Thread;
 
-/// The link of a core to the writer thread.
-pub struct ThreadLink {
-    tx: SpscSender<Req>,
-    /// What did not fit in the queue, sent before anything newer.
-    overflow: VecDeque<Req>,
-    /// The writer's answers before the core's loop takes them ([`LogPort::attach`]).
+use super::writer::{Req, Shared, Sink, deliver};
+use crate::engine::post::ShardPost;
+
+/// The next value of `rx`, `None` once its sender is gone. In an engine thread (a core's recovery
+/// on its shard) the thread yields to its shard while it waits, so that the writer, which may run
+/// on the same shard, goes on; elsewhere the calling thread blocks.
+fn wait_for<T>(rx: &Receiver<T>) -> Option<T> {
+    if !Thread::running_in_thread() {
+        return rx.recv().ok();
+    }
+    loop {
+        match rx.try_recv() {
+            Ok(v) => return Some(v),
+            Err(TryRecvError::Empty) => Thread::yield_(),
+            Err(TryRecvError::Disconnected) => return None,
+        }
+    }
+}
+
+/// The link of a core to the writer.
+pub struct EngineLink {
+    /// Shard 0, where the writer runs.
+    post: ShardPost,
+    /// The writer's identifier on its shard.
+    log: u64,
+    core: u16,
+    /// What waits for the end of the turn.
+    batch: Vec<Req>,
+    /// The writer's answers before the core's task takes them ([`LogPort::attach`]).
     answers: Receiver<IoDone>,
     shared: Arc<Shared>,
     closed: bool,
 }
 
-impl ThreadLink {
+impl EngineLink {
     fn queue(&mut self, req: Req) -> bool {
         if self.closed {
             return false;
         }
-        if !self.overflow.is_empty() {
-            self.overflow.push_back(req);
-            return true;
-        }
-        match self.tx.send(req) {
-            Ok(()) => true,
-            Err(SendError::Full(r)) => {
-                self.overflow.push_back(r);
-                true
-            }
-            Err(SendError::Closed(_)) => {
-                self.closed = true;
-                false
-            }
-        }
+        self.batch.push(req);
+        true
     }
 
-    /// Sends what waited for room in the queue. Returns whether something still waits.
-    fn pump(&mut self) -> bool {
-        while let Some(r) = self.overflow.pop_front() {
-            match self.tx.send(r) {
-                Ok(()) => {}
-                Err(SendError::Full(r)) => {
-                    self.overflow.push_front(r);
-                    return true;
-                }
-                Err(SendError::Closed(_)) => {
-                    self.closed = true;
-                    self.overflow.clear();
-                }
-            }
+    /// Sends what waits to the writer, in one message.
+    fn flush(&mut self) {
+        if self.batch.is_empty() {
+            return;
         }
-        false
-    }
-
-    /// Sends everything waiting, yielding while the queue is full: for the synchronous callers,
-    /// which then wait for the writer.
-    fn push_all(&mut self) {
-        while self.pump() {
-            std::thread::yield_now();
+        let (log, core) = (self.log, self.core);
+        let batch = std::mem::take(&mut self.batch);
+        if !self.post.post(move || deliver(log, core, batch)) {
+            self.closed = true;
         }
     }
 }
 
-impl LogLink for ThreadLink {
+impl LogLink for EngineLink {
     fn send(&mut self, req: LogReq) -> bool {
         // A sync carries when it was asked: the writer counts its wait in the queue.
         let asked = matches!(req, LogReq::Sync(_)).then(Instant::now);
@@ -81,12 +77,12 @@ impl LogLink for ThreadLink {
     }
 
     fn read(&mut self, wal: u64) -> Result<Vec<u8>, IoErrno> {
-        let (reply, got) = mpsc::channel();
+        let (reply, got) = mpsc::sync_channel(1);
         if !self.queue(Req::Read { wal, reply }) {
             return Err(IoErrno::Io);
         }
-        self.push_all();
-        got.recv().unwrap_or(Err(IoErrno::Io))
+        self.flush();
+        wait_for(&got).unwrap_or(Err(IoErrno::Io))
     }
 
     fn disk_full(&self) -> bool {
@@ -94,15 +90,15 @@ impl LogLink for ThreadLink {
     }
 
     fn wait_sync(&mut self, op: IoOp) -> IoDone {
-        self.push_all();
-        self.answers.recv().unwrap_or(IoDone::Err { op, errno: IoErrno::Io })
+        self.flush();
+        wait_for(&self.answers).unwrap_or(IoDone::Err { op, errno: IoErrno::Io })
     }
 }
 
 /// What one core has of the device log.
 pub struct LogPort {
     book: PortBook,
-    link: ThreadLink,
+    link: EngineLink,
 }
 
 impl std::fmt::Debug for LogPort {
@@ -114,14 +110,14 @@ impl std::fmt::Debug for LogPort {
 impl LogPort {
     pub(crate) fn new(
         core: u16,
-        tx: SpscSender<Req>,
+        (post, log): (ShardPost, u64),
         wals: BTreeSet<u64>,
+        answers: Receiver<IoDone>,
         shared: Arc<Shared>,
-    ) -> (LogPort, Sink) {
-        let (answer, answers) = mpsc::channel();
-        let sink: Sink = Box::new(move |d| answer.send(d).is_ok());
-        let link = ThreadLink { tx, overflow: VecDeque::new(), answers, shared, closed: false };
-        (LogPort { book: PortBook::new(core, wals), link }, sink)
+    ) -> LogPort {
+        let link =
+            EngineLink { post, log, core, batch: Vec::new(), answers, shared, closed: false };
+        LogPort { book: PortBook::new(core, wals), link }
     }
 
     /// The core it serves.
@@ -136,9 +132,11 @@ impl LogPort {
         self.book.takes(op)
     }
 
-    /// Sends what waited for room in the queue. Returns whether something still waits.
+    /// Sends what the turn asked of the log to the writer. Returns whether something still waits
+    /// (never: a message to shard 0 always leaves).
     pub fn pump(&mut self) -> bool {
-        self.link.pump()
+        self.link.flush();
+        false
     }
 
     /// Hands an operation the port [`takes`](LogPort::takes) to the log. Returns its answer, or
@@ -147,15 +145,16 @@ impl LogPort {
         self.book.submit(&mut self.link, op)
     }
 
-    /// From now on the writer hands its answers to `sink` (the core's mailbox); the core has
+    /// From now on the writer hands its answers to `sink` (the core's task); the core has
     /// recovered.
     pub fn attach(&mut self, sink: Sink) {
         self.link.queue(Req::Attach(sink));
-        self.link.push_all();
+        self.link.flush();
     }
 
-    /// A view of `inner` as the core's disk before its loop runs (recovery): its WAL comes from
-    /// the log, and a sync waits for its answer.
+    /// A view of `inner` as the core's disk before its task runs (recovery): its WAL comes from
+    /// the log, and a sync waits for its answer: on a thread that is not a shard, or in an engine
+    /// thread of a shard (as a core recovers in `NodeEngine::start_core`).
     pub fn disk<'a, D: Disk>(&'a mut self, inner: &'a mut D) -> super::PortDisk<'a, D> {
         self.book.disk(&mut self.link, inner)
     }
