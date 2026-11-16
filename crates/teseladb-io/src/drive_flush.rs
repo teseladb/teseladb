@@ -1,6 +1,4 @@
-//! Making a file durable. On macOS `fsync(2)` leaves data in the drive's cache and only
-//! `F_FULLFSYNC` makes it durable, by writing the drive's whole cache to permanent storage; on
-//! Linux `fsync` asks the drive to flush as part of the call. The Raft logs of every core go
+//! Making a file durable: `fsync` asks the drive to flush as part of the call. The Raft logs of every core go
 //! through one writer per device that syncs once for all of them (012 FR-035, D-154), so the
 //! syncs that reach here are the LSM's, the snapshots' and the directories', each made on its own.
 
@@ -18,16 +16,7 @@ pub(crate) fn make_durable(file: &std::fs::File) -> io::Result<()> {
 /// [`make_durable`] without timing it.
 fn make_durable_now(file: &std::fs::File) -> io::Result<()> {
     crate::counters::record_device_flush();
-    #[cfg(target_os = "macos")]
-    {
-        use teseladb_sys::drive;
-        drive::push_to_drive(file)?;
-        timed(|| drive::flush_drive(file))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        timed(|| file.sync_all())
-    }
+    timed(|| file.sync_all())
 }
 
 /// Runs a flush of a drive's cache and counts how long it took.

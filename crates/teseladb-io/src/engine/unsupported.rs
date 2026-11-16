@@ -11,22 +11,12 @@ use std::time::{Duration, Instant};
 use teseladb_raftlog::{Disk, IoDone, IoOp};
 
 use super::core_loop::{CoreLogic, CoreSender};
+use super::options::EngineConfig;
 use crate::IoClass;
 use crate::device_log::LogPort;
 use crate::handshake::AcceptorOptions;
 use crate::peer::Hello;
 use crate::secure::PeerTls;
-
-/// How a node's engine starts.
-#[derive(Clone, Debug, Default)]
-pub struct EngineConfig {
-    /// Shards: the node's cores.
-    pub shards: u16,
-    /// The CPU of each shard, in shard order; empty: the shards are not pinned.
-    pub cpus: Vec<usize>,
-    /// Memory for all the shards, in bytes; `None`: the engine's default.
-    pub memory: Option<u64>,
-}
 
 /// What a core's task needs besides its logic and disk.
 #[derive(Clone, Debug)]

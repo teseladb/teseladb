@@ -201,11 +201,9 @@ impl<D: Disk + Send + 'static> DeviceLog<D> {
         }
         let recovered_files = state.files();
         let s = shared.clone();
-        let handle = thread::Builder::new().name("raft-log".into()).spawn(move || {
-            // Every confirmed write waits for this thread's sync.
-            let _ = teseladb_sys::favor_current_thread();
-            run(disk, state, queues, (&s, &bound), poller)
-        })?;
+        let handle = thread::Builder::new()
+            .name("raft-log".into())
+            .spawn(move || run(disk, state, queues, (&s, &bound), poller))?;
         Ok((DeviceLog { shared, recovered_files, handle: Some(handle) }, ports))
     }
 

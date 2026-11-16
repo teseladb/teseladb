@@ -1,6 +1,9 @@
 //! Real I/O for TeselaDB: [`FileDisk`], the executor of the engine's disk operations on real files,
 //! the inter-node protocol ([`peer`], [`handshake`]) and a node on the engine ([`engine`]: its
 //! shards, the task that drives each core and the connections between nodes).
+//!
+//! Linux only (D-177): on every other target the crate is empty.
+#![cfg(target_os = "linux")]
 #![cfg_attr(coverage, feature(coverage_attribute))]
 #![deny(unsafe_code)]
 

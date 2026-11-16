@@ -40,10 +40,17 @@ mod driver;
 mod node_engine;
 #[cfg(target_os = "linux")]
 mod offload;
+pub mod options;
 #[cfg(target_os = "linux")]
 mod peers;
 #[cfg(target_os = "linux")]
 mod post;
+#[cfg(target_os = "linux")]
+pub mod resources;
+#[cfg(target_os = "linux")]
+pub mod signals;
+#[cfg(target_os = "linux")]
+pub mod stats;
 #[cfg(target_os = "linux")]
 pub mod tls_stream;
 #[cfg(not(target_os = "linux"))]
@@ -57,9 +64,12 @@ pub use core_loop::{
 #[cfg(target_os = "linux")]
 pub use disk_port::{CoreDisk, DiskWaker, ThreadDisk};
 #[cfg(target_os = "linux")]
-pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
+pub use node_engine::{CoreConfig, CoreHandle, NodeEngine};
+pub use options::{DirectIo, EngineConfig, Placement};
+#[cfg(target_os = "linux")]
+pub use stats::EngineProbe;
 #[cfg(not(target_os = "linux"))]
-pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, ThreadDisk};
+pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, NodeEngine, ThreadDisk};
 
 /// The deadline `timeout` from now on the steady clock.
 #[cfg(target_os = "linux")]

@@ -37,11 +37,8 @@ impl<D: Disk + Send + 'static> DiskThread<D> {
     pub fn spawn(name: String, disk: D, done: DoneSink) -> io::Result<DiskThread<D>> {
         let (tx, rx) = mpsc::channel();
         let sync_name = format!("{name}-sync");
-        let handle = thread::Builder::new().name(name).spawn(move || {
-            // A write waits on this thread: on the fast cores (H-049 of the native tests).
-            let _ = teseladb_sys::favor_current_thread();
-            run(disk, rx, &done, &sync_name)
-        })?;
+        let handle =
+            thread::Builder::new().name(name).spawn(move || run(disk, rx, &done, &sync_name))?;
         Ok(DiskThread { ops: tx, handle: Some(handle) })
     }
 
@@ -201,8 +198,6 @@ impl Syncs {
     fn spawn(name: &str, done: DoneSink) -> io::Result<Syncs> {
         let (jobs, rx) = mpsc::channel::<DetachedSync>();
         let handle = thread::Builder::new().name(name.to_owned()).spawn(move || {
-            // Every confirmed write waits for a sync of this thread.
-            let _ = teseladb_sys::favor_current_thread();
             while let Ok(first) = rx.recv() {
                 let mut turn = vec![first];
                 turn.extend(rx.try_iter());
